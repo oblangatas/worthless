@@ -3,45 +3,64 @@ title: "Install — Claude Code, Cursor, or Windsurf"
 description: "Run the Worthless proxy locally and point your editor's SDK at it."
 ---
 
-# Install -- Claude Code, Cursor, or Windsurf
+# Install — Claude Code, Cursor, or Windsurf
 
-Run the Worthless proxy locally, then point your editor's SDK at it.
+Worthless ships an MCP server exposing `lock`, `scan`, `status`, and `spend`
+tools to AI coding agents. The recommended install path needs only Node 18+;
+Python and `uv` are bootstrapped automatically on first run.
 
-:::note
-Worthless includes both an HTTP proxy and an MCP server. Your editor
-talks to AI providers through the proxy via `BASE_URL`. The MCP server
-(`worthless mcp`) exposes lock, scan, status, and spend tools for
-agent-driven workflows (Claude Code, Cursor, Windsurf).
-:::
+## Recommended — npm wrapper via `.mcp.json`
 
-## Prerequisites
+Add to your project's `.mcp.json` (Claude Code, Cursor, and Windsurf all read
+this file):
 
-```bash
-git clone https://github.com/shacharm2/worthless && cd worthless
-uv pip install -e .
-worthless lock          # protect your .env keys
+```json
+{
+  "mcpServers": {
+    "worthless": {
+      "command": "npx",
+      "args": ["-y", "worthless-mcp"]
+    }
+  }
+}
 ```
 
-## Claude Code
+Restart your editor. On first launch, `worthless-mcp`:
 
-Option A — run the proxy, then launch Claude Code (recommended):
+1. Finds or installs `uv` (one-time, ~5 s).
+2. Runs `uvx worthless[mcp]==<pinned-version> mcp` — `uvx` caches the Python
+   environment, so subsequent starts are instant.
+3. Streams MCP protocol over stdio to the editor.
+
+Total cold-start install time: **< 30 s** on a fresh machine with Node only.
+No Python toolchain awareness required.
+
+### Available tools
+
+- `worthless_status()` — running proxy state, protected keys
+- `worthless_lock(env_path)` — split the real key, rewrite `.env` with a shard
+- `worthless_scan(paths, deep)` — find accidental key exposures
+- `worthless_spend(alias)` — per-provider spend readout
+
+## Alternative — manual CLI install
+
+If you already use `pipx` or want the full CLI (`worthless wrap`,
+`worthless up`, proxy mode), install the Python package directly:
 
 ```bash
-worthless up -d          # start proxy in background on port 8787
+pipx install worthless
+# or: curl -sSL https://worthless.sh | sh
+worthless lock              # protect your .env keys
+worthless wrap claude       # starts proxy + launches Claude Code
+```
+
+Then point your editor at the HTTP proxy:
+
+```bash
+worthless up -d             # background proxy on :8787
 export OPENAI_BASE_URL=http://localhost:8787
 export ANTHROPIC_BASE_URL=http://localhost:8787
-claude                   # SDK calls route through the proxy
 ```
-
-Option B — `worthless wrap` (convenience):
-
-```bash
-worthless wrap claude    # ephemeral proxy, injects BASE_URL, launches Claude Code
-```
-
-`worthless up` is the canonical way to run the proxy. `worthless wrap` still
-works today, but it is slated to be replaced by `up` — prefer `up` for anything
-you intend to keep.
 
 ## Cursor
 

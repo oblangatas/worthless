@@ -1,0 +1,49 @@
+name: Verify worthless-mcp package
+
+on:
+  pull_request:
+    paths:
+      - "packages/worthless-mcp/**"
+      - ".github/workflows/verify-npm.yml"
+      - ".github/workflows/publish-npm.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "packages/worthless-mcp/**"
+
+permissions:
+  contents: read
+
+jobs:
+  dry-run-publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/worthless-mcp
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+
+      - name: Validate package manifest
+        run: node -e "const p = require('./package.json'); if (!p.version || !p.name || !p.bin) { console.error('manifest missing required fields'); process.exit(1); }"
+
+      - name: Smoke-test --version flag
+        run: |
+          node index.js --version
+          OUT=$(node index.js --version)
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if [ "${OUT}" != "${PKG_VERSION}" ]; then
+            echo "version mismatch: CLI reported '${OUT}', package.json has '${PKG_VERSION}'"
+            exit 1
+          fi
+
+      - name: npm publish --dry-run
+        run: npm publish --dry-run --access public

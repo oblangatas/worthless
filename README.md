@@ -73,6 +73,27 @@ PyPI version, signed git tag (`vX.Y.Z`), and the `X-Worthless-Script-Tag` header
 
 Everything lives at **[docs.wless.io](https://docs.wless.io)**, install guides, the security model, wire protocol, recovery runbook, the verified-install flow, and the agent skill file (Claude Code / Cursor / Windsurf).
 
+## For AI coding agents
+
+Add to your project's `.mcp.json` (Node ≥ 18, no Python needed upfront):
+
+```json
+{
+  "mcpServers": {
+    "worthless": {
+      "command": "npx",
+      "args": ["-y", "worthless-mcp"]
+    }
+  }
+}
+```
+
+Restart Claude Code / Cursor / Windsurf — MCP tools appear immediately. On first run, `worthless-mcp` bootstraps `uv` and installs the Python package automatically. Install time < 30 s.
+
+Available tools: `worthless_status`, `worthless_lock`, `worthless_scan`, `worthless_spend`.
+
+See [SKILL.md](SKILL.md) for the full agent discovery file.
+
 ## Development
 
 ```bash

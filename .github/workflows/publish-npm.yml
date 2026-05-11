@@ -1,0 +1,46 @@
+name: Publish worthless-mcp to npm
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/worthless-mcp
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org/"
+
+      - name: Stamp version from tag
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          TAG="${REF_NAME#v}"
+          echo "Publishing version: ${TAG}"
+          npm version "${TAG}" --no-git-tag-version --allow-same-version
+          if [[ "${TAG}" =~ (rc|a|b|alpha|beta) ]]; then
+            echo "DIST_TAG=next" >> "$GITHUB_ENV"
+          else
+            echo "DIST_TAG=latest" >> "$GITHUB_ENV"
+          fi
+
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --tag "${DIST_TAG}"

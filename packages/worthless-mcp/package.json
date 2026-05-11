@@ -1,0 +1,38 @@
+{
+  "name": "worthless-mcp",
+  "version": "0.3.0",
+  "description": "MCP server for Worthless split-key API proxy — wraps `uvx worthless mcp`",
+  "keywords": [
+    "mcp",
+    "api-keys",
+    "security",
+    "proxy",
+    "worthless",
+    "claude-code",
+    "cursor",
+    "windsurf"
+  ],
+  "homepage": "https://github.com/shacharm2/worthless",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/shacharm2/worthless.git",
+    "directory": "packages/worthless-mcp"
+  },
+  "license": "AGPL-3.0",
+  "main": "index.js",
+  "bin": {
+    "worthless-mcp": "./index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "index.js",
+    "package.json",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
+}
