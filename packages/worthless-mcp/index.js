@@ -178,6 +178,9 @@ function main() {
     if (signal) {
       // uvx exited via signal — re-raise so the parent shell sees the correct exit reason.
       process.kill(process.pid, signal);
+      // Fallback: SIGKILL cannot be caught; if kill() doesn't terminate us
+      // synchronously, exit non-zero rather than hanging.
+      setTimeout(() => process.exit(1), 500).unref();
     } else {
       process.exit(code ?? 0);
     }
