@@ -144,12 +144,19 @@ jobs:
             sudo apt-get update && sudo apt-get install -y squid
             sudo systemctl start squid
             # Give squid a beat to bind.
+            proxy_ready=0
             for _ in 1 2 3 4 5; do
               if curl -fsS -x http://localhost:3128 https://astral.sh/ -o /dev/null; then
-                echo "proxy reachable"; break
+                echo "proxy reachable"
+                proxy_ready=1
+                break
               fi
               sleep 2
             done
+            if [ "$proxy_ready" -ne 1 ]; then
+              echo "proxy did not become reachable after retries" >&2
+              exit 1
+            fi
           } 2>&1 | tee install-smoke-traces/proxy-setup.log
 
       - name: Run install.sh through proxy
