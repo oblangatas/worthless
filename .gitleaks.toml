@@ -43,3 +43,9 @@ paths = [
     '''\.planning/ROADMAP\.md$''',
     '''tests/.*\.py$''',
 ]
+
+[[allowlists]]
+id = "install-doc-fake-api-aliases"
+description = "provider-hexhash placeholders (e.g. openai-a1b2c3d4) used in install doc examples"
+paths = ['''website/install-.*\.md$''']
+regexes = ['''(?i)(openai|anthropic|google|xai)-[a-f0-9]{8}(?!\w)''']
