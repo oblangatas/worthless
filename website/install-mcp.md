@@ -15,7 +15,7 @@ That's it. `worthless lock` injects `ANTHROPIC_BASE_URL` and `OPENAI_BASE_URL` i
 worthless status
 ```
 
-```
+```text
 Enrolled keys:
   anthropic-a1b2c3d4 anthropic  PROTECTED
   openai-a1b2c3d4    openai     PROTECTED

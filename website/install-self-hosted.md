@@ -26,7 +26,7 @@ Repeat for each key. The original key never touches disk.
 docker compose exec proxy worthless status
 ```
 
-```
+```text
 Enrolled keys:
   openai-a1b2c3d4  openai  PROTECTED
 
@@ -46,6 +46,9 @@ export OPENAI_BASE_URL=http://localhost:8787/openai-a1b2c3d4/v1
 If your client runs in a container and the Worthless proxy runs on your host, the container needs to reach the host. Set two env vars before locking on the host:
 
 ```bash
+# Switch proxy out of loopback mode so it can bind to all interfaces
+export WORTHLESS_DEPLOY_MODE=lan
+
 # Bind the proxy to all interfaces (not just loopback)
 export WORTHLESS_HOST=0.0.0.0
 

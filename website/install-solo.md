@@ -11,7 +11,7 @@ Within a few seconds your API keys are split and your proxy is running. No code 
 
 Scans `.env`, splits each key into two shards, and injects `BASE_URL` so your SDK routes through the proxy automatically:
 
-```
+```text
 Scanning .env for API keys...
   Protecting OPENAI_API_KEY...
   Protecting ANTHROPIC_API_KEY...
@@ -27,7 +27,7 @@ Next: run `worthless wrap <command>` or `worthless up` for daemon mode
 worthless status
 ```
 
-```
+```text
 Enrolled keys:
   openai-a1b2c3d4    openai     PROTECTED
   anthropic-a1b2c3d4 anthropic  PROTECTED
@@ -39,7 +39,7 @@ Proxy: running on 127.0.0.1:8787
 
 ## How protection works
 
-Your `.env` looks exactly the same after `worthless lock`. The key looks exactly the same. An attacker who steals your `.env` gets a dead shard — and doesn't even know it. The shard is cryptographically indistinguishable from a real key, but it fails silently when used directly against any provider.
+After `worthless lock`, your API key value in `.env` is replaced with a format-preserving shard — it looks like a real key. An attacker who steals your `.env` gets a dead shard and doesn't even know it. The shard fails silently when used directly against any provider. (`worthless lock` also injects `BASE_URL` entries so your SDK routes through the proxy automatically.)
 
 ## Run your app
 

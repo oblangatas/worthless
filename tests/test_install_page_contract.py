@@ -17,7 +17,6 @@ runner = CliRunner(mix_stderr=False)
 _INSTALL_PAGES = [
     "website/install-solo.md",
     "website/install-mcp.md",
-    "website/install-openclaw.md",
     "website/install-self-hosted.md",
 ]
 
@@ -82,6 +81,7 @@ class TestInstallPageContract:
             env={"WORTHLESS_HOME": str(home_dir.base_dir)},
         )
 
+        assert result.exit_code == 0
         # Normalize Rich line-wrapping before asserting on multi-word phrases.
         output = " ".join((result.stderr + result.stdout).split())
         assert "key(s) split" in output, "lock output must confirm key was split (docs claim this)"
