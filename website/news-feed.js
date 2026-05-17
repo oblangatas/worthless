@@ -1,0 +1,80 @@
+const NEWS_FEED_URL = "https://gist.githubusercontent.com/shacharm2/7f6e2293b540004c4a733258a2461800/raw/news-feed.json";
+const NEWS_FEED_FALLBACK_URL = "news-feed.json";
+const NEWS_FEED_TIMEOUT_MS = 5000;
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function renderFeedRows(entries) {
+  return entries.map((entry) => {
+    const date = entry.date ? `<span class="feed-date">${escapeHtml(entry.date)}</span>` : '<span class="feed-date"></span>';
+    return `<a href="${escapeHtml(safeHref(entry.href))}" target="_blank" rel="noopener" class="feed-row"><span class="feed-src">${escapeHtml(entry.source)}</span><span class="feed-desc">${escapeHtml(entry.desc)}</span>${date}</a>`;
+  }).join("");
+}
+
+function safeHref(value) {
+  const href = String(value || "").trim();
+  if (href.startsWith("/")) return href;
+
+  try {
+    const parsed = new URL(href);
+    return ["http:", "https:", "mailto:"].includes(parsed.protocol) ? href : "#";
+  } catch (_error) {
+    return "#";
+  }
+}
+
+function setNewsFeed(entries) {
+  const feed = document.getElementById("news-feed");
+  if (!feed) return;
+
+  const usableEntries = Array.isArray(entries) ? entries.filter((entry) => entry && entry.source && entry.desc && entry.href) : [];
+  if (usableEntries.length === 0) {
+    feed.innerHTML = '<div class="feed-empty">No incidents loaded.</div>';
+    return;
+  }
+
+  const loopEntries = usableEntries.concat(usableEntries);
+  feed.innerHTML = renderFeedRows(loopEntries);
+}
+
+async function fetchNewsFeed(url) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), NEWS_FEED_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(url, { cache: "no-store", signal: controller.signal });
+    if (!response.ok) {
+      throw new Error(`Feed request failed: ${response.status}`);
+    }
+
+    return response.json();
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw new Error(`Feed request timed out after ${NEWS_FEED_TIMEOUT_MS}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function loadNewsFeed() {
+  try {
+    setNewsFeed(await fetchNewsFeed(NEWS_FEED_URL));
+  } catch (_remoteError) {
+    try {
+      setNewsFeed(await fetchNewsFeed(NEWS_FEED_FALLBACK_URL));
+    } catch (_fallbackError) {
+      setNewsFeed([]);
+    }
+  }
+}
+
+loadNewsFeed();
