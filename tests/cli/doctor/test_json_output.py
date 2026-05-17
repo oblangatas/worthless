@@ -36,7 +36,7 @@ def test_json_emits_single_parseable_document(fake_home, monkeypatch: pytest.Mon
     """Stdout must be exactly one JSON document. No log lines, no banners."""
 
     async def _no_orphans(_repo):
-        return []
+        return [], []
 
     monkeypatch.setattr(doctor_module, "_list_orphans", _no_orphans)
     monkeypatch.setattr(doctor_module, "_list_synced_keychain_entries", lambda: [])
@@ -63,7 +63,7 @@ def test_json_includes_all_check_ids(fake_home, monkeypatch: pytest.MonkeyPatch)
     """Every registered check appears in the JSON output, even ``ok`` ones."""
 
     async def _no_orphans(_repo):
-        return []
+        return [], []
 
     monkeypatch.setattr(doctor_module, "_list_orphans", _no_orphans)
     monkeypatch.setattr(doctor_module, "_list_synced_keychain_entries", lambda: [])
@@ -93,7 +93,7 @@ def test_json_ok_true_on_clean_install(fake_home, monkeypatch: pytest.MonkeyPatc
     """Fresh home with no orphans, no synced keys → top-level ``ok=true``."""
 
     async def _no_orphans(_repo):
-        return []
+        return [], []
 
     monkeypatch.setattr(doctor_module, "_list_orphans", _no_orphans)
     monkeypatch.setattr(doctor_module, "_list_synced_keychain_entries", lambda: [])
