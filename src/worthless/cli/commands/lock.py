@@ -237,7 +237,7 @@ async def _filter_unprotected_candidates(
             encrypted = await repo.fetch_encrypted(enrollment.key_alias)
             if encrypted is None or encrypted.prefix is None or encrypted.charset is None:
                 continue
-            stored = repo.decrypt_shard(encrypted)
+            stored = await repo.decrypt_shard(encrypted)
             shard_a = bytearray(value.encode("utf-8"))
             reconstructed: bytearray | None = None
             try:
