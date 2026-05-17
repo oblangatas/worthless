@@ -236,6 +236,7 @@
     .feed-src { font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; color: var(--slate); min-width: 2.2rem; flex-shrink: 0; }
     .feed-desc { color: var(--text); }
     .feed-date { font-size: 0.75rem; color: var(--text2); margin-left: auto; white-space: nowrap; flex-shrink: 0; }
+    .feed-empty { font-size: 0.875rem; color: var(--text2); padding: 0.5rem 0; }
 
     @media (max-width: 520px) {
       .waitlist-form {
@@ -261,38 +262,8 @@
     <div class="feed">
       <div class="feed-label">In the wild</div>
       <div class="feed-ticker">
-        <div class="feed-inner">
-          <a href="https://news.ycombinator.com/item?id=47791871" target="_blank" rel="noopener" class="feed-row"><span class="feed-src">HN</span><span class="feed-desc">€54K charged in 13 hours</span><span class="feed-date">Apr 2026</span></a>
-          <a href="https://news.ycombinator.com/item?id=47231469" target="_blank" rel="noopener" class="feed-row"><span class="feed-src">HN</span><span class="feed-desc">$82K Gemini bill in 48 hours</span><span class="feed-date">Mar 2026</span></a>
-          <a href="https://news.ycombinator.com/item?id=47417874" target="_blank" rel="noopener" class="feed-row"><span class="feed-src">HN</span><span class="feed-desc">$128K GCP bill from one leaked key</span><span class="feed-date"></span></a>
-          <a href="https://news.ycombinator.com/item?id=47156925" target="_blank" rel="noopener" class="feed-row"><span class="feed-src">HN</span><span class="feed-desc">Google API scope expansion - leaked keys do more than you think</span><span class="feed-date"></span></a>
-          <a href="https://news.ycombinator.com/item?id=45589628" target="_blank" rel="noopener" class="feed-row"><span class="feed-src">HN</span><span class="feed-desc">OpenAI quietly removed hard spend caps</span><span class="feed-date">Dec 2025</span></a>
-          <a href="https://news.ycombinator.com/item?id=45241001" target="_blank" rel="noopener" class="feed-row"><span class="feed-src">HN</span><span class="feed-desc">Lost $300 from "vibe coding" key leak</span><span class="feed-date">Sep 2025</span></a>
-          <a href="https://news.ycombinator.com/item?id=47164359" target="_blank" rel="noopener" class="feed-row"><span class="feed-src">HN</span><span class="feed-desc">Anthropic "final query" policy allows overbilling past prepay</span><span class="feed-date"></span></a>
-          <a href="https://reddit.com/r/googlecloud/comments/1klwz0v/98k1_day_firebase_bill_open_letter_to_google" target="_blank" rel="noopener" class="feed-row"><span class="feed-src">r/</span><span class="feed-desc">$98K in 1 day - open letter to Google</span><span class="feed-date">May 2025</span></a>
-          <a href="https://reddit.com/r/Firebase/comments/17wqdnp/what_ever_happened_to_the_121k_bill" target="_blank" rel="noopener" class="feed-row"><span class="feed-src">r/</span><span class="feed-desc">$121K Firebase bill - Google forgave 90%</span><span class="feed-date">Nov 2023</span></a>
-          <a href="https://www.reddit.com/r/googlecloud/" target="_blank" rel="noopener" class="feed-row"><span class="feed-src">r/</span><span class="feed-desc">r/googlecloud billing horror - stickied as permanent fixture</span><span class="feed-date"></span></a>
-          <a href="https://dev.to/ayame0328/60k-billed-in-13-hours-why-leaked-firebase-keys-keep-killing-ai-built-apps-6l6" target="_blank" rel="noopener" class="feed-row"><span class="feed-src">dev</span><span class="feed-desc">"$60K in 13 hours" - AI agent pushed .env to GitHub</span><span class="feed-date">Apr 2026</span></a>
-          <a href="https://dev.to/dhayabaran/googles-documentation-says-api-keys-are-secrets-and-also-not-secrets-2863-verified-keys-are-219k" target="_blank" rel="noopener" class="feed-row"><span class="feed-src">dev</span><span class="feed-desc">2,863 live Google keys exposed in Common Crawl</span><span class="feed-date">Feb 2026</span></a>
-          <a href="https://dev.to/rainkode/google-api-keys-werent-secrets-until-gemini-broke-everything-ohm" target="_blank" rel="noopener" class="feed-row"><span class="feed-src">dev</span><span class="feed-desc">Google API keys weren't secrets - until Gemini broke everything</span><span class="feed-date">Feb 2026</span></a>
-          <a href="https://dev.to/linou518/is-your-api-key-still-running-naked-the-complete-2026-secrets-management-guide-4m7n" target="_blank" rel="noopener" class="feed-row"><span class="feed-src">dev</span><span class="feed-desc">Is your API key still running naked?</span><span class="feed-date">Feb 2026</span></a>
-          <a href="https://dev.to/uzyntra/top-api-security-vulnerabilities-in-2026-real-world-breakdown-e9g" target="_blank" rel="noopener" class="feed-row"><span class="feed-src">dev</span><span class="feed-desc">Top API security vulns 2026 - billing bypass tactics</span><span class="feed-date"></span></a>
-          <!-- duplicate for seamless loop -->
-          <a href="https://news.ycombinator.com/item?id=47791871" target="_blank" rel="noopener" class="feed-row"><span class="feed-src">HN</span><span class="feed-desc">€54K charged in 13 hours</span><span class="feed-date">Apr 2026</span></a>
-          <a href="https://news.ycombinator.com/item?id=47231469" target="_blank" rel="noopener" class="feed-row"><span class="feed-src">HN</span><span class="feed-desc">$82K Gemini bill in 48 hours</span><span class="feed-date">Mar 2026</span></a>
-          <a href="https://news.ycombinator.com/item?id=47417874" target="_blank" rel="noopener" class="feed-row"><span class="feed-src">HN</span><span class="feed-desc">$128K GCP bill from one leaked key</span><span class="feed-date"></span></a>
-          <a href="https://news.ycombinator.com/item?id=47156925" target="_blank" rel="noopener" class="feed-row"><span class="feed-src">HN</span><span class="feed-desc">Google API scope expansion - leaked keys do more than you think</span><span class="feed-date"></span></a>
-          <a href="https://news.ycombinator.com/item?id=45589628" target="_blank" rel="noopener" class="feed-row"><span class="feed-src">HN</span><span class="feed-desc">OpenAI quietly removed hard spend caps</span><span class="feed-date">Dec 2025</span></a>
-          <a href="https://news.ycombinator.com/item?id=45241001" target="_blank" rel="noopener" class="feed-row"><span class="feed-src">HN</span><span class="feed-desc">Lost $300 from "vibe coding" key leak</span><span class="feed-date">Sep 2025</span></a>
-          <a href="https://news.ycombinator.com/item?id=47164359" target="_blank" rel="noopener" class="feed-row"><span class="feed-src">HN</span><span class="feed-desc">Anthropic "final query" policy allows overbilling past prepay</span><span class="feed-date"></span></a>
-          <a href="https://reddit.com/r/googlecloud/comments/1klwz0v/98k1_day_firebase_bill_open_letter_to_google" target="_blank" rel="noopener" class="feed-row"><span class="feed-src">r/</span><span class="feed-desc">$98K in 1 day - open letter to Google</span><span class="feed-date">May 2025</span></a>
-          <a href="https://reddit.com/r/Firebase/comments/17wqdnp/what_ever_happened_to_the_121k_bill" target="_blank" rel="noopener" class="feed-row"><span class="feed-src">r/</span><span class="feed-desc">$121K Firebase bill - Google forgave 90%</span><span class="feed-date">Nov 2023</span></a>
-          <a href="https://www.reddit.com/r/googlecloud/" target="_blank" rel="noopener" class="feed-row"><span class="feed-src">r/</span><span class="feed-desc">r/googlecloud billing horror - stickied as permanent fixture</span><span class="feed-date"></span></a>
-          <a href="https://dev.to/ayame0328/60k-billed-in-13-hours-why-leaked-firebase-keys-keep-killing-ai-built-apps-6l6" target="_blank" rel="noopener" class="feed-row"><span class="feed-src">dev</span><span class="feed-desc">"$60K in 13 hours" - AI agent pushed .env to GitHub</span><span class="feed-date">Apr 2026</span></a>
-          <a href="https://dev.to/dhayabaran/googles-documentation-says-api-keys-are-secrets-and-also-not-secrets-2863-verified-keys-are-219k" target="_blank" rel="noopener" class="feed-row"><span class="feed-src">dev</span><span class="feed-desc">2,863 live Google keys exposed in Common Crawl</span><span class="feed-date">Feb 2026</span></a>
-          <a href="https://dev.to/rainkode/google-api-keys-werent-secrets-until-gemini-broke-everything-ohm" target="_blank" rel="noopener" class="feed-row"><span class="feed-src">dev</span><span class="feed-desc">Google API keys weren't secrets - until Gemini broke everything</span><span class="feed-date">Feb 2026</span></a>
-          <a href="https://dev.to/linou518/is-your-api-key-still-running-naked-the-complete-2026-secrets-management-guide-4m7n" target="_blank" rel="noopener" class="feed-row"><span class="feed-src">dev</span><span class="feed-desc">Is your API key still running naked?</span><span class="feed-date">Feb 2026</span></a>
-          <a href="https://dev.to/uzyntra/top-api-security-vulnerabilities-in-2026-real-world-breakdown-e9g" target="_blank" rel="noopener" class="feed-row"><span class="feed-src">dev</span><span class="feed-desc">Top API security vulns 2026 - billing bypass tactics</span><span class="feed-date"></span></a>
+        <div class="feed-inner" id="news-feed">
+          <div class="feed-empty">Loading feed...</div>
         </div>
       </div>
     </div>
@@ -357,6 +328,63 @@
       }
     ]
   }
+  </script>
+  <script>
+  const NEWS_FEED_URL = "https://gist.githubusercontent.com/shacharm2/7f6e2293b540004c4a733258a2461800/raw/news-feed.json";
+  const NEWS_FEED_FALLBACK_URL = "news-feed.json";
+
+  function escapeHtml(value) {
+    return String(value)
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#39;");
+  }
+
+  function renderFeedRows(entries) {
+    return entries.map((entry) => {
+      const date = entry.date ? `<span class="feed-date">${escapeHtml(entry.date)}</span>` : '<span class="feed-date"></span>';
+      return `<a href="${escapeHtml(entry.href)}" target="_blank" rel="noopener" class="feed-row"><span class="feed-src">${escapeHtml(entry.source)}</span><span class="feed-desc">${escapeHtml(entry.desc)}</span>${date}</a>`;
+    }).join("");
+  }
+
+  function setNewsFeed(entries) {
+    const feed = document.getElementById("news-feed");
+    if (!feed) return;
+
+    const usableEntries = Array.isArray(entries) ? entries.filter((entry) => entry && entry.source && entry.desc && entry.href) : [];
+    if (usableEntries.length === 0) {
+      feed.innerHTML = '<div class="feed-empty">No incidents loaded.</div>';
+      return;
+    }
+
+    const loopEntries = usableEntries.concat(usableEntries);
+    feed.innerHTML = renderFeedRows(loopEntries);
+  }
+
+  async function fetchNewsFeed(url) {
+    const response = await fetch(url, { cache: "no-store" });
+    if (!response.ok) {
+      throw new Error(`Feed request failed: ${response.status}`);
+    }
+
+    return response.json();
+  }
+
+  async function loadNewsFeed() {
+    try {
+      setNewsFeed(await fetchNewsFeed(NEWS_FEED_URL));
+    } catch (_remoteError) {
+      try {
+        setNewsFeed(await fetchNewsFeed(NEWS_FEED_FALLBACK_URL));
+      } catch (_fallbackError) {
+        setNewsFeed([]);
+      }
+    }
+  }
+
+  loadNewsFeed();
   </script>
 </body>
 </html>
