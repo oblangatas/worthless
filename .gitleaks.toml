@@ -42,4 +42,5 @@ paths = [
     '''\.planning/snapshots/.*\.json$''',
     '''\.planning/ROADMAP\.md$''',
     '''tests/.*\.py$''',
+    '''website/install-.*\.md$''',
 ]
