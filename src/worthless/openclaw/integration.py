@@ -292,30 +292,53 @@ def _probe_config() -> tuple[Path | None, list[str]]:
     where the project-local file is the correct write target.
     """
     notes: list[str] = []
+    locked_candidate: Path | None = None
+
     try:
-        candidate = next(
-            (p for p in _global_config_candidates() if p.exists()),
-            None,
-        )
+        candidates = _global_config_candidates()
     except OSError as exc:
         notes.append(f"config probe failed: {exc}")
         return None, notes
 
-    if candidate is None:
-        return None, notes
+    for p in candidates:
+        try:
+            p.stat()
+        except FileNotFoundError:
+            continue
+        except PermissionError:
+            # The file's *parent dir* is locked (e.g. openclaw sets its config
+            # dir to 0700 on startup — DV-01).  ``p.exists()`` catches this and
+            # returns False, making detect() silently report present=False.
+            # ``p.stat()`` surfaces the distinction so we can store the path
+            # and return present=True with an actionable diagnostic note.
+            if locked_candidate is None:
+                locked_candidate = p
+                notes.append(
+                    f"openclaw config dir locked ({p.parent}): PermissionError "
+                    "on stat — openclaw has likely set the dir to 0700 on "
+                    "startup. Stop openclaw before re-locking to restore write "
+                    "access (worthless-eq5c)."
+                )
+            continue
+        except OSError:
+            continue
 
-    # F-CFG-15: do NOT call .resolve() on a symlink — that dereferences
-    # the link and hides the attack vector. Return the un-resolved path
-    # so apply_lock's symlink check fires correctly. For non-symlinks
-    # we still resolve for F35 (case-insensitive FS canonical compare).
-    try:
-        if candidate.is_symlink():
-            notes.append(f"config is a symlink (refused for safety): {candidate}")
-            return candidate, notes
-        return candidate.resolve(), notes
-    except OSError as exc:
-        notes.append(f"config unresolvable: {exc}")
-        return None, notes
+        # stat() succeeded — the file is accessible. Apply F-CFG-15 symlink
+        # check: do NOT call .resolve() on a symlink — that dereferences the
+        # link and hides the attack vector. For non-symlinks resolve for F35
+        # (case-insensitive FS canonical compare).
+        try:
+            if p.is_symlink():
+                notes.append(f"config is a symlink (refused for safety): {p}")
+                return p, notes
+            return p.resolve(), notes
+        except OSError as exc:
+            notes.append(f"config unresolvable: {exc}")
+            return None, notes
+
+    # No accessible config found. If we hit a locked dir, return that path so
+    # detect() can report present=True and surface the diagnostic to the user.
+    return locked_candidate, notes
 
 
 def detect() -> IntegrationState:
@@ -513,6 +536,30 @@ def _is_proxy_url(url: str, proxy_base_url: str) -> bool:
     return re.match(rf"^https?://[^/]*:{port}/", url) is not None
 
 
+def _get_provider_for_lock(
+    config_path: Path,
+    provider_name: str,
+) -> tuple[dict | None, Exception | None]:
+    """Return ``(existing_entry_or_None, skip_error_or_None)``.
+
+    ``skip_error`` is non-None when the caller must skip the provider (corrupt
+    config, raw OSError).  ``None`` means either the entry was read cleanly or
+    the file is unreadable due to a ``PermissionError`` (foreign-owned in the
+    Docker shared-volume setup) — in that case ``set_provider`` handles it via
+    ``permission_as_missing=True`` and the atomic-replace path.
+    """
+    try:
+        return _config_mod.get_provider(config_path, provider_name), None
+    except OpenclawConfigError as exc:
+        if isinstance(exc.__cause__, PermissionError):
+            # File unreadable — can't detect conflicts, but set_provider can
+            # still write atomically. Fall through; do not skip.
+            return None, None
+        return None, exc
+    except OSError as exc:
+        return None, exc
+
+
 def apply_lock(
     planned_updates: list[tuple[str, str, str]],
     *,
@@ -621,30 +668,51 @@ def apply_lock(
         )
 
     # ---- Stage A: write providers ----------------------------------------
+    # In all-container Docker setups the openclaw daemon chmods its config
+    # dir to 0700 on startup.  If apply_lock reaches here it means the dir
+    # was accessible at detect() time (proxy ran first and created the dir),
+    # but the file may still be 0600 (foreign-owned) after openclaw's
+    # atomic-write cycle.  read_config() returns {} on PermissionError so
+    # set_provider can still write via atomic replace (dir is 777 when proxy
+    # created it before openclaw started).  Emit one warn-level event so the
+    # operator knows non-worthless config keys (gateway auth etc.) were reset.
+    try:
+        _file_exists = config_path.exists()
+        _file_readable = (not _file_exists) or os.access(str(config_path), os.R_OK)
+    except OSError:
+        _file_readable = True  # can't tell — don't emit the advisory
+    if not _file_readable:
+        events.append(
+            OpenclawIntegrationEvent(
+                code=OpenclawErrorCode.WRITE_FAILED,
+                level="warn",
+                detail=(
+                    "openclaw.json is not readable by the current user "
+                    f"({config_path}). Writing fresh provider entries — "
+                    "non-worthless config fields (gateway auth token etc.) "
+                    "will be regenerated by openclaw on container restart. "
+                    "This is expected when openclaw has rewritten the shared "
+                    "Docker volume config as a foreign-owned file."
+                ),
+                extra={"path": str(config_path)},
+            )
+        )
+
     for provider, alias, shard_a in planned_updates:
         provider_name = f"worthless-{provider}"
         base_url = f"{resolved_proxy_base_url.rstrip('/')}/{alias}/v1"
 
         # F-CFG-13: pre-existing entry pointing somewhere that isn't our
         # proxy is a manual override. Skip + emit conflict event.
-        try:
-            existing = _config_mod.get_provider(config_path, provider_name)
-        except OpenclawConfigError as exc:
+        # PermissionError is handled transparently by _get_provider_for_lock —
+        # see its docstring for the DV-01/DV-02 fall-through rationale.
+        existing, read_err = _get_provider_for_lock(config_path, provider_name)
+        if read_err is not None:
             events.append(
                 OpenclawIntegrationEvent(
                     code=OpenclawErrorCode.CONFIG_UNREADABLE,
                     level="error",
-                    detail=f"could not read {config_path}: {exc}",
-                )
-            )
-            providers_skipped.append((provider_name, "config_unreadable"))
-            continue
-        except OSError as exc:
-            events.append(
-                OpenclawIntegrationEvent(
-                    code=OpenclawErrorCode.CONFIG_UNREADABLE,
-                    level="error",
-                    detail=f"could not read {config_path}: {exc}",
+                    detail=f"could not read {config_path}: {read_err}",
                 )
             )
             providers_skipped.append((provider_name, "config_unreadable"))

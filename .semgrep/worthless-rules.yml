@@ -96,3 +96,46 @@ rules:
     metadata:
       category: security
       cwe: "CWE-338: Use of Cryptographically Weak PRNG"
+
+  # SC-01: Docker image must be pinned by digest, not just a mutable tag
+  #
+  # ELI5: A tag like `openclaw:2026.5.3-1` is a pointer. The registry owner
+  # can silently push a different image to that tag — you pull "the same version"
+  # and get different (potentially malicious) code. A sha256 digest is a
+  # cryptographic hash of the exact bytes you're pulling; it's immutable. This
+  # rule catches `image:` lines in docker-compose files that use a tag without
+  # a digest. Dockerfiles (FROM) are caught by the second rule.
+  - id: sc01-docker-compose-mutable-image-tag
+    patterns:
+      - pattern: |
+          image: $IMAGE
+      - pattern-not-regex: "image: .+@sha256:[a-f0-9]{64}"
+    message: >
+      SC-01: Docker image "$IMAGE" is pinned by mutable tag only. A tag can be
+      silently repointed to a different image. Pin by digest:
+      image: <name>:<tag>@sha256:<64-hex-chars>
+      Get the digest with: docker buildx imagetools inspect <image>:<tag>
+    languages: [yaml]
+    severity: WARNING
+    paths:
+      include:
+        - "**/docker-compose*.yml"
+        - "**/compose*.yml"
+    metadata:
+      category: supply-chain
+      cwe: "CWE-494: Download of Code Without Integrity Check"
+
+  - id: sc01-dockerfile-mutable-from-tag
+    patterns:
+      - pattern: FROM $IMAGE
+      - pattern-not-regex: "FROM .+@sha256:[a-f0-9]{64}"
+      - pattern-not-regex: "FROM scratch"
+    message: >
+      SC-01: Dockerfile FROM "$IMAGE" uses a mutable tag without a digest.
+      Pin by digest: FROM <name>:<tag>@sha256:<64-hex-chars>
+      Get the digest with: docker buildx imagetools inspect <image>:<tag>
+    languages: [dockerfile]
+    severity: WARNING
+    metadata:
+      category: supply-chain
+      cwe: "CWE-494: Download of Code Without Integrity Check"

@@ -416,3 +416,41 @@ def find_synced_entries(service: str) -> list[str]:
 def is_synced(service: str, username: str) -> bool:
     """Check whether a specific entry is in synced scope."""
     return username in find_synced_entries(service)
+
+
+def find_all_entries(service: str) -> list[str]:
+    """Scan for ALL entries (local + synced) under our service tag.
+
+    WOR-464: orphan-keychain detection needs a complete enumeration —
+    ``find_synced_entries`` only returns the synced subset. Pinning
+    ``kSecAttrSynchronizable=kSecAttrSynchronizableAny`` (a special
+    sentinel that means "match either scope") is what gives us the
+    union without two queries.
+
+    Returns ``kSecAttrAccount`` strings. Empty list when nothing matches.
+    """
+    query = _build_dict(
+        [
+            (kSecClass, kSecClassGenericPassword),
+            (kSecAttrService, service),
+            (kSecMatchLimit, kSecMatchLimitAll),
+            (kSecReturnAttributes, kCFBooleanTrue),
+            (kSecAttrSynchronizable, kSecAttrSynchronizableAny),
+        ]
+    )
+    result = c_void_p()
+    status = SecItemCopyMatching(query, byref(result))
+    if status == _ErrorCodes.item_not_found:
+        return []
+    _raise_for_status(status)
+
+    accounts: list[str] = []
+    count = CFArrayGetCount(result)
+    for i in range(count):
+        entry = CFArrayGetValueAtIndex(result, i)
+        acct_ptr = CFDictionaryGetValue(entry, kSecAttrAccount)
+        if acct_ptr:
+            acct = _cfstr_to_str(acct_ptr)
+            if acct:
+                accounts.append(acct)
+    return accounts

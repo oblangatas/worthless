@@ -90,9 +90,7 @@ def _proxy_base_url(alias: str) -> str:
     deployments can write ``host.docker.internal`` (or any reachable hostname)
     into openclaw.json instead of the loopback address.
     """
-    import os as _os
-
-    host = _os.environ.get("WORTHLESS_PROXY_HOST", "127.0.0.1")
+    host = os.environ.get("WORTHLESS_PROXY_HOST", "127.0.0.1")
     return f"http://{host}:{resolve_port(None)}/{alias}/v1"
 
 
@@ -551,7 +549,11 @@ def _apply_openclaw(
     # openclaw.json's baseUrl matches a non-default --port. Without this,
     # users on non-default ports got a wrong baseUrl in openclaw.json
     # while .env's BASE_URL was correct (split-brain proxy URL).
-    proxy_base_url = f"http://127.0.0.1:{resolve_port(None)}"
+    # Also honour WORTHLESS_PROXY_HOST so all-container Docker deployments
+    # write the Docker-internal service name (e.g. "proxy") instead of
+    # 127.0.0.1, which is unreachable inside the openclaw container.
+    _proxy_host = os.environ.get("WORTHLESS_PROXY_HOST", "127.0.0.1")
+    proxy_base_url = f"http://{_proxy_host}:{resolve_port(None)}"
     try:
         result = _openclaw_integration.apply_lock(
             planned_updates=triples, proxy_base_url=proxy_base_url

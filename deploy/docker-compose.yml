@@ -11,13 +11,32 @@ services:
       # Separate fernet key from shard data — requires the worthless-secrets
       # volume below. Remove this for single-volume PaaS deployments.
       WORTHLESS_FERNET_KEY_PATH: /secrets/fernet.key
+      # Used by `worthless lock` so openclaw.json gets the Docker-internal
+      # service name instead of 127.0.0.1. Harmless when openclaw is not running.
+      WORTHLESS_PROXY_HOST: proxy
+      # Signal to _atomic_write_json to chmod openclaw.json to 0644 after
+      # each write. Required because mkstemp creates 0600 files and the
+      # openclaw container (node user) must be able to read what the proxy
+      # (worthless user) writes on the shared openclaw-config volume.
+      WORTHLESS_OPENCLAW_CONFIG_SHARED: "1"
     volumes:
       - worthless-data:/data
       # Keeps the decryption key off the same volume as shard data.
       # Compromise of one volume alone cannot reconstruct API keys.
       - worthless-secrets:/secrets
+      # Shared with the openclaw service — worthless lock writes openclaw.json
+      # here; openclaw reads it. Always mounted so lock works correctly
+      # regardless of whether the openclaw profile is active.
+      - openclaw-config:/data/.openclaw
     networks:
       - frontend
+      - openclaw-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8787/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
     read_only: true
     tmpfs:
@@ -38,11 +57,62 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # OpenClaw Gateway — opt-in via: docker compose --profile openclaw up
+  # Setup: printf 'OPENAI_API_KEY=<key>\n' | docker compose exec -T proxy sh -c 'cat > /tmp/.env'
+  #        docker compose exec proxy worthless lock --env /tmp/.env
+  #        docker compose restart openclaw
+  # Full guide: website/install-openclaw.md § All-container setup
+  openclaw:
+    image: ghcr.io/openclaw/openclaw:2026.5.3-1@sha256:142f70fa2751bdedf03648ae427372fff3f92ac0e96ab91abb3824b088c38b7b
+    profiles:
+      - openclaw
+    ports:
+      - "127.0.0.1:18789:18789"
+    environment:
+      OPENCLAW_ACCEPT_TERMS: "yes"
+    volumes:
+      # Shared with proxy — worthless lock writes here, openclaw reads here.
+      - openclaw-config:/home/node/.openclaw
+    networks:
+      - openclaw-net
+    depends_on:
+      proxy:
+        condition: service_healthy
+    restart: unless-stopped
+    read_only: true
+    user: "node"
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+      - /run:noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+          pids: 100
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 networks:
   frontend:
     driver: bridge
+  # Internal network shared between proxy and openclaw. No host access needed —
+  # openclaw reaches proxy via Docker DNS (`proxy:8787`).
+  openclaw-net:
+    driver: bridge
+    internal: true
   # Future: add `backend` with `internal: true` for Redis/DB services
 
 volumes:
   worthless-data:
   worthless-secrets:
+  # Shared openclaw config. worthless lock writes openclaw.json here;
+  # openclaw reads it as /home/node/.openclaw.
+  openclaw-config:

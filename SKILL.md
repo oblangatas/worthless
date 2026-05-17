@@ -165,6 +165,35 @@ Locked keys:
 Proxy: http://127.0.0.1:8787 (running)
 ```
 
+### worthless doctor
+
+**Diagnose and repair stuck states across all known failure modes. WOR-464 adds a check registry + `--json` machine-readable output.**
+
+`worthless doctor` runs eight checks: `recovery_import`, `orphan_db`, `openclaw`, `icloud_keychain`, `orphan_keychain`, `stranded_shards`, `fernet_drift`, `broken_status`. Read-only by default. `--fix` enables repair for all checks EXCEPT `fernet_drift` (drift is hardcoded `fixable=False` — only the user can pick which side is canonical, never the tool).
+
+**JSON mode:**
+
+```bash
+worthless doctor --json
+```
+
+Emits a single document on stdout:
+
+```json
+{"schema_version": "1",
+ "ok": true,
+ "checks": [{"check_id": "orphan_db", "status": "ok", "findings": [],
+             "summary": "No orphan enrollments found.",
+             "fixable": true, "fixed": [], "skipped_reason": null}, ...],
+ "summary": {"total": 8, "warn": 0, "error": 0, "fixed": 0}}
+```
+
+`schema_version` is bumped only on breaking shape changes. New `check_id` values, new finding keys, and new optional fields are additive.
+
+**Troubleshooting tree:** `docs/troubleshooting.md` has one section per `check_id` with the user-visible symptom and the exact command to run.
+
+The detailed text-mode output is documented under the `worthless doctor [OPTIONS]` subsection further down.
+
 #### `worthless wrap [OPTIONS] COMMAND [ARGS...]`
 **Ephemeral proxy + child process lifecycle.**
 
