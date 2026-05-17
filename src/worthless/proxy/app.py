@@ -11,6 +11,7 @@ Architecture invariants enforced:
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import os
@@ -102,6 +103,23 @@ def _extract_shard_a(request: Request) -> bytearray | None:
     return None
 
 
+def _extract_bearer_string(request: Request) -> str | None:
+    """Extract the raw Bearer token string from the Authorization header.
+
+    Used by the worthless-16x2 stable-token path.  Unlike
+    ``_extract_shard_a`` this returns the raw string without wrapping in
+    ``bytearray``, because the token is compared with
+    ``hmac.compare_digest`` (SR-07) — no zeroing required (it's a public
+    URL-safe token, not raw key material).
+    """
+    auth = request.headers.get("authorization")
+    if auth and auth.lower().startswith("bearer "):
+        token = auth[7:]
+        if token:
+            return token
+    return None
+
+
 def _extract_alias_and_path(raw_path: str) -> tuple[str, str] | None:
     """Extract alias prefix and API path from ``/<alias>/v1/chat/completions``.
 
@@ -178,6 +196,11 @@ async def _lifespan(app: FastAPI):
     await repo.initialize()
     app.state.repo = repo
 
+    # worthless-16x2: load stable proxy auth token once at startup.
+    # Stored encrypted in the metadata table; None when no token has been
+    # set (pre-16x2 deployments, or fresh proxy before first lock).
+    app.state.proxy_auth_token = await repo.get_proxy_auth_token()
+
     client = httpx.AsyncClient(
         follow_redirects=False,
         timeout=httpx.Timeout(
@@ -211,6 +234,9 @@ async def _lifespan(app: FastAPI):
         await client.aclose()
         await db.close()
         repo.close()
+        # worthless-16x2: clear auth token string from app state (not raw key
+        # material, but remove reference so GC can collect promptly)
+        app.state.proxy_auth_token = None
     finally:
         for i in range(len(settings.fernet_key)):
             settings.fernet_key[i] = 0
@@ -235,6 +261,10 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
         lifespan=_lifespan,
     )
     app.state.settings = settings
+    # worthless-16x2: initialize to None; overwritten in _lifespan once the
+    # repo loads the encrypted token from DB. Tests that bypass the full
+    # lifespan see None and fall through to the legacy header-based path.
+    app.state.proxy_auth_token = None
 
     # Middleware stack (reverse order: last registered runs first)
     app.add_middleware(CORSMiddleware, allow_origins=[], allow_methods=["GET"], allow_headers=[])
@@ -331,12 +361,47 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
             )
             return _uniform_401()
 
-        # SR-09: shard-A from request header only (no disk, no files)
-        # OpenAI: Authorization: Bearer <shard-A>
-        # Anthropic: x-api-key: <shard-A>
-        shard_a = _extract_shard_a(request)
-        if shard_a is None:
-            return _uniform_401()
+        # worthless-16x2: two auth paths based on whether this alias was
+        # locked with the new stable-token scheme.
+        #
+        # 16x2 path (shard_a_enc is present in DB row):
+        #   Client sends a stable opaque token as Bearer — NOT shard-A.
+        #   Token is verified with hmac.compare_digest (SR-07, constant-time).
+        #   shard-A is retrieved from DB after decryption, never from the header.
+        #   shard_a is left None here and populated from stored.shard_a post-decrypt.
+        #
+        # Legacy path (shard_a_enc is None, pre-16x2 row):
+        #   SR-09: shard-A from request header only (no disk, no files).
+        #   OpenAI: Authorization: Bearer <shard-A>
+        #   Anthropic: x-api-key: <shard-A>
+        #
+        # The SR-09 note about "no disk" still holds for the legacy path.
+        # For 16x2 rows the shard-A comes from the encrypted DB column,
+        # which was written by the client at lock time — not from a live header.
+        proxy_auth_token: str | None = request.app.state.proxy_auth_token
+        shard_a: bytearray | None
+
+        if encrypted.shard_a_enc is not None:
+            # 16x2 path — verify stable token (constant-time, SR-07)
+            if proxy_auth_token is None:
+                # Alias locked with 16x2 but proxy has no auth token loaded.
+                # This should not happen in normal operation (token set at lock
+                # time, proxy loaded it at startup). Fail safe.
+                logger.warning(
+                    "16x2 alias %r has shard_a_enc but proxy_auth_token not loaded; "
+                    "re-start the proxy after `worthless lock`",
+                    alias,
+                )
+                return _uniform_401()
+            bearer = _extract_bearer_string(request)
+            if bearer is None or not hmac.compare_digest(bearer, proxy_auth_token):
+                return _uniform_401()
+            shard_a = None  # will be set from stored.shard_a after decryption
+        else:
+            # Legacy path — shard-A from request header
+            shard_a = _extract_shard_a(request)
+            if shard_a is None:
+                return _uniform_401()
 
         # Pre-read body ONCE before rules engine (WOR-182: eliminates
         # Starlette body-caching coupling — rules receive bytes, not stream)
@@ -349,8 +414,9 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
         # GATE: rules engine evaluates BEFORE any Fernet decrypt
         denial = await rules_engine.evaluate(alias, request, provider=encrypted.provider, body=body)
         if denial is not None:
-            # Zero shard_a before returning
-            shard_a[:] = b"\x00" * len(shard_a)
+            # Zero shard_a before returning (legacy path only; 16x2 path has None here)
+            if shard_a is not None:
+                shard_a[:] = b"\x00" * len(shard_a)
             # Release any reservation placed by an earlier rule in the chain
             # (e.g. TokenBudgetRule reserves before RateLimitRule/SpendCapRule run).
             await rules_engine.release_spend_reservation(alias, _spend_reservation)
@@ -364,7 +430,8 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
         # Get adapter (uniform 401, not 404, for anti-enumeration)
         adapter = get_adapter(clean_path)
         if adapter is None:
-            shard_a[:] = b"\x00" * len(shard_a)
+            if shard_a is not None:
+                shard_a[:] = b"\x00" * len(shard_a)
             await rules_engine.release_spend_reservation(alias, _spend_reservation)
             return _uniform_401()
 
@@ -372,9 +439,23 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
         try:
             stored = repo.decrypt_shard(encrypted)
         except Exception:
-            shard_a[:] = b"\x00" * len(shard_a)
+            if shard_a is not None:
+                shard_a[:] = b"\x00" * len(shard_a)
             await rules_engine.release_spend_reservation(alias, _spend_reservation)
             return _uniform_401()
+
+        # worthless-16x2: for 16x2 aliases, shard_a comes from the decrypted DB row.
+        # For legacy aliases, shard_a was extracted from the header earlier.
+        if encrypted.shard_a_enc is not None:
+            if stored.shard_a is None:
+                # Row has shard_a_enc column but decryption yielded None — storage error.
+                stored.zero()
+                await rules_engine.release_spend_reservation(alias, _spend_reservation)
+                return _uniform_401()
+            active_shard_a: bytearray = stored.shard_a
+        else:
+            # shard_a is not None here (legacy path set it before the gate)
+            active_shard_a = shard_a  # type: ignore[assignment]
 
         # Reconstruct key inside secure_key context (body already read above)
         req_headers = {k: v for k, v in request.headers.items()}
@@ -382,7 +463,7 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
         try:
             if encrypted.prefix is not None and encrypted.charset is not None:
                 key_buf = reconstruct_key_fp(
-                    shard_a,
+                    active_shard_a,
                     stored.shard_b,
                     stored.commitment,
                     stored.nonce,
@@ -390,9 +471,12 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
                     encrypted.charset,
                 )
             else:
-                key_buf = reconstruct_key(shard_a, stored.shard_b, stored.commitment, stored.nonce)
+                key_buf = reconstruct_key(
+                    active_shard_a, stored.shard_b, stored.commitment, stored.nonce
+                )
         except Exception:
-            shard_a[:] = b"\x00" * len(shard_a)
+            if shard_a is not None:
+                shard_a[:] = b"\x00" * len(shard_a)
             stored.zero()
             await rules_engine.release_spend_reservation(alias, _spend_reservation)
             return _uniform_401()
@@ -524,9 +608,12 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
                     background=BackgroundTask(_do_record_spend, adapter_resp.body),
                 )
         finally:
-            shard_a[:] = b"\x00" * len(shard_a)
+            # Zero shard_a only for legacy path (16x2 path leaves it None;
+            # stored.zero() handles stored.shard_a in that case).
+            if shard_a is not None:
+                shard_a[:] = b"\x00" * len(shard_a)
             if stored is not None:
-                stored.zero()
+                stored.zero()  # zeros stored.shard_a too (16x2 path)
 
     return app
 

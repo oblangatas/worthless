@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS shards (
     prefix      TEXT,
     charset     TEXT,
     base_url    TEXT,
+    shard_a_enc BLOB,
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -148,6 +149,24 @@ async def _migrate_base_url_column(
             raise
 
 
+async def _migrate_shard_a_enc_column(db: aiosqlite.Connection, shard_columns: set[str]) -> None:
+    """worthless-16x2: add ``shards.shard_a_enc`` (nullable, no backfill).
+
+    Pre-16x2 rows have NULL here — the proxy falls back to the legacy
+    header-based shard-A path for those aliases.  After the operator
+    re-locks an alias the column is populated and the stable-token path
+    takes over automatically.
+    """
+    if "shard_a_enc" in shard_columns:
+        return
+    try:
+        await db.execute("ALTER TABLE shards ADD COLUMN shard_a_enc BLOB")
+        await db.commit()
+    except Exception as exc:
+        if "duplicate column" not in str(exc).lower():
+            raise
+
+
 async def init_db(db_path: str) -> None:
     """Create tables and enable WAL journal mode."""
     async with aiosqlite.connect(db_path) as db:
@@ -201,6 +220,7 @@ async def migrate_db(db_path: str) -> None:
         shard_columns = {row[1] for row in await cursor.fetchall()}
         await _migrate_shard_format_columns(db, shard_columns)
         await _migrate_base_url_column(db, db_path, shard_columns)
+        await _migrate_shard_a_enc_column(db, shard_columns)
 
         # WOR-183: Add rules engine columns to enrollment_config
         # Guard: table may not exist in very old DBs

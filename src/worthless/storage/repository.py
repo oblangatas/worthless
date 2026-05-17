@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 from contextlib import asynccontextmanager
@@ -38,13 +39,18 @@ class EncryptedShard(NamedTuple):
     # created before 8rqs landed; Phase-6 readers refuse to use it and prompt
     # the user to re-lock.
     base_url: str | None = None
+    # worthless-16x2: Fernet-encrypted shard-A stored server-side so the proxy
+    # can reconstruct the full key without the client supplying shard-A on every
+    # request. None on pre-16x2 rows — proxy falls back to the legacy Bearer path.
+    shard_a_enc: bytes | None = None
 
     def __repr__(self) -> str:
         return (
             f"EncryptedShard(shard_b_enc=<{len(self.shard_b_enc)} bytes>, "
             f"commitment=<{len(self.commitment)} bytes>, "
             f"nonce=<{len(self.nonce)} bytes>, provider={self.provider!r}, "
-            f"prefix={self.prefix!r}, base_url={self.base_url!r})"
+            f"prefix={self.prefix!r}, base_url={self.base_url!r}, "
+            f"shard_a_enc={'<present>' if self.shard_a_enc else 'None'})"
         )
 
 
@@ -73,17 +79,24 @@ class StoredShard:
     commitment: bytearray
     nonce: bytearray
     provider: str
+    # worthless-16x2: shard-A decrypted from DB. None on pre-16x2 rows where
+    # shard-A still arrives in the Authorization header (legacy path).
+    shard_a: bytearray | None = None
 
     def __repr__(self) -> str:
         return (
             f"StoredShard(shard_b=<{len(self.shard_b)} bytes>, "
             f"commitment=<{len(self.commitment)} bytes>, "
-            f"nonce=<{len(self.nonce)} bytes>, provider={self.provider!r})"
+            f"nonce=<{len(self.nonce)} bytes>, provider={self.provider!r}, "
+            f"shard_a={'<present>' if self.shard_a else 'None'})"
         )
 
     def zero(self) -> None:
         """Zero all cryptographic fields in place (SR-02)."""
-        for buf in (self.shard_b, self.commitment, self.nonce):
+        bufs = [self.shard_b, self.commitment, self.nonce]
+        if self.shard_a is not None:
+            bufs.append(self.shard_a)
+        for buf in bufs:
             buf[:] = b"\x00" * len(buf)
 
 
@@ -182,13 +195,15 @@ class ShardRepository:
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
-                "SELECT shard_b_enc, commitment, nonce, provider, prefix, charset, base_url "
+                "SELECT shard_b_enc, commitment, nonce, provider, prefix, charset, base_url, "
+                "shard_a_enc "
                 "FROM shards WHERE key_alias = ?",
                 (alias,),
             )
             row = await cursor.fetchone()
             if row is None:
                 return None
+            raw_a = row["shard_a_enc"]
             return EncryptedShard(
                 shard_b_enc=memoryview(  # nosemgrep: sr01-key-material-not-bytearray
                     row["shard_b_enc"]
@@ -203,19 +218,31 @@ class ShardRepository:
                 prefix=row["prefix"],
                 charset=row["charset"],
                 base_url=row["base_url"],
+                shard_a_enc=memoryview(  # nosemgrep: sr01-key-material-not-bytearray
+                    raw_a
+                ).tobytes()
+                if raw_a is not None
+                else None,
             )
 
     def decrypt_shard(self, encrypted: EncryptedShard) -> StoredShard:
         """Fernet-decrypt an :class:`EncryptedShard` into a :class:`StoredShard`.
 
-        All byte fields are wrapped in ``bytearray`` per SR-01.
+        All byte fields are wrapped in ``bytearray`` per SR-01.  When
+        ``encrypted.shard_a_enc`` is present (worthless-16x2 rows), shard-A
+        is also decrypted and returned; legacy rows leave ``shard_a=None``.
         """
-        shard_b = self._get_fernet().decrypt(encrypted.shard_b_enc)
+        fernet = self._get_fernet()
+        shard_b = fernet.decrypt(encrypted.shard_b_enc)
+        shard_a: bytearray | None = None
+        if encrypted.shard_a_enc is not None:
+            shard_a = bytearray(fernet.decrypt(encrypted.shard_a_enc))
         return StoredShard(
             shard_b=bytearray(shard_b),
             commitment=bytearray(encrypted.commitment),
             nonce=bytearray(encrypted.nonce),
             provider=encrypted.provider,
+            shard_a=shard_a,
         )
 
     async def retrieve(self, alias: str) -> StoredShard | None:
@@ -285,6 +312,75 @@ class ShardRepository:
             )
             row = await cursor.fetchone()
             return row[0] if row else None
+
+    # ------------------------------------------------------------------
+    # worthless-16x2: stable proxy auth token
+    # ------------------------------------------------------------------
+
+    _AUTH_TOKEN_META_KEY = "proxy_auth_token_enc"  # noqa: S105 — metadata key, not a credential
+
+    async def set_proxy_auth_token(self, token: str) -> None:
+        """Fernet-encrypt *token* and persist it in the metadata table.
+
+        *token* is the URL-safe base64 string produced by
+        ``secrets.token_urlsafe(32)`` at lock time.  It is stored encrypted so
+        that read access to the DB does not expose it directly.  The proxy
+        loads and decrypts it once at startup.
+        """
+        token_enc = self._get_fernet().encrypt(token.encode())
+        await self.set_metadata(self._AUTH_TOKEN_META_KEY, base64.b64encode(token_enc).decode())
+
+    async def get_proxy_auth_token(self) -> str | None:
+        """Return the decrypted proxy auth token string, or *None* if not set."""
+        raw = await self.get_metadata(self._AUTH_TOKEN_META_KEY)
+        if raw is None:
+            return None
+        token_enc = base64.b64decode(raw)
+        return self._get_fernet().decrypt(token_enc).decode()
+
+    async def upsert_locked_shard(
+        self,
+        alias: str,
+        shard: StoredShard,
+        *,
+        shard_a: bytearray,
+        prefix: str | None = None,
+        charset: str | None = None,
+        base_url: str | None = None,
+    ) -> None:
+        """INSERT OR REPLACE a shard row, storing both shard-A and shard-B encrypted.
+
+        Unlike ``store_enrolled`` (which uses INSERT OR IGNORE to preserve
+        existing shards), this method always overwrites — keeping the
+        commitment, nonce, and both encrypted shards in sync on every
+        lock/re-lock.  Without replace semantics, re-locking left the old
+        shard-B in the DB while writing a new shard-A to openclaw.json,
+        causing XOR reconstruction to fail permanently (worthless-16x2).
+        """
+        fernet = self._get_fernet()
+        shard_b_enc = fernet.encrypt(
+            memoryview(shard.shard_b).tobytes()
+        )  # Fernet requires immutable bytes
+        shard_a_enc = fernet.encrypt(memoryview(shard_a).tobytes())
+        async with self._connect() as db:
+            await db.execute(
+                "INSERT OR REPLACE INTO shards "
+                "(key_alias, shard_b_enc, commitment, nonce, provider, prefix, charset, "
+                " base_url, shard_a_enc) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    alias,
+                    shard_b_enc,
+                    memoryview(shard.commitment).tobytes(),
+                    memoryview(shard.nonce).tobytes(),
+                    shard.provider,
+                    prefix,
+                    charset,
+                    base_url,
+                    shard_a_enc,
+                ),
+            )
+            await db.commit()
 
     # ------------------------------------------------------------------
     # Enrollment CRUD

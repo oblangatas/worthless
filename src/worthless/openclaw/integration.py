@@ -572,9 +572,12 @@ def apply_lock(
     structured events in the returned :class:`OpenclawApplyResult`.
 
     Args:
-        planned_updates: list of ``(provider, alias, shard_a)`` triples
-            for keys that were just locked. ``shard_a`` is a UTF-8 string
-            (lock.py decodes the bytearray before calling us).
+        planned_updates: list of ``(provider, alias, auth_token)`` triples
+            for keys that were just locked.  ``auth_token`` is the stable
+            proxy auth token (worthless-16x2) — an opaque URL-safe base64
+            string — NOT shard-A.  The same token is written to every
+            provider entry so all aliases share one secret, rotated on
+            ``worthless relock``.
         proxy_base_url: override for the proxy host. Defaults to
             ``http://127.0.0.1:8787`` (the canonical worthless port).
 
@@ -698,7 +701,7 @@ def apply_lock(
             )
         )
 
-    for provider, alias, shard_a in planned_updates:
+    for provider, alias, auth_token in planned_updates:
         provider_name = f"worthless-{provider}"
         base_url = f"{resolved_proxy_base_url.rstrip('/')}/{alias}/v1"
 
@@ -740,7 +743,11 @@ def apply_lock(
                 config_path,
                 provider_name,
                 base_url,
-                api_key=shard_a,
+                # worthless-16x2: write the stable opaque auth token as
+                # apiKey (NOT shard-A).  The proxy verifies this token on
+                # every request and retrieves shard-A from the DB — so
+                # openclaw.json no longer carries raw key material.
+                api_key=auth_token,
                 # Required by OpenClaw daemon — without these the daemon
                 # rejects the config with "Invalid input: expected array,
                 # received undefined". Verified live (WOR-431 evidence).

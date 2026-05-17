@@ -7,6 +7,7 @@ import hashlib
 import logging
 import os
 import re
+import secrets
 import stat
 import sys
 from dataclasses import dataclass
@@ -378,6 +379,18 @@ async def _pass1_db_writes(
                     db_shard.prefix,
                     db_shard.charset,
                 )
+                # worthless-16x2: upsert the shards row (INSERT OR REPLACE) so
+                # shard_a_enc is always in sync with the value written to openclaw.json.
+                # Pre-16x2 used only add_enrollment(), leaving the old shard_b in DB
+                # while writing a new shard_a to openclaw.json — XOR would fail forever.
+                await repo.upsert_locked_shard(
+                    alias,
+                    stored_decrypted,
+                    shard_a=derived_shard_a,
+                    prefix=db_shard.prefix,
+                    charset=db_shard.charset,
+                    base_url=db_shard.base_url or upstream_base_url,
+                )
                 await repo.add_enrollment(alias, var_name=var_name, env_path=env_str)
                 await _delete_superseded_location_enrollments(
                     repo,
@@ -418,6 +431,18 @@ async def _pass1_db_writes(
                 commitment=sr.commitment,
                 nonce=sr.nonce,
                 provider=provider,
+            )
+            # worthless-16x2: use upsert_locked_shard (INSERT OR REPLACE) so
+            # shard_a_enc is stored from the first lock. store_enrolled() handles
+            # enrollment rows and enrollment_config; upsert_locked_shard() handles
+            # the shards row with shard_a_enc included.
+            await repo.upsert_locked_shard(
+                alias,
+                stored,
+                shard_a=bytearray(sr.shard_a),
+                prefix=sr.prefix,
+                charset=sr.charset,
+                base_url=upstream_base_url,
             )
             await repo.store_enrolled(
                 alias,
@@ -521,6 +546,7 @@ def _apply_openclaw(
     console,  # noqa: ANN001 — Console type is opaque from this layer
     quiet: bool,
     home: WorthlessHome,
+    auth_token: str,
 ) -> bool:
     """OpenClaw integration call + sentinel write. Returns ``partial_failure``.
 
@@ -542,9 +568,10 @@ def _apply_openclaw(
         status`` can report DEGRADED state across terminal sessions.
         Sentinel write failure is itself best-effort (logged, swallowed).
     """
-    triples: list[tuple[str, str, str]] = [
-        (p.provider, p.alias, p.shard_a.decode("utf-8")) for p in planned
-    ]
+    # worthless-16x2: write the stable auth_token (NOT shard-A) to openclaw.json.
+    # All aliases share the same token so the proxy can verify with a single
+    # in-memory compare_digest (SR-07) without a per-alias lookup.
+    triples: list[tuple[str, str, str]] = [(p.provider, p.alias, auth_token) for p in planned]
     # Plumb the SAME port lock just used for .env's BASE_URL vars so
     # openclaw.json's baseUrl matches a non-default --port. Without this,
     # users on non-default ports got a wrong baseUrl in openclaw.json
@@ -836,6 +863,15 @@ def _lock_keys(
         ]
         existing_env_keys = set(env_values.keys())
 
+        # worthless-16x2: ensure a stable proxy auth token exists in DB.
+        # Reuse the existing token if present (stable across re-locks — avoids
+        # invalidating long-running OpenClaw cron jobs). Generate on first lock
+        # or after `worthless unlock --all` clears the metadata.
+        proxy_auth_token = await repo.get_proxy_auth_token()
+        if proxy_auth_token is None:
+            proxy_auth_token = secrets.token_urlsafe(32)
+            await repo.set_proxy_auth_token(proxy_auth_token)
+
         planned: list[_PlannedUpdate] = []
         try:
             if not quiet:
@@ -858,7 +894,7 @@ def _lock_keys(
             # by the verification gauntlet): detected+failed returns
             # partial_failure=True so the caller can raise typer.Exit(73)
             # AFTER lock-core's .env/DB writes are fully committed.
-            partial_failure = _apply_openclaw(planned, console, quiet, home)
+            partial_failure = _apply_openclaw(planned, console, quiet, home, proxy_auth_token)
             return len(planned), partial_failure
         except Exception:
             if planned:
