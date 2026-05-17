@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import hmac
 from contextlib import asynccontextmanager
@@ -39,9 +38,9 @@ class EncryptedShard(NamedTuple):
     # created before 8rqs landed; Phase-6 readers refuse to use it and prompt
     # the user to re-lock.
     base_url: str | None = None
-    # worthless-16x2: Fernet-encrypted shard-A stored server-side so the proxy
-    # can reconstruct the full key without the client supplying shard-A on every
-    # request. None on pre-16x2 rows — proxy falls back to the legacy Bearer path.
+    # Fernet-encrypted shard-A stored server-side so the proxy reconstructs the
+    # full key without the client sending shard-A on each request.  None on
+    # pre-16x2 rows — proxy falls back to the legacy Bearer-header path.
     shard_a_enc: bytes | None = None
 
     def __repr__(self) -> str:
@@ -79,8 +78,8 @@ class StoredShard:
     commitment: bytearray
     nonce: bytearray
     provider: str
-    # worthless-16x2: shard-A decrypted from DB. None on pre-16x2 rows where
-    # shard-A still arrives in the Authorization header (legacy path).
+    # None on pre-16x2 rows where shard-A arrives in the Authorization header
+    # (legacy path).  Populated by decrypt_shard() when shard_a_enc is present.
     shard_a: bytearray | None = None
 
     def __repr__(self) -> str:
@@ -314,7 +313,7 @@ class ShardRepository:
             return row[0] if row else None
 
     # ------------------------------------------------------------------
-    # worthless-16x2: stable proxy auth token
+    # stable proxy auth token
     # ------------------------------------------------------------------
 
     _AUTH_TOKEN_META_KEY = "proxy_auth_token_enc"  # noqa: S105 — metadata key, not a credential
@@ -328,15 +327,14 @@ class ShardRepository:
         loads and decrypts it once at startup.
         """
         token_enc = self._get_fernet().encrypt(token.encode())
-        await self.set_metadata(self._AUTH_TOKEN_META_KEY, base64.b64encode(token_enc).decode())
+        await self.set_metadata(self._AUTH_TOKEN_META_KEY, token_enc.decode())
 
     async def get_proxy_auth_token(self) -> str | None:
         """Return the decrypted proxy auth token string, or *None* if not set."""
         raw = await self.get_metadata(self._AUTH_TOKEN_META_KEY)
         if raw is None:
             return None
-        token_enc = base64.b64decode(raw)
-        return self._get_fernet().decrypt(token_enc).decode()
+        return self._get_fernet().decrypt(raw.encode()).decode()
 
     async def upsert_locked_shard(
         self,

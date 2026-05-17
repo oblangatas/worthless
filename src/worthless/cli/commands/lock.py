@@ -379,10 +379,9 @@ async def _pass1_db_writes(
                     db_shard.prefix,
                     db_shard.charset,
                 )
-                # worthless-16x2: upsert the shards row (INSERT OR REPLACE) so
-                # shard_a_enc is always in sync with the value written to openclaw.json.
-                # Pre-16x2 used only add_enrollment(), leaving the old shard_b in DB
-                # while writing a new shard_a to openclaw.json — XOR would fail forever.
+                # INSERT OR REPLACE keeps shard_a_enc in sync with the auth token
+                # written to openclaw.json.  INSERT OR IGNORE would leave the old
+                # shard_b in DB on re-lock, causing XOR reconstruction to fail permanently.
                 await repo.upsert_locked_shard(
                     alias,
                     stored_decrypted,
@@ -432,10 +431,8 @@ async def _pass1_db_writes(
                 nonce=sr.nonce,
                 provider=provider,
             )
-            # worthless-16x2: use upsert_locked_shard (INSERT OR REPLACE) so
-            # shard_a_enc is stored from the first lock. store_enrolled() handles
-            # enrollment rows and enrollment_config; upsert_locked_shard() handles
-            # the shards row with shard_a_enc included.
+            # store_enrolled() handles enrollment rows; upsert_locked_shard()
+            # writes the shards row with shard_a_enc included from the first lock.
             await repo.upsert_locked_shard(
                 alias,
                 stored,
@@ -568,9 +565,8 @@ def _apply_openclaw(
         status`` can report DEGRADED state across terminal sessions.
         Sentinel write failure is itself best-effort (logged, swallowed).
     """
-    # worthless-16x2: write the stable auth_token (NOT shard-A) to openclaw.json.
-    # All aliases share the same token so the proxy can verify with a single
-    # in-memory compare_digest (SR-07) without a per-alias lookup.
+    # All aliases share the same stable token so the proxy verifies with a
+    # single in-memory compare_digest (SR-07) without a per-alias DB lookup.
     triples: list[tuple[str, str, str]] = [(p.provider, p.alias, auth_token) for p in planned]
     # Plumb the SAME port lock just used for .env's BASE_URL vars so
     # openclaw.json's baseUrl matches a non-default --port. Without this,
@@ -863,10 +859,8 @@ def _lock_keys(
         ]
         existing_env_keys = set(env_values.keys())
 
-        # worthless-16x2: ensure a stable proxy auth token exists in DB.
-        # Reuse the existing token if present (stable across re-locks — avoids
-        # invalidating long-running OpenClaw cron jobs). Generate on first lock
-        # or after `worthless unlock --all` clears the metadata.
+        # Reuse the existing token across re-locks so running OpenClaw cron jobs
+        # are not invalidated.  Generate only on first lock or after unlock --all.
         proxy_auth_token = await repo.get_proxy_auth_token()
         if proxy_auth_token is None:
             proxy_auth_token = secrets.token_urlsafe(32)
