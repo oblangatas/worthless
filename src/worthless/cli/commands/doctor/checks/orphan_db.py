@@ -33,7 +33,7 @@ def run(ctx: CheckContext) -> CheckResult:
     from worthless.cli.commands.doctor import _list_orphans
 
     try:
-        orphans = asyncio.run(_list_orphans(ctx.repo))
+        _all, orphans = asyncio.run(_list_orphans(ctx.repo))
     except Exception as exc:  # noqa: BLE001 - SR-04 scrub
         return CheckResult(
             check_id=check_id,
