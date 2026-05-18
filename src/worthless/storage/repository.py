@@ -10,7 +10,7 @@ from collections.abc import AsyncIterator
 from typing import NamedTuple
 
 import aiosqlite
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken
 
 from worthless.defaults import DEFAULT_SPEND_CAP_TOKENS
 from worthless.storage.schema import init_db, migrate_db
@@ -330,11 +330,21 @@ class ShardRepository:
         await self.set_metadata(self._AUTH_TOKEN_META_KEY, token_enc.decode())
 
     async def get_proxy_auth_token(self) -> str | None:
-        """Return the decrypted proxy auth token string, or *None* if not set."""
+        """Return the decrypted proxy auth token string, or *None* if not set.
+
+        Returns *None* if the token was encrypted with a different (rotated)
+        Fernet key — e.g. after a full revoke deletes the key and the next
+        ``worthless lock`` generates a fresh one.  The caller treats *None* as
+        "generate a new token", so stale ciphertext self-heals on re-lock.
+        """
         raw = await self.get_metadata(self._AUTH_TOKEN_META_KEY)
         if raw is None:
             return None
-        return self._get_fernet().decrypt(raw.encode()).decode()
+        try:
+            return self._get_fernet().decrypt(raw.encode()).decode()
+        except InvalidToken:
+            # Token was encrypted with a different (rotated) key — treat as absent.
+            return None
 
     async def upsert_locked_shard(
         self,
@@ -346,14 +356,17 @@ class ShardRepository:
         charset: str | None = None,
         base_url: str | None = None,
     ) -> None:
-        """INSERT OR REPLACE a shard row, storing both shard-A and shard-B encrypted.
+        """Upsert a shard row, storing both shard-A and shard-B encrypted.
 
-        Unlike ``store_enrolled`` (which uses INSERT OR IGNORE to preserve
-        existing shards), this method always overwrites — keeping the
-        commitment, nonce, and both encrypted shards in sync on every
-        lock/re-lock.  Without replace semantics, re-locking left the old
-        shard-B in the DB while writing a new shard-A to openclaw.json,
-        causing XOR reconstruction to fail permanently (worthless-16x2).
+        Uses ``ON CONFLICT DO UPDATE`` (not ``INSERT OR REPLACE``) so the row
+        is patched in place.  INSERT OR REPLACE deletes then re-inserts, which
+        fires the ``enrollments → shards ON DELETE CASCADE`` and wipes all
+        enrollment records for the alias — breaking the two-env-same-key case.
+
+        On-conflict update keeps commitment, nonce, and both encrypted shards in
+        sync on every lock/re-lock.  Without this, re-locking left the old
+        shard-B in the DB while writing a new shard-A to openclaw.json, causing
+        XOR reconstruction to fail permanently (worthless-16x2).
         """
         fernet = self._get_fernet()
         shard_b_enc = fernet.encrypt(
@@ -362,10 +375,19 @@ class ShardRepository:
         shard_a_enc = fernet.encrypt(memoryview(shard_a).tobytes())
         async with self._connect() as db:
             await db.execute(
-                "INSERT OR REPLACE INTO shards "
+                "INSERT INTO shards "
                 "(key_alias, shard_b_enc, commitment, nonce, provider, prefix, charset, "
                 " base_url, shard_a_enc) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(key_alias) DO UPDATE SET "
+                "  shard_b_enc = excluded.shard_b_enc, "
+                "  commitment  = excluded.commitment, "
+                "  nonce       = excluded.nonce, "
+                "  provider    = excluded.provider, "
+                "  prefix      = excluded.prefix, "
+                "  charset     = excluded.charset, "
+                "  base_url    = excluded.base_url, "
+                "  shard_a_enc = excluded.shard_a_enc",
                 (
                     alias,
                     shard_b_enc,
