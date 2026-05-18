@@ -366,9 +366,11 @@ def _check_alias_not_in_db(home: WorthlessHome, enrollments: list[EnrollmentReco
     """Returns True when a .env BASE_URL references a proxy alias absent from *enrollments*."""
     known_aliases = {e.key_alias for e in enrollments}
     env_paths: set[Path] = {Path(e.env_path) for e in enrollments if e.env_path}
-    env_paths.add(Path.cwd() / ".env")
+    cwd_env = Path.cwd() / ".env"
+    if cwd_env.exists():
+        env_paths.add(cwd_env)
 
-    issues = _collect_alias_issues(env_paths, known_aliases, home)
+    issues = _collect_alias_issues(env_paths, known_aliases, home.db_path.name)
     if not issues:
         return False
 
@@ -378,9 +380,7 @@ def _check_alias_not_in_db(home: WorthlessHome, enrollments: list[EnrollmentReco
     return True
 
 
-def _collect_alias_issues(
-    env_paths: set[Path], known_aliases: set[str], home: WorthlessHome
-) -> list[str]:
+def _collect_alias_issues(env_paths: set[Path], known_aliases: set[str], db_name: str) -> list[str]:
     """Scan env_paths for BASE_URL values referencing proxy aliases absent from DB."""
     issues: list[str] = []
     seen: set[str] = set()
@@ -401,7 +401,7 @@ def _collect_alias_issues(
             seen.add(alias)
             issues.append(
                 f"alias '{alias}' is set in {env_file.name} BASE_URL "
-                f"but {ALIAS_NOT_IN_DB_PHRASE} ({home.db_path.name})"
+                f"but {ALIAS_NOT_IN_DB_PHRASE} ({db_name})"
             )
     return issues
 
