@@ -8,7 +8,9 @@ Proves the three guarantees the feature makes:
 
 from __future__ import annotations
 
+import asyncio
 import secrets
+from unittest.mock import patch
 
 import aiosqlite
 import httpx
@@ -456,3 +458,236 @@ def test_stored_shard_zero_clears_shard_a() -> None:
     s.zero()
     assert all(b == 0 for b in s.shard_a)  # type: ignore[union-attr]
     assert all(b == 0 for b in s.shard_b)
+
+
+# ------------------------------------------------------------------
+# SP-1: caplog — warning logged when lock never ran
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_16x2_no_auth_token_logs_warning(
+    enrolled_16x2,
+    repo: ShardRepository,
+    proxy_settings: ProxySettings,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When shard_a_enc is present but no token exists in DB, a WARNING is logged.
+
+    SP-1: proxy has auth_token=None AND no token in DB (lock never ran).
+    Must return 401 AND log the 'no proxy_auth_token in DB' warning with the alias name.
+    """
+    import logging
+
+    alias, auth_token, _ = enrolled_16x2
+    # Do NOT write a token to DB — simulates lock never having run.
+    app, db = await _make_proxy_app(proxy_settings, repo, auth_token=None)
+
+    try:
+        with caplog.at_level(logging.WARNING, logger="worthless.proxy.app"):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                resp = await client.post(
+                    f"/{alias}/v1/chat/completions",
+                    json={"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}]},
+                    headers={"Authorization": f"Bearer {auth_token}"},
+                )
+        assert resp.status_code == 401
+        warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+        msgs = [r.message for r in warning_records]
+        assert any("no proxy_auth_token in DB" in m for m in msgs), (
+            f"Expected 'no proxy_auth_token in DB' in caplog. Got: {msgs}"
+        )
+        assert any(alias in m for m in msgs), (
+            f"Expected alias {alias!r} in caplog warning. Got: {msgs}"
+        )
+    finally:
+        await app.state.httpx_client.aclose()
+        await db.close()
+
+
+# ------------------------------------------------------------------
+# SP-6: corrupt shard_a_enc in DB → 401 not 500
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_16x2_corrupt_shard_a_enc_returns_401(
+    enrolled_16x2,
+    repo: ShardRepository,
+    proxy_settings: ProxySettings,
+) -> None:
+    """Corrupt shard_a_enc in DB (garbled Fernet token) must yield 401, not 500.
+
+    SP-6: decrypt_shard raises an exception (InvalidToken); the proxy must
+    catch it and return the standard uniform 401, byte-identical to the
+    normal auth failure body.
+    """
+    from worthless.proxy.errors import auth_error_response
+
+    alias, auth_token, _ = enrolled_16x2
+    app, db = await _make_proxy_app(proxy_settings, repo, auth_token=auth_token)
+
+    # Corrupt the shard_a_enc field directly in SQLite.
+    async with aiosqlite.connect(proxy_settings.db_path) as raw_db:
+        await raw_db.execute(
+            "UPDATE shards SET shard_a_enc = ? WHERE key_alias = ?",
+            (b"not-a-valid-fernet-token-garbage-xyz", alias),
+        )
+        await raw_db.commit()
+
+    expected_body = auth_error_response().body
+
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            resp = await client.post(
+                f"/{alias}/v1/chat/completions",
+                json={"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}]},
+                headers={"Authorization": f"Bearer {auth_token}"},
+            )
+        assert resp.status_code == 401
+        assert resp.content == expected_body, (
+            f"Response body differs from uniform 401. Got: {resp.content!r}"
+        )
+    finally:
+        await app.state.httpx_client.aclose()
+        await db.close()
+
+
+# ------------------------------------------------------------------
+# SP-7: stored.shard_a is None after decrypt → 401 not crash
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_16x2_shard_a_none_after_decrypt_returns_401(
+    enrolled_16x2,
+    repo: ShardRepository,
+    proxy_settings: ProxySettings,
+) -> None:
+    """When decrypt_shard returns StoredShard with shard_a=None, proxy returns 401.
+
+    SP-7: shard_a_enc is present but the decryption yields shard_a=None
+    (storage anomaly). No exception must escape — the handler catches this
+    and returns the uniform 401.
+    """
+    alias, auth_token, _ = enrolled_16x2
+    app, db = await _make_proxy_app(proxy_settings, repo, auth_token=auth_token)
+
+    # Build a valid-looking StoredShard whose shard_a is None.
+    null_shard_a_stored = StoredShard(
+        shard_b=bytearray(b"b" * 43),
+        commitment=bytearray(b"c" * 32),
+        nonce=bytearray(b"n" * 16),
+        provider="openai",
+        shard_a=None,
+    )
+
+    try:
+        with patch.object(repo, "decrypt_shard", return_value=null_shard_a_stored):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                resp = await client.post(
+                    f"/{alias}/v1/chat/completions",
+                    json={"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}]},
+                    headers={"Authorization": f"Bearer {auth_token}"},
+                )
+        assert resp.status_code == 401
+    finally:
+        await app.state.httpx_client.aclose()
+        await db.close()
+
+
+# ------------------------------------------------------------------
+# SP-5: unknown endpoint on 16x2 alias → 401, zeroing guard safe
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_16x2_unknown_endpoint_returns_401(
+    enrolled_16x2,
+    repo: ShardRepository,
+    proxy_settings: ProxySettings,
+) -> None:
+    """A 16x2 alias hitting an unknown endpoint path returns 401 (anti-enumeration).
+
+    SP-5: the adapter lookup returns None for unrecognised paths; the proxy
+    must return the uniform 401. The `if shard_a is not None:` zeroing guard
+    must not raise — shard_a is None on the 16x2 path at that point.
+    """
+    alias, auth_token, _ = enrolled_16x2
+    app, db = await _make_proxy_app(proxy_settings, repo, auth_token=auth_token)
+
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            resp = await client.post(
+                f"/{alias}/v1/unknown-endpoint-xyz",
+                json={"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}]},
+                headers={"Authorization": f"Bearer {auth_token}"},
+            )
+        assert resp.status_code == 401
+    finally:
+        await app.state.httpx_client.aclose()
+        await db.close()
+
+
+# ------------------------------------------------------------------
+# SP-2 adversarial: concurrent requests when token is None at startup
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_16x2_concurrent_lazy_load_all_succeed(
+    enrolled_16x2,
+    repo: ShardRepository,
+    proxy_settings: ProxySettings,
+) -> None:
+    """Five concurrent requests all succeed when proxy starts before lock.
+
+    SP-2 adversarial: auth_token=None at startup, token in DB. All 5
+    concurrent requests must return 200 (lazy-load on the 16x2 path). The
+    token is effectively cached after the first request; subsequent ones
+    use the cached value.
+    """
+    alias, auth_token, _ = enrolled_16x2
+
+    # Write the token to DB (lock ran), but proxy started before it.
+    await repo.set_proxy_auth_token(auth_token)
+    app, db = await _make_proxy_app(proxy_settings, repo, auth_token=None)
+
+    async def _one_request(client: httpx.AsyncClient) -> int:
+        with respx.mock:
+            respx.post("https://api.openai.com/v1/chat/completions").respond(
+                200,
+                json={
+                    "choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 5, "completion_tokens": 10, "total_tokens": 15},
+                    "model": "gpt-4",
+                },
+            )
+            resp = await client.post(
+                f"/{alias}/v1/chat/completions",
+                json={"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}]},
+                headers={"Authorization": f"Bearer {auth_token}"},
+            )
+        return resp.status_code
+
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            statuses = await asyncio.gather(*[_one_request(client) for _ in range(5)])
+
+        assert list(statuses) == [200, 200, 200, 200, 200], f"Expected all 200s, got: {statuses}"
+        assert app.state.proxy_auth_token == auth_token, (
+            "Expected lazy-loaded token to be cached in app.state"
+        )
+    finally:
+        await app.state.httpx_client.aclose()
+        await db.close()
