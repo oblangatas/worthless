@@ -32,13 +32,15 @@ Design seams (foreseen extensions, NOT in this PR):
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 import os
 import re
 import sys
 from contextlib import contextmanager
 from pathlib import Path
-from collections.abc import Iterator
+from collections.abc import Coroutine, Iterator
+from typing import Any
 
 if sys.platform != "win32":
     import fcntl
@@ -93,6 +95,24 @@ _MULTI_DEVICE_WARNING = (
     "that, locked .env files on other Macs will be unrecoverable until you\n"
     "re-enroll there."
 )
+
+
+def _run_async(coro: Coroutine[Any, Any, Any]) -> Any:
+    """Run *coro* safely regardless of whether an event loop is already running.
+
+    ``asyncio.run()`` raises ``RuntimeError`` when called from within a running
+    event loop (e.g. pytest-asyncio test context).  In that case we dispatch to
+    a fresh event loop in a worker thread, which is the same pattern used by
+    ``worthless.cli.bootstrap`` for ``migrate_db``.
+    """
+    try:
+        asyncio.get_running_loop()
+        # Already inside a running loop — spin up a thread with its own loop.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, coro).result()
+    except RuntimeError:
+        # No running loop — safe to call asyncio.run() directly.
+        return asyncio.run(coro)
 
 
 async def _list_orphans(
@@ -671,7 +691,7 @@ def _doctor_run(*, fix: bool, yes: bool, dry_run: bool) -> None:
 
         # ----------- check 2: orphan DB rows -----------
         repo = ShardRepository(str(home.db_path), home.fernet_key)
-        all_enrollments, orphans = asyncio.run(_list_orphans(repo))
+        all_enrollments, orphans = _run_async(_list_orphans(repo))
         openclaw_issues = _check_openclaw_section(all_enrollments, fix=fix, dry_run=dry_run)
 
         # ----------- check 3: home mismatch -----------
