@@ -33,7 +33,13 @@ RUN apt-get update \
     && chown root:worthless /secrets \
     && chmod 0750 /secrets \
     && chown root:worthless /run/worthless \
-    && chmod 0770 /run/worthless
+    && chmod 0770 /run/worthless \
+    # OpenClaw shared-config dir (#192): pre-created so `worthless lock` can
+    # detect openclaw before the openclaw container starts. entrypoint.sh
+    # seeds openclaw.json and widens the mode at runtime when
+    # WORTHLESS_OPENCLAW_CONFIG_SHARED=1; default mode stays restrictive.
+    && mkdir -p /data/.openclaw \
+    && chown worthless-proxy:worthless /data/.openclaw
 
 COPY --from=builder /usr/local/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages
 COPY --from=builder /usr/local/bin/worthless /usr/local/bin/worthless

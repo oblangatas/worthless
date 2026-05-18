@@ -42,4 +42,10 @@ paths = [
     '''\.planning/snapshots/.*\.json$''',
     '''\.planning/ROADMAP\.md$''',
     '''tests/.*\.py$''',
+    # install docs are public-facing examples — they contain placeholder
+    # provider aliases (e.g. anthropic-a1b2c3d4) and sample `worthless
+    # status` output. Allowlisted by path here in the singular [allowlist]
+    # so coverage can't be silently dropped: a prior [[allowlists]] block
+    # for this was never honored by the pinned gitleaks (WOR-306 merge).
+    '''website/install-.*\.md$''',
 ]

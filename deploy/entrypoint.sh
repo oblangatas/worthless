@@ -75,6 +75,23 @@ if [ ! -f "$FERNET_PATH" ]; then
   python -c "from worthless.cli.bootstrap import get_home; get_home()"
 fi
 
+# Best-effort: seed the OpenClaw config stub on the shared volume so that
+# `worthless lock` can detect openclaw before the openclaw container starts.
+# Only runs when WORTHLESS_OPENCLAW_CONFIG_SHARED=1 (all-container Docker
+# setup). In host or single-container deployments the openclaw config dir
+# is the user's ~/.openclaw and must keep its default permissions.
+# Runs as root (entrypoint starts as uid 0); the priv-drop block below
+# re-owns this dir to worthless-proxy:worthless via the recursive find.
+if [ "${WORTHLESS_OPENCLAW_CONFIG_SHARED:-}" = "1" ]; then
+  OPENCLAW_DIR="${HOME_DIR}/.openclaw"
+  mkdir -p "$OPENCLAW_DIR" 2>/dev/null || true
+  chmod 777 "$OPENCLAW_DIR" 2>/dev/null || true
+  [ -f "${OPENCLAW_DIR}/openclaw.json" ] || {
+    printf '{}' > "${OPENCLAW_DIR}/openclaw.json" 2>/dev/null || true
+    chmod 666 "${OPENCLAW_DIR}/openclaw.json" 2>/dev/null || true
+  }
+fi
+
 # WOR-310: bootstrap ran as root (entrypoint started as uid 0 so
 # deploy/start.py can do the priv-drop dance) — every file/dir it
 # touched is now root:root.  After the dance the proxy runs as
