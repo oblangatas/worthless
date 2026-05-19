@@ -121,14 +121,19 @@ class TestHelpText:
         for cmd in ("lock", "unlock", "enroll", "scan", "status", "wrap", "up"):
             assert cmd in output, f"Command {cmd!r} missing from --help output"
 
-    def test_no_args_runs_default_command(self) -> None:
+    def test_no_args_runs_default_command(self, tmp_path: Path) -> None:
         """worthless with no args runs the default pipeline (not help).
 
         No xdist_group marker: the autouse `_isolate_default_command_proxy`
         fixture in conftest.py stubs the daemon path for every test, so two
         workers can run this in parallel without racing port 8787.
+
+        Isolated WORTHLESS_HOME: without it the no-args path resolves the
+        developer's real ~/.worthless and ``run_default`` aborts with
+        WRTLS-102 on a dogfooding box whose Fernet key lives only in the
+        keyring (which conftest nulls for the test session).
         """
-        result = runner.invoke(app, [])
+        result = runner.invoke(app, [], env={"WORTHLESS_HOME": str(tmp_path / ".worthless")})
         assert result.exit_code == 0
         output = result.stdout + result.stderr
         # Default command runs — should NOT show help/command list

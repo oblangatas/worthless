@@ -211,14 +211,17 @@ class TestAppEntryPoint:
         assert result.exit_code == 0
         assert "worthless" in result.output.lower() or "api" in result.output.lower()
 
-    def test_no_args_runs_default_command(self):
+    def test_no_args_runs_default_command(self, tmp_path):
         # No xdist_group marker needed: the autouse `_isolate_default_command_proxy`
         # fixture in conftest.py stubs the daemon path for every test, so two
         # workers can run this in parallel without racing port 8787.
+        # Isolated WORTHLESS_HOME: without it the no-args path resolves the
+        # developer's real ~/.worthless and run_default aborts with WRTLS-102
+        # on a dogfooding box whose Fernet key lives only in the keyring.
         from typer.testing import CliRunner
 
         from worthless.cli.app import app
 
         runner = CliRunner()
-        result = runner.invoke(app, [])
+        result = runner.invoke(app, [], env={"WORTHLESS_HOME": str(tmp_path / ".worthless")})
         assert result.exit_code == 0
