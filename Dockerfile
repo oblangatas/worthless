@@ -1,5 +1,5 @@
 # NOTE: pin patch versions; update quarterly or on CVE.
-FROM python:3.13-slim-bookworm@sha256:f13a6b7565175da40695e8109f64cbc4d2e65f4c9ef2e3b321c3a44fa3c06fe7 AS builder
+FROM python:3.13-slim-bookworm@sha256:386df64585134ba00b1d5e307acb1e72f33e9e87dbbb00aad9b8f24dbb51db72 AS builder
 
 WORKDIR /build
 COPY pyproject.toml ./
@@ -8,7 +8,7 @@ COPY src/ src/
 RUN pip install --no-cache-dir .
 
 # -----------------------------------------------------------
-FROM python:3.13-slim-bookworm@sha256:f13a6b7565175da40695e8109f64cbc4d2e65f4c9ef2e3b321c3a44fa3c06fe7
+FROM python:3.13-slim-bookworm@sha256:386df64585134ba00b1d5e307acb1e72f33e9e87dbbb00aad9b8f24dbb51db72
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends tini \
