@@ -5,12 +5,16 @@ WORKDIR /build
 COPY pyproject.toml ./
 COPY src/ src/
 
-RUN pip install --no-cache-dir .
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir .
 
 # -----------------------------------------------------------
 FROM python:3.13-slim-bookworm@sha256:386df64585134ba00b1d5e307acb1e72f33e9e87dbbb00aad9b8f24dbb51db72
 
 RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends tini \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -r worthless && useradd -r -g worthless -m worthless \
