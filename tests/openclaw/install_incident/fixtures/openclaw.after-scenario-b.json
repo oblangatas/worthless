@@ -1,0 +1,12 @@
+{
+  "models": {
+    "providers": {
+      "worthless-openai": {
+        "api": "openai-completions",
+        "apiKey": "<key-shaped-redacted>",
+        "baseUrl": "http://127.0.0.1:8787/openai-558dd0d8/v1",
+        "models": []
+      }
+    }
+  }
+}

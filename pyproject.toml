@@ -206,6 +206,8 @@ ignore = [
 "tests/test_deploy_static.py" = ["S607"]
 # Eval scripts shell out to claude CLI
 "tests/evals/eval_skill_md.py" = ["S607"]
+# OpenClaw install-incident reproduction shells out to the uv/worthless CLI
+"tests/openclaw/install_incident/*.py" = ["S607"]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "random".msg = "Use the 'secrets' module for cryptographic randomness. The 'random' module is banned (CRYP-04)."
