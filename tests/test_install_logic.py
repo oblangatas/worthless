@@ -137,16 +137,15 @@ def test_success_with_persistent_rc_shows_clean_done_message(tmp_path: Path) -> 
 def test_success_without_persistent_rc_warns_and_shows_persistence_hint(
     tmp_path: Path,
 ) -> None:
-    """Happy path + no rc persistence → warn + persistence hint (no activation).
+    """Happy path + no rc persistence → warn + activation/persistence hints.
 
-    This is the fresh-macOS papercut we're fixing. install.sh exported
-    ~/.local/bin for its own subprocesses, so `command -v worthless` succeeds,
-    but a new terminal won't. We must flag that loudly and give the exact
-    one-liner to fix it.
+    This mirrors the real `curl | sh` shape: the installer subprocess can
+    verify the uv tool, but the parent terminal cannot inherit PATH changes.
+    We must not tell users `worthless` works before they update PATH.
     """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    write_happy_path_stubs(bin_dir)
+    write_happy_path_stubs(bin_dir, with_worthless=False)
     # No rc files — simulates a fresh user account.
 
     result = run_install(bin_dir)
@@ -154,19 +153,54 @@ def test_success_without_persistent_rc_warns_and_shows_persistence_hint(
     assert result.returncode == 0, (
         f"happy path must exit 0, got {result.returncode}\nstderr: {result.stderr}"
     )
-    assert "works in this shell" in result.stdout, (
-        f"must tell the user PATH is live here but not persistent.\nstdout: {result.stdout}"
+    assert "is installed" in result.stdout, (
+        f"must confirm install without claiming parent-shell PATH.\nstdout: {result.stdout}"
+    )
+    assert "works in this shell" not in result.stdout, (
+        f"must not claim the parent shell can run worthless after curl|sh.\nstdout: {result.stdout}"
+    )
+    assert "is on your PATH" not in result.stdout, (
+        f"must not claim worthless is on the user's PATH.\nstdout: {result.stdout}"
     )
     # warn() routes to stderr, so the "Heads up" banner lives there.
     assert "Heads up" in result.stderr, (
-        f"must warn explicitly that a new terminal won't find worthless.\nstderr: {result.stderr}"
+        f"must warn explicitly that this terminal won't find worthless.\nstderr: {result.stderr}"
+    )
+    assert "Activate in this shell" in result.stdout, (
+        "must print the activation one-liner so the user can use worthless now"
     )
     assert "Make permanent" in result.stdout, (
         "must print the make-permanent one-liner so the user can fix it"
     )
-    assert "Activate in this shell" not in result.stdout, (
-        "must NOT print 'Activate in this shell' — PATH is already live here; "
-        "that hint would confuse users into thinking worthless doesn't work yet"
+
+
+def test_success_with_persistent_rc_but_missing_parent_path_says_open_terminal(
+    tmp_path: Path,
+) -> None:
+    """If rc is updated but the parent shell PATH lacks worthless, say so.
+
+    This is the actual `curl -sSL https://worthless.sh | sh` product shape on
+    a fresh macOS shell after uv's installer has edited rc files: a new
+    terminal may work, but the current parent terminal still cannot run
+    `worthless` until the user opens a new shell or exports PATH manually.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_happy_path_stubs(bin_dir, with_worthless=False)
+    (tmp_path / ".zshrc").write_text('export PATH="$HOME/.local/bin:$PATH"\n')
+
+    result = run_install(bin_dir)
+
+    assert result.returncode == 0, (
+        f"happy path must exit 0, got {result.returncode}\nstderr: {result.stderr}"
+    )
+    assert "is installed" in result.stdout
+    assert "is on your PATH" not in result.stdout
+    assert "works in this shell" not in result.stdout
+    assert "Open a new terminal" in result.stdout
+    assert "Activate in this shell" in result.stdout
+    assert "Make permanent" not in result.stdout, (
+        "rc already contains ~/.local/bin, so don't tell the user to append it again"
     )
 
 

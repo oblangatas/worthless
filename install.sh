@@ -37,6 +37,7 @@ WINDOWS_DOCS_URL="https://docs.wless.io/install/wsl"
 
 # Force uv to use its own managed Python for fresh-box reproducibility.
 export UV_PYTHON_PREFERENCE="${UV_PYTHON_PREFERENCE:-only-managed}"
+ORIGINAL_PATH="${PATH:-}"
 
 # --- Output helpers ----------------------------------------------------------
 
@@ -346,32 +347,49 @@ path_is_persistent() {
     esac
 }
 
+command_in_original_path() {
+    name="$1"
+    current_path="${PATH:-}"
+    PATH="$ORIGINAL_PATH"
+    if command -v "$name" >/dev/null 2>&1; then
+        PATH="$current_path"
+        return 0
+    fi
+    PATH="$current_path"
+    return 1
+}
+
 # mode: "full" (default) prints both current-shell + make-permanent hints;
-# "persist" prints only the make-permanent step (for when PATH is already
-# live in this shell but the user's rc file doesn't have it).
+# "activate" prints only the current-shell activation command.
 print_activation_hint() {
     mode="${1:-full}"
     user_shell="$(basename "${SHELL:-/bin/sh}")"
     case "$user_shell" in
         bash|zsh)
-            if [ "$mode" = "full" ]; then
+            if [ "$mode" = "full" ] || [ "$mode" = "activate" ]; then
                 printf "  Activate in this shell: %s\n" 'export PATH="$HOME/.local/bin:$PATH"'
             fi
-            printf "  Make permanent:         %s\n" \
-                "echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.${user_shell}rc"
+            if [ "$mode" = "full" ]; then
+                printf "  Make permanent:         %s\n" \
+                    "echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.${user_shell}rc"
+            fi
             ;;
         fish)
-            if [ "$mode" = "full" ]; then
+            if [ "$mode" = "full" ] || [ "$mode" = "activate" ]; then
                 printf "  Activate in this shell: %s\n" 'set -gx PATH $HOME/.local/bin $PATH'
             fi
-            printf "  Make permanent:         %s\n" \
-                'fish_add_path $HOME/.local/bin'
+            if [ "$mode" = "full" ]; then
+                printf "  Make permanent:         %s\n" \
+                    'fish_add_path $HOME/.local/bin'
+            fi
             ;;
         *)
-            if [ "$mode" = "full" ]; then
+            if [ "$mode" = "full" ] || [ "$mode" = "activate" ]; then
                 printf "  Activate in this shell: %s\n" 'export PATH="$HOME/.local/bin:$PATH"'
             fi
-            printf "  (Detected shell: %s — adapt for your rc file)\n" "$user_shell"
+            if [ "$mode" = "full" ]; then
+                printf "  (Detected shell: %s — adapt for your rc file)\n" "$user_shell"
+            fi
             ;;
     esac
 }
@@ -394,25 +412,26 @@ main() {
     smoke_test
 
     printf "\n"
-    if command -v worthless >/dev/null 2>&1; then
-        if path_is_persistent; then
-            ok "Done! 'worthless' is on your PATH."
-        else
-            # Most common fresh-macOS case: PATH works in this shell (we exported
-            # ~/.local/bin in ensure_uv) but a new terminal won't find it.
-            ok "Done! 'worthless' works in this shell."
-            printf "\n"
-            warn "Heads up: a new terminal won't find 'worthless' yet — ~/.local/bin isn't in your rc file."
-            printf "\n"
-            print_activation_hint persist
-        fi
+    if command_in_original_path worthless; then
+        ok "Done! 'worthless' is on your PATH."
     else
-        warn "Done — but 'worthless' is not yet on your PATH."
+        ok "Done! 'worthless' is installed."
         printf "\n"
-        print_activation_hint
+        warn "Heads up: this terminal will not find 'worthless' until PATH is updated."
+        printf "\n"
+        if path_is_persistent; then
+            printf "  Open a new terminal, or activate this one now:\n"
+            print_activation_hint activate
+        else
+            print_activation_hint
+        fi
     fi
     printf "\n"
-    printf "  ${BOLD}Try it:${RESET}        cd your-project && worthless lock\n"
+    if command_in_original_path worthless; then
+        printf "  ${BOLD}Try it:${RESET}        cd your-project && worthless lock\n"
+    else
+        printf "  ${BOLD}Try after PATH:${RESET} cd your-project && worthless lock\n"
+    fi
     printf "  ${BOLD}Audit script:${RESET}  curl worthless.sh?explain=1 | less\n"
     printf "  ${BOLD}Source:${RESET}        https://github.com/shacharm2/worthless\n"
     printf "\n"

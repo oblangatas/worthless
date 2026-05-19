@@ -67,8 +67,10 @@ def test_install_lifecycle_trace_documents_current_install_contract(
     assert "fresh install" in report.lower()
     assert "reinstall" in report.lower()
     assert "Done! 'worthless' is on your PATH." in report
-    assert "Done! 'worthless' works in this shell." in report
-    assert "Heads up: a new terminal won't find 'worthless' yet" in report
+    assert "Done! 'worthless' is installed." in report
+    assert "Heads up: this terminal will not find 'worthless' until PATH is updated" in report
+    assert "Open a new terminal, or activate this one now" in report
+    assert "Try after PATH" in report
     assert "worthless 0.3.0 already installed" in report
     assert "pipx uninstall worthless" in report
     assert "No solution found when resolving dependencies" in report

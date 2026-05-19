@@ -145,12 +145,12 @@ class TraceRunner:
         before = snapshot_env_files("before", [state_file])
 
         if name == "fresh install with persistent PATH":
-            write_happy_path_stubs(bin_dir)
+            write_happy_path_stubs(bin_dir, with_worthless=False)
             (case_root / ".zshrc").write_text('export PATH="$HOME/.local/bin:$PATH"\n')
             result = run_install(bin_dir)
             command = ["sh", "./install.sh"]
         elif name == "fresh install without persistent PATH":
-            write_happy_path_stubs(bin_dir)
+            write_happy_path_stubs(bin_dir, with_worthless=False)
             result = run_install(bin_dir)
             command = ["sh", "./install.sh"]
         elif name == "reinstall pinned version already installed":

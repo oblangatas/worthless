@@ -1045,9 +1045,13 @@ Worthless installer (uv-bootstrap)
   uv 0.11.7 already installed
   worthless 0.3.0
 
-Done! 'worthless' is on your PATH.
+Done! 'worthless' is installed.
 
-  Try it:        cd your-project && worthless lock
+
+  Open a new terminal, or activate this one now:
+  Activate in this shell: export PATH="$HOME/.local/bin:$PATH"
+
+  Try after PATH: cd your-project && worthless lock
   Audit script:  curl worthless.sh?explain=1 | less
   Source:        https://github.com/shacharm2/worthless
 
@@ -1060,7 +1064,7 @@ Done! 'worthless' is on your PATH.
 **stderr**
 
 ```text
-<empty>
+Heads up: this terminal will not find 'worthless' until PATH is updated.
 ```
 
 **Files after**
@@ -1098,12 +1102,13 @@ Worthless installer (uv-bootstrap)
   uv 0.11.7 already installed
   worthless 0.3.0
 
-Done! 'worthless' works in this shell.
+Done! 'worthless' is installed.
 
 
+  Activate in this shell: export PATH="$HOME/.local/bin:$PATH"
   Make permanent:         echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
 
-  Try it:        cd your-project && worthless lock
+  Try after PATH: cd your-project && worthless lock
   Audit script:  curl worthless.sh?explain=1 | less
   Source:        https://github.com/shacharm2/worthless
 
@@ -1116,7 +1121,7 @@ Done! 'worthless' works in this shell.
 **stderr**
 
 ```text
-Heads up: a new terminal won't find 'worthless' yet — ~/.local/bin isn't in your rc file.
+Heads up: this terminal will not find 'worthless' until PATH is updated.
 ```
 
 **Files after**
@@ -1155,10 +1160,7 @@ Worthless installer (uv-bootstrap)
   worthless 0.3.0 already installed
   worthless 0.3.0
 
-Done! 'worthless' works in this shell.
-
-
-  Make permanent:         echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
+Done! 'worthless' is on your PATH.
 
   Try it:        cd your-project && worthless lock
   Audit script:  curl worthless.sh?explain=1 | less
@@ -1173,7 +1175,7 @@ Done! 'worthless' works in this shell.
 **stderr**
 
 ```text
-Heads up: a new terminal won't find 'worthless' yet — ~/.local/bin isn't in your rc file.
+<empty>
 ```
 
 **Files after**
