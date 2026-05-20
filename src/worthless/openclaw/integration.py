@@ -664,7 +664,7 @@ def apply_lock(
             providers_set=(),
             providers_skipped=tuple(
                 (f"worthless-{provider}", "symlink_refused")
-                for provider, _alias, _shard in planned_updates
+                for provider, _alias, _shard_a in planned_updates
             ),
             skill_installed=False,
             events=tuple(events),
@@ -701,7 +701,7 @@ def apply_lock(
             )
         )
 
-    for provider, alias, auth_token in planned_updates:
+    for provider, alias, shard_a_str in planned_updates:
         provider_name = f"worthless-{provider}"
         base_url = f"{resolved_proxy_base_url.rstrip('/')}/{alias}/v1"
 
@@ -743,11 +743,12 @@ def apply_lock(
                 config_path,
                 provider_name,
                 base_url,
-                # worthless-16x2: write the stable opaque auth token as
-                # apiKey (NOT shard-A).  The proxy verifies this token on
-                # every request and retrieves shard-A from the DB — so
-                # openclaw.json no longer carries raw key material.
-                api_key=auth_token,
+                # Post-16x2-revert: write shard-A directly as apiKey.
+                # The agent reads this and sends it as Bearer; the proxy
+                # validates via commitment check (XOR + HMAC) — no stable
+                # token required. openclaw.json carries format-preserving
+                # key material (starts with provider prefix e.g. "sk-").
+                api_key=shard_a_str,
                 # Required by OpenClaw daemon — without these the daemon
                 # rejects the config with "Invalid input: expected array,
                 # received undefined". Verified live (WOR-431 evidence).

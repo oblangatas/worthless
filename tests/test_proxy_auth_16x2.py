@@ -71,17 +71,20 @@ def proxy_settings(tmp_db_path: str, fernet_key: bytes) -> ProxySettings:
 
 @pytest.fixture()
 async def enrolled_16x2(repo: ShardRepository):
-    """Enroll a test key using upsert_locked_shard (16x2 path).
+    """Enroll a test key using upsert_locked_shard.
 
-    Returns (alias, auth_token, raw_api_key).
+    Post-16x2-revert: returns (alias, shard_a_str, raw_api_key).
+    shard_a_str is the format-preserving shard-A value that the client
+    presents as Authorization: Bearer on every request.
     """
     from worthless.crypto.splitter import split_key_fp
 
     alias = "test-16x2"
     api_key = "sk-test-16x2-key-abcdef1234567890"
-    auth_token = secrets.token_urlsafe(32)
 
     sr = split_key_fp(api_key, prefix="sk-", provider="openai")
+    # Capture shard_a before zeroing — this is what lives in openclaw.json
+    shard_a_str = sr.shard_a.decode("utf-8")
     stored = StoredShard(
         shard_b=bytearray(sr.shard_b),
         commitment=bytearray(sr.commitment),
@@ -97,7 +100,7 @@ async def enrolled_16x2(repo: ShardRepository):
         base_url="https://api.openai.com/v1",
     )
     sr.zero()
-    return alias, auth_token, api_key.encode()
+    return alias, shard_a_str, api_key.encode()
 
 
 # ------------------------------------------------------------------
@@ -106,12 +109,16 @@ async def enrolled_16x2(repo: ShardRepository):
 
 
 @pytest.mark.asyncio
-async def test_16x2_valid_token_reaches_upstream(
+async def test_16x2_valid_shard_a_reaches_upstream(
     enrolled_16x2, repo: ShardRepository, proxy_settings: ProxySettings
 ) -> None:
-    """A request with the correct stable token is forwarded to the upstream."""
-    alias, auth_token, raw_api_key = enrolled_16x2
-    app, db = await _make_proxy_app(proxy_settings, repo, auth_token=auth_token)
+    """A request with shard-A as Bearer is forwarded to the upstream.
+
+    Post-16x2-revert: the proxy validates shard-A via commitment check
+    (reconstruct_key_fp) instead of comparing a stable opaque token.
+    """
+    alias, shard_a_str, raw_api_key = enrolled_16x2
+    app, db = await _make_proxy_app(proxy_settings, repo, auth_token=None)
 
     try:
         with respx.mock:
@@ -129,9 +136,11 @@ async def test_16x2_valid_token_reaches_upstream(
                 resp = await client.post(
                     f"/{alias}/v1/chat/completions",
                     json={"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}]},
-                    headers={"Authorization": f"Bearer {auth_token}"},
+                    headers={"Authorization": f"Bearer {shard_a_str}"},
                 )
-        assert resp.status_code == 200
+        assert resp.status_code == 200, (
+            f"Expected 200 with shard-A as Bearer; got {resp.status_code}"
+        )
     finally:
         await app.state.httpx_client.aclose()
         await db.close()
@@ -212,20 +221,19 @@ async def test_16x2_no_auth_token_in_proxy_returns_401(
 
 
 @pytest.mark.asyncio
-async def test_16x2_lazy_load_when_proxy_started_before_lock(
+async def test_16x2_shard_a_bearer_no_restart_needed(
     enrolled_16x2, repo: ShardRepository, proxy_settings: ProxySettings
 ) -> None:
-    """Proxy started before lock (auth_token=None at startup) lazy-loads from DB.
+    """Proxy started before lock (no stable token) works with shard-A Bearer.
 
-    Normal fresh-install flow: `worthless up` runs first, then `worthless lock`
-    writes the token to DB. The proxy must not require a restart — it loads the
-    token on the first 16x2 request and caches it.
+    Post-16x2-revert: no stable token to lazy-load. The proxy validates
+    shard-A via commitment check on every request. No DB or state needed
+    beyond the shard_b + commitment stored by lock.
     """
-    alias, auth_token, _ = enrolled_16x2
+    alias, shard_a_str, _ = enrolled_16x2
 
-    # Simulate: lock ran and wrote the token to DB, but proxy started before that
-    await repo.set_proxy_auth_token(auth_token)
-    app, db = await _make_proxy_app(proxy_settings, repo, auth_token=None)  # None = pre-lock start
+    # No stable token written — post-revert lock doesn't write one.
+    app, db = await _make_proxy_app(proxy_settings, repo, auth_token=None)
 
     try:
         with respx.mock:
@@ -243,11 +251,11 @@ async def test_16x2_lazy_load_when_proxy_started_before_lock(
                 resp = await client.post(
                     f"/{alias}/v1/chat/completions",
                     json={"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}]},
-                    headers={"Authorization": f"Bearer {auth_token}"},
+                    headers={"Authorization": f"Bearer {shard_a_str}"},
                 )
-        assert resp.status_code == 200
-        # Token should now be cached in app.state
-        assert app.state.proxy_auth_token == auth_token
+        assert resp.status_code == 200, (
+            f"Expected 200 with shard-A as Bearer; got {resp.status_code}"
+        )
     finally:
         await app.state.httpx_client.aclose()
         await db.close()
@@ -296,10 +304,16 @@ async def test_auth_token_encrypted_at_rest(repo: ShardRepository, tmp_db_path: 
 
 
 @pytest.mark.asyncio
-async def test_upsert_locked_shard_stores_shard_a_enc(
+async def test_upsert_locked_shard_does_not_store_shard_a_enc(
     repo: ShardRepository, tmp_db_path: str
 ) -> None:
-    """upsert_locked_shard writes shard_a_enc to the shards table."""
+    """upsert_locked_shard writes NULL for shard_a_enc (post-16x2-revert contract).
+
+    shard-A is no longer stored server-side. The proxy reads it from the
+    Authorization: Bearer header on every request and validates via the
+    commitment check. shard_a_enc stays NULL so a stolen DB never reveals
+    shard-A (the half that reconstructs the full API key).
+    """
     from worthless.crypto.splitter import split_key_fp
 
     alias = "relock-test"
@@ -320,7 +334,7 @@ async def test_upsert_locked_shard_stores_shard_a_enc(
         cursor = await db.execute("SELECT shard_a_enc FROM shards WHERE key_alias = ?", (alias,))
         row = await cursor.fetchone()
     assert row is not None
-    assert row[0] is not None, "shard_a_enc should be set after upsert_locked_shard"
+    assert row[0] is None, "shard_a_enc must be NULL — shard-A is not stored server-side"
 
 
 @pytest.mark.asyncio
@@ -352,6 +366,9 @@ async def test_upsert_locked_shard_replaces_on_relock(repo: ShardRepository) -> 
 
     # Second lock (simulated re-lock — same key, same alias)
     sr2 = split_key_fp(api_key, prefix="sk-", provider="openai")
+    # Capture shard_a₂ before zeroing — in real usage this is the value
+    # written to openclaw.json and presented as Authorization: Bearer.
+    shard_a2_bytes = bytes(sr2.shard_a)
     stored2 = StoredShard(
         shard_b=bytearray(sr2.shard_b),
         commitment=bytearray(sr2.commitment),
@@ -368,33 +385,46 @@ async def test_upsert_locked_shard_replaces_on_relock(repo: ShardRepository) -> 
     )
     sr2.zero()
 
-    # After re-lock: decrypt should give back both shards and reconstruction should succeed
+    # After re-lock: shard_a_enc is NULL (not stored), shard_b and commitment updated.
+    # Reconstruction uses caller-provided shard_a (held by the client, not the server).
     encrypted = await repo.fetch_encrypted(alias)
     assert encrypted is not None
-    assert encrypted.shard_a_enc is not None
+    assert encrypted.shard_a_enc is None, "shard_a_enc must be NULL post-16x2-revert"
     assert encrypted.prefix is not None
     assert encrypted.charset is not None
 
+    # decrypt_shard returns shard_a=None since shard_a_enc is NULL
     stored = repo.decrypt_shard(encrypted)
-    assert stored.shard_a is not None
+    assert stored.shard_a is None
 
+    # Reconstruction uses shard_a₂ captured before sr2.zero().
     from worthless.crypto.splitter import reconstruct_key_fp
 
-    reconstructed = reconstruct_key_fp(
-        stored.shard_a,
-        stored.shard_b,
-        stored.commitment,
-        stored.nonce,
-        encrypted.prefix,
-        encrypted.charset,
-    )
-    assert bytes(reconstructed) == api_key.encode()
+    shard_a_buf = bytearray(shard_a2_bytes)
+    try:
+        reconstructed = reconstruct_key_fp(
+            shard_a_buf,
+            stored.shard_b,
+            stored.commitment,
+            stored.nonce,
+            encrypted.prefix,
+            encrypted.charset,
+        )
+        assert bytes(reconstructed) == api_key.encode()
+    finally:
+        for i in range(len(shard_a_buf)):
+            shard_a_buf[i] = 0
     stored.zero()
 
 
 @pytest.mark.asyncio
-async def test_decrypt_shard_populates_shard_a(repo: ShardRepository) -> None:
-    """decrypt_shard returns shard_a in StoredShard when shard_a_enc is set."""
+async def test_upsert_locked_shard_shard_a_enc_is_null(repo: ShardRepository) -> None:
+    """upsert_locked_shard never stores shard_a_enc; decrypt_shard returns shard_a=None.
+
+    Post-16x2-revert: shard-A is not persisted server-side. decrypt_shard
+    always yields shard_a=None for rows written by upsert_locked_shard.
+    The client supplies shard-A on every request via Authorization: Bearer.
+    """
     from worthless.crypto.splitter import split_key_fp
 
     api_key = "sk-decrypt-test-abcdef1234567890"
@@ -410,14 +440,17 @@ async def test_decrypt_shard_populates_shard_a(repo: ShardRepository) -> None:
         "decrypt-alias", stored, shard_a=shard_a_raw, base_url="https://api.openai.com/v1"
     )
     sr.zero()
+    for i in range(len(shard_a_raw)):
+        shard_a_raw[i] = 0
 
     encrypted = await repo.fetch_encrypted("decrypt-alias")
     assert encrypted is not None
-    assert encrypted.shard_a_enc is not None
+    assert encrypted.shard_a_enc is None, "shard_a_enc must be NULL — not stored post-16x2-revert"
 
     decrypted = repo.decrypt_shard(encrypted)
-    assert decrypted.shard_a is not None
-    assert decrypted.shard_a == shard_a_raw
+    assert decrypted.shard_a is None, (
+        "decrypt_shard must return shard_a=None when shard_a_enc is NULL"
+    )
     decrypted.zero()
 
 
@@ -466,42 +499,30 @@ def test_stored_shard_zero_clears_shard_a() -> None:
 
 
 @pytest.mark.asyncio
-async def test_16x2_no_auth_token_logs_warning(
+async def test_16x2_wrong_shard_a_returns_401(
     enrolled_16x2,
     repo: ShardRepository,
     proxy_settings: ProxySettings,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """When shard_a_enc is present but no token exists in DB, a WARNING is logged.
+    """A wrong shard-A presented as Bearer returns 401.
 
-    SP-1: proxy has auth_token=None AND no token in DB (lock never ran).
-    Must return 401 AND log the 'no proxy_auth_token in DB' warning with the alias name.
+    Post-16x2-revert: the proxy validates shard-A via commitment check.
+    A random string that is not the correct shard-A fails reconstruction
+    (ShardTamperedError) and the proxy returns the uniform 401.
     """
-    import logging
-
-    alias, auth_token, _ = enrolled_16x2
-    # Do NOT write a token to DB — simulates lock never having run.
+    alias, shard_a_str, _ = enrolled_16x2
     app, db = await _make_proxy_app(proxy_settings, repo, auth_token=None)
 
     try:
-        with caplog.at_level(logging.WARNING, logger="worthless.proxy.app"):
-            async with httpx.AsyncClient(
-                transport=httpx.ASGITransport(app=app), base_url="http://test"
-            ) as client:
-                resp = await client.post(
-                    f"/{alias}/v1/chat/completions",
-                    json={"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}]},
-                    headers={"Authorization": f"Bearer {auth_token}"},
-                )
-        assert resp.status_code == 401
-        warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
-        msgs = [r.message for r in warning_records]
-        assert any("no proxy_auth_token in DB" in m for m in msgs), (
-            f"Expected 'no proxy_auth_token in DB' in caplog. Got: {msgs}"
-        )
-        assert any(alias in m for m in msgs), (
-            f"Expected alias {alias!r} in caplog warning. Got: {msgs}"
-        )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            resp = await client.post(
+                f"/{alias}/v1/chat/completions",
+                json={"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}]},
+                headers={"Authorization": "Bearer sk-wrong-shard-a-abcdef1234567890"},
+            )
+        assert resp.status_code == 401, f"Expected 401 for wrong shard-A; got {resp.status_code}"
     finally:
         await app.state.httpx_client.aclose()
         await db.close()
@@ -643,22 +664,17 @@ async def test_16x2_unknown_endpoint_returns_401(
 
 
 @pytest.mark.asyncio
-async def test_16x2_concurrent_lazy_load_all_succeed(
+async def test_16x2_concurrent_shard_a_requests_all_succeed(
     enrolled_16x2,
     repo: ShardRepository,
     proxy_settings: ProxySettings,
 ) -> None:
-    """Five concurrent requests all succeed when proxy starts before lock.
+    """Five concurrent requests with shard-A all succeed.
 
-    SP-2 adversarial: auth_token=None at startup, token in DB. All 5
-    concurrent requests must return 200 (lazy-load on the 16x2 path). The
-    token is effectively cached after the first request; subsequent ones
-    use the cached value.
+    Post-16x2-revert: no stable token — each request is authenticated
+    independently via commitment check. Concurrency must not race.
     """
-    alias, auth_token, _ = enrolled_16x2
-
-    # Write the token to DB (lock ran), but proxy started before it.
-    await repo.set_proxy_auth_token(auth_token)
+    alias, shard_a_str, _ = enrolled_16x2
     app, db = await _make_proxy_app(proxy_settings, repo, auth_token=None)
 
     async def _one_request(client: httpx.AsyncClient) -> int:
@@ -674,7 +690,7 @@ async def test_16x2_concurrent_lazy_load_all_succeed(
             resp = await client.post(
                 f"/{alias}/v1/chat/completions",
                 json={"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}]},
-                headers={"Authorization": f"Bearer {auth_token}"},
+                headers={"Authorization": f"Bearer {shard_a_str}"},
             )
         return resp.status_code
 
@@ -685,9 +701,6 @@ async def test_16x2_concurrent_lazy_load_all_succeed(
             statuses = await asyncio.gather(*[_one_request(client) for _ in range(5)])
 
         assert list(statuses) == [200, 200, 200, 200, 200], f"Expected all 200s, got: {statuses}"
-        assert app.state.proxy_auth_token == auth_token, (
-            "Expected lazy-loaded token to be cached in app.state"
-        )
     finally:
         await app.state.httpx_client.aclose()
         await db.close()

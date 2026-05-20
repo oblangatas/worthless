@@ -37,9 +37,9 @@ import logging
 import os
 import re
 import sys
+from collections.abc import Coroutine, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from collections.abc import Coroutine, Iterator
 from typing import Any
 
 if sys.platform != "win32":
@@ -61,6 +61,7 @@ from worthless.openclaw import skill as _oc_skill
 from worthless.openclaw.errors import OpenclawIntegrationError
 from worthless.openclaw.integration import IntegrationState
 from worthless.storage.repository import EnrollmentRecord, ShardRepository
+from worthless.crypto.splitter import reconstruct_key_fp
 
 # WOR-456: top-level conditional import so tests can monkeypatch the
 # module attribute directly. Local imports inside functions resolve via
@@ -71,6 +72,7 @@ else:
     _keystore_macos = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
+
 
 # WOR-456: iCloud-keychain-leak phrases. Local because doctor.py is the only
 # consumer; if a third check arrives, extract to a sibling _messages module.
@@ -290,9 +292,136 @@ def _check_providers(
     return issues
 
 
+def _read_worthless_providers_from_config(config_path: Path) -> dict[str, dict]:
+    """Read all ``worthless-*`` provider entries from openclaw.json.
+
+    Handles both the canonical ``models.providers`` schema and the flat
+    ``providers`` top-level schema emitted by some OpenClaw versions.
+
+    Returns a mapping of provider_name -> entry dict. Empty on any error.
+    """
+    try:
+        import json as _json
+
+        raw = config_path.read_text(encoding="utf-8").strip()
+        if not raw:
+            return {}
+        data = _json.loads(raw)
+        if not isinstance(data, dict):
+            return {}
+    except Exception:
+        return {}
+
+    # Try canonical schema: data["models"]["providers"]
+    models = data.get("models")
+    if isinstance(models, dict):
+        providers = models.get("providers")
+        if isinstance(providers, dict):
+            return {
+                k: v
+                for k, v in providers.items()
+                if k.startswith("worthless-") and isinstance(v, dict)
+            }
+
+    # Fallback: flat data["providers"] (some OpenClaw / test fixtures)
+    flat_providers = data.get("providers")
+    if isinstance(flat_providers, dict):
+        return {
+            k: v
+            for k, v in flat_providers.items()
+            if k.startswith("worthless-") and isinstance(v, dict)
+        }
+
+    return {}
+
+
+_ALIAS_FROM_BASE_URL_RE = re.compile(r"/([^/]+)/v1(?:/|$)")
+
+
+def _alias_from_base_url(base_url: str) -> str | None:
+    """Extract the key alias from a worthless proxy baseUrl.
+
+    ``http://127.0.0.1:8787/openai-stale/v1`` -> ``openai-stale``
+    Returns ``None`` when the URL does not match the expected pattern.
+    """
+    m = _ALIAS_FROM_BASE_URL_RE.search(base_url)
+    return m.group(1) if m else None
+
+
+def _check_openclaw_apikey_consistency(
+    state: IntegrationState,
+    repo: ShardRepository,
+) -> list[str]:
+    """Check that openclaw.json apiKey values reconstruct correctly with DB shards.
+
+    Post-16x2-revert: openclaw.json carries shard-A as apiKey. If the DB has
+    been updated (re-lock wrote new shard-B + commitment) without updating
+    openclaw.json (e.g. crash/revert), the stored apiKey is stale.
+
+    Iterates over worthless-* provider entries in openclaw.json directly
+    (not via enrollment rows, which may not exist when upsert_locked_shard was
+    called without store_enrolled).
+
+    Returns a list of issue strings (empty = consistent).
+    """
+    if state.config_path is None:
+        return []
+
+    providers = _read_worthless_providers_from_config(state.config_path)
+    if not providers:
+        return []
+
+    issues: list[str] = []
+    for provider_name, entry in providers.items():
+        api_key_str = entry.get("apiKey", "")
+        if not api_key_str:
+            continue
+
+        base_url = entry.get("baseUrl", "")
+        alias = _alias_from_base_url(base_url)
+        if not alias:
+            continue
+
+        try:
+            encrypted = _run_async(repo.fetch_encrypted(alias))
+        except Exception:  # noqa: S112 — fetch failure skipped; alias may be orphaned
+            continue
+        if encrypted is None or encrypted.prefix is None or encrypted.charset is None:
+            continue
+
+        stored = None
+        shard_a_buf = None
+        try:
+            stored = repo.decrypt_shard(encrypted)
+            shard_a_buf = bytearray(api_key_str, "utf-8")
+            reconstruct_key_fp(
+                shard_a_buf,
+                stored.shard_b,
+                stored.commitment,
+                stored.nonce,
+                encrypted.prefix,
+                encrypted.charset,
+            )
+            # Reconstruction succeeded — apiKey is consistent with DB
+        except Exception:
+            issues.append(
+                f"openclaw.json apiKey for {provider_name!r} is stale and out of sync "
+                f"with DB shards — re-run `worthless lock` to fix"
+            )
+        finally:
+            if shard_a_buf is not None:
+                for i in range(len(shard_a_buf)):
+                    shard_a_buf[i] = 0
+            if stored is not None:
+                stored.zero()
+
+    return issues
+
+
 def _check_openclaw_section(
     enrollments: list[EnrollmentRecord],
     *,
+    repo: ShardRepository,
     fix: bool,
     dry_run: bool,
 ) -> bool:
@@ -315,7 +444,10 @@ def _check_openclaw_section(
     port = resolve_port(None)
     provider_issues = _check_providers(state, healthy, port=port)
 
-    all_issues = skill_issues + provider_issues
+    # Check openclaw.json apiKey consistency with DB shards (post-16x2-revert).
+    consistency_issues = _check_openclaw_apikey_consistency(state, repo)
+
+    all_issues = skill_issues + provider_issues + consistency_issues
     if not all_issues and not fixed_items:
         return False  # all checks passed, stay silent
 
@@ -641,7 +773,7 @@ def _doctor_apply(
 ) -> None:
     """Execute the fix actions (purge orphans + migrate synced keys)."""
     if orphans:
-        purged = asyncio.run(_purge_all(orphans, repo, home.shard_a_dir))
+        purged = _run_async(_purge_all(orphans, repo, home.shard_a_dir))
         console.print_success(f"Cleaned up {purged} broken record(s).")
 
     if synced:
@@ -692,7 +824,9 @@ def _doctor_run(*, fix: bool, yes: bool, dry_run: bool) -> None:
         # ----------- check 2: orphan DB rows -----------
         repo = ShardRepository(str(home.db_path), home.fernet_key)
         all_enrollments, orphans = _run_async(_list_orphans(repo))
-        openclaw_issues = _check_openclaw_section(all_enrollments, fix=fix, dry_run=dry_run)
+        openclaw_issues = _check_openclaw_section(
+            all_enrollments, repo=repo, fix=fix, dry_run=dry_run
+        )
 
         # ----------- check 3: home mismatch -----------
         had_mismatch = _check_home_mismatch(home)
