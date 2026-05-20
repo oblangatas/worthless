@@ -1,0 +1,99 @@
+[
+  {
+    "source": "HN",
+    "desc": "Cloud bill charged in 13 hours",
+    "date": "Apr 2026",
+    "href": "https://news.ycombinator.com/item?id=47791871",
+    "impact": "EUR54K charged"
+  },
+  {
+    "source": "HN",
+    "desc": "Gemini bill in 48 hours",
+    "date": "Mar 2026",
+    "href": "https://news.ycombinator.com/item?id=47231469",
+    "impact": "$82K billed"
+  },
+  {
+    "source": "HN",
+    "desc": "GCP bill from one leaked key",
+    "date": "",
+    "href": "https://news.ycombinator.com/item?id=47417874",
+    "impact": "$128K billed"
+  },
+  {
+    "source": "HN",
+    "desc": "Google API scope expansion; leaked keys do more than you think",
+    "date": "",
+    "href": "https://news.ycombinator.com/item?id=47156925"
+  },
+  {
+    "source": "HN",
+    "desc": "OpenAI quietly removed hard spend caps",
+    "date": "Dec 2025",
+    "href": "https://news.ycombinator.com/item?id=45589628"
+  },
+  {
+    "source": "HN",
+    "desc": "Vibe-coding key leak",
+    "date": "Sep 2025",
+    "href": "https://news.ycombinator.com/item?id=45241001",
+    "impact": "$300 lost"
+  },
+  {
+    "source": "HN",
+    "desc": "Anthropic final query policy allows overbilling past prepay",
+    "date": "",
+    "href": "https://news.ycombinator.com/item?id=47164359"
+  },
+  {
+    "source": "r/",
+    "desc": "One-day Firebase bill; open letter to Google",
+    "date": "May 2025",
+    "href": "https://reddit.com/r/googlecloud/comments/1klwz0v/98k1_day_firebase_bill_open_letter_to_google",
+    "impact": "$98K billed"
+  },
+  {
+    "source": "r/",
+    "desc": "Firebase bill; Google forgave 90 percent",
+    "date": "Nov 2023",
+    "href": "https://reddit.com/r/Firebase/comments/17wqdnp/what_ever_happened_to_the_121k_bill",
+    "impact": "$121K billed"
+  },
+  {
+    "source": "r/",
+    "desc": "r/googlecloud billing horror pinned as permanent fixture",
+    "date": "",
+    "href": "https://www.reddit.com/r/googlecloud/"
+  },
+  {
+    "source": "dev",
+    "desc": "AI agent pushed .env to GitHub",
+    "date": "Apr 2026",
+    "href": "https://dev.to/ayame0328/60k-billed-in-13-hours-why-leaked-firebase-keys-keep-killing-ai-built-apps-6l6",
+    "impact": "$60K billed"
+  },
+  {
+    "source": "dev",
+    "desc": "2,863 live Google keys exposed in Common Crawl",
+    "date": "Feb 2026",
+    "href": "https://dev.to/dhayabaran/googles-documentation-says-api-keys-are-secrets-and-also-not-secrets-2863-verified-keys-are-219k"
+  },
+  {
+    "source": "dev",
+    "desc": "Google API keys were not secrets until Gemini broke everything",
+    "date": "Feb 2026",
+    "href": "https://dev.to/rainkode/google-api-keys-werent-secrets-until-gemini-broke-everything-ohm"
+  },
+  {
+    "source": "dev",
+    "desc": "Is your API key still running naked?",
+    "date": "Feb 2026",
+    "href": "https://dev.to/linou518/is-your-api-key-still-running-naked-the-complete-2026-secrets-management-guide-4m7n"
+  },
+  {
+    "source": "dev",
+    "desc": "Top API security vulnerabilities in 2026; billing bypass tactics",
+    "date": "",
+    "href": "https://dev.to/uzyntra/top-api-security-vulnerabilities-in-2026-real-world-breakdown-e9g"
+  }
+]
