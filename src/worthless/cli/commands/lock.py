@@ -200,7 +200,7 @@ def _build_verify_hook(planned: list[_PlannedUpdate]):
     return _hook
 
 
-async def _filter_unprotected_candidates(
+async def _select_unlocked_keys(
     repo: ShardRepository,
     scanned: list[tuple[str, str, str]],
     enrollments: list,
@@ -856,7 +856,7 @@ def _lock_keys(
         all_enrollments = await repo.list_enrollments()
 
         raw_scanned = scan_env_keys(env_path)
-        scanned = await _filter_unprotected_candidates(
+        scanned = await _select_unlocked_keys(
             repo,
             raw_scanned,
             all_enrollments,
