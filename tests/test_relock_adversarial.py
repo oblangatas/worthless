@@ -111,7 +111,6 @@ async def _do_relock(
     await repo.upsert_locked_shard(
         alias,
         shard,
-        shard_a=bytearray(sr.shard_a),
         prefix=sr.prefix,
         charset=sr.charset,
         base_url=base_url,

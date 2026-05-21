@@ -367,6 +367,15 @@ def _check_openclaw_apikey_consistency(
     if state.config_path is None:
         return []
 
+    # F-CFG-15: refuse to read through a symlinked config_path.  health_check()
+    # records a note for symlinks rather than following them; this function must
+    # honour the same boundary so a malicious symlink cannot poison the check.
+    if state.config_path.is_symlink():
+        return [
+            f"openclaw.json at {state.config_path} is a symlink (refused for safety) — "
+            "re-run `worthless lock` to regenerate a real config file"
+        ]
+
     providers = _read_worthless_providers_from_config(state.config_path)
     if not providers:
         return []
@@ -384,9 +393,20 @@ def _check_openclaw_apikey_consistency(
 
         try:
             encrypted = _run_async(repo.fetch_encrypted(alias))
-        except Exception:  # noqa: S112 — fetch failure skipped; alias may be orphaned
+        except Exception:  # noqa: BLE001 — treat any fetch error as "not found"
+            issues.append(
+                f"openclaw.json references alias {alias!r} (provider {provider_name!r}) "
+                f"but the DB lookup failed — re-run `worthless lock` to fix"
+            )
             continue
-        if encrypted is None or encrypted.prefix is None or encrypted.charset is None:
+        if encrypted is None:
+            # Alias present in openclaw.json but not in DB — explicit issue
+            issues.append(
+                f"openclaw.json references alias {alias!r} (provider {provider_name!r}) "
+                f"which is not enrolled in the DB — re-run `worthless lock` to fix"
+            )
+            continue
+        if encrypted.prefix is None or encrypted.charset is None:
             continue
 
         stored = None
