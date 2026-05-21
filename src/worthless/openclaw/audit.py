@@ -22,7 +22,7 @@ import os
 import re
 import shutil
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -133,7 +133,7 @@ def _parse_audit_result(data: dict) -> AuditResult:
 # --- Public API ---------------------------------------------------------------
 
 
-def resolve_openclaw_bin(env: dict[str, str] | None = None) -> Path:
+def resolve_openclaw_bin(env: Mapping[str, str] | None = None) -> Path:
     """Resolve the openclaw binary to an absolute path.
 
     Checks ``WORTHLESS_OPENCLAW_BIN`` env var first; falls back to
