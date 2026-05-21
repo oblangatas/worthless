@@ -100,7 +100,6 @@ async def _enroll_16x2(
         await repo.upsert_locked_shard(
             alias,
             stored,
-            shard_a=bytearray(sr.shard_a),
             prefix=sr.prefix,
             charset=sr.charset,
             base_url=base_url,
@@ -219,7 +218,6 @@ async def test_relock_old_shard_a_rejected_after_relock(
         await repo.upsert_locked_shard(
             alias,
             stored2,
-            shard_a=bytearray(sr2.shard_a),
             prefix=sr2.prefix,
             charset=sr2.charset,
             base_url="https://api.openai.com/v1",
@@ -304,7 +302,6 @@ async def test_relock_doctor_detects_stale_openclaw(
         await repo.upsert_locked_shard(
             alias,
             stored1,
-            shard_a=bytearray(sr1.shard_a),
             prefix=sr1.prefix,
             charset=sr1.charset,
             base_url="https://api.openai.com/v1",
@@ -344,7 +341,6 @@ async def test_relock_doctor_detects_stale_openclaw(
         await repo.upsert_locked_shard(
             alias,
             stored2,
-            shard_a=bytearray(sr2.shard_a),
             prefix=sr2.prefix,
             charset=sr2.charset,
             base_url="https://api.openai.com/v1",

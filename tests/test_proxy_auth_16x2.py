@@ -94,7 +94,6 @@ async def enrolled_16x2(repo: ShardRepository):
     await repo.upsert_locked_shard(
         alias,
         stored,
-        shard_a=bytearray(sr.shard_a),
         prefix=sr.prefix,
         charset=sr.charset,
         base_url="https://api.openai.com/v1",
@@ -326,7 +325,11 @@ async def test_upsert_locked_shard_does_not_store_shard_a_enc(
         provider="openai",
     )
     await repo.upsert_locked_shard(
-        alias, stored, shard_a=bytearray(sr.shard_a), base_url="https://api.openai.com/v1"
+        alias,
+        stored,
+        prefix=sr.prefix,
+        charset=sr.charset,
+        base_url="https://api.openai.com/v1",
     )
     sr.zero()
 
@@ -357,7 +360,6 @@ async def test_upsert_locked_shard_replaces_on_relock(repo: ShardRepository) -> 
     await repo.upsert_locked_shard(
         alias,
         stored1,
-        shard_a=bytearray(sr1.shard_a),
         prefix=prefix,
         charset=charset,
         base_url="https://api.openai.com/v1",
@@ -378,7 +380,6 @@ async def test_upsert_locked_shard_replaces_on_relock(repo: ShardRepository) -> 
     await repo.upsert_locked_shard(
         alias,
         stored2,
-        shard_a=bytearray(sr2.shard_a),
         prefix=prefix,
         charset=charset,
         base_url="https://api.openai.com/v1",
@@ -437,7 +438,11 @@ async def test_upsert_locked_shard_shard_a_enc_is_null(repo: ShardRepository) ->
     )
     shard_a_raw = bytearray(sr.shard_a)
     await repo.upsert_locked_shard(
-        "decrypt-alias", stored, shard_a=shard_a_raw, base_url="https://api.openai.com/v1"
+        "decrypt-alias",
+        stored,
+        prefix=sr.prefix,
+        charset=sr.charset,
+        base_url="https://api.openai.com/v1",
     )
     sr.zero()
     for i in range(len(shard_a_raw)):

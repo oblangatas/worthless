@@ -310,7 +310,6 @@ class TestDoctorOpenclawConsistency:
             await repo.upsert_locked_shard(
                 alias,
                 stored,
-                shard_a=bytearray(sr2.shard_a),
                 prefix=sr2.prefix,
                 charset=sr2.charset,
                 base_url=_BASE_URL,
@@ -542,7 +541,7 @@ class TestOpencawConsistencyHardening:
                         "providers": {
                             "worthless-openai": {
                                 "apiKey": "sk-GARBAGE-NOT-A-REAL-SHARD",
-                                "baseUrl": f"http://localhost:8787/openai/{alias}",
+                                "baseUrl": f"http://localhost:8787/{alias}/v1",
                             }
                         }
                     }
@@ -609,7 +608,7 @@ class TestOpencawConsistencyHardening:
                         "providers": {
                             "worthless-openai": {
                                 "apiKey": "sk-some-shard-a",
-                                "baseUrl": "http://localhost:8787/openai/worthless-openai",
+                                "baseUrl": "http://localhost:8787/worthless-openai/v1",
                             }
                         }
                     }

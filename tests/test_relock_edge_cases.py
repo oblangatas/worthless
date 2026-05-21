@@ -45,7 +45,6 @@ async def _upsert(repo: ShardRepository, alias: str, sr) -> None:
     await repo.upsert_locked_shard(
         alias,
         stored,
-        shard_a=bytearray(sr.shard_a),
         prefix=sr.prefix,
         charset=sr.charset,
         base_url=_BASE_URL,
@@ -385,7 +384,6 @@ async def test_relock_updates_spend_cap(repo: ShardRepository, tmp_db_path: str)
     await repo.upsert_locked_shard(
         alias,
         stored1,
-        shard_a=bytearray(sr1.shard_a),
         prefix=sr1.prefix,
         charset=sr1.charset,
         base_url=_BASE_URL,
@@ -418,28 +416,16 @@ async def test_relock_updates_spend_cap(repo: ShardRepository, tmp_db_path: str)
     await repo.upsert_locked_shard(
         alias,
         stored2,
-        shard_a=bytearray(sr2.shard_a),
         prefix=sr2.prefix,
         charset=sr2.charset,
         base_url=_BASE_URL,
     )
 
     # upsert_locked_shard does NOT update enrollment_config.spend_cap.
-    # The re-lock path must explicitly update spend_cap to the new value.
-    # This assertion will fail because there is currently no mechanism inside
-    # upsert_locked_shard to propagate a new spend cap — the caller must do it
-    # separately, and nothing in the current implementation does.
-    # After re-lock, spend_cap must reflect the NEW value (5000), not the old one (1000).
+    # The re-lock path must explicitly update spend_cap via set_spend_cap().
     new_cap = 5000
-    # Simulate the re-lock updating the cap (expected behaviour post-fix):
-    # The lock command must UPDATE enrollment_config when re-locking with --spend-cap.
-    # For the red phase we assert the DB *after* an explicit UPDATE that the fix will do.
-    async with aiosqlite.connect(tmp_db_path) as db:
-        await db.execute(
-            "UPDATE enrollment_config SET spend_cap = ? WHERE key_alias = ?",
-            (new_cap, alias),
-        )
-        await db.commit()
+    updated = await repo.set_spend_cap(alias, new_cap)
+    assert updated, f"set_spend_cap(alias, {new_cap}) must return True for existing alias"
     sr2.zero()
 
     # New cap must be stored
@@ -511,7 +497,6 @@ async def test_concurrent_relock_last_writer_wins(repo: ShardRepository, tmp_db_
         repo.upsert_locked_shard(
             alias,
             stored_a,
-            shard_a=shard_a_a,
             prefix=prefix_a,
             charset=charset_a,
             base_url=_BASE_URL,
@@ -519,7 +504,6 @@ async def test_concurrent_relock_last_writer_wins(repo: ShardRepository, tmp_db_
         repo.upsert_locked_shard(
             alias,
             stored_b,
-            shard_a=shard_a_b,
             prefix=prefix_b,
             charset=charset_b,
             base_url=_BASE_URL,
@@ -589,7 +573,7 @@ async def test_relock_preserves_enrollment_rows(
     sr1 = split_key_fp(api_key, prefix="sk-", provider=_PROVIDER)
     stored1 = _make_stored(sr1)
     await repo.upsert_locked_shard(
-        alias, stored1, shard_a=bytearray(sr1.shard_a), base_url=_BASE_URL
+        alias, stored1, prefix=sr1.prefix, charset=sr1.charset, base_url=_BASE_URL
     )
     await repo.store_enrolled(
         alias,
@@ -604,7 +588,7 @@ async def test_relock_preserves_enrollment_rows(
     sr2 = split_key_fp(api_key, prefix="sk-", provider=_PROVIDER)
     stored2 = _make_stored(sr2)
     await repo.upsert_locked_shard(
-        alias, stored2, shard_a=bytearray(sr2.shard_a), base_url=_BASE_URL
+        alias, stored2, prefix=sr2.prefix, charset=sr2.charset, base_url=_BASE_URL
     )
     sr2.zero()
 
