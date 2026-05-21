@@ -703,4 +703,103 @@ async def test_16x2_concurrent_shard_a_requests_all_succeed(
         assert list(statuses) == [200, 200, 200, 200, 200], f"Expected all 200s, got: {statuses}"
     finally:
         await app.state.httpx_client.aclose()
+
+
+# ------------------------------------------------------------------
+# worthless-m1td RED tests
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_upstream_receives_raw_api_key_not_shard_a(
+    enrolled_16x2,
+    repo: ShardRepository,
+    proxy_settings: ProxySettings,
+) -> None:
+    """Upstream Authorization header must carry Bearer <raw_api_key>, not shard-A.
+
+    Core split-key invariant: the proxy reconstructs the full key from
+    (shard-A Bearer + DB shard-B) and forwards the reconstructed key to
+    upstream — never the partial shard-A the client sent.
+
+    RED: test_16x2_valid_shard_a_reaches_upstream at line 112 only asserts
+    response status (200).  It never inspects what Authorization header was
+    actually forwarded upstream, so it would pass even if the proxy
+    forwarded shard-A verbatim (bypassing reconstruction entirely).
+    """
+    alias, shard_a_str, raw_api_key = enrolled_16x2
+    app, db = await _make_proxy_app(proxy_settings, repo, auth_token=None)
+
+    captured_auth: list[str] = []
+
+    def _capture_and_respond(request: httpx.Request) -> httpx.Response:
+        captured_auth.append(request.headers.get("authorization", ""))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 10, "total_tokens": 15},
+                "model": "gpt-4",
+            },
+        )
+
+    try:
+        with respx.mock:
+            respx.post("https://api.openai.com/v1/chat/completions").mock(
+                side_effect=_capture_and_respond
+            )
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                resp = await client.post(
+                    f"/{alias}/v1/chat/completions",
+                    json={"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}]},
+                    headers={"Authorization": f"Bearer {shard_a_str}"},
+                )
+
+        assert resp.status_code == 200, f"Expected 200, got {resp.status_code}"
+        assert len(captured_auth) == 1, "Upstream must be called exactly once"
+
+        expected = f"Bearer {raw_api_key.decode()}"
+        assert captured_auth[0] == expected, (
+            f"Upstream must receive the reconstructed raw API key as Bearer.\n"
+            f"  expected: {expected!r}\n"
+            f"  got:      {captured_auth[0]!r}\n"
+            "Forwarding shard-A instead of the reconstructed key breaks the "
+            "split-key invariant and reveals an inert shard to the upstream."
+        )
+    finally:
+        await app.state.httpx_client.aclose()
         await db.close()
+
+
+@pytest.mark.asyncio
+async def test_auth_token_survives_repo_reconnect(tmp_db_path: str, fernet_key: bytes) -> None:
+    """Proxy auth token persists across distinct ShardRepository instances.
+
+    test_auth_token_survives_restart (line 270) calls set_proxy_auth_token and
+    get_proxy_auth_token on the *same* repo instance — it only tests in-memory
+    round-trip, not actual DB persistence.  A fresh repo over the same DB path
+    is the real restart scenario.
+
+    RED: the existing test reuses the same object so it proves nothing about
+    persistence across a real process restart.
+    """
+    # Write token with first instance (simulates proxy at lock time)
+    repo1 = ShardRepository(tmp_db_path, bytearray(fernet_key))
+    await repo1.initialize()
+    token = secrets.token_urlsafe(32)
+    await repo1.set_proxy_auth_token(token)
+    # Intentionally do NOT use repo1 below — simulates the proxy restarting
+    del repo1
+
+    # Recover with a second independent instance (simulates proxy after restart)
+    repo2 = ShardRepository(tmp_db_path, bytearray(fernet_key))
+    await repo2.initialize()
+    recovered = await repo2.get_proxy_auth_token()
+
+    assert recovered == token, (
+        f"Token must survive a fresh ShardRepository instance over the same DB.\n"
+        f"  wrote:     {token!r}\n"
+        f"  recovered: {recovered!r}"
+    )

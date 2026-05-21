@@ -658,3 +658,221 @@ async def test_first_lock_inserts_via_upsert(repo: ShardRepository, tmp_db_path:
     assert reconstructed == api_key.encode(), (
         f"First-lock INSERT: expected {api_key.encode()!r}, got {reconstructed!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# worthless-fhta: upsert_locked_shard API contract (RED tests)
+# ---------------------------------------------------------------------------
+
+
+class TestUpsertLockedShardApiContract:
+    """worthless-fhta TDD red phase.
+
+    Defines the correct upsert_locked_shard API contract:
+    - No redundant shard_a kwarg (StoredShard.shard_a is the sole source)
+    - prefix, charset, base_url are required — None is a hard error, not a NULL write
+    """
+
+    def test_shard_a_kwarg_absent_from_signature(self) -> None:
+        """upsert_locked_shard must NOT expose a shard_a parameter.
+
+        Having shard_a alongside StoredShard.shard_a lets callers silently pass
+        mismatched halves.  Remove the param: shard-A is never stored server-side
+        and the StoredShard instance is the canonical carrier.
+
+        RED: shard_a IS in the current signature → test fails today.
+        """
+        import inspect
+
+        sig = inspect.signature(ShardRepository.upsert_locked_shard)
+        assert "shard_a" not in sig.parameters, (
+            "upsert_locked_shard must not accept a shard_a kwarg — "
+            "the parameter is never stored and exposes a mismatched-shard footgun."
+        )
+
+    @pytest.mark.asyncio
+    async def test_call_without_shard_a_kwarg_succeeds(self, repo: ShardRepository) -> None:
+        """Calling upsert_locked_shard without shard_a= must not raise TypeError.
+
+        After the fix, shard_a is removed from the signature so the canonical
+        call is: upsert_locked_shard(alias, shard, prefix=..., charset=..., base_url=...)
+
+        RED today: shard_a is a required keyword arg → TypeError: missing arg.
+        """
+        alias = "fhta-no-shard-a"
+        sr = split_key_fp("sk-fhta-test-abcdef1234567", prefix="sk-", provider=_PROVIDER)
+        stored = _make_stored(sr)
+        # Must not raise TypeError after the fix
+        await repo.upsert_locked_shard(
+            alias,
+            stored,
+            prefix=sr.prefix,
+            charset=sr.charset,
+            base_url=_BASE_URL,
+        )
+        sr.zero()
+
+    @pytest.mark.asyncio
+    async def test_none_prefix_is_hard_error(self, repo: ShardRepository) -> None:
+        """upsert_locked_shard(prefix=None) must raise — not silently write NULL.
+
+        NULL prefix in the shards row breaks reconstruction: the proxy reads
+        encrypted.prefix before calling reconstruct_key_fp and refuses a None value.
+        The API must reject it at call time.
+
+        RED today: None is accepted and written to the DB without error.
+        """
+        alias = "fhta-null-prefix"
+        sr = split_key_fp("sk-fhta-prefix-abcdef123", prefix="sk-", provider=_PROVIDER)
+        stored = _make_stored(sr)
+        with pytest.raises((ValueError, TypeError)):
+            await repo.upsert_locked_shard(
+                alias,
+                stored,
+                prefix=None,  # type: ignore[arg-type]
+                charset=sr.charset,
+                base_url=_BASE_URL,
+            )
+        sr.zero()
+
+    @pytest.mark.asyncio
+    async def test_none_charset_is_hard_error(self, repo: ShardRepository) -> None:
+        """upsert_locked_shard(charset=None) must raise — not silently write NULL.
+
+        RED today: None is accepted.
+        """
+        alias = "fhta-null-charset"
+        sr = split_key_fp("sk-fhta-charset-abcdef12", prefix="sk-", provider=_PROVIDER)
+        stored = _make_stored(sr)
+        with pytest.raises((ValueError, TypeError)):
+            await repo.upsert_locked_shard(
+                alias,
+                stored,
+                prefix=sr.prefix,
+                charset=None,  # type: ignore[arg-type]
+                base_url=_BASE_URL,
+            )
+        sr.zero()
+
+    @pytest.mark.asyncio
+    async def test_none_base_url_is_hard_error(self, repo: ShardRepository) -> None:
+        """upsert_locked_shard(base_url=None) must raise — not silently write NULL.
+
+        NULL base_url causes the proxy to refuse requests with "re-lock required".
+        The API must catch it immediately, not let it leak into the DB.
+
+        RED today: None is accepted.
+        """
+        alias = "fhta-null-base-url"
+        sr = split_key_fp("sk-fhta-base-url-abcdef1", prefix="sk-", provider=_PROVIDER)
+        stored = _make_stored(sr)
+        with pytest.raises((ValueError, TypeError)):
+            await repo.upsert_locked_shard(
+                alias,
+                stored,
+                prefix=sr.prefix,
+                charset=sr.charset,
+                base_url=None,  # type: ignore[arg-type]
+            )
+        sr.zero()
+
+
+# ---------------------------------------------------------------------------
+# worthless-rbog: spend-cap test drives real repo path, not raw SQL (RED)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_relock_preserves_spend_cap_via_repo(repo: ShardRepository, tmp_db_path: str) -> None:
+    """Re-lock via the real repo path must NOT overwrite enrollment_config.spend_cap.
+
+    Drives the actual upsert_locked_shard + add_enrollment path (not raw SQL)
+    and asserts spend_cap survives.  This is the behavioral invariant:
+    key rotation must not destroy user-configured budget limits.
+
+    Complements the storage-layer test below which uses set_spend_cap().
+    """
+    alias = "rbog-preserve-spend-cap"
+    api_key = "sk-rbog-preserve-abcdef12345"
+
+    # First lock — sets the initial spend cap
+    sr1 = split_key_fp(api_key, prefix="sk-", provider=_PROVIDER)
+    stored1 = _make_stored(sr1)
+    await repo.upsert_locked_shard(
+        alias, stored1, prefix=sr1.prefix, charset=sr1.charset, base_url=_BASE_URL
+    )
+    await repo.store_enrolled(
+        alias,
+        stored1,
+        var_name="OPENAI_API_KEY",
+        env_path=None,
+        spend_cap=1000,
+        prefix=sr1.prefix,
+        charset=sr1.charset,
+        base_url=_BASE_URL,
+    )
+    sr1.zero()
+
+    # Re-lock: upsert new shard pair (what lock.py does on re-lock)
+    sr2 = split_key_fp(api_key, prefix="sk-", provider=_PROVIDER)
+    stored2 = _make_stored(sr2)
+    await repo.upsert_locked_shard(
+        alias, stored2, prefix=sr2.prefix, charset=sr2.charset, base_url=_BASE_URL
+    )
+    await repo.add_enrollment(alias, var_name="OPENAI_API_KEY", env_path=None)
+    sr2.zero()
+
+    # spend_cap must be unchanged
+    async with aiosqlite.connect(tmp_db_path) as db:
+        cursor = await db.execute(
+            "SELECT spend_cap FROM enrollment_config WHERE key_alias = ?", (alias,)
+        )
+        row = await cursor.fetchone()
+    assert row is not None and row[0] == 1000, (
+        f"Re-lock must preserve spend_cap=1000, got {row!r}. "
+        "upsert_locked_shard must not touch enrollment_config."
+    )
+
+
+@pytest.mark.asyncio
+async def test_set_spend_cap_updates_via_repo_method(
+    repo: ShardRepository, tmp_db_path: str
+) -> None:
+    """ShardRepository.set_spend_cap() updates enrollment_config.spend_cap.
+
+    Replaces the previous raw SQL UPDATE in test_relock_updates_spend_cap.
+    Tests the real repo method rather than exercising SQLite directly.
+
+    RED today: ShardRepository has no set_spend_cap method.
+    """
+    alias = "rbog-set-spend-cap"
+    api_key = "sk-rbog-set-spend-abcdef1234"
+
+    sr = split_key_fp(api_key, prefix="sk-", provider=_PROVIDER)
+    stored = _make_stored(sr)
+    await repo.upsert_locked_shard(
+        alias, stored, prefix=sr.prefix, charset=sr.charset, base_url=_BASE_URL
+    )
+    await repo.store_enrolled(
+        alias,
+        stored,
+        var_name="OPENAI_API_KEY",
+        env_path=None,
+        spend_cap=1000,
+        prefix=sr.prefix,
+        charset=sr.charset,
+        base_url=_BASE_URL,
+    )
+    sr.zero()
+
+    # Update spend cap via the repo method (not raw SQL)
+    await repo.set_spend_cap(alias, 5000)
+
+    async with aiosqlite.connect(tmp_db_path) as db:
+        cursor = await db.execute(
+            "SELECT spend_cap FROM enrollment_config WHERE key_alias = ?", (alias,)
+        )
+        row = await cursor.fetchone()
+    assert row is not None and row[0] == 5000, (
+        f"set_spend_cap(5000) must update enrollment_config, got {row!r}"
+    )
