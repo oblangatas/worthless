@@ -796,12 +796,13 @@ async def test_auth_token_survives_repo_reconnect(tmp_db_path: str, fernet_key: 
     token = secrets.token_urlsafe(32)
     await repo1.set_proxy_auth_token(token)
     # Intentionally do NOT use repo1 below — simulates the proxy restarting
-    del repo1
+    repo1.close()
 
     # Recover with a second independent instance (simulates proxy after restart)
     repo2 = ShardRepository(tmp_db_path, bytearray(fernet_key))
     await repo2.initialize()
     recovered = await repo2.get_proxy_auth_token()
+    repo2.close()
 
     assert recovered == token, (
         f"Token must survive a fresh ShardRepository instance over the same DB.\n"

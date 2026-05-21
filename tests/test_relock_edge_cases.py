@@ -709,7 +709,7 @@ class TestUpsertLockedShardApiContract:
         alias = "fhta-null-prefix"
         sr = split_key_fp("sk-fhta-prefix-abcdef123", prefix="sk-", provider=_PROVIDER)
         stored = _make_stored(sr)
-        with pytest.raises((ValueError, TypeError)):
+        with pytest.raises(ValueError):
             await repo.upsert_locked_shard(
                 alias,
                 stored,
@@ -728,7 +728,7 @@ class TestUpsertLockedShardApiContract:
         alias = "fhta-null-charset"
         sr = split_key_fp("sk-fhta-charset-abcdef12", prefix="sk-", provider=_PROVIDER)
         stored = _make_stored(sr)
-        with pytest.raises((ValueError, TypeError)):
+        with pytest.raises(ValueError):
             await repo.upsert_locked_shard(
                 alias,
                 stored,
@@ -750,7 +750,7 @@ class TestUpsertLockedShardApiContract:
         alias = "fhta-null-base-url"
         sr = split_key_fp("sk-fhta-base-url-abcdef1", prefix="sk-", provider=_PROVIDER)
         stored = _make_stored(sr)
-        with pytest.raises((ValueError, TypeError)):
+        with pytest.raises(ValueError):
             await repo.upsert_locked_shard(
                 alias,
                 stored,
@@ -850,7 +850,8 @@ async def test_set_spend_cap_updates_via_repo_method(
     sr.zero()
 
     # Update spend cap via the repo method (not raw SQL)
-    await repo.set_spend_cap(alias, 5000)
+    updated = await repo.set_spend_cap(alias, 5000)
+    assert updated is True, "set_spend_cap must return True when the enrollment_config row exists"
 
     async with aiosqlite.connect(tmp_db_path) as db:
         cursor = await db.execute(
