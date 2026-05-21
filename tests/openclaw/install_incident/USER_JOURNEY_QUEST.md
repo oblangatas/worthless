@@ -16,8 +16,7 @@ the discoverability evidence is the most useful part.
 
 ```bash
 docker compose -p wor514 down -v --remove-orphans 2>/dev/null
-WT=/Users/shachar/Projects/worthless/worthless/.claude/worktrees/heuristic-ptolemy-2224e2
-cd "$WT/deploy"
+cd "$(git rev-parse --show-toplevel)/deploy"
 cp -f docker-compose.env.example docker-compose.env
 # Fake-but-real-shaped key for the manual fallback step. Replace with your real
 # key in Step 5 only if you want chat to actually complete.

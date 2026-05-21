@@ -19,10 +19,9 @@ the data.
 # Wipe any prior quest artifacts so this is truly fresh
 docker compose -p wor514 down -v --remove-orphans 2>/dev/null
 
-# IMPORTANT: cd to the worktree's deploy dir so docker's build context
+# IMPORTANT: run from this repo's deploy dir so docker's build context
 # (`context: ..` in the compose file) resolves to the repo root, not /tmp.
-WT=/Users/shachar/Projects/worthless/worthless/.claude/worktrees/heuristic-ptolemy-2224e2
-cd "$WT/deploy"
+cd "$(git rev-parse --show-toplevel)/deploy"
 cp -f docker-compose.env.example docker-compose.env
 
 # Fake-but-real-shaped key; no real credential at risk
@@ -31,8 +30,8 @@ echo "KEY=$KEY"
 ```
 
 The compose file (`deploy/docker-compose.yml`) is what `docs.wless.io`
-tells users to `curl`. We run from the worktree's `deploy/` so the build
-context resolves to the repo root. Nothing here writes to your `~`.
+tells users to `curl`. We run from the current clone's `deploy/` so the
+build context resolves to the repo root. Nothing here writes to your `~`.
 
 ---
 
