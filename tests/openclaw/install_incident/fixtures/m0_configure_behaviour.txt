@@ -1,0 +1,25 @@
+mkdir: cannot create directory '/root': Permission denied
+bash: line 29: /root/.openclaw/agents/main/agent/openclaw.json: Permission denied
+bash: line 38: /root/.openclaw/agents/main/agent/auth-profiles.json: Permission denied
+--- configure --apply --yes output ---
+EXIT_CODE:124
+--- post-configure audit ---
+{
+  "version": 1,
+  "status": "clean",
+  "resolution": {
+    "refsChecked": 0,
+    "skippedExecRefs": 0,
+    "resolvabilityComplete": true
+  },
+  "filesScanned": [
+    "/home/node/.openclaw/openclaw.json"
+  ],
+  "summary": {
+    "plaintextCount": 0,
+    "unresolvedRefCount": 0,
+    "shadowedRefCount": 0,
+    "legacyResidueCount": 0
+  },
+  "findings": []
+}
