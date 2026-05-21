@@ -15,8 +15,10 @@ can start real subprocesses, and may require platform facilities such as a
 native keyring.
 
 For product review and manual UX traceability, see
-[`UX_PRODUCT_REPORT.md`](UX_PRODUCT_REPORT.md). For literal command output,
-`.env` before/after snapshots, and redacted terminal proof, see
+[`UX_PRODUCT_REPORT.md`](UX_PRODUCT_REPORT.md). Its `WOR-544` section maps the
+top-down user journey to pytest proof, terminal traces, CI artifacts, and
+explicitly owned gaps. For literal command output, `.env` before/after
+snapshots, and redacted terminal proof, see
 [`TERMINAL_TRACES.md`](TERMINAL_TRACES.md).
 The trace report also includes deterministic install/reinstall/manual-uninstall
 guidance evidence for `WOR-441`; live OS install proof comes from the GitHub

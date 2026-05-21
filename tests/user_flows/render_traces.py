@@ -648,12 +648,12 @@ def main() -> int:
     args = parse_args()
     reset_root()
     journeys = [
+        build_install_lifecycle(),
         build_lock_status_scan_unlock(),
         build_teammate_handoff_failure(),
         build_rotation_relock(),
         build_multi_project_isolation(),
         build_native_stress(),
-        build_install_lifecycle(),
     ]
     report = render_report(journeys)
     args.output.parent.mkdir(parents=True, exist_ok=True)
