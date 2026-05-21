@@ -253,6 +253,9 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
         lifespan=_lifespan,
     )
     app.state.settings = settings
+    # proxy_auth_token is no longer used — kept for tests that set it to None
+    # to indicate "target state: no stable token". The proxy ignores this field.
+    app.state.proxy_auth_token = None
 
     # Middleware stack (reverse order: last registered runs first)
     app.add_middleware(CORSMiddleware, allow_origins=[], allow_methods=["GET"], allow_headers=[])
@@ -350,10 +353,12 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
             )
             return _uniform_401()
 
-        # SR-09: shard-A from request header only (no disk, no files)
-        # OpenAI: Authorization: Bearer <shard-A>
-        # Anthropic: x-api-key: <shard-A>
-        shard_a = _extract_shard_a(request)
+        # SR-09: shard-A arrives in the Authorization: Bearer header (or x-api-key).
+        # This is the only auth path — the 16x2 stable-token path has been removed.
+        # The commitment check in reconstruct_key_fp validates that shard-A + shard-B
+        # reconstruct the original key — old shard-A values are automatically rejected
+        # after re-lock because the DB shard-B (and commitment) have changed.
+        shard_a: bytearray | None = _extract_shard_a(request)
         if shard_a is None:
             return _uniform_401()
 
@@ -368,7 +373,7 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
         # GATE: rules engine evaluates BEFORE any Fernet decrypt
         denial = await rules_engine.evaluate(alias, request, provider=encrypted.provider, body=body)
         if denial is not None:
-            # Zero shard_a before returning
+            # Zero shard_a before returning (SR-01/SR-02)
             shard_a[:] = b"\x00" * len(shard_a)
             # Release any reservation placed by an earlier rule in the chain
             # (e.g. TokenBudgetRule reserves before RateLimitRule/SpendCapRule run).
@@ -551,6 +556,7 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
                     background=BackgroundTask(_do_record_spend, adapter_resp.body),
                 )
         finally:
+            # Zero shard_a (SR-01/SR-02)
             shard_a[:] = b"\x00" * len(shard_a)
             if plaintext_shard_b is not None:
                 plaintext_shard_b[:] = b"\x00" * len(plaintext_shard_b)
