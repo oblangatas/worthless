@@ -924,13 +924,9 @@ def _lock_keys(
     if not quiet:
         if fresh_count or relock_count:
             if fresh_count:
-                # Storytelling shape (UX P1): tell the user keys are split
-                # between this machine and the OS keystore, name the .env so
-                # they know which file is now safe.
-                # Trust-fix accessibility (2026-05-08 verification gauntlet):
-                # lead with literal ``[OK]`` text prefix as the carrier for
-                # monochrome terminals + screen readers + CI log scrapers
-                # (color/glyph reinforce but is never the carrier).
+                # [OK] text prefix is the accessibility carrier — color/glyph
+                # reinforce but are never the sole signal (monochrome, CI logs,
+                # screen readers).
                 console.print_success(
                     f"[OK] {fresh_count} key(s) split between this machine and "
                     f"{_shard_b_storage_label()} — {env_path.name} no longer contains "

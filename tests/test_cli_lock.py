@@ -1932,3 +1932,16 @@ class TestLockRerun:
         enrollments = asyncio.run(_repo(home_dir).list_enrollments())
         env_paths = {e.env_path for e in enrollments}
         assert len(env_paths) == 2
+
+    def test_lock_rerun_quiet_suppresses_re_verified(
+        self, home_dir: WorthlessHome, env_file: Path
+    ) -> None:
+        """--quiet on re-lock produces no output, consistent with --quiet on fresh lock."""
+        env_vars = {"WORTHLESS_HOME": str(home_dir.base_dir)}
+        runner.invoke(app, ["lock", "--env", str(env_file)], env=env_vars)
+
+        result = runner.invoke(app, ["-q", "lock", "--env", str(env_file)], env=env_vars)
+
+        assert result.exit_code == 0, result.output
+        assert "[OK]" not in result.output
+        assert "already protected" not in result.output.lower()
