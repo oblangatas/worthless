@@ -148,10 +148,11 @@ async def attack_app(tmp_db_path: str, fernet_key: bytes, attack_repo: ShardRepo
 
 
 @pytest.fixture()
-def attack_client(attack_app):
+async def attack_client(attack_app):
     app, _ = attack_app
     transport = httpx.ASGITransport(app=app)
-    return httpx.AsyncClient(transport=transport, base_url="http://test")
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        yield client
 
 
 # ---------------------------------------------------------------------------

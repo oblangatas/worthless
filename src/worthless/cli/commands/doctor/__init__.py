@@ -421,7 +421,7 @@ def _check_openclaw_apikey_consistency(
 def _check_openclaw_section(
     enrollments: list[EnrollmentRecord],
     *,
-    repo: ShardRepository,
+    repo: ShardRepository | None = None,
     fix: bool,
     dry_run: bool,
 ) -> bool:
@@ -445,7 +445,8 @@ def _check_openclaw_section(
     provider_issues = _check_providers(state, healthy, port=port)
 
     # Check openclaw.json apiKey consistency with DB shards (post-16x2-revert).
-    consistency_issues = _check_openclaw_apikey_consistency(state, repo)
+    # repo=None when called from tests that don't need the consistency check.
+    consistency_issues = _check_openclaw_apikey_consistency(state, repo) if repo is not None else []
 
     all_issues = skill_issues + provider_issues + consistency_issues
     if not all_issues and not fixed_items:
