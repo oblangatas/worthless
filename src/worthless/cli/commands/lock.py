@@ -347,6 +347,21 @@ async def _pass1_db_writes(
         upstream_base_url = _resolve_upstream_base_url(base_url_var, env_values, provider)
 
         alias = _make_alias(provider, value)
+
+        # Cross-path collision check: if this alias is already enrolled from a
+        # DIFFERENT .env path, the new shard-B upsert will replace the old one —
+        # making the original enrollment's shard-A unable to reconstruct. Warn
+        # so the user can decide whether to unlock the original path first.
+        existing_enrollments = await repo.list_enrollments(alias)
+        for existing in existing_enrollments:
+            if existing.env_path and existing.env_path != env_str:
+                get_console().print_warning(
+                    f"Warning: alias '{alias}' already enrolled from "
+                    f"{existing.env_path} — re-locking from a different "
+                    "path will break that enrollment."
+                )
+                break  # one warning per alias is sufficient
+
         db_shard = await repo.fetch_encrypted(alias)
 
         if db_shard is not None:
@@ -377,6 +392,17 @@ async def _pass1_db_writes(
                     stored_decrypted.shard_b,
                     db_shard.prefix,
                     db_shard.charset,
+                )
+                # INSERT OR REPLACE keeps shard_a_enc in sync with the auth token
+                # written to openclaw.json.  INSERT OR IGNORE would leave the old
+                # shard_b in DB on re-lock, causing XOR reconstruction to fail permanently.
+                await repo.upsert_locked_shard(
+                    alias,
+                    stored_decrypted,
+                    shard_a=derived_shard_a,
+                    prefix=db_shard.prefix,
+                    charset=db_shard.charset,
+                    base_url=db_shard.base_url or upstream_base_url,
                 )
                 await repo.add_enrollment(alias, var_name=var_name, env_path=env_str)
                 await _delete_superseded_location_enrollments(
@@ -418,6 +444,16 @@ async def _pass1_db_writes(
                 commitment=sr.commitment,
                 nonce=sr.nonce,
                 provider=provider,
+            )
+            # store_enrolled() handles enrollment rows; upsert_locked_shard()
+            # writes the shards row with shard_a_enc included from the first lock.
+            await repo.upsert_locked_shard(
+                alias,
+                stored,
+                shard_a=bytearray(sr.shard_a),
+                prefix=sr.prefix,
+                charset=sr.charset,
+                base_url=upstream_base_url,
             )
             await repo.store_enrolled(
                 alias,
@@ -542,6 +578,9 @@ def _apply_openclaw(
         status`` can report DEGRADED state across terminal sessions.
         Sentinel write failure is itself best-effort (logged, swallowed).
     """
+    # Each alias gets its own shard-A (format-preserving split value) as the
+    # apiKey in openclaw.json. The agent sends shard-A as Bearer on each request;
+    # the proxy validates via commitment check (no stable token needed).
     triples: list[tuple[str, str, str]] = [
         (p.provider, p.alias, p.shard_a.decode("utf-8")) for p in planned
     ]
@@ -807,7 +846,7 @@ def _lock_keys(
     if not quiet:
         console.print_hint(f"Scanning {env_path} for API keys...")
 
-    async def _lock_async() -> tuple[int, bool]:
+    async def _lock_async() -> tuple[int, bool, bool]:
         from dotenv import dotenv_values  # noqa: PLC0415 — local import keeps test surface tight
 
         repo = ShardRepository(str(home.db_path), home.fernet_key)
@@ -823,8 +862,16 @@ def _lock_keys(
             env_str,
         )
         if not scanned:
-            console.print_warning("No unprotected API keys found.")
-            return 0, False
+            # Same-path re-lock: .env has already-locked keys. Emit a
+            # confirmation so the user knows the enrollment is up to date.
+            same_path = [e for e in all_enrollments if e.env_path == env_str]
+            if same_path and not quiet:
+                aliases_str = ", ".join(sorted({e.key_alias for e in same_path}))
+                console.print_hint(
+                    f"Re-lock: {aliases_str} already up to date (same path, no changes needed)."
+                )
+                return 0, False, True  # suppress the outer "No unprotected" message
+            return 0, False, False
 
         # 8rqs Phase 7: snapshot the full .env so _pass1 can read existing
         # *_BASE_URL values and pull them into the DB row.
@@ -850,7 +897,7 @@ def _lock_keys(
                 repo, candidates, env_str, token_budget_daily, planned, env_values
             )
             if not planned:
-                return 0, False
+                return 0, False, False
             _batch_rewrite(env_path, planned, keys_only, existing_env_keys)
             # Phase 2.b: OpenClaw magic. Per L1 in
             # engineering/research/openclaw-WOR-431-phase-2-spec.md, this
@@ -859,7 +906,7 @@ def _lock_keys(
             # partial_failure=True so the caller can raise typer.Exit(73)
             # AFTER lock-core's .env/DB writes are fully committed.
             partial_failure = _apply_openclaw(planned, console, quiet, home)
-            return len(planned), partial_failure
+            return len(planned), partial_failure, False
         except Exception:
             if planned:
                 unwind_errors = await _compensating_unwind(repo, planned)
@@ -873,7 +920,7 @@ def _lock_keys(
             for p in planned:
                 p.zero()
 
-    count, partial_failure = asyncio.run(_lock_async())
+    count, partial_failure, suppress_no_keys = asyncio.run(_lock_async())
 
     if count and env_path.exists():
         current = env_path.stat().st_mode
@@ -903,7 +950,7 @@ def _lock_keys(
                 "Next: run `worthless wrap <command>` or `worthless up` for daemon mode"
             )
             _maybe_prompt_code_scan(Path.cwd())
-        else:
+        elif not suppress_no_keys:
             console.print_warning("No unprotected API keys found.")
 
     # Trust-fix (2026-05-08 verification gauntlet): when OpenClaw was

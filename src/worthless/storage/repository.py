@@ -10,7 +10,7 @@ from collections.abc import AsyncIterator
 from typing import NamedTuple
 
 import aiosqlite
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken
 
 from worthless.defaults import DEFAULT_SPEND_CAP_TOKENS
 from worthless.storage.schema import init_db, migrate_db
@@ -38,13 +38,18 @@ class EncryptedShard(NamedTuple):
     # created before 8rqs landed; Phase-6 readers refuse to use it and prompt
     # the user to re-lock.
     base_url: str | None = None
+    # Nullable column kept in schema for backward compatibility with pre-revert rows.
+    # Target state (post-16x2-revert): upsert_locked_shard does NOT write this field;
+    # proxy reads shard-A from the Bearer header, not from the DB.
+    shard_a_enc: bytes | None = None
 
     def __repr__(self) -> str:
         return (
             f"EncryptedShard(shard_b_enc=<{len(self.shard_b_enc)} bytes>, "
             f"commitment=<{len(self.commitment)} bytes>, "
             f"nonce=<{len(self.nonce)} bytes>, provider={self.provider!r}, "
-            f"prefix={self.prefix!r}, base_url={self.base_url!r})"
+            f"prefix={self.prefix!r}, base_url={self.base_url!r}, "
+            f"shard_a_enc={'<present>' if self.shard_a_enc else 'None'})"
         )
 
 
@@ -73,17 +78,25 @@ class StoredShard:
     commitment: bytearray
     nonce: bytearray
     provider: str
+    # shard_a is populated only when shard_a_enc was present in the DB row
+    # (legacy 16x2 rows). In the target state (post-revert), shard_a is always
+    # None here because upsert_locked_shard no longer writes shard_a_enc.
+    shard_a: bytearray | None = None
 
     def __repr__(self) -> str:
         return (
             f"StoredShard(shard_b=<{len(self.shard_b)} bytes>, "
             f"commitment=<{len(self.commitment)} bytes>, "
-            f"nonce=<{len(self.nonce)} bytes>, provider={self.provider!r})"
+            f"nonce=<{len(self.nonce)} bytes>, provider={self.provider!r}, "
+            f"shard_a={'<present>' if self.shard_a else 'None'})"
         )
 
     def zero(self) -> None:
         """Zero all cryptographic fields in place (SR-02)."""
-        for buf in (self.shard_b, self.commitment, self.nonce):
+        bufs = [self.shard_b, self.commitment, self.nonce]
+        if self.shard_a is not None:
+            bufs.append(self.shard_a)
+        for buf in bufs:
             buf[:] = b"\x00" * len(buf)
 
 
@@ -182,13 +195,15 @@ class ShardRepository:
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
-                "SELECT shard_b_enc, commitment, nonce, provider, prefix, charset, base_url "
+                "SELECT shard_b_enc, commitment, nonce, provider, prefix, charset, base_url, "
+                "shard_a_enc "
                 "FROM shards WHERE key_alias = ?",
                 (alias,),
             )
             row = await cursor.fetchone()
             if row is None:
                 return None
+            raw_a = row["shard_a_enc"]
             return EncryptedShard(
                 shard_b_enc=memoryview(  # nosemgrep: sr01-key-material-not-bytearray
                     row["shard_b_enc"]
@@ -203,19 +218,31 @@ class ShardRepository:
                 prefix=row["prefix"],
                 charset=row["charset"],
                 base_url=row["base_url"],
+                shard_a_enc=memoryview(  # nosemgrep: sr01-key-material-not-bytearray
+                    raw_a
+                ).tobytes()
+                if raw_a is not None
+                else None,
             )
 
     def decrypt_shard(self, encrypted: EncryptedShard) -> StoredShard:
         """Fernet-decrypt an :class:`EncryptedShard` into a :class:`StoredShard`.
 
-        All byte fields are wrapped in ``bytearray`` per SR-01.
+        All byte fields are wrapped in ``bytearray`` per SR-01.  When
+        ``encrypted.shard_a_enc`` is present (legacy 16x2 rows), shard-A
+        is also decrypted and returned; target-state rows leave ``shard_a=None``.
         """
-        shard_b = self._get_fernet().decrypt(encrypted.shard_b_enc)
+        fernet = self._get_fernet()
+        shard_b = fernet.decrypt(encrypted.shard_b_enc)
+        shard_a: bytearray | None = None
+        if encrypted.shard_a_enc is not None:
+            shard_a = bytearray(fernet.decrypt(encrypted.shard_a_enc))
         return StoredShard(
             shard_b=bytearray(shard_b),
             commitment=bytearray(encrypted.commitment),
             nonce=bytearray(encrypted.nonce),
             provider=encrypted.provider,
+            shard_a=shard_a,
         )
 
     async def retrieve(self, alias: str) -> StoredShard | None:
@@ -285,6 +312,99 @@ class ShardRepository:
             )
             row = await cursor.fetchone()
             return row[0] if row else None
+
+    # ------------------------------------------------------------------
+    # Stable proxy auth token (kept for backward compatibility — no longer used
+    # by the proxy or lock. The proxy now validates shard-A from the Bearer
+    # header directly via commitment check instead of a stable token.
+    # ------------------------------------------------------------------
+
+    _AUTH_TOKEN_META_KEY = "proxy_auth_token_enc"  # noqa: S105 — metadata key, not a credential
+
+    async def set_proxy_auth_token(self, token: str) -> None:
+        """Fernet-encrypt *token* and persist it in the metadata table.
+
+        Kept for backward compatibility. The proxy no longer reads this value;
+        use of this method is deprecated post-16x2-revert.
+        """
+        token_enc = self._get_fernet().encrypt(token.encode())
+        await self.set_metadata(self._AUTH_TOKEN_META_KEY, token_enc.decode())
+
+    async def get_proxy_auth_token(self) -> str | None:
+        """Return the decrypted proxy auth token string, or *None* if not set.
+
+        Kept for backward compatibility. The proxy no longer reads this value
+        post-16x2-revert. Returns *None* if the token was encrypted with a
+        different (rotated) Fernet key.
+        """
+        raw = await self.get_metadata(self._AUTH_TOKEN_META_KEY)
+        if raw is None:
+            return None
+        try:
+            return self._get_fernet().decrypt(raw.encode()).decode()
+        except InvalidToken:
+            # Token was encrypted with a different (rotated) key — treat as absent.
+            return None
+
+    async def upsert_locked_shard(
+        self,
+        alias: str,
+        shard: StoredShard,
+        *,
+        shard_a: bytearray,
+        prefix: str | None = None,
+        charset: str | None = None,
+        base_url: str | None = None,
+    ) -> None:
+        """Upsert a shard row, storing only shard-B (NOT shard-A) encrypted.
+
+        Uses ``ON CONFLICT DO UPDATE`` (not ``INSERT OR REPLACE``) so the row
+        is patched in place.  INSERT OR REPLACE deletes then re-inserts, which
+        fires the ``enrollments → shards ON DELETE CASCADE`` and wipes all
+        enrollment records for the alias — breaking the two-env-same-key case.
+
+        On-conflict update keeps commitment, nonce, and shard-B in sync on
+        every lock/re-lock. The ``shard_a`` parameter is accepted for API
+        compatibility but is NOT stored server-side — shard-A lives only in
+        the client's .env file (as the format-preserving split value) and in
+        openclaw.json as the Bearer token the agent sends on each request.
+
+        Post-16x2-revert: ``shard_a_enc`` is explicitly set to NULL on every
+        upsert so old rows that previously stored it are cleared.
+        """
+        fernet = self._get_fernet()
+        shard_b_enc = fernet.encrypt(
+            memoryview(shard.shard_b).tobytes()
+        )  # Fernet requires immutable bytes
+        # shard_a parameter is intentionally NOT encrypted/stored — it stays
+        # client-side only (in .env and openclaw.json).
+        async with self._connect() as db:
+            await db.execute(
+                "INSERT INTO shards "
+                "(key_alias, shard_b_enc, commitment, nonce, provider, prefix, charset, "
+                " base_url, shard_a_enc) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL) "
+                "ON CONFLICT(key_alias) DO UPDATE SET "
+                "  shard_b_enc = excluded.shard_b_enc, "
+                "  commitment  = excluded.commitment, "
+                "  nonce       = excluded.nonce, "
+                "  provider    = excluded.provider, "
+                "  prefix      = excluded.prefix, "
+                "  charset     = excluded.charset, "
+                "  base_url    = excluded.base_url, "
+                "  shard_a_enc = NULL",
+                (
+                    alias,
+                    shard_b_enc,
+                    memoryview(shard.commitment).tobytes(),
+                    memoryview(shard.nonce).tobytes(),
+                    shard.provider,
+                    prefix,
+                    charset,
+                    base_url,
+                ),
+            )
+            await db.commit()
 
     # ------------------------------------------------------------------
     # Enrollment CRUD
