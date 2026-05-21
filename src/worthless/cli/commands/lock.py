@@ -863,13 +863,11 @@ def _lock_keys(
         )
         if not scanned:
             # Same-path re-lock: .env has already-locked keys. Emit a
-            # confirmation so the user knows the enrollment is up to date.
+            # positive confirmation so the user knows protection is still active.
             same_path = [e for e in all_enrollments if e.env_path == env_str]
             if same_path and not quiet:
                 aliases_str = ", ".join(sorted({e.key_alias for e in same_path}))
-                console.print_hint(
-                    f"Re-lock: {aliases_str} already up to date (same path, no changes needed)."
-                )
+                console.print_success(f"Already protected — re-verified. ({aliases_str})")
                 return 0, False, True  # suppress the outer "No unprotected" message
             return 0, False, False
 

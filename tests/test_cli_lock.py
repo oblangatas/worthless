@@ -1815,6 +1815,79 @@ class TestLockHardcodedBaseUrlDetection:
         assert result.exit_code == 0, "Mismatched quotes produced a false-positive finding"
 
 
+# ---------------------------------------------------------------------------
+# WOR-504: "Already protected — re-verified." on re-lock
+# ---------------------------------------------------------------------------
+
+
+class TestAlreadyProtectedMessage:
+    """Re-locking an already-enrolled key must print a clear confirmation.
+
+    When ``worthless lock`` is run a second time on the same .env, the key is
+    already split and stored.  The commitment check passes, and the user needs
+    to know their key is still protected — not silently wonder whether anything
+    happened.
+
+    RED today: lock succeeds but prints no "already protected" / "re-verified"
+    confirmation for the re-lock path.
+    """
+
+    def test_relock_prints_already_protected(self, home_dir: WorthlessHome, env_file: Path) -> None:
+        """Second ``worthless lock`` on the same .env must print confirmation.
+
+        Contract:
+        - First lock: key enrolled, exit 0.
+        - Second lock (same .env, same key): exit 0 AND output contains
+          "already protected" or "re-verified" (case-insensitive).
+
+        RED: today the re-lock path succeeds silently — no confirmation line.
+        """
+        # First lock — fresh enroll
+        result1 = runner.invoke(
+            app,
+            ["lock", "--env", str(env_file)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+        )
+        assert result1.exit_code == 0, f"First lock failed: {result1.output}"
+
+        # Second lock — re-lock, same key
+        result2 = runner.invoke(
+            app,
+            ["lock", "--env", str(env_file)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+        )
+        assert result2.exit_code == 0, f"Second lock failed: {result2.output}"
+
+        combined = (result2.output or "").lower()
+        assert "already protected" in combined or "re-verified" in combined, (
+            "Re-locking an already-enrolled key must print an 'already protected' or "
+            "'re-verified' confirmation so the user knows the key is still gated.\n"
+            f"stdout: {result2.output!r}"
+        )
+
+    def test_fresh_enroll_does_not_print_already_protected(
+        self, home_dir: WorthlessHome, env_file: Path
+    ) -> None:
+        """First-time lock must NOT print 'already protected'.
+
+        The message is only meaningful on re-lock.  Fresh enrollments must not
+        emit confusing 'already protected' text.
+        """
+        result = runner.invoke(
+            app,
+            ["lock", "--env", str(env_file)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+        )
+        assert result.exit_code == 0, f"First lock failed: {result.output}"
+
+        combined = (result.output or "").lower()
+        assert "already protected" not in combined, (
+            "Fresh enroll must not print 'already protected' — "
+            "that message is for re-lock only.\n"
+            f"stdout: {result.output!r}"
+        )
+
+
 class TestScannerProperties:
     """Property-based tests for scan_source_for_hardcoded_provider_urls."""
 
