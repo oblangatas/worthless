@@ -59,7 +59,7 @@ REALISTIC_OPENCLAW_JSON = {
     "channels": {
         "discord": {"enabled": True, "botToken": "discord-bot-token-must-survive"},
     },
-    "agents": {"main": {"defaultModel": "openai/gpt-4o"}},
+    "agents": {"defaults": {"model": {"primary": "openai/gpt-4o"}}},
     "models": {
         "providers": {
             "openai": {
@@ -79,6 +79,14 @@ AUTH_PROFILES_JSON = {
         "openai": {"token": REAL_KEY, "cachedAt": "2026-05-17T10:00:00Z"},
     },
 }
+
+
+def agent_primary_model(cfg: dict) -> str | None:
+    """Return OpenClaw's configured primary model across known schema versions."""
+    agents = cfg.get("agents", {})
+    return agents.get("defaults", {}).get("model", {}).get("primary") or agents.get("main", {}).get(
+        "defaultModel"
+    )
 
 
 def seed(root: Path) -> dict[str, Path]:
@@ -190,9 +198,7 @@ def scenario(name: str, description: str, make_unreadable: bool) -> dict:
         lost_siblings = sibling_keys_before - sibling_keys_after
         original_openai_survived = "openai" in providers_after
         worthless_added = any(p.startswith("worthless-") for p in providers_after)
-        agent_still_on_real = (
-            after.get("agents", {}).get("main", {}).get("defaultModel") == "openai/gpt-4o"
-        )
+        agent_still_on_real = agent_primary_model(after) == "openai/gpt-4o"
         auth_profiles_untouched = before_auth == after_auth
         real_key_still_reachable = REAL_KEY in json.dumps(after) or REAL_KEY in json.dumps(
             after_auth
@@ -201,7 +207,7 @@ def scenario(name: str, description: str, make_unreadable: bool) -> dict:
         rc = result.returncode
         stdout_lines = result.stdout.strip().splitlines()
         stdout_tail = stdout_lines[-1] if stdout_lines else "(empty)"
-        default_model = after.get("agents", {}).get("main", {}).get("defaultModel", "(GONE)")
+        default_model = agent_primary_model(after) or "(GONE)"
 
         print(f"lock exit code         : {rc}")
         print(f"lock stdout (tail)     : {stdout_tail}")

@@ -90,13 +90,17 @@ print("agent model AFTER:", d.get("agents",{}).get("defaults",{}).get("model",{}
 print("providers AFTER  :", list(d.get("models",{}).get("providers",{}).keys()))
 print("siblings AFTER   :", sorted(k for k in d if k != "models"))
 PY
-echo "---auth-profiles diff vs backup---"
-diff "$HOME"/.openclaw.backup.*/agents/main/agent/auth-profiles.json \
-     ~/.openclaw/agents/main/agent/auth-profiles.json 2>&1 \
-     && echo "auth-profiles: UNCHANGED (real token still on disk)"
+echo "---auth-profiles comparison---"
+if cmp -s "$BK/agents/main/agent/auth-profiles.json" \
+         ~/.openclaw/agents/main/agent/auth-profiles.json; then
+  echo "auth-profiles: UNCHANGED (real token still on disk)"
+else
+  echo "auth-profiles: CHANGED"
+fi
 ```
 
-**DEBUG-2: paste the output above.**
+**DEBUG-2: paste the output above.** Do not paste raw
+`auth-profiles.json` contents.
 
 **PASS for WOR-515** (these mean the bypass is live on your machine):
 - `agent model AFTER` is **unchanged** from Step 1

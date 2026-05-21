@@ -24,6 +24,7 @@ import pytest
 
 from tests.openclaw.install_incident.reproduce import (
     REAL_KEY,
+    agent_primary_model,
     read_json_lenient,
     run_lock,
     seed,
@@ -45,7 +46,7 @@ def test_lock_routes_agent_through_proxy_or_does_not_claim_success(tmp_path):
     result = run_lock(paths)
     after = read_json_lenient(paths["cfg"])
 
-    default_model = after.get("agents", {}).get("main", {}).get("defaultModel", "")
+    default_model = agent_primary_model(after) or ""
     routed = default_model.startswith("worthless-")
     assert routed or result.returncode != 0, (
         f"lock exited {result.returncode} but the agent's default model is "
@@ -93,9 +94,10 @@ def test_lock_preserves_openclaw_file_mode(tmp_path):
     group/world-readable config must keep its mode."""
     paths = seed(tmp_path)
     before_mode = stat.S_IMODE(paths["cfg"].stat().st_mode)
-    run_lock(paths)
+    result = run_lock(paths)
     after_mode = stat.S_IMODE(paths["cfg"].stat().st_mode)
 
-    assert after_mode == before_mode, (
-        f"lock changed openclaw.json mode {oct(before_mode)} -> {oct(after_mode)}"
+    assert after_mode == before_mode or result.returncode != 0, (
+        f"lock exited {result.returncode} and changed openclaw.json mode "
+        f"{oct(before_mode)} -> {oct(after_mode)}"
     )

@@ -10,8 +10,10 @@
     }
   },
   "agents": {
-    "main": {
-      "defaultModel": "openai/gpt-4o"
+    "defaults": {
+      "model": {
+        "primary": "openai/gpt-4o"
+      }
     }
   },
   "models": {
