@@ -82,11 +82,8 @@ AUTH_PROFILES_JSON = {
 
 
 def agent_primary_model(cfg: dict) -> str | None:
-    """Return OpenClaw's configured primary model across known schema versions."""
-    agents = cfg.get("agents", {})
-    return agents.get("defaults", {}).get("model", {}).get("primary") or agents.get("main", {}).get(
-        "defaultModel"
-    )
+    """Return OpenClaw's configured primary model from the current schema."""
+    return cfg.get("agents", {}).get("defaults", {}).get("model", {}).get("primary")
 
 
 def seed(root: Path) -> dict[str, Path]:
