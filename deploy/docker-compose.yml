@@ -74,7 +74,8 @@ services:
       # Shared with proxy — worthless lock writes here, openclaw reads here.
       - openclaw-config:/home/node/.openclaw
     networks:
-      - openclaw-net
+      - openclaw-net  # proxy reachability via Docker DNS
+      - frontend      # allows the Control UI port (18789) to publish to host
     depends_on:
       proxy:
         condition: service_healthy
