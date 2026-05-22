@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import socket
 import subprocess
 import sys
 import textwrap
@@ -22,11 +23,17 @@ from tests.helpers import fake_openai_key
 runner = CliRunner(mix_stderr=False)
 
 
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
 @pytest.fixture()
-def e2e_env(tmp_path: Path) -> tuple[Path, Path, str, dict[str, str]]:
+def e2e_env(tmp_path: Path) -> tuple[Path, Path, str, int, dict[str, str]]:
     """Set up an isolated project directory with a .env and WORTHLESS_HOME.
 
-    Returns (env_file, worthless_home, original_key, cli_env).
+    Returns (env_file, worthless_home, original_key, proxy_port, cli_env).
     """
     project_dir = tmp_path / "myproject"
     project_dir.mkdir()
@@ -36,8 +43,9 @@ def e2e_env(tmp_path: Path) -> tuple[Path, Path, str, dict[str, str]]:
     env_file = project_dir / ".env"
     env_file.write_text(f"OPENAI_API_KEY={original_key}\n")
 
-    cli_env = {"WORTHLESS_HOME": str(worthless_home)}
-    return env_file, worthless_home, original_key, cli_env
+    proxy_port = _free_port()
+    cli_env = {"WORTHLESS_HOME": str(worthless_home), "WORTHLESS_PORT": str(proxy_port)}
+    return env_file, worthless_home, original_key, proxy_port, cli_env
 
 
 # ---------------------------------------------------------------------------
@@ -50,8 +58,8 @@ def e2e_env(tmp_path: Path) -> tuple[Path, Path, str, dict[str, str]]:
 class TestLockStatusUnlockCycle:
     """Prove the full lock -> status -> unlock data flow works end-to-end."""
 
-    def test_full_cycle(self, e2e_env: tuple[Path, Path, str, dict[str, str]]) -> None:
-        env_file, worthless_home, original_key, cli_env = e2e_env
+    def test_full_cycle(self, e2e_env: tuple[Path, Path, str, int, dict[str, str]]) -> None:
+        env_file, worthless_home, original_key, _proxy_port, cli_env = e2e_env
         original_content = env_file.read_text()
 
         # ---- Step 1: lock ------------------------------------------------
@@ -183,8 +191,10 @@ _CHILD_SCRIPT = textwrap.dedent("""\
 class TestWrapProxiesRequest:
     """Prove ``worthless wrap`` spawns a real proxy that transits requests."""
 
-    def test_wrap_real_proxy_transit(self, e2e_env: tuple[Path, Path, str, dict[str, str]]) -> None:
-        env_file, worthless_home, _original_key, cli_env = e2e_env
+    def test_wrap_real_proxy_transit(
+        self, e2e_env: tuple[Path, Path, str, int, dict[str, str]]
+    ) -> None:
+        env_file, worthless_home, _original_key, proxy_port, cli_env = e2e_env
 
         # Lock a key first
         result = runner.invoke(
@@ -210,6 +220,7 @@ class TestWrapProxiesRequest:
             env={
                 **os.environ,
                 "WORTHLESS_HOME": str(worthless_home),
+                "WORTHLESS_PORT": str(proxy_port),
                 # Pass .env path so the child can pick up the OPENAI_BASE_URL
                 # that lock wrote (post-8rqs wrap doesn't synthesise it).
                 "WORTHLESS_E2E_ENV_PATH": str(env_file),
