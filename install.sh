@@ -1,6 +1,7 @@
 #!/bin/sh
 # Worthless installer — https://worthless.sh
-# Usage: curl -sSL https://worthless.sh | sh
+# Usage:         curl -sSL https://worthless.sh | sh
+# Inspect first: curl -sSL 'https://worthless.sh?explain=1' | less
 #
 # Exit codes (UX contract):
 #   0   success

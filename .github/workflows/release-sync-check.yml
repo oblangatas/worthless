@@ -119,6 +119,35 @@ jobs:
           fi
           echo "OK: worthless.sh body sha256 matches install.sh@${LATEST_TAG} and header = ${TAG_HEADER}"
 
+      # ===== Assertion 2c: worthless.sh ?explain=1 audit walkthrough ========
+      - name: A2c — worthless.sh ?explain=1 serves the walkthrough @ latest tag
+        env:
+          LATEST_TAG: ${{ steps.versions.outputs.latest_tag }}
+        run: |
+          set -euo pipefail
+          # The ?explain=1 audit page is what a cautious user reads before
+          # piping to sh. It must (a) be live, (b) byte-match the walkthrough
+          # at the shipped tag, and (c) carry no version literal that has
+          # drifted into a lie (WOR-558). Symmetric with A2a for install.sh.
+          BODY_TMP=$(mktemp)
+          HTTP=$(curl -sSL -A "curl/8.0" -w '%{http_code}' 'https://worthless.sh/?explain=1' -o "$BODY_TMP")
+          if [ "$HTTP" != "200" ]; then
+            echo "::error title=explain endpoint down::worthless.sh/?explain=1 → HTTP ${HTTP}, expected 200"
+            exit 1
+          fi
+          BODY_SHA=$(sha256sum "$BODY_TMP" | awk '{print $1}')
+          REPO_SHA=$(git show "${LATEST_TAG}:workers/worthless-sh/src/walkthrough.txt" | sha256sum | awk '{print $1}')
+          if [ "$BODY_SHA" != "$REPO_SHA" ]; then
+            echo "::error title=Walkthrough drift::?explain=1 body sha256 ${BODY_SHA} != walkthrough.txt@${LATEST_TAG} ${REPO_SHA}"
+            exit 1
+          fi
+          if grep -qE 'worthless==[0-9]|lines? [0-9]|/v[0-9]' "$BODY_TMP"; then
+            echo "::error title=Walkthrough version literal::live ?explain=1 regained a rot-able version literal"
+            grep -nE 'worthless==[0-9]|lines? [0-9]|/v[0-9]' "$BODY_TMP"
+            exit 1
+          fi
+          echo "OK: worthless.sh/?explain=1 → 200, byte-matches walkthrough.txt@${LATEST_TAG}, no version literal"
+
       # ===== Assertion 2b: worthless.sh content negotiation (browser) =======
       - name: A2b — worthless.sh browser-UA → 30x → wless.io
         run: |

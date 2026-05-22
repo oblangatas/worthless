@@ -36,13 +36,25 @@ parties. Anyone who can forge TLS or modify the payload can own your box.
 - No second-reviewer gate on releases (solo maintainer)
 - No kill-switch: if `install.sh` is ever discovered to be compromised, there is no pre-wired mechanism to serve a 503 from `worthless.sh` — the only recourse today is revoking Cloudflare credentials and pulling the asset manually
 
-Until those land, users who want stronger guarantees should download
-`install.sh`, inspect it, and run it locally rather than piping to `sh`:
+Until those land, users who want stronger guarantees can audit before running.
+
+**Read a plain-English walkthrough of exactly what the script does** (no need to parse shell):
+
+```bash
+curl -sSL 'https://worthless.sh?explain=1' | less
+```
+
+**Or inspect the raw script and run it locally** rather than piping to `sh`:
 
 ```bash
 curl -sSL https://worthless.sh -o install.sh
 less install.sh    # inspect
 sh install.sh
 ```
+
+There is no `/install.sh` path. The bare `https://worthless.sh` URL *is* the
+script — it is served to curl-family clients, while browsers are redirected to
+the marketing site. `https://worthless.sh/install.sh` returns `404` by design,
+so the installer has exactly one canonical source.
 
 Planned hardening is tracked in Linear under [WOR-257](https://linear.app/plumbusai/issue/WOR-257). This file describes what's real today; controls move in here when they ship.
