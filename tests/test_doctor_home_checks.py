@@ -281,8 +281,8 @@ class TestCollectAliasIssuesUnit:
         assert issues == []
 
     @pytest.mark.skipif(
-        hasattr(os, "getuid") and os.getuid() == 0,
-        reason="root bypasses file permissions",
+        os.name == "nt" or (hasattr(os, "getuid") and os.getuid() == 0),
+        reason="chmod 0o000 does not deny reads on Windows; root bypasses on POSIX",
     )
     def test_permission_denied_env_file_silently_skipped(self, tmp_path: Path) -> None:
         """A .env that cannot be read (OSError) is skipped; no crash, no issue."""
