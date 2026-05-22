@@ -1845,31 +1845,31 @@ class TestScannerProperties:
 
 
 # ---------------------------------------------------------------------------
-# WOR-504: re-lock surfaces "Already protected — re-verified." instead of
+# WOR-504: re-lock surfaces "[OK] N key(s) still protected." instead of
 # silently succeeding or falsely claiming a new split occurred.
 # ---------------------------------------------------------------------------
 
 
 class TestLockRerun:
-    """Re-locking an already-protected .env surfaces 'Already protected — re-verified.'
+    """Re-locking an already-protected .env surfaces '[OK] N keys still protected.'
 
     The commitment-verify path already proves the key is intact on re-lock —
     it just doesn't say so. These tests pin the new output contract and guard
     the DB invariants (no dup shards, no re-split).
     """
 
-    def test_lock_prints_already_protected_on_rerun(
+    def test_lock_prints_still_protected_on_rerun(
         self, home_dir: WorthlessHome, env_file: Path
     ) -> None:
-        """Second lock run on same .env prints 'Already protected — re-verified.'"""
+        """Second lock run on same .env prints '[OK] N keys still protected.'"""
         env_vars = {"WORTHLESS_HOME": str(home_dir.base_dir)}
         runner.invoke(app, ["lock", "--env", str(env_file)], env=env_vars)
 
         result = runner.invoke(app, ["lock", "--env", str(env_file)], env=env_vars)
 
         assert result.exit_code == 0, result.output
-        assert "already protected" in result.output.lower(), result.output
-        assert "re-verified" in result.output.lower(), result.output
+        assert "[OK]" in result.output, result.output
+        assert "still protected" in result.output.lower(), result.output
 
     def test_lock_rerun_does_not_create_duplicate_shard_row(
         self, home_dir: WorthlessHome, env_file: Path
@@ -1933,10 +1933,10 @@ class TestLockRerun:
         env_paths = {e.env_path for e in enrollments}
         assert len(env_paths) == 2
 
-    def test_lock_rerun_quiet_suppresses_re_verified(
+    def test_lock_rerun_quiet_suppresses_still_protected(
         self, home_dir: WorthlessHome, env_file: Path
     ) -> None:
-        """--quiet on re-lock produces no output, consistent with --quiet on fresh lock."""
+        """-q on re-lock produces no output, consistent with -q on fresh lock."""
         env_vars = {"WORTHLESS_HOME": str(home_dir.base_dir)}
         runner.invoke(app, ["lock", "--env", str(env_file)], env=env_vars)
 
@@ -1944,12 +1944,12 @@ class TestLockRerun:
 
         assert result.exit_code == 0, result.output
         assert "[OK]" not in result.output
-        assert "already protected" not in result.output.lower()
+        assert "still protected" not in result.output.lower()
 
-    def test_fresh_lock_does_not_print_already_protected(
+    def test_fresh_lock_does_not_print_still_protected(
         self, home_dir: WorthlessHome, env_file: Path
     ) -> None:
-        """First-time lock must not print 'already protected' — that message is re-lock only."""
+        """First-time lock must not print 'still protected' — that message is re-lock only."""
         result = runner.invoke(
             app,
             ["lock", "--env", str(env_file)],
@@ -1957,4 +1957,25 @@ class TestLockRerun:
         )
 
         assert result.exit_code == 0, result.output
-        assert "already protected" not in result.output.lower(), result.output
+        assert "still protected" not in result.output.lower(), result.output
+
+    def test_lock_mixed_fresh_and_relock_prints_both_messages(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """1 already-locked key + 1 new key in same run → both messages appear."""
+        key_old = fake_openai_key()
+        key_new = fake_anthropic_key()
+        env_file = tmp_path / ".env"
+        env_vars = {"WORTHLESS_HOME": str(home_dir.base_dir)}
+
+        # Lock just the old key first.
+        env_file.write_text(f"OPENAI_API_KEY={key_old}\n")
+        runner.invoke(app, ["lock", "--env", str(env_file)], env=env_vars)
+
+        # Add a fresh key and re-lock — mixed run.
+        env_file.write_text(f"OPENAI_API_KEY={key_old}\nANTHROPIC_API_KEY={key_new}\n")
+        result = runner.invoke(app, ["lock", "--env", str(env_file)], env=env_vars)
+
+        assert result.exit_code == 0, result.output
+        assert "split between" in result.output.lower(), result.output
+        assert "still protected" in result.output.lower(), result.output

@@ -865,8 +865,7 @@ def _lock_keys(
         if not scanned:
             return 0, len(raw_scanned), False
 
-        # 8rqs Phase 7: snapshot the full .env so _pass1 can read existing
-        # *_BASE_URL values and pull them into the DB row.
+        # Snapshot .env so _pass1 can pull *_BASE_URL values into the DB row.
         env_values = dict(dotenv_values(env_path))
 
         candidates = [
@@ -927,23 +926,24 @@ def _lock_keys(
                 # [OK] text prefix is the accessibility carrier — color/glyph
                 # reinforce but are never the sole signal (monochrome, CI logs,
                 # screen readers).
+                _fresh_noun = "key" if fresh_count == 1 else "keys"
                 console.print_success(
-                    f"[OK] {fresh_count} key(s) split between this machine and "
+                    f"[OK] {fresh_count} {_fresh_noun} split between this machine and "
                     f"{_shard_b_storage_label()} — {env_path.name} no longer contains "
                     f"a usable secret."
                 )
             if relock_count:
-                console.print_success(
-                    f"[OK] {relock_count} key(s) already protected — re-verified."
-                )
+                _relock_noun = "key" if relock_count == 1 else "keys"
+                console.print_success(f"[OK] {relock_count} {_relock_noun} still protected.")
             env_home = os.environ.get("WORTHLESS_HOME")
             if env_home and home.base_dir.resolve() != (Path.home() / ".worthless").resolve():
                 typer.echo(
                     f"Warning: using non-default home {home.base_dir} (WORTHLESS_HOME is set)"
                 )
-            console.print_hint(
-                "Next: run `worthless wrap <command>` or `worthless up` for daemon mode"
-            )
+            if fresh_count:
+                console.print_hint(
+                    "Next: run `worthless wrap <command>` or `worthless up` for daemon mode"
+                )
             _maybe_prompt_code_scan(Path.cwd())
         else:
             console.print_warning("No unprotected API keys found.")
