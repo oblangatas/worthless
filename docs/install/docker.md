@@ -66,6 +66,16 @@ OPENAI_API_KEY=<decoy-prefix>...
 OPENAI_BASE_URL=http://host.docker.internal:8787/<alias>/v1
 ```
 
+On Linux without Docker Desktop, the host proxy also has to listen on the
+Docker bridge, not only on host loopback:
+
+```bash
+WORTHLESS_DEPLOY_MODE=lan worthless up
+```
+
+Keep the default loopback mode for native apps. Use `lan` only for the Docker
+app journey where a container must reach the host proxy.
+
 ### A.4 Mount the .env into the container
 
 Your `docker-compose.yml` (or `docker run`) needs to volume-mount the
@@ -243,7 +253,7 @@ commands:
 post_lock_required_step:
   description: "Edit .env to use host.docker.internal:8787 instead of 127.0.0.1:8787 (containers can't reach host loopback)"
   sed_command: "sed -i.bak 's|127.0.0.1:8787|host.docker.internal:8787|' .env"
-  linux_extra: "Add `--add-host=host.docker.internal:host-gateway` if no Docker Desktop"
+  linux_extra: "Add `--add-host=host.docker.internal:host-gateway` if no Docker Desktop, and start the host proxy with `WORTHLESS_DEPLOY_MODE=lan worthless up`"
 expectations:
   install_succeeds_silently: true
   # Docker itself adds no popup. The host platform's keystore is what fires.
