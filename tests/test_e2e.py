@@ -9,6 +9,7 @@ import socket
 import subprocess
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,12 @@ from worthless.storage.repository import ShardRepository
 from tests.helpers import fake_openai_key
 
 runner = CliRunner(mix_stderr=False)
+_WRAP_BIND_ATTEMPTS = 5
+_WRAP_BIND_COLLISION_MARKERS = (
+    "couldn't bind port",
+    "address already in use",
+    "eaddrinuse",
+)
 
 
 def _free_port() -> int:
@@ -29,23 +36,30 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-@pytest.fixture()
-def e2e_env(tmp_path: Path) -> tuple[Path, Path, str, int, dict[str, str]]:
-    """Set up an isolated project directory with a .env and WORTHLESS_HOME.
-
-    Returns (env_file, worthless_home, original_key, proxy_port, cli_env).
-    """
-    project_dir = tmp_path / "myproject"
-    project_dir.mkdir()
-    worthless_home = tmp_path / ".worthless"
+def _make_e2e_env(
+    base_dir: Path, *, proxy_port: int | None = None
+) -> tuple[Path, Path, str, dict[str, str]]:
+    """Set up an isolated project directory with a .env and WORTHLESS_HOME."""
+    project_dir = base_dir / "myproject"
+    project_dir.mkdir(parents=True)
+    worthless_home = base_dir / ".worthless"
 
     original_key = fake_openai_key()
     env_file = project_dir / ".env"
     env_file.write_text(f"OPENAI_API_KEY={original_key}\n")
 
-    proxy_port = _free_port()
-    cli_env = {"WORTHLESS_HOME": str(worthless_home), "WORTHLESS_PORT": str(proxy_port)}
-    return env_file, worthless_home, original_key, proxy_port, cli_env
+    cli_env = {"WORTHLESS_HOME": str(worthless_home)}
+    if proxy_port is not None:
+        cli_env["WORTHLESS_PORT"] = str(proxy_port)
+    return env_file, worthless_home, original_key, cli_env
+
+
+@pytest.fixture()
+def e2e_env(tmp_path: Path) -> tuple[Path, Path, str, dict[str, str]]:
+    """Set up an isolated project directory with a .env and WORTHLESS_HOME."""
+    # Port 1 keeps status probes away from an already-running local daemon.
+    # These tests do not start the proxy; the real bind happens in wrap below.
+    return _make_e2e_env(tmp_path, proxy_port=1)
 
 
 # ---------------------------------------------------------------------------
@@ -58,8 +72,8 @@ def e2e_env(tmp_path: Path) -> tuple[Path, Path, str, int, dict[str, str]]:
 class TestLockStatusUnlockCycle:
     """Prove the full lock -> status -> unlock data flow works end-to-end."""
 
-    def test_full_cycle(self, e2e_env: tuple[Path, Path, str, int, dict[str, str]]) -> None:
-        env_file, worthless_home, original_key, _proxy_port, cli_env = e2e_env
+    def test_full_cycle(self, e2e_env: tuple[Path, Path, str, dict[str, str]]) -> None:
+        env_file, worthless_home, original_key, cli_env = e2e_env
         original_content = env_file.read_text()
 
         # ---- Step 1: lock ------------------------------------------------
@@ -191,55 +205,75 @@ _CHILD_SCRIPT = textwrap.dedent("""\
 class TestWrapProxiesRequest:
     """Prove ``worthless wrap`` spawns a real proxy that transits requests."""
 
-    def test_wrap_real_proxy_transit(
-        self, e2e_env: tuple[Path, Path, str, int, dict[str, str]]
-    ) -> None:
-        env_file, worthless_home, _original_key, proxy_port, cli_env = e2e_env
+    def test_wrap_real_proxy_transit(self, tmp_path: Path) -> None:
+        # Run wrap as a real subprocess: spawns proxy, runs child, cleans up.
+        # Lock owns OPENAI_BASE_URL and must write the chosen port into .env,
+        # so a bind collision needs a full fresh lock->wrap retry.
+        attempts: list[str] = []
+        proc: subprocess.CompletedProcess[str] | None = None
 
-        # Lock a key first
-        result = runner.invoke(
-            app,
-            ["lock", "--env", str(env_file)],
-            env=cli_env,
-        )
-        assert result.exit_code == 0, f"lock failed: {result.output}"
+        for attempt in range(1, _WRAP_BIND_ATTEMPTS + 1):
+            proxy_port = _free_port()
+            env_file, worthless_home, _original_key, cli_env = _make_e2e_env(
+                tmp_path / f"attempt-{attempt}", proxy_port=proxy_port
+            )
 
-        # Run wrap as a real subprocess — spawns proxy, runs child, cleans up
-        # Resolve the worthless entrypoint from the same venv as the test runner
-        _venv_bin = Path(sys.executable).parent
-        _worthless = str(_venv_bin / "worthless")
-        proc = subprocess.run(
-            [
-                _worthless,
-                "wrap",
-                "--",
-                sys.executable,
-                "-c",
-                _CHILD_SCRIPT,
-            ],
-            env={
-                **os.environ,
-                "WORTHLESS_HOME": str(worthless_home),
-                "WORTHLESS_PORT": str(proxy_port),
-                # Pass .env path so the child can pick up the OPENAI_BASE_URL
-                # that lock wrote (post-8rqs wrap doesn't synthesise it).
-                "WORTHLESS_E2E_ENV_PATH": str(env_file),
-                # WOR-463: explicit even though conftest.py setdefault
-                # propagates via **os.environ. Self-documents the contract:
-                # this subprocess must not leak fernet-key-* into the host
-                # keychain. Defense-in-depth.
-                "WORTHLESS_KEYRING_BACKEND": "null",
-            },
-            timeout=45,
-            capture_output=True,
-            text=True,
-        )
+            result = runner.invoke(
+                app,
+                ["lock", "--env", str(env_file)],
+                env=cli_env,
+            )
+            assert result.exit_code == 0, f"lock failed: {result.output}"
 
+            _venv_bin = Path(sys.executable).parent
+            _worthless = str(_venv_bin / "worthless")
+            proc = subprocess.run(
+                [
+                    _worthless,
+                    "wrap",
+                    "--",
+                    sys.executable,
+                    "-c",
+                    _CHILD_SCRIPT,
+                ],
+                env={
+                    **os.environ,
+                    "WORTHLESS_HOME": str(worthless_home),
+                    "WORTHLESS_PORT": str(proxy_port),
+                    # Pass .env path so the child can pick up the OPENAI_BASE_URL
+                    # that lock wrote (post-8rqs wrap doesn't synthesise it).
+                    "WORTHLESS_E2E_ENV_PATH": str(env_file),
+                    # WOR-463: explicit even though conftest.py setdefault
+                    # propagates via **os.environ. Self-documents the contract:
+                    # this subprocess must not leak fernet-key-* into the host
+                    # keychain. Defense-in-depth.
+                    "WORTHLESS_KEYRING_BACKEND": "null",
+                },
+                timeout=45,
+                capture_output=True,
+                text=True,
+            )
+
+            combined = proc.stdout + proc.stderr
+            if proc.returncode == 0 or not any(
+                marker in combined.lower() for marker in _WRAP_BIND_COLLISION_MARKERS
+            ):
+                break
+
+            attempts.append(
+                f"attempt {attempt} port {proxy_port} bind collision:\n"
+                f"stdout: {proc.stdout}\nstderr: {proc.stderr}"
+            )
+            time.sleep(0.05 * attempt)
+
+        assert proc is not None
         combined = proc.stdout + proc.stderr
 
         # Child should have exited 0 (got a response OR connect error)
         assert proc.returncode == 0, (
-            f"wrap failed (rc={proc.returncode}):\nstdout: {proc.stdout}\nstderr: {proc.stderr}"
+            f"wrap failed after {len(attempts) + 1} attempt(s) "
+            f"(rc={proc.returncode}):\n"
+            f"{chr(10).join(attempts)}\nstdout: {proc.stdout}\nstderr: {proc.stderr}"
         )
 
         # Prove the proxy was involved: child got a status code or reached proxy
