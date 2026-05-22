@@ -62,10 +62,10 @@ fi
 # explicitly set (e.g., docker-compose with a secrets volume).  Without the
 # env var the key stays on the data volume — safe for single-volume PaaS.
 if [ -n "$WORTHLESS_FERNET_KEY_PATH" ] && [ ! -f "$FERNET_PATH" ] && [ -f "$HOME_DIR/fernet.key" ]; then
-  # Mode 0440 (not 0400) so the worthless group can read post-chown
-  # below.  Final ownership/mode is fixed by the priv-drop block:
-  # worthless-crypto:worthless-crypto 0400 — sidecar owns the key;
-  # the proxy uid (10001) has no access even under RCE. See WOR-465 A4.
+  # Mode 0440 at copy time (owner root, group root — proxy uid 10001 cannot
+  # read it; neither can worthless-crypto until the chown below).  The
+  # priv-drop block re-owns to worthless-crypto:worthless-crypto and sets
+  # 0400; proxy uid has no access at any point. WOR-465 A4.
   install -m 0440 "$HOME_DIR/fernet.key" "$FERNET_PATH"
   rm "$HOME_DIR/fernet.key"
 fi
