@@ -27,7 +27,7 @@ parties. Anyone who can forge TLS or modify the payload can own your box.
 
 - **Compromised Cloudflare or `worthless.sh` DNS → game over.** A malicious `install.sh` served from the canonical URL has the user's trust. The only in-script mitigation is the Astral SHA pin, which stops a substituted uv installer underneath a legit `install.sh`.
 - **Compromised Astral → the uv pin catches it** *only if* the attacker doesn't also control `worthless.sh` (a compromised `install.sh` could simply rewrite the pin).
-- **MITM on the user's connection → TLS catches it.**
+- **MITM by a passive network attacker → TLS catches it.** A TLS-terminating proxy your machine already trusts (e.g. a corporate network) does *not* — see "What this does NOT defend against" below.
 
 ## What `install.sh` does NOT verify today
 
@@ -56,5 +56,18 @@ There is no `/install.sh` path. The bare `https://worthless.sh` URL *is* the
 script — it is served to curl-family clients, while browsers are redirected to
 the marketing site. `https://worthless.sh/install.sh` returns `404` by design,
 so the installer has exactly one canonical source.
+
+## What this does NOT defend against (and what you can do)
+
+`curl … | sh` runs code before you read it. Be honest about the limits — and what's in your control:
+
+- **Origin compromise is the real risk, not the wire.** The `X-Worthless-Script-Sha256` header lets you confirm the bytes weren't tampered *in transit*, but it comes from the same Worker as the script — so a compromised `worthless.sh` / Cloudflare account / DNS serves a matching malicious script *and* header. The header catches transit and cache tampering; it does **not** prove the origin is honest.
+- **The PyPI package is the softest link.** `install.sh` installs the latest `worthless` from PyPI without pinning a version or hash, so a compromised PyPI release would run regardless of every other control. To remove that window, pin the version yourself:
+  ```bash
+  WORTHLESS_VERSION=x.y.z curl -sSL https://worthless.sh | sh
+  ```
+- **A trusted TLS-terminating proxy can rewrite the script.** Plain TLS stops a passive network attacker, but a corporate/MITM proxy your machine already trusts can rewrite the piped bytes. On an untrusted network, download-and-inspect (above) instead of piping straight to `sh`.
+
+Cryptographic receipts you could verify *independently* of `worthless.sh` — cosign/Sigstore signatures and SLSA provenance on the released artifacts — are tracked in [WOR-303](https://linear.app/plumbusai/issue/WOR-303). Until they ship, the controls above are what's real; we'd rather say so than imply more.
 
 Planned hardening is tracked in Linear under [WOR-257](https://linear.app/plumbusai/issue/WOR-257). This file describes what's real today; controls move in here when they ship.
