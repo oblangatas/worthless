@@ -37,7 +37,7 @@ scope statement), not detection-scope bugs.
 
 ## Install front-door — current-state attack-surface map (updated 2026-05-22, WOR-558)
 
-A consolidated view of the `curl -sSL https://worthless.sh | sh` chain: each surface, the control in place today, and the residual gap. This synthesizes the findings below into one dashboard; F-numbers link to the detail. **Real-world-incident grounding (xz/liblzma 2024, Codecov bash-uploader 2021, tj-actions/changed-files 2025, the `ctx` PyPI hijack) is pending** — web access was unavailable when this was written; verify and add citations before relying on this externally.
+A consolidated view of the `curl -sSL https://worthless.sh | sh` chain: each surface, the control in place today, and the residual gap. This synthesizes the findings below into one dashboard; F-numbers link to the detail. Grounded in real incidents — see **Real-world precedents** below.
 
 | Surface | Attacker move | Control today | Residual gap |
 |---|---|---|---|
@@ -57,6 +57,25 @@ A consolidated view of the `curl -sSL https://worthless.sh | sh` chain: each sur
 3. **Trusted-proxy MITM rewrite of the piped script.** Defeats TLS once the proxy is trusted. *(F-34 → documented; prefer two-step inspect-install.)*
 
 Worker-layer attacks (UA bypass, CRLF, cache, panic→HTML) **fail today** — that surface is well-hardened and wire-tested. The user's real exposure is the PyPI package, the Cloudflare token, and trusted-proxy MITM — none of which more Worker tests can fix.
+
+### Real-world precedents (cited)
+
+Documented incidents that map to our surfaces, and the defense each motivated.
+
+| Incident (year) | Maps to | Defense it argues for | Source |
+|---|---|---|---|
+| `ctx` PyPI account takeover (2022) | **PyPI (#1)** | Trusted Publishing (OIDC) + hardware-key 2FA; consumers pin + hash | python-security.readthedocs.io/pypi-vuln/index-2022-05-24-ctx-domain-takeover.html |
+| Ultralytics PyPI via Actions cache-poison (2024) | **PyPI (#1)** | *Trusted Publishing protects the channel, not the artifact* → pin + hash deps; SLSA provenance | blog.pypi.org/posts/2024-12-11-ultralytics-attack-analysis/ |
+| `ua-parser-js` npm hijack (2021) | **PyPI (#1)** | scoped short-lived publish tokens + 2FA; consumers pin (≈4-hour evil window) | github.com/advisories/GHSA-pjwm-rvh2-c87w |
+| Codecov bash-uploader (2021) | `curl\|sh` + CI token | out-of-band signed checksums; retire curl-pipe; rotate/scope CI secrets | about.codecov.io/security-update/ |
+| Linux Mint ISO (2016), HandBrake mirror (2017) | DNS/origin serving the installer | publish out-of-band SHA256; verified updater | blog.linuxmint.com/?p=2994 |
+| tj-actions/changed-files (2025, CVE-2025-30066) | GitHub Actions deploy path | **pin Actions by full commit SHA, never tag** — tags were retroactively re-pointed | cisa.gov/news-events/alerts/2025/03/18 |
+| xz/liblzma (2024, CVE-2024-3094) | build-pipeline backdoor | signed git tag as sole trust anchor; reproducible builds verified vs the released artifact | openssf.org/blog/2024/03/30/xz-backdoor-cve-2024-3094/ |
+| Polyfill.io (2024) | CDN/edge serving content | Subresource Integrity; independent mirrors | sansec.io/research/polyfill-supply-chain-attack |
+
+**Most analogous to our #1 gap (unpinned PyPI install):** `ctx` (2022), Ultralytics (2024), `ua-parser-js` (2021) — in each the consumer fetched "whatever the index calls latest" with no integrity check. Ultralytics is the sharpest lesson: it *used* Trusted Publishing and was still compromised via a poisoned build cache — OIDC publishing protects the credential, not the bytes. The consume-side fix is a pinned version **+ wheel hash**.
+
+**uv mechanism — verified against the CLI (uv 0.10.12):** `uv tool install` has **no** `--require-hashes`/`--hash` flag (only `uv pip install` does). So the hash step (WOR-559) cannot be a flag on `uv tool install` — it needs download-wheel → verify-sha → `uv tool install ./file.whl` (or `uv pip install --require-hashes` into the tool venv). The widely-suggested `uv tool install --require-hashes …` one-liner does **not** exist — confirmed, do not propagate it. Version-pinning (`worthless==X.Y.Z`) does work and is the smaller first step.
 
 ## 1. Supply-chain attacks
 
