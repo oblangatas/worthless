@@ -536,20 +536,17 @@ def _check_home_mismatch(home: WorthlessHome) -> bool:
 
 
 def _check_alias_not_in_db(home: WorthlessHome, enrollments: list[EnrollmentRecord]) -> bool:
-    """Returns True when a .env BASE_URL references a proxy alias absent from *enrollments*.
+    """Returns True when an enrolled .env BASE_URL references a proxy alias absent from enrollments.
 
-    If there are no enrollments, there are no known aliases — the check is vacuously
-    clean (nothing can be "missing from DB" when the DB has no records to compare
-    against). Returning early also avoids a false-positive when an unrelated .env
-    in the current working directory contains a BASE_URL from a different project.
+    Only enrolled .env paths are scanned — doctor never speculatively reads files
+    outside the recorded enrollment set. When enrollments is empty, env_paths is
+    empty and _collect_alias_issues returns [] naturally, so the function returns
+    False without a special-cased early return. This avoids false-positives from
+    unrelated .env files that happen to exist in the current working directory
+    (especially relevant under pytest-xdist where multiple workers share the same cwd).
     """
-    if not enrollments:
-        return False
     known_aliases = {e.key_alias for e in enrollments}
     env_paths: set[Path] = {Path(e.env_path) for e in enrollments if e.env_path}
-    cwd_env = Path.cwd() / ".env"
-    if cwd_env.exists():
-        env_paths.add(cwd_env)
 
     issues = _collect_alias_issues(env_paths, known_aliases, home.db_path.name)
     if not issues:
