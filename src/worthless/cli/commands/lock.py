@@ -18,7 +18,7 @@ from worthless.cli.bootstrap import WorthlessHome, acquire_lock, get_home
 from worthless.cli.code_scanner import scan_for_hardcoded_provider_urls
 from worthless.cli.commands.scan import _format_code_findings_human
 from worthless.cli.process import resolve_port
-from worthless.cli.console import get_console
+from worthless.cli.console import WorthlessConsole, get_console
 from worthless.cli.scanner import scan_source_for_hardcoded_provider_urls
 from worthless.cli.dotenv_rewriter import (
     rewrite_env_keys,
@@ -788,6 +788,40 @@ def _write_lock_sentinel(
         logger.warning("sentinel write failed unexpectedly: %s", exc)
 
 
+def _print_lock_result(
+    console: WorthlessConsole,
+    fresh_count: int,
+    relock_count: int,
+    env_path: Path,
+    home: WorthlessHome,
+) -> None:
+    """Emit the post-lock user-facing summary (called only when quiet=False)."""
+    if fresh_count or relock_count:
+        if fresh_count:
+            # [OK] text prefix is the accessibility carrier — color/glyph
+            # reinforce but are never the sole signal (monochrome, CI logs,
+            # screen readers).
+            noun = "key" if fresh_count == 1 else "keys"
+            console.print_success(
+                f"[OK] {fresh_count} {noun} split between this machine and "
+                f"{_shard_b_storage_label()} — {env_path.name} no longer contains "
+                f"a usable secret."
+            )
+        if relock_count:
+            noun = "key" if relock_count == 1 else "keys"
+            console.print_success(f"[OK] {relock_count} {noun} still protected.")
+        env_home = os.environ.get("WORTHLESS_HOME")
+        if env_home and home.base_dir.resolve() != (Path.home() / ".worthless").resolve():
+            typer.echo(f"Warning: using non-default home {home.base_dir} (WORTHLESS_HOME is set)")
+        if fresh_count:
+            console.print_hint(
+                "Next: run `worthless wrap <command>` or `worthless up` for daemon mode"
+            )
+        _maybe_prompt_code_scan(Path.cwd())
+    else:
+        console.print_warning("No unprotected API keys found.")
+
+
 def _lock_keys(
     env_path: Path,
     home: WorthlessHome,
@@ -921,32 +955,7 @@ def _lock_keys(
             env_path.chmod(current & ~(stat.S_IRWXG | stat.S_IRWXO))
 
     if not quiet:
-        if fresh_count or relock_count:
-            if fresh_count:
-                # [OK] text prefix is the accessibility carrier — color/glyph
-                # reinforce but are never the sole signal (monochrome, CI logs,
-                # screen readers).
-                _fresh_noun = "key" if fresh_count == 1 else "keys"
-                console.print_success(
-                    f"[OK] {fresh_count} {_fresh_noun} split between this machine and "
-                    f"{_shard_b_storage_label()} — {env_path.name} no longer contains "
-                    f"a usable secret."
-                )
-            if relock_count:
-                _relock_noun = "key" if relock_count == 1 else "keys"
-                console.print_success(f"[OK] {relock_count} {_relock_noun} still protected.")
-            env_home = os.environ.get("WORTHLESS_HOME")
-            if env_home and home.base_dir.resolve() != (Path.home() / ".worthless").resolve():
-                typer.echo(
-                    f"Warning: using non-default home {home.base_dir} (WORTHLESS_HOME is set)"
-                )
-            if fresh_count:
-                console.print_hint(
-                    "Next: run `worthless wrap <command>` or `worthless up` for daemon mode"
-                )
-            _maybe_prompt_code_scan(Path.cwd())
-        else:
-            console.print_warning("No unprotected API keys found.")
+        _print_lock_result(console, fresh_count, relock_count, env_path, home)
 
     # Trust-fix (2026-05-08 verification gauntlet): when OpenClaw was
     # detected on this host AND the integration stage failed, the user is
