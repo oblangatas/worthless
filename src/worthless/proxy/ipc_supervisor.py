@@ -413,7 +413,7 @@ class IPCSupervisor:
                 raise IPCUnavailable("timed out waiting for peer reconnect")
             try:
                 await asyncio.wait_for(self._connect_done.wait(), timeout=remaining)
-            except TimeoutError as exc:
+            except asyncio.TimeoutError as exc:
                 raise IPCUnavailable("timed out waiting for peer reconnect") from exc
             async with self._state_lock:
                 if self._state is SupervisorState.READY and self._client is not None:
