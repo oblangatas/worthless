@@ -8,6 +8,7 @@
   },
   "filesScanned": [
     "/home/node/.openclaw/agents/main/agent/auth-profiles.json",
+    "/home/node/.openclaw/agents/main/agent/models.json",
     "/home/node/.openclaw/openclaw.json"
   ],
   "summary": {
@@ -27,18 +28,18 @@
     {
       "code": "PLAINTEXT_FOUND",
       "severity": "warn",
-      "file": "/home/node/.openclaw/openclaw.json",
-      "jsonPath": "models.providers.custom-api-openai-com.apiKey",
-      "message": "models.providers.custom-api-openai-com.apiKey is stored as plaintext.",
-      "provider": "custom-api-openai-com"
+      "file": "/home/node/.openclaw/agents/main/agent/models.json",
+      "jsonPath": "providers.anthropic.apiKey",
+      "message": "models.json provider apiKey is stored as plaintext.",
+      "provider": "anthropic"
     },
     {
       "code": "PLAINTEXT_FOUND",
       "severity": "warn",
-      "file": "/home/node/.openclaw/openclaw.json",
-      "jsonPath": "models.providers.anthropic.apiKey",
-      "message": "models.providers.anthropic.apiKey is stored as plaintext.",
-      "provider": "anthropic"
+      "file": "/home/node/.openclaw/agents/main/agent/models.json",
+      "jsonPath": "providers.custom-api-openai-com.apiKey",
+      "message": "models.json provider apiKey is stored as plaintext.",
+      "provider": "custom-api-openai-com"
     }
   ]
 }

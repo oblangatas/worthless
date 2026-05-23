@@ -1,1 +1,2 @@
-EXIT_CODE:124
+Error: secrets configure requires an interactive TTY.
+EXIT_CODE:1

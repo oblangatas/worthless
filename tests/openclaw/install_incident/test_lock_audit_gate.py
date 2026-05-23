@@ -66,7 +66,7 @@ def _audit_json(findings: list[dict], files_scanned: list[str] | None = None) ->
 
 
 def _plaintext_finding(
-    json_path: str = "models.providers.openai.apiKey",
+    json_path: str = "providers.openai.apiKey",
     file: str = "/home/node/.openclaw/openclaw.json",
     provider: str | None = "openai",
 ) -> dict:
@@ -123,8 +123,8 @@ class TestAC2PlaintextProviderKey:
             code="PLAINTEXT_FOUND",
             severity="warn",
             file="/home/node/.openclaw/openclaw.json",
-            json_path="models.providers.openai.apiKey",
-            message="models.providers.openai.apiKey is stored as plaintext.",
+            json_path="providers.openai.apiKey",
+            message="providers.openai.apiKey is stored as plaintext.",
             provider="openai",
         )
         result = AuditResult(
@@ -136,14 +136,14 @@ class TestAC2PlaintextProviderKey:
         )
         classification = classify_findings(result)
         assert len(classification.blocking) == 1
-        assert classification.blocking[0].json_path == "models.providers.openai.apiKey"
+        assert classification.blocking[0].json_path == "providers.openai.apiKey"
 
     def test_error_message_names_configure_remediation(self) -> None:
         """AC 2+5: error message for exit 73 names openclaw secrets configure."""
         blocking = (
             BlockingFinding(
                 file="/home/node/.openclaw/openclaw.json",
-                json_path="models.providers.openai.apiKey",
+                json_path="providers.openai.apiKey",
                 provider="openai",
                 message="openai.apiKey is plaintext",
                 source="audit",
@@ -238,7 +238,7 @@ class TestAC4MultiProviderAggregation:
                 code="PLAINTEXT_FOUND",
                 severity="warn",
                 file="/home/node/.openclaw/openclaw.json",
-                json_path=f"models.providers.provider{i}.apiKey",
+                json_path=f"providers.provider{i}.apiKey",
                 message=f"provider{i}.apiKey is plaintext",
                 provider=f"provider{i}",
             )
@@ -259,7 +259,7 @@ class TestAC4MultiProviderAggregation:
         blocking = tuple(
             BlockingFinding(
                 file="/home/node/.openclaw/openclaw.json",
-                json_path=f"models.providers.provider{i}.apiKey",
+                json_path=f"providers.provider{i}.apiKey",
                 provider=f"provider{i}",
                 message=f"provider{i} is plaintext",
                 source="audit",
@@ -282,7 +282,7 @@ class TestAC5RemediationMessage:
         blocking = (
             BlockingFinding(
                 file="/f",
-                json_path="models.providers.x.apiKey",
+                json_path="providers.x.apiKey",
                 provider="x",
                 message="x is plaintext",
                 source="audit",
@@ -308,7 +308,7 @@ class TestAC6ReLockBootstrapParadox:
             code="PLAINTEXT_FOUND",
             severity="warn",
             file="/home/node/.openclaw/openclaw.json",
-            json_path="models.providers.worthless-openai.apiKey",
+            json_path="providers.worthless-openai.apiKey",
             message="worthless-openai.apiKey is stored as plaintext.",
             provider="worthless-openai",
         )
@@ -530,7 +530,7 @@ class TestAC10DoctorSurface:
         blocking = (
             BlockingFinding(
                 file="/home/user/.openclaw/openclaw.json",
-                json_path="models.providers.anthropic.apiKey",
+                json_path="providers.anthropic.apiKey",
                 provider="anthropic",
                 message="plaintext key",
                 source="audit",
@@ -556,7 +556,7 @@ class TestAC10DoctorSurface:
         assert len(findings) == 1
         assert findings[0]["exit_code"] == 73
         assert "73" in findings[0]["issue"]
-        assert findings[0]["json_path"] == "models.providers.anthropic.apiKey"
+        assert findings[0]["json_path"] == "providers.anthropic.apiKey"
         assert "openclaw secrets configure" in findings[0]["remediation"]
 
     def test_doctor_returns_empty_findings_when_audit_clean(self) -> None:
@@ -615,8 +615,8 @@ class TestAC11RealAuditFixture:
         classification = classify_findings(result)
         # gateway.auth.token is advisory; openai and anthropic are blocking
         blocking_paths = {b.json_path for b in classification.blocking}
-        assert "models.providers.custom-api-openai-com.apiKey" in blocking_paths
-        assert "models.providers.anthropic.apiKey" in blocking_paths
+        assert "providers.custom-api-openai-com.apiKey" in blocking_paths
+        assert "providers.anthropic.apiKey" in blocking_paths
         assert "gateway.auth.token" not in blocking_paths
 
     def test_m0_audit_schema_has_correct_structure(self) -> None:
@@ -662,7 +662,7 @@ class TestAdversarial:
             code="PLAINTEXT_FOUND",
             severity="warn",
             file="/home/node/.openclaw/openclaw.json",
-            json_path="models.providers.worthless-evil.apiKey",
+            json_path="providers.worthless-evil.apiKey",
             message="worthless-evil.apiKey is stored as plaintext.",
             provider="worthless-evil",
         )
@@ -676,7 +676,7 @@ class TestAdversarial:
         classification = classify_findings(result)
         # Must be blocking — "worthless-evil" is NOT in the exact allowlist
         blocking_paths = {b.json_path for b in classification.blocking}
-        assert "models.providers.worthless-evil.apiKey" in blocking_paths
+        assert "providers.worthless-evil.apiKey" in blocking_paths
 
     def test_adversarial_path_traversal_in_file_field_sanitised(self) -> None:
         """Adv 2: audit emits file:'../../etc/passwd' → path not followed."""
@@ -684,7 +684,7 @@ class TestAdversarial:
             code="PLAINTEXT_FOUND",
             severity="warn",
             file="../../etc/passwd",
-            json_path="models.providers.openai.apiKey",
+            json_path="providers.openai.apiKey",
             message="plaintext",
             provider="openai",
         )
@@ -706,7 +706,7 @@ class TestAdversarial:
 
     def test_adversarial_control_chars_in_jsonpath_sanitised_in_message(self) -> None:
         """Adv 3: jsonPath with control chars → sanitised in error message."""
-        evil_path = "models.providers.x.apiKey\x1b[31mRED\x1b[0m\nnewline"
+        evil_path = "providers.x.apiKey\x1b[31mRED\x1b[0m\nnewline"
         blocking = (
             BlockingFinding(
                 file="/f",
@@ -730,7 +730,7 @@ class TestAdversarial:
             code="FUTURE_UNKNOWN_CODE",
             severity="warn",
             file="/home/node/.openclaw/openclaw.json",
-            json_path="models.providers.x.apiKey",
+            json_path="providers.x.apiKey",
             message="unknown",
             provider="x",
         )
@@ -806,7 +806,7 @@ class TestAdversarial:
         blocking = (
             BlockingFinding(
                 file=str(f),
-                json_path="models.providers.evil.apiKey",
+                json_path="providers.evil.apiKey",
                 provider="evil",
                 message="plaintext key injected",
                 source="audit",

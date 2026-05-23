@@ -1,14 +1,14 @@
 --- configure --plan-out ---
-EXIT_CODE:124
+Error: secrets configure requires an interactive TTY.
+EXIT_CODE:1
 --- test if --plan-out produced output ---
 Error: secrets configure requires an interactive TTY.
 EXIT:1
-outer exit: 124
 --- plan.json content ---
 NO_PLAN_FILE
 --- apply --from and --yes availability ---
 
-🦞 OpenClaw 2026.5.3-1 (unknown) — Powered by open source, sustained by spite and good documentation.
+🦞 OpenClaw 2026.5.3-1 (unknown) — One CLI to rule them all, and one more restart because you changed the port.
 
 Usage: openclaw secrets apply [options]
 
@@ -22,7 +22,7 @@ Options:
   -h, --help     Display help for command
   --json         Output JSON (default: false)
 
-🦞 OpenClaw 2026.5.3-1 (unknown) — I'm not AI-powered, I'm AI-possessed. Big difference.
+🦞 OpenClaw 2026.5.3-1 (unknown) — Like having a senior engineer on call, except I don't bill hourly or sigh audibly.
 
 Usage: openclaw secrets configure [options]
 

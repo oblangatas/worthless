@@ -1,8 +1,16 @@
+# ruff: noqa: S607  # test file — docker subprocess calls use "docker" not a full path
 """WOR-515 Phase 1 AC 11 — Real-container audit gate CI test.
 
 Runs ``openclaw secrets audit --json`` inside the real
 ``ghcr.io/openclaw/openclaw:2026.5.3-1`` container against a seeded
-openclaw.json that has multi-provider plaintext API keys.
+config that has multi-provider plaintext API keys.
+
+Verified config structure (M0 re-probe 2026-05-23):
+- Provider API keys live in ``agents/main/agent/models.json`` with schema
+  ``{"providers": {"<name>": {"apiKey": "..."}}}``
+- Container requires ``openclaw setup`` first — hand-crafted openclaw.json
+  produces REF_UNRESOLVED; only setup-initialised configs trigger PLAINTEXT_FOUND
+- Audit jsonPath format is ``providers.<name>.apiKey`` (no ``models.`` prefix)
 
 Verifies:
 - Gate classifies findings correctly against live container output
@@ -16,6 +24,7 @@ Marked openclaw+docker; skipped automatically when Docker is unavailable.
 from __future__ import annotations
 
 import json
+import secrets
 import subprocess
 import tempfile
 from pathlib import Path
@@ -47,40 +56,33 @@ pytestmark = [
 ]
 
 # ---------------------------------------------------------------------------
-# Seeded config helpers
+# Seed helpers
 # ---------------------------------------------------------------------------
 
-#: Seeded openclaw.json — two non-worthless providers with plaintext apiKeys
-#: plus a gateway auth token (advisory, must be ignored by gate).
-_SEEDED_OPENCLAW_JSON: dict = {
-    "version": 1,
-    "gateway": {
-        "auth": {"token": "oc-ui-session-token-plaintext-1234567890abcdef"},
-        "baseUrl": "http://127.0.0.1:18789",
-    },
-    "models": {
+
+#: models.json — two non-worthless providers with real-prefix plaintext apiKeys.
+#: Provider keys live in agents/main/agent/models.json, NOT in openclaw.json.
+#: Confirmed by M0 re-probe against ghcr.io/openclaw/openclaw:2026.5.3-1.
+def _make_models_json() -> dict:
+    """Return a models.json dict with real-prefix plaintext API keys."""
+    ant_key = f"sk-ant-api03-{secrets.token_urlsafe(71)}"
+    oai_key = f"sk-{secrets.token_urlsafe(36)}"
+    return {
         "providers": {
-            "anthropic": {
-                "apiKey": "sk-ant-api03-AAAAAAAABBBBBBBBCCCCCCCCDDDDDDDDEEEEEEEEFFFFFFFF00000000",
-                "baseUrl": "https://api.anthropic.com",
-            },
+            "anthropic": {"apiKey": ant_key, "baseUrl": "https://api.anthropic.com"},
             "custom-openai-provider": {
-                "apiKey": "sk-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "apiKey": oai_key,
                 "baseUrl": "https://api.openai.com/v1",
             },
         }
-    },
-}
-
-_EMPTY_AUTH_PROFILES: dict = {"version": 1, "profiles": []}
+    }
 
 
 @pytest.fixture(scope="session")
 def _openclaw_image_pulled() -> None:
     """Pull the OpenClaw image once per test session; skip on network failure."""
-    docker_bin = "docker"
     pull = subprocess.run(
-        [docker_bin, "pull", _OPENCLAW_IMAGE],
+        ["docker", "pull", _OPENCLAW_IMAGE],  # noqa: S607
         capture_output=True,
         timeout=120,
     )
@@ -89,38 +91,72 @@ def _openclaw_image_pulled() -> None:
 
 
 def _seed_openclaw_config(base: Path) -> None:
-    """Write a seeded openclaw config tree under *base*."""
+    """Initialise a valid OpenClaw config tree under *base* with plaintext keys.
+
+    Two-phase:
+    1. ``openclaw setup`` — creates openclaw.json + workspace directories.
+    2. Inject ``agents/main/agent/models.json`` with plaintext provider keys
+       and add ``gateway.auth.token`` to openclaw.json for the advisory-finding
+       test (gateway token must be in IGNORE_JSON_PATHS, not blocking).
+    """
     base.mkdir(parents=True, exist_ok=True)
-    (base / "openclaw.json").write_text(json.dumps(_SEEDED_OPENCLAW_JSON))
-    agents_dir = base / "agents" / "main" / "agent"
-    agents_dir.mkdir(parents=True, exist_ok=True)
-    (agents_dir / "auth-profiles.json").write_text(json.dumps(_EMPTY_AUTH_PROFILES))
+    base.chmod(0o777)  # container runs as node (uid 1000); must be world-writable
+
+    # Phase 1: let the container initialise a valid config
+    subprocess.run(  # noqa: S607
+        [
+            "docker",
+            "run",
+            "--rm",
+            "-e",
+            "OPENCLAW_ACCEPT_TERMS=yes",
+            "-v",
+            f"{base}:/home/node/.openclaw",
+            _OPENCLAW_IMAGE,
+            "openclaw",
+            "setup",
+        ],
+        capture_output=True,
+        timeout=30,
+        check=True,
+    )
+
+    # Phase 2: inject plaintext provider keys into models.json
+    agent_dir = base / "agents" / "main" / "agent"
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / "models.json").write_text(
+        json.dumps(_make_models_json(), indent=2), encoding="utf-8"
+    )
+    (agent_dir / "auth-profiles.json").write_text(json.dumps({"profiles": []}), encoding="utf-8")
+
+    # Add plaintext gateway token to openclaw.json (must stay advisory)
+    config_path = base / "openclaw.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config.setdefault("gateway", {})["auth"] = {"token": "oc-session-plaintext-abc123deadbeef"}
+    config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
 
 
 def _run_container_audit(config_dir: Path) -> AuditResult:
     """Run ``openclaw secrets audit --json`` inside the real container.
 
-    Mounts *config_dir* at ``/home/node/.openclaw`` (read-only).
+    Mounts *config_dir* at ``/home/node/.openclaw`` (writable — setup already
+    ran before this call; audit itself is read-only in practice).
     Returns the parsed :class:`~worthless.openclaw.audit.AuditResult`.
 
     Raises ``AssertionError`` if the command exits non-zero or emits bad JSON.
     The caller must ensure the image is already pulled (use ``_openclaw_image_pulled``).
     """
-    docker_bin = "docker"
-    result = subprocess.run(
+    result = subprocess.run(  # noqa: S607
         [
-            docker_bin,
+            "docker",
             "run",
             "--rm",
-            "--user",
-            "node",
-            "--entrypoint",
-            "openclaw",
             "-e",
             "OPENCLAW_ACCEPT_TERMS=yes",
             "-v",
-            f"{config_dir}:/home/node/.openclaw:ro",
+            f"{config_dir}:/home/node/.openclaw",
             _OPENCLAW_IMAGE,
+            "openclaw",
             "secrets",
             "audit",
             "--json",
@@ -157,6 +193,8 @@ class TestAC11RealContainerAuditGate:
         """Gate classifies live container output — anthropic + custom are blocking.
 
         gateway.auth.token is advisory (in IGNORE_JSON_PATHS), not blocking.
+        Provider keys are in agents/main/agent/models.json; jsonPath is
+        ``providers.<name>.apiKey`` (confirmed by M0 re-probe 2026-05-23).
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             config_dir = Path(tmpdir)
@@ -171,10 +209,10 @@ class TestAC11RealContainerAuditGate:
         )
 
         blocking_paths = {b.json_path for b in classification.blocking}
-        assert "models.providers.anthropic.apiKey" in blocking_paths, (
+        assert "providers.anthropic.apiKey" in blocking_paths, (
             f"anthropic not in blocking: {blocking_paths}"
         )
-        assert "models.providers.custom-openai-provider.apiKey" in blocking_paths, (
+        assert "providers.custom-openai-provider.apiKey" in blocking_paths, (
             f"custom-openai-provider not in blocking: {blocking_paths}"
         )
         # gateway.auth.token must be advisory (IGNORE_JSON_PATHS)

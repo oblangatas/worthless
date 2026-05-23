@@ -18,28 +18,36 @@ trap 'rm -rf "$TMPDIR_SEED"' EXIT
 
 mkdir -p "$TMPDIR_SEED/agent"
 
+# models.json lives at agents/main/agent/models.json with a flat "providers" top-level key.
+# (NOT wrapped in "models": {...} — confirmed by M0 container probe 2026-05-21.)
+cat > "$TMPDIR_SEED/agent/models.json" <<'JSON'
+{
+  "providers": {
+    "openai": {
+      "apiKey": "sk-plaintext-probe0000000000000000000000000000000000",
+      "baseUrl": "https://api.openai.com/v1"
+    },
+    "anthropic": {
+      "apiKey": "sk-ant-api03-plaintext-probe000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "baseUrl": "https://api.anthropic.com"
+    },
+    "worthless-openai": {
+      "apiKey": "wl-shardA-0000000000000000000000000000000000000000",
+      "baseUrl": "http://localhost:4000/openai/v1"
+    },
+    "via-ref": {
+      "apiKey": "${secret:OPENAI_API_KEY}",
+      "baseUrl": "https://api.openai.com/v1"
+    }
+  }
+}
+JSON
+
+# openclaw.json holds gateway config; gateway.auth.token is flagged but ignored by worthless.
+# NOTE: openclaw setup must run first before the audit works — hand-crafted configs return
+# REF_UNRESOLVED. These probe scripts document the schema but cannot run a full onboard flow.
 cat > "$TMPDIR_SEED/agent/openclaw.json" <<'JSON'
 {
-  "models": {
-    "providers": {
-      "openai": {
-        "apiKey": "sk-plaintext-probe0000000000000000000000000000000000",
-        "baseUrl": "https://api.openai.com/v1"
-      },
-      "anthropic": {
-        "apiKey": "sk-ant-plaintext-probe0000000000000000000000000000000000",
-        "baseUrl": "https://api.anthropic.com"
-      },
-      "worthless-openai": {
-        "apiKey": "wl-shardA-0000000000000000000000000000000000000000",
-        "baseUrl": "http://localhost:4000/openai/v1"
-      },
-      "via-ref": {
-        "apiKey": "${secret:OPENAI_API_KEY}",
-        "baseUrl": "https://api.openai.com/v1"
-      }
-    }
-  },
   "gateway": {
     "auth": {
       "token": "openclaw-ui-session-token-not-a-provider-key"

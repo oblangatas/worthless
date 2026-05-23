@@ -8,6 +8,10 @@ M0 findings (2026-05-21, ghcr.io/openclaw/openclaw:2026.5.3-1):
 - ``secrets audit --json`` schema: version/status/filesScanned/summary/findings
 - ``configure --apply --yes`` still prompts (no non-interactive path exists)
 - ``filesScanned[]`` is the authoritative file-scope list (no per-finding inScope)
+- Provider API keys live in ``agents/main/agent/models.json``, NOT in ``openclaw.json``.
+  The audit jsonPath format is ``providers.<name>.apiKey`` (no ``models.`` prefix).
+- ``openclaw setup`` (non-interactive) is required before audit; hand-crafted configs
+  produce ``REF_UNRESOLVED at <root>`` and never emit PLAINTEXT_FOUND.
 - auth-profiles.json is in filesScanned but audit NEVER emits PLAINTEXT_FOUND for it;
   worthless reads it directly and applies KEY_PATTERN matching
 - wl-shardA values in a properly-structured config trigger PLAINTEXT_FOUND →
@@ -55,8 +59,10 @@ _MAX_AUDIT_ATTEMPTS = 2
 #: while bounding CPU on adversarially deep JSON inputs.
 _AUTH_PROFILES_MAX_DEPTH = 6
 
-#: jsonPath prefix that identifies provider API key findings.
-_PROVIDER_APIKEY_RE = re.compile(r"^models\.providers\.(?P<provider>[^.]+)\.apiKey$")
+#: jsonPath pattern that identifies provider API key findings in models.json.
+#: OpenClaw 2026.5.3-1 emits ``providers.<name>.apiKey`` (no ``models.`` prefix) —
+#: confirmed by M0 probe against the real container.
+_PROVIDER_APIKEY_RE = re.compile(r"^providers\.(?P<provider>[^.]+)\.apiKey$")
 
 #: Strips ASCII control chars, C1 controls, and Unicode bidi/direction-override
 #: characters from user-facing strings to prevent terminal log injection.
@@ -353,7 +359,7 @@ def classify_findings(
     """Classify audit findings into blocking vs advisory vs unknown.
 
     Blocking findings:
-    - PLAINTEXT_FOUND for models.providers.<X>.apiKey where X not in allowlist
+    - PLAINTEXT_FOUND for providers.<X>.apiKey where X not in allowlist
     - auth-profiles findings from direct read (passed in as auth_profiles_blocking)
 
     Advisory findings (never block):

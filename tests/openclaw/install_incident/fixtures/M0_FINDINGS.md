@@ -24,7 +24,7 @@ These findings are authoritative for Phase 1 implementation and test contract.
       "code": "PLAINTEXT_FOUND",
       "severity": "warn",
       "file": "<absolute path>",
-      "jsonPath": "models.providers.<name>.apiKey",
+      "jsonPath": "providers.<name>.apiKey",
       "message": "...",
       "provider": "<name>"   // present on provider findings, absent on gateway.auth.token
     }
@@ -38,8 +38,9 @@ These findings are authoritative for Phase 1 implementation and test contract.
 
 **`filesScanned` is the correct field.** No `inScope` field per finding. Absolute paths always used.
 
-**`auth-profiles.json` scanned but NEVER emits `PLAINTEXT_FOUND`** — the audit checks the
-`openclaw.json` provider apiKeys and gateway token, but NOT the auth-profiles cached tokens.
+**`auth-profiles.json` scanned but NEVER emits `PLAINTEXT_FOUND`** — the audit checks
+`agents/main/agent/models.json` for provider apiKeys and `openclaw.json` for the gateway
+token, but NOT the auth-profiles cached tokens.
 Implementation must read auth-profiles directly (using `filesScanned[]` paths) for AC 3.
 
 **`gateway.auth.token` IS flagged as `PLAINTEXT_FOUND`** — this is the OpenClaw UI session
@@ -70,7 +71,7 @@ session and is deferred to manual testing.
 
 With a properly structured (onboarded) config, after `worthless lock` writes
 `worthless-openai.apiKey = wl-shardA-...`, the audit:
-- Emits `PLAINTEXT_FOUND` for `models.providers.worthless-openai.apiKey`
+- Emits `PLAINTEXT_FOUND` for `providers.worthless-openai.apiKey`
 - The exact-name allowlist in WOR-515 IS required and IS sufficient for AC 6
 
 With a manually-edited (invalid-structure) config, `wl-shardA-...` causes
