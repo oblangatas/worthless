@@ -35,6 +35,48 @@ scope statement), not detection-scope bugs.
 
 ---
 
+## Install front-door — current-state attack-surface map (updated 2026-05-22, WOR-558)
+
+A consolidated view of the `curl -sSL https://worthless.sh | sh` chain: each surface, the control in place today, and the residual gap. This synthesizes the findings below into one dashboard; F-numbers link to the detail. Grounded in real incidents — see **Real-world precedents** below.
+
+| Surface | Attacker move | Control today | Residual gap |
+|---|---|---|---|
+| `curl \| sh` itself | User pipes unverified bytes to a shell | docs prefer inspect-before-run + `?explain=1`; honest-limits section in `docs/install-security.md` | **Accepted (F-01).** No control makes piped bytes verified; cosign two-step is the fix (WOR-303). |
+| Worker request surface | UA spoof, CRLF/NUL injection, path/method/Range/cache abuse, query reflection on `?explain=1` | strict UA allowlist + shell-safe errors (`src/index.ts`, `src/ua.ts`); exhaustively tested — `worker-wire-attacks.yml` (raw-TLS CRLF/NUL) + `methods`/`paths`/`query-canonicalization`/`headers-and-integrity`.test.ts | **Closed — strongest area.** But UA routing is UX, not a security boundary (F-34) — do not oversell. |
+| DNS / domain | Registrar/zone takeover repoints the apex | CF account 2FA + registrar lock (operational); `workers_dev=false` kills the `*.workers.dev` surface (`wrangler.toml`) | **Accepted (F-27/F-28).** CF = registrar+DNS+host = single point. |
+| Cloudflare token / out-of-band deploy | Stolen token → `wrangler deploy` of a malicious bundle, bypassing CI | post-deploy live SHA smoke hashes served bytes vs the CI build (`deploy-worker.yml`) | **Real (F-12).** Smoke only runs *inside* the GHA deploy; an out-of-band deploy isn't caught. No required-reviewer gate. |
+| GitHub repo / Actions | Push a malicious tag; PR a token-exfil workflow | GPG-signed-tag verify (fail-closed), pinned action SHAs, read-only perms (`verify-tag.sh`, `deploy-worker.yml`) | **Accepted (F-02/F-03).** A repo-admin who writes both `MAINTAINER_GPG_*` Variables defeats the pin. The `workflow_dispatch`→prod re-opening is guarded by a comment + the pending WOR-406 structural test. |
+| TLS / MITM | A trusted TLS-terminating proxy rewrites the piped script | HSTS preload (`index.ts`) | **Real (F-34).** A proxy the machine already trusts defeats TLS; now surfaced to users in `docs/install-security.md`. |
+| **PyPI package** ⚠️ #1 | Compromise the `worthless` PyPI release → RCE on every install | only the *uv installer* is SHA-pinned; `WORTHLESS_VERSION=` is the user escape hatch | **Real, the softest link (F-06/F-49).** The package install is unpinned `latest`, no hash; `uv tool install` can't `--require-hashes`. Pinning (`worthless-1mg3`) parked in WOR-303. |
+| Astral / uv installer | Substitute the uv installer payload | `ASTRAL_INSTALLER_SHA256` pin, hard-fail on mismatch (`install.sh`) | **Accepted (F-05/F-48).** Only as strong as the pin-bump PR review. |
+| Script verifiability | User can't confirm what they ran | `X-Worthless-Script-Sha256/-Tag/-Commit` headers; `?explain=1` walkthrough (drift-guarded, WOR-558) | **Theater for the 99% (F-24/F-39).** Headers travel the same channel as the script; only cosign from GitHub Releases makes this non-theater (WOR-303). |
+
+### Top 3 attacker moves that would succeed today
+1. **Poison the `worthless` PyPI release** (steal/phish the maintainer token). `install.sh` pulls latest, unpinned, and runs it — bypassing every Worker and tag control. *(F-06/F-49 → WOR-303; interim user mitigation: `WORTHLESS_VERSION=` pin.)*
+2. **Steal the Cloudflare token and deploy out-of-band.** The CI live-smoke never fires on a non-CI deploy. *(F-12 → required-reviewer gate + scoped, short-lived token.)*
+3. **Trusted-proxy MITM rewrite of the piped script.** Defeats TLS once the proxy is trusted. *(F-34 → documented; prefer two-step inspect-install.)*
+
+Worker-layer attacks (UA bypass, CRLF, cache, panic→HTML) **fail today** — that surface is well-hardened and wire-tested. The user's real exposure is the PyPI package, the Cloudflare token, and trusted-proxy MITM — none of which more Worker tests can fix.
+
+### Real-world precedents (cited)
+
+Documented incidents that map to our surfaces, and the defense each motivated.
+
+| Incident (year) | Maps to | Defense it argues for | Source |
+|---|---|---|---|
+| `ctx` PyPI account takeover (2022) | **PyPI (#1)** | Trusted Publishing (OIDC) + hardware-key 2FA; consumers pin + hash | python-security.readthedocs.io/pypi-vuln/index-2022-05-24-ctx-domain-takeover.html |
+| Ultralytics PyPI via Actions cache-poison (2024) | **PyPI (#1)** | *Trusted Publishing protects the channel, not the artifact* → pin + hash deps; SLSA provenance | blog.pypi.org/posts/2024-12-11-ultralytics-attack-analysis/ |
+| `ua-parser-js` npm hijack (2021) | **PyPI (#1)** | scoped short-lived publish tokens + 2FA; consumers pin (≈4-hour evil window) | github.com/advisories/GHSA-pjwm-rvh2-c87w |
+| Codecov bash-uploader (2021) | `curl\|sh` + CI token | out-of-band signed checksums; retire curl-pipe; rotate/scope CI secrets | about.codecov.io/security-update/ |
+| Linux Mint ISO (2016), HandBrake mirror (2017) | DNS/origin serving the installer | publish out-of-band SHA256; verified updater | blog.linuxmint.com/?p=2994 |
+| tj-actions/changed-files (2025, CVE-2025-30066) | GitHub Actions deploy path | **pin Actions by full commit SHA, never tag** — tags were retroactively re-pointed | cisa.gov/news-events/alerts/2025/03/18 |
+| xz/liblzma (2024, CVE-2024-3094) | build-pipeline backdoor | signed git tag as sole trust anchor; reproducible builds verified vs the released artifact | openssf.org/blog/2024/03/30/xz-backdoor-cve-2024-3094/ |
+| Polyfill.io (2024) | CDN/edge serving content | Subresource Integrity; independent mirrors | sansec.io/research/polyfill-supply-chain-attack |
+
+**Most analogous to our #1 gap (unpinned PyPI install):** `ctx` (2022), Ultralytics (2024), `ua-parser-js` (2021) — in each the consumer fetched "whatever the index calls latest" with no integrity check. Ultralytics is the sharpest lesson: it *used* Trusted Publishing and was still compromised via a poisoned build cache — OIDC publishing protects the credential, not the bytes. The consume-side fix is a pinned version **+ wheel hash**.
+
+**uv mechanism — verified against the CLI (uv 0.10.12):** `uv tool install` has **no** `--require-hashes`/`--hash` flag (only `uv pip install` does). So the hash step (WOR-559) cannot be a flag on `uv tool install` — it needs download-wheel → verify-sha → `uv tool install ./file.whl` (or `uv pip install --require-hashes` into the tool venv). The widely-suggested `uv tool install --require-hashes …` one-liner does **not** exist — confirmed, do not propagate it. Version-pinning (`worthless==X.Y.Z`) does work and is the smaller first step.
+
 ## 1. Supply-chain attacks
 
 - **F-01 (H) — Root: `curl | sh` trust model.** User executes whatever bytes arrive. All downstream controls are secondary. *Mitigation:* two-step verified install is the default in docs; one-liner is a convenience with explicit "you are trusting worthless.sh + Cloudflare + your CA store" line in `?explain=1`.

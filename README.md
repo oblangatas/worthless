@@ -12,6 +12,7 @@ When your `.env` leaks, the keys inside are placeholders. The real key never sit
 
 ```bash
 curl -sSL https://worthless.sh | sh        # fresh machine, no Python needed
+# prefer to read it first?  curl -sSL 'https://worthless.sh?explain=1' | less
 # or, if you already have Python 3.10+:
 pipx install worthless
 ```
