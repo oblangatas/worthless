@@ -39,7 +39,9 @@ from worthless.cli.app import app
 
 
 @pytest.mark.user_flow
-def test_full_dogfood_lock_break_doctor_recover(tmp_path: Path) -> None:
+def test_full_dogfood_lock_break_doctor_recover(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The 2026-04-30 v0.3.2 dogfood scenario, end-to-end.
 
     Pre-HF7: this scenario left the user stuck — ``unlock`` and ``status``
@@ -50,6 +52,7 @@ def test_full_dogfood_lock_break_doctor_recover(tmp_path: Path) -> None:
     home = tmp_path / ".worthless"
     env_file = tmp_path / ".env"
     env_file.write_text(f"OPENAI_API_KEY={fake_openai_key()}\n")
+    monkeypatch.chdir(tmp_path)
 
     runner = CliRunner()
     cli_env = scrubbed_cli_env(home)
