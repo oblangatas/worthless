@@ -426,10 +426,15 @@ class TestAC8TOCTOUPostFlight:
         assert str(f) in hashes
         assert len(hashes[str(f)]) == 64  # hex SHA-256
 
-    def test_snapshot_hashes_skips_missing_files(self) -> None:
-        """AC 8: snapshot_hashes silently skips unreadable files."""
+    def test_snapshot_hashes_records_sentinel_for_unreadable_files(self) -> None:
+        """AC 8: snapshot_hashes records UNREADABLE sentinel so TOCTOU guard still fires.
+
+        Silently omitting unreadable files would allow a file that is unreadable
+        at pre-flight but readable+modified at post-flight to produce identical
+        dicts and bypass the guard.
+        """
         hashes = snapshot_hashes(["/nonexistent/file.json"])
-        assert "/nonexistent/file.json" not in hashes
+        assert hashes["/nonexistent/file.json"] == "UNREADABLE"
 
 
 # --------------------------------------------------------------------------- #

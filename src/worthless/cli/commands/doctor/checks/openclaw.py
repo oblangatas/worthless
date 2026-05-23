@@ -13,6 +13,7 @@ JSON-mode reporter for:
 from __future__ import annotations
 
 import asyncio
+from typing import Literal
 
 from worthless.cli.commands.doctor.registry import CheckContext, CheckResult
 from worthless.cli.process import resolve_port
@@ -72,15 +73,16 @@ def _audit_gate_findings() -> list[dict]:
         )
 
     for blocking in classification.blocking:
+        file_safe = _oc_audit.sanitise_for_message(blocking.file)
+        path_safe = _oc_audit.sanitise_for_message(blocking.json_path)
         findings.append(
             {
                 "issue": (
-                    f"plaintext API key detected"
-                    f" (worthless lock would exit 73): {blocking.json_path}"
+                    f"plaintext API key detected (worthless lock would exit 73): {path_safe}"
                 ),
                 "exit_code": 73,
-                "file": blocking.file,
-                "json_path": blocking.json_path,
+                "file": file_safe,
+                "json_path": path_safe,
                 "remediation": ("run `openclaw secrets configure` to migrate keys to SecretRefs"),
             }
         )
@@ -127,7 +129,7 @@ def run(ctx: CheckContext) -> CheckResult:
     findings = [{"issue": s} for s in all_issues] + audit_findings
 
     has_error = any(f.get("exit_code") == 87 for f in audit_findings)
-    status: str
+    status: Literal["ok", "warn", "error"]
     if has_error:
         status = "error"
     elif findings:

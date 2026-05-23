@@ -46,8 +46,31 @@ IGNORE_JSON_PATHS: frozenset[str] = frozenset(["gateway.auth.token"])
 #: Default subprocess timeout in seconds.
 _DEFAULT_TIMEOUT = 30.0
 
+#: Total subprocess attempts for run_audit (1 initial + 1 retry on transient failure).
+#: Timeouts are never retried regardless of this value.
+_MAX_AUDIT_ATTEMPTS = 2
+
+#: Maximum recursion depth for _walk in check_auth_profiles_direct.
+#: OpenClaw's auth-profiles schema nests at most 4 levels; 6 gives headroom
+#: while bounding CPU on adversarially deep JSON inputs.
+_AUTH_PROFILES_MAX_DEPTH = 6
+
 #: jsonPath prefix that identifies provider API key findings.
 _PROVIDER_APIKEY_RE = re.compile(r"^models\.providers\.(?P<provider>[^.]+)\.apiKey$")
+
+#: Strips ASCII control chars, C1 controls, and Unicode bidi/direction-override
+#: characters from user-facing strings to prevent terminal log injection.
+#: Covers: C0 (U+0000–001F), DEL (U+007F), C1 (U+0080–009F),
+#: zero-width/direction marks (U+200B–200F), bidi embeddings/overrides
+#: (U+202A–202E), bidi isolates (U+2066–2069), and BOM (U+FEFF).
+_SANITISE_RE = re.compile(
+    "[\x00-\x1f\x7f\x80-\x9f"
+    "​-‏"  # zero-width space, ZWNJ, ZWJ, LRM, RLM
+    "‪-‮"  # LRE, RLE, PDF, LRO, RLO
+    "⁦-⁩"  # LRI, RLI, FSI, PDI
+    "﻿"  # BOM
+    "]"
+)
 
 # --- Data classes -------------------------------------------------------------
 
@@ -126,24 +149,27 @@ def parse_audit_result(data: dict) -> AuditResult:
     Callers that receive raw JSON from the container (e.g. Docker integration
     tests) should use this rather than going through :func:`run_audit`.
     """
-    findings = tuple(
-        AuditFinding(
-            code=f["code"],
-            severity=f["severity"],
-            file=f["file"],
-            json_path=f["jsonPath"],
-            message=f["message"],
-            provider=f.get("provider"),
+    try:
+        findings = tuple(
+            AuditFinding(
+                code=f["code"],
+                severity=f["severity"],
+                file=f["file"],
+                json_path=f["jsonPath"],
+                message=f["message"],
+                provider=f.get("provider"),
+            )
+            for f in data.get("findings", [])
         )
-        for f in data.get("findings", [])
-    )
-    return AuditResult(
-        version=data["version"],
-        status=data["status"],
-        files_scanned=tuple(data.get("filesScanned", [])),
-        plaintext_count=data.get("summary", {}).get("plaintextCount", 0),
-        findings=findings,
-    )
+        return AuditResult(
+            version=data["version"],
+            status=data["status"],
+            files_scanned=tuple(data.get("filesScanned", [])),
+            plaintext_count=data.get("summary", {}).get("plaintextCount", 0),
+            findings=findings,
+        )
+    except (KeyError, TypeError) as exc:
+        raise AuditGateError(f"openclaw secrets audit output has unexpected schema: {exc}") from exc
 
 
 # --- Public API ---------------------------------------------------------------
@@ -248,7 +274,10 @@ def run_audit(
 def snapshot_hashes(files_scanned: Sequence[str]) -> dict[str, str]:
     """SHA-256 each file in files_scanned for TOCTOU pre-filter.
 
-    Silently skips files that cannot be read (e.g. permissions).
+    Files that cannot be read are recorded with sentinel ``"UNREADABLE"``
+    rather than silently omitted — a file unreadable at pre-flight that becomes
+    readable and modified at post-flight would otherwise produce identical dicts
+    and bypass the TOCTOU guard.
     """
     result: dict[str, str] = {}
     for path_str in files_scanned:
@@ -256,7 +285,7 @@ def snapshot_hashes(files_scanned: Sequence[str]) -> dict[str, str]:
             data = Path(path_str).read_bytes()
             result[path_str] = hashlib.sha256(data).hexdigest()
         except OSError:
-            pass
+            result[path_str] = "UNREADABLE"
     return result
 
 
@@ -283,7 +312,7 @@ def check_auth_profiles_direct(
         json_path: str = "",
         depth: int = 0,
     ) -> None:
-        if depth > 20:
+        if depth > _AUTH_PROFILES_MAX_DEPTH:
             return
         if isinstance(obj, str):
             if KEY_PATTERN.search(obj):
@@ -309,7 +338,7 @@ def check_auth_profiles_direct(
         if p.name != "auth-profiles.json":
             continue
         try:
-            data = json.loads(p.read_text())
+            data = json.loads(p.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
         _walk(data, path_str, findings)
@@ -437,4 +466,4 @@ def format_gate_error_message(
 
 def sanitise_for_message(value: str) -> str:
     """Strip control characters and terminal escapes from a user-facing string."""
-    return re.sub(r"[\x00-\x1f\x7f]", "", value)
+    return _SANITISE_RE.sub("", value)
