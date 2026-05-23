@@ -23,7 +23,7 @@ import re
 import shutil
 import subprocess
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -73,7 +73,6 @@ class AuditResult:
     files_scanned: tuple[str, ...]
     plaintext_count: int
     findings: tuple[AuditFinding, ...]
-    file_hashes: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -96,6 +95,19 @@ class AuditClassification:
     unknown_codes: tuple[str, ...]
 
 
+@dataclass
+class AuditGateHandle:
+    """Pre-flight state passed to post-flight for TOCTOU hash comparison.
+
+    ``pre_hashes`` maps each scanned file path to its SHA-256 hex digest at
+    pre-flight time. Post-flight re-hashes the same paths; if nothing changed
+    the second ``run_audit`` subprocess is skipped entirely.
+    """
+
+    openclaw_bin: Path
+    pre_hashes: dict[str, str]
+
+
 class AuditGateError(Exception):
     """Raised when the audit subprocess fails (maps to exit 87)."""
 
@@ -107,7 +119,13 @@ class AuditGateError(Exception):
 # --- Internal helpers ---------------------------------------------------------
 
 
-def _parse_audit_result(data: dict) -> AuditResult:
+def parse_audit_result(data: dict) -> AuditResult:
+    """Parse a raw ``openclaw secrets audit --json`` dict into :class:`AuditResult`.
+
+    Maps camelCase wire fields (``jsonPath``, ``filesScanned``) to snake_case.
+    Callers that receive raw JSON from the container (e.g. Docker integration
+    tests) should use this rather than going through :func:`run_audit`.
+    """
     findings = tuple(
         AuditFinding(
             code=f["code"],
@@ -176,7 +194,8 @@ def run_audit(
 ) -> AuditResult:
     """Run ``openclaw secrets audit --json`` and return the parsed result.
 
-    Retries once on failure before raising :exc:`AuditGateError`.
+    Retries once on transient failure before raising :exc:`AuditGateError`.
+    Timeouts are never retried — they raise immediately.
     A non-zero exit code, unparsable stdout, or timeout all raise.
 
     Args:
@@ -184,7 +203,7 @@ def run_audit(
         timeout: subprocess timeout in seconds.
 
     Raises:
-        AuditGateError: on subprocess failure after one retry.
+        AuditGateError: on subprocess failure after one retry, or on timeout.
     """
     cmd = [str(openclaw_bin), "secrets", "audit", "--json"]
 
@@ -196,6 +215,10 @@ def run_audit(
                 text=True,
                 timeout=timeout,
             )
+        except subprocess.TimeoutExpired as exc:
+            raise AuditGateError(
+                f"openclaw secrets audit timed out after {timeout}s — exit 87"
+            ) from exc
         except FileNotFoundError as exc:
             raise AuditGateError(
                 f"openclaw binary not found at {openclaw_bin} — set WORTHLESS_OPENCLAW_BIN"
@@ -206,20 +229,20 @@ def run_audit(
             data = json.loads(proc.stdout)
         except json.JSONDecodeError as exc:
             raise AuditGateError(f"openclaw secrets audit output is not valid JSON: {exc}") from exc
-        return _parse_audit_result(data)
+        return parse_audit_result(data)
 
-    last_exc: AuditGateError | subprocess.TimeoutExpired | None = None
+    last_exc: AuditGateError | None = None
     for _ in range(2):
         try:
             return _attempt()
-        except (AuditGateError, subprocess.TimeoutExpired) as exc:
+        except AuditGateError as exc:
+            # Timeout is already wrapped as AuditGateError but should not be retried.
+            # Check the original cause to avoid 2× the wait on a hung binary.
+            if isinstance(exc.__cause__, subprocess.TimeoutExpired):
+                raise
             last_exc = exc
 
-    if isinstance(last_exc, subprocess.TimeoutExpired):
-        raise AuditGateError(
-            f"openclaw secrets audit timed out after {timeout}s — exit 87"
-        ) from last_exc
-    raise last_exc  # type: ignore[misc]  # already an AuditGateError
+    raise last_exc  # type: ignore[misc]  # always an AuditGateError after 2 attempts
 
 
 def snapshot_hashes(files_scanned: Sequence[str]) -> dict[str, str]:
@@ -362,6 +385,25 @@ def classify_findings(
         advisory_count=advisory_count,
         unknown_codes=tuple(dict.fromkeys(unknown_codes)),
     )
+
+
+def run_and_classify(
+    openclaw_bin: Path,
+    timeout: float = _DEFAULT_TIMEOUT,
+) -> tuple[AuditResult, AuditClassification]:
+    """Run the audit and classify findings in one call.
+
+    Convenience wrapper used by both pre-flight and post-flight so callers
+    don't duplicate the ``run_audit → check_auth_profiles_direct →
+    classify_findings`` sequence.
+
+    Raises:
+        AuditGateError: on subprocess failure (propagated from :func:`run_audit`).
+    """
+    result = run_audit(openclaw_bin, timeout=timeout)
+    auth_blocking = check_auth_profiles_direct(result.files_scanned)
+    classification = classify_findings(result, auth_blocking)
+    return result, classification
 
 
 def format_gate_error_message(

@@ -828,12 +828,7 @@ def _print_lock_result(
         console.print_warning("No unprotected API keys found.")
 
 
-@dataclass
-class _OpenclawGateState:
-    openclaw_bin: Path
-
-
-def _openclaw_audit_preflight(console) -> _OpenclawGateState | None:  # noqa: ANN001
+def _openclaw_audit_preflight() -> _oc_audit.AuditGateHandle | None:
     """Run OpenClaw secrets audit pre-flight before worthless lock writes.
 
     Returns None if OpenClaw is not detected on this host or binary is not
@@ -857,13 +852,10 @@ def _openclaw_audit_preflight(console) -> _OpenclawGateState | None:  # noqa: AN
         return None
 
     try:
-        result = _oc_audit.run_audit(openclaw_bin)
+        result, classification = _oc_audit.run_and_classify(openclaw_bin)
     except _oc_audit.AuditGateError as exc:
         typer.echo(f"worthless lock: openclaw audit gate failed: {exc}", err=True)
         raise typer.Exit(code=87) from exc
-
-    auth_blocking = _oc_audit.check_auth_profiles_direct(result.files_scanned)
-    classification = _oc_audit.classify_findings(result, auth_blocking)
 
     if classification.unknown_codes:
         typer.echo(
@@ -877,23 +869,32 @@ def _openclaw_audit_preflight(console) -> _OpenclawGateState | None:  # noqa: AN
         typer.echo(_oc_audit.format_gate_error_message(classification.blocking), err=True)
         raise typer.Exit(code=73)
 
-    return _OpenclawGateState(openclaw_bin=openclaw_bin)
+    return _oc_audit.AuditGateHandle(
+        openclaw_bin=openclaw_bin,
+        pre_hashes=_oc_audit.snapshot_hashes(result.files_scanned),
+    )
 
 
-def _openclaw_audit_postflight(gate: _OpenclawGateState) -> None:
+def _openclaw_audit_postflight(gate: _oc_audit.AuditGateHandle) -> None:
     """Post-flight TOCTOU re-audit after lock-core write commits.
+
+    Skips the second subprocess entirely if file hashes are unchanged since
+    pre-flight (covers the 99.99% case where no external process touched the
+    OpenClaw config during the lock write).
 
     Raises typer.Exit(87) if new blocking findings appeared since pre-flight,
     indicating the OpenClaw config was modified between the two audit passes.
     """
+    post_hashes = _oc_audit.snapshot_hashes(list(gate.pre_hashes.keys()))
+    if post_hashes == gate.pre_hashes:
+        # Files unchanged — no need to re-run the 30s subprocess.
+        return
+
     try:
-        post_result = _oc_audit.run_audit(gate.openclaw_bin)
+        _, post_class = _oc_audit.run_and_classify(gate.openclaw_bin)
     except _oc_audit.AuditGateError as exc:
         typer.echo(f"worthless lock: post-flight audit failed: {exc}", err=True)
         raise typer.Exit(code=87) from exc
-
-    auth_blocking = _oc_audit.check_auth_profiles_direct(post_result.files_scanned)
-    post_class = _oc_audit.classify_findings(post_result, auth_blocking)
 
     if post_class.unknown_codes:
         typer.echo(
@@ -1002,7 +1003,7 @@ def _lock_keys(
         ]
         existing_env_keys = set(env_values.keys())
 
-        _oc_gate = _openclaw_audit_preflight(console)
+        _oc_gate = _openclaw_audit_preflight()
 
         planned: list[_PlannedUpdate] = []
         try:
