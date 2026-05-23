@@ -819,7 +819,7 @@ def _print_lock_result(
             )
         _maybe_prompt_code_scan(Path.cwd())
     else:
-        console.print_warning("No unprotected API keys found.")
+        console.print_warning("[OK] No unprotected API keys found.")
 
 
 def _lock_keys(
@@ -897,7 +897,7 @@ def _lock_keys(
             env_str,
         )
         if not scanned:
-            return 0, len(raw_scanned), False
+            return len(raw_scanned), 0, False
 
         # Snapshot .env so _pass1 can pull *_BASE_URL values into the DB row.
         env_values = dict(dotenv_values(env_path))
