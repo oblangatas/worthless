@@ -156,6 +156,7 @@ class TestAC2PlaintextProviderKey:
         msg = format_gate_error_message(blocking)
         assert "openclaw secrets configure" in msg
         assert "--apply" not in msg  # no non-interactive flag — requires TTY
+        assert "--yes" not in msg
 
     def test_run_audit_dispatches_subprocess(self, tmp_path: Path) -> None:
         """run_audit calls openclaw with --json and returns parsed result."""

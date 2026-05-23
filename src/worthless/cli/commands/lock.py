@@ -906,8 +906,10 @@ def _openclaw_audit_postflight(gate: _oc_audit.AuditGateHandle) -> None:
         raise typer.Exit(code=87)
 
     if post_class.blocking:
+        detail = _oc_audit.format_gate_error_message(post_class.blocking)
         typer.echo(
-            "worthless lock: State changed under our feet; re-run worthless lock.",
+            f"worthless lock: state changed between pre-flight and post-flight "
+            f"— new plaintext detected, re-run worthless lock.\n{detail}",
             err=True,
         )
         raise typer.Exit(code=87)
