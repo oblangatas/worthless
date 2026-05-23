@@ -1,0 +1,55 @@
+name: Wire-attack canary (scheduled)
+
+# Scheduled adversarial probe of the LIVE production worthless.sh Worker.
+# WOR-541.
+#
+# The gap this fills:
+#   - release-sync-check.yml (daily) already canaries production install
+#     HEALTH — `curl | sh` works, cache fresh, versions in sync, routing OK.
+#   - What NOTHING runs on a schedule is the wire-attack probe battery
+#     (WOR-374): raw-socket byte sequences asserting the edge layer
+#     (workerd / undici) still rejects CRLF injection, NUL polyglots, OWS
+#     stripping, etc. Those probes only ran post-deploy (WOR-391).
+#   - Between deploys, an edge-runtime shift (Cloudflare rolls workerd,
+#     undici behaviour changes) could quietly loosen a defense and we
+#     would not find out until the next deploy. This canary closes that
+#     window.
+#
+# Why a cron, NOT a pull_request trigger:
+#   - An earlier WOR-391 draft probed on PRs; three reviewers flagged a
+#     fork-PR RCE surface — the probe script runs from a PR-controlled ref.
+#     A schedule runs from `main` only: no PR surface, no fork-controlled
+#     code.
+#
+# Scope (intentionally narrow):
+#   - Probes PRODUCTION (worthless.sh) — the surface users actually hit.
+#   - Adds ONLY the adversarial dimension. `curl | sh` smoke is NOT
+#     duplicated here — release-sync-check.yml's A4 already runs it against
+#     production daily.
+#
+# Notification: a failed run goes red and GitHub emails the scheduled-run
+#   failure to the repo owner. NOT a release gate — surfaces a regression,
+#   blocks nothing.
+
+on:
+  schedule:
+    # Daily 03:30 UTC — just after release-sync-check (03:00) so the two
+    # production canaries cluster in one window without overlapping.
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wire-attack-canary
+  cancel-in-progress: false
+
+jobs:
+  wire-attacks:
+    name: Wire-level attack probes (production)
+    uses: ./.github/workflows/worker-wire-attacks.yml
+    with:
+      target_url: "https://worthless.sh/"
+    permissions:
+      contents: read
