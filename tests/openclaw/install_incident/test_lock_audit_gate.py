@@ -19,11 +19,15 @@ from worthless.openclaw.audit import (
     AuditGateError,
     AuditResult,
     BlockingFinding,
+    _AUTH_PROFILES_MAX_DEPTH,
     check_auth_profiles_direct,
     classify_findings,
     format_gate_error_message,
+    parse_audit_result,
     resolve_openclaw_bin,
+    run_and_classify,
     run_audit,
+    sanitise_for_message,
     snapshot_hashes,
 )
 
@@ -869,3 +873,333 @@ class TestAdversarial:
         # filesScanned[] does not include this file
         findings = check_auth_profiles_direct([])  # empty filesScanned
         assert len(findings) == 0
+
+
+# =========================================================================== #
+# GAP CLOSURE TESTS (worthless-avcd)                                           #
+# Tests covering execution paths identified in post-review gap analysis.       #
+# =========================================================================== #
+
+
+# --------------------------------------------------------------------------- #
+# parse_audit_result — schema guard (KeyError / TypeError paths)               #
+# --------------------------------------------------------------------------- #
+
+
+class TestParseAuditResult:
+    def test_missing_version_key_raises_audit_gate_error(self) -> None:
+        """parse_audit_result raises AuditGateError on missing 'version' key."""
+        bad = {"status": "clean", "filesScanned": [], "summary": {}, "findings": []}
+        with pytest.raises(AuditGateError, match="unexpected schema"):
+            parse_audit_result(bad)
+
+    def test_missing_finding_code_raises_audit_gate_error(self) -> None:
+        """parse_audit_result raises AuditGateError when a finding lacks 'code'."""
+        bad = {
+            "version": 1,
+            "status": "findings",
+            "filesScanned": [],
+            "summary": {"plaintextCount": 1},
+            "findings": [
+                # 'code' intentionally missing
+                {"severity": "warn", "file": "/f", "jsonPath": "x", "message": "m"}
+            ],
+        }
+        with pytest.raises(AuditGateError, match="unexpected schema"):
+            parse_audit_result(bad)
+
+    def test_findings_not_iterable_raises_audit_gate_error(self) -> None:
+        """parse_audit_result raises AuditGateError when 'findings' is not a list."""
+        bad = {
+            "version": 1,
+            "status": "findings",
+            "filesScanned": [],
+            "summary": {"plaintextCount": 0},
+            "findings": "not-a-list",
+        }
+        with pytest.raises(AuditGateError, match="unexpected schema"):
+            parse_audit_result(bad)
+
+    def test_valid_payload_round_trips_correctly(self) -> None:
+        """parse_audit_result maps camelCase wire fields to snake_case."""
+        raw = _load_fixture("m0_audit_schema.json")
+        result = parse_audit_result(raw)
+        assert result.version == 1
+        assert len(result.findings) == len(raw["findings"])
+        # jsonPath → json_path mapping
+        paths = {f.json_path for f in result.findings}
+        assert "providers.anthropic.apiKey" in paths
+
+
+# --------------------------------------------------------------------------- #
+# resolve_openclaw_bin — relative WORTHLESS_OPENCLAW_BIN is rejected           #
+# --------------------------------------------------------------------------- #
+
+
+class TestResolveOpenclawBinRelativePath:
+    def test_relative_env_var_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """resolve_openclaw_bin raises when WORTHLESS_OPENCLAW_BIN is not absolute.
+
+        'openclaw' (no leading /) looks like a PATH lookup — accepting it would
+        let an attacker in $PATH substitute a rogue binary. Must be rejected.
+        """
+        monkeypatch.setenv("WORTHLESS_OPENCLAW_BIN", "openclaw")
+        with pytest.raises(AuditGateError, match="not an absolute path"):
+            resolve_openclaw_bin()
+
+    def test_dotslash_relative_env_var_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """./openclaw is relative — also rejected."""
+        monkeypatch.setenv("WORTHLESS_OPENCLAW_BIN", "./openclaw")
+        with pytest.raises(AuditGateError, match="not an absolute path"):
+            resolve_openclaw_bin()
+
+
+# --------------------------------------------------------------------------- #
+# run_and_classify — end-to-end wiring                                         #
+# --------------------------------------------------------------------------- #
+
+
+class TestRunAndClassifyWiring:
+    def test_files_scanned_threaded_to_auth_profiles_check(self, tmp_path: Path) -> None:
+        """run_and_classify wires files_scanned from AuditResult into
+        check_auth_profiles_direct — a wiring bug here would produce silent false-clean.
+
+        Seeds an auth-profiles.json with a plaintext key.  The audit subprocess
+        reports that file in filesScanned.  run_and_classify must surface the
+        auth-profiles finding.
+        """
+        auth = tmp_path / "auth-profiles.json"
+        auth.write_text(
+            json.dumps(
+                {
+                    "profiles": {
+                        "x": {"token": "sk-proj-realcachedkey0000000000000000000000000000000"}
+                    }
+                }
+            )
+        )
+        # Subprocess returns clean audit result (no PLAINTEXT_FOUND from binary)
+        # but filesScanned includes the auth-profiles path so direct-read fires.
+        clean_payload = json.dumps(
+            {
+                "version": 1,
+                "status": "clean",
+                "resolution": {
+                    "refsChecked": 0,
+                    "skippedExecRefs": 0,
+                    "resolvabilityComplete": True,
+                },
+                "filesScanned": [str(auth)],
+                "summary": {
+                    "plaintextCount": 0,
+                    "unresolvedRefCount": 0,
+                    "shadowedRefCount": 0,
+                    "legacyResidueCount": 0,
+                },
+                "findings": [],
+            }
+        )
+        proc = _make_proc(stdout=clean_payload)
+        fake_bin = tmp_path / "openclaw"
+        fake_bin.write_text("#!/bin/sh\n")
+        fake_bin.chmod(0o755)
+
+        with patch("subprocess.run", return_value=proc):
+            _result, classification = run_and_classify(fake_bin)
+
+        assert len(classification.blocking) == 1
+        assert classification.blocking[0].source == "auth-profiles-direct"
+
+    def test_clean_audit_and_clean_auth_profiles_returns_empty_classification(
+        self, tmp_path: Path
+    ) -> None:
+        """run_and_classify returns empty blocking when both audit and auth-profiles are clean."""
+        clean_payload = json.dumps(
+            {
+                "version": 1,
+                "status": "clean",
+                "resolution": {
+                    "refsChecked": 0,
+                    "skippedExecRefs": 0,
+                    "resolvabilityComplete": True,
+                },
+                "filesScanned": [],
+                "summary": {
+                    "plaintextCount": 0,
+                    "unresolvedRefCount": 0,
+                    "shadowedRefCount": 0,
+                    "legacyResidueCount": 0,
+                },
+                "findings": [],
+            }
+        )
+        proc = _make_proc(stdout=clean_payload)
+        fake_bin = tmp_path / "openclaw"
+        fake_bin.write_text("#!/bin/sh\n")
+        fake_bin.chmod(0o755)
+
+        with patch("subprocess.run", return_value=proc):
+            _result, classification = run_and_classify(fake_bin)
+
+        assert len(classification.blocking) == 0
+        assert len(classification.unknown_codes) == 0
+
+
+# --------------------------------------------------------------------------- #
+# Doctor — unknown_codes branch (default-deny security path)                   #
+# --------------------------------------------------------------------------- #
+
+
+class TestDoctorUnknownCodes:
+    def test_doctor_reports_exit_87_for_unknown_finding_code(self) -> None:
+        """Doctor surfaces exit-87 when classification contains unknown codes.
+
+        This is the default-deny path: a future OpenClaw finding code that
+        worthless doesn't recognise must block lock (exit 87), not silently pass.
+        Without this test the doctor branch at openclaw.py:63-73 is unexercised.
+        """
+        from worthless.openclaw.audit import AuditClassification
+
+        from worthless.cli.commands.doctor.checks.openclaw import _audit_gate_findings
+
+        mock_classification = AuditClassification(
+            blocking=(),
+            advisory_count=0,
+            unknown_codes=("FUTURE_UNKNOWN_CODE",),
+        )
+        with (
+            patch(
+                "worthless.cli.commands.doctor.checks.openclaw._oc_audit.resolve_openclaw_bin",
+                return_value=Path("/usr/local/bin/openclaw"),
+            ),
+            patch(
+                "worthless.cli.commands.doctor.checks.openclaw._oc_audit.run_and_classify",
+                return_value=(MagicMock(), mock_classification),
+            ),
+        ):
+            findings = _audit_gate_findings()
+
+        assert len(findings) == 1
+        assert findings[0]["exit_code"] == 87
+        assert "FUTURE_UNKNOWN_CODE" in findings[0]["issue"]
+        assert "87" in findings[0]["issue"]
+
+
+# --------------------------------------------------------------------------- #
+# _walk depth-limit guard in check_auth_profiles_direct                        #
+# --------------------------------------------------------------------------- #
+
+
+class TestAuthProfilesWalkDepth:
+    def test_deeply_nested_dict_does_not_crash_or_leak(self, tmp_path: Path) -> None:
+        """_walk stops at _AUTH_PROFILES_MAX_DEPTH — no recursion error, no CPU spin.
+
+        Adversarially deep JSON (depth > limit) must produce zero findings
+        (the walk stops before reaching string values), not a RecursionError.
+        """
+        # Build a dict nested _AUTH_PROFILES_MAX_DEPTH + 3 levels deep,
+        # with a plaintext API key at the deepest level.
+        nested: dict = {"key": "sk-proj-shouldnotbefound0000000000000000000000000000"}
+        for _ in range(_AUTH_PROFILES_MAX_DEPTH + 3):
+            nested = {"level": nested}
+
+        auth = tmp_path / "auth-profiles.json"
+        auth.write_text(json.dumps(nested))
+
+        findings = check_auth_profiles_direct([str(auth)])
+        # The key is buried beyond the max depth — must NOT be found
+        assert len(findings) == 0, "Key nested beyond _AUTH_PROFILES_MAX_DEPTH must not be reported"
+
+    def test_key_within_depth_limit_is_still_detected(self, tmp_path: Path) -> None:
+        """Keys within _AUTH_PROFILES_MAX_DEPTH are still found (depth guard is a ceiling)."""
+        # Nest exactly at max depth (should still be walked)
+        nested: dict = {"key": "sk-proj-withinlimitkey0000000000000000000000000000"}
+        for _ in range(_AUTH_PROFILES_MAX_DEPTH - 1):
+            nested = {"level": nested}
+
+        auth = tmp_path / "auth-profiles.json"
+        auth.write_text(json.dumps(nested))
+
+        findings = check_auth_profiles_direct([str(auth)])
+        assert len(findings) == 1, "Key at max depth must be detected"
+
+
+# --------------------------------------------------------------------------- #
+# sanitise_for_message — direct assertion on bidi / BOM character classes      #
+# --------------------------------------------------------------------------- #
+
+
+class TestSanitiseForMessage:
+    def test_c0_control_chars_stripped(self) -> None:
+        """C0 control characters (U+0000–U+001F) and DEL are stripped."""
+        assert sanitise_for_message("abc\x00\x01\x1f\x7fdef") == "abcdef"
+
+    def test_c1_control_chars_stripped(self) -> None:
+        """C1 control characters (U+0080–U+009F) are stripped."""
+        assert sanitise_for_message("x\x80\x9fy") == "xy"
+
+    def test_zero_width_marks_stripped(self) -> None:
+        """Zero-width and direction marks (U+200B–U+200F) are stripped."""
+        zwsp = "​"  # ZERO WIDTH SPACE
+        zwnj = "‌"  # ZERO WIDTH NON-JOINER
+        rlm = "‏"  # RIGHT-TO-LEFT MARK
+        assert sanitise_for_message(f"a{zwsp}{zwnj}{rlm}b") == "ab"
+
+    def test_bidi_embedding_overrides_stripped(self) -> None:
+        """Bidi embedding/override characters (U+202A–U+202E) are stripped."""
+        lre = "‪"  # LEFT-TO-RIGHT EMBEDDING
+        rlo = "‮"  # RIGHT-TO-LEFT OVERRIDE
+        assert sanitise_for_message(f"a{lre}b{rlo}c") == "abc"
+
+    def test_bidi_isolates_stripped(self) -> None:
+        """Bidi isolate characters (U+2066–U+2069) are stripped."""
+        lri = "⁦"  # LEFT-TO-RIGHT ISOLATE
+        pdi = "⁩"  # POP DIRECTIONAL ISOLATE
+        assert sanitise_for_message(f"a{lri}b{pdi}c") == "abc"
+
+    def test_bom_stripped(self) -> None:
+        """BOM (U+FEFF) is stripped."""
+        assert sanitise_for_message("﻿path/to/file") == "path/to/file"
+
+    def test_clean_string_unchanged(self) -> None:
+        """Normal ASCII strings pass through unchanged."""
+        s = "/home/user/.openclaw/models.json"
+        assert sanitise_for_message(s) == s
+
+
+# --------------------------------------------------------------------------- #
+# Non-providers.X.apiKey PLAINTEXT_FOUND scope (intentional advisory)          #
+# --------------------------------------------------------------------------- #
+
+
+class TestNonProviderPlaintextScope:
+    def test_plaintext_found_at_non_provider_path_is_advisory(self) -> None:
+        """PLAINTEXT_FOUND at a jsonPath that doesn't match providers.<X>.apiKey
+        is classified as advisory, not blocking.
+
+        This is intentional scope: worthless only gates on provider API keys in
+        models.json. A finding at config.apiKey or settings.key is a future
+        OpenClaw schema addition that worthless hasn't been told to handle.
+        The comment in classify_findings documents this; this test pins it so
+        a refactor can't silently change the behaviour.
+        """
+        finding = AuditFinding(
+            code="PLAINTEXT_FOUND",
+            severity="warn",
+            file="/home/node/.openclaw/openclaw.json",
+            json_path="config.apiKey",  # matches no known schema
+            message="config.apiKey is stored as plaintext.",
+            provider=None,
+        )
+        result = AuditResult(
+            version=1,
+            status="findings",
+            files_scanned=("/home/node/.openclaw/openclaw.json",),
+            plaintext_count=1,
+            findings=(finding,),
+        )
+        classification = classify_findings(result)
+        # Must be advisory, not blocking — intentional scope boundary
+        assert len(classification.blocking) == 0
+        assert classification.advisory_count == 1
+        assert len(classification.unknown_codes) == 0
