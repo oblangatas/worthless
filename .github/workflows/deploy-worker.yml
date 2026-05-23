@@ -191,46 +191,6 @@ jobs:
           MAINTAINER_FINGERPRINT: ${{ vars.MAINTAINER_GPG_FINGERPRINT }}
         run: bash .github/scripts/verify-tag.sh
 
-      - name: Verify install.sh pin matches release tag (fatal, tag-push only)
-        if: github.event_name == 'push'
-        # WOR-559. Runs immediately AFTER the GPG re-verify so a passing result
-        # is bound to a maintainer-signed tag. Asserts the WORTHLESS_VERSION_PIN
-        # baked into the served installer equals the release version — the
-        # served default install pins a version the signed tag vouched for, not
-        # an unpinned PyPI `latest`. Mismatch (or empty pin) = fail closed.
-        # Single source of truth at .github/scripts/verify-pin.sh, unit-tested
-        # by tests/test_deploy_static.py::TestVerifyPinScript.
-        env:
-          GH_REF_NAME: ${{ github.ref_name }}
-        run: TAG_VERSION="${GH_REF_NAME#v}" bash .github/scripts/verify-pin.sh
-
-      - name: Wait for worthless==<tag> to be resolvable on PyPI (fatal, production only)
-        if: needs.verify.outputs.target == 'production'
-        # WOR-559 self-DoS guard. publish.yml (PyPI) and this workflow are BOTH
-        # triggered by the `v*` tag and run in parallel with NO coordination.
-        # If we flipped the served bundle to pin `worthless==<tag>` before PyPI
-        # had that version, every fresh `curl|sh` would hard-fail (pinned
-        # version unresolvable) for the whole propagation window. Block the
-        # deploy until PyPI can satisfy the pin. Fail closed after ~5 min.
-        env:
-          GH_REF_NAME: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          VERSION="${GH_REF_NAME#v}"
-          URL="https://pypi.org/pypi/worthless/${VERSION}/json"
-          echo "Waiting for ${URL} to return 200 before deploying ..."
-          for attempt in $(seq 1 30); do
-            CODE=$(curl -s -o /dev/null -w '%{http_code}' "${URL}" || echo "000")
-            if [ "${CODE}" = "200" ]; then
-              echo "PyPI has worthless==${VERSION} (attempt ${attempt})."
-              exit 0
-            fi
-            echo "[attempt ${attempt}] worthless==${VERSION} not on PyPI yet (HTTP ${CODE}); retrying in 10s..."
-            sleep 10
-          done
-          echo "::error title=pypi-availability::worthless==${VERSION} not resolvable on PyPI after ~5min. Refusing to deploy a Worker that would serve a pin PyPI cannot satisfy (self-DoS guard, WOR-559)."
-          exit 1
-
       - name: Set up Node.js
         uses: ./.github/actions/setup-node-worker
 

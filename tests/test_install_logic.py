@@ -327,17 +327,14 @@ def test_success_with_persistent_rc_but_missing_parent_path_says_open_terminal(
 # ---------------------------------------------------------------------------
 
 
-def _failing_uv_stub(install_stderr: str = "", upgrade_stderr: str = "") -> str:
-    """Build a uv stub that fails BOTH install AND upgrade with the given stderr."""
+def _failing_uv_stub(install_stderr: str = "") -> str:
+    """Build a uv stub whose `tool install` fails with the given stderr."""
     return f"""case "$1" in
   --version) echo "uv 0.11.7" ;;
   tool) shift; case "$1" in
-    list) ;;  # empty → no fast-path; force install+upgrade attempts
+    list) ;;  # empty → fast-path miss; forces the install attempt
     install)
       printf '%b' {install_stderr!r} >&2
-      exit 1 ;;
-    upgrade)
-      printf '%b' {upgrade_stderr!r} >&2
       exit 1 ;;
     *) echo "uv tool: unhandled: $*" >&2; exit 1 ;;
   esac ;;
@@ -359,7 +356,6 @@ def test_install_failure_surfaces_uv_stderr(tmp_path: Path) -> None:
         "uv",
         _failing_uv_stub(
             install_stderr="× No solution found when resolving dependencies\n",
-            upgrade_stderr="× package not installed\n",
         ),
     )
 
@@ -397,7 +393,6 @@ def test_install_failure_proxy_hint_is_secondary(tmp_path: Path) -> None:
         "uv",
         _failing_uv_stub(
             install_stderr="× No solution found\n",
-            upgrade_stderr="× package not installed\n",
         ),
     )
 
@@ -432,7 +427,7 @@ def test_install_failure_empty_stderr_still_shows_banner(tmp_path: Path) -> None
     write_stub(
         bin_dir,
         "uv",
-        _failing_uv_stub(install_stderr="", upgrade_stderr=""),
+        _failing_uv_stub(install_stderr=""),
     )
 
     result = run_install(bin_dir)
@@ -445,17 +440,6 @@ def test_install_failure_empty_stderr_still_shows_banner(tmp_path: Path) -> None
     assert "uv tool install reported:" not in result.stderr, (
         f"empty-stderr path must not show an empty 'uv tool install reported:' "
         f"block — that's noise, not signal.\nstderr: {result.stderr}"
-    )
-    assert "uv tool upgrade reported:" not in result.stderr, (
-        f"empty-stderr path must not show an empty 'uv tool upgrade reported:' "
-        f"block.\nstderr: {result.stderr}"
-    )
-    # Empty upgrade stderr → no "upgrade also failed" one-liner either.
-    # No file content means we can't be sure upgrade was even attempted in
-    # a way that produced output; better to stay silent than confuse.
-    assert "uv tool upgrade also failed" not in result.stderr, (
-        f"empty-stderr path must not show the upgrade one-liner; reserve "
-        f"it for the case where there IS suppressed content.\nstderr: {result.stderr}"
     )
 
 

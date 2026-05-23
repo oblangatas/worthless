@@ -379,13 +379,12 @@ def test_worthless_version_pinned(install_text: str) -> None:
     )
 
 
-def test_pin_matches_pyproject_version() -> None:
-    """The baked install.sh pin must equal the pyproject [project] version.
-
-    Chain of trust: pyproject version == install.sh pin == signed tag
-    (deploy gate) == PyPI-resolvable (deploy gate). This test pins the first
-    link — fast PR feedback so a release bump can't land in pyproject while
-    install.sh still pins the previous version.
+def test_pin_not_ahead_of_pyproject() -> None:
+    """The baked pin tracks the latest PUBLISHED release, so it must never
+    point AHEAD of the in-prep pyproject version (you can't have published a
+    version that doesn't exist yet). Offline guard against a typo'd/future
+    pin; the "pin == latest PyPI" freshness check lives in release-sync-check
+    (needs network, so it runs in CI, not here).
     """
     import sys
 
@@ -393,6 +392,8 @@ def test_pin_matches_pyproject_version() -> None:
         import tomllib
     else:
         import tomli as tomllib
+
+    from packaging.version import Version
 
     pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     pyproject_version = pyproject["project"]["version"]
@@ -404,10 +405,10 @@ def test_pin_matches_pyproject_version() -> None:
     )
     assert match, "install.sh must declare WORTHLESS_VERSION_PIN"
     pin = match.group(1)
-    assert pin == pyproject_version, (
-        f"install.sh pin {pin!r} != pyproject version {pyproject_version!r}. "
-        "Bump both together at release time (the deploy gate then ties them "
-        "to the signed tag)."
+    assert Version(pin) <= Version(pyproject_version), (
+        f"install.sh pin {pin!r} is ahead of pyproject version "
+        f"{pyproject_version!r} — the pin must be a version that's actually "
+        "been released (≤ the in-prep version)."
     )
 
 

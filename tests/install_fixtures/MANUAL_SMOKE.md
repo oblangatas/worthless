@@ -10,7 +10,7 @@ For supply-chain trust roots, see
 
 - [ ] CI green on `tests.yml`, `install-smoke.yml`, and the Docker integration job for the tagged commit
 - [ ] `UV_VERSION` / `ASTRAL_INSTALLER_SHA256` triplet re-verified (see "Bumping UV_VERSION" below)
-- [ ] `WORTHLESS_VERSION_PIN` in `install.sh` == `pyproject.toml` version == tag (the deploy gate enforces this, but bump it in the release PR alongside pyproject)
+- [ ] `WORTHLESS_VERSION_PIN` in `install.sh` == latest published PyPI release (bump it when you publish a new release; `release-sync-check.yml` fails if it lags)
 
 ## Personal Mac (current dev machine)
 

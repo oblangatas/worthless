@@ -19,17 +19,15 @@ EXIT_INTERNAL=40
 
 UV_VERSION="0.11.7"
 
-# Default worthless version, baked in at release time (bumped per release,
-# like UV_VERSION above). The signed `v*` tag that builds the served Worker
-# bundle vouches for this exact value — the deploy gate asserts pin == tag
-# (.github/scripts/verify-pin.sh) and refuses to flip the served bundle until
-# `worthless==$PIN` is resolvable on PyPI. install.sh installs that pinned
-# spec, NOT an unpinned `latest`.
+# Default worthless version. Hand-bumped per release like UV_VERSION above,
+# kept at the latest version ALREADY published on PyPI — a CI drift check
+# (release-sync-check.yml) fails if it falls behind the latest release.
+# install.sh installs `worthless==$WORTHLESS_VERSION_PIN`, NOT unpinned `latest`.
 #
 # Why this matters (WOR-559, threat-model F-06/F-49): a `curl|sh` ending in
 # `uv tool install worthless` (unpinned) auto-runs whatever PyPI calls latest.
-# A compromised release (stolen maintainer token) would then get RCE on every
-# fresh install — the highest-impact, previously-undefended hop in the chain.
+# A release compromised AFTER ours (stolen maintainer token) would then get
+# RCE on every fresh install — the highest-impact, previously-undefended hop.
 # Real analogues: ctx (2022), Ultralytics (2024), ua-parser-js (2021).
 #
 # HONEST SCOPE: pinning selects WHICH release; it does NOT verify the package
@@ -38,7 +36,7 @@ UV_VERSION="0.11.7"
 # latest", and does NOT defend against a compromised Worker/origin (which
 # would serve a bad script AND a bad pin together). Wheel-hash verification is
 # a tracked follow-up. Override with `WORTHLESS_VERSION=x.y.z curl … | sh`.
-WORTHLESS_VERSION_PIN="0.3.7"
+WORTHLESS_VERSION_PIN="0.3.6"
 
 # SHA256 of https://astral.sh/uv/${UV_VERSION}/install.sh — bump with UV_VERSION.
 ASTRAL_INSTALLER_SHA256="efed99618cb5c31e4e36a700ab7c3698e83c0ae0f3c336714043d0f932c8d32c"
