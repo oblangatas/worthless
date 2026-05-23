@@ -48,6 +48,13 @@ def test_full_dogfood_lock_break_doctor_recover(
     gave opposite answers and there was no recovery command. This test
     pins the post-HF7 contract: each of the four commands behaves
     correctly across the chain.
+
+    monkeypatch.chdir pins the process cwd to tmp_path so that doctor's
+    speculative cwd/.env scan (which catches stale BASE_URL aliases) reads
+    THIS test's .env rather than whatever cwd a parallel xdist worker
+    may have been left in by a previous test.  After step 3 empties the
+    .env and step 7 purges the DB, the cwd scan finds no BASE_URL entries
+    and step 8 correctly reports "no issues found".
     """
     # WOR-571: `doctor` is invoked below WITHOUT `--env`, so its
     # BASE_URL-alias check (`_check_alias_not_in_db`) scans `Path.cwd()/.env`.

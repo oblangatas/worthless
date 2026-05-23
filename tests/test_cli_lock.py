@@ -12,6 +12,7 @@ import subprocess
 import sys
 import textwrap
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from typer.testing import CliRunner
@@ -1842,3 +1843,281 @@ class TestScannerProperties:
                 f"No finding for registered hostname {hostname!r} ({entry.name})"
             )
             src.unlink()
+
+
+# ---------------------------------------------------------------------------
+# WOR-504: re-lock surfaces "[OK] N key(s) still protected." instead of
+# silently succeeding or falsely claiming a new split occurred.
+# ---------------------------------------------------------------------------
+
+
+class TestLockRerun:
+    """Re-locking an already-protected .env surfaces '[OK] N keys still protected.'
+
+    The commitment-verify path already proves the key is intact on re-lock —
+    it just doesn't say so. These tests pin the new output contract and guard
+    the DB invariants (no dup shards, no re-split).
+    """
+
+    def test_lock_prints_still_protected_on_rerun(
+        self, home_dir: WorthlessHome, env_file: Path
+    ) -> None:
+        """Second lock run on same .env prints '[OK] N keys still protected.'"""
+        env_vars = {"WORTHLESS_HOME": str(home_dir.base_dir)}
+        first = runner.invoke(app, ["lock", "--env", str(env_file)], env=env_vars)
+        assert first.exit_code == 0, first.output
+
+        result = runner.invoke(app, ["lock", "--env", str(env_file)], env=env_vars)
+
+        assert result.exit_code == 0, result.output
+        assert "[OK]" in result.output, result.output
+        assert "still protected" in result.output.lower(), result.output
+
+    def test_lock_rerun_does_not_create_duplicate_shard_row(
+        self, home_dir: WorthlessHome, env_file: Path
+    ) -> None:
+        """Second lock run on same .env leaves the DB shard count unchanged."""
+        env_vars = {"WORTHLESS_HOME": str(home_dir.base_dir)}
+        first = runner.invoke(app, ["lock", "--env", str(env_file)], env=env_vars)
+        assert first.exit_code == 0, first.output
+        count_before = len(asyncio.run(_repo(home_dir).list_keys()))
+
+        second = runner.invoke(app, ["lock", "--env", str(env_file)], env=env_vars)
+        assert second.exit_code == 0, second.output
+        count_after = len(asyncio.run(_repo(home_dir).list_keys()))
+
+        assert count_after == count_before
+
+    def test_lock_rerun_does_not_resplit_key(self, home_dir: WorthlessHome, env_file: Path) -> None:
+        """Second lock run leaves shard_b byte-identical in the DB — key was not re-split."""
+        env_vars = {"WORTHLESS_HOME": str(home_dir.base_dir)}
+        first = runner.invoke(app, ["lock", "--env", str(env_file)], env=env_vars)
+        assert first.exit_code == 0, first.output
+
+        repo = _repo(home_dir)
+        aliases = asyncio.run(repo.list_keys())
+        alias = aliases[0]
+        enc_before = asyncio.run(_repo(home_dir).fetch_encrypted(alias))
+        stored_before = _repo(home_dir).decrypt_shard(enc_before)
+        shard_b_before = bytes(stored_before.shard_b)
+        stored_before.zero()
+
+        second = runner.invoke(app, ["lock", "--env", str(env_file)], env=env_vars)
+        assert second.exit_code == 0, second.output
+
+        enc_after = asyncio.run(_repo(home_dir).fetch_encrypted(alias))
+        stored_after = _repo(home_dir).decrypt_shard(enc_after)
+        shard_b_after = bytes(stored_after.shard_b)
+        stored_after.zero()
+
+        assert shard_b_after == shard_b_before
+
+    def test_lock_rerun_fresh_project_same_key_creates_new_enrollment(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """Same key in a second project dir creates a new enrollment row, not a new shard."""
+        key = fake_openai_key()
+        env_a = tmp_path / "proj_a" / ".env"
+        env_b = tmp_path / "proj_b" / ".env"
+        env_a.parent.mkdir()
+        env_b.parent.mkdir()
+        env_a.write_text(f"OPENAI_API_KEY={key}\n")
+        env_b.write_text(f"OPENAI_API_KEY={key}\n")
+
+        env_vars = {"WORTHLESS_HOME": str(home_dir.base_dir)}
+        r1 = runner.invoke(app, ["lock", "--env", str(env_a)], env=env_vars)
+        assert r1.exit_code == 0, r1.output
+        r2 = runner.invoke(app, ["lock", "--env", str(env_b)], env=env_vars)
+        assert r2.exit_code == 0, r2.output
+
+        # One shard row for the shared key — never duplicated.
+        aliases = asyncio.run(_repo(home_dir).list_keys())
+        assert len(aliases) == 1
+
+        # Two enrollment rows — one per project path.
+        enrollments = asyncio.run(_repo(home_dir).list_enrollments())
+        env_paths = {e.env_path for e in enrollments}
+        assert len(env_paths) == 2
+
+        # Both .env files must be rewritten — the real key must not remain in either.
+        from dotenv import dotenv_values
+
+        shard_a_a = dotenv_values(env_a)["OPENAI_API_KEY"]
+        shard_a_b = dotenv_values(env_b)["OPENAI_API_KEY"]
+        assert shard_a_a != key, "env_a still contains the real key after lock"
+        assert shard_a_b != key, "env_b still contains the real key after second-project lock"
+        assert shard_a_a.startswith("sk-proj-"), "env_a shard-A must preserve key prefix"
+        assert shard_a_b.startswith("sk-proj-"), "env_b shard-A must preserve key prefix"
+
+    def test_lock_rerun_quiet_suppresses_still_protected(
+        self, home_dir: WorthlessHome, env_file: Path
+    ) -> None:
+        """-q on re-lock produces no output, consistent with -q on fresh lock."""
+        env_vars = {"WORTHLESS_HOME": str(home_dir.base_dir)}
+        first = runner.invoke(app, ["lock", "--env", str(env_file)], env=env_vars)
+        assert first.exit_code == 0, first.output
+
+        result = runner.invoke(app, ["-q", "lock", "--env", str(env_file)], env=env_vars)
+
+        assert result.exit_code == 0, result.output
+        assert "[OK]" not in result.output
+        assert "still protected" not in result.output.lower()
+
+    def test_fresh_lock_does_not_print_still_protected(
+        self, home_dir: WorthlessHome, env_file: Path
+    ) -> None:
+        """First-time lock must not print 'still protected' — that message is re-lock only."""
+        result = runner.invoke(
+            app,
+            ["lock", "--env", str(env_file)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "still protected" not in result.output.lower(), result.output
+
+    def test_lock_mixed_fresh_and_relock_prints_both_messages(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """1 already-locked key + 1 new key in same run → both messages appear."""
+        key_old = fake_openai_key()
+        key_new = fake_anthropic_key()
+        env_file = tmp_path / ".env"
+        env_vars = {"WORTHLESS_HOME": str(home_dir.base_dir)}
+
+        # Lock just the old key first.
+        env_file.write_text(f"OPENAI_API_KEY={key_old}\n")
+        first = runner.invoke(app, ["lock", "--env", str(env_file)], env=env_vars)
+        assert first.exit_code == 0, first.output
+
+        # Add a fresh key and re-lock — mixed run.
+        env_file.write_text(f"OPENAI_API_KEY={key_old}\nANTHROPIC_API_KEY={key_new}\n")
+        result = runner.invoke(app, ["lock", "--env", str(env_file)], env=env_vars)
+
+        assert result.exit_code == 0, result.output
+        assert "split between" in result.output.lower(), result.output
+        assert "still protected" in result.output.lower(), result.output
+
+
+# ---------------------------------------------------------------------------
+# WOR-504: _select_unlocked_keys exception-swallow paths
+# ---------------------------------------------------------------------------
+
+
+class TestSelectUnlockedKeys:
+    """Unit tests for the _select_unlocked_keys re-lock guard.
+
+    This function decides which scanned keys need (re-)locking by calling
+    ``reconstruct_key_fp`` to verify a shard-A value is still intact.  When
+    reconstruction raises ``UnicodeDecodeError`` (corrupt UTF-8 shard bytes)
+    or ``IndexError`` (length mismatch), the enrollment is treated as unusable
+    and the key is returned as a re-lock candidate.  These tests target those
+    error branches directly via mock so the CLI URL-registration check and
+    .env rewriter do not interfere with the assertions.
+    """
+
+    @staticmethod
+    def _enrollment(env_path: str, var_name: str, alias: str):
+        e = MagicMock()
+        e.env_path = env_path
+        e.var_name = var_name
+        e.key_alias = alias
+        return e
+
+    @staticmethod
+    def _repo():
+        encrypted = MagicMock()
+        encrypted.prefix = "sk-proj-"
+        encrypted.charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+        stored = MagicMock()
+        stored.shard_b = bytearray(32)
+        stored.zero = MagicMock()
+        repo = MagicMock()
+        repo.fetch_encrypted = AsyncMock(return_value=encrypted)
+        repo.decrypt_shard = MagicMock(return_value=stored)
+        return repo
+
+    def test_value_error_returns_key_as_candidate(self) -> None:
+        """ValueError (including UnicodeDecodeError subclass) → key treated as not-still-protected.
+
+        UnicodeDecodeError IS a ValueError subclass, so testing ValueError directly
+        is the minimal mutation-killing form.  Drives the ValueError branch of the
+        except clause in ``_select_unlocked_keys``.
+        """
+        from worthless.cli.commands.lock import _select_unlocked_keys
+
+        env_path = "/project/.env"
+        var_name = "OPENAI_API_KEY"
+        value = "sk-proj-abc123fakefakefakefakefakefakefakefakefakefake"
+        provider = "openai"
+
+        with patch(
+            "worthless.cli.commands.lock.reconstruct_key_fp",
+            side_effect=ValueError("corrupt shard bytes"),
+        ):
+            candidates = asyncio.run(
+                _select_unlocked_keys(
+                    self._repo(),
+                    [(var_name, value, provider)],
+                    [self._enrollment(env_path, var_name, "openai-deadbeef")],
+                    env_path,
+                )
+            )
+
+        assert candidates == [(var_name, value, provider)]
+
+    def test_index_error_returns_key_as_candidate(self) -> None:
+        """IndexError during reconstruction → key treated as not-still-protected.
+
+        Drives the IndexError branch of the same except clause.  A
+        length-mismatched shard must not suppress the key from re-locking.
+        """
+        from worthless.cli.commands.lock import _select_unlocked_keys
+
+        env_path = "/project/.env"
+        var_name = "OPENAI_API_KEY"
+        value = "sk-proj-abc123fakefakefakefakefakefakefakefakefakefake"
+        provider = "openai"
+
+        with patch(
+            "worthless.cli.commands.lock.reconstruct_key_fp",
+            side_effect=IndexError("shard length mismatch"),
+        ):
+            candidates = asyncio.run(
+                _select_unlocked_keys(
+                    self._repo(),
+                    [(var_name, value, provider)],
+                    [self._enrollment(env_path, var_name, "openai-deadbeef")],
+                    env_path,
+                )
+            )
+
+        assert candidates == [(var_name, value, provider)]
+
+    def test_successful_reconstruct_excludes_key_from_candidates(self) -> None:
+        """Successful reconstruction → key is still-protected and NOT returned.
+
+        Happy-path complement: a healthy DB shard means the .env value is
+        already shard-A and the key must not be re-locked.
+        """
+        from worthless.cli.commands.lock import _select_unlocked_keys
+
+        env_path = "/project/.env"
+        var_name = "OPENAI_API_KEY"
+        value = "sk-proj-abc123fakefakefakefakefakefakefakefakefakefake"
+        provider = "openai"
+
+        with patch(
+            "worthless.cli.commands.lock.reconstruct_key_fp",
+            return_value=bytearray(b"reconstructed-key"),
+        ):
+            candidates = asyncio.run(
+                _select_unlocked_keys(
+                    self._repo(),
+                    [(var_name, value, provider)],
+                    [self._enrollment(env_path, var_name, "openai-deadbeef")],
+                    env_path,
+                )
+            )
+
+        assert candidates == []

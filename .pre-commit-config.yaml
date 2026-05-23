@@ -187,6 +187,19 @@ repos:
         pass_filenames: false
         stages: [pre-push]
 
+  # ── Lock command regression gate ───────────────────────────────
+  # Run the re-lock tests whenever lock.py changes. Prevents the tuple-order
+  # class of bug that already landed once (WOR-504) — tests exist but only
+  # catch regressions if they actually run.
+  - repo: local
+    hooks:
+      - id: test-lock-rerun
+        name: "test: lock re-run contract (TestLockRerun)"
+        language: system
+        entry: uv run pytest tests/test_cli_lock.py::TestLockRerun -x -q --tb=short
+        pass_filenames: false
+        files: 'src/worthless/cli/commands/lock\.py$'
+
   # ── 7. Conventional commits ────────────────────────────────────
   - repo: https://github.com/compilerla/conventional-pre-commit
     rev: v4.1.0
