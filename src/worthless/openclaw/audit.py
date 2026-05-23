@@ -267,7 +267,7 @@ def run_audit(
         return parse_audit_result(data)
 
     last_exc: AuditGateError | None = None
-    for _ in range(2):
+    for _ in range(_MAX_AUDIT_ATTEMPTS):
         try:
             return _attempt()
         except AuditGateError as exc:
@@ -393,9 +393,14 @@ def classify_findings(
             continue
 
         if finding.code == "PLAINTEXT_FOUND":
-            # File scope: only trust findings where file is in filesScanned
+            # File scope: only trust findings where file is in filesScanned.
+            # A PLAINTEXT_FOUND for a file not in filesScanned is internally
+            # inconsistent audit output — OpenClaw cannot report a finding for a
+            # file it did not scan. Treat as unknown (exit 87), not advisory:
+            # silently passing here would allow a rogue binary to suppress a
+            # real plaintext finding by omitting the file from filesScanned.
             if finding.file not in result.files_scanned:
-                advisory_count += 1
+                unknown_codes.append("PLAINTEXT_FOUND[file_not_in_filesScanned]")
                 continue
 
             m = _PROVIDER_APIKEY_RE.match(finding.json_path)

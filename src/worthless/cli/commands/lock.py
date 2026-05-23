@@ -63,7 +63,8 @@ logger = logging.getLogger(__name__)
 # registry name to its protocol via ``lookup_by_name`` before checking
 # this map. ``worthless-9t74`` will promote that translation into a
 # structural ``provider name`` vs ``protocol`` separation post-merge.
-_CTRL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+# sanitise_for_message (from _oc_audit) covers C0/C1 + bidi overrides + BOM —
+# a strict superset of the old _CTRL_RE; no separate regex needed here.
 
 _PROVIDER_ENV_MAP: dict[str, str] = {
     "openai": "OPENAI_BASE_URL",
@@ -940,8 +941,8 @@ def _lock_keys(
         header = "worthless: hardcoded provider URLs detected — these bypass the proxy:"
         detail_lines = [header]
         for f in bypass_findings:
-            safe_file = _CTRL_RE.sub("", f.file)
-            safe_url = _CTRL_RE.sub("", f.url)
+            safe_file = _oc_audit.sanitise_for_message(f.file)
+            safe_url = _oc_audit.sanitise_for_message(f.url)
             detail_lines.append(f"  {safe_file}:{f.line}  {safe_url}  ({f.provider})")
         findings_text = "\n".join(detail_lines)
 

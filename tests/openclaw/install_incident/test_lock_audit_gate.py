@@ -678,8 +678,13 @@ class TestAdversarial:
         blocking_paths = {b.json_path for b in classification.blocking}
         assert "providers.worthless-evil.apiKey" in blocking_paths
 
-    def test_adversarial_path_traversal_in_file_field_sanitised(self) -> None:
-        """Adv 2: audit emits file:'../../etc/passwd' → path not followed."""
+    def test_adversarial_path_traversal_in_file_field_exits_87(self) -> None:
+        """Adv 2: PLAINTEXT_FOUND for a file not in filesScanned → exit 87 (inconsistent output).
+
+        A rogue binary could suppress a real finding by emitting PLAINTEXT_FOUND but
+        omitting the file from filesScanned. Treating this as advisory would let the
+        gate pass. It must appear in unknown_codes so the caller raises AuditGateError.
+        """
         evil_finding = AuditFinding(
             code="PLAINTEXT_FOUND",
             severity="warn",
@@ -696,11 +701,10 @@ class TestAdversarial:
             findings=(evil_finding,),
         )
         classification = classify_findings(result)
-        # The finding is from a file NOT in filesScanned[] — must not block.
-        # Explicit assertion first so the test cannot vacuously pass on an empty list.
-        assert len(classification.blocking) == 0, (
-            "Out-of-scope traversal path must not produce blocking findings; "
-            f"got: {classification.blocking}"
+        assert len(classification.blocking) == 0
+        assert "PLAINTEXT_FOUND[file_not_in_filesScanned]" in classification.unknown_codes, (
+            "Out-of-scope PLAINTEXT_FOUND must appear in unknown_codes (→ exit 87), "
+            f"got unknown_codes={classification.unknown_codes}"
         )
 
     def test_adversarial_control_chars_in_jsonpath_sanitised_in_message(self) -> None:
