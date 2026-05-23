@@ -401,6 +401,30 @@ class IPCSupervisor:
                 raise IPCUnavailable("reconnect did not yield a ready client")
             return self._client
 
+    async def _wait_for_connector(self) -> None:
+        """Wait for the active connector coroutine to finish, re-waiting if a
+        new attempt starts immediately after a failure (CONNECTING again).
+        Bounded by ``_drain_ceiling_s``."""
+        _loop = asyncio.get_event_loop()
+        deadline = _loop.time() + self._drain_ceiling_s
+        while True:
+            remaining = deadline - _loop.time()
+            if remaining <= 0:
+                raise IPCUnavailable("timed out waiting for peer reconnect")
+            try:
+                await asyncio.wait_for(self._connect_done.wait(), timeout=remaining)
+            except TimeoutError as exc:
+                raise IPCUnavailable("timed out waiting for peer reconnect") from exc
+            async with self._state_lock:
+                if self._state is SupervisorState.READY and self._client is not None:
+                    return
+                if self._state is SupervisorState.CLOSED or self._draining:
+                    raise IPCUnavailable("supervisor is draining or closed")
+                if self._state is SupervisorState.CONNECTING:
+                    continue  # new attempt started; re-wait
+            # DISCONNECTED: connector failed, no new attempt yet.
+            raise IPCUnavailable("peer reconnect failed")
+
     async def _reconnect_with_backoff(self) -> None:
         """Atomically claim connector role or wait for the active claimant.
 
@@ -426,35 +450,7 @@ class IPCSupervisor:
                 we_connect = True
 
         if not we_connect:
-            # Loop so that a waiter re-waits when the connector failed and a
-            # new reconnect attempt started immediately (CONNECTING again).
-            # Without the loop, the waiter could observe CONNECTING state
-            # after wake (a new attempt cleared _connect_done before the waiter
-            # re-acquired _state_lock) and incorrectly raise IPCUnavailable.
-            _loop = asyncio.get_event_loop()
-            deadline = _loop.time() + self._drain_ceiling_s
-            while True:
-                remaining = deadline - _loop.time()
-                if remaining <= 0:
-                    raise IPCUnavailable("timed out waiting for peer reconnect")
-                try:
-                    await asyncio.wait_for(self._connect_done.wait(), timeout=remaining)
-                except TimeoutError as exc:
-                    raise IPCUnavailable("timed out waiting for peer reconnect") from exc
-                async with self._state_lock:
-                    if self._state is SupervisorState.READY and self._client is not None:
-                        return
-                    if self._state is SupervisorState.CLOSED or self._draining:
-                        raise IPCUnavailable("supervisor is draining or closed")
-                    if self._state is SupervisorState.CONNECTING:
-                        # A new reconnect attempt started before we re-acquired
-                        # the lock (the connector cleared _connect_done and set
-                        # state back to CONNECTING before we got here). The event
-                        # is already clear — just re-wait for the connector to
-                        # set() it when done.
-                        continue
-                # State is DISCONNECTED: connector failed, no new attempt yet.
-                raise IPCUnavailable("peer reconnect failed")
+            await self._wait_for_connector()
 
         delay = self._backoff_delay(self._reconnect_attempt)
         if delay > 0:

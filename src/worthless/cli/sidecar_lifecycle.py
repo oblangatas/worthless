@@ -23,7 +23,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NamedTuple
+from typing import IO, NamedTuple
 from collections.abc import Callable
 
 from worthless.cli.errors import ErrorCode, WorthlessError
@@ -174,7 +174,7 @@ def split_to_tmpfs(fernet_key: bytearray, home_dir: Path) -> ShareFiles:
 # ---------------------------------------------------------------------------
 
 
-def _drain_pipe(pipe: subprocess.IO[bytes]) -> None:
+def _drain_pipe(pipe: IO[bytes]) -> None:
     """Read and discard bytes from *pipe* until EOF.
 
     Used for stdout — the sidecar's one ready-line to stdout is not needed
@@ -194,7 +194,7 @@ _STDERR_CAPTURE_LIMIT = 4096
 
 
 def _collect_stderr(
-    pipe: subprocess.IO[bytes],
+    pipe: IO[bytes],
     buf: collections.deque[bytes],
 ) -> None:
     """Read stderr chunks into a bounded deque for crash diagnostics.
