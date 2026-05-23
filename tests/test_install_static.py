@@ -30,6 +30,28 @@ def test_uv_version_pinned(install_text: str) -> None:
     )
 
 
+# --- WOR-558: single-origin + discoverable audit (?explain=1) ----------------
+
+
+def test_installer_not_leaked_to_website() -> None:
+    # The installer is served only by the worthless.sh Worker (one
+    # content-negotiated path). A copy under website/ would create a second,
+    # unverified install vector on the marketing site — the parallel path the
+    # Worker design forbids.
+    leaked = REPO_ROOT / "website" / "install.sh"
+    assert not leaked.exists(), f"install.sh must never be copied to the marketing site: {leaked}"
+
+
+def test_explain_audit_discoverable() -> None:
+    # ?explain=1 must be findable wherever a cautious dev looks BEFORE running:
+    # the install.sh header (piped to `less`), the README, the security doc, the SKILL file.
+    header = "\n".join((REPO_ROOT / "install.sh").read_text(encoding="utf-8").splitlines()[:8])
+    assert "?explain=1" in header, "install.sh header must point to the ?explain=1 audit mode"
+    for rel in ("README.md", "docs/install-security.md", "SKILL.md"):
+        text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+        assert "?explain=1" in text, f"{rel} must mention the ?explain=1 audit command"
+
+
 # --- WOR-319: supply-chain pinning of base images + Astral installer SHA -----
 
 

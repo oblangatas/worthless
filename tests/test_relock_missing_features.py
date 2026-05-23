@@ -297,7 +297,6 @@ class TestDoctorOpenclawConsistency:
             await repo.upsert_locked_shard(
                 alias,
                 stored,
-                shard_a=bytearray(sr2.shard_a),
                 prefix=sr2.prefix,
                 charset=sr2.charset,
                 base_url=_BASE_URL,
@@ -465,3 +464,166 @@ class TestDoctorOpenclawConsistency:
             phrase in issues_text
             for phrase in ("stale", "out of sync", "invalid", "mismatch", "re-run", "re-lock")
         ), f"Issue message does not describe the problem clearly: {issues}"
+
+
+# ---------------------------------------------------------------------------
+# worthless-4lsv: _check_openclaw_apikey_consistency hardening (RED tests)
+# ---------------------------------------------------------------------------
+
+
+class TestOpencawConsistencyHardening:
+    """worthless-4lsv TDD red phase.
+
+    _check_openclaw_apikey_consistency must:
+    1. Refuse to read a symlinked config_path (re-introduces the attack vector
+       that health_check() intentionally blocks via F-CFG-15).
+    2. Report aliases present in openclaw.json but absent from the DB as an
+       explicit issue — not silently skip them.
+    """
+
+    def test_consistency_check_refuses_symlinked_config_path(self, tmp_path: Path) -> None:
+        """_check_openclaw_apikey_consistency must surface a symlink as an issue.
+
+        health_check() records a note when config_path is a symlink (F-CFG-15)
+        rather than following the link.  The consistency check must do the same —
+        reading through a symlinked openclaw.json is the exact attack surface
+        F-CFG-15 closes.
+
+        Setup:
+        - Lock a real key so the DB has a valid enrollment.
+        - Create a symlinked openclaw.json pointing at a real file that contains
+          a worthless-* provider entry with a GARBAGE apiKey for that alias.
+        - Call _check_openclaw_apikey_consistency with config_path = symlink.
+
+        Without the guard the function follows the symlink, reads the garbage
+        apiKey, and returns ["stale apiKey"]. With the guard it must instead
+        return an issue mentioning "symlink" (or at minimum "refused" / "safe").
+
+        RED: today the function reads through the symlink without any guard.
+        """
+        import json as _json
+
+        from worthless.cli.commands.doctor import _check_openclaw_apikey_consistency
+        from worthless.openclaw.integration import IntegrationState
+
+        home = ensure_home(tmp_path / ".worthless")
+        env_file = tmp_path / ".env"
+        env_file.write_text("OPENAI_API_KEY=sk-symlink-test-abcdef1234567890\n")
+        _lock_env(home, env_file)
+
+        alias = _get_first_alias(home)
+        repo = _make_repo(home)
+
+        openclaw_dir = tmp_path / ".openclaw"
+        openclaw_dir.mkdir(parents=True, exist_ok=True)
+
+        # Real target file — contains a garbage apiKey for the enrolled alias.
+        # Without the symlink guard the function reads this, fails reconstruct,
+        # and returns a "stale apiKey" issue (not a symlink issue).
+        real_target = openclaw_dir / "real_openclaw.json"
+        real_target.write_text(
+            _json.dumps(
+                {
+                    "models": {
+                        "providers": {
+                            "worthless-openai": {
+                                "apiKey": "sk-GARBAGE-NOT-A-REAL-SHARD",
+                                "baseUrl": f"http://localhost:8787/{alias}/v1",
+                            }
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        # Symlink → target (the attack vector)
+        symlink_config = openclaw_dir / "openclaw.json"
+        symlink_config.symlink_to(real_target)
+
+        state = IntegrationState(
+            present=True,
+            config_path=symlink_config,  # symlinked path
+            workspace_path=None,
+            skill_path=None,
+            home_dir=openclaw_dir,
+            notes=(),
+        )
+
+        issues = _check_openclaw_apikey_consistency(state, repo)
+
+        # Must surface the symlink, not silently read through it
+        assert len(issues) > 0, "Expected at least one issue for a symlinked config_path, got none."
+        issues_text = " ".join(issues).lower()
+        assert "symlink" in issues_text or "refused" in issues_text, (
+            f"Issue must mention 'symlink' or 'refused', got: {issues}\n"
+            "Returning a 'stale apiKey' issue instead means the function "
+            "followed the symlink — the guard is missing."
+        )
+
+    def test_consistency_check_reports_missing_db_alias(self, tmp_path: Path) -> None:
+        """Alias in openclaw.json but absent from DB → explicit issue, not silent skip.
+
+        The current implementation has:
+            except Exception:  # noqa: S112 — fetch failure skipped
+                continue
+
+        This silently swallows DB lookup failures, letting doctor report clean
+        OpenClaw section even when openclaw.json refers to an alias that was never
+        enrolled or was deleted from the DB.  The missing alias must be surfaced.
+
+        RED: today the function silently skips aliases whose fetch_encrypted() returns
+        None or raises, and the issues list comes back empty.
+        """
+        import json as _json
+
+        from worthless.cli.commands.doctor import _check_openclaw_apikey_consistency
+        from worthless.openclaw.integration import IntegrationState
+
+        home = ensure_home(tmp_path / ".worthless")
+        repo = ShardRepository(str(home.db_path), home.fernet_key)
+        asyncio.run(repo.initialize())
+
+        # openclaw.json references an alias that is NOT in the DB
+        openclaw_dir = tmp_path / ".openclaw"
+        openclaw_dir.mkdir(parents=True, exist_ok=True)
+        config_path = openclaw_dir / "openclaw.json"
+        config_path.write_text(
+            _json.dumps(
+                {
+                    "models": {
+                        "providers": {
+                            "worthless-openai": {
+                                "apiKey": "sk-some-shard-a",
+                                "baseUrl": "http://localhost:8787/worthless-openai/v1",
+                            }
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        state = IntegrationState(
+            present=True,
+            config_path=config_path,
+            workspace_path=None,
+            skill_path=None,
+            home_dir=openclaw_dir,
+            notes=(),
+        )
+
+        issues = _check_openclaw_apikey_consistency(state, repo)
+
+        assert len(issues) > 0, (
+            "Expected _check_openclaw_apikey_consistency to return an issue "
+            "for an alias present in openclaw.json but absent from the DB. "
+            "Silent skip masks a configuration error and lets doctor pass clean "
+            "when keys are actually unresolvable.\n"
+            f"issues={issues}"
+        )
+        issues_text = " ".join(issues).lower()
+        assert any(
+            phrase in issues_text
+            for phrase in ("not found", "missing", "no db", "not enrolled", "re-lock", "re-run")
+        ), f"Issue must describe the missing-alias problem clearly: {issues}"

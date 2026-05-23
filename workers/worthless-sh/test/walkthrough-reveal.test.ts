@@ -75,4 +75,20 @@ describe("walkthrough REVEAL block (WOR-323)", () => {
     const sha = await sha256Hex(body);
     expect(res.headers.get("etag")).toBe(`W/"walkthrough-${sha}"`);
   });
+
+  // WOR-558 — drift guard. The audit must never hardcode a value that rots
+  // into a lie: the worthless package version (changes every release), source
+  // line numbers (change every edit), or a version-pinned raw URL. The
+  // deliberate UV_VERSION pin in Step 4 is the security fact being audited,
+  // not drift, and is intentionally NOT matched by these patterns.
+  it("walkthrough states no rot-able version literal", async () => {
+    const res = await SELF.fetch("https://worthless.sh/?explain=1", {
+      headers: { "user-agent": CURL_UA },
+    });
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).not.toMatch(/worthless==\d/); // package version pin
+    expect(body).not.toMatch(/\blines?\s+\d/i); // "lines 1-30" citations
+    expect(body).not.toMatch(/\/v\d/); // /v0.3.0/install.sh URL
+  });
 });

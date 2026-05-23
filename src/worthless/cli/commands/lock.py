@@ -404,7 +404,6 @@ async def _pass1_db_writes(
                 await repo.upsert_locked_shard(
                     alias,
                     stored_decrypted,
-                    shard_a=derived_shard_a,
                     prefix=db_shard.prefix,
                     charset=db_shard.charset,
                     base_url=db_shard.base_url or upstream_base_url,
@@ -455,7 +454,6 @@ async def _pass1_db_writes(
             await repo.upsert_locked_shard(
                 alias,
                 stored,
-                shard_a=bytearray(sr.shard_a),
                 prefix=sr.prefix,
                 charset=sr.charset,
                 base_url=upstream_base_url,

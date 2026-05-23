@@ -148,6 +148,10 @@ jobs:
     needs: verify
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    outputs:
+      # WOR-391: expose the deployed Worker URL for the post-deploy
+      # `url-smoke` / `wire-attacks` chained jobs.
+      worker_url: ${{ steps.worker_url.outputs.value }}
     environment:
       # Actions environment scopes secrets per target. Production gating
       # by required reviewers stays at 0 for solo dev (WOR-330) but the
@@ -228,6 +232,26 @@ jobs:
             --var "SCRIPT_TAG:${GITHUB_REF_NAME}" \
             --var "SCRIPT_COMMIT:${GITHUB_SHA}" \
             --var "SCRIPT_BUILD_PROVENANCE:${PROVENANCE_URL}"
+
+      - name: Resolve deployed Worker URL
+        id: worker_url
+        # WOR-391: expose the URL of the Worker just deployed so the
+        # chained `url-smoke` / `wire-attacks` jobs can probe the live
+        # deployment. Production = apex domain; preview = the
+        # deterministic workers.dev URL. Both are hardcoded — they are
+        # public, account-bound, and never change (same treatment as
+        # `https://worthless.sh/` hardcoded in the smoke step below).
+        env:
+          DEPLOY_TARGET: ${{ needs.verify.outputs.target }}
+        run: |
+          set -euo pipefail
+          if [ "${DEPLOY_TARGET}" = "production" ]; then
+            URL="https://worthless.sh/"
+          else
+            URL="https://worthless-sh-preview.shacharm.workers.dev/"
+          fi
+          echo "value=${URL}" >> "$GITHUB_OUTPUT"
+          echo "Deployed Worker URL: ${URL}"
 
       - name: Smoke-test deployed Worker (production only)
         if: needs.verify.outputs.target == 'production'
@@ -316,3 +340,31 @@ jobs:
           done
           echo "::error::Smoke test failed across 3 attempts. Possible CDN cache lag, Worker regression, or direct-deploy bypass of CI."
           exit 1
+
+  # ---------------------------------------------------------------------
+  # WOR-391 — post-deploy live verification
+  # ---------------------------------------------------------------------
+  # After a real deploy (tag-push production OR workflow_dispatch preview),
+  # probe the URL the deploy job just published. These are the
+  # AUTHORITATIVE live tests — they hit the actual deployed bytes, unlike
+  # install-smoke.yml which only tests the local install.sh in the branch.
+
+  url-smoke:
+    name: Live URL smoke (curl|sh)
+    needs: deploy
+    uses: ./.github/workflows/worker-url-smoke.yml
+    with:
+      target_url: ${{ needs.deploy.outputs.worker_url }}
+    permissions:
+      contents: read
+
+  wire-attacks:
+    name: Wire-level attack probes
+    # WOR-374 shipped the probes; WOR-391 owns the trigger model — chain
+    # them post-deploy here.
+    needs: deploy
+    uses: ./.github/workflows/worker-wire-attacks.yml
+    with:
+      target_url: ${{ needs.deploy.outputs.worker_url }}
+    permissions:
+      contents: read

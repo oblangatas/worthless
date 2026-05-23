@@ -20,6 +20,7 @@ Coverage:
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -280,7 +281,10 @@ class TestCollectAliasIssuesUnit:
         issues = _collect_alias_issues({env_file}, set(), _TEST_DB_NAME)
         assert issues == []
 
-    @pytest.mark.skipif(os.getuid() == 0, reason="root bypasses file permissions")
+    @pytest.mark.skipif(
+        sys.platform == "win32" or os.getuid() == 0,
+        reason="chmod 0o000 is a no-op on Windows; root bypasses file permissions on POSIX",
+    )
     def test_permission_denied_env_file_silently_skipped(self, tmp_path: Path) -> None:
         """A .env that cannot be read (OSError) is skipped; no crash, no issue."""
         env_file = tmp_path / ".env"
