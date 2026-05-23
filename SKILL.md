@@ -53,6 +53,7 @@ Worthless scans for **LLM provider API key prefixes only** — currently `openai
 pipx install worthless
 # or: pip install worthless (in a virtualenv)
 # or: curl -sSL worthless.sh | sh
+#     inspect first: curl -sSL 'https://worthless.sh?explain=1' | less
 ```
 
 ### First-Time Setup (the magic way)
