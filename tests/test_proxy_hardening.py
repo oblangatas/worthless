@@ -2311,3 +2311,173 @@ class TestFailClosedSpendAccounting:
             f"Fail-closed: should charge reservation (75), got {tokens}. "
             "Charging 0 on truncated stream lets attackers bypass the spend cap."
         )
+
+
+class TestRequestBodyLimit:
+    """Request body size enforcement before rules evaluation (worthless-dupf.3).
+
+    A request body exceeding WORTHLESS_MAX_REQUEST_BYTES must be rejected with
+    413 before RulesEngine.evaluate() runs — preventing memory exhaustion from
+    an authenticated attacker who sends huge prompt payloads across all enrolled
+    keys simultaneously.
+    """
+
+    @pytest.fixture()
+    async def limited_proxy_app(self, proxy_settings: ProxySettings, repo):
+        """Proxy app with a tiny 1 KB body limit for fast tests."""
+        small_settings = replace(proxy_settings, max_request_bytes=1024)
+        app = create_app(small_settings)
+        db = await aiosqlite.connect(small_settings.db_path)
+        app.state.db = db
+        app.state.repo = repo
+        app.state.httpx_client = httpx.AsyncClient(follow_redirects=False)
+        app.state.rules_engine = RulesEngine(
+            rules=[
+                SpendCapRule(db=db),
+                RateLimitRule(default_rps=proxy_settings.default_rate_limit_rps),
+            ]
+        )
+        yield app
+        await app.state.httpx_client.aclose()
+        await db.close()
+
+    @pytest.fixture()
+    async def limited_proxy_client(self, limited_proxy_app):
+        transport = httpx.ASGITransport(app=limited_proxy_app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            yield client
+
+    async def test_oversized_request_body_rejected_with_413(
+        self, limited_proxy_client, enrolled_alias
+    ):
+        """Body > max_request_bytes → 413 before rules_engine.evaluate()."""
+        alias, shard_a_utf8, _ = enrolled_alias
+        oversized_body = b"x" * 1025  # 1 byte over 1 KB limit
+
+        resp = await limited_proxy_client.post(
+            f"/{alias}/v1/chat/completions",
+            headers={
+                "authorization": f"Bearer {shard_a_utf8}",
+                "content-type": "application/json",
+            },
+            content=oversized_body,
+        )
+
+        assert resp.status_code == 413, (
+            f"Expected 413 for body exceeding limit, got {resp.status_code}. "
+            "Oversized bodies must be rejected before rules evaluation."
+        )
+
+    async def test_rules_not_called_when_body_exceeds_limit(
+        self, limited_proxy_app, limited_proxy_client, enrolled_alias
+    ):
+        """rules_engine.evaluate() must NOT be called when the body is too large.
+
+        The 413 must fire BEFORE the rules gate — otherwise the DoS still hits
+        the expensive rules path before being rejected.
+        """
+        alias, shard_a_utf8, _ = enrolled_alias
+        oversized_body = b"x" * 1025
+
+        evaluate_called = False
+        original_evaluate = limited_proxy_app.state.rules_engine.evaluate
+
+        async def tracking_evaluate(*args, **kwargs):
+            nonlocal evaluate_called
+            evaluate_called = True
+            return await original_evaluate(*args, **kwargs)
+
+        limited_proxy_app.state.rules_engine.evaluate = tracking_evaluate
+
+        resp = await limited_proxy_client.post(
+            f"/{alias}/v1/chat/completions",
+            headers={
+                "authorization": f"Bearer {shard_a_utf8}",
+                "content-type": "application/json",
+            },
+            content=oversized_body,
+        )
+
+        assert resp.status_code == 413
+        assert not evaluate_called, (
+            "rules_engine.evaluate must NOT be called when body exceeds size limit. "
+            "The size guard must fire before the rules gate."
+        )
+
+    @respx.mock
+    async def test_body_at_exact_limit_passes(self, limited_proxy_client, enrolled_alias):
+        """Body exactly at max_request_bytes → request proceeds (not rejected)."""
+        alias, shard_a_utf8, _ = enrolled_alias
+
+        # Build a body exactly 1024 bytes
+        base = b'{"model":"gpt-4o","messages":[],"max_tokens":1}'
+        at_limit = base + b" " * (1024 - len(base))
+        assert len(at_limit) == 1024
+
+        respx.post("https://api.openai.com/v1/chat/completions").mock(
+            return_value=httpx.Response(
+                200,
+                json={"choices": [], "usage": {"total_tokens": 1}},
+            )
+        )
+
+        resp = await limited_proxy_client.post(
+            f"/{alias}/v1/chat/completions",
+            headers={
+                "authorization": f"Bearer {shard_a_utf8}",
+                "content-type": "application/json",
+            },
+            content=at_limit,
+        )
+
+        assert resp.status_code == 200, (
+            f"Body exactly at limit should pass; got {resp.status_code}. "
+            "Limit is exclusive-upper-bound: > limit rejects, == limit passes."
+        )
+
+    def test_default_limit_is_4mb(self, proxy_settings: ProxySettings):
+        """Default max_request_bytes is 4 MB when no env override is set."""
+        assert proxy_settings.max_request_bytes == 4 * 1024 * 1024, (
+            f"Default body limit should be 4 MB, got {proxy_settings.max_request_bytes}. "
+            "A reasonable default prevents memory exhaustion without blocking real requests."
+        )
+
+    def test_limit_configurable_via_env(self, monkeypatch, tmp_db_path: str, fernet_key: bytes):
+        """WORTHLESS_MAX_REQUEST_BYTES env var overrides the default limit."""
+        monkeypatch.setenv("WORTHLESS_MAX_REQUEST_BYTES", "2048")
+        settings = ProxySettings(
+            db_path=tmp_db_path,
+            fernet_key=bytearray(fernet_key),
+            allow_insecure=True,
+        )
+        assert settings.max_request_bytes == 2048, (
+            f"Expected limit=2048 from env, got {settings.max_request_bytes}. "
+            "WORTHLESS_MAX_REQUEST_BYTES must set the body size limit."
+        )
+
+    async def test_chunked_body_over_limit_rejected(self, limited_proxy_client, enrolled_alias):
+        """Chunked transfer (no Content-Length) over limit → 413.
+
+        The guard must count actual bytes read from request.stream(), NOT trust
+        the Content-Length header, which is absent for chunked requests.
+        """
+        alias, shard_a_utf8, _ = enrolled_alias
+
+        # Send content via an async iterator — httpx omits Content-Length for generators
+        async def chunked_payload():
+            yield b"x" * 600  # chunk 1
+            yield b"x" * 600  # chunk 2 — total 1200 > 1024 limit
+
+        resp = await limited_proxy_client.post(
+            f"/{alias}/v1/chat/completions",
+            headers={
+                "authorization": f"Bearer {shard_a_utf8}",
+                "content-type": "application/json",
+            },
+            content=chunked_payload(),
+        )
+
+        assert resp.status_code == 413, (
+            f"Chunked body over limit should return 413, got {resp.status_code}. "
+            "Guard must count stream bytes, not trust Content-Length."
+        )

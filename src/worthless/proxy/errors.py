@@ -87,6 +87,16 @@ def time_window_error_response(
     )
 
 
+def request_too_large_response(limit_bytes: int) -> ErrorResponse:
+    """413 request entity too large — body exceeded WORTHLESS_MAX_REQUEST_BYTES."""
+    message = f"request body exceeds maximum allowed size ({limit_bytes:,} bytes)"
+    return ErrorResponse(
+        status_code=413,
+        body=_openai_error(413, message, "invalid_request_error"),
+        headers={"content-type": "application/json"},
+    )
+
+
 def gateway_error_response(status: int, message: str, provider: str = "openai") -> ErrorResponse:
     """Gateway error (502/504) — upstream connectivity or timeout failure."""
     return ErrorResponse(

@@ -30,7 +30,12 @@ from worthless.adapters.registry import get_adapter
 from worthless.adapters.types import INTERNAL_HEADER_PREFIX
 from worthless.crypto.splitter import reconstruct_key, reconstruct_key_fp, secure_key
 from worthless.proxy.config import DeployMode, ProxySettings
-from worthless.proxy.errors import _error_body, auth_error_response, gateway_error_response
+from worthless.proxy.errors import (
+    _error_body,
+    auth_error_response,
+    gateway_error_response,
+    request_too_large_response,
+)
 from worthless.proxy.metering import (
     StreamingUsageCollector,
     extract_usage_anthropic,
@@ -344,8 +349,26 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
             return _uniform_401()
 
         # Pre-read body ONCE before rules engine (WOR-182: eliminates
-        # Starlette body-caching coupling — rules receive bytes, not stream)
-        body = await request.body()
+        # Starlette body-caching coupling — rules receive bytes, not stream).
+        #
+        # worthless-dupf.3: enforce size limit by counting actual bytes read from
+        # request.stream() — do NOT trust Content-Length (absent for chunked
+        # Transfer-Encoding). Reading in chunks prevents buffering the full body
+        # into memory before the limit check fires.
+        _body_chunks: list[bytes] = []
+        _body_size = 0
+        async for _chunk in request.stream():
+            _body_size += len(_chunk)
+            if _body_size > settings.max_request_bytes:
+                shard_a[:] = b"\x00" * len(shard_a)
+                err = request_too_large_response(settings.max_request_bytes)
+                return Response(
+                    content=err.body,
+                    status_code=err.status_code,
+                    headers=err.headers,
+                )
+            _body_chunks.append(_chunk)
+        body = b"".join(_body_chunks)
 
         # Estimate max tokens for spend-cap reservation (WOR-242).
         # Computed once here so error paths and spend recording can release it.

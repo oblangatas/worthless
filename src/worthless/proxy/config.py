@@ -141,6 +141,11 @@ class ProxySettings:
         default_factory=lambda: float(os.environ.get("WORTHLESS_STREAMING_TIMEOUT", "300.0"))
     )
     allow_insecure: bool = field(default_factory=lambda: _env_bool("WORTHLESS_ALLOW_INSECURE"))
+    max_request_bytes: int = field(
+        default_factory=lambda: int(
+            os.environ.get("WORTHLESS_MAX_REQUEST_BYTES", str(4 * 1024 * 1024))
+        )
+    )
     deploy_mode: DeployMode = field(default_factory=_read_deploy_mode)
     host: str = field(default="")
     trusted_proxies: tuple[str, ...] = field(default_factory=_read_trusted_proxies)
