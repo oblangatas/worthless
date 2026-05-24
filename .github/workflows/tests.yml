@@ -50,7 +50,16 @@ jobs:
           WORTHLESS_SIDECAR_READY_TIMEOUT_SECS: "20"
         run: |
           uv sync --extra dev --extra test --extra mcp
-          uv run pytest --reruns 1 --cov=worthless --cov-report=xml --cov-report=term-missing --cov-fail-under=80 -n auto --dist loadscope -x -m "not docker"
+          # Parallel pass — everything EXCEPT the real-subprocess sidecar/IPC
+          # family. That family (`real_ipc`) crashes xdist workers
+          # nondeterministically when many spawn real sidecars at once
+          # (WOR-582). Coverage is accumulated, not gated here.
+          uv run pytest --reruns 1 --cov=worthless --cov-report=xml --cov-report=term-missing -n auto --dist loadscope -x -m "not docker and not real_ipc"
+          # Serial pass — the quarantined real_ipc family, single-process so
+          # there's no concurrent spawn to crash. `--cov-append` rolls its
+          # coverage into the total; `--cov-fail-under` gates the combined
+          # result. Interim mitigation; root cause tracked in WOR-582.
+          uv run pytest --reruns 1 --cov=worthless --cov-append --cov-report=xml --cov-report=term-missing --cov-fail-under=80 -n0 -m "real_ipc and not docker"
 
       - name: Lint
         env:
