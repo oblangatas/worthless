@@ -27,7 +27,13 @@ from worthless.crypto.splitter import split_key_fp
 from worthless.proxy.app import _ALIAS_RE, _BAD_HEADER_CHARS, _extract_alias_and_path, create_app
 from worthless.proxy.config import DeployMode, ProxySettings
 from worthless.proxy.errors import ErrorResponse, gateway_error_response
-from worthless.proxy.rules import RateLimitRule, RulesEngine, SpendCapRule
+from worthless.proxy.rules import (
+    RateLimitRule,
+    RulesEngine,
+    SpendCapRule,
+    _estimate_input_tokens,
+    _estimate_tokens,
+)
 from worthless.storage.repository import EncryptedShard, StoredShard
 
 
@@ -3087,3 +3093,130 @@ class TestAmbientEnvTrustDisabled:
             "httpx.AsyncClient must be created with trust_env=False to prevent "
             "HTTP_PROXY/HTTPS_PROXY/NO_PROXY env vars from redirecting upstream calls"
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 4a — Input token estimation (worthless-dupf.2)
+# ---------------------------------------------------------------------------
+
+
+class TestInputTokenEstimation:
+    """_estimate_tokens must account for input (messages) cost, not just max_tokens.
+
+    An attacker who sends a huge prompt with max_tokens=1 currently bypasses the
+    spend cap because we only reserve max_tokens=1 token. The combined input+output
+    estimate closes that gap.
+    """
+
+    def test_estimate_tokens_includes_input_from_messages(self):
+        """Output tokens + input tokens are combined in the reservation estimate."""
+        body = json.dumps(
+            {
+                "max_tokens": 100,
+                "messages": [{"role": "user", "content": "A" * 4000}],  # 4000 chars → 1000 tokens
+            }
+        ).encode()
+        estimate = _estimate_tokens(body)
+        # Should be 100 (output) + 1000 (input) = 1100, well above max_tokens=100 alone
+        assert estimate >= 1100, f"Expected combined estimate ≥ 1100, got {estimate}"
+
+    def test_estimate_tokens_large_messages_dominates_tiny_max_tokens(self):
+        """max_tokens=1 + 50k-char messages → reservation reflects input size, not just 1."""
+        messages = [{"role": "user", "content": "X" * 50_000}]
+        body = json.dumps({"max_tokens": 1, "messages": messages}).encode()
+        estimate = _estimate_tokens(body)
+        # 50_000 chars / 4 = 12_500 input tokens; combined = 12_501
+        assert estimate >= 12_000, (
+            f"Input-heavy request must produce estimate >> max_tokens=1, got {estimate}"
+        )
+
+    def test_estimate_tokens_no_messages_falls_back_to_max_tokens(self):
+        """Requests without messages field return only output token estimate."""
+        body = json.dumps({"max_tokens": 500}).encode()
+        assert _estimate_tokens(body) == 500
+
+    def test_estimate_tokens_vision_image_counted(self):
+        """Image blocks contribute a fixed token estimate."""
+        body = json.dumps(
+            {
+                "max_tokens": 100,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": "https://example.com/img.jpg"},
+                            },
+                        ],
+                    }
+                ],
+            }
+        ).encode()
+        estimate = _estimate_tokens(body)
+        # image_url block → 1000 tokens; combined ≥ 1100
+        assert estimate >= 1100, f"Vision request estimate too low: {estimate}"
+
+    def test_estimate_input_tokens_multimodal_text_and_image(self):
+        """Mixed text + image block sums both contributions."""
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "A" * 400},  # 100 tokens
+                    {"type": "image_url", "image_url": {}},  # 1000 tokens
+                ],
+            }
+        ]
+        total = _estimate_input_tokens(messages)
+        assert total >= 1100, f"Mixed content estimate too low: {total}"
+
+    def test_estimate_tokens_empty_messages_zero_input(self):
+        """Empty messages list contributes 0 input tokens."""
+        body = json.dumps({"max_tokens": 200, "messages": []}).encode()
+        assert _estimate_tokens(body) == 200
+
+    async def test_spend_cap_denied_by_input_token_cost(self, tmp_path):
+        """Input token estimation causes the second request to be denied.
+
+        With max_tokens-only estimation (old), the first request reserves 5 tokens
+        → 95 remain for the second request → second is allowed (wrong).
+
+        With combined input+output estimation (new), the first request has a 400-char
+        message (100 input tokens) + max_tokens=5 → estimate=105 → reserves all 100
+        remaining tokens → the second request sees already_reserved=100, total=100 ≥ 100
+        → denied (correct).
+        """
+        db_path = str(tmp_path / "cap_input.db")
+        async with aiosqlite.connect(db_path) as db:
+            from worthless.storage.schema import SCHEMA
+
+            await db.executescript(SCHEMA)
+            # spend_cap=100, spent=0 → all 100 tokens available
+            await db.execute(
+                "INSERT INTO enrollment_config (key_alias, spend_cap) VALUES (?, ?)",
+                ("cap-test", 100),
+            )
+            await db.commit()
+
+            rule = SpendCapRule(db=db)
+
+            # First request: max_tokens=5 but 400-char message → 100 input tokens
+            # Combined estimate=105 → reserves min(105, 100)=100 (all remaining)
+            body1 = json.dumps(
+                {
+                    "max_tokens": 5,
+                    "messages": [{"role": "user", "content": "A" * 400}],
+                }
+            ).encode()
+            result1 = await rule.evaluate("cap-test", object(), body=body1)
+            assert result1 is None, "First request should be allowed (budget available)"
+
+            # Second request: max_tokens=5, no messages → estimate=5
+            # already_reserved=100, spent=0 → 0+100=100 ≥ 100 → DENIED
+            body2 = json.dumps({"max_tokens": 5}).encode()
+            result2 = await rule.evaluate("cap-test", object(), body=body2)
+            assert result2 is not None, (
+                "Second request must be denied — first request's large input consumed "
+                "all remaining budget via combined input+output estimation"
+            )

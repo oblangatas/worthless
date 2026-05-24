@@ -31,19 +31,58 @@ logger = logging.getLogger(__name__)
 _DEFAULT_TOKEN_ESTIMATE: int = 4096
 
 
+def _estimate_input_tokens(messages: list) -> int:
+    """Estimate input token count from a messages list.
+
+    Uses a character-count / 4 heuristic — a lower-bound approximation that
+    avoids importing tiktoken at runtime. Image blocks are estimated at a
+    fixed 1 000 tokens (4 000 chars) to capture vision cost.
+
+    worthless-dupf.2: input tokens are the dominant cost for large-prompt
+    abuse; not counting them lets an attacker bypass the spend cap by sending
+    huge prompts with a tiny max_tokens value.
+    """
+    total_chars = 0
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            total_chars += len(content)
+        elif isinstance(content, list):
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type", "")
+                if btype == "text":
+                    total_chars += len(block.get("text", ""))
+                elif btype in ("image_url", "image"):
+                    # Fixed estimate: ~1 000 tokens per image (4 chars / token)
+                    total_chars += 4_000
+    return total_chars // 4
+
+
 def _estimate_tokens(body: bytes) -> int:
     """Best-effort token reservation estimate from request body.
 
-    Reads ``max_tokens`` from the JSON body.  Falls back to _DEFAULT_TOKEN_ESTIMATE — a
-    conservative upper bound so the spend cap remains a hard limit even
-    when the client omits the field.
+    Combines output tokens (``max_tokens``) with input token cost estimated
+    from the ``messages`` field. Falls back to _DEFAULT_TOKEN_ESTIMATE for
+    the output side when the client omits max_tokens.
+
+    worthless-dupf.2: reserving output tokens only lets an attacker bypass
+    the spend cap by sending huge prompts — input cost goes untracked.
+    Combining both makes the reservation conservative across all request shapes.
     """
     try:
         payload = json.loads(body)
         if isinstance(payload, dict):
             v = payload.get("max_tokens")
-            if isinstance(v, int) and v > 0:
-                return v
+            output_tokens = v if (isinstance(v, int) and v > 0) else _DEFAULT_TOKEN_ESTIMATE
+
+            messages = payload.get("messages")
+            input_tokens = _estimate_input_tokens(messages) if isinstance(messages, list) else 0
+
+            return output_tokens + input_tokens
     except (json.JSONDecodeError, ValueError):
         pass
     return _DEFAULT_TOKEN_ESTIMATE
