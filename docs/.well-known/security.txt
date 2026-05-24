@@ -1,4 +1,4 @@
-Contact: mailto:security@worthless.cloud
+Contact: mailto:security@wless.io
 Expires: 2027-04-15T00:00:00.000Z
 Preferred-Languages: en
-Canonical: https://worthless.cloud/.well-known/security.txt
+Canonical: https://wless.io/.well-known/security.txt

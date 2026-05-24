@@ -11,11 +11,12 @@ function escapeHtml(value) {
     .replaceAll("'", "&#39;");
 }
 
-function renderFeedRows(entries) {
+function renderFeedRows(entries, options = {}) {
+  const hiddenAttrs = options.hidden ? ' tabindex="-1" aria-hidden="true"' : "";
   return entries.map((entry) => {
     const date = entry.date ? `<span class="feed-date">${escapeHtml(entry.date)}</span>` : '<span class="feed-date"></span>';
     const impact = entry.impact ? `<span class="feed-impact">└ ${escapeHtml(entry.impact)}</span>` : "";
-    return `<a href="${escapeHtml(safeHref(entry.href))}" target="_blank" rel="noopener noreferrer" class="feed-row"><span class="feed-src">${escapeHtml(entry.source)}</span><span class="feed-main"><span class="feed-desc">${escapeHtml(entry.desc)}</span>${impact}</span>${date}</a>`;
+    return `<a href="${escapeHtml(safeHref(entry.href))}" target="_blank" rel="noopener noreferrer" class="feed-row"${hiddenAttrs}><span class="feed-src">${escapeHtml(entry.source)}</span><span class="feed-main"><span class="feed-desc">${escapeHtml(entry.desc)}</span>${impact}</span>${date}</a>`;
   }).join("");
 }
 
@@ -47,8 +48,7 @@ function setNewsFeed(entries) {
     return;
   }
 
-  const loopEntries = usableEntries.concat(usableEntries);
-  feed.innerHTML = renderFeedRows(loopEntries);
+  feed.innerHTML = renderFeedRows(usableEntries) + renderFeedRows(usableEntries, { hidden: true });
 }
 
 async function fetchNewsFeed(url) {
