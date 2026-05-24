@@ -92,7 +92,18 @@ jobs:
             echo "::error title=Tag/pyproject drift at tag::pyproject@${LATEST_TAG} = ${PYPROJECT_AT_TAG}, tag = ${LATEST_VERSION}"
             exit 1
           fi
-          echo "OK: PyPI = tag = pyproject@tag = $LATEST_VERSION"
+          # WOR-559: the version install.sh PINS by default (what the default
+          # `curl|sh` actually installs) must equal the latest PUBLISHED
+          # release. The pin is hand-bumped per release like UV_VERSION; this
+          # is the deploy-decoupled guard that fails if a release shipped
+          # without bumping the pin — so new installs never silently lag on an
+          # old version. Reads the current repo install.sh.
+          INSTALL_PIN=$(sed -n 's/^WORTHLESS_VERSION_PIN="\([^"]*\)".*/\1/p' install.sh | head -n1)
+          if [ "$INSTALL_PIN" != "$PYPI_VERSION" ]; then
+            echo "::error title=install.sh pin drift::WORTHLESS_VERSION_PIN = '${INSTALL_PIN}' but latest PyPI = ${PYPI_VERSION}. Bump WORTHLESS_VERSION_PIN in install.sh to ${PYPI_VERSION} — default curl|sh installs are stuck on '${INSTALL_PIN}' until you do."
+            exit 1
+          fi
+          echo "OK: PyPI = tag = pyproject@tag = install.sh pin = $LATEST_VERSION"
 
       # ===== Assertion 2a: worthless.sh content negotiation (curl) ==========
       - name: A2a — worthless.sh curl-UA serves install.sh @ latest tag
@@ -118,6 +129,35 @@ jobs:
             exit 1
           fi
           echo "OK: worthless.sh body sha256 matches install.sh@${LATEST_TAG} and header = ${TAG_HEADER}"
+
+      # ===== Assertion 2c: worthless.sh ?explain=1 audit walkthrough ========
+      - name: A2c — worthless.sh ?explain=1 serves the walkthrough @ latest tag
+        env:
+          LATEST_TAG: ${{ steps.versions.outputs.latest_tag }}
+        run: |
+          set -euo pipefail
+          # The ?explain=1 audit page is what a cautious user reads before
+          # piping to sh. It must (a) be live, (b) byte-match the walkthrough
+          # at the shipped tag, and (c) carry no version literal that has
+          # drifted into a lie (WOR-558). Symmetric with A2a for install.sh.
+          BODY_TMP=$(mktemp)
+          HTTP=$(curl -sSL -A "curl/8.0" -w '%{http_code}' 'https://worthless.sh/?explain=1' -o "$BODY_TMP")
+          if [ "$HTTP" != "200" ]; then
+            echo "::error title=explain endpoint down::worthless.sh/?explain=1 → HTTP ${HTTP}, expected 200"
+            exit 1
+          fi
+          BODY_SHA=$(sha256sum "$BODY_TMP" | awk '{print $1}')
+          REPO_SHA=$(git show "${LATEST_TAG}:workers/worthless-sh/src/walkthrough.txt" | sha256sum | awk '{print $1}')
+          if [ "$BODY_SHA" != "$REPO_SHA" ]; then
+            echo "::error title=Walkthrough drift::?explain=1 body sha256 ${BODY_SHA} != walkthrough.txt@${LATEST_TAG} ${REPO_SHA}"
+            exit 1
+          fi
+          if grep -qE 'worthless==[0-9]|lines? [0-9]|/v[0-9]' "$BODY_TMP"; then
+            echo "::error title=Walkthrough version literal::live ?explain=1 regained a rot-able version literal"
+            grep -nE 'worthless==[0-9]|lines? [0-9]|/v[0-9]' "$BODY_TMP"
+            exit 1
+          fi
+          echo "OK: worthless.sh/?explain=1 → 200, byte-matches walkthrough.txt@${LATEST_TAG}, no version literal"
 
       # ===== Assertion 2b: worthless.sh content negotiation (browser) =======
       - name: A2b — worthless.sh browser-UA → 30x → wless.io
@@ -237,7 +277,7 @@ jobs:
           # Worker deploy lag: last successful run of deploy-worker.yml on a
           # `v*` tag, compared to that tag's creation time. If a tag exists
           # but no deploy ran successfully within the threshold, flag.
-          LAST_DEPLOY=$(gh run list --workflow="Deploy worker (worthless.sh)" --status=success --limit=1 --json updatedAt --jq '.[0].updatedAt' 2>/dev/null || echo "")
+          LAST_DEPLOY=$(gh run list --workflow=deploy-worker.yml --status=success --limit=1 --json updatedAt --jq '.[0].updatedAt' 2>/dev/null || echo "")
           if [ -z "$LAST_DEPLOY" ]; then
             echo "::warning title=Worker deploy-lag check incomplete::Could not query deploy-worker workflow runs. Skipping."
           else

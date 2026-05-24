@@ -39,14 +39,32 @@ from worthless.cli.app import app
 
 
 @pytest.mark.user_flow
-def test_full_dogfood_lock_break_doctor_recover(tmp_path: Path) -> None:
+def test_full_dogfood_lock_break_doctor_recover(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The 2026-04-30 v0.3.2 dogfood scenario, end-to-end.
 
     Pre-HF7: this scenario left the user stuck — ``unlock`` and ``status``
     gave opposite answers and there was no recovery command. This test
     pins the post-HF7 contract: each of the four commands behaves
     correctly across the chain.
+
+    monkeypatch.chdir pins the process cwd to tmp_path so that doctor's
+    speculative cwd/.env scan (which catches stale BASE_URL aliases) reads
+    THIS test's .env rather than whatever cwd a parallel xdist worker
+    may have been left in by a previous test.  After step 3 empties the
+    .env and step 7 purges the DB, the cwd scan finds no BASE_URL entries
+    and step 8 correctly reports "no issues found".
     """
+    # WOR-571: `doctor` is invoked below WITHOUT `--env`, so its
+    # BASE_URL-alias check (`_check_alias_not_in_db`) scans `Path.cwd()/.env`.
+    # Run in-process via CliRunner, that resolves to the pytest worker's CWD —
+    # shared across every test in an xdist worker. A sibling test that leaves a
+    # `.env` with a proxy BASE_URL there made the final "no issues found"
+    # assertion flake (a foreign alias looked like an orphan). Pin CWD to this
+    # test's own tmp_path so doctor only ever sees this test's `.env`.
+    monkeypatch.chdir(tmp_path)
+
     home = tmp_path / ".worthless"
     env_file = tmp_path / ".env"
     env_file.write_text(f"OPENAI_API_KEY={fake_openai_key()}\n")

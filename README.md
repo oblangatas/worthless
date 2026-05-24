@@ -12,6 +12,7 @@ When your `.env` leaks, the keys inside are placeholders. The real key never sit
 
 ```bash
 curl -sSL https://worthless.sh | sh        # fresh machine, no Python needed
+# prefer to read it first?  curl -sSL 'https://worthless.sh?explain=1' | less
 # or, if you already have Python 3.10+:
 pipx install worthless
 ```
@@ -55,7 +56,7 @@ Native-Windows support is tracked in [WOR-237](https://linear.app/plumbusai/issu
 
 ## Versioning
 
-PyPI version, signed git tag (`vX.Y.Z`), and the `X-Worthless-Script-Tag` header on `worthless.sh` are kept aligned — CI fails fast if `pyproject.toml` and the tag disagree. `install.sh` resolves the latest `worthless` from PyPI at install time; pin via `WORTHLESS_VERSION=x.y.z curl -sSL https://worthless.sh | sh`.
+PyPI version, signed git tag (`vX.Y.Z`), and the `X-Worthless-Script-Tag` header on `worthless.sh` are kept aligned — CI fails fast if `pyproject.toml` and the tag disagree. By default `install.sh` installs a pinned `worthless==<version>` — the `WORTHLESS_VERSION_PIN` constant, hand-bumped per release like `UV_VERSION` and kept at the latest *published* release (a CI drift check fails if it falls behind) — **not** PyPI `latest`, so a release compromised *after* yours cannot land on fresh installs. Override with `WORTHLESS_VERSION=x.y.z curl -sSL https://worthless.sh | sh`.
 
 ## Documentation
 

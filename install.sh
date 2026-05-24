@@ -1,6 +1,7 @@
 #!/bin/sh
 # Worthless installer — https://worthless.sh
-# Usage: curl -sSL https://worthless.sh | sh
+# Usage:         curl -sSL https://worthless.sh | sh
+# Inspect first: curl -sSL 'https://worthless.sh?explain=1' | less
 #
 # Exit codes (UX contract):
 #   0   success
@@ -18,15 +19,24 @@ EXIT_INTERNAL=40
 
 UV_VERSION="0.11.7"
 
-# Worthless version: install.sh resolves the latest worthless from PyPI
-# at install time. Override with `WORTHLESS_VERSION=x.y.z curl … | sh` to
-# pin. Pattern matches Ollama, Bun, Deno install scripts. See README
-# "Versioning" section for the rationale.
+# Default worthless version. Hand-bumped per release like UV_VERSION above,
+# kept at the latest version ALREADY published on PyPI — a CI drift check
+# (release-sync-check.yml) fails if it falls behind the latest release.
+# install.sh installs `worthless==$WORTHLESS_VERSION_PIN`, NOT unpinned `latest`.
 #
-# TODO[hardening] worthless-1mg3: planned defense against the PyPI-compromise
-# window — Worker will emit X-Worthless-Recommended-Version header, install.sh
-# will read+pin to it. Until then the env-var escape hatch is the security
-# user's defense; default callers run latest.
+# Why this matters (WOR-559, threat-model F-06/F-49): a `curl|sh` ending in
+# `uv tool install worthless` (unpinned) auto-runs whatever PyPI calls latest.
+# A release compromised AFTER ours (stolen maintainer token) would then get
+# RCE on every fresh install — the highest-impact, previously-undefended hop.
+# Real analogues: ctx (2022), Ultralytics (2024), ua-parser-js (2021).
+#
+# HONEST SCOPE: pinning selects WHICH release; it does NOT verify the package
+# BYTES (`uv tool install` has no --require-hashes). It shrinks the window to
+# "compromise this exact pinned release" instead of "publish any malicious
+# latest", and does NOT defend against a compromised Worker/origin (which
+# would serve a bad script AND a bad pin together). Wheel-hash verification is
+# a tracked follow-up. Override with `WORTHLESS_VERSION=x.y.z curl … | sh`.
+WORTHLESS_VERSION_PIN="0.3.6"
 
 # SHA256 of https://astral.sh/uv/${UV_VERSION}/install.sh — bump with UV_VERSION.
 ASTRAL_INSTALLER_SHA256="efed99618cb5c31e4e36a700ab7c3698e83c0ae0f3c336714043d0f932c8d32c"
@@ -212,85 +222,88 @@ ensure_uv() {
 }
 
 install_or_upgrade_worthless() {
-    # Validate WORTHLESS_VERSION against a PEP-440-ish charset before it
-    # reaches `uv tool install`. Catches:
+    # Resolve the version to install. Precedence:
+    #   1. WORTHLESS_VERSION   — explicit user override
+    #   2. WORTHLESS_VERSION_PIN — baked into this script at release time
+    # There is deliberately NO unpinned `latest` fallback: installing whatever
+    # PyPI calls latest is the F-06/F-49 supply-chain window (a compromised
+    # release auto-runs on every fresh install). If neither is set we FAIL
+    # CLOSED rather than reach for latest.
+    effective_version="${WORTHLESS_VERSION:-$WORTHLESS_VERSION_PIN}"
+
+    # Strip whitespace a mangled checkout or env could smuggle past a bare
+    # `-n` test (e.g. a stray CR from a CRLF edit, or "  ").
+    effective_version="$(printf '%s' "$effective_version" | tr -d '[:space:]')"
+
+    if [ -z "$effective_version" ]; then
+        die "$EXIT_INTERNAL" \
+            "This installer has no pinned worthless version and WORTHLESS_VERSION is unset." \
+            "Refusing to install an unpinned 'latest' from PyPI (supply-chain safety)." \
+            "Pin a version explicitly:" \
+            "  WORTHLESS_VERSION=<version> curl -sSL https://worthless.sh | sh"
+    fi
+
+    # Validate the effective version (whatever its source) against a
+    # PEP-440-ish charset before it reaches `uv tool install`. Catches:
     #   WORTHLESS_VERSION="; rm -rf /"  → shell-metachar (rejected)
     #   WORTHLESS_VERSION="-e ."        → leading-`-` arg-confusion (rejected)
-    #   WORTHLESS_VERSION="latest"      → uv rejects later as non-PEP-440
-    if [ -n "${WORTHLESS_VERSION:-}" ]; then
-        case "$WORTHLESS_VERSION" in
-            ''|*[!0-9A-Za-z.+!-]*)
-                die "$EXIT_INTERNAL" \
-                    "Invalid WORTHLESS_VERSION='${WORTHLESS_VERSION}' — must match [0-9A-Za-z.+!-]+." \
-                    "Example: WORTHLESS_VERSION=<version> curl https://worthless.sh | sh"
-                ;;
-        esac
+    #   WORTHLESS_VERSION="latest"      → rejected here as non-PEP-440
+    # Defense-in-depth also covers a malformed baked pin (we control it, but
+    # the static test guards repo state, not the running script).
+    case "$effective_version" in
+        *[!0-9A-Za-z.+!-]*)
+            die "$EXIT_INTERNAL" \
+                "Invalid worthless version '${effective_version}' — must match [0-9A-Za-z.+!-]+." \
+                "Check WORTHLESS_VERSION, or report a bad release pin at ${DOCS_URL}."
+            ;;
+    esac
+
+    spec="worthless==${effective_version}"
+
+    # WOR-317 idempotency fast-path: if the resolved version is already the
+    # installed one, short-circuit. `uv tool install --force` rewrites tool
+    # metadata even on a no-op, breaking byte-for-byte idempotency for
+    # repeated `curl ... | sh` runs. Keyed on effective_version (pin OR
+    # override) so it fires on the common default path too, not just when the
+    # user sets WORTHLESS_VERSION.
+    installed_ver="$(uv tool list 2>/dev/null \
+        | awk '/^worthless / {sub("^v", "", $2); print $2; exit}')"
+    if [ -n "$installed_ver" ] && [ "$installed_ver" = "$effective_version" ]; then
+        ok "  worthless ${installed_ver} already installed"
+        return 0
     fi
 
-    # Env var pins; otherwise uv resolves the latest worthless from PyPI.
-    spec="worthless${WORTHLESS_VERSION:+==${WORTHLESS_VERSION}}"
-
-    # WOR-317 fast-path: if the requested version is already installed,
-    # short-circuit. `uv tool install` followed by `uv tool upgrade` writes
-    # tool metadata even on a no-op, breaking byte-for-byte idempotency
-    # for repeated `curl ... | sh` runs. This guard keeps re-runs cheap
-    # and deterministic when the user pins WORTHLESS_VERSION (or when CI
-    # bootstraps the same installer twice).
-    if [ -n "${WORTHLESS_VERSION:-}" ]; then
-        installed_ver="$(uv tool list 2>/dev/null \
-            | awk '/^worthless / {sub("^v", "", $2); print $2; exit}')"
-        if [ -n "$installed_ver" ] && [ "$installed_ver" = "$WORTHLESS_VERSION" ]; then
-            ok "  worthless ${installed_ver} already installed"
-            return 0
-        fi
-    fi
-
-    # First run: `uv tool install`. Re-run: that fails with "already installed",
-    # so we fall through to `uv tool upgrade` for an idempotent upgrade path.
+    # Single PINNED install path. `--force` makes it idempotent whether the
+    # box is fresh OR has a different version (a pin bump) — and crucially
+    # keeps the install pinned to $spec. The previous fallback ran bare
+    # `uv tool upgrade worthless`, which resolves PyPI *latest* and silently
+    # re-opened the F-06/F-49 supply-chain window on every re-run (WOR-559
+    # security review). Never call `uv tool upgrade` with no version.
     #
-    # Capture stderr to tempfiles so we can SHOW it on failure. Pre-fix this
+    # Capture stderr to a tempfile so we can SHOW it on failure. Pre-fix this
     # block did `2>&1 >/dev/null` and the user only ever saw a generic "Failed
     # to install" + proxy hint banner — masking the actual uv error (bad
     # version, dep conflict, deleted cwd, disk full, etc.). worthless-nrl1.
-    #
-    # When BOTH install AND upgrade fail (the common real-error path: any
-    # cause that breaks install also breaks upgrade — same resolver, same
-    # network, same disk), only the INSTALL stderr is inlined; upgrade is
-    # surfaced as a one-liner. uv's resolver tracebacks are easily 30+ lines
-    # each — printing both back-to-back pushes the actionable proxy hint
-    # below the fold and buries the real signal. Install error is the
-    # actionable diagnostic ~95% of the time. (brutus catch on PR #148.)
     #
     # `mktemp -t TEMPLATE` portability: BSD treats the arg as a prefix and appends
     # random chars; modern GNU coreutils tolerate a bare prefix but emit a stderr
     # warning. Pass an explicit `.XXXXXX` template so both backends behave
     # quietly. (CodeRabbit catch on PR #148.)
     uv_install_err="$(mktemp 2>/dev/null || mktemp -t worthless-uv-install-err.XXXXXX)"
-    uv_upgrade_err="$(mktemp 2>/dev/null || mktemp -t worthless-uv-upgrade-err.XXXXXX)"
     # POSIX trap REPLACES rather than chains, so re-include ensure_uv's
     # tmpdir cleanup here. Without this, ensure_uv's downloaded installer
     # tmpdir leaks every time install_or_upgrade_worthless runs (the common
     # path for any non-fresh box). `${tmpdir:-}` guards the case where
     # ensure_uv short-circuited (uv already at pinned version → never set
     # tmpdir → `set -u` would barf without the default). (CodeRabbit catch.)
-    # shellcheck disable=SC2064  # expand uv_install_err/uv_upgrade_err NOW; tmpdir resolves at trap-fire time
-    trap "rm -rf \"\${tmpdir:-}\"; rm -f \"$uv_install_err\" \"$uv_upgrade_err\"" EXIT INT TERM
+    # shellcheck disable=SC2064  # expand uv_install_err NOW; tmpdir resolves at trap-fire time
+    trap "rm -rf \"\${tmpdir:-}\"; rm -f \"$uv_install_err\"" EXIT INT TERM
 
-    if uv tool install "$spec" >/dev/null 2>"$uv_install_err"; then
-        :
-    elif uv tool upgrade worthless >/dev/null 2>"$uv_upgrade_err"; then
-        :
-    else
+    if ! uv tool install --force "$spec" >/dev/null 2>"$uv_install_err"; then
         err "Failed to install ${spec}."
         if [ -s "$uv_install_err" ]; then
             printf "\n       uv tool install reported:\n" >&2
             sed 's/^/         /' "$uv_install_err" >&2
-        fi
-        # Don't inline upgrade_err: same root cause as install_err in the
-        # vast majority of cases, and a 30-line repeat just buries the
-        # proxy hint. One-liner is enough to confirm we tried.
-        if [ -s "$uv_upgrade_err" ]; then
-            printf "\n       uv tool upgrade also failed (same root cause likely).\n" >&2
         fi
         printf "\n       If this looks like a network issue:\n" >&2
         proxy_hints

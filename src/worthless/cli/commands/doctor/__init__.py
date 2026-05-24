@@ -537,7 +537,12 @@ def _check_home_mismatch(home: WorthlessHome) -> bool:
 
 
 def _check_alias_not_in_db(home: WorthlessHome, enrollments: list[EnrollmentRecord]) -> bool:
-    """Returns True when a .env BASE_URL references a proxy alias absent from *enrollments*."""
+    """Returns True when a .env BASE_URL references a proxy alias absent from enrollments.
+
+    Scans enrolled .env paths plus the current working directory's .env (when it
+    exists), so users running doctor from their project directory get checked even
+    if the .env path was not explicitly recorded at enrollment time.
+    """
     known_aliases = {e.key_alias for e in enrollments}
     env_paths: set[Path] = {Path(e.env_path) for e in enrollments if e.env_path}
     cwd_env = Path.cwd() / ".env"

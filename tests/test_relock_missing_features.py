@@ -161,23 +161,11 @@ class TestAliasCollisionWarning:
         )
 
     def test_lock_no_warning_when_relocking_same_path(self, tmp_path: Path) -> None:
-        """Test 2 — RED: re-locking the same .env twice must NOT emit a cross-path warning.
+        """Test 2 — GREEN (WOR-504): same-path re-lock must not emit a collision warning.
 
-        This test is RED because Feature 1 is not yet implemented. Once Feature 1
-        lands it must be path-scoped: same-path re-lock is normal and must NOT
-        produce the "already enrolled from /other/path" warning.
-
-        The test asserts the SPECIFIC collision warning phrase that Feature 1 will
-        introduce. Until Feature 1 is written, this assertion cannot pass because:
-        (a) the phrase does not exist yet → this test would trivially pass, which
-            is wrong for a RED test.
-
-        To keep the test genuinely RED we additionally assert that the command
-        emits a "re-lock confirmed same path" / success indicator that does NOT
-        exist in the current code (no per-path confirmation output).
-
-        FAILS today: lock does not emit a per-path confirmation line such as
-        "[OK] re-lock: same .env path" after a re-lock of an already-enrolled key.
+        Feature 1 is now implemented (WOR-504): same-path re-lock emits
+        "[OK] N key(s) still protected." and does NOT produce the cross-path
+        "already enrolled from /other/path" warning.
         """
         home = ensure_home(tmp_path / ".worthless")
         key = fake_openai_key()
@@ -201,14 +189,13 @@ class TestAliasCollisionWarning:
             f"stdout: {result_b.output}\nstderr: {result_b.stderr}"  # type: ignore[union-attr]
         )
 
-        # Feature 1 must emit a same-path re-lock confirmation line.
-        # This line does NOT exist in current code → test stays RED.
+        # Feature 1 (WOR-504): must emit a same-path re-lock confirmation line.
+        # Delivered as "[OK] N key still protected." / "[OK] N keys still protected."
         assert any(
             phrase in combined_lower
-            for phrase in ("re-lock", "same path", "re-enrolled", "updated")
+            for phrase in ("re-lock", "same path", "re-enrolled", "updated", "still protected")
         ), (
-            "Feature 1 must emit a same-path re-lock confirmation after updating the "
-            "alias. Current code never prints such a line → test RED.\n"
+            "Feature 1 must emit a same-path re-lock confirmation.\n"
             f"stdout: {result_b.output}\nstderr: {result_b.stderr}"  # type: ignore[union-attr]
         )
 

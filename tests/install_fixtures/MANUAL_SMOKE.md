@@ -9,12 +9,13 @@ For supply-chain trust roots, see
 ## Pre-flight
 
 - [ ] CI green on `tests.yml`, `install-smoke.yml`, and the Docker integration job for the tagged commit
-- [ ] `UV_VERSION` / `ASTRAL_INSTALLER_SHA256` / `WORTHLESS_VERSION` triplet re-verified (see "Bumping UV_VERSION" below)
+- [ ] `UV_VERSION` / `ASTRAL_INSTALLER_SHA256` triplet re-verified (see "Bumping UV_VERSION" below)
+- [ ] `WORTHLESS_VERSION_PIN` in `install.sh` == latest published PyPI release (bump it when you publish a new release; `release-sync-check.yml` fails if it lags)
 
 ## Personal Mac (current dev machine)
 
 - [ ] Run `curl -sSL https://worthless.sh | sh`
-  - Existing uv: re-run is idempotent (routes to `uv tool upgrade worthless`)
+  - Existing uv: re-run is idempotent (fast-path short-circuits when the pinned version is already installed; otherwise `uv tool install --force worthless==<pin>`)
   - Existing pipx-installed worthless: warns with exit 30 + uninstall command
 - [ ] Verify activation one-liner matches `$SHELL`
 - [ ] After activation, `worthless --version` works

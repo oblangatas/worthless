@@ -963,6 +963,41 @@ class TestCrossConfigConsistency:
 # ------------------------------------------------------------------
 
 
+class TestInstallPinDriftCheck:
+    """WOR-559 — release-sync-check.yml fails when install.sh's default pin
+    falls behind the latest published PyPI release. This deploy-decoupled
+    drift guard replaces the deploy-time pin gate (Option B: pin = latest
+    published, hand-bumped like UV_VERSION)."""
+
+    @pytest.fixture(scope="class")
+    def release_sync_text(self) -> str:
+        return (REPO_ROOT / ".github" / "workflows" / "release-sync-check.yml").read_text(
+            encoding="utf-8"
+        )
+
+    def test_drift_check_compares_pin_to_pypi(self, release_sync_text: str):
+        assert "WORTHLESS_VERSION_PIN" in release_sync_text, (
+            "release-sync-check must read the install.sh pin."
+        )
+        assert "INSTALL_PIN" in release_sync_text and "PYPI_VERSION" in release_sync_text, (
+            "drift check must compare the install.sh pin against the latest PyPI version."
+        )
+
+    def test_no_deploy_time_pin_gate(self):
+        """Option B: no deploy-time gate. No verify-pin script, and
+        deploy-worker.yml must not block on pin==tag or PyPI availability."""
+        assert not (REPO_ROOT / ".github" / "scripts" / "verify-pin.sh").exists(), (
+            "verify-pin.sh deploy gate was removed in favour of the drift check."
+        )
+        deploy = (REPO_ROOT / ".github" / "workflows" / "deploy-worker.yml").read_text(
+            encoding="utf-8"
+        )
+        assert "verify-pin.sh" not in deploy
+        assert "pypi.org/pypi/worthless/" not in deploy, (
+            "no PyPI-availability wait — the pin is always already published."
+        )
+
+
 class TestEdgeCaseAwareness:
     """Tests that document what MUST be present -- catch regressions if removed."""
 

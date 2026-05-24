@@ -11,14 +11,132 @@ from __future__ import annotations
 from pathlib import Path
 
 from tests._install_helpers import (
+    EXIT_INTERNAL,
     EXIT_NETWORK,
     EXIT_PIPX_CONFLICT,
     EXIT_PLATFORM,
     INSTALL_SH,
+    install_sh_with_pin,
+    read_install_pin,
     run_install,
     write_happy_path_stubs,
     write_stub,
 )
+
+
+# ---------------------------------------------------------------------------
+# WOR-559: default install pins a baked version (never unpinned `latest`)
+# ---------------------------------------------------------------------------
+
+
+def test_default_install_pins_baked_version(tmp_path: Path) -> None:
+    """With no WORTHLESS_VERSION, install.sh must install `worthless==<pin>`,
+    never bare `worthless` (which would resolve PyPI latest — F-06/F-49) and
+    never via `uv tool upgrade` (also resolves latest)."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_happy_path_stubs(bin_dir)
+
+    result = run_install(bin_dir)
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+
+    pin = read_install_pin()
+    log = (tmp_path / "uv-invocations.log").read_text()
+    assert f"tool install --force worthless=={pin}" in log, (
+        f"default install must pin to worthless=={pin}.\nuv log:\n{log}"
+    )
+    assert "tool upgrade" not in log, (
+        "must not run bare `uv tool upgrade` — it resolves PyPI latest and "
+        f"re-opens the supply-chain window on re-runs.\nuv log:\n{log}"
+    )
+
+
+def test_user_override_beats_pin(tmp_path: Path) -> None:
+    """WORTHLESS_VERSION overrides the baked pin."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_happy_path_stubs(bin_dir)
+
+    result = run_install(bin_dir, env_extra={"WORTHLESS_VERSION": "9.9.9"})
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+
+    log = (tmp_path / "uv-invocations.log").read_text()
+    assert "worthless==9.9.9" in log, f"override ignored.\nuv log:\n{log}"
+    assert f"worthless=={read_install_pin()}" not in log, (
+        f"baked pin must not also be installed when overridden.\nuv log:\n{log}"
+    )
+
+
+def test_empty_pin_fails_closed(tmp_path: Path) -> None:
+    """An installer with no baked pin AND no override must FAIL CLOSED with an
+    internal error — never silently install latest."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_happy_path_stubs(bin_dir)
+    patched = install_sh_with_pin(tmp_path, "")
+
+    result = run_install(bin_dir, install_sh=patched)
+
+    assert result.returncode == EXIT_INTERNAL, (
+        f"empty pin must fail closed with exit {EXIT_INTERNAL}, "
+        f"got {result.returncode}\nstderr: {result.stderr}"
+    )
+    assert "unpinned" in result.stderr.lower(), (
+        f"must explain it refuses unpinned latest.\nstderr: {result.stderr}"
+    )
+    log_path = tmp_path / "uv-invocations.log"
+    log = log_path.read_text() if log_path.exists() else ""
+    assert "tool install" not in log, (
+        f"must not attempt any install on the fail-closed path.\nuv log:\n{log}"
+    )
+
+
+def test_whitespace_only_pin_fails_closed(tmp_path: Path) -> None:
+    """A pin that is whitespace-only (e.g. a CRLF-mangled checkout) must not
+    slip past the `-n` guard — it trims to empty and fails closed."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_happy_path_stubs(bin_dir)
+    patched = install_sh_with_pin(tmp_path, "   ")
+
+    result = run_install(bin_dir, install_sh=patched)
+    assert result.returncode == EXIT_INTERNAL, (
+        f"whitespace pin must fail closed, got {result.returncode}\nstderr: {result.stderr}"
+    )
+
+
+def test_invalid_pin_rejected(tmp_path: Path) -> None:
+    """A malformed baked pin (shell metacharacters) is rejected before it can
+    reach `uv tool install`."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_happy_path_stubs(bin_dir)
+    patched = install_sh_with_pin(tmp_path, "; rm -rf /")
+
+    result = run_install(bin_dir, install_sh=patched)
+    assert result.returncode == EXIT_INTERNAL, (
+        f"malformed pin must be rejected, got {result.returncode}\nstderr: {result.stderr}"
+    )
+    assert "invalid" in result.stderr.lower()
+
+
+def test_leading_dash_pin_is_not_arg_injection(tmp_path: Path) -> None:
+    """A pin starting with `-` PASSES the PEP-440 charset (which allows `-`),
+    so the charset is NOT what stops arg-injection — the `worthless==` prefix
+    is. A value like `-rf` must reach uv glued to the package name
+    (`worthless==-rf`), never as a standalone `-rf` flag. Lock the prefix in
+    so a future refactor that drops it gets caught here."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_happy_path_stubs(bin_dir)
+    patched = install_sh_with_pin(tmp_path, "-rf")
+
+    run_install(bin_dir, install_sh=patched)
+    log = (tmp_path / "uv-invocations.log").read_text()
+    assert "--force worthless==-rf" in log, (
+        f"pin must be passed as `worthless==<pin>`, never a standalone "
+        f"argument uv could interpret as a flag.\nuv log:\n{log}"
+    )
 
 
 def test_windows_native_exits_20_with_link(tmp_path: Path) -> None:
@@ -209,17 +327,14 @@ def test_success_with_persistent_rc_but_missing_parent_path_says_open_terminal(
 # ---------------------------------------------------------------------------
 
 
-def _failing_uv_stub(install_stderr: str = "", upgrade_stderr: str = "") -> str:
-    """Build a uv stub that fails BOTH install AND upgrade with the given stderr."""
+def _failing_uv_stub(install_stderr: str = "") -> str:
+    """Build a uv stub whose `tool install` fails with the given stderr."""
     return f"""case "$1" in
   --version) echo "uv 0.11.7" ;;
   tool) shift; case "$1" in
-    list) ;;  # empty → no fast-path; force install+upgrade attempts
+    list) ;;  # empty → fast-path miss; forces the install attempt
     install)
       printf '%b' {install_stderr!r} >&2
-      exit 1 ;;
-    upgrade)
-      printf '%b' {upgrade_stderr!r} >&2
       exit 1 ;;
     *) echo "uv tool: unhandled: $*" >&2; exit 1 ;;
   esac ;;
@@ -241,7 +356,6 @@ def test_install_failure_surfaces_uv_stderr(tmp_path: Path) -> None:
         "uv",
         _failing_uv_stub(
             install_stderr="× No solution found when resolving dependencies\n",
-            upgrade_stderr="× package not installed\n",
         ),
     )
 
@@ -265,49 +379,6 @@ def test_install_failure_surfaces_uv_stderr(tmp_path: Path) -> None:
     assert "HTTPS_PROXY" in result.stderr
 
 
-def test_install_failure_dual_skips_upgrade_block(tmp_path: Path) -> None:
-    """When BOTH install AND upgrade fail with non-empty stderrs, only the
-    install stderr is inlined. Upgrade is summarized as a one-liner — uv's
-    resolver tracebacks are easily 30+ lines each, and printing both
-    back-to-back buries the actionable proxy hint below the fold. The install
-    error is the actionable diagnostic ~95% of the time; upgrade is just a
-    retry that fails for the same root cause. (worthless-nrl1, brutus catch.)
-    """
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    write_stub(bin_dir, "uname", "echo Darwin")
-    write_stub(bin_dir, "sw_vers", 'echo "14.5"')
-    write_stub(
-        bin_dir,
-        "uv",
-        _failing_uv_stub(
-            install_stderr="× No solution found when resolving dependencies\n",
-            upgrade_stderr="× package not installed sentinel-do-not-print\n",
-        ),
-    )
-
-    result = run_install(bin_dir)
-    stderr = result.stderr
-
-    assert result.returncode == EXIT_NETWORK
-    # Install stderr is inlined.
-    assert "No solution found" in stderr
-    assert "uv tool install reported:" in stderr
-    # Upgrade stderr is NOT inlined — only a one-liner acknowledging it failed.
-    assert "sentinel-do-not-print" not in stderr, (
-        f"upgrade stderr must NOT be inlined when install stderr is — "
-        f"30 lines of redundant resolver output buries the proxy hint.\nstderr: {stderr}"
-    )
-    assert "uv tool upgrade reported:" not in stderr, (
-        f"`uv tool upgrade reported:` block must be suppressed when install "
-        f"stderr already covers the same root cause.\nstderr: {stderr}"
-    )
-    assert "uv tool upgrade also failed" in stderr, (
-        f"user must still know upgrade was attempted — show a one-liner "
-        f"so the absence of the upgrade block isn't mysterious.\nstderr: {stderr}"
-    )
-
-
 def test_install_failure_proxy_hint_is_secondary(tmp_path: Path) -> None:
     """The proxy hint must come AFTER uv's stderr, not before — uv's actual
     error is the primary diagnostic; proxy is the fallback suggestion.
@@ -322,7 +393,6 @@ def test_install_failure_proxy_hint_is_secondary(tmp_path: Path) -> None:
         "uv",
         _failing_uv_stub(
             install_stderr="× No solution found\n",
-            upgrade_stderr="× package not installed\n",
         ),
     )
 
@@ -357,7 +427,7 @@ def test_install_failure_empty_stderr_still_shows_banner(tmp_path: Path) -> None
     write_stub(
         bin_dir,
         "uv",
-        _failing_uv_stub(install_stderr="", upgrade_stderr=""),
+        _failing_uv_stub(install_stderr=""),
     )
 
     result = run_install(bin_dir)
@@ -370,17 +440,6 @@ def test_install_failure_empty_stderr_still_shows_banner(tmp_path: Path) -> None
     assert "uv tool install reported:" not in result.stderr, (
         f"empty-stderr path must not show an empty 'uv tool install reported:' "
         f"block — that's noise, not signal.\nstderr: {result.stderr}"
-    )
-    assert "uv tool upgrade reported:" not in result.stderr, (
-        f"empty-stderr path must not show an empty 'uv tool upgrade reported:' "
-        f"block.\nstderr: {result.stderr}"
-    )
-    # Empty upgrade stderr → no "upgrade also failed" one-liner either.
-    # No file content means we can't be sure upgrade was even attempted in
-    # a way that produced output; better to stay silent than confuse.
-    assert "uv tool upgrade also failed" not in result.stderr, (
-        f"empty-stderr path must not show the upgrade one-liner; reserve "
-        f"it for the case where there IS suppressed content.\nstderr: {result.stderr}"
     )
 
 
@@ -429,6 +488,6 @@ def test_install_trap_preserves_ensure_uv_tmpdir_cleanup() -> None:
         f"tmpdir cleanup — POSIX trap REPLACES, must chain explicitly. "
         f"got: {trap_line!r}"
     )
-    assert "uv_install_err" in trap_line and "uv_upgrade_err" in trap_line, (
-        f"trap must clean BOTH uv stderr tempfiles. got: {trap_line!r}"
+    assert "uv_install_err" in trap_line, (
+        f"trap must clean the uv stderr tempfile. got: {trap_line!r}"
     )

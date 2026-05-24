@@ -20,6 +20,7 @@ Coverage:
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -65,8 +66,9 @@ class TestLockHomeMismatchWarning:
             env={"WORTHLESS_HOME": str(home.base_dir)},
         )
         assert result.exit_code == 0, result.output
-        assert "Warning: using non-default home" in result.output
-        assert "WORTHLESS_HOME is set" in result.output
+        # Warning is routed to stderr (typer.echo(..., err=True)); result.output is stdout.
+        assert "Warning: using non-default home" in result.stderr
+        assert "WORTHLESS_HOME is set" in result.stderr
 
     def test_lock_silent_when_default_home(self, tmp_path: Path, monkeypatch) -> None:
         """When WORTHLESS_HOME is NOT set, lock produces no home warning."""
@@ -77,7 +79,7 @@ class TestLockHomeMismatchWarning:
         env_file.write_text(f"OPENAI_API_KEY={fake_openai_key()}\n")
         result = runner.invoke(app, ["lock", "--env", str(env_file)])
         assert result.exit_code == 0, result.output
-        assert "WORTHLESS_HOME is set" not in result.output
+        assert "WORTHLESS_HOME is set" not in (result.output + (result.stderr or ""))
 
     def test_lock_no_warning_on_failed_lock(self, tmp_path: Path) -> None:
         """When lock fails (missing .env), the non-default-home warning is never printed.
@@ -94,7 +96,7 @@ class TestLockHomeMismatchWarning:
             env={"WORTHLESS_HOME": str(tmp_path / ".worthless")},
         )
         assert result.exit_code != 0
-        assert "WORTHLESS_HOME is set" not in result.output
+        assert "WORTHLESS_HOME is set" not in (result.output + (result.stderr or ""))
 
 
 # ---------------------------------------------------------------------------
@@ -280,7 +282,10 @@ class TestCollectAliasIssuesUnit:
         issues = _collect_alias_issues({env_file}, set(), _TEST_DB_NAME)
         assert issues == []
 
-    @pytest.mark.skipif(os.getuid() == 0, reason="root bypasses file permissions")
+    @pytest.mark.skipif(
+        sys.platform == "win32" or os.getuid() == 0,
+        reason="chmod 0o000 is a no-op on Windows; root bypasses file permissions on POSIX",
+    )
     def test_permission_denied_env_file_silently_skipped(self, tmp_path: Path) -> None:
         """A .env that cannot be read (OSError) is skipped; no crash, no issue."""
         env_file = tmp_path / ".env"

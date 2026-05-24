@@ -182,8 +182,8 @@ class TestLockUx:
         assert env_with_openai.name in combined, (
             f"success message did not reference {env_with_openai.name}:\n{combined}"
         )
-        # Count is still surfaced.
-        assert "1 key(s)" in combined, f"count missing from success:\n{combined}"
+        # Count is still surfaced — runtime plural: "1 key split between …"
+        assert "1 key split between" in combined, f"count missing from success:\n{combined}"
 
     def test_lock_protect_message_names_each_key(
         self, home_dir: WorthlessHome, env_with_openai: Path

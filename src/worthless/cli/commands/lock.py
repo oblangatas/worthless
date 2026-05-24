@@ -10,6 +10,7 @@ import re
 import stat
 import sys
 from dataclasses import dataclass
+from typing import NamedTuple
 from pathlib import Path
 
 import typer
@@ -19,7 +20,7 @@ from worthless.cli.bootstrap import WorthlessHome, acquire_lock, get_home
 from worthless.cli.code_scanner import scan_for_hardcoded_provider_urls
 from worthless.cli.commands.scan import _format_code_findings_human
 from worthless.cli.process import resolve_port
-from worthless.cli.console import get_console
+from worthless.cli.console import WorthlessConsole, get_console
 from worthless.cli.scanner import scan_source_for_hardcoded_provider_urls
 from worthless.cli.dotenv_rewriter import (
     rewrite_env_keys,
@@ -203,7 +204,7 @@ def _build_verify_hook(planned: list[_PlannedUpdate]):
     return _hook
 
 
-async def _filter_unprotected_candidates(
+async def _select_unlocked_keys(
     repo: ShardRepository,
     scanned: list[tuple[str, str, str]],
     enrollments: list,
@@ -249,7 +250,11 @@ async def _filter_unprotected_candidates(
                 )
                 still_protected = True
                 break
-            except (ShardTamperedError, ValueError, KeyError):
+            except (ShardTamperedError, ValueError, KeyError, UnicodeDecodeError, IndexError):
+                # UnicodeDecodeError: corrupt UTF-8 shard bytes in DB row.
+                # IndexError: mismatched shard lengths past the explicit check.
+                # Both are safe-fail — treat the enrollment as not still-protected
+                # and let the caller re-lock the key.
                 continue
             finally:
                 zero_buf(shard_a)
@@ -789,6 +794,42 @@ def _write_lock_sentinel(
         logger.warning("sentinel write failed unexpectedly: %s", exc)
 
 
+def _print_lock_result(
+    console: WorthlessConsole,
+    fresh_count: int,
+    relock_count: int,
+    env_path: Path,
+    home_base_dir: Path,
+) -> None:
+    """Emit the post-lock user-facing summary (called only when quiet=False)."""
+    if fresh_count or relock_count:
+        if fresh_count:
+            # [OK] text prefix is the accessibility carrier — color/glyph
+            # reinforce but are never the sole signal (monochrome, CI logs,
+            # screen readers).
+            noun = "key" if fresh_count == 1 else "keys"
+            console.print_success(
+                f"[OK] {fresh_count} {noun} split between this machine and "
+                f"{_shard_b_storage_label()} — {env_path.name} no longer contains "
+                f"a usable secret."
+            )
+        if relock_count:
+            noun = "key" if relock_count == 1 else "keys"
+            console.print_success(f"[OK] {relock_count} {noun} still protected.")
+        env_home = os.environ.get("WORTHLESS_HOME")
+        if env_home and home_base_dir.resolve() != (Path.home() / ".worthless").resolve():
+            typer.echo(
+                f"Warning: using non-default home {home_base_dir} (WORTHLESS_HOME is set)", err=True
+            )
+        if fresh_count:
+            console.print_hint(
+                "Next: run `worthless wrap <command>` or `worthless up` for daemon mode"
+            )
+        _maybe_prompt_code_scan(Path.cwd())
+    else:
+        console.print_warning("No unprotected API keys found.")
+
+
 def _lock_keys(
     env_path: Path,
     home: WorthlessHome,
@@ -847,7 +888,12 @@ def _lock_keys(
     if not quiet:
         console.print_hint(f"Scanning {env_path} for API keys...")
 
-    async def _lock_async() -> tuple[int, bool, bool]:
+    class _LockResult(NamedTuple):
+        total: int
+        fresh_count: int
+        partial_failure: bool
+
+    async def _lock_async() -> _LockResult:
         from dotenv import dotenv_values  # noqa: PLC0415 — local import keeps test surface tight
 
         async with open_repo(home) as repo:
@@ -856,26 +902,17 @@ def _lock_keys(
             env_str = str(env_path.resolve())
             all_enrollments = await repo.list_enrollments()
 
-            scanned = await _filter_unprotected_candidates(
+            raw_scanned = scan_env_keys(env_path)
+            scanned = await _select_unlocked_keys(
                 repo,
-                scan_env_keys(env_path),
+                raw_scanned,
                 all_enrollments,
                 env_str,
             )
             if not scanned:
-                # Same-path re-lock: .env has already-locked keys. Emit a
-                # confirmation so the user knows the enrollment is up to date.
-                same_path = [e for e in all_enrollments if e.env_path == env_str]
-                if same_path and not quiet:
-                    aliases_str = ", ".join(sorted({e.key_alias for e in same_path}))
-                    console.print_hint(
-                        f"Re-lock: {aliases_str} already up to date (same path, no changes needed)."
-                    )
-                    return 0, False, True  # suppress the outer "No unprotected" message
-                return 0, False, False
+                return _LockResult(total=len(raw_scanned), fresh_count=0, partial_failure=False)
 
-            # 8rqs Phase 7: snapshot the full .env so _pass1 can read existing
-            # *_BASE_URL values and pull them into the DB row.
+            # Snapshot .env so _pass1 can pull *_BASE_URL values into the DB row.
             env_values = dict(dotenv_values(env_path))
 
             candidates = [
@@ -898,7 +935,7 @@ def _lock_keys(
                     repo, candidates, env_str, token_budget_daily, planned, env_values
                 )
                 if not planned:
-                    return 0, False, False
+                    return _LockResult(total=0, fresh_count=0, partial_failure=False)
                 _batch_rewrite(env_path, planned, keys_only, existing_env_keys)
                 # Phase 2.b: OpenClaw magic. Per L1 in
                 # engineering/research/openclaw-WOR-431-phase-2-spec.md, this
@@ -907,7 +944,10 @@ def _lock_keys(
                 # partial_failure=True so the caller can raise typer.Exit(73)
                 # AFTER lock-core's .env/DB writes are fully committed.
                 partial_failure = _apply_openclaw(planned, console, quiet, home)
-                return len(planned), partial_failure, False
+                fresh_count = sum(1 for p in planned if p.was_fresh_enroll)
+                return _LockResult(
+                    total=len(planned), fresh_count=fresh_count, partial_failure=partial_failure
+                )
             except Exception:
                 if planned:
                     unwind_errors = await _compensating_unwind(repo, planned)
@@ -921,38 +961,16 @@ def _lock_keys(
                 for p in planned:
                     p.zero()
 
-    count, partial_failure, suppress_no_keys = asyncio.run(_lock_async())
+    result = asyncio.run(_lock_async())
+    relock_count = result.total - result.fresh_count
 
-    if count and env_path.exists():
+    if result.fresh_count and env_path.exists():
         current = env_path.stat().st_mode
         if current & (stat.S_IRWXG | stat.S_IRWXO):
             env_path.chmod(current & ~(stat.S_IRWXG | stat.S_IRWXO))
 
     if not quiet:
-        if count:
-            # Storytelling shape (UX P1): tell the user keys are split
-            # between this machine and the OS keystore, name the .env so
-            # they know which file is now safe.
-            # Trust-fix accessibility (2026-05-08 verification gauntlet):
-            # lead with literal ``[OK]`` text prefix as the carrier for
-            # monochrome terminals + screen readers + CI log scrapers
-            # (color/glyph reinforce but is never the carrier).
-            console.print_success(
-                f"[OK] {count} key(s) split between this machine and "
-                f"{_shard_b_storage_label()} — {env_path.name} no longer contains "
-                f"a usable secret."
-            )
-            env_home = os.environ.get("WORTHLESS_HOME")
-            if env_home and home.base_dir.resolve() != (Path.home() / ".worthless").resolve():
-                typer.echo(
-                    f"Warning: using non-default home {home.base_dir} (WORTHLESS_HOME is set)"
-                )
-            console.print_hint(
-                "Next: run `worthless wrap <command>` or `worthless up` for daemon mode"
-            )
-            _maybe_prompt_code_scan(Path.cwd())
-        elif not suppress_no_keys:
-            console.print_warning("No unprotected API keys found.")
+        _print_lock_result(console, result.fresh_count, relock_count, env_path, home.base_dir)
 
     # Trust-fix (2026-05-08 verification gauntlet): when OpenClaw was
     # detected on this host AND the integration stage failed, the user is
@@ -961,10 +979,10 @@ def _lock_keys(
     # lock-core writes have committed (L1 binding contract preserved).
     # Exit code 73 = EX_CANTCREAT (POSIX), distinguishable from 1.
     # The [FAIL] block is already printed by _apply_openclaw.
-    if partial_failure:
+    if result.partial_failure:
         raise typer.Exit(code=73)
 
-    return count
+    return result.fresh_count + relock_count
 
 
 def _enroll_single(

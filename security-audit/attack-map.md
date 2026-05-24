@@ -242,11 +242,19 @@ Severity: High
 
 Attacker goal: get code running on operator, developer, or agent hosts.
 
+> Detailed surface-by-surface map of the `curl … | sh` front door (each
+> control + residual gap, with cited real-world precedents) lives in
+> [`threat-model-worthless-sh.md`](threat-model-worthless-sh.md). The
+> `worthless` PyPI package is now version-pinned by default (WOR-559),
+> closing the unpinned-`latest` auto-install vector.
+
 Why it works:
 
 - Docs recommend `curl ... | sh`.
 - MCP install uses `npx -y` without pinning or verification.
-- Dependencies are not locked for reproducible, verified installs.
+- The `worthless` package version is pinned by default (WOR-559), but the
+  wheel is not yet hash-verified, and other dependencies are not locked for
+  reproducible, verified installs.
 
 Likely chain:
 
