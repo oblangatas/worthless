@@ -456,8 +456,35 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
                     await rules_engine.release_spend_reservation(alias, _spend_reservation)
                     return _make_gateway_response(502, "bad gateway")
 
+            # worthless-dupf.5: fast reject when upstream declares a body that
+            # exceeds our buffer cap. Check Content-Length BEFORE relay_response
+            # so we never call aread() on a known-oversized response.
+            # Skip SSE (text/event-stream) — those are unbuffered streams.
+            _upstream_ct = upstream_resp.headers.get("content-type", "").split(";")[0].strip()
+            if _upstream_ct != "text/event-stream":
+                _cl_str = upstream_resp.headers.get("content-length", "")
+                if _cl_str:
+                    try:
+                        _cl_val = int(_cl_str)
+                        if _cl_val > settings.max_response_bytes:
+                            await upstream_resp.aclose()
+                            await rules_engine.release_spend_reservation(alias, _spend_reservation)
+                            return _make_gateway_response(502, "upstream response too large")
+                    except ValueError:
+                        pass  # malformed Content-Length — let relay_response handle it
+
             # Relay response (key_buf is zeroed after secure_key exits)
             adapter_resp = await adapter.relay_response(upstream_resp)
+
+            # worthless-dupf.5 (post-read): reject decompressed bodies that
+            # exceed the cap even if Content-Length looked fine (gzip bomb).
+            # Applies only to non-streaming; streaming bodies are chunked.
+            if (
+                not adapter_resp.is_streaming
+                and len(adapter_resp.body) > settings.max_response_bytes
+            ):
+                await rules_engine.release_spend_reservation(alias, _spend_reservation)
+                return _make_gateway_response(502, "upstream response too large")
 
             clean_headers = _strip_worthless_headers(adapter_resp.headers)
             provider = encrypted.provider

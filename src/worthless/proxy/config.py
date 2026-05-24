@@ -146,6 +146,11 @@ class ProxySettings:
             os.environ.get("WORTHLESS_MAX_REQUEST_BYTES", str(4 * 1024 * 1024))
         )
     )
+    max_response_bytes: int = field(
+        default_factory=lambda: int(
+            os.environ.get("WORTHLESS_MAX_RESPONSE_BYTES", str(8 * 1024 * 1024))
+        )
+    )
     deploy_mode: DeployMode = field(default_factory=_read_deploy_mode)
     host: str = field(default="")
     trusted_proxies: tuple[str, ...] = field(default_factory=_read_trusted_proxies)

@@ -2481,3 +2481,206 @@ class TestRequestBodyLimit:
             f"Chunked body over limit should return 413, got {resp.status_code}. "
             "Guard must count stream bytes, not trust Content-Length."
         )
+
+
+class TestResponseBufferCap:
+    """Non-SSE upstream response buffering cap (worthless-dupf.5).
+
+    A huge or gzip-bomb upstream response must be rejected with 502 before
+    the decompressed body exhausts proxy memory.  The cap applies only to
+    non-streaming responses (is_streaming=False); SSE streams are exempt.
+    """
+
+    @pytest.fixture()
+    async def small_resp_limit_app(self, proxy_settings: ProxySettings, repo):
+        """Proxy app with a 512-byte response body limit for fast tests."""
+        small_settings = replace(proxy_settings, max_response_bytes=512)
+        app = create_app(small_settings)
+        db = await aiosqlite.connect(small_settings.db_path)
+        app.state.db = db
+        app.state.repo = repo
+        app.state.httpx_client = httpx.AsyncClient(follow_redirects=False)
+        app.state.rules_engine = RulesEngine(
+            rules=[
+                SpendCapRule(db=db),
+                RateLimitRule(default_rps=proxy_settings.default_rate_limit_rps),
+            ]
+        )
+        yield app
+        await app.state.httpx_client.aclose()
+        await db.close()
+
+    @pytest.fixture()
+    async def small_resp_limit_client(self, small_resp_limit_app):
+        transport = httpx.ASGITransport(app=small_resp_limit_app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            yield client
+
+    @respx.mock
+    async def test_non_sse_response_over_limit_rejected_with_502(
+        self, small_resp_limit_client, enrolled_alias
+    ):
+        """Upstream non-SSE body > max_response_bytes → proxy returns 502.
+
+        A large upstream response (real or decompressed from a gzip bomb)
+        must be rejected before the proxy forwards it, preventing OOM.
+        """
+        alias, shard_a_utf8, _ = enrolled_alias
+        big_body = b"x" * 513  # 1 byte over 512-byte limit
+
+        respx.post("https://api.openai.com/v1/chat/completions").mock(
+            return_value=httpx.Response(
+                200,
+                content=big_body,
+                headers={"content-type": "application/json"},
+            )
+        )
+
+        resp = await small_resp_limit_client.post(
+            f"/{alias}/v1/chat/completions",
+            headers={
+                "authorization": f"Bearer {shard_a_utf8}",
+                "content-type": "application/json",
+            },
+            content=b'{"model": "gpt-4o", "messages": [], "max_tokens": 10}',
+        )
+
+        assert resp.status_code == 502, (
+            f"Expected 502 for oversized upstream response, got {resp.status_code}. "
+            "The proxy must not forward or buffer huge upstream responses."
+        )
+
+    @respx.mock
+    async def test_non_sse_response_content_length_over_limit_rejected(
+        self, small_resp_limit_client, enrolled_alias
+    ):
+        """Content-Length header > max_response_bytes → 502 before body is buffered.
+
+        When the upstream declares a body that would exceed the limit, the
+        proxy must reject immediately without calling aread() on the full body.
+        """
+        alias, shard_a_utf8, _ = enrolled_alias
+        declared_big = 513  # > 512 limit
+
+        respx.post("https://api.openai.com/v1/chat/completions").mock(
+            return_value=httpx.Response(
+                200,
+                content=b"x" * declared_big,
+                headers={
+                    "content-type": "application/json",
+                    "content-length": str(declared_big),
+                },
+            )
+        )
+
+        resp = await small_resp_limit_client.post(
+            f"/{alias}/v1/chat/completions",
+            headers={
+                "authorization": f"Bearer {shard_a_utf8}",
+                "content-type": "application/json",
+            },
+            content=b'{"model": "gpt-4o", "messages": [], "max_tokens": 10}',
+        )
+
+        assert resp.status_code == 502, (
+            f"Expected 502 when Content-Length exceeds limit, got {resp.status_code}. "
+            "Fast rejection without buffering is required."
+        )
+
+    @respx.mock
+    async def test_non_sse_response_at_limit_passes(self, small_resp_limit_client, enrolled_alias):
+        """Non-SSE body exactly at max_response_bytes → forwarded normally (200)."""
+        alias, shard_a_utf8, _ = enrolled_alias
+        at_limit = b'{"choices":[],"usage":{"total_tokens":1}}' + b" " * (
+            512 - len(b'{"choices":[],"usage":{"total_tokens":1}}')
+        )
+        assert len(at_limit) == 512
+
+        respx.post("https://api.openai.com/v1/chat/completions").mock(
+            return_value=httpx.Response(
+                200,
+                content=at_limit,
+                headers={"content-type": "application/json"},
+            )
+        )
+
+        resp = await small_resp_limit_client.post(
+            f"/{alias}/v1/chat/completions",
+            headers={
+                "authorization": f"Bearer {shard_a_utf8}",
+                "content-type": "application/json",
+            },
+            content=b'{"model": "gpt-4o", "messages": [], "max_tokens": 10}',
+        )
+
+        assert resp.status_code == 200, (
+            f"Body exactly at limit should pass, got {resp.status_code}."
+        )
+
+    @respx.mock
+    async def test_sse_streaming_not_blocked_by_response_cap(
+        self, small_resp_limit_client, enrolled_alias
+    ):
+        """SSE streaming responses are exempt from the non-SSE response cap.
+
+        The cap applies to buffered non-SSE bodies only — streaming responses
+        bypass it (they have their own unbounded-but-chunked delivery path).
+        """
+        alias, shard_a_utf8, _ = enrolled_alias
+        # SSE body WAY over 512-byte limit — should still pass for streaming.
+        # Pad content chunks to ensure total > 512 bytes.
+        content_chunk = json.dumps(
+            {"choices": [{"delta": {"content": "x" * 80}}], "model": "gpt-4o"}
+        ).encode()
+        usage_chunk = json.dumps(
+            {"choices": [{"delta": {}}], "usage": {"total_tokens": 5}, "model": "gpt-4o"}
+        ).encode()
+        sse_chunks = (
+            (b"data: " + content_chunk + b"\n\n") * 5
+            + b"data: "
+            + usage_chunk
+            + b"\n\ndata: [DONE]\n\n"
+        )
+        assert len(sse_chunks) > 512, "SSE payload must exceed limit to test exemption"
+
+        respx.post("https://api.openai.com/v1/chat/completions").mock(
+            return_value=httpx.Response(
+                200,
+                content=sse_chunks,
+                headers={"content-type": "text/event-stream"},
+            )
+        )
+
+        resp = await small_resp_limit_client.post(
+            f"/{alias}/v1/chat/completions",
+            headers={
+                "authorization": f"Bearer {shard_a_utf8}",
+                "content-type": "application/json",
+            },
+            content=b'{"model": "gpt-4o", "messages": [], "max_tokens": 10}',
+        )
+
+        assert resp.status_code == 200, (
+            f"SSE streaming must not be blocked by the non-SSE response cap, "
+            f"got {resp.status_code}."
+        )
+
+    def test_default_response_limit_is_8mb(self, proxy_settings: ProxySettings):
+        """Default max_response_bytes is 8 MB."""
+        assert proxy_settings.max_response_bytes == 8 * 1024 * 1024, (
+            f"Default response limit should be 8 MB, got {proxy_settings.max_response_bytes}."
+        )
+
+    def test_response_limit_configurable_via_env(
+        self, monkeypatch, tmp_db_path: str, fernet_key: bytes
+    ):
+        """WORTHLESS_MAX_RESPONSE_BYTES env var overrides the default limit."""
+        monkeypatch.setenv("WORTHLESS_MAX_RESPONSE_BYTES", "4096")
+        settings = ProxySettings(
+            db_path=tmp_db_path,
+            fernet_key=bytearray(fernet_key),
+            allow_insecure=True,
+        )
+        assert settings.max_response_bytes == 4096, (
+            f"Expected 4096 from env, got {settings.max_response_bytes}."
+        )
