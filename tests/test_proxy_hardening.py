@@ -2684,3 +2684,229 @@ class TestResponseBufferCap:
         assert settings.max_response_bytes == 4096, (
             f"Expected 4096 from env, got {settings.max_response_bytes}."
         )
+
+
+# ==================================================================
+# Phase 1a: Decoy tripwire at proxy ingress (worthless-ld4m)
+# ==================================================================
+
+
+class TestDecoyTripwire:
+    """When a decoy shard-A is presented, the proxy MUST:
+    1. Return a uniform 401 (same as any other auth failure).
+    2. Log a warning containing "decoy_detected" (alert + audit trail).
+    3. Never call is_known_decoy on every request (performance guard).
+    4. Not alert for non-decoy wrong keys.
+
+    Design: a decoy enrollment stores sha256(shard_a_bytes) as decoy_hash.
+    The stored shard_b/commitment is intentionally mismatched so reconstruction
+    always fails — a decoy key can never succeed. The proxy computes
+    sha256(presented_shard_a_bytes) BEFORE zeroing, then fires a background
+    decoy check only at the reconstruction-failure path.
+    """
+
+    @pytest.fixture()
+    async def decoy_enrolled(self, repo, proxy_settings: ProxySettings, tmp_path):
+        """Enroll a decoy alias: valid shard_a, mismatched shard_b/commitment.
+
+        The mismatch guarantees reconstruction always fails, so the proxy
+        always returns 401 — making decoy detection fire on the failure path.
+
+        Uses store_enrolled (not store) so an enrollments row is created —
+        set_decoy_hash writes to that row.
+
+        Returns (alias, shard_a_utf8, shard_a_bytes).
+        """
+        alias = "decoy-key"
+        # Split two different keys — use shard_a from key1, shard_b/commitment from key2.
+        # reconstruct_key_fp will fail the commitment check because the stored
+        # shard_b doesn't correspond to the presented shard_a.
+        api_key1 = "sk-decoy-key-1234567890abcdef"
+        api_key2 = "sk-other-key-9876543210fedcba"
+        sr1 = split_key_fp(api_key1, prefix="sk-", provider="openai")
+        sr2 = split_key_fp(api_key2, prefix="sk-", provider="openai")
+
+        # Store shard_b/commitment from sr2 but shard_a will be sr1's
+        shard = StoredShard(
+            shard_b=bytearray(sr2.shard_b),  # mismatched!
+            commitment=bytearray(sr2.commitment),  # mismatched!
+            nonce=bytearray(sr2.nonce),
+            provider="openai",
+        )
+        # store_enrolled creates both shards and enrollments rows;
+        # set_decoy_hash updates the enrollments row.
+        env_path = tmp_path / ".env"
+        env_path.write_text(f"OPENAI_API_KEY={api_key1}\n")
+        await repo.store_enrolled(
+            alias,
+            shard,
+            var_name="OPENAI_API_KEY",
+            env_path=str(env_path),
+            prefix=sr1.prefix,
+            charset=sr1.charset,
+            base_url="https://api.openai.com/v1",
+        )
+
+        # Mark as decoy: store sha256(shard_a_bytes)
+        shard_a_bytes = bytes(sr1.shard_a)
+        await repo.set_decoy_hash(alias, str(env_path), shard_a_bytes)
+
+        shard_a_utf8 = sr1.shard_a.decode("utf-8")
+        return alias, shard_a_utf8, shard_a_bytes
+
+    async def test_decoy_key_triggers_alert_not_just_401(
+        self,
+        proxy_app,
+        decoy_enrolled,
+        caplog,
+    ):
+        """Presenting a decoy shard-A returns 401 AND logs 'decoy_detected'.
+
+        The attacker gets no extra information (same 401), but the operator
+        sees the alert in the audit log.
+        """
+        alias, shard_a_utf8, _ = decoy_enrolled
+
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="worthless.proxy.app"):
+            transport = httpx.ASGITransport(app=proxy_app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                resp = await client.post(
+                    f"/{alias}/v1/chat/completions",
+                    headers={
+                        "authorization": f"Bearer {shard_a_utf8}",
+                        "content-type": "application/json",
+                    },
+                    content=b'{"model": "gpt-4", "messages": []}',
+                )
+
+        # Still returns uniform 401 — no information leak to attacker
+        assert resp.status_code == 401, (
+            f"Decoy presentation must return 401, got {resp.status_code}"
+        )
+        # Background decoy check must have logged "decoy_detected"
+        # Allow a brief moment for the background task to complete
+        import asyncio
+
+        await asyncio.sleep(0.05)
+        decoy_logs = [r for r in caplog.records if "decoy_detected" in r.getMessage()]
+        assert decoy_logs, (
+            "Decoy presentation did not trigger 'decoy_detected' warning. "
+            f"Log records: {[r.getMessage() for r in caplog.records]}"
+        )
+
+    async def test_decoy_detection_uses_shard_a_hash_not_original_key(
+        self,
+        repo,
+        decoy_enrolled,
+    ):
+        """is_known_decoy is keyed on sha256(shard_a_bytes), not the original API key.
+
+        Presenting the sha256 of the original key (not shard_a) must NOT
+        trigger decoy detection. Only sha256(shard_a_bytes) matches.
+        """
+        import hashlib
+
+        alias, shard_a_utf8, shard_a_bytes = decoy_enrolled
+
+        # sha256 of the shard_a bytes → should match
+        shard_a_digest = hashlib.sha256(shard_a_bytes).digest()
+        assert await repo.is_known_decoy(shard_a_digest), (
+            "is_known_decoy(sha256(shard_a_bytes)) must return True for a decoy"
+        )
+
+        # sha256 of the original key string → must NOT match
+        original_key = "sk-decoy-key-1234567890abcdef"
+        original_key_digest = hashlib.sha256(original_key.encode()).digest()
+        assert not await repo.is_known_decoy(original_key_digest), (
+            "is_known_decoy must NOT match when given sha256 of the original key "
+            "— it must be keyed on sha256(shard_a_bytes) only"
+        )
+
+    @respx.mock
+    async def test_decoy_detection_does_not_call_is_known_decoy_on_every_request(
+        self,
+        proxy_app,
+        enrolled_alias,
+    ):
+        """Normal successful requests must never call is_known_decoy (performance guard).
+
+        The decoy check fires ONLY on the reconstruction-failure path,
+        never on the happy path — calling it every request would add a
+        DB round-trip to every valid request.
+        """
+        alias, shard_a_utf8, _ = enrolled_alias
+
+        respx.post("https://api.openai.com/v1/chat/completions").mock(
+            return_value=httpx.Response(
+                200,
+                json={"choices": [], "usage": {"total_tokens": 5}},
+            )
+        )
+
+        call_log: list[str] = []
+
+        original_is_known_decoy = proxy_app.state.repo.is_known_decoy
+
+        async def tracking_is_known_decoy(shard_a_sha256):
+            call_log.append("called")
+            return await original_is_known_decoy(shard_a_sha256)
+
+        proxy_app.state.repo.is_known_decoy = tracking_is_known_decoy
+
+        transport = httpx.ASGITransport(app=proxy_app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                f"/{alias}/v1/chat/completions",
+                headers={
+                    "authorization": f"Bearer {shard_a_utf8}",
+                    "content-type": "application/json",
+                },
+                content=b'{"model": "gpt-4", "messages": []}',
+            )
+
+        assert resp.status_code == 200
+        assert len(call_log) == 0, (
+            f"is_known_decoy was called {len(call_log)} time(s) on a normal request — "
+            "must only fire on the reconstruction-failure path"
+        )
+
+    async def test_non_decoy_wrong_key_does_not_trigger_alert(
+        self,
+        proxy_app,
+        enrolled_alias,
+        caplog,
+    ):
+        """Wrong shard-A that is NOT a decoy returns 401 but no 'decoy_detected' log.
+
+        An attacker guessing random shard-A values must not trigger alerts —
+        only a shard-A explicitly enrolled as decoy should fire the tripwire.
+        """
+        alias, _, _ = enrolled_alias
+
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="worthless.proxy.app"):
+            transport = httpx.ASGITransport(app=proxy_app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                resp = await client.post(
+                    f"/{alias}/v1/chat/completions",
+                    headers={
+                        # Present a wrong (non-decoy) shard_a for the known alias
+                        "authorization": "Bearer sk-wrong-shard-aaaaaaaaaa",
+                        "content-type": "application/json",
+                    },
+                    content=b'{"model": "gpt-4", "messages": []}',
+                )
+
+        import asyncio
+
+        await asyncio.sleep(0.05)  # let any background task settle
+
+        assert resp.status_code == 401
+        decoy_logs = [r for r in caplog.records if "decoy_detected" in r.getMessage()]
+        assert not decoy_logs, (
+            "Non-decoy wrong key triggered 'decoy_detected' alert — "
+            "only explicitly enrolled decoys should fire the tripwire"
+        )

@@ -11,6 +11,8 @@ Architecture invariants enforced:
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -76,6 +78,22 @@ def _uniform_401() -> Response:
         headers=_AUTH_HEADERS,
         media_type="application/json",
     )
+
+
+async def _check_and_alert_decoy(repo: ShardRepository, shard_a_sha256: bytes, alias: str) -> None:
+    """Background check: if presented shard_a is a known decoy, log a warning.
+
+    Called only on the reconstruction-failure path — never on the happy path
+    (SR-03 upheld: the 401 decision was already made before this fires).
+    Errors are suppressed so a DB failure never changes the client response.
+    """
+    try:
+        if await repo.is_known_decoy(shard_a_sha256):
+            logger.warning(
+                "decoy_detected: alias=%s shard_a_sha256=%s", alias, shard_a_sha256.hex()
+            )
+    except Exception:
+        logger.debug("decoy check failed for alias=%s", alias, exc_info=True)
 
 
 def _scheme_is_trusted(request: Request, settings: ProxySettings) -> bool:
@@ -420,9 +438,13 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
             else:
                 key_buf = reconstruct_key(shard_a, stored.shard_b, stored.commitment, stored.nonce)
         except Exception:
+            # Capture sha256(shard_a) BEFORE zeroing for the decoy check.
+            # The check fires as a background task so it never delays the 401 response.
+            _shard_a_sha256 = hashlib.sha256(bytes(shard_a)).digest()
             shard_a[:] = b"\x00" * len(shard_a)
             stored.zero()
             await rules_engine.release_spend_reservation(alias, _spend_reservation)
+            asyncio.create_task(_check_and_alert_decoy(repo, _shard_a_sha256, alias))
             return _uniform_401()
 
         # Build and send with stream=True for SSE support

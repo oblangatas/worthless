@@ -663,9 +663,13 @@ class ShardRepository:
     # Decoy hash registry (WOR-31)
     # ------------------------------------------------------------------
 
-    async def set_decoy_hash(self, alias: str, env_path: str | None, decoy_value: str) -> None:
-        """Store the HMAC-SHA256 hash of *decoy_value* on the enrollment row."""
-        h = self._compute_decoy_hash(decoy_value)
+    async def set_decoy_hash(self, alias: str, env_path: str | None, shard_a_bytes: bytes) -> None:
+        """Store sha256(shard_a_bytes) on the enrollment row.
+
+        Keyed on shard_a bytes — not the original API key — because the proxy
+        never receives the original key, only the presented shard_a.
+        """
+        h = hashlib.sha256(shard_a_bytes).hexdigest()
         async with self._connect() as db:
             if env_path is None:
                 await db.execute(
@@ -680,9 +684,14 @@ class ShardRepository:
                 )
             await db.commit()
 
-    async def is_known_decoy(self, value: str) -> bool:
-        """Return True if *value* matches any stored decoy hash."""
-        h = self._compute_decoy_hash(value)
+    async def is_known_decoy(self, shard_a_sha256: bytes) -> bool:
+        """Return True if the sha256 digest matches any stored decoy hash.
+
+        Accepts the raw sha256 digest (bytes) of the presented shard_a.
+        The caller is responsible for computing sha256(shard_a_bytes) *before*
+        zeroing shard_a memory.
+        """
+        h = shard_a_sha256.hex()
         async with self._connect() as db:
             cursor = await db.execute(
                 "SELECT 1 FROM enrollments WHERE decoy_hash = ? LIMIT 1",
