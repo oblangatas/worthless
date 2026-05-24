@@ -13,12 +13,14 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import json
 import logging
 import os
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from urllib.parse import urlparse
 
 import aiosqlite
 import httpx
@@ -57,6 +59,50 @@ from worthless.storage.schema import SCHEMA
 logger = logging.getLogger(__name__)
 
 _ALIAS_RE = re.compile(r"[a-zA-Z0-9_-]+")
+
+# SSRF protection: IP ranges that must never be used as upstream base_url targets.
+# Covers loopback, RFC 1918 private ranges, and link-local (cloud metadata services
+# like 169.254.169.254 live here). IPv6 equivalents are included for completeness.
+# Residual risk: DNS rebinding can bypass literal-IP checks. Full closure requires
+# mTLS pinning to the reconstruction service (Phase 6 / worthless-1pua).
+_BLOCKED_NETWORKS: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = (
+    ipaddress.ip_network("127.0.0.0/8"),  # IPv4 loopback
+    ipaddress.ip_network("10.0.0.0/8"),  # RFC 1918 private
+    ipaddress.ip_network("172.16.0.0/12"),  # RFC 1918 private
+    ipaddress.ip_network("192.168.0.0/16"),  # RFC 1918 private
+    ipaddress.ip_network("169.254.0.0/16"),  # link-local / cloud metadata (AWS, GCP, Azure)
+    ipaddress.ip_network("::1/128"),  # IPv6 loopback
+    ipaddress.ip_network("fc00::/7"),  # IPv6 unique local
+    ipaddress.ip_network("fe80::/10"),  # IPv6 link-local
+)
+
+
+def _validate_upstream_url(url: str) -> bool:
+    """Return True if url is safe to proxy upstream requests to.
+
+    Checks the URL's hostname against a blocklist of loopback, link-local, and
+    RFC 1918 private IP ranges. Only literal IPs in the URL are checked here;
+    hostname-based URLs pass through (DNS rebinding is a documented residual risk,
+    see _BLOCKED_NETWORKS comment above).
+
+    Returns False (block) on parse errors or empty hostnames.
+    """
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+        try:
+            addr = ipaddress.ip_address(hostname)
+        except ValueError:
+            # Hostname (not a literal IP) — allowed at this layer.
+            return True
+        return not any(addr in net for net in _BLOCKED_NETWORKS)
+    except Exception:
+        logger.warning("SSRF check failed unexpectedly for url=%r; blocking", url)
+        return False
+
+
 _BAD_HEADER_CHARS = frozenset("\x00\r\n")
 
 
@@ -203,6 +249,7 @@ async def _lifespan(app: FastAPI):
 
     client = httpx.AsyncClient(
         follow_redirects=False,
+        trust_env=False,  # dupf.1: ignore HTTP_PROXY/HTTPS_PROXY/NO_PROXY env vars
         timeout=httpx.Timeout(
             connect=10.0,
             read=settings.streaming_timeout,
@@ -356,6 +403,20 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
                 alias,
             )
             return _uniform_401()
+
+        # worthless-q8sm (SSRF): reject base_url pointing to loopback, link-local,
+        # or RFC 1918 private IP ranges. Check happens BEFORE shard_a extraction and
+        # BEFORE any key reconstruction — no key material is ever touched for blocked URLs.
+        # Returns 502 so the operator knows the enrollment base_url is misconfigured,
+        # without leaking which alias triggered it to unauthenticated callers
+        # (only callers with a valid shard_a reach this point).
+        if not _validate_upstream_url(encrypted.base_url):
+            logger.warning(
+                "SSRF blocked: alias=%r base_url=%r points to a blocked IP range",
+                alias,
+                encrypted.base_url,
+            )
+            return _make_gateway_response(502, "upstream URL blocked")
 
         # SR-09: shard-A arrives in the Authorization: Bearer header (or x-api-key).
         # This is the only auth path — the 16x2 stable-token path has been removed.

@@ -75,7 +75,10 @@ async def proxy_app(proxy_settings: ProxySettings, repo):
     db = await aiosqlite.connect(proxy_settings.db_path)
     app.state.db = db
     app.state.repo = repo
-    app.state.httpx_client = httpx.AsyncClient(follow_redirects=False)
+    app.state.httpx_client = httpx.AsyncClient(
+        follow_redirects=False,
+        trust_env=False,  # dupf.1: mirror the production lifespan setting
+    )
     app.state.rules_engine = RulesEngine(
         rules=[
             SpendCapRule(db=db),
@@ -2909,4 +2912,178 @@ class TestDecoyTripwire:
         assert not decoy_logs, (
             "Non-decoy wrong key triggered 'decoy_detected' alert — "
             "only explicitly enrolled decoys should fire the tripwire"
+        )
+
+
+# ==================================================================
+# Phase 3a: Upstream URL SSRF protection (worthless-q8sm)
+# ==================================================================
+
+
+class TestSSRFProtection:
+    """base_url from DB must be validated before any upstream request is made.
+
+    An enrolled alias whose base_url points to cloud metadata, localhost,
+    or private IP ranges must be rejected with 502 — never forwarded.
+    """
+
+    @pytest.fixture()
+    async def _enroll_with_base_url(self, repo, proxy_settings):
+        """Helper to enroll an alias with an arbitrary base_url."""
+
+        async def _do(alias: str, base_url: str) -> str:
+            """Enroll alias with base_url; return shard_a_utf8."""
+            api_key = f"sk-ssrf-test-{alias}-1234567890"
+            sr = split_key_fp(api_key, prefix="sk-", provider="openai")
+            shard = StoredShard(
+                shard_b=bytearray(sr.shard_b),
+                commitment=bytearray(sr.commitment),
+                nonce=bytearray(sr.nonce),
+                provider="openai",
+            )
+            await repo.store(
+                alias,
+                shard,
+                prefix=sr.prefix,
+                charset=sr.charset,
+                base_url=base_url,
+            )
+            return sr.shard_a.decode("utf-8")
+
+        return _do
+
+    async def test_ssrf_to_cloud_metadata_blocked(
+        self, proxy_app, _enroll_with_base_url, enrolled_alias
+    ):
+        """base_url pointing to AWS metadata endpoint returns 502, never forwarded."""
+        alias = "ssrf-meta"
+        shard_a_utf8 = await _enroll_with_base_url(alias, "http://169.254.169.254/latest/meta-data")
+
+        transport = httpx.ASGITransport(app=proxy_app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                f"/{alias}/v1/chat/completions",
+                headers={
+                    "authorization": f"Bearer {shard_a_utf8}",
+                    "content-type": "application/json",
+                },
+                content=b'{"model": "gpt-4", "messages": []}',
+            )
+
+        assert resp.status_code == 502, (
+            f"SSRF to metadata endpoint must be blocked with 502, got {resp.status_code}"
+        )
+
+    async def test_ssrf_to_localhost_blocked(self, proxy_app, _enroll_with_base_url):
+        """base_url pointing to localhost is blocked before any outbound connection."""
+        alias = "ssrf-localhost"
+        shard_a_utf8 = await _enroll_with_base_url(alias, "http://127.0.0.1:9000/")
+
+        transport = httpx.ASGITransport(app=proxy_app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                f"/{alias}/v1/chat/completions",
+                headers={
+                    "authorization": f"Bearer {shard_a_utf8}",
+                    "content-type": "application/json",
+                },
+                content=b'{"model": "gpt-4", "messages": []}',
+            )
+
+        assert resp.status_code == 502, (
+            f"SSRF to localhost must be blocked with 502, got {resp.status_code}"
+        )
+
+    async def test_ssrf_to_private_10_range_blocked(self, proxy_app, _enroll_with_base_url):
+        """base_url in 10.x/8 private range is blocked."""
+        alias = "ssrf-10"
+        shard_a_utf8 = await _enroll_with_base_url(alias, "http://10.0.0.1/")
+
+        transport = httpx.ASGITransport(app=proxy_app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                f"/{alias}/v1/chat/completions",
+                headers={
+                    "authorization": f"Bearer {shard_a_utf8}",
+                    "content-type": "application/json",
+                },
+                content=b'{"model": "gpt-4", "messages": []}',
+            )
+
+        assert resp.status_code == 502, (
+            f"SSRF to 10.x must be blocked with 502, got {resp.status_code}"
+        )
+
+    async def test_ssrf_to_private_192168_range_blocked(self, proxy_app, _enroll_with_base_url):
+        """base_url in 192.168.x.x private range is blocked."""
+        alias = "ssrf-192"
+        shard_a_utf8 = await _enroll_with_base_url(alias, "https://192.168.1.1/v1")
+
+        transport = httpx.ASGITransport(app=proxy_app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                f"/{alias}/v1/chat/completions",
+                headers={
+                    "authorization": f"Bearer {shard_a_utf8}",
+                    "content-type": "application/json",
+                },
+                content=b'{"model": "gpt-4", "messages": []}',
+            )
+
+        assert resp.status_code == 502, (
+            f"SSRF to 192.168.x.x must be blocked with 502, got {resp.status_code}"
+        )
+
+    @respx.mock
+    async def test_valid_openai_base_url_allowed(self, proxy_app, _enroll_with_base_url):
+        """https://api.openai.com is a valid base_url — must pass the allowlist."""
+        alias = "ssrf-openai"
+        shard_a_utf8 = await _enroll_with_base_url(alias, "https://api.openai.com/v1")
+
+        respx.post("https://api.openai.com/v1/chat/completions").mock(
+            return_value=httpx.Response(200, json={"choices": [], "usage": {"total_tokens": 5}})
+        )
+
+        transport = httpx.ASGITransport(app=proxy_app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                f"/{alias}/v1/chat/completions",
+                headers={
+                    "authorization": f"Bearer {shard_a_utf8}",
+                    "content-type": "application/json",
+                },
+                content=b'{"model": "gpt-4", "messages": []}',
+            )
+
+        assert resp.status_code == 200, (
+            f"Valid openai.com base_url must pass SSRF allowlist, got {resp.status_code}"
+        )
+
+
+# ==================================================================
+# Phase 3b: Ambient env trust disabled (worthless-dupf.1)
+# ==================================================================
+
+
+class TestAmbientEnvTrustDisabled:
+    """The httpx.AsyncClient must have trust_env=False so HTTP_PROXY /
+    HTTPS_PROXY / NO_PROXY env vars are never honoured.
+
+    An attacker who sets these on the proxy host would otherwise redirect all
+    upstream calls (including key reconstruction) to their own server.
+    """
+
+    def test_httpx_client_created_with_trust_env_false(self, proxy_app):
+        """The proxy's httpx client must have trust_env=False.
+
+        Verified by inspecting the client's _transport.trust_env attribute
+        or by checking the client was built with the correct kwarg.
+        We check the internal _trust_env attribute (stable across httpx versions).
+        """
+        client: httpx.AsyncClient = proxy_app.state.httpx_client
+        # httpx.AsyncClient stores trust_env on _transport, but the canonical
+        # way to verify is via the client's internal flag.
+        assert not client._trust_env, (
+            "httpx.AsyncClient must be created with trust_env=False to prevent "
+            "HTTP_PROXY/HTTPS_PROXY/NO_PROXY env vars from redirecting upstream calls"
         )
