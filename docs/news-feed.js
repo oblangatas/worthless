@@ -15,13 +15,13 @@ function renderFeedRows(entries) {
   return entries.map((entry) => {
     const date = entry.date ? `<span class="feed-date">${escapeHtml(entry.date)}</span>` : '<span class="feed-date"></span>';
     const impact = entry.impact ? `<span class="feed-impact">└ ${escapeHtml(entry.impact)}</span>` : "";
-    return `<a href="${escapeHtml(safeHref(entry.href))}" target="_blank" rel="noopener" class="feed-row"><span class="feed-src">${escapeHtml(entry.source)}</span><span class="feed-main"><span class="feed-desc">${escapeHtml(entry.desc)}</span>${impact}</span>${date}</a>`;
+    return `<a href="${escapeHtml(safeHref(entry.href))}" target="_blank" rel="noopener noreferrer" class="feed-row"><span class="feed-src">${escapeHtml(entry.source)}</span><span class="feed-main"><span class="feed-desc">${escapeHtml(entry.desc)}</span>${impact}</span>${date}</a>`;
   }).join("");
 }
 
 function safeHref(value) {
   const href = String(value || "").trim();
-  if (href.startsWith("/")) return href;
+  if (href.startsWith("/") && !href.startsWith("//")) return href;
 
   try {
     const parsed = new URL(href);

@@ -315,6 +315,10 @@
       box-shadow: 0 14px 42px oklch(44% 0.09 205 / 0.09);
     }
 
+    .install.is-copied {
+      border-color: oklch(70% 0.13 155);
+    }
+
     .command-text {
       padding: 0 0.92rem;
       white-space: nowrap;
@@ -469,6 +473,7 @@
       max-width: 640px;
       margin-top: 1.6rem;
       opacity: 0;
+      visibility: hidden;
       transform: translateY(10px);
       pointer-events: none;
       transition: opacity 320ms var(--ease), transform 320ms var(--ease);
@@ -476,6 +481,7 @@
 
     body[data-beat="3"] .beat-trust {
       opacity: 1;
+      visibility: visible;
       transform: translateY(0);
       pointer-events: auto;
     }
@@ -936,6 +942,10 @@
       align-items: center;
     }
 
+    .receipt-panel {
+      min-width: 0;
+    }
+
     .wild h2 {
       max-width: 680px;
       margin: 0;
@@ -959,6 +969,31 @@
       align-items: center;
       gap: 0.5rem;
       margin-top: 2rem;
+    }
+
+    .receipt-controls {
+      display: flex;
+      justify-content: flex-end;
+      margin-bottom: 0.8rem;
+    }
+
+    .receipt-pause {
+      appearance: none;
+      border: 1px solid oklch(76% 0.045 205 / 0.8);
+      border-radius: 999px;
+      background: oklch(96% 0.024 205 / 0.58);
+      color: var(--ink-soft);
+      cursor: pointer;
+      font: inherit;
+      font-size: 0.78rem;
+      font-weight: 800;
+      padding: 0.42rem 0.7rem;
+    }
+
+    .receipt-pause:hover,
+    .receipt-pause:focus-visible {
+      background: oklch(98% 0.018 205 / 0.84);
+      color: var(--accent-dark);
     }
 
     .wild-link {
@@ -995,7 +1030,9 @@
       animation: receipt-roll 34s linear infinite;
     }
 
-    .receipt-rail:hover .receipt-track {
+    .receipt-rail:hover .receipt-track,
+    .receipt-rail:focus-within .receipt-track,
+    .receipt-rail.is-paused .receipt-track {
       animation-play-state: paused;
     }
 
@@ -1477,6 +1514,12 @@
         scroll-behavior: auto !important;
       }
     }
+
+    @media (pointer: coarse) {
+      .receipt-track {
+        animation: none;
+      }
+    }
   </style>
 </head>
 <body data-beat="0">
@@ -1513,7 +1556,7 @@
         </h1>
         <p class="subline">Your API key just got leaked. Stolen. Doesn’t matter. It won’t work.<br /><strong>It’s Worthless.</strong></p>
         <div class="hero-actions">
-          <button class="install" type="button" title="Copy install command" aria-label="Copy install command: curl -sSL https://worthless.sh | sh" onclick="navigator.clipboard && navigator.clipboard.writeText('curl -sSL https://worthless.sh | sh')">
+          <button class="install" id="copy-install" type="button" title="Copy install command" aria-label="Copy install command: curl -sSL https://worthless.sh | sh">
             <span class="command-text">curl -sSL https://worthless.sh | sh</span>
             <span class="copy-divider" aria-hidden="true"></span>
             <span class="copy-affordance" aria-hidden="true">
@@ -1523,6 +1566,7 @@
               </svg>
             </span>
           </button>
+          <span class="sr-only" id="copy-install-status" aria-live="polite"></span>
           <a class="button" href="https://github.com/shacharm2/worthless" target="_blank" rel="noopener">
             <svg class="github-mark" viewBox="0 0 16 16" aria-hidden="true">
               <path d="M8 0C3.58 0 0 3.67 0 8.19c0 3.62 2.29 6.69 5.47 7.77.4.08.55-.18.55-.4 0-.2-.01-.84-.01-1.53-2.01.38-2.53-.5-2.69-.96-.09-.24-.48-.96-.82-1.16-.28-.15-.68-.53-.01-.54.63-.01 1.08.59 1.23.84.72 1.24 1.87.89 2.33.68.07-.53.28-.89.51-1.09-1.78-.21-3.64-.91-3.64-4.04 0-.89.31-1.62.82-2.19-.08-.21-.36-1.04.08-2.16 0 0 .67-.22 2.2.84A7.37 7.37 0 0 1 8 3.98c.68 0 1.36.09 2 .27 1.53-1.06 2.2-.84 2.2-.84.44 1.12.16 1.95.08 2.16.51.57.82 1.3.82 2.19 0 3.14-1.87 3.83-3.65 4.04.29.26.54.76.54 1.54 0 1.11-.01 2-.01 2.27 0 .22.15.48.55.4A8.14 8.14 0 0 0 16 8.19C16 3.67 12.42 0 8 0Z" />
@@ -1548,7 +1592,7 @@
             <h2 id="beat-title">No vault. No key to leak.</h2>
             <p id="beat-body">Worthless leaves a useless part of the key in your app.</p>
           </article>
-          <div class="beat-trust" aria-label="Audit with AI">
+          <div class="beat-trust" aria-label="Audit with AI" aria-hidden="true" inert>
             <span>Don’t trust us. Audit with AI.</span>
             <div class="audit-icons">
               <a class="audit-icon" href="#" data-audit="claude" aria-label="Audit with Claude" title="Audit with Claude">
@@ -1674,9 +1718,14 @@
             <a class="wild-link secondary" href="red/index.html">Red Blog</a>
           </div>
         </div>
-        <div class="receipt-rail" aria-label="Leak reports">
-          <div class="receipt-track" id="news-feed" aria-live="polite">
-            <div class="receipt-empty">Loading feed...</div>
+        <div class="receipt-panel">
+          <div class="receipt-controls">
+            <button class="receipt-pause" id="receipt-pause" type="button" aria-pressed="false" aria-controls="news-feed">Pause feed</button>
+          </div>
+          <div class="receipt-rail" aria-label="Leak reports">
+            <div class="receipt-track" id="news-feed" aria-live="polite">
+              <div class="receipt-empty">Loading feed...</div>
+            </div>
           </div>
         </div>
       </div>
@@ -1746,6 +1795,13 @@
     const beatLabel = document.getElementById("beat-label");
     const beatTitle = document.getElementById("beat-title");
     const beatBody = document.getElementById("beat-body");
+    const beatTrust = document.querySelector(".beat-trust");
+    const beatTrustLinks = Array.from(document.querySelectorAll(".beat-trust a"));
+    const installCopy = document.getElementById("copy-install");
+    const installStatus = document.getElementById("copy-install-status");
+    const receiptRail = document.querySelector(".receipt-rail");
+    const receiptPause = document.getElementById("receipt-pause");
+    const installCommand = "curl -sSL https://worthless.sh | sh";
     const beats = [
       {
         label: "Protect",
@@ -1770,15 +1826,25 @@
     ];
     let currentBeat = "0";
 
+    function setBeatTrustActive(active) {
+      if (!beatTrust) return;
+      beatTrust.setAttribute("aria-hidden", String(!active));
+      beatTrust.inert = !active;
+      beatTrustLinks.forEach((link) => {
+        link.tabIndex = active ? 0 : -1;
+      });
+    }
+
     function setBeat(beat) {
-      if (beat === currentBeat) return;
+      const next = beats[Number(beat)];
+      if (!next || beat === currentBeat) return;
       currentBeat = beat;
       document.body.setAttribute("data-beat", beat);
       document.documentElement.style.setProperty("--beat", beat);
-      const next = beats[Number(beat)];
       beatLabel.textContent = next.label;
       beatTitle.textContent = next.title;
       beatBody.textContent = next.body;
+      setBeatTrustActive(beat === "3");
     }
 
     function clamp(value, min = 0, max = 1) {
@@ -1808,6 +1874,29 @@
       threshold: [0, 0.25, 0.5, 0.75, 1]
     });
     sentinels.forEach((el) => observer.observe(el));
+    setBeatTrustActive(false);
+
+    installCopy?.addEventListener("click", async () => {
+      try {
+        if (!navigator.clipboard?.writeText) {
+          throw new Error("Clipboard API unavailable");
+        }
+        await navigator.clipboard.writeText(installCommand);
+        installStatus.textContent = "Install command copied.";
+        installCopy.classList.add("is-copied");
+        window.setTimeout(() => installCopy.classList.remove("is-copied"), 1600);
+      } catch (_error) {
+        window.prompt("Copy install command:", installCommand);
+        installStatus.textContent = "Copy prompt opened.";
+      }
+    });
+
+    receiptPause?.addEventListener("click", () => {
+      const paused = receiptRail?.classList.toggle("is-paused") || false;
+      receiptPause.setAttribute("aria-pressed", String(paused));
+      receiptPause.textContent = paused ? "Resume feed" : "Pause feed";
+    });
+
     (function () {
       const prompt = encodeURIComponent("Please audit the Worthless installer script before I run it. Check for data exfiltration, privilege escalation, persistence, obfuscation, and unsafe downloads. Raw script: https://raw.githubusercontent.com/shacharm2/worthless/main/install.sh");
       const urls = {
@@ -1819,7 +1908,7 @@
       document.querySelectorAll("[data-audit]").forEach((link) => {
         link.href = urls[link.dataset.audit];
         link.target = "_blank";
-        link.rel = "noopener";
+        link.rel = "noopener noreferrer";
       });
     })();
     updateVisualTransition();
