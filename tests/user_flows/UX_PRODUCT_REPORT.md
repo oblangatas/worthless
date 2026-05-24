@@ -28,6 +28,9 @@ nearby projects." `WOR-441` extends that proof to "I am a new user starting
 from installation": deterministic install traces exercise installer messaging,
 reinstall/idempotency, failure diagnostics, and the current manual uninstall
 guidance; GitHub install-smoke CI remains the live Ubuntu/macOS proof.
+`WOR-442` starts the Docker proof lane: a host-native Worthless CLI locks a
+project, the host proxy runs outside Docker, and an app container consumes the
+locked `.env` through Docker's host bridge without receiving the raw key.
 
 `WOR-544` adds the second pass over the suite: start from the top-level user
 journey, then trace each step to automated proof, terminal proof, live CI proof,
@@ -95,7 +98,7 @@ normal and abnormal states, and finally test app-specific integrations.
 | 13. Survive destructive native state mishaps | `test_native_stress_journeys.py` covers refused rewrite and tampered locked value | `Native Stress` trace shows failure output and unchanged evidence | User-flow CI runs on Ubuntu 24.04 and macOS 15 | **Needs user-flow test:** deleted/corrupt DB, cleanup failure, and doctor multi-project safety remain queued | `WOR-447` |
 | 14. Install and use Worthless from WSL | Static installer logic allows WSL and docs describe the route | No WSL terminal trace | Windows job records deferral only; no real WSL environment is exercised | **Intentionally deferred:** needs real WSL runner or explicit manual release gate | `WOR-446` |
 | 15. Native Windows behavior | Installer logic exits with the documented unsupported native-Windows path | No native Windows user trace | Windows smoke is not a real user-flow proof; user-flow workflow labels Windows deferred | **Intentionally deferred** until platform support decision | `WOR-446` |
-| 16. Docker app journey | `tests/test_install_docker.py` covers clean distro install and lock lifecycle in containers | No user-flow terminal trace for app bind mounts | `install-docker.yml` runs Docker-marked install matrix when installer paths change | **Needs user-flow test / live proof:** host install plus containerized app bind-mount/permission journeys | `WOR-442` |
+| 16. Docker app journey | `tests/test_install_docker.py` covers clean distro install, container-local lock lifecycle, source CLI outside Docker + app-container `.env` bridge, skipped-bridge sample-app preflight, and unwritable `.env` refusal with no phantom enrollment | No rendered terminal trace for Docker app containers yet | `install-docker.yml` runs Docker-marked install matrix when installer, Docker, CLI, proxy, or mock-upstream paths change | **Covered for first `WOR-442` pass:** CI artifact/storytelling can still be improved if we want copy-paste Docker traces like native user flows | `WOR-442` |
 | 17. OpenClaw user journey | Existing OpenClaw unit/integration tests cover apply/detect/doctor surfaces; `WOR-514`, PR #201 adds incident reproduction proof outside this branch | PR #201 contains manual quest docs and incident reproduction artifacts | OpenClaw fix CI depends on the active OpenClaw branch, not this report | **Needs live/manual proof and fixes:** cached token bypass, config corruption, gateway lifecycle | `WOR-443`, `WOR-514`, `WOR-515`, `WOR-516`, `WOR-517` |
 | 18. Agent/MCP setup | In-process/lower-level coverage exists outside this user-flow suite | No child-process MCP terminal trace in this report | No dedicated MCP user-flow CI lane yet | **Needs user-flow test:** stdio initialize/list-tools/call-tool plus agent config examples | `WOR-444` |
 
@@ -113,7 +116,7 @@ normal and abnormal states, and finally test app-specific integrations.
 | Open | `WOR-515` | OpenClaw cached token bypass fix |
 | Open | `WOR-516` | OpenClaw config corruption / restore safety fix |
 | Open | `WOR-517` | Gateway lifecycle: restart, autostart, verification |
-| Backlog | `WOR-442` | Docker clean distro / bind-mount user journeys |
+| In progress | `WOR-442` | Docker clean distro / host-Worthless app-container journeys |
 | Backlog | `WOR-443` | OpenClaw end-to-end user journey lane |
 | Backlog | `WOR-444` | Agent/MCP user journey lane |
 | Backlog | `WOR-446` | CI matrix governance, Windows, WSL, nightly/full sweep |
@@ -130,9 +133,13 @@ normal and abnormal states, and finally test app-specific integrations.
 - Windows and WSL are not proven by the current suite. The Windows job is an
   explicit deferral marker, and WSL needs either a real WSL runner or a manual
   release gate.
-- Docker has meaningful installer/container coverage, but the product journey
-  "I installed Worthless natively and my app runs in Docker" still needs the
-  `WOR-442` bind-mount and permission lane.
+- Docker now has product journey proof for "Worthless runs outside Docker and
+  my app runs in Docker": the app container receives shard-A plus a
+  Docker-routable proxy URL, while the mock upstream receives the reconstructed
+  real key. The suite also catches the skipped `host.docker.internal` edit via
+  a sample-app preflight and an unwritable `.env` refusal with no phantom
+  enrollment. Remaining Docker polish is CI artifact/storytelling and real
+  bind-mount UID/path variants.
 - OpenClaw should stay open: `WOR-514`, PR #201 proves the incident, while
   `WOR-515`, `WOR-516`, and `WOR-517` own the actual fixes.
 
@@ -155,6 +162,9 @@ normal and abnormal states, and finally test app-specific integrations.
 | Refused rewrite after planned lock | If Worthless refuses to rewrite an unsafe `.env`, the user must not be left half-protected. | `lock` fails without traceback, original `.env` bytes remain, status has no protected phantom row, and explicit scan still finds the raw key. | `test_native_stress_journeys.py::test_lock_rewrite_refusal_leaves_env_and_status_recoverable` |
 | Tampered locked `.env` | If a user edits a locked shard value, unlock should fail clearly without destroying evidence. | `unlock` fails without traceback, says the value was modified after lock / commitment mismatch, leaves `.env` unchanged, and status still shows protected state. | `test_native_stress_journeys.py::test_unlock_tampered_locked_env_fails_without_destroying_state` |
 | Install lifecycle evidence | A new user should see a clear install result, safe reinstall behavior, actionable failure output, and honest uninstall guidance. | Deterministic terminal traces show PATH messaging, pinned reinstall no-op, pipx conflict guidance, uv failure diagnostics, and current `uv tool uninstall worthless` limitation. Live install-smoke CI uploads per-runner artifacts. | `test_render_traces.py::test_install_lifecycle_trace_documents_current_install_contract` + `test_install_static.py::test_install_smoke_uploads_terminal_artifacts` |
+| Docker app on host Worthless | Worthless can run outside Docker, lock a project `.env`, run the proxy in host LAN mode, and let an app container call through the proxy without seeing the raw key. | `.env` contains shard-A plus `host.docker.internal`; the app container request succeeds; the mock upstream sees the reconstructed real key. | `test_install_docker.py::test_host_cli_locked_env_reaches_proxy_from_app_container` |
+| Docker loopback mistake | If the user skips the Docker bridge edit and gives a container `127.0.0.1`, the sample app preflight should point at the real mistake. | The synthetic app container fails before the request and says it received a loopback base URL; this is not a Worthless-owned diagnostic for arbitrary apps. | `test_install_docker.py::test_app_container_fails_fast_when_locked_env_keeps_loopback_url` |
+| Docker unwritable `.env` | If a host permission problem prevents rewriting `.env`, Worthless should fail without half-protecting the project. | `lock` refuses the unsafe rewrite, `.env` remains unchanged, and `status` says no keys are enrolled. Real bind-mount UID/path variants remain follow-up. | `test_install_docker.py::test_host_lock_unwritable_env_fails_without_phantom_enrollment` |
 
 ## Manual journey scripts
 
@@ -311,13 +321,36 @@ Trace first to:
 - `test_render_traces.py::test_install_lifecycle_trace_documents_current_install_contract`
 - `test_install_static.py::test_install_smoke_uploads_terminal_artifacts`
 
+### Journey I: Docker app on host Worthless
+
+1. Install/run Worthless outside the app container.
+2. Lock the project `.env` on the host.
+3. Replace the locked `127.0.0.1:<port>` base URL with `host.docker.internal:<port>`.
+4. Start the host proxy; on Linux without Docker Desktop, run it with `WORTHLESS_DEPLOY_MODE=lan`.
+5. Run the app container with the locked `.env`.
+
+Expected UX:
+
+- The container never receives the raw provider key.
+- The container sees a Docker-routable base URL, not `127.0.0.1`.
+- A request from the app container reaches the host proxy.
+- The upstream receives the reconstructed real key.
+- If the user skips the bridge edit, the sample app preflight names the loopback mistake.
+- If `.env` cannot be rewritten due to host permissions, the file remains unchanged and `status` does not show a phantom protected key.
+
+Trace first to:
+
+- `test_install_docker.py::test_host_cli_locked_env_reaches_proxy_from_app_container`
+- `test_install_docker.py::test_app_container_fails_fast_when_locked_env_keeps_loopback_url`
+- `test_install_docker.py::test_host_lock_unwritable_env_fails_without_phantom_enrollment`
+
 ## Current gaps
 
 These are intentionally not covered by this first branch:
 
 | Linear issue | Surface | Status |
 | --- | --- | --- |
-| `WOR-442` | Docker and clean distro matrix | Backlog |
+| `WOR-442` | Docker and clean distro matrix | In progress: first pass covered locally; awaiting PR/CI |
 | `WOR-443` | OpenClaw install/config/protected request | Backlog |
 | `WOR-444` | Agent and MCP driven setup | Backlog |
 | `WOR-446` | CI user-flow lane | First pass in this branch: Ubuntu/macOS user flows and trace artifacts; Windows/WSL deferred |
@@ -332,6 +365,7 @@ Product-risk gaps still worth promoting into explicit journeys:
 - Agent-facing JSON/exit-code contracts.
 - Non-TTY install and consent behavior beyond the deterministic installer traces.
 - First-class `worthless uninstall` remains future WOR-435 scope.
+- Real Docker bind-mount UID/path variants for apps that load `.env` from disk.
 
 ## Review rule
 

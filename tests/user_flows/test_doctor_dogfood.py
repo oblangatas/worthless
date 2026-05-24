@@ -68,6 +68,7 @@ def test_full_dogfood_lock_break_doctor_recover(
     home = tmp_path / ".worthless"
     env_file = tmp_path / ".env"
     env_file.write_text(f"OPENAI_API_KEY={fake_openai_key()}\n")
+    monkeypatch.chdir(tmp_path)
 
     runner = CliRunner()
     cli_env = scrubbed_cli_env(home)

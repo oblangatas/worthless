@@ -50,7 +50,8 @@ Priority order:
 | --- | --- | --- | --- | --- | --- |
 | P0 | Native keyring unavailable or disabled | User sees Keychain/system-keystore promise that is false | File fallback wording is explicit; native keyring cases are guarded | First branch covers fallback wording | Add platform trace rows and keyring guarded user-flow proof |
 | P0 | Windows/WSL path behavior | `.env` path resolves differently or filesystem checks refuse incorrectly | Clear support/defer signal; no false green | Windows user-flow job is deferred | Separate `WOR-446`/platform branch with Windows/WSL probes |
-| P1 | Docker bind mount path/permission mismatch | Container locks wrong path or cannot write mounted `.env` | Container journey uses explicit mounts and readable diagnostics | Docker branch deferred | `WOR-442` clean distro matrix |
+| P1 | Docker host/app URL mismatch | App container gets `127.0.0.1` and cannot reach the host proxy | Sample app preflight names the loopback mistake; happy path uses Docker's host bridge | `WOR-442` adds host CLI + app-container proof | `tests/test_install_docker.py::test_host_cli_locked_env_reaches_proxy_from_app_container` and `::test_app_container_fails_fast_when_locked_env_keeps_loopback_url` |
+| P1 | Docker bind mount path/permission mismatch | Container locks wrong path or cannot write mounted `.env` | Host refused rewrite leaves `.env` unchanged and no phantom enrollment; real bind-mount UID/path cases remain follow-up | `WOR-442` adds unwritable-project proof | `tests/test_install_docker.py::test_host_lock_unwritable_env_fails_without_phantom_enrollment` |
 | P1 | Install/reinstall/uninstall half-failure | New user cannot recover from partial install | Idempotent reinstall/uninstall with exact next step | Install smoke exists, not user-flow docs | `WOR-441` install journey branch |
 
 References used for platform assumptions:

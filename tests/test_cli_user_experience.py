@@ -121,15 +121,20 @@ class TestHelpText:
         for cmd in ("lock", "unlock", "enroll", "scan", "status", "wrap", "up"):
             assert cmd in output, f"Command {cmd!r} missing from --help output"
 
-    def test_no_args_runs_default_command(self) -> None:
+    def test_no_args_runs_default_command(self, home_dir: WorthlessHome) -> None:
         """worthless with no args runs the default pipeline (not help).
 
         No xdist_group marker: the autouse `_isolate_default_command_proxy`
         fixture in conftest.py stubs the daemon path for every test, so two
         workers can run this in parallel without racing port 8787.
         """
-        result = runner.invoke(app, [])
-        assert result.exit_code == 0
+        result = runner.invoke(app, [], env={"WORTHLESS_HOME": str(home_dir.base_dir)})
+        assert result.exit_code == 0, (
+            f"worthless with no args failed:\n"
+            f"stdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}\n"
+            f"exception: {result.exception!r}"
+        )
         output = result.stdout + result.stderr
         # Default command runs — should NOT show help/command list
         assert "Usage:" not in output

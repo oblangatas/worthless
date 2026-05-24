@@ -23,6 +23,9 @@ snapshots, and redacted terminal proof, see
 The trace report also includes deterministic install/reinstall/manual-uninstall
 guidance evidence for `WOR-441`; live OS install proof comes from the GitHub
 `Install Smoke (live curl|sh)` workflow artifacts.
+Docker journeys live in the Docker-marked suite, not under this directory:
+`tests/test_install_docker.py` covers `WOR-442` clean distro install plus the
+host-Worthless/app-container `.env` bridge proof.
 For the follow-on destructive-state and platform stress backlog, see
 [`STRESS_TEST_MATRIX.md`](STRESS_TEST_MATRIX.md).
 
