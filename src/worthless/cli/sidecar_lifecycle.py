@@ -488,6 +488,21 @@ def _validate_service_uids(uids: ServiceUids) -> None:
         )
 
 
+def _close_stderr_read_end(proc: subprocess.Popen[bytes]) -> None:
+    """Close the READ end of *proc*'s stderr pipe so the drainer thread sees EOF.
+
+    The write end is already closed once the child exits; leaving the read end
+    open defers fd release until the ``Popen`` object is GC-collected, which
+    CPython delays long enough that accumulated leaks across many test
+    teardowns caused the 97%-completion CI hang (10-min timeout).
+    """
+    if proc.stderr is not None:
+        try:
+            proc.stderr.close()
+        except OSError:
+            pass
+
+
 def _kill_and_close_proc(
     proc: subprocess.Popen[bytes],
     socket_path: Path,
@@ -497,13 +512,8 @@ def _kill_and_close_proc(
     Called from the ``except BaseException`` path of :func:`spawn_sidecar`
     so the sidecar never leaks as an orphan on any failure mode.
 
-    After ``proc.kill()`` + ``proc.wait()`` the kernel closes the WRITE end
-    of the stderr pipe (child exited).  Explicitly closing the READ end
-    (``proc.stderr``) here ensures the background drainer thread sees EOF
-    immediately rather than waiting for GC.  Without this close the fd
-    lives until the ``Popen`` object is collected, which CPython defers long
-    enough that accumulated leaks across many test invocations caused the
-    97%-completion CI hang (10-min timeout).
+    See :func:`_close_stderr_read_end` for why the stderr read end is closed
+    explicitly here.
     """
     if proc.poll() is None:
         proc.kill()
@@ -511,11 +521,7 @@ def _kill_and_close_proc(
         proc.wait(timeout=2.0)
     except subprocess.TimeoutExpired:
         pass
-    if proc.stderr is not None:
-        try:
-            proc.stderr.close()
-        except OSError:
-            pass
+    _close_stderr_read_end(proc)
     try:
         if socket_path.exists():
             socket_path.unlink()
@@ -702,15 +708,7 @@ def shutdown_sidecar(handle: SidecarHandle) -> None:
                 # WRTLS-113 if the runaway persists.
                 pass
 
-    # Close the read end of the stderr pipe so the background drainer thread
-    # sees EOF immediately.  The write end is already closed (child exited);
-    # leaving the read end open delays GC-collected fd release, which can
-    # accumulate across many test teardowns and cause CI-level hangs.
-    if proc.stderr is not None:
-        try:
-            proc.stderr.close()
-        except OSError:
-            pass
+    _close_stderr_read_end(proc)
 
     for path in (
         handle.shares.share_a_path,

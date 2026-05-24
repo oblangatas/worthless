@@ -226,7 +226,7 @@ def register_wrap_commands(app: typer.Typer) -> None:
             socket_path = shares.run_dir / "sidecar.sock"
             sidecar = spawn_sidecar(socket_path, shares, allowed_uid=os.getuid())
         except WorthlessError:
-            # Issue 2: re-raise WorthlessError directly — don't overwrite
+            # Re-raise WorthlessError directly — don't overwrite
             # SIDECAR_NOT_READY or other structured error codes with a
             # generic PROXY_UNREACHABLE.
             _cleanup_lifecycle(proxy=None, write_fd=None, sidecar=sidecar)
@@ -238,9 +238,9 @@ def register_wrap_commands(app: typer.Typer) -> None:
                 sanitize_exception(exc, generic="failed to start sidecar"),
             ) from exc
 
-        # Issue 3: wrap pipe creation and env build in try/finally so the
-        # sidecar is torn down if either step raises (e.g. OS fd exhaustion
-        # or keyring error in build_proxy_env).
+        # Wrap pipe creation and env build so the sidecar is torn down if
+        # either step raises (e.g. OS fd exhaustion or keyring error in
+        # build_proxy_env).
         try:
             # Create liveness pipe
             read_fd, write_fd = create_liveness_pipe()
@@ -249,10 +249,10 @@ def register_wrap_commands(app: typer.Typer) -> None:
             proxy_env = build_proxy_env(home)
             proxy_env["WORTHLESS_SIDECAR_SOCKET"] = str(sidecar.socket_path)
 
-            # Issue 4: In IPC-only mode the sidecar holds the Fernet key;
-            # the proxy must NOT receive it in its environment. Scrub it
-            # unconditionally here — the proxy uses the sidecar socket
-            # (WORTHLESS_SIDECAR_SOCKET above) for all key material.
+            # In IPC-only mode the sidecar holds the Fernet key; the proxy
+            # must NOT receive it in its environment. Defense in depth — the
+            # canonical scrub lives in prepare_proxy_env, but scrubbing here
+            # too keeps this call site self-evidently safe.
             proxy_env.pop("WORTHLESS_FERNET_KEY", None)
         except Exception:
             _cleanup_lifecycle(proxy=None, write_fd=None, sidecar=sidecar)
@@ -365,7 +365,7 @@ def register_wrap_commands(app: typer.Typer) -> None:
         watcher = threading.Thread(target=_watch_proxy, daemon=True)
         watcher.start()
 
-        # Issue 5: wrap child wait + summary + cleanup in try/finally so
+        # Wrap child wait + summary + cleanup in try/finally so
         # KeyboardInterrupt and unexpected exceptions still tear down proxy
         # and sidecar rather than leaving orphaned processes.
         try:
