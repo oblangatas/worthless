@@ -328,11 +328,6 @@ class TestDBFileDeleted:
     """If ~/.worthless/db.sqlite is wiped, the shards are unrecoverable.
     Commands must say so plainly instead of crashing on a missing table."""
 
-    @pytest.mark.xfail(
-        strict=False,
-        reason="RED: DB-wipe-recovery contract not yet implemented. "
-        "File a bead and remove this marker when the fix lands.",
-    )
     def test_unlock_after_db_wipe_fails_gracefully(
         self, home_dir: WorthlessHome, env_file: Path
     ) -> None:
@@ -350,11 +345,10 @@ class TestDBFileDeleted:
         assert has_actionable_hint(
             result.output,
             "database",
-            "db.sqlite",
-            "no such table",
-            "rerun lock",
-            "re-enroll",
-            "not enrolled",
+            "worthless.db",
+            "restore",
+            "replace",
+            "worthless lock --env",
         ), f"no actionable hint after db wipe:\n{result.output}"
 
     def test_status_after_db_wipe_does_not_crash(

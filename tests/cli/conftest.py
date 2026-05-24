@@ -79,6 +79,32 @@ def list_enrollments(home: WorthlessHome) -> list:
 
 
 @pytest.fixture()
+def _cli_user_home(tmp_path: Path) -> Path:
+    home = tmp_path / "user-home"
+    home.mkdir()
+    return home
+
+
+@pytest.fixture(autouse=True)
+def _isolate_cli_process_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _cli_user_home: Path
+) -> None:
+    """Keep cwd/HOME-sensitive CLI commands hermetic under xdist.
+
+    `worthless doctor` intentionally inspects both the current project's
+    `.env` and the user's OpenClaw home. Tests in this package usually pass
+    an explicit `WORTHLESS_HOME`, but that alone is not enough: a previous
+    test in the same xdist worker can leave cwd or HOME pointing at a project
+    with `.env` / OpenClaw state and make unrelated doctor tests flaky.
+    """
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("HOME", str(_cli_user_home))
+    monkeypatch.setenv("USERPROFILE", str(_cli_user_home))
+
+
+@pytest.fixture()
 def env_file(tmp_path: Path) -> Path:
     """A .env file with a single OpenAI-shaped fake key."""
     env = tmp_path / ".env"

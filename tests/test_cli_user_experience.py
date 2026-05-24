@@ -121,7 +121,7 @@ class TestHelpText:
         for cmd in ("lock", "unlock", "enroll", "scan", "status", "wrap", "up"):
             assert cmd in output, f"Command {cmd!r} missing from --help output"
 
-    def test_no_args_runs_default_command(self, tmp_path: Path) -> None:
+    def test_no_args_runs_default_command(self, home_dir: WorthlessHome) -> None:
         """worthless with no args runs the default pipeline (not help).
 
         No xdist_group marker: the autouse `_isolate_default_command_proxy`
@@ -133,8 +133,13 @@ class TestHelpText:
         WRTLS-102 on a dogfooding box whose Fernet key lives only in the
         keyring (which conftest nulls for the test session).
         """
-        result = runner.invoke(app, [], env={"WORTHLESS_HOME": str(tmp_path / ".worthless")})
-        assert result.exit_code == 0
+        result = runner.invoke(app, [], env={"WORTHLESS_HOME": str(home_dir.base_dir)})
+        assert result.exit_code == 0, (
+            f"worthless with no args failed:\n"
+            f"stdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}\n"
+            f"exception: {result.exception!r}"
+        )
         output = result.stdout + result.stderr
         # Default command runs — should NOT show help/command list
         assert "Usage:" not in output

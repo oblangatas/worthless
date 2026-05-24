@@ -12,6 +12,9 @@ on:
       - "tests/test_install_*.py"
       - "tests/_install_helpers.py"
       - "tests/install_fixtures/**"
+      - "tests/openclaw/mock-upstream/**"
+      - "src/worthless/cli/**"
+      - "src/worthless/proxy/**"
       - ".github/workflows/install-docker.yml"
   push:
     branches:
@@ -21,6 +24,9 @@ on:
       - "tests/test_install_*.py"
       - "tests/_install_helpers.py"
       - "tests/install_fixtures/**"
+      - "tests/openclaw/mock-upstream/**"
+      - "src/worthless/cli/**"
+      - "src/worthless/proxy/**"
       - ".github/workflows/install-docker.yml"
 
 permissions:
@@ -32,9 +38,10 @@ concurrency:
 
 jobs:
   install-matrix:
-    name: install.sh host matrix (Ubuntu/Debian/Alpine, lock lifecycle)
+    name: install.sh host matrix (distros, lock lifecycle, app container)
     runs-on: ubuntu-24.04
-    # 9 install fixtures + 2 lock-lifecycle fixtures = 11 docker-marked tests.
+    # 7 install fixtures + 2 lock-lifecycle fixtures + 3 host/app-container
+    # journeys = 12 docker-marked tests.
     # ubuntu-idempotency runs install.sh TWICE (~2x install fixture time). On
     # the first PR run BuildKit caches are cold, so PBS Python + wheels are
     # fetched per-fixture. 40m gives margin without being absurd.

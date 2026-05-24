@@ -27,14 +27,14 @@ service in a container. worthless lives on your host.
 ### A.1 Install worthless natively on your host
 
 Follow [mac.md](/install/mac/) / [linux.md](/install/linux/) / [wsl.md](/install/wsl/)
-end-to-end. After this you have `worthless` in your shell PATH and a
-proxy running on host's `127.0.0.1:8787`.
+to install the native CLI. For this Docker scenario, do not start the default
+loopback proxy yet; you will start it in LAN mode after the `.env` bridge edit.
 
 ### A.2 Lock the keys
 
 ```bash
 cd /path/to/your/project
-worthless
+worthless lock
 ```
 
 This rewrites your `.env`:
@@ -66,10 +66,23 @@ OPENAI_API_KEY=<decoy-prefix>...
 OPENAI_BASE_URL=http://host.docker.internal:8787/<alias>/v1
 ```
 
-### A.4 Mount the .env into the container
+Now start the host proxy. On Linux without Docker Desktop, the host proxy has
+to listen on the Docker bridge, not only on host loopback:
 
-Your `docker-compose.yml` (or `docker run`) needs to volume-mount the
-`.env` so the container reads the rewritten file:
+```bash
+WORTHLESS_DEPLOY_MODE=lan worthless up
+```
+
+On Docker Desktop, LAN mode also works for this scenario and avoids accidentally
+leaving a loopback-only proxy running from the default `worthless` command.
+Keep the default loopback mode for native apps. Use `lan` only for the Docker
+app journey where a container must reach the host proxy.
+
+### A.4 Pass the locked .env into the container
+
+If your app reads configuration from environment variables, use Compose
+`env_file` (or `docker run --env-file`) so the container receives the rewritten
+values:
 
 ```yaml
 services:
@@ -79,6 +92,16 @@ services:
       - .env
     extra_hosts:                   # ONLY needed on Linux (no Docker Desktop)
       - "host.docker.internal:host-gateway"
+```
+
+If your app loads `.env` from disk with dotenv, bind-mount the file instead:
+
+```yaml
+services:
+  app:
+    image: my-app:latest
+    volumes:
+      - ./.env:/app/.env:ro
 ```
 
 ### A.5 Verify
@@ -238,12 +261,12 @@ scenario: app_in_container_worthless_on_host   # most common; see scenario A
 commands:
   install: "curl -sSL https://worthless.sh | sh"   # CLI is ALWAYS native, never `docker run`
   verify: "worthless --version"
-  first_lock: "worthless"
-  proxy_restart: "worthless up"
+  first_lock: "worthless lock"
+  proxy_restart: "WORTHLESS_DEPLOY_MODE=lan worthless up"
 post_lock_required_step:
   description: "Edit .env to use host.docker.internal:8787 instead of 127.0.0.1:8787 (containers can't reach host loopback)"
   sed_command: "sed -i.bak 's|127.0.0.1:8787|host.docker.internal:8787|' .env"
-  linux_extra: "Add `--add-host=host.docker.internal:host-gateway` if no Docker Desktop"
+  linux_extra: "Add `--add-host=host.docker.internal:host-gateway` if no Docker Desktop, and start the host proxy with `WORTHLESS_DEPLOY_MODE=lan worthless up`"
 expectations:
   install_succeeds_silently: true
   # Docker itself adds no popup. The host platform's keystore is what fires.
