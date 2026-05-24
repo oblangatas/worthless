@@ -36,7 +36,19 @@ def extract_usage_openai(data: bytes) -> UsageInfo | None:
 
     try:
         text = data.decode("utf-8", errors="replace")
-        for line in reversed(text.splitlines()):
+        # Forward-iterate and take the FIRST usage block found.
+        #
+        # Rationale: OpenAI places usage in the penultimate chunk (before [DONE]).
+        # An attacker controlling the upstream can append a fake {"total_tokens": 0}
+        # chunk AFTER the real usage chunk. reversed() would find the injected chunk
+        # first and return 0, zeroing out the spend record.
+        #
+        # First-wins means the injected zero (appended later) is never reached
+        # once the real usage is found earlier in the stream. An attacker who wants
+        # to inject early (before real usage) would need to control the content of
+        # the stream, which requires full upstream control — that threat is addressed
+        # by SSRF/URL-allowlist protections (Phase 3a), not by this function.
+        for line in text.splitlines():
             if not line.startswith("data: "):
                 continue
             payload = line[6:].strip()

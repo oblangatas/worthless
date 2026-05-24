@@ -230,8 +230,14 @@ async def test_record_spend(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_record_spend_zero_token_audit_row(tmp_path):
-    """When extraction returns None, record_spend still inserts a 0-token audit row."""
+async def test_record_spend_accepts_any_token_count(tmp_path):
+    """record_spend inserts whatever token count the caller provides.
+
+    The caller (_do_record_spend / _record_metering in proxy/app.py) is
+    responsible for choosing the right amount — when usage extraction fails,
+    the caller MUST pass _spend_reservation (fail-closed), NOT 0.
+    This test verifies the DB layer accepts any non-negative value.
+    """
     import aiosqlite
 
     from worthless.storage.schema import SCHEMA
@@ -241,13 +247,8 @@ async def test_record_spend_zero_token_audit_row(tmp_path):
         await db.executescript(SCHEMA)
         await db.commit()
 
-    # Simulate what _do_record_spend does when extraction fails
-    usage = extract_usage_openai(b"not valid json at all")
-    assert usage is None
-
-    tokens = usage.total_tokens if usage else 0
-    model = usage.model if usage else None
-    await record_spend(db_path, alias="k1", tokens=tokens, model=model, provider="openai")
+    # Caller provides reservation amount (fail-closed), not 0
+    await record_spend(db_path, alias="k1", tokens=500, model=None, provider="openai")
 
     async with aiosqlite.connect(db_path) as db:
         async with db.execute(
@@ -256,7 +257,7 @@ async def test_record_spend_zero_token_audit_row(tmp_path):
         ) as cur:
             row = await cur.fetchone()
     assert row is not None
-    assert row[0] == 0, "Failed extraction should record 0 tokens for audit"
+    assert row[0] == 500, "Caller must pass reservation amount (fail-closed), not zero"
     assert row[1] is None
 
 
@@ -273,3 +274,110 @@ def test_extraction_failure_is_distinguishable_from_zero_usage():
     assert result is not None
     assert result.total_tokens == 0
     assert result.model == "gpt-4"
+
+
+# ---------------------------------------------------------------------------
+# Phase 1c: fail-closed streaming usage (worthless-dupf.4)
+# ---------------------------------------------------------------------------
+
+
+def test_fake_zero_usage_injected_after_real_usage_ignored():
+    """Injected zero usage at stream end does not override real usage.
+
+    Attack: malicious upstream sends the real usage chunk first, then appends
+    {"usage": {"total_tokens": 0}} at the very end just before [DONE].
+    reversed() finds the injected zero first and returns 0 — wrong.
+    Forward iteration with last-wins also returns 0 — still wrong.
+
+    The correct defence: use StreamingUsageCollector (incremental) for the
+    streaming path, which already processes chunks as they arrive and takes
+    the last seen value. For the buffered extract_usage_openai path, the
+    known-good approach is to require the usage block to appear in the FINAL
+    non-DONE data chunk (OpenAI canonical position). This test documents the
+    expected behavior after the fix: real usage (60) must be returned, not 0.
+    """
+    stream = (
+        # Real usage in the canonical final chunk before [DONE]
+        b"data: "
+        + json.dumps(
+            {
+                "choices": [{"delta": {}, "finish_reason": "stop"}],
+                "model": "gpt-4o",
+                "usage": {"prompt_tokens": 10, "completion_tokens": 50, "total_tokens": 60},
+            }
+        ).encode()
+        + b"\n\n"
+        # Attacker appends a fake zero usage chunk after the real one
+        b"data: " + json.dumps({"usage": {"total_tokens": 0}, "model": "gpt-4o"}).encode() + b"\n\n"
+        b"data: [DONE]\n\n"
+    )
+    result = extract_usage_openai(stream)
+    assert result is not None
+    assert result.total_tokens == 60, (
+        "Real usage must be returned even when a zero-usage chunk is appended after it. "
+        "This requires first-wins (not last-wins) when usage is found."
+    )
+
+
+def test_multiple_usage_blocks_uses_first():
+    """When multiple usage blocks appear in SSE, the FIRST one wins.
+
+    First-wins defends against end-of-stream injection: an attacker who appends
+    a fake zero-usage block after the real usage block is ignored because the
+    real block was already found first.
+    """
+    stream = (
+        b"data: "
+        + json.dumps({"usage": {"total_tokens": 100}, "model": "gpt-4o"}).encode()
+        + b"\n\n"
+        # Attacker-injected zero after the real usage
+        b"data: " + json.dumps({"usage": {"total_tokens": 0}, "model": "gpt-4o"}).encode() + b"\n\n"
+        b"data: [DONE]\n\n"
+    )
+    result = extract_usage_openai(stream)
+    assert result is not None
+    assert result.total_tokens == 100, (
+        "First-wins: real usage (100) found first; injected zero (0) at end is ignored"
+    )
+
+
+def test_missing_usage_in_stream_returns_none():
+    """SSE stream with no usage block at all returns None."""
+    stream = (
+        b"data: "
+        + json.dumps({"choices": [{"delta": {"content": "Hi"}}], "model": "gpt-4o"}).encode()
+        + b"\n\n"
+        b"data: [DONE]\n\n"
+    )
+    assert extract_usage_openai(stream) is None
+
+
+def test_interrupted_stream_returns_none():
+    """Truncated SSE (no [DONE], no usage block) returns None."""
+    stream = (
+        b"data: "
+        + json.dumps({"choices": [{"delta": {"content": "He"}}], "model": "gpt-4o"}).encode()
+        + b"\n\n"
+        # Stream ends abruptly — no usage, no [DONE]
+    )
+    assert extract_usage_openai(stream) is None
+
+
+def test_anthropic_missing_usage_returns_none():
+    """Anthropic SSE with no message_delta returns None."""
+    stream = (
+        b"event: message_start\n"
+        b"data: "
+        + json.dumps(
+            {"message": {"model": "claude-3-5-sonnet-20241022", "usage": {"input_tokens": 10}}}
+        ).encode()
+        + b"\n\n"
+        # No message_delta — stream truncated
+    )
+    assert extract_usage_anthropic(stream) is None
+
+
+def test_anthropic_interrupted_stream_returns_none():
+    """Anthropic truncated SSE (no message_delta) returns None."""
+    stream = b"event: content_block_delta\ndata: {}\n\n"
+    assert extract_usage_anthropic(stream) is None
