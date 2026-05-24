@@ -16,11 +16,12 @@ import json
 import os
 import sqlite3
 import sys
+from pathlib import Path
 from typing import Any
 
 import typer
 
-from worthless.cli.bootstrap import WorthlessHome, resolve_home
+from worthless.cli.bootstrap import WorthlessHome, ensure_home
 from worthless.cli.console import get_console
 from worthless.cli.errors import error_boundary
 from worthless.cli.keystore import PLACEHOLDER_FERNET_KEY
@@ -34,6 +35,17 @@ from worthless.storage.repository import EnrollmentRecord, ShardRepository
 # imports from ``worthless.cli.commands.status`` (mcp/server.py,
 # tests) keep working without churn.
 _check_proxy_health = check_proxy_health
+
+
+def _resolve_home_for_status() -> WorthlessHome | None:
+    """Load an existing home for status without hiding storage corruption."""
+    env_home = os.environ.get("WORTHLESS_HOME")
+    if env_home:
+        base = Path(env_home)
+        return ensure_home(base) if base.exists() else None
+
+    default = Path.home() / ".worthless"
+    return ensure_home(default) if default.exists() else None
 
 
 def _list_enrolled_keys(home: WorthlessHome) -> list[dict[str, str]]:
@@ -121,7 +133,7 @@ def register_status_commands(app: typer.Typer) -> None:
         """Show enrolled keys and proxy health."""
         console = get_console()
 
-        home = resolve_home()
+        home = _resolve_home_for_status()
 
         # Enrolled keys
         keys: list[dict[str, str]] = []

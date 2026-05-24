@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -46,6 +47,14 @@ logger = logging.getLogger(__name__)
 
 
 _RECOVERY_LABEL = "<recovery>"
+
+
+def _db_missing_after_completed_bootstrap() -> tuple[bool, Path]:
+    """Return whether an initialized Worthless home has lost its SQLite DB."""
+    env_home = os.environ.get("WORTHLESS_HOME")
+    base = Path(env_home) if env_home else Path.home() / ".worthless"
+    db_path = base / "worthless.db"
+    return (base / ".bootstrapped").exists() and not db_path.exists(), db_path
 
 
 def _format_restored_line(p: _PlannedRestore) -> str:
@@ -465,6 +474,7 @@ def register_unlock_commands(app: typer.Typer) -> None:
         byte-identical and DB rows are not deleted.
         """
         console = get_console()
+        db_was_missing, missing_db_path = _db_missing_after_completed_bootstrap()
         home = get_home()
         repo = ShardRepository(str(home.db_path), home.fernet_key)
 
@@ -493,6 +503,16 @@ def register_unlock_commands(app: typer.Typer) -> None:
             unrecognised = _unrecognised_shards(env)
             if not unrecognised:
                 return
+            if db_was_missing:
+                raise WorthlessError(
+                    ErrorCode.KEY_NOT_FOUND,
+                    f"Local Worthless database is missing at {missing_db_path}. "
+                    f"This locked .env cannot be restored from this home because "
+                    f"the enrollment records are gone. Restore the database from "
+                    f"backup, recover on the original machine, or replace "
+                    f"{', '.join(unrecognised)} with raw key(s) and run "
+                    f"`worthless lock --env {env}` again.",
+                )
             raise WorthlessError(
                 ErrorCode.KEY_NOT_FOUND,
                 f"No enrollment found for shard-shape value(s) in {env}: "
