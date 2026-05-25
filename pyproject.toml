@@ -142,12 +142,6 @@ worthless = ["providers.toml"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 timeout = 30
-# WOR-582: thread-based timeout fires SIGINT (via _thread.interrupt_main) which
-# interrupts os.waitpid, os.read, and other blocking C calls that SIGALRM
-# (signal mode) cannot interrupt under PEP 475 EINTR-retry.  Using thread mode
-# everywhere is the belt-and-suspenders guard against any remaining blocking
-# calls that slip through the select()-based fixes in the sidecar helpers.
-timeout_method = "thread"
 # WOR-582: real_ipc tests spawn real subprocess sidecars; run concurrently
 # under `-n auto` they crash xdist workers nondeterministically. Excluded from
 # the default parallel run here and run serially instead (CI: dedicated -n0
