@@ -35,6 +35,12 @@ from worthless.proxy.ipc_supervisor import (
 )
 
 
+# WOR-582: test_timeout_fires_at_2s hangs >30s under py3.13 xdist workers —
+# the asyncio wait_for timeout does not fire correctly in a threaded xdist
+# context on py3.13. test_no_crypto_import_runtime also spawns a real subprocess.
+# Route the whole module to the serial pass to avoid the INTERNALERROR on teardown.
+pytestmark = pytest.mark.real_ipc
+
 _EXPECTED_CAPS = frozenset({"seal", "open", "attest"})
 
 
