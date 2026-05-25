@@ -639,6 +639,7 @@ def _read_proc_status_field(pid: int, field_prefix: str) -> str | None:
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="real-fork test requires Linux prctl + setres*")
+@pytest.mark.real_ipc  # os.fork + os.waitpid; xdist threads -> deadlock (WOR-582)
 def test_set_dumpable_zero_or_log_actually_sets_dumpable_in_forked_child() -> None:
     """In a forked child, ``set_dumpable_zero_or_log()`` makes ``prctl(PR_GET_DUMPABLE) == 0``.
 
@@ -673,6 +674,7 @@ def test_set_dumpable_zero_or_log_actually_sets_dumpable_in_forked_child() -> No
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="real-fork test requires Linux /proc + prctl")
+@pytest.mark.real_ipc  # os.fork + os.waitpid; xdist threads -> deadlock (WOR-582)
 def test_set_no_new_privs_or_log_actually_sets_no_new_privs_in_forked_child() -> None:
     """In a forked child, ``set_no_new_privs_or_log()`` makes ``NoNewPrivs: 1``."""
     r_fd, w_fd = os.pipe()
@@ -696,6 +698,7 @@ def test_set_no_new_privs_or_log_actually_sets_no_new_privs_in_forked_child() ->
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="real-fork test requires Linux setresuid")
+@pytest.mark.real_ipc  # os.fork + os.waitpid; xdist threads -> deadlock (WOR-582)
 def test_preexec_fn_eperms_in_forked_child_when_non_root() -> None:
     """In a forked NON-ROOT child, ``preexec_fn`` raises EPERM from setresuid.
 
@@ -732,6 +735,7 @@ def test_preexec_fn_eperms_in_forked_child_when_non_root() -> None:
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="real-fork test requires Linux fork semantics")
+@pytest.mark.real_ipc  # real fork via Popen; xdist threads -> deadlock (WOR-582)
 def test_preexec_fn_runs_in_forked_child_via_subprocess(tmp_path: Path) -> None:
     """``Popen(preexec_fn=cb)`` actually executes the callable in the child.
 
@@ -972,6 +976,7 @@ def test_chaos_dumpable_failure_does_not_break_caller(
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="kernel order-enforcement is Linux-only")
+@pytest.mark.real_ipc  # os.fork + os.waitpid; xdist threads -> deadlock (WOR-582)
 def test_kernel_rejects_setgroups_after_setresuid_when_root() -> None:
     """ROOT + Linux only: prove the kernel rejects ``setgroups([])`` after ``setresuid``.
 

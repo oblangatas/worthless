@@ -1522,6 +1522,7 @@ class TestLockBaseUrlSlotPriority:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.real_ipc  # asyncio.run() inside lock; xdist threads → event-loop conflict (WOR-582)
 class TestLockHardcodedBaseUrlDetection:
     """Lock fails fast when source files contain hardcoded provider URLs.
 

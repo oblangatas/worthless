@@ -654,6 +654,7 @@ def _worthless_cli_args() -> list[str]:
     return [sys.executable, "-m", "worthless.cli.app"]
 
 
+@pytest.mark.real_ipc
 class TestConcurrencyAndCorruption:
     """xdist-parallel-safe: every test uses tmp_path + an explicit
     WORTHLESS_HOME env var. Real $HOME is never touched.

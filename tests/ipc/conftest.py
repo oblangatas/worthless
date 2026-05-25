@@ -359,6 +359,7 @@ def subprocess_sidecar(
         if sidecar_socket_path.exists():
             break
         if proc.poll() is not None:
+            proc.wait(timeout=2)
             stderr = proc.stderr.read().decode() if proc.stderr else ""
             pytest.fail(f"sidecar exited rc={proc.returncode}: {stderr}")
         time.sleep(0.05)

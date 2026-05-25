@@ -142,7 +142,12 @@ worthless = ["providers.toml"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 timeout = 30
-addopts = "--strict-config --strict-markers -n auto --dist loadscope --reruns 1 -m 'not live and not docker and not user_flow'"
+# WOR-582: real_ipc tests spawn real subprocess sidecars; run concurrently
+# under `-n auto` they crash xdist workers nondeterministically. Excluded from
+# the default parallel run here and run serially instead (CI: dedicated -n0
+# step; locally: `uv run pytest -m real_ipc -n0`). Root cause tracked in
+# WOR-582; this is the interim quarantine.
+addopts = "--strict-config --strict-markers -n auto --dist loadscope --reruns 1 -m 'not live and not docker and not user_flow and not real_ipc'"
 markers = [
     "benchmark: performance and latency regression checks",
     "contract: schema-driven API and protocol checks",

@@ -43,6 +43,7 @@ pytestmark = [
     pytest.mark.asyncio,
     pytest.mark.integration,
     pytest.mark.real_ipc,
+    pytest.mark.xdist_group("real_sidecar"),
 ]
 
 _EXPECTED_CAPS = frozenset({"seal", "open", "attest"})

@@ -24,6 +24,7 @@ import base64
 import inspect
 import os
 import secrets
+import select
 import socket
 import subprocess
 import sys
@@ -36,6 +37,8 @@ import pytest
 
 # Public surface under test. These imports MUST resolve once health.py lands.
 from worthless.sidecar import health
+
+pytestmark = [pytest.mark.integration, pytest.mark.xdist_group("real_sidecar")]
 
 _SUN_PATH_MAX = 104
 
@@ -98,14 +101,21 @@ def _spawn_sidecar_subprocess(
         text=True,
         bufsize=1,
     )
-    # Wait for ready line.
+    # Wait for ready line — use select() before readline() to avoid blocking
+    # indefinitely at the C level (PEP 475 EINTR-retry defeats SIGALRM timeouts).
     deadline = time.monotonic() + 5.0
     assert proc.stdout is not None
-    while time.monotonic() < deadline:
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
         if proc.poll() is not None:
             err = proc.stderr.read() if proc.stderr else ""
             proc.kill()
             pytest.fail(f"sidecar exited early (rc={proc.returncode}): {err}")
+        ready, _, _ = select.select([proc.stdout], [], [], min(0.1, remaining))
+        if not ready:
+            continue
         line = proc.stdout.readline()
         if line.startswith("sidecar: ready"):
             return proc, sock

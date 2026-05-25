@@ -37,7 +37,10 @@ import pytest
 
 from worthless.proxy.ipc_supervisor import IPCSupervisor
 
-pytestmark = pytest.mark.asyncio
+# WOR-582: fake_sidecar with delay-configured replies can hang under py3.13 xdist
+# workers (same asyncio event-loop conflict as test_proxy_client_unit.py).
+# Serial pass eliminates the race.
+pytestmark = [pytest.mark.asyncio, pytest.mark.real_ipc]
 
 _EXPECTED_CAPS = frozenset({"seal", "open", "attest"})
 

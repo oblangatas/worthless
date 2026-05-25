@@ -19,6 +19,13 @@ from pathlib import Path
 
 import pytest
 
+# WOR-582: every test in tests/sidecar/ spawns a real sidecar subprocess.
+# Running them under xdist -n auto causes nondeterministic worker crashes
+# (same root cause as the readline/select fix in the test helpers).
+# Marking the whole directory real_ipc routes all these tests to the serial
+# CI pass (-n0 -m "real_ipc and not docker") instead of the parallel pass.
+pytestmark = pytest.mark.real_ipc
+
 # AF_UNIX sun_path is 104 bytes on macOS; pytest's tmp_path on macOS
 # already eats ~90 bytes so we go straight to /tmp/w-* with mkdtemp.
 _SUN_PATH_MAX = 104

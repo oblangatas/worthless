@@ -439,6 +439,10 @@ def _init_db(home: WorthlessHome) -> None:
             pool.submit(asyncio.run, migrate_db(str(home.db_path))).result()
     except RuntimeError:
         # No running loop — safe to use asyncio.run()
+        # Snapshot threads BEFORE the call so we only join the aiosqlite
+        # cleanup thread that migrate_db spawns, not the pre-existing xdist
+        # worker / pytest-asyncio threads that would each block 2 s (WOR-582).
+        _threads_before = set(threading.enumerate())
         asyncio.run(migrate_db(str(home.db_path)))
         # aiosqlite starts a daemon thread per connection and signals it to
         # stop before close() returns, but never calls thread.join().  The
@@ -449,7 +453,7 @@ def _init_db(home: WorthlessHome) -> None:
         # thread has fully exited before we return (WRTLS-114).
         _main = threading.main_thread()
         for _t in list(threading.enumerate()):
-            if _t is not _main:
+            if _t is not _main and _t not in _threads_before:
                 _t.join(timeout=2.0)
 
     # Restrict DB file permissions (no-op on Windows — NTFS ACLs are different)

@@ -4,7 +4,7 @@ on:
   pull_request:
   push:
     branches:
-      - "**"
+      - main
     tags:
       - "v*"
 
@@ -50,7 +50,14 @@ jobs:
           WORTHLESS_SIDECAR_READY_TIMEOUT_SECS: "20"
         run: |
           uv sync --extra dev --extra test --extra mcp
-          uv run pytest --reruns 1 --cov=worthless --cov-report=xml --cov-report=term-missing --cov-fail-under=80 -n auto --dist loadscope -x -m "not docker"
+          # Parallel pass — everything EXCEPT the real-subprocess sidecar/IPC
+          # family. Coverage is accumulated, not gated here.
+          uv run pytest --reruns 1 --cov=worthless --cov-report=xml --cov-report=term-missing -n auto --dist loadscope -x -m "not live and not docker and not user_flow and not real_ipc"
+          # Serial pass — real_ipc tests that spawn real processes/sidecars;
+          # kept serial because subprocess.run(waitpid) + PEP 475 EINTR-retry
+          # makes pytest-timeout ineffective for these tests under xdist.
+          # `--cov-append` rolls coverage into total; `--cov-fail-under` gates.
+          uv run pytest --reruns 1 --cov=worthless --cov-append --cov-report=xml --cov-report=term-missing --cov-fail-under=80 -n0 -m "real_ipc and not live and not docker"
 
       - name: Lint
         env:
