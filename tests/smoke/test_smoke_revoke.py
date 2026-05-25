@@ -26,6 +26,11 @@ from tests.helpers import fake_key
 
 _WORKTREE_ROOT = Path(__file__).resolve().parents[2]
 
+# WOR-582: subprocess.run(["uv", "run", "worthless", ...]) with no timeout hangs
+# indefinitely under PEP 475 (SIGALRM can't interrupt waitpid). Route to the
+# serial pass so a stuck subprocess doesn't wedge an xdist worker.
+pytestmark = pytest.mark.real_ipc
+
 # Split to avoid tripping secret scanners on a literal key prefix in source.
 _OPENAI_PREFIX = "sk-" + "proj-"
 
@@ -53,6 +58,7 @@ def _run(args: list[str], home: Path) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
         cwd=_WORKTREE_ROOT,
+        timeout=60,
     )
 
 

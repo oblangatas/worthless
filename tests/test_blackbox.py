@@ -21,6 +21,11 @@ from tests.helpers import fake_anthropic_key, fake_openai_key
 
 runner = CliRunner(mix_stderr=False)
 
+# WOR-582: CliRunner.invoke(["lock", ...]) calls asyncio.run() via bootstrap;
+# under xdist threaded workers this triggers event-loop conflicts that hang the
+# worker. Route the whole module to the serial pass (-n0).
+pytestmark = pytest.mark.real_ipc
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
