@@ -35,10 +35,13 @@ from worthless.cli.errors import UnsafeReason, UnsafeRewriteRefused
 from worthless.cli.safe_rewrite import safe_rewrite
 
 
-pytestmark = pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="chaos harness is POSIX-only",
-)
+pytestmark = [
+    pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="chaos harness is POSIX-only",
+    ),
+    pytest.mark.real_ipc,
+]
 
 
 # ---------------------------------------------------------------------------
