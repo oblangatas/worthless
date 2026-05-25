@@ -1075,8 +1075,15 @@ def _lock_keys(
     # is not gated. Surface this LOUDLY by exiting non-zero AFTER the
     # lock-core writes have committed (L1 binding contract preserved).
     # Exit code 73 = EX_CANTCREAT (POSIX), distinguishable from 1.
-    # The [FAIL] block is already printed by _apply_openclaw.
+    # The [FAIL] block is already printed by _apply_openclaw; this final
+    # LOCK FAILED line disambiguates the mixed [FAIL]+[OK] output so the
+    # user cannot mistake a partial failure for overall success (WOR-551).
     if result.partial_failure:
+        console.print_failure(
+            "LOCK FAILED — .env key is split but OpenClaw integration did not complete.\n"
+            "Your agent traffic is NOT gated through the Worthless proxy.\n"
+            "Run `worthless doctor` to diagnose, `worthless unlock` to roll back."
+        )
         raise typer.Exit(code=73)
 
     return result.fresh_count + relock_count

@@ -209,6 +209,54 @@ def test_lock_emits_FAIL_text_prefix_on_detected_failure(
     assert "[FAIL]" in result.output
 
 
+def test_lock_emits_LOCK_FAILED_summary_on_detected_failure(
+    home_dir: WorthlessHome,
+    env_file: Path,
+    openclaw_present: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TF-05b: a final ``LOCK FAILED`` summary line appears AFTER the [OK] key-split
+    message so the user cannot mistake the mixed [FAIL]+[OK] output for overall
+    success (WOR-551).
+
+    Before this fix the output was:
+        [FAIL] OpenClaw integration did NOT complete.
+        [OK] 1 key split …
+        (exit 73 — but no further text)
+
+    After this fix:
+        [FAIL] OpenClaw integration did NOT complete.
+        [OK] 1 key split …
+        LOCK FAILED — …
+        (exit 73)
+    """
+    from worthless.openclaw import config as config_mod
+
+    def _exploding_set_provider(*_: object, **__: object) -> None:
+        raise OSError("simulated EACCES on openclaw.json")
+
+    monkeypatch.setattr(config_mod, "set_provider", _exploding_set_provider)
+
+    result = runner.invoke(
+        app,
+        ["lock", "--env", str(env_file)],
+        env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+    )
+
+    assert result.exit_code == 73, result.output
+    # Final LOCK FAILED summary must appear AFTER the [OK] key-split line.
+    ok_pos = result.output.find("[OK]")
+    failed_pos = result.output.find("LOCK FAILED")
+    assert ok_pos != -1, "expected [OK] key-split line in output"
+    assert failed_pos != -1, (
+        "expected 'LOCK FAILED' summary after [OK] line; got:\n" + result.output
+    )
+    assert failed_pos > ok_pos, (
+        "LOCK FAILED must appear AFTER the [OK] key-split line so the user "
+        "cannot miss the failure; got:\n" + result.output
+    )
+
+
 # ---------------------------------------------------------------------------
 # TF-06 — --json flag emits the report payload
 # ---------------------------------------------------------------------------
