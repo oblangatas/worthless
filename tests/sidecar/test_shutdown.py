@@ -109,6 +109,87 @@ def _terminate(proc: subprocess.Popen[str]) -> tuple[int, str, str]:
     return proc.returncode, out, err
 
 
+# ---------------------------------------------------------------------------
+# Unit tests for _wait_for_ready (WOR-582 select() fix)
+#
+# These tests exercise the helper in isolation using tiny synthetic
+# subprocesses.  They prove the select()-based timeout actually fires —
+# without them the only evidence is "CI didn't get killed this time."
+# ---------------------------------------------------------------------------
+
+
+def test_wait_for_ready_times_out_on_silent_process() -> None:
+    """Timeout fires within ≤ timeout + 0.5 s on a process that never writes.
+
+    Before the WOR-582 fix, readline() blocked at the C level and this
+    test would hang for the full pytest-timeout budget (30 s) before the
+    signal timeout fired.  With select(), the loop exits within ~timeout s.
+    """
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    t0 = time.monotonic()
+    with pytest.raises((pytest.fail.Exception, SystemExit), match="did not print ready"):
+        _wait_for_ready(proc, timeout=0.5)
+    elapsed = time.monotonic() - t0
+    # select() polls every 0.1 s; allow generous headroom for slow CI runners.
+    assert elapsed < 2.0, (
+        f"_wait_for_ready hung for {elapsed:.2f}s — select() timeout is not firing.\n"
+        "This indicates the WOR-582 regression: readline() is blocking at the C level."
+    )
+
+
+def test_wait_for_ready_succeeds_after_delayed_ready_line() -> None:
+    """Helper returns the ready line when the process writes it after a delay.
+
+    Validates the polling loop does not exit early on the first select()
+    timeout interval — it must keep polling until the line arrives.
+    """
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import time, sys; "
+                "time.sleep(0.25); "
+                "print('sidecar: ready sock=/tmp/x uid=0', flush=True); "
+                "time.sleep(30)"
+            ),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    try:
+        line = _wait_for_ready(proc, timeout=5.0)
+        assert line.startswith("sidecar: ready"), f"unexpected line: {line!r}"
+    finally:
+        proc.kill()
+        proc.wait(timeout=2)
+
+
+def test_wait_for_ready_fails_on_early_process_exit() -> None:
+    """Helper reports the exit code and stderr when the process dies early.
+
+    Verifies the ``proc.poll()`` branch — the helper must not hang waiting
+    for output that will never arrive after the process exits.
+    """
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.stderr.write('boom\\n'); sys.exit(2)"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    with pytest.raises((pytest.fail.Exception, SystemExit), match="exited before ready"):
+        _wait_for_ready(proc, timeout=5.0)
+
+
 def test_startup_removes_stale_socket_file_after_sigkill(
     sidecar_env: tuple[Path, dict[str, str]],
 ) -> None:
