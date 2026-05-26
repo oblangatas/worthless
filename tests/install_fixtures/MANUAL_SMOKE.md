@@ -12,6 +12,18 @@ For supply-chain trust roots, see
 - [ ] `UV_VERSION` / `ASTRAL_INSTALLER_SHA256` triplet re-verified (see "Bumping UV_VERSION" below)
 - [ ] `WORTHLESS_VERSION_PIN` in `install.sh` == latest published PyPI release (bump it when you publish a new release; `release-sync-check.yml` fails if it lags)
 
+## Evidence capture
+
+For every public `curl -sSL https://worthless.sh | sh` smoke below, copy the
+terminal output into the release Linear ticket, PR, or release notes. Include:
+
+- the exact install command and installer output
+- `worthless --version` or `uv run --no-project worthless --version`
+- any failure output and the remediation text the user saw
+
+This checklist is the public-domain release proof. Per-PR CI runs checkout-local
+`sh ./install.sh`; it does not prove the deployed `worthless.sh` Worker.
+
 ## Personal Mac (current dev machine)
 
 - [ ] Run `curl -sSL https://worthless.sh | sh`

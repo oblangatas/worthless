@@ -572,5 +572,92 @@ def test_install_smoke_uploads_terminal_artifacts() -> None:
         "proxy install proof should upload a separate artifact from the OS matrix."
     )
     assert "tee install-smoke-traces/" in text, (
-        "live install steps must tee command output into install-smoke-traces/ before upload."
+        "install.sh steps must tee command output into install-smoke-traces/ before upload."
+    )
+
+
+# --- WOR-568: public install proof must not be overclaimed -------------------
+
+
+def test_install_smoke_name_matches_checkout_local_proof() -> None:
+    """Workflow + job labels must not overclaim public install proof.
+
+    A PR reviewer reads the GitHub checks list, which shows
+    `<workflow name> / <job name>`. Per-PR CI runs checkout-local
+    `sh ./install.sh`, not public `curl https://worthless.sh | sh` (which hits
+    the deployed Worker and is a release/manual gate). So neither the workflow
+    name nor any job name may carry public-domain `curl|sh` / `worthless.sh`
+    wording or the ambiguous standalone word "live" while CI stays
+    checkout-local. If the workflow is changed to run the public command, a
+    label must say so explicitly.
+    """
+    workflow = REPO_ROOT / ".github" / "workflows" / "install-smoke.yml"
+    text = workflow.read_text(encoding="utf-8")
+
+    # Strip comments so a clarifying comment that *mentions* the public command
+    # cannot flip detection and force a misleading rename.
+    non_comment = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+    runs_public_curl = bool(
+        re.search(r"curl\s+(?:-\S+\s+)*https://worthless\.sh\s*\|\s*sh", non_comment)
+    )
+
+    # Workflow name (col 0) + each job name (indented). Step `- name:` lines have
+    # a leading dash and are intentionally excluded — they are not check labels.
+    labels = re.findall(r"^[ \t]*name:[ \t]*(.+)$", text, re.MULTILINE)
+    assert labels, "install-smoke.yml must define a workflow name and job names"
+
+    if not runs_public_curl:
+        for label in labels:
+            low = label.lower()
+            assert (
+                "curl|sh" not in low
+                and "worthless.sh" not in low
+                and not re.search(r"\blive\b", low)
+            ), (
+                f"install-smoke.yml label {label!r} overclaims public-domain "
+                "proof, but CI runs checkout-local `sh ./install.sh`. Use "
+                "checkout-local/execute wording (no `live`, `curl|sh`, or "
+                "`worthless.sh` in workflow/job names)."
+            )
+    else:
+        assert any(
+            "worthless.sh" in label.lower() or "curl|sh" in label.lower() for label in labels
+        ), (
+            "if install-smoke.yml is changed to run public "
+            "`curl -sSL https://worthless.sh | sh`, a workflow/job name should "
+            "say that explicitly."
+        )
+
+
+def test_public_curl_manual_gate_requires_terminal_evidence() -> None:
+    """The public worthless.sh gate must require pasteable terminal output.
+
+    A checked box that says "I ran curl" is weak product proof. The manual
+    release gate must preserve the actual install output, version output, and
+    any failure wording, recorded somewhere durable, so a top-down UX review
+    can trace the public journey back to evidence.
+    """
+    manual = INSTALL_FIXTURES / "MANUAL_SMOKE.md"
+    text = manual.read_text(encoding="utf-8")
+    normalized = text.lower()
+
+    assert "curl -sSL https://worthless.sh | sh" in text, (
+        "MANUAL_SMOKE.md must preserve the canonical copy-paste public "
+        "install command with curl's case-sensitive `-sSL` flags."
+    )
+    assert "terminal output" in normalized or "terminal transcript" in normalized, (
+        "MANUAL_SMOKE.md must require copy-pasted terminal output/transcript "
+        "for public `curl https://worthless.sh | sh` release proof."
+    )
+    assert "--version" in text, (
+        "MANUAL_SMOKE.md public evidence must include version output (`worthless --version`)."
+    )
+    assert (
+        "linear" in normalized
+        or "pull request" in normalized
+        or "release notes" in normalized
+        or re.search(r"\bpr\b", normalized) is not None
+    ), (
+        "public curl proof must say where the terminal evidence is recorded "
+        "(Linear, PR, or release notes), not just local memory."
     )
