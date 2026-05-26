@@ -75,6 +75,9 @@ htmlcov/
 testsprite_prd.md
 testsprite_tests/
 
+# Live end-to-end gate evidence (local-only; CI re-runs from scratch)
+.worthless/
+
 # Milestone phase archives (full history in git, only summaries tracked)
 .planning/milestones/v1.0-phases/**
 !.planning/milestones/v1.0-phases/**/
