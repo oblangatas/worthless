@@ -97,6 +97,7 @@
       display: inline-flex;
       align-items: center;
       gap: 0.55rem;
+      font-size: 1.05rem;
       font-weight: 800;
       text-decoration: none;
       letter-spacing: 0;
@@ -124,6 +125,12 @@
       padding: 0.42rem 0.7rem;
       border-radius: 999px;
       color: oklch(43% 0.09 205);
+    }
+
+    .nav-links .nav-early {
+      color: oklch(98% 0.01 220);
+      background: oklch(42% 0.135 255);
+      box-shadow: 0 10px 28px oklch(37% 0.12 250 / 0.2);
     }
 
     .nav-actions {
@@ -799,20 +806,6 @@
       transform: translateX(2px);
     }
 
-    .waitlist-badge {
-      display: inline-flex;
-      align-items: center;
-      min-height: 2rem;
-      padding: 0 0.72rem;
-      border: 1px solid oklch(78% 0.05 205 / 0.72);
-      border-radius: 999px;
-      color: var(--accent-dark);
-      background: oklch(96% 0.025 205 / 0.72);
-      font-size: 0.78rem;
-      font-weight: 850;
-      white-space: nowrap;
-    }
-
     .waitlist-mode {
       display: inline-flex;
       align-items: center;
@@ -832,29 +825,6 @@
     .waitlist-mode strong {
       color: var(--accent-dark);
       font-weight: 880;
-    }
-
-    .waitlist .note {
-      display: flex;
-      align-items: flex-start;
-      gap: 0.55rem;
-      max-width: 540px;
-      margin-top: 0.95rem;
-      color: var(--ink-soft);
-      font-size: 0.88rem;
-      font-weight: 700;
-      line-height: 1.45;
-    }
-
-    .waitlist .note::before {
-      content: "";
-      width: 0.48rem;
-      height: 0.48rem;
-      flex: 0 0 auto;
-      margin-top: 0.38rem;
-      border-radius: 999px;
-      background: oklch(70% 0.11 154);
-      box-shadow: 0 0 0 0.34rem oklch(88% 0.05 160 / 0.52);
     }
 
     .env-panel {
@@ -1284,16 +1254,19 @@
         padding: 0 0.75rem;
       }
 
-      .nav-links a:nth-child(1),
-      .nav-links a:nth-child(2),
-      .nav-links a:nth-child(4),
-      .nav-links a:nth-child(5) {
-        display: none;
+      .brand {
+        gap: 0.45rem;
+        font-size: 1rem;
+      }
+
+      .brand img {
+        width: 26px;
+        height: 26px;
       }
 
       .nav-links {
         margin-left: auto;
-        gap: 0;
+        gap: 0.12rem;
       }
 
       .nav-links a,
@@ -1302,7 +1275,17 @@
         padding: 0.34rem 0.46rem;
       }
 
+      .nav-links .nav-early {
+        padding-inline: 0.58rem;
+      }
+
       .nav-actions {
+        display: flex;
+        gap: 0.25rem;
+        margin-left: 0;
+      }
+
+      .nav-actions .ghost {
         display: none;
       }
 
@@ -1311,12 +1294,15 @@
       }
 
       .kofi-short {
-        display: inline;
+        display: none;
       }
 
       .kofi {
         gap: 0.26rem;
         flex: 0 0 auto;
+        min-width: 2.05rem;
+        justify-content: center;
+        padding-inline: 0.42rem;
       }
 
       .hero {
@@ -1329,7 +1315,7 @@
       }
 
       h1 {
-        font-size: 2.25rem;
+        font-size: clamp(3.15rem, 15vw, 4.7rem);
         line-height: var(--intro-title-leading);
         letter-spacing: var(--intro-title-tracking);
         max-width: 100%;
@@ -1541,12 +1527,9 @@
       worthless
     </a>
     <div class="nav-links">
-      <a href="how-it-works.html">How it works</a>
-      <a href="features.html">Features</a>
       <a href="https://docs.wless.io/">Docs</a>
-      <a href="blog/index.html">Blog</a>
-      <a href="red/index.html">Red Blog</a>
       <a href="memes.html">Memes</a>
+      <a class="nav-early" href="#early-access">Early access</a>
     </div>
     <div class="nav-actions">
       <a class="ghost" href="https://github.com/shacharm2/worthless" target="_blank" rel="noopener">
@@ -1676,25 +1659,15 @@
       </div>
     </section>
 
-    <section class="trust-rail" aria-label="Worthless positioning">
-      <p>Scanners find leaks. Vaults store secrets. Provider dashboards and gateways manage spend. <span>Worthless makes a copied .env AI key not a blank check.</span></p>
-      <div class="trust-actions">
-        <a href="https://docs.wless.io/security/">Security model</a>
-        <a href="https://docs.wless.io/protocol/">Protocol</a>
-      </div>
-    </section>
-
-    <section class="waitlist" aria-label="Worthless Hosted API waitlist">
+    <section class="waitlist" id="early-access" aria-label="Worthless Hosted API waitlist">
       <div class="waitlist-inner">
         <div>
-          <p class="eyebrow">Hosted Worthless API</p>
-          <h2>Copied .env keys hit a wall.</h2>
-          <p>Your app keeps working. The copied AI key cannot call the provider alone.</p>
+          <p class="eyebrow">Early access</p>
+          <h2>Hosted Worthless</h2>
+          <p>Leaked .env keys hit a wall.<br>AI keys today. More secrets next.</p>
           <div class="waitlist-actions">
-            <a class="button waitlist-cta" href="https://tally.so/r/WOpNVL" target="_blank" rel="noopener">Join the waitlist</a>
-            <span class="waitlist-badge">Early access</span>
+            <a class="button waitlist-cta" href="https://tally.so/r/WOpNVL" target="_blank" rel="noopener">Join early access</a>
           </div>
-          <div class="note">Current Worthless: local LLM keys. Hosted: team AI key paths.</div>
         </div>
         <div class="env-panel" aria-hidden="true">
           <div class="env-panel-head">.env</div>
@@ -1745,6 +1718,14 @@
             </div>
           </div>
         </div>
+      </div>
+    </section>
+
+    <section class="trust-rail" aria-label="Worthless positioning">
+      <p>Scanners find leaks. Vaults store secrets. Provider dashboards and gateways manage spend. <span>Worthless makes a copied .env AI key not a blank check.</span></p>
+      <div class="trust-actions">
+        <a href="https://docs.wless.io/security/">Security model</a>
+        <a href="https://docs.wless.io/protocol/">Protocol</a>
       </div>
     </section>
   </main>
