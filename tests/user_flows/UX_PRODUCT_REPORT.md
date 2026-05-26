@@ -35,9 +35,10 @@ project, the host proxy runs outside Docker, and an app container consumes the
 locked `.env` through Docker's host bridge without receiving the raw key.
 
 `WOR-544` adds the second pass over the suite: start from the top-level user
-journey, then trace each step to automated proof, terminal proof, live CI proof,
-or an explicit owner for the remaining gap. It does not reopen the completed
-child tickets; it makes their coverage reviewable as one product story.
+journey, then trace each step to automated proof, terminal proof,
+checkout-local CI proof, or an explicit owner for the remaining gap. It does
+not reopen the completed child tickets; it makes their coverage reviewable as
+one product story.
 
 ## How to use this report
 
@@ -83,7 +84,7 @@ This is the product map for manual review. Read it as the user would experience
 Worthless: install first, then protect a project, prove protection, recover from
 normal and abnormal states, and finally test app-specific integrations.
 
-| Journey step | Current automated proof | Terminal trace proof | Live / CI proof | Residual gap | Owning ticket |
+| Journey step | Current automated proof | Terminal trace proof | Checkout-local CI proof | Residual gap | Owning ticket |
 | --- | --- | --- | --- | --- | --- |
 | 1. Discover and install Worthless on a supported host | Installer static/logic tests plus install Docker matrix: `tests/test_install_static.py`, `tests/test_install_logic.py`, `tests/test_install_docker.py` | `TERMINAL_TRACES.md` starts with deterministic install/reinstall/manual-uninstall traces | `install-smoke.yml` runs checkout-local `sh ./install.sh` on macOS 15/14 and Ubuntu 24.04/22.04, plus Ubuntu proxy | **Being clarified by `WOR-568`:** published `curl https://worthless.sh \| sh` is a public-domain release/manual proof with required terminal evidence, not a per-PR pytest | `WOR-568`, `WOR-446` |
 | 2. Verify the installed CLI exists and prints a version | Install smoke runs `uv run --no-project worthless --version`; static tests assert installer smoke-test behavior | Install lifecycle trace includes successful installer output | `install-smoke.yml` uploads `verify-version-*` artifacts | **Covered** for repo checkout installer; public `worthless.sh` version proof is required in the release/manual transcript | `WOR-441`, `WOR-568` |
@@ -169,7 +170,7 @@ normal and abnormal states, and finally test app-specific integrations.
 | Multi-project doctor repair | Doctor repair should be surgical when one project is broken and a sibling project is still healthy. | `doctor --fix --yes` cleans the broken row only; the sibling `.env` remains locked and later unlocks to its original key. | `test_recovery_journeys.py::test_doctor_fix_repairs_broken_project_without_unlocking_sibling` |
 | Refused rewrite after planned lock | If Worthless refuses to rewrite an unsafe `.env`, the user must not be left half-protected. | `lock` fails without traceback, original `.env` bytes remain, status has no protected phantom row, and explicit scan still finds the raw key. | `test_native_stress_journeys.py::test_lock_rewrite_refusal_leaves_env_and_status_recoverable` |
 | Tampered locked `.env` | If a user edits a locked shard value, unlock should fail clearly without destroying evidence. | `unlock` fails without traceback, says the value was modified after lock / commitment mismatch, leaves `.env` unchanged, and status still shows protected state. | `test_native_stress_journeys.py::test_unlock_tampered_locked_env_fails_without_destroying_state` |
-| Install lifecycle evidence | A new user should see a clear install result, safe reinstall behavior, actionable failure output, and honest uninstall guidance. | Deterministic terminal traces show PATH messaging, pinned reinstall no-op, pipx conflict guidance, uv failure diagnostics, and current `uv tool uninstall worthless` limitation. Live install-smoke CI uploads per-runner artifacts. | `test_render_traces.py::test_install_lifecycle_trace_documents_current_install_contract` + `test_install_static.py::test_install_smoke_uploads_terminal_artifacts` |
+| Install lifecycle evidence | A new user should see a clear install result, safe reinstall behavior, actionable failure output, and honest uninstall guidance. | Deterministic terminal traces show PATH messaging, pinned reinstall no-op, pipx conflict guidance, uv failure diagnostics, and current `uv tool uninstall worthless` limitation. Checkout-local install-smoke CI uploads per-runner artifacts. | `test_render_traces.py::test_install_lifecycle_trace_documents_current_install_contract` + `test_install_static.py::test_install_smoke_uploads_terminal_artifacts` |
 | Docker app on host Worthless | Worthless can run outside Docker, lock a project `.env`, run the proxy in host LAN mode, and let an app container call through the proxy without seeing the raw key. | `.env` contains shard-A plus `host.docker.internal`; the app container request succeeds; the mock upstream sees the reconstructed real key. | `test_install_docker.py::test_host_cli_locked_env_reaches_proxy_from_app_container` |
 | Docker loopback mistake | If the user skips the Docker bridge edit and gives a container `127.0.0.1`, the sample app preflight should point at the real mistake. | The synthetic app container fails before the request and says it received a loopback base URL; this is not a Worthless-owned diagnostic for arbitrary apps. | `test_install_docker.py::test_app_container_fails_fast_when_locked_env_keeps_loopback_url` |
 | Docker unwritable `.env` | If a host permission problem prevents rewriting `.env`, Worthless should fail without half-protecting the project. | `lock` refuses the unsafe rewrite, `.env` remains unchanged, and `status` says no keys are enrolled. Real bind-mount UID/path variants remain follow-up. | `test_install_docker.py::test_host_lock_unwritable_env_fails_without_phantom_enrollment` |

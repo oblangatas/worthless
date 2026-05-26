@@ -52,8 +52,8 @@ jobs:
           uv sync --extra test
           uv run pytest -q tests/test_install_static.py tests/test_install_shellcheck.py tests/test_install_logic.py
 
-  live:
-    name: Live install (${{ matrix.os }})
+  execute:
+    name: Execute install.sh (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     needs: static
@@ -116,7 +116,7 @@ jobs:
           mkdir -p install-smoke-traces
           sh ./install.sh 2>&1 | tee install-smoke-traces/reinstall-${{ runner.os }}.log
 
-      - name: Upload live install terminal traces
+      - name: Upload install.sh terminal traces
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
