@@ -10,6 +10,7 @@ Run with: uv run pytest tests/test_deploy_static.py -v
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -719,4 +720,126 @@ class TestReleaseSyncTrustAnchor:
             "A5 must derive the tag date from the git tag "
             "(`git for-each-ref ... creatordate`), not a Release object "
             "(worthless-xn4l)."
+        )
+
+
+# ------------------------------------------------------------------
+# Release-sync-check workflow: BEHAVIOURAL tests (worthless-xn4l)
+#
+# The class above only greps the workflow text. These run the ACTUAL shell
+# extracted from the YAML against throwaway git repos with adversarial tag
+# sets — proving the logic behaves, not just that the right strings exist.
+# ------------------------------------------------------------------
+
+
+def _git(cwd: Path, *args: str, when: str | None = None) -> None:
+    """Run a git command in cwd with deterministic identity/time."""
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@e",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@e",
+    }
+    if when is not None:
+        env["GIT_AUTHOR_DATE"] = when
+        env["GIT_COMMITTER_DATE"] = when
+    subprocess.run(["git", *args], cwd=cwd, env=env, check=True, capture_output=True, text=True)
+
+
+def _extract_shell_line(workflow_text: str, needle: str) -> str:
+    """Pull the exact on-disk shell line containing `needle` from the YAML.
+
+    Extracting the real line (not a hand-copy) means these tests exercise
+    whatever the workflow actually ships — they break if the line drifts.
+    """
+    for line in workflow_text.splitlines():
+        if needle in line:
+            return line.strip()
+    raise AssertionError(f"no workflow line contains {needle!r}")
+
+
+def _seed_repo(tmp_path: Path) -> Path:
+    """A git repo with a single commit dated far in the past (2020)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    (repo / "f").write_text("x")
+    _git(repo, "add", "f")
+    _git(repo, "commit", "-q", "-m", "c", when="2020-01-01T00:00:00")
+    return repo
+
+
+def _resolve_latest_tag(repo: Path, resolver_line: str) -> tuple[str, int]:
+    """Run the extracted LATEST_TAG resolver line; return (tag, returncode)."""
+    script = f'set -euo pipefail\n{resolver_line}\nprintf "%s" "$LATEST_TAG"'
+    out = subprocess.run(["bash", "-c", script], cwd=repo, capture_output=True, text=True)
+    return out.stdout.strip(), out.returncode
+
+
+class TestReleaseSyncResolutionBehaviour:
+    """Execute the workflow's real tag-resolution shell against fixtures."""
+
+    def test_picks_latest_clean_release_tag(self, tmp_path: Path, release_sync_text: str):
+        """rc, dashed, junk, and a stray higher non-release tag are all
+        ignored; the highest clean vMAJOR.MINOR.PATCH wins.
+
+        Mirrors the live tag set that broke this: v1.0 (the original stray)
+        sorts above v0.3.6 under version sort and MUST be filtered out.
+        """
+        repo = _seed_repo(tmp_path)
+        for tag in ["v0.3.5", "v0.3.6", "v0.3.7rc1", "v1.0", "v0.0.0-test", "v0.1-website-base"]:
+            _git(repo, "tag", tag)
+        line = _extract_shell_line(release_sync_text, "LATEST_TAG=$(git tag")
+        tag, rc = _resolve_latest_tag(repo, line)
+        assert rc == 0
+        assert tag == "v0.3.6", f"expected v0.3.6, got {tag!r}"
+
+    def test_a_real_higher_release_is_not_filtered(self, tmp_path: Path, release_sync_text: str):
+        """(A) Negative / real-drift: the clean-semver filter must not be so
+        aggressive it hides a genuine higher release.
+
+        A real `v0.4.0` MUST win — so if PyPI lagged at 0.3.6, the downstream
+        version-chain check would correctly fire. This proves the monitor
+        still barks at a real fire, not just that it stopped crying wolf.
+        """
+        repo = _seed_repo(tmp_path)
+        for tag in ["v0.3.6", "v0.4.0"]:
+            _git(repo, "tag", tag)
+        line = _extract_shell_line(release_sync_text, "LATEST_TAG=$(git tag")
+        tag, _ = _resolve_latest_tag(repo, line)
+        assert tag == "v0.4.0", "a real higher release must be detected, not filtered away"
+        # A lagging PyPI (0.3.6) vs this tag is genuine drift the monitor flags.
+        assert tag[1:] != "0.3.6"
+
+    def test_no_clean_tag_does_not_crash(self, tmp_path: Path, release_sync_text: str):
+        """`|| true` must absorb grep no-match / head SIGPIPE under pipefail,
+        leaving LATEST_TAG empty for the guard to report — not a crash."""
+        repo = _seed_repo(tmp_path)
+        _git(repo, "tag", "nightly")  # non-matching tag only
+        line = _extract_shell_line(release_sync_text, "LATEST_TAG=$(git tag")
+        tag, rc = _resolve_latest_tag(repo, line)
+        assert rc == 0, "pipefail must not crash when no clean release tag exists"
+        assert tag == "", f"expected empty (guard handles it), got {tag!r}"
+
+    def test_tag_date_is_creation_time_not_commit_date(
+        self, tmp_path: Path, release_sync_text: str
+    ):
+        """(B) + point 3: an annotated tag created now on a 2020 commit must
+        report ~now (creatordate), NOT 2020 (commit date).
+
+        `git log -1 --format=%cI` would return the commit date and re-inflate
+        deploy-lag; `for-each-ref creatordate` returns the true tag time. Also
+        documents the lightweight-tag caveat: signed release tags are always
+        annotated, so creatordate is the real signal here.
+        """
+        repo = _seed_repo(tmp_path)
+        _git(repo, "tag", "-a", "v0.3.6", "-m", "release")  # annotated, created now
+        line = _extract_shell_line(release_sync_text, "TAG_DATE=$(git for-each-ref")
+        script = f'set -euo pipefail\nLATEST_TAG=v0.3.6\n{line}\nprintf "%s" "$TAG_DATE"'
+        out = subprocess.run(["bash", "-c", script], cwd=repo, capture_output=True, text=True)
+        assert out.returncode == 0, out.stderr
+        assert not out.stdout.startswith("2020"), (
+            f"tag date {out.stdout!r} is the commit date (2020), not the tag "
+            "creation date — A5 must use creatordate, not commit date"
         )
