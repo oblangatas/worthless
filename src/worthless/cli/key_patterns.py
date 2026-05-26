@@ -42,9 +42,9 @@ def detect_provider(api_key: str) -> str | None:
 ENTROPY_THRESHOLD: float = 3.9
 # Lowered 4.5 → 3.9 so legitimate OpenRouter keys (entropy ~4.118) clear the
 # scan, while common placeholders ("sk-your-key-here" 3.03, "sk-aaaa" 0.88,
-# WRTLS-decoy 3.63, "sk-PLACEHOLDER" 3.74) remain rejected. Mirrors the fix
-# in the WOR-306 epic (commit f087180); merging that epic to main will be a
-# no-op merge for this line.
+# WRTLS-decoy 3.63, "sk-PLACEHOLDER" 3.74) remain rejected. The earlier
+# 4.5 cutoff false-flagged real OpenRouter (entropy 4.118) and structured
+# provider keys in the 4.0-5.0 entropy band.
 
 
 # Canonical API-key env var convention: ``<PROVIDER>_API_KEY`` (with the

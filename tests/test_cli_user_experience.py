@@ -127,6 +127,11 @@ class TestHelpText:
         No xdist_group marker: the autouse `_isolate_default_command_proxy`
         fixture in conftest.py stubs the daemon path for every test, so two
         workers can run this in parallel without racing port 8787.
+
+        Isolated WORTHLESS_HOME: without it the no-args path resolves the
+        developer's real ~/.worthless and ``run_default`` aborts with
+        WRTLS-102 on a dogfooding box whose Fernet key lives only in the
+        keyring (which conftest nulls for the test session).
         """
         result = runner.invoke(app, [], env={"WORTHLESS_HOME": str(home_dir.base_dir)})
         assert result.exit_code == 0, (

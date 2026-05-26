@@ -14,7 +14,7 @@ from typer.testing import CliRunner
 from worthless.cli.app import app
 from worthless.cli.bootstrap import WorthlessHome
 
-from worthless.crypto import split_key
+from worthless.crypto.splitter import split_key
 from tests.conftest import make_repo, stored_shard_from_split
 from tests.helpers import fake_openai_key
 

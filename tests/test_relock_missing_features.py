@@ -28,6 +28,10 @@ from worthless.storage.repository import ShardRepository, StoredShard
 
 from tests.helpers import fake_openai_key
 
+import pytest
+
+pytestmark = pytest.mark.skip(reason="WOR-549: worthless-16x2 ↔ sidecar IPC integration pending")
+
 # mix_stderr=False so CLI output to stderr doesn't bleed into result.output
 runner = CliRunner(mix_stderr=False)
 

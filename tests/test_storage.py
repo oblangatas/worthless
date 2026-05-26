@@ -167,7 +167,7 @@ async def test_decrypt_shard_returns_bytearray_stored_shard(
     enc = await repo.fetch_encrypted("dec1")
     assert enc is not None
 
-    result = repo.decrypt_shard(enc)
+    result = await repo.decrypt_shard(enc)
     assert isinstance(result, StoredShard)
     assert isinstance(result.shard_b, bytearray)
     assert isinstance(result.commitment, bytearray)

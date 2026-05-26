@@ -1,7 +1,7 @@
 # WOR-464 — Test Summary
 
 All tests added or touched in this PR. The legacy doctor suite (135
-tests across `tests/test_doctor_icloud.py`, `tests/test_wor456_additional.py`,
+tests across `tests/test_doctor_icloud.py`, `tests/test_keystore_doctor_recovery_coverage.py`,
 `tests/openclaw/test_doctor_command_openclaw.py`, `tests/cli/test_doctor_purge.py`,
 `tests/user_flows/test_doctor_dogfood.py`) is unchanged and continues
 to pass byte-identical text output. The 28 new tests below pin the new
@@ -72,7 +72,7 @@ and `orphan_keychain` allowlisting the active install).
 | Test file | Count | Result |
 |---|---|---|
 | `tests/test_doctor_icloud.py` | 20 | PASS |
-| `tests/test_wor456_additional.py` | 67 | PASS |
+| `tests/test_keystore_doctor_recovery_coverage.py` | 67 | PASS |
 | `tests/openclaw/test_doctor_command_openclaw.py` | 16 | PASS |
 | `tests/cli/test_doctor_purge.py` | 5 | PASS |
 | `tests/user_flows/test_doctor_dogfood.py` | 27 (1 skipped non-darwin) | PASS |
@@ -81,7 +81,7 @@ Run the full suite locally:
 
 ```bash
 uv run pytest tests/test_doctor_icloud.py tests/cli/test_doctor_purge.py \
-              tests/openclaw/test_doctor_command_openclaw.py tests/test_wor456_additional.py \
+              tests/openclaw/test_doctor_command_openclaw.py tests/test_keystore_doctor_recovery_coverage.py \
               tests/cli/doctor/ tests/user_flows/test_doctor_dogfood.py
 ```
 

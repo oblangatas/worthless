@@ -53,6 +53,7 @@ from worthless.cli.platform import read_process_env
 from worthless.cli.process import pid_path, read_pid, resolve_port
 from worthless.cli.commands.revoke import _revoke_async
 from worthless.cli.console import WorthlessConsole, get_console
+from worthless._flags import ipc_mode_active
 from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary
 from worthless.cli.keystore import _SERVICE
 from worthless.cli.orphans import FIX_PHRASE, PROBLEM_PHRASE, find_orphans, is_orphan
@@ -412,7 +413,7 @@ def _check_openclaw_apikey_consistency(
         stored = None
         shard_a_buf = None
         try:
-            stored = repo.decrypt_shard(encrypted)
+            stored = _run_async(repo.decrypt_shard(encrypted))
             shard_a_buf = bytearray(api_key_str, "utf-8")
             reconstruct_key_fp(
                 shard_a_buf,
@@ -937,6 +938,21 @@ def register_doctor_commands(app: typer.Typer) -> None:
         ),
     ) -> None:
         """Diagnose and repair stuck DB/.env states (HF7 / worthless-3907)."""
+        # WOR-465 A4: under WORTHLESS_FERNET_IPC_ONLY=1 the doctor cannot
+        # materialise home.fernet_key — the proxy uid cannot read the key
+        # file by design, and the interactive prompts cannot be bracketed
+        # by a single async-with against an IPCClient. Refuse early rather
+        # than silently break the proxy-uid invariant. Operators run doctor
+        # on bare metal or as root inside the container (`docker exec
+        # --user root`). The guard applies to JSON mode too — agents can
+        # parse the WRTLS-114 envelope.
+        if ipc_mode_active():
+            raise WorthlessError(
+                ErrorCode.SIDECAR_NOT_READY,
+                "`worthless doctor` is not available under WORTHLESS_FERNET_IPC_ONLY=1. "
+                "Run doctor on bare metal (operator workstation) or as root inside "
+                "the container: `docker exec --user root <container> worthless doctor`.",
+            )
         if json_output:
             # Local import so the text-mode path stays free of the runner
             # module and the JSON consumers see deterministic output.

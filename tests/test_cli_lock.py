@@ -15,6 +15,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from worthless.cli.app import app
@@ -724,7 +725,7 @@ class TestLockCommand:
         assert len(aliases) == 1
         encrypted = asyncio.run(repo.fetch_encrypted(aliases[0]))
         assert encrypted is not None
-        stored = repo.decrypt_shard(encrypted)
+        stored = asyncio.run(repo.decrypt_shard(encrypted))
 
         reconstructed = reconstruct_key_fp(
             bytearray(shard_a_str.encode()),
@@ -1522,6 +1523,7 @@ class TestLockBaseUrlSlotPriority:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.real_ipc  # asyncio.run() inside lock; xdist threads → event-loop conflict (WOR-582)
 class TestLockHardcodedBaseUrlDetection:
     """Lock fails fast when source files contain hardcoded provider URLs.
 
@@ -1898,7 +1900,7 @@ class TestLockRerun:
         aliases = asyncio.run(repo.list_keys())
         alias = aliases[0]
         enc_before = asyncio.run(_repo(home_dir).fetch_encrypted(alias))
-        stored_before = _repo(home_dir).decrypt_shard(enc_before)
+        stored_before = asyncio.run(_repo(home_dir).decrypt_shard(enc_before))
         shard_b_before = bytes(stored_before.shard_b)
         stored_before.zero()
 
@@ -1906,7 +1908,7 @@ class TestLockRerun:
         assert second.exit_code == 0, second.output
 
         enc_after = asyncio.run(_repo(home_dir).fetch_encrypted(alias))
-        stored_after = _repo(home_dir).decrypt_shard(enc_after)
+        stored_after = asyncio.run(_repo(home_dir).decrypt_shard(enc_after))
         shard_b_after = bytes(stored_after.shard_b)
         stored_after.zero()
 
@@ -2034,7 +2036,9 @@ class TestSelectUnlockedKeys:
         stored.zero = MagicMock()
         repo = MagicMock()
         repo.fetch_encrypted = AsyncMock(return_value=encrypted)
-        repo.decrypt_shard = MagicMock(return_value=stored)
+        # decrypt_shard is async in the sidecar-IPC repo (WOR-306): it may
+        # round-trip to the crypto sidecar, so production awaits it.
+        repo.decrypt_shard = AsyncMock(return_value=stored)
         return repo
 
     def test_value_error_returns_key_as_candidate(self) -> None:
@@ -2121,3 +2125,63 @@ class TestSelectUnlockedKeys:
             )
 
         assert candidates == []
+
+
+class TestOpenClawGateWiredIntoLock:
+    """Pin that the OpenClaw audit gate (#210) is actually wired into the
+    ``worthless lock`` flow at the right point.
+
+    The gate's unit tests cover the helper functions in isolation and the
+    docker tests cover classification of live container output — but NOTHING
+    exercises that ``_openclaw_audit_preflight()`` is invoked inside
+    ``_lock_async`` BEFORE any write. Without these, a mis-wired graft
+    (preflight dropped, or moved after the writes) passes CI silently while
+    the gate is dead. These are the merge's composition guard.
+    """
+
+    def test_blocking_gate_aborts_lock_before_any_write(
+        self, home_dir: WorthlessHome, env_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A blocking pre-flight (Exit 73) must abort lock with ZERO side
+        effects: .env is untouched (gate-before-write, SR-03)."""
+        original_env = env_file.read_text(encoding="utf-8")
+
+        def _blocking_preflight() -> None:
+            raise typer.Exit(code=73)
+
+        monkeypatch.setattr(
+            "worthless.cli.commands.lock._openclaw_audit_preflight", _blocking_preflight
+        )
+
+        result = runner.invoke(
+            app, ["lock", "--env", str(env_file)], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
+        )
+
+        assert result.exit_code == 73, (
+            f"blocking gate did not abort lock with exit 73:\n{result.stdout}\n{result.exception!r}"
+        )
+        assert env_file.read_text(encoding="utf-8") == original_env, (
+            "gate blocked but .env was still rewritten — preflight is wired AFTER "
+            "the writes (or not at all). Must run before any DB/.env mutation."
+        )
+
+    def test_postflight_runs_after_successful_lock(
+        self, home_dir: WorthlessHome, env_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When the pre-flight returns a handle, the post-flight must be
+        invoked with it after the lock writes succeed."""
+        sentinel = object()
+        postflight = MagicMock()
+        monkeypatch.setattr(
+            "worthless.cli.commands.lock._openclaw_audit_preflight", lambda: sentinel
+        )
+        monkeypatch.setattr("worthless.cli.commands.lock._openclaw_audit_postflight", postflight)
+
+        result = runner.invoke(
+            app, ["lock", "--env", str(env_file)], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
+        )
+
+        assert result.exit_code == 0, (
+            f"lock failed with gate handle present:\n{result.stdout}\n{result.exception!r}"
+        )
+        postflight.assert_called_once_with(sentinel)

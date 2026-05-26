@@ -25,6 +25,10 @@ from pathlib import Path
 
 PROXY_PORT = 8787
 MOCK_URL = "http://mock-upstream:9999"
+# OpenAI base URL on the mock — the proxy appends /chat/completions when
+# forwarding requests under the alias.  Must match the path served by
+# tests/openclaw/mock-upstream/app.py::chat_completions.
+MOCK_OPENAI_BASE_URL = f"{MOCK_URL}/v1"
 PROXY_HEALTH_URL = f"http://127.0.0.1:{PROXY_PORT}/healthz"
 
 
@@ -72,24 +76,20 @@ def main() -> int:
     env_path = env_dir / ".env"
 
     real_key = fake_openai_key()
-    # Post-8rqs: write OPENAI_BASE_URL alongside OPENAI_API_KEY so `worthless
-    # lock` stores it per-enrollment and the proxy forwards to mock-upstream.
-    # Same pattern as tests/test_openclaw_e2e.py::openclaw_stack. Pre-8rqs
-    # used WORTHLESS_UPSTREAM_OPENAI_URL via docker-compose env; that var was
-    # ripped in PR #127 (Phase 5+6) and became a silent no-op once v0.3.3
-    # shipped to PyPI.
-    mock_base = "http://mock-upstream:9999/v1"
+    # Write OPENAI_BASE_URL alongside OPENAI_API_KEY BEFORE locking so
+    # ``worthless lock`` stores the mock URL on the per-enrollment row
+    # (8rqs Phase 5+6 ripped the global WORTHLESS_UPSTREAM_OPENAI_URL
+    # override).  Same pattern as tests/test_openclaw_e2e.py::openclaw_stack.
     with env_path.open("w") as f:
-        f.write(f"OPENAI_API_KEY={real_key}\nOPENAI_BASE_URL={mock_base}\n")
-    print(f"[1] wrote .env (real key + OPENAI_BASE_URL) ({real_key[:10]}...)")
+        f.write(f"OPENAI_API_KEY={real_key}\n")
+        f.write(f"OPENAI_BASE_URL={MOCK_OPENAI_BASE_URL}\n")
+    print(f"[1] wrote real key + base URL to {env_path} ({real_key[:10]}...)")
 
-    # Register the mock as a known provider so `worthless lock` accepts the
-    # OPENAI_BASE_URL in .env. WRTLS-112 requires this on post-8rqs Worthless.
-    # PyPI v0.3.4 quirks vs main-branch source:
-    # - Flag is `--url` here; main source has `--upstream-base-url`.
-    # - Name `openai` conflicts with the bundled provider; use `openai-mock`.
-    # `worthless lock` resolves OPENAI_BASE_URL by matching URL, not name,
-    # so the mock-named registration is enough for the WRTLS-112 check.
+    # Register the mock URL in the user provider registry.  Lock refuses
+    # an unregistered ``OPENAI_BASE_URL`` (M3 / Blocker #1: an attacker
+    # who can write .env should not redirect the proxy at an arbitrary
+    # upstream), so the URL must be in ~/.worthless/providers.toml
+    # before lock runs.
     register = subprocess.run(  # noqa: S603, S607
         [  # noqa: S607
             "worthless",
@@ -98,7 +98,7 @@ def main() -> int:
             "--name",
             "openai-mock",
             "--url",
-            mock_base,
+            MOCK_OPENAI_BASE_URL,
             "--protocol",
             "openai",
         ],
@@ -110,7 +110,7 @@ def main() -> int:
         sys.stdout.write(register.stdout)
         sys.stderr.write(register.stderr)
         return fail(f"`worthless providers register` exited {register.returncode}")
-    print("[1b] registered mock as openai provider")
+    print("[1.5] registered openai-mock provider")
 
     lock = subprocess.run(  # noqa: S603, S607
         ["worthless", "lock", "--env", str(env_path)],  # noqa: S607

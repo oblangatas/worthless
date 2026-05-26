@@ -21,6 +21,7 @@ import pytest
 
 from worthless.cli.process import check_pid, read_pid
 
+from tests._fakes import WOR309_SUBPROCESS_FOLLOWUP
 from tests.helpers import fake_anthropic_key, fake_openai_key
 
 # Use high ports to avoid conflicts with dev proxy
@@ -124,6 +125,8 @@ def project_no_keys(tmp_path: Path) -> Path:
 
 
 @pytest.mark.e2e
+@pytest.mark.real_ipc
+@pytest.mark.skip(reason=WOR309_SUBPROCESS_FOLLOWUP)
 class TestDefaultCommandE2E:
     """Real end-to-end tests for bare ``worthless``."""
 

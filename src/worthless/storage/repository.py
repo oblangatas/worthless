@@ -4,18 +4,20 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
 from collections.abc import AsyncIterator
-from typing import NamedTuple
+from contextlib import asynccontextmanager
+from enum import Enum
+from typing import TYPE_CHECKING
 
 import aiosqlite
 from cryptography.fernet import Fernet, InvalidToken
 
 from worthless.defaults import DEFAULT_SPEND_CAP_TOKENS
+from worthless.storage.models import EncryptedShard, EnrollmentRecord, StoredShard
 from worthless.storage.schema import init_db, migrate_db
 
-from enum import Enum
+if TYPE_CHECKING:
+    from worthless.ipc.client import IPCClient
 
 
 class _Sentinel(Enum):
@@ -25,110 +27,87 @@ class _Sentinel(Enum):
 _USE_DEFAULT = _Sentinel.USE_DEFAULT
 
 
-class EncryptedShard(NamedTuple):
-    """Raw encrypted shard record — no Fernet decryption applied."""
-
-    shard_b_enc: bytes
-    commitment: bytes
-    nonce: bytes
-    provider: str
-    prefix: str | None = None
-    charset: str | None = None
-    # worthless-8rqs: per-enrollment upstream URL. None means the row was
-    # created before 8rqs landed; Phase-6 readers refuse to use it and prompt
-    # the user to re-lock.
-    base_url: str | None = None
-    # Nullable column kept in schema for backward compatibility with pre-revert rows.
-    # Target state (post-16x2-revert): upsert_locked_shard does NOT write this field;
-    # proxy reads shard-A from the Bearer header, not from the DB.
-    shard_a_enc: bytes | None = None
-
-    def __repr__(self) -> str:
-        return (
-            f"EncryptedShard(shard_b_enc=<{len(self.shard_b_enc)} bytes>, "
-            f"commitment=<{len(self.commitment)} bytes>, "
-            f"nonce=<{len(self.nonce)} bytes>, provider={self.provider!r}, "
-            f"prefix={self.prefix!r}, base_url={self.base_url!r}, "
-            f"shard_a_enc={'<present>' if self.shard_a_enc else 'None'})"
-        )
-
-
-@dataclass
-class EnrollmentRecord:
-    """A single enrollment binding a key alias to a var name and optional env path.
-
-    ``provider`` is denormalized via JOIN with ``shards`` at load time so
-    callers don't need a separate lookup or alias-prefix parsing. The
-    canonical source remains ``shards.provider``; this is a read-side
-    convenience.
-    """
-
-    key_alias: str
-    var_name: str
-    env_path: str | None = None
-    decoy_hash: str | None = field(default=None, repr=False)
-    provider: str | None = None
-
-
-@dataclass
-class StoredShard:
-    """Decrypted shard record with bytearray fields (SR-01 compliance)."""
-
-    shard_b: bytearray
-    commitment: bytearray
-    nonce: bytearray
-    provider: str
-    # shard_a is populated only when shard_a_enc was present in the DB row
-    # (legacy 16x2 rows). In the target state (post-revert), shard_a is always
-    # None here because upsert_locked_shard no longer writes shard_a_enc.
-    shard_a: bytearray | None = None
-
-    def __repr__(self) -> str:
-        return (
-            f"StoredShard(shard_b=<{len(self.shard_b)} bytes>, "
-            f"commitment=<{len(self.commitment)} bytes>, "
-            f"nonce=<{len(self.nonce)} bytes>, provider={self.provider!r}, "
-            f"shard_a={'<present>' if self.shard_a else 'None'})"
-        )
-
-    def zero(self) -> None:
-        """Zero all cryptographic fields in place (SR-02)."""
-        bufs = [self.shard_b, self.commitment, self.nonce]
-        if self.shard_a is not None:
-            bufs.append(self.shard_a)
-        for buf in bufs:
-            buf[:] = b"\x00" * len(buf)
-
-
 class ShardRepository:
     """Async repository that encrypts Shard B at rest with Fernet.
 
     Each public method opens its own ``aiosqlite`` connection (simple PoC
     approach -- connection pooling is not needed at this stage).
 
+    Two construction modes (WOR-465 A3b 2/3):
+
+    * **Legacy / bare-metal**: pass ``bytes`` or ``bytearray`` Fernet key.
+      ``seal`` / ``open`` / decoy-HMAC happen in-process. ``close()``
+      zeroes the key bytes.
+    * **IPC-only** (proxy container with ``WORTHLESS_FERNET_IPC_ONLY=1``):
+      pass an :class:`worthless.ipc.client.IPCClient`. All crypto
+      round-trips to the sidecar — the repository instance NEVER holds
+      key material. ``close()`` is a no-op (no bytes to zero).
+
     .. todo:: Use a persistent connection or pool before production (STOR-01).
     """
 
-    def __init__(self, db_path: str, fernet_key: bytes | bytearray) -> None:
+    def __init__(
+        self,
+        db_path: str,
+        key_or_client: bytes | bytearray | IPCClient,
+    ) -> None:
         self._db_path = db_path
-        self._fernet_key_bytes = bytearray(fernet_key)  # SR-01: mutable for zeroing
-        self._fernet: Fernet | None = Fernet(
-            memoryview(self._fernet_key_bytes).tobytes()
-        )  # Fernet requires immutable bytes; we zero _fernet_key_bytes on close()
-        # Note: Fernet internally stores an immutable copy — unavoidable with
-        # the cryptography library. We zero what we control on close().
+
+        if isinstance(key_or_client, bytes | bytearray):
+            # Legacy / bare-metal path — unchanged from pre-A3b.
+            self._ipc: IPCClient | None = None
+            self._fernet_key_bytes: bytearray | None = bytearray(
+                key_or_client
+            )  # SR-01: mutable for zeroing
+            self._fernet: Fernet | None = Fernet(
+                memoryview(self._fernet_key_bytes).tobytes()
+            )  # Fernet requires immutable bytes; we zero _fernet_key_bytes on close()
+            # Note: Fernet internally stores an immutable copy — unavoidable with
+            # the cryptography library. We zero what we control on close().
+        elif (
+            hasattr(key_or_client, "seal")
+            and hasattr(key_or_client, "open")
+            and hasattr(key_or_client, "mac")
+        ):
+            # IPC-only path (WOR-465 A3b). Duck-typed on the three verbs
+            # the repository needs so test doubles work without importing
+            # the concrete IPCClient.
+            self._ipc = key_or_client  # type: ignore[assignment]
+            self._fernet_key_bytes = None
+            self._fernet = None
+        else:
+            raise TypeError(
+                "ShardRepository: second argument must be bytes / bytearray / "
+                f"IPCClient, got {type(key_or_client).__name__}"
+            )
 
     def _get_fernet(self) -> Fernet:
-        """Return the Fernet instance, raising if closed."""
+        """Return the Fernet instance, raising if closed or IPC-only."""
         if self._fernet is None:
+            if self._ipc is not None:
+                raise RuntimeError(
+                    "ShardRepository is in IPC-only mode; use async seal/open via the sidecar"
+                )
             raise RuntimeError("ShardRepository has been closed")
         return self._fernet
 
+    async def _seal(self, plaintext: bytes) -> bytes:
+        """Encrypt *plaintext* via Fernet (legacy) or the sidecar (IPC mode)."""
+        if self._ipc is not None:
+            return await self._ipc.seal(plaintext)
+        return self._get_fernet().encrypt(plaintext)
+
     def close(self) -> None:
-        """Zero key material and release the Fernet instance (SR-02)."""
-        for i in range(len(self._fernet_key_bytes)):
-            self._fernet_key_bytes[i] = 0
+        """Zero key material and release the Fernet instance (SR-02).
+
+        No-op in IPC-only mode: the repository never held key bytes, so
+        there is nothing to zero. Idempotent in both modes.
+        """
+        if self._fernet_key_bytes is not None:
+            for i in range(len(self._fernet_key_bytes)):
+                self._fernet_key_bytes[i] = 0
         self._fernet = None
+        self._ipc = None
 
     @asynccontextmanager
     async def _connect(self) -> AsyncIterator[aiosqlite.Connection]:
@@ -142,9 +121,19 @@ class ShardRepository:
         await init_db(self._db_path)
         await migrate_db(self._db_path)
 
-    def _compute_decoy_hash(self, value: str) -> str:
-        """Compute HMAC-SHA256 of *value* keyed with the Fernet key material."""
-        if self._fernet is None:
+    async def _compute_decoy_hash(self, value: str) -> str:
+        """Compute HMAC-SHA256 of *value* keyed with the Fernet key material.
+
+        WOR-465 A3b 2/3: in IPC-only mode this round-trips through
+        ``ipc.mac`` so the repository instance never holds the key.
+        The sidecar returns 32 raw bytes; we hex-encode here so output
+        bytes are byte-identical to the legacy ``hmac.new(...).hexdigest()``
+        path — load-bearing for stored decoy_hash rows.
+        """
+        if self._ipc is not None:
+            tag = await self._ipc.mac(value.encode())
+            return tag.hex()
+        if self._fernet is None or self._fernet_key_bytes is None:
             raise RuntimeError("ShardRepository has been closed")
         return hmac.new(self._fernet_key_bytes, value.encode(), hashlib.sha256).hexdigest()
 
@@ -165,9 +154,7 @@ class ShardRepository:
         Accepts bytearray or bytes for shard_b (converts to bytes for Fernet).
         Raises ``aiosqlite.IntegrityError`` if *alias* already exists.
         """
-        shard_b_enc = self._get_fernet().encrypt(
-            memoryview(shard.shard_b).tobytes()
-        )  # Fernet requires immutable bytes
+        shard_b_enc = await self._seal(memoryview(shard.shard_b).tobytes())
         async with self._connect() as db:
             await db.execute(
                 "INSERT INTO shards "
@@ -225,18 +212,25 @@ class ShardRepository:
                 else None,
             )
 
-    def decrypt_shard(self, encrypted: EncryptedShard) -> StoredShard:
-        """Fernet-decrypt an :class:`EncryptedShard` into a :class:`StoredShard`.
+    async def decrypt_shard(self, encrypted: EncryptedShard) -> StoredShard:
+        """Decrypt an :class:`EncryptedShard` into a :class:`StoredShard`.
 
-        All byte fields are wrapped in ``bytearray`` per SR-01.  When
+        Became async in WOR-465 A3b 2/3: in IPC-only mode the call
+        round-trips through the sidecar's ``open`` verb. All byte
+        fields are wrapped in ``bytearray`` per SR-01.  When
         ``encrypted.shard_a_enc`` is present (legacy 16x2 rows), shard-A
         is also decrypted and returned; target-state rows leave ``shard_a=None``.
         """
-        fernet = self._get_fernet()
-        shard_b = fernet.decrypt(encrypted.shard_b_enc)
         shard_a: bytearray | None = None
-        if encrypted.shard_a_enc is not None:
-            shard_a = bytearray(fernet.decrypt(encrypted.shard_a_enc))
+        if self._ipc is not None:
+            shard_b = await self._ipc.open(encrypted.shard_b_enc)
+            if encrypted.shard_a_enc is not None:
+                shard_a = bytearray(await self._ipc.open(encrypted.shard_a_enc))
+        else:
+            fernet = self._get_fernet()
+            shard_b = fernet.decrypt(encrypted.shard_b_enc)
+            if encrypted.shard_a_enc is not None:
+                shard_a = bytearray(fernet.decrypt(encrypted.shard_a_enc))
         return StoredShard(
             shard_b=bytearray(shard_b),
             commitment=bytearray(encrypted.commitment),
@@ -253,7 +247,7 @@ class ShardRepository:
         encrypted = await self.fetch_encrypted(alias)
         if encrypted is None:
             return None
-        return self.decrypt_shard(encrypted)
+        return await self.decrypt_shard(encrypted)
 
     async def delete(self, alias: str) -> bool:
         """Delete the shard record for *alias*. Returns True if deleted."""
@@ -326,8 +320,15 @@ class ShardRepository:
 
         Kept for backward compatibility. The proxy no longer reads this value;
         use of this method is deprecated post-16x2-revert.
+
+        WOR-465 A3b: in IPC-only mode the encrypt round-trips through the
+        sidecar's ``seal`` verb so the proxy uid never touches Fernet bytes.
         """
-        token_enc = self._get_fernet().encrypt(token.encode())
+        token_bytes = token.encode()
+        if self._ipc is not None:
+            token_enc = await self._ipc.seal(token_bytes)
+        else:
+            token_enc = self._get_fernet().encrypt(token_bytes)
         await self.set_metadata(self._AUTH_TOKEN_META_KEY, token_enc.decode())
 
     async def get_proxy_auth_token(self) -> str | None:
@@ -336,11 +337,17 @@ class ShardRepository:
         Kept for backward compatibility. The proxy no longer reads this value
         post-16x2-revert. Returns *None* if the token was encrypted with a
         different (rotated) Fernet key.
+
+        WOR-465 A3b: in IPC-only mode the decrypt round-trips through the
+        sidecar's ``open`` verb. An InvalidToken from the sidecar surfaces as
+        an IPC error path; we treat it the same as the legacy InvalidToken.
         """
         raw = await self.get_metadata(self._AUTH_TOKEN_META_KEY)
         if raw is None:
             return None
         try:
+            if self._ipc is not None:
+                return (await self._ipc.open(raw.encode())).decode()
             return self._get_fernet().decrypt(raw.encode()).decode()
         except InvalidToken:
             # Token was encrypted with a different (rotated) key — treat as absent.
@@ -373,6 +380,10 @@ class ShardRepository:
 
         Post-16x2-revert: ``shard_a_enc`` is explicitly set to NULL on every
         upsert so old rows that previously stored it are cleared.
+
+        WOR-465 A3b: in IPC-only mode the encrypt round-trips through the
+        sidecar's ``seal`` verb so the proxy uid never touches Fernet key
+        bytes. Same dispatch shape as :meth:`decrypt_shard`.
         """
         if prefix is None:
             raise ValueError(
@@ -386,10 +397,14 @@ class ShardRepository:
                 "base_url is required routing metadata for upsert_locked_shard — "
                 "the proxy uses it to forward requests to the correct upstream."
             )
-        fernet = self._get_fernet()
-        shard_b_enc = fernet.encrypt(
-            memoryview(shard.shard_b).tobytes()
-        )  # Fernet requires immutable bytes
+        # WOR-465 A3b: in IPC-only mode the encrypt round-trips through the
+        # sidecar's ``seal`` verb so the proxy uid never touches Fernet bytes.
+        shard_b_bytes = memoryview(shard.shard_b).tobytes()
+        if self._ipc is not None:
+            shard_b_enc = await self._ipc.seal(shard_b_bytes)
+        else:
+            fernet = self._get_fernet()
+            shard_b_enc = fernet.encrypt(shard_b_bytes)  # Fernet requires immutable bytes
         # shard_a parameter is intentionally NOT encrypted/stored — it stays
         # client-side only (in .env and openclaw.json).
         async with self._connect() as db:
@@ -456,9 +471,7 @@ class ShardRepository:
         else:
             effective_cap = spend_cap  # type: ignore[assignment]  # int | None at this point
 
-        shard_b_enc = self._get_fernet().encrypt(
-            memoryview(shard.shard_b).tobytes()
-        )  # Fernet requires immutable bytes
+        shard_b_enc = await self._seal(memoryview(shard.shard_b).tobytes())
         async with self._connect() as db:
             await db.execute("BEGIN IMMEDIATE")
             await db.execute(
@@ -665,7 +678,7 @@ class ShardRepository:
 
     async def set_decoy_hash(self, alias: str, env_path: str | None, decoy_value: str) -> None:
         """Store the HMAC-SHA256 hash of *decoy_value* on the enrollment row."""
-        h = self._compute_decoy_hash(decoy_value)
+        h = await self._compute_decoy_hash(decoy_value)
         async with self._connect() as db:
             if env_path is None:
                 await db.execute(
@@ -682,7 +695,7 @@ class ShardRepository:
 
     async def is_known_decoy(self, value: str) -> bool:
         """Return True if *value* matches any stored decoy hash."""
-        h = self._compute_decoy_hash(value)
+        h = await self._compute_decoy_hash(value)
         async with self._connect() as db:
             cursor = await db.execute(
                 "SELECT 1 FROM enrollments WHERE decoy_hash = ? LIMIT 1",

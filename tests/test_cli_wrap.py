@@ -28,6 +28,56 @@ runner = CliRunner()
 
 
 @pytest.fixture(autouse=True)
+def _stub_sidecar_lifecycle(monkeypatch: pytest.MonkeyPatch) -> dict:
+    """Stub ``split_to_tmpfs`` + ``spawn_sidecar`` + ``shutdown_sidecar`` so
+    wrap tests don't try to launch a real sidecar subprocess.
+
+    After WOR-309, ``wrap`` spawns the sidecar before the proxy. The full
+    lifecycle is covered by ``tests/cli/test_sidecar_lifecycle.py`` — here
+    we stub to no-op fakes and yield a recorder dict so individual tests can
+    assert call ordering (e.g., that shutdown_sidecar fired on cleanup).
+    """
+    from pathlib import Path
+    from unittest.mock import MagicMock as _MagicMock
+
+    fake_run_dir = Path("/tmp/wor-test-run")  # noqa: S108
+    fake_socket = fake_run_dir / "sidecar.sock"
+    fake_shares = _MagicMock(
+        run_dir=fake_run_dir,
+        share_a_path=fake_run_dir / "share_a.bin",
+        share_b_path=fake_run_dir / "share_b.bin",
+        shard_a=bytearray(32),
+        shard_b=bytearray(32),
+    )
+    fake_handle = _MagicMock(
+        socket_path=fake_socket,
+        shares=fake_shares,
+        allowed_uid=os.getuid(),
+        proc=_MagicMock(pid=99999, poll=lambda: 0),
+    )
+
+    calls: dict = {"shutdown_count": 0, "shutdown_handle": None}
+
+    def _record_shutdown(handle):
+        calls["shutdown_count"] += 1
+        calls["shutdown_handle"] = handle
+
+    monkeypatch.setattr(
+        "worthless.cli.commands.wrap.split_to_tmpfs",
+        lambda _key, _home: fake_shares,
+    )
+    monkeypatch.setattr(
+        "worthless.cli.commands.wrap.spawn_sidecar",
+        lambda _socket, _shares, **_kw: fake_handle,
+    )
+    monkeypatch.setattr(
+        "worthless.cli.commands.wrap.shutdown_sidecar",
+        _record_shutdown,
+    )
+    return calls
+
+
+@pytest.fixture(autouse=True)
 def _default_port_free(monkeypatch: pytest.MonkeyPatch) -> None:
     """Default ``_port_in_use=False`` for every wrap test in this file.
 
@@ -43,6 +93,10 @@ def _default_port_free(monkeypatch: pytest.MonkeyPatch) -> None:
         "worthless.cli.commands.wrap._port_in_use",
         lambda *_a, **_kw: False,
     )
+
+
+class TestWrapEnvInjection:
+    """wrap injects BASE_URL env vars for enrolled providers."""
 
 
 class TestWrapChildEnvContract:
@@ -127,6 +181,227 @@ class TestListEnrolledAliasesWithDB:
         assert len(aliases) >= 1
         assert all(isinstance(a, str) and isinstance(p, str) for a, p in aliases)
 
+    def test_returns_aliases_under_ipc_only_flag_without_sidecar(
+        self, home_with_key, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Under WORTHLESS_FERNET_IPC_ONLY=1, alias listing must NOT depend on a
+        running sidecar. The pre-flight enrollment check is a pure DB read —
+        no Fernet key, no IPC socket needed. A missing socket must not cause
+        _list_enrolled_aliases to silently return [] and mislead the user."""
+        monkeypatch.setenv("WORTHLESS_FERNET_IPC_ONLY", "1")
+        aliases = _list_enrolled_aliases(home_with_key)
+        assert len(aliases) >= 1, (
+            "Expected enrolled aliases but got []. "
+            "Likely open_repo tried to connect IPC before sidecar started."
+        )
+        assert all(isinstance(a, str) and isinstance(p, str) for a, p in aliases)
+
+    @pytest.mark.asyncio
+    async def test_returns_aliases_from_running_loop(self, home_with_key) -> None:
+        """_list_enrolled_aliases is a sync function but is invoked from CLI
+        commands that may already be inside an event loop (MCP server,
+        pytest-asyncio auto mode). The implementation must route through
+        worthless._async.run_sync, not raw asyncio.run, otherwise asyncio.run
+        raises RuntimeError("This event loop is already running") and the
+        bare-except guard swallows it as []."""
+        aliases = _list_enrolled_aliases(home_with_key)
+        assert len(aliases) >= 1
+
+    def test_corrupt_db_returns_empty(self, home_with_key, monkeypatch: pytest.MonkeyPatch) -> None:
+        """OSError from aiosqlite.connect (e.g. unreadable file, permission
+        denied) must be caught by the narrowed handler and produce []."""
+        import aiosqlite
+
+        def _raise_oserror(*_args, **_kwargs):
+            raise OSError("simulated unreadable DB")
+
+        monkeypatch.setattr(aiosqlite, "connect", _raise_oserror)
+        aliases = _list_enrolled_aliases(home_with_key)
+        assert aliases == []
+
+    def test_aiosqlite_error_returns_empty(
+        self, home_with_key, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """aiosqlite.Error (malformed DB, locked file, etc.) must be caught
+        by the narrowed handler and produce []."""
+        import aiosqlite
+
+        def _raise_aiosqlite_error(*_args, **_kwargs):
+            raise aiosqlite.Error("simulated query failure")
+
+        monkeypatch.setattr(aiosqlite, "connect", _raise_aiosqlite_error)
+        aliases = _list_enrolled_aliases(home_with_key)
+        assert aliases == []
+
+    def test_returned_values_are_str(self, home_with_key) -> None:
+        """sqlite3.Row indexes return Any at the type level. The implementation
+        must coerce both fields to str() so the declared return type
+        list[tuple[str, str]] holds even if a column ever returns a non-text
+        value (defensive, pyright-strict compliance)."""
+        aliases = _list_enrolled_aliases(home_with_key)
+        assert len(aliases) >= 1
+        for alias, provider in aliases:
+            assert type(alias) is str, f"alias is {type(alias).__name__}, not str"
+            assert type(provider) is str, f"provider is {type(provider).__name__}, not str"
+
+
+class TestListEnrolledAliasesAdversarial:
+    """Hostile-input and race-condition probes for _list_enrolled_aliases.
+
+    PR #166 changed this function to read the SQLite DB directly. The
+    attack surface is now: anyone who can write to ``home.db_path`` (or
+    swap it for a different file) can influence what the pre-flight
+    enrollment check returns. These tests pin the failure modes that
+    must produce a safe ``[]`` instead of a crash or data leak.
+    """
+
+    def test_symlink_to_non_sqlite_file_returns_empty(self, home_dir, tmp_path: Path) -> None:
+        """If home.db_path is a symlink pointing at a file that isn't a
+        valid SQLite database (e.g. /etc/hostname), aiosqlite must fail
+        cleanly and the function must return [] — never the target file's
+        content. This is the static analogue of a symlink-swap TOCTOU."""
+        decoy = tmp_path / "decoy.txt"
+        decoy.write_text("not a sqlite db, definitely not key material\n")
+        home_dir.db_path.unlink(missing_ok=True)
+        home_dir.db_path.symlink_to(decoy)
+
+        aliases = _list_enrolled_aliases(home_dir)
+        assert aliases == [], "non-SQLite symlink target leaked through"
+
+    def test_hostile_alias_round_trips_safely(self, home_with_key, tmp_path: Path) -> None:
+        """SQL-special chars / NULL-byte / RTL-unicode in the key_alias
+        column must not break the join, must not SQL-inject (queries are
+        parameterized), and must surface verbatim so downstream display
+        code can sanitise them — never silently swallowed.
+
+        If the schema enforces a CHECK constraint that rejects these
+        values, the test still proves the protection exists by failing
+        on insert; that's a different (also good) outcome."""
+        import sqlite3
+
+        hostile_aliases = [
+            "'; DROP TABLE shards; --",
+            "evil‮reversed",
+            "with spaces and 'quotes'",
+        ]
+
+        conn = sqlite3.connect(str(home_with_key.db_path))
+        try:
+            for alias in hostile_aliases:
+                try:
+                    conn.execute(
+                        "INSERT INTO shards (key_alias, shard_b_enc, commitment, "
+                        "nonce, provider, prefix, charset, base_url) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (alias, b"x", b"x", b"x", "openai", "sk-", "abc", None),
+                    )
+                    conn.execute(
+                        "INSERT INTO enrollments (key_alias, var_name, env_path, decoy_hash) "
+                        "VALUES (?, ?, ?, ?)",
+                        (alias, "OPENAI_API_KEY", str(tmp_path / ".env"), "h"),
+                    )
+                except sqlite3.IntegrityError:
+                    pytest.skip("schema rejects hostile alias — protection lives at write time")
+            conn.commit()
+        finally:
+            conn.close()
+
+        aliases = _list_enrolled_aliases(home_with_key)
+        returned_alias_names = {a for a, _ in aliases}
+        for hostile in hostile_aliases:
+            assert hostile in returned_alias_names, (
+                f"hostile alias {hostile!r} was silently dropped — "
+                "must round-trip so downstream code can decide to sanitise"
+            )
+        cursor = sqlite3.connect(str(home_with_key.db_path)).execute("SELECT COUNT(*) FROM shards")
+        assert cursor.fetchone()[0] >= 1, "shards table was dropped — SQL injection succeeded"
+
+    def test_missing_shards_table_returns_empty(self, home_dir, tmp_path: Path) -> None:
+        """If an attacker swaps home.db_path for a SQLite file with a
+        different schema (no shards/enrollments tables), aiosqlite raises
+        OperationalError (subclass of aiosqlite.Error). The narrowed
+        handler must catch it and return []."""
+        import sqlite3
+
+        home_dir.db_path.unlink(missing_ok=True)
+        conn = sqlite3.connect(str(home_dir.db_path))
+        try:
+            conn.execute("CREATE TABLE attacker_owned (junk TEXT)")
+            conn.commit()
+        finally:
+            conn.close()
+
+        aliases = _list_enrolled_aliases(home_dir)
+        assert aliases == []
+
+    def test_busy_lock_returns_empty(self, home_with_key, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When another process holds an exclusive lock on the DB, SQLite
+        raises SQLITE_BUSY which aiosqlite surfaces as OperationalError
+        (subclass of aiosqlite.Error). The narrowed handler must catch it
+        and return [] — concurrent CLI commands (wrap + doctor) must not
+        crash each other."""
+        import aiosqlite
+
+        def _busy(*_args, **_kwargs):
+            raise aiosqlite.OperationalError("database is locked")
+
+        monkeypatch.setattr(aiosqlite, "connect", _busy)
+        aliases = _list_enrolled_aliases(home_with_key)
+        assert aliases == []
+
+    def test_permission_denied_returns_empty(self, home_with_key) -> None:
+        """DB file readable to the user at exists()-time but unreadable
+        at connect()-time (chmod 000, ownership flip, mount remount)
+        surfaces as PermissionError (subclass of OSError). Must be caught
+        by the narrowed handler."""
+        original_mode = home_with_key.db_path.stat().st_mode
+        home_with_key.db_path.chmod(0o000)
+        try:
+            aliases = _list_enrolled_aliases(home_with_key)
+            assert aliases == []
+        finally:
+            home_with_key.db_path.chmod(original_mode)
+
+    def test_large_alias_set_does_not_hang(self, home_with_key, tmp_path: Path) -> None:
+        """A DB with 10k enrolled aliases must complete the pre-flight
+        check quickly — startup cannot become O(seconds) on legit-shaped
+        but oversized data. Cap at 5s; on a healthy machine this runs
+        well under 1s."""
+        import sqlite3
+        import time
+
+        env_path = tmp_path / ".env"
+        env_path.write_text("OPENAI_API_KEY=stub\n")
+        conn = sqlite3.connect(str(home_with_key.db_path))
+        try:
+            shard_rows = [
+                (f"bulk-{i:05d}", b"x", b"x", b"x", "openai", "sk-", "abc", None)
+                for i in range(10_000)
+            ]
+            conn.executemany(
+                "INSERT INTO shards "
+                "(key_alias, shard_b_enc, commitment, nonce, provider, prefix, charset, base_url) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                shard_rows,
+            )
+            enroll_rows = [
+                (f"bulk-{i:05d}", "OPENAI_API_KEY", str(env_path), "h") for i in range(10_000)
+            ]
+            conn.executemany(
+                "INSERT INTO enrollments (key_alias, var_name, env_path, decoy_hash) "
+                "VALUES (?, ?, ?, ?)",
+                enroll_rows,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        start = time.monotonic()
+        aliases = _list_enrolled_aliases(home_with_key)
+        elapsed = time.monotonic() - start
+        assert len(aliases) >= 10_000
+        assert elapsed < 5.0, f"alias listing took {elapsed:.2f}s — too slow for startup"
+
 
 class TestWrapExitCode:
     """wrap mirrors child exit code."""
@@ -163,6 +438,134 @@ class TestWrapNoKeys:
         home = ensure_home(tmp_path / ".worthless")
         aliases = _list_enrolled_aliases(home)
         assert aliases == []
+
+
+class TestWrapLifecycleOrdering:
+    """Pin the wrap startup contract: sidecar spawns BEFORE proxy, and the
+    proxy is handed the sidecar's socket path via WORTHLESS_SIDECAR_SOCKET.
+
+    Regression target: the wrap command shipped without sidecar spawn at all
+    (worthless-r67t — proxy refused to bind because no IPC peer was running).
+    The 36 stubbed tests in this file all passed because they don't assert
+    ordering or env threading. This class is the canary that fires if anyone
+    drops the spawn_sidecar call or forgets to thread the socket path.
+    """
+
+    def test_spawn_sidecar_runs_before_spawn_proxy(
+        self, home_with_key, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """spawn_sidecar must be invoked strictly before spawn_proxy."""
+        from pathlib import Path
+        from unittest.mock import MagicMock as _MagicMock
+
+        order: list[str] = []
+
+        # Override the autouse fixture's stubs to record call order.
+        fake_run_dir = Path("/tmp/wor-test-run-order")  # noqa: S108
+        fake_socket = fake_run_dir / "sidecar.sock"
+        fake_shares = _MagicMock(
+            run_dir=fake_run_dir,
+            share_a_path=fake_run_dir / "share_a.bin",
+            share_b_path=fake_run_dir / "share_b.bin",
+            shard_a=bytearray(32),
+            shard_b=bytearray(32),
+        )
+        fake_handle = _MagicMock(
+            socket_path=fake_socket,
+            shares=fake_shares,
+            allowed_uid=os.getuid(),
+            proc=_MagicMock(pid=99999, poll=lambda: 0),
+        )
+
+        def _record_split(_key, _home):
+            order.append("split_to_tmpfs")
+            return fake_shares
+
+        def _record_spawn_sidecar(_socket, _shares, **_kw):
+            order.append("spawn_sidecar")
+            return fake_handle
+
+        def _record_spawn_proxy(**_kw):
+            order.append("spawn_proxy")
+            mock_proxy = MagicMock()
+            mock_proxy.poll.return_value = None
+            mock_proxy.wait.return_value = 0
+            return (mock_proxy, 9999)
+
+        monkeypatch.setattr("worthless.cli.commands.wrap.split_to_tmpfs", _record_split)
+        monkeypatch.setattr("worthless.cli.commands.wrap.spawn_sidecar", _record_spawn_sidecar)
+        monkeypatch.setattr("worthless.cli.commands.wrap.spawn_proxy", _record_spawn_proxy)
+        # Health poll fails so we exit cleanly without running the child.
+        monkeypatch.setattr("worthless.cli.commands.wrap.poll_health", lambda *_a, **_kw: False)
+
+        runner.invoke(
+            app,
+            ["wrap", "--", "echo", "hi"],
+            env={"WORTHLESS_HOME": str(home_with_key.base_dir)},
+        )
+
+        assert order[:3] == ["split_to_tmpfs", "spawn_sidecar", "spawn_proxy"], (
+            f"wrong startup order: {order}. Expected split_to_tmpfs → spawn_sidecar → spawn_proxy."
+        )
+
+    def test_proxy_env_contains_sidecar_socket(
+        self, home_with_key, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """spawn_proxy must receive WORTHLESS_SIDECAR_SOCKET pointing to the
+        sidecar's actual socket path. Without this, the proxy can't connect
+        to the sidecar's IPC peer and refuses to bind."""
+        from pathlib import Path
+        from unittest.mock import MagicMock as _MagicMock
+
+        fake_socket = Path("/tmp/wor-test-run-env/sidecar.sock")  # noqa: S108
+        fake_shares = _MagicMock(
+            run_dir=fake_socket.parent,
+            share_a_path=fake_socket.parent / "share_a.bin",
+            share_b_path=fake_socket.parent / "share_b.bin",
+            shard_a=bytearray(32),
+            shard_b=bytearray(32),
+        )
+        fake_handle = _MagicMock(
+            socket_path=fake_socket,
+            shares=fake_shares,
+            allowed_uid=os.getuid(),
+            proc=_MagicMock(pid=99999, poll=lambda: 0),
+        )
+
+        captured_proxy_env: dict = {}
+
+        def _capture_spawn_proxy(**kw):
+            captured_proxy_env.update(kw.get("env", {}))
+            mock_proxy = MagicMock()
+            mock_proxy.poll.return_value = None
+            mock_proxy.wait.return_value = 0
+            return (mock_proxy, 9999)
+
+        monkeypatch.setattr(
+            "worthless.cli.commands.wrap.split_to_tmpfs",
+            lambda _key, _home: fake_shares,
+        )
+        monkeypatch.setattr(
+            "worthless.cli.commands.wrap.spawn_sidecar",
+            lambda _socket, _shares, **_kw: fake_handle,
+        )
+        monkeypatch.setattr("worthless.cli.commands.wrap.spawn_proxy", _capture_spawn_proxy)
+        monkeypatch.setattr("worthless.cli.commands.wrap.poll_health", lambda *_a, **_kw: False)
+
+        runner.invoke(
+            app,
+            ["wrap", "--", "echo", "hi"],
+            env={"WORTHLESS_HOME": str(home_with_key.base_dir)},
+        )
+
+        assert "WORTHLESS_SIDECAR_SOCKET" in captured_proxy_env, (
+            f"proxy env must include WORTHLESS_SIDECAR_SOCKET, got keys: "
+            f"{sorted(captured_proxy_env)}"
+        )
+        assert captured_proxy_env["WORTHLESS_SIDECAR_SOCKET"] == str(fake_socket), (
+            f"socket path mismatch: env={captured_proxy_env['WORTHLESS_SIDECAR_SOCKET']!r}, "
+            f"expected={str(fake_socket)!r}"
+        )
 
 
 class TestWrapLivenessPipe:
@@ -211,7 +614,10 @@ class TestWrapHealthTimeout:
     """wrap cleans up proxy when poll_health times out."""
 
     def test_health_timeout_cleans_proxy(
-        self, home_with_key, monkeypatch: pytest.MonkeyPatch
+        self,
+        home_with_key,
+        monkeypatch: pytest.MonkeyPatch,
+        _stub_sidecar_lifecycle: dict,
     ) -> None:
         """When poll_health returns False, proxy is terminated and exit 1.
 
@@ -245,6 +651,8 @@ class TestWrapHealthTimeout:
         # Cleanup invariant: terminate is called regardless of which
         # diagnostic message branch fires.
         mock_proxy.terminate.assert_called()
+        # _cleanup_lifecycle must shut down the sidecar after the proxy.
+        assert _stub_sidecar_lifecycle["shutdown_count"] == 1
 
 
 class TestWrapChildSpawnFailure:

@@ -339,24 +339,24 @@ class TestEdgeCases:
 
 
 class TestGateBeforeDecrypt:
-    """SR-03: Rules engine evaluates BEFORE any Fernet decryption.
+    """SR-03: Rules engine evaluates BEFORE any decryption.
 
-    The proxy handler must call rules_engine.evaluate() before
-    repo.decrypt_shard() to ensure denied requests never touch
-    decrypted key material.
+    Post-WOR-309 the proxy delegates decryption to the sidecar via
+    ``ipc.open()``. The handler must call rules_engine.evaluate() before
+    ipc.open() so denied requests never trigger sidecar decryption.
     """
 
     def test_evaluate_precedes_decrypt_in_proxy_handler(self) -> None:
-        """Static analysis: rules_engine.evaluate appears before repo.decrypt_shard in source."""
+        """Static analysis: rules_engine.evaluate appears before ipc.open in source."""
         from worthless.proxy.app import create_app
 
         source = inspect.getsource(create_app)
         gate_pos = source.find("rules_engine.evaluate")
-        decrypt_pos = source.find("repo.decrypt_shard")
+        open_pos = source.find("ipc.open")
         assert gate_pos != -1, "rules_engine.evaluate not found in proxy handler"
-        assert decrypt_pos != -1, "repo.decrypt_shard not found in proxy handler"
-        assert gate_pos < decrypt_pos, (
-            f"gate (pos {gate_pos}) must appear before decrypt (pos {decrypt_pos}) in source"
+        assert open_pos != -1, "ipc.open not found in proxy handler"
+        assert gate_pos < open_pos, (
+            f"gate (pos {gate_pos}) must appear before ipc.open (pos {open_pos}) in source"
         )
 
     def test_fetch_encrypted_returns_encrypted_type(self) -> None:
@@ -395,10 +395,10 @@ class TestGateBeforeDecrypt:
     @hsettings(deadline=None)
     @given(allow=st.booleans())
     def test_gate_deny_prevents_decrypt(self, allow: bool) -> None:
-        """When gate denies, decrypt_shard must not be called.
+        """When gate denies, ipc.open must not be called.
 
         Verifies the control flow structure: the denial return statement
-        appears before the decrypt_shard call in the source.
+        appears before the ipc.open call in the source.
         """
         from worthless.proxy.app import create_app
 
@@ -413,17 +413,17 @@ class TestGateBeforeDecrypt:
         assert denial_check_idx != -1, "denial check must follow evaluate call"
 
         # Find the return statement inside the denial block
-        # (must come before decrypt_shard)
+        # (must come before ipc.open)
         denial_return_idx = source.find("return Response(", denial_check_idx)
-        decrypt_idx = source.find("repo.decrypt_shard", gate_idx)
+        open_idx = source.find("ipc.open", gate_idx)
         assert denial_return_idx != -1, "denial block must have a return"
-        assert decrypt_idx != -1, "decrypt_shard must exist in handler"
-        assert denial_return_idx < decrypt_idx, "denial return must come before decrypt_shard call"
+        assert open_idx != -1, "ipc.open must exist in handler"
+        assert denial_return_idx < open_idx, "denial return must come before ipc.open call"
 
         if not allow:
             # When denied, the handler returns at denial_return_idx
-            # which is before decrypt_idx — decrypt is never reached
-            assert denial_return_idx < decrypt_idx
+            # which is before open_idx — sidecar decryption never reached
+            assert denial_return_idx < open_idx
 
 
 # ---------------------------------------------------------------------------

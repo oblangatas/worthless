@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 from pathlib import Path
@@ -14,9 +15,12 @@ from hypothesis import HealthCheck, settings
 
 from worthless.cli import default_command  # used by _isolate_default_command_proxy autouse fixture
 from worthless.cli.bootstrap import WorthlessHome, ensure_home
-from worthless.crypto import SplitResult, split_key
+from worthless.crypto import SplitResult
+from worthless.crypto.splitter import split_key
+from worthless.proxy import app as _proxy_app_module
 from worthless.storage.repository import ShardRepository, StoredShard
 
+from tests._fakes.fake_ipc_supervisor import FakeIPCSupervisor
 from tests.helpers import fake_openai_key
 
 # Disable the real OS keyring for the entire test session.
@@ -256,6 +260,106 @@ async def repo(tmp_db_path: str, fernet_key: bytes) -> ShardRepository:
     r = ShardRepository(tmp_db_path, fernet_key)
     await r.initialize()
     return r
+
+
+# ------------------------------------------------------------------
+# WOR-309 Phase 5: autouse FakeIPCSupervisor injection
+# ------------------------------------------------------------------
+#
+# Phase 3 rewired the proxy to call ``app.state.ipc_supervisor.open(...)``
+# instead of an in-process Fernet decrypt. ``app.py:180-189`` honours a
+# pre-set ``app.state.ipc_supervisor`` and skips eager-connect when
+# ``app.state.ipc_supervisor_preconnected`` is truthy.
+#
+# Two layers of injection — both autouse, both bypassed by ``real_ipc``:
+#
+# 1. Session-scoped: wrap ``worthless.proxy.app.create_app`` once at
+#    session start. Required because module-scoped fixtures (like
+#    ``live_proxy`` in tests/test_contract.py) execute their setup
+#    *outside* function-scoped autouse fixtures. If we only patched at
+#    function scope, those module fixtures would build a real proxy
+#    against a non-existent sidecar socket and 503 every test.
+#
+# 2. Function-scoped: re-wrap per-test so a leftover patch from a
+#    `real_ipc`-marked test (which clobbered the wrap) is restored. Also
+#    yields the per-test ``fakes_seen`` list to test code that wants to
+#    inspect the fake.
+
+
+def _make_create_app_wrapper(original_create_app):
+    """Return a wrapper that stamps a FakeIPCSupervisor onto every app.
+
+    Uses ``functools.wraps`` so ``inspect.getsource(create_app)`` returns the
+    original ``create_app`` source — required by tests in
+    ``test_security_properties.py`` that statically scan handler source for
+    the gate-before-decrypt invariant.
+    """
+
+    @functools.wraps(original_create_app)
+    def _wrapped(*args, **kwargs):
+        app = original_create_app(*args, **kwargs)
+        if getattr(app.state, "ipc_supervisor", None) is None:
+            app.state.ipc_supervisor = FakeIPCSupervisor()
+            app.state.ipc_supervisor_preconnected = True
+        return app
+
+    return _wrapped
+
+
+_ORIGINAL_CREATE_APP = _proxy_app_module.create_app
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _session_fake_ipc_supervisor():
+    """Patch ``create_app`` for the whole test session.
+
+    Walks every already-imported module that captured ``create_app`` by
+    ``from ... import create_app`` and rebinds the captured reference to
+    the wrapped version. Restored on session teardown.
+    """
+    import sys
+
+    wrapper = _make_create_app_wrapper(_ORIGINAL_CREATE_APP)
+
+    captured_locations: list[tuple[object, str]] = []
+    for mod in list(sys.modules.values()):
+        if mod is None or mod is _proxy_app_module:
+            continue
+        captured = getattr(mod, "create_app", None)
+        if captured is _ORIGINAL_CREATE_APP:
+            captured_locations.append((mod, "create_app"))
+            setattr(mod, "create_app", wrapper)
+    _proxy_app_module.create_app = wrapper
+
+    try:
+        yield
+    finally:
+        _proxy_app_module.create_app = _ORIGINAL_CREATE_APP
+        for mod, attr in captured_locations:
+            setattr(mod, attr, _ORIGINAL_CREATE_APP)
+
+
+@pytest.fixture(autouse=True)
+def _autouse_fake_ipc_supervisor(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
+    """Per-test wrapping. Honours ``real_ipc`` opt-out.
+
+    ``real_ipc``-marked tests need the *original* ``create_app`` so the
+    lifespan really connects to a subprocess sidecar. We unconditionally
+    rebind to the original at function-scope; ``monkeypatch`` restores the
+    session-scope wrap on teardown.
+    """
+    if request.node.get_closest_marker("real_ipc") is None:
+        return
+
+    import sys
+
+    monkeypatch.setattr(_proxy_app_module, "create_app", _ORIGINAL_CREATE_APP)
+    for mod in list(sys.modules.values()):
+        if mod is None or mod is _proxy_app_module:
+            continue
+        captured = getattr(mod, "create_app", None)
+        if captured is not None and captured is not _ORIGINAL_CREATE_APP:
+            monkeypatch.setattr(mod, "create_app", _ORIGINAL_CREATE_APP)
 
 
 # Synthetic PID returned by the start_daemon mock below. Must be non-zero —

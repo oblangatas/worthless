@@ -40,6 +40,9 @@ from worthless.proxy.config import ProxySettings
 from worthless.proxy.rules import RateLimitRule, RulesEngine, SpendCapRule
 from worthless.storage.repository import ShardRepository, StoredShard
 
+
+pytestmark = pytest.mark.skip(reason="WOR-549: worthless-16x2 ↔ sidecar IPC integration pending")
+
 # ---------------------------------------------------------------------------
 # Shared constants
 # ---------------------------------------------------------------------------

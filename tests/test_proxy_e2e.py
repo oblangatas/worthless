@@ -21,6 +21,8 @@ from worthless.proxy.config import ProxySettings
 from worthless.proxy.rules import RateLimitRule, RulesEngine, SpendCapRule
 from worthless.storage.repository import ShardRepository, StoredShard
 
+from tests._fakes import pin_shard_b
+
 
 # ------------------------------------------------------------------
 # Fixtures
@@ -64,8 +66,21 @@ async def proxy_client(proxy_app):
         yield client
 
 
-async def _enroll(repo: ShardRepository, alias: str, api_key: str, prefix: str, provider: str):
-    """Enroll a key and return (alias, shard_a_utf8, raw_api_key)."""
+async def _enroll(
+    repo: ShardRepository,
+    alias: str,
+    api_key: str,
+    prefix: str,
+    provider: str,
+    proxy_app=None,
+):
+    """Enroll a key and return (alias, shard_a_utf8, raw_api_key).
+
+    If ``proxy_app`` is supplied, also pins the alias's plaintext shard-B
+    onto the autouse FakeIPCSupervisor at ``proxy_app.state.ipc_supervisor``.
+    Without this pin the fake returns its default plaintext, reconstruction
+    yields the wrong API key, and reconstruct-dependent tests return 401.
+    """
     sr = split_key_fp(api_key, prefix=prefix, provider=provider)
     shard = StoredShard(
         shard_b=bytearray(sr.shard_b),
@@ -76,13 +91,22 @@ async def _enroll(repo: ShardRepository, alias: str, api_key: str, prefix: str, 
     await repo.store(
         alias, shard, prefix=sr.prefix, charset=sr.charset, base_url="https://api.openai.com/v1"
     )
+    if proxy_app is not None:
+        pin_shard_b(proxy_app, alias, sr.shard_b)
     shard_a_utf8 = sr.shard_a.decode("utf-8")
     return alias, shard_a_utf8, api_key
 
 
 @pytest.fixture()
-async def enrolled_alias(repo):
-    return await _enroll(repo, "test-key", "sk-test-key-1234567890abcdef", "sk-", "openai")
+async def enrolled_alias(repo, proxy_app):
+    return await _enroll(
+        repo,
+        "test-key",
+        "sk-test-key-1234567890abcdef",
+        "sk-",
+        "openai",
+        proxy_app=proxy_app,
+    )
 
 
 # ------------------------------------------------------------------
@@ -296,10 +320,14 @@ class TestCrossAliasAttack:
     """Sending one alias's shard-A to a different alias's endpoint must fail."""
 
     @pytest.fixture()
-    async def two_aliases(self, repo):
+    async def two_aliases(self, repo, proxy_app):
         """Enroll two different keys under different aliases."""
-        a = await _enroll(repo, "alias-a", "sk-keyAAAAAAAAAAAAAAAA", "sk-", "openai")
-        b = await _enroll(repo, "alias-b", "sk-keyBBBBBBBBBBBBBBBB", "sk-", "openai")
+        a = await _enroll(
+            repo, "alias-a", "sk-keyAAAAAAAAAAAAAAAA", "sk-", "openai", proxy_app=proxy_app
+        )
+        b = await _enroll(
+            repo, "alias-b", "sk-keyBBBBBBBBBBBBBBBB", "sk-", "openai", proxy_app=proxy_app
+        )
         return a, b
 
     async def test_cross_alias_shard_a_rejected(self, proxy_client: httpx.AsyncClient, two_aliases):

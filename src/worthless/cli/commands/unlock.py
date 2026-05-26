@@ -17,6 +17,7 @@ from pathlib import Path
 import typer
 from dotenv import dotenv_values
 
+from worthless.cli._repo_factory import open_repo
 from worthless.cli.bootstrap import WorthlessHome, acquire_lock, get_home
 from worthless.cli.console import get_console
 
@@ -31,7 +32,7 @@ from worthless.cli.commands.lock import _PROVIDER_ENV_MAP
 from worthless.cli.dotenv_rewriter import rewrite_env_keys, scan_env_keys
 from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary
 from worthless.cli.orphans import format_orphan_error
-from worthless.crypto.splitter import reconstruct_key, reconstruct_key_fp
+from worthless.crypto.reconstruction import reconstruct_key, reconstruct_key_fp
 from worthless.crypto.types import zero_buf
 from worthless.exceptions import ShardTamperedError
 from worthless.openclaw import integration as _openclaw_integration
@@ -191,7 +192,7 @@ async def _pass1_reconstruct(
                 f"Shard B not found in DB for alias: {alias}",
             )
 
-        stored = repo.decrypt_shard(encrypted)
+        stored = await repo.decrypt_shard(encrypted)
         shard_a: bytearray | None = None
         try:
             enrollment = await _resolve_enrollment(alias, repo, env_path)
@@ -476,7 +477,6 @@ def register_unlock_commands(app: typer.Typer) -> None:
         console = get_console()
         db_was_missing, missing_db_path = _db_missing_after_completed_bootstrap()
         home = get_home()
-        repo = ShardRepository(str(home.db_path), home.fernet_key)
 
         # Detect whether the user passed --env explicitly. The HF4
         # discriminator (raise on shard-shape values without DB rows)
@@ -527,46 +527,49 @@ def register_unlock_commands(app: typer.Typer) -> None:
         # raises typer.Exit(73) AFTER unlock-core's .env restoration
         # commits. False = full success or OpenClaw absent.
         async def _unlock_async() -> bool:
-            await repo.initialize()
-            # Trust-fix: collect (provider, alias) tuples from `planned`
-            # for OpenClaw symmetric undo. Drives _apply_openclaw_unlock
-            # at the end.
-            planned: list[_PlannedRestore] = []
+            async with open_repo(home) as repo:
+                await repo.initialize()
+                # Trust-fix: collect (provider, alias) tuples from `planned`
+                # for OpenClaw symmetric undo. Drives _apply_openclaw_unlock
+                # at the end.
+                planned: list[_PlannedRestore] = []
 
-            if alias:
-                planned = await _unlock_batch([alias], home, repo, env)
-                if not planned:
-                    # If a typo'd --alias points at a .env full of shard-shape
-                    # values, silent success is the worst possible feedback.
-                    _raise_unrecognised_shards()
-                    console.print_warning(f"Alias not found or no keys restored: {alias}.")
-                    return False
-                console.print_success(_format_restored_line(planned[0]))
-            else:
-                env_str = str(env.resolve())
-                all_enrollments = await repo.list_enrollments()
-                aliases = sorted({e.key_alias for e in all_enrollments if e.env_path == env_str})
-                if not aliases:
-                    _raise_unrecognised_shards()
-                    console.print_warning("No enrolled keys found.")
-                    return False
+                if alias:
+                    planned = await _unlock_batch([alias], home, repo, env)
+                    if not planned:
+                        # If a typo'd --alias points at a .env full of shard-shape
+                        # values, silent success is the worst possible feedback.
+                        _raise_unrecognised_shards()
+                        console.print_warning(f"Alias not found or no keys restored: {alias}.")
+                        return False
+                    console.print_success(_format_restored_line(planned[0]))
+                else:
+                    env_str = str(env.resolve())
+                    all_enrollments = await repo.list_enrollments()
+                    aliases = sorted(
+                        {e.key_alias for e in all_enrollments if e.env_path == env_str}
+                    )
+                    if not aliases:
+                        _raise_unrecognised_shards()
+                        console.print_warning("No enrolled keys found.")
+                        return False
 
-                planned = await _unlock_batch(aliases, home, repo, env)
-                for p in planned:
-                    console.print_success(_format_restored_line(p))
-                n = len(planned)
-                if n > 1:
-                    # Per-key lines already covered N=1; only emit the summary
-                    # when there's something to count.
-                    console.print_success(f"[OK] {n} key(s) restored.")
+                    planned = await _unlock_batch(aliases, home, repo, env)
+                    for p in planned:
+                        console.print_success(_format_restored_line(p))
+                    n = len(planned)
+                    if n > 1:
+                        # Per-key lines already covered N=1; only emit the summary
+                        # when there's something to count.
+                        console.print_success(f"[OK] {n} key(s) restored.")
 
-            # Phase 2.c: OpenClaw symmetric undo. Per L1: NEVER aborts
-            # unlock-core success. Per L2 (revised 2026-05-08): detected+failed
-            # returns True so the caller raises typer.Exit(73) AFTER
-            # unlock-core's .env restoration commits. Extract (provider, alias)
-            # from the planned list — _PlannedRestore exposes both fields.
-            unlocked: list[tuple[str, str]] = [(p.provider, p.alias) for p in planned]
-            return _apply_openclaw_unlock(unlocked, console, home)
+                # Phase 2.c: OpenClaw symmetric undo. Per L1: NEVER aborts
+                # unlock-core success. Per L2 (revised 2026-05-08): detected+failed
+                # returns True so the caller raises typer.Exit(73) AFTER
+                # unlock-core's .env restoration commits. Extract (provider, alias)
+                # from the planned list — _PlannedRestore exposes both fields.
+                unlocked: list[tuple[str, str]] = [(p.provider, p.alias) for p in planned]
+                return _apply_openclaw_unlock(unlocked, console, home)
 
         with acquire_lock(home):
             partial_failure = asyncio.run(_unlock_async())

@@ -54,6 +54,11 @@ jobs:
           fail-build: false
 
       - name: Dockle best-practice lint
+        # ``.dockleignore`` in the repo root skips CIS-DI-0001 (image
+        # runs root by default — INTENTIONAL for WOR-310's priv-drop
+        # entrypoint).  See the .dockleignore comments for full
+        # rationale.  Dockle reads .dockleignore from CWD, which is
+        # the checkout root inside the action runner.
         uses: erzz/dockle-action@69369bc745ee29813f730231a821bcd4f71cd290 # v1
         with:
           image: worthless-proxy:${{ github.sha }}

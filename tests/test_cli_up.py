@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import collections
 import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -19,8 +20,47 @@ from worthless.cli.process import (
     read_pid,
     write_pid,
 )
+from worthless.cli.sidecar_lifecycle import ShareFiles, SidecarHandle
 
 runner = CliRunner()
+
+
+def _stub_sidecar_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Patch the Phase D sidecar lifecycle hooks for foreground tests.
+
+    These tests pre-date Phase D and only mock ``spawn_proxy``. The real
+    ``split_to_tmpfs`` + ``spawn_sidecar`` would touch tmpfs and try to
+    launch ``python -m worthless.sidecar`` — too heavy for unit-level
+    coverage. Stub them with no-ops; per-Phase-D tests cover the wiring.
+    """
+
+    def _fake_split(_key, home_dir: Path) -> ShareFiles:
+        run_dir = home_dir / "run" / "test"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        return ShareFiles(
+            share_a_path=run_dir / "share_a.bin",
+            share_b_path=run_dir / "share_b.bin",
+            shard_a=bytearray(b"\x00" * 22),
+            shard_b=bytearray(b"\x00" * 22),
+            run_dir=run_dir,
+        )
+
+    def _fake_spawn_sidecar(socket_path, shares, allowed_uid, **_):
+        proc = MagicMock()
+        proc.poll.return_value = None  # alive throughout
+        proc.pid = 99001
+        return SidecarHandle(
+            proc=proc,
+            socket_path=socket_path,
+            shares=shares,
+            allowed_uid=allowed_uid,
+            drain_timeout=5.0,
+            stderr_buf=collections.deque(),
+        )
+
+    monkeypatch.setattr("worthless.cli.commands.up.split_to_tmpfs", _fake_split)
+    monkeypatch.setattr("worthless.cli.commands.up.spawn_sidecar", _fake_spawn_sidecar)
+    monkeypatch.setattr("worthless.cli.commands.up.shutdown_sidecar", lambda _h: None)
 
 
 class TestUpDefaultPort:
@@ -127,80 +167,23 @@ class TestUpPidFileErrorBranches:
 
 
 class TestUpDaemonFlow:
-    """up --daemon starts a daemon process and writes a PID file."""
+    """up --daemon currently rejects with WRTLS-110 (Phase D: foreground only).
 
-    def test_daemon_mode_writes_pid(self, home_with_key, monkeypatch: pytest.MonkeyPatch) -> None:
-        """up --daemon writes PID file and exits 0 when healthy."""
-        mock_proc = MagicMock()
-        mock_proc.pid = 54321
+    Daemon + sidecar IPC handle inheritance is unsolved. Until that lands,
+    ``-d`` raises before any subprocess is spawned, so callers cannot
+    accidentally end up with a running proxy that has no sidecar.
+    """
 
-        monkeypatch.setattr(
-            "subprocess.Popen",
-            lambda *_a, **_kw: mock_proc,
-        )
-        monkeypatch.setattr(
-            "worthless.cli.commands.up.poll_health_pid",
-            lambda *_a, **_kw: 54321,
-        )
-
+    def test_daemon_mode_rejected(self, home_with_key) -> None:
         result = runner.invoke(
             app,
             ["up", "--daemon"],
             env={"WORTHLESS_HOME": str(home_with_key.base_dir)},
         )
-        assert result.exit_code == 0
-
-        pid_file = pid_path(home_with_key)
-        assert pid_file.exists()
-        info = read_pid(pid_file)
-        assert info is not None
-        pid, port = info
-        assert pid == 54321
-        assert port == 8787
-
-    def test_daemon_ignores_foreign_healthz_pid(
-        self, home_with_key, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A foreign daemon already bound to the port would answer /healthz.
-
-        We must not upgrade the pidfile to that foreign PID — keep the spawn
-        PID so `worthless down` walks our own tree, not someone else's.
-        """
-        mock_proc = MagicMock()
-        mock_proc.pid = 54321
-
-        monkeypatch.setattr(
-            "subprocess.Popen",
-            lambda *_a, **_kw: mock_proc,
-        )
-        # /healthz reports a PID that is NOT in mock_proc's tree.
-        monkeypatch.setattr(
-            "worthless.cli.commands.up.poll_health_pid",
-            lambda *_a, **_kw: 88888,
-        )
-        # Force the descendant check to return False — 88888 is "foreign".
-        monkeypatch.setattr(
-            "worthless.cli.commands.up.pid_in_tree",
-            lambda _root, _candidate: False,
-        )
-
-        result = runner.invoke(
-            app,
-            ["up", "--daemon"],
-            env={"WORTHLESS_HOME": str(home_with_key.base_dir)},
-        )
-        assert result.exit_code == 0
-        # Rich wraps terminal output — collapse whitespace before the match.
-        collapsed = " ".join(result.output.split()).lower()
-        assert "not a descendant" in collapsed, collapsed
-
-        pid_file = pid_path(home_with_key)
-        info = read_pid(pid_file)
-        assert info is not None
-        # Must have stayed on the spawn PID, not accepted the foreign one.
-        assert info[0] == 54321, (
-            f"pidfile accepted foreign PID 88888 — expected 54321. Got {info[0]}"
-        )
+        assert result.exit_code == 1
+        out = result.output.lower()
+        assert "daemon" in out
+        assert "foreground" in out
 
 
 class TestUpErrorBranches:
@@ -230,6 +213,7 @@ class TestUpErrorBranches:
         self, home_with_key, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """RuntimeError in spawn_proxy -> exit_code=1 with WRTLS."""
+        _stub_sidecar_lifecycle(monkeypatch)
 
         def _boom(**_kw):
             raise RuntimeError("bind failed")
@@ -251,6 +235,8 @@ class TestUpErrorBranches:
         self, home_with_key, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """poll_health_pid returns None -> exit_code=1, proxy terminated."""
+        _stub_sidecar_lifecycle(monkeypatch)
+
         mock_proxy = MagicMock()
         mock_proxy.pid = 99999
         mock_proxy.poll.return_value = None
@@ -274,52 +260,10 @@ class TestUpErrorBranches:
         assert "WRTLS" in result.output
         mock_proxy.terminate.assert_called()
 
-    def test_up_daemon_spawn_failure_exits_clean(
-        self, home_with_key, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """OSError in subprocess.Popen for daemon mode -> exit_code=1."""
-
-        def _fail_popen(*_a, **_kw):
-            raise OSError("too many processes")
-
-        monkeypatch.setattr("subprocess.Popen", _fail_popen)
-
-        result = runner.invoke(
-            app,
-            ["up", "--daemon"],
-            env={"WORTHLESS_HOME": str(home_with_key.base_dir)},
-        )
-        assert result.exit_code == 1
-
-    def test_up_daemon_health_timeout_warns(
-        self, home_with_key, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Daemon mode: health timeout prints warning but exits 0."""
-        mock_proc = MagicMock()
-        mock_proc.pid = 54321
-
-        monkeypatch.setattr("subprocess.Popen", lambda *_a, **_kw: mock_proc)
-        monkeypatch.setattr(
-            "worthless.cli.commands.up.poll_health_pid",
-            lambda *_a, **_kw: None,
-        )
-
-        result = runner.invoke(
-            app,
-            ["up", "--daemon"],
-            env={"WORTHLESS_HOME": str(home_with_key.base_dir)},
-        )
-        # Daemon mode warns on health timeout but doesn't fail
-        assert result.exit_code == 0
-        assert "health check timed out" in result.output.lower()
-
-        # PID file should still be written (daemon stays running, falls back
-        # to proc.pid when /healthz never answers).
-        pid_file = pid_path(home_with_key)
-        assert pid_file.exists()
-        info = read_pid(pid_file)
-        assert info is not None
-        assert info[0] == 54321
+    # Daemon-spawn-failure and daemon-health-timeout cases collapse into the
+    # single "daemon rejected" path (covered by
+    # ``TestUpDaemonFlow::test_daemon_mode_rejected``). Reinstate when
+    # daemon + sidecar IPC handle inheritance lands.
 
 
 class TestUpStalePidReclaim:
@@ -329,11 +273,15 @@ class TestUpStalePidReclaim:
         self, home_with_key, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Existing stale PID file is reclaimed, proxy starts normally."""
+        _stub_sidecar_lifecycle(monkeypatch)
+
         pid_file = pid_path(home_with_key)
         write_pid(pid_file, 99999999, 8787)
 
         mock_proxy = MagicMock()
         mock_proxy.pid = 11111
+        # poll() returns 0 (exited) so the supervise loop exits cleanly.
+        mock_proxy.poll.return_value = 0
 
         monkeypatch.setattr(
             "worthless.cli.commands.up.spawn_proxy",
@@ -419,8 +367,12 @@ class TestUpStartsProxyBackground:
         self, home_with_key, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """CliRunner invokes `up`, mocked subprocess confirms proxy launch."""
+        _stub_sidecar_lifecycle(monkeypatch)
+
         mock_proxy = MagicMock()
         mock_proxy.pid = 12345
+        # poll() returns 0 immediately so the supervise loop exits cleanly.
+        mock_proxy.poll.return_value = 0
 
         monkeypatch.setattr(
             "worthless.cli.commands.up.spawn_proxy",
@@ -451,11 +403,15 @@ class TestUpStartsProxyBackground:
 class TestUpDuplicateDetection:
     """Integration tests proving duplicate daemon/foreground detection."""
 
-    def test_duplicate_daemon_rejected(
-        self, home_with_key, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Second `up -d` exits 1 with WRTLS-107 when a live PID file exists."""
-        # Plant a PID file with our own (live) PID to simulate running daemon
+    def test_duplicate_daemon_rejected(self, home_with_key) -> None:
+        """Phase D: `up -d` is rejected with WRTLS-110 (daemon mode disabled).
+
+        Pre-Phase-D this test asserted WRTLS-107 from the live-PID check, but
+        daemon-mode rejection now happens first (no point doing pidfile work
+        for a flag we will never honor).
+        """
+        # Plant a PID file with our own (live) PID — irrelevant under Phase D
+        # because daemon rejection is the first guard in the command body.
         pid_file = pid_path(home_with_key)
         write_pid(pid_file, os.getpid(), 8787)
 
@@ -465,40 +421,24 @@ class TestUpDuplicateDetection:
             env={"WORTHLESS_HOME": str(home_with_key.base_dir)},
         )
         assert result.exit_code == 1, f"Expected rejection, got: {result.output}"
-        assert "WRTLS-107" in result.output
-        assert "already running" in result.output.lower()
+        out = result.output.lower()
+        assert "daemon" in out
+        assert "foreground" in out
 
-    def test_duplicate_daemon_stale_reclaimed_then_starts(
-        self, home_with_key, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Stale PID is reclaimed and daemon starts normally."""
+    def test_duplicate_daemon_stale_reclaimed_then_starts(self, home_with_key) -> None:
+        """Phase D: even with stale pid, `up -d` is rejected before reclaim."""
         pid_file = pid_path(home_with_key)
-        # 99999999 is almost certainly not a live PID
         write_pid(pid_file, 99999999, 8787)
-
-        mock_proc = MagicMock()
-        mock_proc.pid = 77777
-
-        monkeypatch.setattr("subprocess.Popen", lambda *_a, **_kw: mock_proc)
-        monkeypatch.setattr(
-            "worthless.cli.commands.up.poll_health_pid",
-            lambda *_a, **_kw: 77777,
-        )
 
         result = runner.invoke(
             app,
             ["up", "--daemon"],
             env={"WORTHLESS_HOME": str(home_with_key.base_dir)},
         )
-        assert result.exit_code == 0, f"Expected success, got: {result.output}"
-        assert "Reclaimed" in result.output
-
-        # New PID file should reflect the new daemon
-        info = read_pid(pid_file)
-        assert info is not None
-        pid, port = info
-        assert pid == 77777
-        assert port == 8787
+        assert result.exit_code == 1
+        out = result.output.lower()
+        assert "daemon" in out
+        assert "foreground" in out
 
     def test_duplicate_foreground_rejected(
         self, home_with_key, monkeypatch: pytest.MonkeyPatch

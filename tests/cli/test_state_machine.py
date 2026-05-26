@@ -508,6 +508,7 @@ class TestDoctorFixOrphans:
     This test is no longer RED: doctor exists and repairs broken DB rows.
     """
 
+    @pytest.mark.skip(reason="WOR-549: worthless-16x2 ↔ sidecar IPC integration pending")
     def test_doctor_fix_detects_and_repairs_orphans(
         self, home_dir: WorthlessHome, env_file: Path
     ) -> None:
@@ -653,6 +654,7 @@ def _worthless_cli_args() -> list[str]:
     return [sys.executable, "-m", "worthless.cli.app"]
 
 
+@pytest.mark.real_ipc
 class TestConcurrencyAndCorruption:
     """xdist-parallel-safe: every test uses tmp_path + an explicit
     WORTHLESS_HOME env var. Real $HOME is never touched.

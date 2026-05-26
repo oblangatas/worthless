@@ -115,21 +115,83 @@ def container(docker_image: str) -> tuple[str, int]:
             "WORTHLESS_DEPLOY_MODE=lan",
             "-e",
             "WORTHLESS_ALLOW_INSECURE=true",
+            # Without this, deploy/start.py's _resolve_bind() returns
+            # 127.0.0.1 for `lan` mode (only `public` mode auto-binds
+            # 0.0.0.0).  Docker NAT then can't reach uvicorn from the
+            # host: TCP RST on every host-side connection.  Real users
+            # in `lan` mode set WORTHLESS_HOST explicitly to the LAN
+            # iface; for the test container we want all interfaces so
+            # the host-side httpx can reach the proxy through the
+            # docker-published port.
+            "-e",
+            "WORTHLESS_HOST=0.0.0.0",
             "--read-only",
             "--tmpfs",
             "/tmp:noexec,nosuid",
+            # WOR-466: sidecar stable-symlink lives at /run/worthless/sidecar.sock.
+            # The image bakes /run/worthless root:worthless 0770 but Docker's
+            # --tmpfs resets uid/gid to root:root — the probe (uid 10001) becomes
+            # "other" with zero access → EACCES on stat.  Specifying
+            # uid=0,gid=10001,mode=0770 restores the image intent: root owns,
+            # worthless group (proxy + crypto) can rwx.
+            "--tmpfs",
+            "/run/worthless:uid=0,gid=10001,mode=0770",
             "-v",
             f"{name}-data:/data",
             "-v",
             f"{name}-secrets:/secrets",
+            # WOR-310: drop all caps EXCEPT the six the runtime needs
+            # *briefly* during the priv-drop dance.  The preexec_fn
+            # clears the bounding set before exec, so the post-drop
+            # process has zero caps anyway — same end-state as
+            # --cap-drop=ALL.  The six:
+            #   * SETUID / SETGID — setresuid/setresgid/setgroups
+            #   * SETPCAP        — prctl(PR_CAPBSET_DROP)
+            #   * DAC_OVERRIDE   — entrypoint bootstrap writes into
+            #     /data which is owned by worthless-proxy (uid 10001);
+            #     without DAC_OVERRIDE root is treated as "other"
+            #     and mkdir /data/shard_a hits EACCES.
+            #   * CHOWN          — entrypoint chowns bootstrap output
+            #     to worthless-proxy after first boot.
+            #   * FOWNER         — chmod fernet.key to 0400 after
+            #     bootstrap touches a non-root-owned file.
             "--cap-drop=ALL",
+            "--cap-add=SETUID",
+            "--cap-add=SETGID",
+            "--cap-add=SETPCAP",
+            "--cap-add=DAC_OVERRIDE",
+            "--cap-add=CHOWN",
+            "--cap-add=FOWNER",
             "--security-opt=no-new-privileges",
             docker_image,
         ]
     )
     port = int(_run_ok(["docker", "port", name, "8787"]).rsplit(":", 1)[-1])
     try:
-        assert wait_healthy(name), f"Container {name} did not become healthy"
+        if not wait_healthy(name):
+            # Capture logs BEFORE _cleanup_container removes them; otherwise
+            # CI shows only "did not become healthy" with no clue why the
+            # entrypoint died.  See WOR-310 priv-drop dance: a stderr line
+            # like ``setresuid: EPERM`` reveals an incompatible cap-drop;
+            # ``WRTLS-114`` reveals a hardening assertion miss.
+            logs = subprocess.run(
+                ["docker", "logs", name],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            inspect = subprocess.run(
+                ["docker", "inspect", "--format", "{{.State.Status}} rc={{.State.ExitCode}}", name],
+                capture_output=True,
+                text=True,
+                check=False,
+            ).stdout.strip()
+            raise AssertionError(
+                f"Container {name} did not become healthy "
+                f"(state: {inspect})\n"
+                f"--- stdout ---\n{logs.stdout}\n"
+                f"--- stderr ---\n{logs.stderr}"
+            )
         yield name, port  # type: ignore[misc]
     finally:
         _cleanup_container(name)
@@ -157,6 +219,10 @@ def persistent_container(docker_image: str) -> tuple[str, int, str]:
             "WORTHLESS_DEPLOY_MODE=lan",
             "-e",
             "WORTHLESS_ALLOW_INSECURE=true",
+            # See container fixture: lan mode binds 127.0.0.1 by default;
+            # we need 0.0.0.0 so docker NAT can reach uvicorn.
+            "-e",
+            "WORTHLESS_HOST=0.0.0.0",
             "-v",
             f"{vol}:/data",
             docker_image,
@@ -191,7 +257,14 @@ def compose_stack(docker_image: str) -> tuple[str, str]:
 
     created_env = False
     if not env_file.exists():
-        env_file.write_text("WORTHLESS_DEPLOY_MODE=lan\nWORTHLESS_ALLOW_INSECURE=true\n")
+        env_file.write_text(
+            "WORTHLESS_DEPLOY_MODE=lan\n"
+            "WORTHLESS_ALLOW_INSECURE=true\n"
+            # Bind all interfaces so the host-side httpx in test_compose_*
+            # can reach uvicorn through docker NAT (lan mode otherwise
+            # binds 127.0.0.1 only — see deploy/start.py::_resolve_bind).
+            "WORTHLESS_HOST=0.0.0.0\n"
+        )
         created_env = True
 
     # Override port to dynamic to avoid bind conflicts
@@ -272,12 +345,70 @@ class TestBuild:
         assert result.returncode == 0
 
     def test_runs_as_non_root(self, container: tuple[str, int]) -> None:
+        """The runtime PROCESSES (uvicorn + sidecar) must run as non-root.
+
+        WOR-310 removed the static ``USER worthless`` directive so the
+        entrypoint can start as root briefly to do the priv-drop dance
+        (resolve uids, chown shares, setresuid).  After the dance,
+        uvicorn runs as ``worthless-proxy`` (uid 10001) and the sidecar
+        runs as ``worthless-crypto`` (uid 10002).  ``docker exec id``
+        spawns a new shell which inherits the IMAGE's default user
+        (root, since we dropped the USER directive) — that's expected
+        and unrelated to the priv-drop.  We verify the SECURITY claim
+        directly by walking ``/proc/<pid>/status`` for the uvicorn +
+        sidecar runtime processes and asserting their Uid is non-zero.
+
+        slim-bookworm has no ``ps``; we walk ``/proc`` from a busybox-
+        compatible shell snippet that prints ``<pid> <uid> <comm>``
+        per process.
+        """
         name, _ = container
-        result = docker_exec(name, ["id"])
-        assert result.returncode == 0
-        assert "worthless" in result.stdout
-        # uid should be non-zero
-        assert "uid=0" not in result.stdout
+        result = docker_exec(
+            name,
+            [
+                "sh",
+                "-c",
+                "for d in /proc/[0-9]*; do "
+                'pid="${d##*/}"; '
+                'comm=$(cat "$d/comm" 2>/dev/null) || continue; '
+                'uid=$(awk "/^Uid:/{print \\$2; exit}" "$d/status" 2>/dev/null); '
+                'echo "$pid $uid $comm"; '
+                "done",
+            ],
+        )
+        assert result.returncode == 0, (
+            f"/proc walk failed: rc={result.returncode} stderr={result.stderr!r}"
+        )
+        # Match python (sidecar entrypoint is `python -m worthless.sidecar`)
+        # AND uvicorn (proxy).  Tini (PID 1) is allowed to be root.
+        runtime_lines = [
+            line
+            for line in result.stdout.splitlines()
+            if any(needle in line.lower() for needle in ("uvicorn", "python"))
+        ]
+        assert runtime_lines, f"no uvicorn/python processes found; /proc walk:\n{result.stdout}"
+        uids_seen: set[str] = set()
+        for line in runtime_lines:
+            parts = line.split(maxsplit=2)
+            if len(parts) < 3:
+                continue
+            _pid, uid, _comm = parts
+            assert uid != "0", (
+                f"WOR-310 priv-drop failed: process running as uid=0:\n{line}\n"
+                f"full /proc walk:\n{result.stdout}"
+            )
+            uids_seen.add(uid)
+        # Two-uid topology: proxy (10001) and crypto sidecar (10002) MUST be
+        # distinct.  A regression in spawn_sidecar / deploy/start.py that
+        # silently drops both processes to the SAME non-root uid would pass
+        # the bare uid != 0 check above while completely defeating the
+        # ptrace / /proc/<pid>/mem wall this PR exists to enforce.  Pin the
+        # exact uid pair here so the test fails loud on that regression.
+        assert {"10001", "10002"}.issubset(uids_seen), (
+            f"WOR-310 two-uid wall missing: expected both 10001 (proxy) and "
+            f"10002 (crypto), saw uids {sorted(uids_seen)}.\n"
+            f"full /proc walk:\n{result.stdout}"
+        )
 
 
 # ===================================================================
@@ -321,11 +452,28 @@ class TestBootstrap:
         assert "shards" in result.stdout
 
     def test_fernet_key_permissions(self, container: tuple[str, int]) -> None:
+        """fernet.key is worthless-crypto:worthless-crypto 0400 inside Docker.
+
+        WOR-465 A4: unconditional lockdown — the sidecar (worthless-crypto)
+        owns the key exclusively. Mode 0400 (owner-only) means the proxy uid
+        (10001 = worthless-proxy) cannot open() the file even with group
+        membership; only the sidecar uid (10002 = worthless-crypto) can read
+        it. Owner is worthless-crypto (not root) so chown is load-bearing: the
+        entrypoint fail-closed stat check exits 78 if a host bind-mount
+        silently swallows the chown (e.g. macOS Docker Desktop, WSL /mnt/c).
+
+        Bare-metal install.sh still uses 0400 single-uid (no group wall);
+        tested in tests/test_bootstrap.py and test_cli_security_hardening.py.
+        """
         name, _ = container
         # GNU coreutils stat inside Debian slim
-        result = docker_exec(name, ["stat", "-c", "%a", "/data/fernet.key"])
+        result = docker_exec(name, ["stat", "-c", "%a %U:%G", "/data/fernet.key"])
         assert result.returncode == 0
-        assert result.stdout.strip() == "400"
+        assert result.stdout.strip() == "400 worthless-crypto:worthless-crypto", (
+            f"WOR-465 A4: fernet.key must be worthless-crypto:worthless-crypto 0400 "
+            f"in Docker (unconditional — no operator flag required). "
+            f"Got {result.stdout.strip()!r}."
+        )
 
 
 # ===================================================================
@@ -387,36 +535,120 @@ class TestPersistence:
 class TestLifecycle:
     """Enroll + proxy health."""
 
-    def test_enroll_and_healthz(self, container: tuple[str, int]) -> None:
+    def test_lock_and_healthz(self, container: tuple[str, int]) -> None:
+        """Locking a key while the proxy is live + hitting /healthz works.
+
+        Renamed from ``test_enroll_and_healthz`` because the underlying
+        CLI command was renamed in 8rqs: ``worthless enroll`` was
+        replaced with ``worthless lock --env``.  The old test asserted
+        ``enroll.returncode == 0`` against a non-existent subcommand,
+        which Typer printed as "No such command" but still returned
+        rc=0 in some old releases — so the assertion never fired and
+        the test silently exercised nothing before hitting /healthz.
+
+        WOR-310 nuance: ``docker exec`` defaults to the IMAGE's user.
+        Since we dropped ``USER worthless`` for the priv-drop entry,
+        we explicitly run as ``worthless-proxy`` (uid 10001) so the
+        ``worthless.db`` write owner matches the live proxy uid.
+        """
         name, port = container
 
-        # Enroll a fake key
+        # Write a fake .env, then lock it as worthless-proxy.  Mirrors
+        # the openclaw_stack pattern in test_openclaw_e2e.py — the
+        # supported 8rqs lock-time flow.
         key = fake_openai_key()
-        enroll = subprocess.run(
+        env_content = f"OPENAI_API_KEY={key}"
+        write = subprocess.run(  # noqa: S603, S607
             [
                 "docker",
                 "exec",
                 "-i",
+                "--user",
+                "worthless-proxy",
                 name,
-                "worthless",
-                "enroll",
-                "--alias",
-                "healthz-test",
-                "--key-stdin",
-                "--provider",
-                "openai",
+                "sh",
+                "-c",
+                "cat > /tmp/.env",
             ],
-            input=key,
+            input=env_content,
             capture_output=True,
             text=True,
         )
-        assert enroll.returncode == 0, f"enroll failed: {enroll.stderr}"
+        assert write.returncode == 0, f"failed to write .env: {write.stderr}"
 
-        # Hit healthz
-        resp = httpx.get(
-            f"http://127.0.0.1:{port}/healthz",
-            timeout=5.0,
+        # Sanity check: /healthz works BEFORE we touch the DB.  If this
+        # fails, the failure is NOT lock-related — we want full
+        # diagnostics (proxy logs + container state) so CI is
+        # self-explanatory next iteration.
+        try:
+            pre = httpx.get(f"http://127.0.0.1:{port}/healthz", timeout=5.0)
+        except httpx.HTTPError as exc:
+            logs = subprocess.run(  # noqa: S603, S607
+                ["docker", "logs", "--tail", "200", name],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            inspect = subprocess.run(  # noqa: S603, S607
+                [
+                    "docker",
+                    "inspect",
+                    "--format",
+                    "status={{.State.Status}} health={{.State.Health.Status}} "
+                    "rc={{.State.ExitCode}}",
+                    name,
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            ).stdout.strip()
+            raise AssertionError(
+                f"baseline /healthz failed pre-lock: {exc}\n"
+                f"--- container state: {inspect}\n"
+                f"--- proxy logs (last 200 lines) ---\n{logs.stdout}\n{logs.stderr}"
+            ) from exc
+        assert pre.status_code == 200, (
+            f"baseline /healthz failed pre-lock: {pre.status_code} {pre.text!r}"
         )
+
+        lock = subprocess.run(  # noqa: S603, S607
+            [
+                "docker",
+                "exec",
+                "--user",
+                "worthless-proxy",
+                name,
+                "worthless",
+                "lock",
+                "--env",
+                "/tmp/.env",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert lock.returncode == 0, f"lock failed: {lock.stderr}"
+
+        # Hit healthz post-lock.  If this fails, capture proxy logs so
+        # CI shows what made uvicorn drop the connection.
+        try:
+            resp = httpx.get(
+                f"http://127.0.0.1:{port}/healthz",
+                timeout=5.0,
+            )
+        except httpx.HTTPError as exc:
+            logs = subprocess.run(  # noqa: S603, S607
+                ["docker", "logs", "--tail", "100", name],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            raise AssertionError(
+                f"post-lock /healthz failed: {exc}\n"
+                f"--- pre-lock /healthz returned: {pre.status_code} {pre.text!r}\n"
+                f"--- lock stdout ---\n{lock.stdout}\n"
+                f"--- lock stderr ---\n{lock.stderr}\n"
+                f"--- proxy logs (last 100 lines) ---\n{logs.stdout}\n{logs.stderr}"
+            ) from exc
         assert resp.status_code == 200
         body = resp.json()
         assert "status" in body
@@ -1056,11 +1288,53 @@ class TestComposeSecurity:
         assert "read-only" in result.stderr.lower() or "read only" in result.stderr.lower()
 
     def test_compose_non_root(self, compose_stack: tuple[str, str]) -> None:
+        """Same as TestBuild::test_runs_as_non_root but for the compose stack.
+
+        slim-bookworm has no ``ps``; we walk ``/proc`` and assert the
+        runtime processes (uvicorn + python sidecar) are non-root.
+        """
         _project, cname = compose_stack
-        result = docker_exec(cname, ["id"])
-        assert result.returncode == 0
-        assert "worthless" in result.stdout
-        assert "uid=0" not in result.stdout
+        result = docker_exec(
+            cname,
+            [
+                "sh",
+                "-c",
+                "for d in /proc/[0-9]*; do "
+                'pid="${d##*/}"; '
+                'comm=$(cat "$d/comm" 2>/dev/null) || continue; '
+                'uid=$(awk "/^Uid:/{print \\$2; exit}" "$d/status" 2>/dev/null); '
+                'echo "$pid $uid $comm"; '
+                "done",
+            ],
+        )
+        assert result.returncode == 0, (
+            f"/proc walk failed: rc={result.returncode} stderr={result.stderr!r}"
+        )
+        runtime_lines = [
+            line
+            for line in result.stdout.splitlines()
+            if any(needle in line.lower() for needle in ("uvicorn", "python"))
+        ]
+        assert runtime_lines, f"no runtime processes; /proc walk:\n{result.stdout}"
+        uids_seen: set[str] = set()
+        for line in runtime_lines:
+            parts = line.split(maxsplit=2)
+            if len(parts) < 3:
+                continue
+            _pid, uid, _comm = parts
+            assert uid != "0", (
+                f"WOR-310 compose priv-drop failed: process at uid=0:\n{line}\n"
+                f"full /proc walk:\n{result.stdout}"
+            )
+            uids_seen.add(uid)
+        # Two-uid topology check (mirrors test_runs_as_non_root): both
+        # 10001 (proxy) and 10002 (crypto) must appear as distinct uids.
+        # A same-uid drop would pass the uid != 0 check but defeat the
+        # kernel uid wall — fail loud here instead.
+        assert {"10001", "10002"}.issubset(uids_seen), (
+            f"WOR-310 compose two-uid wall missing: expected both 10001 and "
+            f"10002, saw {sorted(uids_seen)}.\nfull /proc walk:\n{result.stdout}"
+        )
 
 
 class TestSDKSmokeDocker:

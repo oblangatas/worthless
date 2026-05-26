@@ -10,12 +10,12 @@ These tests define the contracts for the fix:
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from cryptography.fernet import Fernet
 
-from worthless.cli.errors import ErrorCode, WorthlessError
 from worthless.proxy.config import ProxySettings, _read_fernet_key
 from worthless.storage.repository import ShardRepository
 
@@ -51,13 +51,11 @@ class TestFernetKeyTypeContract:
             f"Expected bytearray, got {type(s.fernet_key).__name__}"
         )
 
-    def test_fernet_key_empty_is_bytearray(self) -> None:
+    def test_fernet_key_empty_is_bytearray(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Even empty fernet_key should be bytearray (empty), not empty str."""
-        with patch(
-            "worthless.proxy.config.read_fernet_key",
-            side_effect=WorthlessError(ErrorCode.KEY_NOT_FOUND, "no key"),
-        ):
-            s = ProxySettings()
+        # Class-attr injection — bulletproof against the py3.10 xdist race.
+        monkeypatch.setattr(ProxySettings, "_fernet_reader", staticmethod(lambda: bytearray()))
+        s = ProxySettings()
         assert isinstance(s.fernet_key, bytearray), (
             f"Expected bytearray, got {type(s.fernet_key).__name__}"
         )
@@ -89,13 +87,16 @@ class TestReadFernetKeyReturnsBytearray:
             result = _read_fernet_key()
         assert isinstance(result, bytearray), f"Expected bytearray, got {type(result).__name__}"
 
-    def test_read_fernet_key_empty_returns_bytearray(self) -> None:
-        """No key found -> empty bytearray, not empty str."""
-        with patch(
-            "worthless.proxy.config.read_fernet_key",
-            side_effect=WorthlessError(ErrorCode.KEY_NOT_FOUND, "no key"),
-        ):
-            result = _read_fernet_key()
+    def test_read_fernet_key_empty_returns_bytearray(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """No key found -> empty bytearray, not empty str.
+
+        Uses real filesystem state (empty HOME) instead of patching the
+        keystore — sidesteps the py3.10 xdist patch-state race.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        result = _read_fernet_key()
         assert isinstance(result, bytearray), f"Expected bytearray, got {type(result).__name__}"
 
 
@@ -137,7 +138,8 @@ class TestRepositoryZeroing:
 class TestRepositoryBytearray:
     """ShardRepository must work with bytearray keys."""
 
-    def test_compute_decoy_hash_raises_after_close(self, tmp_db_path: str) -> None:
+    @pytest.mark.asyncio
+    async def test_compute_decoy_hash_raises_after_close(self, tmp_db_path: str) -> None:
         """After close(), _compute_decoy_hash must raise RuntimeError
         instead of silently producing wrong HMACs with zeroed key."""
         key = Fernet.generate_key()
@@ -145,7 +147,7 @@ class TestRepositoryBytearray:
         repo.close()
 
         with pytest.raises(RuntimeError, match="closed"):
-            repo._compute_decoy_hash("test")
+            await repo._compute_decoy_hash("test")
 
     @pytest.mark.asyncio
     async def test_repository_accepts_bytearray_key(

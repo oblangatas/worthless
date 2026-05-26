@@ -32,6 +32,12 @@ services:
     environment:
       WORTHLESS_DEPLOY_MODE: "lan"
       WORTHLESS_ALLOW_INSECURE: "true"
+      # WOR-310: deploy/start.py::_resolve_bind() returns 127.0.0.1
+      # for `lan` mode (only `public` auto-binds 0.0.0.0).  Real LAN
+      # users explicitly set WORTHLESS_HOST to their iface; the
+      # openclaw test stack needs all interfaces so host-side httpx
+      # reaches uvicorn through the docker-published port.
+      WORTHLESS_HOST: "0.0.0.0"
       # 8rqs Phase 5+6 removed the global per-provider URL overrides.
       # The mock-upstream is now reached via per-enrollment base_url
       # stored at lock time — see the openclaw_stack fixture in
@@ -49,8 +55,28 @@ services:
     read_only: true
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
+      # WOR-466: Docker resets tmpfs gid to root(0); probe drops to uid=10001
+      # before stat() so without gid=10001 it gets EACCES on the dir.
+      - /run/worthless:uid=0,gid=10001,mode=0770
+    # WOR-310: drop all caps EXCEPT the six the runtime needs briefly
+    # during entrypoint bootstrap + priv-drop dance (the preexec_fn
+    # clears the bounding set before exec, so post-drop has zero caps).
+    #   * SETUID/SETGID — setres*/setgroups
+    #   * SETPCAP       — prctl(PR_CAPBSET_DROP)
+    #   * DAC_OVERRIDE  — root must write to /data which is owned by
+    #                     worthless-proxy (uid 10001) — without DAC
+    #                     override root is "other" and mkdir EACCES.
+    #   * CHOWN         — chown bootstrap output to worthless-proxy.
+    #   * FOWNER        — chmod fernet.key (non-root-owned file).
     cap_drop:
       - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+      - SETPCAP
+      - DAC_OVERRIDE
+      - CHOWN
+      - FOWNER
     security_opt:
       - no-new-privileges:true
     deploy:

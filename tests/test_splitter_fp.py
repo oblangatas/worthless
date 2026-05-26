@@ -9,10 +9,10 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from worthless.crypto.charsets import ALPHANUMERIC, BASE64URL, PRINTABLE, PROVIDER_CHARSETS
+from worthless.crypto.reconstruction import _verify_commitment
 from worthless.crypto.splitter import (
     _detect_charset,
     _make_commitment,
-    _verify_commitment,
     reconstruct_key_fp,
     split_key_fp,
 )
@@ -774,7 +774,7 @@ class TestZeroingOnFailure:
             zeroed_bufs.append(buf)
             original_zero_buf(buf)
 
-        with patch("worthless.crypto.splitter.zero_buf", side_effect=tracking_zero_buf):
+        with patch("worthless.crypto.reconstruction.zero_buf", side_effect=tracking_zero_buf):
             with pytest.raises(ShardTamperedError):
                 reconstruct_key_fp(
                     sr.shard_a,
@@ -802,7 +802,7 @@ class TestZeroingOnFailure:
             zeroed_bufs.append(bytearray(buf))  # snapshot before zeroing
             original_zero_buf(buf)
 
-        with patch("worthless.crypto.splitter.zero_buf", side_effect=tracking_zero_buf):
+        with patch("worthless.crypto.reconstruction.zero_buf", side_effect=tracking_zero_buf):
             _verify_commitment(b"test-key", commitment, nonce)
 
         # The expected digest was zeroed (32 bytes)

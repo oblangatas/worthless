@@ -41,8 +41,30 @@ services:
     read_only: true
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
+      # WOR-466: Docker resets tmpfs gid to root(0) regardless of image ownership.
+      # Probe drops to uid=10001 before stat(); without gid=10001 it is "other"
+      # with zero access → EACCES.  Explicit uid=0,gid=10001,mode=0770 restores
+      # worthless-group ownership so the healthcheck probe can traverse the dir.
+      - /run/worthless:uid=0,gid=10001,mode=0770
+    # WOR-310: drop all caps EXCEPT the six the runtime needs briefly
+    # during entrypoint bootstrap + priv-drop dance.  preexec_fn
+    # clears the bounding set before exec, so post-drop has zero caps.
+    #   * SETUID/SETGID — setres*/setgroups
+    #   * SETPCAP       — prctl(PR_CAPBSET_DROP)
+    #   * DAC_OVERRIDE  — root must write to /data which is owned by
+    #                     worthless-proxy (uid 10001) — without DAC
+    #                     override root is "other" and mkdir EACCES.
+    #   * CHOWN         — chown bootstrap output to worthless-proxy.
+    #   * FOWNER        — chmod fernet.key (non-root-owned file).
     cap_drop:
       - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+      - SETPCAP
+      - DAC_OVERRIDE
+      - CHOWN
+      - FOWNER
     security_opt:
       - no-new-privileges:true
     deploy:

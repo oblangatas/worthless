@@ -17,6 +17,7 @@ import os
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import aiosqlite
 import httpx
@@ -28,9 +29,10 @@ from starlette.middleware.cors import CORSMiddleware
 
 from worthless.adapters.registry import get_adapter
 from worthless.adapters.types import INTERNAL_HEADER_PREFIX
-from worthless.crypto.splitter import reconstruct_key, reconstruct_key_fp, secure_key
+from worthless.crypto.reconstruction import reconstruct_key, reconstruct_key_fp, secure_key
 from worthless.proxy.config import DeployMode, ProxySettings
 from worthless.proxy.errors import _error_body, auth_error_response, gateway_error_response
+from worthless.proxy.ipc_supervisor import IPCSupervisor, IPCUnavailable
 from worthless.proxy.metering import (
     StreamingUsageCollector,
     extract_usage_anthropic,
@@ -44,8 +46,8 @@ from worthless.proxy.rules import (
     TokenBudgetRule,
     _estimate_tokens,
 )
-from worthless.storage.repository import ShardRepository
 from worthless.storage.schema import SCHEMA
+from worthless.storage.shard_reader import ShardReader
 
 logger = logging.getLogger(__name__)
 
@@ -164,7 +166,12 @@ def _sanitize_upstream_error(status_code: int, body: bytes, provider: str) -> by
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    """Startup/shutdown lifecycle for the proxy."""
+    """Startup/shutdown lifecycle for the proxy.
+
+    WOR-309: the proxy holds **no** key material. Decryption is delegated
+    to the sidecar over IPC; this lifespan only owns ciphertext-at-rest
+    (``ShardReader``) and the supervisor for the IPC connection.
+    """
     settings: ProxySettings = app.state.settings
 
     db = await aiosqlite.connect(settings.db_path)
@@ -174,9 +181,22 @@ async def _lifespan(app: FastAPI):
     await db.commit()
     app.state.db = db
 
-    repo = ShardRepository(settings.db_path, settings.fernet_key)
-    await repo.initialize()
+    repo = ShardReader(settings.db_path)
     app.state.repo = repo
+
+    # Allow tests to inject a pre-configured supervisor (avoids spawning a
+    # real sidecar in unit tests). When absent, build one from settings and
+    # eager-connect — fail-loud if the sidecar is unreachable (no fallback).
+    ipc: IPCSupervisor = getattr(app.state, "ipc_supervisor", None) or IPCSupervisor(
+        socket_path=Path(settings.sidecar_socket_path),
+        protocol_version=settings.sidecar_protocol_version,
+        expected_caps=settings.sidecar_expected_caps,
+        max_concurrency=settings.sidecar_max_concurrency,
+        request_timeout_s=settings.sidecar_request_timeout_s,
+    )
+    if not getattr(app.state, "ipc_supervisor_preconnected", False):
+        await ipc.connect()
+    app.state.ipc_supervisor = ipc
 
     client = httpx.AsyncClient(
         follow_redirects=False,
@@ -206,14 +226,12 @@ async def _lifespan(app: FastAPI):
 
     yield
 
-    # Cleanup — zeroing MUST happen even if earlier cleanup steps raise (SR-02)
+    # Cleanup
     try:
         await client.aclose()
         await db.close()
-        repo.close()
     finally:
-        for i in range(len(settings.fernet_key)):
-            settings.fernet_key[i] = 0
+        await ipc.aclose()
 
 
 def create_app(settings: ProxySettings | None = None) -> FastAPI:
@@ -288,9 +306,10 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
     @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
     async def proxy_request(request: Request, path: str) -> Response:  # noqa: C901
         settings: ProxySettings = request.app.state.settings
-        repo: ShardRepository = request.app.state.repo
+        repo: ShardReader = request.app.state.repo
         rules_engine: RulesEngine = request.app.state.rules_engine
         httpx_client: httpx.AsyncClient = request.app.state.httpx_client
+        ipc: IPCSupervisor = request.app.state.ipc_supervisor
 
         raw_path = "/" + path.split("?")[0].lstrip("/")
 
@@ -373,9 +392,15 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
             await rules_engine.release_spend_reservation(alias, _spend_reservation)
             return _uniform_401()
 
-        # Decrypt now that the gate has passed
+        # Decrypt now that the gate has passed — over IPC to the sidecar.
+        # No in-process Fernet (WOR-309). Transport failure → 503.
+        plaintext_shard_b: bytearray | None = None
         try:
-            stored = repo.decrypt_shard(encrypted)
+            plaintext_shard_b = await ipc.open(encrypted.shard_b_enc, key_id=alias)
+        except IPCUnavailable:
+            shard_a[:] = b"\x00" * len(shard_a)
+            await rules_engine.release_spend_reservation(alias, _spend_reservation)
+            return _make_gateway_response(503, "sidecar unavailable")
         except Exception:
             shard_a[:] = b"\x00" * len(shard_a)
             await rules_engine.release_spend_reservation(alias, _spend_reservation)
@@ -388,17 +413,19 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
             if encrypted.prefix is not None and encrypted.charset is not None:
                 key_buf = reconstruct_key_fp(
                     shard_a,
-                    stored.shard_b,
-                    stored.commitment,
-                    stored.nonce,
+                    plaintext_shard_b,
+                    encrypted.commitment,
+                    encrypted.nonce,
                     encrypted.prefix,
                     encrypted.charset,
                 )
             else:
-                key_buf = reconstruct_key(shard_a, stored.shard_b, stored.commitment, stored.nonce)
+                key_buf = reconstruct_key(
+                    shard_a, plaintext_shard_b, encrypted.commitment, encrypted.nonce
+                )
         except Exception:
             shard_a[:] = b"\x00" * len(shard_a)
-            stored.zero()
+            plaintext_shard_b[:] = b"\x00" * len(plaintext_shard_b)
             await rules_engine.release_spend_reservation(alias, _spend_reservation)
             return _uniform_401()
 
@@ -531,8 +558,8 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
         finally:
             # Zero shard_a (SR-01/SR-02)
             shard_a[:] = b"\x00" * len(shard_a)
-            if stored is not None:
-                stored.zero()
+            if plaintext_shard_b is not None:
+                plaintext_shard_b[:] = b"\x00" * len(plaintext_shard_b)
 
     return app
 

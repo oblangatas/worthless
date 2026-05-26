@@ -102,6 +102,28 @@ class TestFakeKeyGuard:
         assert shannon_entropy(_fake_anthropic_key()) >= ENTROPY_THRESHOLD
 
 
+class TestEntropyThresholdRegression:
+    """The entropy gate is slated for replacement; this is a thin shim that
+    just pins the user-visible contract: real-shape provider keys clear
+    whatever threshold ships, common placeholders fall below it. When the
+    gate is removed/replaced, delete this class.
+    """
+
+    def test_real_shape_key_admitted(self) -> None:
+        from worthless.cli.dotenv_rewriter import shannon_entropy
+        from worthless.cli.key_patterns import ENTROPY_THRESHOLD
+
+        real_shape = "sk-or-v1-" + "a8b3c9d2e1f70" * 4 + "abcde"
+        assert shannon_entropy(real_shape) >= ENTROPY_THRESHOLD
+
+    def test_common_placeholders_rejected(self) -> None:
+        from worthless.cli.dotenv_rewriter import shannon_entropy
+        from worthless.cli.key_patterns import ENTROPY_THRESHOLD
+
+        for placeholder in ("sk-your-key-here", "sk-aaaa", "sk-PLACEHOLDER_VALUE"):
+            assert shannon_entropy(placeholder) < ENTROPY_THRESHOLD, placeholder
+
+
 # ---------------------------------------------------------------------------
 # Tests: basic scan
 # ---------------------------------------------------------------------------

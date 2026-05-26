@@ -24,11 +24,20 @@ import aiosqlite
 from worthless.adapters import registry
 from worthless.adapters.types import AdapterRequest, AdapterResponse
 from worthless.crypto.splitter import split_key_fp
-from worthless.proxy.app import _ALIAS_RE, _BAD_HEADER_CHARS, _extract_alias_and_path, create_app
+from worthless.proxy.app import (
+    _ALIAS_RE,
+    _AUTH_BODY,
+    _BAD_HEADER_CHARS,
+    _extract_alias_and_path,
+    create_app,
+)
 from worthless.proxy.config import DeployMode, ProxySettings
 from worthless.proxy.errors import ErrorResponse, gateway_error_response
 from worthless.proxy.rules import RateLimitRule, RulesEngine, SpendCapRule
-from worthless.storage.repository import EncryptedShard, StoredShard
+from worthless.storage.repository import EncryptedShard, ShardRepository, StoredShard
+from worthless.storage.shard_reader import ShardReader
+
+from tests._fakes import pin_shard_b
 
 
 # ------------------------------------------------------------------
@@ -49,8 +58,13 @@ def proxy_settings(tmp_db_path: str, fernet_key: bytes, tmp_path) -> ProxySettin
 
 
 @pytest.fixture()
-async def enrolled_alias(repo, proxy_settings: ProxySettings):
-    """Enroll a test key and return (alias, shard_a_utf8, raw_api_key)."""
+async def enrolled_alias(repo, proxy_settings: ProxySettings, proxy_app):
+    """Enroll a test key and return (alias, shard_a_utf8, raw_api_key).
+
+    Pins the plaintext shard-B into the autouse FakeIPCSupervisor so the
+    proxy's ``ipc.open(ciphertext, key_id=alias)`` returns the real shard-B
+    bytes — letting downstream reconstruct succeed on the happy path.
+    """
     alias = "test-key"
     api_key = "sk-test-key-1234567890abcdef"
     sr = split_key_fp(api_key, prefix="sk-", provider="openai")
@@ -65,16 +79,28 @@ async def enrolled_alias(repo, proxy_settings: ProxySettings):
         alias, shard, prefix=sr.prefix, charset=sr.charset, base_url="https://api.openai.com/v1"
     )
 
+    pin_shard_b(proxy_app, alias, sr.shard_b)
+
     shard_a_utf8 = sr.shard_a.decode("utf-8")
     return alias, shard_a_utf8, api_key.encode()
 
 
 @pytest.fixture()
 async def proxy_app(proxy_settings: ProxySettings, repo):
+    """Build a proxy app with the autouse FakeIPCSupervisor pre-attached.
+
+    The fake is installed by the conftest-level autouse fixture; here we
+    just patch in the rest of the lifespan-owned state (db, httpx_client,
+    rules) since ASGITransport never invokes ``_lifespan``.
+    """
     app = create_app(proxy_settings)
     db = await aiosqlite.connect(proxy_settings.db_path)
     app.state.db = db
-    app.state.repo = repo
+    # The proxy hot path reads ``request.app.state.repo`` as a
+    # :class:`ShardReader` (ciphertext-at-rest only — Phase 3 split out
+    # the Fernet bits to keep the proxy crypto-clean). Keep the ASGI
+    # tests aligned with production so type-narrowing in app.py works.
+    app.state.repo = ShardReader(proxy_settings.db_path)
     app.state.httpx_client = httpx.AsyncClient(follow_redirects=False)
     app.state.rules_engine = RulesEngine(
         rules=[
@@ -362,27 +388,33 @@ class TestSSEStreaming:
 class TestGateBeforeDecrypt:
     @respx.mock
     async def test_fetch_encrypted_before_rules_decrypt_after(self, proxy_app, enrolled_alias):
-        """fetch_encrypted called BEFORE rules_engine.evaluate, decrypt_shard AFTER."""
+        """fetch_encrypted called BEFORE rules_engine.evaluate, ipc.open AFTER.
+
+        WOR-309: in-process Fernet decrypt was replaced by an IPC call to
+        the sidecar (``ipc.open(ciphertext, key_id=alias)``). The
+        gate-before-reconstruct invariant now means *gate-before-IPC*.
+        """
         alias, shard_a_utf8, _ = enrolled_alias
         call_order: list[str] = []
 
         orig_fetch = proxy_app.state.repo.fetch_encrypted
-        orig_decrypt = proxy_app.state.repo.decrypt_shard
+        fake_ipc = proxy_app.state.ipc_supervisor
+        orig_open = fake_ipc.open
 
         async def mock_fetch(a):
             call_order.append("fetch_encrypted")
             return await orig_fetch(a)
 
-        def mock_decrypt(enc):
-            call_order.append("decrypt_shard")
-            return orig_decrypt(enc)
+        async def mock_open(ciphertext, *, key_id):
+            call_order.append("ipc_open")
+            return await orig_open(ciphertext, key_id=key_id)
 
         async def mock_evaluate(_self, a, r, **kwargs):
             call_order.append("evaluate")
             return None
 
         proxy_app.state.repo.fetch_encrypted = mock_fetch
-        proxy_app.state.repo.decrypt_shard = mock_decrypt
+        fake_ipc.open = mock_open
 
         async def mock_release(_self, alias, amount):
             pass
@@ -409,22 +441,22 @@ class TestGateBeforeDecrypt:
                 content=b'{"model": "gpt-4", "messages": []}',
             )
 
-        assert call_order == ["fetch_encrypted", "evaluate", "decrypt_shard"]
+        assert call_order == ["fetch_encrypted", "evaluate", "ipc_open"]
 
     @respx.mock
     async def test_denial_skips_decrypt(self, proxy_app, enrolled_alias):
-        """When rules engine denies, decrypt_shard is never called."""
+        """When rules engine denies, ipc.open is never called."""
         alias, shard_a_utf8, _ = enrolled_alias
-        decrypt_called = False
+        ipc_open_called = False
+        fake_ipc = proxy_app.state.ipc_supervisor
+        orig_open = fake_ipc.open
 
-        orig_decrypt = proxy_app.state.repo.decrypt_shard
+        async def mock_open(ciphertext, *, key_id):
+            nonlocal ipc_open_called
+            ipc_open_called = True
+            return await orig_open(ciphertext, key_id=key_id)
 
-        def mock_decrypt(enc):
-            nonlocal decrypt_called
-            decrypt_called = True
-            return orig_decrypt(enc)
-
-        proxy_app.state.repo.decrypt_shard = mock_decrypt
+        fake_ipc.open = mock_open
         proxy_app.state.rules_engine = type(
             "MockEngine",
             (),
@@ -450,7 +482,7 @@ class TestGateBeforeDecrypt:
                 content=b'{"model": "gpt-4", "messages": []}',
             )
         assert resp.status_code == 402
-        assert not decrypt_called
+        assert not ipc_open_called
 
     @respx.mock
     async def test_proxy_response_pipe_is_consistent_with_gzip_upstream(
@@ -674,18 +706,25 @@ class TestGateBeforeDecrypt:
 class TestByteArrayZeroing:
     @respx.mock
     async def test_shard_material_zeroed_after_request(self, proxy_app, enrolled_alias):
-        """shard_a and stored shard fields are zeroed after request completes."""
+        """The plaintext shard-B returned by IPC is zeroed after the request.
+
+        WOR-309: the proxy no longer holds in-process Fernet decrypted
+        material on a ``StoredShard``. Instead, ``ipc.open()`` returns a
+        :class:`bytearray` that the proxy is contractually required to
+        zero in its ``finally`` block (see ``app.py:516-517``).
+        """
         alias, shard_a_utf8, _ = enrolled_alias
-        captured_stored: dict = {}
+        captured_plaintexts: list[bytearray] = []
+        fake_ipc = proxy_app.state.ipc_supervisor
+        orig_open = fake_ipc.open
 
-        orig_decrypt = proxy_app.state.repo.decrypt_shard
+        async def capturing_open(ciphertext, *, key_id):
+            buf = await orig_open(ciphertext, key_id=key_id)
+            # Stash the *same* bytearray instance the proxy will mutate.
+            captured_plaintexts.append(buf)
+            return buf
 
-        def capturing_decrypt(enc):
-            result = orig_decrypt(enc)
-            captured_stored["shard"] = result
-            return result
-
-        proxy_app.state.repo.decrypt_shard = capturing_decrypt
+        fake_ipc.open = capturing_open
 
         respx.post("https://api.openai.com/v1/chat/completions").mock(
             return_value=httpx.Response(
@@ -705,10 +744,11 @@ class TestByteArrayZeroing:
                 content=b'{"model": "gpt-4", "messages": []}',
             )
 
-        shard = captured_stored["shard"]
-        assert all(b == 0 for b in shard.shard_b), "shard_b not zeroed"
-        assert all(b == 0 for b in shard.commitment), "commitment not zeroed"
-        assert all(b == 0 for b in shard.nonce), "nonce not zeroed"
+        assert len(captured_plaintexts) == 1, "ipc.open should fire exactly once"
+        plaintext_shard_b = captured_plaintexts[0]
+        assert all(b == 0 for b in plaintext_shard_b), (
+            f"plaintext shard-B not zeroed: {bytes(plaintext_shard_b)!r}"
+        )
 
 
 # ------------------------------------------------------------------
@@ -719,39 +759,56 @@ class TestByteArrayZeroing:
 class TestReconstructFailureZeroing:
     @respx.mock
     async def test_shard_material_zeroed_on_reconstruct_failure(self, proxy_app, enrolled_alias):
-        """When reconstruct_key raises, all shard material is zeroed and 401 returned."""
-        alias, shard_a_utf8, _ = enrolled_alias
-        captured_stored: dict = {}
+        """When reconstruct_key raises, the IPC plaintext is zeroed and 401 returned.
 
-        orig_decrypt = proxy_app.state.repo.decrypt_shard
+        Triggers the failure naturally instead of patching
+        ``worthless.proxy.app.reconstruct_key_fp`` — sidesteps the py3.10/3.13
+        xdist patch-state race that bit PR #112. Sending a wrong-length /
+        wrong-content shard_a means ``reconstruct_key_fp`` will fail the
+        commitment check (or earlier length check) and raise inside the
+        ``try`` block at app.py:392, exercising the same zeroing branch.
+        """
+        alias, _real_shard_a, _ = enrolled_alias
+        captured_plaintexts: list[bytearray] = []
+        fake_ipc = proxy_app.state.ipc_supervisor
+        orig_open = fake_ipc.open
 
-        def capturing_decrypt(enc):
-            result = orig_decrypt(enc)
-            captured_stored["shard"] = result
-            return result
+        async def capturing_open(ciphertext, *, key_id):
+            buf = await orig_open(ciphertext, key_id=key_id)
+            captured_plaintexts.append(buf)
+            return buf
 
-        proxy_app.state.repo.decrypt_shard = capturing_decrypt
+        fake_ipc.open = capturing_open
 
-        with patch(
-            "worthless.proxy.app.reconstruct_key_fp",
-            side_effect=Exception("tampered shard"),
-        ):
-            transport = httpx.ASGITransport(app=proxy_app)
-            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-                resp = await client.post(
-                    f"/{alias}/v1/chat/completions",
-                    headers={
-                        "authorization": f"Bearer {shard_a_utf8}",
-                        "content-type": "application/json",
-                    },
-                    content=b'{"model": "gpt-4", "messages": []}',
-                )
+        # A non-empty bearer token that is NOT the real shard_a → XOR with
+        # plaintext_shard_b yields garbage → commitment HMAC mismatch →
+        # ``reconstruct_key_fp`` raises naturally. No mocks, no race.
+        wrong_shard_a = "sk-wrong-shard-a-deliberately-corrupted-aaaaaaaaaaaaaa"
+        transport = httpx.ASGITransport(app=proxy_app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                f"/{alias}/v1/chat/completions",
+                headers={
+                    "authorization": f"Bearer {wrong_shard_a}",
+                    "content-type": "application/json",
+                },
+                content=b'{"model": "gpt-4", "messages": []}',
+            )
 
         assert resp.status_code == 401
-        shard = captured_stored["shard"]
-        assert all(b == 0 for b in shard.shard_b), "shard_b not zeroed on failure"
-        assert all(b == 0 for b in shard.commitment), "commitment not zeroed on failure"
-        assert all(b == 0 for b in shard.nonce), "nonce not zeroed on failure"
+        # Anti-enumeration: reconstruct-failure path must return the exact
+        # canonical 401 body — byte-identical to every other ``_uniform_401()``
+        # caller. Locks in the invariant alongside ``test_all_failure_modes_*``
+        # so a future divergence between the two ``except`` branches in
+        # app.py:370 / 392 is caught here.
+        assert resp.content == _AUTH_BODY, (
+            "reconstruct-failure 401 body diverged from canonical _uniform_401()"
+        )
+        assert len(captured_plaintexts) == 1, "ipc.open should fire exactly once"
+        plaintext_shard_b = captured_plaintexts[0]
+        assert all(b == 0 for b in plaintext_shard_b), (
+            f"plaintext shard-B not zeroed on failure: {bytes(plaintext_shard_b)!r}"
+        )
 
 
 # ------------------------------------------------------------------
@@ -909,8 +966,13 @@ class TestUpstreamSanitization:
 
 class TestUpstreamSanitizationAnthropic:
     @respx.mock
-    async def test_anthropic_error_body_sanitized(self, proxy_app, tmp_path, fernet_key):
-        """Upstream Anthropic error bodies are sanitized to Anthropic format."""
+    async def test_anthropic_error_body_sanitized(self, proxy_app, repo):
+        """Upstream Anthropic error bodies are sanitized to Anthropic format.
+
+        Enrolls via the writeable :class:`ShardRepository` (the test
+        ``repo`` fixture) since the proxy holds the read-only
+        :class:`ShardReader` post-WOR-309.
+        """
         # Enroll an Anthropic key
         alias = "anthropic-key"
         api_key = "sk-ant-test-key-12345678901234"
@@ -921,13 +983,14 @@ class TestUpstreamSanitizationAnthropic:
             nonce=bytearray(sr.nonce),
             provider="anthropic",
         )
-        await proxy_app.state.repo.store(
+        await repo.store(
             alias,
             shard,
             prefix=sr.prefix,
             charset=sr.charset,
             base_url="https://api.anthropic.com/v1",
         )
+        pin_shard_b(proxy_app, alias, sr.shard_b)
         shard_a_utf8 = sr.shard_a.decode("utf-8")
 
         respx.post("https://api.anthropic.com/v1/messages").mock(
@@ -1079,6 +1142,7 @@ class TestAntiEnumeration:
     async def test_all_failure_modes_return_byte_identical_401(
         self,
         proxy_client: httpx.AsyncClient,
+        proxy_app,
         enrolled_alias,
         proxy_settings: ProxySettings,
     ):
@@ -1134,14 +1198,38 @@ class TestAntiEnumeration:
         )
         responses.append(("unknown_endpoint", r))
 
-        # 7. Reconstruction failure (mock reconstruct_key_fp to raise)
-        with patch("worthless.proxy.app.reconstruct_key_fp", side_effect=ValueError("tampered")):
+        # 7. Decrypt failure → uniform 401 (same _uniform_401() code path
+        # exercised by reconstruct failure, app.py:370 vs :392)
+        #
+        # Originally this mode patched ``reconstruct_key{,_fp}`` at four module
+        # binding sites (proxy.app + crypto.reconstruction × {plain, _fp}).
+        # That race was deterministically lost on py3.10.20 ubuntu under
+        # xdist-loadscope ordering — none of the 4 patches took effect there
+        # and the request flowed past the reconstruct guard. See PR #112
+        # commits f345292 / 11888a2 / cb88293 for the trail.
+        #
+        # The route handler returns ``_uniform_401()`` from BOTH the IPC
+        # failure branch (app.py:370, ``except Exception``) and the reconstruct
+        # failure branch (app.py:392). The byte-identical-401 invariant we
+        # care about here covers every path that returns ``_uniform_401()`` —
+        # both branches qualify.
+        #
+        # Trigger the IPC branch instead: ``FakeIPCSupervisor.fail_open_with``
+        # is one config call, no module-attribute patching, no name-resolution
+        # race. The dedicated reconstruct-failure path is still covered by
+        # ``test_shard_material_zeroed_on_reconstruct_failure`` (single patch
+        # site, not flaky).
+        ipc = proxy_app.state.ipc_supervisor
+        ipc.fail_open_with(exc_class=ValueError, message="tampered ciphertext")
+        try:
             r = await proxy_client.post(
                 f"/{alias}/v1/chat/completions",
                 headers={"authorization": f"Bearer {shard_a_utf8}"},
                 content=b"{}",
             )
-        responses.append(("reconstruct_failure", r))
+        finally:
+            ipc.clear_failures()
+        responses.append(("decrypt_failure", r))
 
         # Assert ALL return 401 with byte-identical bodies
         reference_label, reference = responses[0]
@@ -1306,10 +1394,6 @@ async def attack_scenario(
     tmp_path,
 ):
     """Enrolled key in DB, secure defaults (TLS required)."""
-    from worthless.crypto.splitter import split_key_fp
-    from worthless.proxy.rules import RateLimitRule, RulesEngine, SpendCapRule
-    from worthless.storage.repository import ShardRepository, StoredShard
-
     alias = "openai-abcd1234"
     api_key = "sk-test-key-1234567890abcdef"
     sr = split_key_fp(api_key, prefix="sk-", provider="openai")
@@ -1336,7 +1420,9 @@ async def attack_scenario(
     app = create_app(settings)
     db = await aiosqlite.connect(tmp_db_path)
     app.state.db = db
-    app.state.repo = repo
+    # Production proxy reads through ShardReader (Phase 3 split). The
+    # writeable repo above is only used for enrollment in this fixture.
+    app.state.repo = ShardReader(tmp_db_path)
     app.state.httpx_client = httpx.AsyncClient(follow_redirects=False)
     app.state.rules_engine = RulesEngine(
         rules=[
@@ -1344,6 +1430,7 @@ async def attack_scenario(
             RateLimitRule(default_rps=100.0, db_path=tmp_db_path),
         ]
     )
+    pin_shard_b(app, alias, sr.shard_b)
 
     shard_a_utf8 = sr.shard_a.decode("utf-8")
     yield app, alias, shard_a_utf8, settings

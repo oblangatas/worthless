@@ -15,6 +15,7 @@ from pathlib import Path
 
 import typer
 
+from worthless.cli._repo_factory import open_repo
 from worthless.cli.bootstrap import WorthlessHome, acquire_lock, get_home
 from worthless.cli.code_scanner import scan_for_hardcoded_provider_urls
 from worthless.cli.commands.scan import _format_code_findings_human
@@ -36,8 +37,10 @@ from worthless.cli.errors import (
 from worthless.cli.key_patterns import CANONICAL_KEY_VAR_RE, detect_prefix
 from worthless.cli.keystore import keyring_available
 from worthless.cli.providers import lookup_by_name, lookup_by_url
-from worthless.crypto.splitter import (
+from worthless.crypto.reconstruction import (
     _verify_commitment,  # noqa: PLC2701 — intentional internal use for re-lock guard
+)
+from worthless.crypto.splitter import (
     derive_shard_a_fp,
     reconstruct_key_fp,
     split_key_fp,
@@ -235,7 +238,7 @@ async def _select_unlocked_keys(
             encrypted = await repo.fetch_encrypted(enrollment.key_alias)
             if encrypted is None or encrypted.prefix is None or encrypted.charset is None:
                 continue
-            stored = repo.decrypt_shard(encrypted)
+            stored = await repo.decrypt_shard(encrypted)
             shard_a = bytearray(value.encode("utf-8"))
             reconstructed: bytearray | None = None
             try:
@@ -378,7 +381,7 @@ async def _pass1_db_writes(
                     f"Alias {alias!r} predates format-preserving split. "
                     "Run `worthless unlock --all` then re-lock this .env.",
                 )
-            stored_decrypted = repo.decrypt_shard(db_shard)
+            stored_decrypted = await repo.decrypt_shard(db_shard)
             verify_payload = bytearray(value.encode("utf-8"))
             try:
                 try:
@@ -989,74 +992,78 @@ def _lock_keys(
     async def _lock_async() -> _LockResult:
         from dotenv import dotenv_values  # noqa: PLC0415 — local import keeps test surface tight
 
-        repo = ShardRepository(str(home.db_path), home.fernet_key)
-        await repo.initialize()
+        async with open_repo(home) as repo:
+            await repo.initialize()
 
-        env_str = str(env_path.resolve())
-        all_enrollments = await repo.list_enrollments()
+            env_str = str(env_path.resolve())
+            all_enrollments = await repo.list_enrollments()
 
-        raw_scanned = scan_env_keys(env_path)
-        scanned = await _select_unlocked_keys(
-            repo,
-            raw_scanned,
-            all_enrollments,
-            env_str,
-        )
-        if not scanned:
-            return _LockResult(total=len(raw_scanned), fresh_count=0, partial_failure=False)
-
-        # Snapshot .env so _pass1 can pull *_BASE_URL values into the DB row.
-        env_values = dict(dotenv_values(env_path))
-
-        candidates = [
-            (var_name, value, provider_override or detected_provider)
-            for var_name, value, detected_provider in scanned
-        ]
-        existing_env_keys = set(env_values.keys())
-
-        _oc_gate = _openclaw_audit_preflight()
-
-        planned: list[_PlannedUpdate] = []
-        try:
-            if not quiet:
-                # HF2 UX: name the keys so the user knows exactly which env
-                # vars are being touched — prior "Protecting N key(s)..."
-                # was opaque about which secrets just changed.
-                key_names = ", ".join(var_name for var_name, _, _ in candidates)
-                console.print_hint(f"  Protecting {key_names}...")
-            # 8rqs Phase 7: env_values flows through so _pass1_db_writes can
-            # read each key's matching *_BASE_URL from .env at lock time.
-            await _pass1_db_writes(
-                repo, candidates, env_str, token_budget_daily, planned, env_values
+            raw_scanned = scan_env_keys(env_path)
+            scanned = await _select_unlocked_keys(
+                repo,
+                raw_scanned,
+                all_enrollments,
+                env_str,
             )
-            if not planned:
-                return _LockResult(total=0, fresh_count=0, partial_failure=False)
-            _batch_rewrite(env_path, planned, keys_only, existing_env_keys)
-            if _oc_gate is not None:
-                _openclaw_audit_postflight(_oc_gate)
-            # Phase 2.b: OpenClaw magic. Per L1 in
-            # engineering/research/openclaw-WOR-431-phase-2-spec.md, this
-            # NEVER rolls back lock-core success. Per L2 (revised 2026-05-08
-            # by the verification gauntlet): detected+failed returns
-            # partial_failure=True so the caller can raise typer.Exit(73)
-            # AFTER lock-core's .env/DB writes are fully committed.
-            partial_failure = _apply_openclaw(planned, console, quiet, home)
-            fresh_count = sum(1 for p in planned if p.was_fresh_enroll)
-            return _LockResult(
-                total=len(planned), fresh_count=fresh_count, partial_failure=partial_failure
-            )
-        except Exception:
-            if planned:
-                unwind_errors = await _compensating_unwind(repo, planned)
-                if unwind_errors:
-                    console.print_warning(
-                        f"Database may contain {len(unwind_errors)} stale row(s); "
-                        "run `worthless unlock --all` to reconcile."
-                    )
-            raise
-        finally:
-            for p in planned:
-                p.zero()
+            if not scanned:
+                return _LockResult(total=len(raw_scanned), fresh_count=0, partial_failure=False)
+
+            # Snapshot .env so _pass1 can pull *_BASE_URL values into the DB row.
+            env_values = dict(dotenv_values(env_path))
+
+            candidates = [
+                (var_name, value, provider_override or detected_provider)
+                for var_name, value, detected_provider in scanned
+            ]
+            existing_env_keys = set(env_values.keys())
+
+            # #210 OpenClaw secrets-audit gate: pre-flight runs BEFORE any
+            # DB/.env write so blocking plaintext findings abort the lock with
+            # zero side effects (gate-before-write). Orthogonal to the
+            # sidecar-IPC repo above — placement here is load-bearing.
+            _oc_gate = _openclaw_audit_preflight()
+
+            planned: list[_PlannedUpdate] = []
+            try:
+                if not quiet:
+                    # HF2 UX: name the keys so the user knows exactly which env
+                    # vars are being touched — prior "Protecting N key(s)..."
+                    # was opaque about which secrets just changed.
+                    key_names = ", ".join(var_name for var_name, _, _ in candidates)
+                    console.print_hint(f"  Protecting {key_names}...")
+                # 8rqs Phase 7: env_values flows through so _pass1_db_writes can
+                # read each key's matching *_BASE_URL from .env at lock time.
+                await _pass1_db_writes(
+                    repo, candidates, env_str, token_budget_daily, planned, env_values
+                )
+                if not planned:
+                    return _LockResult(total=0, fresh_count=0, partial_failure=False)
+                _batch_rewrite(env_path, planned, keys_only, existing_env_keys)
+                if _oc_gate is not None:
+                    _openclaw_audit_postflight(_oc_gate)
+                # Phase 2.b: OpenClaw magic. Per L1 in
+                # engineering/research/openclaw-WOR-431-phase-2-spec.md, this
+                # NEVER rolls back lock-core success. Per L2 (revised 2026-05-08
+                # by the verification gauntlet): detected+failed returns
+                # partial_failure=True so the caller can raise typer.Exit(73)
+                # AFTER lock-core's .env/DB writes are fully committed.
+                partial_failure = _apply_openclaw(planned, console, quiet, home)
+                fresh_count = sum(1 for p in planned if p.was_fresh_enroll)
+                return _LockResult(
+                    total=len(planned), fresh_count=fresh_count, partial_failure=partial_failure
+                )
+            except Exception:
+                if planned:
+                    unwind_errors = await _compensating_unwind(repo, planned)
+                    if unwind_errors:
+                        console.print_warning(
+                            f"Database may contain {len(unwind_errors)} stale row(s); "
+                            "run `worthless unlock --all` to reconcile."
+                        )
+                raise
+            finally:
+                for p in planned:
+                    p.zero()
 
     result = asyncio.run(_lock_async())
     relock_count = result.total - result.fresh_count
@@ -1111,35 +1118,35 @@ def _enroll_single(
     sr = split_key_fp(key, prefix, provider)
 
     async def _enroll_async():
-        repo = ShardRepository(str(home.db_path), home.fernet_key)
-        await repo.initialize()
+        async with open_repo(home) as repo:
+            await repo.initialize()
 
-        existing = await repo.fetch_encrypted(alias)
-        if existing is not None:
-            raise WorthlessError(
-                ErrorCode.SCAN_ERROR,
-                f"Alias {alias!r} is already enrolled",
+            existing = await repo.fetch_encrypted(alias)
+            if existing is not None:
+                raise WorthlessError(
+                    ErrorCode.SCAN_ERROR,
+                    f"Alias {alias!r} is already enrolled",
+                )
+
+            stored = StoredShard(
+                shard_b=sr.shard_b,
+                commitment=sr.commitment,
+                nonce=sr.nonce,
+                provider=provider,
             )
-
-        stored = StoredShard(
-            shard_b=sr.shard_b,
-            commitment=sr.commitment,
-            nonce=sr.nonce,
-            provider=provider,
-        )
-        # 8rqs: enroll falls back to the registry default URL — _enroll_single
-        # is the no-.env path so there's no user var to read.
-        registry_default = lookup_by_name(provider)
-        base_url = registry_default.url if registry_default else None
-        await repo.store_enrolled(
-            alias,
-            stored,
-            var_name=alias,
-            env_path=None,
-            prefix=sr.prefix,
-            charset=sr.charset,
-            base_url=base_url,
-        )
+            # 8rqs: enroll falls back to the registry default URL — _enroll_single
+            # is the no-.env path so there's no user var to read.
+            registry_default = lookup_by_name(provider)
+            base_url = registry_default.url if registry_default else None
+            await repo.store_enrolled(
+                alias,
+                stored,
+                var_name=alias,
+                env_path=None,
+                prefix=sr.prefix,
+                charset=sr.charset,
+                base_url=base_url,
+            )
 
     try:
         asyncio.run(_enroll_async())

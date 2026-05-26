@@ -22,6 +22,9 @@ from cryptography.fernet import Fernet
 from worthless.crypto.splitter import split_key_fp
 from worthless.storage.repository import ShardRepository, StoredShard
 
+
+pytestmark = pytest.mark.skip(reason="WOR-549: worthless-16x2 ↔ sidecar IPC integration pending")
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

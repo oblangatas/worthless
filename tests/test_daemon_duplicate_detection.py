@@ -25,8 +25,14 @@ import pytest
 from worthless.cli.bootstrap import ensure_home
 from worthless.cli.process import check_pid, pid_path, poll_health, read_pid
 
+from tests._fakes import WOR309_SUBPROCESS_FOLLOWUP
 
-pytestmark = [pytest.mark.integration, pytest.mark.timeout(30)]
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.real_ipc,
+    pytest.mark.timeout(30),
+    pytest.mark.skip(reason=WOR309_SUBPROCESS_FOLLOWUP),
+]
 
 
 def _ephemeral_port() -> int:

@@ -15,7 +15,6 @@ combinable. Run one or the other.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import socket
@@ -23,8 +22,10 @@ import subprocess  # nosec B404
 import sys
 import threading
 
+import aiosqlite
 import typer
 
+from worthless._async import run_sync
 from worthless.cli.bootstrap import WorthlessHome, get_home
 from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary, sanitize_exception
 from worthless.cli.platform import fail_if_windows, popen_platform_kwargs
@@ -38,7 +39,12 @@ from worthless.cli.process import (
     resolve_port,
     spawn_proxy,
 )
-from worthless.storage.repository import ShardRepository
+from worthless.cli.sidecar_lifecycle import (
+    SidecarHandle,
+    shutdown_sidecar,
+    spawn_sidecar,
+    split_to_tmpfs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -95,19 +101,30 @@ def _list_enrolled_aliases(home: WorthlessHome) -> list[tuple[str, str]]:
     Kept for the empty-DB guard in ``wrap`` (no enrolled keys → friendly
     error). The protocol field isn't used anymore but is preserved in the
     return shape so existing tests stay green.
+
+    Uses a direct SQLite read — no Fernet key, no IPC socket required. This
+    keeps the pre-flight enrollment check independent of sidecar readiness,
+    which matters under WORTHLESS_FERNET_IPC_ONLY=1 where the sidecar has not
+    yet started when this guard runs.
     """
     if not home.db_path.exists():
         return []
 
-    async def _query():
-        repo = ShardRepository(str(home.db_path), home.fernet_key)
-        await repo.initialize()
-        rows = await repo.list_aliases_with_routing()
-        return [(alias, protocol) for alias, _var, _url, protocol in rows]
+    async def _query() -> list[tuple[str, str]]:
+        async with aiosqlite.connect(str(home.db_path)) as db:
+            cursor = await db.execute(
+                "SELECT s.key_alias, s.provider "
+                "FROM shards s "
+                "JOIN enrollments e ON s.key_alias = e.key_alias "
+                "ORDER BY s.key_alias"
+            )
+            rows = await cursor.fetchall()
+            return [(str(r[0]), str(r[1])) for r in rows if r[0] and r[1]]
 
     try:
-        return asyncio.run(_query())
-    except Exception:
+        return run_sync(_query())
+    except (OSError, aiosqlite.Error) as exc:
+        logger.debug("alias list failed: %s", exc, exc_info=True)
         return []
 
 
@@ -146,6 +163,35 @@ def _cleanup_proxy(
         proxy.wait(timeout=2)
 
 
+def _cleanup_lifecycle(
+    proxy: subprocess.Popen | None,
+    write_fd: int | None,
+    sidecar: SidecarHandle | None,
+) -> None:
+    """Tear down proxy and sidecar in the correct order.
+
+    Proxy first so any in-flight upstream forwards complete; then sidecar.
+    Mirrors ``_supervise_proxy_with_sidecar``'s shutdown ordering in
+    ``up.py``. Each step is best-effort — a failure in one must not block
+    the other.
+    """
+    if proxy is not None:
+        try:
+            _cleanup_proxy(proxy, write_fd)
+        except Exception:  # noqa: S110 — best-effort cleanup; sidecar shutdown still required  # nosec B110
+            pass
+    elif write_fd is not None:
+        try:
+            os.close(write_fd)
+        except OSError:
+            pass
+    if sidecar is not None:
+        try:
+            shutdown_sidecar(sidecar)
+        except Exception:  # noqa: S110 — best-effort cleanup  # nosec B110
+            pass
+
+
 def register_wrap_commands(app: typer.Typer) -> None:
     """Register the ``wrap`` command on the Typer app."""
 
@@ -172,11 +218,45 @@ def register_wrap_commands(app: typer.Typer) -> None:
         # Suppress core dumps
         disable_core_dumps()
 
-        # Create liveness pipe
-        read_fd, write_fd = create_liveness_pipe()
+        # The proxy refuses to start without an IPC peer, so the sidecar
+        # must come up first. ``up.py`` uses the same ordering.
+        sidecar: SidecarHandle | None = None
+        try:
+            shares = split_to_tmpfs(home.fernet_key, home.base_dir)
+            socket_path = shares.run_dir / "sidecar.sock"
+            sidecar = spawn_sidecar(socket_path, shares, allowed_uid=os.getuid())
+        except WorthlessError:
+            # Re-raise WorthlessError directly — don't overwrite
+            # SIDECAR_NOT_READY or other structured error codes with a
+            # generic PROXY_UNREACHABLE.
+            _cleanup_lifecycle(proxy=None, write_fd=None, sidecar=sidecar)
+            raise
+        except Exception as exc:
+            _cleanup_lifecycle(proxy=None, write_fd=None, sidecar=sidecar)
+            raise WorthlessError(
+                ErrorCode.PROXY_UNREACHABLE,
+                sanitize_exception(exc, generic="failed to start sidecar"),
+            ) from exc
 
-        # Build proxy environment
-        proxy_env = build_proxy_env(home)
+        # Wrap pipe creation and env build so the sidecar is torn down if
+        # either step raises (e.g. OS fd exhaustion or keyring error in
+        # build_proxy_env).
+        try:
+            # Create liveness pipe
+            read_fd, write_fd = create_liveness_pipe()
+
+            # Build proxy environment with the sidecar socket path threaded in.
+            proxy_env = build_proxy_env(home)
+            proxy_env["WORTHLESS_SIDECAR_SOCKET"] = str(sidecar.socket_path)
+
+            # In IPC-only mode the sidecar holds the Fernet key; the proxy
+            # must NOT receive it in its environment. Defense in depth — the
+            # canonical scrub lives in prepare_proxy_env, but scrubbing here
+            # too keeps this call site self-evidently safe.
+            proxy_env.pop("WORTHLESS_FERNET_KEY", None)
+        except Exception:
+            _cleanup_lifecycle(proxy=None, write_fd=None, sidecar=sidecar)
+            raise
 
         # Spawn proxy on the same port `lock` wrote to .env so the child's
         # *_BASE_URL values resolve. (v0.3.4 fix: pre-fix this was port=0,
@@ -206,6 +286,7 @@ def register_wrap_commands(app: typer.Typer) -> None:
         if _port_in_use(target_port):
             os.close(read_fd)
             os.close(write_fd)
+            _cleanup_lifecycle(proxy=None, write_fd=None, sidecar=sidecar)
             raise WorthlessError(
                 ErrorCode.PROXY_UNREACHABLE,
                 _diagnose_proxy_failure(
@@ -222,7 +303,7 @@ def register_wrap_commands(app: typer.Typer) -> None:
             )
         except Exception as exc:
             os.close(read_fd)
-            os.close(write_fd)
+            _cleanup_lifecycle(proxy=None, write_fd=write_fd, sidecar=sidecar)
             raise WorthlessError(
                 ErrorCode.PROXY_UNREACHABLE,
                 _diagnose_proxy_failure(target_port, exc),
@@ -238,7 +319,7 @@ def register_wrap_commands(app: typer.Typer) -> None:
         # a generic timeout.
         healthy = poll_health(port, timeout=15.0)
         if not healthy:
-            _cleanup_proxy(proxy, write_fd)
+            _cleanup_lifecycle(proxy=proxy, write_fd=write_fd, sidecar=sidecar)
             raise WorthlessError(
                 ErrorCode.PROXY_UNREACHABLE,
                 _diagnose_proxy_failure(
@@ -261,7 +342,7 @@ def register_wrap_commands(app: typer.Typer) -> None:
                 **popen_platform_kwargs(detach=True),
             )
         except Exception as exc:
-            _cleanup_proxy(proxy, write_fd)
+            _cleanup_lifecycle(proxy=proxy, write_fd=write_fd, sidecar=sidecar)
             raise WorthlessError(
                 ErrorCode.WRAP_CHILD_FAILED,
                 sanitize_exception(exc, generic="failed to start child process"),
@@ -284,21 +365,25 @@ def register_wrap_commands(app: typer.Typer) -> None:
         watcher = threading.Thread(target=_watch_proxy, daemon=True)
         watcher.start()
 
-        # Wait for child
-        exit_code = _run_child_and_wait(child)
-
-        # Print post-run summary before cleanup. Uses the same canonical
-        # health probe as ``_diagnose_proxy_failure`` above and ``status``.
+        # Wrap child wait + summary + cleanup in try/finally so
+        # KeyboardInterrupt and unexpected exceptions still tear down proxy
+        # and sidecar rather than leaving orphaned processes.
         try:
-            info = check_proxy_health(port)
-            count = info.get("requests_proxied", 0)
-            if count:
-                sys.stderr.write(f"worthless: proxied {count} requests\n")
-                sys.stderr.flush()
-        except Exception:  # noqa: S110 — best-effort summary  # nosec B110
-            pass
+            # Wait for child
+            exit_code = _run_child_and_wait(child)
 
-        # Clean up proxy
-        _cleanup_proxy(proxy, write_fd)
+            # Print post-run summary before cleanup. Uses the same canonical
+            # health probe as ``_diagnose_proxy_failure`` above and ``status``.
+            try:
+                info = check_proxy_health(port)
+                count = info.get("requests_proxied", 0)
+                if count:
+                    sys.stderr.write(f"worthless: proxied {count} requests\n")
+                    sys.stderr.flush()
+            except Exception:  # noqa: S110 — best-effort summary  # nosec B110
+                pass
+        finally:
+            # Clean up proxy first, then sidecar (mirrors ``up.py`` ordering).
+            _cleanup_lifecycle(proxy=proxy, write_fd=write_fd, sidecar=sidecar)
 
         raise typer.Exit(code=exit_code)

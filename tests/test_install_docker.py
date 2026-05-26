@@ -577,6 +577,156 @@ def test_lock_lifecycle_end_to_end(distro: str, dockerfile_name: str) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# WOR-310 Phase E — production Dockerfile integration smoke tests.
+#
+# Phases A-D shipped LOGIC (mock-based unit/property/chaos/order tests
+# pin syscall correctness). Phase E builds the actual production
+# Dockerfile and verifies the image's RUNTIME state — labels exposed,
+# two service users present, /run/worthless ownership correct. The
+# only proof we have that the image we ship to users actually carries
+# the security claim.
+#
+# Skipped without docker; CI Linux runs them.
+# ---------------------------------------------------------------------------
+
+
+PRODUCTION_DOCKERFILE = REPO_ROOT / "Dockerfile"
+
+
+@pytest.mark.timeout(BUILD_S + RUN_S + RMI_S + OUTER_BUFFER_S)
+def test_production_image_advertises_required_run_flags_label() -> None:
+    """``docker inspect`` reports the LABEL Phase B baked in.
+
+    The LABEL is the self-documenting handshake: ``docker inspect`` →
+    ``--security-opt=no-new-privileges`` → operator knows what flag the
+    security claim depends on. Future Dockerfile drift that drops the
+    LABEL silently breaks the contract; this test catches it.
+    """
+    image_tag = f"worthless-prod-test:label-{uuid.uuid4().hex[:8]}"
+    try:
+        build = subprocess.run(  # noqa: S603
+            [  # noqa: S607
+                "docker",
+                "build",
+                "--platform",
+                BUILD_PLATFORM,
+                "--file",
+                str(PRODUCTION_DOCKERFILE),
+                "--tag",
+                image_tag,
+                str(REPO_ROOT),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=BUILD_S,
+            check=False,
+            env={**os.environ, "DOCKER_BUILDKIT": "1"},
+        )
+        assert build.returncode == 0, (
+            f"docker build failed (rc={build.returncode}):\n"
+            f"--- stdout ---\n{build.stdout}\n--- stderr ---\n{build.stderr}"
+        )
+        inspect = subprocess.run(  # noqa: S603
+            [  # noqa: S607
+                "docker",
+                "inspect",
+                "--format",
+                '{{ index .Config.Labels "org.worthless.required-run-flags" }}',
+                image_tag,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=RMI_S,
+            check=False,
+        )
+        assert inspect.returncode == 0, f"docker inspect failed: {inspect.stderr}"
+        assert "--security-opt=no-new-privileges" in inspect.stdout, (
+            f"WOR-310 E: image LABEL org.worthless.required-run-flags missing the "
+            f"--security-opt=no-new-privileges advisory; got {inspect.stdout!r}"
+        )
+    finally:
+        subprocess.run(  # noqa: S603
+            ["docker", "rmi", "-f", image_tag],  # noqa: S607
+            capture_output=True,
+            timeout=RMI_S,
+            check=False,
+        )
+
+
+@pytest.mark.timeout(BUILD_S + RUN_S + RMI_S + OUTER_BUFFER_S)
+def test_production_image_creates_both_service_users_with_pinned_uids() -> None:
+    """``docker run`` confirms worthless-proxy + worthless-crypto exist at runtime.
+
+    Phase B's static test asserted the Dockerfile contains the useradd
+    lines; this test BUILDS the image and asks ``id`` for both names.
+    Catches a Dockerfile that compiles but shadows the user creation
+    (e.g. base-image overlay that removes /etc/passwd entries) — which
+    static text inspection wouldn't find.
+    """
+    image_tag = f"worthless-prod-test:users-{uuid.uuid4().hex[:8]}"
+    try:
+        build = subprocess.run(  # noqa: S603
+            [  # noqa: S607
+                "docker",
+                "build",
+                "--platform",
+                BUILD_PLATFORM,
+                "--file",
+                str(PRODUCTION_DOCKERFILE),
+                "--tag",
+                image_tag,
+                str(REPO_ROOT),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=BUILD_S,
+            check=False,
+            env={**os.environ, "DOCKER_BUILDKIT": "1"},
+        )
+        assert build.returncode == 0, f"build failed: {build.stderr}"
+
+        run = subprocess.run(  # noqa: S603
+            [  # noqa: S607
+                "docker",
+                "run",
+                "--rm",
+                "--entrypoint",
+                "sh",
+                image_tag,
+                "-c",
+                # id exits non-zero if the user is missing — AND chain fails
+                # fast and surfaces the missing one in stderr.
+                "id worthless-proxy && id worthless-crypto && stat -c '%U:%G %a' /run/worthless",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=RUN_S,
+            check=False,
+        )
+        assert run.returncode == 0, (
+            f"WOR-310 E: image runtime smoke failed (rc={run.returncode}):\n"
+            f"--- stdout ---\n{run.stdout}\n--- stderr ---\n{run.stderr}"
+        )
+        # uid pin from Dockerfile — drift caught here.
+        assert "uid=10001(worthless-proxy)" in run.stdout, (
+            f"worthless-proxy uid != 10001; got: {run.stdout!r}"
+        )
+        assert "uid=10002(worthless-crypto)" in run.stdout, (
+            f"worthless-crypto uid != 10002; got: {run.stdout!r}"
+        )
+        assert "root:worthless 770" in run.stdout, (
+            f"/run/worthless ownership/mode wrong; got: {run.stdout!r}"
+        )
+    finally:
+        subprocess.run(  # noqa: S603
+            ["docker", "rmi", "-f", image_tag],  # noqa: S607
+            capture_output=True,
+            timeout=RMI_S,
+            check=False,
+        )
+
+
 @pytest.mark.timeout(HOST_APP_TIMEOUT)
 def test_host_cli_locked_env_reaches_proxy_from_app_container(tmp_path: Path) -> None:
     """Scenario A: host Worthless + app container consuming the locked `.env`.

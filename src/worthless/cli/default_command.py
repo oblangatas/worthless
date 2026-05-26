@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sqlite3
 import sys
 from pathlib import Path
@@ -20,7 +21,7 @@ import typer
 
 from worthless.cli.bootstrap import WorthlessHome, acquire_lock, get_home
 from worthless.cli.commands.lock import _lock_keys
-from worthless.storage.repository import ShardRepository
+from worthless.cli._repo_factory import open_repo
 from worthless.cli.commands.up import start_daemon
 from worthless.cli.process import resolve_port
 from worthless.cli.console import get_console
@@ -34,6 +35,8 @@ from worthless.cli.process import (
     poll_health,
     read_pid,
 )
+
+logger = logging.getLogger(__name__)
 
 # Maximum keys to show before collapsing with "(+ N more)"
 _MAX_DISPLAY_KEYS = 5
@@ -182,12 +185,13 @@ def run_default(
             if not home.db_path.exists():
                 return scan_env_keys(env_path)
             try:
-                repo = ShardRepository(str(home.db_path), home.fernet_key)
-                await repo.initialize()
-                enrollments = await repo.list_enrollments()
-                enrolled_locations = build_enrolled_locations(enrollments)
-                return scan_env_keys(env_path, enrolled_locations=enrolled_locations)
+                async with open_repo(home) as repo:
+                    await repo.initialize()
+                    enrollments = await repo.list_enrollments()
+                    enrolled_locations = build_enrolled_locations(enrollments)
+                    return scan_env_keys(env_path, enrolled_locations=enrolled_locations)
             except Exception:
+                logger.debug("enrollment query failed, scanning without enrollments", exc_info=True)
                 return scan_env_keys(env_path)
 
         keys = asyncio.run(_scan_with_enrollments())

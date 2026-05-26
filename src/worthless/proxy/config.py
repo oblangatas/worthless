@@ -8,7 +8,20 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
+from worthless._flags import fernet_ipc_only_enabled
 from worthless.cli.keystore import read_fernet_key
+
+#: Capabilities the proxy expects from the sidecar HELLO frame (WOR-309).
+#: Caps shrinking across reconnects is fatal — see C3 in
+#: ``.research/10-security-signoff.md``.
+DEFAULT_SIDECAR_CAPS: frozenset[str] = frozenset({"open", "seal", "attest"})
+
+#: IPC protocol version (msgpack envelope schema). Bump on breaking changes.
+DEFAULT_SIDECAR_PROTOCOL_VERSION: int = 1
+
+#: Default Unix Domain Socket path. Single-container deployment puts the
+#: socket on a tmpfs volume shared by the proxy and sidecar uids.
+DEFAULT_SIDECAR_SOCKET_PATH: str = "/run/worthless/sidecar.sock"
 
 
 _PAAS_ENV_VARS: tuple[str, ...] = ("RENDER", "FLY_APP_NAME", "KUBERNETES_SERVICE_HOST")
@@ -45,7 +58,14 @@ def _default_db_path() -> str:
 
 
 def _env_bool(name: str) -> bool:
-    """Return ``True`` when the environment variable *name* is a truthy string."""
+    """Return ``True`` when the environment variable *name* is a truthy string.
+
+    DELIBERATELY does NOT strip — flipping ``WORTHLESS_ALLOW_INSECURE`` from
+    secure to insecure on a copy-paste typo is the wrong direction. The
+    IPC-only flag has a stricter parser inlined at its call site that DOES
+    strip (because its fail-secure direction is the opposite — see
+    ``_read_fernet_key`` below).
+    """
     return os.environ.get(name, "").lower() in ("1", "true", "yes")
 
 
@@ -87,7 +107,19 @@ def resolve_bind_host() -> str:
 
 
 def _read_fernet_key() -> bytearray:
-    """Read Fernet key: fd (secure pipe) -> keystore (env/keyring/file)."""
+    """Read Fernet key: fd (secure pipe) -> keystore (env/keyring/file).
+
+    WOR-465 A3b 3/3: under ``WORTHLESS_FERNET_IPC_ONLY=1`` this returns
+    an empty bytearray WITHOUT ever calling ``read_fernet_key``. The
+    proxy uid then never holds key material in memory; every crypto
+    op routes through the sidecar over IPC instead.
+    """
+    if fernet_ipc_only_enabled():
+        # WOR-465 invariant: proxy uid MUST NOT touch the keystore on
+        # the flag-on path. Returning empty here is the contract — the
+        # sidecar holds the key, the proxy delegates over IPC.
+        return bytearray()
+
     fd_str = os.environ.get("WORTHLESS_FERNET_FD")
     if fd_str:
         try:
@@ -125,12 +157,26 @@ def _is_private_ipv4_or_v6(addr: str) -> bool:
 
 @dataclass
 class ProxySettings:
-    """Proxy configuration loaded from environment variables."""
+    """Proxy configuration loaded from environment variables.
+
+    The Fernet reader is exposed as a class-level callable
+    (:attr:`_fernet_reader`) so tests can swap it via
+    ``monkeypatch.setattr(ProxySettings, "_fernet_reader", ...)`` without
+    racing module-attribute patches against pytest-rerunfailures + xdist
+    + parenthesized-with on py3.10. See WOR-309 PR #112 for the trail.
+    """
+
+    # Class-level Fernet reader hook. Tests patch this via
+    # ``monkeypatch.setattr(ProxySettings, "_fernet_reader", staticmethod(fn))``.
+    # Intentionally unannotated so the dataclass machinery doesn't treat it
+    # as an instance field, AND pyright resolves the staticmethod descriptor
+    # correctly through the class. Production callers should leave it alone.
+    _fernet_reader = staticmethod(_read_fernet_key)
 
     db_path: str = field(
         default_factory=lambda: os.environ.get("WORTHLESS_DB_PATH", _default_db_path())
     )
-    fernet_key: bytearray = field(default_factory=lambda: _read_fernet_key())
+    fernet_key: bytearray = field(default_factory=lambda: ProxySettings._fernet_reader())
     default_rate_limit_rps: float = field(
         default_factory=lambda: float(os.environ.get("WORTHLESS_RATE_LIMIT_RPS", "100.0"))
     )
@@ -141,6 +187,25 @@ class ProxySettings:
         default_factory=lambda: float(os.environ.get("WORTHLESS_STREAMING_TIMEOUT", "300.0"))
     )
     allow_insecure: bool = field(default_factory=lambda: _env_bool("WORTHLESS_ALLOW_INSECURE"))
+    sidecar_socket_path: str = field(
+        default_factory=lambda: os.environ.get(
+            "WORTHLESS_SIDECAR_SOCKET", DEFAULT_SIDECAR_SOCKET_PATH
+        )
+    )
+    sidecar_protocol_version: int = field(
+        default_factory=lambda: int(
+            os.environ.get(
+                "WORTHLESS_SIDECAR_PROTOCOL_VERSION", str(DEFAULT_SIDECAR_PROTOCOL_VERSION)
+            )
+        )
+    )
+    sidecar_expected_caps: frozenset[str] = field(default_factory=lambda: DEFAULT_SIDECAR_CAPS)
+    sidecar_max_concurrency: int = field(
+        default_factory=lambda: int(os.environ.get("WORTHLESS_SIDECAR_MAX_CONCURRENCY", "32"))
+    )
+    sidecar_request_timeout_s: float = field(
+        default_factory=lambda: float(os.environ.get("WORTHLESS_SIDECAR_REQUEST_TIMEOUT", "2.0"))
+    )
     deploy_mode: DeployMode = field(default_factory=_read_deploy_mode)
     host: str = field(default="")
     trusted_proxies: tuple[str, ...] = field(default_factory=_read_trusted_proxies)
@@ -150,13 +215,16 @@ class ProxySettings:
             self.host = _read_default_host(self.deploy_mode)
 
     def validate(self) -> None:
-        """Refuse startup on missing keys or unsafe deploy-mode combinations."""
-        if len(self.fernet_key) == 0:
-            raise ConfigError(
-                "Fernet key not available. "
-                "Set WORTHLESS_FERNET_KEY or check OS keyring, "
-                "or verify entrypoint.sh ran successfully in Docker."
-            )
+        """Refuse startup on unsafe deploy-mode combinations.
+
+        WOR-309: ``fernet_key`` is no longer required at proxy boot. The
+        sidecar holds the key; the proxy only reads ciphertext-at-rest and
+        delegates ``open()`` over IPC. Existing setups still load the key
+        for backwards-compat (e.g. CLI flows reused by the proxy container)
+        but the proxy itself never decrypts. The deploy-mode / trusted-
+        proxies validation still runs because it gates header trust before
+        any request reaches the IPC peer.
+        """
         self._validate_deploy_mode()
 
     def _validate_deploy_mode(self) -> None:

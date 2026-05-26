@@ -143,66 +143,49 @@ class TestMemoryDumpKeyExtraction:
         )
 
     @pytest.mark.asyncio
-    async def test_settings_key_zeroed_after_lifespan_shutdown(self, tmp_path):
-        """Attacker scenario: proxy process exits, attacker finds the
-        ProxySettings fernet_key bytearray still in memory.
-        Defense: _lifespan handler zeros the bytearray on shutdown."""
-        from cryptography.fernet import Fernet as FernetCls
+    async def test_settings_key_never_held_by_proxy(self, tmp_path):
+        """WOR-309: the proxy MUST never hold the Fernet key in memory.
 
-        from worthless.proxy.app import create_app
-        from worthless.proxy.config import ProxySettings
+        Pre-WOR-309 the proxy reconstructed shard-B in-process and zeroed
+        ``ProxySettings.fernet_key`` on lifespan shutdown. Post-WOR-309 the
+        sidecar owns the key and the proxy only sees ciphertext-at-rest, so
+        there is no key in proxy memory for an attacker to extract — even
+        if the caller hands one to ``ProxySettings``, the proxy never reads
+        it. The strongest assertion we can make is that ``proxy.app`` does
+        not reference ``fernet_key`` at all.
+        """
+        import inspect
 
-        db_path = str(tmp_path / "test.db")
-        fernet_key = bytearray(FernetCls.generate_key())
-        key_ref = fernet_key  # hold a reference to the same bytearray
+        from worthless.proxy import app as proxy_app_module
 
-        settings = ProxySettings(db_path=db_path, fernet_key=fernet_key)
-        app = create_app(settings)
-
-        # Precondition: key is non-zero
-        assert any(b != 0 for b in key_ref)
-
-        # Exercise actual lifespan (startup + shutdown)
-        async with app.router.lifespan_context(app):
-            # Proxy is "running" — key still alive
-            assert any(b != 0 for b in key_ref)
-
-        # After lifespan shutdown: key should be zeroed
-        assert all(b == 0 for b in key_ref), (
-            "ProxySettings fernet_key survives lifespan shutdown -- "
-            "attacker can extract it from process memory"
+        src = inspect.getsource(proxy_app_module)
+        assert "fernet_key" not in src, (
+            "proxy.app references fernet_key — WOR-309 invariant broken: "
+            "the sidecar owns the key, the proxy must never see it"
         )
 
     @pytest.mark.asyncio
-    async def test_settings_key_zeroed_even_when_db_close_raises(self, tmp_path):
-        """Attacker scenario: db.close() throws during shutdown, attacker
-        hopes the fernet_key zeroing is skipped due to the exception.
-        Defense: zeroing runs in a finally block."""
-        from cryptography.fernet import Fernet as FernetCls
+    async def test_proxy_never_imports_fernet(self, tmp_path):
+        """WOR-309: the proxy import chain must be Fernet-free.
 
-        from worthless.proxy.app import create_app
-        from worthless.proxy.config import ProxySettings
+        Pre-WOR-309 the proxy zeroed the fernet_key in a finally block to
+        survive db.close() raising. Post-WOR-309 the proxy doesn't import
+        ``cryptography.fernet`` at all — there's no Fernet object to clean
+        up because the sidecar owns crypto. This test asserts the absence
+        of the import to lock the invariant from a different angle than
+        ``test_settings_key_never_held_by_proxy``.
+        """
+        import inspect
 
-        db_path = str(tmp_path / "test.db")
-        fernet_key = bytearray(FernetCls.generate_key())
-        key_ref = fernet_key
+        from worthless.proxy import app as proxy_app_module
 
-        settings = ProxySettings(db_path=db_path, fernet_key=fernet_key)
-        app = create_app(settings)
-
-        assert any(b != 0 for b in key_ref)
-
-        try:
-            async with app.router.lifespan_context(app):
-                # Sabotage db.close so it raises during shutdown
-                real_db = app.state.db
-                real_db.close = AsyncMock(side_effect=RuntimeError("db boom"))
-        except RuntimeError:
-            pass  # expected from the sabotaged close
-
-        assert all(b == 0 for b in key_ref), (
-            "ProxySettings fernet_key not zeroed when db.close() raises -- "
-            "attacker can extract key from memory after crash"
+        src = inspect.getsource(proxy_app_module)
+        assert "from cryptography" not in src, (
+            "proxy.app imports cryptography — WOR-309 invariant broken: "
+            "the proxy must delegate all crypto to the sidecar over IPC"
+        )
+        assert "import cryptography" not in src, (
+            "proxy.app imports cryptography — WOR-309 invariant broken"
         )
 
 

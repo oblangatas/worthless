@@ -44,3 +44,16 @@ paths = [
     '''tests/.*\.py$''',
     '''tests/.*\.sh$''',
 ]
+# Public install docs (website/install-*.md) show sample `worthless status`
+# output with placeholder provider aliases like `anthropic-a1b2c3d4`.
+# Exempt ONLY that exact placeholder shape — provider name + exactly 8 hex
+# digits — matched against the whole source line. A real key (sk-..., AIza...,
+# 20+ chars) cannot match this, so real secrets pasted into install docs are
+# still caught. This is a regexes allowlist, NOT a path allowlist: an earlier
+# WOR-306 merge fix allowlisted all of website/install-*.md by path, which
+# suppressed every rule there (caught in security review — HIGH).
+# gitleaks v8.24 uses the RE2 engine — no lookahead. \b (exactly-8-hex
+# word boundary) replaces an unsupported (?!\w): it still rejects the
+# 8-char prefix of any longer real key (e.g. a 20+ char xai-... key).
+regexTarget = "line"
+regexes = ['''(?i)(?:openai|anthropic|google|xai)-[a-f0-9]{8}\b''']

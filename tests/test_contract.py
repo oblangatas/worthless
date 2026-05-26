@@ -22,6 +22,7 @@ import pytest
 import uvicorn
 from cryptography.fernet import Fernet
 
+from tests._fakes import pin_shard_b
 from tests.helpers import fake_anthropic_key, fake_openai_key
 from worthless.crypto.splitter import split_key_fp
 from worthless.proxy.app import create_app
@@ -120,6 +121,10 @@ def live_proxy():
 
     # Enroll fake keys and collect shard_a tokens for Bearer auth
     shard_a_tokens: dict[str, str] = {}
+    # Capture each alias's plaintext shard-B so we can later pin it into
+    # the autouse FakeIPCSupervisor — without this the fake returns the
+    # wrong plaintext, reconstruction fails, and the proxy 401s.
+    plaintexts: dict[str, bytes] = {}
 
     prefixes = {"openai": "sk-proj-", "anthropic": "sk-ant-api03-"}
     # 8rqs Phase 5+6: each enrollment carries its own base_url. Point both at
@@ -154,6 +159,7 @@ def live_proxy():
                 base_url=enrollment_base_urls[provider],
             )
             shard_a_tokens[provider] = sr.shard_a.decode("utf-8")
+            plaintexts[f"{provider}-contract"] = bytes(sr.shard_b)
 
     asyncio.run(_enroll())
 
@@ -166,6 +172,9 @@ def live_proxy():
             default_rate_limit_rps=100.0,
         )
         proxy_app = create_app(settings)
+
+        for alias, pt in plaintexts.items():
+            pin_shard_b(proxy_app, alias, pt)
 
         # Start both servers in background threads.
         # `sockets=[sock]` hands the pre-bound listening socket to uvicorn

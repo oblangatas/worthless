@@ -433,8 +433,12 @@ class TestKeyringCallCountInvariants:
             ),
             patch("worthless.cli.bootstrap.store_fernet_key"),
             patch(
-                "worthless.cli.bootstrap.Fernet.generate_key",
+                "worthless.cli.bootstrap.base64.urlsafe_b64encode",
                 return_value=generated,
+            ),
+            patch(
+                "worthless.cli.bootstrap.os.urandom",
+                return_value=b"\x00" * 32,
             ),
         ):
             home = ensure_home(base_dir=tmp_path / ".worthless")

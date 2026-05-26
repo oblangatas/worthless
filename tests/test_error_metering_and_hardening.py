@@ -24,6 +24,8 @@ from worthless.proxy.metering import extract_usage_anthropic
 from worthless.proxy.rules import RateLimitRule, RulesEngine, SpendCapRule
 from worthless.storage.repository import ShardRepository, StoredShard
 
+from tests._fakes import pin_shard_b
+
 
 # ------------------------------------------------------------------
 # Fixtures & helpers
@@ -57,27 +59,6 @@ def proxy_settings(tmp_db_path: str, fernet_key: bytes, tmp_path) -> ProxySettin
 
 
 @pytest.fixture()
-async def enrolled_alias(repo, proxy_settings: ProxySettings):
-    """Enroll a test key and return (alias, shard_a_utf8, raw_api_key)."""
-    alias = "test-key"
-    api_key = "sk-test-key-1234567890abcdef"
-    sr = split_key_fp(api_key, prefix="sk-", provider="openai")
-
-    shard = StoredShard(
-        shard_b=bytearray(sr.shard_b),
-        commitment=bytearray(sr.commitment),
-        nonce=bytearray(sr.nonce),
-        provider="openai",
-    )
-    await repo.store(
-        alias, shard, prefix=sr.prefix, charset=sr.charset, base_url="https://api.openai.com/v1"
-    )
-
-    shard_a_utf8 = sr.shard_a.decode("utf-8")
-    return alias, shard_a_utf8, api_key.encode()
-
-
-@pytest.fixture()
 async def proxy_app(proxy_settings: ProxySettings, repo):
     app = create_app(proxy_settings)
     db = await aiosqlite.connect(proxy_settings.db_path)
@@ -96,6 +77,35 @@ async def proxy_app(proxy_settings: ProxySettings, repo):
     yield app
     await app.state.httpx_client.aclose()
     await db.close()
+
+
+@pytest.fixture()
+async def enrolled_alias(repo, proxy_settings: ProxySettings, proxy_app):
+    """Enroll a test key and return (alias, shard_a_utf8, raw_api_key).
+
+    WOR-309: pins the per-alias plaintext shard-B onto the FakeIPCSupervisor
+    attached to ``proxy_app.state.ipc_supervisor`` so the proxy's IPC-based
+    decrypt round-trips to the real shard-B (the fake otherwise returns a
+    DEFAULT plaintext that fails reconstruction → 401).
+    """
+    alias = "test-key"
+    api_key = "sk-test-key-1234567890abcdef"
+    sr = split_key_fp(api_key, prefix="sk-", provider="openai")
+
+    shard = StoredShard(
+        shard_b=bytearray(sr.shard_b),
+        commitment=bytearray(sr.commitment),
+        nonce=bytearray(sr.nonce),
+        provider="openai",
+    )
+    await repo.store(
+        alias, shard, prefix=sr.prefix, charset=sr.charset, base_url="https://api.openai.com/v1"
+    )
+
+    pin_shard_b(proxy_app, alias, sr.shard_b)
+
+    shard_a_utf8 = sr.shard_a.decode("utf-8")
+    return alias, shard_a_utf8, api_key.encode()
 
 
 @pytest.fixture()
