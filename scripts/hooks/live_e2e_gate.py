@@ -30,7 +30,7 @@ import re
 import subprocess
 import sys
 import time
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 # A change under these paths can break the real round-trip in a way mocks and
@@ -127,7 +127,7 @@ def write_evidence(root: Path, result: str, duration_s: float) -> Path:
         "result": result,
         "tree_hash": scoped_state_hash(root),
         "head_sha": _git("rev-parse", "HEAD").strip(),
-        "timestamp_utc": datetime.now(UTC).isoformat(),
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "duration_seconds": round(duration_s, 2),
         "command": "pytest -m live",
     }
