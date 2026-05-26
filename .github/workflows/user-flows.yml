@@ -54,8 +54,14 @@ jobs:
           relevant=true
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             relevant=false
-            files="$(gh pr diff "${{ github.event.pull_request.number }}" \
-              --name-only --repo "${{ github.repository }}")"
+            # Fail open: a transient `gh pr diff` error must not fail this
+            # required check and block unrelated PRs — run the suite instead.
+            if ! files="$(gh pr diff "${{ github.event.pull_request.number }}" \
+              --name-only --repo "${{ github.repository }}")"; then
+              echo "::warning::Could not read PR diff; running the user-flow suite (fail-open)."
+              relevant=true
+              files=""
+            fi
             while IFS= read -r f; do
               [ -z "$f" ] && continue
               case "$f" in
