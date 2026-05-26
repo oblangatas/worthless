@@ -48,11 +48,17 @@ jobs:
           # xdist load occasionally exceeds the 5.0s prod default; bump
           # to 20s so a slow runner doesn't masquerade as a regression.
           WORTHLESS_SIDECAR_READY_TIMEOUT_SECS: "20"
+          # DEBUG (WOR-582 py3.13 hang): dump every thread's stack every 90s so a
+          # wedged worker names itself in the log instead of silently dying at the cap.
+          PYTHONFAULTHANDLER: "1"
+          WORTHLESS_FH_DUMP: "90"
         run: |
           uv sync --extra dev --extra test --extra mcp
           # Parallel pass — everything EXCEPT the real-subprocess sidecar/IPC
           # family. Coverage is accumulated, not gated here.
-          uv run pytest --reruns 1 --cov=worthless --cov-report=xml --cov-report=term-missing -n auto --dist loadscope -x -m "not live and not docker and not user_flow and not real_ipc"
+          # DEBUG: -v names each test as it reports; combined with the faulthandler
+          # dump this pinpoints the py3.13-only hang.
+          uv run pytest --reruns 1 --cov=worthless --cov-report=xml --cov-report=term-missing -n auto --dist loadscope -x -v -m "not live and not docker and not user_flow and not real_ipc"
           # Serial pass — real_ipc tests that spawn real processes/sidecars;
           # kept serial because subprocess.run(waitpid) + PEP 475 EINTR-retry
           # makes pytest-timeout ineffective for these tests under xdist.

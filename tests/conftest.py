@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import faulthandler
 import functools
 import json
 import os
@@ -19,6 +20,14 @@ from worthless.crypto import SplitResult
 from worthless.crypto.splitter import split_key
 from worthless.proxy import app as _proxy_app_module
 from worthless.storage.repository import ShardRepository, StoredShard
+
+# DEBUG (WOR-582 py3.13 hang): when WORTHLESS_FH_DUMP=<seconds> is set, every
+# process (controller + each xdist worker imports this conftest) dumps all thread
+# stacks to stderr on that interval, so a wedged worker names exactly where it is
+# stuck instead of silently dying at the job timeout. Inert unless the var is set.
+_fh_dump_secs = os.environ.get("WORTHLESS_FH_DUMP")
+if _fh_dump_secs:
+    faulthandler.dump_traceback_later(int(_fh_dump_secs), repeat=True)
 
 from tests._fakes.fake_ipc_supervisor import FakeIPCSupervisor
 from tests.helpers import fake_openai_key
