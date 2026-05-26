@@ -35,6 +35,11 @@ from worthless.sidecar.backends.base import Backend
 from worthless.sidecar.backends.fernet import FernetBackend
 from worthless.sidecar.server import start_sidecar
 
+# WOR-582: every test here spawns a real sidecar; running them in the
+# parallel xdist pass crashes a worker on py3.13 (asyncio server + forked
+# worker). Route the whole module to the serial real_ipc pass.
+pytestmark = pytest.mark.real_ipc
+
 
 # ---------------------------------------------------------------------------
 # Helpers — reconstruct a known Fernet key from hardcoded shares so tests
