@@ -6,7 +6,7 @@ Key bodies and local temp paths are redacted for documentation safety.
 
 ## Install, Reinstall, Manual Uninstall Guidance
 
-The installer succeeds with and without persistent PATH setup, re-running a pinned install is a no-op, failure paths keep actionable diagnostics visible, and uninstall is currently documented as the manual `uv tool uninstall worthless` command plus platform cleanup notes until WOR-435 ships a first-class command.
+The installer succeeds with and without persistent PATH setup, re-running a pinned install is a no-op, stale PATH binaries are called out, failure paths keep actionable diagnostics visible, and uninstall is currently documented as the manual `uv tool uninstall worthless` command plus platform cleanup notes until WOR-435 ships a first-class command.
 
 - Workspace: `$TRACE_ROOT/install-lifecycle`
 
@@ -124,7 +124,66 @@ phase=after
 exit=0
 ```
 
-### 3. `WORTHLESS_VERSION=0.3.0 sh ./install.sh`
+### 3. `sh ./install.sh`
+
+- cwd: `$TRACE_ROOT/install-lifecycle/stale-worthless-on-path`
+- WORTHLESS_HOME: `$TRACE_ROOT/install-lifecycle/.worthless`
+- exit: `0`
+
+**Files before**
+
+`$TRACE_ROOT/install-lifecycle/stale-worthless-on-path/install-state.txt`
+
+```text
+case=stale worthless on PATH
+phase=before
+```
+
+**stdout**
+
+```text
+
+Worthless installer (uv-bootstrap)
+
+  Platform: macos
+  uv 0.11.7 already installed
+  worthless 0.3.0
+
+Done! 'worthless' is installed.
+
+
+  PATH resolves:      $TRACE_ROOT/install-lifecycle/stale-worthless-on-path/bin/worthless
+  PATH version:       worthless 0.1.0
+  Installed version:  worthless 0.3.0
+  Activate in this shell: export PATH="$HOME/.local/bin:$PATH"
+
+  Try after PATH: cd your-project && worthless lock
+  Audit script:  curl worthless.sh?explain=1 | less
+  Source:        https://github.com/shacharm2/worthless
+
+  worthless lock rewrites .env, splits your API keys, and starts a
+  local proxy. Your app code doesn't change.
+
+  Docs: https://docs.wless.io
+```
+
+**stderr**
+
+```text
+Heads up: this terminal finds a different 'worthless' first on PATH.
+```
+
+**Files after**
+
+`$TRACE_ROOT/install-lifecycle/stale-worthless-on-path/install-state.txt`
+
+```text
+case=stale worthless on PATH
+phase=after
+exit=0
+```
+
+### 4. `WORTHLESS_VERSION=0.3.0 sh ./install.sh`
 
 - cwd: `$TRACE_ROOT/install-lifecycle/reinstall-pinned-version-already-installed`
 - WORTHLESS_HOME: `$TRACE_ROOT/install-lifecycle/.worthless`
@@ -178,7 +237,7 @@ phase=after
 exit=0
 ```
 
-### 4. `sh ./install.sh`
+### 5. `sh ./install.sh`
 
 - cwd: `$TRACE_ROOT/install-lifecycle/pipx-conflict-shows-uninstall-guidance`
 - WORTHLESS_HOME: `$TRACE_ROOT/install-lifecycle/.worthless`
@@ -221,7 +280,7 @@ phase=after
 exit=30
 ```
 
-### 5. `sh ./install.sh`
+### 6. `sh ./install.sh`
 
 - cwd: `$TRACE_ROOT/install-lifecycle/uv-failure-surfaces-network-hints`
 - WORTHLESS_HOME: `$TRACE_ROOT/install-lifecycle/.worthless`
@@ -249,12 +308,10 @@ Worthless installer (uv-bootstrap)
 **stderr**
 
 ```text
-error: Failed to install worthless.
+error: Failed to install worthless==0.3.6.
 
        uv tool install reported:
          x No solution found when resolving dependencies
-
-       uv tool upgrade also failed (same root cause likely).
 
        If this looks like a network issue:
        Behind a proxy or corporate network? Try:
@@ -273,7 +330,7 @@ phase=after
 exit=10
 ```
 
-### 6. `uv tool uninstall worthless`
+### 7. `uv tool uninstall worthless`
 
 - cwd: `$TRACE_ROOT/install-lifecycle/manual-uninstall-current-limitation`
 - WORTHLESS_HOME: `$TRACE_ROOT/install-lifecycle/.worthless`
@@ -333,7 +390,7 @@ OPENAI_API_KEY=sk-proj-<redacted:fake-raw:len=51:sha256=6628552e72>
 **stdout**
 
 ```text
-Warning: using non-default home $TRACE_ROOT/lock-status-scan-unlock/.worthless (WORTHLESS_HOME is set)
+<empty>
 ```
 
 **stderr**
@@ -343,7 +400,8 @@ Scanning $TRACE_ROOT/lock-status-scan-unlock/project/.env
 for API keys...
   Protecting OPENAI_API_KEY...
 worthless: added OPENAI_BASE_URL=http://127.0.0.1:8787/openai-6628552e/v1 to $TRACE_ROOT/lock-status-scan-unlock/project/.env (was missing)
-[OK] 1 key(s) split between this machine and a local key file — .env no longer contains a usable secret.
+[OK] 1 key split between this machine and a local key file — .env no longer contains a usable secret.
+Warning: using non-default home $TRACE_ROOT/lock-status-scan-unlock/.worthless (WORTHLESS_HOME is set)
 Next: run `worthless wrap <command>` or `worthless up` for daemon mode
 ```
 
@@ -527,7 +585,7 @@ OPENAI_API_KEY=sk-proj-<redacted:fake-raw:len=51:sha256=fe67659040>
 **stdout**
 
 ```text
-Warning: using non-default home $TRACE_ROOT/teammate-handoff-failure/.worthless (WORTHLESS_HOME is set)
+<empty>
 ```
 
 **stderr**
@@ -538,7 +596,8 @@ $TRACE_ROOT/teammate-handoff-failure/owner-project/.env
 for API keys...
   Protecting OPENAI_API_KEY...
 worthless: added OPENAI_BASE_URL=http://127.0.0.1:8787/openai-fe676590/v1 to $TRACE_ROOT/teammate-handoff-failure/owner-project/.env (was missing)
-[OK] 1 key(s) split between this machine and a local key file — .env no longer contains a usable secret.
+[OK] 1 key split between this machine and a local key file — .env no longer contains a usable secret.
+Warning: using non-default home $TRACE_ROOT/teammate-handoff-failure/.worthless (WORTHLESS_HOME is set)
 Next: run `worthless wrap <command>` or `worthless up` for daemon mode
 ```
 
@@ -613,7 +672,7 @@ OPENAI_API_KEY=sk-proj-<redacted:fake-raw:len=51:sha256=0122837f50>
 **stdout**
 
 ```text
-Warning: using non-default home $TRACE_ROOT/rotation-relock/.worthless (WORTHLESS_HOME is set)
+<empty>
 ```
 
 **stderr**
@@ -623,7 +682,8 @@ Scanning $TRACE_ROOT/rotation-relock/same-shape/.env for
 API keys...
   Protecting OPENAI_API_KEY...
 worthless: added OPENAI_BASE_URL=http://127.0.0.1:8787/openai-0122837f/v1 to $TRACE_ROOT/rotation-relock/same-shape/.env (was missing)
-[OK] 1 key(s) split between this machine and a local key file — .env no longer contains a usable secret.
+[OK] 1 key split between this machine and a local key file — .env no longer contains a usable secret.
+Warning: using non-default home $TRACE_ROOT/rotation-relock/.worthless (WORTHLESS_HOME is set)
 Next: run `worthless wrap <command>` or `worthless up` for daemon mode
 ```
 
@@ -653,7 +713,7 @@ OPENAI_API_KEY=sk-proj-<redacted:fake-raw:len=51:sha256=8190d0c36a>
 **stdout**
 
 ```text
-Warning: using non-default home $TRACE_ROOT/rotation-relock/.worthless (WORTHLESS_HOME is set)
+<empty>
 ```
 
 **stderr**
@@ -663,7 +723,8 @@ Scanning $TRACE_ROOT/rotation-relock/same-shape/.env for
 API keys...
   Protecting OPENAI_API_KEY...
 worthless: added OPENAI_BASE_URL=http://127.0.0.1:8787/openai-8190d0c3/v1 to $TRACE_ROOT/rotation-relock/same-shape/.env (was missing)
-[OK] 1 key(s) split between this machine and a local key file — .env no longer contains a usable secret.
+[OK] 1 key split between this machine and a local key file — .env no longer contains a usable secret.
+Warning: using non-default home $TRACE_ROOT/rotation-relock/.worthless (WORTHLESS_HOME is set)
 Next: run `worthless wrap <command>` or `worthless up` for daemon mode
 ```
 
@@ -729,7 +790,7 @@ OPENAI_API_KEY=sk-proj-<redacted:fake-raw:len=51:sha256=54ddf68f39>
 **stdout**
 
 ```text
-Warning: using non-default home $TRACE_ROOT/rotation-relock/.worthless (WORTHLESS_HOME is set)
+<empty>
 ```
 
 **stderr**
@@ -739,7 +800,8 @@ Scanning $TRACE_ROOT/rotation-relock/different-shape/.env
 for API keys...
   Protecting OPENAI_API_KEY...
 worthless: added OPENAI_BASE_URL=http://127.0.0.1:8787/openai-54ddf68f/v1 to $TRACE_ROOT/rotation-relock/different-shape/.env (was missing)
-[OK] 1 key(s) split between this machine and a local key file — .env no longer contains a usable secret.
+[OK] 1 key split between this machine and a local key file — .env no longer contains a usable secret.
+Warning: using non-default home $TRACE_ROOT/rotation-relock/.worthless (WORTHLESS_HOME is set)
 Next: run `worthless wrap <command>` or `worthless up` for daemon mode
 ```
 
@@ -769,7 +831,7 @@ OPENAI_API_KEY=sk-<redacted:fake-raw:len=46:sha256=21f0003478>
 **stdout**
 
 ```text
-Warning: using non-default home $TRACE_ROOT/rotation-relock/.worthless (WORTHLESS_HOME is set)
+<empty>
 ```
 
 **stderr**
@@ -779,7 +841,8 @@ Scanning $TRACE_ROOT/rotation-relock/different-shape/.env
 for API keys...
   Protecting OPENAI_API_KEY...
 worthless: added OPENAI_BASE_URL=http://127.0.0.1:8787/openai-21f00034/v1 to $TRACE_ROOT/rotation-relock/different-shape/.env (was missing)
-[OK] 1 key(s) split between this machine and a local key file — .env no longer contains a usable secret.
+[OK] 1 key split between this machine and a local key file — .env no longer contains a usable secret.
+Warning: using non-default home $TRACE_ROOT/rotation-relock/.worthless (WORTHLESS_HOME is set)
 Next: run `worthless wrap <command>` or `worthless up` for daemon mode
 ```
 
@@ -857,7 +920,7 @@ OPENAI_API_KEY=sk-proj-<redacted:fake-raw:len=51:sha256=b6e34dbee6>
 **stdout**
 
 ```text
-Warning: using non-default home $TRACE_ROOT/multi-project-isolation/.worthless (WORTHLESS_HOME is set)
+<empty>
 ```
 
 **stderr**
@@ -868,7 +931,8 @@ $TRACE_ROOT/multi-project-isolation/project-a/.env for
 API keys...
   Protecting OPENAI_API_KEY...
 worthless: added OPENAI_BASE_URL=http://127.0.0.1:8787/openai-fd488525/v1 to $TRACE_ROOT/multi-project-isolation/project-a/.env (was missing)
-[OK] 1 key(s) split between this machine and a local key file — .env no longer contains a usable secret.
+[OK] 1 key split between this machine and a local key file — .env no longer contains a usable secret.
+Warning: using non-default home $TRACE_ROOT/multi-project-isolation/.worthless (WORTHLESS_HOME is set)
 Next: run `worthless wrap <command>` or `worthless up` for daemon mode
 ```
 
@@ -911,7 +975,7 @@ OPENAI_API_KEY=sk-proj-<redacted:fake-raw:len=51:sha256=b6e34dbee6>
 **stdout**
 
 ```text
-Warning: using non-default home $TRACE_ROOT/multi-project-isolation/.worthless (WORTHLESS_HOME is set)
+<empty>
 ```
 
 **stderr**
@@ -922,7 +986,8 @@ $TRACE_ROOT/multi-project-isolation/project-b/.env for
 API keys...
   Protecting OPENAI_API_KEY...
 worthless: added OPENAI_BASE_URL=http://127.0.0.1:8787/openai-b6e34dbe/v1 to $TRACE_ROOT/multi-project-isolation/project-b/.env (was missing)
-[OK] 1 key(s) split between this machine and a local key file — .env no longer contains a usable secret.
+[OK] 1 key split between this machine and a local key file — .env no longer contains a usable secret.
+Warning: using non-default home $TRACE_ROOT/multi-project-isolation/.worthless (WORTHLESS_HOME is set)
 Next: run `worthless wrap <command>` or `worthless up` for daemon mode
 ```
 
@@ -1225,7 +1290,7 @@ OPENAI_API_KEY=sk-proj-<redacted:fake-raw:len=51:sha256=0ca90940b2>
 **stdout**
 
 ```text
-Warning: using non-default home $TRACE_ROOT/native-stress/.worthless (WORTHLESS_HOME is set)
+<empty>
 ```
 
 **stderr**
@@ -1235,7 +1300,8 @@ Scanning $TRACE_ROOT/native-stress/tampered-lock/.env for
 API keys...
   Protecting OPENAI_API_KEY...
 worthless: added OPENAI_BASE_URL=http://127.0.0.1:8787/openai-0ca90940/v1 to $TRACE_ROOT/native-stress/tampered-lock/.env (was missing)
-[OK] 1 key(s) split between this machine and a local key file — .env no longer contains a usable secret.
+[OK] 1 key split between this machine and a local key file — .env no longer contains a usable secret.
+Warning: using non-default home $TRACE_ROOT/native-stress/.worthless (WORTHLESS_HOME is set)
 Next: run `worthless wrap <command>` or `worthless up` for daemon mode
 ```
 

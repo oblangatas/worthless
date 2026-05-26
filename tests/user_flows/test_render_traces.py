@@ -61,14 +61,17 @@ def test_install_lifecycle_trace_documents_current_install_contract(
     journey = render_traces.build_install_lifecycle()
     report = "\n".join(render_traces.render_journey(journey))
 
-    assert len(journey.traces) == 6
-    assert [trace.exit_code for trace in journey.traces] == [0, 0, 0, 30, 10, 0]
+    assert len(journey.traces) == 7
+    assert [trace.exit_code for trace in journey.traces] == [0, 0, 0, 0, 30, 10, 0]
     assert "Install, Reinstall, Manual Uninstall Guidance" in report
     assert "fresh install" in report.lower()
     assert "reinstall" in report.lower()
     assert "Done! 'worthless' is on your PATH." in report
     assert "Done! 'worthless' is installed." in report
     assert "Heads up: this terminal will not find 'worthless' until PATH is updated" in report
+    assert "Heads up: this terminal finds a different 'worthless' first on PATH" in report
+    assert "PATH version:       worthless 0.1.0" in report
+    assert "Installed version:  worthless 0.3.0" in report
     assert "Open a new terminal, or activate this one now" in report
     assert "Try after PATH" in report
     assert "worthless 0.3.0 already installed" in report

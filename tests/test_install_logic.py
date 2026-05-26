@@ -322,6 +322,38 @@ def test_success_with_persistent_rc_but_missing_parent_path_says_open_terminal(
     )
 
 
+def test_success_with_stale_worthless_on_path_warns_about_shadowing(
+    tmp_path: Path,
+) -> None:
+    """A stale PATH binary must not be reported as a clean install success.
+
+    Real users can have an older pip/manual/dev `worthless` earlier on PATH.
+    The installer smoke test proves the uv-installed tool works, but the next
+    command the user types may still hit the stale binary. That should be an
+    actionable warning, not "Done! 'worthless' is on your PATH."
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_happy_path_stubs(bin_dir)
+    write_stub(bin_dir, "worthless", 'echo "worthless 0.1.0"')
+
+    result = run_install(bin_dir)
+
+    assert result.returncode == 0, (
+        f"install must still succeed, got {result.returncode}\nstderr: {result.stderr}"
+    )
+    assert "different 'worthless' first on PATH" in result.stderr, (
+        f"must warn that a stale binary shadows the fresh install.\nstderr: {result.stderr}"
+    )
+    assert "worthless 0.1.0" in result.stdout
+    assert "worthless 0.3.0" in result.stdout
+    assert "is on your PATH" not in result.stdout, (
+        f"must not claim a clean PATH success when PATH resolves a stale binary.\n"
+        f"stdout: {result.stdout}"
+    )
+    assert "Activate in this shell" in result.stdout
+
+
 # ---------------------------------------------------------------------------
 # worthless-nrl1: failure path surfaces uv's actual stderr above the proxy hint
 # ---------------------------------------------------------------------------

@@ -153,6 +153,11 @@ class TraceRunner:
             write_happy_path_stubs(bin_dir, with_worthless=False)
             result = run_install(bin_dir)
             command = ["sh", "./install.sh"]
+        elif name == "stale worthless on PATH":
+            write_happy_path_stubs(bin_dir)
+            write_stub(bin_dir, "worthless", 'echo "worthless 0.1.0"')
+            result = run_install(bin_dir)
+            command = ["sh", "./install.sh"]
         elif name == "reinstall pinned version already installed":
             write_happy_path_stubs(bin_dir)
             write_stub(
@@ -324,13 +329,15 @@ def build_install_lifecycle() -> Journey:
         title="Install, Reinstall, Manual Uninstall Guidance",
         summary=(
             "The installer succeeds with and without persistent PATH setup, re-running a "
-            "pinned install is a no-op, failure paths keep actionable diagnostics visible, "
-            "and uninstall is currently documented as the manual `uv tool uninstall worthless` "
-            "command plus platform cleanup notes until WOR-435 ships a first-class command."
+            "pinned install is a no-op, stale PATH binaries are called out, failure paths "
+            "keep actionable diagnostics visible, and uninstall is currently documented "
+            "as the manual `uv tool uninstall worthless` command plus platform cleanup "
+            "notes until WOR-435 ships a first-class command."
         ),
     )
     runner.run_install_case("fresh install with persistent PATH")
     runner.run_install_case("fresh install without persistent PATH")
+    runner.run_install_case("stale worthless on PATH")
     runner.run_install_case("reinstall pinned version already installed")
     runner.run_install_case(
         "pipx conflict shows uninstall guidance",
