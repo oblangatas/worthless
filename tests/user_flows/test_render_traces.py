@@ -61,8 +61,8 @@ def test_install_lifecycle_trace_documents_current_install_contract(
     journey = render_traces.build_install_lifecycle()
     report = "\n".join(render_traces.render_journey(journey))
 
-    assert len(journey.traces) == 7
-    assert [trace.exit_code for trace in journey.traces] == [0, 0, 0, 0, 30, 10, 0]
+    assert len(journey.traces) == 8
+    assert [trace.exit_code for trace in journey.traces] == [0, 0, 0, 0, 0, 30, 10, 0]
     assert "Install, Reinstall, Manual Uninstall Guidance" in report
     assert "fresh install" in report.lower()
     assert "reinstall" in report.lower()
@@ -75,8 +75,10 @@ def test_install_lifecycle_trace_documents_current_install_contract(
     assert "Open a new terminal, or activate this one now" in report
     assert "Try after PATH" in report
     assert "worthless 0.3.0 already installed" in report
+    assert "upgrade older uv tool install" in report
     assert "pipx uninstall worthless" in report
     assert "No solution found when resolving dependencies" in report
     assert "UV_PYTHON_INSTALL_MIRROR" in report
     assert "uv tool uninstall worthless" in report
+    assert "uv tool uninstall does not purge this" in report
     assert "worthless uninstall" not in report

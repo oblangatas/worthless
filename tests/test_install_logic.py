@@ -67,6 +67,54 @@ def test_user_override_beats_pin(tmp_path: Path) -> None:
     )
 
 
+def test_older_uv_tool_install_upgrades_via_pinned_force_install(
+    tmp_path: Path,
+) -> None:
+    """An older uv-installed Worthless must upgrade through the pinned path.
+
+    A repeat installer run is both an idempotency path and an upgrade path.
+    Same version should short-circuit; older versions must run
+    `uv tool install --force worthless==<pin>`, never bare `uv tool upgrade`.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_happy_path_stubs(bin_dir)
+    pin = read_install_pin()
+    write_stub(
+        bin_dir,
+        "uv",
+        f"""printf 'uv %s\\n' "$*" >> "$HOME/uv-invocations.log"
+case "$1" in
+  --version) echo "uv 0.11.7" ;;
+  tool) shift; case "$1" in
+    list) echo "worthless v0.1.0" ;;
+    install)
+      [ "$2" = "--force" ] || exit 2
+      [ "$3" = "worthless=={pin}" ] || exit 3
+      echo "installed $3" ;;
+    upgrade) echo "unexpected upgrade" >&2; exit 4 ;;
+    *) echo "uv tool: unhandled: $*" >&2; exit 1 ;;
+  esac ;;
+  run) echo "worthless {pin}" ;;
+  *) echo "uv: unhandled: $*" >&2; exit 1 ;;
+esac""",
+    )
+
+    result = run_install(bin_dir)
+
+    assert result.returncode == 0, (
+        f"older installed version must upgrade cleanly.\nstdout: {result.stdout}\n"
+        f"stderr: {result.stderr}"
+    )
+    log = (tmp_path / "uv-invocations.log").read_text()
+    assert f"tool install --force worthless=={pin}" in log, (
+        f"pin-bump upgrades must use pinned force install.\nuv log:\n{log}"
+    )
+    assert "tool upgrade" not in log, f"must not use uv tool upgrade for pin bumps.\nuv log:\n{log}"
+    assert f"worthless {pin} already installed" not in result.stdout
+    assert f"worthless {pin}" in result.stdout
+
+
 def test_empty_pin_fails_closed(tmp_path: Path) -> None:
     """An installer with no baked pin AND no override must FAIL CLOSED with an
     internal error — never silently install latest."""
