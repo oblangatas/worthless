@@ -761,3 +761,176 @@ async def test_migrate_no_backup_when_already_migrated(tmp_path) -> None:
     assert len(backups) == 0, (
         f"backup file created on no-op migration; got: {[p.name for p in backups]}"
     )
+
+
+# ------------------------------------------------------------------
+# Signing nonces (worthless-1pua Phase 6b)
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_store_and_validate_signing_nonce(repo: ShardRepository, sample_split_result) -> None:
+    """store_signing_nonce + is_valid_signing_nonce roundtrip."""
+    import secrets
+    import time
+
+    await repo.store_enrolled(
+        "nonce-test",
+        stored_shard_from_split(sample_split_result),
+        var_name="OPENAI_API_KEY",
+        env_path="/tmp/.env",  # noqa: S108
+    )
+    nonce = secrets.token_bytes(16)
+    expires_at = int(time.time()) + 3600
+
+    await repo.store_signing_nonce("nonce-test", nonce, expires_at)
+    assert await repo.is_valid_signing_nonce("nonce-test", nonce)
+
+
+@pytest.mark.asyncio
+async def test_wrong_nonce_is_invalid(repo: ShardRepository, sample_split_result) -> None:
+    """A different nonce for the same alias is rejected."""
+    import secrets
+    import time
+
+    await repo.store_enrolled(
+        "nonce-test2",
+        stored_shard_from_split(sample_split_result),
+        var_name="OPENAI_API_KEY",
+        env_path="/tmp/.env",  # noqa: S108
+    )
+    nonce1 = secrets.token_bytes(16)
+    nonce2 = secrets.token_bytes(16)
+    expires_at = int(time.time()) + 3600
+
+    await repo.store_signing_nonce("nonce-test2", nonce1, expires_at)
+    assert not await repo.is_valid_signing_nonce("nonce-test2", nonce2)
+
+
+@pytest.mark.asyncio
+async def test_expired_nonce_is_invalid(repo: ShardRepository, sample_split_result) -> None:
+    """A nonce whose expires_at is in the past is rejected."""
+    import secrets
+
+    await repo.store_enrolled(
+        "nonce-test3",
+        stored_shard_from_split(sample_split_result),
+        var_name="OPENAI_API_KEY",
+        env_path="/tmp/.env",  # noqa: S108
+    )
+    nonce = secrets.token_bytes(16)
+    past_ts = 1  # Unix epoch + 1 second — definitively expired
+
+    await repo.store_signing_nonce("nonce-test3", nonce, past_ts)
+    assert not await repo.is_valid_signing_nonce("nonce-test3", nonce)
+
+
+@pytest.mark.asyncio
+async def test_re_lock_revokes_old_nonce(repo: ShardRepository, sample_split_result) -> None:
+    """Storing a new nonce for an alias immediately invalidates the old one."""
+    import secrets
+    import time
+
+    await repo.store_enrolled(
+        "nonce-test4",
+        stored_shard_from_split(sample_split_result),
+        var_name="OPENAI_API_KEY",
+        env_path="/tmp/.env",  # noqa: S108
+    )
+    nonce1 = secrets.token_bytes(16)
+    nonce2 = secrets.token_bytes(16)
+    expires_at = int(time.time()) + 3600
+
+    await repo.store_signing_nonce("nonce-test4", nonce1, expires_at)
+    assert await repo.is_valid_signing_nonce("nonce-test4", nonce1)
+
+    # Re-lock: new nonce replaces old
+    await repo.store_signing_nonce("nonce-test4", nonce2, expires_at)
+    assert not await repo.is_valid_signing_nonce("nonce-test4", nonce1)
+    assert await repo.is_valid_signing_nonce("nonce-test4", nonce2)
+
+
+@pytest.mark.asyncio
+async def test_prune_expired_nonces(repo: ShardRepository, sample_split_result) -> None:
+    """prune_expired_signing_nonces removes expired rows and leaves valid ones."""
+    import secrets
+    import time
+
+    for alias in ("prune-a", "prune-b", "prune-c"):
+        await repo.store_enrolled(
+            alias,
+            stored_shard_from_split(sample_split_result),
+            var_name="OPENAI_API_KEY",
+            env_path="/tmp/.env",  # noqa: S108
+        )
+
+    nonce_expired = secrets.token_bytes(16)
+    nonce_valid = secrets.token_bytes(16)
+    now = int(time.time())
+
+    await repo.store_signing_nonce("prune-a", nonce_expired, now - 1)  # expired
+    await repo.store_signing_nonce("prune-b", nonce_expired, now - 1)  # expired
+    await repo.store_signing_nonce("prune-c", nonce_valid, now + 3600)  # valid
+
+    deleted = await repo.prune_expired_signing_nonces()
+    assert deleted == 2
+
+    assert not await repo.is_valid_signing_nonce("prune-a", nonce_expired)
+    assert not await repo.is_valid_signing_nonce("prune-b", nonce_expired)
+    assert await repo.is_valid_signing_nonce("prune-c", nonce_valid)
+
+
+@pytest.mark.asyncio
+async def test_migrate_adds_signing_nonces_table(tmp_path) -> None:
+    """migrate_db creates signing_nonces on pre-existing databases that lack it."""
+    db_path = tmp_path / "old.db"
+
+    # Simulate a pre-Phase-6b DB: create the core tables but NOT signing_nonces
+    old_schema = """
+    PRAGMA foreign_keys = ON;
+    CREATE TABLE IF NOT EXISTS shards (
+        key_alias TEXT PRIMARY KEY,
+        shard_b_enc BLOB NOT NULL, commitment BLOB NOT NULL,
+        nonce BLOB NOT NULL, provider TEXT NOT NULL,
+        prefix TEXT, charset TEXT, base_url TEXT, shard_a_enc BLOB,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS spend_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        key_alias TEXT NOT NULL, tokens INTEGER NOT NULL,
+        model TEXT, provider TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS enrollment_config (
+        key_alias TEXT PRIMARY KEY, spend_cap REAL,
+        rate_limit_rps REAL NOT NULL DEFAULT 100.0,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS enrollments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        key_alias TEXT NOT NULL REFERENCES shards(key_alias) ON DELETE CASCADE,
+        var_name TEXT NOT NULL, env_path TEXT, decoy_hash TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(key_alias, var_name, env_path)
+    );
+    """
+    async with aiosqlite.connect(str(db_path)) as db:
+        await db.executescript(old_schema)
+        await db.commit()
+
+    # Verify signing_nonces does NOT exist yet
+    async with aiosqlite.connect(str(db_path)) as db:
+        cursor = await db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='signing_nonces'"
+        )
+        assert await cursor.fetchone() is None
+
+    await migrate_db(str(db_path))
+
+    # After migration it MUST exist
+    async with aiosqlite.connect(str(db_path)) as db:
+        cursor = await db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='signing_nonces'"
+        )
+        assert await cursor.fetchone() is not None

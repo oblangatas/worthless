@@ -88,6 +88,13 @@ CREATE TABLE IF NOT EXISTS enrollments (
     UNIQUE(key_alias, var_name, env_path)
 );
 
+CREATE TABLE IF NOT EXISTS signing_nonces (
+    alias      TEXT PRIMARY KEY,
+    nonce_hex  TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_spend_log_alias ON spend_log (key_alias);
 CREATE INDEX IF NOT EXISTS idx_spend_log_alias_created ON spend_log (key_alias, created_at);
 CREATE INDEX IF NOT EXISTS idx_enrollments_alias ON enrollments (key_alias);
@@ -95,6 +102,7 @@ CREATE INDEX IF NOT EXISTS idx_enrollments_decoy_hash
     ON enrollments (decoy_hash) WHERE decoy_hash IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_enrollments_null_path
     ON enrollments (key_alias, var_name) WHERE env_path IS NULL;
+CREATE INDEX IF NOT EXISTS idx_signing_nonces_expires ON signing_nonces (expires_at);
 """
 
 
@@ -210,11 +218,39 @@ async def _migrate_decoy_hash_column(db: aiosqlite.Connection) -> None:
             raise
 
 
+async def _migrate_signing_nonces_table(db: aiosqlite.Connection) -> None:
+    """worthless-1pua: add signing_nonces table for shard-A HMAC envelope nonces.
+
+    One row per alias — stores the currently valid nonce (written at lock time).
+    Proxy ingress checks this after HMAC passes to catch post-restart replay.
+    """
+    cursor = await db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='signing_nonces'"
+    )
+    if await cursor.fetchone() is not None:
+        return  # already migrated
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS signing_nonces (
+            alias      TEXT PRIMARY KEY,
+            nonce_hex  TEXT NOT NULL,
+            expires_at INTEGER NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_signing_nonces_expires ON signing_nonces (expires_at)"
+    )
+    await db.commit()
+
+
 async def migrate_db(db_path: str) -> None:
     """Apply forward-only migrations for existing databases."""
     async with aiosqlite.connect(db_path) as db:
         await _prune_old_spend_log(db)
         await _migrate_decoy_hash_column(db)
+        await _migrate_signing_nonces_table(db)
 
         cursor = await db.execute("PRAGMA table_info(shards)")
         shard_columns = {row[1] for row in await cursor.fetchall()}

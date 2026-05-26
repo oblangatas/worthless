@@ -706,3 +706,76 @@ class ShardRepository:
                 "SELECT decoy_hash FROM enrollments WHERE decoy_hash IS NOT NULL"
             )
             return {row[0] for row in await cursor.fetchall()}
+
+    # ------------------------------------------------------------------
+    # Shard-A signing nonces (worthless-1pua)
+    # ------------------------------------------------------------------
+
+    async def store_signing_nonce(
+        self,
+        alias: str,
+        nonce: bytes,
+        expires_at: int,
+    ) -> None:
+        """Persist the shard-A signing nonce for *alias*.
+
+        One row per alias (PRIMARY KEY). Calling this again for the same
+        alias revokes the previous nonce — the old signed envelope becomes
+        immediately invalid even if its HMAC is still correct.
+
+        Args:
+            alias:      Enrollment alias (must exist in shards table).
+            nonce:      16-byte random nonce from sign_shard_a().
+            expires_at: Unix timestamp of envelope expiry (from sign_shard_a()).
+        """
+        async with self._connect() as db:
+            await db.execute(
+                """
+                INSERT INTO signing_nonces (alias, nonce_hex, expires_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(alias) DO UPDATE SET
+                    nonce_hex  = excluded.nonce_hex,
+                    expires_at = excluded.expires_at,
+                    created_at = datetime('now')
+                """,
+                (alias, nonce.hex(), expires_at),
+            )
+            await db.commit()
+
+    async def is_valid_signing_nonce(self, alias: str, nonce: bytes) -> bool:
+        """Return True iff *alias* has a stored nonce that matches *nonce* and is not expired.
+
+        Called after HMAC passes — confirms that the nonce has not been revoked
+        (by a re-lock) and survives server restarts (SQLite persistence).
+
+        Args:
+            alias: Enrollment alias from the URL path.
+            nonce: 16-byte nonce extracted from the verified envelope.
+
+        Returns:
+            True if (alias, nonce) is in the table and expires_at > now.
+        """
+        import time
+
+        async with self._connect() as db:
+            cursor = await db.execute(
+                "SELECT 1 FROM signing_nonces WHERE alias = ? AND nonce_hex = ? AND expires_at > ?",
+                (alias, nonce.hex(), int(time.time())),
+            )
+            return await cursor.fetchone() is not None
+
+    async def prune_expired_signing_nonces(self) -> int:
+        """Delete signing_nonces rows where expires_at <= now.
+
+        Intended to be called from a background task at proxy startup and
+        periodically thereafter.  Returns the number of rows deleted.
+        """
+        import time
+
+        async with self._connect() as db:
+            cursor = await db.execute(
+                "DELETE FROM signing_nonces WHERE expires_at <= ?",
+                (int(time.time()),),
+            )
+            await db.commit()
+            return cursor.rowcount or 0
