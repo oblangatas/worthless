@@ -22,8 +22,15 @@ enforces spend caps **before** the key reconstructs. Budget blown = key never
 forms = request never reaches the provider.
 
 Three architectural invariants protect this claim. All three are CI-tested and
-would break the build if violated. The Python PoC has known memory-safety
-limitations — documented below with a concrete Rust hardening path.
+would break the build if violated.
+
+In the blessed Docker deployment, key reconstruction runs in a **separate sidecar
+process under its own Unix user** — the proxy process cannot read the Fernet key
+or the reconstructed key, even if an attacker gains code execution inside it.
+Bare-metal single-process installs do not have this boundary yet; see
+[Process isolation](#process-isolation-the-crypto-sidecar-docker). The Python PoC
+has known memory-safety limitations — documented below with a concrete Rust
+hardening path.
 
 **This is not a compliance certification.** Worthless has not been audited or
 certified under SOC 2, FIPS, ISO 27001, or any other framework.
@@ -159,6 +166,55 @@ zeros shard material.
 See [Known limitations](#known-limitations-python-poc) for what `secure_key`
 does NOT cover in the Python PoC.
 
+## Process isolation: the crypto sidecar (Docker)
+
+*Shipped in [WOR-306](https://linear.app/plumbusai/issue/WOR-306). Applies to the
+Docker deployment — the blessed topology for v1.1. Bare-metal `pip` installs run
+single-process and do not have this boundary yet.*
+
+In the Docker image, the proxy and the crypto code run as **two different Unix
+users in the same container**:
+
+| Process                       | User                          | Holds                          |
+| ----------------------------- | ----------------------------- | ------------------------------ |
+| Proxy (FastAPI, HTTP ingress) | `worthless-proxy` (uid 10001) | nothing secret                 |
+| Crypto sidecar                | `worthless-crypto` (uid 10002)| the Fernet key + reconstruction|
+
+The Fernet key file and the reconstruction code live entirely inside the sidecar.
+The proxy never holds the Fernet key, never sees Shard B plaintext, and never sees
+the reconstructed key. To do a key operation, the proxy sends a request to the
+sidecar over a local Unix-domain socket; the sidecar does the crypto.
+
+**What this buys you.** Code execution in the proxy process — the most exposed
+component — no longer reaches key material. The attacker lands on the wrong side
+of a kernel-enforced user boundary:
+
+```bash
+# The proxy user cannot read the key the sidecar owns:
+$ docker exec --user worthless-proxy <ctr> cat /secrets/fernet.key
+cat: /secrets/fernet.key: Permission denied
+```
+
+**How the boundary is enforced.**
+
+- **Peer-uid authentication.** The sidecar reads the connecting process's uid from
+  the kernel (`SO_PEERCRED` on Linux, `getpeereid()` on macOS) and rejects any peer
+  that is not the authorized proxy uid. The check runs only on `AF_UNIX` sockets — a
+  guard rejects every other socket family before the uid check, so a non-Unix socket
+  cannot be authorized as root.
+- **Filesystem ACLs.** The socket directory and the key file are owned by the crypto
+  user; the proxy user cannot traverse to or read them.
+- **Fail closed, never fall back.** If the sidecar is unreachable, the request
+  returns `503` (`WRTLS-114 SIDECAR_NOT_READY`). The proxy never falls back to
+  in-process reconstruction — no code path allows it.
+
+**What this does NOT defend against.** Root (or a container escape) inside the
+container can still read both users' memory and files — a compromised _host_ is an
+explicit non-goal (see [non-goals](#threat-model-non-goals)). The boundary protects
+against a compromised proxy _process_, not a compromised host. The crypto user is a
+software boundary, not a hardware enclave; v2.0's Rust/MPC sidecar is the hardening
+path.
+
 ## Atomic `.env` rewrite (WOR-276 v2)
 
 `worthless lock KEY1 KEY2 ...` must leave the user's `.env` either
@@ -236,7 +292,7 @@ Worthless does **not** protect against:
 3. **Side-channel timing attacks on the Python PoC.** HMAC verification uses `hmac.compare_digest` (SR-07), but other operations (XOR loop, allocation) are not constant-time.
 4. **Memory forensics on the proxy host.** CPython's GC may retain intermediate copies. See [Known limitations](#known-limitations-python-poc).
 5. **Supply chain attacks on Python dependencies.** `pip-audit` runs in CI; no full SBOM or reproducible builds yet.
-6. **Compromised proxy server.** An attacker with shell on the proxy host can read process memory, attach a debugger, or modify the app. The proxy is trusted infrastructure.
+6. **Compromised proxy _host_.** An attacker with a root shell (or a container escape) on the proxy host can read process memory, attach a debugger, or modify the app. The host is trusted infrastructure. Note: in Docker, a compromised proxy _process_ (the HTTP-facing component, running as an unprivileged uid) can no longer reach key material — that is what the [crypto sidecar](#process-isolation-the-crypto-sidecar-docker) buys. The non-goal is host/root compromise, not proxy-process compromise.
 7. **Nation-state adversaries with physical access.** Hardware, cold-boot, and electromagnetic side channels are out of scope.
 
 ## Known limitations (Python PoC)
@@ -274,15 +330,18 @@ guarantee.
 - **Risk.** Low — additive to GC non-determinism, not independent.
 - **Rust path.** `core::ptr::write_volatile` is guaranteed not to be elided.
 
-### In-process reconstruction
+### In-process reconstruction (bare-metal only)
 
-Reconstruction runs in the same Python process as the FastAPI proxy. No
-hardware or OS-level isolation between gate and reconstruction.
+**Resolved in Docker** by the crypto sidecar (see
+[Process isolation](#process-isolation-the-crypto-sidecar-docker)). This
+limitation now applies only to bare-metal single-process installs (`pip install`
+without the sidecar), where reconstruction still runs in the FastAPI process with
+no OS-level isolation between gate and reconstruction.
 
-- **Exploit shape.** A vulnerability in any FastAPI dependency could access the reconstruction function or read its memory, bypassing the gate.
-- **Prerequisite.** Code execution in the FastAPI process plus knowledge of the reconstruction code path.
-- **Risk.** Medium — architectural; cannot be fixed without process separation.
-- **Rust path.** Distroless container with its own memory space. Communication via Unix domain socket / gRPC. `seccomp` restricts syscalls to network + memory.
+- **Exploit shape.** On bare-metal, a vulnerability in any FastAPI dependency could access the reconstruction function or read its memory, bypassing the gate. In Docker, the proxy process runs as a different uid and cannot reach the key.
+- **Prerequisite.** Code execution in the FastAPI process (bare-metal); code execution _plus_ root or container-escape (Docker).
+- **Risk.** Low in Docker (process-isolated); Medium on bare-metal.
+- **Path.** Docker: shipped (two-uid sidecar, WOR-306). v2.0: Rust distroless sidecar with `seccomp` syscall restriction for both topologies.
 
 ### `api_key.decode()` creates an immutable `str` copy
 
@@ -382,7 +441,7 @@ addresses. Upstream error messages are sanitized via `_sanitize_upstream_error`
 | GC retains intermediate key copies             | Medium   | Primary buffer zeroed; intermediates at GC mercy |
 | `api_key.decode()` creates immutable str copy  | Medium   | Gap — `str` cannot be zeroed in Python   |
 | Key pages swappable to disk                    | Low      | Planned (Rust `mlock`)                   |
-| In-process reconstruction shares memory        | Medium   | Planned (Rust distroless container)      |
+| In-process reconstruction shares memory        | Low (Docker) / Med (bare-metal) | **Shipped** for Docker (two-uid sidecar, WOR-306); bare-metal pending v2.0 Rust sidecar |
 | No bulk key rotation                           | Medium   | Planned (V2)                             |
 | No protocol versioning for shard schema        | Low      | Gap — [WOR-257](https://linear.app/plumbusai/issue/WOR-257) |
 | Fernet key on proxy host                       | Medium   | Accepted (non-goal: compromised proxy)   |
@@ -399,6 +458,7 @@ must make source available.
 
 | Date       | Change                                                                 |
 | ---------- | ---------------------------------------------------------------------- |
+| 2026-05-26 | Documented the crypto sidecar (WOR-306): in Docker, key reconstruction runs in a separate Unix user (`worthless-crypto`) the proxy process cannot read. Updated the in-process-reconstruction limitation, non-goal #6, and the residual-risk table to reflect the shipped boundary. |
 | 2026-04-24 | Added T-9 (in-flight transaction rollback) + T-10 (reconstruction-verify) for WOR-276 v2. Transactional `.env` rewrite replaces persistent cleartext backups. |
 | 2026-04-21 | Consolidated from SECURITY_POSTURE.md, docs/security-model.md, docs/risk-key-material-in-python-memory.md. Stripped confidence-tier prose, hard-cap rule, update-cadence, enterprise-tier marketing, mTLS orphan claim. Refs WOR-235, WOR-257, WOR-262. |
 | 2026-04-03 | Initial security posture document (SECURITY_POSTURE.md). Commit `4f79fe6`. |
