@@ -6,6 +6,8 @@
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-green)](LICENSE)
 [![Tests](https://github.com/shacharm2/worthless/actions/workflows/tests.yml/badge.svg)](https://github.com/shacharm2/worthless/actions/workflows/tests.yml)
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/shacharm2/worthless/badge)](https://securityscorecards.dev/projects/github.com/shacharm2/worthless)
+[![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=shacharm2_worthless&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=shacharm2_worthless)
+
 
 
 When your `.env` leaks, the keys inside are placeholders. The real key never sits in your repo, your shell history, or your laptop's memory.
@@ -73,6 +75,13 @@ uv run pytest
 ```
 
 Internal developer documentation lives in [`engineering/`](engineering/). Security invariants are in [`SECURITY.md`](SECURITY.md).
+
+### Test Hardening & Repo Health
+
+To maintain codebase health and prevent CI instability, the repository implements automated guards:
+* **Thread Leak Detector**: Any unit test that leaks an active background thread will fail immediately. This prevents leaked threads from contaminating subsequent tests or causing runner crashes under `pytest-xdist`.
+* **Flaky-Test Quarantine**: Flaky tests are dynamically quarantined to keep PRs blocking-free. If a test fails but passes on a rerun, it is automatically appended to `tests/quarantined_tests.txt`. Quarantined tests are excluded from the main blocking CI run and executed in a separate, non-blocking job.
+
 
 ## Contributing
 
