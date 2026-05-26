@@ -32,6 +32,7 @@ ENV_EXAMPLE = DEPLOY_DIR / "docker-compose.env.example"
 ENTRYPOINT = DEPLOY_DIR / "entrypoint.sh"
 RAILWAY_TOML = DEPLOY_DIR / "railway.toml"
 RENDER_YAML = DEPLOY_DIR / "render.yaml"
+RELEASE_SYNC_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release-sync-check.yml"
 
 
 # ------------------------------------------------------------------
@@ -67,6 +68,12 @@ def render_data() -> dict:
 def entrypoint_text() -> str:
     """Raw entrypoint.sh content."""
     return ENTRYPOINT.read_text()
+
+
+@pytest.fixture(scope="module")
+def release_sync_text() -> str:
+    """Raw release-sync-check.yml workflow content."""
+    return RELEASE_SYNC_WORKFLOW.read_text()
 
 
 # ------------------------------------------------------------------
@@ -641,4 +648,75 @@ class TestEdgeCaseAwareness:
         assert "healthcheckPath" in railway_data.get("deploy", {}), (
             "Railway config missing healthcheckPath! "
             "Without it, Railway cannot detect unhealthy containers."
+        )
+
+
+# ------------------------------------------------------------------
+# Release-sync-check workflow: trust-anchor invariants (worthless-xn4l)
+# ------------------------------------------------------------------
+
+
+class TestReleaseSyncTrustAnchor:
+    """The daily release-sync monitor must anchor 'what shipped' to signed
+    git tags, NOT to GitHub Release objects.
+
+    Git `v*` tags are GPG-signed and deletion/re-point-locked by the
+    `v-tags-signed` ruleset. GitHub Release objects have no such protection
+    (anyone with write access can create/edit/delete one without a signed
+    tag). Deriving the monitor's source of truth from a mutable, ungated
+    Release object lets a forged Release define what the monitor then
+    'verifies' against. These tests pin the fix (worthless-xn4l) so it
+    cannot silently rot back to `gh release view`.
+    """
+
+    def test_no_gh_release_view(self, release_sync_text: str):
+        """The monitor must not derive any trust signal from Release objects.
+
+        `gh release view` reads the latest/ named GitHub Release object — a
+        spoofable, ruleset-ungated source. Both the version chain (A1) and
+        the deploy-lag date (A5) previously leaned on it, which caused a
+        false drift alarm and a false stale-deploy alarm.
+        """
+        assert "gh release view" not in release_sync_text, (
+            "release-sync-check.yml uses `gh release view` — it must derive "
+            "the latest shipped version and tag date from signed git tags, "
+            "not from mutable GitHub Release objects (worthless-xn4l)."
+        )
+
+    def test_latest_tag_from_signed_git_tags(self, release_sync_text: str):
+        """Latest version comes from git tags, filtered to the signed `v*`
+        pattern that the `v-tags-signed` ruleset gates.
+
+        The `--list 'v[0-9]*'` filter is both the fix and the security
+        boundary: only ruleset-protected `v*` tags can define 'latest', so a
+        stray non-`v*` tag cannot skew the version sort.
+        """
+        assert re.search(
+            r"git tag --sort=-version:refname --list 'v\[0-9\]\*'",
+            release_sync_text,
+        ), (
+            "Latest tag must be resolved via "
+            "`git tag --sort=-version:refname --list 'v[0-9]*'` — signed, "
+            "ruleset-gated tags only (worthless-xn4l)."
+        )
+        # And refined to clean release tags only, so a prerelease (v0.3.7rc1)
+        # cut before its release cannot be mistaken for "latest shipped".
+        assert r"^v[0-9]+\.[0-9]+\.[0-9]+$" in release_sync_text, (
+            "Latest tag must be filtered to clean vMAJOR.MINOR.PATCH release "
+            "tags (grep '^v[0-9]+\\.[0-9]+\\.[0-9]+$'), excluding rc/prerelease "
+            "tags that would skew the version sort (worthless-xn4l)."
+        )
+
+    def test_tag_date_from_git_not_release(self, release_sync_text: str):
+        """A5's deploy-lag date must come from the git tag's creation time,
+        not a Release object's publishedAt.
+
+        A hand-created Release stamps publishedAt=now, which faked a stale
+        deploy. `for-each-ref creatordate` reads the annotated tag's true
+        creation time.
+        """
+        assert "creatordate" in release_sync_text, (
+            "A5 must derive the tag date from the git tag "
+            "(`git for-each-ref ... creatordate`), not a Release object "
+            "(worthless-xn4l)."
         )

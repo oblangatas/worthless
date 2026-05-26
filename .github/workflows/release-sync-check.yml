@@ -51,8 +51,24 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # Latest GH `v*` release tag — authoritative source for "what's shipped".
-          LATEST_TAG=$(gh release view --json tagName -q .tagName)
+          # Latest signed `v*` git tag — the authoritative, ruleset-gated
+          # source for "what's shipped". `v*` tags are GPG-signed and
+          # deletion/re-point-locked by the `v-tags-signed` ruleset; GitHub
+          # Release objects are NOT (anyone with write access can create one
+          # without a signed tag), so this monitor never derives trust from
+          # them. Two filters: `--list 'v[0-9]*'` is the security boundary
+          # (only ruleset-gated `v*` tags qualify); the `^v[0-9]+\.[0-9]+\.[0-9]+$`
+          # grep keeps ONLY clean release tags (vMAJOR.MINOR.PATCH), excluding
+          # prereleases (v0.3.0rc1), pre-release-dashed (v0.3.1-rc1) and junk
+          # (v0.0.0-test) — otherwise a `v0.3.7rc1` cut before `v0.3.7` would
+          # sort above the last real release and fake a drift alarm. `|| true`
+          # absorbs grep no-match / head SIGPIPE under pipefail; the empty
+          # check below then reports it clearly.
+          LATEST_TAG=$(git tag --sort=-version:refname --list 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)
+          if [ -z "$LATEST_TAG" ]; then
+            echo "::error title=No release tag::No clean 'vMAJOR.MINOR.PATCH' git tag found (shallow checkout without tags, or pre-first-release). Cannot resolve the shipped version."
+            exit 1
+          fi
           LATEST_VERSION="${LATEST_TAG#v}"
 
           # PyPI's view of "what's installable today".
@@ -203,12 +219,17 @@ jobs:
           set -euo pipefail
           # WOR-449 design: multiple install commands per audience is intentional.
           # We assert ≥1 of the documented forms exists, NOT a specific one.
+          #
+          # PRE-LAUNCH (worthless-xn4l): the public wless.io homepage is still
+          # served from `website-dev` and intentionally carries no install
+          # command until launch. This is a launch-day invariant, not current
+          # drift — so it is a WARNING for now. RE-ARM to a hard `exit 1` at
+          # public launch (tracked in a follow-up bead).
           BODY=$(curl -fsSL https://wless.io)
           if echo "$BODY" | grep -qE 'curl -sSL https://worthless\.sh|pipx install worthless|pip install worthless|docker run[^"]*worthless'; then
             echo "OK: wless.io advertises a documented install command"
           else
-            echo "::error title=wless.io marketing drift::wless.io html does not contain any of: curl -sSL worthless.sh, pipx install worthless, pip install worthless, docker run ... worthless"
-            exit 1
+            echo "::warning title=wless.io marketing (pre-launch)::wless.io shows no documented install command yet — expected pre-launch (homepage still on website-dev). Re-arm this to a hard failure at launch."
           fi
 
       # ===== Assertion 4: dynamic install in clean Docker ===================
@@ -281,18 +302,27 @@ jobs:
           if [ -z "$LAST_DEPLOY" ]; then
             echo "::warning title=Worker deploy-lag check incomplete::Could not query deploy-worker workflow runs. Skipping."
           else
-            TAG_DATE=$(gh release view "$LATEST_TAG" --json publishedAt --jq '.publishedAt')
+            # Tag creation time from the signed git tag itself (annotated-tag
+            # creatordate), NOT a Release object's publishedAt: a hand-created
+            # Release stamps publishedAt=now and faked a 144h stale-deploy
+            # alarm. creatordate is the true "when was this released" signal.
+            TAG_DATE=$(git for-each-ref --format='%(creatordate:iso-strict)' "refs/tags/${LATEST_TAG}")
             TAG_EPOCH=$(date -d "$TAG_DATE" +%s)
             DEPLOY_EPOCH=$(date -d "$LAST_DEPLOY" +%s)
-            # If most recent successful deploy is OLDER than the latest tag, that's drift.
+            # If the most recent successful deploy is OLDER than the latest
+            # tag, the Worker MAY be serving a stale script. But this is only
+            # a timestamp proxy — A2a (live byte-equality of worthless.sh vs
+            # install.sh@tag) is the authoritative deploy-freshness gate and
+            # already hard-fails above. So this is a WARNING, not a hard fail:
+            # it surfaces a stuck/never-ran deploy pipeline without blocking a
+            # release that A2a has already proven is correctly served.
             if [ "$DEPLOY_EPOCH" -lt "$TAG_EPOCH" ]; then
               LAG_HOURS=$(( (TAG_EPOCH - DEPLOY_EPOCH) / 3600 ))
               if [ "$LAG_HOURS" -gt "$STALE_HOURS" ]; then
-                echo "::error title=Worker deploy lag::tag ${LATEST_TAG} published $TAG_DATE, last successful Worker deploy $LAST_DEPLOY (${LAG_HOURS}h stale, threshold ${STALE_HOURS}h)"
-                exit 1
+                echo "::warning title=Worker deploy lag::tag ${LATEST_TAG} created $TAG_DATE, last successful Worker deploy $LAST_DEPLOY (${LAG_HOURS}h older; A2a is the authoritative gate)"
               fi
             fi
-            echo "OK: Worker last deploy $LAST_DEPLOY ≥ tag publish $TAG_DATE"
+            echo "OK: Worker last deploy $LAST_DEPLOY vs tag created $TAG_DATE"
           fi
 
       # ===== Assertion 6: stale-domain regression guard =====================
