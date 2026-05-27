@@ -27,9 +27,16 @@ jobs:
           persist-credentials: false
       - name: Set up Snyk CLI
         uses: snyk/actions/setup@806182742461562b67788a64410098c9d9b96adb
-      # Uploads the project snapshot to Snyk.io so the README badge has data
-      # to render. Non-fatal — badge should show current state even if a new
-      # snapshot upload fails transiently.
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      # Snyk's Python scanner can't read uv.lock, so it would otherwise resolve
+      # its own tree from pyproject.toml and report versions we don't ship.
+      # Export the locked runtime deps to a format Snyk parses natively.
+      - name: Export locked runtime deps for Snyk
+        run: uv export --no-dev --no-hashes --format requirements-txt -o requirements.txt
+      # Uploads the project snapshot to Snyk.io so the dashboard reflects our
+      # actual locked tree. Non-fatal — a transient upload failure must not
+      # fail the build.
       - name: Snyk Open Source monitor
-        run: snyk monitor --all-projects
+        run: snyk monitor --file=requirements.txt --package-manager=pip
         continue-on-error: true
