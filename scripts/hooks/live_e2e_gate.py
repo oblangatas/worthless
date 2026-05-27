@@ -29,7 +29,9 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
 import time
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -119,7 +121,9 @@ def read_evidence(root: Path) -> dict | None:
         return None
 
 
-def write_evidence(root: Path, result: str, duration_s: float) -> Path:
+def write_evidence(
+    root: Path, result: str, duration_s: float, counts: dict[str, int] | None = None
+) -> Path:
     path = root / EVIDENCE_RELPATH
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -130,9 +134,33 @@ def write_evidence(root: Path, result: str, duration_s: float) -> Path:
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "duration_seconds": round(duration_s, 2),
         "command": "pytest -m live",
+        "counts": counts or {},
     }
     path.write_text(json.dumps(payload, indent=2) + "\n")
     return path
+
+
+def _parse_junit(report: Path) -> dict[str, int]:
+    """Return {passed, skipped, failed, total} from a pytest JUnit XML report.
+
+    Lets a genuine live PASS be told apart from an all-skipped run: pytest exits
+    0 when every test is SKIPPED (e.g. no API key present), which must NOT count
+    as proof — otherwise the gate green-lights code no real round-trip touched.
+    """
+    counts = {"passed": 0, "skipped": 0, "failed": 0, "total": 0}
+    try:
+        root_el = ET.parse(report).getroot()  # noqa: S314 — our own pytest output
+    except (OSError, ET.ParseError):
+        return counts
+    for suite in root_el.iter("testsuite"):
+        total = int(suite.get("tests", "0"))
+        skipped = int(suite.get("skipped", "0"))
+        failed = int(suite.get("failures", "0")) + int(suite.get("errors", "0"))
+        counts["total"] += total
+        counts["skipped"] += skipped
+        counts["failed"] += failed
+        counts["passed"] += total - skipped - failed
+    return counts
 
 
 def run_mode() -> int:
@@ -141,28 +169,51 @@ def run_mode() -> int:
         print("live-e2e: not inside a git repo", file=sys.stderr)
         return 1
     print("live-e2e: running real provider round-trip (pytest -m live)...", file=sys.stderr)
-    start = time.monotonic()
-    proc = subprocess.run(  # noqa: S603 — fixed argv, no shell
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "-x",
-            "-v",
-            "-s",
-            "-m",
-            "live",
-            "-o",
-            "addopts=--strict-markers --timeout=120",
-        ],
-        cwd=root,
-        check=False,
+    with tempfile.TemporaryDirectory() as tmp:
+        report = Path(tmp) / "live-junit.xml"
+        start = time.monotonic()
+        proc = subprocess.run(  # noqa: S603 — fixed argv, no shell
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "-x",
+                "-v",
+                "-s",
+                "-m",
+                "live",
+                f"--junitxml={report}",
+                "-o",
+                "addopts=--strict-markers --timeout=120",
+            ],
+            cwd=root,
+            check=False,
+        )
+        elapsed = time.monotonic() - start
+        counts = _parse_junit(report)
+    # A live PASS REQUIRES at least one real round-trip to have actually run.
+    # pytest exits 0 on an all-skipped run (no API key), so returncode alone
+    # would record a false PASS and let the gate accept untested code.
+    if proc.returncode == 0 and counts["failed"] == 0 and counts["passed"] >= 1:
+        result = "PASS"
+    elif counts["failed"] == 0 and counts["passed"] == 0:
+        result = "SKIPPED"
+    else:
+        result = "FAIL"
+    path = write_evidence(root, result, elapsed, counts)
+    print(
+        f"live-e2e: {result} "
+        f"({counts['passed']} passed, {counts['skipped']} skipped, {counts['failed']} failed) "
+        f"in {elapsed:.1f}s -> {path}",
+        file=sys.stderr,
     )
-    elapsed = time.monotonic() - start
-    result = "PASS" if proc.returncode == 0 else "FAIL"
-    path = write_evidence(root, result, elapsed)
-    print(f"live-e2e: {result} in {elapsed:.1f}s -> {path}", file=sys.stderr)
-    return proc.returncode
+    if result == "SKIPPED":
+        print(
+            "live-e2e: NO live tests ran — set your provider API key(s) and re-run. "
+            "This does NOT satisfy the push gate.",
+            file=sys.stderr,
+        )
+    return 0 if result == "PASS" else 1
 
 
 def _deny_reason(risky: list[str], evidence: dict | None) -> str:
