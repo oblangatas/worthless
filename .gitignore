@@ -44,6 +44,12 @@ CLAUDE.md
 AGENTS.md
 TESTING.md
 
+# Internal security docs — symlinked from private worthless-cloud (WOR-593).
+# Public repo: these enumerate threat models / attack surface, so they live
+# private and are symlinked back in via worthless-cloud/config/worthless/link.sh.
+/security-audit
+/engineering/modules.md
+
 # Project management (local-only)
 ccpm/
 .claude/
