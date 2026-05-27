@@ -468,10 +468,20 @@ def detect_thread_leak(request):
     has_mismatch = any(t not in initial_threads for t in current_threads)
 
     if has_mismatch:
-        # Give exiting threads a polling window to clean up (up to 250ms under heavy load).
-        # This handles generic background threads spawned by libraries like aiosqlite ('Thread-N')
-        # which take a brief moment to join after a database connection is closed.
-        for _ in range(25):
+        # Give exiting threads a grace window to clean up. The ``gc.collect()``
+        # is load-bearing: it collects garbage cycles that hold a thread's owner
+        # (an asyncio loop, an un-shutdown ThreadPoolExecutor), letting the
+        # owner's finalizer join its workers — without it, GC-reclaimable owners
+        # surface as false-positive leaks.
+        #
+        # Bound the window by *wall-clock* time, not a fixed iteration count.
+        # Each ``gc.collect()`` can cost tens of ms under load/coverage, so the
+        # old ``range(25)`` loop drifted to ~0.8s: enough to add real teardown
+        # latency to every test and to race the leak self-test's 1s probe
+        # thread (the check landed at the thread's death edge → flaky misses).
+        # Capping wall-clock keeps the check at ~0.25s regardless of gc cost.
+        deadline = time.monotonic() + 0.25
+        while time.monotonic() < deadline:
             time.sleep(0.01)
             gc.collect()
             current_threads = threading.enumerate()
