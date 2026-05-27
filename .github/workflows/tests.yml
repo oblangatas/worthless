@@ -165,7 +165,7 @@ jobs:
           name: coverage-xml-py3.13
 
       - name: SonarCloud Scan
-        uses: SonarSource/sonarqube-scan-action@1a6d90e4f20bf8a06e9c490a6e00b8e7c10d3f23 # v5.3.1
+        uses: SonarSource/sonarqube-scan-action@1a6d90ebcb0e6a6b1d87e37ba693fe453195ae25 # v5.3.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
