@@ -360,8 +360,10 @@ def detect_thread_leak(request):
     )
 
     if has_mismatch:
-        # Give temporary/exiting threads a brief polling window to clean up (up to 50ms)
-        for _ in range(5):
+        # Give exiting threads a polling window to clean up (up to 250ms under heavy load).
+        # This handles generic background threads spawned by libraries like aiosqlite ('Thread-N')
+        # which take a brief moment to join after a database connection is closed.
+        for _ in range(25):
             time.sleep(0.01)
             gc.collect()
             current_threads = threading.enumerate()

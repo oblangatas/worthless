@@ -86,7 +86,7 @@ Internal developer documentation lives in [`engineering/`](engineering/). Securi
 
 To maintain codebase health and prevent CI instability, the repository implements automated guards:
 * **Thread Leak Detector**: Any unit test that leaks an active background thread will fail immediately. This prevents leaked threads from contaminating subsequent tests or causing runner crashes under `pytest-xdist`.
-* **Flaky-Test Quarantine**: Flaky tests are dynamically quarantined to keep PRs blocking-free. If a test fails but passes on a rerun, it is automatically appended to `tests/quarantined_tests.txt`. Quarantined tests are excluded from the main blocking CI run and executed in a separate, non-blocking job.
+* **Flaky-Test Quarantine**: Flaky tests are detected at runtime and log high-visibility warnings to ensure root causes are investigated instead of swept under the rug. Quarantining a test requires a conscious human commit to `tests/quarantined_tests.txt`. Quarantined tests are excluded from the main blocking CI run and executed in a separate, non-blocking job.
 
 
 ## Contributing
