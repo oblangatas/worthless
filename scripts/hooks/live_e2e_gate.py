@@ -196,7 +196,10 @@ def run_mode() -> int:
     # would record a false PASS and let the gate accept untested code.
     if proc.returncode == 0 and counts["failed"] == 0 and counts["passed"] >= 1:
         result = "PASS"
-    elif counts["failed"] == 0 and counts["passed"] == 0:
+    # returncode==0 matters here: a crashed or empty pytest run (exit != 0,
+    # e.g. collection error / no tests collected) is a real FAIL, not a
+    # harmless "no API key" skip — don't let it masquerade as SKIPPED.
+    elif proc.returncode == 0 and counts["failed"] == 0 and counts["passed"] == 0:
         result = "SKIPPED"
     else:
         result = "FAIL"
