@@ -201,7 +201,9 @@ cat: /secrets/fernet.key: Permission denied
   the kernel (`SO_PEERCRED` on Linux, `getpeereid()` on macOS) and rejects any peer
   that is not the authorized proxy uid. The check runs only on `AF_UNIX` sockets — a
   guard rejects every other socket family before the uid check, so a non-Unix socket
-  cannot be authorized as root.
+  cannot be authorized as root. (macOS is supported for local development; the
+  user-isolation guarantee above is delivered by the Docker deployment, which runs on
+  Linux — a macOS bare-metal install is single-process and does not have this boundary.)
 - **Filesystem ACLs.** The socket directory and the key file are owned by the crypto
   user; the proxy user cannot traverse to or read them.
 - **Fail closed, never fall back.** If the sidecar is unreachable, the request
