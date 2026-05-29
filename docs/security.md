@@ -204,8 +204,11 @@ cat: /secrets/fernet.key: Permission denied
   cannot be authorized as root. (macOS is supported for local development; the
   user-isolation guarantee above is delivered by the Docker deployment, which runs on
   Linux — a macOS bare-metal install is single-process and does not have this boundary.)
-- **Filesystem ACLs.** The socket directory and the key file are owned by the crypto
-  user; the proxy user cannot traverse to or read them.
+- **Filesystem permissions.** Access is gated by owner, group, and mode — not by
+  trusting the proxy. The Fernet key file is owned by the crypto user, mode `0400`, so
+  the proxy user cannot read it. The socket is created and owned by the crypto user; the
+  proxy connects only through the shared `worthless` group and the socket's mode, and
+  never owns key material.
 - **Fail closed, never fall back.** If the sidecar is unreachable, the request
   returns `503` (`WRTLS-114 SIDECAR_NOT_READY`). The proxy never falls back to
   in-process reconstruction — no code path allows it.
