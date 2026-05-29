@@ -1,16 +1,13 @@
 name: User-flow CI
 
+# The PR trigger is intentionally UNFILTERED so these checks always report —
+# a path-scoped *required* status check that never runs would block every PR
+# that doesn't touch these paths forever (worthless-kp4u). The Detect step in
+# each matrix leg no-ops the run on PRs that don't touch user-flow-relevant
+# paths. Pushes keep the path filter (only fire on relevant changes).
+
 on:
   pull_request:
-    paths:
-      - "tests/user_flows/**"
-      - "src/worthless/cli/**"
-      - "src/worthless/storage/**"
-      - "src/worthless/crypto/**"
-      - "pyproject.toml"
-      - "uv.lock"
-      - ".github/actions/setup-uv-python/**"
-      - ".github/workflows/user-flows.yml"
   push:
     branches:
       - "**"
@@ -27,6 +24,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -45,15 +43,55 @@ jobs:
           - macos-15
 
     steps:
+      - name: Detect user-flow-relevant changes
+        id: detect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Non-PR events (push, workflow_dispatch) reach here only on relevant
+          # paths or by explicit dispatch, so always run for them.
+          relevant=true
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            relevant=false
+            # Fail open: a transient `gh pr diff` error must not fail this
+            # required check and block unrelated PRs — run the suite instead.
+            if ! files="$(gh pr diff "${{ github.event.pull_request.number }}" \
+              --name-only --repo "${{ github.repository }}")"; then
+              echo "::warning::Could not read PR diff; running the user-flow suite (fail-open)."
+              relevant=true
+              files=""
+            fi
+            while IFS= read -r f; do
+              [ -z "$f" ] && continue
+              case "$f" in
+                tests/user_flows/*) relevant=true ;;
+                src/worthless/cli/*|src/worthless/storage/*|src/worthless/crypto/*) relevant=true ;;
+                pyproject.toml|uv.lock) relevant=true ;;
+                .github/actions/setup-uv-python/*) relevant=true ;;
+                .github/workflows/user-flows.yml) relevant=true ;;
+              esac
+            done <<< "$files"
+          fi
+          echo "relevant=$relevant" >> "$GITHUB_OUTPUT"
+          if [ "$relevant" = "true" ]; then
+            echo "User-flow-relevant paths changed — running the suite."
+          else
+            echo "No user-flow-relevant paths changed — passing without the run."
+          fi
+
       - name: Check out repository
+        if: steps.detect.outputs.relevant == 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
 
       - name: Set up uv + Python
+        if: steps.detect.outputs.relevant == 'true'
         uses: ./.github/actions/setup-uv-python
 
       - name: Run user-flow tests
+        if: steps.detect.outputs.relevant == 'true'
         env:
           UV_CACHE_DIR: /tmp/uv-cache
         shell: bash
@@ -64,7 +102,7 @@ jobs:
           uv run pytest tests/user_flows -m user_flow 2>&1 | tee user-flow-traces/pytest-${{ runner.os }}.log
 
       - name: Render terminal traces
-        if: always()
+        if: ${{ always() && steps.detect.outputs.relevant == 'true' }}
         env:
           UV_CACHE_DIR: /tmp/uv-cache
         shell: bash
@@ -74,7 +112,7 @@ jobs:
             --output user-flow-traces/TERMINAL_TRACES-${{ runner.os }}.md
 
       - name: Upload terminal traces
-        if: always()
+        if: ${{ always() && steps.detect.outputs.relevant == 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: user-flow-traces-${{ runner.os }}-${{ github.run_id }}
