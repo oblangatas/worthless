@@ -26,6 +26,11 @@ services:
     build:
       context: ../..
       dockerfile: tests/install_fixtures/${LOCK_E2E_DOCKERFILE:-Dockerfile.ubuntu-bare-lock-e2e}
+      args:
+        # PR-only: install.sh's baked pin (release version) isn't on PyPI yet, so
+        # CI sets WORTHLESS_VERSION to the latest published version. Empty on
+        # push/tag → the Dockerfile falls back to install.sh's baked pin.
+        WORTHLESS_VERSION: ${WORTHLESS_VERSION:-}
     environment:
       # Upstream redirection now lives in .env (OPENAI_BASE_URL) — written by
       # lock_e2e.py and stored per-enrollment by `worthless lock`. WORTHLESS_-

@@ -425,6 +425,18 @@ def _is_host_proxy_bind_collision(exc: HostProxyStartError) -> bool:
     return any(marker in exc.combined for marker in HOST_PROXY_BIND_COLLISION_MARKERS)
 
 
+def _published_version_run_args() -> list[str]:
+    """`-e WORTHLESS_VERSION=<v>` for `docker run`, only when CI set it (PRs).
+
+    On a release PR install.sh's baked pin is the version being shipped, which
+    isn't on PyPI yet — install would fail. CI sets WORTHLESS_VERSION to the
+    latest *published* version so the installer MECHANISM is exercised against a
+    real release. Empty on push/tag → the container uses install.sh's baked pin.
+    """
+    v = os.environ.get("WORTHLESS_VERSION")
+    return ["-e", f"WORTHLESS_VERSION={v}"] if v else []
+
+
 @pytest.mark.timeout(INSTALL_TIMEOUT)
 @pytest.mark.parametrize("fixture", INSTALL_MATRIX)
 def test_install_succeeds_on_distro(fixture: str) -> None:
@@ -464,7 +476,15 @@ def test_install_succeeds_on_distro(fixture: str) -> None:
         )
 
         run = subprocess.run(  # noqa: S603
-            ["docker", "run", "--rm", "--platform", BUILD_PLATFORM, image_tag],  # noqa: S607
+            [  # noqa: S607
+                "docker",
+                "run",
+                "--rm",
+                *_published_version_run_args(),
+                "--platform",
+                BUILD_PLATFORM,
+                image_tag,
+            ],
             capture_output=True,
             text=True,
             timeout=RUN_S,
@@ -526,6 +546,12 @@ def test_lock_lifecycle_end_to_end(distro: str, dockerfile_name: str) -> None:
         "DOCKER_BUILDKIT": "1",
         "COMPOSE_DOCKER_CLI_BUILD": "1",
     }
+    # PR-only: install.sh's baked pin (the release version) isn't on PyPI yet, so
+    # build the lock-e2e image against the latest published version via the
+    # WORTHLESS_VERSION build-arg (honored by the *-lock-e2e Dockerfiles). Empty
+    # on push/tag → the baked pin is used (the real release assertion).
+    if os.environ.get("WORTHLESS_VERSION"):
+        env["WORTHLESS_VERSION"] = os.environ["WORTHLESS_VERSION"]
 
     up_stdout, up_stderr, up_rc = "", "", None
     logs_text = ""

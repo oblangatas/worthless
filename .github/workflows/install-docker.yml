@@ -55,6 +55,20 @@ jobs:
       - name: Set up uv + Python (pytest harness only; not used inside container)
         uses: ./.github/actions/setup-uv-python
 
+      - name: PR-only — resolve the latest PUBLISHED version for the docker install tests
+        # The baked pin (release version) isn't on PyPI until the tag is pushed.
+        # On PRs the docker tests install the latest published version instead —
+        # the harness reads $WORTHLESS_VERSION and passes it into the containers
+        # (runtime -e for the matrix, build-arg for the lock-e2e images). On
+        # push/tag this is skipped → the baked pin is exercised (real release).
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          V=$(curl -fsSL https://pypi.org/pypi/worthless/json | python3 -c 'import json,sys; print(json.load(sys.stdin)["info"]["version"])')
+          echo "WORTHLESS_VERSION=$V" >> "$GITHUB_ENV"
+          echo "Docker install tests will target published worthless==$V (baked pin tested by the daily monitor + the release tag)."
+
       - name: Run docker-marked integration tests in parallel
         env:
           UV_CACHE_DIR: /tmp/uv-cache

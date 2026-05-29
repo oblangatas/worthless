@@ -24,10 +24,14 @@ COPY install.sh /work/install.sh
 RUN chmod +x /work/install.sh
 
 ENV UV_PYTHON_PREFERENCE=only-managed
+# PR-only override: CI passes WORTHLESS_VERSION=<latest published> as a build-arg
+# so a release PR's not-yet-published baked pin doesn't fail the build. Empty on
+# push/tag → install.sh uses its baked WORTHLESS_VERSION_PIN.
+ARG WORTHLESS_VERSION=""
 # Cache uv's download dir between builds (PBS Python tarballs + wheels)
 # so matrix re-runs don't re-fetch ~50MB from astral.sh each time.
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=shared \
-    sh /work/install.sh
+    WORTHLESS_VERSION="${WORTHLESS_VERSION}" sh /work/install.sh
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 \
