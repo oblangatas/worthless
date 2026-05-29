@@ -65,7 +65,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          V=$(curl -fsSL https://pypi.org/pypi/worthless/json | python3 -c 'import json,sys; print(json.load(sys.stdin)["info"]["version"])')
+          V=$(curl -fsSL --retry 3 --retry-delay 2 https://pypi.org/pypi/worthless/json | python3 -c 'import json,sys; print(json.load(sys.stdin)["info"]["version"])')
           echo "WORTHLESS_VERSION=$V" >> "$GITHUB_ENV"
           echo "Docker install tests will target published worthless==$V (baked pin tested by the daily monitor + the release tag)."
 
