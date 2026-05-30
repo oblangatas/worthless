@@ -81,6 +81,7 @@ Then CONFIRM Y/N (non-TTY exits). Then push. On any local-verify failure: delete
 |---|---|
 | 4.1 | `gh run watch publish.yml deploy-worker.yml` — if `verify-tag` job fails → print exact `scripts/release-recover.sh <v>` command + exit 2 |
 | 4.2 | `pip index versions worthless` polled with max-attempts + exponential backoff (R-17) until `<version>` appears |
+| 4.2b | **`gh attestation verify <wheel> --owner shacharm2 --repo worthless`** against the freshly-fetched wheel — Sigstore bundle MUST chain to GHA OIDC issuer + worthless repo + `v<version>` tag ref. Failure → exit non-zero (R-10). Works today via the `gh` CLI. |
 | 4.3 | Worker `X-Worthless-Script-Tag` header + served `install.sh` `WORTHLESS_VERSION_PIN` both match `<version>` |
 | 4.4 | `docker run --rm python:3.12-slim sh -c "pip install worthless==<v> && worthless --version"` succeeds with `<v>` |
 | 4.5 | `awk` extract CHANGELOG section → non-empty |
@@ -89,7 +90,7 @@ Then CONFIRM Y/N (non-TTY exits). Then push. On any local-verify failure: delete
 | 4.8 | Auto-open `chore/changelog-stamp-<v>` PR with the date replacement (the Phase 3 #1 pattern, now automatic) |
 | 4.9 | Emit Linear comment markdown to stdout — maintainer pastes (R-NEW: no MCP coupling in release.sh, keeps the script auditable and offline-capable) |
 
-**R-10 caveat:** Step 4.2 declares the version **"published (attestation unverified)"** until `pip`/`uv` support PEP 740 attestation verify in their CLIs. `release-doctor.sh` refuses to flip this dimension green.
+**R-10:** Step 4.2b calls `gh attestation verify` — cryptographic proof the wheel was built by our CI from the signed tag (works today). End-user `pip install` does NOT yet verify attestations at install time (PEP 740 enforcement in pip/uv is in progress) — user-facing wording is "verified at release-cut by maintainer; client-side enforcement when pip/uv ship it."
 
 ---
 
@@ -126,7 +127,7 @@ Compressed cross-reference:
 | **Idempotency / replay** | R-6 every phase classified; markers in `.release-state/<v>/` |
 | **Secret hygiene** | R-7 gpg-agent only; R-8 no rc-sourcing, no env export, no `bash -x`; R-13 stderr redactor; R-16 tag-message regex lint |
 | **Token scope** | R-9 exactly `repo` (or `repo, workflow`), reject broader, reject CI `GITHUB_TOKEN` |
-| **Live trust** | R-10 "published (attestation unverified)" until PEP 740 verify lands; R-17 bounded polling |
+| **Live trust** | R-10 `gh attestation verify` mandatory in step 4.2b (works today, chains Sigstore bundle to GHA OIDC + repo + tag ref); R-17 bounded polling |
 | **Negative space** | R-11 grep-based self-check (no force-push, hard-reset, workflow edits, `curl\|sh`, ...); R-12 no writes to trust-root paths; R-18 no `git config --global`, no `gpg --import` |
 | **Supply chain** | R-14 SHA256 self-pin in `SECURITY_RULES.md` SR-09; `--accept-script-change` requires both flag + env var |
 
@@ -182,5 +183,5 @@ This is **design-only**. Implementation requires the maintainer's explicit go on
 
 1. **The `Linear comment markdown to stdout`** (4.9) vs MCP coupling — is paste-acceptable, or should we wire `mcp__linear__save_comment`? Recommended: paste, keeps script offline-capable + auditable.
 2. **The `--allow-ruleset-disable` flag** (R-3) — opt-in or default-on? Recommended: opt-in. Forces deliberate keystrokes for the dangerous path.
-3. **PEP 740 attestation labeling** (R-10) — accept "published (attestation unverified)" wording for now, or block release until tooling exists? Recommended: accept, with TODO tracking.
+3. **PEP 740 attestation** (R-10) — RESOLVED 2026-05-30 fixup: `release.sh` calls `gh attestation verify` directly in step 4.2b (works today). User-facing release notes say "verified at release-cut; client-side enforcement when pip/uv ship PEP 740 support."
 4. **PR-1's scope** — is 10 preflight gates + scaffold the right first slice, or split smaller (e.g., 5 gates + scaffold first)? Recommended: full 10, since each gate is small and they share lib helpers.
