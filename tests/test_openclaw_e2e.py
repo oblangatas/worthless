@@ -642,13 +642,15 @@ class TestAnthropicSDKOpenClaw:
             base_url=f"http://127.0.0.1:{proxy_port}/{alias}",
             max_retries=0,
         )
-        with pytest.raises(anthropic.BadRequestError) as exc:
+        # Real Anthropic returns 404 not_found_error for an unknown model
+        # (confirmed via direct probe 2026-05-30). Mock mirrors that contract.
+        with pytest.raises(anthropic.NotFoundError) as exc:
             client.messages.create(
                 model="claude-does-not-exist-zzz",
                 max_tokens=1,
                 messages=[{"role": "user", "content": "hi"}],
             )
-        assert exc.value.status_code == 400
+        assert exc.value.status_code == 404
         msg = str(exc.value).lower()
         assert "traceback" not in msg
         assert "worthless" not in msg
