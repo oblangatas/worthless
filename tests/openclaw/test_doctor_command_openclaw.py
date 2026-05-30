@@ -405,9 +405,14 @@ class TestRecoveryNoteSchema:
     doesn't crash on the last entry.
     """
 
-    def test_all_findings_have_string_issue_field(self, tmp_path) -> None:
-        """Every entry in the findings list returned by the openclaw doctor check
-        must have ``issue`` as a str (possibly empty), never None.
+    def test_recovery_note_appended_after_real_findings_has_string_issue(self, tmp_path) -> None:
+        """recovery_note is the final entry in findings[] and must have ``"issue"``
+        as a str (possibly empty), never None.
+
+        Mocks one real skill issue so findings[] contains at least one entry before
+        the recovery_note.  With zero real findings the loop was trivially vacuous
+        — it ran on an empty list and passed even if recovery_note was never
+        appended or carried ``"issue": None``.
 
         Catches the bug where recovery_note was appended with ``"issue": None``
         while all other findings have ``"issue": str``.
@@ -422,6 +427,8 @@ class TestRecoveryNoteSchema:
 
         # run() imports _check_skill, _check_providers, is_orphan from the
         # parent doctor package at call-time, so patches must target that module.
+        # One real skill issue ensures findings[] is non-empty before recovery_note
+        # is appended — the test is not vacuous.
         with (
             patch(
                 "worthless.cli.commands.doctor.checks.openclaw._audit_gate_findings",
@@ -433,7 +440,7 @@ class TestRecoveryNoteSchema:
             ),
             patch(
                 "worthless.cli.commands.doctor._check_skill",
-                return_value=([], []),
+                return_value=(["skill not installed"], []),
             ),
             patch(
                 "worthless.cli.commands.doctor._check_providers",
@@ -446,8 +453,23 @@ class TestRecoveryNoteSchema:
         ):
             result = run(ctx)
 
-        # CheckResult is a TypedDict — access via subscript, not attribute
-        for i, finding in enumerate(result["findings"]):
+        findings = result["findings"]  # CheckResult is a TypedDict
+
+        # At minimum: the real skill issue + the recovery_note
+        assert len(findings) >= 2, (
+            f"Expected at least 2 findings (skill issue + recovery_note), got {findings}"
+        )
+
+        # The recovery_note is always the last entry — assert it has a str "issue"
+        last = findings[-1]
+        assert "issue" in last, f"last finding missing 'issue' key: {last}"
+        assert isinstance(last["issue"], str), (
+            f"last finding['issue'] must be str (recovery_note), "
+            f"got {type(last['issue'])!r}: {last}"
+        )
+
+        # Belt-and-suspenders: every entry in the list must have a str "issue"
+        for i, finding in enumerate(findings):
             assert "issue" in finding, f"finding[{i}] missing 'issue' key: {finding}"
             assert isinstance(finding["issue"], str), (
                 f"finding[{i}]['issue'] must be str, got {type(finding['issue'])!r}: {finding}"
