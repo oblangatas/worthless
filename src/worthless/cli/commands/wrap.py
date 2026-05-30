@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import socket
 import subprocess  # nosec B404
 import sys
@@ -49,6 +50,22 @@ from worthless.cli.sidecar_lifecycle import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Provider → env var name for *_BASE_URL injection. ``wrap`` uses this to
+# route the child through the local proxy without requiring direnv or a
+# pre-loaded .env.  Unknown protocols fall back to
+# ``{PROTO.upper().replace('-','_')}_BASE_URL`` (POSIX-safe).
+_PROVIDER_URL_VAR: dict[str, str] = {
+    "openai": "OPENAI_BASE_URL",
+    "anthropic": "ANTHROPIC_BASE_URL",
+    "openrouter": "OPENROUTER_BASE_URL",
+}
+
+# Allow-list for alias characters used in URL path construction.
+# Stored aliases originate from the local worthless DB (no remote input),
+# but a tampered DB could store arbitrary strings — validate before
+# interpolating into the child environment.
+_ALIAS_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 def _port_in_use(port: int, host: str = "127.0.0.1", timeout: float = 0.5) -> bool:
@@ -337,13 +354,14 @@ def register_wrap_commands(app: typer.Typer) -> None:
         # Only sets vars absent from the parent env — direnv users keep
         # their value. Restores the _build_child_env contract deleted in
         # 4f496c9.
-        _PROVIDER_URL_VAR: dict[str, str] = {
-            "openai": "OPENAI_BASE_URL",
-            "anthropic": "ANTHROPIC_BASE_URL",
-            "openrouter": "OPENROUTER_BASE_URL",
-        }
         for alias, protocol in aliases:
-            var = _PROVIDER_URL_VAR.get(protocol, f"{protocol.upper()}_BASE_URL")
+            if not _ALIAS_RE.match(alias):
+                logger.warning("wrap: skipping alias %r — contains unsafe characters", alias)
+                continue
+            var = _PROVIDER_URL_VAR.get(
+                protocol,
+                f"{protocol.upper().replace('-', '_')}_BASE_URL",
+            )
             if var not in child_env:
                 child_env[var] = f"http://127.0.0.1:{port}/{alias}/v1"
 
