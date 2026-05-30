@@ -66,7 +66,7 @@ _PROVIDER_URL_VAR: dict[str, str] = {
 # remote input), but a tampered DB could store arbitrary strings — validate
 # before interpolating into the child environment.
 _ALIAS_RE = re.compile(r"^[A-Za-z0-9_-]+$")
-_PROTO_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_PROTO_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 
 
 def _port_in_use(port: int, host: str = "127.0.0.1", timeout: float = 0.5) -> bool:

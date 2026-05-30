@@ -143,6 +143,21 @@ class TestWrapEnvInjection:
         assert "OPENAI_BASE_URL" not in child_env
         assert not any("evil" in v for v in child_env.values())
 
+    def test_skips_digit_prefix_protocol(
+        self, home_with_key, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Protocols starting with a digit (e.g. '0abc') produce POSIX-invalid
+        env var names like '0ABC_BASE_URL' that are silently dropped by shells
+        and libc. _PROTO_RE rejects them before they reach subprocess.Popen."""
+        monkeypatch.setattr(
+            "worthless.cli.commands.wrap._list_enrolled_aliases",
+            lambda _home: [("openai-a1b2c3d4", "0abc")],
+        )
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        child_env = TestWrapChildEnvContract._capture_child_env(home_with_key, monkeypatch)
+        assert "0ABC_BASE_URL" not in child_env
+        assert "OPENAI_BASE_URL" not in child_env
+
 
 class TestWrapChildEnvContract:
     """``wrap`` injects ``*_BASE_URL`` for enrolled providers, preserving
