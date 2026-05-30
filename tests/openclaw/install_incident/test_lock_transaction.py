@@ -686,6 +686,55 @@ def test_fix1_rollback_deletes_when_original_was_none(tmp_path):
     )
 
 
+# ---------------------------------------------------------------------------
+# Exit code 87 for CONFIG_UNREADABLE (infra block — never attempted)
+# ---------------------------------------------------------------------------
+
+
+def test_config_unreadable_produces_exit_87_not_73():
+    """_apply_openclaw must return 87 when apply_lock emits CONFIG_UNREADABLE.
+
+    CONFIG_UNREADABLE is the Docker UID-mismatch case: worthless cannot read
+    openclaw.json because it is owned by a different UID (daemon vs proxy
+    container). The integration was never attempted — this is an infra block,
+    not a partial failure.
+
+    Exit 73 = "tried, partial fail" (lock-core committed, OpenClaw failed mid-way).
+    Exit 87 = "infra blocked, never attempted" (gate fired before any write).
+
+    RED: fails on current code which returns True (bool) instead of 87 (int).
+    """
+    from worthless.cli.commands import lock as _lock_mod  # noqa: PLC0415
+    from worthless.openclaw.errors import OpenclawErrorCode  # noqa: PLC0415
+
+    fake_event = MagicMock()
+    fake_event.code = OpenclawErrorCode.CONFIG_UNREADABLE
+    fake_event.level = "error"
+    fake_event.detail = "chmod 000 uid-mismatch test"
+
+    fake_result = MagicMock()
+    fake_result.detected = True
+    fake_result.has_failure = True
+    fake_result.providers_skipped = []
+    fake_result.events = [fake_event]
+    fake_result.providers_set = []
+    fake_result.skill_installed = False
+
+    console = MagicMock()
+    home = MagicMock()
+
+    with (
+        patch.object(_lock_mod._openclaw_integration, "apply_lock", return_value=fake_result),
+        patch.object(_lock_mod, "_write_lock_sentinel"),
+    ):
+        exit_code = _lock_mod._apply_openclaw([], console, quiet=True, home=home)
+
+    assert exit_code == 87, (
+        f"CONFIG_UNREADABLE is infra-blocked (never attempted) → must return 87, "
+        f"got {exit_code!r}. 73 = tried/partial; 87 = infra blocked."
+    )
+
+
 def test_fix2_apply_lock_aborts_when_read_config_raises_oserror(openclaw_config, mock_state):
     """apply_lock must abort with CONFIG_UNREADABLE when read_config raises OSError.
 

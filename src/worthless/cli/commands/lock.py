@@ -49,7 +49,7 @@ from worthless.crypto.types import zero_buf
 from worthless.exceptions import ShardTamperedError
 from worthless.openclaw import audit as _oc_audit
 from worthless.openclaw import integration as _openclaw_integration
-from worthless.openclaw.errors import OpenclawIntegrationError
+from worthless.openclaw.errors import OpenclawErrorCode, OpenclawIntegrationError
 from worthless.storage.repository import ShardRepository, StoredShard
 
 logger = logging.getLogger(__name__)
@@ -565,21 +565,22 @@ def _apply_openclaw(
     console,  # noqa: ANN001 — Console type is opaque from this layer
     quiet: bool,
     home: WorthlessHome,
-) -> bool:
-    """OpenClaw integration call + sentinel write. Returns ``partial_failure``.
+) -> int:
+    """OpenClaw integration call + sentinel write. Returns exit code (0/73/87).
 
     Per L1 in ``engineering/research/openclaw-WOR-431-phase-2-spec.md``:
     failures here NEVER roll back lock-core. Per L2 (revised 2026-05-08
     by the verification gauntlet): when OpenClaw is **detected** AND the
     integration stage fails, the user is in a false-invariant state ("lock
     succeeded but my agent traffic isn't gated"). Caller (`_lock_keys`)
-    raises ``typer.Exit(73)`` AFTER lock-core's `.env`/DB writes are
-    fully committed — the binding contract is preserved, but the user
+    raises ``typer.Exit(openclaw_exit)`` AFTER lock-core's `.env`/DB writes
+    are fully committed — the binding contract is preserved, but the user
     learns about the partial failure unmissably.
 
     Returns:
-        True if detected+failed (caller should exit non-zero post-commit).
-        False if all succeeded OR OpenClaw was not detected on this host.
+        0  — succeeded or OpenClaw not detected on this host.
+        73 — detected + integration failed mid-way (tried, partial fail).
+        87 — infra blocked before any write (CONFIG_UNREADABLE / UID mismatch).
 
     Side effects:
         Writes ``$WORTHLESS_HOME/last-lock-status.json`` so ``worthless
@@ -611,17 +612,17 @@ def _apply_openclaw(
         # genuinely broken state — surface it loudly).
         logger.warning("openclaw apply_lock raised unexpectedly: %s", exc)
         _emit_openclaw_failure(console, quiet, home, len(planned), str(exc))
-        return True
+        return 73
     except Exception as exc:  # noqa: BLE001 — last-resort guard for L1
         logger.warning("openclaw apply_lock raised unexpectedly: %s", exc)
         _emit_openclaw_failure(console, quiet, home, len(planned), str(exc))
-        return True
+        return 73
 
     # ---- Classify the result ---------------------------------------------
     if not result.detected:
         # No OpenClaw on this host — sentinel reflects "absent", not failure.
         _write_lock_sentinel(home, status="ok", openclaw="absent", alias_count=0, events=())
-        return False
+        return 0
 
     # Trust-fix classification lives on OpenclawApplyResult.has_failure
     # (single-sourced — see integration.py docstring). Lock + unlock both
@@ -644,11 +645,16 @@ def _apply_openclaw(
             alias_count=len(result.providers_set),
             events=tuple(e.to_dict() for e in result.events),
         )
-        return False
+        return 0
 
     # Detected + failed: the trust-failure path. Print [FAIL] block, write
-    # sentinel as partial. Caller raises typer.Exit(73) after lock-core's
-    # .env/DB writes finish committing.
+    # sentinel as partial. Caller raises typer.Exit(openclaw_exit) after
+    # lock-core's .env/DB writes finish committing.
+    #
+    # Exit code classification:
+    #   87 — CONFIG_UNREADABLE: infra blocked before any write (UID mismatch,
+    #        chmod 000). The integration was never attempted.
+    #   73 — any other failure: integration tried and partially failed.
     if not quiet:
         console.print_failure("[FAIL] OpenClaw integration did NOT complete.")
         console.print_warning("   Your .env is locked, but OpenClaw is still calling the")
@@ -668,7 +674,11 @@ def _apply_openclaw(
         alias_count=len(result.providers_set),
         events=tuple(e.to_dict() for e in result.events),
     )
-    return True
+    # CONFIG_UNREADABLE = infra block (never attempted) → 87.
+    # All other failures = tried and partially failed → 73.
+    if any(e.code == OpenclawErrorCode.CONFIG_UNREADABLE for e in result.events):
+        return 87
+    return 73
 
 
 _CI_ENV_VARS = (
@@ -987,7 +997,7 @@ def _lock_keys(
     class _LockResult(NamedTuple):
         total: int
         fresh_count: int
-        partial_failure: bool
+        openclaw_exit: int  # 0 = ok, 73 = partial fail, 87 = infra blocked
 
     async def _lock_async() -> _LockResult:
         from dotenv import dotenv_values  # noqa: PLC0415 — local import keeps test surface tight
@@ -1006,7 +1016,7 @@ def _lock_keys(
                 env_str,
             )
             if not scanned:
-                return _LockResult(total=len(raw_scanned), fresh_count=0, partial_failure=False)
+                return _LockResult(total=len(raw_scanned), fresh_count=0, openclaw_exit=0)
 
             # Snapshot .env so _pass1 can pull *_BASE_URL values into the DB row.
             env_values = dict(dotenv_values(env_path))
@@ -1037,20 +1047,20 @@ def _lock_keys(
                     repo, candidates, env_str, token_budget_daily, planned, env_values
                 )
                 if not planned:
-                    return _LockResult(total=0, fresh_count=0, partial_failure=False)
+                    return _LockResult(total=0, fresh_count=0, openclaw_exit=0)
                 _batch_rewrite(env_path, planned, keys_only, existing_env_keys)
                 if _oc_gate is not None:
                     _openclaw_audit_postflight(_oc_gate)
                 # Phase 2.b: OpenClaw magic. Per L1 in
                 # engineering/research/openclaw-WOR-431-phase-2-spec.md, this
                 # NEVER rolls back lock-core success. Per L2 (revised 2026-05-08
-                # by the verification gauntlet): detected+failed returns
-                # partial_failure=True so the caller can raise typer.Exit(73)
+                # by the verification gauntlet): detected+failed returns non-zero
+                # openclaw_exit so the caller can raise typer.Exit(openclaw_exit)
                 # AFTER lock-core's .env/DB writes are fully committed.
-                partial_failure = _apply_openclaw(planned, console, quiet, home)
+                openclaw_exit = _apply_openclaw(planned, console, quiet, home)
                 fresh_count = sum(1 for p in planned if p.was_fresh_enroll)
                 return _LockResult(
-                    total=len(planned), fresh_count=fresh_count, partial_failure=partial_failure
+                    total=len(planned), fresh_count=fresh_count, openclaw_exit=openclaw_exit
                 )
             except Exception:
                 if planned:
@@ -1081,17 +1091,18 @@ def _lock_keys(
     # in a false-invariant state — .env is locked, but their agent traffic
     # is not gated. Surface this LOUDLY by exiting non-zero AFTER the
     # lock-core writes have committed (L1 binding contract preserved).
-    # Exit code 73 = EX_CANTCREAT (POSIX), distinguishable from 1.
+    # Exit 73 = tried, partial fail (EX_CANTCREAT, POSIX).
+    # Exit 87 = infra blocked before any attempt (CONFIG_UNREADABLE / UID mismatch).
     # The [FAIL] block is already printed by _apply_openclaw; this final
     # LOCK FAILED line disambiguates the mixed [FAIL]+[OK] output so the
     # user cannot mistake a partial failure for overall success (WOR-551).
-    if result.partial_failure:
+    if result.openclaw_exit:
         console.print_failure(
             "LOCK FAILED — .env key is split but OpenClaw integration did not complete.\n"
             "Your agent traffic is NOT gated through the Worthless proxy.\n"
             "Run `worthless doctor` to diagnose, `worthless unlock` to roll back."
         )
-        raise typer.Exit(code=73)
+        raise typer.Exit(code=result.openclaw_exit)
 
     return result.fresh_count + relock_count
 
