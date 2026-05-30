@@ -410,8 +410,15 @@ class TestLiveAttacks:
         resp = _post_anthropic(reconstructed)
 
         print(f"\n  reconstructed -> Anthropic: {resp.status_code}")
-        assert resp.status_code in (200, 429), (
-            f"Reconstructed key should be accepted, got {resp.status_code}: {resp.text}"
+        # A valid reconstructed key is "accepted" if Anthropic authenticated it
+        # and took the (fixed, valid) request: 200, 429/529 (throttled/overloaded),
+        # or 400 "credit balance too low" (billing). A bad key returns 401, and the
+        # body here is hard-coded valid, so a 400 can only be billing -- which still
+        # proves the key + wire format are good. Matches the convention already used
+        # by test_e2e_live.py's Anthropic round-trip and SDK tests.
+        assert resp.status_code in (200, 400, 429, 529), (
+            f"Reconstructed key should be accepted (200/400-billing/429/529), "
+            f"got {resp.status_code}: {resp.text}"
         )
         if resp.status_code == 200:
             content = resp.json()["content"][0]["text"]
