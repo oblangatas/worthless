@@ -323,6 +323,110 @@ class TestSourceScannerGuards:
         assert findings == []
         assert skipped == []
 
+    def test_past_deadline_records_timeout(self, tmp_path: Path, monkeypatch):
+        """A past deadline must short-circuit the source scanner before reading
+        the next candidate, recording a ``timeout`` skip — the lock-time hang
+        guard advertised by c5kc."""
+        import time as _time
+        from pathlib import Path as _P
+
+        from worthless.cli import scanner as scanner_mod
+        from worthless.cli.scanner import (
+            SkippedFile,
+            scan_source_for_hardcoded_provider_urls,
+        )
+
+        srcfile = tmp_path / "anything.py"
+        srcfile.write_text("# unused — deadline trips first\n")
+
+        def fake_walk(_root: _P):
+            yield srcfile
+
+        monkeypatch.setattr(scanner_mod, "_walk_source_files", fake_walk)
+        past = _time.monotonic() - 1.0
+
+        skipped: list[SkippedFile] = []
+        findings = scan_source_for_hardcoded_provider_urls(tmp_path, deadline=past, skipped=skipped)
+
+        assert findings == []
+        assert [s.reason for s in skipped] == ["timeout"]
+
+    def test_oversize_file_flagged_truncated(self, tmp_path: Path, monkeypatch):
+        """An oversize source file is read up to the cap, prefix scanned, and
+        flagged ``truncated`` — mirrors the same guarantee on .env scanning."""
+        from pathlib import Path as _P
+
+        from worthless.cli import scanner as scanner_mod
+        from worthless.cli.scanner import (
+            SkippedFile,
+            scan_source_for_hardcoded_provider_urls,
+        )
+
+        srcfile = tmp_path / "big.py"
+        srcfile.write_bytes(b"# nothing to find here\n" + b"x" * 4096)
+
+        def fake_walk(_root: _P):
+            yield srcfile
+
+        monkeypatch.setattr(scanner_mod, "_walk_source_files", fake_walk)
+
+        skipped: list[SkippedFile] = []
+        findings = scan_source_for_hardcoded_provider_urls(
+            tmp_path, max_file_bytes=256, skipped=skipped
+        )
+
+        assert findings == []
+        assert [(s.file, s.reason) for s in skipped] == [(str(srcfile), "truncated")]
+
+
+class TestCodeScannerOuterDeadline:
+    """The ``--code`` source scanner outer timeout-break: when the deadline
+    trips mid-walk, both inner and outer loops must exit cleanly and the
+    candidate that would have been scanned next is recorded as ``timeout``."""
+
+    def test_past_deadline_breaks_outer_root_loop(self, tmp_path: Path, monkeypatch):
+        import time as _time
+
+        from worthless.cli import code_scanner as cs_mod
+        from worthless.cli.scanner import SkippedFile
+
+        # One candidate so we can pin which file the timeout skip names.
+        # Use the real bundled registry — mocking ProviderEntry is brittle
+        # (its constructor signature is owned by the providers module).
+        srcfile = tmp_path / "anything.py"
+        srcfile.write_text("# unused — deadline trips first\n")
+
+        monkeypatch.setattr(cs_mod, "_candidate_files", lambda *a, **k: [srcfile])
+
+        skipped: list[SkippedFile] = []
+        findings = cs_mod.scan_for_hardcoded_provider_urls(
+            [tmp_path], deadline=_time.monotonic() - 1.0, skipped=skipped
+        )
+
+        assert findings == []
+        assert [s.reason for s in skipped] == ["timeout"]
+        assert skipped[0].file == str(srcfile)
+
+    def test_oversize_source_file_truncated_in_one_file(self, tmp_path: Path):
+        """``_scan_one_file`` truncated branch: file longer than the cap returns
+        no findings (key not in prefix) and records a ``truncated`` skip."""
+        from worthless.cli.code_scanner import _scan_one_file
+        from worthless.cli.scanner import SkippedFile
+
+        srcfile = tmp_path / "big.py"
+        srcfile.write_bytes(b"# header\n" + b"x" * 4096)
+
+        skipped: list[SkippedFile] = []
+        findings = _scan_one_file(
+            srcfile,
+            {"https://example.com": object()},
+            max_file_bytes=256,
+            skipped=skipped,
+        )
+
+        assert findings == []
+        assert [(s.file, s.reason) for s in skipped] == [(str(srcfile), "truncated")]
+
 
 class TestCodeScannerOneFileGuards:
     """Same fail-closed guards on ``code_scanner._scan_one_file`` (the
