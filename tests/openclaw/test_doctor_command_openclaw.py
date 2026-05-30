@@ -474,3 +474,50 @@ class TestRecoveryNoteSchema:
             assert isinstance(finding["issue"], str), (
                 f"finding[{i}]['issue'] must be str, got {type(finding['issue'])!r}: {finding}"
             )
+
+    def test_recovery_note_issue_is_nonempty(self, tmp_path) -> None:
+        """Fix 2 (WOR-516): recovery_note had 'issue': '' — renders blank in JSON consumers.
+
+        The real text was in a non-standard 'note' key no consumer reads.
+        This test fails on the old code (empty string is falsy) and passes
+        once 'issue' carries the actual recovery message.
+        """
+        from unittest.mock import MagicMock, patch  # noqa: PLC0415
+
+        from worthless.cli.commands.doctor.checks.openclaw import run  # noqa: PLC0415
+
+        ctx = MagicMock()
+        ctx.dry_run = False
+        ctx.fix = False
+
+        with (
+            patch(
+                "worthless.cli.commands.doctor.checks.openclaw._audit_gate_findings",
+                return_value=[],
+            ),
+            patch(
+                "worthless.cli.commands.doctor.checks.openclaw._oc_integration.detect",
+                return_value=_make_state(present=True, workspace_path=tmp_path),
+            ),
+            patch(
+                "worthless.cli.commands.doctor._check_skill",
+                return_value=([], []),
+            ),
+            patch(
+                "worthless.cli.commands.doctor._check_providers",
+                return_value=[],
+            ),
+            patch(
+                "worthless.cli.commands.doctor.is_orphan",
+                return_value=False,
+            ),
+        ):
+            result = run(ctx)
+
+        findings = result["findings"]
+        assert findings, "findings must be non-empty (recovery_note is always appended)"
+        last = findings[-1]
+        assert last.get("issue"), (
+            f"recovery_note 'issue' must be a non-empty string so consumers can display it; "
+            f"got: {last.get('issue')!r}"
+        )
