@@ -91,11 +91,14 @@ def _messages_body(model: str) -> dict:
 
 
 def _anthropic_bad_model_body(model: str) -> dict:
+    # Mirrors the real Anthropic API: an unknown model returns a 404
+    # not_found_error with message "model: <name>" (confirmed via direct
+    # probe 2026-05-30). Surfaced as drift by the WOR-228 live gate.
     return {
         "type": "error",
         "error": {
-            "type": "invalid_request_error",
-            "message": f"model: {model} is not a recognized model name.",
+            "type": "not_found_error",
+            "message": f"model: {model}",
         },
     }
 
@@ -304,7 +307,7 @@ async def messages(request: Request):
             status_code=500,
         )
     if _is_bad_model(model):
-        return JSONResponse(_anthropic_bad_model_body(model), status_code=400)
+        return JSONResponse(_anthropic_bad_model_body(model), status_code=404)
 
     stream = body.get("stream", False)
     if stream:

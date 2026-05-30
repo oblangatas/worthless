@@ -555,13 +555,16 @@ class TestAnthropicLiveSDK:
                 api_key=shard_a,
                 base_url=f"http://127.0.0.1:{port}/{alias}",
             )
-            with pytest.raises(anthropic.BadRequestError) as exc:
+            # Real Anthropic returns 404 not_found_error for an unknown model
+            # (confirmed via direct probe 2026-05-30); the hermetic mock mirrors
+            # this contract so both lanes agree with the real provider.
+            with pytest.raises(anthropic.NotFoundError) as exc:
                 client.messages.create(
                     model="claude-does-not-exist-zzz",
                     max_tokens=1,
                     messages=[{"role": "user", "content": "hi"}],
                 )
-            assert exc.value.status_code == 400
+            assert exc.value.status_code == 404
             msg = str(exc.value).lower()
             assert "traceback" not in msg
             assert "worthless" not in msg
