@@ -54,13 +54,21 @@ def _find_git_dir() -> Path | None:
 
 
 def _collect_fast_paths(explicit_paths: list[Path]) -> list[Path]:
-    """Fast mode: .env, .env.local, plus any explicit paths."""
+    """Fast mode: .env, .env.local, plus any explicit paths.
+
+    Deduplicates while preserving order — without this, a caller passing
+    ``.env`` explicitly while cwd also has ``.env`` scans the same file
+    twice (visible in c5kc's ``skipped`` list as duplicate entries; was
+    invisible noise before).
+    """
     paths: list[Path] = []
     for name in [".env", ".env.local"]:
         p = Path(name)
         if p.exists():
             paths.append(p)
-    paths.extend(explicit_paths)
+    for p in explicit_paths:
+        if p not in paths:
+            paths.append(p)
     return paths
 
 
