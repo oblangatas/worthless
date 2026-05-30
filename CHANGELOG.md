@@ -4,7 +4,7 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
-## [0.3.7] — TBD (stamped at release-cut)
+## [0.3.7] — 2026-05-30
 
 The "harden the whole front door" release. Everything merged since v0.3.6 ships at once: your API key now survives a proxy compromise (a crypto sidecar holds the key, not the proxy), OpenClaw runs fully containerised and `worthless lock` refuses to proceed when plaintext keys are present, and the entire install path — `worthless.sh`, the `?explain=1` audit, the PyPI publish, and the Worker deploy — is version-pinned and signed-tag-verified end to end. Plus a wave of `lock`/`doctor` fixes that tell you the truth instead of failing silently.
 
