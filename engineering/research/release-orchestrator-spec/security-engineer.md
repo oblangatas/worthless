@@ -1,0 +1,134 @@
+# Release Orchestrator — Security & Safety Spec
+
+**Bead:** worthless-5xzo
+**Scope:** `scripts/release.sh`, `scripts/release-recover.sh`, `scripts/release-doctor.sh`
+**Trust root:** `MAINTAINER_GPG_FINGERPRINT = $MAINTAINER_GPG_FINGERPRINT`
+**Anchor:** `.github/scripts/verify-tag.sh` is the unmovable production gate. This script exists to *feed it cleanly*, never to bypass it.
+
+---
+
+# 1. Tag-format ambiguity (the 0.3.7 wound)
+
+The maintainer's global `gpg.format=ssh` silently produces SSH-signed tags. `verify-tag.sh` correctly rejects them. The orchestrator MUST eliminate this class entirely.
+
+**Defense:** Never inherit ambient signing config. Every signing invocation is fully-qualified:
+
+```
+git -c gpg.format=openpgp \
+    -c user.signingkey=$MAINTAINER_GPG_FINGERPRINT \
+    -c tag.gpgSign=true \
+    tag -s "$TAG" -m "$MSG"
+```
+
+After signing, BEFORE push, run `git tag -v "$TAG" 2>&1` and parse for ALL of:
+- literal `gpg: Good signature`
+- the fingerprint `$MAINTAINER_GPG_FINGERPRINT` (no short-ID matching, ever)
+- absence of `Signature made` lines referencing `ssh-` or `x509`
+
+Any mismatch → abort, do not push, do not delete the tag locally (operator inspects).
+
+# 2. Ruleset-disable window (the most dangerous 90 seconds)
+
+When recovery requires disabling `v-tags-signed` (ruleset id `15719679`), the orchestrator MUST:
+
+- **Time-bound:** hard ceiling `RULESET_DISABLE_BUDGET_SEC=120`. Background watchdog with `( sleep 120 && re-enable && kill -TERM $$ ) &` whose PID is tracked and killed on clean exit.
+- **Trap coverage:** `trap re_enable_ruleset EXIT INT TERM HUP` — fires on normal exit, error, Ctrl-C, terminal close, SIGTERM.
+- **`kill -9` residual risk:** cannot be trapped. Mitigation = **separate, always-callable** `scripts/release-doctor.sh` that asserts `enforcement: active` on `v-tags-signed`, run unconditionally at end of `release.sh` AND available as a standalone post-incident check. Doctor exit-code-1 on inactive ruleset is the alarm.
+- **Pre-disable snapshot:** capture the current ruleset JSON to a tempfile, re-enable by PUT-ing the snapshot back (not a hard-coded payload), so accidental schema drift can't widen the rules.
+- **Audit:** every disable/enable logs an ISO-8601 timestamp + actor + reason to `.release-audit/YYYY-MM-DD.log` (local, gitignored).
+- **Refusal:** if disable is required, require explicit `--allow-ruleset-disable` flag. Default = refuse.
+
+# 3. Idempotency classification
+
+Every phase declares one of:
+
+| Class | Behavior | Examples |
+|---|---|---|
+| `idempotent` | Re-run produces same end state | version-bump check, doctor, `gh release view` |
+| `at-most-once` | Re-run is a no-op if marker exists | tag creation (refuses if tag exists with different SHA), GitHub release create |
+| `manual-resume-only` | Cannot auto-resume; operator runs `release-recover.sh` | partial PyPI upload, ruleset left disabled |
+
+Phase markers stored in `.release-state/<version>/<phase>.ok` (gitignored). `release-recover.sh` reads markers and resumes only `at-most-once` phases; `manual-resume-only` always prompts.
+
+# 4. Secret hygiene
+
+- **GPG passphrase:** NEVER `--passphrase`, NEVER `--passphrase-fd`, NEVER `--passphrase-file`. Rely on `gpg-agent` (cached interactively). Process listing leak is the threat.
+- **Never source `~/.zshrc`** or any shell rc — drags arbitrary env into a security-critical script.
+- **Never export** `GPG_PASSPHRASE`, `GPG_TTY`, `PINENTRY_USER_DATA`, or any `GH_TOKEN` derivative.
+- **Never log** `env | grep -i gpg`, `gpg --list-secret-keys`, or pinentry diagnostics.
+- Tag name + tag message are **public** by design — no secrets, no internal hostnames, no contributor PII permitted in tag message. Linter regex on tag message before sign.
+- **`set +x` enforced** at top of script and re-asserted before every signing block (defense against `bash -x` invocation).
+
+# 5. `gh` token scope minimization
+
+At script entry: `gh auth status --show-token` parsed; required scope = exactly `repo` (or `repo, workflow` if workflow dispatch needed). **Reject** tokens with `admin:org`, `delete_repo`, `admin:public_key`, or `gist`. Token broader than necessary = abort with remediation message. Also reject GITHUB_TOKEN from a CI context (this is a local maintainer script).
+
+# 6. Polling-driven trust (PyPI "live" assertion)
+
+`pip index versions worthless` returning the new version is **necessary but not sufficient** to declare "live". Threats: index propagation lag, mirror poisoning, name confusion.
+
+- MUST also verify the version's PEP 740 attestation chain back to the maintainer fingerprint when tooling supports it.
+- Until `pip` / `uv` ship attestation verify in CLI: declare **"published (attestation unverified)"** not **"live"**. Track as known gap in script header comment + `TODO(security): PEP-740-verify` annotation. Refuse to mark `release-doctor` green on this axis.
+- Polling MUST have a max-attempts ceiling and exponential backoff; never an unbounded loop.
+
+# 7. What this script must NEVER do (negative space)
+
+Hard prohibitions enforced by `scripts/release-self-check.sh` (grep-based pre-flight on the script itself):
+
+- No `git push --force`, no `git push -f`, no `--force-with-lease` against `main` or any `v*` tag
+- No `git reset --hard` against `main` or `origin/main`
+- No write to `.github/workflows/*`, `.github/scripts/verify-tag.sh`, `.github/rulesets/*`
+- No write to `~/.ssh/`, `~/.gnupg/`, `~/.config/gh/`, `~/.aws/`, `~/.zshrc`, `~/.bashrc`
+- No `curl … | sh`, no `curl … | bash`, no `wget … | sh`, no `eval "$(curl …)"`
+- No sourcing of CI output: never `eval "$(gh run view …)"` or `source <(gh …)`
+- No `git config --global` mutation
+- No `gpg --import` of any key — keyring is operator-managed
+- No deletion of `v*` tags from `origin` (only the operator, via documented recovery, ever does that)
+
+Self-check is run at script start; failure aborts before any side effect.
+
+# 8. Logging redaction
+
+All `stderr` and final-error output piped through a redactor:
+
+- Regex blacklist: `(?i)(gpg|passphrase|secret|token|api[_-]?key|bearer|authorization|ssh-(rsa|ed25519))`
+- Any base64 string >32 chars in a security context → `<REDACTED b64 len=N>`
+- Anything matching `sk-`, `ghp_`, `github_pat_`, `gho_`, `xoxb-` → `<REDACTED token>`
+- Fingerprint `739B5...814D` is public, **not** redacted (it's verification data, not a secret)
+- Redactor applies to crash traces too (`trap ERR` handler routes through it before `exit`)
+
+Threat: maintainer pastes a failure trace into a public GitHub issue.
+
+# 9. Self-update / supply chain
+
+- `--verify-self` flag: computes `sha256sum scripts/release.sh scripts/release-recover.sh scripts/release-doctor.sh` and compares against pinned digests in `SECURITY_RULES.md` under a new `SR-09: Release Orchestrator Integrity` section.
+- Default behavior on every invocation: verify-self runs first; SHA drift → refuse with message `script SHA changed since pin; re-pin via SECURITY_RULES.md and reviewer signoff, then re-run with --accept-script-change`.
+- `--accept-script-change` requires `WORTHLESS_RELEASE_ACCEPT_DRIFT=1` env *and* the flag — defense against accidental flag-paste.
+- The pin update itself is a normal PR requiring review (no self-modifying script ever updates its own pin).
+
+---
+
+# Rules table
+
+| ID | Rule | Threat defended |
+|---|---|---|
+| R-1 | All `git tag -s` calls use `-c gpg.format=openpgp -c user.signingkey=<FPR>`; never inherit ambient config | SSH/X.509 tag rejected by `verify-tag.sh` (the 0.3.7 incident) |
+| R-2 | `git tag -v` parsed for `Good signature` AND full fingerprint BEFORE push | Push of unverifiable tag, short-ID collision |
+| R-3 | Ruleset disable requires `--allow-ruleset-disable`, hard 120s budget, watchdog re-enable, EXIT/INT/TERM/HUP trap | Forgotten disabled ruleset → silent unsigned tag accepted |
+| R-4 | `release-doctor.sh` callable standalone, asserts `enforcement: active`; run after every `release.sh` and after `kill -9` recovery | Trap bypass via SIGKILL |
+| R-5 | Re-enable PUTs the pre-disable snapshot, not a hard-coded body | Schema drift widening permissions |
+| R-6 | Every phase classified `idempotent` / `at-most-once` / `manual-resume-only`; markers in `.release-state/<v>/` | Replay damage, partial-state confusion |
+| R-7 | GPG passphrase via `gpg-agent` only; never `--passphrase*`, never env var | Process-listing / shell-history leak |
+| R-8 | Never source `~/.*rc`; never export GPG/token env; `set +x` enforced before signing blocks | Ambient-config injection, `bash -x` trace leak |
+| R-9 | `gh` token scope = exactly `repo` (or `repo, workflow`); reject broader; reject CI `GITHUB_TOKEN` | Token-theft blast radius, wrong-context execution |
+| R-10 | PyPI "live" requires PEP 740 attestation verify when available; else label "published (attestation unverified)" | Mirror poisoning, propagation-lag false-positive |
+| R-11 | Pre-flight `release-self-check.sh` greps for forbidden patterns (force-push, hard-reset, workflow edits, `curl\|sh`, etc.); abort on hit | Script-mutation regression, supply-chain paste-in |
+| R-12 | No writes to `~/.ssh/`, `~/.gnupg/`, `~/.config/gh/`, `.github/workflows/*`, `.github/scripts/verify-tag.sh`, `.github/rulesets/*` | Trust-root tampering |
+| R-13 | All stderr + ERR trap piped through redactor (gpg/token/passphrase/b64>32/known token prefixes) | Pasted-trace secret leak |
+| R-14 | `--verify-self` SHA256 check against `SECURITY_RULES.md` SR-09 pins; drift requires `--accept-script-change` + env var | Tampered orchestrator |
+| R-15 | Audit log `.release-audit/YYYY-MM-DD.log` for every disable/enable + every tag sign + every push | Forensics, incident reconstruction |
+| R-16 | Tag message linted against secret regex before sign; tag name `v\d+\.\d+\.\d+(-\w+)?` only | Public leak via tag, malformed-tag confusion |
+| R-17 | Polling loops have max-attempts + exponential backoff; no unbounded waits | DoS-via-hang, masked failure |
+| R-18 | Never `git config --global`, never `gpg --import`, never modify operator keyring | Identity/key substitution |
+
+**End state:** the orchestrator is a *thin, auditable shim* around `verify-tag.sh` and `gh`. Trust still lives in the GPG fingerprint and the ruleset — the script just makes it harder for the maintainer to footgun on the way there.
