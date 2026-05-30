@@ -244,10 +244,13 @@ def openclaw_anthropic_alias(openclaw_stack):
     if register.returncode != 0:
         pytest.skip(f"anthropic register failed: {register.stderr}")
 
-    env_path = "/tmp/.anthropic.env"
+    env_path = "/tmp/worthless-anthropic-mock/.env"
     env_content = (
         f"ANTHROPIC_API_KEY={fake_key}\nANTHROPIC_BASE_URL=http://mock-upstream:9999/anthropic/v1\n"
     )
+    mkdir = docker_exec(proxy_container, ["mkdir", "-p", "/tmp/worthless-anthropic-mock"])
+    if mkdir.returncode != 0:
+        pytest.skip(f"failed to create anthropic env dir: {mkdir.stderr}")
     write = _write_env_to_container(proxy_container, env_content, dest=env_path)
     if write.returncode != 0:
         pytest.skip(f"failed to write anthropic .env: {write.stderr}")
