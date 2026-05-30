@@ -670,6 +670,7 @@ async def test_16x2_concurrent_shard_a_requests_all_succeed(
         assert list(statuses) == [200, 200, 200, 200, 200], f"Expected all 200s, got: {statuses}"
     finally:
         await app.state.httpx_client.aclose()
+        await db.close()
 
 
 # ------------------------------------------------------------------
