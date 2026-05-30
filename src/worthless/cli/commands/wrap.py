@@ -61,11 +61,12 @@ _PROVIDER_URL_VAR: dict[str, str] = {
     "openrouter": "OPENROUTER_BASE_URL",
 }
 
-# Allow-list for alias characters used in URL path construction.
-# Stored aliases originate from the local worthless DB (no remote input),
-# but a tampered DB could store arbitrary strings — validate before
-# interpolating into the child environment.
+# Allow-list for alias and protocol values used in URL path / env var
+# construction. Stored values originate from the local worthless DB (no
+# remote input), but a tampered DB could store arbitrary strings — validate
+# before interpolating into the child environment.
 _ALIAS_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_PROTO_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 def _port_in_use(port: int, host: str = "127.0.0.1", timeout: float = 0.5) -> bool:
@@ -357,6 +358,9 @@ def register_wrap_commands(app: typer.Typer) -> None:
         for alias, protocol in aliases:
             if not _ALIAS_RE.match(alias):
                 logger.warning("wrap: skipping alias %r — contains unsafe characters", alias)
+                continue
+            if not _PROTO_RE.match(protocol):
+                logger.warning("wrap: skipping protocol %r — contains unsafe characters", protocol)
                 continue
             var = _PROVIDER_URL_VAR.get(
                 protocol,

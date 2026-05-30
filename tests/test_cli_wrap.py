@@ -128,6 +128,21 @@ class TestWrapEnvInjection:
         assert child_env.get("OPENAI_BASE_URL") == "http://127.0.0.1:8787/openai-a1b2c3d4/v1"
         assert "../evil-alias" not in str(child_env.get("OPENAI_BASE_URL", ""))
 
+    def test_skips_protocol_with_unsafe_characters(
+        self, home_with_key, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Protocols containing characters outside [A-Za-z0-9_-] are skipped —
+        prevents invalid env var names from reaching subprocess.Popen."""
+        monkeypatch.setattr(
+            "worthless.cli.commands.wrap._list_enrolled_aliases",
+            lambda _home: [("openai-a1b2c3d4", "open ai;evil")],
+        )
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        child_env = TestWrapChildEnvContract._capture_child_env(home_with_key, monkeypatch)
+        # Unsafe protocol skipped — no BASE_URL injected at all
+        assert "OPENAI_BASE_URL" not in child_env
+        assert not any("evil" in v for v in child_env.values())
+
 
 class TestWrapChildEnvContract:
     """``wrap`` injects ``*_BASE_URL`` for enrolled providers, preserving
