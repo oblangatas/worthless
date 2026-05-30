@@ -33,13 +33,14 @@ import aiosqlite
 import httpx
 import pytest
 import respx
-from cryptography.fernet import Fernet
 
 from worthless.crypto.splitter import split_key_fp
 from worthless.proxy.app import _AUTH_BODY, create_app
 from worthless.proxy.config import ProxySettings
 from worthless.proxy.rules import RateLimitRule, RulesEngine, SpendCapRule
 from worthless.storage.repository import ShardRepository, StoredShard
+
+from tests._fakes import bind_real_fernet
 
 # ---------------------------------------------------------------------------
 # Shared constants
@@ -100,14 +101,9 @@ async def _make_proxy_app(settings: ProxySettings, repo: ShardRepository):
     # 16x2 path checks proxy_auth_token first.
     app.state.proxy_auth_token = None
     # WOR-549: bind the autouse FakeIPCSupervisor's ``open`` to a real Fernet
-    # decrypt using the test's key, so ``ipc.open(shard_b_enc, key_id=alias)``
+    # decrypt with the test's key, so the proxy's ``ipc.open(shard_b_enc, ...)``
     # returns honest plaintext rather than DEFAULT_FAKE_PLAINTEXT.
-    _test_fernet = Fernet(bytes(settings.fernet_key))
-
-    async def _real_open(ciphertext: bytes, *, key_id: str) -> bytearray:
-        return bytearray(_test_fernet.decrypt(ciphertext))
-
-    app.state.ipc_supervisor.open = _real_open  # type: ignore[method-assign]
+    bind_real_fernet(app, settings.fernet_key)
     return app, db
 
 

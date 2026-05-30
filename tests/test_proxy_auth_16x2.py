@@ -16,12 +16,13 @@ import aiosqlite
 import httpx
 import pytest
 import respx
-from cryptography.fernet import Fernet
 
 from worthless.proxy.app import create_app
 from worthless.proxy.config import ProxySettings
 from worthless.proxy.rules import RateLimitRule, RulesEngine, SpendCapRule
 from worthless.storage.repository import ShardRepository, StoredShard
+
+from tests._fakes import bind_real_fernet
 
 
 # ------------------------------------------------------------------
@@ -51,16 +52,9 @@ async def _make_proxy_app(
         ]
     )
     # WOR-549: bind the autouse FakeIPCSupervisor's ``open`` to a real Fernet
-    # decrypt using the test's key, so ``ipc.open(shard_b_enc, key_id=alias)``
-    # returns honest plaintext rather than DEFAULT_FAKE_PLAINTEXT. The fixture's
-    # ShardRepository sealed shard_b_enc with the same Fernet key in-process, so
-    # this is the test-process equivalent of the production sidecar roundtrip.
-    _test_fernet = Fernet(bytes(proxy_settings.fernet_key))
-
-    async def _real_open(ciphertext: bytes, *, key_id: str) -> bytearray:
-        return bytearray(_test_fernet.decrypt(ciphertext))
-
-    app.state.ipc_supervisor.open = _real_open  # type: ignore[method-assign]
+    # decrypt with the test's key, so the proxy's ``ipc.open(shard_b_enc, ...)``
+    # returns honest plaintext rather than DEFAULT_FAKE_PLAINTEXT.
+    bind_real_fernet(app, proxy_settings.fernet_key)
     return app, db
 
 
@@ -545,60 +539,10 @@ async def test_16x2_wrong_shard_a_returns_401(
         await db.close()
 
 
-# ------------------------------------------------------------------
-# SP-6: corrupt shard_a_enc in DB → 401 not 500
-# ------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-@pytest.mark.skip(
-    reason="WOR-549: tests the 16x2 lazy shard_a_enc decrypt path that PR #198's "
-    "subsequent revert removed — the proxy no longer reads shard_a_enc, so "
-    "corrupting it in DB has no observable proxy effect. Obsolete; delete with "
-    "the 16x2 cleanup follow-up."
-)
-async def test_16x2_corrupt_shard_a_enc_returns_401(
-    enrolled_16x2,
-    repo: ShardRepository,
-    proxy_settings: ProxySettings,
-) -> None:
-    """Corrupt shard_a_enc in DB (garbled Fernet token) must yield 401, not 500.
-
-    SP-6: decrypt_shard raises an exception (InvalidToken); the proxy must
-    catch it and return the standard uniform 401, byte-identical to the
-    normal auth failure body.
-    """
-    from worthless.proxy.errors import auth_error_response
-
-    alias, auth_token, _ = enrolled_16x2
-    app, db = await _make_proxy_app(proxy_settings, repo, auth_token=auth_token)
-
-    # Corrupt the shard_a_enc field directly in SQLite.
-    async with aiosqlite.connect(proxy_settings.db_path) as raw_db:
-        await raw_db.execute(
-            "UPDATE shards SET shard_a_enc = ? WHERE key_alias = ?",
-            (b"not-a-valid-fernet-token-garbage-xyz", alias),
-        )
-        await raw_db.commit()
-
-    expected_body = auth_error_response().body
-
-    try:
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://test"
-        ) as client:
-            resp = await client.post(
-                f"/{alias}/v1/chat/completions",
-                json={"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}]},
-                headers={"Authorization": f"Bearer {auth_token}"},
-            )
-        assert resp.status_code == 401
-        assert resp.content == expected_body, (
-            f"Response body differs from uniform 401. Got: {resp.content!r}"
-        )
-    finally:
-        await app.state.httpx_client.aclose()
-        await db.close()
+# SP-6 was test_16x2_corrupt_shard_a_enc_returns_401 — the 16x2 lazy
+# shard_a_enc decrypt path. PR #198's subsequent revert removed that proxy
+# code path entirely; corrupting shard_a_enc in the DB has no observable
+# proxy effect today. Test deleted in PR #250 (WOR-549).
 
 
 # ------------------------------------------------------------------
