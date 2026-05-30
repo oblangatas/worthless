@@ -16,14 +16,12 @@ import aiosqlite
 import httpx
 import pytest
 import respx
+from cryptography.fernet import Fernet
 
 from worthless.proxy.app import create_app
 from worthless.proxy.config import ProxySettings
 from worthless.proxy.rules import RateLimitRule, RulesEngine, SpendCapRule
 from worthless.storage.repository import ShardRepository, StoredShard
-
-
-pytestmark = pytest.mark.skip(reason="WOR-549: worthless-16x2 ↔ sidecar IPC integration pending")
 
 
 # ------------------------------------------------------------------
@@ -52,6 +50,17 @@ async def _make_proxy_app(
             ),
         ]
     )
+    # WOR-549: bind the autouse FakeIPCSupervisor's ``open`` to a real Fernet
+    # decrypt using the test's key, so ``ipc.open(shard_b_enc, key_id=alias)``
+    # returns honest plaintext rather than DEFAULT_FAKE_PLAINTEXT. The fixture's
+    # ShardRepository sealed shard_b_enc with the same Fernet key in-process, so
+    # this is the test-process equivalent of the production sidecar roundtrip.
+    _test_fernet = Fernet(bytes(proxy_settings.fernet_key))
+
+    async def _real_open(ciphertext: bytes, *, key_id: str) -> bytearray:
+        return bytearray(_test_fernet.decrypt(ciphertext))
+
+    app.state.ipc_supervisor.open = _real_open  # type: ignore[method-assign]
     return app, db
 
 
@@ -398,7 +407,7 @@ async def test_upsert_locked_shard_replaces_on_relock(repo: ShardRepository) -> 
     assert encrypted.charset is not None
 
     # decrypt_shard returns shard_a=None since shard_a_enc is NULL
-    stored = repo.decrypt_shard(encrypted)
+    stored = await repo.decrypt_shard(encrypted)
     assert stored.shard_a is None
 
     # Reconstruction uses shard_a₂ captured before sr2.zero().
@@ -455,7 +464,7 @@ async def test_upsert_locked_shard_shard_a_enc_is_null(repo: ShardRepository) ->
     assert encrypted is not None
     assert encrypted.shard_a_enc is None, "shard_a_enc must be NULL — not stored post-16x2-revert"
 
-    decrypted = repo.decrypt_shard(encrypted)
+    decrypted = await repo.decrypt_shard(encrypted)
     assert decrypted.shard_a is None, (
         "decrypt_shard must return shard_a=None when shard_a_enc is NULL"
     )
@@ -477,7 +486,7 @@ async def test_legacy_row_shard_a_is_none(repo: ShardRepository) -> None:
     assert encrypted is not None
     assert encrypted.shard_a_enc is None
 
-    decrypted = repo.decrypt_shard(encrypted)
+    decrypted = await repo.decrypt_shard(encrypted)
     assert decrypted.shard_a is None
     decrypted.zero()
 
@@ -542,6 +551,12 @@ async def test_16x2_wrong_shard_a_returns_401(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(
+    reason="WOR-549: tests the 16x2 lazy shard_a_enc decrypt path that PR #198's "
+    "subsequent revert removed — the proxy no longer reads shard_a_enc, so "
+    "corrupting it in DB has no observable proxy effect. Obsolete; delete with "
+    "the 16x2 cleanup follow-up."
+)
 async def test_16x2_corrupt_shard_a_enc_returns_401(
     enrolled_16x2,
     repo: ShardRepository,

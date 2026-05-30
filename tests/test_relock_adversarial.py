@@ -23,15 +23,13 @@ import aiosqlite
 import httpx
 import pytest
 import respx
+from cryptography.fernet import Fernet
 
 from worthless.crypto.splitter import split_key_fp
 from worthless.proxy.app import _AUTH_BODY, create_app
 from worthless.proxy.config import ProxySettings
 from worthless.proxy.rules import RateLimitRule, RulesEngine, SpendCapRule
 from worthless.storage.repository import ShardRepository, StoredShard
-
-
-pytestmark = pytest.mark.skip(reason="WOR-549: worthless-16x2 ↔ sidecar IPC integration pending")
 
 # ---------------------------------------------------------------------------
 # Constants shared across tests
@@ -83,6 +81,15 @@ async def _make_proxy_app(settings: ProxySettings, repo: ShardRepository):
     )
     # Target behavior: no stable auth token in DB — Bearer carries shard-A directly.
     app.state.proxy_auth_token = None
+    # WOR-549: bind the autouse FakeIPCSupervisor's ``open`` to a real Fernet
+    # decrypt using the test's key, so ``ipc.open(shard_b_enc, key_id=alias)``
+    # returns honest plaintext rather than DEFAULT_FAKE_PLAINTEXT.
+    _test_fernet = Fernet(bytes(settings.fernet_key))
+
+    async def _real_open(ciphertext: bytes, *, key_id: str) -> bytearray:
+        return bytearray(_test_fernet.decrypt(ciphertext))
+
+    app.state.ipc_supervisor.open = _real_open  # type: ignore[method-assign]
     return app, db
 
 
