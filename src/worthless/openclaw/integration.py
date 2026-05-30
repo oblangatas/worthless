@@ -1194,8 +1194,8 @@ def apply_unlock(
                 extra={"path": str(config_path)},
             )
         )
-        for provider, alias in aliases:
-            providers_skipped.append((alias or f"worthless-{provider}", "config_unreadable"))
+        for provider, _alias in aliases:
+            providers_skipped.append((f"worthless-{provider}", "config_unreadable"))
         # Fall through to Stage B — skill removal doesn't touch the config.
         config_missing = True  # prevents Stage A from running
 
@@ -1205,7 +1205,7 @@ def apply_unlock(
         # leaves us with present=True (workspace still there). Surface the
         # named event so doctor / --json can report it; skip Stage A but
         # continue to Stage B since skill removal is still useful.
-        config_missing = not config_path.exists()
+        config_missing = config_state_unlock == "missing"
         if config_missing:
             events.append(
                 OpenclawIntegrationEvent(
@@ -1252,26 +1252,8 @@ def apply_unlock(
                 )
             )
 
-    # ---- Stage C: delete .bak (shard-A residue hygiene) ------------------
-    # The OpenClaw daemon writes openclaw.json.bak on every config write.
-    # After worthless lock, that backup contains shard-A in plaintext and
-    # persists indefinitely — the audit gate (filesScanned[]) never scans
-    # .bak paths.  Deleting it on unlock is minimal defense; a zero-residue
-    # guarantee requires the audit gate to also scan .bak (worthless-ca3m).
-    if config_path is not None:
-        bak_path = config_path.parent / (config_path.name + ".bak")
-        try:
-            bak_path.unlink()
-        except FileNotFoundError:
-            pass  # no .bak → nothing to do
-        except OSError as exc:
-            events.append(
-                OpenclawIntegrationEvent(
-                    code=OpenclawErrorCode.WRITE_FAILED,
-                    level="warn",
-                    detail=f"could not delete {bak_path}: {exc} — remove manually",
-                )
-            )
+    # Stage C (.bak residue hygiene) deferred to WOR-599 — leave .bak alone
+    # until the daemon's crash-recovery semantics are fully understood.
 
     return OpenclawApplyResult(
         detected=True,
