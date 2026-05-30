@@ -112,6 +112,22 @@ class TestWrapEnvInjection:
         child_env = TestWrapChildEnvContract._capture_child_env(home_with_key, monkeypatch)
         assert child_env.get("OPENAI_BASE_URL") == "http://127.0.0.1:8787/openai-a1b2c3d4/v1"
 
+    def test_skips_alias_with_unsafe_characters(
+        self, home_with_key, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Aliases containing characters outside [A-Za-z0-9_-] are silently
+        skipped — no BASE_URL injected, no exception raised. Valid aliases
+        in the same list are still processed normally."""
+        monkeypatch.setattr(
+            "worthless.cli.commands.wrap._list_enrolled_aliases",
+            lambda _home: [("../evil-alias", "openai"), ("openai-a1b2c3d4", "openai")],
+        )
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        child_env = TestWrapChildEnvContract._capture_child_env(home_with_key, monkeypatch)
+        # Valid alias is injected; the unsafe one is skipped
+        assert child_env.get("OPENAI_BASE_URL") == "http://127.0.0.1:8787/openai-a1b2c3d4/v1"
+        assert "../evil-alias" not in str(child_env.get("OPENAI_BASE_URL", ""))
+
 
 class TestWrapChildEnvContract:
     """``wrap`` injects ``*_BASE_URL`` for enrolled providers, preserving
@@ -187,6 +203,16 @@ class TestWrapChildEnvContract:
         monkeypatch.setenv("OPENROUTER_BASE_URL", "http://127.0.0.1:8787/openrouter-x/v1")
         child_env = self._capture_child_env(home_with_key, monkeypatch)
         assert child_env.get("OPENROUTER_BASE_URL") == "http://127.0.0.1:8787/openrouter-x/v1"
+
+    def test_enrolled_provider_var_in_parent_is_not_overwritten(
+        self, home_with_key, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If the parent env already carries the enrolled provider's BASE_URL
+        (e.g. direnv loaded it), wrap must not overwrite it with the proxy URL.
+        This covers the ``if var not in child_env`` False branch."""
+        monkeypatch.setenv("OPENAI_BASE_URL", "http://my-custom-proxy:9999/v1")
+        child_env = self._capture_child_env(home_with_key, monkeypatch)
+        assert child_env.get("OPENAI_BASE_URL") == "http://my-custom-proxy:9999/v1"
 
     def test_no_session_token(self, home_with_key, monkeypatch: pytest.MonkeyPatch) -> None:
         """``WORTHLESS_SESSION_TOKEN`` is dead — wrap must never add it back."""
