@@ -41,6 +41,10 @@ def read_text_capped(path: Path, max_bytes: int) -> tuple[str, bool]:
     the cap still yields its prefix for scanning (you can't pad past the cap to
     evade detection). Raises OSError to the caller (handled as ``unreadable``).
     """
+    # Guard against negative caps. ``fh.read(-1)`` reads to EOF in Python,
+    # which would silently defeat the byte cap (fail-closed → fail-open).
+    if max_bytes < 0:
+        raise ValueError(f"max_bytes must be >= 0, got {max_bytes!r}")
     with path.open("rb") as fh:
         data = fh.read(max_bytes + 1)
     truncated = len(data) > max_bytes
@@ -156,6 +160,11 @@ def scan_source_for_hardcoded_provider_urls(
             break
         try:
             text, truncated = read_text_capped(src_file, cap)
+        except (FileNotFoundError, IsADirectoryError):
+            # Same carve-out as :func:`scan_files`: a file that vanished between
+            # enumeration and read (or an accidental directory) is not a fail-
+            # closed concern.
+            continue
         except OSError:
             if skipped is not None:
                 skipped.append(SkippedFile(file=str(src_file), reason="unreadable"))
@@ -241,14 +250,18 @@ def scan_files(
             break
         try:
             text, truncated = read_text_capped(path, cap)
-        except FileNotFoundError:
+        except (FileNotFoundError, IsADirectoryError):
             # File deleted between caller's enumeration and our read (the common
-            # ``git rm``-then-pre-commit case) or just a typo. Not a hang risk
-            # and not a fail-closed concern — silently skip.
+            # ``git rm``-then-pre-commit case), a typo'd path, or the caller
+            # passing a directory by mistake. None of these are hang risks and
+            # the pre-c5kc UX silently no-op'd them — preserve that contract so
+            # a hook that runs ``worthless scan <dir>`` doesn't suddenly fail
+            # closed on a known-benign input.
             continue
         except OSError:
-            # File exists but we couldn't read it (permission, I/O error, etc.).
-            # That IS a fail-closed concern: we don't know what we missed.
+            # File exists, is a regular file, but we couldn't read it
+            # (permission denied, I/O error, etc.). That IS a fail-closed
+            # concern: we don't know what we missed.
             if skipped is not None:
                 skipped.append(SkippedFile(file=str(path), reason="unreadable"))
             continue

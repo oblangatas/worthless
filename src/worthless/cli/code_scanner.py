@@ -255,6 +255,11 @@ def _scan_one_file(
     cap = _MAX_FILE_BYTES if max_file_bytes is None else max_file_bytes
     try:
         text, truncated = read_text_capped(path, cap)
+    except FileNotFoundError:
+        # Vanished between candidate enumeration and the read — silent skip,
+        # matches :func:`worthless.cli.scanner.scan_files` carve-out.
+        logger.debug("code_scanner: skipping vanished %s", path)
+        return []
     except (OSError, UnicodeDecodeError) as exc:
         logger.debug("code_scanner: skipping %s (%s)", path, exc)
         if skipped is not None:
