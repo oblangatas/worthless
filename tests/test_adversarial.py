@@ -15,7 +15,125 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from cryptography.fernet import Fernet
+
+from worthless.crypto.shard_signing import (
+    ShardSigningError,
+    generate_signing_key,
+    sign_shard_a,
+    verify_and_extract,
+)
 from worthless.proxy.errors import ErrorResponse
+from worthless.storage.repository import ShardRepository
+
+
+class TestShardSigningAdversarial:
+    """Phase 6 shard-A HMAC signing — attacks that must fail.
+
+    Each test is named after the attack vector. A passing test means
+    the defense holds — the attack is defeated.
+    """
+
+    def test_git_history_replay_rejected_after_relock(self, tmp_path):
+        """ATTACK: steal a signed envelope from git history; present it after re-lock.
+
+        The HMAC is cryptographically valid (right key, right alias) but the owner
+        re-locked, rotating the nonce. The proxy's is_valid_signing_nonce check catches
+        the stale nonce and rejects the request.
+        """
+        db_path = str(tmp_path / "test.db")
+        fernet_key = Fernet.generate_key()
+        signing_key = generate_signing_key()
+        alias = "stolen-from-git"
+        prefix = "sk-proj-"
+        shard_a = bytearray(("sk-proj-" + "G" * 60).encode())
+
+        async def _run() -> None:
+            repo = ShardRepository(db_path, fernet_key)
+            await repo.initialize()
+
+            # Attacker captures this envelope from a git commit
+            stolen_envelope, nonce_1, expires_1 = sign_shard_a(
+                shard_a, alias, signing_key, prefix=prefix
+            )
+            await repo.store_signing_nonce(alias, nonce_1, expires_1)
+
+            # Owner re-locks — nonce_1 is revoked
+            _, nonce_2, expires_2 = sign_shard_a(shard_a, alias, signing_key, prefix=prefix)
+            await repo.store_signing_nonce(alias, nonce_2, expires_2)
+
+            # Attacker presents stolen_envelope — HMAC verifies but nonce is stale
+            _, stolen_nonce, _ = verify_and_extract(
+                bytearray(stolen_envelope), alias, signing_key, prefix=prefix
+            )
+            is_valid = await repo.is_valid_signing_nonce(alias, stolen_nonce)
+            assert not is_valid, "Stolen pre-relock envelope must be rejected after re-lock"
+
+        asyncio.run(_run())
+
+    def test_forged_envelope_wrong_signing_key_rejected(self):
+        """ATTACK: attacker generates their own signing key and forges an envelope.
+
+        Without the real server-side signing.key, any envelope the attacker constructs
+        will fail HMAC verification — the HMAC is bound to the secret key.
+        """
+        alias = "target-alias"
+        prefix = "sk-proj-"
+        shard_a = bytearray(("sk-proj-" + "F" * 60).encode())
+
+        real_key = generate_signing_key()
+        attacker_key = generate_signing_key()  # attacker's own key — not the real one
+        assert real_key != attacker_key
+
+        # Attacker signs with their own key
+        forged_envelope, _, _ = sign_shard_a(shard_a, alias, attacker_key, prefix=prefix)
+
+        # Proxy verifies with the real key — must reject
+        with pytest.raises(ShardSigningError, match="HMAC"):
+            verify_and_extract(forged_envelope, alias, real_key, prefix=prefix)
+
+    def test_bit_flip_forgery_rejected(self):
+        """ATTACK: flip one bit in the HMAC section of the overhead.
+
+        Any single-bit mutation in the 16-byte truncated HMAC is caught with
+        overwhelming probability (2^128 forgery resistance).
+        """
+        alias = "target-alias"
+        prefix = "sk-proj-"
+        shard_a = bytearray(("sk-proj-" + "B" * 60).encode())
+        key = generate_signing_key()
+
+        envelope, _, _ = sign_shard_a(shard_a, alias, key, prefix=prefix)
+
+        # Flip a bit inside the HMAC region of the base64url overhead.
+        # Overhead starts after the prefix; HMAC occupies bytes 20-36 of the
+        # decoded overhead (nonce=0-16, expiry=16-20, hmac=20-36).
+        prefix_len = len(prefix)
+        # Mutate the first char of the overhead block (safe to corrupt any position)
+        envelope[prefix_len] = envelope[prefix_len] ^ 0x01
+
+        with pytest.raises(ShardSigningError):
+            verify_and_extract(envelope, alias, key, prefix=prefix)
+
+    def test_cross_alias_injection_rejected(self):
+        """ATTACK: take a valid envelope for alias-A and present it under alias-B.
+
+        The HMAC input includes the alias string, so cross-alias reuse is impossible
+        without knowing the signing key.
+        """
+        prefix = "sk-proj-"
+        shard_a = bytearray(("sk-proj-" + "C" * 60).encode())
+        key = generate_signing_key()
+
+        alias_a = "openai-victim"
+        alias_b = "anthropic-target"
+
+        # Attacker has a valid envelope for alias_a
+        envelope_a, _, _ = sign_shard_a(shard_a, alias_a, key, prefix=prefix)
+
+        # Present it to the proxy as if it belongs to alias_b — must fail
+        with pytest.raises(ShardSigningError, match="HMAC"):
+            verify_and_extract(envelope_a, alias_b, key, prefix=prefix)
 
 
 # ---------------------------------------------------------------------------

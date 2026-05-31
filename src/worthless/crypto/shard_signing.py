@@ -27,7 +27,9 @@ Security properties
 - Wrong signing key → HMAC mismatch → rejected
 - Tampered shard_a or overhead → HMAC mismatch → rejected
 - Expired envelope → rejected on the expiry check before HMAC
-- Replay-within-TTL after server restart: nonces stored in SQLite (see repository.py)
+- Re-lock revocation: nonces are per-alias and upserted on re-lock; envelopes issued
+  before the re-lock are immediately invalid (nonce mismatch). TLS handles per-request
+  replay — the nonce is NOT a per-request token.
 
 Residual risks (documented)
 ---------------------------
@@ -35,6 +37,10 @@ Residual risks (documented)
   An attacker with local file access can read it. Mitigation: mTLS + HSM in Phase 6b.
 - Truncated HMAC (16 bytes / 128 bits) provides 2^64 security against forgery.
   Acceptable for this threat model; full 32 bytes would lengthen the envelope by 16 chars.
+- Threat model scope: Phase 6 protects against non-filesystem exfiltration vectors
+  (git history leaks, CI log leaks, env var scraping). It does NOT protect against
+  machine-level compromise — an attacker with read access to the proxy host can read
+  signing.key and forge envelopes.
 """
 
 from __future__ import annotations
@@ -42,12 +48,15 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import logging
 import os
 import secrets
 import stat
 import struct
 import time
 from pathlib import Path
+
+_logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -138,6 +147,18 @@ def load_or_create_signing_key(home_dir: Path) -> bytes:
         os.write(fd, (key.hex() + "\n").encode("ascii"))
     finally:
         os.close(fd)
+
+    # If a DB already exists but the signing key was just created, all existing
+    # enrollments were signed with a different (now-gone) key. Warn loudly so the
+    # operator knows to re-lock every .env file.
+    if (home_dir / "worthless.db").exists():
+        _logger.warning(
+            "Created new signing key at %s but worthless.db already exists — "
+            "existing enrollments were signed with a different key and will be "
+            "rejected at proxy ingress until re-locked. Run: worthless lock <your-.env>",
+            key_path,
+        )
+
     return key
 
 

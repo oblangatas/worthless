@@ -1122,6 +1122,54 @@ class TestPhase6NoncePersistence:
         asyncio.run(_run())
 
 
+class TestPhase6KeyRotation:
+    """Rotating the signing key invalidates all outstanding envelopes."""
+
+    def test_old_key_envelope_rejected_after_signing_key_rotation(self):
+        """ATTACK: attacker holds a valid signed envelope but the signing key was rotated.
+
+        After key rotation every previously issued envelope fails verify_and_extract
+        because the HMAC was computed with the old key.
+        """
+        alias = "test-alias-rotation"
+        prefix = "sk-proj-"
+        shard_a = bytearray(("sk-proj-" + "Z" * 60).encode())
+
+        key_a = generate_signing_key()
+        key_b = generate_signing_key()
+        assert key_a != key_b  # sanity: two independent keys
+
+        # Sign with key_a (the "old" signing key before rotation)
+        old_envelope, _, _ = sign_shard_a(shard_a, alias, key_a, prefix=prefix)
+
+        # After rotation, the proxy uses key_b — old envelope must be rejected
+        with pytest.raises(ShardSigningError):
+            verify_and_extract(bytearray(old_envelope), alias, key_b, prefix=prefix)
+
+
+class TestPhase6KeyCreationWarning:
+    """Warning emitted when a new signing key is created alongside an existing DB."""
+
+    def test_warning_logged_when_key_created_with_existing_db(self, tmp_path, caplog):
+        """load_or_create_signing_key warns when worthless.db exists but signing.key does not.
+
+        This state means existing enrollments were signed with a now-deleted key —
+        the operator must re-lock every .env file or requests will be rejected.
+        """
+        import logging
+
+        # Simulate existing DB (enrollments present) without a signing key
+        (tmp_path / "worthless.db").write_bytes(b"")
+
+        with caplog.at_level(logging.WARNING, logger="worthless.crypto.shard_signing"):
+            load_or_create_signing_key(tmp_path)
+
+        assert any("existing enrollments" in r.message for r in caplog.records), (
+            "Expected a WARNING about existing enrollments when signing key is created "
+            f"alongside worthless.db. Got: {[r.message for r in caplog.records]}"
+        )
+
+
 # Helpers for Phase 6 tests
 
 
