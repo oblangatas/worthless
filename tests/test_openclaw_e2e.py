@@ -811,8 +811,13 @@ class TestErrorBodyPreservation:
             f"Proxy sanitization is stripping error.code."
         )
 
-    def test_anthropic_400_preserves_error_type(self, openclaw_stack, openclaw_anthropic_alias):
-        """error.type must survive sanitization — SDK uses it to classify bad-request errors."""
+    def test_anthropic_404_preserves_error_type(self, openclaw_stack, openclaw_anthropic_alias):
+        """error.type must survive sanitization — SDK uses it to classify not-found errors.
+
+        Real Anthropic returns 404 not_found_error for unknown models (confirmed 2026-05-30;
+        mock updated to mirror this in WOR-228). The proxy must pass error.type through
+        unchanged so the SDK can surface the correct typed exception.
+        """
         proxy_port, mock_port, *_ = openclaw_stack
         _fake_key, shard_a, alias = openclaw_anthropic_alias
         _clear_mock_headers(mock_port)
@@ -822,17 +827,17 @@ class TestErrorBodyPreservation:
             base_url=f"http://127.0.0.1:{proxy_port}/{alias}",
             max_retries=0,
         )
-        with pytest.raises(anthropic.BadRequestError) as exc:
+        with pytest.raises(anthropic.NotFoundError) as exc:
             client.messages.create(
                 model="claude-does-not-exist-zzz",
                 max_tokens=1,
                 messages=[{"role": "user", "content": "hi"}],
             )
-        assert exc.value.status_code == 400
+        assert exc.value.status_code == 404
         body = exc.value.body
         assert isinstance(body, dict), f"expected dict body, got {type(body)}: {body}"
         error = body.get("error", {})
-        assert error.get("type") == "invalid_request_error", (
-            f"error.type was {error.get('type')!r}, expected 'invalid_request_error'. "
+        assert error.get("type") == "not_found_error", (
+            f"error.type was {error.get('type')!r}, expected 'not_found_error'. "
             f"Proxy sanitization is stripping error.type."
         )

@@ -34,6 +34,7 @@ from worthless.cli.process import (
     poll_health,
     spawn_proxy,
 )
+from worthless.cli.sidecar_lifecycle import shutdown_sidecar, spawn_sidecar, split_to_tmpfs
 from worthless.storage.repository import ShardRepository
 
 runner = CliRunner(mix_stderr=False)
@@ -422,8 +423,19 @@ def _locked_proxy(
 
     read_fd, write_fd = create_liveness_pipe()
     proxy: subprocess.Popen | None = None
+    sidecar = None
     try:
-        proxy, port = spawn_proxy(env=build_proxy_env(home), port=0, liveness_fd=read_fd)
+        # Sidecar must come up before the proxy — mirrors wrap.py ordering.
+        shares = split_to_tmpfs(home.fernet_key, home.base_dir)
+        socket_path = shares.run_dir / "sidecar.sock"
+        sidecar = spawn_sidecar(socket_path, shares, allowed_uid=os.getuid())
+
+        proxy_env = build_proxy_env(home)
+        proxy_env["WORTHLESS_SIDECAR_SOCKET"] = str(sidecar.socket_path)
+        # IPC-only mode: proxy must NOT receive the Fernet key in its env.
+        proxy_env.pop("WORTHLESS_FERNET_KEY", None)
+
+        proxy, port = spawn_proxy(env=proxy_env, port=0, liveness_fd=read_fd)
         os.close(read_fd)
         read_fd = -1
         assert poll_health(port, timeout=15.0), "proxy failed to become healthy"
@@ -438,6 +450,11 @@ def _locked_proxy(
                     os.close(fd)
                 except OSError:
                     pass
+        if sidecar is not None:
+            try:
+                shutdown_sidecar(sidecar)
+            except Exception:  # noqa: BLE001 — best-effort teardown
+                pass
         result = runner.invoke(app, ["unlock", "--env", str(env_file)], env=cli_env)
         assert result.exit_code == 0, f"unlock failed: {result.output}"
 
