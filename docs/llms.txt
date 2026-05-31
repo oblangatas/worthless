@@ -24,9 +24,9 @@ worthless lock
 worthless wrap python app.py
 ```
 
-1. `pip install worthless` — install the CLI
-2. `worthless lock` — scans .env, splits each API key into two shares
-3. `worthless wrap python app.py` — runs your app with the proxy injecting the reconstructed key
+1. `pip install worthless`, install the CLI
+2. `worthless lock`, scans .env, splits each API key into two shares
+3. `worthless wrap python app.py`, runs your app with the proxy injecting the reconstructed key
 
 Your code needs zero changes. Environment variables work exactly as before.
 
