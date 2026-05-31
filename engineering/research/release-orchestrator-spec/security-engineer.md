@@ -61,7 +61,9 @@ Phase markers stored in `.release-state/<version>/<phase>.ok` (gitignored). `rel
 
 # 5. `gh` token scope minimization
 
-At script entry: `gh auth status --show-token` parsed; required scope = exactly `repo` (or `repo, workflow` if workflow dispatch needed). **Reject** tokens with `admin:org`, `delete_repo`, `admin:public_key`, or `gist`. Token broader than necessary = abort with remediation message. Also reject GITHUB_TOKEN from a CI context (this is a local maintainer script).
+At script entry: `gh auth status` (NO `--show-token` — that flag prints the token value to gh's own stderr, leaking it via process listings + terminal scrollback). Parse only the scope line. Required scope = exactly `repo` (or `repo, workflow` if workflow dispatch needed). **Reject** tokens with `admin:org`, `delete_repo`, `admin:public_key`, or `gist`. Token broader than necessary = abort with remediation message. Also reject GITHUB_TOKEN from a CI context (this is a local maintainer script).
+
+When the script actually needs the token value for an API call, use `gh auth token` (writes ONLY the token to stdout, nothing to stderr) and pipe it directly to the consumer — never store in a shell variable that survives the subshell.
 
 # 6. Polling-driven trust (PyPI "live" assertion)
 
@@ -106,6 +108,7 @@ Threat: maintainer pastes a failure trace into a public GitHub issue.
 - Default behavior on every invocation: verify-self runs first; SHA drift → refuse with message `script SHA changed since pin; re-pin via SECURITY_RULES.md and reviewer signoff, then re-run with --accept-script-change`.
 - `--accept-script-change` requires `WORTHLESS_RELEASE_ACCEPT_DRIFT=1` env *and* the flag — defense against accidental flag-paste.
 - The pin update itself is a normal PR requiring review (no self-modifying script ever updates its own pin).
+- **Bootstrap (first-ever invocation):** the initial commit that lands `scripts/release.sh` AND the SR-09 SHA pins in `SECURITY_RULES.md` must come together in one PR (the PR-1 of the implementation series in SPEC.md §9). Reviewers manually verify the SHA-pin matches the script bytes on the PR head before approval. After merge, every subsequent invocation self-verifies. Resolves the chicken-and-egg of "script can't run until pinned, can't pin until reviewed."
 
 ---
 
@@ -121,12 +124,13 @@ Threat: maintainer pastes a failure trace into a public GitHub issue.
 | R-6 | Every phase classified `idempotent` / `at-most-once` / `manual-resume-only`; markers in `.release-state/<v>/` | Replay damage, partial-state confusion |
 | R-7 | GPG passphrase via `gpg-agent` only; never `--passphrase*`, never env var | Process-listing / shell-history leak |
 | R-8 | Never source `~/.*rc`; never export GPG/token env; `set +x` enforced before signing blocks | Ambient-config injection, `bash -x` trace leak |
-| R-9 | `gh` token scope = exactly `repo` (or `repo, workflow`); reject broader; reject CI `GITHUB_TOKEN` | Token-theft blast radius, wrong-context execution |
-| R-10 | `release.sh` MUST call `gh attestation verify <wheel> --owner shacharm2 --repo worthless` against the freshly-fetched wheel; failure = exit non-zero. End-user `pip install` attestation enforcement is a separate ecosystem gap tracked outside this script. | Mirror poisoning, name confusion, propagation-lag false-positive |
+| R-9 | `gh` token scope = exactly `repo` (or `repo, workflow`); reject broader; reject CI `GITHUB_TOKEN`. Never call `gh auth status --show-token` (prints token to stderr → process-listing/scrollback leak); use `gh auth status` for scope check + `gh auth token` (stdout-only) for the one API call that needs the value. | Token-theft blast radius, wrong-context execution, stderr leak |
+| R-10 | `release.sh` MUST pin the wheel via `pip download --no-deps` in step 4.2 (SHA256 captured to `.release-state/<v>/wheel.sha256`), then call `gh attestation verify <pinned-wheel> --owner shacharm2 --repo worthless` against the EXACT pinned file in step 4.2b. Never call `gh attestation verify` on a freshly-fetched wheel (defeats TOCTOU between PyPI lookup + verify). End-user `pip install` attestation enforcement is a separate ecosystem gap. | Mirror poisoning, name confusion, propagation-lag false-positive, TOCTOU between PyPI lookup + attestation fetch |
+| R-19 | Tag-cut MUST verify the tag points at the SHA captured in preflight P1.5 (`EXPECTED_SHA=$(git rev-parse origin/main)`), not just that the tag is GPG-signed. `git rev-parse "v${VERSION}^{commit}"` must equal `$EXPECTED_SHA` before push. | `main` advancing between preflight + tag-cut → signing a moved HEAD silently |
 | R-11 | Pre-flight `release-self-check.sh` greps for forbidden patterns (force-push, hard-reset, workflow edits, `curl\|sh`, etc.); abort on hit | Script-mutation regression, supply-chain paste-in |
 | R-12 | No writes to `~/.ssh/`, `~/.gnupg/`, `~/.config/gh/`, `.github/workflows/*`, `.github/scripts/verify-tag.sh`, `.github/rulesets/*` | Trust-root tampering |
 | R-13 | All stderr + ERR trap piped through redactor (gpg/token/passphrase/b64>32/known token prefixes) | Pasted-trace secret leak |
-| R-14 | `--verify-self` SHA256 check against `SECURITY_RULES.md` SR-09 pins; drift requires `--accept-script-change` + env var | Tampered orchestrator |
+| R-14 | `--verify-self` SHA256 check against `SECURITY_RULES.md` SR-09 pins; drift requires `--accept-script-change` + `WORTHLESS_RELEASE_ACCEPT_DRIFT=1` env var. **Bootstrap:** PR-1 of the 4-PR implementation series lands scripts AND SR-09 pins in the same commit; reviewer manually verifies SHA-pin matches script bytes before merge. After merge, every invocation self-verifies. | Tampered orchestrator, first-commit chicken-and-egg |
 | R-15 | Audit log `.release-audit/YYYY-MM-DD.log` for every disable/enable + every tag sign + every push | Forensics, incident reconstruction |
 | R-16 | Tag message linted against secret regex before sign; tag name `v\d+\.\d+\.\d+(-\w+)?` only | Public leak via tag, malformed-tag confusion |
 | R-17 | Polling loops have max-attempts + exponential backoff; no unbounded waits | DoS-via-hang, masked failure |

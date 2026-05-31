@@ -53,15 +53,23 @@ Unconditional, first-fail-exits, one-line remediation each. Full table in `deplo
 
 ---
 
-## 3. Tag-cut (deployment-engineer §3 + R-1, R-2, R-7, R-8)
+## 3. Tag-cut (deployment-engineer §3 + R-1, R-2, R-7, R-8, R-19)
 
 The **only** GPG step. Passphrase prompted once via gpg-agent, never via `--passphrase*`.
 
+**Expected-SHA capture happens in preflight gate P1.5 (new):** `EXPECTED_SHA=$(git rev-parse origin/main)` written to `.release-state/<version>/expected-sha`. The signed tag must point at exactly this commit — defends against `main` advancing between preflight + tag-cut (R-19).
+
 ```bash
+EXPECTED_SHA=$(cat .release-state/${VERSION}/expected-sha)
+
 git -c gpg.format=openpgp \
     -c user.signingkey="$MAINTAINER_GPG_FINGERPRINT" \
     -c tag.gpgSign=true \
-    tag -s "v${VERSION}" -m "$TAG_MSG"
+    tag -s "v${VERSION}" "$EXPECTED_SHA" -m "$TAG_MSG"
+
+# R-19: Verify the tag points at EXACTLY the SHA captured in preflight.
+ACTUAL_SHA=$(git rev-parse "v${VERSION}^{commit}")
+[ "$ACTUAL_SHA" = "$EXPECTED_SHA" ] || die "tag points at $ACTUAL_SHA, expected $EXPECTED_SHA (main advanced mid-release? wrong commit signed)"
 
 git tag -v "v${VERSION}" 2>&1 | tee /tmp/tag-verify.out
 grep -q "Good signature"                                    /tmp/tag-verify.out || die "GPG signature missing"
@@ -80,10 +88,10 @@ Then CONFIRM Y/N (non-TTY exits). Then push. On any local-verify failure: delete
 | Step | Hard gate |
 |---|---|
 | 4.1 | `gh run watch publish.yml deploy-worker.yml` — if `verify-tag` job fails → print exact `scripts/release-recover.sh <v>` command + exit 2 |
-| 4.2 | `pip index versions worthless` polled with max-attempts + exponential backoff (R-17) until `<version>` appears |
-| 4.2b | **`gh attestation verify <wheel> --owner shacharm2 --repo worthless`** against the freshly-fetched wheel — Sigstore bundle MUST chain to GHA OIDC issuer + worthless repo + `v<version>` tag ref. Failure → exit non-zero (R-10). Works today via the `gh` CLI. |
+| 4.2 | `pip index versions worthless` polled with max-attempts + exponential backoff (R-17) until `<version>` appears. Then `pip download --no-deps --dest .release-state/<v>/ worthless==<version>` to fetch the wheel; capture its SHA256 to `.release-state/<v>/wheel.sha256`. The **pinned file** is the artifact for all subsequent verification steps. |
+| 4.2b | **`gh attestation verify .release-state/<v>/worthless-<v>-*.whl --owner shacharm2 --repo worthless`** against the EXACT pinned wheel from 4.2 (NOT a fresh fetch — defeats TOCTOU). Sigstore bundle MUST chain to GHA OIDC issuer + worthless repo + `v<version>` tag ref. Failure → exit non-zero (R-10). |
 | 4.3 | Worker `X-Worthless-Script-Tag` header + served `install.sh` `WORTHLESS_VERSION_PIN` both match `<version>` |
-| 4.4 | `docker run --rm python:3.12-slim sh -c "pip install worthless==<v> && worthless --version"` succeeds with `<v>` |
+| 4.4 | Docker install proof using the **already-verified wheel from 4.2** (NOT a fresh `pip install` — that downloads a different wheel and bypasses the attestation chain): `docker run --rm -v "$PWD/.release-state/<v>:/wheels:ro" python:3.12-slim sh -c "pip install /wheels/worthless-*.whl && worthless --version"` succeeds with `<v>` |
 | 4.5 | `awk` extract CHANGELOG section → non-empty |
 | 4.6 | `gh release create v<v> --notes-file ... --verify-tag` |
 | 4.7 | `gh workflow run release-sync-check.yml` → individual A1-A5 PASS/FAIL report |
@@ -122,7 +130,7 @@ Compressed cross-reference:
 
 | Lens | Rules |
 |---|---|
-| **Tag integrity** | R-1 forced `gpg.format=openpgp` + explicit `user.signingkey`; R-2 fingerprint + format verified before push |
+| **Tag integrity** | R-1 forced `gpg.format=openpgp` + explicit `user.signingkey`; R-2 fingerprint + format verified before push; R-19 expected-SHA assertion (captured in P1.5 preflight, checked in tag-cut) |
 | **Ruleset window** | R-3 opt-in flag + 120s watchdog + 4-signal trap; R-4 doctor standalone; R-5 snapshot-restore not hard-coded body; R-15 audit log |
 | **Idempotency / replay** | R-6 every phase classified; markers in `.release-state/<v>/` |
 | **Secret hygiene** | R-7 gpg-agent only; R-8 no rc-sourcing, no env export, no `bash -x`; R-13 stderr redactor; R-16 tag-message regex lint |
