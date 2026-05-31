@@ -198,7 +198,7 @@
         <h2>What if leaked keys just didn't work?</h2>
         <p>That's the question I couldn't stop thinking about. Not "how do we prevent leaks" (you can't) but "how do we make leaks harmless."</p>
         <p>The answer turned out to be simple: split the key. Your .env gets one half. Your server gets the other. Neither half works alone. When you make an API call, the halves combine for a split second, the call goes through, and the key is destroyed.</p>
-        <p>If someone steals your .env, they get one half of an XOR split. Mathematically useless. They can't brute-force it. They can't derive anything from it. It's just random bytes.</p>
+        <p>If someone steals your .env, they get one half of an XOR split. Useless on its own. They can't brute-force it. They can't derive anything from it. It's just random bytes.</p>
 
         <h2>That's Worthless</h2>
         <p>Two commands. Your key is split. Your .env now contains a share that's worthless to steal. The proxy handles reconstruction, enforces spend caps, and never lets the full key leave server memory.</p>
