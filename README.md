@@ -114,7 +114,9 @@ uv run pytest
 
 ## Contributing
 
-PRs welcome. Read [SECURITY_RULES.md](SECURITY_RULES.md) first.
+Pull requests welcome. Before you start, read **[CONTRIBUTING.md](CONTRIBUTING.md)** and **[SECURITY_RULES.md](SECURITY_RULES.md)**.
+
+All non-trivial contributions require a signed [Contributor License Agreement (CLA)](CLA.md). The CLA grants the project the right to relicense your contribution — including under commercial terms — so the open-source code can coexist with a future paid hosted service. See [CLA.md](CLA.md) for the full text.
 
 ## License
 
