@@ -15,10 +15,8 @@ upstream error sanitization.
 from __future__ import annotations
 
 import ast
-import base64
 import inspect
 import json
-import struct
 import textwrap
 import time as _time
 from pathlib import Path
@@ -940,9 +938,11 @@ class TestPhase6RejectionPaths:
         prefix = "sk-proj-"
         key = generate_signing_key()
         shard_a = bytearray(("sk-proj-" + "P" * 60).encode())
-        envelope, _, _ = sign_shard_a(shard_a, "alias", key, prefix=prefix, ttl_days=1)
-        # Rewrite expiry to 1 second in the past
-        _rewrite_expiry_to_past(envelope, prefix, OVERHEAD_CHARS)
+        # Sign with a negative TTL so the envelope is genuinely expired AND the
+        # HMAC covers the past expiry. This exercises the expiry check on a VALID
+        # envelope, not a tampered one (mutating expiry post-sign would break the
+        # MAC and could pass for the wrong reason).
+        envelope, _, _ = sign_shard_a(shard_a, "alias", key, prefix=prefix, ttl_days=-1)
         with pytest.raises(ShardSigningError, match="expired"):
             verify_and_extract(envelope, "alias", key, prefix=prefix)
 
@@ -1168,17 +1168,3 @@ class TestPhase6KeyCreationWarning:
             "Expected a WARNING about existing enrollments when signing key is created "
             f"alongside worthless.db. Got: {[r.message for r in caplog.records]}"
         )
-
-
-# Helpers for Phase 6 tests
-
-
-def _rewrite_expiry_to_past(envelope: bytearray, prefix: str, overhead_chars: int) -> None:
-    """Rewrite the expiry field in the overhead to 1 second ago, in-place."""
-    prefix_len = len(prefix)
-    overhead_b64 = envelope[prefix_len : prefix_len + overhead_chars].decode("ascii")
-    overhead = bytearray(base64.urlsafe_b64decode(overhead_b64))
-    past_ts = int(_time.time()) - 1
-    overhead[16:20] = struct.pack(">I", past_ts)
-    new_b64 = base64.urlsafe_b64encode(bytes(overhead)).decode("ascii")
-    envelope[prefix_len : prefix_len + overhead_chars] = new_b64.encode("ascii")

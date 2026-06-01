@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import time
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from collections.abc import AsyncIterator
+from enum import Enum
 from typing import NamedTuple
 
 import aiosqlite
@@ -14,8 +16,6 @@ from cryptography.fernet import Fernet, InvalidToken
 
 from worthless.defaults import DEFAULT_SPEND_CAP_TOKENS
 from worthless.storage.schema import init_db, migrate_db
-
-from enum import Enum
 
 
 class _Sentinel(Enum):
@@ -755,8 +755,6 @@ class ShardRepository:
         Returns:
             True if (alias, nonce) is in the table and expires_at > now.
         """
-        import time
-
         async with self._connect() as db:
             cursor = await db.execute(
                 "SELECT 1 FROM signing_nonces WHERE alias = ? AND nonce_hex = ? AND expires_at > ?",
@@ -770,8 +768,6 @@ class ShardRepository:
         Intended to be called from a background task at proxy startup and
         periodically thereafter.  Returns the number of rows deleted.
         """
-        import time
-
         async with self._connect() as db:
             cursor = await db.execute(
                 "DELETE FROM signing_nonces WHERE expires_at <= ?",

@@ -194,15 +194,19 @@ def sign_shard_a(
         The original *shard_a* bytearray is NOT modified or zeroed by this function.
         The caller retains ownership and must zero it after use (SR-01).
     """
-    if not bytes(shard_a).startswith(prefix.encode("ascii")):
+    if not shard_a.startswith(prefix.encode("ascii")):
         raise ValueError(f"shard_a does not start with prefix {prefix!r}")
 
     nonce = secrets.token_bytes(16)
     expires_at = int(time.time()) + ttl_days * 86400
     expiry_bytes = struct.pack(">I", expires_at)
 
-    # HMAC over: alias || nonce || expiry || original_shard_a
-    msg = alias.encode("utf-8") + nonce + expiry_bytes + bytes(shard_a)
+    # HMAC over: alias || nonce || expiry || original_shard_a.
+    # bytes(shard_a) is an unavoidable immutable copy — hmac requires a bytes
+    # message. Shard-A is non-secret on its own (needs shard-B to reconstruct,
+    # see engineering/modules.md), and the caller still zeroes the bytearray.
+    shard_a_bytes = bytes(shard_a)  # nosemgrep: sr01-key-material-not-bytearray
+    msg = alias.encode("utf-8") + nonce + expiry_bytes + shard_a_bytes
     mac_full = hmac.new(signing_key, msg, hashlib.sha256).digest()
     mac_truncated = mac_full[:16]  # 128-bit truncation — see module docstring
 
@@ -290,8 +294,11 @@ def verify_and_extract(
     # Reconstruct original shard_a = prefix + body
     original_shard_a = bytearray((prefix + body).encode("ascii"))
 
-    # HMAC verification (constant-time compare — SR-07)
-    msg = alias.encode("utf-8") + nonce + expiry_bytes + bytes(original_shard_a)
+    # HMAC verification (constant-time compare — SR-07).
+    # bytes(original_shard_a) is an unavoidable immutable copy — hmac requires a
+    # bytes message. Shard-A is non-secret on its own; caller zeroes the bytearray.
+    original_bytes = bytes(original_shard_a)  # nosemgrep: sr01-key-material-not-bytearray
+    msg = alias.encode("utf-8") + nonce + expiry_bytes + original_bytes
     mac_expected = hmac.new(signing_key, msg, hashlib.sha256).digest()[:16]
     if not hmac.compare_digest(mac_expected, mac_received):
         raise ShardSigningError("HMAC verification failed")

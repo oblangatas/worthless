@@ -598,7 +598,8 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
         except Exception:
             # Capture sha256(shard_a) BEFORE zeroing for the decoy check.
             # The check fires as a background task so it never delays the 401 response.
-            _shard_a_sha256 = hashlib.sha256(bytes(shard_a)).digest()
+            # hashlib accepts the bytearray directly — no immutable copy needed.
+            _shard_a_sha256 = hashlib.sha256(shard_a).digest()
             shard_a[:] = b"\x00" * len(shard_a)
             stored.zero()
             await rules_engine.release_spend_reservation(alias, _spend_reservation)

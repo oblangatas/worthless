@@ -9,6 +9,7 @@ Tests for Phase 3.1:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import replace
@@ -2838,12 +2839,15 @@ class TestDecoyTripwire:
         assert resp.status_code == 401, (
             f"Decoy presentation must return 401, got {resp.status_code}"
         )
-        # Background decoy check must have logged "decoy_detected"
-        # Allow a brief moment for the background task to complete
-        import asyncio
-
-        await asyncio.sleep(0.05)
-        decoy_logs = [r for r in caplog.records if "decoy_detected" in r.getMessage()]
+        # Background decoy check logs "decoy_detected" asynchronously. Poll for it
+        # (deterministic — returns as soon as the task finishes) instead of a fixed
+        # sleep that can flake on a busy CI runner.
+        decoy_logs = []
+        for _ in range(200):  # up to ~2s
+            decoy_logs = [r for r in caplog.records if "decoy_detected" in r.getMessage()]
+            if decoy_logs:
+                break
+            await asyncio.sleep(0.01)
         assert decoy_logs, (
             "Decoy presentation did not trigger 'decoy_detected' warning. "
             f"Log records: {[r.getMessage() for r in caplog.records]}"
