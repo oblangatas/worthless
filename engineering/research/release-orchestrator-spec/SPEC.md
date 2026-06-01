@@ -117,6 +117,15 @@ Strict 6-step dance with watchdog + heartbeat + full trap stack:
 
 ```bash
 R1  Snapshot current ruleset JSON (R-5) to /tmp
+R1.5 R-29 (F-18): OFFSITE beacon BEFORE the disable — survives kill -9 -<pgid>
+    SNAPSHOT_SHA=$(sha256sum "$SNAPSHOT_JSON"|awk '{print $1}')
+    GIST_URL=$(gh gist create --private --filename ruleset-snapshot.json "$SNAPSHOT_JSON"|tail -n1)
+    DEADLINE_EPOCH=$(( $(date +%s) + 120 ))
+    gh api -X POST "/repos/$REPO/issues/$AUDIT_TRACKER/comments" -f body="RULESET-DISABLED v${VERSION} START $(date -u +%FT%TZ) PID $$ EXPECT-RESTORE-BY <+120s> SNAPSHOT-SHA256: $SNAPSHOT_SHA SNAPSHOT-GIST: $GIST_URL"
+    gh workflow run audit-ruleset-watchdog.yml -f version="$VERSION" -f deadline_epoch="$DEADLINE_EPOCH" -f snapshot_gist_url="$GIST_URL" -f snapshot_sha256="$SNAPSHOT_SHA" -f audit_issue_number="$AUDIT_TRACKER"
+    # BLOCK ≤30s for WATCHDOG-ARMED comment; fail-closed if absent (never disable without offsite failsafe)
+    for i in $(seq 1 30); do gh api ".../comments?..." --jq '...WATCHDOG-ARMED...' | grep -qx '[1-9]*' && { ARMED=1; break; }; sleep 1; done
+    [ "${ARMED:-0}" = 1 ] || die "R-29: GHA watchdog did not arm within 30s"
 R2  Disable v-tags-signed (PATCH enforcement=disabled)
     # R-25 (F-12): require BOTH the CLI flag AND env var; refuse if invoked under shell completion
     [ "$ALLOW_RULESET_DISABLE" = "1" ] && [ "$WORTHLESS_ALLOW_RULESET_DISABLE" = "1" ] || die "R-25 violation"
@@ -148,18 +157,29 @@ R6  Re-enable v-tags-signed (PUT the R1 snapshot back, not a hard-coded body)
       sleep 2
     done
 
-    # R-21 (F-3): second-channel canary — API answer alone is not proof
-    git push origin :refs/canary/ruleset-probe-$$ 2>&1 | grep -q "rejected.*v-tags-signed" \
-      || die "ruleset second-channel probe failed: API says active, push was not rejected"
+    # R-21 (F-3, F-15): canary MUST target refs/tags/v* and rejection MUST name
+    # v-tags-signed. A canary on refs/canary/* would be bounced by an UNRELATED
+    # ruleset → false-green. Cleaned up via RETURN-trap regardless of outcome.
+    CANARY_TAG="v0.0.0-canary-$$-$(date +%s)"
+    git tag "$CANARY_TAG" HEAD
+    cleanup_canary() { git tag -d "$CANARY_TAG" 2>/dev/null||true; git push origin --delete "refs/tags/$CANARY_TAG" 2>/dev/null||true; }
+    trap 'cleanup_canary' RETURN
+    CANARY_OUT=$(git push origin "refs/tags/$CANARY_TAG" 2>&1); CANARY_RC=$?
+    [ $CANARY_RC -eq 0 ] && { cleanup_canary; die "R-21: canary tag pushed SUCCESSFULLY — v-tags-signed is OFF"; }
+    printf '%s\n' "$CANARY_OUT" | grep -Eq 'rejected.*(v-tags-signed|Required signatures)' \
+      || { cleanup_canary; die "R-21: canary rejected but NOT by v-tags-signed — treat as DISABLED"; }
+    cleanup_canary
 ```
 
-Append-only audit log `.release-audit/YYYY-MM-DD.log` written for every disable/enable/sign/push, sealed with GPG-detached signature `.log.asc` at script exit (R-15, F-14).
+After R6 success, post `RULESET-RESTORED v${VERSION} END <iso> DOCTOR-VERIFIED: true` to the audit issue (R-29) — the GHA watchdog sees this and exits clean instead of re-enabling.
 
-`release-doctor.sh` runs unconditionally at end of `release.sh` AND at end of `release-recover.sh` AND is callable standalone — asserts `v-tags-signed` is `active` (R-21 second-channel verified, R-24 cache-bypass verified) AND `--verify-audit-log` re-verifies every `.asc` against `$MAINTAINER_GPG_FINGERPRINT`. Exit-1 on any failure = alarm bell (R-4, mitigates `kill -9` bypassing the trap).
+**Audit log (R-15, R-26, R-27 / F-14, F-16, F-17).** `.release-audit/YYYY-MM-DD.log` is **JSONL** (schema: `scripts/release/audit-schema.json`, built in impl PR). Every line witnesses the resolved tool path+SHA256 *at that call*, gpg-agent socket, gh token scopes, watchdog liveness, RUID/tty/umask, `script_git_sha`, and R-13-redacted env keys — so a post-breach investigator can prove which binary/agent actually ran (F-16). Append-only (`chflags uappnd`/`chattr +a`, single `printf` under `flock`), GPG-signed `.log.asc` at exit. Then **shipped offsite to 3 independent channels** (audit-issue comment + private gist + `git notes`), because a compromised laptop can clear the append-only flag and re-sign with the cached subkey — local-only audit is no audit (F-17, R-27).
+
+`release-doctor.sh` runs unconditionally at end of `release.sh` AND `release-recover.sh` AND is callable standalone — asserts `v-tags-signed` is `active` (R-21 canary verified, R-24 cache-bypass verified), `--verify-audit-log` re-verifies every `.asc` + R-26 schema, `--replay-day` checks cross-line invariants, `--verify-audit-shipped` re-fetches the 3 offsite copies. Exit-1 on any failure = alarm bell (R-4).
 
 ---
 
-## 6. The 18 hard rules (security-engineer §1-9, full table in `security-engineer.md`)
+## 6. The 28 hard rules (security-engineer §1-9, full table in `security-engineer.md`)
 
 Compressed cross-reference:
 
@@ -167,15 +187,16 @@ Compressed cross-reference:
 |---|---|
 | **Tag integrity** | R-1 forced `gpg.format=openpgp` + explicit `user.signingkey`; R-2 fingerprint + format verified before push; R-19 expected-SHA assertion (captured in P1.5 preflight, checked in tag-cut) |
 | **Tool Trust** | R-20 SHA256-pin every external binary (`gh`, `gpg`, `docker`, `pip`, `awk`, `jq`, `sha256sum`, `python3`, `curl`) in `SECURITY_RULES.md` SR-10; preflight P11 enforces before any GPG/`gh` call. See §11. |
-| **Ruleset window** | R-3 opt-in flag + 120s wall-clock watchdog + 8-signal trap stack; R-4 doctor standalone; R-5 snapshot-restore not hard-coded body; R-15 append-only + GPG-signed audit log; R-21 second-channel canary attestation; R-22 wall-clock deadline (suspend-safe); R-23 PIPE/QUIT/USR1/USR2 trap; R-24 R6 3x no-cache verification; R-25 alias/completion injection defense |
-| **Idempotency / replay** | R-6 every phase classified; markers in `.release-state/<v>/` |
-| **Secret hygiene** | R-7 gpg-agent only; R-8 no rc-sourcing, no env export, no `bash -x`; R-13 stderr redactor; R-16 tag-message regex lint |
-| **Token scope** | R-9 exactly `repo` (or `repo, workflow`), reject broader, reject CI `GITHUB_TOKEN` |
-| **Live trust** | R-10 `gh attestation verify` mandatory in step 4.2b (works today, chains Sigstore bundle to GHA OIDC + repo + tag ref); R-17 bounded polling |
+| **Ruleset window** | R-3 opt-in flag + 120s wall-clock watchdog + 8-signal trap stack; R-4 doctor standalone; R-5 snapshot-restore not hard-coded body; R-21 canary pushes an UNSIGNED `v0.0.0-canary` tag matching `refs/tags/v*` + parses rejection for `v-tags-signed` by name (F-15); R-22 wall-clock deadline (suspend-safe); R-23 PIPE/QUIT/USR1/USR2 trap; R-24 R6 3x no-cache verification; R-25 alias/completion injection defense; R-29 OFFSITE pre-window beacon + GHA deadman-switch surviving `kill -9 -<pgid>` (F-18) |
+| **Forensics / audit** | R-15 append-only JSONL + GPG-signed `.asc`; R-26 witnessed-field schema (`scripts/release/audit-schema.json`) + `--replay-day` cross-line invariants (F-16); R-27 3-channel offsite shipping (issue comment + private gist + `git notes`) so a compromised laptop can't erase the trail (F-17) |
+| **Idempotency / replay** | R-6 every phase classified; markers in `.release-state/<v>/`; both state dirs in `.gitignore` (F-11) |
+| **Secret hygiene** | R-7 gpg-agent socket pinned + `GPG_AGENT_INFO` refused (F-2); R-8 no rc-sourcing, no env export, no `bash -x`; R-13 stderr redactor; R-16 tag-message regex lint + markdown/HTML escape (F-13) |
+| **Token scope** | R-9 BOTH `repo` AND `workflow` unconditionally (F-9), reject broader, reject CI `GITHUB_TOKEN`, never `--show-token` |
+| **Live trust** | R-10 `gh attestation verify` mandatory against the pinned wheel in step 4.2b (works today, chains Sigstore bundle to GHA OIDC + repo + tag ref); R-17 bounded polling |
 | **Negative space** | R-11 grep-based self-check (no force-push, hard-reset, workflow edits, `curl\|sh`, ...); R-12 no writes to trust-root paths; R-18 no `git config --global`, no `gpg --import` |
 | **Supply chain** | R-14 SHA256 self-pin in `SECURITY_RULES.md` SR-09; `--accept-script-change` requires both flag + env var |
 
-R-1 + R-3 are the rules I'd most fight a reviewer over — they encode the 0.3.7 incident as immutable safety properties.
+R-1 + R-3 are the rules I'd most fight a reviewer over — they encode the 0.3.7 incident as immutable safety properties. **R-28 is reserved** for the tag-provenance trailer (F-23, deferred to FOLLOWUPS.md).
 
 ---
 
@@ -205,7 +226,7 @@ R-1 + R-3 are the rules I'd most fight a reviewer over — they encode the 0.3.7
 | Negative | mock `verify-tag` failure | Phase 3 prints exact recover hint + exit 2 |
 | Negative (F-1) | inject fake `gh` binary on `$PATH` that exits 0 from any `gh attestation verify` call | Preflight P11 MUST abort with `tool binary SHA drift: gh (got <hash>, expected <hash>)` BEFORE any `gh attestation verify` call executes. Regression test for compromised-toolchain class. |
 | Negative (F-2) | set `GPG_AGENT_INFO=/tmp/evil.sock` pointing at a no-prompt forging agent | Tag-cut MUST refuse before `git tag -s` — assert `GPG_AGENT_INFO` unset, socket resolves under `$HOME/.gnupg/`, `gpg --version` SHA matches R-20 pin |
-| Negative (F-3) | MITM `gh api /rulesets` returns `enforcement: active` while upstream is disabled | P9 + R-4 doctor MUST fail because second-channel canary push to `refs/canary/ruleset-probe-<ts>` was NOT rejected by the ruleset |
+| Negative (F-3 / F-15) | MITM `gh api /rulesets` returns `enforcement: active` while upstream disabled — 3 sub-cases: (a) `v-tags-signed` OFF + no other tag-ruleset → canary tag push succeeds; (b) `v-tags-signed` OFF + `branch-protection` rejects with non-matching name; (c) `v-tags-signed` ON → rejected naming it | P9 + R-4 doctor MUST: (a) die `canary tag pushed SUCCESSFULLY — v-tags-signed is OFF`; (b) die `rejected but NOT by v-tags-signed`; (c) pass. All 3 leave zero `v0.0.0-canary-*` tags locally + on remote |
 | Negative (F-4) | after R2 starts watchdog, `kill -9 $WATCHDOG_PID` from second shell, let R4 proceed | Parent MUST detect dead watchdog within 5s via `kill -0` heartbeat poll, abort recovery, re-enable ruleset from snapshot, exit non-zero |
 | Negative (F-5) | mid-recovery `SIGSTOP` watchdog for 200s then `SIGCONT` (simulates laptop suspend) | Wall-clock deadline MUST detect `date +%s` exceeded `START+120`, re-enable from snapshot, exit non-zero — `sleep 120` resumption MUST NOT extend window |
 | Negative (F-6) | after R2 disables ruleset, send `SIGPIPE` (close terminal mid-pipe) or `SIGQUIT` (Ctrl-\) to parent | Trap MUST fire, re-enable ruleset from snapshot. Test runs once per signal in `{PIPE, QUIT, USR1, USR2}` |
@@ -217,6 +238,9 @@ R-1 + R-3 are the rules I'd most fight a reviewer over — they encode the 0.3.7
 | Negative (F-12) | define `alias release.sh='release.sh --allow-ruleset-disable'` in zshrc OR have zsh completion auto-insert flag | Script MUST refuse: env var `WORTHLESS_ALLOW_RULESET_DISABLE=1` not also set ⇒ exit; PPID matching completion subprocess ⇒ exit `completion-injected flag detected` |
 | Negative (F-13) | tag annotation contains `[click me](https://evil.example)` or raw `<script>` | step 4.9 emitter MUST HTML-escape tag body before Linear paste AND R-16 regex MUST reject the tag at creation time; both layers fail-closed |
 | Negative (F-14) | after recovery writes a line to `.release-audit/<date>.log`, run `sed -i '' '1d'` to rewrite history | OS append-only flag (`chflags uappnd` mac / `chattr +a` Linux) MUST cause `sed` to fail with EPERM; `release-doctor.sh --verify-audit-log` MUST detect GPG-signature mismatch on the day's log |
+| Negative (F-16) | hand-craft a `.release-audit/<date>.log` line omitting a required R-26 field (e.g. `tool_witness`), re-sign with valid GPG; AND a second `sign` line whose `gpg` SHA256 differs from the P11 baseline | `--verify-audit-log` MUST refuse `schema-violation: missing required property`; `--replay-day` MUST refuse `tool-swap-detected: gpg sha256 changed mid-window-marker`; both exit 1 |
+| Negative (F-17) | block egress to `api.github.com` after `.asc` sealed but before R-27 ships; AND post-ship, locally rewrite the log + re-sign with cached subkey | ship MUST exit-3 `R-27 channel (a) failed`, no `ship-manifest.json`; `--reship-audit` with net restored succeeds; `--verify-audit-shipped` MUST exit-1 `sha256 drift channel (a): local=<X> remote=<Y>` |
+| Negative (F-18) | after `WATCHDOG-ARMED` posts + ruleset disabled, `kill -9 -<pgid>` the whole process group (bypasses local trap + watchdog + heartbeat in one syscall); IR has only `gh` read access | GHA `audit-ruleset-watchdog.yml` MUST detect deadline passed without `RULESET-RESTORED`, PUT the snapshot, confirm `active` via 3× no-cache reads, post `RULESET-REENABLED-BY-WATCHDOG` + `WATCHDOG-FINAL-STATE`; cold IR reconstructs tag + window + snapshot from `gh issue view` alone |
 
 CI job `release-script-ci.yml` runs the above on every PR touching `scripts/release*.sh` or `lib/*.sh`. Real releases require this suite green on `main`.
 
