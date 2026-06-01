@@ -297,8 +297,23 @@ Worthless does **not** protect against:
 3. **Side-channel timing attacks on the Python PoC.** HMAC verification uses `hmac.compare_digest` (SR-07), but other operations (XOR loop, allocation) are not constant-time.
 4. **Memory forensics on the proxy host.** CPython's GC may retain intermediate copies. See [Known limitations](#known-limitations-python-poc).
 5. **Supply chain attacks on Python dependencies.** `pip-audit` runs in CI; no full SBOM or reproducible builds yet.
-6. **Compromised proxy _host_.** An attacker with a root shell (or a container escape) on the proxy host can read process memory, attach a debugger, or modify the app. The host is trusted infrastructure. Note: in Docker, a compromised proxy _process_ (the HTTP-facing component, running as an unprivileged uid) can no longer reach key material — that is what the [crypto sidecar](#process-isolation-the-crypto-sidecar-docker) buys. The non-goal is host/root compromise, not proxy-process compromise.
-7. **Nation-state adversaries with physical access.** Hardware, cold-boot, and electromagnetic side channels are out of scope.
+6. **Compromised proxy _host_.** An attacker with a root shell (or a container escape) on the proxy host can read process memory, attach a debugger, or modify the app. The host is trusted infrastructure. The non-goal is host/root compromise.
+7. **Compromised proxy _process_** (application-uid RCE on `worthless-proxy`). The [crypto sidecar](#process-isolation-the-crypto-sidecar-docker) boundary protects a specific scope, not a general one.
+
+   The wall **does** protect:
+   - Fernet key shares (`share_a.bin`, `share_b.bin`) from disk exfiltration — the share files are owned by `worthless-crypto`, mode `0400`, on a `0700` directory.
+   - Fernet key bytes from in-memory exfiltration via the proxy uid — the key is reconstructed only inside the sidecar's address space.
+   - Decrypted shard-B plaintext from persisting in the proxy uid — it transits the proxy in-flight and is zeroed in a `finally` block on every code path.
+
+   The wall **does not** protect:
+   - Live in-flight `Authorization: Bearer <shard-A>` headers from a compromised proxy uid that reads requests as they arrive.
+   - Key reconstruction itself — a compromised proxy can call the sidecar's IPC `open()` verb at the documented contract, which the sidecar authenticates by uid match. The sidecar does not rate-limit, scope, or per-call audit-alert; legitimate and compromised `open()` calls are indistinguishable at the IPC layer.
+   - After-the-fact detection that any specific request reconstructed a key under attacker control. Reconstruction by a compromised proxy looks identical to legitimate traffic in the audit log.
+
+   The rules engine (spend caps, rate limits, token budgets) is in the same blast radius — it runs in the proxy process, on the compromised uid. An attacker who patches it has no further software defense. The architectural hardening path is sidecar-side enforcement on the `open()` verb (per-alias rate limits, alerting on velocity anomalies, audit-log signing) — tracked in [WOR-619](https://linear.app/plumbusai/issue/WOR-619); not currently scheduled for V1.
+
+   The non-goal is proxy-process RCE. The wall's coverage is Fernet-key isolation, not key-reconstruction prevention.
+8. **Nation-state adversaries with physical access.** Hardware, cold-boot, and electromagnetic side channels are out of scope.
 
 ## Known limitations (Python PoC)
 
@@ -383,6 +398,28 @@ touching every row.
 
 - **Risk.** Low (operational). Rolling upgrades are impossible without a version column.
 - **Tracked.** [WOR-257](https://linear.app/plumbusai/issue/WOR-257) epic child.
+
+### Legacy `shard_a_enc` column
+
+The `shards` table includes a column `shard_a_enc` that is `NULL` on every
+modern enrollment. It exists for backwards compatibility with the pre-Bearer-auth
+era (PR #198, internally codenamed "worthless-16x2"), where both shards were
+Fernet-encrypted at rest. The current design places shard-A in the request's
+`Authorization: Bearer` header; the proxy's auth code path does not fall back to
+`shard_a_enc` even when present.
+
+- **Risk.** Medium until [WOR-615](https://linear.app/plumbusai/issue/WOR-615)
+  lands. The invariant ("Bearer is the only auth path") is enforced
+  structurally in the proxy code at `src/worthless/proxy/app.py` —
+  no fallback branch consumes `stored.shard_a` for authentication. `worthless
+  relock` sets the column to `NULL` on every re-lock. **However**, the
+  invariant currently relies on code review, not on a CI test. A future
+  refactor reintroducing a stored-shard-A fallback would not be caught.
+- **Tracked.** [WOR-615](https://linear.app/plumbusai/issue/WOR-615) — adds the
+  adversarial regression test, plus a proposed startup assertion that refuses
+  to boot the proxy if any row has `shard_a_enc IS NOT NULL`, making the
+  precondition machine-checkable. Once WOR-615 lands, this row downgrades to
+  Low.
 
 ### Windows (experimental)
 
