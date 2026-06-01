@@ -3,7 +3,7 @@
 **Subject:** How OpenClaw selects the HTTP endpoint for an LLM provider request, and whether `worthless lock` rewriting `openclaw.json` is sufficient to make the Worthless proxy load-bearing.
 **OpenClaw version:** `ghcr.io/openclaw/openclaw:2026.5.3-1` (all results are pinned to this tag — see Version fragility).
 **Method:** Live Docker probes (two mock upstreams + hit counters) + extraction and reading of the `dist/*.js` bundle + bundled docs.
-**Status:** Routing question RESOLVED for `openai-completions`. Anthropic api-type + a few low-value cells still open.
+**Status:** Routing question RESOLVED — verified for `openai-completions` AND `anthropic-messages`, under both `merge` and `replace` modes, across infer / agent-local / gateway. Only LOW-value cells remain unrun (model-row order, multi-agent); OAuth is out of scope.
 **Related:** WOR-621 (Phase 3 design), `phase3-independent-design-review.md` (the Cursor review that triggered this), WOR-514 (incident).
 
 ---
