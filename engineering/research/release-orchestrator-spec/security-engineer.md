@@ -13,7 +13,7 @@ The maintainer's global `gpg.format=ssh` silently produces SSH-signed tags. `ver
 
 **Defense:** Never inherit ambient signing config. Every signing invocation is fully-qualified:
 
-```
+```bash
 git -c gpg.format=openpgp \
     -c user.signingkey=$MAINTAINER_GPG_FINGERPRINT \
     -c tag.gpgSign=true \
@@ -25,7 +25,7 @@ After signing, BEFORE push, run `git tag -v "$TAG" 2>&1` and parse for ALL of:
 - the fingerprint `$MAINTAINER_GPG_FINGERPRINT` (no short-ID matching, ever)
 - absence of `Signature made` lines referencing `ssh-` or `x509`
 
-Any mismatch → abort, do not push, do not delete the tag locally (operator inspects).
+Any mismatch → abort, do not push; then delete the local tag (`git tag -d`) so re-runs start clean — but ONLY after the full `git tag -v` output is recorded to the audit log (R-15). The bad signature is preserved in the audit trail for operator inspection, not left as a dangling local tag. (Consistent with SPEC.md §3 and deployment-engineer.md §3, which both delete the local tag on local-verify failure.)
 
 # 2. Ruleset-disable window (the most dangerous 90 seconds)
 
@@ -61,7 +61,7 @@ Phase markers stored in `.release-state/<version>/<phase>.ok` (gitignored). `rel
 
 # 5. `gh` token scope minimization
 
-At script entry: `gh auth status` (NO `--show-token` — that flag prints the token value to gh's own stderr, leaking it via process listings + terminal scrollback). Parse only the scope line. Required scope = exactly `repo` (or `repo, workflow` if workflow dispatch needed). **Reject** tokens with `admin:org`, `delete_repo`, `admin:public_key`, or `gist`. Token broader than necessary = abort with remediation message. Also reject GITHUB_TOKEN from a CI context (this is a local maintainer script).
+At script entry: `gh auth status` (NO `--show-token` — that flag prints the token value to gh's own stderr, leaking it via process listings + terminal scrollback). Parse only the scope line. Required scope = BOTH `repo` AND `workflow`, unconditionally (R-9 — `workflow` is required on every run, not only when workflow dispatch is "needed", because step 4.7 `gh workflow run` silently no-ops with a `repo`-only token, F-9). **Reject** tokens with `admin:org`, `delete_repo`, `admin:public_key`, or `gist`. Token broader than necessary = abort with remediation message. Also reject GITHUB_TOKEN from a CI context (this is a local maintainer script).
 
 When the script actually needs the token value for an API call, use `gh auth token` (writes ONLY the token to stdout, nothing to stderr) and pipe it directly to the consumer — never store in a shell variable that survives the subshell.
 

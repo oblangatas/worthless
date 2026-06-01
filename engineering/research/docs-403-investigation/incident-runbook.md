@@ -22,7 +22,7 @@
 | # | Option | ETA | Risk | Completeness | Verdict |
 |---|--------|-----|------|--------------|---------|
 | 1 | GitHub README banner + pinned issue | <5 min | none | sets expectations only | **DO FIRST (parallel with #2)** |
-| 2 | CF Pages dashboard → Rollback to last green deployment | <10 min | low (deploys are immutable, atomic) | full if cause is bad deploy | **PRIMARY containment** |
+| 2 | Roll back the *correct* system per the topology doc: **docs.wless.io** = Cloudflare Workers Builds (CF dashboard → Workers & Pages → `worthless-docs` → redeploy last green build); **wless.io** = GitHub Pages (re-run `deploy-website.yml` or revert the offending `website/**` commit) | <10 min | low (deploys are immutable, atomic) | full if cause is bad deploy | **PRIMARY containment** |
 | 3 | Disable CF Access policy if one is enabled | <5 min | low | full for Branch B only | conditional |
 | 4 | Repoint DNS to static 503 maintenance page | <30 min | medium (TTL + cert) | partial | fallback if #2 fails |
 | 5 | Serve stopgap landing via `worthless.sh` Worker on alt hostname | <60 min | medium | partial, breaks deep links | last resort |
@@ -32,14 +32,21 @@
 
 ## §3 Decision Tree — Recovery Steps by Cause
 
-### Branch A — Build failed → Pages serving 403 on a broken deploy
-**Signal:** recent deploy shows "Failed" in CF Pages, or last "Success" predates 14:30 UTC.
-1. CF dashboard → Workers & Pages → select project (handle `docs` and `wless` separately).
-2. Deployments → find last green deploy (Success, age predates 14:30 UTC).
-3. Click "..." → **Rollback to this deployment**. Confirm.
+### Branch A — Build failed → broken deploy serving 403
+**Signal:** recent deploy shows "Failed", or last "Success" predates 14:30 UTC. The two hostnames use **different** deploy systems (per `devops-engineer.md` §1) — handle each on its own:
+
+**docs.wless.io — Cloudflare Workers Builds:**
+1. CF dashboard → Workers & Pages → `worthless-docs`.
+2. Deployments → find last green build (Success, age predates 14:30 UTC).
+3. Click "..." → **Rollback to this deployment** (or **Retry** the last green build). Confirm.
 4. Wait 30–60 s for edge propagation.
-5. **Verify:** `curl -sI https://docs.wless.io | head -1` → `HTTP/2 200`. Repeat for `wless.io`.
-6. Fix the broken build in a follow-up PR. Do not redeploy until verified locally.
+
+**wless.io — GitHub Pages (`deploy-website.yml`):**
+1. `gh run list --workflow=deploy-website.yml` → find the last green run.
+2. Re-run it (`gh run rerun <id>`), OR `git revert` the offending `website/**` commit and push to `main` to retrigger the Pages deploy.
+3. Confirm the Pages deployment goes green in the repo's Pages settings / Actions.
+
+**Verify both:** `curl -sI https://docs.wless.io | head -1` and `curl -sI https://wless.io | head -1` → both `HTTP/2 200`. Fix the broken build in a follow-up PR; do not redeploy until verified locally.
 
 ### Branch B — Cloudflare Access policy enabled / misconfigured
 **Signal:** 403 body contains a CF Access challenge HTML or `cf-access-*` headers.
@@ -78,4 +85,4 @@ Minimal, honest, no cause speculation. Channels in order:
 
 ---
 
-**Containment recommendation (one line):** Post the GitHub README banner + pinned issue immediately (60 s), then rollback to the last green Cloudflare Pages deployment (Branch A in §3) — highest-probability cause, cheapest reversible action.
+**Containment recommendation (one line):** Post the GitHub README banner + pinned issue immediately (60 s), then roll back the right system — docs.wless.io via a Cloudflare Workers Builds redeploy, wless.io via a `deploy-website.yml` re-run or `website/**` revert (Branch A in §3) — highest-probability cause, cheapest reversible action.

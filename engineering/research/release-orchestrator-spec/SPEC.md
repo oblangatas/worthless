@@ -1,6 +1,6 @@
 # Release Orchestrator — Joint Spec
 
-> Synthesis of deployment-engineer (phase shape, gates, error handling) + security-engineer (18 hard rules, threat model). Beads: **worthless-5xzo** (folds **worthless-avm7**). Phase 3 #2 of WOR-598 close-out.
+> Synthesis of deployment-engineer (phase shape, gates, error handling) + security-engineer (28 hard rules, threat model). Beads: **worthless-5xzo** (folds **worthless-avm7**). Phase 3 #2 of WOR-598 close-out.
 
 **Reads:** [`deployment-engineer.md`](./deployment-engineer.md) · [`security-engineer.md`](./security-engineer.md)
 
@@ -21,7 +21,7 @@ The orchestrator is a thin, auditable shim that turns `~30 commands + judgement 
 
 ## 1. Top-level shape (deployment-engineer §1)
 
-```
+```text
 ./scripts/release.sh <version>           # happy path
 ./scripts/release.sh <version> --dry-run # read-only preflight only
 ./scripts/release-recover.sh <version>   # called when post-tag hint fires
