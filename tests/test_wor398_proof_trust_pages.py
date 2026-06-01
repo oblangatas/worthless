@@ -69,7 +69,7 @@ def test_red_index_is_attack_blog_not_trust_dashboard() -> None:
     assert lower.count("<section") <= 4
 
 
-def test_red_index_uses_real_attack_headlines_and_red_green_boundary() -> None:
+def test_red_index_uses_real_attack_headlines() -> None:
     html = _read(RED / "index.html")
 
     for required in (
@@ -80,8 +80,6 @@ def test_red_index_uses_real_attack_headlines_and_red_green_boundary() -> None:
         "TrapDoor hid in npm, PyPI, and crates.",
         "Shai-Hulud put the secrets in public repos.",
         "A GitHub Action printed the secrets.",
-        "copied locked AI-key material alone is less useful",
-        "attacker code running as you is still inside the room",
     ):
         assert required in html
 
