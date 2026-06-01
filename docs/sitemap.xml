@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-  <url><loc>https://worthless.cloud/</loc></url>
-  <url><loc>https://worthless.cloud/features.html</loc></url>
-  <url><loc>https://worthless.cloud/how-it-works.html</loc></url>
-  <url><loc>https://worthless.cloud/blog/</loc></url>
+  <url><loc>https://wless.io/</loc></url>
+  <url><loc>https://wless.io/features.html</loc></url>
+  <url><loc>https://wless.io/how-it-works.html</loc></url>
+  <url><loc>https://wless.io/blog/</loc></url>
+  <url><loc>https://wless.io/red/</loc></url>
+  <url><loc>https://wless.io/memes.html</loc></url>
 </urlset>

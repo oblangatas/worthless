@@ -4,25 +4,25 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>How It Works — Worthless</title>
-  <meta name="description" content="A step-by-step walkthrough of how Worthless splits API keys and enforces spending budgets." />
-  <link rel="canonical" href="https://worthless.cloud/how-it-works.html" />
+  <meta name="description" content="How Worthless replaces a local AI API key with a .env shard and routes legitimate calls through a local proxy." />
+  <link rel="canonical" href="https://wless.io/how-it-works.html" />
   <meta name="theme-color" content="#4a6fa5" />
 
   <!-- Open Graph -->
   <meta property="og:title" content="How It Works — Worthless" />
-  <meta property="og:description" content="A step-by-step walkthrough of how Worthless splits API keys and enforces spending budgets." />
-  <meta property="og:image" content="https://worthless.cloud/og-image.png" />
+  <meta property="og:description" content="See how a copied .env shard alone cannot call the AI provider while your local app keeps working." />
+  <meta property="og:image" content="https://wless.io/og-image.png" />
   <meta property="og:image:width" content="1200" />
   <meta property="og:image:height" content="630" />
-  <meta property="og:url" content="https://worthless.cloud/how-it-works.html" />
+  <meta property="og:url" content="https://wless.io/how-it-works.html" />
   <meta property="og:type" content="website" />
   <meta property="og:site_name" content="Worthless" />
 
   <!-- Twitter Card -->
   <meta name="twitter:card" content="summary_large_image" />
   <meta name="twitter:title" content="How It Works — Worthless" />
-  <meta name="twitter:description" content="A step-by-step walkthrough of how Worthless splits API keys and enforces spending budgets." />
-  <meta name="twitter:image" content="https://worthless.cloud/og-image.png" />
+  <meta name="twitter:description" content="See how a copied .env shard alone cannot call the AI provider while your local app keeps working." />
+  <meta name="twitter:image" content="https://wless.io/og-image.png" />
 
   <!-- Favicon -->
   <link rel="icon" type="image/x-icon" href="favicon.ico" />
@@ -239,7 +239,7 @@
     <div class="step-body">
       <h2>Worthless splits it in half</h2>
       <p>Run <code>worthless lock</code>. Your key gets split into two random-looking pieces. One stays in your .env. The other goes to a local proxy on your machine. Neither piece works on its own.</p>
-      <p>Someone steals your .env? They get random bytes. Can't use it. Can't brute-force it. Mathematically impossible.</p>
+      <p>Someone copies your .env? They get a shard. That copied value alone cannot call the provider or reveal the original key.</p>
       <details><summary>wait, how is it impossible?</summary><p>It's called XOR secret sharing. Think of it like tearing a photo in half — each piece looks like random noise. You need both halves to see the picture. The math guarantees that one half reveals zero information about the original. Not "hard to guess" — literally zero. Even with every computer on earth running forever.</p></details>
     </div>
   </div>
@@ -256,9 +256,9 @@
   <div class="step">
     <div class="step-rail"><div class="step-num">04</div><div class="step-line"></div></div>
     <div class="step-body">
-      <h2>Spending cap stops the bleeding</h2>
-      <p>Set a dollar limit. Hit it, the proxy stops reconstructing the key. Hard stop. Your app can't override it. Even if someone somehow gets both halves, the budget gate fires first.</p>
-      <details><summary>how is this different from OpenAI's spending limit?</summary><p>OpenAI's limit is checked after the request. Worthless checks before the key even forms. If you're over budget, the key never gets reconstructed. No API call happens. No money spent. The gate is at the infrastructure layer, not the provider's billing page.</p></details>
+      <h2>Usage rules run before reconstruction</h2>
+      <p>Worthless can check local token or usage rules before it reconstructs key material for a request. If the local rule denies the request, the provider key is not formed for that request.</p>
+      <details><summary>is this the same as a provider billing cap?</summary><p>No. Provider billing rules vary, and Worthless should not be described as a provider-side dollar cap. It is a local gate that can deny requests before reconstruction.</p></details>
     </div>
   </div>
 
@@ -286,56 +286,19 @@
 <script type="application/ld+json">
 {
   "@context": "https://schema.org",
-  "@type": "FAQPage",
-  "mainEntity": [
-    {
-      "@type": "Question",
-      "name": "How does Worthless split API keys?",
-      "acceptedAnswer": {
-        "@type": "Answer",
-        "text": "XOR secret sharing. Your key is split into two shares. Neither share reveals the original key. Recombining them reconstructs it."
-      }
-    },
-    {
-      "@type": "Question",
-      "name": "Where are the key shares stored?",
-      "acceptedAnswer": {
-        "@type": "Answer",
-        "text": "Share A stays on your machine in .env. Share B is encrypted on the Worthless server. The full key never exists at rest."
-      }
-    },
-    {
-      "@type": "Question",
-      "name": "Does Worthless see my full API key?",
-      "acceptedAnswer": {
-        "@type": "Answer",
-        "text": "Only for a split second during a request, inside server memory. The key is destroyed immediately after the API call completes."
-      }
-    },
-    {
-      "@type": "Question",
-      "name": "What if the Worthless server is compromised?",
-      "acceptedAnswer": {
-        "@type": "Answer",
-        "text": "The attacker gets Share B, which is useless without Share A from your machine. Neither share works alone."
-      }
-    },
-    {
-      "@type": "Question",
-      "name": "Does Worthless add latency?",
-      "acceptedAnswer": {
-        "@type": "Answer",
-        "text": "Minimal. Key reconstruction takes microseconds. The proxy adds single-digit milliseconds to each request."
-      }
-    },
-    {
-      "@type": "Question",
-      "name": "Can I self-host Worthless?",
-      "acceptedAnswer": {
-        "@type": "Answer",
-        "text": "Yes. Docker Compose, Railway, or Render. Full control over your key shares."
-      }
-    }
+  "@type": "WebPage",
+  "name": "How It Works - Worthless",
+  "url": "https://wless.io/how-it-works.html",
+  "description": "How Worthless replaces a local AI API key with a .env shard and routes legitimate calls through a local proxy.",
+  "isPartOf": {
+    "@type": "WebSite",
+    "name": "Worthless",
+    "url": "https://wless.io/"
+  },
+  "about": [
+    { "@type": "Thing", "name": "post-leak API key protection" },
+    { "@type": "Thing", "name": "AI API key security" },
+    { "@type": "Thing", "name": "local proxy" }
   ]
 }
 </script>

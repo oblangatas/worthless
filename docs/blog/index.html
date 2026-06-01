@@ -4,25 +4,25 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Blog — Worthless</title>
-  <meta name="description" content="Deep dives on API key security, secret management, and developer tooling from the Worthless team." />
-  <link rel="canonical" href="https://worthless.cloud/blog/" />
+  <meta name="description" content="Plain-English explainers on AI agent key leaks, post-leak protection, scanners, vaults, and local proxy guardrails." />
+  <link rel="canonical" href="https://wless.io/blog/" />
   <meta name="theme-color" content="#4a6fa5" />
 
   <!-- Open Graph -->
   <meta property="og:title" content="Blog — Worthless" />
-  <meta property="og:description" content="Deep dives on API key security, secret management, and developer tooling from the Worthless team." />
-  <meta property="og:image" content="https://worthless.cloud/og-image.png" />
+  <meta property="og:description" content="Explain how AI keys leak and how Worthless changes what a copied .env value can do." />
+  <meta property="og:image" content="https://wless.io/og-image.png" />
   <meta property="og:image:width" content="1200" />
   <meta property="og:image:height" content="630" />
-  <meta property="og:url" content="https://worthless.cloud/blog/" />
+  <meta property="og:url" content="https://wless.io/blog/" />
   <meta property="og:type" content="website" />
   <meta property="og:site_name" content="Worthless" />
 
   <!-- Twitter Card -->
   <meta name="twitter:card" content="summary_large_image" />
   <meta name="twitter:title" content="Blog — Worthless" />
-  <meta name="twitter:description" content="Deep dives on API key security, secret management, and developer tooling from the Worthless team." />
-  <meta name="twitter:image" content="https://worthless.cloud/og-image.png" />
+  <meta name="twitter:description" content="Explain how AI keys leak and how Worthless changes what a copied .env value can do." />
+  <meta name="twitter:image" content="https://wless.io/og-image.png" />
 
   <!-- Favicon -->
   <link rel="icon" type="image/x-icon" href="../favicon.ico" />
@@ -183,12 +183,12 @@
       <div class="article">
         <h2>The problem nobody solved</h2>
         <p>API keys leak. Constantly. Not because developers are careless, but because the entire AI ecosystem runs on plaintext secrets in .env files, and every tool in the chain is designed to move fast and break things.</p>
-        <p>AI agents run <code>git add .</code> and push your .env to GitHub. CI pipelines print keys in logs. Package managers get compromised and exfiltrate environment variables. And every week, someone discovers their $10k OpenAI bill came from a key they thought was safe.</p>
+        <p>AI agents run <code>git add .</code> and push your .env to GitHub. CI pipelines print keys in logs. Package managers get compromised and exfiltrate environment variables. One copied key can turn into provider abuse before the owner notices.</p>
 
         <h2>How many keys are out there right now?</h2>
-        <p>Search GitHub for <code>sk-proj-</code> (OpenAI's key prefix). You'll find tens of thousands of results. Live, working API keys sitting in public repositories. Some have been there for months. Some are being used right now by someone who isn't the owner.</p>
-        <p>OpenClaw leaks are massive. GitGuardian's annual report says millions of secrets are exposed on GitHub every year. And those are just the ones they can detect.</p>
-        <p>And it's getting worse. Google's Gemini API keys <a href="https://trufflesecurity.com/blog/google-api-keys-werent-secrets-but-then-gemini-changed-the-rules">weren't even considered secrets</a> until Gemini changed the rules. Suddenly, API keys that were safe to commit became attack vectors overnight. Every developer who followed Google's own guidance had keys exposed.</p>
+        <p>Public repos, build logs, local tool histories, and generated code can all expose AI-provider keys. A scanner may catch many leaks, but one missed leak can still become a real incident.</p>
+        <p>The practical lesson is simple: keep scanning, but also change what a copied .env value can do.</p>
+        <p>And it's getting worse. Google's Gemini API keys <a href="https://trufflesecurity.com/blog/google-api-keys-werent-secrets-but-then-gemini-changed-the-rules">showed how API key risk can change</a> when provider capabilities change. A key that looked harmless in one context can become dangerous in another.</p>
 
         <h2>The solutions don't work</h2>
         <p>Vaults protect keys at rest. Great. But the moment you use the key, it's in memory, in environment variables, in places where it can leak. A vault doesn't help when your CI pipeline logs the key, or when a compromised npm package reads process.env.</p>
@@ -196,14 +196,14 @@
         <p>Then there's the Cloudflare approach: build an entire infrastructure layer with Workers, KV stores, custom auth, rate limiting, and hope your team maintains it. It works, but it's complex enough that most teams won't do it. And the ones that do spend weeks on it.</p>
 
         <h2>What if leaked keys just didn't work?</h2>
-        <p>That's the question I couldn't stop thinking about. Not "how do we prevent leaks" (you can't) but "how do we make leaks harmless."</p>
-        <p>The answer turned out to be simple: split the key. Your .env gets one half. Your server gets the other. Neither half works alone. When you make an API call, the halves combine for a split second, the call goes through, and the key is destroyed.</p>
+        <p>That's the question I couldn't stop thinking about. Not just "how do we prevent leaks" but "how do we reduce what one copied .env value can do."</p>
+        <p>The answer turned out to be simple: split the key material. Your .env gets a shard. The local proxy keeps the matching material behind a separate boundary. Neither side works alone. When your app makes a legitimate API call, the proxy handles reconstruction for that request.</p>
         <p>If someone steals your .env, they get one half of an XOR split. Mathematically useless. They can't brute-force it. They can't derive anything from it. It's just random bytes.</p>
 
         <h2>That's Worthless</h2>
-        <p>Two commands. Your key is split. Your .env now contains a share that's worthless to steal. The proxy handles reconstruction, enforces spend caps, and never lets the full key leave server memory.</p>
-        <p>No vault. No complex infrastructure. No key rotation dance. Just a key that doesn't work when stolen.</p>
-        <p><code>pip install worthless</code></p>
+        <p>Two commands. Your key is split. Your .env now contains a shard that is not enough to call the provider by itself. The proxy handles reconstruction and local usage checks.</p>
+        <p>No vault. No complex infrastructure. No key rotation dance. Just a copied .env value that is not a provider credential on its own.</p>
+        <p><code>curl -sSL https://worthless.sh | sh</code></p>
       </div>
     </div>
   </div>
@@ -246,13 +246,13 @@
         <p>If you're a solo dev or a small team building with AI APIs, Vault is like buying a forklift to move a chair.</p>
 
         <h2>So where does Worthless fit?</h2>
-        <p>All of the above protect the key before it leaks. Worthless protects you after it leaks.</p>
-        <p>Your key gets split. Your .env has one half. The proxy has the other. Neither works alone. The full key exists for microseconds during a request, then it's gone.</p>
-        <p>Use a vault AND Worthless. Use GitGuardian AND Worthless. They're complementary, not competing. The vault prevents leaks. Worthless makes leaks harmless.</p>
+        <p>All of the above protect the key before it leaks. Worthless reduces what a copied local AI-key value can do after it leaks.</p>
+        <p>Your key material gets split. Your .env has a shard. The proxy has the matching material. Neither works alone.</p>
+        <p>Use a vault AND Worthless. Use GitGuardian AND Worthless. They're complementary, not competing. The vault prevents leaks. Worthless makes copied .env key material less useful after one slips through.</p>
         <p>Two commands:</p>
-        <pre><code>pip install worthless
+        <pre><code>curl -sSL https://worthless.sh | sh
 worthless lock</code></pre>
-        <p>That's the entire setup. No infrastructure to build. No team to maintain it. Your key is split, your .env is safe to leak, and you get back to shipping.</p>
+        <p>That's the setup path. No cloud account is required. Your .env gets a key-looking shard, and you get back to shipping.</p>
       </div>
     </div>
   </div>
@@ -280,7 +280,7 @@ worthless lock</code></pre>
           <li><strong>Pre-leak prevention</strong> — Vault, dotenv, GitHub secret scanning. These keep keys out of code and logs.</li>
           <li><strong>Post-leak response</strong> — rotating the key, monitoring for abuse, revoking tokens.</li>
         </ol>
-        <p>What's missing is the middle: <strong>what if the key leaks, but it's already useless?</strong></p>
+        <p>What's missing is the middle: <strong>what if the copied .env value is not enough to call the provider?</strong></p>
         <h2>How Worthless works</h2>
         <p>Worthless splits your API key into two cryptographic shares. Neither share reveals anything about the original key — you need both to reconstruct it. Reconstruction happens in memory only, for milliseconds, and only when your app actually needs to make an API call.</p>
         <pre><code>$ worthless lock
@@ -291,10 +291,10 @@ $ worthless wrap python app.py
 
 $ worthless unlock
 1 key(s) restored.</code></pre>
-        <p>There's also a budget enforcement layer: if your spending limit is hit, the key simply never forms — even if your code tries to use it. A hard stop.</p>
+        <p>There is also a local usage gate: if the request violates your token or usage rule, Worthless can deny it before key material is reconstructed for that request.</p>
         <blockquote>"Every secrets tool protects the key until your app uses it. Worthless protects you after it leaks."</blockquote>
         <h2>Get started</h2>
-        <pre><code>pip install worthless
+        <pre><code>curl -sSL https://worthless.sh | sh
 worthless lock
 worthless wrap python app.py</code></pre>
       </div>
@@ -331,8 +331,8 @@ worthless wrap python app.py</code></pre>
         <p>Because A is purely random. An attacker with only A sees that every possible value of S produces a valid B — the share A is statistically independent of S. It could have come from any secret equally well.</p>
         <div class="info-box"><strong>Information-theoretic security.</strong> This is called one-time pad secret sharing. It cannot be broken even with unlimited computational power — no brute force is possible because every guess is equally valid.</div>
         <h2>What Worthless does in practice</h2>
-        <p>When you run <code>worthless lock</code>: your key is read, Share A is generated randomly, Share B is derived so A XOR B = key. A goes to local encrypted storage; B lives in proxy memory. Your <code>.env</code> is updated to point at the proxy. The full key exists for milliseconds, then memory is zeroed.</p>
-        <div class="info-box success"><strong>Two independent protections:</strong><br/>1. Cryptographic split — a leaked share reveals nothing.<br/>2. Budget enforcement — even with full key access, spending is capped.</div>
+        <p>When you run <code>worthless lock</code>: your key is read, Share A is generated randomly, Share B is derived so A XOR B = key. Your <code>.env</code> receives key-looking shard material, and the matching material stays behind the local proxy/storage boundary. Reconstruction happens only when the proxy handles a legitimate request.</p>
+        <div class="info-box success"><strong>Two independent protections:</strong><br/>1. Cryptographic split — a copied shard reveals nothing by itself.<br/>2. Local usage gate — requests can be denied before reconstruction.</div>
       </div>
     </div>
   </div>

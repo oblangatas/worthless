@@ -4,25 +4,25 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Features — Worthless</title>
-  <meta name="description" content="Full feature breakdown for Worthless — split-key cryptography, budget enforcement, pre-commit scanning, and more." />
-  <link rel="canonical" href="https://worthless.cloud/features.html" />
+  <meta name="description" content="Worthless protects local AI API keys with a format-preserving .env shard, local proxy, token guardrails, and LLM-key scanning." />
+  <link rel="canonical" href="https://wless.io/features.html" />
   <meta name="theme-color" content="#4a6fa5" />
 
   <!-- Open Graph -->
   <meta property="og:title" content="Features — Worthless" />
-  <meta property="og:description" content="Full feature breakdown for Worthless — split-key cryptography, budget enforcement, pre-commit scanning, and more." />
-  <meta property="og:image" content="https://worthless.cloud/og-image.png" />
+  <meta property="og:description" content="Protect local AI API keys with a copied .env shard that cannot call the provider by itself." />
+  <meta property="og:image" content="https://wless.io/og-image.png" />
   <meta property="og:image:width" content="1200" />
   <meta property="og:image:height" content="630" />
-  <meta property="og:url" content="https://worthless.cloud/features.html" />
+  <meta property="og:url" content="https://wless.io/features.html" />
   <meta property="og:type" content="website" />
   <meta property="og:site_name" content="Worthless" />
 
   <!-- Twitter Card -->
   <meta name="twitter:card" content="summary_large_image" />
   <meta name="twitter:title" content="Features — Worthless" />
-  <meta name="twitter:description" content="Full feature breakdown for Worthless — split-key cryptography, budget enforcement, pre-commit scanning, and more." />
-  <meta name="twitter:image" content="https://worthless.cloud/og-image.png" />
+  <meta name="twitter:description" content="Protect local AI API keys with a copied .env shard that cannot call the provider by itself." />
+  <meta name="twitter:image" content="https://wless.io/og-image.png" />
 
   <!-- Favicon -->
   <link rel="icon" type="image/x-icon" href="favicon.ico" />
@@ -155,17 +155,17 @@
 
 <div class="page">
   <div class="eyebrow">Features</div>
-  <h1>Leaked key? $0 damage.</h1>
-  <p class="intro">AI agents run <code>git add -A</code> and push your .env to GitHub. Vaults protect the key at rest, but it's still one piece, still in memory, still leaks. And your code has to change to use them. Worthless splits the key. Leaked half is useless. No code changes. Two commands.</p>
+  <h1>Post-leak protection for AI keys.</h1>
+  <p class="intro">AI agents, logs, and generated code can copy your .env. Worthless changes what gets copied: the .env value is a shard, so that copied value alone cannot call the provider. Your local app keeps working through the Worthless proxy.</p>
 
   <div class="feat-section">
-    <h2>The key in your .env doesn't work</h2>
-    <p>Your .env has one half of an XOR split. The other half lives in the proxy. Neither works alone. Someone steals your .env? They get random bytes. Mathematically useless, even with unlimited compute.</p>
+    <h2>The copied .env value is not enough</h2>
+    <p>Your .env contains a format-preserving shard. The matching material stays behind the local proxy boundary. Neither side can call the provider alone.</p>
   </div>
 
   <div class="feat-section">
-    <h2>Hard spending cap</h2>
-    <p>Set a dollar limit per key. Hit the cap, the proxy refuses to reconstruct. Not a soft warning. A hard stop. Your app can't override it. Even if both halves are somehow available, the budget gate fires first.</p>
+    <h2>Token guardrails before reconstruction</h2>
+    <p>Worthless can apply local usage rules before it reconstructs key material for a request. This is a local guardrail, not a promise that a provider bill has a hard dollar cap.</p>
   </div>
 
   <div class="feat-section">
@@ -200,8 +200,8 @@
     <tbody>
       <tr><td>Prevents commits with raw keys</td><td class="ty">&#10003;</td><td class="tn">&#10007;</td><td class="ty">&#10003;</td><td class="tp">Partial</td></tr>
       <tr><td>Post-leak protection</td><td class="ty">&#10003;</td><td class="tn">&#10007;</td><td class="tn">&#10007;</td><td class="tn">&#10007;</td></tr>
-      <tr><td>Leaked key is cryptographically useless</td><td class="ty">&#10003;</td><td class="tn">&#10007;</td><td class="tn">&#10007;</td><td class="tn">&#10007;</td></tr>
-      <tr><td>Budget / hard spending cap</td><td class="ty">&#10003;</td><td class="tn">&#10007;</td><td class="tn">&#10007;</td><td class="tn">&#10007;</td></tr>
+      <tr><td>Copied .env shard alone cannot call provider</td><td class="ty">&#10003;</td><td class="tn">&#10007;</td><td class="tn">&#10007;</td><td class="tn">&#10007;</td></tr>
+      <tr><td>Local token/usage gate before reconstruction</td><td class="ty">&#10003;</td><td class="tn">&#10007;</td><td class="tn">&#10007;</td><td class="tn">&#10007;</td></tr>
       <tr><td>Zero code changes</td><td class="ty">&#10003;</td><td class="tn">&#10007;</td><td class="ty">&#10003;</td><td class="ty">&#10003;</td></tr>
       <tr><td>Fully self-hosted</td><td class="ty">&#10003;</td><td class="tp">Optional</td><td class="ty">&#10003;</td><td class="ty">&#10003;</td></tr>
       <tr><td>Open source</td><td class="ty">&#10003;</td><td class="ty">&#10003;</td><td class="ty">&#10003;</td><td>—</td></tr>
@@ -213,7 +213,7 @@
     <h2>Ready to make your keys worthless?</h2>
     <p>Install in one command. Protect your first key in under a minute.</p>
     <div class="cta-row">
-      <a href="https://pypi.org/project/worthless" class="btn-calm" target="_blank" rel="noopener">pip install worthless &#8599;</a>
+      <a href="https://docs.wless.io/install/" class="btn-calm">Install guide &#8599;</a>
       <a href="how-it-works.html" class="btn-ghost">How it works &#8594;</a>
     </div>
   </div>

@@ -1,66 +1,57 @@
 # Worthless
 
-> Worthless is an open-source tool that splits your API keys so a leaked key can't do anything. It's not a vault. Even if the key leaks, it won't work.
+> Worthless makes copied `.env` AI-key material useless by itself while your local app keeps working through a proxy.
 
-## What does Worthless do?
+## Short answer
 
-Worthless splits your API key into two shares using XOR secret sharing. One share stays on your machine (.env), the other goes to a local proxy. Neither share works alone. When your app makes an API call, the proxy combines both shares for a split second, calls the provider, then destroys the key. A leaked .env contains only a useless share.
+AI agents, build logs, generated code, and repos can copy secrets out of a local `.env` file. Worthless changes what gets copied. It replaces a real AI-provider key in `.env` with a format-preserving shard. The app keeps working locally through Worthless, but the copied `.env` value alone cannot call the provider.
 
-## Why use Worthless?
+## What Worthless is
 
-API keys leak constantly. AI agents run `git add -A` and push your .env to GitHub. CI logs print keys. Compromised packages read process.env. Vaults protect keys at rest, but the key is still one piece in memory. Worthless is different: the key in your .env is only half a key. Even if it leaks, it's mathematically useless.
+- Open-source local tool for reducing AI API key blast radius.
+- Local proxy for supported AI-provider API calls.
+- Format-preserving `.env` shard so existing local workflows can keep reading environment variables.
+- Complement to scanners, vaults, provider dashboards, and gateways.
+- No Worthless cloud account required for local use.
 
-## Supported providers
+## What Worthless is not
 
-- OpenAI (sk-proj-* keys)
-- Anthropic (sk-ant-* keys)
-- Gemini (planned)
+- Not a promise that "nothing happens" after every leak.
+- Not protection against host compromise, same-user code execution, or a fully compromised laptop.
+- Not a launch claim for Windows outside WSL; use macOS, Linux, or WSL.
+- Not an AWS, Stripe, GitHub, database-password, or all-secret scanner.
+- Not a provider-side dollar cap.
 
-## Quick start (3 commands)
+## Supported scope
 
-```bash
-pip install worthless
-worthless lock
-worthless wrap python app.py
-```
+- Proxy adapters: OpenAI-compatible chat-completions traffic and Anthropic messages traffic.
+- Scanner prefixes: OpenAI, Anthropic, Google AI, and xAI-style key prefixes.
+- Install path: `curl -sSL https://worthless.sh | sh`
+- Docs: `https://docs.wless.io/`
 
-1. `pip install worthless` — install the CLI
-2. `worthless lock` — scans .env, splits each API key into two shares
-3. `worthless wrap python app.py` — runs your app with the proxy injecting the reconstructed key
+## Query map
 
-Your code needs zero changes. Environment variables work exactly as before.
-
-## How to uninstall
-
-```bash
-worthless unlock
-```
-
-One command. Original .env restored. Proxy stopped. Shares deleted. Zero artifacts left behind. No lock-in.
-
-## Key features
-
-- Split-key cryptography (XOR, information-theoretically secure)
-- Hard spending cap per key (proxy refuses to reconstruct if budget exceeded)
-- Pre-commit scanning (blocks commits with raw API keys)
-- Zero code changes (proxy injects keys transparently)
-- Fully reversible (`worthless unlock` restores everything)
-- Self-hosted, open source (AGPL-3.0), no cloud, no account, zero telemetry
-
-## Not a vault
-
-Worthless is complementary to vaults, not a replacement. Use a vault AND Worthless. The vault prevents leaks. Worthless makes leaks harmless. They solve different problems.
+- "What should I do if my OpenAI API key leaked?" Start with rotation and provider triage, then reduce future blast radius with Worthless.
+- "How do I stop AI agents from leaking API keys?" Use scanners and least privilege, then avoid giving copied `.env` values enough material to call the provider.
+- "Are secret scanners enough?" No. Scanners find leaks. Worthless changes what one missed copied `.env` value can do.
+- "Is Worthless a vault?" No. Vaults store secrets. Worthless focuses on post-leak AI-key blast radius for local workflows.
+- "Does Worthless cap provider bills?" No. Worthless can apply local token or usage gates before reconstruction, but provider billing rules still vary.
+- "What is post-leak API key protection?" It is a design where a copied key-looking value is not enough by itself to call the upstream provider.
 
 ## Pages
 
-- [Home](https://worthless.cloud/): Product overview
-- [Features](https://worthless.cloud/features.html): Full feature breakdown
-- [How It Works](https://worthless.cloud/how-it-works.html): Architecture and security model
-- [Blog](https://worthless.cloud/blog/): Articles on API key security
-- [Red Blog](https://worthless.cloud/red/): Attack scenarios from the attacker's POV
-- [Memes](https://worthless.cloud/memes.html): Security memes
+- [Home](https://wless.io/): Product overview and install path.
+- [Features](https://wless.io/features.html): Feature summary and comparisons.
+- [How It Works](https://wless.io/how-it-works.html): Local proxy and shard explanation.
+- [Blog](https://wless.io/blog/): Plain-English security explainers.
+- [Red Blog](https://wless.io/red/): Security writeups and red-team perspective.
+- [Memes](https://wless.io/memes.html): Visual explanation of the `.env` risk.
+- [Docs](https://docs.wless.io/): Install, security model, protocol, and recovery docs.
 
 ## Links
 
+- [Install guide](https://docs.wless.io/install/)
+- [Security model](https://docs.wless.io/security/)
+- [Protocol](https://docs.wless.io/protocol/)
 - [GitHub](https://github.com/shacharm2/worthless)
 - [PyPI](https://pypi.org/project/worthless/)

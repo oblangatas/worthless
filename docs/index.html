@@ -207,6 +207,13 @@
       object-fit: contain;
     }
 
+    .audit-icon .audit-letter {
+      font-size: 0.62rem;
+      font-weight: 800;
+      line-height: 1;
+      letter-spacing: 0;
+    }
+
     .nav-actions .kofi {
       display: inline-flex;
       align-items: center;
@@ -1550,7 +1557,7 @@
         <h1>
           <span>Worthless.</span>
         </h1>
-        <p class="subline">Your API key gets leaked. Or stolen. Doesn't matter. It won't work.<br /><strong>It's Worthless.</strong></p>
+        <p class="subline">Your .env gets copied. The copied AI-key value alone cannot call the provider.<br /><strong>It's Worthless.</strong></p>
         <div class="hero-actions">
           <button class="install" id="copy-install" type="button" title="Copy install command" aria-label="Copy install command: curl -sSL https://worthless.sh | sh">
             <span class="command-text">curl -sSL https://worthless.sh | sh</span>
@@ -1596,7 +1603,7 @@
                 <img src="https://cdn.simpleicons.org/claude/CC785C" alt="" aria-hidden="true" />
               </a>
               <a class="audit-icon" href="#" data-audit="chatgpt" aria-label="Audit with ChatGPT" title="Audit with ChatGPT">
-                <img src="https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/openai.svg" alt="" aria-hidden="true" />
+                <span class="audit-letter" aria-hidden="true">AI</span>
               </a>
               <a class="audit-icon" href="#" data-audit="gemini" aria-label="Audit with Gemini" title="Audit with Gemini">
                 <img src="https://cdn.simpleicons.org/googlegemini/8E75B2" alt="" aria-hidden="true" />
@@ -1746,7 +1753,7 @@
               <img src="https://cdn.simpleicons.org/claude/CC785C" alt="" aria-hidden="true" />
             </a>
             <a class="audit-icon" href="#" data-audit="chatgpt" aria-label="Audit with ChatGPT" title="Audit with ChatGPT">
-              <img src="https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/openai.svg" alt="" aria-hidden="true" />
+              <span class="audit-letter" aria-hidden="true">AI</span>
             </a>
             <a class="audit-icon" href="#" data-audit="gemini" aria-label="Audit with Gemini" title="Audit with Gemini">
               <img src="https://cdn.simpleicons.org/googlegemini/8E75B2" alt="" aria-hidden="true" />
