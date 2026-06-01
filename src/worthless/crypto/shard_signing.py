@@ -54,6 +54,7 @@ import logging
 import os
 import secrets
 import struct
+import tempfile
 import time
 from pathlib import Path
 
@@ -128,7 +129,10 @@ def load_or_create_signing_key(home_dir: Path, fernet_key: bytes | bytearray) ->
                     the wrong length (internal invariant violation).
     """
     key_path = home_dir / "signing.key"
-    cipher = _Fernet(bytes(fernet_key))
+    # bytes(fernet_key) is an unavoidable immutable copy — the Fernet ctor requires
+    # bytes. The caller passes a throwaway bytearray copy and keeps the cached
+    # original; this KEK copy is short-lived and not a new exposure class.
+    cipher = _Fernet(bytes(fernet_key))  # nosemgrep: sr01-key-material-not-bytearray
 
     if key_path.exists():
         content = key_path.read_bytes()
@@ -202,13 +206,26 @@ def load_or_create_signing_key(home_dir: Path, fernet_key: bytes | bytearray) ->
 
 
 def _atomic_write(path: Path, data: bytes) -> None:
-    """Write *data* to *path* atomically at 0o600 (create or overwrite)."""
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    fd = os.open(str(path), flags, 0o600)
+    """Write *data* to *path* atomically at 0o600 (create or overwrite).
+
+    Writes to a temp file in the same directory, fsyncs, then ``os.replace``
+    onto the target. A crash leaves either the old file or the complete new
+    one — never a torn or empty signing.key (which would force a spurious
+    regenerate and invalidate live enrollments).
+    """
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".signing.key.")
     try:
-        os.write(fd, data)
-    finally:
-        os.close(fd)
+        try:
+            os.fchmod(fd, 0o600)
+            os.write(fd, data)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        Path(tmp_name).replace(path)
+    except BaseException:
+        # Best-effort cleanup of the temp file on any failure before replace.
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
 
 
 # ---------------------------------------------------------------------------
