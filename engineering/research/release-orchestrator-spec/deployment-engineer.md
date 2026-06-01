@@ -6,7 +6,7 @@
 
 # 1. Top-Level Shape
 
-```
+```text
 ./scripts/release.sh <version>           # happy path
 ./scripts/release.sh <version> --dry-run # read-only, no tag, no push
 ./scripts/release-recover.sh <version>   # called only when post-tag hint fires
@@ -14,7 +14,7 @@
 
 Three subphases, strictly sequential, fail-closed between each:
 
-```
+```text
 release.sh <version>
 ├── phase 1: preflight       (read-only, no secrets, ~30s)
 │   └── 10 gates, each: check → pass | fail+remediation+exit
@@ -35,7 +35,7 @@ release.sh <version>
 
 Call graph:
 
-```
+```text
 release.sh
  ├── lib/preflight.sh        (10 gate functions)
  ├── lib/tag-cut.sh          (gpg-format-forced tag + verify + push)
@@ -60,7 +60,7 @@ All 10 gates run unconditionally; first failure exits non-zero with **one** reme
 | P5 | CHANGELOG placeholder | `## <version> — TBD` heading exists | `Add a CHANGELOG.md section for <version> with TBD date marker.` |
 | P6 | Smoke test green | `./scripts/smoke-test.sh` exits 0 (folds worthless-avm7) | `Smoke failed — fix lock/scan/unlock round-trip before releasing.` |
 | P7 | GPG fingerprint match | `gpg --list-secret-keys --with-colons` includes repo Variable `MAINTAINER_GPG_FINGERPRINT` | `Your secret key fingerprint != MAINTAINER_GPG_FINGERPRINT repo Variable.` |
-| P8 | `gh` auth | `gh auth status` returns 0 AND token scope includes `repo`+`workflow` | `Run gh auth refresh -s repo,workflow.` |
+| P8 | `gh` auth | `gh auth status` returns 0 AND token scope includes BOTH `repo` AND `workflow` unconditionally (security-engineer R-9 — `workflow` is required even on the happy path because step 4.7 `gh workflow run` silently no-ops without it) | `Run gh auth refresh -s repo,workflow.` |
 | P9 | Ruleset alive | `gh api /repos/:owner/:repo/rulesets/15719679 --jq .enforcement` == `active` | `v-tags-signed ruleset 15719679 not active — re-enable in repo settings.` |
 | P10 | Workflows file fresh | `verify-tag.sh` exists, executable, hash recorded in `.release-meta` matches | `verify-tag.sh changed since last release — re-review and update .release-meta hash.` |
 
@@ -90,7 +90,7 @@ grep -q "$FPR"            /tmp/tag-verify.out || die "tag-cut: signed by wrong k
 
 Then **mandatory** interactive confirmation (no `--yes` flag exists; non-TTY exits):
 
-```
+```text
 About to push v0.3.8 (GPG-signed by D3AD…BEEF). Continue? [y/N]
 ```
 
@@ -116,7 +116,7 @@ Then `git push origin "v${VERSION}"`. On any local-verify failure, the local tag
 
 # 5. `scripts/release-recover.sh <version>`
 
-Strict 5-step recovery, each step idempotent:
+Strict 6-step recovery (R1–R6), each step idempotent:
 
 ```bash
 R1  gh api -X PATCH /repos/:owner/:repo/rulesets/15719679 -f enforcement=disabled
