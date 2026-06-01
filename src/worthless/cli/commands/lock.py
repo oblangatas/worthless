@@ -720,9 +720,40 @@ def _maybe_prompt_code_scan(cwd: Path) -> None:
     - Zero findings → completely silent.
     - User pressing Ctrl-C at the prompt → treated as "no", exits cleanly.
     - Any other exception → swallowed; lock exit code is never affected.
+
+    worthless-8vvg: bounded by ``SCAN_TIME_BUDGET_S`` + ``skipped`` collector
+    so a hostile or oversized source file can't make ``worthless lock`` hang
+    after the lock has already succeeded. This is ADVISORY not blocking —
+    unlike the pre-flight scan in ``_lock_keys`` (which fail-closes on a
+    non-empty skipped list), this post-lock prompt is opportunistic: the lock
+    is already committed, the exit code MUST NOT change, and the user just
+    needs to know the source scan was incomplete so they can re-run
+    ``worthless scan --code`` manually.
     """
     try:
-        findings = scan_for_hardcoded_provider_urls([cwd])
+        skipped: list[SkippedFile] = []
+        deadline = time.monotonic() + SCAN_TIME_BUDGET_S
+        findings = scan_for_hardcoded_provider_urls(
+            [cwd], deadline=deadline, skipped=skipped
+        )
+        if skipped:
+            # Advisory note ONLY — lock already succeeded; we don't prompt and
+            # we don't change the exit code. The user can re-run the scan
+            # manually once they fix the underlying cause (oversized file,
+            # permission error, slow disk).
+            reason_counts: dict[str, int] = {}
+            for s in skipped:
+                reason_counts[s.reason] = reason_counts.get(s.reason, 0) + 1
+            reason_summary = ", ".join(
+                f"{n} {r}" for r, n in sorted(reason_counts.items())
+            )
+            typer.echo(
+                f"\nNote: post-lock source scan incomplete ({reason_summary}). "
+                "Run `worthless scan --code` after addressing the cause for a "
+                "full report on hardcoded provider URLs.",
+                err=True,
+            )
+            return
         if not findings:
             return
         count = len(findings)

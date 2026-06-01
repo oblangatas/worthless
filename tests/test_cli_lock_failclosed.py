@@ -123,3 +123,107 @@ def test_happy_path_no_skipped_proceeds_to_existing_flow(
     assert "scan incomplete" not in result.stderr.lower()
     assert deadline_received["value"] is not None
     assert deadline_received["value"] > 0
+
+
+# ---------------------------------------------------------------------------
+# worthless-8vvg: post-lock _maybe_prompt_code_scan is ADVISORY not blocking
+#
+# Unlike the pre-flight scan (which fail-closes on incomplete), the post-lock
+# prompt is opportunistic — lock has already committed, exit code MUST NOT
+# change. Skipped non-empty → emit advisory note and skip the prompt.
+# ---------------------------------------------------------------------------
+
+
+class TestPostLockPromptAdvisoryOnly:
+    """Direct unit tests for ``_maybe_prompt_code_scan`` — the post-lock
+    opportunistic scan that runs AFTER enrollment succeeded. A hostile or
+    oversized source file must not freeze the terminal, and must not change
+    the lock's exit code."""
+
+    def test_incomplete_scan_emits_advisory_note_and_returns_silently(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """8vvg: when the bounded scan reports skipped files, the prompt is
+        suppressed and a one-line advisory goes to stderr. No raise."""
+        from worthless.cli.commands.lock import _maybe_prompt_code_scan
+
+        deadline_received: dict[str, float | None] = {"value": None}
+
+        def fake_scan(_roots, *, deadline=None, skipped=None, **_kw):
+            # 8vvg requires both arguments be plumbed through.
+            assert skipped is not None, "lock must pass mutable skipped list (8vvg)"
+            assert deadline is not None and deadline > 0, (
+                "lock must bound the post-lock scan with a real deadline (8vvg)"
+            )
+            deadline_received["value"] = deadline
+            skipped.append(SkippedFile(file=str(tmp_path / "big.py"), reason="truncated"))
+            return []  # no findings, scan incomplete
+
+        monkeypatch.setattr(
+            "worthless.cli.commands.lock.scan_for_hardcoded_provider_urls",
+            fake_scan,
+        )
+
+        # Must NOT raise. Lock has already succeeded; exit code is owned by
+        # the caller and we don't touch it here.
+        _maybe_prompt_code_scan(tmp_path)
+
+        captured = capsys.readouterr()
+        # Advisory note appears on stderr.
+        assert "post-lock source scan incomplete" in captured.err
+        # Reason summary survives the message renderer.
+        assert "1 truncated" in captured.err
+        # User knows how to retry.
+        assert "worthless scan --code" in captured.err
+
+    def test_incomplete_scan_suppresses_the_interactive_prompt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """8vvg: an incomplete scan must NOT trigger the typer.confirm prompt
+        — the prompt would block the post-lock flow waiting for input that
+        will never arrive on a CI machine or scripted invocation."""
+        from worthless.cli.commands.lock import _maybe_prompt_code_scan
+
+        def fake_scan(_roots, *, deadline=None, skipped=None, **_kw):
+            skipped.append(SkippedFile(file=str(tmp_path / "big.py"), reason="timeout"))
+            return []
+
+        confirm_called = {"count": 0}
+
+        def fake_confirm(*_a, **_kw):
+            confirm_called["count"] += 1
+            return True
+
+        monkeypatch.setattr(
+            "worthless.cli.commands.lock.scan_for_hardcoded_provider_urls",
+            fake_scan,
+        )
+        monkeypatch.setattr("worthless.cli.commands.lock.typer.confirm", fake_confirm)
+
+        _maybe_prompt_code_scan(tmp_path)
+
+        assert confirm_called["count"] == 0, (
+            "8vvg: the interactive prompt must NOT fire on an incomplete scan"
+        )
+
+    def test_happy_path_no_skipped_no_findings_silent(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression guard: happy path (no skipped, no findings) stays
+        completely silent — same as before 8vvg."""
+        from worthless.cli.commands.lock import _maybe_prompt_code_scan
+
+        def fake_scan(_roots, *, deadline=None, skipped=None, **_kw):
+            return []  # no findings, no skips
+
+        monkeypatch.setattr(
+            "worthless.cli.commands.lock.scan_for_hardcoded_provider_urls",
+            fake_scan,
+        )
+
+        _maybe_prompt_code_scan(tmp_path)
+
+        captured = capsys.readouterr()
+        assert captured.err == "", (
+            f"happy path must stay silent; got stderr: {captured.err!r}"
+        )
