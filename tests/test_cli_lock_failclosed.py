@@ -227,3 +227,41 @@ class TestPostLockPromptAdvisoryOnly:
         assert captured.err == "", (
             f"happy path must stay silent; got stderr: {captured.err!r}"
         )
+
+    def test_incomplete_scan_drops_partial_findings(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """8vvg: when the scan returns BOTH skipped files AND findings, the
+        partial findings are deliberately DROPPED (not shown to the user) —
+        an incomplete scan can't be trusted to be representative.
+
+        Without this test, a future refactor could silently start emitting the
+        partial findings as if they were complete, which would be misleading.
+        """
+        from worthless.cli.commands.lock import _maybe_prompt_code_scan
+
+        def fake_scan(_roots, *, deadline=None, skipped=None, **_kw):
+            # Both populated: scan found a URL in one file but couldn't
+            # finish reading another. We MUST NOT report the partial result.
+            skipped.append(SkippedFile(file=str(tmp_path / "big.py"), reason="truncated"))
+            # Anonymous truthy entry — _maybe_prompt_code_scan never iterates
+            # findings when skipped is non-empty, so the exact shape is
+            # immaterial; what matters is that ``if findings`` is True.
+            return [object(), object()]
+
+        monkeypatch.setattr(
+            "worthless.cli.commands.lock.scan_for_hardcoded_provider_urls",
+            fake_scan,
+        )
+
+        _maybe_prompt_code_scan(tmp_path)
+
+        captured = capsys.readouterr()
+        # The advisory note is present — user knows the scan was incomplete.
+        assert "post-lock source scan incomplete" in captured.err
+        # The partial-findings block must NOT appear — phrases that would
+        # only render when findings are reported:
+        assert "Found 2 hardcoded provider URLs" not in captured.err
+        assert "bypass the proxy" not in captured.err
+        # User is told to retry rather than shown partial data.
+        assert "worthless scan --code" in captured.err
