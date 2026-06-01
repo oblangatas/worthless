@@ -3,11 +3,11 @@
 :root {
   --bg: #090b10;
   --line: #252b36;
-  --text: #dfe7df;
-  --muted: #8fa194;
-  --faint: #5d6e62;
+  --text: #e9ecef;
+  --muted: #a3a9b4;
+  --faint: #667080;
   --red: #ff4d4d;
-  --green: #69e58f;
+  --green: #8fb99a;
   --mono: "JetBrains Mono", ui-monospace, monospace;
 }
 
@@ -15,7 +15,7 @@ body {
   margin: 0;
   font-family: Inter, system-ui, sans-serif;
   background:
-    linear-gradient(180deg, rgba(255, 77, 77, .085), rgba(105, 229, 143, .04) 38rem, rgba(9, 11, 16, 0) 58rem),
+    linear-gradient(180deg, rgba(255, 77, 77, .085), rgba(9, 11, 16, 0) 34rem),
     var(--bg);
   color: var(--text);
   line-height: 1.6;
@@ -96,7 +96,7 @@ h1 {
 }
 
 .source a {
-  color: var(--green);
+  color: var(--text);
   text-decoration: none;
 }
 
@@ -130,6 +130,7 @@ p {
   margin-top: .85rem;
   color: var(--green);
   font: 500 .9rem/1.55 var(--mono);
+  opacity: .86;
 }
 
 .grid {
@@ -156,7 +157,7 @@ p {
 }
 
 .note {
-  color: var(--green);
+  color: var(--muted);
   font: 500 .95rem/1.55 var(--mono);
 }
 
