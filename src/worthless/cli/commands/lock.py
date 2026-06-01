@@ -9,6 +9,7 @@ import os
 import re
 import stat
 import sys
+import time
 from dataclasses import dataclass
 from typing import NamedTuple
 from pathlib import Path
@@ -18,10 +19,10 @@ import typer
 from worthless.cli._repo_factory import open_repo
 from worthless.cli.bootstrap import WorthlessHome, acquire_lock, get_home
 from worthless.cli.code_scanner import scan_for_hardcoded_provider_urls
-from worthless.cli.commands.scan import _format_code_findings_human
+from worthless.cli.commands.scan import SCAN_TIME_BUDGET_S, _format_code_findings_human
 from worthless.cli.process import resolve_port
 from worthless.cli.console import WorthlessConsole, get_console
-from worthless.cli.scanner import scan_source_for_hardcoded_provider_urls
+from worthless.cli.scanner import SkippedFile, scan_source_for_hardcoded_provider_urls
 from worthless.cli.dotenv_rewriter import (
     rewrite_env_keys,
     scan_env_keys,
@@ -959,7 +960,54 @@ def _lock_keys(
     if env_path.is_symlink():
         raise WorthlessError(ErrorCode.ENV_NOT_FOUND, f"Refusing to follow symlink: {env_path}")
 
-    bypass_findings = scan_source_for_hardcoded_provider_urls(env_path.parent)
+    # c5kc-61tw: same fail-closed contract the CLI scan uses — bounded per-file
+    # read + wall-clock deadline so a hostile / oversized source file can't hang
+    # ``worthless lock`` the way it could hang ``worthless scan`` pre-c5kc.
+    # ``skipped`` collects files we couldn't fully scan (truncated / unreadable
+    # / timeout); incomplete scan = hard fail BEFORE evaluating bypass_findings,
+    # because ``--allow-hardcoded-urls`` can't waive bypass URLs that were
+    # never surfaced (we don't know what was in the un-scanned tail).
+    bypass_skipped: list[SkippedFile] = []
+    bypass_deadline = time.monotonic() + SCAN_TIME_BUDGET_S
+    bypass_findings = scan_source_for_hardcoded_provider_urls(
+        env_path.parent,
+        deadline=bypass_deadline,
+        skipped=bypass_skipped,
+    )
+    # Filter to the HANG-class skips only. ``unreadable`` (permission denied,
+    # I/O error) is silently tolerated here because lock's source scan is
+    # opportunistic defense-in-depth — vendored binaries, OS-specific files,
+    # and dev-only permission quirks are normal and should NOT block a lock.
+    # The pre-existing contract (``test_unreadable_source_file_does_not_crash``)
+    # is preserved. ``truncated`` / ``timeout`` ARE genuine hang risks (the
+    # c5kc-named scenarios) and still fail closed.
+    hang_class_skipped = [s for s in bypass_skipped if s.reason != "unreadable"]
+    if hang_class_skipped:
+        # Lead with the reason summary so the user-facing word ("truncated" /
+        # "timeout") lands in the header — downstream message truncation can
+        # eat the middle of multi-line messages, but the header stays intact.
+        reason_counts: dict[str, int] = {}
+        for s in hang_class_skipped:
+            reason_counts[s.reason] = reason_counts.get(s.reason, 0) + 1
+        reason_summary = ", ".join(
+            f"{n} {r}" for r, n in sorted(reason_counts.items())
+        )
+        skip_lines = [
+            f"worthless: source scan incomplete ({reason_summary}) — refusing to lock.",
+            "An incomplete scan can't prove no hardcoded provider URLs slipped past.",
+            "Affected files:",
+        ]
+        for s in hang_class_skipped:
+            # File paths come from our own walk, not untrusted input.
+            skip_lines.append(f"  {s.file}  [{s.reason}]")
+        skip_lines.append(
+            "Resolve the cause (oversized source, permission, slow disk) and re-run."
+        )
+        raise WorthlessError(
+            ErrorCode.SCAN_ERROR,
+            "\n".join(skip_lines),
+            exit_code=2,
+        )
     if bypass_findings:
         header = "worthless: hardcoded provider URLs detected — these bypass the proxy:"
         detail_lines = [header]
