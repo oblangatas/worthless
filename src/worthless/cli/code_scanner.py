@@ -181,7 +181,16 @@ def _list_files_git(root: Path) -> list[Path] | None:
         except (UnicodeDecodeError, ValueError):
             logger.debug("code_scanner: skipping non-decodable git path %r", raw)
             continue
-        if f.is_symlink():
+        # ``is_symlink()`` calls ``lstat()``; wrap to match the walk-branch
+        # contract — a file that vanishes between ``git ls-files`` and our
+        # read, or one we can't stat for any other OS reason, is silently
+        # skipped. Without this guard, OSError escapes through
+        # ``scan_for_hardcoded_provider_urls`` and crashes the whole scan.
+        try:
+            if f.is_symlink():
+                continue
+        except OSError:
+            logger.debug("code_scanner: skipping unstatable git path %s", f)
             continue
         files.append(f)
     return files
