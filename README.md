@@ -92,7 +92,9 @@ To maintain codebase health and prevent CI instability, the repository implement
 
 ## Contributing
 
-PRs welcome. Read [CONTRIBUTING-security.md](CONTRIBUTING-security.md) first.
+Pull requests welcome. Before you start, read **[CONTRIBUTING.md](CONTRIBUTING.md)** and **[CONTRIBUTING-security.md](CONTRIBUTING-security.md)**.
+
+All non-trivial contributions require a signed [Contributor License Agreement (CLA)](CLA.md). The CLA grants the project the right to relicense your contribution, including under commercial terms, so the open-source code can coexist with a future paid hosted service. See [CLA.md](CLA.md) for the full text.
 
 ## License
 
