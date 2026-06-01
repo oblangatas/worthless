@@ -15,6 +15,15 @@ TRUST_PAGES = {
     "red/security-model.html": RED / "security-model.html",
 }
 
+RED_POSTS = {
+    "red/posts/package-before-build.html": RED / "posts" / "package-before-build.html",
+    "red/posts/fake-bitwarden-cli.html": RED / "posts" / "fake-bitwarden-cli.html",
+    "red/posts/axios-rat.html": RED / "posts" / "axios-rat.html",
+    "red/posts/trapdoor.html": RED / "posts" / "trapdoor.html",
+    "red/posts/shai-hulud.html": RED / "posts" / "shai-hulud.html",
+    "red/posts/github-action-secrets.html": RED / "posts" / "github-action-secrets.html",
+}
+
 AI_SLOP_PHRASES = (
     "in today's rapidly evolving threat landscape",
     "it is important to understand",
@@ -82,6 +91,39 @@ def test_red_index_uses_real_attack_headlines() -> None:
         "A GitHub Action printed the secrets.",
     ):
         assert required in html
+
+
+def test_red_index_links_to_local_writeups_not_external_sources() -> None:
+    html = _read(RED / "index.html")
+    hrefs = _hrefs(html)
+
+    for label in RED_POSTS:
+        assert label.removeprefix("red/") in hrefs
+
+    assert "microsoft.com" not in html
+    assert "paloaltonetworks.com" not in html
+    assert "stepsecurity.io" not in html
+    assert "thehackernews.com" not in html
+    assert "wiz.io" not in html
+
+
+def test_red_writeups_keep_sources_and_worthless_boundaries() -> None:
+    expected_sources = (
+        "microsoft.com",
+        "paloaltonetworks.com",
+        "stepsecurity.io",
+        "thehackernews.com",
+        "wiz.io",
+    )
+
+    for path in RED_POSTS.values():
+        html = _read(path).lower()
+        assert "source:" in html
+        assert "worthless" in html
+        assert any(source in html for source in expected_sources)
+        assert "would have prevented" not in html
+        assert "leaks are harmless" not in html
+        assert "hard spend cap" not in html
 
 
 def test_claim_ledger_states_claims_proof_and_limitations() -> None:

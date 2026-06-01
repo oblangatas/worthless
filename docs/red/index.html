@@ -179,37 +179,37 @@
     </section>
 
     <section class="attacks" aria-label="Recent attack headlines">
-      <a class="attack" href="https://www.microsoft.com/en-us/security/blog/2026/05/28/typosquatted-npm-packages-used-steal-cloud-ci-cd-secrets/" target="_blank" rel="noopener">
+      <a class="attack" href="posts/package-before-build.html">
         <h2>The package ran before your build did.</h2>
         <span class="path">install hook -> env read -> exfil -> test</span>
         <span class="date">May 2026</span>
       </a>
 
-      <a class="attack" href="https://www.paloaltonetworks.com/blog/cloud-security/bitwardencli-supply-chain-attack/" target="_blank" rel="noopener">
+      <a class="attack" href="posts/fake-bitwarden-cli.html">
         <h2>Bitwarden CLI was fake. The package was not.</h2>
         <span class="path">typo package -> credential grab -> attacker server</span>
         <span class="date">Apr 2026</span>
       </a>
 
-      <a class="attack" href="https://www.stepsecurity.io/blog/axios-compromised-on-npm-malicious-versions-drop-remote-access-trojan" target="_blank" rel="noopener">
+      <a class="attack" href="posts/axios-rat.html">
         <h2>Axios shipped a RAT for three hours.</h2>
         <span class="path">maintainer path -> malicious release -> local execution</span>
         <span class="date">Mar 2026</span>
       </a>
 
-      <a class="attack" href="https://thehackernews.com/2026/05/trapdoor-supply-chain-attack-spreads.html" target="_blank" rel="noopener">
+      <a class="attack" href="posts/trapdoor.html">
         <h2>TrapDoor hid in npm, PyPI, and crates.</h2>
         <span class="path">package trap -> cross-ecosystem reach -> secret theft</span>
         <span class="date">May 2026</span>
       </a>
 
-      <a class="attack" href="https://www.wiz.io/blog/shai-hulud-npm-supply-chain-attack" target="_blank" rel="noopener">
+      <a class="attack" href="posts/shai-hulud.html">
         <h2>Shai-Hulud put the secrets in public repos.</h2>
         <span class="path">npm worm -> token theft -> repo spam</span>
         <span class="date">Sep 2025</span>
       </a>
 
-      <a class="attack" href="https://www.wiz.io/blog/github-action-tj-actions-changed-files-supply-chain-attack-cve-2025-30066" target="_blank" rel="noopener">
+      <a class="attack" href="posts/github-action-secrets.html">
         <h2>A GitHub Action printed the secrets.</h2>
         <span class="path">action compromise -> CI secret leak -> public logs</span>
         <span class="date">Mar 2025</span>
