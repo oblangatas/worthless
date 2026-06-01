@@ -3,13 +3,13 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>How It Works — Worthless</title>
+  <title>How It Works: Worthless</title>
   <meta name="description" content="A step-by-step walkthrough of how Worthless splits API keys and enforces spending budgets." />
   <link rel="canonical" href="https://worthless.cloud/how-it-works.html" />
   <meta name="theme-color" content="#4a6fa5" />
 
   <!-- Open Graph -->
-  <meta property="og:title" content="How It Works — Worthless" />
+  <meta property="og:title" content="How It Works: Worthless" />
   <meta property="og:description" content="A step-by-step walkthrough of how Worthless splits API keys and enforces spending budgets." />
   <meta property="og:image" content="https://worthless.cloud/og-image.png" />
   <meta property="og:image:width" content="1200" />
@@ -20,7 +20,7 @@
 
   <!-- Twitter Card -->
   <meta name="twitter:card" content="summary_large_image" />
-  <meta name="twitter:title" content="How It Works — Worthless" />
+  <meta name="twitter:title" content="How It Works: Worthless" />
   <meta name="twitter:description" content="A step-by-step walkthrough of how Worthless splits API keys and enforces spending budgets." />
   <meta name="twitter:image" content="https://worthless.cloud/og-image.png" />
 
@@ -33,7 +33,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
   <style>
     :root {
-      /* Soothing palette — soft blue-grays, no harsh tones */
+      /* Soothing palette, soft blue-grays, no harsh tones */
       --bg: #eef6ff;
       --bg2: #eef3fb;
       --white: #ffffff;
@@ -239,8 +239,8 @@
     <div class="step-body">
       <h2>Worthless splits it in half</h2>
       <p>Run <code>worthless lock</code>. Your key gets split into two random-looking pieces. One stays in your .env. The other goes to a local proxy on your machine. Neither piece works on its own.</p>
-      <p>Someone steals your .env? They get random bytes. Can't use it. Can't brute-force it. Mathematically impossible.</p>
-      <details><summary>wait, how is it impossible?</summary><p>It's called XOR secret sharing. Think of it like tearing a photo in half — each piece looks like random noise. You need both halves to see the picture. The math guarantees that one half reveals zero information about the original. Not "hard to guess" — literally zero. Even with every computer on earth running forever.</p></details>
+      <p>Someone steals your .env? They get random bytes. The stored share reveals nothing about the original key.</p>
+      <details><summary>how does that work?</summary><p>It's called XOR secret sharing. Think of it like tearing a photo in half, each piece looks like random noise. You need both halves to see the picture. One half reveals zero bits about the original. The catch: only true while the other half stays out of reach.</p></details>
     </div>
   </div>
 
@@ -249,7 +249,7 @@
     <div class="step-body">
       <h2>Your app works exactly the same</h2>
       <p>Run <code>worthless wrap python app.py</code> instead of <code>python app.py</code>. That's the only change. Your code reads environment variables like before. The proxy combines both halves for a split second, makes the API call, then destroys the key.</p>
-      <details><summary>what happens under the hood?</summary><p>The proxy sits between your app and the API provider. When your app makes a request, the proxy grabs both halves, XORs them back together, makes the real API call, gets the response, wipes the key from memory, and passes the response to your app. The full key exists for milliseconds. Your app never sees it.</p></details>
+      <details><summary>what happens under the hood?</summary><p>The proxy sits between your app and the API provider. When your app makes a request, the proxy combines both halves, makes the real API call, and passes the response back. The key reconstructs, calls the provider, then drops. Your app never sees it. (Python PoC: memory-zeroing has known limits, see <a href="https://docs.wless.io/security/">security model</a>.)</p></details>
     </div>
   </div>
 
@@ -257,7 +257,7 @@
     <div class="step-rail"><div class="step-num">04</div><div class="step-line"></div></div>
     <div class="step-body">
       <h2>Spending cap stops the bleeding</h2>
-      <p>Set a dollar limit. Hit it, the proxy stops reconstructing the key. Hard stop. Your app can't override it. Even if someone somehow gets both halves, the budget gate fires first.</p>
+      <p>Set a dollar limit. Hit it, the proxy refuses to reconstruct the key. Your app can't override it. One in-flight call may slip past, then the key stops.</p>
       <details><summary>how is this different from OpenAI's spending limit?</summary><p>OpenAI's limit is checked after the request. Worthless checks before the key even forms. If you're over budget, the key never gets reconstructed. No API call happens. No money spent. The gate is at the infrastructure layer, not the provider's billing page.</p></details>
     </div>
   </div>
@@ -269,6 +269,26 @@
       <p>Run <code>worthless unlock</code>. Original .env restored. Proxy gone. Shares deleted. Like it was never there.</p>
       <details><summary>is there really zero lock-in?</summary><p>Zero. Your original key is stored encrypted locally. <code>worthless unlock</code> decrypts it, writes it back to .env, stops the proxy, and deletes the shares. Your app goes back to reading the real key directly. No artifacts, no config files, no dependencies left behind.</p></details>
     </div>
+  </div>
+
+  <style>
+    .limits-block{margin-top:1rem;padding-top:2rem;border-top:1px solid var(--border-soft)}
+    .limits-block h2{font-size:1.05rem;font-weight:700;color:var(--text);letter-spacing:-.01em;margin-bottom:.5rem}
+    .limits-block > p{font-size:.875rem;color:var(--text2);line-height:1.8;margin-bottom:.75rem}
+    .limits-block ul{margin:.4rem 0 .9rem 1.1rem;display:grid;gap:.4rem}
+    .limits-block li{font-size:.875rem;color:var(--text2);line-height:1.65}
+    .limits-block strong{color:var(--text);font-weight:600}
+    .limits-block a{color:var(--slate);font-weight:500;text-decoration:none}
+  </style>
+  <div class="limits-block">
+    <h2>What Worthless does not protect against</h2>
+    <p>Worthless aims to make a copied <code>.env</code> share useless on its own. It is not a sandbox for a machine that is already compromised, and it is not the only layer you need.</p>
+    <ul>
+      <li><strong>A compromised machine.</strong> If an attacker controls the computer Worthless runs on, they can reach your key. Same trust boundary as a password manager.</li>
+      <li><strong>The provider's side.</strong> A breach or outage at OpenAI, Anthropic, or another upstream is outside what Worthless can affect.</li>
+      <li><strong>This early build's limits.</strong> The proof of concept is Python, with documented limits on how briefly key material lives in memory.</li>
+    </ul>
+    <p>Worthless is one layer, built to sit alongside a vault, secret scanning, and key rotation. Full threat model: <a href="https://docs.wless.io/security/">security model</a>.</p>
   </div>
 
   <div class="page-nav">

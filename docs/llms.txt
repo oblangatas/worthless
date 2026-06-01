@@ -8,7 +8,7 @@ Worthless splits your API key into two shares using XOR secret sharing. One shar
 
 ## Why use Worthless?
 
-API keys leak constantly. AI agents run `git add -A` and push your .env to GitHub. CI logs print keys. Compromised packages read process.env. Vaults protect keys at rest, but the key is still one piece in memory. Worthless is different: the key in your .env is only half a key. Even if it leaks, it's mathematically useless.
+API keys leak constantly. AI agents run `git add -A` and push your .env to GitHub. CI logs print keys. Compromised packages read process.env. Vaults protect keys at rest, but the key is still one piece in memory. Worthless is different: the key in your .env is only half a key. Even if that half leaks, it can't call the provider on its own.
 
 ## Supported providers
 
@@ -24,9 +24,9 @@ worthless lock
 worthless wrap python app.py
 ```
 
-1. `pip install worthless` — install the CLI
-2. `worthless lock` — scans .env, splits each API key into two shares
-3. `worthless wrap python app.py` — runs your app with the proxy injecting the reconstructed key
+1. `pip install worthless`, install the CLI
+2. `worthless lock`, scans .env, splits each API key into two shares
+3. `worthless wrap python app.py`, runs your app with the proxy injecting the reconstructed key
 
 Your code needs zero changes. Environment variables work exactly as before.
 
@@ -49,7 +49,7 @@ One command. Original .env restored. Proxy stopped. Shares deleted. Zero artifac
 
 ## Not a vault
 
-Worthless is complementary to vaults, not a replacement. Use a vault AND Worthless. The vault prevents leaks. Worthless makes leaks harmless. They solve different problems.
+Worthless is complementary to vaults, not a replacement. Use a vault AND Worthless. Vaults guard at rest. Worthless kills what a leaked share can do. Different problems.
 
 ## Pages
 

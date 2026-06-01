@@ -3,14 +3,14 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Features — Worthless</title>
-  <meta name="description" content="Full feature breakdown for Worthless — split-key cryptography, budget enforcement, pre-commit scanning, and more." />
+  <title>Features: Worthless</title>
+  <meta name="description" content="Full feature breakdown for Worthless: split-key cryptography, budget enforcement, pre-commit scanning, and more." />
   <link rel="canonical" href="https://worthless.cloud/features.html" />
   <meta name="theme-color" content="#4a6fa5" />
 
   <!-- Open Graph -->
-  <meta property="og:title" content="Features — Worthless" />
-  <meta property="og:description" content="Full feature breakdown for Worthless — split-key cryptography, budget enforcement, pre-commit scanning, and more." />
+  <meta property="og:title" content="Features: Worthless" />
+  <meta property="og:description" content="Full feature breakdown for Worthless: split-key cryptography, budget enforcement, pre-commit scanning, and more." />
   <meta property="og:image" content="https://worthless.cloud/og-image.png" />
   <meta property="og:image:width" content="1200" />
   <meta property="og:image:height" content="630" />
@@ -20,8 +20,8 @@
 
   <!-- Twitter Card -->
   <meta name="twitter:card" content="summary_large_image" />
-  <meta name="twitter:title" content="Features — Worthless" />
-  <meta name="twitter:description" content="Full feature breakdown for Worthless — split-key cryptography, budget enforcement, pre-commit scanning, and more." />
+  <meta name="twitter:title" content="Features: Worthless" />
+  <meta name="twitter:description" content="Full feature breakdown for Worthless: split-key cryptography, budget enforcement, pre-commit scanning, and more." />
   <meta name="twitter:image" content="https://worthless.cloud/og-image.png" />
 
   <!-- Favicon -->
@@ -33,7 +33,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
   <style>
     :root {
-      /* Soothing palette — soft blue-grays, no harsh tones */
+      /* Soothing palette, soft blue-grays, no harsh tones */
       --bg: #eef6ff;
       --bg2: #eef3fb;
       --white: #ffffff;
@@ -155,22 +155,22 @@
 
 <div class="page">
   <div class="eyebrow">Features</div>
-  <h1>Leaked key? $0 damage.</h1>
+  <h1>Leaked <code>.env</code>? Worthless to whoever took it.</h1>
   <p class="intro">AI agents run <code>git add -A</code> and push your .env to GitHub. Vaults protect the key at rest, but it's still one piece, still in memory, still leaks. And your code has to change to use them. Worthless splits the key. Leaked half is useless. No code changes. Two commands.</p>
 
   <div class="feat-section">
     <h2>The key in your .env doesn't work</h2>
-    <p>Your .env has one half of an XOR split. The other half lives in the proxy. Neither works alone. Someone steals your .env? They get random bytes. Mathematically useless, even with unlimited compute.</p>
+    <p>Your .env has one half of an XOR split. The other half lives in the proxy. Neither works alone. Someone steals your .env? They get random bytes. Useless without the other half.</p>
   </div>
 
   <div class="feat-section">
     <h2>Hard spending cap</h2>
-    <p>Set a dollar limit per key. Hit the cap, the proxy refuses to reconstruct. Not a soft warning. A hard stop. Your app can't override it. Even if both halves are somehow available, the budget gate fires first.</p>
+    <p>Set a dollar limit per key. Hit the cap, the proxy refuses to reconstruct. Your app can't override it. One in-flight call may slip past, then the key stops forming.</p>
   </div>
 
   <div class="feat-section">
     <h2>Zero code changes</h2>
-    <p><code>worthless wrap python app.py</code> — that's it. Your code reads environment variables exactly as before. No SDK. No imports. No config files.</p>
+    <p><code>worthless wrap python app.py</code>, that's it. Your code reads environment variables exactly as before. No SDK. No imports. No config files.</p>
   </div>
 
   <div class="feat-section">
@@ -180,12 +180,23 @@
 
   <div class="feat-section">
     <h2>Fully reversible</h2>
-    <p><code>worthless unlock</code> — original .env restored, proxy stopped, shares deleted. Don't like it? One command and it's gone. Zero lock-in.</p>
+    <p><code>worthless unlock</code>, original .env restored, proxy stopped, shares deleted. Don't like it? One command and it's gone. Zero lock-in.</p>
   </div>
 
   <div class="feat-section">
     <h2>Self-hosted. Open source. No cloud.</h2>
     <p>Your keys never touch anyone else's server. AGPL-3.0. Zero telemetry. No account needed.</p>
+  </div>
+
+  <div class="feat-section">
+    <h2>What Worthless does not protect against</h2>
+    <p>Worthless aims to make a copied <code>.env</code> share useless on its own. It is not a sandbox for a machine that is already compromised, and it is not the only layer you need.</p>
+    <ul>
+      <li><strong>A compromised machine.</strong> If an attacker controls the computer Worthless runs on, they can reach your key. Same trust boundary as a password manager.</li>
+      <li><strong>The provider's side.</strong> A breach or outage at OpenAI, Anthropic, or another upstream is outside what Worthless can affect.</li>
+      <li><strong>This early build's limits.</strong> The proof of concept is Python, with documented limits on how briefly key material lives in memory.</li>
+    </ul>
+    <p>Worthless is one layer, built to sit alongside a vault, secret scanning, and key rotation. Full threat model: <a href="https://docs.wless.io/security/">security model</a>.</p>
   </div>
 
   <!-- Comparison -->
@@ -198,13 +209,13 @@
       <tr><td>Capability</td><td>worthless</td><td>Vault / Secrets Mgr</td><td>detect-secrets</td><td>.gitignore</td></tr>
     </thead>
     <tbody>
-      <tr><td>Prevents commits with raw keys</td><td class="ty">&#10003;</td><td class="tn">&#10007;</td><td class="ty">&#10003;</td><td class="tp">Partial</td></tr>
+      <tr><td>Prevents commits w/ detected raw keys</td><td class="ty">&#10003;</td><td class="tn">&#10007;</td><td class="ty">&#10003;</td><td class="tp">Partial</td></tr>
       <tr><td>Post-leak protection</td><td class="ty">&#10003;</td><td class="tn">&#10007;</td><td class="tn">&#10007;</td><td class="tn">&#10007;</td></tr>
-      <tr><td>Leaked key is cryptographically useless</td><td class="ty">&#10003;</td><td class="tn">&#10007;</td><td class="tn">&#10007;</td><td class="tn">&#10007;</td></tr>
+      <tr><td>Leaked <code>.env</code> share is useless on its own</td><td class="ty">&#10003;</td><td class="tn">&#10007;</td><td class="tn">&#10007;</td><td class="tn">&#10007;</td></tr>
       <tr><td>Budget / hard spending cap</td><td class="ty">&#10003;</td><td class="tn">&#10007;</td><td class="tn">&#10007;</td><td class="tn">&#10007;</td></tr>
       <tr><td>Zero code changes</td><td class="ty">&#10003;</td><td class="tn">&#10007;</td><td class="ty">&#10003;</td><td class="ty">&#10003;</td></tr>
       <tr><td>Fully self-hosted</td><td class="ty">&#10003;</td><td class="tp">Optional</td><td class="ty">&#10003;</td><td class="ty">&#10003;</td></tr>
-      <tr><td>Open source</td><td class="ty">&#10003;</td><td class="ty">&#10003;</td><td class="ty">&#10003;</td><td>—</td></tr>
+      <tr><td>Open source</td><td class="ty">&#10003;</td><td class="ty">&#10003;</td><td class="ty">&#10003;</td><td>-</td></tr>
     </tbody>
   </table>
   </div>

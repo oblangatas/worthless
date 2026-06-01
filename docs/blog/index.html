@@ -3,13 +3,13 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Blog — Worthless</title>
+  <title>Blog: Worthless</title>
   <meta name="description" content="Deep dives on API key security, secret management, and developer tooling from the Worthless team." />
   <link rel="canonical" href="https://worthless.cloud/blog/" />
   <meta name="theme-color" content="#4a6fa5" />
 
   <!-- Open Graph -->
-  <meta property="og:title" content="Blog — Worthless" />
+  <meta property="og:title" content="Blog: Worthless" />
   <meta property="og:description" content="Deep dives on API key security, secret management, and developer tooling from the Worthless team." />
   <meta property="og:image" content="https://worthless.cloud/og-image.png" />
   <meta property="og:image:width" content="1200" />
@@ -20,7 +20,7 @@
 
   <!-- Twitter Card -->
   <meta name="twitter:card" content="summary_large_image" />
-  <meta name="twitter:title" content="Blog — Worthless" />
+  <meta name="twitter:title" content="Blog: Worthless" />
   <meta name="twitter:description" content="Deep dives on API key security, secret management, and developer tooling from the Worthless team." />
   <meta name="twitter:image" content="https://worthless.cloud/og-image.png" />
 
@@ -173,7 +173,7 @@
 
           <span class="post-date">April 17, 2026</span>
         </div>
-        <div class="post-title">Why I built Worthless — make API keys worthless post leak</div>
+        <div class="post-title">Why I built Worthless, make API keys worthless post leak</div>
       </div>
     </div>
     <button class="expand-btn" id="btn-p0" onclick="togglePost('p0')">
@@ -198,7 +198,7 @@
         <h2>What if leaked keys just didn't work?</h2>
         <p>That's the question I couldn't stop thinking about. Not "how do we prevent leaks" (you can't) but "how do we make leaks harmless."</p>
         <p>The answer turned out to be simple: split the key. Your .env gets one half. Your server gets the other. Neither half works alone. When you make an API call, the halves combine for a split second, the call goes through, and the key is destroyed.</p>
-        <p>If someone steals your .env, they get one half of an XOR split. Mathematically useless. They can't brute-force it. They can't derive anything from it. It's just random bytes.</p>
+        <p>If someone steals your .env, they get one half of an XOR split. Useless on its own. They can't brute-force it. They can't derive anything from it. It's just random bytes.</p>
 
         <h2>That's Worthless</h2>
         <p>Two commands. Your key is split. Your .env now contains a share that's worthless to steal. The proxy handles reconstruction, enforces spend caps, and never lets the full key leave server memory.</p>
@@ -247,8 +247,8 @@
 
         <h2>So where does Worthless fit?</h2>
         <p>All of the above protect the key before it leaks. Worthless protects you after it leaks.</p>
-        <p>Your key gets split. Your .env has one half. The proxy has the other. Neither works alone. The full key exists for microseconds during a request, then it's gone.</p>
-        <p>Use a vault AND Worthless. Use GitGuardian AND Worthless. They're complementary, not competing. The vault prevents leaks. Worthless makes leaks harmless.</p>
+        <p>Your key gets split. Your .env has one half. The proxy has the other. Neither works alone. The reconstructed key lives only for the upstream call, then drops. (Python PoC: memory-zeroing has known limits, see <a href="https://docs.wless.io/security/">security model</a>.)</p>
+        <p>Use a vault AND Worthless. Use GitGuardian AND Worthless. Complementary, not competing. Vaults guard at rest. Worthless kills what a leaked share can do.</p>
         <p>Two commands:</p>
         <pre><code>pip install worthless
 worthless lock</code></pre>
@@ -265,7 +265,7 @@ worthless lock</code></pre>
 
           <span class="post-date">April 13, 2026</span>
         </div>
-        <div class="post-title">Introducing Worthless — post-leak API key protection</div>
+        <div class="post-title">Introducing Worthless, post-leak API key protection</div>
       </div>
     </div>
     <button class="expand-btn" id="btn-p1" onclick="togglePost('p1')">
@@ -277,12 +277,12 @@ worthless lock</code></pre>
         <h2>What exists today</h2>
         <p>Two kinds of tools deal with API key security:</p>
         <ol>
-          <li><strong>Pre-leak prevention</strong> — Vault, dotenv, GitHub secret scanning. These keep keys out of code and logs.</li>
-          <li><strong>Post-leak response</strong> — rotating the key, monitoring for abuse, revoking tokens.</li>
+          <li><strong>Pre-leak prevention</strong>, Vault, dotenv, GitHub secret scanning. These keep keys out of code and logs.</li>
+          <li><strong>Post-leak response</strong>, rotating the key, monitoring for abuse, revoking tokens.</li>
         </ol>
         <p>What's missing is the middle: <strong>what if the key leaks, but it's already useless?</strong></p>
         <h2>How Worthless works</h2>
-        <p>Worthless splits your API key into two cryptographic shares. Neither share reveals anything about the original key — you need both to reconstruct it. Reconstruction happens in memory only, for milliseconds, and only when your app actually needs to make an API call.</p>
+        <p>Worthless splits your API key into two cryptographic shares. Neither share reveals anything about the original, you need both. Reconstruction happens in memory, scoped to one call.</p>
         <pre><code>$ worthless lock
 1 key(s) protected.
 
@@ -291,7 +291,7 @@ $ worthless wrap python app.py
 
 $ worthless unlock
 1 key(s) restored.</code></pre>
-        <p>There's also a budget enforcement layer: if your spending limit is hit, the key simply never forms — even if your code tries to use it. A hard stop.</p>
+        <p>There's also a budget enforcement layer: if your spending limit is hit, the key simply never forms, even if your code tries to use it. A hard stop.</p>
         <blockquote>"Every secrets tool protects the key until your app uses it. Worthless protects you after it leaks."</blockquote>
         <h2>Get started</h2>
         <pre><code>pip install worthless
@@ -309,7 +309,7 @@ worthless wrap python app.py</code></pre>
 
           <span class="post-date">April 13, 2026</span>
         </div>
-        <div class="post-title">Why splitting a key makes it useless — the cryptography in plain English</div>
+        <div class="post-title">Why splitting a key makes it useless, the cryptography in plain English</div>
       </div>
     </div>
     <button class="expand-btn" id="btn-p2" onclick="togglePost('p2')">
@@ -317,9 +317,9 @@ worthless wrap python app.py</code></pre>
     </button>
     <div class="post-full" id="p2">
       <div class="article">
-        <p>When we say "a leaked share is worthless," we mean it in a precise mathematical sense. This post explains why — without requiring a cryptography background.</p>
+        <p>When we say "a leaked share is worthless," we mean it in a precise mathematical sense. This post explains why, without requiring a cryptography background.</p>
         <h2>The intuition: a lock with two keys</h2>
-        <p>Imagine a padlock that requires two keys simultaneously to open. If someone steals one, they can't open the lock. They have something real — but it's useless without the other half. Secret sharing is the mathematical equivalent.</p>
+        <p>Imagine a padlock that requires two keys simultaneously to open. If someone steals one, they can't open the lock. They have something real, but it's useless without the other half. Secret sharing is the mathematical equivalent.</p>
         <h2>The XOR method (2-of-2 sharing)</h2>
         <ol>
           <li>Generate a truly random string <strong>A</strong> the same length as your secret <strong>S</strong></li>
@@ -328,11 +328,11 @@ worthless wrap python app.py</code></pre>
         </ol>
         <p>Reconstruction: <code>S = A XOR B</code>. Simple. Brilliant.</p>
         <h3>Why is A useless alone?</h3>
-        <p>Because A is purely random. An attacker with only A sees that every possible value of S produces a valid B — the share A is statistically independent of S. It could have come from any secret equally well.</p>
-        <div class="info-box"><strong>Information-theoretic security.</strong> This is called one-time pad secret sharing. It cannot be broken even with unlimited computational power — no brute force is possible because every guess is equally valid.</div>
+        <p>Because A is purely random. An attacker with only A sees that every possible value of S produces a valid B, the share A is statistically independent of S. It could have come from any secret equally well.</p>
+        <div class="info-box"><strong>Information-theoretic security.</strong> This is called one-time pad secret sharing. It cannot be broken even with unlimited computational power, no brute force is possible because every guess is equally valid.</div>
         <h2>What Worthless does in practice</h2>
-        <p>When you run <code>worthless lock</code>: your key is read, Share A is generated randomly, Share B is derived so A XOR B = key. A goes to local encrypted storage; B lives in proxy memory. Your <code>.env</code> is updated to point at the proxy. The full key exists for milliseconds, then memory is zeroed.</p>
-        <div class="info-box success"><strong>Two independent protections:</strong><br/>1. Cryptographic split — a leaked share reveals nothing.<br/>2. Budget enforcement — even with full key access, spending is capped.</div>
+        <p>When you run <code>worthless lock</code>: your key is read, Share A is generated randomly, Share B is derived so A XOR B = key. A goes to local encrypted storage; B lives in proxy memory. Your <code>.env</code> is updated to point at the proxy. The reconstructed key lives only for the upstream call, then drops. (Python PoC: memory-zeroing has known limits, see <a href="https://docs.wless.io/security/">security model</a>.)</p>
+        <div class="info-box success"><strong>Two independent protections:</strong><br/>1. Cryptographic split, a leaked share reveals nothing.<br/>2. Budget enforcement, even with full key access, spending is capped.</div>
       </div>
     </div>
   </div>

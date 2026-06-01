@@ -3,11 +3,11 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Worthless — Make copied .env AI keys useless</title>
+  <title>Worthless: Make copied .env AI keys useless</title>
   <meta name="description" content="Put a seatbelt on your .env. If an AI key is copied out of .env, the copied value alone cannot call the provider." />
   <link rel="canonical" href="https://wless.io/" />
   <meta name="theme-color" content="#d5f4fb" />
-  <meta property="og:title" content="Worthless — Make copied .env AI keys useless" />
+  <meta property="og:title" content="Worthless: Make copied .env AI keys useless" />
   <meta property="og:description" content="Put a seatbelt on your .env. If an AI key is copied out of .env, the copied value alone cannot call the provider." />
   <meta property="og:image" content="https://wless.io/og-image.png" />
   <meta property="og:image:width" content="1200" />
@@ -16,7 +16,7 @@
   <meta property="og:type" content="website" />
   <meta property="og:site_name" content="Worthless" />
   <meta name="twitter:card" content="summary_large_image" />
-  <meta name="twitter:title" content="Worthless — Make copied .env AI keys useless" />
+  <meta name="twitter:title" content="Worthless: Make copied .env AI keys useless" />
   <meta name="twitter:description" content="Put a seatbelt on your .env. If an AI key is copied out of .env, the copied value alone cannot call the provider." />
   <meta name="twitter:image" content="https://wless.io/og-image.png" />
   <link rel="icon" type="image/x-icon" href="favicon.ico" />
@@ -1720,6 +1720,27 @@
           </div>
         </div>
       </div>
+    </section>
+
+    <style>
+      .limits-rail{margin:2.5rem clamp(1.35rem,8vw,10rem) 0;padding-top:1.8rem;border-top:1px solid oklch(82% 0.035 215);color:var(--ink-soft)}
+      .limits-rail h2{font-size:1.05rem;font-weight:800;color:var(--ink);margin:0 0 .55rem}
+      .limits-rail > p{font-size:.95rem;line-height:1.6;margin:0 0 .9rem;max-width:64ch}
+      .limits-rail ul{margin:0 0 .9rem;padding-left:1.15rem;display:grid;gap:.45rem;max-width:70ch}
+      .limits-rail li{font-size:.92rem;line-height:1.55}
+      .limits-rail strong{color:var(--ink);font-weight:700}
+      .limits-rail a{color:var(--accent-dark);font-weight:700;text-decoration:none}
+      .limits-rail .foot{font-size:.9rem;color:var(--ink-faint);max-width:64ch}
+    </style>
+    <section class="limits-rail" aria-label="What Worthless does not protect against">
+      <h2>What Worthless does not protect against</h2>
+      <p>Worthless aims to make a copied .env share useless on its own. It is not a sandbox for a machine that is already compromised, and it is not the only layer you need.</p>
+      <ul>
+        <li><strong>A compromised machine.</strong> If an attacker controls the computer Worthless runs on, they can reach your key. Same trust boundary as a password manager.</li>
+        <li><strong>The provider's side.</strong> A breach or outage at OpenAI, Anthropic, or another upstream is outside what Worthless can affect.</li>
+        <li><strong>This early build's limits.</strong> The proof of concept is Python, with documented limits on how briefly key material lives in memory.</li>
+      </ul>
+      <p class="foot">Worthless is one layer, built to sit alongside a vault, secret scanning, and key rotation. Full threat model: <a href="https://docs.wless.io/security/">security model</a>.</p>
     </section>
 
     <section class="trust-rail" aria-label="Worthless positioning">
