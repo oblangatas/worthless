@@ -145,14 +145,26 @@
     .wless-badge {
       display: inline-flex;
       align-items: center;
-      min-height: 1.45rem;
-      border: 1px solid rgba(105, 229, 143, .24);
+      justify-content: center;
+      width: 1.45rem;
+      height: 1.45rem;
+      border: 1px solid rgba(105, 229, 143, .18);
       border-radius: 999px;
-      padding: .12rem .45rem .1rem;
-      color: rgba(105, 229, 143, .72);
-      font: 700 .62rem var(--mono);
-      letter-spacing: .08em;
-      text-transform: uppercase;
+      padding: .15rem;
+      opacity: .42;
+      transition: border-color .16s ease, opacity .16s ease;
+    }
+
+    .wless-badge img {
+      width: 100%;
+      height: 100%;
+      border-radius: 999px;
+      filter: saturate(.7) brightness(.9);
+    }
+
+    .attack:hover .wless-badge {
+      border-color: rgba(105, 229, 143, .36);
+      opacity: .66;
     }
 
     h2 {
@@ -212,37 +224,37 @@
       <a class="attack" href="posts/package-before-build.html">
         <h2>The package ran before your build did.</h2>
         <span class="path">install hook -> env read -> exfil -> test</span>
-        <span class="meta"><span class="date">May 2026</span><span class="wless-badge">wless angle</span></span>
+        <span class="meta"><span class="date">May 2026</span><span class="wless-badge" aria-hidden="true"><img src="../logo-transparent.png" alt="" /></span></span>
       </a>
 
       <a class="attack" href="posts/fake-bitwarden-cli.html">
         <h2>Bitwarden CLI was fake. The package was not.</h2>
         <span class="path">typo package -> credential grab -> attacker server</span>
-        <span class="meta"><span class="date">Apr 2026</span><span class="wless-badge">wless angle</span></span>
+        <span class="meta"><span class="date">Apr 2026</span><span class="wless-badge" aria-hidden="true"><img src="../logo-transparent.png" alt="" /></span></span>
       </a>
 
       <a class="attack" href="posts/axios-rat.html">
         <h2>Axios shipped a RAT for three hours.</h2>
         <span class="path">maintainer path -> malicious release -> local execution</span>
-        <span class="meta"><span class="date">Mar 2026</span><span class="wless-badge">wless angle</span></span>
+        <span class="meta"><span class="date">Mar 2026</span><span class="wless-badge" aria-hidden="true"><img src="../logo-transparent.png" alt="" /></span></span>
       </a>
 
       <a class="attack" href="posts/trapdoor.html">
         <h2>TrapDoor hid in npm, PyPI, and crates.</h2>
         <span class="path">package trap -> cross-ecosystem reach -> secret theft</span>
-        <span class="meta"><span class="date">May 2026</span><span class="wless-badge">wless angle</span></span>
+        <span class="meta"><span class="date">May 2026</span><span class="wless-badge" aria-hidden="true"><img src="../logo-transparent.png" alt="" /></span></span>
       </a>
 
       <a class="attack" href="posts/shai-hulud.html">
         <h2>Shai-Hulud put the secrets in public repos.</h2>
         <span class="path">npm worm -> token theft -> repo spam</span>
-        <span class="meta"><span class="date">Sep 2025</span><span class="wless-badge">wless angle</span></span>
+        <span class="meta"><span class="date">Sep 2025</span><span class="wless-badge" aria-hidden="true"><img src="../logo-transparent.png" alt="" /></span></span>
       </a>
 
       <a class="attack" href="posts/github-action-secrets.html">
         <h2>A GitHub Action printed the secrets.</h2>
         <span class="path">action compromise -> CI secret leak -> public logs</span>
-        <span class="meta"><span class="date">Mar 2025</span><span class="wless-badge">wless angle</span></span>
+        <span class="meta"><span class="date">Mar 2025</span><span class="wless-badge" aria-hidden="true"><img src="../logo-transparent.png" alt="" /></span></span>
       </a>
     </section>
 
