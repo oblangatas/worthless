@@ -1043,8 +1043,17 @@ def _lock_keys(
             "Affected files:",
         ]
         for s in hang_class_skipped:
-            # File paths come from our own walk, not untrusted input.
-            skip_lines.append(f"  {s.file}  [{s.reason}]")
+            # File paths come from our own filesystem walk — but the walk
+            # traverses files NAMED BY THE USER'S REPO, which can include
+            # attacker-controlled bytes (npm tarball, hostile git clone,
+            # supply-chain dep). Strip C0/C1 + bidi overrides + BOM via
+            # sanitise_for_message to defeat terminal-escape spoofing and
+            # Trojan Source (CVE-2021-42574) attacks against this security-
+            # gate error message. The console layer's k82c bracket-escape
+            # handles ``[`` and ``]`` separately. Mirrors the same pattern
+            # the bypass-findings path below already uses.
+            safe_file = _oc_audit.sanitise_for_message(s.file)
+            skip_lines.append(f"  {safe_file}  [{s.reason}]")
         skip_lines.append(
             "Resolve the cause (oversized source, permission, slow disk) and re-run."
         )
