@@ -127,11 +127,30 @@
       color: var(--red);
     }
 
-    .date {
-      display: block;
-      color: var(--faint);
+    .meta {
+      display: flex;
+      align-items: center;
+      gap: .55rem;
+      flex-wrap: wrap;
       margin-top: .6rem;
+    }
+
+    .date {
+      color: var(--faint);
       font: 700 .78rem var(--mono);
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    .wless-badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 1.45rem;
+      border: 1px solid rgba(105, 229, 143, .24);
+      border-radius: 999px;
+      padding: .12rem .45rem .1rem;
+      color: rgba(105, 229, 143, .72);
+      font: 700 .62rem var(--mono);
       letter-spacing: .08em;
       text-transform: uppercase;
     }
@@ -193,37 +212,37 @@
       <a class="attack" href="posts/package-before-build.html">
         <h2>The package ran before your build did.</h2>
         <span class="path">install hook -> env read -> exfil -> test</span>
-        <span class="date">May 2026</span>
+        <span class="meta"><span class="date">May 2026</span><span class="wless-badge">wless angle</span></span>
       </a>
 
       <a class="attack" href="posts/fake-bitwarden-cli.html">
         <h2>Bitwarden CLI was fake. The package was not.</h2>
         <span class="path">typo package -> credential grab -> attacker server</span>
-        <span class="date">Apr 2026</span>
+        <span class="meta"><span class="date">Apr 2026</span><span class="wless-badge">wless angle</span></span>
       </a>
 
       <a class="attack" href="posts/axios-rat.html">
         <h2>Axios shipped a RAT for three hours.</h2>
         <span class="path">maintainer path -> malicious release -> local execution</span>
-        <span class="date">Mar 2026</span>
+        <span class="meta"><span class="date">Mar 2026</span><span class="wless-badge">wless angle</span></span>
       </a>
 
       <a class="attack" href="posts/trapdoor.html">
         <h2>TrapDoor hid in npm, PyPI, and crates.</h2>
         <span class="path">package trap -> cross-ecosystem reach -> secret theft</span>
-        <span class="date">May 2026</span>
+        <span class="meta"><span class="date">May 2026</span><span class="wless-badge">wless angle</span></span>
       </a>
 
       <a class="attack" href="posts/shai-hulud.html">
         <h2>Shai-Hulud put the secrets in public repos.</h2>
         <span class="path">npm worm -> token theft -> repo spam</span>
-        <span class="date">Sep 2025</span>
+        <span class="meta"><span class="date">Sep 2025</span><span class="wless-badge">wless angle</span></span>
       </a>
 
       <a class="attack" href="posts/github-action-secrets.html">
         <h2>A GitHub Action printed the secrets.</h2>
         <span class="path">action compromise -> CI secret leak -> public logs</span>
-        <span class="date">Mar 2025</span>
+        <span class="meta"><span class="date">Mar 2025</span><span class="wless-badge">wless angle</span></span>
       </a>
     </section>
 

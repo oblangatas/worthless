@@ -65,11 +65,35 @@ main {
   padding: clamp(3rem, 8vw, 5.8rem) 0 5rem;
 }
 
+.kicker-row {
+  display: flex;
+  align-items: center;
+  gap: .6rem;
+  flex-wrap: wrap;
+}
+
 .kicker,
 .label {
   color: var(--red);
   font: 700 .72rem var(--mono);
   letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+.kicker {
+  margin: 0;
+}
+
+.wless-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.45rem;
+  border: 1px solid rgba(143, 185, 154, .32);
+  border-radius: 999px;
+  padding: .12rem .45rem .1rem;
+  color: rgba(143, 185, 154, .84);
+  font: 700 .62rem var(--mono);
+  letter-spacing: .08em;
   text-transform: uppercase;
 }
 
