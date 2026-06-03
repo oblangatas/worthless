@@ -88,6 +88,13 @@ CREATE TABLE IF NOT EXISTS enrollments (
     UNIQUE(key_alias, var_name, env_path)
 );
 
+CREATE TABLE IF NOT EXISTS pending_charges (
+    handle     TEXT PRIMARY KEY,
+    key_alias  TEXT NOT NULL,
+    estimate   INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_spend_log_alias ON spend_log (key_alias);
 CREATE INDEX IF NOT EXISTS idx_spend_log_alias_created ON spend_log (key_alias, created_at);
 CREATE INDEX IF NOT EXISTS idx_enrollments_alias ON enrollments (key_alias);
@@ -95,6 +102,8 @@ CREATE INDEX IF NOT EXISTS idx_enrollments_decoy_hash
     ON enrollments (decoy_hash) WHERE decoy_hash IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_enrollments_null_path
     ON enrollments (key_alias, var_name) WHERE env_path IS NULL;
+CREATE INDEX IF NOT EXISTS idx_pending_charges_alias ON pending_charges (key_alias);
+CREATE INDEX IF NOT EXISTS idx_pending_charges_created ON pending_charges (created_at);
 """
 
 
@@ -210,9 +219,30 @@ async def _migrate_decoy_hash_column(db: aiosqlite.Connection) -> None:
             raise
 
 
+async def _migrate_pending_charges(db: aiosqlite.Connection) -> None:
+    """Create the write-ahead pre-charge ledger table + indexes (WOR-659).
+
+    Pure-additive and idempotent. Committed independently so it lands even on
+    very old DBs that trip the enrollment_config early-return in migrate_db.
+    """
+    await db.executescript(
+        "CREATE TABLE IF NOT EXISTS pending_charges ("
+        " handle TEXT PRIMARY KEY, key_alias TEXT NOT NULL,"
+        " estimate INTEGER NOT NULL,"
+        " created_at TEXT NOT NULL DEFAULT (datetime('now')));"
+        "CREATE INDEX IF NOT EXISTS idx_pending_charges_alias"
+        " ON pending_charges (key_alias);"
+        "CREATE INDEX IF NOT EXISTS idx_pending_charges_created"
+        " ON pending_charges (created_at);"
+    )
+    await db.commit()
+
+
 async def migrate_db(db_path: str) -> None:
     """Apply forward-only migrations for existing databases."""
     async with aiosqlite.connect(db_path) as db:
+        await _migrate_pending_charges(db)
+
         await _prune_old_spend_log(db)
         await _migrate_decoy_hash_column(db)
 
