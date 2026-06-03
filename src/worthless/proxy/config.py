@@ -226,6 +226,37 @@ class ProxySettings:
         any request reaches the IPC peer.
         """
         self._validate_deploy_mode()
+        self._validate_single_worker()
+
+    def _validate_single_worker(self) -> None:
+        """Refuse multi-worker launch — the spend cap is only exact per process.
+
+        WOR-662: spend-cap and token-budget reservations live in process-local
+        memory and are only correct with a single owning process per database.
+        ``WEB_CONCURRENCY``/``uvicorn --workers`` would spawn N processes that
+        each reserve independently against the same stale ``spend_log`` SUM,
+        overshooting the cap ~Nx. We refuse it here with a clear message. This
+        is the interim fail-closed guard; durable cross-process correctness
+        (and relaxing this check) lands with the WOR-659 pre-charge ledger.
+        Scale today with replicas that each own a distinct ``WORTHLESS_DB_PATH``.
+        """
+        raw = os.environ.get("WEB_CONCURRENCY", "").strip()
+        if not raw:
+            return
+        try:
+            workers = int(raw)
+        except ValueError as exc:
+            raise ConfigError(
+                f"WEB_CONCURRENCY={raw!r} is not an integer. Unset it or set it to 1 — "
+                "worthless-proxy runs a single worker per database (WOR-662)."
+            ) from exc
+        if workers > 1:
+            raise ConfigError(
+                f"WEB_CONCURRENCY={workers} is unsupported: worthless-proxy enforces a "
+                "single worker per database so the hard spend cap stays exact (WOR-662). "
+                "Set WEB_CONCURRENCY=1 and scale with replicas that each own a distinct "
+                "WORTHLESS_DB_PATH."
+            )
 
     def _validate_deploy_mode(self) -> None:
         paas = _detected_paas_vars()

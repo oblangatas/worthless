@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 import aiosqlite
 from cryptography.fernet import Fernet, InvalidToken
 
+from worthless.crypto.kdf import derive_mac_secret
 from worthless.defaults import DEFAULT_SPEND_CAP_TOKENS
 from worthless.storage.models import EncryptedShard, EnrollmentRecord, StoredShard
 from worthless.storage.schema import init_db, migrate_db
@@ -122,20 +123,27 @@ class ShardRepository:
         await migrate_db(self._db_path)
 
     async def _compute_decoy_hash(self, value: str) -> str:
-        """Compute HMAC-SHA256 of *value* keyed with the Fernet key material.
+        """Compute HMAC-SHA256 of *value* keyed with an HKDF-derived MAC subkey.
 
         WOR-465 A3b 2/3: in IPC-only mode this round-trips through
         ``ipc.mac`` so the repository instance never holds the key.
-        The sidecar returns 32 raw bytes; we hex-encode here so output
-        bytes are byte-identical to the legacy ``hmac.new(...).hexdigest()``
-        path — load-bearing for stored decoy_hash rows.
+        WOR-637: the in-process path keys the HMAC with
+        ``derive_mac_secret(fernet_key)`` — the SAME subkey the sidecar's
+        ``mac`` verb derives — never the raw Fernet master key. Both paths
+        therefore stay byte-identical across the WORTHLESS_FERNET_IPC_ONLY
+        flag flip (load-bearing for stored decoy_hash rows) while neither
+        exposes the master key as a MAC oracle.
         """
         if self._ipc is not None:
             tag = await self._ipc.mac(value.encode())
             return tag.hex()
         if self._fernet is None or self._fernet_key_bytes is None:
             raise RuntimeError("ShardRepository has been closed")
-        return hmac.new(self._fernet_key_bytes, value.encode(), hashlib.sha256).hexdigest()
+        # SR-01: pass the zeroable bytearray straight through — do NOT wrap in
+        # bytes(), which would make an un-zeroable immutable copy of the key.
+        # HKDF reads the buffer identically, so output stays byte-identical.
+        mac_secret = derive_mac_secret(self._fernet_key_bytes)
+        return hmac.new(mac_secret, value.encode(), hashlib.sha256).hexdigest()
 
     # ------------------------------------------------------------------
     # Shard CRUD
