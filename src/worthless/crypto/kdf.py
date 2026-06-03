@@ -30,14 +30,17 @@ _MAC_INFO = b"mac"
 _MAC_SECRET_LEN = 32
 
 
-def derive_mac_secret(fernet_key: bytes) -> bytes:
+def derive_mac_secret(fernet_key: bytes | bytearray) -> bytes:
     """Derive the 32-byte MAC subkey from *fernet_key* via HKDF-SHA256.
 
     *fernet_key* is the 44-byte urlsafe-base64 Fernet key (the same bytes the
     sidecar reconstructs from its XOR shares and the repository holds in its
-    legacy in-process mode). The returned 32 bytes are used as the HMAC key for
-    decoy-hash computation. Identical input always yields identical output, so
-    callers on either side of the IPC boundary produce byte-identical MACs.
+    legacy in-process mode). Accepts a ``bytearray`` so the in-process caller
+    can pass its zeroable key buffer directly without an un-zeroable ``bytes``
+    copy (SR-01); HKDF reads the buffer identically either way. The returned 32
+    bytes are used as the HMAC key for decoy-hash computation. Identical input
+    always yields identical output, so callers on either side of the IPC
+    boundary produce byte-identical MACs.
     """
     hkdf = HKDF(
         algorithm=hashes.SHA256(),

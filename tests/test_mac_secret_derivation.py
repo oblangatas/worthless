@@ -144,4 +144,10 @@ def test_derived_mac_never_equals_master_key_mac(raw32: bytes, value: bytes) -> 
 def test_derived_subkey_never_equals_master_key(raw32: bytes) -> None:
     """For ANY Fernet key, the derived MAC subkey != the master key bytes."""
     fernet_key = base64.urlsafe_b64encode(raw32)
-    assert derive_mac_secret(fernet_key) != fernet_key
+    subkey = derive_mac_secret(fernet_key)
+    assert subkey != fernet_key
+    # Compare against the equal-length raw 32-byte key material too: the
+    # subkey is 32 bytes and fernet_key is 44, so the assertion above can
+    # never fail on length alone. This one would catch a derivation that
+    # merely returned the first 32 bytes of the key material.
+    assert subkey != raw32

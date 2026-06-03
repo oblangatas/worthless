@@ -139,7 +139,10 @@ class ShardRepository:
             return tag.hex()
         if self._fernet is None or self._fernet_key_bytes is None:
             raise RuntimeError("ShardRepository has been closed")
-        mac_secret = derive_mac_secret(bytes(self._fernet_key_bytes))
+        # SR-01: pass the zeroable bytearray straight through — do NOT wrap in
+        # bytes(), which would make an un-zeroable immutable copy of the key.
+        # HKDF reads the buffer identically, so output stays byte-identical.
+        mac_secret = derive_mac_secret(self._fernet_key_bytes)
         return hmac.new(mac_secret, value.encode(), hashlib.sha256).hexdigest()
 
     # ------------------------------------------------------------------
