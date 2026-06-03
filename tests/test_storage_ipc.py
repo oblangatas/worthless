@@ -28,6 +28,7 @@ from typing import Any
 
 import pytest
 
+from worthless.crypto.kdf import derive_mac_secret
 from worthless.sidecar.backends.fernet import FernetBackend
 from worthless.storage.repository import ShardRepository
 
@@ -245,14 +246,27 @@ async def test_decoy_hash_byte_identical_across_flag_flip(
         "WORTHLESS_FERNET_IPC_ONLY=1 is enabled."
     )
 
-    # Cross-check: the expected hex matches the textbook HMAC-SHA256
-    # so a future refactor of the legacy path can't drift either.
-    textbook = hmac.new(fernet_key_44b, b"sk-secret-decoy-value", sha256).hexdigest()
+    # Cross-check: the expected hex matches the textbook HMAC-SHA256 keyed
+    # with the DERIVED MAC subkey (WOR-637), NOT the raw Fernet master key,
+    # so a future refactor of the legacy path can't drift either — and so this
+    # test would fail if anyone reverted the legacy path to keying with the
+    # master key (re-opening the mac-oracle).
+    mac_secret = derive_mac_secret(fernet_key_44b)
+    textbook = hmac.new(mac_secret, b"sk-secret-decoy-value", sha256).hexdigest()
     assert expected_hex == textbook, (
         "legacy _compute_decoy_hash must equal "
-        "hmac.new(fernet_key, value.encode(), sha256).hexdigest() — "
+        "hmac.new(derive_mac_secret(fernet_key), value.encode(), sha256).hexdigest() — "
         "if this drifts, the byte-identity guarantee is broken on the "
         "legacy side, not the IPC side."
+    )
+
+    # Adversarial cross-check: the hash MUST NOT equal the old master-key HMAC.
+    # This is the regression guard for the WOR-637 mac-oracle fix — if either
+    # path ever reverts to keying with the raw Fernet key, this fails loudly.
+    master_key_hex = hmac.new(fernet_key_44b, b"sk-secret-decoy-value", sha256).hexdigest()
+    assert actual_hex != master_key_hex, (
+        "decoy_hash must NOT be keyed with the raw Fernet master key — the "
+        "mac-oracle (WOR-637) must stay closed on both the legacy and IPC paths."
     )
 
 

@@ -72,7 +72,12 @@ class Backend(ABC):
         """Return opaque evidence binding ``nonce`` to backend identity."""
 
     async def mac(self, value: bytes) -> bytes:
-        """Return raw HMAC-SHA256 over ``(key, value)``.
+        """Return HMAC-SHA256(value) keyed with an HKDF-DERIVED MAC subkey.
+
+        WOR-637: the MAC key MUST be a subkey derived from the backend's key
+        material (e.g. via ``worthless.crypto.kdf.derive_mac_secret``), NOT the
+        raw master key. Keying with the master key turns this verb into a
+        chosen-message oracle on it — do not do that in any override.
 
         Default implementation raises :class:`NotImplementedError`. Subclasses
         that include ``"mac"`` in :attr:`caps` MUST override. The server

@@ -326,3 +326,128 @@ class TestPostLockPromptAdvisoryOnly:
         assert "bypass the proxy" not in captured.err
         # User is told to retry rather than shown partial data.
         assert "worthless scan --code" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# worthless-k82c follow-up: terminal-escape spoofing defense
+#
+# A file in the user's repo with attacker-controlled bytes in its name
+# (npm tarball, hostile git clone, supply-chain dep) reaches the
+# "refusing to lock" error message via SkippedFile.file. Without
+# sanitisation, the bytes flow into the terminal:
+#   - ESC \x1b[31m...\x1b[0m → fake colored "FAKE_PROTECTED" text
+#   - C1 CSI \x9b...           → same effect on 8-bit-aware terminals
+#   - U+202E bidi override     → visual filename spoofing (Trojan Source)
+#
+# These tests pin that _lock_keys's skip block strips all three classes
+# from the file path before raising WorthlessError.
+# ---------------------------------------------------------------------------
+
+
+class TestSkipBlockSanitisesAttackerControlledFilenames:
+    """k82c follow-up: file paths in the skip-block error must be stripped
+    of terminal control characters / bidi overrides so an attacker who
+    lands a maliciously-named file in the victim's repo can't spoof the
+    security-gate error message."""
+
+    def _run_with_malicious_skip(
+        self,
+        tmp_path: Path,
+        env_with_key: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        malicious_filename: str,
+    ) -> object:
+        """Helper: inject a SkippedFile carrying ``malicious_filename`` into
+        the bypass scan and invoke ``worthless lock`` end-to-end. Returns
+        the CliRunner result."""
+        monkeypatch.setenv("WORTHLESS_HOME", str(tmp_path / "wh"))
+
+        def fake_scan(_root, *, deadline=None, skipped=None, **_kw):
+            skipped.append(SkippedFile(file=malicious_filename, reason="truncated"))
+            return []
+
+        with patch(
+            "worthless.cli.commands.lock.scan_source_for_hardcoded_provider_urls",
+            side_effect=fake_scan,
+        ):
+            return runner.invoke(app, ["lock", "--env", str(env_with_key)])
+
+    def test_esc_ansi_in_filename_is_stripped(
+        self, tmp_path: Path, env_with_key: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An ``\\x1b[31m...\\x1b[0m`` payload in the filename must NOT
+        reach the terminal — it would render fake red text inside the
+        WRTLS-106 'refusing to lock' security message."""
+        malicious = "evil\x1b[31mFAKE_PROTECTED\x1b[0m.py"
+        result = self._run_with_malicious_skip(tmp_path, env_with_key, monkeypatch, malicious)
+
+        # Exit 2 still — the fail-closed contract is unaffected.
+        assert result.exit_code == 2
+        # The raw ESC byte (0x1b) must NOT appear anywhere in the stderr
+        # output. Even the filename text gets shown, but with the escape
+        # sequence stripped.
+        assert "\x1b" not in result.stderr, (
+            f"ESC byte leaked to user's terminal — Trojan Source vector unfixed. "
+            f"stderr={result.stderr!r}"
+        )
+        # Stripped text remains visible (so the user can still see the
+        # attempted attack and tell us about it).
+        assert "FAKE_PROTECTED" in result.stderr
+
+    def test_c1_csi_in_filename_is_stripped(
+        self, tmp_path: Path, env_with_key: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """C1 CSI (U+009B) in a filename must NOT reach the terminal —
+        8-bit-aware terminals interpret it as a CSI introducer just like
+        ESC ``[``."""
+        malicious = "evil\x9b31mFAKE\x9b0m.py"
+        result = self._run_with_malicious_skip(tmp_path, env_with_key, monkeypatch, malicious)
+
+        assert result.exit_code == 2
+        # U+009B serializes as UTF-8 bytes 0xc2 0x9b — neither should
+        # appear in the encoded stderr output.
+        assert "\x9b" not in result.stderr, (
+            f"C1 CSI codepoint leaked to terminal. stderr={result.stderr!r}"
+        )
+        # Spot-check the encoded bytes too (defensive: in case stderr is
+        # already encoded).
+        encoded = result.stderr.encode("utf-8", errors="replace")
+        assert b"\xc2\x9b" not in encoded
+
+    def test_bidi_override_in_filename_is_stripped(
+        self, tmp_path: Path, env_with_key: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """U+202E (RIGHT-TO-LEFT OVERRIDE) is the Trojan Source class
+        (CVE-2021-42574) — visual filename spoofing inside the security
+        gate. Must be stripped before rendering."""
+        malicious = "good\u202emoc.evil.py"
+        result = self._run_with_malicious_skip(tmp_path, env_with_key, monkeypatch, malicious)
+
+        assert result.exit_code == 2
+        assert "\u202e" not in result.stderr, (
+            f"Bidi override leaked to terminal — Trojan Source unfixed. "
+            f"stderr={result.stderr!r}"
+        )
+
+    def test_clean_filename_passes_through_unchanged(
+        self, tmp_path: Path, env_with_key: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression guard: a clean filename (no attack chars) must render
+        intact AND with its ``[reason]`` token. Pins that
+        ``sanitise_for_message`` doesn't over-strip, and that
+        ``rich.markup.escape`` keeps the reason token readable.
+
+        If a future overzealous sanitiser tweak silently breaks normal
+        paths, the 3 attack-vector tests above would still pass (they
+        only assert ON-ABSENCE of attack bytes) — this test catches that
+        regression."""
+        clean = "src/api/client.py"
+        result = self._run_with_malicious_skip(tmp_path, env_with_key, monkeypatch, clean)
+
+        assert result.exit_code == 2
+        # Clean filename appears intact — no over-stripping.
+        assert "src/api/client.py" in result.stderr
+        # Reason token survives the k82c renderer escape.
+        assert "[truncated]" in result.stderr
+        # And the surrounding message body is intact.
+        assert "scan incomplete" in result.stderr.lower()
