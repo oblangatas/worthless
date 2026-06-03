@@ -29,6 +29,13 @@ class EncryptedShard(NamedTuple):
     # Target state (post-16x2-revert): upsert_locked_shard does NOT write this field;
     # proxy reads shard-A from the Bearer header, not from the DB.
     shard_a_enc: bytes | None = None
+    # WOR-651/F4: shape-only OpenClaw rollback record so unlock (F2) can restore
+    # the original provider entry without ever storing the real key. These are
+    # NON-secret: oc_original_base_url is the ORIGINAL OpenClaw provider baseUrl
+    # (distinct from base_url above, the UPSTREAM url); oc_original_api_key_json
+    # is a shape-only {"kind":...} record, never key material.
+    oc_original_base_url: str | None = None
+    oc_original_api_key_json: str | None = None
 
     def __repr__(self) -> str:
         return (

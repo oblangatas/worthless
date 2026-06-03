@@ -24,6 +24,7 @@ Predicate" and §"Failure modes" rows F01–F04, F36.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -58,6 +59,40 @@ from worthless.openclaw.errors import (
 _SKILL_SUBPATH = ("skills", "worthless")
 _DEFAULT_PROXY_BASE_URL = "http://127.0.0.1:8787"
 _DEFAULT_PROXY_PORT = 8787
+
+
+def build_oc_rollback_apikey_record(kind: str, ref: dict | None = None) -> str:
+    """Return the SHAPE-ONLY OpenClaw rollback apiKey record as JSON.
+
+    WOR-651/F4. This encodes the product rule "never persist the real key":
+    the returned record describes only the *shape* of the original
+    OpenClaw provider apiKey so ``unlock`` (F2) can restore it from a
+    client-side source — it never carries key material.
+
+    * ``kind == "plaintext"`` → ``{"kind":"plaintext"}``. The original
+      entry held an inline key; we record only that fact. The real value
+      is reconstructed client-side at unlock time, never from this DB.
+    * ``kind == "secretref"`` → ``{"kind":"secretref","ref":<ref>}``.
+      ``ref`` is a NON-secret pointer (e.g. ``{source, provider, id}``)
+      to where the real key lives (env var, secret manager) — never the
+      key itself.
+
+    A stolen DB therefore yields, at most, half a key plus a pointer —
+    never a usable credential.
+
+    Raises:
+        ValueError: on any unknown ``kind``.
+    """
+    if kind == "plaintext":
+        record: dict = {"kind": "plaintext"}
+    elif kind == "secretref":
+        record = {"kind": "secretref", "ref": ref}
+    else:
+        raise ValueError(
+            f"unknown OpenClaw rollback apiKey record kind: {kind!r} "
+            "(expected 'plaintext' or 'secretref')"
+        )
+    return json.dumps(record, separators=(",", ":"))
 
 
 def _resolve_proxy_base_url() -> str:

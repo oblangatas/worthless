@@ -50,6 +50,12 @@ CREATE TABLE IF NOT EXISTS shards (
     charset     TEXT,
     base_url    TEXT,
     shard_a_enc BLOB,
+    -- WOR-651/F4: shape-only OpenClaw rollback record so unlock (F2) can
+    -- restore the original provider entry WITHOUT ever storing the real key.
+    -- ``oc_original_base_url`` is the ORIGINAL OpenClaw provider baseUrl —
+    -- distinct from ``base_url`` above, which is the UPSTREAM provider url.
+    oc_original_base_url     TEXT,
+    oc_original_api_key_json TEXT,
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -105,6 +111,30 @@ async def _migrate_shard_format_columns(db: aiosqlite.Connection, shard_columns:
         "charset": "ALTER TABLE shards ADD COLUMN charset TEXT",
     }
     for col_name, stmt in _SHARD_MIGRATIONS.items():
+        if col_name not in shard_columns:
+            try:
+                await db.execute(stmt)
+            except Exception as exc:
+                if "duplicate column" not in str(exc).lower():
+                    raise
+    await db.commit()
+
+
+async def _migrate_oc_rollback_columns(db: aiosqlite.Connection, shard_columns: set[str]) -> None:
+    """WOR-651/F4: add shape-only OpenClaw rollback columns to ``shards``.
+
+    ``oc_original_base_url`` is the ORIGINAL OpenClaw provider baseUrl
+    (distinct from the ``base_url`` column, which is the UPSTREAM provider
+    url). ``oc_original_api_key_json`` holds a shape-only record (kind +
+    optional non-secret ref) — never the real key. Mirrors
+    :func:`_migrate_shard_format_columns`: duplicate-column-tolerant ALTERs,
+    nullable, no backfill.
+    """
+    _OC_MIGRATIONS = {
+        "oc_original_base_url": "ALTER TABLE shards ADD COLUMN oc_original_base_url TEXT",
+        "oc_original_api_key_json": ("ALTER TABLE shards ADD COLUMN oc_original_api_key_json TEXT"),
+    }
+    for col_name, stmt in _OC_MIGRATIONS.items():
         if col_name not in shard_columns:
             try:
                 await db.execute(stmt)
@@ -219,6 +249,7 @@ async def migrate_db(db_path: str) -> None:
         cursor = await db.execute("PRAGMA table_info(shards)")
         shard_columns = {row[1] for row in await cursor.fetchall()}
         await _migrate_shard_format_columns(db, shard_columns)
+        await _migrate_oc_rollback_columns(db, shard_columns)
         await _migrate_base_url_column(db, db_path, shard_columns)
         await _migrate_shard_a_enc_column(db, shard_columns)
 
