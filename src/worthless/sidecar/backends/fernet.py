@@ -38,8 +38,9 @@ _ATTEST_SECRET_LEN = 32
 class FernetBackend(Backend):
     """Fernet backend reconstructed from two XOR shares."""
 
-    # ``mac`` is the WOR-465 A3a verb — raw HMAC-SHA256 over (key, value).
-    # See backends/base.py docstring for why caps gates dispatch.
+    # ``mac`` is the WOR-465 A3a verb — HMAC-SHA256 over (derived subkey,
+    # value), re-keyed off the master key in WOR-637. See backends/base.py
+    # docstring for why caps gates dispatch.
     caps: ClassVar[tuple[str, ...]] = ("seal", "open", "attest", "mac")
 
     __slots__ = ("_fernet", "_attest_secret", "_mac_secret")

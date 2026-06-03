@@ -68,6 +68,32 @@ def test_derive_mac_secret_is_not_the_input_key() -> None:
     assert secret != _KAT_KEY_B64URL[:32]
 
 
+def test_derive_mac_secret_bytearray_equals_bytes_and_leaves_input_intact() -> None:
+    """A ``bytearray`` key MUST derive identically to the same ``bytes`` key.
+
+    Pins the WOR-637 commit-2 SR-01 fix: the in-process caller
+    (``ShardRepository._compute_decoy_hash``) passes its *zeroable*
+    ``bytearray`` key buffer straight to ``derive_mac_secret`` rather than an
+    un-zeroable ``bytes(...)`` copy. Without this test, a regression that did
+    ``hkdf.derive(bytes(x))`` internally — re-introducing the un-zeroable copy
+    — would pass every other test, since they all pass ``bytes``.
+
+    Also asserts the input bytearray is left unmodified, so HKDF reading the
+    buffer never consumes or mutates the caller's zeroable key.
+    """
+    key_bytes = bytes(_KAT_KEY_B64URL)
+    key_bytearray = bytearray(_KAT_KEY_B64URL)
+    snapshot = bytes(key_bytearray)  # copy of the original contents
+
+    out_bytes = derive_mac_secret(key_bytes)
+    out_bytearray = derive_mac_secret(key_bytearray)
+
+    assert out_bytearray == out_bytes
+    assert bytes(key_bytearray) == snapshot, (
+        "derive_mac_secret must not mutate the caller's zeroable key buffer"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Known-answer vectors
 # ---------------------------------------------------------------------------

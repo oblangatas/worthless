@@ -1,16 +1,17 @@
-"""Tests for the sidecar ``mac`` verb (WOR-465 A3a).
+"""Tests for the sidecar ``mac`` verb (WOR-465 A3a, re-keyed in WOR-637).
 
-The ``mac`` verb computes raw HMAC-SHA256 over (key, value). It is NOT an
-alias of ``attest``: attest is HKDF-derived + length-prefixed (multi-component
-domain separation), while ``mac`` returns the unwrapped HMAC tag over a
-single value with the raw Fernet key as the MAC key.
+The ``mac`` verb computes HMAC-SHA256 over a single value keyed with an
+HKDF-DERIVED subkey (``derive_mac_secret``), NOT the raw Fernet master key
+(WOR-637 closed that chosen-message oracle). It is still NOT an alias of
+``attest``: ``attest`` derives its own subkey with a different salt/info and
+length-prefixes (nonce, purpose) for multi-component domain separation, while
+``mac`` returns the unwrapped HMAC tag over a single value.
 
-Why a separate verb: ``ShardRepository._compute_decoy_hash`` uses
-``hmac.new(fernet_key, value, sha256).hexdigest()`` directly. Migrating to
-``attest`` would change the bytes and invalidate every stored decoy_hash.
-The ``mac`` verb is the smallest primitive that lets the proxy uid stop
-holding the key while keeping decoy bytes byte-identical across the flag
-flip.
+Why a separate verb: ``ShardRepository._compute_decoy_hash`` keys HMAC with
+the same derived subkey (via the shared ``derive_mac_secret`` helper). The
+``mac`` verb is the smallest primitive that lets the proxy uid stop holding
+the key while keeping decoy bytes byte-identical across the
+WORTHLESS_FERNET_IPC_ONLY flag flip.
 
 Contract pinned here:
     Backend.mac(value: bytes) -> bytes        (async)
