@@ -1741,13 +1741,12 @@
     </style>
     <section class="limits-rail" aria-label="What Worthless does not protect against">
       <h2>What Worthless does not protect against</h2>
-      <p>Worthless aims to make a copied .env share useless on its own. It is not a sandbox for a machine that is already compromised, and it is not the only layer you need.</p>
       <ul>
-        <li><strong>A compromised machine.</strong> If an attacker controls the computer Worthless runs on, they can reach your key. Same trust boundary as a password manager.</li>
-        <li><strong>The provider's side.</strong> A breach or outage at OpenAI, Anthropic, or another upstream is outside what Worthless can affect.</li>
-        <li><strong>This early build's limits.</strong> The proof of concept is Python, with documented limits on how briefly key material lives in memory.</li>
+        <li><strong>Compromised machine.</strong></li>
+        <li><strong>Provider compromised.</strong></li>
+        <li><strong>Early build limits.</strong></li>
       </ul>
-      <p class="foot">Worthless is one layer, built to sit alongside a vault, secret scanning, and key rotation. Full threat model: <a href="https://docs.wless.io/security/">security model</a>.</p>
+      <p class="foot">Worthless is not a sandbox and not the only layer you need. Use it with a vault, secret scanning, and key rotation. Full threat model: <a href="https://docs.wless.io/security/">security model</a>.</p>
     </section>
 
     <section class="trust-rail" aria-label="Worthless positioning">
