@@ -98,18 +98,81 @@ def _default_port_free(monkeypatch: pytest.MonkeyPatch) -> None:
 class TestWrapEnvInjection:
     """wrap injects BASE_URL env vars for enrolled providers."""
 
+    def test_injects_base_url_for_enrolled_provider(
+        self, home_with_key, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With no *_BASE_URL in the parent env, wrap injects the proxy URL
+        for each enrolled provider.
+
+        ``home_with_key`` enrolls alias ``openai-a1b2c3d4`` (protocol
+        ``openai``) and the port fixture uses ``WORTHLESS_PORT=8787``.
+        Expected injection: ``OPENAI_BASE_URL=http://127.0.0.1:8787/openai-a1b2c3d4/v1``.
+        """
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        child_env = TestWrapChildEnvContract._capture_child_env(home_with_key, monkeypatch)
+        assert child_env.get("OPENAI_BASE_URL") == "http://127.0.0.1:8787/openai-a1b2c3d4/v1"
+
+    def test_skips_alias_with_unsafe_characters(
+        self, home_with_key, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Aliases containing characters outside [A-Za-z0-9_-] are silently
+        skipped — no BASE_URL injected, no exception raised. Valid aliases
+        in the same list are still processed normally."""
+        monkeypatch.setattr(
+            "worthless.cli.commands.wrap._list_enrolled_aliases",
+            lambda _home: [("../evil-alias", "openai"), ("openai-a1b2c3d4", "openai")],
+        )
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        child_env = TestWrapChildEnvContract._capture_child_env(home_with_key, monkeypatch)
+        # Valid alias is injected; the unsafe one is skipped
+        assert child_env.get("OPENAI_BASE_URL") == "http://127.0.0.1:8787/openai-a1b2c3d4/v1"
+        assert "../evil-alias" not in str(child_env.get("OPENAI_BASE_URL", ""))
+
+    def test_skips_protocol_with_unsafe_characters(
+        self, home_with_key, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Protocols containing characters outside [A-Za-z0-9_-] are skipped —
+        prevents invalid env var names from reaching subprocess.Popen."""
+        monkeypatch.setattr(
+            "worthless.cli.commands.wrap._list_enrolled_aliases",
+            lambda _home: [("openai-a1b2c3d4", "open ai;evil")],
+        )
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        child_env = TestWrapChildEnvContract._capture_child_env(home_with_key, monkeypatch)
+        # Unsafe protocol skipped — no BASE_URL injected at all
+        assert "OPENAI_BASE_URL" not in child_env
+        assert not any("evil" in v for v in child_env.values())
+
+    def test_skips_digit_prefix_protocol(
+        self, home_with_key, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Protocols starting with a digit (e.g. '0abc') produce POSIX-invalid
+        env var names like '0ABC_BASE_URL' that are silently dropped by shells
+        and libc. _PROTO_RE rejects them before they reach subprocess.Popen."""
+        monkeypatch.setattr(
+            "worthless.cli.commands.wrap._list_enrolled_aliases",
+            lambda _home: [("openai-a1b2c3d4", "0abc")],
+        )
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        child_env = TestWrapChildEnvContract._capture_child_env(home_with_key, monkeypatch)
+        assert "0ABC_BASE_URL" not in child_env
+        assert "OPENAI_BASE_URL" not in child_env
+
 
 class TestWrapChildEnvContract:
-    """``wrap`` inherits parent env into the child unchanged.
+    """``wrap`` injects ``*_BASE_URL`` for enrolled providers, preserving
+    any value already present in the parent env.
 
     Pre-8rqs, wrap synthesised ``OPENAI_BASE_URL`` / ``ANTHROPIC_BASE_URL``
-    into the child env. PR #127 (8rqs Phase 8) moved the contract to
-    ``lock``: lock writes ``*_BASE_URL`` into the user's .env preserving
-    their var names, and wrap stops touching env entirely. v0.3.5 removes
-    the dead ``_build_child_env`` helper that wrapped that empty contract;
-    these tests now assert the contract end-to-end against the real
-    ``subprocess.Popen`` ``env=`` kwarg captured during a wrap run, not
-    against the deleted helper's return value.
+    into the child env. PR #127 (8rqs Phase 8) removed that injection on the
+    assumption that ``lock`` would write the vars into .env. That assumption
+    broke users not running direnv. PR #251 restores injection: after the proxy
+    starts healthy, wrap sets ``{PROVIDER}_BASE_URL=http://127.0.0.1:{port}/{alias}/v1``
+    for each enrolled provider — only when the var is absent from the parent env,
+    so direnv users keep their loaded value.
+
+    These tests assert the contract end-to-end against the
+    ``subprocess.Popen`` ``env=`` kwarg captured during a wrap run.
     """
 
     @staticmethod
@@ -145,14 +208,19 @@ class TestWrapChildEnvContract:
         assert result.exit_code == 0, result.output
         return captured["env"]
 
-    def test_no_base_url_synthesis(self, home_with_key, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Headline 8rqs Phase 8 contract: wrap does NOT synthesise *_BASE_URL.
-        With a parent env that's clean of BASE_URL vars, the child env is too."""
+    def test_injects_enrolled_providers_when_absent_from_parent(
+        self, home_with_key, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """PR #251 restores injection: when *_BASE_URL is absent from the
+        parent env, wrap injects the proxy URL for each enrolled provider.
+        Providers not enrolled (anthropic, openrouter) are NOT synthesised."""
         monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
         monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
         monkeypatch.delenv("OPENROUTER_BASE_URL", raising=False)
         child_env = self._capture_child_env(home_with_key, monkeypatch)
-        assert "OPENAI_BASE_URL" not in child_env
+        # openai-a1b2c3d4 is enrolled in home_with_key → must be injected
+        assert child_env.get("OPENAI_BASE_URL") == "http://127.0.0.1:8787/openai-a1b2c3d4/v1"
+        # not enrolled → must not be synthesised
         assert "ANTHROPIC_BASE_URL" not in child_env
         assert "OPENROUTER_BASE_URL" not in child_env
 
@@ -165,6 +233,16 @@ class TestWrapChildEnvContract:
         monkeypatch.setenv("OPENROUTER_BASE_URL", "http://127.0.0.1:8787/openrouter-x/v1")
         child_env = self._capture_child_env(home_with_key, monkeypatch)
         assert child_env.get("OPENROUTER_BASE_URL") == "http://127.0.0.1:8787/openrouter-x/v1"
+
+    def test_enrolled_provider_var_in_parent_is_not_overwritten(
+        self, home_with_key, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If the parent env already carries the enrolled provider's BASE_URL
+        (e.g. direnv loaded it), wrap must not overwrite it with the proxy URL.
+        This covers the ``if var not in child_env`` False branch."""
+        monkeypatch.setenv("OPENAI_BASE_URL", "http://my-custom-proxy:9999/v1")
+        child_env = self._capture_child_env(home_with_key, monkeypatch)
+        assert child_env.get("OPENAI_BASE_URL") == "http://my-custom-proxy:9999/v1"
 
     def test_no_session_token(self, home_with_key, monkeypatch: pytest.MonkeyPatch) -> None:
         """``WORTHLESS_SESSION_TOKEN`` is dead — wrap must never add it back."""
@@ -1019,13 +1097,12 @@ class TestWrapSetsEnvAndRunsCommand:
         )
         assert result.exit_code == 0, f"wrap failed: {result.output}"
 
-        # 8rqs Phase 8: wrap no longer injects OPENAI_BASE_URL (lock owns
-        # that now via the user's own .env). The child env is the parent
-        # env passed through; we verify it's NOT the synthetic alias-URL
-        # form that pre-8rqs wrap would have produced.
-        synthetic = "http://127.0.0.1:9999/"
-        assert not captured_env.get("OPENAI_BASE_URL", "").startswith(synthetic), (
-            f"wrap synthesised OPENAI_BASE_URL post-8rqs: {captured_env.get('OPENAI_BASE_URL')!r}"
+        # PR #251 restores injection: wrap injects OPENAI_BASE_URL for each
+        # enrolled provider when the var is absent from the parent env.
+        # home_with_key enrolls alias 'openai-a1b2c3d4' (protocol 'openai');
+        # spawn_proxy mock returns port 9999 → expect the alias URL.
+        assert captured_env.get("OPENAI_BASE_URL") == "http://127.0.0.1:9999/openai-a1b2c3d4/v1", (
+            f"wrap did not inject OPENAI_BASE_URL: {captured_env.get('OPENAI_BASE_URL')!r}"
         )
 
 

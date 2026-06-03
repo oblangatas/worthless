@@ -2,11 +2,13 @@
 
 ``worthless wrap python main.py`` starts a transparent proxy on the same
 port ``worthless lock`` wrote into the user's ``.env`` (default 8787,
-overridable via ``WORTHLESS_PORT``) and runs the child against it. After
-8rqs, the .env that ``worthless lock`` already rewrote IS the contract —
-wrap no longer mutates ``*_BASE_URL`` vars in the child env. Its job is
-process supervision only: spawn proxy on lock's port, spawn child, wait,
-clean up.
+overridable via ``WORTHLESS_PORT``) and runs the child against it.
+
+Wrap injects ``*_BASE_URL`` env vars into the child so it hits the local
+proxy even without direnv or a pre-loaded ``.env``. Vars already present in
+the parent environment (e.g. loaded by direnv) are left unchanged.  Its job
+is process supervision: spawn proxy on lock's port, inject provider URLs,
+spawn child, wait, clean up.
 
 If lock's port is already serving (e.g. ``worthless up`` is running), wrap
 fails fast with a clean error — the two commands are alternatives, not
@@ -17,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import socket
 import subprocess  # nosec B404
 import sys
@@ -47,6 +50,23 @@ from worthless.cli.sidecar_lifecycle import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Provider → env var name for *_BASE_URL injection. ``wrap`` uses this to
+# route the child through the local proxy without requiring direnv or a
+# pre-loaded .env.  Unknown protocols fall back to
+# ``{PROTO.upper().replace('-','_')}_BASE_URL`` (POSIX-safe).
+_PROVIDER_URL_VAR: dict[str, str] = {
+    "openai": "OPENAI_BASE_URL",
+    "anthropic": "ANTHROPIC_BASE_URL",
+    "openrouter": "OPENROUTER_BASE_URL",
+}
+
+# Allow-list for alias and protocol values used in URL path / env var
+# construction. Stored values originate from the local worthless DB (no
+# remote input), but a tampered DB could store arbitrary strings — validate
+# before interpolating into the child environment.
+_ALIAS_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_PROTO_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 
 
 def _port_in_use(port: int, host: str = "127.0.0.1", timeout: float = 0.5) -> bool:
@@ -329,10 +349,25 @@ def register_wrap_commands(app: typer.Typer) -> None:
             )
 
         full_command = list(command) + ctx.args
-        # Inherit parent env unchanged. Post-8rqs, `worthless lock` writes
-        # *_BASE_URL into the user's .env (preserving their var names);
-        # wrap doesn't synthesise or overwrite anything.
         child_env = dict(os.environ)
+        # Re-inject *_BASE_URL for each enrolled provider so wrap is
+        # self-contained without requiring direnv or a pre-loaded .env.
+        # Only sets vars absent from the parent env — direnv users keep
+        # their value. Restores the _build_child_env contract deleted in
+        # 4f496c9.
+        for alias, protocol in aliases:
+            if not _ALIAS_RE.match(alias):
+                logger.warning("wrap: skipping alias %r — contains unsafe characters", alias)
+                continue
+            if not _PROTO_RE.match(protocol):
+                logger.warning("wrap: skipping protocol %r — contains unsafe characters", protocol)
+                continue
+            var = _PROVIDER_URL_VAR.get(
+                protocol,
+                f"{protocol.upper().replace('-', '_')}_BASE_URL",
+            )
+            if var not in child_env:
+                child_env[var] = f"http://127.0.0.1:{port}/{alias}/v1"
 
         # Spawn child
         try:

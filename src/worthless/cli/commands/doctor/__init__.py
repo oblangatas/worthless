@@ -478,6 +478,13 @@ def _check_openclaw_section(
         typer.echo(f"  ✗ {issue}")
     for item in fixed_items:
         typer.echo(f"  ✓ {item}")
+    # WOR-516: always surface the .bak recovery path when issues are present so
+    # operators know where to look if openclaw.json is damaged after a failed lock.
+    typer.echo(
+        "  ℹ  If openclaw.json is damaged: recover from the OpenClaw backup"
+        " file ~/.openclaw/openclaw.json.bak"
+        " (created automatically by the openclaw daemon on each write)"
+    )
     return True
 
 

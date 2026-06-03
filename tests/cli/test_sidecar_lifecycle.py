@@ -945,6 +945,13 @@ def test_spawn_sidecar_accepts_path_within_limit(
     fake_proc = MagicMock()
     fake_proc.poll.return_value = None
     fake_proc.pid = 99999
+    # Suppress the _collect_stderr daemon thread.  MagicMock().stderr is a
+    # truthy MagicMock, so the production guard ``if proc.stderr is not None``
+    # would start the drainer thread; that thread calls .read(256) in a tight
+    # loop because MagicMock.read() never returns b"".  Under -n auto + reruns
+    # the accumulating threads starve the 2-core CI runner.  Setting stderr=None
+    # matches every other stub proc in this file (_FakeProc, _SpawnFakeProc).
+    fake_proc.stderr = None
 
     with (
         _patch("worthless.cli.sidecar_lifecycle.subprocess.Popen", return_value=fake_proc),

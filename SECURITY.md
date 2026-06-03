@@ -4,20 +4,20 @@
 
 | Version | Supported |
 |---------|-----------|
-| v0.x (Python PoC) | Yes — security fixes applied |
+| v0.x (Python PoC) | Yes, security fixes applied |
 
 ## Reporting a Vulnerability
 
-Worthless exists to protect API keys — a vulnerability here has real consequences.
+Worthless exists to protect API keys, a vulnerability here has real consequences.
 
 ### How to Report
 
-- **Preferred:** [GitHub Private Vulnerability Reporting](https://github.com/worthless-dev/worthless/security/advisories/new)
-- **Alternative:** Email `security@worthless.dev`
+- **Preferred:** [GitHub Private Vulnerability Reporting](https://github.com/shacharm2/worthless/security/advisories/new)
+- **Alternative:** Email `security@wless.io`
 
 ### Response timeline
 
-Solo maintainer — response time is bounded by real life. Best-effort
+Solo maintainer, response time is bounded by real life. Best-effort
 acknowledgment within one week. Triage, fix, and coordinated disclosure are
 handled proportional to severity; 90 days is the default
 coordinated-disclosure window by convention. If a report sits for longer than
@@ -27,11 +27,11 @@ two weeks without reply, ping again or escalate publicly.
 
 Vulnerabilities in the following areas are in scope:
 
-- **Crypto** — key splitting, reconstruction, commitment scheme, zeroing
-- **Proxy** — gate-before-reconstruct bypass, request smuggling, error leakage
-- **Storage** — shard encryption at rest, repository access controls
-- **CLI** — credential handling, shard exposure, command injection
-- **Installer** — the `curl -sSL https://worthless.sh | sh` supply chain. Trust roots and what `install.sh` verifies today: [docs/install-security.md](docs/install-security.md).
+- **Crypto**, key splitting, reconstruction, commitment scheme, zeroing
+- **Proxy**, gate-before-reconstruct bypass, request smuggling, error leakage
+- **Storage**, shard encryption at rest, repository access controls
+- **CLI**, credential handling, shard exposure, command injection
+- **Installer**, the `curl -sSL https://worthless.sh | sh` supply chain. Trust roots and what `install.sh` verifies today: [docs/install-security.md](docs/install-security.md).
 
 ### Out of Scope
 
@@ -54,7 +54,7 @@ English.
 ## How the split-key model works (in one paragraph)
 
 Your API key is split in two on the client using a format-preserving one-time
-pad. Shard A replaces the original key in your `.env` — it looks like a real
+pad. Shard A replaces the original key in your `.env`, it looks like a real
 key but is cryptographically useless alone. Shard B lives on the proxy,
 Fernet-encrypted at rest. Every request hits the rules engine **before** the
 key reconstructs: spend cap blown, rate limit exceeded, model not allowed =

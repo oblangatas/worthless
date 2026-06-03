@@ -161,6 +161,17 @@ repos:
         pass_filenames: false
         files: '(pyproject\.toml|uv\.lock)$'
 
+      # Keep requirements.txt (the Snyk badge's scan source) in sync with
+      # uv.lock. Snyk's live badge can't parse uv.lock, so the README badge
+      # points at this exported, parseable manifest (?targetFile=requirements.txt).
+      # --no-dev scopes it to the runtime tree users actually install.
+      - id: uv-export-requirements
+        name: "supply chain: export requirements.txt for Snyk badge"
+        language: system
+        entry: uv export --no-dev --no-hashes --format requirements-txt -o requirements.txt
+        pass_filenames: false
+        files: '(pyproject\.toml|uv\.lock)$'
+
   # deptry: catches missing, unused, and transitive deps.
   # Anti-slopsquatting — detects imports of packages not in your dependency tree
   # (LLMs hallucinate package names; attackers register them).

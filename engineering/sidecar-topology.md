@@ -97,6 +97,8 @@ Socket activation + `User=`/`Group=` directives give the same two-uid shape (pro
 
 Additional contract guards not tied to a red-team row: `test_backend_error_message_is_scrubbed_on_wire` (no plaintext/key/share bytes in error strings), `test_client_timeout_raises_ipc_timeout_error_fast` (2 s deadline, §ipc-contract `deadline_ms`).
 
+**Shard-A Bearer + commitment verify via sidecar IPC (WOR-549, PR #250)** — the proxy delivers `Authorization: Bearer <shard-A>` from the agent through to upstream by: (1) extracting shard-A from the header, (2) calling `await ipc.open(shard_b_enc, key_id=alias)` to decrypt shard-B inside the sidecar, (3) XOR'ing the two halves in-process, and (4) verifying commitment via HMAC-SHA256 keyed by the per-row nonce (public, in DB — **not the Fernet key**). The proxy uid never holds Fernet key bytes during any of this. Executable evidence: `tests/test_proxy_auth_16x2.py` (20 tests — token survival, restart, re-lock atomicity), `tests/test_relock_adversarial.py` (6 tests — uniform 401 body across all failure paths, commitment-mismatch never reaches upstream, concurrent re-lock atomicity), `tests/test_relock_attacks.py` (8 tests — bit-flip, truncation, cross-alias, replay, empty/null bytes, corrupt shard-B, anti-enumeration). WOR-465 invariant test `tests/test_proxy_no_fernet_key_read.py` stays green alongside (20/20). Wire-level IPC (framing, peercred, request-id correlation) covered separately by `tests/ipc/*` per rows 6, 7, 8.
+
 ## 5. Backend ABC stability contract (for v2.0 Rust/MPC)
 
 The `Backend` ABC in `src/worthless/sidecar/backends/base.py` is the boundary v2.0 reimplements against. The **three verbs and their shapes are frozen**:

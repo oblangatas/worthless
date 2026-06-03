@@ -117,12 +117,15 @@ async def worthless_scan(
         deep: Extended scan — also checks *.yml, *.yaml, *.toml, *.json,
               and live environment variables.
     """
+    import time
+
     from worthless.cli.commands.scan import (
+        SCAN_TIME_BUDGET_S,
         _collect_deep_paths,
         _collect_fast_paths,
         _load_db_state_async,
     )
-    from worthless.cli.scanner import scan_files
+    from worthless.cli.scanner import SkippedFile, scan_files
 
     explicit = [Path(p) for p in (paths or [])]
 
@@ -137,7 +140,27 @@ async def worthless_scan(
         # locations for now (orphan-flagging in MCP would be a future bead).
         enrolled, _orphans = await _load_db_state_async()
         enrollment_checker_available = enrolled is not None
-        findings = scan_files(scan_paths, enrolled_locations=enrolled)
+
+        # c5kc: same fail-closed contract as the CLI — bounded per-file read
+        # plus a wall-clock deadline so an MCP-driven scan over a huge or slow
+        # file can't freeze the calling agent. Skipped files are surfaced so
+        # the agent doesn't misread "0 findings" as "clean" on a partial scan.
+        #
+        # scan_files is synchronous and can run for up to SCAN_TIME_BUDGET_S
+        # seconds. Calling it inline would block the FastMCP event loop and
+        # starve other concurrent MCP tool calls — offload to a thread executor
+        # (same pattern worthless_status / worthless_lock use in this file).
+        # ``skipped`` is mutated in-place inside the executor; the reference
+        # we read after the await sees the same list.
+        skipped: list[SkippedFile] = []
+        deadline = time.monotonic() + SCAN_TIME_BUDGET_S
+        findings = await asyncio.to_thread(
+            scan_files,
+            scan_paths,
+            enrolled_locations=enrolled,
+            deadline=deadline,
+            skipped=skipped,
+        )
 
         items = [
             {
@@ -163,6 +186,12 @@ async def worthless_scan(
                     "unprotected": unprotected,
                 },
                 "enrollment_checker_available": enrollment_checker_available,
+                # Additive fields (c5kc): tell the calling agent which files
+                # couldn't be fully scanned and whether the result is partial.
+                # Agents should treat scan_incomplete=true as "I don't know if
+                # you're clean" — same fail-closed semantics as CLI exit code 2.
+                "skipped": [{"file": s.file, "reason": s.reason} for s in skipped],
+                "scan_incomplete": bool(skipped),
             }
         )
     finally:

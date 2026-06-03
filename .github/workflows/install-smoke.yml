@@ -87,6 +87,21 @@ jobs:
             if [ "$RUNNER_OS" = "Linux" ]; then ldd --version | head -1; fi
           } 2>&1 | tee install-smoke-traces/platform-${{ runner.os }}.log
 
+      - name: PR-only — target the latest PUBLISHED version (the baked pin isn't on PyPI until release)
+        # On a release PR the baked WORTHLESS_VERSION_PIN points at the version
+        # being shipped, which isn't on PyPI yet → a real `curl|sh` would fail.
+        # On PRs we exercise the installer MECHANISM against the latest published
+        # version instead. On push/tag this step is skipped, so the real baked
+        # pin is what gets installed (the genuine release assertion). The daily
+        # release-sync monitor always asserts the literal baked pin vs PyPI.
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          V=$(curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 30 https://pypi.org/pypi/worthless/json | python3 -c 'import json,sys; print(json.load(sys.stdin)["info"]["version"])')
+          echo "WORTHLESS_VERSION=$V" >> "$GITHUB_ENV"
+          echo "PR install-test will install published worthless==$V (baked pin is asserted by the daily monitor + the release tag)."
+
       - name: Run install.sh
         env:
           # Force the same managed-Python path real users get on a fresh box.
@@ -135,6 +150,16 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
+
+      - name: PR-only — resolve latest PUBLISHED version (before proxy lockdown, needs direct net)
+        # See the execute job: on PRs the baked pin (release version) isn't on
+        # PyPI yet, so test the installer against the latest published version.
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          V=$(curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 30 https://pypi.org/pypi/worthless/json | python3 -c 'import json,sys; print(json.load(sys.stdin)["info"]["version"])')
+          echo "WORTHLESS_VERSION=$V" >> "$GITHUB_ENV"
 
       - name: Start local squid proxy
         shell: bash

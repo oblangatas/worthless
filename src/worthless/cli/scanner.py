@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +13,45 @@ from worthless.cli.dotenv_rewriter import shannon_entropy
 from worthless.cli.key_patterns import ENTROPY_THRESHOLD, KEY_PATTERN, detect_provider
 
 _VAR_NAME_RE = re.compile(r"(\w+)\s*$")
+
+# Cap bytes read per file. A file larger than this is scanned up to the cap
+# (its prefix) and flagged ``truncated`` — never silently skipped. Fail-closed:
+# a key padded just past the cap is still caught in the prefix.
+MAX_SCAN_FILE_BYTES = 5 * 1024 * 1024
+
+
+@dataclass
+class SkippedFile:
+    """A file that could not be fully scanned. Surfaced to the user — never
+    dropped silently — so a leaked key can't slip through an unscanned file.
+
+    reason: ``truncated`` (exceeded the byte cap; prefix was scanned),
+    ``unreadable`` (OSError), or ``timeout`` (scan deadline hit before this
+    file; nothing after it was scanned).
+    """
+
+    file: str
+    reason: str
+
+
+def read_text_capped(path: Path, max_bytes: int) -> tuple[str, bool]:
+    """Read up to ``max_bytes`` of *path* as text. Returns (text, truncated).
+
+    Streams a bounded read rather than stat-then-read so a file sized just over
+    the cap still yields its prefix for scanning (you can't pad past the cap to
+    evade detection). Raises OSError to the caller (handled as ``unreadable``).
+    """
+    # Guard against negative caps. ``fh.read(-1)`` reads to EOF in Python,
+    # which would silently defeat the byte cap (fail-closed → fail-open).
+    if max_bytes < 0:
+        raise ValueError(f"max_bytes must be >= 0, got {max_bytes!r}")
+    with path.open("rb") as fh:
+        data = fh.read(max_bytes + 1)
+    truncated = len(data) > max_bytes
+    if truncated:
+        data = data[:max_bytes]
+    return data.decode("utf-8", errors="replace"), truncated
+
 
 # Source file extensions to scan for hardcoded provider URLs.
 _SOURCE_EXTENSIONS: frozenset[str] = frozenset(
@@ -78,12 +118,25 @@ class HardcodedUrlFinding:
 
 def scan_source_for_hardcoded_provider_urls(
     project_root: Path,
+    *,
+    max_file_bytes: int | None = None,
+    deadline: float | None = None,
+    skipped: list[SkippedFile] | None = None,
 ) -> list[HardcodedUrlFinding]:
     """Walk source files under *project_root*, return any hardcoded provider URLs.
 
     Uses the bundled provider registry so the list of flagged hostnames stays
     in sync with what worthless actually knows about. Localhost providers
     (e.g. Ollama on 127.0.0.1) are excluded — they're already local.
+
+    Robustness (mirrors :func:`scan_files`):
+    * *deadline* — a ``time.monotonic()`` value; once passed, scanning stops
+      and returns findings gathered SO FAR, recording a ``timeout`` entry in
+      *skipped*. A pre-commit / lock-time gate must still flag URLs already
+      found.
+    * Files larger than *max_file_bytes* are scanned up to the cap and flagged
+      ``truncated``; unreadable files are flagged ``unreadable``. Nothing is
+      silently dropped — that would let a hardcoded URL slip past ``lock``.
     """
     from worthless.cli.providers import load_bundled  # deferred — avoids circular at module init
 
@@ -97,26 +150,40 @@ def scan_source_for_hardcoded_provider_urls(
     if not hostnames:
         return []
 
+    cap = MAX_SCAN_FILE_BYTES if max_file_bytes is None else max_file_bytes
     combined = re.compile("|".join(re.escape(h) for h in hostnames))
     findings: list[HardcodedUrlFinding] = []
     for src_file in _walk_source_files(project_root):
+        if deadline is not None and time.monotonic() > deadline:
+            if skipped is not None:
+                skipped.append(SkippedFile(file=str(src_file), reason="timeout"))
+            break
         try:
-            with src_file.open(errors="replace") as fh:
-                for line_no, line in enumerate(fh, start=1):
-                    for m in _QUOTED_STR_RE.finditer(line):
-                        value = m.group(2)  # group 1 is the quote char; group 2 is content
-                        host_match = combined.search(value)
-                        if host_match:
-                            findings.append(
-                                HardcodedUrlFinding(
-                                    file=str(src_file),
-                                    line=line_no,
-                                    url=value,
-                                    provider=hostnames[host_match.group(0)],
-                                )
-                            )
-        except OSError:
+            text, truncated = read_text_capped(src_file, cap)
+        except (FileNotFoundError, IsADirectoryError):
+            # Same carve-out as :func:`scan_files`: a file that vanished between
+            # enumeration and read (or an accidental directory) is not a fail-
+            # closed concern.
             continue
+        except OSError:
+            if skipped is not None:
+                skipped.append(SkippedFile(file=str(src_file), reason="unreadable"))
+            continue
+        if truncated and skipped is not None:
+            skipped.append(SkippedFile(file=str(src_file), reason="truncated"))
+        for line_no, line in enumerate(text.splitlines(), start=1):
+            for m in _QUOTED_STR_RE.finditer(line):
+                value = m.group(2)  # group 1 is the quote char; group 2 is content
+                host_match = combined.search(value)
+                if host_match:
+                    findings.append(
+                        HardcodedUrlFinding(
+                            file=str(src_file),
+                            line=line_no,
+                            url=value,
+                            provider=hostnames[host_match.group(0)],
+                        )
+                    )
     return findings
 
 
@@ -152,21 +219,54 @@ def scan_files(
     paths: list[Path],
     *,
     enrolled_locations: set[tuple[str, str]] | None = None,
+    max_file_bytes: int | None = None,
+    deadline: float | None = None,
+    skipped: list[SkippedFile] | None = None,
 ) -> list[ScanFinding]:
     """Scan files for API key patterns.
 
-    Each file is read line-by-line. Matches with entropy below the
-    threshold are skipped (likely placeholders). If *enrolled_locations*
-    is provided, matching (var_name, file_path) tuples are marked
-    ``is_protected=True``.
+    Each file is read (up to ``max_file_bytes``) line-by-line. Matches with
+    entropy below the threshold are skipped (likely placeholders). If
+    *enrolled_locations* is provided, matching (var_name, file_path) tuples are
+    marked ``is_protected=True``.
+
+    Robustness (the caller owns the policy, this honours it):
+    * *deadline* — a ``time.monotonic()`` value. Once passed, scanning stops and
+      returns the findings gathered SO FAR (a pre-commit hook must still block
+      on keys already found), recording a ``timeout`` entry in *skipped*.
+    * Files exceeding ``max_file_bytes`` or unreadable are recorded in *skipped*
+      (``truncated`` / ``unreadable``) — never silently dropped.
     """
+    cap = MAX_SCAN_FILE_BYTES if max_file_bytes is None else max_file_bytes
     findings: list[ScanFinding] = []
 
+    # Deadline is checked BETWEEN files, not mid-file. A single file inside
+    # ``cap`` bytes is bounded by the size cap + linear regex — slow but never
+    # unbounded — so per-file granularity is the right portable trade-off.
     for path in paths:
+        if deadline is not None and time.monotonic() > deadline:
+            if skipped is not None:
+                skipped.append(SkippedFile(file=str(path), reason="timeout"))
+            break
         try:
-            text = path.read_text(errors="replace")
-        except OSError:
+            text, truncated = read_text_capped(path, cap)
+        except (FileNotFoundError, IsADirectoryError):
+            # File deleted between caller's enumeration and our read (the common
+            # ``git rm``-then-pre-commit case), a typo'd path, or the caller
+            # passing a directory by mistake. None of these are hang risks and
+            # the pre-c5kc UX silently no-op'd them — preserve that contract so
+            # a hook that runs ``worthless scan <dir>`` doesn't suddenly fail
+            # closed on a known-benign input.
             continue
+        except OSError:
+            # File exists, is a regular file, but we couldn't read it
+            # (permission denied, I/O error, etc.). That IS a fail-closed
+            # concern: we don't know what we missed.
+            if skipped is not None:
+                skipped.append(SkippedFile(file=str(path), reason="unreadable"))
+            continue
+        if truncated and skipped is not None:
+            skipped.append(SkippedFile(file=str(path), reason="truncated"))
         file_str = str(path.resolve())
         for line_no, line in enumerate(text.splitlines(), start=1):
             for match in KEY_PATTERN.finditer(line):

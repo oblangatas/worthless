@@ -1,6 +1,6 @@
 """Phase 2.e — failure-injection harness for atomic-write + skill-copy paths.
 
-Spec: ``engineering/research/openclaw-WOR-431-phase-2-spec.md`` § "Phase
+Spec: ``engineering/research/openclaw/WOR-431-phase-2-spec.md`` § "Phase
 2.e" rows GAP-INJ20 / INJ21 / INJ33. Mock-patches ``os.replace`` /
 ``os.fsync`` / the skill-asset copy loop to drive ENOSPC / EACCES /
 mid-copy failures and assert:

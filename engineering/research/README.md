@@ -10,6 +10,6 @@ Current contents:
 - `docker-hardening-research.md`: container hardening research and recommendations
 - `wave3-rules-plan.md`: historical rules-engine implementation planning retained for maintainer context
 - `openclaw.md`: OpenClaw integration reference — verified evidence, integration paths, current gaps, phase scope
-- `openclaw-WOR-431-phase-2-spec.md`: WOR-431 Phase 2 implementation spec — 6 sub-phases, 53 failure modes, 14 ACs, locked decisions, risk register, implementation log. Verifier agents (Jenny/karen) cite this by section.
+- `openclaw/WOR-431-phase-2-spec.md`: WOR-431 Phase 2 implementation spec — 6 sub-phases, 53 failure modes, 14 ACs, locked decisions, risk register, implementation log. Verifier agents (Jenny/karen) cite this by section.
 
 These files are internal reference material. They are not public website docs.

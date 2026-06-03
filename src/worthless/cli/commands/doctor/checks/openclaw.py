@@ -139,6 +139,19 @@ def run(ctx: CheckContext) -> CheckResult:
     else:
         status = "ok"
 
+    # WOR-516: always surface the OpenClaw .bak recovery path so operators
+    # know where to look if openclaw.json is damaged after a failed lock.
+    # The note is low-signal when everything is healthy (status=ok) but
+    # critical when a write-failed event appears in the findings list.
+    recovery_note = {
+        "issue": (
+            "Recovery: if openclaw.json is damaged, restore from "
+            "~/.openclaw/openclaw.json.bak "
+            "(written by the openclaw daemon on each config change)"
+        ),
+        "exit_code": None,
+    }
+
     summary = (
         "OpenClaw integration healthy."
         if not findings
@@ -147,7 +160,7 @@ def run(ctx: CheckContext) -> CheckResult:
     return CheckResult(
         check_id=check_id,
         status=status,
-        findings=findings,
+        findings=findings + [recovery_note],
         summary=summary,
         fixable=True,
         fixed=[],

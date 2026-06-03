@@ -44,6 +44,12 @@ CLAUDE.md
 AGENTS.md
 TESTING.md
 
+# Internal security docs — symlinked from private worthless-cloud (WOR-593).
+# Public repo: these enumerate threat models / attack surface, so they live
+# private and are symlinked back in via worthless-cloud/config/worthless/link.sh.
+/security-audit
+/engineering/modules.md
+
 # Project management (local-only)
 ccpm/
 .claude/
@@ -69,6 +75,9 @@ htmlcov/
 testsprite_prd.md
 testsprite_tests/
 
+# Live end-to-end gate evidence (local-only; CI re-runs from scratch)
+.worthless/
+
 # Milestone phase archives (full history in git, only summaries tracked)
 .planning/milestones/v1.0-phases/**
 !.planning/milestones/v1.0-phases/**/
@@ -87,3 +96,7 @@ docs-standalone/
 # Starlight / Astro docs site
 dist/
 .astro/
+
+# Internal — not published to the public repo (WOR-532)
+.planning/
+.beads/

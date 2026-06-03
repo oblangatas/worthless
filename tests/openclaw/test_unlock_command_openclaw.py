@@ -1,6 +1,6 @@
 """Phase 2.c — ``worthless unlock`` integration with apply_unlock().
 
-Spec: ``engineering/research/openclaw-WOR-431-phase-2-spec.md`` §"Phase 2.c"
+Spec: ``engineering/research/openclaw/WOR-431-phase-2-spec.md`` §"Phase 2.c"
 + AC1 (no-OpenClaw byte-identical), AC10/L1/L2 (.env success + OpenClaw
 failure → exit 0).
 

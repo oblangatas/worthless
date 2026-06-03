@@ -1,6 +1,6 @@
 """Phase 2.d — ``integration.health_check()`` unit tests.
 
-Spec: ``engineering/research/openclaw-WOR-431-phase-2-spec.md`` §"Phase 2.d"
+Spec: ``engineering/research/openclaw/WOR-431-phase-2-spec.md`` §"Phase 2.d"
 and AC4 (doctor surfaces OpenClaw status with traffic lights).
 
 ``health_check(state, *, expected_providers, proxy_port)`` is the read-only

@@ -1,6 +1,6 @@
 """Phase 2.b — ``worthless lock`` integration with apply_lock().
 
-Spec: ``engineering/research/openclaw-WOR-431-phase-2-spec.md`` §"Phase 2.b"
+Spec: ``engineering/research/openclaw/WOR-431-phase-2-spec.md`` §"Phase 2.b"
 + AC1 (no-OpenClaw byte-identical), AC10 (.env success + OpenClaw failure
 → exit 0), AC11 (lock-core never rolls back).
 
@@ -12,6 +12,7 @@ workspace, not the developer's real ``~/.openclaw/``.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -212,3 +213,39 @@ def test_lock_with_openclaw_apply_lock_returns_failure_events_exits_nonzero(
     assert result.exit_code == 73, result.output
     # L1: lock-core preserved its .env write despite OpenClaw failure.
     assert "OPENAI_API_KEY=" in env_file.read_text()
+
+
+# ---------------------------------------------------------------------------
+# SP4: UID mismatch → CLI outputs [FAIL] and exits 73
+# ---------------------------------------------------------------------------
+
+
+def test_lock_with_uid_mismatch_outputs_failure_and_exits_73(
+    home_dir: WorthlessHome,
+    env_file: Path,
+    openclaw_present: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SP4: when openclaw.json is owned by a different UID (Docker two-UID
+    topology), ``worthless lock`` must:
+      - print '[FAIL] OpenClaw integration did NOT complete.'
+      - exit 73 (distinguishable from generic error; CI scripts cannot miss it)
+
+    Proves the end-to-end CLI wiring:
+    UID mismatch → OpenclawConfigUnreadableError → _emit_openclaw_failure → exit 73.
+    """
+    real_uid = openclaw_present["config_path"].stat().st_uid
+    monkeypatch.setattr(os, "geteuid", lambda: real_uid + 1)
+
+    result = runner.invoke(
+        app,
+        ["lock", "--env", str(env_file)],
+        env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+    )
+
+    assert result.exit_code == 73, (
+        f"expected exit 73 on UID mismatch, got {result.exit_code}\n{result.output}"
+    )
+    assert "[FAIL] OpenClaw" in result.output, (
+        f"expected '[FAIL] OpenClaw' in output\n{result.output}"
+    )

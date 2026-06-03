@@ -22,8 +22,7 @@ from worthless.proxy.config import ProxySettings
 from worthless.proxy.rules import RateLimitRule, RulesEngine, SpendCapRule
 from worthless.storage.repository import ShardRepository, StoredShard
 
-
-pytestmark = pytest.mark.skip(reason="WOR-549: worthless-16x2 ↔ sidecar IPC integration pending")
+from tests._fakes import bind_real_fernet
 
 
 # ------------------------------------------------------------------
@@ -52,6 +51,10 @@ async def _make_proxy_app(
             ),
         ]
     )
+    # WOR-549: bind the autouse FakeIPCSupervisor's ``open`` to a real Fernet
+    # decrypt with the test's key, so the proxy's ``ipc.open(shard_b_enc, ...)``
+    # returns honest plaintext rather than DEFAULT_FAKE_PLAINTEXT.
+    bind_real_fernet(app, proxy_settings.fernet_key)
     return app, db
 
 
@@ -398,7 +401,7 @@ async def test_upsert_locked_shard_replaces_on_relock(repo: ShardRepository) -> 
     assert encrypted.charset is not None
 
     # decrypt_shard returns shard_a=None since shard_a_enc is NULL
-    stored = repo.decrypt_shard(encrypted)
+    stored = await repo.decrypt_shard(encrypted)
     assert stored.shard_a is None
 
     # Reconstruction uses shard_a₂ captured before sr2.zero().
@@ -455,7 +458,7 @@ async def test_upsert_locked_shard_shard_a_enc_is_null(repo: ShardRepository) ->
     assert encrypted is not None
     assert encrypted.shard_a_enc is None, "shard_a_enc must be NULL — not stored post-16x2-revert"
 
-    decrypted = repo.decrypt_shard(encrypted)
+    decrypted = await repo.decrypt_shard(encrypted)
     assert decrypted.shard_a is None, (
         "decrypt_shard must return shard_a=None when shard_a_enc is NULL"
     )
@@ -477,7 +480,7 @@ async def test_legacy_row_shard_a_is_none(repo: ShardRepository) -> None:
     assert encrypted is not None
     assert encrypted.shard_a_enc is None
 
-    decrypted = repo.decrypt_shard(encrypted)
+    decrypted = await repo.decrypt_shard(encrypted)
     assert decrypted.shard_a is None
     decrypted.zero()
 
@@ -536,54 +539,10 @@ async def test_16x2_wrong_shard_a_returns_401(
         await db.close()
 
 
-# ------------------------------------------------------------------
-# SP-6: corrupt shard_a_enc in DB → 401 not 500
-# ------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_16x2_corrupt_shard_a_enc_returns_401(
-    enrolled_16x2,
-    repo: ShardRepository,
-    proxy_settings: ProxySettings,
-) -> None:
-    """Corrupt shard_a_enc in DB (garbled Fernet token) must yield 401, not 500.
-
-    SP-6: decrypt_shard raises an exception (InvalidToken); the proxy must
-    catch it and return the standard uniform 401, byte-identical to the
-    normal auth failure body.
-    """
-    from worthless.proxy.errors import auth_error_response
-
-    alias, auth_token, _ = enrolled_16x2
-    app, db = await _make_proxy_app(proxy_settings, repo, auth_token=auth_token)
-
-    # Corrupt the shard_a_enc field directly in SQLite.
-    async with aiosqlite.connect(proxy_settings.db_path) as raw_db:
-        await raw_db.execute(
-            "UPDATE shards SET shard_a_enc = ? WHERE key_alias = ?",
-            (b"not-a-valid-fernet-token-garbage-xyz", alias),
-        )
-        await raw_db.commit()
-
-    expected_body = auth_error_response().body
-
-    try:
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://test"
-        ) as client:
-            resp = await client.post(
-                f"/{alias}/v1/chat/completions",
-                json={"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}]},
-                headers={"Authorization": f"Bearer {auth_token}"},
-            )
-        assert resp.status_code == 401
-        assert resp.content == expected_body, (
-            f"Response body differs from uniform 401. Got: {resp.content!r}"
-        )
-    finally:
-        await app.state.httpx_client.aclose()
-        await db.close()
+# SP-6 was test_16x2_corrupt_shard_a_enc_returns_401 — the 16x2 lazy
+# shard_a_enc decrypt path. PR #198's subsequent revert removed that proxy
+# code path entirely; corrupting shard_a_enc in the DB has no observable
+# proxy effect today. Test deleted in PR #250 (WOR-549).
 
 
 # ------------------------------------------------------------------
@@ -711,6 +670,7 @@ async def test_16x2_concurrent_shard_a_requests_all_succeed(
         assert list(statuses) == [200, 200, 200, 200, 200], f"Expected all 200s, got: {statuses}"
     finally:
         await app.state.httpx_client.aclose()
+        await db.close()
 
 
 # ------------------------------------------------------------------

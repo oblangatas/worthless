@@ -22,12 +22,14 @@ import logging
 import os
 import stat as _stat
 import subprocess  # nosec B404
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Iterable
 
 from worthless.cli.key_patterns import KEY_PATTERN
 from worthless.cli.providers import ProviderEntry, load_registry
+from worthless.cli.scanner import SkippedFile, read_text_capped
 
 logger = logging.getLogger(__name__)
 
@@ -100,8 +102,14 @@ _EXCLUDED_FILE_BASENAMES: frozenset[str] = frozenset(
     }
 )
 
-# Files larger than this are skipped to avoid pathological perf on
-# generated/vendored bundles.
+# Cap bytes read per file. Files larger than this are scanned up to the cap
+# (their prefix) and reported via the ``skipped`` list as ``truncated`` — never
+# silently dropped. The cap bounds worst-case read time on generated/vendored
+# bundles while still catching a URL pasted into the first MB.
+#
+# Smaller than scanner.MAX_SCAN_FILE_BYTES (5 MB) intentionally — source files
+# don't need 5 MB of headroom and the tighter cap keeps ``scan --code`` fast
+# on large repos. The two constants are independent on purpose.
 _MAX_FILE_BYTES = 1_000_000
 
 
@@ -173,7 +181,16 @@ def _list_files_git(root: Path) -> list[Path] | None:
         except (UnicodeDecodeError, ValueError):
             logger.debug("code_scanner: skipping non-decodable git path %r", raw)
             continue
-        if f.is_symlink():
+        # ``is_symlink()`` calls ``lstat()``; wrap to match the walk-branch
+        # contract — a file that vanishes between ``git ls-files`` and our
+        # read, or one we can't stat for any other OS reason, is silently
+        # skipped. Without this guard, OSError escapes through
+        # ``scan_for_hardcoded_provider_urls`` and crashes the whole scan.
+        try:
+            if f.is_symlink():
+                continue
+        except OSError:
+            logger.debug("code_scanner: skipping unstatable git path %s", f)
             continue
         files.append(f)
     return files
@@ -221,8 +238,9 @@ def _candidate_files(root: Path, excluded_dirs: frozenset[str] = _EXCLUDED_DIRS)
             st = f.lstat()
             if not _stat.S_ISREG(st.st_mode):
                 continue
-            if st.st_size > _MAX_FILE_BYTES:
-                continue
+            # NOTE: oversize files are NOT pre-filtered here — they're handled
+            # in :func:`_scan_one_file` via the bounded read so the caller sees
+            # a ``truncated`` skip entry instead of a silent drop.
         except (OSError, ValueError):
             continue
         candidates.append(f)
@@ -232,13 +250,32 @@ def _candidate_files(root: Path, excluded_dirs: frozenset[str] = _EXCLUDED_DIRS)
 def _scan_one_file(
     path: Path,
     registry_lower: dict[str, ProviderEntry],
+    *,
+    max_file_bytes: int | None = None,
+    skipped: list[SkippedFile] | None = None,
 ) -> list[CodeFinding]:
-    """Return findings for a single file, or [] on any I/O / decode error."""
+    """Return findings for a single file.
+
+    Reads up to *max_file_bytes* via :func:`read_text_capped`. Oversize files
+    contribute a ``truncated`` entry to *skipped* (the prefix is still scanned).
+    Unreadable / undecodable files contribute an ``unreadable`` entry. Nothing
+    is silently dropped.
+    """
+    cap = _MAX_FILE_BYTES if max_file_bytes is None else max_file_bytes
     try:
-        text = path.read_text(encoding="utf-8")
+        text, truncated = read_text_capped(path, cap)
+    except FileNotFoundError:
+        # Vanished between candidate enumeration and the read — silent skip,
+        # matches :func:`worthless.cli.scanner.scan_files` carve-out.
+        logger.debug("code_scanner: skipping vanished %s", path)
+        return []
     except (OSError, UnicodeDecodeError) as exc:
         logger.debug("code_scanner: skipping %s (%s)", path, exc)
+        if skipped is not None:
+            skipped.append(SkippedFile(file=str(path), reason="unreadable"))
         return []
+    if truncated and skipped is not None:
+        skipped.append(SkippedFile(file=str(path), reason="truncated"))
 
     text_lower = text.casefold()
     if not any(url in text_lower for url in registry_lower):
@@ -272,6 +309,9 @@ def scan_for_hardcoded_provider_urls(
     roots: Iterable[Path],
     *,
     extra_excludes: Iterable[str] = (),
+    max_file_bytes: int | None = None,
+    deadline: float | None = None,
+    skipped: list[SkippedFile] | None = None,
 ) -> list[CodeFinding]:
     """Scan one or more roots for hardcoded provider base URLs.
 
@@ -282,6 +322,13 @@ def scan_for_hardcoded_provider_urls(
     Args:
         roots: directories (or single files) to scan.
         extra_excludes: directory names to add to the built-in excludelist.
+        max_file_bytes: cap bytes read per file (default ~1 MB). Larger files
+            scan their prefix and contribute a ``truncated`` skip entry.
+        deadline: a ``time.monotonic()`` value. Once passed, scanning stops
+            and returns findings gathered so far, recording a ``timeout``
+            entry in *skipped*. Keeps an oversized tree from wedging.
+        skipped: collector for files that couldn't be fully scanned. Caller
+            should surface this to the user — never silently drop.
 
     Returns:
         Findings in (file, line) order across all roots. Empty when no
@@ -312,7 +359,24 @@ def scan_for_hardcoded_provider_urls(
         # Resolve to absolute so part-based exclude checks are stable.
         root_path = Path(root).resolve()
         for candidate in _candidate_files(root_path, excluded_dirs):
-            findings.extend(_scan_one_file(candidate, registry_lower))
+            if deadline is not None and time.monotonic() > deadline:
+                if skipped is not None:
+                    skipped.append(SkippedFile(file=str(candidate), reason="timeout"))
+                # Outer loop will see the same deadline and break too.
+                break
+            findings.extend(
+                _scan_one_file(
+                    candidate,
+                    registry_lower,
+                    max_file_bytes=max_file_bytes,
+                    skipped=skipped,
+                )
+            )
+        else:
+            # Inner loop ran to completion — proceed to the next root.
+            continue
+        # Inner loop was broken (timeout) — stop scanning further roots too.
+        break
 
     # Stable ordering: by file, then line, then column.
     findings.sort(key=lambda f: (f.file, f.line, f.column))

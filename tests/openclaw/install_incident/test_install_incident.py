@@ -70,7 +70,6 @@ def test_lock_neutralizes_cached_credential_or_fails_loud(tmp_path):
     )
 
 
-@pytest.mark.xfail(reason=_WOR_516, strict=True)
 def test_lock_preserves_sibling_config_on_unreadable_file(tmp_path):
     """If ``openclaw.json`` is unreadable to the worthless process, ``lock``
     must not silently rewrite it from scratch. The user's gateway / channels

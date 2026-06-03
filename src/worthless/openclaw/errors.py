@@ -85,6 +85,19 @@ class OpenclawIntegrationError(Exception):
         super().__init__(detail)
 
 
+class OpenclawConfigUnreadableError(Exception):
+    """Raised by ``apply_lock`` when openclaw.json exists but is owned by a
+    different UID (Docker two-UID topology) or ``WORTHLESS_OPENCLAW_CONFIG_SHARED``
+    is set.
+
+    WOR-516 case (c) fix: abort before any writes rather than silently
+    overwriting with a blank-slate config (which was the bug Ido hit).
+
+    Exit code 87 (env fault) — the user must fix their deployment topology
+    before re-running ``worthless lock``.
+    """
+
+
 @dataclass(frozen=True)
 class OpenclawIntegrationReport:
     """Wire-stable JSON shape for ``worthless --json lock|unlock`` output.

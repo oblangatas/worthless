@@ -8,6 +8,7 @@ import os
 import stat
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import typer
@@ -20,8 +21,20 @@ from worthless.cli.key_patterns import KEY_PATTERN
 from worthless.cli.dotenv_rewriter import build_enrolled_locations
 from worthless.cli.keystore import PLACEHOLDER_FERNET_KEY
 from worthless.cli.orphans import FIX_PHRASE, PROBLEM_PHRASE, find_orphans
-from worthless.cli.scanner import ScanFinding, format_sarif, scan_files
+from worthless.cli.scanner import ScanFinding, SkippedFile, format_sarif, scan_files
 from worthless.storage.repository import EnrollmentRecord, ShardRepository
+
+
+# Wall-clock budget for the scan body. Sized so a typical .env / config tree
+# scans well under the limit; oversized trees stop and surface a ``timeout``
+# skip entry instead of wedging a pre-commit hook silently.
+SCAN_TIME_BUDGET_S = 30.0
+
+# Exit code used when ``skipped`` is non-empty (scan incomplete: timeout /
+# truncated / unreadable). Distinct from 1 (unprotected key) and 0 (clean) so
+# a pre-commit hook can tell the cases apart. Keep this constant in lockstep
+# with the human stderr block in ``_format_skipped_human``.
+SCAN_INCOMPLETE_EXIT_CODE = 2
 
 
 def _find_git_dir() -> Path | None:
@@ -41,13 +54,21 @@ def _find_git_dir() -> Path | None:
 
 
 def _collect_fast_paths(explicit_paths: list[Path]) -> list[Path]:
-    """Fast mode: .env, .env.local, plus any explicit paths."""
+    """Fast mode: .env, .env.local, plus any explicit paths.
+
+    Deduplicates while preserving order — without this, a caller passing
+    ``.env`` explicitly while cwd also has ``.env`` scans the same file
+    twice (visible in c5kc's ``skipped`` list as duplicate entries; was
+    invisible noise before).
+    """
     paths: list[Path] = []
     for name in [".env", ".env.local"]:
         p = Path(name)
         if p.exists():
             paths.append(p)
-    paths.extend(explicit_paths)
+    for p in explicit_paths:
+        if p not in paths:
+            paths.append(p)
     return paths
 
 
@@ -320,6 +341,27 @@ def _format_ai_prompt_block(findings: list[CodeFinding]) -> str:
     )
 
 
+def _format_skipped_human(skipped: list[SkippedFile]) -> str:
+    """Render skipped files for the human stderr path.
+
+    Lists only file paths + reasons (``truncated`` / ``unreadable`` / ``timeout``).
+    Never echoes file contents — an oversized hostile file might contain the
+    very key we're scanning for. The trailing line is the "incomplete scan"
+    signal so a user reading the terminal sees why exit code is non-zero.
+    """
+    if not skipped:
+        return ""
+
+    lines: list[str] = [
+        "",
+        f"Skipped (scan incomplete — exit code {SCAN_INCOMPLETE_EXIT_CODE}):",
+    ]
+    for s in skipped:
+        lines.append(f"  {s.file}  [{s.reason}]")
+    lines.append("A pre-commit hook will block on this — re-run after addressing the cause.")
+    return "\n".join(lines) + "\n"
+
+
 def _code_findings_to_json(findings: list[CodeFinding]) -> list[dict[str, object]]:
     """Serialize code findings for JSON output."""
     return [
@@ -429,8 +471,19 @@ def register_scan_commands(app: typer.Typer) -> None:
             # Build enrollment checker + orphan list from DB if available
             enrolled, orphans = _load_db_state()
 
-            # Run scan
-            findings = scan_files(scan_paths, enrolled_locations=enrolled)
+            # Run scan under a wall-clock budget and bounded per-file reads.
+            # ``skipped`` collects files we couldn't fully scan (truncated /
+            # unreadable / timeout); fail-closed below treats a non-empty
+            # ``skipped`` list as a non-zero exit so a pre-commit hook never
+            # silently passes an incomplete scan.
+            skipped: list[SkippedFile] = []
+            deadline = time.monotonic() + SCAN_TIME_BUDGET_S
+            findings = scan_files(
+                scan_paths,
+                enrolled_locations=enrolled,
+                deadline=deadline,
+                skipped=skipped,
+            )
 
             # Count unprotected
             unprotected = [f for f in findings if not f.is_protected]
@@ -467,7 +520,14 @@ def register_scan_commands(app: typer.Typer) -> None:
                             "several seconds.\n"
                         )
                         sys.stderr.flush()
-                code_findings = scan_for_hardcoded_provider_urls(code_roots)
+                # Reuse the same skipped list + deadline so --code is also
+                # under the fail-closed contract: if a source file is too
+                # large / unreadable, surface it and exit non-zero.
+                code_findings = scan_for_hardcoded_provider_urls(
+                    code_roots,
+                    deadline=deadline,
+                    skipped=skipped,
+                )
 
             # Output
             if fmt == "sarif":
@@ -479,6 +539,9 @@ def register_scan_commands(app: typer.Typer) -> None:
                 payload = json.loads(_format_json_findings(findings, orphans))
                 if code:
                     payload["code_findings"] = _code_findings_to_json(code_findings)
+                # Fail-closed: surface skips so JSON consumers (CI/hooks) can
+                # see why exit code is non-zero without an unprotected finding.
+                payload["skipped"] = [{"file": s.file, "reason": s.reason} for s in skipped]
                 sys.stdout.write(json.dumps(payload) + "\n")
                 sys.stdout.flush()
             else:
@@ -493,11 +556,22 @@ def register_scan_commands(app: typer.Typer) -> None:
                         sys.stderr.write(_format_code_findings_human(code_findings))
                         if ai_prompt and code_findings:
                             sys.stderr.write(_format_ai_prompt_block(code_findings))
+                    if skipped:
+                        sys.stderr.write(_format_skipped_human(skipped))
                     sys.stderr.flush()
 
-            # Exit code — unchanged by --code (warn-only contract).
+            # Exit code:
+            #  * unprotected findings → 1 (the "you have leaks" signal)
+            #  * skipped files (timeout/truncated/unreadable) → 2 (incomplete
+            #    scan — fail-closed; a pre-commit hook MUST NOT pass on a scan
+            #    that couldn't read every file).
+            #  * otherwise → 0
+            # SARIF/JSON formats also honour these codes so CI parsers see the
+            # same signal as humans.
             if unprotected:
                 raise typer.Exit(code=1)
+            if skipped:
+                raise typer.Exit(code=SCAN_INCOMPLETE_EXIT_CODE)
             raise typer.Exit(code=0)
         finally:
             if tmp_file is not None:

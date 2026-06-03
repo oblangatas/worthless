@@ -245,7 +245,17 @@ class TestCodeScanConvolutedFlow:
         assert "tracked.py" in files
         assert "local.py" not in files
 
-    def test_gitignore_ignored_outside_git_repo(self, tmp_path: Path) -> None:
+    def test_gitignore_ignored_outside_git_repo(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # GIT_CEILING_DIRECTORIES stops git from walking up the directory tree
+        # to find an ancestor repo. Without this, when pytest's tmp_path lives
+        # under a developer worktree (e.g. ``.claude/worktrees/...``), the
+        # parent worthless repo gitignores ``.claude/`` and ``git ls-files
+        # --exclude-standard`` returns an empty list — defeating the test's
+        # premise of "outside any git repo". CI is fine; this guards local runs.
+        monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent))
+
         write(tmp_path / ".gitignore", "secret/\n")
         write(tmp_path / "secret" / "local.py", '"https://api.openai.com/v1"\n')
 
@@ -305,10 +315,20 @@ class TestCodeScanConvolutedFlow:
         assert len(findings) == 1
         assert findings[0].file.endswith("README.md")
 
-    def test_project_inside_excluded_named_dir_not_false_excluded(self, tmp_path: Path) -> None:
+    def test_project_inside_excluded_named_dir_not_false_excluded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         # Regression: _is_excluded_path previously used absolute path parts,
         # so a project at /some/user/dist/myproject would exclude all files
         # because "dist" appeared in the absolute path above the root.
+        #
+        # GIT_CEILING_DIRECTORIES isolates this test from any ancestor git
+        # repo (e.g. when tmp_path is under a developer's ``.claude/worktrees``
+        # which is gitignored by the parent worthless repo). Without it, the
+        # ls-files branch returns an empty list and the test fails locally on
+        # any dev worktree under .claude/. CI is unaffected.
+        monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent))
+
         root = tmp_path / "dist" / "myproject"
         write(root / "app.py", '"https://api.openai.com/v1"\n')
         findings = scan_for_hardcoded_provider_urls([root])
@@ -464,6 +484,38 @@ class TestCodeScanApiSurface:
         findings = scan_for_hardcoded_provider_urls([f])
         assert len(findings) == 1
         assert findings[0].file.endswith("app.py")
+
+    def test_oserror_on_is_symlink_in_git_branch_skips_file_silently(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """worthless-nxyz: ``_list_files_git`` calls ``f.is_symlink()`` which
+        internally calls ``lstat()``. If the file vanishes mid-scan (race) or
+        the OS errors out, the OSError must NOT escape — it must be caught
+        and the file silently skipped, matching the walk-branch contract.
+
+        This test exercises the GIT branch specifically (init_git + real
+        commit) so the new guard in ``_list_files_git`` is the one that
+        catches the error — not the OLD guard in ``_candidate_files``."""
+        write(tmp_path / "racy.py", '"https://api.openai.com/v1"\n')
+        write(tmp_path / "ok.py", '"https://api.anthropic.com/v1"\n')
+        init_git(tmp_path)  # makes ``_list_files_git`` the active branch
+
+        # Patch ``Path.is_symlink`` (NOT ``Path.lstat``) so the OSError fires
+        # at the exact call site this PR guards. ``_list_files_git`` does
+        # ``if f.is_symlink(): continue`` — that's the new try/except's job.
+        real_is_symlink = Path.is_symlink
+
+        def fake_is_symlink(self):  # noqa: ANN001
+            if self.name == "racy.py":
+                raise OSError("file vanished between git ls-files and stat")
+            return real_is_symlink(self)
+
+        monkeypatch.setattr(Path, "is_symlink", fake_is_symlink)
+
+        findings = scan_for_hardcoded_provider_urls([tmp_path])
+        files = {Path(f.file).name for f in findings}
+        assert "racy.py" not in files, "OSError-raising file must be silently dropped"
+        assert "ok.py" in files, "clean files in the same scan must still be reported"
 
     def test_oserror_on_stat_skips_file_silently(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

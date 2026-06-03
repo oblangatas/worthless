@@ -455,12 +455,16 @@ def run_and_classify(
     don't duplicate the ``run_audit → check_auth_profiles_direct →
     classify_findings`` sequence.
 
+    Args:
+        openclaw_bin: absolute path to the openclaw binary.
+        timeout: subprocess timeout passed to :func:`run_audit`.
+
     Raises:
         AuditGateError: on subprocess failure (propagated from :func:`run_audit`).
     """
     result = run_audit(openclaw_bin, timeout=timeout)
-    auth_blocking = check_auth_profiles_direct(result.files_scanned)
-    classification = classify_findings(result, auth_blocking)
+    direct_blocking: list[BlockingFinding] = check_auth_profiles_direct(result.files_scanned)
+    classification = classify_findings(result, direct_blocking)
     return result, classification
 
 

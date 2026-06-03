@@ -1,6 +1,6 @@
 """Phase 2.c — ``integration.apply_unlock()`` unit + functional tests.
 
-Spec: ``engineering/research/openclaw-WOR-431-phase-2-spec.md`` §"Phase 2.c —
+Spec: ``engineering/research/openclaw/WOR-431-phase-2-spec.md`` §"Phase 2.c —
 ``unlock`` integration", §"Failure modes" rows RT-01/02/03 + F-XS-40/41,
 §"Locked decisions" L1, L2, L3.
 

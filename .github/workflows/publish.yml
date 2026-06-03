@@ -1,6 +1,11 @@
 name: Publish to PyPI
 
 on:
+  # LOAD-BEARING: push-tags-only. Do NOT add workflow_dispatch or
+  # workflow_call — the GPG signed-tag verify step in the build job is
+  # guarded on `github.event_name == 'push'`, so any other trigger would
+  # publish to PyPI WITHOUT a signature check. tests/test_deploy_static.py
+  # (TestPublishTagVerification) enforces this.
   push:
     tags:
       - "v*"
@@ -18,7 +23,23 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
+          # Need full history so `git verify-tag` can read the signed tag
+          # object; a shallow clone strips signatures (mirrors deploy-worker.yml).
+          fetch-depth: 0
           persist-credentials: false
+
+      - name: Verify tag GPG signature (fatal — must precede pyproject parse + build)
+        # FIRST step after checkout, BY DESIGN. PyPI must publish only from a
+        # tag the maintainer GPG-signed: deploy-worker.yml already fails closed
+        # on an unsigned tag; this closes the same gap on the publish side.
+        # It must run BEFORE the next step (which parses attacker-controlled
+        # pyproject.toml) and before `python -m build` (which runs build hooks).
+        # Reuses the same verify-tag.sh + repo Variables as deploy-worker.yml.
+        if: github.event_name == 'push'
+        env:
+          MAINTAINER_PUBKEY: ${{ vars.MAINTAINER_GPG_PUBKEY }}
+          MAINTAINER_FINGERPRINT: ${{ vars.MAINTAINER_GPG_FINGERPRINT }}
+        run: bash .github/scripts/verify-tag.sh
 
       - name: Verify tag matches pyproject version
         # Single sync invariant in the resolve-latest install.sh model:

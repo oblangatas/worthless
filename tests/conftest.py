@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import functools
+import gc
 import json
+import logging
 import os
 from pathlib import Path
+import threading
+import time
 
 import keyring
 import keyring.backends.null
 import pytest
 from cryptography.fernet import Fernet
 from hypothesis import HealthCheck, settings
+
 
 from worthless.cli import default_command  # used by _isolate_default_command_proxy autouse fixture
 from worthless.cli.bootstrap import WorthlessHome, ensure_home
@@ -23,7 +28,10 @@ from worthless.storage.repository import ShardRepository, StoredShard
 from tests._fakes.fake_ipc_supervisor import FakeIPCSupervisor
 from tests.helpers import fake_openai_key
 
+logger = logging.getLogger(__name__)
+
 # Disable the real OS keyring for the entire test session.
+
 #
 # Context: on macOS, concurrent ``SecItemAdd`` calls from multiple pytest-xdist
 # workers can hang indefinitely on the Keychain API. ``pytest-timeout`` then
@@ -431,3 +439,118 @@ def _isolate_default_command_proxy(request, monkeypatch):
         "poll_health",
         lambda port, timeout=10.0: True,
     )
+
+
+@pytest.fixture(autouse=True)
+def detect_thread_leak(request):
+    """Detect and fail on background thread leaks during test run.
+
+    This catches leaked background threads (e.g. from async runners or leaked loops)
+    before they can escape, pollute other tests, or cause xdist worker crashes.
+    """
+    if request.node.get_closest_marker("integration") or request.node.get_closest_marker("docker"):
+        yield
+        return
+
+    # Capture initial threads. Track by Thread *object*, not by ``ident``:
+    # the OS recycles thread ids, so a thread spawned during the test can be
+    # handed an ident that belonged to an already-exited thread present at
+    # setup. Ident-based tracking then mistakes a real leak for a pre-existing
+    # thread and silently skips it (a non-deterministic false negative). Object
+    # identity is unique per live thread, so it is reuse-proof. Holding the
+    # references for the test's duration is a negligible, bounded cost.
+    initial_threads = set(threading.enumerate())
+
+    yield
+
+    # Short-circuit if there are no new threads at all. Avoids sleep tax on clean tests.
+    current_threads = threading.enumerate()
+    has_mismatch = any(t not in initial_threads for t in current_threads)
+
+    if has_mismatch:
+        # Give exiting threads a grace window to clean up. The ``gc.collect()``
+        # is load-bearing: it collects garbage cycles that hold a thread's owner
+        # (an asyncio loop, an un-shutdown ThreadPoolExecutor), letting the
+        # owner's finalizer join its workers — without it, GC-reclaimable owners
+        # surface as false-positive leaks.
+        #
+        # Bound the window by *wall-clock* time, not a fixed iteration count.
+        # Each ``gc.collect()`` can cost tens of ms under load/coverage, so the
+        # old ``range(25)`` loop drifted to ~0.8s: enough to add real teardown
+        # latency to every test and to race the leak self-test's 1s probe
+        # thread (the check landed at the thread's death edge → flaky misses).
+        # Capping wall-clock keeps the check at ~0.25s regardless of gc cost.
+        deadline = time.monotonic() + 0.25
+        while time.monotonic() < deadline:
+            time.sleep(0.01)
+            gc.collect()
+            current_threads = threading.enumerate()
+            has_mismatch = any(t not in initial_threads for t in current_threads)
+            if not has_mismatch:
+                break
+
+    # Final check for real leaks
+    leaked = []
+    for t in current_threads:
+        if t in initial_threads:
+            continue
+        # Daemon threads are killed at interpreter exit and cannot keep a
+        # process (or xdist worker) alive, so they are not leaks in the sense
+        # this detector guards against. The codebase intentionally uses daemon
+        # threads for fire-and-forget work (sidecar stderr collectors, stream
+        # readers, the run_sync worker); flagging them is a false positive.
+        if t.daemon:
+            continue
+        name = t.name or ""
+        # Filter out common benign pytest/xdist worker control or standard worker threads
+        if any(b in name.lower() for b in ("pytest", "xdist", "mainthread")):
+            continue
+        if t.is_alive():
+            leaked.append(t)
+
+    if leaked:
+        leak_details = ", ".join(f"'{t.name}' (repr={t!r})" for t in leaked)
+        raise AssertionError(
+            f"Thread leak detected: {len(leaked)} thread(s) leaked during test. "
+            f"Leaked threads: {leak_details}. Fail-fast to prevent subsequent worker crashes."
+        )
+
+
+def pytest_collection_modifyitems(config, items):
+    """Mark tests in tests/quarantined_tests.txt with @pytest.mark.quarantine."""
+    quarantine_file = Path(config.rootdir) / "tests" / "quarantined_tests.txt"
+    if not quarantine_file.exists():
+        return
+
+    try:
+        quarantined = set()
+        for line in quarantine_file.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            quarantined.add(line)
+    except Exception as exc:
+        logger.warning(f"Failed to read quarantined_tests.txt: {exc}")
+        return
+
+    if not quarantined:
+        return
+
+    quarantine_marker = pytest.mark.quarantine
+    for item in items:
+        # Match nodeid only (item.name match is too broad)
+        if item.nodeid in quarantined:
+            item.add_marker(quarantine_marker)
+
+
+def pytest_runtest_logreport(report):
+    """Auto-detect flaky tests (failed once, then passed on rerun) and warn/annotate."""
+    if report.when != "call":
+        return
+
+    if report.outcome == "passed" and getattr(report, "rerun", 0) > 0:
+        nodeid = report.nodeid
+        logger.warning(
+            f"worthless-quarantine: Flaky test detected: {nodeid}. "
+            f"Please investigate the root cause instead of dismissing it as flaky."
+        )

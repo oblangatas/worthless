@@ -1,6 +1,6 @@
 """Phase 2.e — concurrency harness for OpenClaw integration.
 
-Spec: ``engineering/research/openclaw-WOR-431-phase-2-spec.md`` § "Phase 2.e"
+Spec: ``engineering/research/openclaw/WOR-431-phase-2-spec.md`` § "Phase 2.e"
 rows CONC-22 / CONC-45 / CONC-46.
 
 These tests cross **process** boundaries to verify the inter-process

@@ -56,4 +56,13 @@ paths = [
 # word boundary) replaces an unsupported (?!\w): it still rejects the
 # 8-char prefix of any longer real key (e.g. a 20+ char xai-... key).
 regexTarget = "line"
-regexes = ['''(?i)(?:openai|anthropic|google|xai)-[a-f0-9]{8}\b''']
+# - First regex: placeholder provider aliases in public install docs (see above).
+# - Second regex: SonarCloud's public `sonar.projectKey` identifier. It contains
+#   the word "key" and trips gitleaks' default generic-api-key rule, but it is a
+#   public project slug (visible in any SonarCloud badge), not a secret. Exempt
+#   ONLY that exact line rather than path-allowlisting the whole file, which would
+#   suppress every rule there (the over-broad-path mistake documented above).
+regexes = [
+    '''(?i)(?:openai|anthropic|google|xai)-[a-f0-9]{8}\b''',
+    '''sonar\.projectKey''',
+]

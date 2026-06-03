@@ -1,6 +1,6 @@
 """Phase 2.e — idempotency harness covering re-runs and crash recovery.
 
-Spec: ``engineering/research/openclaw-WOR-431-phase-2-spec.md`` § "Phase
+Spec: ``engineering/research/openclaw/WOR-431-phase-2-spec.md`` § "Phase
 2.e" rows IDEM-24 / IDEM-42.
 
 IDEM-24 pins ``apply_lock`` to byte-level reproducibility — same input,

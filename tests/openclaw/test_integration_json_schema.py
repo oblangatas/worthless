@@ -1,6 +1,6 @@
 """Phase 2.e — AC6: ``OpenclawIntegrationReport`` round-trip / schema tests.
 
-Spec: ``engineering/research/openclaw-WOR-431-phase-2-spec.md`` §"AC6" —
+Spec: ``engineering/research/openclaw/WOR-431-phase-2-spec.md`` §"AC6" —
 the JSON shape produced by ``worthless lock --json`` and
 ``worthless unlock --json`` must be parseable by Pi (the downstream JSON
 consumer agent). These tests prove the wire contract is stable and

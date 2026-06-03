@@ -168,3 +168,79 @@ class TestScanCodeEdges:
                 if r.get("ruleId"):
                     all_rule_ids.add(r["ruleId"])
         assert "hardcoded-provider-url" not in all_rule_ids
+
+
+class TestScanCodeAdversarialRace:
+    """worthless-nxyz: a single file failing to stat mid-scan must not crash
+    the entire CLI invocation. Unit coverage in test_code_scanner pins the
+    library contract; this test pins the FULL CLI flow — typer wiring + output
+    formatters + exit code — against the same race so a future refactor that
+    re-introduces the crash in a downstream formatter still fails loudly."""
+
+    def test_racy_file_in_git_branch_does_not_crash_cli(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import subprocess
+
+        # Build a real git repo so the scan goes through ``_list_files_git``
+        # (the branch with the new OSError guard). Two files: one will trip
+        # ``Path.is_symlink`` with OSError, the other is a clean finding.
+        (tmp_path / "racy.py").write_text(
+            'client = OpenAI(base_url="https://api.openai.com/v1")\n', encoding="utf-8"
+        )
+        (tmp_path / "ok.py").write_text(
+            'client = Anthropic(base_url="https://api.anthropic.com/v1")\n', encoding="utf-8"
+        )
+        subprocess.run(
+            ["git", "init", "--quiet", "--initial-branch=main"],  # noqa: S607
+            cwd=tmp_path,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "add", "-A"],  # noqa: S607
+            cwd=tmp_path,
+            check=True,
+        )
+        subprocess.run(
+            [  # noqa: S607
+                "git",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "--quiet",
+                "-m",
+                "init",
+            ],
+            cwd=tmp_path,
+            check=True,
+        )
+
+        # Patch ``Path.is_symlink`` to raise OSError on racy.py. Hits the
+        # exact call site the production fix guards.
+        real_is_symlink = Path.is_symlink
+
+        def fake_is_symlink(self: Path) -> bool:
+            if self.name == "racy.py":
+                raise OSError("simulated mid-scan stat failure")
+            return real_is_symlink(self)
+
+        monkeypatch.setattr(Path, "is_symlink", fake_is_symlink)
+        monkeypatch.chdir(tmp_path)
+
+        # Full CLI invocation — exit code, JSON envelope, no traceback.
+        result = runner.invoke(app, ["scan", "--code", "--json"])
+
+        assert result.exit_code == 0, (
+            f"CLI must NOT crash on a single racy file. "
+            f"stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+        assert "Traceback" not in result.stderr
+        assert "Traceback" not in result.stdout
+
+        payload = json.loads(result.stdout)
+        assert "code_findings" in payload
+        finding_files = {Path(f["file"]).name for f in payload["code_findings"]}
+        assert "racy.py" not in finding_files, "OSError-raising file must be silently dropped"
+        assert "ok.py" in finding_files, "clean file in the same scan must still be reported"

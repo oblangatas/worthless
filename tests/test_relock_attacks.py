@@ -40,8 +40,7 @@ from worthless.proxy.config import ProxySettings
 from worthless.proxy.rules import RateLimitRule, RulesEngine, SpendCapRule
 from worthless.storage.repository import ShardRepository, StoredShard
 
-
-pytestmark = pytest.mark.skip(reason="WOR-549: worthless-16x2 ↔ sidecar IPC integration pending")
+from tests._fakes import bind_real_fernet
 
 # ---------------------------------------------------------------------------
 # Shared constants
@@ -101,6 +100,10 @@ async def _make_proxy_app(settings: ProxySettings, repo: ShardRepository):
     # On 16x2 code, this causes ALL Bearer requests to return 401 because the
     # 16x2 path checks proxy_auth_token first.
     app.state.proxy_auth_token = None
+    # WOR-549: bind the autouse FakeIPCSupervisor's ``open`` to a real Fernet
+    # decrypt with the test's key, so the proxy's ``ipc.open(shard_b_enc, ...)``
+    # returns honest plaintext rather than DEFAULT_FAKE_PLAINTEXT.
+    bind_real_fernet(app, settings.fernet_key)
     return app, db
 
 

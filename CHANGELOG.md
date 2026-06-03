@@ -4,6 +4,39 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [0.3.7] — 2026-05-30
+
+The "harden the whole front door" release. Everything merged since v0.3.6 ships at once: your API key now survives a proxy compromise (a crypto sidecar holds the key, not the proxy), OpenClaw runs fully containerised and `worthless lock` refuses to proceed when plaintext keys are present, and the entire install path — `worthless.sh`, the `?explain=1` audit, the PyPI publish, and the Worker deploy — is version-pinned and signed-tag-verified end to end. Plus a wave of `lock`/`doctor` fixes that tell you the truth instead of failing silently.
+
+### Security
+- **Your API key survives a proxy compromise** (WOR-306, #134). On the Docker topology a crypto sidecar holds the Fernet key under a separate uid; a breached proxy process can no longer read it.
+- **`worthless lock` blocks on plaintext keys** (#210). The OpenClaw secrets-audit gate refuses to lock when an unprotected API key is present instead of silently locking around it.
+- **A stolen shard-A is inert** (#208). Tightened the upsert API + doctor consistency so a leaked key-half can't be replayed.
+- **The install front door is honest and signed end to end.** The `?explain=1` audit page no longer claims a version pin / line numbers that don't exist, and a CI check fails if a version literal drifts back in (WOR-558, #213). The default `curl | sh` pins a known-good PyPI release instead of running latest (WOR-559, #217). Every Worker deploy (WOR-391, #205) **and now every PyPI publish** verifies the maintainer's GPG-signed tag. The release-sync monitor anchors to signed git tags, not a forgeable GitHub Release object (#224). Production edge wire-defenses are probed daily, not only at deploy (#216).
+- **Stolen creds can't deadlock cron jobs** (worthless-16x2, #198) — a stable auth token for the OpenClaw→proxy hop.
+- **`lock` flags hardcoded provider URLs** that would route around the proxy (#174, #182).
+
+### Added
+- **OpenClaw runs fully containerised** — no host process required (#192); agents work through the proxy with the 400s and Docker connectivity fixed (#188).
+- **`worthless doctor` heals itself** — `check-registry`, `--json` for agents, and 4 new checks (WOR-464, #190); it catches wrong-database confusion before you waste hours on phantom 401s (#195).
+- **Verified end-to-end install journeys** for solo, Claude Code, and Docker users (WOR-502, #197), with proof traces (WOR-441, #194) and a user-journey → proof matrix (WOR-544, #206).
+- Website: homepage incident ticker (#199, #204) and wless.io source migrated into the main repo (WOR-455, #179).
+
+### Fixed
+- **Re-lock tells you it worked**, not nothing (WOR-504, #207); **`lock` catches a broken app before you walk away** (WOR-493, #180).
+- **Silent 401 fixed** — the canonical key now wins the `BASE_URL` slot (WOR-496, #176).
+- **LAN mode actually binds the network** (worthless-rczo, #186).
+- **`LOCK FAILED` summary** ends the mixed `[FAIL]`+`[OK]` ambiguity (#222).
+- The last revoke wipes the orphan Fernet key from the keychain (#175).
+- `worthless_status` (MCP) returns keys correctly from an async context (#196); ticker script loads under CSP (#200).
+
+### Changed
+- Version labels aligned to PyPI `v0.x` (WOR-489, #183).
+- Internal security docs privatised (WOR-593, #236); Snyk reports the dependency tree we actually ship (#235, #237).
+
+### Tests & Infrastructure
+- New user-flow test foundation plus native and adversarial stress journeys (WOR-439/447/567/442, #177/#187/#215/#212); install-failure and repo-health monitoring with flaky-test quarantine (WOR-578, #226); Windows test collection no longer crashes on a POSIX-only `os.getuid()` (#211); xdist flake suppression (WOR-571, #218; #238); PR auto-labelling by branch prefix and security paths (#219).
+
 ## [0.3.6] — 2026-05-12
 
 The "OpenClaw integration actually works for Docker users" release. v0.3.5 shipped the WOR-431 OpenClaw magic-integration (Phase 2), but Brutus review caught 3 release blockers and CodeRabbit caught 2 more before the developer-facing flow was sound. Headline: `worthless lock` on a host with a Dockerised OpenClaw now writes a `baseUrl` that OpenClaw can actually reach (loopback → docker0 bridge / `host.docker.internal`), SKILL.md ships the YAML frontmatter ClawHub needs for auto-install discovery, and cross-environment re-locks on non-default ports correctly refresh the apiKey instead of misclassifying our own entries as third-party conflicts.
@@ -115,6 +148,7 @@ First release published to PyPI. `pip install worthless` now works.
 - Gate evaluation strictly precedes shard reconstruction (SR-03).
 - Published artifacts built via PyPI trusted publishing (OIDC, no long-lived tokens).
 
+[0.3.7]: https://github.com/shacharm2/worthless/releases/tag/v0.3.7
 [0.3.6]: https://github.com/shacharm2/worthless/releases/tag/v0.3.6
 [0.3.5]: https://github.com/shacharm2/worthless/releases/tag/v0.3.5
 [0.3.4]: https://github.com/shacharm2/worthless/releases/tag/v0.3.4

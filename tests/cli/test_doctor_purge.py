@@ -15,7 +15,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 
 from worthless.cli.bootstrap import WorthlessHome
 
@@ -69,7 +68,6 @@ class TestDoctorOrphanPurge:
 
     # ---- 2. Diagnose mode (no --fix) is read-only ---------------------------
 
-    @pytest.mark.skip(reason="WOR-549: worthless-16x2 ↔ sidecar IPC integration pending")
     def test_doctor_detects_orphan_in_diagnose_mode(
         self, home_dir: WorthlessHome, env_file: Path
     ) -> None:
@@ -94,7 +92,6 @@ class TestDoctorOrphanPurge:
 
     # ---- 3. --fix --yes actually purges the orphan --------------------------
 
-    @pytest.mark.skip(reason="WOR-549: worthless-16x2 ↔ sidecar IPC integration pending")
     def test_doctor_fix_yes_purges_orphan(self, home_dir: WorthlessHome, env_file: Path) -> None:
         """`doctor --fix --yes`: skip prompt, purge orphan, DB empty after."""
         self._orphan(env_file, home_dir)
@@ -110,7 +107,6 @@ class TestDoctorOrphanPurge:
 
     # ---- 4. --fix --dry-run lists planned deletions, writes nothing ---------
 
-    @pytest.mark.skip(reason="WOR-549: worthless-16x2 ↔ sidecar IPC integration pending")
     def test_doctor_fix_dry_run_does_not_write(
         self, home_dir: WorthlessHome, env_file: Path
     ) -> None:
@@ -137,7 +133,6 @@ class TestDoctorOrphanPurge:
 
     # ---- 5. --fix without --yes prompts; declining aborts -------------------
 
-    @pytest.mark.skip(reason="WOR-549: worthless-16x2 ↔ sidecar IPC integration pending")
     def test_doctor_fix_without_yes_prompts_then_aborts(
         self, home_dir: WorthlessHome, env_file: Path
     ) -> None:
@@ -168,7 +163,6 @@ class TestDoctorOrphanPurge:
 
     # ---- 6. Regression: multi-enrollment alias — surgical purge --------------
 
-    @pytest.mark.skip(reason="WOR-549: worthless-16x2 ↔ sidecar IPC integration pending")
     def test_doctor_fix_yes_keeps_other_envs_intact_for_same_alias(
         self, home_dir: WorthlessHome, tmp_path: Path
     ) -> None:

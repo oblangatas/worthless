@@ -32,6 +32,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit
 
 # pwd is POSIX-only. worthless refuses native Windows (WRTLS-110) but the
@@ -48,6 +49,7 @@ from worthless.openclaw.config import (
     _global_config_candidates,
 )
 from worthless.openclaw.errors import (
+    OpenclawConfigUnreadableError,
     OpenclawErrorCode,
     OpenclawIntegrationError,
     OpenclawIntegrationEvent,
@@ -414,6 +416,7 @@ class OpenclawApplyResult:
     providers_skipped: tuple[tuple[str, str], ...] = ()
     skill_installed: bool = False
     events: tuple[OpenclawIntegrationEvent, ...] = field(default_factory=tuple)
+    original_config_snapshot: dict | None = None
 
     @property
     def has_failure(self) -> bool:
@@ -536,6 +539,168 @@ def _is_proxy_url(url: str, proxy_base_url: str) -> bool:
     return re.match(rf"^https?://[^/]*:{port}/", url) is not None
 
 
+def _classify_config_state(
+    path: Path,
+) -> Literal["missing", "unreadable", "present"]:
+    """Classify the openclaw.json config file using POSITIVE signals only.
+
+    Using ``os.access`` to infer a Docker shared-volume topology was the
+    root cause of WOR-516 case (c): ``read_config(permission_as_missing=True)``
+    silently returned ``{}`` and ``set_provider`` overwrote the config with a
+    blank slate.  We now require a POSITIVE signal to declare "unreadable":
+
+    * ``WORTHLESS_OPENCLAW_CONFIG_SHARED`` set to a non-empty value — explicit
+      operator override for shared Docker volume topologies.
+    * UID mismatch — ``os.stat(path).st_uid != os.geteuid()`` — the file is
+      owned by a different user, classic Docker two-UID layout.
+
+    Returns "missing" when the file does not exist (first lock on a fresh
+    install), "unreadable" for the two Docker signals, "present" otherwise.
+    """
+    try:
+        file_exists = path.exists()
+    except OSError:
+        # Python 3.10 / macOS: PermissionError can bubble out of Path.exists()
+        # when the parent directory is locked (chmod 000).  The file IS there —
+        # the subsequent write will produce WRITE_FAILED through normal error
+        # handling rather than the Docker-topology abort path.
+        return "present"
+    if not file_exists:
+        return "missing"
+    if os.environ.get("WORTHLESS_OPENCLAW_CONFIG_SHARED"):
+        return "unreadable"
+    try:
+        if os.stat(str(path)).st_uid != os.geteuid():  # noqa: PTH116 — must use os.stat so tests can patch("os.stat")
+            return "unreadable"
+    except PermissionError:
+        # Dir-locked after exists() passed: write will fail → WRITE_FAILED.
+        return "present"
+    except OSError:
+        # Any other stat failure (e.g. ENOENT TOCTOU race): proceed and let
+        # the write path surface the error.
+        return "present"
+    return "present"
+
+
+@dataclass(frozen=True)
+class LockPlan:
+    """Collect-then-decide representation of an ``apply_lock`` operation.
+
+    Built by :func:`build_lock_plan` and consumed by both ``--dry-run``
+    (display only) and the live write path (execute).  Having a single
+    function that produces this struct guarantees the two paths can never
+    diverge in their classification logic.
+
+    ``original_config`` is the config dict read *before* any writes.  The
+    live path stores this in :attr:`OpenclawApplyResult.original_config_snapshot`
+    so a caller can call :func:`rollback_config` on failure.
+    """
+
+    config_path: Path | None
+    config_state: Literal["missing", "unreadable", "present"]
+    providers_to_add: tuple[str, ...]
+    providers_to_skip: tuple[tuple[str, str], ...]
+    skill_to_install: bool
+    original_config: dict | None
+
+    def to_dict(self) -> dict:
+        """Return a JSON-serialisable representation for ``--dry-run`` output."""
+        return {
+            "config_path": str(self.config_path) if self.config_path else None,
+            "config_state": self.config_state,
+            "providers_to_add": list(self.providers_to_add),
+            "providers_to_skip": [list(p) for p in self.providers_to_skip],
+            "skill_to_install": self.skill_to_install,
+        }
+
+
+def build_lock_plan(
+    state: IntegrationState,
+    planned_updates: list[tuple[str, str, str]],
+    *,
+    proxy_base_url: str,
+) -> LockPlan:
+    """Return a :class:`LockPlan` without performing any writes.
+
+    Pure function used by both ``--dry-run`` (display) and the live path
+    (execute) so the two can never diverge in their classification logic.
+    """
+    config_path = _resolve_active_config_path(state, state.home_dir)
+    config_state = _classify_config_state(config_path)
+
+    if config_state == "unreadable":
+        return LockPlan(
+            config_path=config_path,
+            config_state="unreadable",
+            providers_to_add=(),
+            providers_to_skip=(),
+            skill_to_install=False,
+            original_config=None,
+        )
+
+    # Read the existing config once (for conflict detection + snapshot).
+    original_config: dict | None = None
+    if config_state == "present":
+        try:
+            original_config = _config_mod.read_config(config_path)
+        except Exception:
+            original_config = None
+
+    providers_to_add: list[str] = []
+    providers_to_skip: list[tuple[str, str]] = []
+
+    for provider, _alias, _shard_a in planned_updates:
+        provider_name = f"worthless-{provider}"
+        existing_entry = (
+            (original_config or {}).get("models", {}).get("providers", {}).get(provider_name)
+        )
+        if existing_entry is not None:
+            existing_url = existing_entry.get("baseUrl", "")
+            if existing_url and not _is_proxy_url(existing_url, proxy_base_url):
+                providers_to_skip.append((provider_name, "provider_conflict"))
+                continue
+        providers_to_add.append(provider_name)
+
+    skill_to_install = state.workspace_path is not None
+
+    return LockPlan(
+        config_path=config_path,
+        config_state=config_state,
+        providers_to_add=tuple(providers_to_add),
+        providers_to_skip=tuple(providers_to_skip),
+        skill_to_install=skill_to_install,
+        original_config=original_config,
+    )
+
+
+def rollback_config(config_path: Path | None, original_config: dict | None) -> None:
+    """Atomically restore ``config_path`` to ``original_config``.
+
+    Called when a mid-loop ``set_provider`` write fails so that the config is
+    never left in a partially-written state.  Uses the same atomic-write path
+    (:func:`worthless.openclaw.config._atomic_write_json`) that ``set_provider``
+    itself uses.
+
+    ``original_config=None`` means the file was absent before the lock attempt.
+    Any partial file created during the attempt is deleted.  ``{}`` means the
+    file existed with empty content and must be restored to ``{}``.
+
+    Raises :class:`OSError` on disk-full or permission failure — the caller
+    surfaces both the original write error and the rollback error via events.
+    """
+    if config_path is None:
+        return
+    if original_config is None:
+        # File was absent before this lock attempt — delete any partial file
+        # written before the failure rather than leaving {} on disk.
+        try:
+            config_path.unlink()
+        except FileNotFoundError:
+            pass  # never created; nothing to clean up
+        return
+    _config_mod._atomic_write_json(config_path, original_config)
+
+
 def _get_provider_for_lock(
     config_path: Path,
     provider_name: str,
@@ -558,6 +723,127 @@ def _get_provider_for_lock(
         return None, exc
     except OSError as exc:
         return None, exc
+
+
+def _apply_lock_write_providers(
+    config_path: Path,
+    resolved_proxy_base_url: str,
+    planned_updates: list[tuple[str, str, str]],
+    events: list[OpenclawIntegrationEvent],
+    providers_set: list[str],
+    providers_skipped: list[tuple[str, str]],
+) -> bool:
+    """Stage A of apply_lock: write each provider entry.
+
+    Returns ``True`` if a write failure occurred and rollback is required,
+    ``False`` when all providers were handled cleanly (written or skipped).
+    Extracted to keep :func:`apply_lock` within xenon's complexity budget.
+    """
+    for provider, alias, shard_a_str in planned_updates:
+        provider_name = f"worthless-{provider}"
+        base_url = f"{resolved_proxy_base_url.rstrip('/')}/{alias}/v1"
+
+        existing, read_err = _get_provider_for_lock(config_path, provider_name)
+        if read_err is not None:
+            events.append(
+                OpenclawIntegrationEvent(
+                    code=OpenclawErrorCode.CONFIG_UNREADABLE,
+                    level="error",
+                    detail=f"could not read {config_path}: {read_err}",
+                )
+            )
+            providers_skipped.append((provider_name, "config_unreadable"))
+            continue
+
+        if existing is not None:
+            existing_url = existing.get("baseUrl", "")
+            if existing_url and not _is_proxy_url(existing_url, resolved_proxy_base_url):
+                events.append(
+                    OpenclawIntegrationEvent(
+                        code=OpenclawErrorCode.PROVIDER_CONFLICT,
+                        level="warn",
+                        detail=(
+                            f"refusing to overwrite {provider_name}: "
+                            f"existing baseUrl {existing_url!r} is not a worthless proxy"
+                        ),
+                        extra={"provider": provider_name, "baseUrl": existing_url},
+                    )
+                )
+                providers_skipped.append((provider_name, "provider_conflict"))
+                continue
+
+        try:
+            _config_mod.set_provider(
+                config_path,
+                provider_name,
+                base_url,
+                api_key=shard_a_str,
+                api=_PROVIDER_API.get(provider),
+            )
+        except OpenclawConfigError as exc:
+            events.append(
+                OpenclawIntegrationEvent(
+                    code=OpenclawErrorCode.CONFIG_UNREADABLE,
+                    level="error",
+                    detail=f"set_provider refused: {exc}",
+                    extra={"provider": provider_name},
+                )
+            )
+            providers_skipped.append((provider_name, "config_unreadable"))
+            continue
+        except OSError as exc:
+            events.append(
+                OpenclawIntegrationEvent(
+                    code=OpenclawErrorCode.WRITE_FAILED,
+                    level="error",
+                    detail=f"failed to write {config_path}: {exc}",
+                    extra={"provider": provider_name},
+                )
+            )
+            providers_skipped.append((provider_name, "write_failed"))
+            return True  # rollback needed
+
+        providers_set.append(provider_name)
+        events.append(
+            OpenclawIntegrationEvent(
+                code=OpenclawErrorCode.CONFIG_UPDATED,
+                level="info",
+                detail=f"wrote {provider_name} to {config_path}",
+                extra={"provider": provider_name, "baseUrl": base_url},
+            )
+        )
+    return False  # no rollback needed
+
+
+def _apply_lock_rollback(
+    config_path: Path,
+    original_config: dict | None,
+    events: list[OpenclawIntegrationEvent],
+    providers_set: list[str],
+    providers_skipped: list[tuple[str, str]],
+) -> None:
+    """Execute transactional rollback after a Stage A write failure.
+
+    Restores original_config atomically. Appends an error event if the
+    rollback itself fails (double-fault). Marks written providers as
+    rolled_back in providers_skipped and clears providers_set.
+    Extracted to keep :func:`apply_lock` within xenon's complexity budget.
+    """
+    try:
+        rollback_config(config_path, original_config)
+    except OSError as rb_exc:
+        events.append(
+            OpenclawIntegrationEvent(
+                code=OpenclawErrorCode.WRITE_FAILED,
+                level="error",
+                detail=(
+                    f"rollback of {config_path} also failed: {rb_exc} — manual recovery required"
+                ),
+                extra={"path": str(config_path)},
+            )
+        )
+    providers_skipped.extend((p, "rolled_back") for p in providers_set)
+    providers_set.clear()
 
 
 def apply_lock(
@@ -584,7 +870,7 @@ def apply_lock(
     Returns:
         :class:`OpenclawApplyResult` describing what we did.
 
-    Spec: ``engineering/research/openclaw-WOR-431-phase-2-spec.md``
+    Spec: ``engineering/research/openclaw/WOR-431-phase-2-spec.md``
     §"Phase 2.b" / §"`apply_lock()` contract".
     """
     # Resolve the proxy base URL here (not at import time) so the Docker
@@ -624,6 +910,78 @@ def apply_lock(
         )
 
     config_path = _resolve_active_config_path(state, state.home_dir)
+
+    # WOR-516 case (c): detect Docker two-UID topology BEFORE any writes.
+    # The old code used os.access() + warn-and-proceed, which allowed
+    # read_config(permission_as_missing=True) to return {} and set_provider
+    # to overwrite the config with a blank slate.  Now we abort hard.
+    config_state = _classify_config_state(config_path)
+    if config_state == "unreadable":
+        raise OpenclawConfigUnreadableError(
+            f"openclaw.json at {config_path} is owned by a different user "
+            f"(Docker two-UID topology detected) or WORTHLESS_OPENCLAW_CONFIG_SHARED is set. "
+            f"Re-run worthless lock as the openclaw user, or set WORTHLESS_OPENCLAW_CONFIG_SHARED "
+            f"only when the shared-volume layout is intentional."
+        )
+
+    # Snapshot the original config BEFORE any writes so rollback_config can
+    # restore it atomically if a mid-loop set_provider fails.
+    # None = file was absent (rollback → delete any partial file).
+    # {}   = file existed with empty content (rollback → restore {}).
+    # Any other dict = restore that content.
+    original_config: dict | None = None
+    if config_state == "present":
+        try:
+            original_config = _config_mod.read_config(config_path)
+        except OpenclawConfigError as exc:
+            # read_config wraps PermissionError as OpenclawConfigError.
+            # Two sub-cases both arrive here as config_state=="present":
+            #
+            # a) Directory locked (chmod 000 on parent dir): stat will also fail
+            #    → proceed so write attempt surfaces WRITE_FAILED (DV-01 path).
+            # b) File locked (chmod 000 on file itself, same UID): directory is
+            #    accessible so set_provider's permission_as_missing=True would
+            #    silently create a new file, overwriting siblings — the WOR-516
+            #    case (c) bug.  Abort now before any write happens.
+            #
+            # Distinguish via __cause__: PermissionError + stat succeeds → (b).
+            if isinstance(exc.__cause__, PermissionError):
+                try:
+                    config_path.stat()
+                    # Directory accessible → file-locked → abort.
+                    events.append(
+                        OpenclawIntegrationEvent(
+                            code=OpenclawErrorCode.CONFIG_UNREADABLE,
+                            level="error",
+                            detail=(
+                                f"openclaw.json at {config_path} exists but is not readable "
+                                "(permission denied) — aborting to avoid overwriting your config. "
+                                "Run: chmod u+r openclaw.json"
+                            ),
+                            extra={"path": str(config_path)},
+                        )
+                    )
+                    return OpenclawApplyResult(
+                        detected=True,
+                        config_path=config_path,
+                        workspace_path=state.workspace_path,
+                        skill_path=state.skill_path,
+                        providers_set=(),
+                        providers_skipped=tuple(
+                            (f"worthless-{p}", "config_unreadable") for p, *_ in planned_updates
+                        ),
+                        skill_installed=False,
+                        events=tuple(events),
+                        original_config_snapshot=None,
+                    )
+                except PermissionError:
+                    pass  # directory also locked → proceed, write will hit WRITE_FAILED
+            # All other read failures: proceed; set_provider surfaces WRITE_FAILED.
+            original_config = {}
+        except Exception:
+            # Other exceptions (JSON decode error, OS error, etc.): proceed.
+            original_config = {}
+
     _check_world_writable(config_path, events)
 
     # F-CFG-15: refuse symlinked openclaw.json BEFORE any read or write.
@@ -671,123 +1029,20 @@ def apply_lock(
         )
 
     # ---- Stage A: write providers ----------------------------------------
-    # In all-container Docker setups the openclaw daemon chmods its config
-    # dir to 0700 on startup.  If apply_lock reaches here it means the dir
-    # was accessible at detect() time (proxy ran first and created the dir),
-    # but the file may still be 0600 (foreign-owned) after openclaw's
-    # atomic-write cycle.  read_config() returns {} on PermissionError so
-    # set_provider can still write via atomic replace (dir is 777 when proxy
-    # created it before openclaw started).  Emit one warn-level event so the
-    # operator knows non-worthless config keys (gateway auth etc.) were reset.
-    try:
-        _file_exists = config_path.exists()
-        _file_readable = (not _file_exists) or os.access(str(config_path), os.R_OK)
-    except OSError:
-        _file_readable = True  # can't tell — don't emit the advisory
-    if not _file_readable:
-        events.append(
-            OpenclawIntegrationEvent(
-                code=OpenclawErrorCode.WRITE_FAILED,
-                level="warn",
-                detail=(
-                    "openclaw.json is not readable by the current user "
-                    f"({config_path}). Writing fresh provider entries — "
-                    "non-worthless config fields (gateway auth token etc.) "
-                    "will be regenerated by openclaw on container restart. "
-                    "This is expected when openclaw has rewritten the shared "
-                    "Docker volume config as a foreign-owned file."
-                ),
-                extra={"path": str(config_path)},
-            )
-        )
+    # F-CFG-13 / DV-01/DV-02 handling is inside _apply_lock_write_providers.
+    # Extracted to keep apply_lock within xenon's complexity budget (rank C).
+    rollback_needed = _apply_lock_write_providers(
+        config_path,
+        resolved_proxy_base_url,
+        planned_updates,
+        events,
+        providers_set,
+        providers_skipped,
+    )
 
-    for provider, alias, shard_a_str in planned_updates:
-        provider_name = f"worthless-{provider}"
-        base_url = f"{resolved_proxy_base_url.rstrip('/')}/{alias}/v1"
-
-        # F-CFG-13: pre-existing entry pointing somewhere that isn't our
-        # proxy is a manual override. Skip + emit conflict event.
-        # PermissionError is handled transparently by _get_provider_for_lock —
-        # see its docstring for the DV-01/DV-02 fall-through rationale.
-        existing, read_err = _get_provider_for_lock(config_path, provider_name)
-        if read_err is not None:
-            events.append(
-                OpenclawIntegrationEvent(
-                    code=OpenclawErrorCode.CONFIG_UNREADABLE,
-                    level="error",
-                    detail=f"could not read {config_path}: {read_err}",
-                )
-            )
-            providers_skipped.append((provider_name, "config_unreadable"))
-            continue
-
-        if existing is not None:
-            existing_url = existing.get("baseUrl", "")
-            if existing_url and not _is_proxy_url(existing_url, resolved_proxy_base_url):
-                events.append(
-                    OpenclawIntegrationEvent(
-                        code=OpenclawErrorCode.PROVIDER_CONFLICT,
-                        level="warn",
-                        detail=(
-                            f"refusing to overwrite {provider_name}: "
-                            f"existing baseUrl {existing_url!r} is not a worthless proxy"
-                        ),
-                        extra={"provider": provider_name, "baseUrl": existing_url},
-                    )
-                )
-                providers_skipped.append((provider_name, "provider_conflict"))
-                continue
-
-        try:
-            _config_mod.set_provider(
-                config_path,
-                provider_name,
-                base_url,
-                # Post-16x2-revert: write shard-A directly as apiKey.
-                # The agent reads this and sends it as Bearer; the proxy
-                # validates via commitment check (XOR + HMAC) — no stable
-                # token required. openclaw.json carries format-preserving
-                # key material (starts with provider prefix e.g. "sk-").
-                api_key=shard_a_str,
-                # Required by OpenClaw daemon — without these the daemon
-                # rejects the config with "Invalid input: expected array,
-                # received undefined". Verified live (WOR-431 evidence).
-                api=_PROVIDER_API.get(provider),
-                # `models=[]` default is applied inside set_provider when
-                # the entry is new. Existing arrays are preserved.
-            )
-        except OpenclawConfigError as exc:
-            events.append(
-                OpenclawIntegrationEvent(
-                    code=OpenclawErrorCode.CONFIG_UNREADABLE,
-                    level="error",
-                    detail=f"set_provider refused: {exc}",
-                    extra={"provider": provider_name},
-                )
-            )
-            providers_skipped.append((provider_name, "config_unreadable"))
-            continue
-        except OSError as exc:
-            events.append(
-                OpenclawIntegrationEvent(
-                    code=OpenclawErrorCode.WRITE_FAILED,
-                    level="error",
-                    detail=f"failed to write {config_path}: {exc}",
-                    extra={"provider": provider_name},
-                )
-            )
-            providers_skipped.append((provider_name, "write_failed"))
-            continue
-
-        providers_set.append(provider_name)
-        events.append(
-            OpenclawIntegrationEvent(
-                code=OpenclawErrorCode.CONFIG_UPDATED,
-                level="info",
-                detail=f"wrote {provider_name} to {config_path}",
-                extra={"provider": provider_name, "baseUrl": base_url},
-            )
-        )
+    # ---- Transactional rollback on write failure -------------------------
+    if rollback_needed:
+        _apply_lock_rollback(config_path, original_config, events, providers_set, providers_skipped)
 
     # ---- Stage B: install skill ------------------------------------------
     skill_installed = False
@@ -823,7 +1078,63 @@ def apply_lock(
         providers_skipped=tuple(providers_skipped),
         skill_installed=skill_installed,
         events=tuple(events),
+        original_config_snapshot=original_config,
     )
+
+
+def _apply_unlock_stage_a(
+    config_path: Path,
+    aliases: list[tuple[str, str]],
+    events: list[OpenclawIntegrationEvent],
+    providers_removed: list[str],
+    providers_skipped: list[tuple[str, str]],
+) -> None:
+    """Stage A of apply_unlock: remove each worthless-* provider entry.
+
+    Mutates providers_removed / providers_skipped / events in place.
+    Extracted to keep :func:`apply_unlock` within xenon's complexity budget.
+    """
+    for provider, _alias in aliases:
+        provider_name = f"worthless-{provider}"
+        try:
+            removed = _config_mod.unset_provider(config_path, provider_name)
+        except OpenclawConfigError as exc:
+            events.append(
+                OpenclawIntegrationEvent(
+                    code=OpenclawErrorCode.CONFIG_UNREADABLE,
+                    level="error",
+                    detail=f"could not read {config_path}: {exc}",
+                    extra={"provider": provider_name},
+                )
+            )
+            providers_skipped.append((provider_name, "config_unreadable"))
+            continue
+        except OSError as exc:
+            events.append(
+                OpenclawIntegrationEvent(
+                    code=OpenclawErrorCode.WRITE_FAILED,
+                    level="error",
+                    detail=f"failed to write {config_path}: {exc}",
+                    extra={"provider": provider_name},
+                )
+            )
+            providers_skipped.append((provider_name, "write_failed"))
+            continue
+
+        if removed:
+            providers_removed.append(provider_name)
+        events.append(
+            OpenclawIntegrationEvent(
+                code=OpenclawErrorCode.CONFIG_UPDATED,
+                level="info",
+                detail=(
+                    f"removed {provider_name} from {config_path}"
+                    if removed
+                    else f"{provider_name} already absent in {config_path}"
+                ),
+                extra={"provider": provider_name},
+            )
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -839,7 +1150,7 @@ def apply_unlock(
     """Reverse Phase 2.b's :func:`apply_lock`. Idempotent. Best-effort.
 
     Stage 3 of ``worthless unlock``. Per L1/L2 in
-    ``engineering/research/openclaw-WOR-431-phase-2-spec.md``: failures
+    ``engineering/research/openclaw/WOR-431-phase-2-spec.md``: failures
     here NEVER cause unlock-core to fail. If the user runs ``unlock`` and
     we can't clean up OpenClaw's config, they still get their ``.env``
     restored — surfaced as structured events instead of exceptions.
@@ -860,7 +1171,7 @@ def apply_unlock(
         ``apply_lock``); ``providers_skipped`` lists ones we couldn't
         remove and the reason.
 
-    Spec: ``engineering/research/openclaw-WOR-431-phase-2-spec.md``
+    Spec: ``engineering/research/openclaw/WOR-431-phase-2-spec.md``
     §"Phase 2.c — ``unlock`` integration", failure-mode rows RT-01/02/03,
     F-XS-40 / F-XS-41, locked decisions L1, L2, L3.
     """
@@ -914,77 +1225,57 @@ def apply_unlock(
             events=tuple(events),
         )
 
-    # RT-03: config was deleted between lock and unlock. detect()'s
-    # presence verdict is OR(config, workspace) — a missing config alone
-    # leaves us with present=True (workspace still there). Surface the
-    # named event so doctor / --json can report it; skip Stage A but
-    # continue to Stage B since skill removal is still useful.
-    config_missing = not config_path.exists()
-    if config_missing:
+    # WOR-516 (symmetric guard): detect Docker two-UID topology before any
+    # writes, same as apply_lock. Unlike apply_lock, unlock must NOT raise
+    # (L1/L2 contract: unlock-core failures never abort the unlock).
+    # Surface a CONFIG_UNREADABLE event, skip Stage A, continue to Stage B
+    # (skill removal is still safe and useful regardless of config ownership).
+    config_state_unlock = _classify_config_state(config_path)
+    if config_state_unlock == "unreadable":
         events.append(
             OpenclawIntegrationEvent(
-                code=OpenclawErrorCode.CONFIG_MISSING,
-                level="warn",
+                code=OpenclawErrorCode.CONFIG_UNREADABLE,
+                level="error",
                 detail=(
-                    f"openclaw.json not found at {config_path} — provider entries "
-                    "already absent; skipping Stage A"
+                    f"openclaw.json at {config_path} is owned by a different user "
+                    "(Docker two-UID topology) — skipping provider removal"
                 ),
                 extra={"path": str(config_path)},
             )
         )
         for provider, _alias in aliases:
-            providers_skipped.append((f"worthless-{provider}", "config_missing"))
+            providers_skipped.append((f"worthless-{provider}", "config_unreadable"))
+        # Fall through to Stage B — skill removal doesn't touch the config.
+        config_missing = True  # prevents Stage A from running
+
+    else:
+        # RT-03: config was deleted between lock and unlock. detect()'s
+        # presence verdict is OR(config, workspace) — a missing config alone
+        # leaves us with present=True (workspace still there). Surface the
+        # named event so doctor / --json can report it; skip Stage A but
+        # continue to Stage B since skill removal is still useful.
+        config_missing = config_state_unlock == "missing"
+        if config_missing:
+            events.append(
+                OpenclawIntegrationEvent(
+                    code=OpenclawErrorCode.CONFIG_MISSING,
+                    level="warn",
+                    detail=(
+                        f"openclaw.json not found at {config_path} — provider entries "
+                        "already absent; skipping Stage A"
+                    ),
+                    extra={"path": str(config_path)},
+                )
+            )
+            for provider, _alias in aliases:
+                providers_skipped.append((f"worthless-{provider}", "config_missing"))
 
     # ---- Stage A: remove worthless-* provider entries --------------------
     # Skipped entirely when config_missing — providers_skipped already
-    # populated above with reason="config_missing", and Stage B (skill
-    # removal) still runs below.
-    for provider, _alias in aliases if not config_missing else []:
-        provider_name = f"worthless-{provider}"
-        try:
-            removed = _config_mod.unset_provider(config_path, provider_name)
-        except OpenclawConfigError as exc:
-            events.append(
-                OpenclawIntegrationEvent(
-                    code=OpenclawErrorCode.CONFIG_UNREADABLE,
-                    level="error",
-                    detail=f"could not read {config_path}: {exc}",
-                    extra={"provider": provider_name},
-                )
-            )
-            providers_skipped.append((provider_name, "config_unreadable"))
-            continue
-        except OSError as exc:
-            events.append(
-                OpenclawIntegrationEvent(
-                    code=OpenclawErrorCode.WRITE_FAILED,
-                    level="error",
-                    detail=f"failed to write {config_path}: {exc}",
-                    extra={"provider": provider_name},
-                )
-            )
-            providers_skipped.append((provider_name, "write_failed"))
-            continue
-
-        # ``unset_provider`` returns the removed entry dict when it found
-        # something to remove, or ``{}`` when the entry was already absent
-        # (idempotent no-op). Count the provider as "removed" only when
-        # something was actually there — callers rely on ``providers_set``
-        # being empty for a genuine no-op to avoid false-positive exits.
-        if removed:
-            providers_removed.append(provider_name)
-        events.append(
-            OpenclawIntegrationEvent(
-                code=OpenclawErrorCode.CONFIG_UPDATED,
-                level="info",
-                detail=(
-                    f"removed {provider_name} from {config_path}"
-                    if removed
-                    else f"{provider_name} already absent in {config_path}"
-                ),
-                extra={"provider": provider_name},
-            )
-        )
+    # populated above with reason="config_missing", and Stage B still runs.
+    # Extracted to _apply_unlock_stage_a to keep apply_unlock within xenon.
+    if not config_missing:
+        _apply_unlock_stage_a(config_path, aliases, events, providers_removed, providers_skipped)
 
     # ---- Stage B: uninstall skill folder ---------------------------------
     skill_uninstalled = False
@@ -1009,6 +1300,9 @@ def apply_unlock(
                     detail=f"skill uninstall failed: {exc}",
                 )
             )
+
+    # Stage C (.bak residue hygiene) deferred to WOR-599 — leave .bak alone
+    # until the daemon's crash-recovery semantics are fully understood.
 
     return OpenclawApplyResult(
         detected=True,

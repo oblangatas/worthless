@@ -1,6 +1,6 @@
 """Phase 2.b — ``integration.apply_lock()`` unit + functional tests.
 
-Spec: ``engineering/research/openclaw-WOR-431-phase-2-spec.md`` §"Phase 2.b"
+Spec: ``engineering/research/openclaw/WOR-431-phase-2-spec.md`` §"Phase 2.b"
 and §"Failure modes" rows F-CFG-13/15/16/23, F-XS-40/41/43, IDEM-24.
 
 ``apply_lock`` is the Stage-3 "magic" hook: after ``.env`` and DB are
