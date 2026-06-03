@@ -59,6 +59,24 @@
       border-bottom: 1px solid var(--line);
       background: rgba(9, 11, 16, .88);
     }
+    @media (max-width: 720px) {
+      .top {
+        flex-wrap: wrap;
+        height: auto;
+        gap: .45rem .75rem;
+        padding: .75rem 1rem;
+      }
+
+      .slash {
+        overflow-x: auto;
+        max-width: 100%;
+        scrollbar-width: none;
+      }
+
+      .slash::-webkit-scrollbar {
+        display: none;
+      }
+    }
 
     .brand {
       display: inline-flex;

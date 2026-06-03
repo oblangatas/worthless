@@ -30,7 +30,9 @@ jobs:
         uses: astral-sh/setup-uv@v4
 
       - name: Install worthless
-        run: uv pip install worthless --system
+        run: |
+          curl -sSL https://worthless.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Enroll OpenAI key
         run: echo "$OPENAI_API_KEY" | worthless enroll --alias openai --provider openai --key-stdin

@@ -1,6 +1,6 @@
 # Install -- Self-Hosted
 
-Run the Worthless proxy in Docker. The container is fully self-contained —
+Run the Worthless proxy in Docker. The container is fully self-contained -
 it generates its own encryption key and stores all shard data internally.
 
 ## Quick start (Docker Compose)
@@ -18,7 +18,7 @@ echo $OPENAI_API_KEY | docker compose exec -T proxy \
   worthless enroll --alias openai --key-stdin --provider openai
 ```
 
-Repeat for each key. The container splits and stores the key internally —
+Repeat for each key. The container splits and stores the key internally -
 the original key never touches disk.
 
 ## Cloud deploy

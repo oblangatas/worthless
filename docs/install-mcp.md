@@ -4,7 +4,7 @@ Run the Worthless proxy locally, then point your editor's SDK at it.
 
 > [!NOTE]
 > Worthless is an HTTP proxy, not an MCP server. Your editor talks to AI
-> providers through it via `BASE_URL` — no MCP registration needed.
+> providers through it via `BASE_URL` - no MCP registration needed.
 > MCP server integration is planned for a future release.
 
 ## Prerequisites
@@ -17,13 +17,13 @@ worthless lock          # protect your .env keys
 
 ## Claude Code
 
-Option A — use `wrap` (recommended):
+Option A - use `wrap` (recommended):
 
 ```bash
 worthless wrap claude    # starts proxy, injects BASE_URL, launches Claude Code
 ```
 
-Option B — run the proxy separately:
+Option B - run the proxy separately:
 
 ```bash
 worthless up -d          # start proxy in background on port 8787

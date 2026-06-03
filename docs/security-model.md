@@ -10,7 +10,7 @@ The rules engine (spend cap, rate limit) evaluates every request **before** Shar
 
 ### 2. Transparent routing
 
-Setting `BASE_URL` to the proxy address causes API calls from any HTTP client to route through the proxy. The proxy is invisible to provider SDKs — no wrapper libraries, no code changes beyond one environment variable.
+Setting `BASE_URL` to the proxy address causes API calls from any HTTP client to route through the proxy. The proxy is invisible to provider SDKs - no wrapper libraries, no code changes beyond one environment variable.
 
 ### 3. Server-side only reconstruction
 
@@ -18,7 +18,7 @@ The reconstructed key is used for the upstream API call and never appears in any
 
 ## Anti-Enumeration
 
-All authentication failures — missing alias, unknown alias, missing shard, invalid shard, failed HMAC commitment — return an **identical 401 response body**. This prevents attackers from probing which step of authentication failed or enumerating enrolled keys.
+All authentication failures - missing alias, unknown alias, missing shard, invalid shard, failed HMAC commitment - return an **identical 401 response body**. This prevents attackers from probing which step of authentication failed or enumerating enrolled keys.
 
 ## TLS Enforcement
 
@@ -54,6 +54,6 @@ This is the same trust boundary as a password manager: if the attacker owns the 
 
 ## Planned Hardening
 
-- **Rust reconstruction service** — deterministic memory control, `mlock`, `zeroize`, distroless container
-- **Process isolation** — reconstruction in a separate process with its own memory space
-- **mTLS client certificates** — mutual TLS for proxy authentication
+- **Rust reconstruction service** - deterministic memory control, `mlock`, `zeroize`, distroless container
+- **Process isolation** - reconstruction in a separate process with its own memory space
+- **mTLS client certificates** - mutual TLS for proxy authentication

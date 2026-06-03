@@ -36,6 +36,13 @@ NON_RED_SEO_COPY_FILES = [
     "docs/llms.txt",
 ]
 
+TEXT_SUFFIXES = {".css", ".html", ".js", ".json", ".md", ".txt", ".xml", ""}
+LEGAL_RISK_PATTERN = re.compile(
+    r"(we will|we commit|we aim|we strive|hall of fame|^Acknowledgments$|"
+    r"dollar liability cap|successor-entity|EU rep)",
+    re.IGNORECASE | re.MULTILINE,
+)
+
 
 class _HeadParser(HTMLParser):
     def __init__(self) -> None:
@@ -74,6 +81,15 @@ def _meta_content(parser: _HeadParser, **attrs: str) -> list[str]:
     return matches
 
 
+def _public_text_files() -> list[Path]:
+    files = []
+    for path in DOCS.rglob("*"):
+        if path.is_file() and path.suffix in TEXT_SUFFIXES:
+            path.read_text(encoding="utf-8")
+            files.append(path)
+    return sorted(files)
+
+
 def test_public_seo_surfaces_do_not_reference_worthless_cloud() -> None:
     offenders = [
         path
@@ -82,6 +98,74 @@ def test_public_seo_surfaces_do_not_reference_worthless_cloud() -> None:
     ]
 
     assert offenders == []
+
+
+def test_publishable_docs_do_not_include_internal_planning_sources() -> None:
+    internal_paths = [
+        DOCS / "DOMAIN_PLAN.md",
+        DOCS / "research",
+        DOCS / "superpowers",
+    ]
+
+    assert [path.relative_to(REPO_ROOT).as_posix() for path in internal_paths if path.exists()] == []
+
+
+def test_publishable_docs_do_not_reference_stale_worthless_domains() -> None:
+    offenders = [
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in _public_text_files()
+        if re.search(r"worthless\.cloud|worthless-cloud", path.read_text(encoding="utf-8"))
+    ]
+
+    assert offenders == []
+
+
+def test_publishable_docs_do_not_advertise_unreleased_pip_install() -> None:
+    offenders = [
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in _public_text_files()
+        if "pip install worthless" in path.read_text(encoding="utf-8")
+    ]
+
+    assert offenders == []
+
+
+def test_publishable_docs_do_not_use_em_dashes() -> None:
+    offenders = [
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in _public_text_files()
+        if "—" in path.read_text(encoding="utf-8")
+    ]
+
+    assert offenders == []
+
+
+def test_publishable_docs_do_not_regress_legal_language() -> None:
+    offenders = [
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in _public_text_files()
+        if LEGAL_RISK_PATTERN.search(path.read_text(encoding="utf-8"))
+    ]
+
+    assert offenders == []
+
+
+def test_security_txt_uses_advisory_contact_and_policy() -> None:
+    security_txt = (DOCS / ".well-known" / "security.txt").read_text(encoding="utf-8")
+
+    assert "Contact: https://github.com/shacharm2/worthless/security/advisories/new" in security_txt
+    assert "Contact: mailto:security@wless.io" in security_txt
+    assert "Canonical: https://wless.io/.well-known/security.txt" in security_txt
+    assert "Policy: https://github.com/shacharm2/worthless/blob/main/SECURITY.md" in security_txt
+
+
+def test_mobile_nav_wraps_on_launch_pages() -> None:
+    for path in ("docs/features.html", "docs/how-it-works.html"):
+        html = (REPO_ROOT / path).read_text(encoding="utf-8")
+
+        assert "@media (max-width: 720px)" in html
+        assert "flex-wrap:wrap" in html or "flex-wrap: wrap" in html
+        assert "overflow-x:auto" in html or "overflow-x: auto" in html
 
 
 def test_public_pages_use_wless_canonicals_and_social_urls() -> None:

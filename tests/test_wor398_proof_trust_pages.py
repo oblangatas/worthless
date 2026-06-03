@@ -142,6 +142,14 @@ def test_red_index_is_attack_blog_not_trust_dashboard() -> None:
     assert lower.count("<section") <= 4
 
 
+def test_red_index_has_mobile_header_overflow_guard() -> None:
+    html = _read(RED / "index.html")
+
+    assert "@media (max-width: 720px)" in html
+    assert "flex-wrap: wrap" in html
+    assert "overflow-x: auto" in html
+
+
 def test_red_index_uses_real_attack_headlines() -> None:
     html = _read(RED / "index.html")
 
