@@ -19,6 +19,19 @@ from pathlib import Path
 
 import pytest
 
+# WOR-621 F2 (G5 reconcile): F1 made `lock` rewrite the ORIGINAL provider
+# entry, and F2 makes `unlock` RESTORE it verbatim — replacing the old
+# "remove the worthless-<id> decoy" contract every test below was written
+# against (they call apply_unlock(aliases=...), a signature that no longer
+# exists). This module is being rewritten to the restore contract; until
+# then it is suspended so the suite is not red on a contract we deliberately
+# removed. The NEW contract is covered green by
+# tests/openclaw/test_integration_apply_unlock_restore.py. Remove this skip
+# in G5 (see the F2 GREEN mini-plan on WOR-649).
+pytestmark = pytest.mark.skip(
+    reason="WOR-621 F2 G5: rewriting unlock tests from decoy-removal to restore contract"
+)
+
 
 # ---------------------------------------------------------------------------
 # Fixtures: ``fake_home`` + ``openclaw_present`` provided by conftest.py.

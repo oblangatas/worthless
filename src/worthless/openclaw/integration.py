@@ -33,7 +33,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Literal, NamedTuple
 from urllib.parse import urlsplit
 
 # pwd is POSIX-only. worthless refuses native Windows (WRTLS-110) but the
@@ -43,6 +43,7 @@ if sys.platform != "win32":
 else:
     _pwd = None  # type: ignore[assignment]
 
+from worthless.crypto.types import zero_buf
 from worthless.openclaw import config as _config_mod
 from worthless.openclaw import skill as _skill_mod
 from worthless.openclaw.config import (
@@ -93,6 +94,92 @@ def build_oc_rollback_apikey_record(kind: str, ref: dict | None = None) -> str:
             "(expected 'plaintext' or 'secretref')"
         )
     return json.dumps(record, separators=(",", ":"))
+
+
+def build_oc_rollback_entry_record(original_entry: dict) -> str:
+    """Return the FULL original provider entry as JSON, key-redacted.
+
+    WOR-621 F2. ``unlock`` must restore the original OpenClaw provider
+    entry *verbatim* (byte-identical), but ``lock`` adds fields (``api``,
+    ``models``) a bare entry never had — so restoring baseUrl+apiKey alone
+    leaves those behind. We therefore remember the WHOLE original entry,
+    with the secret ``apiKey`` VALUE replaced by its shape record (see
+    :func:`build_oc_rollback_apikey_record`):
+
+        {"baseUrl": "...", "api": "...", "models": [...],
+         "apiKey": {"kind": "plaintext"}}            # inline key
+        {"baseUrl": "...", "apiKey": {"kind": "secretref", "ref": {...}}}
+
+    Every field except the real key value is non-secret, so a stolen DB
+    still yields no usable credential. ``unlock`` substitutes the real
+    value (reconstructed client-side, or the SecretRef pointer) back into
+    ``apiKey`` and writes the entry wholesale.
+    """
+    entry = dict(original_entry)
+    raw_key = entry.get("apiKey")
+    if isinstance(raw_key, dict):
+        # apiKey is a structured pointer (e.g. {"$ref": {...}}) — a SecretRef.
+        # Store the pointer verbatim (non-secret); restore it verbatim.
+        shape = build_oc_rollback_apikey_record("secretref", ref=raw_key)
+    else:
+        # Inline string key (or absent) — plaintext shape; value dropped.
+        shape = build_oc_rollback_apikey_record("plaintext")
+    entry["apiKey"] = json.loads(shape)
+    return json.dumps(entry, separators=(",", ":"), sort_keys=True)
+
+
+def _parse_oc_rollback_entry_record(record_json: str) -> dict:
+    """Strict parse of a rollback entry record → the original entry dict
+    (with ``apiKey`` still holding its shape record).
+
+    Fail-CLOSED (decision 3): any deviation raises ``ValueError`` so the
+    caller leaves the provider on the proxy rather than risk synthesizing a
+    bad/plaintext restore. Validates: top level is a JSON object; it has an
+    ``apiKey`` that is itself an object with ``kind`` in
+    ``{"plaintext","secretref"}``; a ``secretref`` carries a ``ref`` object;
+    a ``plaintext`` carries no stray keys beyond ``kind``.
+    """
+    parsed = json.loads(record_json)  # raises ValueError on bad JSON
+    if not isinstance(parsed, dict):
+        raise ValueError("rollback entry record is not a JSON object")
+    apikey_shape = parsed.get("apiKey")
+    if not isinstance(apikey_shape, dict):
+        raise ValueError("rollback entry record missing object apiKey shape")
+    kind = apikey_shape.get("kind")
+    if kind == "plaintext":
+        if set(apikey_shape) - {"kind"}:
+            raise ValueError("plaintext apiKey shape has unexpected keys")
+    elif kind == "secretref":
+        if not isinstance(apikey_shape.get("ref"), dict) or set(apikey_shape) - {"kind", "ref"}:
+            raise ValueError("secretref apiKey shape malformed")
+    else:
+        raise ValueError(f"unknown apiKey shape kind: {kind!r}")
+    return parsed
+
+
+class OcRestore(NamedTuple):
+    """One provider's restore instruction for :func:`apply_unlock`.
+
+    Built by the CLI from the stored shard row. Carries everything needed
+    to put the original OpenClaw entry back WITHOUT the DB ever having held
+    the real key:
+
+    * ``provider`` — original provider id, e.g. ``"openai"`` (the entry
+      ``lock`` rewrote; no ``worthless-`` prefix any more).
+    * ``alias`` — globally-unique shard-row id; the proxy URL path segment.
+    * ``oc_original_base_url`` — the original address (cheap recognition).
+    * ``oc_original_api_key_json`` — the key-redacted full entry record
+      (see :func:`build_oc_rollback_entry_record`).
+    * ``plaintext_key`` — the real key reconstructed CLIENT-side
+      (shard-A ⊕ shard-B), owned by unlock and zeroed after use; ``None``
+      for the SecretRef branch (which restores a pointer, never plaintext).
+    """
+
+    provider: str
+    alias: str
+    oc_original_base_url: str | None
+    oc_original_api_key_json: str | None
+    plaintext_key: bytearray | None
 
 
 def _resolve_proxy_base_url() -> str:
@@ -1112,57 +1199,105 @@ def apply_lock(
 
 def _apply_unlock_stage_a(
     config_path: Path,
-    aliases: list[tuple[str, str]],
+    restores: list[OcRestore],
     events: list[OpenclawIntegrationEvent],
-    providers_removed: list[str],
+    providers_restored: list[str],
     providers_skipped: list[tuple[str, str]],
-) -> None:
-    """Stage A of apply_unlock: remove each worthless-* provider entry.
+) -> bool:
+    """Stage A of apply_unlock: restore each provider's ORIGINAL entry.
 
-    Mutates providers_removed / providers_skipped / events in place.
-    Extracted to keep :func:`apply_unlock` within xenon's complexity budget.
+    WOR-621 F2. F1 made ``lock`` rewrite the original entry (proxy +
+    shard-A), so the undo is no longer "remove a ``worthless-*`` decoy" — it
+    RESTORES the original entry verbatim from the key-redacted rollback
+    record (:func:`build_oc_rollback_entry_record`), offline.
+
+    Fail-CLOSED (decision 3): a corrupt/missing record, or a plaintext
+    restore with no reconstructed key, leaves the provider on the proxy and
+    is surfaced as a skip — never a silent pass, never a bad/plaintext
+    write. The reconstructed key is zeroed on every exit (decision 1).
+
+    Returns ``True`` if a write failure occurred and rollback is required.
+    Mutates providers_restored / providers_skipped / events in place.
     """
-    for provider, _alias in aliases:
-        provider_name = f"worthless-{provider}"
+    for restore in restores:
+        provider = restore.provider
+        plaintext_key = restore.plaintext_key
         try:
-            removed = _config_mod.unset_provider(config_path, provider_name)
-        except OpenclawConfigError as exc:
-            events.append(
-                OpenclawIntegrationEvent(
-                    code=OpenclawErrorCode.CONFIG_UNREADABLE,
-                    level="error",
-                    detail=f"could not read {config_path}: {exc}",
-                    extra={"provider": provider_name},
+            record = restore.oc_original_api_key_json
+            try:
+                if record is None:
+                    raise ValueError("no rollback entry record stored")
+                entry = _parse_oc_rollback_entry_record(record)
+            except ValueError as exc:
+                events.append(
+                    OpenclawIntegrationEvent(
+                        code=OpenclawErrorCode.CONFIG_UNREADABLE,
+                        level="error",
+                        detail=f"refusing to restore {provider}: invalid rollback record ({exc})",
+                        extra={"provider": provider},
+                    )
                 )
-            )
-            providers_skipped.append((provider_name, "config_unreadable"))
-            continue
-        except OSError as exc:
-            events.append(
-                OpenclawIntegrationEvent(
-                    code=OpenclawErrorCode.WRITE_FAILED,
-                    level="error",
-                    detail=f"failed to write {config_path}: {exc}",
-                    extra={"provider": provider_name},
-                )
-            )
-            providers_skipped.append((provider_name, "write_failed"))
-            continue
+                providers_skipped.append((provider, "rollback_record_invalid"))
+                continue
 
-        if removed:
-            providers_removed.append(provider_name)
-        events.append(
-            OpenclawIntegrationEvent(
-                code=OpenclawErrorCode.CONFIG_UPDATED,
-                level="info",
-                detail=(
-                    f"removed {provider_name} from {config_path}"
-                    if removed
-                    else f"{provider_name} already absent in {config_path}"
-                ),
-                extra={"provider": provider_name},
+            apikey_shape = entry["apiKey"]
+            if apikey_shape["kind"] == "secretref":
+                entry["apiKey"] = apikey_shape["ref"]
+            else:  # plaintext — substitute the client-reconstructed key
+                if plaintext_key is None:
+                    events.append(
+                        OpenclawIntegrationEvent(
+                            code=OpenclawErrorCode.CONFIG_UNREADABLE,
+                            level="error",
+                            detail=(
+                                f"refusing to restore {provider}: plaintext record "
+                                "but no reconstructed key supplied"
+                            ),
+                            extra={"provider": provider},
+                        )
+                    )
+                    providers_skipped.append((provider, "missing_plaintext_key"))
+                    continue
+                entry["apiKey"] = plaintext_key.decode("utf-8")
+
+            try:
+                _config_mod.replace_provider(config_path, provider, entry)
+            except OpenclawConfigError as exc:
+                events.append(
+                    OpenclawIntegrationEvent(
+                        code=OpenclawErrorCode.CONFIG_UNREADABLE,
+                        level="error",
+                        detail=f"could not restore {provider} in {config_path}: {exc}",
+                        extra={"provider": provider},
+                    )
+                )
+                providers_skipped.append((provider, "config_unreadable"))
+                continue
+            except OSError as exc:
+                events.append(
+                    OpenclawIntegrationEvent(
+                        code=OpenclawErrorCode.WRITE_FAILED,
+                        level="error",
+                        detail=f"failed to write {config_path}: {exc}",
+                        extra={"provider": provider},
+                    )
+                )
+                providers_skipped.append((provider, "write_failed"))
+                return True  # rollback needed
+
+            providers_restored.append(provider)
+            events.append(
+                OpenclawIntegrationEvent(
+                    code=OpenclawErrorCode.CONFIG_UPDATED,
+                    level="info",
+                    detail=f"restored {provider} in {config_path}",
+                    extra={"provider": provider},
+                )
             )
-        )
+        finally:
+            if plaintext_key is not None:
+                zero_buf(plaintext_key)
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -1171,7 +1306,7 @@ def _apply_unlock_stage_a(
 
 
 def apply_unlock(
-    aliases: list[tuple[str, str]],
+    restores: list[OcRestore],
     *,
     remove_skill: bool = True,
 ) -> OpenclawApplyResult:
@@ -1184,9 +1319,9 @@ def apply_unlock(
     restored — surfaced as structured events instead of exceptions.
 
     Args:
-        aliases: list of ``(provider, alias)`` pairs whose ``worthless-*``
-            entries should be removed from ``openclaw.json``. Same shape as
-            :func:`apply_lock` minus ``shard_a`` (we don't need it for undo).
+        restores: list of :class:`OcRestore` records — one per provider
+            whose original ``openclaw.json`` entry should be restored
+            verbatim from its key-redacted rollback record (WOR-621 F2).
         remove_skill: when True (default) sweep
             ``~/.openclaw/workspace/skills/worthless/`` too. Pass False to
             tear down only provider entries — useful for ``doctor --fix``
@@ -1246,9 +1381,7 @@ def apply_unlock(
             workspace_path=state.workspace_path,
             skill_path=None,
             providers_set=(),
-            providers_skipped=tuple(
-                (f"worthless-{provider}", "symlink_refused") for provider, _alias in aliases
-            ),
+            providers_skipped=tuple((r.provider, "symlink_refused") for r in restores),
             skill_installed=False,
             events=tuple(events),
         )
@@ -1271,8 +1404,8 @@ def apply_unlock(
                 extra={"path": str(config_path)},
             )
         )
-        for provider, _alias in aliases:
-            providers_skipped.append((f"worthless-{provider}", "config_unreadable"))
+        for r in restores:
+            providers_skipped.append((r.provider, "config_unreadable"))
         # Fall through to Stage B — skill removal doesn't touch the config.
         config_missing = True  # prevents Stage A from running
 
@@ -1295,15 +1428,43 @@ def apply_unlock(
                     extra={"path": str(config_path)},
                 )
             )
-            for provider, _alias in aliases:
-                providers_skipped.append((f"worthless-{provider}", "config_missing"))
+            for r in restores:
+                providers_skipped.append((r.provider, "config_missing"))
 
-    # ---- Stage A: remove worthless-* provider entries --------------------
+    # ---- Stage A: restore each provider's ORIGINAL entry verbatim --------
     # Skipped entirely when config_missing — providers_skipped already
     # populated above with reason="config_missing", and Stage B still runs.
     # Extracted to _apply_unlock_stage_a to keep apply_unlock within xenon.
+    # SM-2 symmetry: snapshot the config first; on a mid-restore write
+    # failure, roll back so we never leave a half-restored config.
     if not config_missing:
-        _apply_unlock_stage_a(config_path, aliases, events, providers_removed, providers_skipped)
+        try:
+            original_config_snapshot: dict | None = _config_mod.read_config(config_path)
+        except (OpenclawConfigError, OSError):
+            original_config_snapshot = None
+        rollback_needed = _apply_unlock_stage_a(
+            config_path, restores, events, providers_removed, providers_skipped
+        )
+        if rollback_needed and original_config_snapshot is not None:
+            try:
+                rollback_config(config_path, original_config_snapshot)
+            except OSError as rb_exc:
+                events.append(
+                    OpenclawIntegrationEvent(
+                        code=OpenclawErrorCode.WRITE_FAILED,
+                        level="error",
+                        detail=(
+                            f"rollback of {config_path} also failed: {rb_exc} — "
+                            "manual recovery required"
+                        ),
+                        extra={"path": str(config_path)},
+                    )
+                )
+            # Entries restored before the failure are reverted by the
+            # rollback; reflect that they are no longer in restored state.
+            for restored in list(providers_removed):
+                providers_skipped.append((restored, "rolled_back"))
+            providers_removed.clear()
 
     # ---- Stage B: uninstall skill folder ---------------------------------
     skill_uninstalled = False

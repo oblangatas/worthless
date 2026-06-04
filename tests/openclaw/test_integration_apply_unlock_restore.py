@@ -35,8 +35,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 _REAL_KEY = "sk-proj-redteam0000000000000000000000000000000000000000"
 _ORIG_BASE_URL = "https://api.openai.com/v1"
 
@@ -79,9 +77,7 @@ def test_lock_then_unlock_round_trip_byte_identical_plaintext(
     _seed_provider(config_path, "openai", _ORIG_BASE_URL, _REAL_KEY)
     pre_bytes = config_path.read_bytes()
 
-    integration.apply_lock(
-        planned_updates=[("openai", "openai-deadbeef", "shard-a-token")]
-    )
+    integration.apply_lock(planned_updates=[("openai", "openai-deadbeef", "shard-a-token")])
 
     mid = _providers(config_path)
     # F1 contract: the ORIGINAL entry is rewritten — no decoy.
@@ -96,7 +92,9 @@ def test_lock_then_unlock_round_trip_byte_identical_plaintext(
                 provider="openai",
                 alias="openai-deadbeef",
                 oc_original_base_url=_ORIG_BASE_URL,
-                oc_original_api_key_json='{"kind":"plaintext"}',
+                oc_original_api_key_json=integration.build_oc_rollback_entry_record(
+                    {"baseUrl": _ORIG_BASE_URL, "apiKey": _REAL_KEY}
+                ),
                 plaintext_key=bytearray(_REAL_KEY.encode("utf-8")),
             )
         ]
@@ -124,14 +122,10 @@ def test_unlock_restores_secretref_verbatim_never_plaintext(
         "baseUrl": _ORIG_BASE_URL,
         "apiKey": {"$ref": secret_ref},
     }
-    config_path.write_text(
-        json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    config_path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     pre_bytes = config_path.read_bytes()
 
-    integration.apply_lock(
-        planned_updates=[("openai", "openai-deadbeef", "shard-a-token")]
-    )
+    integration.apply_lock(planned_updates=[("openai", "openai-deadbeef", "shard-a-token")])
 
     integration.apply_unlock(
         restores=[
@@ -139,8 +133,8 @@ def test_unlock_restores_secretref_verbatim_never_plaintext(
                 provider="openai",
                 alias="openai-deadbeef",
                 oc_original_base_url=_ORIG_BASE_URL,
-                oc_original_api_key_json=json.dumps(
-                    {"kind": "secretref", "ref": secret_ref}, separators=(",", ":")
+                oc_original_api_key_json=integration.build_oc_rollback_entry_record(
+                    {"baseUrl": _ORIG_BASE_URL, "apiKey": {"$ref": secret_ref}}
                 ),
                 plaintext_key=None,
             )
@@ -157,7 +151,7 @@ def test_unlock_restores_secretref_verbatim_never_plaintext(
 def test_unlock_corrupt_rollback_record_fails_safe(
     openclaw_present: dict[str, Path],
 ) -> None:
-    """Decision 3: a corrupt/unparseable rollback record at unlock → fail
+    """Decision 3: a corrupt/unparsable rollback record at unlock → fail
     safe. Leave the entry on the proxy (never synthesize plaintext), and
     surface the failure as a skip, not a silent pass.
     """
@@ -166,9 +160,7 @@ def test_unlock_corrupt_rollback_record_fails_safe(
     config_path = openclaw_present["config_path"]
     _seed_provider(config_path, "openai", _ORIG_BASE_URL, _REAL_KEY)
 
-    integration.apply_lock(
-        planned_updates=[("openai", "openai-deadbeef", "shard-a-token")]
-    )
+    integration.apply_lock(planned_updates=[("openai", "openai-deadbeef", "shard-a-token")])
     locked = _providers(config_path)
     locked_apikey = locked["openai"]["apiKey"]
 

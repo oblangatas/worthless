@@ -352,7 +352,21 @@ def _apply_openclaw_unlock(
         # Nothing to undo on the OpenClaw side — also nothing to record.
         return False
     try:
-        result = _openclaw_integration.apply_unlock(aliases=unlocked)
+        # WOR-621 F2 (G4 fills the rollback record + reconstructed key from
+        # the shard row). G1 wires the new restore-record shape so the
+        # integration layer compiles; a record-less restore fail-safe-skips
+        # (leaves the entry on the proxy) rather than crashing.
+        restores = [
+            _openclaw_integration.OcRestore(
+                provider=provider,
+                alias=alias,
+                oc_original_base_url=None,
+                oc_original_api_key_json=None,
+                plaintext_key=None,
+            )
+            for provider, alias in unlocked
+        ]
+        result = _openclaw_integration.apply_unlock(restores=restores)
     except OpenclawIntegrationError as exc:
         logger.warning("openclaw apply_unlock raised unexpectedly: %s", exc)
         _emit_openclaw_unlock_failure(console, home, len(unlocked), str(exc))
