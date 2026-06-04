@@ -33,7 +33,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, NamedTuple
+from typing import Literal
 from urllib.parse import urlsplit
 
 # pwd is POSIX-only. worthless refuses native Windows (WRTLS-110) but the
@@ -157,7 +157,8 @@ def _parse_oc_rollback_entry_record(record_json: str) -> dict:
     return parsed
 
 
-class OcRestore(NamedTuple):
+@dataclass(frozen=True)
+class OcRestore:
     """One provider's restore instruction for :func:`apply_unlock`.
 
     Built by the CLI from the stored shard row. Carries everything needed
@@ -167,19 +168,23 @@ class OcRestore(NamedTuple):
     * ``provider`` — original provider id, e.g. ``"openai"`` (the entry
       ``lock`` rewrote; no ``worthless-`` prefix any more).
     * ``alias`` — globally-unique shard-row id; the proxy URL path segment.
-    * ``oc_original_base_url`` — the original address (cheap recognition).
+    * ``oc_original_base_url`` — the original address. G3 light-recognition
+      scaffolding; not read by Stage A in G1 (the address comes from the
+      full entry record below).
     * ``oc_original_api_key_json`` — the key-redacted full entry record
       (see :func:`build_oc_rollback_entry_record`).
     * ``plaintext_key`` — the real key reconstructed CLIENT-side
       (shard-A ⊕ shard-B), owned by unlock and zeroed after use; ``None``
       for the SecretRef branch (which restores a pointer, never plaintext).
+      ``repr=False`` (SR-04): the key must never render in a log line or a
+      traceback frame, once G4 populates it.
     """
 
     provider: str
     alias: str
     oc_original_base_url: str | None
     oc_original_api_key_json: str | None
-    plaintext_key: bytearray | None
+    plaintext_key: bytearray | None = field(repr=False)
 
 
 def _resolve_proxy_base_url() -> str:
@@ -1258,7 +1263,22 @@ def _apply_unlock_stage_a(
                     )
                     providers_skipped.append((provider, "missing_plaintext_key"))
                     continue
-                entry["apiKey"] = plaintext_key.decode("utf-8")
+                try:
+                    entry["apiKey"] = plaintext_key.decode("utf-8")
+                except UnicodeDecodeError:
+                    events.append(
+                        OpenclawIntegrationEvent(
+                            code=OpenclawErrorCode.CONFIG_UNREADABLE,
+                            level="error",
+                            detail=(
+                                f"refusing to restore {provider}: reconstructed key "
+                                "is not valid UTF-8 (corrupt shard?)"
+                            ),
+                            extra={"provider": provider},
+                        )
+                    )
+                    providers_skipped.append((provider, "rollback_record_invalid"))
+                    continue
 
             try:
                 _config_mod.replace_provider(config_path, provider, entry)
@@ -1328,11 +1348,10 @@ def apply_unlock(
             paths that want to refresh providers without reinstalling.
 
     Returns:
-        :class:`OpenclawApplyResult`. ``providers_set`` lists the
-        ``worthless-*`` entries we actually removed (we reuse the field
-        with "providers we changed" semantics — symmetric with
-        ``apply_lock``); ``providers_skipped`` lists ones we couldn't
-        remove and the reason.
+        :class:`OpenclawApplyResult`. ``providers_set`` lists the original
+        provider entries we restored (we reuse the field with "providers we
+        changed" semantics — symmetric with ``apply_lock``);
+        ``providers_skipped`` lists ones we couldn't restore and the reason.
 
     Spec: ``engineering/research/openclaw/WOR-431-phase-2-spec.md``
     §"Phase 2.c — ``unlock`` integration", failure-mode rows RT-01/02/03,
@@ -1348,7 +1367,7 @@ def apply_unlock(
         )
 
     events: list[OpenclawIntegrationEvent] = []
-    providers_removed: list[str] = []
+    providers_restored: list[str] = []
     providers_skipped: list[tuple[str, str]] = []
 
     config_path = _resolve_active_config_path(state, state.home_dir)
@@ -1443,7 +1462,7 @@ def apply_unlock(
         except (OpenclawConfigError, OSError):
             original_config_snapshot = None
         rollback_needed = _apply_unlock_stage_a(
-            config_path, restores, events, providers_removed, providers_skipped
+            config_path, restores, events, providers_restored, providers_skipped
         )
         if rollback_needed and original_config_snapshot is not None:
             try:
@@ -1462,9 +1481,9 @@ def apply_unlock(
                 )
             # Entries restored before the failure are reverted by the
             # rollback; reflect that they are no longer in restored state.
-            for restored in list(providers_removed):
+            for restored in list(providers_restored):
                 providers_skipped.append((restored, "rolled_back"))
-            providers_removed.clear()
+            providers_restored.clear()
 
     # ---- Stage B: uninstall skill folder ---------------------------------
     skill_uninstalled = False
@@ -1498,7 +1517,7 @@ def apply_unlock(
         config_path=config_path,
         workspace_path=workspace,
         skill_path=skill_path,
-        providers_set=tuple(providers_removed),
+        providers_set=tuple(providers_restored),
         providers_skipped=tuple(providers_skipped),
         skill_installed=skill_uninstalled,
         events=tuple(events),
