@@ -132,7 +132,7 @@ async def _migrate_oc_rollback_columns(db: aiosqlite.Connection, shard_columns: 
     """
     _OC_MIGRATIONS = {
         "oc_original_base_url": "ALTER TABLE shards ADD COLUMN oc_original_base_url TEXT",
-        "oc_original_api_key_json": ("ALTER TABLE shards ADD COLUMN oc_original_api_key_json TEXT"),
+        "oc_original_api_key_json": "ALTER TABLE shards ADD COLUMN oc_original_api_key_json TEXT",
     }
     for col_name, stmt in _OC_MIGRATIONS.items():
         if col_name not in shard_columns:
