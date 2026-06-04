@@ -1,16 +1,12 @@
 """Durable write-ahead spend ledger (WOR-659).
 
-A request HOLDs its estimated cost in ``pending_charges`` before the upstream
-call, then SETTLEs to the actual amount after. A crash between hold and settle
-leaves the hold standing — it counts against the cap (fail-closed) and is reaped
-by :meth:`sweep` at its own estimate, never lost.
-
-All SQL runs on the INJECTED connection (never a fresh ``aiosqlite.connect``) so
-it inherits ``busy_timeout`` and serialises with the proxy's other writes. A
-per-instance ``asyncio.Lock`` serialises this ledger's own transactions so
-concurrent callers sharing the one connection can't collide on ``BEGIN
-IMMEDIATE`` (``cannot start a transaction within a transaction``) — mirroring the
-rules engine's ``_reserve_lock``.
+A request HOLDs its estimated cost before the upstream call, then SETTLEs to the
+actual after; a crash leaves the hold standing (fail-closed) and :meth:`sweep`
+bills it at estimate, never lost. Runs on the injected proxy connection (never a
+fresh one) and serialises its own transactions with an ``asyncio.Lock`` so
+concurrent callers can't collide on ``BEGIN IMMEDIATE``. Every transaction rolls
+back on ANY exit — including ``asyncio.CancelledError`` (a client disconnect),
+which is a ``BaseException`` and would otherwise leave the connection mid-txn.
 """
 
 from __future__ import annotations
@@ -33,9 +29,7 @@ class SpendLedger:
 
     def __init__(self, db: aiosqlite.Connection) -> None:
         self._db = db
-        # Serialises this ledger's transactions on the shared connection so
-        # concurrent BEGIN IMMEDIATE calls can't collide.
-        self._lock = asyncio.Lock()
+        self._lock = asyncio.Lock()  # serialise our txns so BEGIN IMMEDIATE can't collide
 
     async def hold(
         self,
@@ -46,14 +40,9 @@ class SpendLedger:
         provider: str,
         model: str | None = None,
     ) -> str | None:
-        """Reserve *estimate* against *cap* in one transaction.
-
-        Returns a fresh handle, or ``None`` if ``committed + held + estimate``
-        would exceed the cap (deny — nothing is written). *estimate* and *cap*
-        are token-denominated; spending exactly to the cap is allowed (``>``).
-        """
+        """Reserve *estimate* against *cap*; return a handle, or None if it would
+        exceed the cap (deny, nothing written). Token-denominated; to-cap is OK."""
         if estimate < 0:
-            # A negative reservation would buy back cap headroom — never legitimate.
             raise ValueError("SpendLedger.hold: estimate must be non-negative")
         async with self._lock:
             await self._db.execute("BEGIN IMMEDIATE")
@@ -83,23 +72,15 @@ class SpendLedger:
                 )
                 await self._db.commit()
                 return handle
-            except BaseException:  # noqa: BLE001
-                # Roll back the open transaction on ANY abnormal exit — including
-                # asyncio.CancelledError (a client disconnect), which is a
-                # BaseException and would otherwise leave the transaction dangling
-                # and break the next request ("transaction within transaction").
+            except BaseException:  # noqa: BLE001 — roll back open txn on any exit (incl. cancel)
                 await self._db.rollback()
                 raise
 
     async def settle(self, handle: str, actual: int) -> None:
         """Atomically swap the hold for one ``spend_log`` row at *actual*.
-
-        Idempotent: if the hold is already gone (settled or swept), this is a
-        no-op — so it is safe to call on every request exit path exactly once.
-        """
+        Idempotent: a no-op if the hold is gone — safe once on every exit path."""
         if actual < 0:
-            # A negative charge would drive the committed SUM down and poison the
-            # running cap total for every future request on this alias.
+            # A negative charge would poison the committed SUM for this alias.
             raise ValueError("SpendLedger.settle: actual must be non-negative")
         async with self._lock:
             await self._db.execute("BEGIN IMMEDIATE")
@@ -120,36 +101,25 @@ class SpendLedger:
                     (alias, actual, model, provider),
                 )
                 await self._db.commit()
-            except BaseException:  # noqa: BLE001
-                # Roll back the open transaction on ANY abnormal exit — including
-                # asyncio.CancelledError (a client disconnect), which is a
-                # BaseException and would otherwise leave the transaction dangling
-                # and break the next request ("transaction within transaction").
+            except BaseException:  # noqa: BLE001 — roll back open txn on any exit (incl. cancel)
                 await self._db.rollback()
                 raise
 
     async def refund(self, handle: str) -> None:
-        """Drop the hold with NO ``spend_log`` write (pre-spend failure path).
-
-        Idempotent — deleting an absent handle is a no-op.
-        """
+        """Drop the hold with no ``spend_log`` write (pre-spend failure). Idempotent."""
         async with self._lock:
             try:
                 await self._db.execute("DELETE FROM pending_charges WHERE handle = ?", (handle,))
                 await self._db.commit()
-            except BaseException:  # noqa: BLE001
-                await self._db.rollback()  # cancel-safe (see hold/settle/sweep)
+            except BaseException:  # noqa: BLE001 — roll back open txn on any exit (incl. cancel)
+                await self._db.rollback()
                 raise
 
     async def sweep(self, max_age_seconds: float) -> int:
-        """Settle every hold older than *max_age_seconds* at its own estimate.
-
-        Fail-closed: a crash-orphaned hold is BILLED (at its estimate), never
-        refunded — so a lost request over-charges by at most one estimate rather
-        than letting spend escape the cap. Returns the number of holds reaped.
-        """
+        """Settle holds older than *max_age_seconds* at their estimate (fail-closed:
+        bill orphans, never refund). Returns the count reaped."""
         if max_age_seconds < 0:
-            # A negative age yields a FUTURE cutoff that would bill fresh holds.
+            # A negative age -> future cutoff that would bill fresh holds.
             raise ValueError("SpendLedger.sweep: max_age_seconds must be non-negative")
         async with self._lock:
             await self._db.execute("BEGIN IMMEDIATE")
@@ -171,10 +141,6 @@ class SpendLedger:
                     )
                 await self._db.commit()
                 return len(stale)
-            except BaseException:  # noqa: BLE001
-                # Roll back the open transaction on ANY abnormal exit — including
-                # asyncio.CancelledError (a client disconnect), which is a
-                # BaseException and would otherwise leave the transaction dangling
-                # and break the next request ("transaction within transaction").
+            except BaseException:  # noqa: BLE001 — roll back open txn on any exit (incl. cancel)
                 await self._db.rollback()
                 raise
