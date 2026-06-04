@@ -17,6 +17,8 @@ this vs looking the provider up from ``shards``.
 
 from __future__ import annotations
 
+import asyncio
+
 import aiosqlite
 import pytest
 
@@ -149,6 +151,26 @@ async def test_sweep_settles_stale_holds_at_estimate_never_refunds(tmp_path) -> 
 
 
 @pytest.mark.asyncio
+async def test_concurrent_holds_serialise_and_respect_cap(tmp_path) -> None:
+    """Two concurrent holds on ONE connection must not crash and must respect
+    the cap. Without internal serialisation, the second BEGIN IMMEDIATE raises
+    'cannot start a transaction within a transaction' — the proxy's real shape."""
+    db = await _open(tmp_path)
+    try:
+        ledger = SpendLedger(db)
+        # cap 100, estimate 60 each → at most ONE may win.
+        results = await asyncio.gather(
+            ledger.hold("k1", estimate=60, cap=100, provider="openai"),
+            ledger.hold("k1", estimate=60, cap=100, provider="openai"),
+        )
+        granted = [h for h in results if h is not None]
+        assert len(granted) == 1  # exactly one grant; no crash, no double-reserve
+        assert await _held(db, "k1") == 60
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
 async def test_hold_rejects_negative_estimate(tmp_path) -> None:
     """A negative reservation would buy back cap headroom — reject it."""
     db = await _open(tmp_path)
@@ -190,5 +212,126 @@ async def test_ledger_uses_injected_connection_not_fresh_connect(tmp_path, monke
         h = await ledger.hold("k1", estimate=10, cap=100, provider="openai")
         await ledger.settle(h, actual=5)
         assert opened == []  # the ledger opened NO new connection
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_hold_allows_spend_exactly_to_cap(tmp_path) -> None:
+    """committed + held + estimate == cap MUST succeed — the `>` (not `>=`)
+    boundary is where off-by-one flips fail-closed into fail-open."""
+    db = await _open(tmp_path)
+    try:
+        ledger = SpendLedger(db)
+        assert await ledger.hold("k1", estimate=100, cap=100, provider="openai") is not None
+        assert await _held(db, "k1") == 100
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_hold_alias_isolation(tmp_path) -> None:
+    """A hold on one alias must not consume another's cap."""
+    db = await _open(tmp_path)
+    try:
+        ledger = SpendLedger(db)
+        await ledger.hold("k2", estimate=90, cap=100, provider="openai")
+        assert await ledger.hold("k1", estimate=90, cap=100, provider="openai") is not None
+        assert await _held(db, "k1") == 90 and await _held(db, "k2") == 90
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_settle_persists_real_model_in_spend_log(tmp_path) -> None:
+    """The settled row carries the hold's model/provider (every other test uses
+    model=None, so a wrong-column write would slip past)."""
+    db = await _open(tmp_path)
+    try:
+        ledger = SpendLedger(db)
+        h = await ledger.hold("k1", estimate=10, cap=100, provider="anthropic", model="claude-x")
+        await ledger.settle(h, actual=8)
+        cur = await db.execute("SELECT model, provider FROM spend_log WHERE key_alias='k1'")
+        model, provider = await cur.fetchone()
+        assert model == "claude-x" and provider == "anthropic"
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_refund_absent_handle_is_noop(tmp_path) -> None:
+    """Refunding a never-issued handle does not raise and writes nothing."""
+    db = await _open(tmp_path)
+    try:
+        ledger = SpendLedger(db)
+        await ledger.refund("never-existed")
+        assert await _held(db, "k1") == 0 and await _committed(db, "k1") == 0
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_sweep_returns_zero_when_nothing_stale(tmp_path) -> None:
+    db = await _open(tmp_path)
+    try:
+        ledger = SpendLedger(db)
+        await ledger.hold("k1", estimate=10, cap=100, provider="openai")  # fresh
+        assert await ledger.sweep(max_age_seconds=60) == 0
+        assert await _held(db, "k1") == 10  # fresh hold untouched
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_sweep_settles_multiple_stale_holds(tmp_path) -> None:
+    db = await _open(tmp_path)
+    try:
+        for h in ("a", "b", "c"):
+            await db.execute(
+                "INSERT INTO pending_charges (handle, key_alias, estimate, created_at, provider) "
+                "VALUES (?, 'k1', 5, datetime('now','-1 hour'), 'openai')",
+                (h,),
+            )
+        await db.commit()
+        ledger = SpendLedger(db)
+        assert await ledger.sweep(max_age_seconds=60) == 3
+        assert await _committed(db, "k1") == 15  # 3 x 5, billed at estimate
+        assert await _held(db, "k1") == 0
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_sweep_rejects_negative_max_age(tmp_path) -> None:
+    """A negative age yields a future cutoff that would bill fresh holds."""
+    db = await _open(tmp_path)
+    try:
+        ledger = SpendLedger(db)
+        await ledger.hold("k1", estimate=10, cap=100, provider="openai")  # fresh
+        with pytest.raises(ValueError):
+            await ledger.sweep(max_age_seconds=-5)
+        assert await _held(db, "k1") == 10  # fresh hold NOT billed
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_hold_rolls_back_on_db_error(tmp_path, monkeypatch) -> None:
+    """A DB error mid-transaction rolls back — no orphan pending row lands."""
+    db = await _open(tmp_path)
+    try:
+        ledger = SpendLedger(db)
+        real_execute = db.execute
+
+        async def boom(sql, *a, **k):
+            if sql.startswith("INSERT INTO pending_charges"):
+                raise aiosqlite.OperationalError("disk I/O error")
+            return await real_execute(sql, *a, **k)
+
+        monkeypatch.setattr(db, "execute", boom)
+        with pytest.raises(aiosqlite.OperationalError):
+            await ledger.hold("k1", estimate=10, cap=100, provider="openai")
+        monkeypatch.undo()
+        assert await _held(db, "k1") == 0  # rolled back, no orphan
     finally:
         await db.close()
