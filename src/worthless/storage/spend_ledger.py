@@ -83,7 +83,11 @@ class SpendLedger:
                 )
                 await self._db.commit()
                 return handle
-            except Exception:
+            except BaseException:  # noqa: BLE001
+                # Roll back the open transaction on ANY abnormal exit — including
+                # asyncio.CancelledError (a client disconnect), which is a
+                # BaseException and would otherwise leave the transaction dangling
+                # and break the next request ("transaction within transaction").
                 await self._db.rollback()
                 raise
 
@@ -116,7 +120,11 @@ class SpendLedger:
                     (alias, actual, model, provider),
                 )
                 await self._db.commit()
-            except Exception:
+            except BaseException:  # noqa: BLE001
+                # Roll back the open transaction on ANY abnormal exit — including
+                # asyncio.CancelledError (a client disconnect), which is a
+                # BaseException and would otherwise leave the transaction dangling
+                # and break the next request ("transaction within transaction").
                 await self._db.rollback()
                 raise
 
@@ -126,8 +134,12 @@ class SpendLedger:
         Idempotent — deleting an absent handle is a no-op.
         """
         async with self._lock:
-            await self._db.execute("DELETE FROM pending_charges WHERE handle = ?", (handle,))
-            await self._db.commit()
+            try:
+                await self._db.execute("DELETE FROM pending_charges WHERE handle = ?", (handle,))
+                await self._db.commit()
+            except BaseException:  # noqa: BLE001
+                await self._db.rollback()  # cancel-safe (see hold/settle/sweep)
+                raise
 
     async def sweep(self, max_age_seconds: float) -> int:
         """Settle every hold older than *max_age_seconds* at its own estimate.
@@ -159,6 +171,10 @@ class SpendLedger:
                     )
                 await self._db.commit()
                 return len(stale)
-            except Exception:
+            except BaseException:  # noqa: BLE001
+                # Roll back the open transaction on ANY abnormal exit — including
+                # asyncio.CancelledError (a client disconnect), which is a
+                # BaseException and would otherwise leave the transaction dangling
+                # and break the next request ("transaction within transaction").
                 await self._db.rollback()
                 raise
