@@ -92,6 +92,8 @@ CREATE TABLE IF NOT EXISTS pending_charges (
     handle     TEXT PRIMARY KEY,
     key_alias  TEXT NOT NULL,
     estimate   INTEGER NOT NULL,
+    provider   TEXT NOT NULL,
+    model      TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -228,13 +230,22 @@ async def _migrate_pending_charges(db: aiosqlite.Connection) -> None:
     await db.executescript(
         "CREATE TABLE IF NOT EXISTS pending_charges ("
         " handle TEXT PRIMARY KEY, key_alias TEXT NOT NULL,"
-        " estimate INTEGER NOT NULL,"
+        " estimate INTEGER NOT NULL, provider TEXT NOT NULL, model TEXT,"
         " created_at TEXT NOT NULL DEFAULT (datetime('now')));"
         "CREATE INDEX IF NOT EXISTS idx_pending_charges_alias"
         " ON pending_charges (key_alias);"
         "CREATE INDEX IF NOT EXISTS idx_pending_charges_created"
         " ON pending_charges (created_at);"
     )
+    # Add the settle-metadata columns to a pre-existing (initial-shape) table.
+    cur = await db.execute("PRAGMA table_info(pending_charges)")
+    cols = {row[1] for row in await cur.fetchall()}
+    if "provider" not in cols:
+        await db.execute(
+            "ALTER TABLE pending_charges ADD COLUMN provider TEXT NOT NULL DEFAULT 'openai'"
+        )
+    if "model" not in cols:
+        await db.execute("ALTER TABLE pending_charges ADD COLUMN model TEXT")
     await db.commit()
 
 

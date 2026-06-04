@@ -43,7 +43,7 @@ async def test_pending_charges_has_expected_columns(tmp_path) -> None:
         await db.executescript(SCHEMA)
         cur = await db.execute("PRAGMA table_info(pending_charges)")
         cols = {row[1]: row for row in await cur.fetchall()}
-    assert set(cols) == {"handle", "key_alias", "estimate", "created_at"}
+    assert set(cols) == {"handle", "key_alias", "estimate", "provider", "model", "created_at"}
     # PRAGMA table_info column index 5 is the primary-key flag.
     assert cols["handle"][5] == 1
 
