@@ -50,6 +50,28 @@ def test_skill_md_has_minimum_yaml_frontmatter_for_openclaw_discovery() -> None:
     assert "- worthless" in frontmatter, "bins must include 'worthless'"
 
 
+def test_skill_md_is_real_not_placeholder_stub() -> None:
+    """WOR-664 (F13a): the installed skill must be the REAL OpenClaw skill,
+    never the Phase-2.a v0.0.0 placeholder. Regression guard so the stub bug
+    — a do-nothing skill shipping to users — can never recur.
+    """
+    from worthless.openclaw import skill
+    from worthless.openclaw.skill import _SKILL_ASSETS_DIR, _SKILL_FILE
+
+    body = (_SKILL_ASSETS_DIR / _SKILL_FILE).read_text(encoding="utf-8")
+
+    # Not a stub.
+    assert "placeholder" not in body.lower(), "installed skill is still a placeholder stub"
+    assert "0.0.0" not in skill.current_version(), "installed skill still carries the stub version"
+
+    # Teaches the agent the core commands (the whole point of the real body).
+    for cmd in ("worthless lock", "worthless wrap", "worthless up", "worthless status"):
+        assert cmd in body, f"skill must teach `{cmd}`"
+
+    # States the honest LLM-key-only scope (not a general secret scanner).
+    assert "sk-ant-" in body and "AIza" in body, "skill must state the LLM-key scope"
+
+
 def test_current_version_returns_nonempty_string() -> None:
     """current_version() reads the embedded SKILL.md placeholder and
     returns its declared version. Phase 3 will replace the body; the
