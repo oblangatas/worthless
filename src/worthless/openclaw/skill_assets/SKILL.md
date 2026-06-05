@@ -9,18 +9,24 @@ metadata:
       bins:
         - worthless
     install:
+      - id: worthless-sh
+        kind: shell
+        command: curl -sSL https://worthless.sh | sh
+        bins:
+          - worthless
+        label: Install Worthless (recommended — worthless.sh)
       - id: uv
         kind: shell
         command: uv tool install worthless
         bins:
           - worthless
-        label: Install worthless (uv — recommended)
+        label: Install Worthless (uv)
       - id: pip
         kind: shell
         command: pip install worthless
         bins:
           - worthless
-        label: Install worthless (pip)
+        label: Install Worthless (pip)
 ---
 
 # Worthless — make leaked LLM keys worthless
@@ -90,8 +96,8 @@ Set rules per key so a runaway agent can't burn the budget:
 
 - Confirm with the user before running `worthless lock` — it rewrites
   `.env`. Show what was detected first (`worthless scan --json`).
-- If `worthless` isn't on PATH, install it via the `install` block above
-  (`uv tool install worthless`) before locking.
+- If `worthless` isn't on PATH, install it first (the `install` block above):
+  `curl -sSL https://worthless.sh | sh` (uv/pip are fallbacks).
 - Never print a reconstructed key or shard-A; surface the `--json` error
   `code` on failure, not raw key material.
 
