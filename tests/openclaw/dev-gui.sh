@@ -40,6 +40,30 @@ OC_IMAGE=ghcr.io/openclaw/openclaw:2026.5.3-1
 UV_IMAGE=ghcr.io/astral-sh/uv:0.11.7
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
+# WOR-664: plant the operator's OpenRouter key + baseUrl + a real model so
+# the GUI chat works immediately (skips the manual "Settings → add key" dance).
+# Key comes from $OPENROUTER_API_KEY in the operator's shell — never hardcoded,
+# never committed. The token transits a tmp file inside the container only.
+_wire_provider() {
+  if [ -z "${OPENROUTER_API_KEY:-}" ]; then
+    echo "(skipping provider wire-up: \$OPENROUTER_API_KEY not set in shell)"
+    return 0
+  fi
+  # Point OpenAI's baseUrl at OpenRouter so the openai provider plugin
+  # actually talks to OpenRouter. Use a real OpenRouter-served default model.
+  docker exec "$NAME" node openclaw.mjs config set models.providers.openai \
+    '{"baseUrl":"https://openrouter.ai/api/v1","api":"openai-completions","models":[]}' \
+    --strict-json >/dev/null
+  docker exec "$NAME" node openclaw.mjs config set agents.defaults.model.primary \
+    openai/gpt-4o-mini >/dev/null
+  # Paste the token non-interactively (paste-token reads stdin).
+  printf '%s' "$OPENROUTER_API_KEY" \
+    | docker exec -i "$NAME" node openclaw.mjs models auth paste-token \
+        --provider openai --profile-id openai:openrouter >/dev/null \
+    && echo "  wired: OpenRouter key + baseUrl + default model openai/gpt-4o-mini" \
+    || echo "  ! provider wire-up failed (the chat will work after you add a key in Settings)"
+}
+
 _url() {
   # WOR-664: do NOT use `openclaw.mjs config get gateway` — it redacts the
   # token to the literal "__OPENCLAW_REDACTED__" by design (good safety
@@ -76,6 +100,7 @@ DF
     docker exec "$NAME" sh -c 'mkdir -p /home/node/.openclaw/workspace/skills/worthless'
     docker cp "$ROOT/src/worthless/openclaw/skill_assets/SKILL.md" \
       "$NAME:/home/node/.openclaw/workspace/skills/worthless/SKILL.md"
+    _wire_provider
     "$0" open
     ;;
   open)
@@ -97,6 +122,7 @@ DF
       docker exec "$NAME" node openclaw.mjs config get gateway >/dev/null 2>&1 && break
       sleep 2
     done
+    _wire_provider
     "$0" open
     ;;
   stop)
