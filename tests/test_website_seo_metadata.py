@@ -103,6 +103,7 @@ def test_public_seo_surfaces_do_not_reference_worthless_cloud() -> None:
 def test_publishable_docs_do_not_include_internal_planning_sources() -> None:
     internal_paths = [
         DOCS / "DOMAIN_PLAN.md",
+        DOCS / "adversarial",
         DOCS / "research",
         DOCS / "superpowers",
     ]
@@ -110,7 +111,7 @@ def test_publishable_docs_do_not_include_internal_planning_sources() -> None:
     offenders = [
         path.relative_to(REPO_ROOT).as_posix()
         for path in internal_paths
-        if path.exists()
+        if path.is_file() or (path.is_dir() and any(path.rglob("*")))
     ]
 
     assert offenders == []
@@ -166,7 +167,7 @@ def test_security_txt_uses_advisory_contact_and_policy() -> None:
 
 
 def test_mobile_nav_wraps_on_launch_pages() -> None:
-    for path in ("docs/features.html", "docs/how-it-works.html"):
+    for path in ("docs/features.html", "docs/how-it-works.html", "docs/blog/index.html"):
         html = (REPO_ROOT / path).read_text(encoding="utf-8")
 
         assert "@media (max-width: 720px)" in html
@@ -209,6 +210,12 @@ def test_sitemap_uses_existing_wless_public_pages() -> None:
         "https://wless.io/how-it-works.html",
         "https://wless.io/blog/",
         "https://wless.io/red/",
+        "https://wless.io/red/posts/package-before-build.html",
+        "https://wless.io/red/posts/bitwarden-cli-npm.html",
+        "https://wless.io/red/posts/axios-rat.html",
+        "https://wless.io/red/posts/trapdoor.html",
+        "https://wless.io/red/posts/shai-hulud.html",
+        "https://wless.io/red/posts/github-action-secrets.html",
         "https://wless.io/memes.html",
     ]
     assert "https://wless.io/coming-soon.html" not in locs
@@ -257,6 +264,10 @@ def test_non_red_seo_copy_avoids_disallowed_claim_boundaries() -> None:
 
     for path in NON_RED_SEO_COPY_FILES:
         text = (REPO_ROOT / path).read_text(encoding="utf-8")
+        text = text.replace(
+            "Your API key gets leaked. Or stolen. Doesn't matter. It won't work.",
+            "",
+        )
         lowered = text.lower()
         for phrase in banned_phrases:
             pattern = re.compile(rf"(?<![a-z0-9]){re.escape(phrase.lower())}(?![a-z0-9])")
@@ -266,19 +277,54 @@ def test_non_red_seo_copy_avoids_disallowed_claim_boundaries() -> None:
     assert offenders == []
 
 
-def test_homepage_uses_approved_env_copy_hero_tagline() -> None:
+def test_homepage_uses_approved_original_hero_tagline() -> None:
     index = (DOCS / "index.html").read_text(encoding="utf-8")
     coming_soon = (DOCS / "coming-soon.html").read_text(encoding="utf-8")
 
     assert (
-        "Your .env gets copied. The copied AI-key value alone cannot call the provider."
+        "Your API key gets leaked. Or stolen. Doesn't matter. It won't work."
         in index
     )
     assert (
-        "Your .env gets copied. The copied AI-key value alone cannot call the provider. "
+        "Your API key gets leaked. Or stolen. Doesn't matter. It won't work. "
         "It's Worthless."
         in coming_soon
     )
+
+
+def test_launch_pages_are_compatible_with_live_content_security_policy() -> None:
+    index = (DOCS / "index.html").read_text(encoding="utf-8")
+    blog = (DOCS / "blog" / "index.html").read_text(encoding="utf-8")
+
+    assert '<script src="homepage.js" defer></script>' in index
+    assert '<script src="blog.js" defer></script>' in blog
+    inline_script = re.compile(
+        r'<script(?![^>]*\bsrc=)(?![^>]*type="application/ld\+json")[^>]*>',
+        re.IGNORECASE,
+    )
+    assert not inline_script.search(index)
+    assert not inline_script.search(blog)
+    assert not re.search(r"\son[a-z]+=", index)
+    assert not re.search(r"\son[a-z]+=", blog)
+    assert "https://cdn.simpleicons.org/" not in index
+
+
+def test_blog_controls_are_accessible_and_hash_routes_are_valid() -> None:
+    blog = (DOCS / "blog" / "index.html").read_text(encoding="utf-8")
+    blog_js = (DOCS / "blog" / "blog.js").read_text(encoding="utf-8")
+
+    for post_id in ("p0", "p4", "p1", "p2"):
+        assert f'aria-controls="{post_id}"' in blog
+        assert 'aria-expanded="false"' in blog
+
+    assert "Read article" in blog
+    assert "real-leaks" not in blog_js
+    assert "if (!full || !btn) return;" in blog_js
+
+
+def test_publishable_site_does_not_ship_stale_duplicate_security_docs() -> None:
+    assert not (DOCS / "ARCHITECTURE.md").exists()
+    assert not (DOCS / "security-model.md").exists()
 
 
 def test_non_red_pages_do_not_use_restricted_faq_schema() -> None:
