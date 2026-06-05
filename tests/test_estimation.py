@@ -371,6 +371,36 @@ def test_unknown_and_nonstring_text_blocks_counted_by_length() -> None:
     assert unknown > 3000
 
 
+def test_unexpected_scalar_content_counted_not_dropped() -> None:
+    """A message `content` that is an unexpected scalar (int/bool) is serialised and
+    counted (fail-high), not silently dropped to 0 — CodeRabbit on #277."""
+    # content is a bare scalar (not str/list/dict) — exercises the fail-high path
+    est = estimate_request_tokens(
+        _body({"messages": [{"role": "user", "content": 10**18}], "max_tokens": 0}),
+        max_output_ceiling=_CEIL,
+    )
+    assert est >= 5  # ~19 serialised chars / 2, well above the never-0 floor
+
+
+def test_empty_valid_request_never_zero() -> None:
+    """A valid but empty request (no content, max_tokens=0) still estimates >=1 — the
+    'never 0' invariant holds for valid payloads too, not just malformed ones."""
+    assert (
+        estimate_request_tokens(_body({"messages": [], "max_tokens": 0}), max_output_ceiling=_CEIL)
+        == 1
+    )
+
+
+def test_absent_fields_do_not_inflate() -> None:
+    """Genuinely absent system/prompt/input stay at 0 chars — the fail-high serialise
+    path must not count a missing field as the string 'null'."""
+    bare = estimate_request_tokens(
+        _body({"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1}),
+        max_output_ceiling=_CEIL,
+    )
+    assert bare < 20  # ~1 input token + 1 output token, no phantom 'null' chars
+
+
 def test_top_level_prompt_and_input_counted() -> None:
     """Legacy `prompt` / Responses-API `input` at the top level are charged."""
     for key in ("prompt", "input"):

@@ -30,8 +30,10 @@ def _walk_content(value: Any) -> tuple[int, int]:
         return len(value), 0
     if isinstance(value, dict):
         value = [value]  # a single content block sent as an object, not a list
+    if value is None:
+        return 0, 0  # genuinely absent field
     if not isinstance(value, list):
-        return 0, 0
+        return len(json.dumps(value)), 0  # unexpected scalar → fail high, count serialised
     chars = images = 0
     for block in value:
         if isinstance(block, str):
@@ -103,4 +105,4 @@ def estimate_request_tokens(body: bytes, *, max_output_ceiling: int) -> int:
     chars, images = _count_chars_and_images(payload)
     input_tokens = math.ceil(chars / _CHARS_PER_TOKEN) + images * _IMAGE_BLOCK_TOKENS
     n, max_tokens = _resolve_output_units(payload, max_output_ceiling)
-    return input_tokens + n * max_tokens
+    return max(input_tokens + n * max_tokens, 1)  # never 0, even for an empty valid request
