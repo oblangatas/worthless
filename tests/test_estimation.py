@@ -342,6 +342,35 @@ def test_dict_shaped_content_is_counted() -> None:
     assert est > 10_000  # not the ~1 the dict-content bluff used to return
 
 
+def test_unknown_and_nonstring_text_blocks_counted_by_length() -> None:
+    """A text block with a NON-string `text`, and unknown block types, fall to the
+    serialised-length catch-all — never silently dropped. (A text block's string
+    `text` is the only field a provider bills, so sibling keys are intentionally
+    not counted; the provider ignores them upstream too.)"""
+    nonstr = estimate_request_tokens(
+        _body(
+            {
+                "messages": [{"role": "user", "content": [{"type": "text", "text": ["A" * 8000]}]}],
+                "max_tokens": 1,
+            }
+        ),
+        max_output_ceiling=_CEIL,
+    )
+    unknown = estimate_request_tokens(
+        _body(
+            {
+                "messages": [
+                    {"role": "user", "content": [{"type": "input_audio", "data": "A" * 8000}]}
+                ],
+                "max_tokens": 1,
+            }
+        ),
+        max_output_ceiling=_CEIL,
+    )
+    assert nonstr > 3000  # ~8000 serialised chars / 2, not dropped to ~0
+    assert unknown > 3000
+
+
 def test_top_level_prompt_and_input_counted() -> None:
     """Legacy `prompt` / Responses-API `input` at the top level are charged."""
     for key in ("prompt", "input"):

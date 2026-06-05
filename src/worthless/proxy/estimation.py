@@ -1,9 +1,11 @@
 """Request-cost estimator for the spend cap (WOR-659 Task 3).
 
 ``estimate = input + n * min(max_tokens, ceiling)``. Input char-counts messages
-(content + tool-call args) + system + tools; images floor high; an unparseable
-body fails high, never 0. An *admission* estimate — the ledger settles to the
-provider's actual usage afterwards.
+(content + tool-call args) + system + tools + top-level prompt. A text block
+counts its ``text`` (the only field a provider bills there); unknown block types
+count their full serialised length; images floor high. An unparseable body fails
+high, never 0. An *admission* estimate — the ledger settles to the provider's
+actual usage afterwards.
 """
 
 from __future__ import annotations
@@ -37,11 +39,12 @@ def _walk_content(value: Any) -> tuple[int, int]:
         elif isinstance(block, dict):
             btype = block.get("type")
             if btype == "text" and isinstance(block.get("text"), str):
+                # a provider bills only `text` here; sibling keys are ignored upstream too
                 chars += len(block["text"])
             elif btype in _IMAGE_BLOCK_TYPES:
                 images += 1
             else:
-                # tool_use / tool_result / unknown → count its full serialised text
+                # non-str text / tool_use / tool_result / unknown → full serialised length
                 chars += len(json.dumps(block))
     return chars, images
 
