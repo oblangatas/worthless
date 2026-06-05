@@ -18,7 +18,7 @@ __all__ = ["estimate_request_tokens"]
 # per char, so we stay well below 4; the ledger settles to the actual usage.
 _CHARS_PER_TOKEN = 2
 _IMAGE_BLOCK_TYPES = frozenset({"image", "image_url", "input_image"})
-_IMAGE_BLOCK_TOKENS = 1024  # opaque + expensive: tiny text, large real cost
+_IMAGE_BLOCK_TOKENS = 1600  # cover Anthropic (~1600) / OpenAI high-detail tiling
 _MALFORMED_FLOOR_TOKENS = 4096  # unparseable body → fail high, never 0
 
 
@@ -26,6 +26,8 @@ def _walk_content(value: Any) -> tuple[int, int]:
     """Return (text_chars, image_block_count) for a message/system content."""
     if isinstance(value, str):
         return len(value), 0
+    if isinstance(value, dict):
+        value = [value]  # a single content block sent as an object, not a list
     if not isinstance(value, list):
         return 0, 0
     chars = images = 0
@@ -70,6 +72,11 @@ def estimate_request_tokens(body: bytes, *, max_output_ceiling: int) -> int:
     tools = payload.get("tools") or payload.get("functions")
     if tools is not None:
         chars += len(json.dumps(tools))
+    # Legacy completions / Responses API carry the prompt at the top level.
+    for key in ("prompt", "input"):
+        c, b = _walk_content(payload.get(key))
+        chars += c
+        images += b
 
     input_tokens = math.ceil(chars / _CHARS_PER_TOKEN) + images * _IMAGE_BLOCK_TOKENS
 

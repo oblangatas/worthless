@@ -322,4 +322,30 @@ def test_image_block_floors_exactly() -> None:
         ),
         max_output_ceiling=_CEIL,
     )
-    assert img - txt == 1024
+    assert img - txt == 1600
+
+
+def test_dict_shaped_content_is_counted() -> None:
+    """A single content block sent as an OBJECT (not a list) must be counted —
+    the headline attack's sibling shape that both providers accept."""
+    est = estimate_request_tokens(
+        _body(
+            {
+                "messages": [
+                    {"role": "user", "content": {"type": "text", "text": "R" * 200_000}}
+                ],
+                "max_tokens": 1,
+            }
+        ),
+        max_output_ceiling=_CEIL,
+    )
+    assert est > 10_000  # not the ~1 the dict-content bluff used to return
+
+
+def test_top_level_prompt_and_input_counted() -> None:
+    """Legacy `prompt` / Responses-API `input` at the top level are charged."""
+    for key in ("prompt", "input"):
+        est = estimate_request_tokens(
+            _body({key: "R" * 200_000, "max_tokens": 1}), max_output_ceiling=_CEIL
+        )
+        assert est > 10_000
