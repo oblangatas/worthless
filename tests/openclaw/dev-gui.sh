@@ -100,19 +100,31 @@ _wire_provider() {
 # .understand-anything/openclaw-skill-dev-workflow.md): there is no
 # `skills test` or `skills lint`; `skills check --json` is the closest gate.
 _skills_check() {
+  # OpenClaw's `skills check` returns:
+  #   eligible            : list[str]                 (bin present, agent can call)
+  #   missingRequirements : list[{name, missing, …}]  (bin not on PATH yet)
+  #   blocked / disabled  : list[str]                 (parse error / disabled)
+  # So we need string OR dict-with-name membership.
   docker exec "$NAME" node openclaw.mjs skills check --json 2>/dev/null \
     | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
-eligible = d.get('eligible', []) or []
-missing  = d.get('missingRequirements', []) or []
-if 'worthless' in eligible:
+def has(bucket, name):
+    items = d.get(bucket) or []
+    for it in items:
+        n = it if isinstance(it, str) else (it.get('name') if isinstance(it, dict) else None)
+        if n == name: return True
+    return False
+if has('eligible', 'worthless'):
     print('  skill check: worthless ELIGIBLE + modelVisible')
     sys.exit(0)
-if isinstance(missing, list) and 'worthless' in missing:
-    print('  skill check: worthless NEEDS SETUP (bin not on PATH yet — expected on a clean container)')
+if has('missingRequirements', 'worthless'):
+    print('  skill check: worthless NEEDS SETUP (bin not on PATH — expected on a clean container; the agent installs it)')
     sys.exit(0)
-print('  skill check: worthless NOT FOUND in OpenClaw skills (frontmatter problem?)', file=sys.stderr)
+if has('blocked', 'worthless') or has('disabled', 'worthless'):
+    print('  skill check: worthless BLOCKED / DISABLED (frontmatter parse error?)', file=sys.stderr)
+    sys.exit(1)
+print('  skill check: worthless NOT FOUND in any OpenClaw bucket (skill file not loaded?)', file=sys.stderr)
 sys.exit(1)
 "
 }
@@ -120,10 +132,17 @@ sys.exit(1)
 # Hot-reload the side-loaded skill. OpenClaw's file watcher (250ms debounce,
 # default ON via skills.load.watch:true) picks the file up automatically —
 # no docker restart needed. Saves ~10s per skill-edit iteration.
+#
+# IMPORTANT: do NOT use `docker cp` — it writes as root, the node user can't
+# subsequently modify the file, and OpenClaw's watcher (running as node)
+# sees a permission-EACCES read and silently drops the skill from its index
+# (proven live: `skills check` total dropped 55 → 54 after a docker cp).
+# Pipe the file in via `docker exec -i` so it lands owned by node.
 _reload_skill() {
   docker exec "$NAME" sh -c 'mkdir -p /home/node/.openclaw/workspace/skills/worthless'
-  docker cp "$ROOT/src/worthless/openclaw/skill_assets/SKILL.md" \
-    "$NAME:/home/node/.openclaw/workspace/skills/worthless/SKILL.md"
+  cat "$ROOT/src/worthless/openclaw/skill_assets/SKILL.md" \
+    | docker exec -i "$NAME" sh -c \
+        'cat > /home/node/.openclaw/workspace/skills/worthless/SKILL.md'
   # File watcher needs a beat to notice the change.
   sleep 1
   _skills_check
