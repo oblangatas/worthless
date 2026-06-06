@@ -130,9 +130,20 @@ class RulesEngine:
                 denial = result
             if denial is not None:
                 # A later rule denied after the cap placed a durable hold — refund it,
-                # so a denied request leaves no pending charge behind.
-                await self._refund(spend_handle)
-                return GateResult(denial=denial)
+                # so a denied request leaves no pending charge behind. If the refund
+                # raises (transient DB error), KEEP the handle in the returned
+                # GateResult so app.py's `_release_reservations` seam can retry it on
+                # the denial exit path. Dropping it would orphan a pending_charges row.
+                if spend_handle is not None:
+                    try:
+                        await self._refund(spend_handle)
+                        spend_handle = None
+                    except Exception:
+                        logger.warning(
+                            "denial-time refund failed; handle preserved for caller retry",
+                            exc_info=True,
+                        )
+                return GateResult(denial=denial, spend_handle=spend_handle)
         return GateResult(spend_handle=spend_handle)
 
     async def _refund(self, spend_handle: str | None) -> None:
