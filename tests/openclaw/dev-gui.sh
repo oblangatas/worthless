@@ -13,11 +13,12 @@
 #   Your AI key lives in the container and dies with it.
 #
 # USAGE
-#   ./tests/openclaw/dev-gui.sh up      # build (if needed) + run + open browser
-#   ./tests/openclaw/dev-gui.sh open    # just (re)open the browser
-#   ./tests/openclaw/dev-gui.sh url     # print the authenticated URL
-#   ./tests/openclaw/dev-gui.sh reset   # clear OpenClaw's auth rate-limit, reopen
-#   ./tests/openclaw/dev-gui.sh stop    # tear it all down
+#   ./tests/openclaw/dev-gui.sh up            # build (if needed) + run + open browser
+#   ./tests/openclaw/dev-gui.sh open          # just (re)open the browser
+#   ./tests/openclaw/dev-gui.sh url           # print the authenticated URL
+#   ./tests/openclaw/dev-gui.sh reload-skill  # hot-reload SKILL.md (no restart — file watcher picks it up)
+#   ./tests/openclaw/dev-gui.sh reset         # clear OpenClaw's auth rate-limit, reopen
+#   ./tests/openclaw/dev-gui.sh stop          # tear it all down
 #
 # NOTE: do NOT read the gateway token via `openclaw.mjs config get gateway` —
 # OpenClaw redacts it to "__OPENCLAW_REDACTED__" there by design. This script
@@ -92,6 +93,42 @@ _wire_provider() {
   return 1
 }
 
+# WOR-664: validate the side-loaded skill via OpenClaw's own check command.
+# Catches frontmatter regressions (missing name/description/bins) BEFORE the
+# agent ever sees the skill — the only "lint" OpenClaw ships. Per the dev-
+# workflow research (~/Projects/worthless/worthless-wor621-phase3/
+# .understand-anything/openclaw-skill-dev-workflow.md): there is no
+# `skills test` or `skills lint`; `skills check --json` is the closest gate.
+_skills_check() {
+  docker exec "$NAME" node openclaw.mjs skills check --json 2>/dev/null \
+    | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+eligible = d.get('eligible', []) or []
+missing  = d.get('missingRequirements', []) or []
+if 'worthless' in eligible:
+    print('  skill check: worthless ELIGIBLE + modelVisible')
+    sys.exit(0)
+if isinstance(missing, list) and 'worthless' in missing:
+    print('  skill check: worthless NEEDS SETUP (bin not on PATH yet — expected on a clean container)')
+    sys.exit(0)
+print('  skill check: worthless NOT FOUND in OpenClaw skills (frontmatter problem?)', file=sys.stderr)
+sys.exit(1)
+"
+}
+
+# Hot-reload the side-loaded skill. OpenClaw's file watcher (250ms debounce,
+# default ON via skills.load.watch:true) picks the file up automatically —
+# no docker restart needed. Saves ~10s per skill-edit iteration.
+_reload_skill() {
+  docker exec "$NAME" sh -c 'mkdir -p /home/node/.openclaw/workspace/skills/worthless'
+  docker cp "$ROOT/src/worthless/openclaw/skill_assets/SKILL.md" \
+    "$NAME:/home/node/.openclaw/workspace/skills/worthless/SKILL.md"
+  # File watcher needs a beat to notice the change.
+  sleep 1
+  _skills_check
+}
+
 _url() {
   # WOR-664: do NOT use `openclaw.mjs config get gateway` — it redacts the
   # token to the literal "__OPENCLAW_REDACTED__" by design (good safety
@@ -125,11 +162,14 @@ DF
       docker exec "$NAME" node openclaw.mjs config get gateway >/dev/null 2>&1 && break
       sleep 2
     done
-    docker exec "$NAME" sh -c 'mkdir -p /home/node/.openclaw/workspace/skills/worthless'
-    docker cp "$ROOT/src/worthless/openclaw/skill_assets/SKILL.md" \
-      "$NAME:/home/node/.openclaw/workspace/skills/worthless/SKILL.md"
+    _reload_skill
     _wire_provider
     "$0" open
+    ;;
+  reload-skill)
+    # Hot-reload SKILL.md without restarting OpenClaw. Use after editing the
+    # skill — the file watcher picks it up in ~250ms, then re-validate.
+    _reload_skill
     ;;
   open)
     url="$(_url)"
@@ -152,6 +192,6 @@ DF
     docker rm -f "$NAME" >/dev/null 2>&1 && echo "stopped $NAME" || echo "$NAME not running"
     ;;
   *)
-    echo "usage: $0 {up|open|url|reset|stop}"; exit 1
+    echo "usage: $0 {up|open|url|reload-skill|reset|stop}"; exit 1
     ;;
 esac
