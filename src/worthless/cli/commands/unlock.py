@@ -154,7 +154,15 @@ def _reconstruct(
 
 @dataclass(eq=False)
 class _PlannedRestore:
-    """One alias's in-flight unlock plan — built pass-1, consumed by pass-2/3."""
+    """One alias's in-flight unlock plan — built pass-1, consumed by pass-2/3.
+
+    WOR-621 F2 G4: the ``oc_*`` trio is captured from the encrypted shard
+    row at pass-1 time so it survives pass-3's row delete. The CLI later
+    builds an :class:`OcRestore` from these fields + a freshly-read plaintext
+    key (from the just-restored .env) and passes the list to
+    ``integration.apply_unlock``. Legacy rows + ``relock_no_prior`` rows
+    carry all three as ``None`` — Stage A fail-safe-skips them.
+    """
 
     alias: str
     provider: str
@@ -162,6 +170,9 @@ class _PlannedRestore:
     var_name: str | None
     env_path: Path | None
     key_buf: bytearray = field(repr=False)
+    oc_original_base_url: str | None = None
+    oc_original_api_key_json: str | None = None
+    oc_rollback_mac: str | None = None
 
     def zero(self) -> None:
         # Per CodeRabbit nitpick: reuse the imported `zero_buf` helper
@@ -217,6 +228,13 @@ async def _pass1_reconstruct(
                     var_name=var_name,
                     env_path=env_path,
                     key_buf=key_buf,
+                    # G4: lift the captured trio off the encrypted row HERE
+                    # so it survives _pass3_db_cleanup's row delete. The
+                    # CLI later MAC-verifies + builds an OcRestore from
+                    # this snapshot + the just-restored plaintext from .env.
+                    oc_original_base_url=encrypted.oc_original_base_url,
+                    oc_original_api_key_json=encrypted.oc_original_api_key_json,
+                    oc_rollback_mac=encrypted.oc_rollback_mac,
                 )
             )
         finally:
@@ -328,8 +346,145 @@ async def _unlock_batch(
             p.zero()
 
 
+async def _build_oc_restores(
+    planned: list[_PlannedRestore],
+    repo: ShardRepository,
+    console,  # noqa: ANN001 — Console type is opaque from this layer
+) -> list[_openclaw_integration.OcRestore]:
+    """WOR-621 F2 G4 — build :class:`OcRestore` per planned restore.
+
+    Runs AFTER ``_unlock_batch`` (so the .env has been restored to
+    plaintext) and BEFORE ``_apply_openclaw_unlock`` (which calls
+    ``integration.apply_unlock``). Per planned restore:
+
+    * Skip rows with no captured record (legacy or ``relock_no_prior`` —
+      Stage A will fail-safe-skip them anyway; we just don't emit a
+      misleading "tampered" warning).
+    * MAC-verify the captured record via the same fernet-keyed
+      :meth:`ShardRepository._compute_decoy_hash` G2 uses. Mismatch →
+      surface a ``rollback_mac_mismatch`` warning AND pass a record-less
+      ``OcRestore`` so Stage A's existing fail-safe-skip leaves the entry
+      on the proxy. Tampered payloads are NEVER written.
+    * Parse the record to detect ``secretref`` vs ``plaintext`` so we
+      know whether to read the plaintext key back from the .env.
+    * For ``plaintext``: re-read the key from the just-restored .env
+      (``var_name``); pass-2 wrote it moments ago. Build a fresh owned
+      bytearray that Stage A's ``finally`` zeroes after use.
+    * For ``secretref``: ``plaintext_key=None``; Stage A writes the ref
+      pointer verbatim — NEVER downgraded to plaintext.
+    """
+    restores: list[_openclaw_integration.OcRestore] = []
+    for p in planned:
+        record = p.oc_original_api_key_json
+        if record is None:
+            # No captured record (pre-G3 row or relock_no_prior). Stage A
+            # will fail-safe-skip; nothing to verify, nothing to warn.
+            restores.append(
+                _openclaw_integration.OcRestore(
+                    provider=p.provider,
+                    alias=p.alias,
+                    oc_original_base_url=None,
+                    oc_original_api_key_json=None,
+                    plaintext_key=None,
+                )
+            )
+            continue
+
+        expected_mac = p.oc_rollback_mac
+        if expected_mac is not None:
+            recomputed = await repo._compute_decoy_hash(record)
+            try:
+                _openclaw_integration._parse_oc_rollback_entry_record(
+                    record,
+                    expected_mac=expected_mac,
+                    recomputed_mac=recomputed,
+                )
+            except ValueError as exc:
+                # G2 tamper-bind tripped (or shape parse failed). Drop the
+                # record so Stage A fails-safe-skips this provider on the
+                # downstream "no rollback entry record stored" path. The
+                # operator sees both warnings — the MAC one here is the
+                # diagnostic; the Stage-A skip is the effect.
+                console.print_warning(
+                    f"OpenClaw {p.provider!r} rollback record failed MAC verification "
+                    f"(rollback_mac_mismatch: {exc}); leaving entry on the proxy."
+                )
+                restores.append(
+                    _openclaw_integration.OcRestore(
+                        provider=p.provider,
+                        alias=p.alias,
+                        oc_original_base_url=None,
+                        oc_original_api_key_json=None,
+                        plaintext_key=None,
+                    )
+                )
+                continue
+        else:
+            # Legacy row: no MAC stored (oc_rollback_mac IS NULL). G1's
+            # docstring blesses shape-only validation in that case — accept
+            # the record. A re-lock under G3 attaches a tag going forward.
+            try:
+                _openclaw_integration._parse_oc_rollback_entry_record(record)
+            except ValueError as exc:
+                console.print_warning(
+                    f"OpenClaw {p.provider!r} rollback record is malformed "
+                    f"({exc}); leaving entry on the proxy."
+                )
+                restores.append(
+                    _openclaw_integration.OcRestore(
+                        provider=p.provider,
+                        alias=p.alias,
+                        oc_original_base_url=None,
+                        oc_original_api_key_json=None,
+                        plaintext_key=None,
+                    )
+                )
+                continue
+
+        # Decide plaintext vs secretref to know whether to read the key back.
+        parsed = _openclaw_integration._parse_oc_rollback_entry_record(record)
+        kind = parsed["apiKey"]["kind"]
+        plaintext_key: bytearray | None = None
+        if kind == "plaintext":
+            # Read the key back from the just-restored .env. pass-2 wrote
+            # the reconstructed plaintext moments ago. If the .env is gone
+            # (recovery mode / user deleted it) we can't restore the OC
+            # plaintext branch — fall through fail-safe.
+            if p.env_path is not None and p.env_path.exists() and p.var_name:
+                parsed_env = dotenv_values(p.env_path)
+                value = parsed_env.get(p.var_name)
+                if value is not None:
+                    plaintext_key = bytearray(value.encode("utf-8"))
+            if plaintext_key is None:
+                console.print_warning(
+                    f"OpenClaw {p.provider!r}: cannot re-read plaintext key "
+                    "from restored .env; leaving entry on the proxy."
+                )
+                restores.append(
+                    _openclaw_integration.OcRestore(
+                        provider=p.provider,
+                        alias=p.alias,
+                        oc_original_base_url=None,
+                        oc_original_api_key_json=None,
+                        plaintext_key=None,
+                    )
+                )
+                continue
+
+        restores.append(
+            _openclaw_integration.OcRestore(
+                provider=p.provider,
+                alias=p.alias,
+                oc_original_base_url=p.oc_original_base_url,
+                oc_original_api_key_json=record,
+                plaintext_key=plaintext_key,
+            )
+        )
+    return restores
+
+
 def _apply_openclaw_unlock(
-    unlocked: list[tuple[str, str]],
+    restores: list[_openclaw_integration.OcRestore],
     console,  # noqa: ANN001 — Console type is opaque from this layer
     home: WorthlessHome,
 ) -> bool:
@@ -348,32 +503,18 @@ def _apply_openclaw_unlock(
         Writes ``$WORTHLESS_HOME/last-lock-status.json`` so ``worthless
         status`` reports DEGRADED state across terminal sessions.
     """
-    if not unlocked:
+    if not restores:
         # Nothing to undo on the OpenClaw side — also nothing to record.
         return False
     try:
-        # WOR-621 F2 (G4 fills the rollback record + reconstructed key from
-        # the shard row). G1 wires the new restore-record shape so the
-        # integration layer compiles; a record-less restore fail-safe-skips
-        # (leaves the entry on the proxy) rather than crashing.
-        restores = [
-            _openclaw_integration.OcRestore(
-                provider=provider,
-                alias=alias,
-                oc_original_base_url=None,
-                oc_original_api_key_json=None,
-                plaintext_key=None,
-            )
-            for provider, alias in unlocked
-        ]
         result = _openclaw_integration.apply_unlock(restores=restores)
     except OpenclawIntegrationError as exc:
         logger.warning("openclaw apply_unlock raised unexpectedly: %s", exc)
-        _emit_openclaw_unlock_failure(console, home, len(unlocked), str(exc))
+        _emit_openclaw_unlock_failure(console, home, len(restores), str(exc))
         return True
     except Exception as exc:  # noqa: BLE001 — last-resort guard for L1
         logger.warning("openclaw apply_unlock raised unexpectedly: %s", exc)
-        _emit_openclaw_unlock_failure(console, home, len(unlocked), str(exc))
+        _emit_openclaw_unlock_failure(console, home, len(restores), str(exc))
         return True
 
     # ---- Classify the result ---------------------------------------------
@@ -384,9 +525,15 @@ def _apply_openclaw_unlock(
 
     # Trust-fix classification lives on OpenclawApplyResult.has_failure
     # (single-sourced — see integration.py docstring).
+    # WOR-621 F2 G4: ``providers_set`` carries the providers Stage A actually
+    # RESTORED to their pre-lock entries (G1 renamed the field's semantic
+    # accordingly). The CLI copy reflects the real action — "restored", not
+    # "removed" (decoy-era wording deferred from G1 review).
     if not result.has_failure:
         if result.providers_set:
-            console.print_success(f"[OK] OpenClaw: removed {len(result.providers_set)} provider(s)")
+            console.print_success(
+                f"[OK] OpenClaw: restored {len(result.providers_set)} provider(s)"
+            )
             for provider_name in result.providers_set:
                 console.print_hint(f"   • {provider_name}")
         if result.skill_installed:
@@ -402,9 +549,13 @@ def _apply_openclaw_unlock(
 
     # Detected + failed: trust-failure path.
     console.print_failure("[FAIL] OpenClaw cleanup did NOT complete.")
-    console.print_warning("   Your .env is restored, but worthless-* entries may remain in")
-    console.print_warning("   ~/.openclaw/openclaw.json — re-run `worthless unlock` or")
-    console.print_warning("   `worthless doctor` to repair.")
+    console.print_warning(
+        "   Your .env is restored, but the original OpenClaw provider entries"
+    )
+    console.print_warning(
+        "   may not have been restored in ~/.openclaw/openclaw.json — re-run"
+    )
+    console.print_warning("   `worthless unlock` or `worthless doctor` to repair.")
     for name, reason in result.providers_skipped:
         console.print_warning(f"   skipped {name} ({reason})")
     for event in result.events:
@@ -428,8 +579,12 @@ def _emit_openclaw_unlock_failure(
 ) -> None:
     """Print [FAIL] block + write partial sentinel for the unexpected-raise path."""
     console.print_failure("[FAIL] OpenClaw cleanup did NOT complete.")
-    console.print_warning("   Your .env is restored, but worthless-* entries may remain in")
-    console.print_warning("   ~/.openclaw/openclaw.json — repair via:")
+    console.print_warning(
+        "   Your .env is restored, but the original OpenClaw provider entries"
+    )
+    console.print_warning(
+        "   may not have been restored in ~/.openclaw/openclaw.json — repair via:"
+    )
     console.print_warning(f"   detail: {detail}")
     console.print_warning("")
     console.print_warning("   Fix:    worthless doctor")
@@ -580,10 +735,15 @@ def register_unlock_commands(app: typer.Typer) -> None:
                 # Phase 2.c: OpenClaw symmetric undo. Per L1: NEVER aborts
                 # unlock-core success. Per L2 (revised 2026-05-08): detected+failed
                 # returns True so the caller raises typer.Exit(73) AFTER
-                # unlock-core's .env restoration commits. Extract (provider, alias)
-                # from the planned list — _PlannedRestore exposes both fields.
-                unlocked: list[tuple[str, str]] = [(p.provider, p.alias) for p in planned]
-                return _apply_openclaw_unlock(unlocked, console, home)
+                # unlock-core's .env restoration commits.
+                # WOR-621 F2 G4: build real OcRestore records — MAC-verify the
+                # captured rollback record, then read the plaintext key back
+                # from the just-restored .env (or pass None for the secretref
+                # branch). Stage A fail-safe-skips anything we couldn't verify
+                # so the entry stays on the proxy rather than getting a
+                # synthetic/tampered restore.
+                restores = await _build_oc_restores(planned, repo, console)
+                return _apply_openclaw_unlock(restores, console, home)
 
         with acquire_lock(home):
             partial_failure = asyncio.run(_unlock_async())

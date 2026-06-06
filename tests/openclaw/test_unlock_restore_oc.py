@@ -220,19 +220,30 @@ def test_g4_db_tamper_of_rollback_record_fails_safe_at_unlock(
     env_file: Path,
     sandboxed_home: Path,
     fixed_key: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The decision-4 attack at unlock: a DB-write attacker (no fernet
-    key) flips ``oc_original_api_key_json`` between lock and unlock.
-    The stored MAC is now stale; G4 must constant-time-verify it
-    against a recompute and refuse the restore on mismatch.
+    """The canonical decision-4 attack at unlock: a DB-write attacker
+    (no fernet key) flips ``oc_original_api_key_json`` from
+    ``{"kind": "secretref", "ref": …}`` to ``{"kind": "plaintext"}``
+    between lock and unlock. Stage A's plaintext branch would then
+    write the reconstructed real key into a slot the attacker can
+    read — a privilege escalation via unlock. G2 stored a MAC that
+    binds ``kind``; G4 must constant-time-verify it against a fresh
+    recompute and refuse the restore on mismatch.
 
     Fail-safe outcome: the provider stays on the proxy (its stage-A
-    ``replace_provider`` is skipped) and the user is told why. Crucially
-    the attacker's planted value is NEVER written into ``openclaw.json``.
+    ``replace_provider`` is skipped) and the user is told why.
+    Crucially the reconstructed real key NEVER lands in
+    ``openclaw.json`` even though pass-1 reconstructs it.
     """
+    monkeypatch.setenv("OPENAI_API_KEY", fixed_key)
+
+    # Seed with a SecretRef original — the attack target. The user's
+    # real key lives only in env, never in openclaw.json.
+    secretref = {"$ref": {"source": "env", "provider": "openai", "id": "OPENAI_API_KEY"}}
     original_entry = {
         "baseUrl": "https://api.openai.com/v1",
-        "apiKey": fixed_key,
+        "apiKey": secretref,
     }
     seeded = _seed_openclaw(sandboxed_home, original_entry)
 
@@ -244,8 +255,9 @@ def test_g4_db_tamper_of_rollback_record_fails_safe_at_unlock(
     shard_a_after_lock = after_lock["models"]["providers"]["openai"]["apiKey"]
     assert proxy_url_after_lock.startswith("http://127.0.0.1:")
 
-    # Attacker tampers with the stored entry record (SecretRef→plaintext
-    # downgrade with a planted value the attacker wants unlock to commit).
+    # Decision-4 attack: flip secretref → plaintext. Stored MAC was
+    # computed over the secretref-shaped record; the recompute over
+    # this plaintext-shaped record will differ → G4 must reject.
     attacker_record = json.dumps(
         {
             "baseUrl": "https://api.openai.com/v1",
@@ -279,13 +291,15 @@ def test_g4_db_tamper_of_rollback_record_fails_safe_at_unlock(
     assert restored["apiKey"] == shard_a_after_lock, (
         "tampered MAC must abort the restore — apiKey changed"
     )
-    # Defence in depth: real key never landed (the only place it lived was
-    # the .env, which pass-2 already restored — that's fine and is unlock's
-    # job; the rule is the attacker's plaintext placeholder is NEVER written
-    # to openclaw.json).
-    assert restored["apiKey"] != fixed_key
+    # Defence in depth: the reconstructed real key must NEVER land in
+    # openclaw.json on the tampered branch (the whole point of the attack).
+    rendered = json.dumps(restored, sort_keys=True)
+    assert fixed_key not in rendered, (
+        "tampered restore wrote the reconstructed real key into openclaw.json "
+        "(decision-4 escalation — the MAC gate did not fire)"
+    )
     # Operator told why.
-    assert "rollback_record_invalid" in unlocked.output or "rollback mac" in unlocked.output, (
+    assert "rollback_mac_mismatch" in unlocked.output or "rollback mac" in unlocked.output, (
         f"missing tamper warning in unlock output:\n{unlocked.output}"
     )
 
