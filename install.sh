@@ -9,6 +9,7 @@
 #   20  unsupported platform (Windows native, macOS <11, glibc <2.17)
 #   30  conflicting pipx-installed worthless detected
 #   40  unexpected internal failure (uv install crash, smoke-test failed)
+#   50  byte-integrity mismatch (CDN-poisoned download — CI MUST NOT auto-retry)
 
 set -eu
 
@@ -16,6 +17,7 @@ EXIT_NETWORK=10
 EXIT_PLATFORM=20
 EXIT_PIPX_CONFLICT=30
 EXIT_INTERNAL=40
+EXIT_INTEGRITY=50
 
 UV_VERSION="0.11.7"
 
@@ -200,10 +202,10 @@ ensure_uv() {
             "Cannot verify Astral installer integrity. Aborting for safety."
     fi
     if [ "$actual" != "$ASTRAL_INSTALLER_SHA256" ]; then
-        die "$EXIT_INTERNAL" "SHA256 mismatch on Astral installer ${UV_VERSION}." \
+        die "$EXIT_INTEGRITY" "SHA256 mismatch on Astral installer ${UV_VERSION}." \
             "expected: ${ASTRAL_INSTALLER_SHA256}" \
             "actual:   ${actual}" \
-            "Refusing to execute. Re-run later or report at ${DOCS_URL}."
+            "Refusing to execute. Do NOT retry; investigate or report at ${DOCS_URL}."
     fi
 
     UV_INSTALL_VERSION="$UV_VERSION" sh "$installer" >/dev/null 2>&1 || {

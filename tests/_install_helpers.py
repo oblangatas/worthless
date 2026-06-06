@@ -15,6 +15,7 @@ EXIT_NETWORK = 10
 EXIT_PLATFORM = 20
 EXIT_PIPX_CONFLICT = 30
 EXIT_INTERNAL = 40
+EXIT_INTEGRITY = 50
 
 
 def write_stub(bin_dir: Path, name: str, body: str) -> Path:
@@ -129,6 +130,7 @@ def run_install(
 
 
 __all__ = [
+    "EXIT_INTEGRITY",
     "EXIT_INTERNAL",
     "EXIT_NETWORK",
     "EXIT_PIPX_CONFLICT",

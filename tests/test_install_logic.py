@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from tests._install_helpers import (
+    EXIT_INTEGRITY,
     EXIT_INTERNAL,
     EXIT_NETWORK,
     EXIT_PIPX_CONFLICT,
@@ -204,6 +205,54 @@ exit 0""",
     )
     assert "pipx uninstall worthless" in result.stderr, (
         "stderr must include the exact 'pipx uninstall worthless' command"
+    )
+
+
+def test_astral_installer_sha_mismatch_exits_50(tmp_path: Path) -> None:
+    """A poisoned/corrupted Astral installer download must exit EXIT_INTEGRITY (50),
+    NOT EXIT_INTERNAL (40). CI retry policies treat 40 as transient and 50 as
+    permanent — conflating them lets an attacker brute-force a CDN poison window
+    via infinite retries (WOR-679 / A8 of WOR-669).
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_stub(bin_dir, "uname", "echo Darwin")
+    write_stub(bin_dir, "sw_vers", 'echo "14.5"')
+    # curl "succeeds" — writes arbitrary bytes to the --output path so install.sh
+    # proceeds past the network check and into the SHA verification branch.
+    write_stub(
+        bin_dir,
+        "curl",
+        'while [ "$#" -gt 0 ]; do\n'
+        '  case "$1" in --output) printf "poisoned" > "$2"; shift 2 ;; *) shift ;; esac\n'
+        "done\n"
+        "exit 0",
+    )
+    # Force the SHA computation to a value that cannot match the pinned constant
+    # in install.sh — deterministic across Linux (sha256sum) and macOS (shasum).
+    bogus = "0000000000000000000000000000000000000000000000000000000000000000"
+    write_stub(bin_dir, "sha256sum", f'echo "{bogus}  $1"')
+    write_stub(bin_dir, "shasum", f'echo "{bogus}  $2"')
+
+    result = run_install(bin_dir)
+
+    assert result.returncode == EXIT_INTEGRITY, (
+        f"corrupt Astral installer must exit {EXIT_INTEGRITY} (byte-integrity), "
+        f"NOT {EXIT_INTERNAL} (generic internal). got {result.returncode}\n"
+        f"stderr: {result.stderr}"
+    )
+    assert "SHA256 mismatch" in result.stderr, (
+        f"stderr should name the integrity failure clearly.\nstderr: {result.stderr}"
+    )
+    # Honest framing: an exit code that says "do not retry" must NOT be paired
+    # with a message that says "Re-run later" — that contradicts the contract
+    # and trains operators / CI to ignore the new exit code.
+    assert "Re-run later" not in result.stderr, (
+        "stderr must NOT suggest retrying — EXIT_INTEGRITY (50) means do-not-retry.\n"
+        f"stderr: {result.stderr}"
+    )
+    assert "Do NOT retry" in result.stderr, (
+        f"stderr must state the do-not-retry contract explicitly.\nstderr: {result.stderr}"
     )
 
 
