@@ -60,8 +60,12 @@ def test_skill_md_is_real_not_placeholder_stub() -> None:
 
     body = (_SKILL_ASSETS_DIR / _SKILL_FILE).read_text(encoding="utf-8")
 
-    # Not a stub.
-    assert "placeholder" not in body.lower(), "installed skill is still a placeholder stub"
+    # Not a stub. (Note: the body legitimately uses the word "placeholder"
+    # in the testing-recipe section when discussing low-entropy fake keys,
+    # so we anchor the regression check to the stub-specific phrasing.)
+    assert "Phase 2.a placeholder" not in body, (
+        "installed skill is still the v0.0.0 'Phase 2.a placeholder' stub"
+    )
     assert "0.0.0" not in skill.current_version(), "installed skill still carries the stub version"
 
     # Teaches the agent the core commands (the whole point of the real body).
@@ -70,6 +74,43 @@ def test_skill_md_is_real_not_placeholder_stub() -> None:
 
     # States the honest LLM-key-only scope (not a general secret scanner).
     assert "sk-ant-" in body and "AIza" in body, "skill must state the LLM-key scope"
+
+
+def test_skill_md_teaches_non_interactive_lock_flags() -> None:
+    """WOR-666 (F13f): every agent driving `worthless lock` from a chat
+    surface has no stdin. The skill MUST tell them to pass `--keys-only`
+    (skip the source-scan noise) AND `--allow-hardcoded-urls` (accept any
+    URL warnings non-interactively). Surfaced by the F13c live drive: every
+    agent stalled on the interactive prompt without these.
+    """
+    from worthless.openclaw.skill import _SKILL_ASSETS_DIR, _SKILL_FILE
+
+    body = (_SKILL_ASSETS_DIR / _SKILL_FILE).read_text(encoding="utf-8")
+    assert "--keys-only" in body, (
+        "skill must teach `--keys-only` (skip source-code URL scan from agents)"
+    )
+    assert "--allow-hardcoded-urls" in body, (
+        "skill must teach `--allow-hardcoded-urls` (non-interactive lock)"
+    )
+
+
+def test_skill_md_has_lock_test_recipe_against_temp_env() -> None:
+    """WOR-667 (F13g): the F13c drive showed agents have no recipe for
+    'test lock against a temp .env' — they scan the working dir and
+    produce noisy warnings. The skill MUST include a self-contained
+    recipe using /tmp/t.env so agents have a deterministic test path,
+    AND the recipe MUST use a high-entropy fake key (`secrets.token_hex`)
+    since Worthless skips low-entropy placeholders like `faketestkey`.
+    """
+    from worthless.openclaw.skill import _SKILL_ASSETS_DIR, _SKILL_FILE
+
+    body = (_SKILL_ASSETS_DIR / _SKILL_FILE).read_text(encoding="utf-8")
+    assert "/tmp/t.env" in body, "skill must provide a temp-.env test recipe"  # noqa: S108
+    assert "worthless lock --env" in body, "skill recipe must show `lock --env`"
+    assert "secrets.token_hex" in body, (
+        "skill recipe must generate a HIGH-ENTROPY fake key — "
+        "low-entropy placeholders trip Worthless's entropy gate and lock skips them"
+    )
 
 
 def test_current_version_returns_nonempty_string() -> None:

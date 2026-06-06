@@ -101,6 +101,70 @@ Set rules per key so a runaway agent can't burn the budget:
 - Never print a reconstructed key or shard-A; surface the `--json` error
   `code` on failure, not raw key material.
 
+## Non-interactive use (CRITICAL for agents)
+
+Agents have no stdin — `worthless lock` will hang or fail if it prompts.
+**Always pass these flags together when running lock from an agent**, unless
+the user explicitly asks for interactive review:
+
+```bash
+worthless lock --env <path> --keys-only --allow-hardcoded-urls
+```
+
+- `--keys-only` — only protect API keys in the `.env`; skip the
+  source-code scan that detects hardcoded provider URLs. Without this,
+  `lock` walks the working tree and produces a long list of warnings
+  about third-party libraries (e.g. OpenClaw's own bundle in `/tmp/jiti/`)
+  that have nothing to do with the user's keys.
+- `--allow-hardcoded-urls` — acknowledge any URL warnings non-interactively
+  instead of prompting. Belt-and-suspenders alongside `--keys-only`.
+
+If you write the `.env` first, **use `python3 -c`** to write it. Do not
+chain `echo "..." > file` with nested `$(cat ...)` or `$(... | python3 -c
+"...")` — shell quoting collapses when the agent rewrites the command,
+which produces empty files and confusing failures. Example:
+
+```bash
+# Right — Python writes the file, no shell quoting risks:
+python3 -c 'import os; open("/tmp/t.env","w").write(f"OPENAI_API_KEY={os.environ[\"OPENAI_API_KEY\"]}\n")'
+
+# Wrong — fragile across agent rewrites:
+echo "OPENAI_API_KEY=$(cat key.txt)" > /tmp/t.env
+```
+
+## Testing & verification
+
+To prove `lock` works without touching a production key, run this exact
+recipe. **The fake key must be high-entropy** — Worthless's scanner uses an
+entropy threshold (3.9) to ignore placeholder strings like
+`sk-proj-faketestkey1234567890`. Low-entropy fakes are silently skipped
+(no key locked, no error), which looks like "lock did nothing".
+
+```bash
+# 1. Create a throwaway .env with a HIGH-ENTROPY fake key.
+python3 -c 'import secrets; print(f"OPENAI_API_KEY=sk-proj-{secrets.token_hex(32)}")' \
+  > /tmp/t.env
+
+# 2. Lock it non-interactively.
+worthless lock --env /tmp/t.env --keys-only --allow-hardcoded-urls
+
+# 3. Verify the split — the .env now holds shard-A, not the original.
+cat /tmp/t.env
+#   ↑ OPENAI_API_KEY=<a DIFFERENT sk-proj-... value> = shard-A (inert)
+#   ↑ OPENAI_BASE_URL=http://127.0.0.1:8787/<alias>/v1  (added by lock)
+
+# 4. Verify enrollment + proxy health.
+worthless status --json
+#   ↑ "keys": [{"alias": "openai-...", ...}]   (1 enrollment, not [])
+#   ↑ "proxy": {"healthy": true, ...}
+```
+
+Success criteria: `OPENAI_API_KEY` value changes (replaced by shard-A),
+`OPENAI_BASE_URL` is added pointing at `127.0.0.1:8787`, and
+`status --json` reports `keys: [{...}]` (non-empty). If any of those is
+missing, lock didn't actually run — most commonly because the fake key
+was too low-entropy.
+
 ## Programmatic access (MCP)
 
 Worthless also ships an MCP server: `worthless_status()`,
