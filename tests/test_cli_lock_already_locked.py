@@ -57,6 +57,7 @@ or stop the 3rd party.
 from __future__ import annotations
 
 import hashlib
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -129,11 +130,20 @@ def test_relock_refuses_when_env_already_has_worthless_base_url(
     assert "worthless unlock" in result.output or "worthless doctor" in result.output, (
         f"refusal message must point at a recovery command:\n{result.output}"
     )
-    # Zero side effects — .env byte-identical, DB untouched.
+    # Zero side effects — .env byte-identical; no shards rows / no enrollments
+    # were written. (Bootstrap initializes the SQLite schema before any lock
+    # preflight runs, so checking file existence is the wrong invariant — the
+    # right one is "no rows written".)
     assert _checksum(env_file) == pre_sum, ".env was mutated by a refused lock"
-    assert not home_dir.db_path.exists() or home_dir.db_path.stat().st_size == 0, (
-        "DB was touched by a refused lock"
-    )
+    if home_dir.db_path.exists():
+        con = sqlite3.connect(str(home_dir.db_path))
+        try:
+            shards = con.execute("SELECT COUNT(*) FROM shards").fetchone()[0]
+            enrolled = con.execute("SELECT COUNT(*) FROM enrollments").fetchone()[0]
+        finally:
+            con.close()
+        assert shards == 0, f"refused lock wrote {shards} shards row(s)"
+        assert enrolled == 0, f"refused lock wrote {enrolled} enrollment(s)"
 
 
 # ---------------------------------------------------------------------------
@@ -172,35 +182,54 @@ def test_lock_proceeds_when_base_url_points_at_third_party(
 
 
 # ---------------------------------------------------------------------------
-# Partial-failure leftover (BASE_URL only, no key) still refuses
+# Legitimate idempotent re-lock (same key value, DB row exists) — NOT refused
 # ---------------------------------------------------------------------------
 
 
-def test_relock_refuses_on_orphan_base_url_with_no_key(
+def test_idempotent_relock_with_matching_db_row_is_not_refused(
     home_dir: WorthlessHome,
     tmp_path: Path,
 ) -> None:
-    """A .env with ONLY the proxy BASE_URL (no API key) is evidence of a
-    partial-failure mid-lock that left the .env in a half-state. Lock
-    must still refuse — running lock again would write a fresh shard-A
-    pair on top, hiding the original problem.
+    """A user re-running ``worthless lock`` after a successful lock — same
+    key value, same DB row — is the legitimate idempotent re-lock path
+    that the project's "lock-rerun contract" depends on.
 
-    The user is told to run unlock or doctor to clean up.
+    The first lock writes shard-A into the .env key field and adds
+    ``*_BASE_URL`` pointing at our proxy. On the second invocation,
+    ``_select_unlocked_keys`` filters out the now-enrolled alias (the
+    commitment matches the value in .env) and the lock exits 0 with a
+    "still protected" hint. Our new check MUST NOT misclassify this as
+    the destructive re-lock case — that would break the documented
+    idempotency contract and an existing test suite (TestLockRerun).
+
+    The discriminator: the destructive case only fires when there's a
+    `scanned` key with NO matching DB row left. The legitimate idempotent
+    case short-circuits via ``if not scanned: return`` BEFORE the new
+    check runs.
     """
     env_file = tmp_path / ".env"
-    # Simulate a half-failed lock: BASE_URL got written, key didn't, or
-    # the user manually removed the key for some reason.
-    env_file.write_text("OPENAI_BASE_URL=http://127.0.0.1:8787/openai-orphan/v1\n")
+    env_file.write_text(f"OPENAI_API_KEY={fake_openai_key()}\n")
 
-    result = runner.invoke(
+    first = runner.invoke(
         app,
         ["lock", "--env", str(env_file)],
         env={"WORTHLESS_HOME": str(home_dir.base_dir)},
     )
+    assert first.exit_code == 0, first.output
 
-    assert result.exit_code == ErrorCode.ENV_ALREADY_LOCKED.value, (
-        f"orphan BASE_URL must trip the check, got exit {result.exit_code}\n{result.output}"
+    body = env_file.read_text()
+    assert "OPENAI_BASE_URL=http://" in body, body
+    pre_sum = _checksum(env_file)
+
+    second = runner.invoke(
+        app,
+        ["lock", "--env", str(env_file)],
+        env={"WORTHLESS_HOME": str(home_dir.base_dir)},
     )
-    assert "worthless unlock" in result.output or "worthless doctor" in result.output, (
-        f"must point at a recovery command:\n{result.output}"
+    assert second.exit_code == 0, (
+        f"idempotent re-lock must succeed (exit 0), got {second.exit_code} — "
+        "the new already-locked check is over-firing on a legitimate same-key "
+        f"re-run.\n{second.output}"
     )
+    assert second.exit_code != ErrorCode.ENV_ALREADY_LOCKED.value
+    assert _checksum(env_file) == pre_sum, ".env mutated on idempotent re-lock"

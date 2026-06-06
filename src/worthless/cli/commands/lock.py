@@ -102,6 +102,46 @@ def _proxy_base_url(alias: str) -> str:
     return f"http://{host}:{resolve_port(None)}/{alias}/v1"
 
 
+def _detect_already_locked_env(env_values: dict[str, str | None]) -> str | None:
+    """worthless-ftmg — return the offending var name if the .env is already locked.
+
+    A successful ``worthless lock`` always writes ``*_BASE_URL`` pointing at
+    the local Worthless proxy. A subsequent ``lock`` against that same .env
+    would re-read the shard-A in the key field as if it were a fresh plaintext
+    key, split it, and overwrite both halves — destroying the only path back
+    to the original real key.
+
+    We refuse this scenario one preflight earlier: scan the parsed env_values
+    for any ``*_BASE_URL`` whose host:port matches our proxy. If found, the
+    caller raises ``ErrorCode.ENV_ALREADY_LOCKED`` and points the user at
+    ``worthless unlock`` (clean exit) or ``worthless doctor`` (recovery from
+    a half-state).
+
+    Detection is intentionally narrow: ONLY the host:port signal. A foreign
+    proxy on the same port is the worst-case false positive (we refuse; the
+    user changes ``WORTHLESS_PORT`` or stops the foreign service).
+    Higher-coverage commitment-scan detection is filed as a follow-up
+    (approach B in worthless-ftmg).
+    """
+    proxy_host = os.environ.get("WORTHLESS_PROXY_HOST", "127.0.0.1")
+    proxy_port = resolve_port(None)
+    proxy_netloc_prefixes = (
+        f"http://{proxy_host}:{proxy_port}/",
+        # Loopback aliases — ``127.0.0.1`` and ``localhost`` resolve to the
+        # same socket, so an entry written by one match still binds to the
+        # other. Catch both regardless of how WORTHLESS_PROXY_HOST is set.
+        f"http://127.0.0.1:{proxy_port}/",
+        f"http://localhost:{proxy_port}/",
+    )
+    for var_name, value in env_values.items():
+        if not (var_name.endswith("_BASE_URL") and isinstance(value, str)):
+            continue
+        normalised = value.rstrip("/") + "/"
+        if any(normalised.startswith(prefix) for prefix in proxy_netloc_prefixes):
+            return var_name
+    return None
+
+
 def _derive_base_url_var(var_name: str, provider: str) -> str:
     """Derive the corresponding ``*_BASE_URL`` variable name for a key var.
 
@@ -365,9 +405,7 @@ def _read_openclaw_providers_for_capture() -> dict | None:
     if not state.present:
         return None
     try:
-        config_path = _openclaw_integration._resolve_active_config_path(
-            state, state.home_dir
-        )
+        config_path = _openclaw_integration._resolve_active_config_path(state, state.home_dir)
         return _openclaw_config_mod.read_config(config_path)
     except Exception:  # noqa: BLE001 — fail-safe: missing rollback row is acceptable
         return None
@@ -1190,9 +1228,7 @@ def _lock_keys(
             # the bypass-findings path below already uses.
             safe_file = _oc_audit.sanitise_for_message(s.file)
             skip_lines.append(f"  {safe_file}  [{s.reason}]")
-        skip_lines.append(
-            "Resolve the cause (oversized source, permission, slow disk) and re-run."
-        )
+        skip_lines.append("Resolve the cause (oversized source, permission, slow disk) and re-run.")
         raise WorthlessError(
             ErrorCode.SCAN_ERROR,
             "\n".join(skip_lines),
@@ -1258,6 +1294,31 @@ def _lock_keys(
 
             # Snapshot .env so _pass1 can pull *_BASE_URL values into the DB row.
             env_values = dict(dotenv_values(env_path))
+
+            # worthless-ftmg: refuse to lock an already-locked .env BEFORE any
+            # state mutation. The legitimate idempotent re-lock case (same key
+            # value → same alias → DB row matches → commitment passes) already
+            # short-circuited via `if not scanned: return` above — anything
+            # still in `scanned` here has NO matching DB row. So a *_BASE_URL
+            # pointing at our proxy means we'd be about to re-split a value
+            # that's already shard-A from a previous lock cycle (DB-nuked,
+            # restored-from-backup, container rebuild, etc.) and overwrite
+            # both halves. That destroys the only path back to the original
+            # real key. Refuse here with zero side effects.
+            _already_locked_var = _detect_already_locked_env(env_values)
+            if _already_locked_var is not None:
+                raise WorthlessError(
+                    ErrorCode.ENV_ALREADY_LOCKED,
+                    f"This .env is already locked — {_already_locked_var} points at "
+                    "the Worthless proxy and the key field doesn't match any stored "
+                    "shard. Re-locking now would overwrite shard-A and make your "
+                    "original key unrecoverable.\n"
+                    "  • To return to the original key: `worthless unlock`\n"
+                    "  • To recover from a half-state:  `worthless doctor`\n"
+                    "Nothing was changed — your .env, database, and OpenClaw config "
+                    "are untouched.",
+                    exit_code=ErrorCode.ENV_ALREADY_LOCKED.value,
+                )
 
             candidates = [
                 (var_name, value, provider_override or detected_provider)
