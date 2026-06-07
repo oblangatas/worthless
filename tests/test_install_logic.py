@@ -208,6 +208,82 @@ exit 0""",
     )
 
 
+def test_env_scrub_strips_poisoned_uv_pip_vars(tmp_path: Path) -> None:
+    """A poisoned shell rc setting UV_INDEX_URL (or any of its cousins) must
+    NOT propagate to any uv invocation. install.sh ships its own pinned
+    default index, certificate trust, and config; a caller-supplied
+    redirect is an attack vector (WOR-673 / A2 of WOR-669).
+
+    Threat: compromised dotfiles / hostile VS Code workspace env / poisoned
+    `direnv` `.envrc` redirects the entire install to an attacker mirror
+    while install.sh's banner, the Astral SHA pin, and the worthless pin
+    all still look pristine.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_stub(bin_dir, "uname", "echo Darwin")
+    write_stub(bin_dir, "sw_vers", 'echo "14.5"')
+    # uv stub that dumps every UV_*/PIP_* env var it actually receives.
+    # If install.sh's scrub works, the log shows NONE of the poisoned values.
+    write_stub(
+        bin_dir,
+        "uv",
+        'env | grep -E "^(UV_|PIP_)" >> "$HOME/uv-env.log" || true\n'
+        'case "$1" in\n'
+        '  --version) echo "uv 0.11.7" ;;\n'
+        '  tool) shift; case "$1" in\n'
+        '    install|upgrade) echo "ok" ;;\n'
+        "    list) ;;\n"
+        '    *) echo "uv tool: unhandled: $*" >&2; exit 1 ;;\n'
+        "  esac ;;\n"
+        '  run) echo "worthless 0.3.7" ;;\n'
+        '  *) echo "uv: unhandled: $*" >&2; exit 1 ;;\n'
+        "esac",
+    )
+    write_stub(bin_dir, "worthless", 'echo "worthless 0.3.7"')
+
+    poisoned = "http://evil.example/index"
+    result = run_install(
+        bin_dir,
+        env_extra={
+            "UV_INDEX_URL": poisoned,
+            "UV_DEFAULT_INDEX": poisoned + "/default",
+            "UV_EXTRA_INDEX_URL": poisoned + "/extra",
+            "PIP_INDEX_URL": poisoned + "/pip",
+            "UV_CONFIG_FILE": "/tmp/poisoned.toml",  # noqa: S108
+            "PIP_CONFIG_FILE": "/tmp/poisoned-pip.conf",  # noqa: S108
+            "PIP_TRUSTED_HOST": "evil.example",
+            "UV_NATIVE_TLS": "rustls",
+            "UV_OFFLINE": "1",
+            "UV_NO_CACHE": "1",
+        },
+    )
+    assert result.returncode == 0, (
+        f"install must succeed under env scrub (poisoned vars should be "
+        f"silently dropped, not raise).\nstderr: {result.stderr}"
+    )
+
+    env_log = tmp_path / "uv-env.log"
+    log = env_log.read_text() if env_log.exists() else ""
+    forbidden = [
+        "UV_INDEX_URL=",
+        "UV_DEFAULT_INDEX=",
+        "UV_EXTRA_INDEX_URL=",
+        "PIP_INDEX_URL=",
+        "UV_CONFIG_FILE=",
+        "PIP_CONFIG_FILE=",
+        "PIP_TRUSTED_HOST=",
+        "UV_NATIVE_TLS=",
+        "UV_OFFLINE=",
+        "UV_NO_CACHE=",
+    ]
+    leaked = [v for v in forbidden if v in log]
+    assert not leaked, (
+        f"these poisoned env vars leaked through to uv despite the scrub: "
+        f"{leaked}\nuv-env.log:\n{log}"
+    )
+
+
 def test_astral_installer_sha_mismatch_exits_50(tmp_path: Path) -> None:
     """A poisoned/corrupted Astral installer download must exit EXIT_INTEGRITY (50),
     NOT EXIT_INTERNAL (40). CI retry policies treat 40 as transient and 50 as

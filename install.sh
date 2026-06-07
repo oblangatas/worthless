@@ -47,6 +47,33 @@ ASTRAL_INSTALLER_URL="https://astral.sh/uv/${UV_VERSION}/install.sh"
 DOCS_URL="https://docs.wless.io"
 WINDOWS_DOCS_URL="https://docs.wless.io/install/wsl"
 
+# Scrub UV_*/PIP_* env vars that a poisoned shell rc could use to redirect
+# this install to an attacker mirror or bypass TLS verification (WOR-673 /
+# A2 of WOR-669, audit-with-AI hardening). install.sh ships its own pinned
+# index (PyPI default), config (we use --no-config in uv calls, A3), and
+# certificate trust (system store). A caller who legitimately needs an
+# index override must edit the script — that decision belongs in version
+# control, not in environment.
+#
+# Categories scrubbed:
+#   - index URL redirect      → UV_INDEX{,_URL}, UV_DEFAULT_INDEX, UV_EXTRA_INDEX_URL, PIP_INDEX_URL, PIP_EXTRA_INDEX_URL
+#   - config-file redirect    → UV_CONFIG_FILE, PIP_CONFIG_FILE
+#   - cache / offline forcing → UV_NO_CACHE, UV_OFFLINE
+#   - TLS bypass              → PIP_TRUSTED_HOST, UV_NATIVE_TLS
+#
+# Not scrubbed (intentional):
+#   - HTTP_PROXY / HTTPS_PROXY — legitimate caller env, install.sh's proxy
+#     hints already honor them on network-failure paths
+#   - UV_PYTHON_PREFERENCE     — we re-set it ourselves on the next line for
+#     reproducibility; an attacker setting it would change which Python
+#     uv uses (escalation, but bounded — different threat class, not A2)
+unset \
+    UV_INDEX UV_INDEX_URL UV_DEFAULT_INDEX UV_EXTRA_INDEX_URL \
+    PIP_INDEX_URL PIP_EXTRA_INDEX_URL \
+    UV_CONFIG_FILE PIP_CONFIG_FILE \
+    UV_NO_CACHE UV_OFFLINE \
+    PIP_TRUSTED_HOST UV_NATIVE_TLS
+
 # Force uv to use its own managed Python for fresh-box reproducibility.
 export UV_PYTHON_PREFERENCE="${UV_PYTHON_PREFERENCE:-only-managed}"
 ORIGINAL_PATH="${PATH:-}"

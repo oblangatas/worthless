@@ -84,6 +84,76 @@ def test_exit_integrity_used_for_sha_mismatch_only(install_text: str) -> None:
     )
 
 
+# --- WOR-673 (A2): env-scrub for UV_*/PIP_* attack surface ------------------
+
+
+_SCRUBBED_VARS = (
+    # Index URL redirect class
+    "UV_INDEX",
+    "UV_INDEX_URL",
+    "UV_DEFAULT_INDEX",
+    "UV_EXTRA_INDEX_URL",
+    "PIP_INDEX_URL",
+    "PIP_EXTRA_INDEX_URL",
+    # Config-file redirect class
+    "UV_CONFIG_FILE",
+    "PIP_CONFIG_FILE",
+    # Cache / offline forcing class
+    "UV_NO_CACHE",
+    "UV_OFFLINE",
+    # TLS bypass class
+    "PIP_TRUSTED_HOST",
+    "UV_NATIVE_TLS",
+)
+
+
+def test_env_scrub_lists_every_known_redirect_var(install_text: str) -> None:
+    """A2 ships an `unset` block scrubbing the 4 attack classes documented in
+    WOR-673 (index URL redirect, config-file redirect, cache/offline forcing,
+    TLS bypass). If a future PR drops one of these vars, the attack surface
+    silently widens — A2's whole point lost.
+    """
+    # Find the `unset` block — must be a single multi-line statement.
+    match = re.search(r"^unset\s*\\?\n((?:\s+.*\\?\n)+)", install_text, re.MULTILINE)
+    assert match is not None, (
+        "install.sh must contain a multi-line `unset` block scrubbing "
+        "UV_*/PIP_* redirect vars (WOR-673 / A2). Got no match."
+    )
+    block = match.group(0)
+    missing = [v for v in _SCRUBBED_VARS if v not in block]
+    assert not missing, (
+        f"install.sh `unset` block is missing these env vars from the "
+        f"WOR-673 scrub list: {missing}\nfound block:\n{block}"
+    )
+
+
+def test_env_scrub_runs_before_any_uv_invocation(install_text: str) -> None:
+    """Ordering invariant: the scrub must run before any `uv` invocation
+    inherits the poisoned env. install.sh defines all functions that call
+    uv (`ensure_uv`, `install_or_upgrade_worthless`, etc.) AFTER the scrub
+    block; this pins the order.
+    """
+    lines = install_text.splitlines()
+    unset_line = next(
+        (i for i, line in enumerate(lines) if line.strip().startswith("unset ")),
+        None,
+    )
+    assert unset_line is not None, "`unset` block must exist (WOR-673)."
+
+    # First function definition (POSIX sh: `name() {`) anchors where uv
+    # invocations can start. The scrub MUST come before any function.
+    first_fn_line = next(
+        (i for i, line in enumerate(lines) if re.match(r"^\s*\w+\s*\(\)\s*\{?\s*$", line)),
+        None,
+    )
+    assert first_fn_line is not None, "expected at least one function definition"
+    assert unset_line < first_fn_line, (
+        f"env scrub (line {unset_line + 1}) must run BEFORE any function "
+        f"definition (first at line {first_fn_line + 1}) — otherwise a uv "
+        f"call could inherit the poisoned env before the scrub fires."
+    )
+
+
 # --- WOR-558: single-origin + discoverable audit (?explain=1) ----------------
 
 
