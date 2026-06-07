@@ -27,9 +27,12 @@ class SpendLedger:
 
     __slots__ = ("_db", "_lock")
 
-    def __init__(self, db: aiosqlite.Connection) -> None:
+    def __init__(self, db: aiosqlite.Connection, lock: asyncio.Lock | None = None) -> None:
         self._db = db
-        self._lock = asyncio.Lock()  # serialise our txns so BEGIN IMMEDIATE can't collide
+        # One lock per CONNECTION serialises BEGIN IMMEDIATE. Share it with every other
+        # code path that opens a txn on this same connection (e.g. TokenBudgetRule), or two
+        # different locks would let concurrent requests nest a transaction → crash.
+        self._lock = lock if lock is not None else asyncio.Lock()
 
     async def hold(
         self,
@@ -99,6 +102,37 @@ class SpendLedger:
                     "INSERT INTO spend_log (key_alias, tokens, model, provider)"
                     " VALUES (?, ?, ?, ?)",
                     (alias, actual, model, provider),
+                )
+                await self._db.commit()
+            except BaseException:  # noqa: BLE001 — roll back open txn on any exit (incl. cancel)
+                await self._db.rollback()
+                raise
+
+    async def settle_at_estimate(self, handle: str) -> None:
+        """Atomically swap the hold for one ``spend_log`` row at the hold's STORED
+        estimate (fail-closed fallback when the provider's actual usage can't be
+        read — e.g. mid-stream client disconnect, malformed response). Idempotent:
+        a no-op if the hold is gone. Same shape as :meth:`settle` but bills the
+        admission estimate instead of waiting for the background sweeper.
+        """
+        async with self._lock:
+            await self._db.execute("BEGIN IMMEDIATE")
+            try:
+                cur = await self._db.execute(
+                    "SELECT key_alias, estimate, provider, model FROM pending_charges"
+                    " WHERE handle = ?",
+                    (handle,),
+                )
+                row = await cur.fetchone()
+                if row is None:
+                    await self._db.rollback()
+                    return
+                alias, estimate, provider, model = row
+                await self._db.execute("DELETE FROM pending_charges WHERE handle = ?", (handle,))
+                await self._db.execute(
+                    "INSERT INTO spend_log (key_alias, tokens, model, provider)"
+                    " VALUES (?, ?, ?, ?)",
+                    (alias, estimate, model, provider),
                 )
                 await self._db.commit()
             except BaseException:  # noqa: BLE001 — roll back open txn on any exit (incl. cancel)

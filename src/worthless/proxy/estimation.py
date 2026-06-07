@@ -1,11 +1,16 @@
 """Request-cost estimator for the spend cap (WOR-659 Task 3).
 
-``estimate = input + n * min(max_tokens, ceiling)``. Input char-counts messages
+``estimate = input + n * declared_max_tokens``. Input char-counts messages
 (content + tool-call args) + system + tools + top-level prompt. A text block
 counts its ``text`` (the only field a provider bills there); unknown block types
-count their full serialised length; images floor high. An unparseable body fails
-high, never 0. An *admission* estimate — the ledger settles to the provider's
-actual usage afterwards.
+count their full serialised length; images floor high. An unparsable body fails
+high, never 0.
+
+We count only what the request states — no invented model/provider output bound.
+When ``max_tokens`` is absent we reserve 0 for the output, so a request is never
+blocked merely for omitting it; its real output is billed on settle (one such
+request can overshoot the cap by its actual output before later requests block).
+An *admission* estimate; the ledger settles to the provider's actual usage after.
 """
 
 from __future__ import annotations
@@ -21,7 +26,7 @@ __all__ = ["estimate_request_tokens"]
 _CHARS_PER_TOKEN = 2
 _IMAGE_BLOCK_TYPES = frozenset({"image", "image_url", "input_image"})
 _IMAGE_BLOCK_TOKENS = 1600  # cover Anthropic (~1600) / OpenAI high-detail tiling
-_MALFORMED_FLOOR_TOKENS = 4096  # unparseable body → fail high, never 0
+_MALFORMED_FLOOR_TOKENS = 4096  # unparsable body → fail high, never 0
 
 
 def _walk_content(value: Any) -> tuple[int, int]:
@@ -80,8 +85,11 @@ def _count_chars_and_images(payload: dict[str, Any]) -> tuple[int, int]:
     return chars, images
 
 
-def _resolve_output_units(payload: dict[str, Any], max_output_ceiling: int) -> tuple[int, int]:
-    """(n, capped_max_tokens) — both validated; invalid/absent values assume the worst."""
+def _resolve_output_units(payload: dict[str, Any]) -> tuple[int, int]:
+    """(n, output tokens). Counts the client's DECLARED ``max_tokens`` exactly as
+    written — we don't invent a model/provider output bound we can't know. If it's
+    absent/invalid we reserve 0; the actual output is billed on settle.
+    """
     n = payload.get("n", 1)
     if not isinstance(n, int) or n < 1:
         n = 1
@@ -89,12 +97,16 @@ def _resolve_output_units(payload: dict[str, Any], max_output_ceiling: int) -> t
     if not isinstance(max_tokens, int) or max_tokens < 0:
         max_tokens = payload.get("max_completion_tokens")  # modern OpenAI o-series
     if not isinstance(max_tokens, int) or max_tokens < 0:
-        max_tokens = max_output_ceiling  # absent/invalid → assume the worst
-    return n, min(max_tokens, max_output_ceiling)
+        # Not declared → reserve nothing for the unknown output ("go along with the
+        # ride"); settle records the actual. One such request can overshoot the cap
+        # by its real output, but subsequent requests are blocked once over.
+        return n, 0
+    return n, max_tokens
 
 
-def estimate_request_tokens(body: bytes, *, max_output_ceiling: int) -> int:
-    """Estimate a request's token cost for the spend cap. Fails high, never 0."""
+def estimate_request_tokens(body: bytes) -> int:
+    """Estimate a request's token cost for the spend cap. Fails high, never 0.
+    Counts only what's in the request — provider/model defaults are never invented."""
     try:
         payload = json.loads(body)
     except (json.JSONDecodeError, ValueError):
@@ -104,5 +116,5 @@ def estimate_request_tokens(body: bytes, *, max_output_ceiling: int) -> int:
 
     chars, images = _count_chars_and_images(payload)
     input_tokens = math.ceil(chars / _CHARS_PER_TOKEN) + images * _IMAGE_BLOCK_TOKENS
-    n, max_tokens = _resolve_output_units(payload, max_output_ceiling)
+    n, max_tokens = _resolve_output_units(payload)
     return max(input_tokens + n * max_tokens, 1)  # never 0, even for an empty valid request

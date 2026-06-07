@@ -30,6 +30,60 @@ def test_uv_version_pinned(install_text: str) -> None:
     )
 
 
+# --- WOR-679 (A8): EXIT_INTEGRITY=50 contract -------------------------------
+
+
+def test_header_documents_exit_integrity(install_text: str) -> None:
+    """The script header is the human-readable contract for operators wiring CI.
+
+    EXIT_INTEGRITY=50 means "byte-integrity mismatch; CI MUST NOT auto-retry."
+    If a future PR silently drops the header line, the contract decays into
+    folklore — A8's whole point is lost.
+    """
+    header = "\n".join(install_text.splitlines()[:14])
+    assert re.search(r"^#\s*50\b", header, re.MULTILINE), (
+        "install.sh header must document exit code 50 (byte-integrity) so "
+        "operators wiring CI retry policies see the contract before running."
+    )
+    assert "MUST NOT auto-retry" in header or "MUST NOT retry" in header, (
+        "header must name the no-auto-retry contract for code 50, not just the code itself."
+    )
+
+
+def test_exit_internal_die_site_count(install_text: str) -> None:
+    """A8 promises to flip ONLY the Astral SHA-mismatch die-site to
+    EXIT_INTEGRITY. The 5 other EXIT_INTERNAL sites (missing hash tool,
+    uv-not-on-PATH after install, install crash branches, smoke-test
+    failure) must stay at EXIT_INTERNAL — they're genuine transient
+    failures where retry is sane. If a future refactor silently flips
+    one of those to EXIT_INTEGRITY, the boundary between "retry-me-40"
+    and "stop-50" rots and the exit-code contract is meaningless.
+    """
+    die_sites = re.findall(r'\bdie\s+"\$EXIT_INTERNAL"', install_text)
+    assert len(die_sites) == 5, (
+        f'install.sh must have exactly 5 `die "$EXIT_INTERNAL"` sites '
+        f"after A8 (missing hash tool, uv-not-on-PATH, two install crash "
+        f"branches, smoke-test failure). Got {len(die_sites)}. "
+        f"If you intentionally moved one to EXIT_INTEGRITY or EXIT_NETWORK, "
+        f"update this count and document the boundary change."
+    )
+
+
+def test_exit_integrity_used_for_sha_mismatch_only(install_text: str) -> None:
+    """Inverse guard: EXIT_INTEGRITY appears exactly twice — once at the
+    constant declaration, once at the Astral SHA-mismatch die-site. If a
+    future PR sprouts new EXIT_INTEGRITY callers without updating tests
+    or the header, this fires.
+    """
+    occurrences = re.findall(r"\bEXIT_INTEGRITY\b", install_text)
+    assert len(occurrences) == 2, (
+        f"EXIT_INTEGRITY should appear exactly twice in install.sh "
+        f"(declaration + Astral SHA die-site). Got {len(occurrences)}. "
+        f"A1 (wheel hash) and A5 (uv-version match) will add more — when "
+        f"they land, update this count to match."
+    )
+
+
 # --- WOR-558: single-origin + discoverable audit (?explain=1) ----------------
 
 

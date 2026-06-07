@@ -11,6 +11,7 @@ Architecture invariants enforced:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -210,16 +211,21 @@ async def _lifespan(app: FastAPI):
     )
     app.state.httpx_client = client
 
+    # One transaction lock per connection: every BEGIN IMMEDIATE path on `db`
+    # (the ledger inside SpendCapRule, and TokenBudgetRule) must share it, or two
+    # concurrent requests could nest a transaction on the one connection → crash.
+    db_lock = asyncio.Lock()
+    app.state.db_lock = db_lock
     rules_engine = RulesEngine(
         rules=[
-            TokenBudgetRule(db=db),
+            TokenBudgetRule(db=db, lock=db_lock),
             RateLimitRule(
                 default_rps=settings.default_rate_limit_rps,
                 db_path=settings.db_path,
             ),
             # LAST — TokenBudgetRule and SpendCapRule both place reservations;
             # SpendCapRule runs last to minimise denial-path leaks.
-            SpendCapRule(db=db),
+            SpendCapRule(db=db, lock=db_lock),
         ]
     )
     app.state.rules_engine = rules_engine
@@ -366,22 +372,29 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
         # Starlette body-caching coupling — rules receive bytes, not stream)
         body = await request.body()
 
-        # Estimate max tokens for spend-cap reservation (WOR-242).
-        # Computed once here so error paths and spend recording can release it.
+        # Token-budget reservation amount (WOR-242). The spend CAP no longer uses
+        # this — its reservation is the durable ledger hold below.
         _spend_reservation = _estimate_tokens(body)
 
         # GATE: rules engine evaluates BEFORE any Fernet decrypt
-        denial = await rules_engine.evaluate(alias, request, provider=encrypted.provider, body=body)
-        if denial is not None:
-            # Zero shard_a before returning (SR-01/SR-02)
+        gate = await rules_engine.evaluate(alias, request, provider=encrypted.provider, body=body)
+        spend_handle = gate.spend_handle
+
+        async def _release_reservations() -> None:
+            """Failure / denial exit: drop the durable spend hold (if any) + the
+            in-memory token-budget reservation. Single seam for every exit path."""
+            await rules_engine.refund_spend(spend_handle)
+            await rules_engine.release_spend_reservation(alias, amount=_spend_reservation)
+
+        if gate.denial is not None:
+            # Zero shard_a before returning (SR-01/SR-02). The engine already
+            # refunded any spend hold on denial; this also drops the token budget.
             shard_a[:] = b"\x00" * len(shard_a)
-            # Release any reservation placed by an earlier rule in the chain
-            # (e.g. TokenBudgetRule reserves before RateLimitRule/SpendCapRule run).
-            await rules_engine.release_spend_reservation(alias, _spend_reservation)
+            await _release_reservations()
             return Response(
-                content=denial.body,
-                status_code=denial.status_code,
-                headers=denial.headers,
+                content=gate.denial.body,
+                status_code=gate.denial.status_code,
+                headers=gate.denial.headers,
                 media_type="application/json",
             )
 
@@ -389,7 +402,7 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
         adapter = get_adapter(clean_path)
         if adapter is None:
             shard_a[:] = b"\x00" * len(shard_a)
-            await rules_engine.release_spend_reservation(alias, _spend_reservation)
+            await _release_reservations()
             return _uniform_401()
 
         # Decrypt now that the gate has passed — over IPC to the sidecar.
@@ -399,11 +412,11 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
             plaintext_shard_b = await ipc.open(encrypted.shard_b_enc, key_id=alias)
         except IPCUnavailable:
             shard_a[:] = b"\x00" * len(shard_a)
-            await rules_engine.release_spend_reservation(alias, _spend_reservation)
+            await _release_reservations()
             return _make_gateway_response(503, "sidecar unavailable")
         except Exception:
             shard_a[:] = b"\x00" * len(shard_a)
-            await rules_engine.release_spend_reservation(alias, _spend_reservation)
+            await _release_reservations()
             return _uniform_401()
 
         # Reconstruct key inside secure_key context (body already read above)
@@ -426,7 +439,7 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
         except Exception:
             shard_a[:] = b"\x00" * len(shard_a)
             plaintext_shard_b[:] = b"\x00" * len(plaintext_shard_b)
-            await rules_engine.release_spend_reservation(alias, _spend_reservation)
+            await _release_reservations()
             return _uniform_401()
 
         # Build and send with stream=True for SSE support
@@ -451,13 +464,13 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
                 try:
                     upstream_resp = await httpx_client.send(upstream_req, stream=True)
                 except httpx.TimeoutException:
-                    await rules_engine.release_spend_reservation(alias, _spend_reservation)
+                    await _release_reservations()
                     return _make_gateway_response(504, "gateway timeout")
                 except httpx.ConnectError:
-                    await rules_engine.release_spend_reservation(alias, _spend_reservation)
+                    await _release_reservations()
                     return _make_gateway_response(502, "bad gateway")
                 except httpx.HTTPError:
-                    await rules_engine.release_spend_reservation(alias, _spend_reservation)
+                    await _release_reservations()
                     return _make_gateway_response(502, "bad gateway")
 
             # Relay response (key_buf is zeroed after secure_key exits)
@@ -466,8 +479,19 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
             clean_headers = _strip_worthless_headers(adapter_resp.headers)
             provider = encrypted.provider
 
-            async def _do_record_spend(data: bytes):
-                """Extract usage and record spend — shared by streaming and non-streaming."""
+            async def _do_record_spend(data: bytes, *, provider_succeeded: bool = True):
+                """Settle / record spend after the upstream call.
+
+                * If the provider reported usage, honour it (provider DID bill input
+                  tokens even on a 4xx error response).
+                * If usage is absent and provider FAILED (>= 400): refund the hold
+                  (capped) / skip (uncapped) — the provider rejected the call.
+                * If usage is absent and provider SUCCEEDED (200 but parse failure /
+                  mid-stream disconnect): settle at estimate (capped) so the cap is
+                  billed immediately — closes the cost-griefing window where the
+                  sweeper TTL would otherwise let an attacker pay only estimate via
+                  many aborted streams. For uncapped: warn-only, no phantom spend.
+                """
                 if provider == "anthropic":
                     usage = extract_usage_anthropic(data)
                 else:
@@ -479,19 +503,72 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
                     # python-logger-credential-disclosure rule fires on
                     # the word "Token" in log messages, but here we mean
                     # the LLM response usage-tokens count (for metering),
-                    # not an auth token. Renaming clears the rule
-                    # without needing a # nosemgrep annotation.
+                    # not an auth token.
                     logger.warning(
                         "Usage extraction failed for alias=%s provider=%s",
                         alias,
                         provider,
                     )
-                try:
-                    await record_spend(settings.db_path, alias, tokens, model, provider)
-                except Exception:
-                    logger.warning("Failed to record spend for alias=%s", alias)
-                # Release the spend reservation now that actual tokens are recorded (WOR-242).
-                await rules_engine.release_spend_reservation(alias, _spend_reservation)
+                if spend_handle is not None:
+                    if usage is not None:
+                        # Bill at provider-reported actual; on failure fall back to
+                        # admission estimate so the cap is still updated promptly.
+                        try:
+                            await rules_engine.settle_spend(spend_handle, tokens)
+                        except Exception:
+                            logger.warning(
+                                "settle failed for alias=%s; falling back to estimate",
+                                alias,
+                            )
+                            try:
+                                await rules_engine.settle_spend_at_estimate(spend_handle)
+                            except Exception:
+                                logger.warning(
+                                    "settle_at_estimate also failed for alias=%s; "
+                                    "sweeper is the last backstop",
+                                    alias,
+                                )
+                    elif provider_succeeded:
+                        # Success but unreadable usage (stream disconnect / parse fail):
+                        # bill at admission estimate immediately (closes cost-griefing).
+                        try:
+                            await rules_engine.settle_spend_at_estimate(spend_handle)
+                        except Exception:
+                            logger.warning(
+                                "settle_at_estimate failed for alias=%s; "
+                                "sweeper is the last backstop",
+                                alias,
+                            )
+                    else:
+                        # Upstream error (4xx/5xx) with no usage: refund — the user
+                        # must NOT pay for a request the provider rejected. A refund
+                        # failure must retry refund, never fall through to billing.
+                        try:
+                            await rules_engine.refund_spend(spend_handle)
+                        except Exception:
+                            logger.warning(
+                                "refund failed for alias=%s on upstream error; "
+                                "retrying refund, never billing",
+                                alias,
+                            )
+                            try:
+                                await rules_engine.refund_spend(spend_handle)
+                            except Exception:
+                                logger.warning(
+                                    "refund retry also failed for alias=%s; sweeper "
+                                    "will bill at estimate (worst-case soft-overcharge)",
+                                    alias,
+                                )
+                elif usage is not None or not provider_succeeded:
+                    # Uncapped: record actual usage when present; on error paths with
+                    # no usage, still record(0) as an audit trail of the failed call.
+                    try:
+                        await record_spend(settings.db_path, alias, tokens, model, provider)
+                    except Exception:
+                        logger.warning("Failed to record spend for alias=%s", alias)
+                # Else: uncapped + success + no usage → warn-only, no phantom spend.
+                # Release the in-memory token-budget reservation (WOR-242).
+                await rules_engine.release_spend_reservation(alias, amount=_spend_reservation)
 
             if adapter_resp.status_code >= 400:
                 sanitized_body = _sanitize_upstream_error(
@@ -502,7 +579,9 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
                     status_code=adapter_resp.status_code,
                     headers={"content-type": "application/json"},
                     media_type="application/json",
-                    background=BackgroundTask(_do_record_spend, adapter_resp.body),
+                    background=BackgroundTask(
+                        _do_record_spend, adapter_resp.body, provider_succeeded=False
+                    ),
                 )
 
             if adapter_resp.is_streaming and adapter_resp.stream is not None:
@@ -519,25 +598,55 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
 
                 async def _record_metering():
                     usage = usage_collector.result()
-                    if usage is not None:
-                        await record_spend(
-                            settings.db_path,
-                            alias,
-                            usage.total_tokens,
-                            usage.model,
-                            encrypted.provider,
-                        )
+                    if spend_handle is not None:
+                        # Capped: settle hold to actual, or to estimate if usage is
+                        # unreadable (mid-stream client disconnect, SSE format change).
+                        # Settling at estimate IMMEDIATELY closes the cost-griefing
+                        # window where an attacker aborts streams to pay only estimate
+                        # via the sweeper TTL backstop.
+                        try:
+                            if usage is not None:
+                                await rules_engine.settle_spend(spend_handle, usage.total_tokens)
+                            else:
+                                logger.warning(
+                                    "Could not extract usage from streaming response "
+                                    "for alias=%s; settling at estimate",
+                                    alias,
+                                )
+                                await rules_engine.settle_spend_at_estimate(spend_handle)
+                        except Exception:
+                            logger.warning(
+                                "settle failed for alias=%s; falling back to estimate", alias
+                            )
+                            try:
+                                await rules_engine.settle_spend_at_estimate(spend_handle)
+                            except Exception:
+                                logger.warning(
+                                    "settle_at_estimate also failed for alias=%s; "
+                                    "sweeper is the last backstop",
+                                    alias,
+                                )
+                    elif usage is not None:
+                        try:
+                            await record_spend(
+                                settings.db_path,
+                                alias,
+                                usage.total_tokens,
+                                usage.model,
+                                encrypted.provider,
+                            )
+                        except Exception:
+                            logger.warning("Failed to record spend for alias=%s", alias)
                     else:
-                        # Zero friction: if we can't extract usage (provider
-                        # changed SSE format, etc.), log a warning but don't
-                        # penalize the user with phantom spend.
+                        # Uncapped + no usage: zero friction, don't penalise the user
+                        # with phantom spend (the cap mechanism isn't engaged here).
                         logger.warning(
                             "Could not extract usage from streaming response "
                             "for alias=%s; spend not recorded",
                             alias,
                         )
-                    # Release the spend reservation (WOR-242).
-                    await rules_engine.release_spend_reservation(alias, _spend_reservation)
+                    # Release the in-memory token-budget reservation (WOR-242).
+                    await rules_engine.release_spend_reservation(alias, amount=_spend_reservation)
 
                 return StreamingResponse(
                     _stream_with_metering(),

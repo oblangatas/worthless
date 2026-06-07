@@ -123,6 +123,63 @@ async def test_settle_is_idempotent_by_handle(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_settle_at_estimate_bills_the_stored_estimate(tmp_path) -> None:
+    """When actual usage can't be read (mid-stream disconnect, parse failure),
+    settle_at_estimate must atomically convert the hold to a spend_log row at
+    the hold's STORED estimate — same shape as settle, but with the conservative
+    admission value instead of waiting for the background sweeper.
+    """
+    db = await _open(tmp_path)
+    try:
+        ledger = SpendLedger(db)
+        h = await ledger.hold("k1", estimate=42, cap=100, provider="openai")
+        await ledger.settle_at_estimate(h)
+        assert await _held(db, "k1") == 0  # hold gone
+        assert await _committed(db, "k1") == 42  # exactly the estimate
+        assert await _spend_rows(db, "k1") == 1
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_settle_at_estimate_is_idempotent_by_handle(tmp_path) -> None:
+    """A double call (e.g. a retry after a logged settle failure) must be a no-op
+    — the cap can't be double-billed when the hold is already gone."""
+    db = await _open(tmp_path)
+    try:
+        ledger = SpendLedger(db)
+        h = await ledger.hold("k1", estimate=42, cap=100, provider="openai")
+        await ledger.settle_at_estimate(h)
+        await ledger.settle_at_estimate(h)  # second call must do nothing
+        assert await _spend_rows(db, "k1") == 1
+        assert await _committed(db, "k1") == 42
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_settle_at_estimate_unblocks_cap_without_waiting_for_sweep(tmp_path) -> None:
+    """Cost-griefing guard: an aborted/unreadable request must IMMEDIATELY bill
+    the cap so the next request sees an honest budget, not a stale one. Without
+    settle_at_estimate the hold would only be cleared by the background sweeper —
+    a window an attacker could use to fire many requests cheaply.
+    """
+    db = await _open(tmp_path)
+    try:
+        ledger = SpendLedger(db)
+        # Fill the cap to 90/100 with a hold; usage is unreadable.
+        h1 = await ledger.hold("k1", estimate=90, cap=100, provider="openai")
+        await ledger.settle_at_estimate(h1)
+        # The very next request sees the cap honestly accounted for — only 10 left.
+        h2 = await ledger.hold("k1", estimate=11, cap=100, provider="openai")
+        assert h2 is None  # would exceed cap
+        h3 = await ledger.hold("k1", estimate=10, cap=100, provider="openai")
+        assert h3 is not None  # fits exactly
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
 async def test_refund_deletes_hold_without_spend_log_write(tmp_path) -> None:
     db = await _open(tmp_path)
     try:
