@@ -1,42 +1,54 @@
-"""Chaos test — exactly-once settle on mid-stream disconnect (WOR-695).
+"""Chaos test — row-check no-op after consumed hold (WOR-695).
 
 > Make sure the spend cap actually holds on every request — so once the budget's
 > blown, the key stops forming, no matter who's spending or why.
 
-The spend cap is only as honest as the counter it reads from. Today the counter
-is protected by:
+**Scope (honest):** this test guards the ROW-CHECK inside `settle_at_estimate`
+ONLY. It does NOT exercise the asyncio.Lock or the `BEGIN IMMEDIATE` transaction
+under contention. The reason: `httpx.ASGITransport` does not expose an in-flight
+window — by the time `client.post()` returns, the BackgroundTask has already run
+its settle. We tried `client.stream()`; the same race-skip pattern fired on
+100/100 iterations. So the forced double-fire here happens AFTER the BG task
+already drained the hold, which means the test exercises:
 
-1. an asyncio.Lock on the shared aiosqlite connection,
-2. a SQLite `BEGIN IMMEDIATE` transaction inside that lock,
-3. a row-check against `pending_charges` inside the transaction (settle no-ops
-   when the hold is already consumed).
+   "second `settle_at_estimate` against a hold that's already been consumed
+    by the BG task returns a no-op without inserting a duplicate spend_log row."
 
-We *believe* that triple-lock makes settle exactly-once even when a client
-disconnects mid-stream and a "double-fire" race occurs (BackgroundTask runs +
-another settle attempt sneaks in). But "we believe" isn't a regression guard.
-A future refactor (multi-process, lock-splitting, replacing aiosqlite) could
-silently re-open the race and we wouldn't notice until a customer cap leaked.
+That's the row-check guard (the third of the three guards the cap depends on).
+It is NOT a guard for the lock or BEGIN IMMEDIATE — those are exercised by the
+sibling test in `tests/chaos/test_ledger_lock_contention.py`, which fires
+`asyncio.gather(settle, settle)` directly against an active hold at the
+SpendLedger layer, where contention is observable.
 
-This file PROVES the invariant under deliberately-forced double-fire by:
+**What this proves:** if a future refactor breaks the row-check (e.g. removes
+the `if row is None: return` short-circuit inside the BEGIN IMMEDIATE
+transaction), this test goes red.
 
-* booting the real proxy app against a real SQLite tempfile,
-* enrolling a real (mocked-upstream) key,
-* running N requests against the real ASGI app,
-* after each request, FORCING a second `settle_at_estimate(handle)` call
-  concurrently with the BackgroundTask's own settle,
-* asserting via raw SQL after every iteration:
-    - exactly 1 row in `spend_log` for that handle,
-    - exactly 0 rows in `pending_charges` for that handle,
-    - total tokens recorded == one settle amount (not double),
-* repeating N≥100 times to make any timing-dependent leak surface.
+**What this does NOT prove:** if a future refactor removes the asyncio.Lock
+or downgrades `BEGIN IMMEDIATE` to a deferred transaction, this test stays
+green. That's `test_ledger_lock_contention.py`'s job.
 
-Expected behavior on the current code: the test passes — the second settle
-finds no `pending_charges` row, no-ops, and the count stays exact. If the test
-ever goes red, a refactor has broken the invariant and the cap is leaking.
+**Why this still ships:** the row-check is the cheapest of the three guards
+and the most likely to drift in a refactor (the lock and BEGIN IMMEDIATE are
+attention-grabbing; the row-check is a tiny conditional). It's worth a
+regression guard.
 
-This test ships ZERO production-code changes — the chaos test IS the asset.
+How this works:
+
+* boots the real proxy app against a real SQLite tempfile,
+* enrolls a real (mocked-upstream) key,
+* spies on `SpendLedger.hold` at the CLASS level to capture handles as they
+  issue (ASGITransport hides the in-flight pending_charges window, so spying
+  is the only honest way),
+* fires N=100 streaming requests; after each, fires two concurrent
+  `settle_at_estimate(handle)` calls AGAINST AN ALREADY-CONSUMED hold,
+* asserts via raw SQL: spend_log row-count moved by exactly 1, total tokens
+  moved by exactly one settle's worth, hold's pending_charges row is gone,
+* `race_skipped < N // 2` keeps the green honest — if the spy ever fails to
+  capture handles, the test fails loudly (no silent false-positive).
 
 Out of scope (do NOT add here):
+* lock + BEGIN IMMEDIATE contention — `test_ledger_lock_contention.py`
 * per-(provider, model) ceiling table — WOR-696
 * max-stream-duration / idle-timeout kills — WOR-696
 * divergence telemetry — WOR-697
@@ -199,16 +211,19 @@ async def _snapshot(db_path: str, handle: str | None) -> tuple[int, int, int, se
 
 
 @pytest.mark.asyncio
-async def test_exactly_once_settle_under_forced_double_fire() -> None:
-    """N≥100 requests, each forced into a settle double-fire race.
+async def test_row_check_blocks_settle_after_consumed_hold() -> None:
+    """N≥100 requests; after each, force two more settles vs the consumed hold.
 
     Invariants after every iteration:
-    - exactly one spend_log row per handle
-    - zero pending_charges rows per handle
-    - sum of tokens for that handle == single settle amount
+    - exactly one new spend_log row (BG task's settle wins; forced settles no-op)
+    - zero pending_charges rows for the handle (BG task drained it)
+    - tokens delta > 0 (settle did move the counter at least once)
 
-    If the lock + row-check inside BEGIN IMMEDIATE ever stops serializing,
-    one of those three will fail and this test goes red.
+    If the row-check inside settle_at_estimate's BEGIN IMMEDIATE ever stops
+    short-circuiting on an already-consumed hold, this test goes red.
+
+    Does NOT guard the asyncio.Lock or BEGIN IMMEDIATE itself — see
+    `test_ledger_lock_contention.py` for those invariants.
     """
     # TemporaryDirectory auto-cleans on context exit — avoids tmpdir leak
     # if the test fails partway through (post-code panel finding).
