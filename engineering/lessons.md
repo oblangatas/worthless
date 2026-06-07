@@ -8,6 +8,16 @@ recognize the situation. Newest at the top.
 
 ---
 
+## Recursive-walk RED: enumerate every position a primitive can live
+
+**Rule:** Before writing RED for a function that walks a structured input, enumerate every position a primitive can live in the input type. For JSON that's *value-at-any-depth*, *dict-KEY*, and *list-item*. Write a RED assertion for each position. Don't anchor on the one example the spec mentioned — the spec example is one position, not all of them.
+
+Originated 2026-06-07 on F2 G5-B (`build_oc_rollback_entry_record` deep-redact). The continuation prompt's example was `headers.Authorization: "Bearer sk-..."` — a value. I wrote RED that pinned value-at-depth, list-item, and SecretRef-pointer paths, but missed dict-KEY. GREEN shipped with `{k: walk(v) for k,v in d.items()}` — walked values, ignored keys. A pathological config storing a key-shaped string AS a dict key would leak. Both code-reviewer (HIGH-1) and security-reviewer (MED-2) flagged it post-GREEN, turning what should have been one commit into three (RED + GREEN + panel polish). The panel doing its job is fine; the cycle cost was preventable.
+
+Sharper RED takes 30 seconds: ask "where can a primitive live in this input type?" and write one assertion per position. The pattern applies to any recursive-walk feature: redact, transform, validate, serialize.
+
+---
+
 ## Beads is the inbox; Linear is the scoreboard
 
 **Rule:** Capture every emergent discovery in beads. Export to Linear ONLY when team-visibility, scheduling, or non-engineer eyes actually need it — and even then, draft the proposed Linear ticket(s) inline in chat for operator confirmation before calling `save_issue`. Never mirror a bd issue to Linear by default.
