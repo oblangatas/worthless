@@ -225,22 +225,24 @@ detect_linux_subenv() {
 # --- Conflict detection ------------------------------------------------------
 
 check_pipx_conflict() {
-    # Stop early: a pipx shim on PATH would mask the uv-installed binary.
-    #
-    # Hard requirement: pipx MUST resolve from a trusted system dir before we
-    # exec it. An attacker-controlled pipx (anywhere outside the trusted set)
-    # would execute arbitrary code in this process during `pipx list` — RCE
-    # in install.sh BEFORE any uv call. Empirically demonstrated 2026-06-07
-    # on macOS against A2-extended; WOR-709 closes the gap.
+    # Pipx MUST resolve from a trusted system dir before we exec it. An
+    # attacker-controlled pipx (e.g. ~/evil/bin/pipx on a poisoned PATH)
+    # would run as arbitrary code in this process during `pipx list` — RCE
+    # before any uv call. WOR-709. Known limit: trust is path-based, not
+    # ownership-based — an attacker who can already write to a trusted dir
+    # or plant a symlink there bypasses this; WOR-707 covers the broader
+    # absolute-path / ownership defense.
     pipx_path="$(command -v pipx 2>/dev/null || true)"
+    # Guard against unset/empty HOME — `${HOME:-/root}` only fires on unset,
+    # so HOME="" would yield `/.local/bin/pipx` as a "trusted" arm.
+    home_for_path="${HOME:-/root}"
+    [ -z "$home_for_path" ] && home_for_path="/root"
+    # Trusted set: distro system dirs, macOS/Linux Homebrew, MacPorts, user pip.
     case "$pipx_path" in
-        "")
-            # No pipx anywhere — nothing to check.
-            return 0
-            ;;
-        /usr/bin/pipx|/bin/pipx|/usr/local/bin/pipx|"${HOME:-/root}/.local/bin/pipx")
-            # Trusted location — safe to invoke.
-            ;;
+        "") return 0 ;;
+        /usr/bin/pipx|/bin/pipx|/usr/local/bin/pipx|/usr/sbin/pipx|/sbin/pipx) ;;
+        /opt/homebrew/bin/pipx|/opt/local/bin/pipx|/home/linuxbrew/.linuxbrew/bin/pipx) ;;
+        "$home_for_path/.local/bin/pipx") ;;
         *)
             warn "pipx detected at ${pipx_path} (outside trusted dirs); skipping conflict check"
             warn "  → if you have a pipx-installed worthless, run \`pipx uninstall worthless\` first"

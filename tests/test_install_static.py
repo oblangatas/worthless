@@ -242,14 +242,12 @@ def test_pipx_conflict_check_gated_on_trusted_dir(install_text: str) -> None:
     assert match is not None, "check_pipx_conflict() must exist"
     body = match.group(1)
 
-    assert re.search(r"pipx_path\s*=.*command\s+-v\s+pipx", body), (
-        "check_pipx_conflict must resolve pipx via `command -v` and capture "
-        "the path so the trusted-dir gate can inspect it (WOR-709)."
-    )
-    assert "/usr/bin/pipx" in body and "/bin/pipx" in body, (
-        "trusted-dir gate must enumerate the system paths pipx may legitimately "
-        "live in (/usr/bin, /bin, /usr/local/bin, $HOME/.local/bin)."
-    )
+    # Panel E pragmatist + brutus: don't pin implementation shape (the exact
+    # command or the literal list of paths — pinning paths blocks adding
+    # /opt/homebrew/bin etc. without test churn). Pin the USER CONTRACT
+    # (warning text) and the REGRESSION FEAR (unconditional invocation).
+    # The dynamic test test_pipx_in_untrusted_dir_is_not_invoked proves the
+    # behavior end-to-end; this static guard is the minimum belt-and-braces.
     assert "outside trusted dirs" in body, (
         "untrusted-pipx skip MUST emit a warning naming the threat — silent "
         "skip leaves the user unaware their conflict surface wasn't checked."
