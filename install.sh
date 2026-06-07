@@ -92,10 +92,6 @@ unset \
     DYLD_FRAMEWORK_PATH DYLD_FORCE_FLAT_NAMESPACE \
     ALL_PROXY all_proxy http_proxy https_proxy
 
-# IFS hardening is deferred — pinning POSIX-default IFS in a static file is
-# brittle (literal tab/newline encoding) and most expansions are already
-# quoted. Tracked as a Tier A follow-up under WOR-669.
-
 # uv-managed Python, unconditional. The `:-default` pattern honored hostile
 # non-empty values (UV_PYTHON_PREFERENCE=system → install onto attacker-
 # controllable Python with sitecustomize.py hijack). Scrub above + hard set.

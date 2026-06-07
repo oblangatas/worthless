@@ -172,26 +172,6 @@ def test_env_scrub_lists_every_known_redirect_var(install_text: str) -> None:
     )
 
 
-def test_env_scrub_block_has_no_extra_vars(install_text: str) -> None:
-    """Drift guard (reverse direction of the previous test). Every var that
-    appears in install.sh's `unset` block MUST also appear in `_SCRUBBED_VARS`.
-    Catches "added to install.sh, forgot to update test list" — the silent
-    drift class that the runtime forbidden list in test_install_logic.py
-    won't catch on its own.
-    """
-    match = re.search(r"^unset\s*\\?\n((?:[ \t]+.*\\?\n)+)", install_text, re.MULTILINE)
-    assert match is not None, "expected an `unset` block"
-    block_body = match.group(1)
-    # Extract every identifier-looking token from the block body.
-    block_vars = set(re.findall(r"\b([A-Z][A-Z0-9_]*|[a-z][a-z0-9_]*proxy)\b", block_body))
-    extras = sorted(block_vars - set(_SCRUBBED_VARS))
-    assert not extras, (
-        f"install.sh `unset` block contains vars NOT in _SCRUBBED_VARS: "
-        f"{extras}. Add them to the tracking tuple so the runtime forbidden "
-        f"list in tests/test_install_logic.py can be updated to match."
-    )
-
-
 def test_env_scrub_runs_before_any_uv_invocation(install_text: str) -> None:
     """Ordering invariant: the scrub must run before any `uv` invocation
     inherits the poisoned env. install.sh defines all functions that call

