@@ -15,6 +15,7 @@ EXIT_NETWORK = 10
 EXIT_PLATFORM = 20
 EXIT_PIPX_CONFLICT = 30
 EXIT_INTERNAL = 40
+EXIT_INTEGRITY = 50
 
 
 def write_stub(bin_dir: Path, name: str, body: str) -> Path:
@@ -115,6 +116,14 @@ def run_install(
         # install.sh's smoke_test stubs `worthless` today, but this stays
         # defensive against future install.sh paths that exec the binary.
         "WORTHLESS_KEYRING_BACKEND": "null",
+        # WOR-673 (A2): install.sh prepends /usr/bin:/bin:... to PATH as a
+        # defense against poisoned caller PATH. That would evict our stub
+        # bin_dir's `uname` / `sw_vers` / `uv` etc. behind real system
+        # binaries — tests would call real `sw_vers` on macOS and get the
+        # actual OS version instead of our mock. WORTHLESS_TRUST_PATH=1
+        # tells install.sh to preserve caller PATH. Real users never set
+        # this; the canonical script served by the Worker is always locked.
+        "WORTHLESS_TRUST_PATH": "1",
     }
     if env_extra:
         env.update(env_extra)
@@ -129,6 +138,7 @@ def run_install(
 
 
 __all__ = [
+    "EXIT_INTEGRITY",
     "EXIT_INTERNAL",
     "EXIT_NETWORK",
     "EXIT_PIPX_CONFLICT",

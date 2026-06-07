@@ -30,6 +30,249 @@ def test_uv_version_pinned(install_text: str) -> None:
     )
 
 
+# --- WOR-679 (A8): EXIT_INTEGRITY=50 contract -------------------------------
+
+
+def test_header_documents_exit_integrity(install_text: str) -> None:
+    """The script header is the human-readable contract for operators wiring CI.
+
+    EXIT_INTEGRITY=50 means "byte-integrity mismatch; CI MUST NOT auto-retry."
+    If a future PR silently drops the header line, the contract decays into
+    folklore — A8's whole point is lost.
+    """
+    header = "\n".join(install_text.splitlines()[:14])
+    assert re.search(r"^#\s*50\b", header, re.MULTILINE), (
+        "install.sh header must document exit code 50 (byte-integrity) so "
+        "operators wiring CI retry policies see the contract before running."
+    )
+    assert "MUST NOT auto-retry" in header or "MUST NOT retry" in header, (
+        "header must name the no-auto-retry contract for code 50, not just the code itself."
+    )
+
+
+def test_exit_internal_die_site_count(install_text: str) -> None:
+    """A8 promises to flip ONLY the Astral SHA-mismatch die-site to
+    EXIT_INTEGRITY. The 5 other EXIT_INTERNAL sites (missing hash tool,
+    uv-not-on-PATH after install, install crash branches, smoke-test
+    failure) must stay at EXIT_INTERNAL — they're genuine transient
+    failures where retry is sane. If a future refactor silently flips
+    one of those to EXIT_INTEGRITY, the boundary between "retry-me-40"
+    and "stop-50" rots and the exit-code contract is meaningless.
+    """
+    die_sites = re.findall(r'\bdie\s+"\$EXIT_INTERNAL"', install_text)
+    assert len(die_sites) == 5, (
+        f'install.sh must have exactly 5 `die "$EXIT_INTERNAL"` sites '
+        f"after A8 (missing hash tool, uv-not-on-PATH, two install crash "
+        f"branches, smoke-test failure). Got {len(die_sites)}. "
+        f"If you intentionally moved one to EXIT_INTEGRITY or EXIT_NETWORK, "
+        f"update this count and document the boundary change."
+    )
+
+
+def test_exit_integrity_used_for_sha_mismatch_only(install_text: str) -> None:
+    """Inverse guard: EXIT_INTEGRITY appears exactly twice — once at the
+    constant declaration, once at the Astral SHA-mismatch die-site. If a
+    future PR sprouts new EXIT_INTEGRITY callers without updating tests
+    or the header, this fires.
+    """
+    occurrences = re.findall(r"\bEXIT_INTEGRITY\b", install_text)
+    assert len(occurrences) == 2, (
+        f"EXIT_INTEGRITY should appear exactly twice in install.sh "
+        f"(declaration + Astral SHA die-site). Got {len(occurrences)}. "
+        f"A1 (wheel hash) and A5 (uv-version match) will add more — when "
+        f"they land, update this count to match."
+    )
+
+
+# --- WOR-673 (A2): env-scrub for UV_*/PIP_* attack surface ------------------
+
+
+_SCRUBBED_VARS = (
+    # Index URL redirect class
+    "UV_INDEX",
+    "UV_INDEX_URL",
+    "UV_DEFAULT_INDEX",
+    "UV_EXTRA_INDEX_URL",
+    "UV_INDEX_STRATEGY",
+    "UV_FIND_LINKS",
+    "PIP_INDEX_URL",
+    "PIP_EXTRA_INDEX_URL",
+    "PIP_FIND_LINKS",
+    "PIP_NO_INDEX",
+    # Config-file redirect class
+    "UV_CONFIG_FILE",
+    "PIP_CONFIG_FILE",
+    # Cache / offline forcing class
+    "UV_NO_CACHE",
+    "UV_OFFLINE",
+    # Anti-MitM / cert-bundle class
+    "PIP_TRUSTED_HOST",
+    "UV_INSECURE_HOST",
+    "UV_NATIVE_TLS",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+    "PIP_CERT",
+    "PIP_CLIENT_CERT",
+    # Python source class (UV_PYTHON_PREFERENCE scrubbed then re-set unconditionally)
+    "UV_PYTHON_INSTALL_MIRROR",
+    "UV_PYTHON_PREFERENCE",
+    # Auth / keyring class
+    "UV_KEYRING_PROVIDER",
+    "PIP_KEYRING_PROVIDER",
+    # Astral installer redirect class
+    "UV_INSTALL_DIR",
+    "UV_UNMANAGED_INSTALL",
+    "INSTALLER_DOWNLOAD_URL",
+    # Python sitecustomize hijack class
+    "PYTHONPATH",
+    "PYTHONSTARTUP",
+    # Shell init hijack class
+    "BASH_ENV",
+    "ENV",
+    "CDPATH",
+    "GLOBIGNORE",
+    # Dynamic loader injection class (Panel B re-review BLOCKER)
+    "LD_PRELOAD",
+    "LD_AUDIT",
+    "LD_LIBRARY_PATH",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_FALLBACK_LIBRARY_PATH",
+    "DYLD_FRAMEWORK_PATH",
+    "DYLD_FORCE_FLAT_NAMESPACE",
+    # Proxy alias class (curl honors lowercase + ALL_PROXY in addition to
+    # documented uppercase HTTP_PROXY / HTTPS_PROXY; scrub the aliases so
+    # only the documented MitM lane stays open)
+    "ALL_PROXY",
+    "all_proxy",
+    "http_proxy",
+    "https_proxy",
+)
+
+
+def test_env_scrub_lists_every_known_redirect_var(install_text: str) -> None:
+    """A2 ships an `unset` block scrubbing the 4 attack classes documented in
+    WOR-673 (index URL redirect, config-file redirect, cache/offline forcing,
+    TLS bypass). If a future PR drops one of these vars, the attack surface
+    silently widens — A2's whole point lost.
+    """
+    # Find the `unset` block — must be a single multi-line statement.
+    match = re.search(r"^unset\s*\\?\n((?:[ \t]+.*\\?\n)+)", install_text, re.MULTILINE)
+    assert match is not None, (
+        "install.sh must contain a multi-line `unset` block scrubbing "
+        "UV_*/PIP_* redirect vars (WOR-673 / A2). Got no match."
+    )
+    # CodeRabbit catch: substring `v in block` false-passes — `UV_INDEX` is
+    # "found" inside `UV_INDEX_URL`. Tokenize the block instead so each var
+    # is matched as a whole identifier (uppercase OR lowercase for the proxy
+    # alias class: all_proxy, http_proxy, https_proxy).
+    block_body = match.group(1)
+    present = set(re.findall(r"\b[A-Za-z][A-Za-z0-9_]*\b", block_body))
+    missing = [v for v in _SCRUBBED_VARS if v not in present]
+    assert not missing, (
+        f"install.sh `unset` block is missing these env vars from the "
+        f"WOR-673 scrub list: {missing}\nfound block:\n{match.group(0)}"
+    )
+
+
+def test_env_scrub_runs_before_any_uv_invocation(install_text: str) -> None:
+    """Ordering invariant: the scrub must run before any `uv` invocation
+    inherits the poisoned env. install.sh defines all functions that call
+    uv (`ensure_uv`, `install_or_upgrade_worthless`, etc.) AFTER the scrub
+    block; this pins the order.
+    """
+    lines = install_text.splitlines()
+    unset_line = next(
+        (i for i, line in enumerate(lines) if line.strip().startswith("unset ")),
+        None,
+    )
+    assert unset_line is not None, "`unset` block must exist (WOR-673)."
+
+    # First function definition (POSIX sh: `name() {`) anchors where uv
+    # invocations can start. The scrub MUST come before any function.
+    first_fn_line = next(
+        (i for i, line in enumerate(lines) if re.match(r"^\s*\w+\s*\(\)\s*\{?\s*$", line)),
+        None,
+    )
+    assert first_fn_line is not None, "expected at least one function definition"
+    assert unset_line < first_fn_line, (
+        f"env scrub (line {unset_line + 1}) must run BEFORE any function "
+        f"definition (first at line {first_fn_line + 1}) — otherwise a uv "
+        f"call could inherit the poisoned env before the scrub fires."
+    )
+
+
+def test_path_prepend_defense_present(install_text: str) -> None:
+    """A poisoned PATH (`~/evil/bin:/usr/bin:...`) wins over /usr/bin for
+    curl, sh, sha256sum, awk, uv — making every external call attacker-RCE
+    regardless of env scrub (Panel B BLOCKER). install.sh must prepend
+    system dirs + the uv install dir so legitimate binaries outrank
+    caller-controlled prefixes.
+    """
+    # Look for the PATH assignment that contains /usr/bin AND a HOME-relative
+    # uv dir. The literal pattern is flexible — what matters is that PATH gets
+    # prepended with safe dirs, not replaced piecemeal.
+    match = re.search(
+        r'PATH="/usr/bin:/bin:/usr/local/bin:[^"]*\.local/bin[^"]*"',
+        install_text,
+    )
+    assert match is not None, (
+        "install.sh must prepend /usr/bin:/bin:/usr/local/bin:$HOME/.local/bin "
+        "to PATH so a poisoned caller PATH can't redirect external calls "
+        "(WOR-673 PATH lockdown, Panel B BLOCKER fix)."
+    )
+
+
+def test_worthless_trust_path_uses_exact_string_compare(install_text: str) -> None:
+    """The PATH-lockdown escape hatch must use exact-string comparison to "1"
+    so attacker-tolerant values ("01", "true", "yes", "1 ", lowercase "1\\n")
+    don't silently bypass the lockdown. The test harness sets literal "1";
+    anyone (attacker or otherwise) supplying anything else gets the lockdown.
+
+    Defense-in-depth: the env scrub still fires regardless of WORTHLESS_TRUST_PATH,
+    so even bypassing the lockdown leaves the 48-var scrub intact.
+    """
+    # Look for the exact `!= "1"` pattern. Bans variants like `!= 1` (numeric),
+    # `-eq 1`, `= "true"`, case-insensitive matches, etc.
+    assert re.search(
+        r'\bWORTHLESS_TRUST_PATH:-\}?"\s*!=\s*"1"',
+        install_text,
+    ), (
+        'install.sh must use exact-string compare against literal "1" for '
+        "the WORTHLESS_TRUST_PATH escape hatch — looser parsing (`-eq`, "
+        "case-insensitive, true/yes acceptance) lets an attacker bypass the "
+        "PATH lockdown with attacker-tolerant values."
+    )
+
+
+def test_uv_python_preference_unconditional(install_text: str) -> None:
+    """The original `export UV_PYTHON_PREFERENCE="${VAR:-only-managed}"` honored
+    a hostile non-empty value (Panel B BLOCKER — `:-default` only fires on
+    unset/empty). install.sh must unset UV_PYTHON_PREFERENCE in the scrub
+    block, then re-export with a hard literal — no `${VAR:-…}` fallback.
+    """
+    # The scrub block must include UV_PYTHON_PREFERENCE.
+    assert "UV_PYTHON_PREFERENCE" in install_text, (
+        "UV_PYTHON_PREFERENCE must be in the scrub block (Panel B BLOCKER)."
+    )
+    # Unconditional re-export, no `${VAR:-...}` fallback.
+    assert re.search(
+        r"^export\s+UV_PYTHON_PREFERENCE=only-managed\s*$",
+        install_text,
+        re.MULTILINE,
+    ), (
+        "install.sh must export UV_PYTHON_PREFERENCE=only-managed unconditionally "
+        "(no `${VAR:-...}` fallback that lets a hostile non-empty value through)."
+    )
+    # Defensive: forbid the old bypass-prone pattern from creeping back.
+    assert "UV_PYTHON_PREFERENCE:-" not in install_text, (
+        "install.sh must NOT use `${UV_PYTHON_PREFERENCE:-...}` — that honored "
+        "a hostile UV_PYTHON_PREFERENCE=system value (Panel B BLOCKER)."
+    )
+
+
 # --- WOR-558: single-origin + discoverable audit (?explain=1) ----------------
 
 

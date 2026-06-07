@@ -1,0 +1,25 @@
+# Grype configuration — read by anchore/scan-action when present at repo root.
+#
+# Ignores are time-boxed. Each entry MUST carry:
+#   - vulnerability ID
+#   - reason citing the upstream status
+#   - linear ticket for the bump/recheck obligation
+#   - expiry date — past this point, Grype auto-re-fires the finding
+#
+# Review every Monday via the scheduled docker-security workflow run.
+
+ignore:
+  - vulnerability: CVE-2026-7210
+    package:
+      name: python
+      type: binary
+    # Python 3.13.13 carries CVE-2026-7210 (Critical). Upstream fix lives in
+    # Python 3.15.0b2 — a beta with no stable backport on 3.13.x yet. Bumping
+    # the Docker base to a beta is the wrong trade against shipping a CVE
+    # whose attack surface in our proxy is bounded (proxy runs as non-root,
+    # network-isolated, no untrusted input parsing on the Python boundary).
+    #
+    # Linear: WOR-691 (filled in after creation) — review base image bump
+    # when a stable 3.13.x patch ships, OR re-justify this ignore.
+    reason: "Upstream fix only in Python 3.15.0b2 (beta). Tracking WOR-691 for stable backport."
+    expiry: "2026-07-06"  # 30 days from PR #280 land date (2026-06-06).
