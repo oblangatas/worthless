@@ -357,16 +357,17 @@ async def _build_oc_restores(
     plaintext) and BEFORE ``_apply_openclaw_unlock`` (which calls
     ``integration.apply_unlock``). Per planned restore:
 
-    * Skip rows with no captured record (legacy or ``relock_no_prior`` —
-      Stage A will fail-safe-skip them anyway; we just don't emit a
-      misleading "tampered" warning).
-    * MAC-verify the captured record via the same fernet-keyed
-      :meth:`ShardRepository._compute_decoy_hash` G2 uses. Mismatch →
-      surface a ``rollback_mac_mismatch`` warning AND pass a record-less
-      ``OcRestore`` so Stage A's existing fail-safe-skip leaves the entry
-      on the proxy. Tampered payloads are NEVER written.
-    * Parse the record to detect ``secretref`` vs ``plaintext`` so we
-      know whether to read the plaintext key back from the .env.
+    * Skip rows with no captured record (legacy pre-G3 or
+      ``relock_no_prior``). Stage A fail-safe-skips them anyway.
+    * For rows with a captured record: do a shape-only parse here so we
+      can decide ``plaintext`` vs ``secretref`` (drives whether to re-read
+      the plaintext key from the .env). The G2 MAC tamper-bind is NOT
+      enforced here — that gate lives in Stage A as of G5-A (Gap 3a) so
+      no caller can bypass it. We just compute ``recomputed_mac`` via the
+      same fernet-keyed
+      :meth:`ShardRepository._compute_decoy_hash` and pass both
+      ``expected_mac`` (from the DB) and ``recomputed_mac`` through the
+      ``OcRestore`` for Stage A to constant-time-compare.
     * For ``plaintext``: re-read the key from the just-restored .env
       (``var_name``); pass-2 wrote it moments ago. Build a fresh owned
       bytearray that Stage A's ``finally`` zeroes after use.
@@ -378,7 +379,7 @@ async def _build_oc_restores(
         record = p.oc_original_api_key_json
         if record is None:
             # No captured record (pre-G3 row or relock_no_prior). Stage A
-            # will fail-safe-skip; nothing to verify, nothing to warn.
+            # will fail-safe-skip; nothing to parse, nothing to warn.
             restores.append(
                 _openclaw_integration.OcRestore(
                     provider=p.provider,
@@ -390,59 +391,36 @@ async def _build_oc_restores(
             )
             continue
 
+        # G5-A: the MAC tamper-bind gate now lives in Stage A. The CLI
+        # only computes the recompute (async — Stage A is sync) and threads
+        # both values through the OcRestore. Legacy rows pass both as None
+        # and fall back to shape-only validation per the G1 docstring.
         expected_mac = p.oc_rollback_mac
-        if expected_mac is not None:
-            recomputed = await repo._compute_decoy_hash(record)
-            try:
-                _openclaw_integration._parse_oc_rollback_entry_record(
-                    record,
-                    expected_mac=expected_mac,
-                    recomputed_mac=recomputed,
-                )
-            except ValueError as exc:
-                # G2 tamper-bind tripped (or shape parse failed). Drop the
-                # record so Stage A fails-safe-skips this provider on the
-                # downstream "no rollback entry record stored" path. The
-                # operator sees both warnings — the MAC one here is the
-                # diagnostic; the Stage-A skip is the effect.
-                console.print_warning(
-                    f"OpenClaw {p.provider!r} rollback record failed MAC verification "
-                    f"(rollback_mac_mismatch: {exc}); leaving entry on the proxy."
-                )
-                restores.append(
-                    _openclaw_integration.OcRestore(
-                        provider=p.provider,
-                        alias=p.alias,
-                        oc_original_base_url=None,
-                        oc_original_api_key_json=None,
-                        plaintext_key=None,
-                    )
-                )
-                continue
-        else:
-            # Legacy row: no MAC stored (oc_rollback_mac IS NULL). G1's
-            # docstring blesses shape-only validation in that case — accept
-            # the record. A re-lock under G3 attaches a tag going forward.
-            try:
-                _openclaw_integration._parse_oc_rollback_entry_record(record)
-            except ValueError as exc:
-                console.print_warning(
-                    f"OpenClaw {p.provider!r} rollback record is malformed "
-                    f"({exc}); leaving entry on the proxy."
-                )
-                restores.append(
-                    _openclaw_integration.OcRestore(
-                        provider=p.provider,
-                        alias=p.alias,
-                        oc_original_base_url=None,
-                        oc_original_api_key_json=None,
-                        plaintext_key=None,
-                    )
-                )
-                continue
+        recomputed_mac = await repo._compute_decoy_hash(record) if expected_mac else None
 
-        # Decide plaintext vs secretref to know whether to read the key back.
-        parsed = _openclaw_integration._parse_oc_rollback_entry_record(record)
+        # Shape-only parse here so we can route plaintext-vs-secretref.
+        # Stage A re-runs the full parse with MAC args; that's the
+        # load-bearing check. If the record is structurally invalid we
+        # surface it now (saves the .env re-read on the plaintext branch)
+        # and let Stage A's identical refusal fire as the canonical event.
+        try:
+            parsed = _openclaw_integration._parse_oc_rollback_entry_record(record)
+        except ValueError as exc:
+            console.print_warning(
+                f"OpenClaw {p.provider!r} rollback record is malformed "
+                f"({exc}); leaving entry on the proxy."
+            )
+            restores.append(
+                _openclaw_integration.OcRestore(
+                    provider=p.provider,
+                    alias=p.alias,
+                    oc_original_base_url=None,
+                    oc_original_api_key_json=None,
+                    plaintext_key=None,
+                )
+            )
+            continue
+
         kind = parsed["apiKey"]["kind"]
         plaintext_key: bytearray | None = None
         if kind == "plaintext":
@@ -478,6 +456,8 @@ async def _build_oc_restores(
                 oc_original_base_url=p.oc_original_base_url,
                 oc_original_api_key_json=record,
                 plaintext_key=plaintext_key,
+                expected_mac=expected_mac,
+                recomputed_mac=recomputed_mac,
             )
         )
     return restores

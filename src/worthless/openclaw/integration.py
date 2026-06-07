@@ -258,6 +258,16 @@ class OcRestore:
       for the SecretRef branch (which restores a pointer, never plaintext).
       ``repr=False`` (SR-04): the key must never render in a log line or a
       traceback frame, once G4 populates it.
+    * ``expected_mac`` (G5-A) — the fernet-keyed HMAC the DB returned with
+      the row's ``oc_rollback_mac`` column. ``None`` for legacy pre-G2 rows.
+    * ``recomputed_mac`` (G5-A) — the CLI's freshly-computed HMAC over
+      ``oc_original_api_key_json`` (via
+      :meth:`ShardRepository._compute_decoy_hash`). The async compute lives
+      in the CLI so Stage A stays sync; Stage A constant-time-compares the
+      two values via the same path
+      :func:`_parse_oc_rollback_entry_record` already implements for G2.
+      Both ``None`` → shape-only validation per the G1 backward-compat
+      fallback (legacy NULL-MAC rows unlock cleanly).
     """
 
     provider: str
@@ -265,6 +275,8 @@ class OcRestore:
     oc_original_base_url: str | None
     oc_original_api_key_json: str | None
     plaintext_key: bytearray | None = field(repr=False)
+    expected_mac: str | None = None
+    recomputed_mac: str | None = None
 
 
 def _resolve_proxy_base_url() -> str:
@@ -1312,7 +1324,17 @@ def _apply_unlock_stage_a(
             try:
                 if record is None:
                     raise ValueError("no rollback entry record stored")
-                entry = _parse_oc_rollback_entry_record(record)
+                # G5-A (Gap 3a): enforce the G2 MAC tamper-bind HERE — the
+                # lowest layer that touches the record — so a caller that
+                # bypasses _build_oc_restores cannot skip the gate. The CLI
+                # populates both fields from the DB + a fresh
+                # ShardRepository._compute_decoy_hash; both-None falls
+                # back to shape-only per G1 (legacy pre-G2 rows).
+                entry = _parse_oc_rollback_entry_record(
+                    record,
+                    expected_mac=restore.expected_mac,
+                    recomputed_mac=restore.recomputed_mac,
+                )
             except ValueError as exc:
                 events.append(
                     OpenclawIntegrationEvent(
