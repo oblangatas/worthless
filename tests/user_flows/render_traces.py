@@ -172,10 +172,14 @@ esac""",
             result = run_install(bin_dir, env_extra={"WORTHLESS_VERSION": "0.3.0"})
             command = ["WORTHLESS_VERSION=0.3.0", "sh", "./install.sh"]
         elif name == "pipx conflict shows uninstall guidance":
+            # WOR-709: pipx must be in a trusted system dir for install.sh
+            # to invoke it. HOME/.local/bin is trusted (mirrors real install).
             write_stub(bin_dir, "uname", "echo Darwin")
             write_stub(bin_dir, "sw_vers", 'echo "14.5"')
+            local_bin = bin_dir.parent / ".local" / "bin"
+            local_bin.mkdir(parents=True)
             write_stub(
-                bin_dir,
+                local_bin,
                 "pipx",
                 """case "$1" in
   list) echo "package worthless 0.3.0, installed using Python 3.12.0" ;;
@@ -183,7 +187,10 @@ esac""",
 esac
 exit 0""",
             )
-            result = run_install(bin_dir)
+            result = run_install(
+                bin_dir,
+                env_extra={"PATH": f"{bin_dir}:{local_bin}:/usr/bin:/bin:/usr/sbin:/sbin"},
+            )
             command = ["sh", "./install.sh"]
         elif name == "uv failure surfaces network hints":
             write_stub(bin_dir, "uname", "echo Darwin")

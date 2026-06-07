@@ -226,13 +226,32 @@ detect_linux_subenv() {
 
 check_pipx_conflict() {
     # Stop early: a pipx shim on PATH would mask the uv-installed binary.
-    if command -v pipx >/dev/null 2>&1; then
-        if pipx list 2>/dev/null | grep -qi "package worthless "; then
-            die "$EXIT_PIPX_CONFLICT" "Detected a pipx-installed worthless." \
-                "uv and pipx both manage tool isolation; running both is confusing." \
-                "Remove the pipx version, then re-run this installer:" \
-                "  pipx uninstall worthless"
-        fi
+    #
+    # Hard requirement: pipx MUST resolve from a trusted system dir before we
+    # exec it. An attacker-controlled pipx (anywhere outside the trusted set)
+    # would execute arbitrary code in this process during `pipx list` — RCE
+    # in install.sh BEFORE any uv call. Empirically demonstrated 2026-06-07
+    # on macOS against A2-extended; WOR-709 closes the gap.
+    pipx_path="$(command -v pipx 2>/dev/null || true)"
+    case "$pipx_path" in
+        "")
+            # No pipx anywhere — nothing to check.
+            return 0
+            ;;
+        /usr/bin/pipx|/bin/pipx|/usr/local/bin/pipx|"${HOME:-/root}/.local/bin/pipx")
+            # Trusted location — safe to invoke.
+            ;;
+        *)
+            warn "pipx detected at ${pipx_path} (outside trusted dirs); skipping conflict check"
+            warn "  → if you have a pipx-installed worthless, run \`pipx uninstall worthless\` first"
+            return 0
+            ;;
+    esac
+    if pipx list 2>/dev/null | grep -qi "package worthless "; then
+        die "$EXIT_PIPX_CONFLICT" "Detected a pipx-installed worthless." \
+            "uv and pipx both manage tool isolation; running both is confusing." \
+            "Remove the pipx version, then re-run this installer:" \
+            "  pipx uninstall worthless"
     fi
 }
 

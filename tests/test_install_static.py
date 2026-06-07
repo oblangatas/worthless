@@ -225,6 +225,46 @@ def test_path_prepend_defense_present(install_text: str) -> None:
     )
 
 
+def test_pipx_conflict_check_gated_on_trusted_dir(install_text: str) -> None:
+    """WOR-709: install.sh MUST gate the `pipx list` invocation on pipx
+    resolving from a trusted system dir. Empirically demonstrated 2026-06-07:
+    an attacker-controlled pipx in caller PATH ran arbitrary code in
+    install.sh's process during the conflict check. The fix is a case-statement
+    gate before `pipx list`; this test pins it so a future refactor that
+    drops the gate (e.g. someone "simplifying" check_pipx_conflict back to
+    its pre-WOR-709 shape) fails CI.
+    """
+    match = re.search(
+        r"check_pipx_conflict\s*\(\)\s*\{(.+?)\n\}",
+        install_text,
+        re.DOTALL,
+    )
+    assert match is not None, "check_pipx_conflict() must exist"
+    body = match.group(1)
+
+    assert re.search(r"pipx_path\s*=.*command\s+-v\s+pipx", body), (
+        "check_pipx_conflict must resolve pipx via `command -v` and capture "
+        "the path so the trusted-dir gate can inspect it (WOR-709)."
+    )
+    assert "/usr/bin/pipx" in body and "/bin/pipx" in body, (
+        "trusted-dir gate must enumerate the system paths pipx may legitimately "
+        "live in (/usr/bin, /bin, /usr/local/bin, $HOME/.local/bin)."
+    )
+    assert "outside trusted dirs" in body, (
+        "untrusted-pipx skip MUST emit a warning naming the threat — silent "
+        "skip leaves the user unaware their conflict surface wasn't checked."
+    )
+    # Defense: catch the regression that just drops the gate and runs
+    # `pipx list` unconditionally.
+    assert not re.search(
+        r"if\s+command\s+-v\s+pipx\s*>/dev/null[^;]*;\s*then\s*\n\s*if\s+pipx\s+list",
+        body,
+    ), (
+        "check_pipx_conflict must NOT use the pre-WOR-709 `command -v pipx && "
+        "pipx list` shape — that's the empirically-demonstrated RCE pattern."
+    )
+
+
 def test_worthless_trust_path_uses_exact_string_compare(install_text: str) -> None:
     """The PATH-lockdown escape hatch must use exact-string comparison to "1"
     so attacker-tolerant values ("01", "true", "yes", "1 ", lowercase "1\\n")

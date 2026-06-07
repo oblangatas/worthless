@@ -181,14 +181,22 @@ def test_macos_below_11_exits_20(tmp_path: Path) -> None:
 
 
 def test_pipx_conflict_warns_and_exits_30(tmp_path: Path) -> None:
-    """Pre-existing pipx-installed worthless triggers exit 30 with uninstall hint."""
+    """Pre-existing pipx-installed worthless triggers exit 30 with uninstall hint.
+
+    WOR-709: pipx must be in a TRUSTED system dir for install.sh to invoke it.
+    Trusted dirs are /usr/bin, /bin, /usr/local/bin, $HOME/.local/bin. Test
+    HOME is tmp_path, so $HOME/.local/bin/pipx is trusted — place the stub
+    there (mirrors how pipx is actually installed via `python -m pip install`).
+    """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     write_stub(bin_dir, "uname", "echo Darwin")
     write_stub(bin_dir, "sw_vers", 'echo "14.5"')
-    # pipx list reports an existing worthless install
+    # Place pipx in HOME/.local/bin (a trusted dir per WOR-709's gate).
+    local_bin = tmp_path / ".local" / "bin"
+    local_bin.mkdir(parents=True)
     write_stub(
-        bin_dir,
+        local_bin,
         "pipx",
         """case "$1" in
   list) echo "package worthless 0.3.0, installed using Python 3.12.0" ;;
@@ -197,7 +205,11 @@ esac
 exit 0""",
     )
 
-    result = run_install(bin_dir)
+    # Add HOME/.local/bin to PATH so `command -v pipx` finds it.
+    result = run_install(
+        bin_dir,
+        env_extra={"PATH": f"{bin_dir}:{local_bin}:/usr/bin:/bin:/usr/sbin:/sbin"},
+    )
 
     assert result.returncode == EXIT_PIPX_CONFLICT, (
         f"expected exit {EXIT_PIPX_CONFLICT} (pipx conflict) when pipx has worthless, "
@@ -205,6 +217,60 @@ exit 0""",
     )
     assert "pipx uninstall worthless" in result.stderr, (
         "stderr must include the exact 'pipx uninstall worthless' command"
+    )
+
+
+def test_pipx_in_untrusted_dir_is_not_invoked(tmp_path: Path) -> None:
+    """An attacker-controlled `pipx` in an untrusted PATH dir must NOT be
+    invoked by install.sh. Empirically demonstrated 2026-06-07 on real macOS:
+    install.sh A2-extended (PR #281) called attacker's pipx during the
+    conflict check, executing arbitrary code in install.sh's process BEFORE
+    any uv invocation. WOR-709 closes the gap by gating the conflict check
+    on pipx resolving from a trusted system dir.
+
+    Test sets up an attacker pipx in `tmp_path/evil` (not in any trusted
+    dir), then runs install.sh under PATH that puts evil-bin first. Asserts:
+    (a) install.sh exits 0 (skip-and-continue, not crash);
+    (b) attacker pipx is NOT invoked (its scream log stays empty);
+    (c) stderr names the skip reason so the user knows the conflict surface
+        wasn't checked.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    evil_dir = tmp_path / "evil"
+    evil_dir.mkdir()
+    write_happy_path_stubs(bin_dir)
+    # Attacker pipx — appends to a scream log + exits 1. If install.sh
+    # invokes it, the log gains a line.
+    scream_log = tmp_path / "attacker-pipx.log"
+    write_stub(
+        evil_dir,
+        "pipx",
+        f'echo "ATTACKER_PIPX_CALLED: $*" >> "{scream_log}"; exit 1',
+    )
+
+    # PATH puts attacker dir FIRST, then the stub bin_dir (test harness
+    # convention). install.sh's PATH prepend would normally put system dirs
+    # ahead, but pipx isn't in /usr/bin so the trusted-dir gate is the only
+    # defense.
+    result = run_install(
+        bin_dir,
+        env_extra={"PATH": f"{evil_dir}:{bin_dir}:/usr/bin:/bin:/usr/sbin:/sbin"},
+    )
+
+    assert result.returncode == 0, (
+        f"install must succeed even when an untrusted pipx is on PATH "
+        f"(skip-and-continue, not crash).\nstderr: {result.stderr}"
+    )
+    scream = scream_log.read_text() if scream_log.exists() else ""
+    assert scream == "", (
+        f"attacker pipx was invoked by install.sh — WOR-709 defense failed. "
+        f"This is the empirically-demonstrated RCE; the trusted-dir gate "
+        f"must prevent it.\nscream log:\n{scream}"
+    )
+    assert "outside trusted dirs" in result.stderr, (
+        f"stderr must explain WHY the pipx conflict check was skipped "
+        f"(user needs to know).\nstderr: {result.stderr}"
     )
 
 
