@@ -233,10 +233,8 @@ check_pipx_conflict() {
     # or plant a symlink there bypasses this; WOR-707 covers the broader
     # absolute-path / ownership defense.
     pipx_path="$(command -v pipx 2>/dev/null || true)"
-    # Guard against unset/empty HOME — `${HOME:-/root}` only fires on unset,
-    # so HOME="" would yield `/.local/bin/pipx` as a "trusted" arm.
+    # POSIX `${HOME:-/root}` fires on UNSET or NULL — HOME="" expands to /root.
     home_for_path="${HOME:-/root}"
-    [ -z "$home_for_path" ] && home_for_path="/root"
     # Trusted set: distro system dirs, macOS/Linux Homebrew, MacPorts, user pip.
     case "$pipx_path" in
         "") return 0 ;;
