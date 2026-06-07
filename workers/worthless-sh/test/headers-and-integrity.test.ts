@@ -355,7 +355,7 @@ describe("body integrity — install.sh shape and bounded size (H-08)", () => {
     //   - Post-WOR-673 (A2 env scrub + PATH lockdown): install.sh is ~23 KB.
     //     48-var unset block (11 attack classes) + PATH defense + honest
     //     proxy_hints + threat-model comments add ~11 KB of substantive
-    //     security content. Ceiling at 24.5 KB keeps ~1 KB slack — tight,
+    //     security content. Ceiling at 24.5 KB keeps ~1.3 KB slack — tight,
     //     intentionally. Each future bump must cite the WOR ticket that
     //     justifies the growth and be a real discussion, not a ratchet.
     const res = await SELF.fetch("https://worthless.sh/", {
