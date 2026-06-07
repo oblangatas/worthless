@@ -47,9 +47,77 @@ ASTRAL_INSTALLER_URL="https://astral.sh/uv/${UV_VERSION}/install.sh"
 DOCS_URL="https://docs.wless.io"
 WINDOWS_DOCS_URL="https://docs.wless.io/install/wsl"
 
-# Force uv to use its own managed Python for fresh-box reproducibility.
-export UV_PYTHON_PREFERENCE="${UV_PYTHON_PREFERENCE:-only-managed}"
+# Hermetic install: ignore caller env. uv+pip+Astral honor ~48 redirect/MitM
+# vars across 11 attack classes — same lanes a poisoned rc/.envrc/workspace
+# ENV uses. Pin defaults; scrub env. Closes ENV vector only — repo-local
+# uv.toml / pyproject.toml [tool.uv] is A3's job. (WOR-673 / A2)
+# Index:        UV_INDEX{,_URL}, UV_DEFAULT_INDEX, UV_EXTRA_INDEX_URL, UV_INDEX_STRATEGY,
+#               UV_FIND_LINKS, PIP_{,EXTRA_}INDEX_URL, PIP_FIND_LINKS, PIP_NO_INDEX
+# Config:       UV_CONFIG_FILE, PIP_CONFIG_FILE
+# Cache:        UV_NO_CACHE, UV_OFFLINE
+# Anti-MitM:    PIP_TRUSTED_HOST, UV_INSECURE_HOST, UV_NATIVE_TLS,
+#               SSL_CERT_{FILE,DIR}, REQUESTS_CA_BUNDLE, CURL_CA_BUNDLE,
+#               PIP_CERT, PIP_CLIENT_CERT
+# Python src:   UV_PYTHON_INSTALL_MIRROR, UV_PYTHON_PREFERENCE (re-set below)
+# Auth:         UV_KEYRING_PROVIDER, PIP_KEYRING_PROVIDER
+# Astral install dir: UV_INSTALL_DIR, UV_UNMANAGED_INSTALL, INSTALLER_DOWNLOAD_URL
+# Python hijack: PYTHONPATH, PYTHONSTARTUP
+# Shell init:   BASH_ENV, ENV, CDPATH, GLOBIGNORE
+# Dynamic loader: LD_PRELOAD, LD_AUDIT, LD_LIBRARY_PATH (Linux), DYLD_INSERT_LIBRARIES,
+#               DYLD_LIBRARY_PATH, DYLD_FALLBACK_LIBRARY_PATH, DYLD_FRAMEWORK_PATH,
+#               DYLD_FORCE_FLAT_NAMESPACE (macOS). Classic .so/.dylib injection lane:
+#               attacker's lib loads into curl's process, intercepts open() to serve
+#               one file to sha256sum and a different one to sh — SHA pin bypassed.
+# Proxy aliases: ALL_PROXY, all_proxy, http_proxy, https_proxy (lowercase) — curl
+#               honors these in addition to HTTP{,S}_PROXY; same MitM lane but
+#               undocumented for users. Scrub the aliases; keep documented uppercase.
+# Keep:         HTTP{,S}_PROXY (legit corp egress, documented; user accepts MitM risk
+#               at their corporate gateway by setting them)
+unset \
+    UV_INDEX UV_INDEX_URL UV_DEFAULT_INDEX UV_EXTRA_INDEX_URL UV_INDEX_STRATEGY \
+    UV_FIND_LINKS \
+    PIP_INDEX_URL PIP_EXTRA_INDEX_URL PIP_FIND_LINKS PIP_NO_INDEX \
+    UV_CONFIG_FILE PIP_CONFIG_FILE \
+    UV_NO_CACHE UV_OFFLINE \
+    PIP_TRUSTED_HOST UV_INSECURE_HOST UV_NATIVE_TLS \
+    SSL_CERT_FILE SSL_CERT_DIR REQUESTS_CA_BUNDLE CURL_CA_BUNDLE \
+    PIP_CERT PIP_CLIENT_CERT \
+    UV_PYTHON_INSTALL_MIRROR UV_PYTHON_PREFERENCE \
+    UV_KEYRING_PROVIDER PIP_KEYRING_PROVIDER \
+    UV_INSTALL_DIR UV_UNMANAGED_INSTALL INSTALLER_DOWNLOAD_URL \
+    PYTHONPATH PYTHONSTARTUP \
+    BASH_ENV ENV CDPATH GLOBIGNORE \
+    LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH \
+    DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH DYLD_FALLBACK_LIBRARY_PATH \
+    DYLD_FRAMEWORK_PATH DYLD_FORCE_FLAT_NAMESPACE \
+    ALL_PROXY all_proxy http_proxy https_proxy
+
+# uv-managed Python, unconditional. The `:-default` pattern honored hostile
+# non-empty values (UV_PYTHON_PREFERENCE=system → install onto attacker-
+# controllable Python with sitecustomize.py hijack). Scrub above + hard set.
+export UV_PYTHON_PREFERENCE=only-managed
+
+# Capture caller's actual PATH BEFORE lockdown — used by `command_in_original_path`
+# to tell the user whether `worthless` is reachable in THEIR shell (not just in
+# our locked-down PATH). Capturing post-lockdown would lie to the user.
 ORIGINAL_PATH="${PATH:-}"
+
+# Caller PATH lockdown. A poisoned ~/evil/bin in $PATH wins over /usr/bin for
+# curl, sh, sha256sum, awk, mktemp, uv — every external call becomes RCE
+# regardless of how clean our env is, and the Astral SHA pin computed by
+# attacker's `sha256sum` is worthless. Prepend system dirs + the uv install
+# dir so legitimate binaries always outrank caller-controlled prefixes.
+# Strict parsing: only literal "1" disables. WORTHLESS_TRUST_PATH=true / yes /
+# 01 / "1 " / etc. all keep lockdown active — attacker can't bypass with a
+# typo-tolerant value. Test harness sets exact "1" to inject stubs.
+if [ "${WORTHLESS_TRUST_PATH:-}" != "1" ]; then
+    # Guard against HOME=/ (would yield //.local/bin) and HOME= (empty).
+    # `${HOME:-/root}` fires on unset OR empty per POSIX `:-` semantics.
+    home_for_path="${HOME:-/root}"
+    [ "$home_for_path" = "/" ] && home_for_path="/root"
+    PATH="/usr/bin:/bin:/usr/local/bin:${home_for_path}/.local/bin:${PATH:-}"
+    export PATH
+fi
 
 # --- Output helpers ----------------------------------------------------------
 
@@ -82,10 +150,13 @@ die() {
 }
 
 proxy_hints() {
-    printf "       Behind a proxy or corporate network? Try:\n" >&2
-    printf "         export HTTPS_PROXY=https://your-proxy:port\n" >&2
-    printf "         export UV_PYTHON_INSTALL_MIRROR=https://your-mirror/python-build-standalone\n" >&2
-    printf "         export SSL_CERT_FILE=/path/to/corp-bundle.pem\n" >&2
+    printf "       Behind a proxy or corporate network?\n" >&2
+    printf "         HTTP_PROXY / HTTPS_PROXY are honored — set those.\n" >&2
+    printf "         For private PyPI mirror, custom CA bundle, or alternate\n" >&2
+    printf "         Python source: edit install.sh directly. Env-var overrides\n" >&2
+    printf "         for index URL, cert bundle, and Python mirror are\n" >&2
+    printf "         deliberately scrubbed (WOR-673) — install corp CAs in the\n" >&2
+    printf "         system trust store instead of pointing SSL_CERT_FILE at them.\n" >&2
 }
 
 # --- Platform detection ------------------------------------------------------

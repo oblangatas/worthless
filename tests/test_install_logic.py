@@ -208,6 +208,205 @@ exit 0""",
     )
 
 
+def test_env_scrub_strips_poisoned_uv_pip_vars(tmp_path: Path) -> None:
+    """A poisoned shell rc setting UV_INDEX_URL (or any of its cousins) must
+    NOT propagate to any uv invocation. install.sh ships its own pinned
+    default index, certificate trust, and config; a caller-supplied
+    redirect is an attack vector (WOR-673 / A2 of WOR-669).
+
+    Threat: compromised dotfiles / hostile VS Code workspace env / poisoned
+    `direnv` `.envrc` redirects the entire install to an attacker mirror
+    while install.sh's banner, the Astral SHA pin, and the worthless pin
+    all still look pristine.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_stub(bin_dir, "uname", "echo Darwin")
+    write_stub(bin_dir, "sw_vers", 'echo "14.5"')
+    # uv stub that dumps every env var it actually receives, so we can assert
+    # against every namespace install.sh scrubs.
+    # Unhandled subcommands exit 99 (NOT 1) — exit 1 collides with install.sh's
+    # set -e propagation and looks like EXIT_INTERNAL=40, misdirecting diagnosis.
+    # 99 is unmistakably "test stub gap" (Panel C FIX-NOW).
+    write_stub(
+        bin_dir,
+        "uv",
+        'env >> "$HOME/uv-env.log" || true\n'
+        'case "$1" in\n'
+        '  --version) echo "uv 0.11.7" ;;\n'
+        '  tool) shift; case "$1" in\n'
+        '    install|upgrade) echo "ok" ;;\n'
+        "    list) ;;\n"
+        '    *) echo "UNHANDLED_UV_CALL (test stub gap): uv tool $*" >&2; exit 99 ;;\n'
+        "  esac ;;\n"
+        '  run) echo "worthless 0.3.7" ;;\n'
+        '  *) echo "UNHANDLED_UV_CALL (test stub gap): uv $*" >&2; exit 99 ;;\n'
+        "esac",
+    )
+    write_stub(bin_dir, "worthless", 'echo "worthless 0.3.7"')
+
+    poisoned = "http://evil.example/index"
+    result = run_install(
+        bin_dir,
+        env_extra={
+            # Index URL class
+            "UV_INDEX_URL": poisoned,
+            "UV_DEFAULT_INDEX": poisoned + "/default",
+            "UV_EXTRA_INDEX_URL": poisoned + "/extra",
+            "UV_FIND_LINKS": poisoned + "/links",
+            "PIP_INDEX_URL": poisoned + "/pip",
+            "PIP_FIND_LINKS": poisoned + "/pip-links",
+            # Config-file class
+            "UV_CONFIG_FILE": "/tmp/poisoned.toml",  # noqa: S108
+            "PIP_CONFIG_FILE": "/tmp/poisoned-pip.conf",  # noqa: S108
+            # Cache / offline class
+            "UV_OFFLINE": "1",
+            "UV_NO_CACHE": "1",
+            # TLS / cert-bundle class
+            "PIP_TRUSTED_HOST": "evil.example",
+            "UV_INSECURE_HOST": "evil.example",
+            "UV_NATIVE_TLS": "rustls",
+            "SSL_CERT_FILE": "/tmp/attacker-ca.pem",  # noqa: S108
+            "REQUESTS_CA_BUNDLE": "/tmp/attacker-ca.pem",  # noqa: S108
+            "PIP_CERT": "/tmp/attacker.pem",  # noqa: S108
+            # Python source class — Panel B BLOCKER. UV_PYTHON_PREFERENCE=system
+            # would force install onto a user-controllable Python (sitecustomize
+            # hijack). UV_PYTHON_INSTALL_MIRROR points uv at attacker's tarball.
+            "UV_PYTHON_PREFERENCE": "system",
+            "UV_PYTHON_INSTALL_MIRROR": poisoned + "/python",
+            # Astral installer redirect class — controls where the uv binary
+            # lands. Combined with PATH, attacker overwrites our pinned uv.
+            "UV_INSTALL_DIR": "/tmp/attacker-install",  # noqa: S108
+            "UV_UNMANAGED_INSTALL": "1",
+            "INSTALLER_DOWNLOAD_URL": poisoned + "/installer",
+            # Python hijack class — PYTHONPATH + PYTHONSTARTUP get inherited by
+            # any python invoked under uv (smoke test, sitecustomize).
+            "PYTHONPATH": "/tmp/attacker-pkg",  # noqa: S108
+            "PYTHONSTARTUP": "/tmp/attacker-startup.py",  # noqa: S108
+            # Shell init class — BASH_ENV is sourced before line 1 when sh→bash
+            # invokes the Astral installer as `sh "$installer"`.
+            "BASH_ENV": "/tmp/attacker-bashenv.sh",  # noqa: S108
+            "ENV": "/tmp/attacker-env.sh",  # noqa: S108
+            "CDPATH": "/tmp/attacker-cd",  # noqa: S108
+            "GLOBIGNORE": "/tmp/attacker-glob",  # noqa: S108
+            # Dynamic loader class — Panel B re-review BLOCKER. .so/.dylib
+            # loads into curl's process, intercepts open() to serve different
+            # bytes to sha256sum vs sh — SHA pin bypassed.
+            "LD_PRELOAD": "/tmp/attacker.so",  # noqa: S108
+            "LD_AUDIT": "/tmp/attacker-audit.so",  # noqa: S108
+            "LD_LIBRARY_PATH": "/tmp/attacker-libs",  # noqa: S108
+            "DYLD_INSERT_LIBRARIES": "/tmp/attacker.dylib",  # noqa: S108
+            "DYLD_LIBRARY_PATH": "/tmp/attacker-libs",  # noqa: S108
+            "DYLD_FORCE_FLAT_NAMESPACE": "1",
+            # Auth / keyring class
+            "UV_KEYRING_PROVIDER": "/tmp/attacker-keyring",  # noqa: S108
+            "PIP_KEYRING_PROVIDER": "/tmp/attacker-keyring",  # noqa: S108
+            # Remaining index-class vars Panel C flagged missing
+            "UV_INDEX": poisoned + "/uv_index_single",
+            "UV_INDEX_STRATEGY": "first-index",
+            "PIP_EXTRA_INDEX_URL": poisoned + "/pip-extra",
+            "PIP_NO_INDEX": "1",
+            # Remaining cert/MitM-class vars Panel C flagged missing
+            "SSL_CERT_DIR": "/tmp/attacker-ca-dir",  # noqa: S108
+            "CURL_CA_BUNDLE": "/tmp/attacker-curl-ca",  # noqa: S108
+            "PIP_CLIENT_CERT": "/tmp/attacker-client.pem",  # noqa: S108
+            # Proxy alias class — Panel B re-review FIX-NOW. curl honors
+            # lowercase + ALL_PROXY in addition to documented uppercase.
+            "ALL_PROXY": "http://attacker.example:8080",
+            "all_proxy": "http://attacker.example:8080",
+            "http_proxy": "http://attacker.example:8080",
+            "https_proxy": "http://attacker.example:8080",
+        },
+    )
+    assert result.returncode == 0, (
+        f"install must succeed under env scrub (poisoned vars should be "
+        f"silently dropped, not raise).\nstderr: {result.stderr}"
+    )
+
+    env_log = tmp_path / "uv-env.log"
+    log = env_log.read_text() if env_log.exists() else ""
+    forbidden = [
+        # Index URL class (all 8)
+        "UV_INDEX=",
+        "UV_INDEX_URL=",
+        "UV_DEFAULT_INDEX=",
+        "UV_EXTRA_INDEX_URL=",
+        "UV_INDEX_STRATEGY=",
+        "UV_FIND_LINKS=",
+        "PIP_INDEX_URL=",
+        "PIP_EXTRA_INDEX_URL=",
+        "PIP_FIND_LINKS=",
+        "PIP_NO_INDEX=",
+        # Config-file class
+        "UV_CONFIG_FILE=",
+        "PIP_CONFIG_FILE=",
+        # Cache / offline class
+        "UV_OFFLINE=",
+        "UV_NO_CACHE=",
+        # TLS / cert-bundle class (all 9)
+        "PIP_TRUSTED_HOST=",
+        "UV_INSECURE_HOST=",
+        "UV_NATIVE_TLS=",
+        "SSL_CERT_FILE=",
+        "SSL_CERT_DIR=",
+        "REQUESTS_CA_BUNDLE=",
+        "CURL_CA_BUNDLE=",
+        "PIP_CERT=",
+        "PIP_CLIENT_CERT=",
+        # Python source class (UV_PYTHON_PREFERENCE asserted separately below)
+        "UV_PYTHON_INSTALL_MIRROR=",
+        # Auth / keyring class
+        "UV_KEYRING_PROVIDER=",
+        "PIP_KEYRING_PROVIDER=",
+        # Astral installer redirect class
+        "UV_INSTALL_DIR=",
+        "UV_UNMANAGED_INSTALL=",
+        "INSTALLER_DOWNLOAD_URL=",
+        # Python hijack class
+        "PYTHONPATH=",
+        "PYTHONSTARTUP=",
+        # Shell init class (Panel C BLOCKER: was missing entirely)
+        "BASH_ENV=",
+        "ENV=",
+        "CDPATH=",
+        "GLOBIGNORE=",
+        # Dynamic loader class (Panel B re-review BLOCKER)
+        "LD_PRELOAD=",
+        "LD_AUDIT=",
+        "LD_LIBRARY_PATH=",
+        "DYLD_INSERT_LIBRARIES=",
+        "DYLD_LIBRARY_PATH=",
+        "DYLD_FALLBACK_LIBRARY_PATH=",
+        "DYLD_FRAMEWORK_PATH=",
+        "DYLD_FORCE_FLAT_NAMESPACE=",
+        # Proxy alias class (Panel B re-review FIX-NOW)
+        "ALL_PROXY=",
+        "all_proxy=",
+        "http_proxy=",
+        "https_proxy=",
+    ]
+    log_lines = log.splitlines()
+    # Line-prefix matching — substring `ENV=` could false-match inside
+    # WORTHLESS_KEYRING_BACKEND=... etc. We want exact var-name leak detection.
+    leaked = [v for v in forbidden if any(line.startswith(v) for line in log_lines)]
+    assert not leaked, (
+        f"these poisoned env vars leaked through to uv despite the scrub: "
+        f"{leaked}\nuv-env.log:\n{log}"
+    )
+
+    # UV_PYTHON_PREFERENCE is special: scrubbed then re-set unconditionally.
+    # The attacker's hostile value ("system") must NOT reach uv; the value uv
+    # sees must be "only-managed" — proves the `:-default` bypass is closed.
+    assert not any(line.startswith("UV_PYTHON_PREFERENCE=system") for line in log_lines), (
+        f"UV_PYTHON_PREFERENCE=system bypassed the scrub via `${{VAR:-default}}` "
+        f"semantics (Panel B BLOCKER). Must be hard-set to only-managed.\n"
+        f"uv-env.log:\n{log}"
+    )
+    assert any(line.startswith("UV_PYTHON_PREFERENCE=only-managed") for line in log_lines), (
+        f"UV_PYTHON_PREFERENCE must be set to only-managed before uv runs.\nuv-env.log:\n{log}"
+    )
+
+
 def test_astral_installer_sha_mismatch_exits_50(tmp_path: Path) -> None:
     """A poisoned/corrupted Astral installer download must exit EXIT_INTEGRITY (50),
     NOT EXIT_INTERNAL (40). CI retry policies treat 40 as transient and 50 as
