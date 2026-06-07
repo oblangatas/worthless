@@ -510,25 +510,55 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
                         provider,
                     )
                 if spend_handle is not None:
-                    try:
-                        if usage is not None:
+                    if usage is not None:
+                        # Bill at provider-reported actual; on failure fall back to
+                        # admission estimate so the cap is still updated promptly.
+                        try:
                             await rules_engine.settle_spend(spend_handle, tokens)
-                        elif provider_succeeded:
-                            await rules_engine.settle_spend_at_estimate(spend_handle)
-                        else:
-                            await rules_engine.refund_spend(spend_handle)
-                    except Exception:
-                        logger.warning(
-                            "settle failed for alias=%s; falling back to estimate", alias
-                        )
+                        except Exception:
+                            logger.warning(
+                                "settle failed for alias=%s; falling back to estimate",
+                                alias,
+                            )
+                            try:
+                                await rules_engine.settle_spend_at_estimate(spend_handle)
+                            except Exception:
+                                logger.warning(
+                                    "settle_at_estimate also failed for alias=%s; "
+                                    "sweeper is the last backstop",
+                                    alias,
+                                )
+                    elif provider_succeeded:
+                        # Success but unreadable usage (stream disconnect / parse fail):
+                        # bill at admission estimate immediately (closes cost-griefing).
                         try:
                             await rules_engine.settle_spend_at_estimate(spend_handle)
                         except Exception:
                             logger.warning(
-                                "settle_at_estimate also failed for alias=%s; "
+                                "settle_at_estimate failed for alias=%s; "
                                 "sweeper is the last backstop",
                                 alias,
                             )
+                    else:
+                        # Upstream error (4xx/5xx) with no usage: refund — the user
+                        # must NOT pay for a request the provider rejected. A refund
+                        # failure must retry refund, never fall through to billing.
+                        try:
+                            await rules_engine.refund_spend(spend_handle)
+                        except Exception:
+                            logger.warning(
+                                "refund failed for alias=%s on upstream error; "
+                                "retrying refund, never billing",
+                                alias,
+                            )
+                            try:
+                                await rules_engine.refund_spend(spend_handle)
+                            except Exception:
+                                logger.warning(
+                                    "refund retry also failed for alias=%s; sweeper "
+                                    "will bill at estimate (worst-case soft-overcharge)",
+                                    alias,
+                                )
                 elif usage is not None or not provider_succeeded:
                     # Uncapped: record actual usage when present; on error paths with
                     # no usage, still record(0) as an audit trail of the failed call.

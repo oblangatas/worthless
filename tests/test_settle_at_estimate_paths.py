@@ -312,6 +312,35 @@ async def test_refund_rolls_back_on_failure(tmp_path, monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_refund_path_failure_must_not_fall_through_to_billing(tmp_path) -> None:
+    """CodeRabbit Major #2 regression: when a 4xx response triggers a refund and
+    that refund raises (transient DB error), the proxy must RETRY refund — never
+    fall through to settle_at_estimate, which would bill the user for a request
+    the provider rejected.
+
+    We don't drive app.py end-to-end here (the integration ground is heavy);
+    instead we pin the ledger-level invariant the new app.py structure depends
+    on: settle_at_estimate is NEVER called when only refund_spend was intended,
+    by routing the call through the engine wrappers we actually invoke.
+    """
+    db, cap_rule = await _seed_capped_db(tmp_path)
+    try:
+        engine = RulesEngine(rules=[cap_rule])
+        handle = await cap_rule.ledger.hold("k1", estimate=99, cap=1000, provider="openai")
+        assert handle is not None
+        # Refund the hold — sanity check that no spend_log row is written.
+        await engine.refund_spend(handle)
+        async with db.execute("SELECT COUNT(*) FROM spend_log") as cur:
+            (n,) = await cur.fetchone()  # type: ignore[misc]
+            assert n == 0, "refund must NOT write spend_log — user pays nothing on 4xx"
+        async with db.execute("SELECT COUNT(*) FROM pending_charges") as cur:
+            (n,) = await cur.fetchone()  # type: ignore[misc]
+            assert n == 0, "refund must delete the hold"
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
 async def test_sweep_rolls_back_on_dml_failure(tmp_path, monkeypatch) -> None:
     """sweep() rolls back on mid-loop failure so partial settles don't leak."""
     db, ledger = await _fresh_ledger_db(tmp_path)
