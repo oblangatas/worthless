@@ -47,23 +47,55 @@ ASTRAL_INSTALLER_URL="https://astral.sh/uv/${UV_VERSION}/install.sh"
 DOCS_URL="https://docs.wless.io"
 WINDOWS_DOCS_URL="https://docs.wless.io/install/wsl"
 
-# Hermetic install: ignore caller env. uv+pip honor a dozen redirect/MitM
-# vars (index URL, config file, TLS trust, offline) — same lanes a poisoned
-# rc/.envrc/workspace ENV uses. Pin defaults; scrub env. (WOR-673 / A2)
-# Index:     UV_INDEX{,_URL}, UV_DEFAULT_INDEX, UV_EXTRA_INDEX_URL, PIP_{,EXTRA_}INDEX_URL
-# Config:    UV_CONFIG_FILE, PIP_CONFIG_FILE
-# Cache:     UV_NO_CACHE, UV_OFFLINE
-# Anti-MitM: PIP_TRUSTED_HOST, UV_NATIVE_TLS
-# Keep:      HTTP{,S}_PROXY (legit corp egress), UV_PYTHON_PREFERENCE (re-set below)
+# Hermetic install: ignore caller env. uv+pip+Astral honor ~36 redirect/MitM
+# vars (index URL, config file, Python mirror, cert bundle, Astral install
+# dir, sitecustomize, shell init) — same lanes a poisoned rc/.envrc/workspace
+# ENV uses. Pin defaults; scrub env. Closes ENV vector only — repo-local
+# uv.toml / pyproject.toml [tool.uv] is A3's job. (WOR-673 / A2)
+# Index:        UV_INDEX{,_URL}, UV_DEFAULT_INDEX, UV_EXTRA_INDEX_URL, UV_INDEX_STRATEGY,
+#               UV_FIND_LINKS, PIP_{,EXTRA_}INDEX_URL, PIP_FIND_LINKS, PIP_NO_INDEX
+# Config:       UV_CONFIG_FILE, PIP_CONFIG_FILE
+# Cache:        UV_NO_CACHE, UV_OFFLINE
+# Anti-MitM:    PIP_TRUSTED_HOST, UV_INSECURE_HOST, UV_NATIVE_TLS,
+#               SSL_CERT_{FILE,DIR}, REQUESTS_CA_BUNDLE, CURL_CA_BUNDLE,
+#               PIP_CERT, PIP_CLIENT_CERT
+# Python src:   UV_PYTHON_INSTALL_MIRROR, UV_PYTHON_PREFERENCE (re-set below)
+# Auth:         UV_KEYRING_PROVIDER, PIP_KEYRING_PROVIDER
+# Astral install dir: UV_INSTALL_DIR, UV_UNMANAGED_INSTALL, INSTALLER_DOWNLOAD_URL
+# Python hijack: PYTHONPATH, PYTHONSTARTUP
+# Shell init:   BASH_ENV, ENV, CDPATH, GLOBIGNORE
+# Keep:         HTTP{,S}_PROXY (legit corp egress; pair with system trust store)
 unset \
-    UV_INDEX UV_INDEX_URL UV_DEFAULT_INDEX UV_EXTRA_INDEX_URL \
-    PIP_INDEX_URL PIP_EXTRA_INDEX_URL \
+    UV_INDEX UV_INDEX_URL UV_DEFAULT_INDEX UV_EXTRA_INDEX_URL UV_INDEX_STRATEGY \
+    UV_FIND_LINKS \
+    PIP_INDEX_URL PIP_EXTRA_INDEX_URL PIP_FIND_LINKS PIP_NO_INDEX \
     UV_CONFIG_FILE PIP_CONFIG_FILE \
     UV_NO_CACHE UV_OFFLINE \
-    PIP_TRUSTED_HOST UV_NATIVE_TLS
+    PIP_TRUSTED_HOST UV_INSECURE_HOST UV_NATIVE_TLS \
+    SSL_CERT_FILE SSL_CERT_DIR REQUESTS_CA_BUNDLE CURL_CA_BUNDLE \
+    PIP_CERT PIP_CLIENT_CERT \
+    UV_PYTHON_INSTALL_MIRROR UV_PYTHON_PREFERENCE \
+    UV_KEYRING_PROVIDER PIP_KEYRING_PROVIDER \
+    UV_INSTALL_DIR UV_UNMANAGED_INSTALL INSTALLER_DOWNLOAD_URL \
+    PYTHONPATH PYTHONSTARTUP \
+    BASH_ENV ENV CDPATH GLOBIGNORE
 
-# Force uv to use its own managed Python for fresh-box reproducibility.
-export UV_PYTHON_PREFERENCE="${UV_PYTHON_PREFERENCE:-only-managed}"
+# uv-managed Python, unconditional. The `:-default` pattern honored hostile
+# non-empty values (UV_PYTHON_PREFERENCE=system → install onto attacker-
+# controllable Python with sitecustomize.py hijack). Scrub above + hard set.
+export UV_PYTHON_PREFERENCE=only-managed
+
+# Caller PATH lockdown. A poisoned ~/evil/bin in $PATH wins over /usr/bin for
+# curl, sh, sha256sum, awk, mktemp, uv — every external call becomes RCE
+# regardless of how clean our env is, and the Astral SHA pin computed by
+# attacker's `sha256sum` is worthless. Prepend system dirs + the uv install
+# dir so legitimate binaries always outrank caller-controlled prefixes.
+# WORTHLESS_TRUST_PATH=1 disables this — set ONLY by the test harness which
+# injects stub binaries via tmp_path PATH and would otherwise lose them.
+if [ "${WORTHLESS_TRUST_PATH:-}" != "1" ]; then
+    PATH="/usr/bin:/bin:/usr/local/bin:${HOME:-/root}/.local/bin:${PATH:-}"
+    export PATH
+fi
 ORIGINAL_PATH="${PATH:-}"
 
 # --- Output helpers ----------------------------------------------------------
@@ -97,10 +129,13 @@ die() {
 }
 
 proxy_hints() {
-    printf "       Behind a proxy or corporate network? Try:\n" >&2
-    printf "         export HTTPS_PROXY=https://your-proxy:port\n" >&2
-    printf "         export UV_PYTHON_INSTALL_MIRROR=https://your-mirror/python-build-standalone\n" >&2
-    printf "         export SSL_CERT_FILE=/path/to/corp-bundle.pem\n" >&2
+    printf "       Behind a proxy or corporate network?\n" >&2
+    printf "         HTTP_PROXY / HTTPS_PROXY are honored — set those.\n" >&2
+    printf "         For private PyPI mirror, custom CA bundle, or alternate\n" >&2
+    printf "         Python source: edit install.sh directly. Env-var overrides\n" >&2
+    printf "         for index URL, cert bundle, and Python mirror are\n" >&2
+    printf "         deliberately scrubbed (WOR-673) — install corp CAs in the\n" >&2
+    printf "         system trust store instead of pointing SSL_CERT_FILE at them.\n" >&2
 }
 
 # --- Platform detection ------------------------------------------------------

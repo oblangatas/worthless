@@ -228,7 +228,7 @@ def test_env_scrub_strips_poisoned_uv_pip_vars(tmp_path: Path) -> None:
     write_stub(
         bin_dir,
         "uv",
-        'env | grep -E "^(UV_|PIP_)" >> "$HOME/uv-env.log" || true\n'
+        'env >> "$HOME/uv-env.log" || true\n'
         'case "$1" in\n'
         '  --version) echo "uv 0.11.7" ;;\n'
         '  tool) shift; case "$1" in\n'
@@ -246,16 +246,45 @@ def test_env_scrub_strips_poisoned_uv_pip_vars(tmp_path: Path) -> None:
     result = run_install(
         bin_dir,
         env_extra={
+            # Index URL class
             "UV_INDEX_URL": poisoned,
             "UV_DEFAULT_INDEX": poisoned + "/default",
             "UV_EXTRA_INDEX_URL": poisoned + "/extra",
+            "UV_FIND_LINKS": poisoned + "/links",
             "PIP_INDEX_URL": poisoned + "/pip",
+            "PIP_FIND_LINKS": poisoned + "/pip-links",
+            # Config-file class
             "UV_CONFIG_FILE": "/tmp/poisoned.toml",  # noqa: S108
             "PIP_CONFIG_FILE": "/tmp/poisoned-pip.conf",  # noqa: S108
-            "PIP_TRUSTED_HOST": "evil.example",
-            "UV_NATIVE_TLS": "rustls",
+            # Cache / offline class
             "UV_OFFLINE": "1",
             "UV_NO_CACHE": "1",
+            # TLS / cert-bundle class
+            "PIP_TRUSTED_HOST": "evil.example",
+            "UV_INSECURE_HOST": "evil.example",
+            "UV_NATIVE_TLS": "rustls",
+            "SSL_CERT_FILE": "/tmp/attacker-ca.pem",  # noqa: S108
+            "REQUESTS_CA_BUNDLE": "/tmp/attacker-ca.pem",  # noqa: S108
+            "PIP_CERT": "/tmp/attacker.pem",  # noqa: S108
+            # Python source class — Panel B BLOCKER. UV_PYTHON_PREFERENCE=system
+            # would force install onto a user-controllable Python (sitecustomize
+            # hijack). UV_PYTHON_INSTALL_MIRROR points uv at attacker's tarball.
+            "UV_PYTHON_PREFERENCE": "system",
+            "UV_PYTHON_INSTALL_MIRROR": poisoned + "/python",
+            # Astral installer redirect class — controls where the uv binary
+            # lands. Combined with PATH, attacker overwrites our pinned uv.
+            "UV_INSTALL_DIR": "/tmp/attacker-install",  # noqa: S108
+            "UV_UNMANAGED_INSTALL": "1",
+            "INSTALLER_DOWNLOAD_URL": poisoned + "/installer",
+            # Python hijack class — PYTHONPATH + PYTHONSTARTUP get inherited by
+            # any python invoked under uv (smoke test, sitecustomize).
+            "PYTHONPATH": "/tmp/attacker-pkg",  # noqa: S108
+            "PYTHONSTARTUP": "/tmp/attacker-startup.py",  # noqa: S108
+            # Shell init class — BASH_ENV is sourced before line 1 when sh→bash
+            # invokes the Astral installer as `sh "$installer"`.
+            "BASH_ENV": "/tmp/attacker-bashenv.sh",  # noqa: S108
+            "ENV": "/tmp/attacker-env.sh",  # noqa: S108
+            "CDPATH": "/tmp/attacker-cd",  # noqa: S108
         },
     )
     assert result.returncode == 0, (
@@ -266,21 +295,55 @@ def test_env_scrub_strips_poisoned_uv_pip_vars(tmp_path: Path) -> None:
     env_log = tmp_path / "uv-env.log"
     log = env_log.read_text() if env_log.exists() else ""
     forbidden = [
+        # Index URL class
         "UV_INDEX_URL=",
         "UV_DEFAULT_INDEX=",
         "UV_EXTRA_INDEX_URL=",
+        "UV_FIND_LINKS=",
         "PIP_INDEX_URL=",
+        "PIP_FIND_LINKS=",
+        # Config-file class
         "UV_CONFIG_FILE=",
         "PIP_CONFIG_FILE=",
-        "PIP_TRUSTED_HOST=",
-        "UV_NATIVE_TLS=",
+        # Cache / offline class
         "UV_OFFLINE=",
         "UV_NO_CACHE=",
+        # TLS / cert-bundle class
+        "PIP_TRUSTED_HOST=",
+        "UV_INSECURE_HOST=",
+        "UV_NATIVE_TLS=",
+        "SSL_CERT_FILE=",
+        "REQUESTS_CA_BUNDLE=",
+        "PIP_CERT=",
+        # Python source class
+        "UV_PYTHON_INSTALL_MIRROR=",
+        # Astral installer redirect class
+        "UV_INSTALL_DIR=",
+        "UV_UNMANAGED_INSTALL=",
+        "INSTALLER_DOWNLOAD_URL=",
+        # Python hijack class
+        "PYTHONPATH=",
+        "PYTHONSTARTUP=",
     ]
-    leaked = [v for v in forbidden if v in log]
+    log_lines = log.splitlines()
+    # Line-prefix matching — substring `ENV=` could false-match inside
+    # WORTHLESS_KEYRING_BACKEND=... etc. We want exact var-name leak detection.
+    leaked = [v for v in forbidden if any(line.startswith(v) for line in log_lines)]
     assert not leaked, (
         f"these poisoned env vars leaked through to uv despite the scrub: "
         f"{leaked}\nuv-env.log:\n{log}"
+    )
+
+    # UV_PYTHON_PREFERENCE is special: scrubbed then re-set unconditionally.
+    # The attacker's hostile value ("system") must NOT reach uv; the value uv
+    # sees must be "only-managed" — proves the `:-default` bypass is closed.
+    assert not any(line.startswith("UV_PYTHON_PREFERENCE=system") for line in log_lines), (
+        f"UV_PYTHON_PREFERENCE=system bypassed the scrub via `${{VAR:-default}}` "
+        f"semantics (Panel B BLOCKER). Must be hard-set to only-managed.\n"
+        f"uv-env.log:\n{log}"
+    )
+    assert any(line.startswith("UV_PYTHON_PREFERENCE=only-managed") for line in log_lines), (
+        f"UV_PYTHON_PREFERENCE must be set to only-managed before uv runs.\nuv-env.log:\n{log}"
     )
 
 

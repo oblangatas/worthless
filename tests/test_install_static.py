@@ -93,17 +93,46 @@ _SCRUBBED_VARS = (
     "UV_INDEX_URL",
     "UV_DEFAULT_INDEX",
     "UV_EXTRA_INDEX_URL",
+    "UV_INDEX_STRATEGY",
+    "UV_FIND_LINKS",
     "PIP_INDEX_URL",
     "PIP_EXTRA_INDEX_URL",
+    "PIP_FIND_LINKS",
+    "PIP_NO_INDEX",
     # Config-file redirect class
     "UV_CONFIG_FILE",
     "PIP_CONFIG_FILE",
     # Cache / offline forcing class
     "UV_NO_CACHE",
     "UV_OFFLINE",
-    # TLS bypass class
+    # Anti-MitM / cert-bundle class
     "PIP_TRUSTED_HOST",
+    "UV_INSECURE_HOST",
     "UV_NATIVE_TLS",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+    "PIP_CERT",
+    "PIP_CLIENT_CERT",
+    # Python source class (UV_PYTHON_PREFERENCE scrubbed then re-set unconditionally)
+    "UV_PYTHON_INSTALL_MIRROR",
+    "UV_PYTHON_PREFERENCE",
+    # Auth / keyring class
+    "UV_KEYRING_PROVIDER",
+    "PIP_KEYRING_PROVIDER",
+    # Astral installer redirect class
+    "UV_INSTALL_DIR",
+    "UV_UNMANAGED_INSTALL",
+    "INSTALLER_DOWNLOAD_URL",
+    # Python sitecustomize hijack class
+    "PYTHONPATH",
+    "PYTHONSTARTUP",
+    # Shell init hijack class
+    "BASH_ENV",
+    "ENV",
+    "CDPATH",
+    "GLOBIGNORE",
 )
 
 
@@ -151,6 +180,53 @@ def test_env_scrub_runs_before_any_uv_invocation(install_text: str) -> None:
         f"env scrub (line {unset_line + 1}) must run BEFORE any function "
         f"definition (first at line {first_fn_line + 1}) — otherwise a uv "
         f"call could inherit the poisoned env before the scrub fires."
+    )
+
+
+def test_path_prepend_defense_present(install_text: str) -> None:
+    """A poisoned PATH (`~/evil/bin:/usr/bin:...`) wins over /usr/bin for
+    curl, sh, sha256sum, awk, uv — making every external call attacker-RCE
+    regardless of env scrub (Panel B BLOCKER). install.sh must prepend
+    system dirs + the uv install dir so legitimate binaries outrank
+    caller-controlled prefixes.
+    """
+    # Look for the PATH assignment that contains /usr/bin AND a HOME-relative
+    # uv dir. The literal pattern is flexible — what matters is that PATH gets
+    # prepended with safe dirs, not replaced piecemeal.
+    match = re.search(
+        r'PATH="/usr/bin:/bin:/usr/local/bin:[^"]*\.local/bin[^"]*"',
+        install_text,
+    )
+    assert match is not None, (
+        "install.sh must prepend /usr/bin:/bin:/usr/local/bin:$HOME/.local/bin "
+        "to PATH so a poisoned caller PATH can't redirect external calls "
+        "(WOR-673 PATH lockdown, Panel B BLOCKER fix)."
+    )
+
+
+def test_uv_python_preference_unconditional(install_text: str) -> None:
+    """The original `export UV_PYTHON_PREFERENCE="${VAR:-only-managed}"` honored
+    a hostile non-empty value (Panel B BLOCKER — `:-default` only fires on
+    unset/empty). install.sh must unset UV_PYTHON_PREFERENCE in the scrub
+    block, then re-export with a hard literal — no `${VAR:-…}` fallback.
+    """
+    # The scrub block must include UV_PYTHON_PREFERENCE.
+    assert "UV_PYTHON_PREFERENCE" in install_text, (
+        "UV_PYTHON_PREFERENCE must be in the scrub block (Panel B BLOCKER)."
+    )
+    # Unconditional re-export, no `${VAR:-...}` fallback.
+    assert re.search(
+        r"^export\s+UV_PYTHON_PREFERENCE=only-managed\s*$",
+        install_text,
+        re.MULTILINE,
+    ), (
+        "install.sh must export UV_PYTHON_PREFERENCE=only-managed unconditionally "
+        "(no `${VAR:-...}` fallback that lets a hostile non-empty value through)."
+    )
+    # Defensive: forbid the old bypass-prone pattern from creeping back.
+    assert "UV_PYTHON_PREFERENCE:-" not in install_text, (
+        "install.sh must NOT use `${UV_PYTHON_PREFERENCE:-...}` — that honored "
+        "a hostile UV_PYTHON_PREFERENCE=system value (Panel B BLOCKER)."
     )
 
 
