@@ -4,7 +4,7 @@ When the user runs ``worthless`` with no subcommand, this module
 detects the current state and does the right thing:
 
 1. **Enrollment**: scan .env/.env.local → show detected keys → prompt → lock
-2. **Proxy**: start daemon if not running → poll health
+2. **Proxy**: start sidecar-supervised proxy if not running → poll health
 3. **Status**: print one-line summary
 """
 
@@ -22,19 +22,13 @@ import typer
 from worthless.cli.bootstrap import WorthlessHome, acquire_lock, get_home
 from worthless.cli.commands.lock import _lock_keys
 from worthless.cli._repo_factory import open_repo
-from worthless.cli.commands.up import start_daemon
-from worthless.cli.process import resolve_port
+from worthless.cli.commands.up import start_supervised_proxy
+from worthless.cli.process import poll_health, resolve_port
 from worthless.cli.console import get_console
 from worthless.cli.dotenv_rewriter import build_enrolled_locations, scan_env_keys
 from worthless.cli.errors import ErrorCode, WorthlessError
 from worthless.cli.commands.service._common import ServiceState
 from worthless.cli.commands.service.proxy_state import detect_proxy_runtime
-from worthless.cli.process import (
-    build_proxy_env,
-    disable_core_dumps,
-    pid_path,
-    poll_health,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -192,23 +186,20 @@ def _run_enrollment_if_needed(
 
 
 def _ensure_proxy_running(home: WorthlessHome, console) -> tuple[bool, int | None, int]:
-    """Phase 2: start proxy if needed; return (running, pid, port)."""
+    """Phase 2: start sidecar-supervised proxy if needed; return (running, pid, port)."""
     running, pid, port = _proxy_is_running(home)
     if not running and _service_start_hint(home, console):
         raise typer.Exit()
     if running:
         return running, pid, port
 
-    disable_core_dumps()
-    proxy_env = build_proxy_env(home)
     actual_port = resolve_port(None)
-    pf = pid_path(home)
     log_file = home.base_dir / "proxy.log"
 
     console.print_hint(f"\n  Starting proxy on 127.0.0.1:{actual_port}...")
 
     try:
-        start_daemon(proxy_env, actual_port, pf, log_file, console)
+        start_supervised_proxy(home, actual_port, log_file, console)
     except (typer.Exit, SystemExit) as exc:
         raise WorthlessError(
             ErrorCode.PROXY_UNREACHABLE,

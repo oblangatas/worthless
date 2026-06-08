@@ -386,7 +386,7 @@ def _isolate_default_command_proxy(request, monkeypatch):
 
     Tests that hit the bare ``worthless`` no-args entry point flow through
     ``default_command.run_default()`` → ``_proxy_is_running`` → ``poll_health(8787)``
-    → ``start_daemon(..., port=8787, ...)``. Under pytest-xdist, four workers
+    → ``start_supervised_proxy(..., port=8787, ...)``. Under pytest-xdist, four workers
     racing for the same port produces non-deterministic state: one wins the
     bind, the others see a "running" daemon belonging to a different test's
     home, and assertions diverge. The same race also leaves orphan uvicorn
@@ -404,7 +404,7 @@ def _isolate_default_command_proxy(request, monkeypatch):
     ``@pytest.mark.integration`` (already a registered marker in
     pyproject.toml) and own their own daemon teardown.
 
-    Tests that monkeypatch ``start_daemon`` / ``poll_health`` themselves
+    Tests that monkeypatch ``start_supervised_proxy`` / ``poll_health`` themselves
     still work — pytest's ``monkeypatch`` stacks LIFO within a single test,
     so the per-test override wins over this fixture's default. Verified
     against ``tests/test_cli_default.py`` which already does this for
@@ -413,7 +413,7 @@ def _isolate_default_command_proxy(request, monkeypatch):
     Mock return values are chosen to match the real shapes:
     - ``_proxy_is_running`` returns ``(running=False, pid=None, port=0)``
       — same tuple production code returns when the daemon is absent.
-    - ``start_daemon`` returns ``_FAKE_DAEMON_PID`` (12345). PID 0 would
+    - ``start_supervised_proxy`` returns ``_FAKE_DAEMON_PID`` (12345). PID 0 would
       hijack ``os.kill`` liveness probes (POSIX-reserved); a non-zero
       synthetic PID lets such probes fail honestly.
     - ``poll_health`` returns ``True`` so callers that only check
@@ -431,7 +431,7 @@ def _isolate_default_command_proxy(request, monkeypatch):
     )
     monkeypatch.setattr(
         default_command,
-        "start_daemon",
+        "start_supervised_proxy",
         lambda *_a, **_kw: _FAKE_DAEMON_PID,
     )
     monkeypatch.setattr(

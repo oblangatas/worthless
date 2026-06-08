@@ -194,6 +194,63 @@ def start_daemon(
     return canonical_pid
 
 
+def start_supervised_proxy(
+    home: WorthlessHome,
+    port: int,
+    log_file: Path,
+    console,
+) -> int:
+    """Start sidecar+proxy by spawning detached ``worthless up`` (WOR-717).
+
+    Foreground ``up`` supervises the crypto sidecar; we run it in a new session
+    so the default command can return while the child keeps running.
+    """
+    from worthless.cli.commands.service._common import resolve_worthless_binary
+
+    binary = resolve_worthless_binary()
+    env = os.environ.copy()
+    env["WORTHLESS_HOME"] = str(home.base_dir)
+    env["WORTHLESS_PORT"] = str(port)
+
+    cmd = [str(binary), "up", "--port", str(port)]
+
+    log_fd: int = -1
+    try:
+        log_fd = os.open(str(log_file), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        subprocess.Popen(  # nosec B603 — argv from resolved binary + fixed flags
+            cmd,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=log_fd,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception as exc:
+        if not isinstance(exc, typer.Exit):
+            console.print_error(
+                WorthlessError(
+                    ErrorCode.PROXY_UNREACHABLE,
+                    sanitize_exception(exc, generic="failed to start supervised proxy"),
+                )
+            )
+        raise typer.Exit(code=1) from exc
+    finally:
+        if log_fd >= 0:
+            os.close(log_fd)
+
+    resolved_pid = poll_health_pid(port, timeout=30.0)
+    if resolved_pid is None:
+        console.print_warning(
+            "Supervised proxy starting but health check timed out. Check ~/.worthless/proxy.log"
+        )
+        pf = pid_path(home)
+        info = read_pid(pf)
+        return info[0] if info else 0
+
+    console.print_success(f"Proxy running on 127.0.0.1:{port} (PID {resolved_pid})")
+    return resolved_pid
+
+
 def _upgrade_pidfile_if_trusted(
     *,
     spawn_pid: int,

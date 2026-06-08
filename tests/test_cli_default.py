@@ -116,7 +116,7 @@ class TestHappyPaths:
 
         # Mock proxy start and health
         monkeypatch.setattr(
-            "worthless.cli.default_command.start_daemon",
+            "worthless.cli.default_command.start_supervised_proxy",
             lambda *a, **kw: 54321,
         )
         monkeypatch.setattr(
@@ -161,7 +161,7 @@ class TestHappyPaths:
             return 54321
 
         monkeypatch.setattr(
-            "worthless.cli.default_command.start_daemon",
+            "worthless.cli.default_command.start_supervised_proxy",
             mock_start_daemon,
         )
         # First poll_health call is the detection probe (should say "not running"),
@@ -226,7 +226,7 @@ class TestHappyPaths:
         monkeypatch.chdir(env_local_only.parent)
 
         monkeypatch.setattr(
-            "worthless.cli.default_command.start_daemon",
+            "worthless.cli.default_command.start_supervised_proxy",
             lambda *a, **kw: 54321,
         )
         monkeypatch.setattr(
@@ -279,7 +279,7 @@ class TestNonInteractive:
         monkeypatch.chdir(env_with_two_keys.parent)
 
         monkeypatch.setattr(
-            "worthless.cli.default_command.start_daemon",
+            "worthless.cli.default_command.start_supervised_proxy",
             lambda *a, **kw: 54321,
         )
         monkeypatch.setattr(
@@ -356,7 +356,7 @@ class TestEdgeCases:
             mock_lock_keys,
         )
         monkeypatch.setattr(
-            "worthless.cli.default_command.start_daemon",
+            "worthless.cli.default_command.start_supervised_proxy",
             lambda *a, **kw: 54321,
         )
         monkeypatch.setattr(
@@ -420,7 +420,7 @@ class TestEdgeCases:
             return 54321
 
         monkeypatch.setattr(
-            "worthless.cli.default_command.start_daemon",
+            "worthless.cli.default_command.start_supervised_proxy",
             mock_start_daemon,
         )
 
@@ -505,7 +505,7 @@ class TestErrorHandling:
         (home_with_key.base_dir / "proxy.pid").unlink(missing_ok=True)
 
         monkeypatch.setattr(
-            "worthless.cli.default_command.start_daemon",
+            "worthless.cli.default_command.start_supervised_proxy",
             lambda *a, **kw: 54321,
         )
         monkeypatch.setattr(
@@ -524,8 +524,80 @@ class TestErrorHandling:
 
 
 # ---------------------------------------------------------------------------
-# Group 5: Security / adversarial
+# Group 6: Sidecar-supervised proxy start (WOR-717)
 # ---------------------------------------------------------------------------
+
+
+class TestSidecarSupervisedProxyStart:
+    """Default command must not use the sidecar-less ``start_daemon`` path."""
+
+    def test_uses_start_supervised_proxy_not_start_daemon(
+        self,
+        home_with_key: WorthlessHome,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        (home_with_key.base_dir / "proxy.pid").unlink(missing_ok=True)
+
+        supervised_called = False
+        daemon_called = False
+
+        def mock_supervised(*args, **kwargs):
+            nonlocal supervised_called
+            supervised_called = True
+            return 54321
+
+        def mock_daemon(*args, **kwargs):
+            nonlocal daemon_called
+            daemon_called = True
+            return 54321
+
+        monkeypatch.setattr(
+            "worthless.cli.default_command.start_supervised_proxy",
+            mock_supervised,
+        )
+        monkeypatch.setattr(
+            "worthless.cli.commands.up.start_daemon",
+            mock_daemon,
+        )
+        monkeypatch.setattr(
+            "worthless.cli.default_command.poll_health",
+            lambda *a, **kw: True,
+        )
+
+        result = _invoke_default({"WORTHLESS_HOME": str(home_with_key.base_dir)})
+        assert result.exit_code == 0, result.output + result.stderr
+        assert supervised_called
+        assert not daemon_called
+
+    def test_skips_start_when_proxy_already_running(
+        self,
+        home_with_key: WorthlessHome,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+
+        supervised_called = False
+
+        def mock_supervised(*args, **kwargs):
+            nonlocal supervised_called
+            supervised_called = True
+            return 54321
+
+        monkeypatch.setattr(
+            "worthless.cli.default_command.start_supervised_proxy",
+            mock_supervised,
+        )
+        monkeypatch.setattr(
+            "worthless.cli.default_command._proxy_is_running",
+            lambda home: (True, 12345, 8787),
+        )
+
+        result = _invoke_default({"WORTHLESS_HOME": str(home_with_key.base_dir)})
+        assert result.exit_code == 0, result.output + result.stderr
+        assert not supervised_called
 
 
 class TestSecurity:
@@ -619,7 +691,7 @@ class TestSecurity:
             mock_lock,
         )
         monkeypatch.setattr(
-            "worthless.cli.default_command.start_daemon",
+            "worthless.cli.default_command.start_supervised_proxy",
             mock_daemon,
         )
 
