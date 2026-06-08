@@ -14,7 +14,7 @@ test.
 
 from __future__ import annotations
 
-from worthless.proxy.response_model_audit import extract_response_model
+from worthless.proxy.response_model_audit import bounded_increment, extract_response_model
 
 
 # ---------------------------------------------------------------------------
@@ -100,3 +100,58 @@ def test_extract_returns_none_when_data_is_a_json_array_not_object() -> None:
     """Hypothetical upstream that wraps events in an array → extractor refuses."""
     chunk = b'data: [{"model":"x"}]\n\n'
     assert extract_response_model(chunk) is None
+
+
+# ---------------------------------------------------------------------------
+# bounded_increment — cardinality cap (worthless-cchq)
+# ---------------------------------------------------------------------------
+
+
+def test_bounded_increment_caps_cardinality_at_1024() -> None:
+    """Counter must not grow unboundedly even under hostile input.
+
+    Attacker controls upstream model strings (e.g. via a malicious
+    OpenRouter-compatible custom URL that returns a unique ``"model":"x-<uuid>"``
+    per response). Without a cap, the dict grows ~100 bytes per pair × millions
+    of pairs = OOM the proxy. brutus on commit 5e84e9a (worthless-cchq) flagged
+    this; the cap is the fix.
+    """
+    counter: dict[tuple[str, str], int] = {}
+    for i in range(2000):
+        bounded_increment(counter, (f"req-{i}", f"resp-{i}"))
+    assert len(counter) <= 1024, (
+        f"counter grew to {len(counter)} entries — unbounded growth is an "
+        f"OOM vector (worthless-cchq)"
+    )
+
+
+def test_bounded_increment_still_counts_existing_keys_when_at_cap() -> None:
+    """At the cap, existing keys MUST still increment.
+
+    Dropping is for NEW keys (cardinality bound); existing keys are the
+    legitimate observation signal and must keep counting.
+    """
+    counter: dict[tuple[str, str], int] = {}
+    # Fill to the cap with distinct pairs.
+    for i in range(1024):
+        bounded_increment(counter, (f"req-{i}", f"resp-{i}"))
+    assert len(counter) == 1024
+
+    # Existing key — count goes up.
+    bounded_increment(counter, ("req-0", "resp-0"))
+    assert counter[("req-0", "resp-0")] == 2
+
+    # New key at cap — silently dropped, NOT raised, NOT OOM.
+    bounded_increment(counter, ("req-novel", "resp-novel"))
+    assert ("req-novel", "resp-novel") not in counter
+    assert len(counter) == 1024
+
+
+def test_bounded_increment_below_cap_is_plain_increment() -> None:
+    """The cap path is only active above the threshold. Below it,
+    bounded_increment must behave identically to a normal dict increment."""
+    counter: dict[tuple[str, str], int] = {}
+    bounded_increment(counter, ("gpt-4o-mini", "gpt-5"))
+    bounded_increment(counter, ("gpt-4o-mini", "gpt-5"))
+    bounded_increment(counter, ("gpt-4o-mini", "gpt-5"))
+    assert counter == {("gpt-4o-mini", "gpt-5"): 3}

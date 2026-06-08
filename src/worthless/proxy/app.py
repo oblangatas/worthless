@@ -41,7 +41,7 @@ from worthless.proxy.metering import (
     extract_usage_openai,
     record_spend,
 )
-from worthless.proxy.response_model_audit import extract_response_model
+from worthless.proxy.response_model_audit import bounded_increment, extract_response_model
 from worthless.proxy.rules import (
     RateLimitRule,
     RulesEngine,
@@ -666,9 +666,13 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
                                     if response_model is not None:
                                         audit_done = True
                                         if _request_model and response_model != _request_model:
-                                            counter = app.state.response_model_mismatch_counter
-                                            key = (_request_model, response_model)
-                                            counter[key] = counter.get(key, 0) + 1
+                                            # Bounded counter (worthless-cchq):
+                                            # hostile upstream can't OOM by
+                                            # flooding unique model pairs.
+                                            bounded_increment(
+                                                app.state.response_model_mismatch_counter,
+                                                (_request_model, response_model),
+                                            )
                                 except Exception:
                                     logger.debug(
                                         "WOR-696: response-model audit failed",

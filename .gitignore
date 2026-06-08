@@ -100,3 +100,5 @@ dist/
 # Internal — not published to the public repo (WOR-532)
 .planning/
 .beads/
+
+testsprite_tests/tmp/config.json

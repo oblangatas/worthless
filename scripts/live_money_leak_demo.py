@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sqlite3
 import sys
 import tempfile
@@ -35,8 +36,7 @@ from fastapi.responses import StreamingResponse
 
 from worthless.crypto.splitter import split_key_fp
 from worthless.proxy.app import create_app
-from worthless.proxy.config import GLOBAL_CEILING_TOKENS
-from worthless.proxy.config import ProxySettings
+from worthless.proxy.config import GLOBAL_CEILING_TOKENS, ProxySettings
 from worthless.proxy.rules import RateLimitRule, RulesEngine, SpendCapRule, TokenBudgetRule
 from worthless.storage.repository import ShardRepository, StoredShard
 from worthless.storage.schema import SCHEMA
@@ -152,6 +152,26 @@ async def _amain() -> int:
     print("=" * 72)
     print("WOR-696 live e2e demo — money-leak closure")
     print("=" * 72)
+
+    # worthless-2ey3 hardening: capture the proxy's "settling at estimate"
+    # warning so we can prove the WOR-696 leak-branch fired. Without this,
+    # a future mock-upstream change (e.g. adding a usage block) could make
+    # the demo PASS via the happy-path settle, silently regressing the
+    # actual leak-fix coverage. karen's PROOF VALID was conditional on
+    # this guard landing.
+    _proxy_logs: list[str] = []
+
+    class _LogCapture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            try:
+                _proxy_logs.append(record.getMessage())
+            except Exception:
+                pass
+
+    _proxy_logger = logging.getLogger("worthless.proxy.app")
+    _proxy_logger.setLevel(logging.INFO)
+    _capture = _LogCapture()
+    _proxy_logger.addHandler(_capture)
 
     with tempfile.TemporaryDirectory(prefix="ceiling-live-") as tmp:
         db_path = str(Path(tmp) / "proxy.db")
@@ -305,9 +325,27 @@ async def _amain() -> int:
         floor = GLOBAL_CEILING_TOKENS
         print("=" * 72)
         if delta >= floor:
-            print(f"PASS: cap counter moved by {delta} ≥ {floor} (GLOBAL_CEILING_TOKENS)")
-            print("      money-leak closed — no-max_tokens disconnect bills honestly")
-            verdict = 0
+            # worthless-2ey3: verify the cap movement came from the
+            # WOR-696 leak-branch (settle_at_estimate), not from a
+            # happy-path settle that would mask a regression.
+            leak_branch_fired = any("settling at estimate" in line.lower() for line in _proxy_logs)
+            if not leak_branch_fired:
+                print(
+                    f"FAIL: cap moved by {delta} but the proxy never logged "
+                    f"'settling at estimate' — the PASS came from the wrong "
+                    f"code path. Either the mock upstream regressed (now "
+                    f"emitting usage), or settle_at_estimate is dead. "
+                    f"WOR-696 leak-branch is unverified."
+                )
+                verdict = 1
+            else:
+                print(f"PASS: cap counter moved by {delta} ≥ {floor} (GLOBAL_CEILING_TOKENS)")
+                print("      money-leak closed — no-max_tokens disconnect bills honestly")
+                print(
+                    "      proven via 'settling at estimate' proxy warning "
+                    "(WOR-696 leak-branch fired)"
+                )
+                verdict = 0
         else:
             print(f"FAIL: cap counter moved by {delta}, expected ≥ {floor}")
             print("      the leak is OPEN — investigate before merging PR #285")
