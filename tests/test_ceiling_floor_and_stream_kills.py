@@ -313,6 +313,7 @@ def test_ceiling_has_no_registry() -> None:
     """
     import pkgutil
 
+    import worthless.proxy as proxy_pkg
     from worthless.proxy import config as proxy_config
 
     # The constant exists at its new home and is what the AC pinned.
@@ -320,23 +321,26 @@ def test_ceiling_has_no_registry() -> None:
     assert proxy_config.GLOBAL_CEILING_TOKENS == 128_000
 
     # The forbidden registry attrs DO NOT exist on config — and don't
-    # appear as module attributes anywhere in worthless.proxy.
-    import worthless.proxy as proxy_pkg
-
+    # appear as module attributes anywhere in worthless.proxy. Use
+    # walk_packages so we ALSO catch any future sub-package additions
+    # (e.g. worthless/proxy/registry/__init__.py) — iter_modules would
+    # miss those silently.
     forbidden = ("is_known_model", "ceiling_for", "KNOWN_MODELS")
-    for module_info in pkgutil.iter_modules(proxy_pkg.__path__):
+    for module_info in pkgutil.walk_packages(
+        proxy_pkg.__path__, prefix="worthless.proxy."
+    ):
         try:
-            mod = __import__(f"worthless.proxy.{module_info.name}", fromlist=["_"])
+            mod = __import__(module_info.name, fromlist=["_"])
         except Exception:  # noqa: S112 — modules with import-time side effects skip
             continue
         for name in forbidden:
             assert not hasattr(mod, name), (
-                f"worthless.proxy.{module_info.name} re-introduced {name!r} — "
-                f"this would silently re-add a model registry. WOR-696 "
-                f"simplification explicitly forbids it; the global ceiling "
-                f"makes the registry pointless friction. If you genuinely "
-                f"need to track models, do it as observability (a metric), "
-                f"not as a gate."
+                f"{module_info.name} re-introduced {name!r} — this would "
+                f"silently re-add a model registry. WOR-696 simplification "
+                f"explicitly forbids it; the global ceiling makes the "
+                f"registry pointless friction. If you genuinely need to "
+                f"track models, do it as observability (a metric), not as "
+                f"a gate."
             )
 
 

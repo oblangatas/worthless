@@ -10,7 +10,7 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - `WORTHLESS_MAX_STREAM_DURATION_SECONDS` (default `900` = 15min) — hard wall-clock cap per stream.
   - `WORTHLESS_MAX_IDLE_BETWEEN_CHUNKS_SECONDS` (default `90`) — kills a stream that drips one chunk every N minutes.
   Either kill triggers the same settle path, which floors at the global ceiling.
-- **Silent provider re-routes are observable** (WOR-696). When a provider responds with a different `model` than the request asked for (e.g. `gpt-4o-mini` → `gpt-5`), `app.state.response_model_mismatch_counter[(request_model, response_model)]` increments. Observation only — no enforcement, no header munging, passthrough preserved.
+- **Silent provider re-routes are observable** (WOR-696). When a provider responds with a different `model` than the request asked for (e.g. `gpt-4o-mini` → `gpt-5`), `app.state.response_model_mismatch_counter[(request_model, response_model)]` increments. Observation only — no enforcement, no header munging, passthrough preserved. **Counter semantics: once per stream**, not once per chunk-with-mismatch. The response model can't change mid-stream, so per-chunk counting was operator-noise (10k-chunk stream produced a count of 10k for the same logical event). Per-stream counting gives operators the right cardinality.
 - **Worthless accepts ANY model string** (WOR-696). No registry, no admission-time model check. Works on OpenRouter, Azure custom deployments, Enterprise gateways, and any future model launch without operator intervention. Cap stays honest via the global-ceiling fallback regardless of model name.
 
 ### What this does NOT defend against
