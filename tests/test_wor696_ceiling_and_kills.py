@@ -8,16 +8,22 @@ written. Each test exercises one specific bypass or kill path. On the current
 codebase (epic HEAD = T5 merged, no T7 code yet), the breakdown is:
 
   - test_estimator_normalizes_max_completion_tokens   → PASSES today (T3 fix)
-  - test_zero_reservation_disconnect_uses_ceiling     → FAILS until T7 ships
-  - test_unknown_model_rejected_pre_reconstruction    → FAILS until T7 ships
-  - test_stream_duration_kill_fires                   → FAILS until T7 ships
-  - test_idle_chunk_kill_fires                        → FAILS until T7 ships
-  - test_response_model_mismatch_counter_increments   → FAILS until T7 ships
-  - test_reconnect_does_not_reset_request_timer       → FAILS until T7 ships
+  - test_zero_reservation_disconnect_uses_ceiling     → GREEN after settle floor
+  - test_ceiling_module_has_no_registry               → negative-existence guard
+  - test_any_model_name_admitted_*                    → parametrized over 6 strings
+  - test_stream_duration_kill_fires                   → GREEN after stream kills
+  - test_idle_chunk_kill_fires                        → GREEN after stream kills
+  - test_response_model_mismatch_counter_increments   → GREEN after audit hook
+  - test_reconnect_does_not_reset_request_timer       → GREEN as side-effect of
+        the settle-at-floor design; per-X-Request-Id timer not shipped (no
+        failing test compels it under the global-ceiling floor)
 
-The PASSING test is a regression guard — it proves T3's normalization for
-the OpenAI reasoning-model parameter rename still works. The other 6 tests
-are the implementation backlog: each one is one slice of T7's AC.
+The first test is a regression guard — it proves T3's normalization for
+the OpenAI reasoning-model parameter rename still works. The rest pin one
+slice each of WOR-696's AC. Note: an earlier draft of this file targeted a
+per-model ceiling design with an admission-time "unknown model rejected"
+check; both were dropped (Simplification 1 + 2 in WOR-696). The
+negative-existence guard locks the "no registry" decision in code.
 
 Test stream defaults are deliberately tight (sub-second timeouts) so the
 tests are fast. Production defaults (15min / 90s) are operator-tunable;
@@ -59,10 +65,11 @@ ALIAS = "wor696-key"
 API_KEY = "sk-WOR696-1234567890abcdefghij"
 OPENAI_COMPLETIONS = "https://api.openai.com/v1/chat/completions"
 
-# Pinned ceiling values the test asserts T7 fallback uses. These should match
-# what eventually lives in src/worthless/proxy/ceilings/model_ceilings.json.
-EXPECTED_CEILING_GPT_4O_MINI = 16_384
-EXPECTED_CEILING_GPT_5 = 128_000
+# Pinned floor that every fail-closed metering path must bill at. Mirrors
+# the production constant `GLOBAL_CEILING_TOKENS` in worthless.proxy.ceiling.
+# Under the global-ceiling design (Simplification 1, 2026-06-07), there is
+# no per-model ceiling map — one floor applies to every model name.
+EXPECTED_FLOOR_TOKENS = 128_000
 
 
 # ---------------------------------------------------------------------------
@@ -268,9 +275,9 @@ async def test_zero_reservation_disconnect_uses_ceiling() -> None:
             # The T7 assertion: total_spent must move by at least the
             # ceiling for gpt-4o-mini (16384), NOT 0. Without T7, this
             # fails because settle_at_estimate uses the 0 reservation.
-            assert spent >= EXPECTED_CEILING_GPT_4O_MINI, (
+            assert spent >= EXPECTED_FLOOR_TOKENS, (
                 f"0-reservation leak: total_spent={spent}, "
-                f"expected ≥ {EXPECTED_CEILING_GPT_4O_MINI} "
+                f"expected ≥ {EXPECTED_FLOOR_TOKENS} "
                 f"(gpt-4o-mini ceiling). settle_at_estimate wrote the "
                 f"original 0 reservation instead of the ceiling fallback."
             )
@@ -499,9 +506,9 @@ async def test_stream_duration_kill_fires() -> None:
                 await asyncio.sleep(0.1)
 
             spent = await _total_spent(db_path)
-            assert spent >= EXPECTED_CEILING_GPT_4O_MINI, (
+            assert spent >= EXPECTED_FLOOR_TOKENS, (
                 f"stream-duration kill: total_spent={spent}, expected ≥ "
-                f"{EXPECTED_CEILING_GPT_4O_MINI} (ceiling). Either the "
+                f"{EXPECTED_FLOOR_TOKENS} (ceiling). Either the "
                 f"kill never fired, or settle_at_estimate wrote 0 instead "
                 f"of the ceiling."
             )
@@ -578,9 +585,9 @@ async def test_idle_chunk_kill_fires() -> None:
                 await asyncio.sleep(0.1)
 
             spent = await _total_spent(db_path)
-            assert spent >= EXPECTED_CEILING_GPT_4O_MINI, (
+            assert spent >= EXPECTED_FLOOR_TOKENS, (
                 f"idle-chunk kill: total_spent={spent}, expected ≥ "
-                f"{EXPECTED_CEILING_GPT_4O_MINI} (ceiling). Either the "
+                f"{EXPECTED_FLOOR_TOKENS} (ceiling). Either the "
                 f"idle kill never fired, or settle wrote 0."
             )
 
@@ -780,9 +787,9 @@ async def test_reconnect_does_not_reset_request_timer() -> None:
             # at r2 admission if cumulative > 0.5s). Either way, settle
             # at ceiling at least once means total_spent ≥ ceiling.
             spent = await _total_spent(db_path)
-            assert spent >= EXPECTED_CEILING_GPT_4O_MINI, (
+            assert spent >= EXPECTED_FLOOR_TOKENS, (
                 f"reconnect bypassed the duration timer: total_spent="
-                f"{spent}, expected ≥ {EXPECTED_CEILING_GPT_4O_MINI} "
+                f"{spent}, expected ≥ {EXPECTED_FLOOR_TOKENS} "
                 f"(ceiling fallback should have fired on at least one "
                 f"of the two requests). T7 must key the duration timer "
                 f"by X-Request-Id, not per-socket."
