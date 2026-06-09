@@ -107,7 +107,7 @@ def verify_proxy_health(port: int, *, timeout: float = 15.0) -> None:
         )
 
 
-def service_paths(home: WorthlessHome) -> tuple[Path, Path]:
+def service_paths(home: WorthlessHome) -> tuple[Path, str]:
     """Return (log_path, worthless_home_str) for unit templates."""
     log_path = home.base_dir / "proxy.log"
     return log_path, str(home.base_dir)

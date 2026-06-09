@@ -65,9 +65,9 @@ def register_service_commands(app: typer.Typer) -> None:
         backend.install(home, port=port)
         if console.json_mode:
             if backend is launchd:
-                unit = str(backend.plist_path())
+                unit = str(launchd.plist_path())
             else:
-                unit = str(backend.unit_path())
+                unit = str(systemd.unit_path())
             sys.stdout.write(
                 json.dumps(
                     {
