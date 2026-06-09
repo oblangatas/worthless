@@ -276,9 +276,7 @@ def _check_providers(
 
     fix_hint = "re-run `worthless lock`"
     if report.config_unreadable:
-        return [
-            f"worthless-{provider} config unreadable — {fix_hint}" for provider, _alias in expected
-        ]
+        return [f"{provider} config unreadable — {fix_hint}" for provider, _alias in expected]
 
     missing_where = (
         "not wired (no openclaw.json)"

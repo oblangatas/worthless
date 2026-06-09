@@ -1302,7 +1302,8 @@ def apply_lock(
             skill_path=None,
             providers_set=(),
             providers_skipped=tuple(
-                (f"worthless-{provider}", "symlink_refused")
+                # F1: report the bare provider name lock writes, not the decoy.
+                (provider, "symlink_refused")
                 for provider, _alias, _shard_a in planned_updates
             ),
             skill_installed=False,
@@ -1773,9 +1774,10 @@ def health_check(
     """
     if state.config_path is None:
         return OpenclawHealthReport(
-            providers_missing=tuple(
-                f"worthless-{provider}" for provider, _alias in expected_providers
-            ),
+            # WOR-621 F1: lock rewrites the provider's ORIGINAL entry in place
+            # (e.g. ``openai``), so health reports the bare provider name — not
+            # the legacy ``worthless-<provider>`` decoy that F1 no longer writes.
+            providers_missing=tuple(provider for provider, _alias in expected_providers),
         )
 
     config_path = state.config_path
@@ -1804,7 +1806,10 @@ def health_check(
     providers_drifted: list[tuple[str, str, str]] = []
 
     for provider, alias in expected_providers:
-        provider_name = f"worthless-{provider}"
+        # WOR-621 F1: lock writes the provider in place under its bare name
+        # (``openai``), so look up that entry — not the legacy ``worthless-``
+        # decoy. Mismatch here made every F1 install read as providers_missing.
+        provider_name = provider
         expected_url = f"{resolved_base}/{alias}/v1"
         try:
             entry = _config_mod.get_provider(config_path, provider_name)

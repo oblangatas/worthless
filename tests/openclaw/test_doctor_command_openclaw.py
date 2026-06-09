@@ -229,7 +229,8 @@ class TestUDoc04ProviderMissing:
 
         assert result is True
         out = capsys.readouterr().out
-        assert "worthless-openai" in out
+        assert "openai" in out
+        assert "worthless-openai" not in out  # F1: bare provider name, no decoy
         assert "not wired" in out
 
     def test_provider_wrong_base_url(self, tmp_path, capsys) -> None:
@@ -361,7 +362,8 @@ class TestUDoc07ConfigMissing:
 
         assert result is True
         out = capsys.readouterr().out
-        assert "worthless-openai" in out
+        assert "openai" in out
+        assert "worthless-openai" not in out  # F1: bare provider name, no decoy
         assert "not wired" in out
 
 
