@@ -160,13 +160,20 @@ def _derive_base_url_var(var_name: str, provider: str) -> str:
 
 
 def _resolve_upstream_base_url(
-    base_url_var: str, env_values: dict[str, str | None], provider: str
+    base_url_var: str, env_values: dict[str, str | None], registry_name: str
 ) -> str:
     """Pick the upstream URL for the DB row.
 
     Prefers the user's explicit ``*_BASE_URL`` value from ``.env`` when set
     AND when that URL is in the provider registry. Otherwise falls back to
     the bundled registry default for the provider.
+
+    ``registry_name`` MUST be the registry name (e.g. ``openrouter``), NOT
+    the wire protocol (e.g. ``openai``). OpenRouter speaks the OpenAI
+    dialect, so its protocol is ``openai`` — but its upstream lives at
+    ``openrouter.ai``. Passing the wire protocol here looked up the OpenAI
+    URL and forwarded OpenRouter keys to ``api.openai.com`` → HTTP 401
+    (PR #276 thermo-nuclear review; live-container regression).
 
     Refuses unregistered user URLs (M3 / Blocker #1): an attacker who can
     write to .env should not be able to redirect the proxy at an arbitrary
@@ -184,7 +191,7 @@ def _resolve_upstream_base_url(
                 "--url <url> --protocol openai|anthropic'.",
             )
         return user_value
-    entry = lookup_by_name(provider)
+    entry = lookup_by_name(registry_name)
     if entry is None:  # pragma: no cover — provider is validated above
         return "https://api.openai.com/v1"
     return entry.url
@@ -498,7 +505,12 @@ async def _pass1_db_writes(
                 f"follow <PROVIDER>_API_KEY to silence this warning."
             )
 
-        upstream_base_url = _resolve_upstream_base_url(base_url_var, env_values, provider)
+        # Resolve the upstream URL by the REGISTRY NAME (detected_provider, e.g.
+        # "openrouter"), not the wire PROTOCOL (provider, e.g. "openai"). They
+        # diverge for OpenAI-dialect-compatible services: OpenRouter's protocol
+        # is "openai" but its upstream is openrouter.ai. Using the protocol here
+        # mailed OpenRouter keys to api.openai.com → 401 (PR #276 review).
+        upstream_base_url = _resolve_upstream_base_url(base_url_var, env_values, detected_provider)
 
         alias = _make_alias(provider, value)
 
