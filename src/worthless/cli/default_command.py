@@ -131,6 +131,100 @@ def _report_json(home: WorthlessHome) -> None:
     sys.stdout.flush()
 
 
+def _run_enrollment_if_needed(
+    home: WorthlessHome,
+    console,
+    *,
+    interactive: bool,
+    yes: bool,
+) -> None:
+    """Phase 1: scan, show, and optionally lock keys from a local .env."""
+    if _has_enrolled_keys(home):
+        return
+
+    env_path = find_env_file()
+    if env_path is None:
+        console.print_warning(
+            "No .env found. Run 'worthless lock --env <path>' in a project with API keys."
+        )
+        raise typer.Exit()
+
+    async def _scan_with_enrollments():
+        if not home.db_path.exists():
+            return scan_env_keys(env_path)
+        try:
+            async with open_repo(home) as repo:
+                await repo.initialize()
+                enrollments = await repo.list_enrollments()
+                enrolled_locations = build_enrolled_locations(enrollments)
+                return scan_env_keys(env_path, enrolled_locations=enrolled_locations)
+        except Exception:
+            logger.debug("enrollment query failed, scanning without enrollments", exc_info=True)
+            return scan_env_keys(env_path)
+
+    keys = asyncio.run(_scan_with_enrollments())
+
+    if not keys:
+        console.print_warning("No API keys found in .env.")
+        raise typer.Exit()
+
+    console.print_hint(f"\n  Found {len(keys)} API key{'s' if len(keys) != 1 else ''}:")
+    show_detected_keys(keys, console)
+    console.print_hint("")
+
+    if not interactive and not yes:
+        console.print_hint("Run 'worthless --yes' or 'worthless lock' to protect these keys.")
+        raise typer.Exit()
+
+    if not yes:
+        confirmed = typer.confirm("  Lock these keys?", default=False)
+        if not confirmed:
+            raise typer.Exit()
+
+    with acquire_lock(home):
+        total = len(keys)
+        count = _lock_keys(env_path, home, quiet=True)
+
+    if count < total:
+        console.print_warning(f"  {count} of {total} keys protected. Re-run to retry the rest.")
+    elif count > 0:
+        console.print_hint(f"\n  {count} key{'s' if count != 1 else ''} protected.")
+
+
+def _ensure_proxy_running(home: WorthlessHome, console) -> tuple[bool, int | None, int]:
+    """Phase 2: start proxy if needed; return (running, pid, port)."""
+    running, pid, port = _proxy_is_running(home)
+    if not running and _service_start_hint(home, console):
+        raise typer.Exit()
+    if running:
+        return running, pid, port
+
+    disable_core_dumps()
+    proxy_env = build_proxy_env(home)
+    actual_port = resolve_port(None)
+    pf = pid_path(home)
+    log_file = home.base_dir / "proxy.log"
+
+    console.print_hint(f"\n  Starting proxy on 127.0.0.1:{actual_port}...")
+
+    try:
+        start_daemon(proxy_env, actual_port, pf, log_file, console)
+    except (typer.Exit, SystemExit) as exc:
+        raise WorthlessError(
+            ErrorCode.PROXY_UNREACHABLE,
+            "Proxy failed to start. Try 'worthless up' for details.",
+        ) from exc
+
+    healthy = poll_health(actual_port, timeout=10.0)
+    if not healthy:
+        console.print_warning(
+            "  Proxy started but health check failed. Check ~/.worthless/proxy.log"
+        )
+        return False, None, 0
+
+    return True, None, actual_port
+
+
 def run_default(
     *,
     interactive: bool = True,
@@ -166,92 +260,13 @@ def run_default(
         _report_json(home)
         return
 
-    # Phase 1: Enrollment
-    if not _has_enrolled_keys(home):
-        env_path = find_env_file()
-        if env_path is None:
-            console.print_warning(
-                "No .env found. Run 'worthless lock --env <path>' in a project with API keys."
-            )
-            return
-
-        # Scan for keys (with enrollment awareness)
-        async def _scan_with_enrollments():
-            if not home.db_path.exists():
-                return scan_env_keys(env_path)
-            try:
-                async with open_repo(home) as repo:
-                    await repo.initialize()
-                    enrollments = await repo.list_enrollments()
-                    enrolled_locations = build_enrolled_locations(enrollments)
-                    return scan_env_keys(env_path, enrolled_locations=enrolled_locations)
-            except Exception:
-                logger.debug("enrollment query failed, scanning without enrollments", exc_info=True)
-                return scan_env_keys(env_path)
-
-        keys = asyncio.run(_scan_with_enrollments())
-
-        if not keys:
-            console.print_warning("No API keys found in .env.")
-            return
-
-        # Show detected keys — var name + provider only (SR-NEW-15)
-        console.print_hint(f"\n  Found {len(keys)} API key{'s' if len(keys) != 1 else ''}:")
-        show_detected_keys(keys, console)
-        console.print_hint("")
-
-        # Prompt for confirmation — [y/N] default No (destructive)
-        if not interactive and not yes:
-            # Non-interactive without --yes: report only
-            console.print_hint("Run 'worthless --yes' or 'worthless lock' to protect these keys.")
-            return
-
-        if not yes:
-            confirmed = typer.confirm("  Lock these keys?", default=False)
-            if not confirmed:
-                return
-
-        # Lock keys — quiet mode, we control output
-        with acquire_lock(home):
-            total = len(keys)
-            count = _lock_keys(env_path, home, quiet=True)
-
-        if count < total:
-            console.print_warning(f"  {count} of {total} keys protected. Re-run to retry the rest.")
-        elif count > 0:
-            console.print_hint(f"\n  {count} key{'s' if count != 1 else ''} protected.")
-
-    # Phase 2: Proxy
-    running, pid, port = _proxy_is_running(home)
-    if not running and _service_start_hint(home, console):
+    try:
+        _run_enrollment_if_needed(home, console, interactive=interactive, yes=yes)
+    except typer.Exit:
         return
-    if not running:
-        disable_core_dumps()
-        proxy_env = build_proxy_env(home)
-        actual_port = resolve_port(None)
-        pf = pid_path(home)
-        log_file = home.base_dir / "proxy.log"
 
-        console.print_hint(f"\n  Starting proxy on 127.0.0.1:{actual_port}...")
+    running, _pid, port = _ensure_proxy_running(home, console)
 
-        try:
-            start_daemon(proxy_env, actual_port, pf, log_file, console)
-        except (typer.Exit, SystemExit) as exc:
-            raise WorthlessError(
-                ErrorCode.PROXY_UNREACHABLE,
-                "Proxy failed to start. Try 'worthless up' for details.",
-            ) from exc
-
-        healthy = poll_health(actual_port, timeout=10.0)
-        if not healthy:
-            console.print_warning(
-                "  Proxy started but health check failed. Check ~/.worthless/proxy.log"
-            )
-        else:
-            port = actual_port
-            running = True
-
-    # Phase 3: Status
     if running:
         console.print_hint(f"\n  Proxy healthy on 127.0.0.1:{port}")
     console.print_hint("")
