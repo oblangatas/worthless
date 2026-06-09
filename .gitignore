@@ -15,14 +15,20 @@ node_modules/
 docker-compose.env
 .mcp.json
 
-# Editor directories and files
+# Editor / IDE / agent tool directories
+.cursor/
+.gemini/
 .idea
+.kiro/
+.opencode/
+.qodo/
 .vscode
-*.suo
-*.ntvs*
 *.njsproj
+*.ntvs*
 *.sln
+*.suo
 *.sw?
+opencode.json
 
 # OS specific
 .DS_Store
@@ -30,14 +36,6 @@ docker-compose.env
 # Dolt database files (added by bd init)
 .dolt/
 *.db
-
-# Editor/tool directories
-.cursor/
-.gemini/
-.kiro/
-.opencode/
-.qodo/
-opencode.json
 
 # Developer tooling (symlinked from private repo)
 CLAUDE.md
@@ -98,5 +96,8 @@ dist/
 .astro/
 
 # Internal — not published to the public repo (WOR-532)
-.planning/
 .beads/
+.planning/
+.reviews/
+reviews/thermo-nuclear/
+reviews/wor-715-schema-existence/
