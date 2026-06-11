@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pwd
 import pytest
 
 from worthless.cli.bootstrap import WorthlessHome
@@ -89,3 +90,23 @@ class TestSystemdBackend:
         assert "WORTHLESS_SERVICE_MANAGED=1" in content
         assert ["systemctl", "--user", "daemon-reload"] in calls
         assert ["systemctl", "--user", "enable", "--now", "worthless-proxy.service"] in calls
+
+
+class TestSystemdSessionUser:
+    def test_session_user_prefers_user_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("USER", "testuser")
+        monkeypatch.delenv("LOGNAME", raising=False)
+        getlogin = MagicMock(side_effect=OSError(25, "Inappropriate ioctl for device"))
+        monkeypatch.setattr(systemd.os, "getlogin", getlogin)
+        assert systemd._session_user() == "testuser"
+        getlogin.assert_not_called()
+
+    def test_session_user_falls_back_to_pw_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("USER", raising=False)
+        monkeypatch.delenv("LOGNAME", raising=False)
+        monkeypatch.setattr(systemd.os, "getlogin", MagicMock(side_effect=OSError(25)))
+        monkeypatch.setattr(systemd.os, "getuid", lambda: 1000)
+
+        fake_passwd = type("Passwd", (), {"pw_name": "runner"})()
+        monkeypatch.setattr(pwd, "getpwuid", lambda uid: fake_passwd)
+        assert systemd._session_user() == "runner"

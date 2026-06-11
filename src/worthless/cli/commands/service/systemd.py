@@ -22,6 +22,20 @@ from worthless.cli.process import poll_health, resolve_port
 SYSTEMD_UNIT = templates.SYSTEMD_UNIT_NAME
 
 
+def _session_user() -> str:
+    """Resolve login name without eager ``os.getlogin()`` (CI has no tty)."""
+    for key in ("USER", "LOGNAME"):
+        value = os.environ.get(key, "").strip()
+        if value:
+            return value
+    try:
+        return os.getlogin()
+    except OSError:
+        import pwd
+
+        return pwd.getpwuid(os.getuid()).pw_name
+
+
 def unit_path() -> Path:
     return Path(templates.systemd_unit_path(str(Path.home())))
 
@@ -31,7 +45,7 @@ def _systemctl(*args: str, check: bool = True):
 
 
 def _linger_enabled() -> bool:
-    user = os.environ.get("USER", "")
+    user = _session_user()
     result = run_cmd(
         ["loginctl", "show-user", user, "-p", "Linger"],
         check=False,
@@ -44,7 +58,7 @@ def _linger_enabled() -> bool:
 def _ensure_linger() -> None:
     if _linger_enabled():
         return
-    run_cmd(["loginctl", "enable-linger", os.environ.get("USER", os.getlogin())])
+    run_cmd(["loginctl", "enable-linger", _session_user()])
 
 
 def _active_state() -> str:
