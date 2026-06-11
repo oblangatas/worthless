@@ -114,3 +114,111 @@ class TestServiceInstall:
             mock_fail.side_effect = WorthlessError(ErrorCode.PLATFORM_UNSUPPORTED, "nope")
             result = runner.invoke(app, ["service", "status"])
         assert result.exit_code != 0
+
+    def test_uninstall_json(self, home_dir: Path) -> None:
+        mock_backend = MagicMock()
+        with (
+            patch("worthless.cli.commands.service._backend", return_value=mock_backend),
+            patch("worthless.cli.commands.service.get_home") as mock_home,
+        ):
+            mock_home.return_value.base_dir = home_dir
+            result = runner.invoke(
+                app,
+                ["--json", "service", "uninstall", "--yes"],
+                env={"WORTHLESS_HOME": str(home_dir)},
+            )
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        assert payload["installed"] is False
+        mock_backend.uninstall.assert_called_once()
+
+    def test_stop_invokes_backend(self, home_dir: Path) -> None:
+        mock_backend = MagicMock()
+        with (
+            patch("worthless.cli.commands.service._backend", return_value=mock_backend),
+            patch("worthless.cli.commands.service.get_home") as mock_home,
+        ):
+            mock_home.return_value.base_dir = home_dir
+            result = runner.invoke(
+                app,
+                ["service", "stop"],
+                env={"WORTHLESS_HOME": str(home_dir)},
+            )
+        assert result.exit_code == 0, result.output
+        mock_backend.stop.assert_called_once_with()
+
+    def test_start_invokes_backend(self, home_dir: Path) -> None:
+        mock_backend = MagicMock()
+        with (
+            patch("worthless.cli.commands.service._backend", return_value=mock_backend),
+            patch("worthless.cli.commands.service.get_home") as mock_home,
+        ):
+            mock_home.return_value.base_dir = home_dir
+            result = runner.invoke(
+                app,
+                ["service", "start"],
+                env={"WORTHLESS_HOME": str(home_dir)},
+            )
+        assert result.exit_code == 0, result.output
+        mock_backend.start.assert_called_once()
+
+    def test_restart_invokes_backend(self, home_dir: Path) -> None:
+        mock_backend = MagicMock()
+        with (
+            patch("worthless.cli.commands.service._backend", return_value=mock_backend),
+            patch("worthless.cli.commands.service.get_home") as mock_home,
+        ):
+            mock_home.return_value.base_dir = home_dir
+            result = runner.invoke(
+                app,
+                ["service", "restart"],
+                env={"WORTHLESS_HOME": str(home_dir)},
+            )
+        assert result.exit_code == 0, result.output
+        mock_backend.restart.assert_called_once()
+
+    def test_logs_invokes_backend(self, home_dir: Path) -> None:
+        mock_backend = MagicMock()
+        with (
+            patch("worthless.cli.commands.service._backend", return_value=mock_backend),
+            patch("worthless.cli.commands.service.get_home") as mock_home,
+        ):
+            mock_home.return_value.base_dir = home_dir
+            result = runner.invoke(
+                app,
+                ["service", "logs", "--follow"],
+                env={"WORTHLESS_HOME": str(home_dir)},
+            )
+        assert result.exit_code == 0, result.output
+        mock_backend.tail_logs.assert_called_once()
+        assert mock_backend.tail_logs.call_args.kwargs.get("follow") is True
+
+    def test_status_human_mode(self, home_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(sys, "platform", "linux")
+        mock_backend = MagicMock()
+        mock_backend.detect_status.return_value = ServiceStatus(
+            state=ServiceState.RUNNING,
+            unit_path=home_dir / "worthless-proxy.service",
+            binary="/usr/bin/worthless",
+            port=8787,
+            healthy=True,
+            detail="",
+        )
+        runtime = MagicMock(running=True, source="health", pid=123)
+        with (
+            patch("worthless.cli.commands.service._backend", return_value=mock_backend),
+            patch(
+                "worthless.cli.commands.service.current_platform_backend_name",
+                return_value="systemd",
+            ),
+            patch("worthless.cli.commands.service.detect_proxy_runtime", return_value=runtime),
+            patch("worthless.cli.commands.service.get_home") as mock_home,
+        ):
+            mock_home.return_value.base_dir = home_dir
+            result = runner.invoke(
+                app,
+                ["service", "status"],
+                env={"WORTHLESS_HOME": str(home_dir)},
+            )
+        assert result.exit_code == 0, result.output
+        assert "running" in result.stdout.lower()

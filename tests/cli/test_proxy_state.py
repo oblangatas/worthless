@@ -59,3 +59,27 @@ class TestDetectProxyRuntime:
             runtime = detect_proxy_runtime(home)
         assert runtime.running is False
         assert runtime.service_state == ServiceState.STOPPED
+
+    def test_service_healthy_via_backend(self, home: WorthlessHome) -> None:
+        healthy = ServiceStatus(
+            state=ServiceState.RUNNING,
+            unit_path=None,
+            binary="/usr/bin/worthless",
+            port=8787,
+            healthy=True,
+        )
+        with (
+            patch("worthless.cli.commands.service.proxy_state.poll_health", return_value=False),
+            patch(
+                "worthless.cli.commands.service.proxy_state.current_platform_backend_name",
+                return_value="launchd",
+            ),
+            patch(
+                "worthless.cli.commands.service.launchd.detect_status",
+                return_value=healthy,
+            ),
+        ):
+            runtime = detect_proxy_runtime(home)
+        assert runtime.running is True
+        assert runtime.source == "service"
+        assert runtime.service_state == ServiceState.RUNNING
