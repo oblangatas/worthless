@@ -205,7 +205,7 @@ class TestSystemdBackend:
         with (
             patch.object(systemd, "unit_path", return_value=unit),
             patch.object(systemd, "_active_state", return_value="active"),
-            patch("worthless.cli.process.poll_health", return_value=True),
+            patch.object(systemd, "poll_health", return_value=True),
         ):
             status = systemd.detect_status(home, 8787)
         assert status.state == ServiceState.RUNNING
@@ -217,7 +217,7 @@ class TestSystemdBackend:
         with (
             patch.object(systemd, "unit_path", return_value=unit),
             patch.object(systemd, "_active_state", return_value="failed"),
-            patch("worthless.cli.process.poll_health", return_value=False),
+            patch.object(systemd, "poll_health", return_value=False),
         ):
             status = systemd.detect_status(home, 8787)
         assert status.state == ServiceState.FAILED
