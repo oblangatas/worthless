@@ -107,8 +107,8 @@ class TestLockScanPromptHappyFlow:
 
         assert result.exit_code == 0, result.stderr
         # findings written via typer.echo(err=True) → captured in result.stderr
+        # post-lock uses collapse mode: env var shown, raw URL omitted (file-level summary)
         assert "OPENAI_BASE_URL" in result.stderr
-        assert "https://api.openai.com/v1" in result.stderr
 
     def test_user_answers_no_exits_cleanly(self, home_dir: WorthlessHome, tmp_path: Path) -> None:
         """N at the prompt → lock exits 0, no scan output."""

@@ -315,18 +315,31 @@ def _format_code_findings_human(
         test_count = 0
 
     lines: list[str] = []
-    for f in display:
-        lines.append(
-            f"[code] {f.file}:{f.line}:{f.column}  {f.provider_name} ({f.suggested_env_var})"
-        )
-        lines.append(f"       {f.matched_url}")
-        # Show the offending source line (trimmed so it doesn't blow up the
-        # terminal). The user's eyes go straight to the arrow + line.
-        snippet = f.line_text.strip()
-        if len(snippet) > 200:
-            snippet = snippet[:197] + "..."
-        lines.append(f"       → {snippet}")
-        lines.append("")
+    if collapse_tests:
+        # One line per file, occurrence count — no per-line detail.
+        by_file: dict[str, list[CodeFinding]] = {}
+        for f in display:
+            by_file.setdefault(f.file, []).append(f)
+        for file, group in by_file.items():
+            count = len(group)
+            env_vars = ", ".join(sorted({f.suggested_env_var for f in group}))
+            suffix = f" ×{count}" if count > 1 else ""
+            lines.append(f"[code] {file}  ({env_vars}){suffix}")
+        if lines:
+            lines.append("")
+    else:
+        for f in display:
+            lines.append(
+                f"[code] {f.file}:{f.line}:{f.column}  {f.provider_name} ({f.suggested_env_var})"
+            )
+            lines.append(f"       {f.matched_url}")
+            # Show the offending source line (trimmed so it doesn't blow up the
+            # terminal). The user's eyes go straight to the arrow + line.
+            snippet = f.line_text.strip()
+            if len(snippet) > 200:
+                snippet = snippet[:197] + "..."
+            lines.append(f"       → {snippet}")
+            lines.append("")
 
     if test_count:
         noun = "finding" if test_count == 1 else "findings"
