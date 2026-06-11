@@ -9,6 +9,7 @@ import stat
 import sys
 import tempfile
 import time
+from collections import defaultdict
 from pathlib import Path
 
 import typer
@@ -316,12 +317,12 @@ def _format_code_findings_human(
     lines: list[str] = []
     if collapse_tests:
         # One line per file, occurrence count — no per-line detail.
-        by_file: dict[str, list[CodeFinding]] = {}
+        by_file: defaultdict[str, list[CodeFinding]] = defaultdict(list)
         for f in display:
-            by_file.setdefault(f.file, []).append(f)
-        for file, group in by_file.items():
-            count = len(group)
-            env_vars = ", ".join(sorted({f.suggested_env_var for f in group}))
+            by_file[f.file].append(f)
+        for file, file_findings in by_file.items():
+            count = len(file_findings)
+            env_vars = ", ".join(sorted({f.suggested_env_var for f in file_findings}))
             suffix = f" x{count}" if count > 1 else ""
             lines.append(f"[code] {file}  ({env_vars}){suffix}")
         if lines:

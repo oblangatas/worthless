@@ -395,31 +395,33 @@ class TestIsTestPath:
 # ---------------------------------------------------------------------------
 
 
+def _make_src_finding(tmp_path: Path) -> CodeFinding:
+    return CodeFinding(
+        file=str(tmp_path / "src" / "app.py"),
+        line=10,
+        column=5,
+        matched_url="https://api.openai.com/v1",
+        provider_name="openai",
+        suggested_env_var="OPENAI_BASE_URL",
+        line_text='client = OpenAI(base_url="https://api.openai.com/v1")',
+    )
+
+
+def _make_test_finding(tmp_path: Path) -> CodeFinding:
+    return CodeFinding(
+        file=str(tmp_path / "tests" / "test_client.py"),
+        line=5,
+        column=1,
+        matched_url="https://api.openai.com/v1",
+        provider_name="openai",
+        suggested_env_var="OPENAI_BASE_URL",
+        line_text='base_url="https://api.openai.com/v1"',
+    )
+
+
 class TestFormatCodeFindingsCollapseTests:
-    def _src_finding(self, tmp_path: Path) -> CodeFinding:
-        return CodeFinding(
-            file=str(tmp_path / "src" / "app.py"),
-            line=10,
-            column=5,
-            matched_url="https://api.openai.com/v1",
-            provider_name="openai",
-            suggested_env_var="OPENAI_BASE_URL",
-            line_text='client = OpenAI(base_url="https://api.openai.com/v1")',
-        )
-
-    def _test_finding(self, tmp_path: Path) -> CodeFinding:
-        return CodeFinding(
-            file=str(tmp_path / "tests" / "test_client.py"),
-            line=5,
-            column=1,
-            matched_url="https://api.openai.com/v1",
-            provider_name="openai",
-            suggested_env_var="OPENAI_BASE_URL",
-            line_text='base_url="https://api.openai.com/v1"',
-        )
-
     def test_collapse_omits_test_findings_inline(self, tmp_path: Path) -> None:
-        findings = [self._src_finding(tmp_path), self._test_finding(tmp_path)]
+        findings = [_make_src_finding(tmp_path), _make_test_finding(tmp_path)]
         output = _format_code_findings_human(findings, collapse_tests=True)
 
         assert "src/app.py" in output
@@ -427,14 +429,14 @@ class TestFormatCodeFindingsCollapseTests:
         assert "1 test-file finding omitted" in output
 
     def test_collapse_shows_src_findings_inline(self, tmp_path: Path) -> None:
-        findings = [self._src_finding(tmp_path), self._test_finding(tmp_path)]
+        findings = [_make_src_finding(tmp_path), _make_test_finding(tmp_path)]
         output = _format_code_findings_human(findings, collapse_tests=True)
 
         assert "OPENAI_BASE_URL" in output
         assert "[code]" in output
 
     def test_collapse_false_shows_all(self, tmp_path: Path) -> None:
-        findings = [self._src_finding(tmp_path), self._test_finding(tmp_path)]
+        findings = [_make_src_finding(tmp_path), _make_test_finding(tmp_path)]
         output = _format_code_findings_human(findings, collapse_tests=False)
 
         assert "src/app.py" in output
@@ -442,14 +444,15 @@ class TestFormatCodeFindingsCollapseTests:
         assert "omitted" not in output
 
     def test_all_test_findings_no_inline_detail(self, tmp_path: Path) -> None:
-        findings = [self._test_finding(tmp_path)]
+        findings = [_make_test_finding(tmp_path)]
         output = _format_code_findings_human(findings, collapse_tests=True)
 
         assert "[code]" not in output
         assert "1 test-file finding omitted" in output
+        assert "Found 1 hardcoded provider URL(s)." in output
 
     def test_honesty_footer_always_present(self, tmp_path: Path) -> None:
-        findings = [self._test_finding(tmp_path)]
+        findings = [_make_test_finding(tmp_path)]
         output = _format_code_findings_human(findings, collapse_tests=True)
 
         assert "NOTE" in output
@@ -466,18 +469,8 @@ class TestPostLockCollapseTests:
     ) -> None:
         """Post-lock TTY scan: test-file findings appear as a count, not inline."""
         env_file = _make_env_file(tmp_path)
-        test_finding = CodeFinding(
-            file=str(tmp_path / "tests" / "test_client.py"),
-            line=5,
-            column=1,
-            matched_url="https://api.openai.com/v1",
-            provider_name="openai",
-            suggested_env_var="OPENAI_BASE_URL",
-            line_text='base_url="https://api.openai.com/v1"',
-        )
-
         with (
-            patch(_SCAN_FN, return_value=[test_finding]),
+            patch(_SCAN_FN, return_value=[_make_test_finding(tmp_path)]),
             patch(_IS_TTY, return_value=True),
         ):
             result = runner.invoke(
@@ -494,18 +487,8 @@ class TestPostLockCollapseTests:
     def test_src_finding_still_shown_inline(self, home_dir: WorthlessHome, tmp_path: Path) -> None:
         """Post-lock TTY scan: src/ findings are still printed in full."""
         env_file = _make_env_file(tmp_path)
-        src_finding = CodeFinding(
-            file=str(tmp_path / "src" / "app.py"),
-            line=10,
-            column=5,
-            matched_url="https://api.openai.com/v1",
-            provider_name="openai",
-            suggested_env_var="OPENAI_BASE_URL",
-            line_text='client = OpenAI(base_url="https://api.openai.com/v1")',
-        )
-
         with (
-            patch(_SCAN_FN, return_value=[src_finding]),
+            patch(_SCAN_FN, return_value=[_make_src_finding(tmp_path)]),
             patch(_IS_TTY, return_value=True),
         ):
             result = runner.invoke(
