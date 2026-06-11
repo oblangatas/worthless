@@ -17,6 +17,9 @@ from typer.testing import CliRunner
 from tests.helpers import fake_anthropic_key, fake_openai_key
 from tests.user_flows.helpers import scrubbed_cli_env
 from worthless.cli.app import app
+from worthless.cli.bootstrap import WorthlessHome
+from worthless.cli.commands.service._common import ServiceState
+from worthless.cli.commands.service.proxy_state import ProxyRuntimeState
 
 
 runner = CliRunner(mix_stderr=False)
@@ -90,6 +93,92 @@ def test_default_command_yes_detects_and_locks_project_env(
     assert values["ANTHROPIC_API_KEY"] != anthropic_key
     assert values["OPENAI_BASE_URL"] is not None
     assert values["ANTHROPIC_BASE_URL"] is not None
+
+
+@pytest.mark.user_flow
+def test_default_second_invocation_skips_supervised_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After lock + first proxy start, bare ``worthless --yes`` must not respawn."""
+    home = tmp_path / ".worthless"
+    project = tmp_path / "project"
+    project.mkdir()
+    env_file = project / ".env"
+    env_file.write_text(f"OPENAI_API_KEY={fake_openai_key()}\n")
+    monkeypatch.chdir(project)
+
+    proxy_checks = {"count": 0}
+    supervised_calls: list[int] = []
+
+    def mock_proxy_is_running(home: WorthlessHome):
+        if proxy_checks["count"] == 0:
+            proxy_checks["count"] += 1
+            return False, None, 0
+        return True, 4242, 8787
+
+    def mock_supervised(*args: object, **kwargs: object) -> int:
+        supervised_calls.append(4242)
+        return 4242
+
+    monkeypatch.setattr("worthless.cli.default_command._proxy_is_running", mock_proxy_is_running)
+    monkeypatch.setattr(
+        "worthless.cli.default_command.start_supervised_proxy",
+        mock_supervised,
+    )
+    monkeypatch.setattr("worthless.cli.default_command.poll_health", lambda *a, **kw: True)
+
+    first = _invoke(["--yes"], home)
+    first_output = _combined_output(first)
+    assert first.exit_code == 0, first_output
+    assert len(supervised_calls) == 1, first_output
+
+    second = _invoke(["--yes"], home)
+    second_output = _combined_output(second)
+    assert second.exit_code == 0, second_output
+    assert len(supervised_calls) == 1, second_output
+    assert "Proxy healthy" in second_output
+
+
+@pytest.mark.user_flow
+def test_default_with_stopped_service_hints_without_supervised_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Installed but stopped service: hint ``service start``, do not spawn duplicate proxy."""
+    home = tmp_path / ".worthless"
+    project = tmp_path / "project"
+    project.mkdir()
+    env_file = project / ".env"
+    env_file.write_text(f"OPENAI_API_KEY={fake_openai_key()}\n")
+    monkeypatch.chdir(project)
+
+    lock = _invoke(["lock", "--env", str(env_file)], home)
+    assert lock.exit_code == 0, _combined_output(lock)
+
+    supervised_calls: list[int] = []
+
+    monkeypatch.setattr(
+        "worthless.cli.default_command.start_supervised_proxy",
+        lambda *a, **kw: supervised_calls.append(1),
+    )
+    monkeypatch.setattr(
+        "worthless.cli.default_command.detect_proxy_runtime",
+        lambda home: ProxyRuntimeState(
+            running=False,
+            pid=None,
+            port=8787,
+            source="service",
+            service_state=ServiceState.STOPPED,
+        ),
+    )
+
+    result = _invoke(["--yes"], home)
+    output = _combined_output(result)
+    assert result.exit_code == 0, output
+    assert not supervised_calls, output
+    normalized = output.lower().replace("\n", " ")
+    assert "worthless service" in normalized and "start" in normalized
 
 
 @pytest.mark.user_flow
