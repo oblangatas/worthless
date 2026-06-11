@@ -21,6 +21,7 @@ from typer.testing import CliRunner
 from worthless.cli.app import app
 from worthless.cli.bootstrap import WorthlessHome
 from worthless.cli.code_scanner import CodeFinding
+from worthless.cli.commands.scan import _format_code_findings_human, _is_test_path
 from worthless.cli.console import WorthlessConsole
 from tests.helpers import fake_openai_key
 
@@ -367,37 +368,25 @@ class TestLockScanPromptInsulation:
 
 class TestIsTestPath:
     def test_tests_dir_segment(self) -> None:
-        from worthless.cli.commands.scan import _is_test_path
-
         assert _is_test_path("tests/test_foo.py")
         assert _is_test_path("/project/tests/helpers.py")
 
     def test_test_prefix_filename(self) -> None:
-        from worthless.cli.commands.scan import _is_test_path
-
         assert _is_test_path("src/test_client.py")
         assert _is_test_path("test_utils.py")
 
     def test_test_suffix_filename(self) -> None:
-        from worthless.cli.commands.scan import _is_test_path
-
         assert _is_test_path("src/client_test.py")
 
     def test_conftest(self) -> None:
-        from worthless.cli.commands.scan import _is_test_path
-
         assert _is_test_path("conftest.py")
         assert _is_test_path("src/conftest.py")
 
     def test_src_file_not_matched(self) -> None:
-        from worthless.cli.commands.scan import _is_test_path
-
         assert not _is_test_path("src/worthless/cli/commands/lock.py")
         assert not _is_test_path("app/client.py")
 
     def test_windows_path_normalised(self) -> None:
-        from worthless.cli.commands.scan import _is_test_path
-
         assert _is_test_path("project\\tests\\test_foo.py")
 
 
@@ -430,8 +419,6 @@ class TestFormatCodeFindingsCollapseTests:
         )
 
     def test_collapse_omits_test_findings_inline(self, tmp_path: Path) -> None:
-        from worthless.cli.commands.scan import _format_code_findings_human
-
         findings = [self._src_finding(tmp_path), self._test_finding(tmp_path)]
         output = _format_code_findings_human(findings, collapse_tests=True)
 
@@ -440,8 +427,6 @@ class TestFormatCodeFindingsCollapseTests:
         assert "1 test-file finding omitted" in output
 
     def test_collapse_shows_src_findings_inline(self, tmp_path: Path) -> None:
-        from worthless.cli.commands.scan import _format_code_findings_human
-
         findings = [self._src_finding(tmp_path), self._test_finding(tmp_path)]
         output = _format_code_findings_human(findings, collapse_tests=True)
 
@@ -449,8 +434,6 @@ class TestFormatCodeFindingsCollapseTests:
         assert "[code]" in output
 
     def test_collapse_false_shows_all(self, tmp_path: Path) -> None:
-        from worthless.cli.commands.scan import _format_code_findings_human
-
         findings = [self._src_finding(tmp_path), self._test_finding(tmp_path)]
         output = _format_code_findings_human(findings, collapse_tests=False)
 
@@ -459,8 +442,6 @@ class TestFormatCodeFindingsCollapseTests:
         assert "omitted" not in output
 
     def test_all_test_findings_no_inline_detail(self, tmp_path: Path) -> None:
-        from worthless.cli.commands.scan import _format_code_findings_human
-
         findings = [self._test_finding(tmp_path)]
         output = _format_code_findings_human(findings, collapse_tests=True)
 
@@ -468,8 +449,6 @@ class TestFormatCodeFindingsCollapseTests:
         assert "1 test-file finding omitted" in output
 
     def test_honesty_footer_always_present(self, tmp_path: Path) -> None:
-        from worthless.cli.commands.scan import _format_code_findings_human
-
         findings = [self._test_finding(tmp_path)]
         output = _format_code_findings_human(findings, collapse_tests=True)
 
