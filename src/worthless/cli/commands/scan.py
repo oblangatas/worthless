@@ -286,13 +286,36 @@ _HONESTY_FOOTER = (
 )
 
 
-def _format_code_findings_human(findings: list[CodeFinding]) -> str:
+def _is_test_path(path: str) -> bool:
+    parts = path.replace("\\", "/").lower().split("/")
+    name = parts[-1] if parts else ""
+    return (
+        "tests" in parts
+        or "test" in parts
+        or name.startswith("test_")
+        or name.endswith("_test.py")
+        or name == "conftest.py"
+    )
+
+
+def _format_code_findings_human(
+    findings: list[CodeFinding],
+    *,
+    collapse_tests: bool = False,
+) -> str:
     """Render code findings + honesty footer for stderr output."""
     if not findings:
         return "No hardcoded provider URLs found.\n"
 
+    if collapse_tests:
+        display = [f for f in findings if not _is_test_path(f.file)]
+        test_count = len(findings) - len(display)
+    else:
+        display = findings
+        test_count = 0
+
     lines: list[str] = []
-    for f in findings:
+    for f in display:
         lines.append(
             f"[code] {f.file}:{f.line}:{f.column}  {f.provider_name} ({f.suggested_env_var})"
         )
@@ -303,6 +326,13 @@ def _format_code_findings_human(findings: list[CodeFinding]) -> str:
         if len(snippet) > 200:
             snippet = snippet[:197] + "..."
         lines.append(f"       → {snippet}")
+        lines.append("")
+
+    if test_count:
+        noun = "finding" if test_count == 1 else "findings"
+        lines.append(
+            f"+ {test_count} test-file {noun} omitted. Run `worthless scan --code` to see them."
+        )
         lines.append("")
 
     lines.append(f"Found {len(findings)} hardcoded provider URL(s).")
