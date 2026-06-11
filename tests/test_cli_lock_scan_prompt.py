@@ -21,8 +21,13 @@ from typer.testing import CliRunner
 from worthless.cli.app import app
 from worthless.cli.bootstrap import WorthlessHome
 from worthless.cli.code_scanner import CodeFinding
-from worthless.cli.commands.scan import _format_code_findings_human, _is_test_path
+from worthless.cli.commands.scan import (
+    _format_code_findings_human,
+    _format_lock_block_human,
+    _is_test_path,
+)
 from worthless.cli.console import WorthlessConsole
+from worthless.cli.scanner import HardcodedUrlFinding
 from tests.helpers import fake_openai_key
 
 _SCAN_FN = "worthless.cli.commands.lock.scan_for_hardcoded_provider_urls"
@@ -501,3 +506,67 @@ class TestPostLockCollapseTests:
         assert result.exit_code == 0
         assert "OPENAI_BASE_URL" in result.stderr
         assert "[OK]" in result.stderr  # console writes to stderr with mix_stderr=False
+
+
+# ---------------------------------------------------------------------------
+# Pre-lock block formatter unit tests (worthless-foh6)
+# ---------------------------------------------------------------------------
+
+
+def _make_hardcoded_finding(
+    file: str, line: int = 10, provider: str = "openai"
+) -> HardcodedUrlFinding:
+    return HardcodedUrlFinding(
+        file=file,
+        line=line,
+        url=f"https://api.{provider}.com/v1",
+        provider=provider,
+    )
+
+
+class TestFormatLockBlockHuman:
+    def test_blocking_true_header(self) -> None:
+        findings = [_make_hardcoded_finding("src/app.py")]
+        output = _format_lock_block_human(findings, blocking=True)
+        assert output.startswith("Can't lock")
+        assert "Warning" not in output
+
+    def test_blocking_false_header(self) -> None:
+        findings = [_make_hardcoded_finding("src/app.py")]
+        output = _format_lock_block_human(findings, blocking=False)
+        assert output.startswith("Warning")
+        assert "Can't lock" not in output
+
+    def test_src_finding_shows_file_and_env_var(self) -> None:
+        findings = [_make_hardcoded_finding("src/client.py", line=42, provider="anthropic")]
+        output = _format_lock_block_human(findings)
+        assert "src/client.py" in output
+        assert "ANTHROPIC_BASE_URL" in output
+        assert "42" in output
+
+    def test_ai_prompt_present_when_src_findings_exist(self) -> None:
+        findings = [_make_hardcoded_finding("src/app.py")]
+        output = _format_lock_block_human(findings)
+        assert "Paste this into Claude Code" in output
+        assert "worthless found hardcoded provider URLs" in output
+
+    def test_test_only_findings_no_ai_prompt(self) -> None:
+        findings = [_make_hardcoded_finding("tests/test_client.py")]
+        output = _format_lock_block_human(findings)
+        assert "Paste this into Claude Code" not in output
+        assert "test" in output.lower()
+
+    def test_test_count_line_present_when_mixed(self) -> None:
+        findings = [
+            _make_hardcoded_finding("src/app.py"),
+            _make_hardcoded_finding("tests/test_foo.py"),
+        ]
+        output = _format_lock_block_human(findings)
+        assert "test file" in output
+        assert "Paste this into Claude Code" in output
+
+    def test_sanitize_applied_to_file_path(self) -> None:
+        findings = [_make_hardcoded_finding("/secret/path/src/app.py")]
+        output = _format_lock_block_human(findings, sanitize=lambda p: "<redacted>")
+        assert "<redacted>" in output
+        assert "/secret/path" not in output

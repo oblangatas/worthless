@@ -22,7 +22,13 @@ from worthless.cli.key_patterns import KEY_PATTERN
 from worthless.cli.dotenv_rewriter import build_enrolled_locations
 from worthless.cli.keystore import PLACEHOLDER_FERNET_KEY
 from worthless.cli.orphans import FIX_PHRASE, PROBLEM_PHRASE, find_orphans
-from worthless.cli.scanner import ScanFinding, SkippedFile, format_sarif, scan_files
+from worthless.cli.scanner import (
+    HardcodedUrlFinding,
+    ScanFinding,
+    SkippedFile,
+    format_sarif,
+    scan_files,
+)
 from worthless.storage.repository import EnrollmentRecord, ShardRepository
 
 
@@ -351,6 +357,93 @@ def _format_code_findings_human(
     lines.append(f"Found {len(findings)} hardcoded provider URL(s).")
     lines.append("")
     lines.append(_HONESTY_FOOTER)
+    return "\n".join(lines)
+
+
+_LOCK_BLOCK_SEP = "─" * 52
+
+
+def _format_lock_block_human(
+    findings: list[HardcodedUrlFinding],
+    *,
+    blocking: bool = True,
+    sanitize: object = None,
+) -> str:
+    """Collapsed pre-lock output + copy-pasteable AI fix prompt.
+
+    blocking=True  → "Can't lock" header (non-TTY / error path).
+    blocking=False → "Warning" header (TTY path where user can still proceed).
+    sanitize       → callable applied to file paths and URLs before display.
+    """
+    _san: object = sanitize if callable(sanitize) else (lambda x: x)
+
+    src = [f for f in findings if not _is_test_path(f.file)]
+    test_count = len(findings) - len(src)
+
+    lines: list[str] = []
+
+    # Header
+    if src:
+        file_count = len({f.file for f in src})
+        noun = "file" if file_count == 1 else "files"
+        if blocking:
+            lines.append(f"Can't lock — {file_count} {noun} have hardcoded provider URLs.")
+        else:
+            lines.append(f"Warning: {file_count} {noun} have hardcoded provider URLs.")
+    else:
+        if blocking:
+            lines.append("Can't lock — hardcoded provider URLs in test files.")
+        else:
+            lines.append("Warning: hardcoded provider URLs detected in test files.")
+    lines.append("Those calls bypass worthless even after locking.")
+    lines.append("")
+
+    # Collapsed file list
+    by_file: defaultdict[str, list[HardcodedUrlFinding]] = defaultdict(list)
+    for f in src:
+        by_file[_san(f.file)].append(f)  # type: ignore[operator]
+    for safe_file, file_findings in by_file.items():
+        line_nums = ", ".join(str(f.line) for f in file_findings)
+        env_vars = ", ".join(sorted({f.provider.upper() + "_BASE_URL" for f in file_findings}))
+        ln_noun = "line" if len(file_findings) == 1 else "lines"
+        lines.append(f"  • {safe_file} — {env_vars} ({ln_noun} {line_nums})")
+    if test_count:
+        t_noun = "file" if test_count == 1 else "files"
+        lines.append(f"  + {test_count} test {t_noun} (safe to ignore)")
+    lines.append("")
+
+    # AI fix prompt — only when there are src findings worth fixing
+    if src:
+        prompt_bullets = []
+        for f in src:
+            env_var = f.provider.upper() + "_BASE_URL"
+            prompt_bullets.append(f"    • {_san(f.file)}:{f.line} — {env_var}")  # type: ignore[operator]
+
+        lines += (
+            [
+                "Paste this into Claude Code / Cursor to fix it:",
+                _LOCK_BLOCK_SEP,
+                "  worthless found hardcoded provider URLs I need to fix.",
+                "  Replace them with environment variables worthless uses.",
+                "",
+                "  Files and lines to fix:",
+            ]
+            + prompt_bullets
+            + [
+                "",
+                "  Before touching anything:",
+                "    • Read each file. Tell me if each change is safe.",
+                "    • Find how this project loads .env. Use that pattern.",
+                "    • If anything looks risky or unclear — stop and ask me.",
+                '    • Show me every change. Ask "ok to apply?" Wait for my yes.',
+                "",
+                "  Don't touch test files. Don't touch .env.",
+                _LOCK_BLOCK_SEP,
+                "Once fixed, re-run: worthless lock --env .env",
+                "",
+            ]
+        )
+
     return "\n".join(lines)
 
 
