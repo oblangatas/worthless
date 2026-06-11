@@ -223,21 +223,28 @@ async def test_refund_deletes_hold_without_spend_log_write(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_sweep_settles_stale_holds_at_estimate_never_refunds(tmp_path) -> None:
+    # Estimate sized ABOVE GLOBAL_CEILING_TOKENS so the WOR-696 sweep floor
+    # (max(estimate, ceiling)) is a no-op here — test pins the original
+    # "sweep bills the stored estimate, never refunds" contract for legit
+    # large reservations. The leak-fix branch (estimate < ceiling) is
+    # covered by test_sweep_floors_orphans_at_ceiling_blocking_sigkill_attack.
+    legit_estimate = GLOBAL_CEILING_TOKENS + 50_000
     db = await _open(tmp_path)
     try:
         # A stale hold (created an hour ago) + a fresh one.
         await db.execute(
             "INSERT INTO pending_charges (handle, key_alias, estimate, created_at, provider) "
-            "VALUES ('stale', 'k1', 42, datetime('now', '-1 hour'), 'openai')"
+            "VALUES ('stale', 'k1', ?, datetime('now', '-1 hour'), 'openai')",
+            (legit_estimate,),
         )
         await db.commit()
         ledger = SpendLedger(db)
-        fresh = await ledger.hold("k1", estimate=10, cap=1000, provider="openai")
+        fresh = await ledger.hold("k1", estimate=10, cap=10_000_000, provider="openai")
 
         reaped = await ledger.sweep(max_age_seconds=60)
 
         assert reaped == 1
-        assert await _committed(db, "k1") == 42  # stale hold settled at its estimate
+        assert await _committed(db, "k1") == legit_estimate  # legit estimate preserved
         cur = await db.execute("SELECT COUNT(*) FROM pending_charges WHERE handle = ?", (fresh,))
         (cnt,) = await cur.fetchone()
         assert cnt == 1  # fresh hold untouched
@@ -441,18 +448,23 @@ async def test_sweep_returns_zero_when_nothing_stale(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_sweep_settles_multiple_stale_holds(tmp_path) -> None:
+    # Estimates above the GLOBAL_CEILING_TOKENS floor so the WOR-696
+    # sweep floor is a no-op for THIS test — pins the multi-hold reap
+    # behavior on legit large estimates. The small-estimate floor path
+    # is covered by test_sweep_floors_orphans_at_ceiling_blocking_sigkill_attack.
+    legit_estimate = GLOBAL_CEILING_TOKENS + 50_000
     db = await _open(tmp_path)
     try:
         for h in ("a", "b", "c"):
             await db.execute(
                 "INSERT INTO pending_charges (handle, key_alias, estimate, created_at, provider) "
-                "VALUES (?, 'k1', 5, datetime('now','-1 hour'), 'openai')",
-                (h,),
+                "VALUES (?, 'k1', ?, datetime('now','-1 hour'), 'openai')",
+                (h, legit_estimate),
             )
         await db.commit()
         ledger = SpendLedger(db)
         assert await ledger.sweep(max_age_seconds=60) == 3
-        assert await _committed(db, "k1") == 15  # 3 x 5, billed at estimate
+        assert await _committed(db, "k1") == 3 * legit_estimate
         assert await _held(db, "k1") == 0
     finally:
         await db.close()
@@ -517,5 +529,127 @@ async def test_hold_rolls_back_on_db_error(tmp_path, monkeypatch) -> None:
             await ledger.hold("k1", estimate=10, cap=100, provider="openai")
         monkeypatch.undo()
         assert await _held(db, "k1") == 0  # rolled back, no orphan
+    finally:
+        await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Adversarial: SIGKILL-orphan sweeper attack (worthless-osgt, brutus finding)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sweep_floors_orphans_at_ceiling_blocking_sigkill_attack(tmp_path) -> None:
+    """ATTACK NARRATIVE — first person, attacker POV.
+
+    I want to drain my victim's OpenAI account past their $10 cap.
+    I know the cap floors at GLOBAL_CEILING_TOKENS on every normal
+    settle path — disconnect, idle kill, duration kill, BackgroundTask
+    exception. So I can't just disconnect; the floor would fire.
+
+    But there's a gap: settle runs in a FastAPI BackgroundTask. If I can
+    kill the proxy process BETWEEN stream-start and BackgroundTask
+    completion, the floor never executes. The pending_charges row sits
+    in the DB with estimate=0 (I sent no max_tokens, so the estimator
+    reserved zero output tokens, T3 passthrough principle).
+
+    The sweeper is the backstop — runs on TTL, reaps orphan holds. But
+    today it bills the STORED estimate, which is 0 for my no-max_tokens
+    requests. Cap counter never moves. I loop forever.
+
+    My attack:
+        1. Send no-max_tokens request to a $10-capped alias
+        2. SIGKILL the proxy mid-stream before BackgroundTask fires
+        3. Repeat 1000x
+        4. Wait for sweeper TTL — it bills 1000 × 0 = 0 tokens to my cap
+        5. My alias is still under cap. Provider bill is unbounded.
+
+    THIS TEST FAILS on production code without the sweep-at-ceiling
+    floor — proves the leak exists.
+
+    With the fix (max(estimate, GLOBAL_CEILING_TOKENS) in sweep), my
+    attack PAYS: sweeper bills 1000 × 128K = 128M tokens, my cap is
+    demolished, key stops reassembling.
+    """
+    db = await _open(tmp_path)
+    try:
+        ledger = SpendLedger(db)
+
+        # Simulate 10 SIGKILL'd no-max_tokens requests. Insert pending_charges
+        # rows directly — that's the post-mortem DB state after the attack.
+        # estimate=0 because no max_tokens was sent (T3 passthrough estimator).
+        # created_at is set 3600s ago so the sweeper picks them up.
+        for i in range(10):
+            await db.execute(
+                "INSERT INTO pending_charges"
+                " (handle, key_alias, estimate, provider, model, created_at)"
+                " VALUES (?, 'victim', 0, 'openai', 'gpt-4o-mini',"
+                " datetime('now', '-3600 seconds'))",
+                (f"sigkill-orphan-{i}",),
+            )
+        await db.commit()
+
+        # Sanity: 10 orphans exist, victim's spend_log is empty.
+        assert await _held(db, "victim") == 0  # estimate is 0 each
+        assert await _committed(db, "victim") == 0
+        cur = await db.execute("SELECT COUNT(*) FROM pending_charges WHERE key_alias = 'victim'")
+        (orphan_count,) = await cur.fetchone()
+        assert orphan_count == 10, "setup: expected 10 orphan holds"
+
+        # Fire the sweeper. max_age_seconds=0 means "reap everything older
+        # than now" — production runs with a TTL like 60s; same code path.
+        reaped = await ledger.sweep(max_age_seconds=0)
+        assert reaped == 10, "sweeper should have reaped all 10 orphans"
+
+        # THE LOAD-BEARING ASSERTION.
+        # Without the fix: total_spent = 10 * 0 = 0. Cap unmoved.
+        # With the fix: total_spent = 10 * GLOBAL_CEILING_TOKENS.
+        committed = await _committed(db, "victim")
+        expected = 10 * GLOBAL_CEILING_TOKENS
+        assert committed == expected, (
+            f"SIGKILL-orphan attack: sweeper billed {committed} tokens, "
+            f"expected {expected} ({10} orphans × {GLOBAL_CEILING_TOKENS} "
+            f"ceiling). At {committed} the attacker drains the provider "
+            f"account without the cap moving — the leak documented in "
+            f"worthless-osgt (brutus P1)."
+        )
+
+        # No orphans remain. Sweeper consumed every row.
+        assert await _held(db, "victim") == 0
+
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_sweep_preserves_legitimate_estimates_above_ceiling(tmp_path) -> None:
+    """Companion test: the floor must NOT cap honest estimates downward.
+
+    A request that legitimately reserved 500_000 tokens (big max_tokens)
+    and got SIGKILL'd should bill its full 500K reservation, not the
+    128K floor. The fix is `max(estimate, GLOBAL_CEILING_TOKENS)` —
+    upward-only floor, never a ceiling.
+    """
+    db = await _open(tmp_path)
+    try:
+        ledger = SpendLedger(db)
+
+        # An honest 500K-token reservation that got orphaned.
+        await db.execute(
+            "INSERT INTO pending_charges"
+            " (handle, key_alias, estimate, provider, model, created_at)"
+            " VALUES ('honest-orphan', 'victim', 500000, 'openai',"
+            " 'gpt-4o', datetime('now', '-3600 seconds'))"
+        )
+        await db.commit()
+
+        await ledger.sweep(max_age_seconds=0)
+
+        committed = await _committed(db, "victim")
+        assert committed == 500_000, (
+            f"sweeper truncated an honest 500K estimate to {committed}; "
+            f"the floor is UPWARD-only — never cap legit estimates down"
+        )
+
     finally:
         await db.close()

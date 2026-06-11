@@ -174,13 +174,20 @@ class SpendLedger:
                 )
                 stale = list(await cur.fetchall())
                 for handle, alias, estimate, provider, model in stale:
+                    # WOR-696 / worthless-osgt: orphans from SIGKILL'd or
+                    # crashed BackgroundTasks bypass the normal settle floor.
+                    # Apply the same GLOBAL_CEILING_TOKENS floor here so the
+                    # sweeper backstop can't be exploited by killing the
+                    # proxy between stream-start and settle. Upward-only —
+                    # honest large estimates pass through unchanged.
+                    charge = max(estimate, GLOBAL_CEILING_TOKENS)
                     await self._db.execute(
                         "DELETE FROM pending_charges WHERE handle = ?", (handle,)
                     )
                     await self._db.execute(
                         "INSERT INTO spend_log (key_alias, tokens, model, provider)"
                         " VALUES (?, ?, ?, ?)",
-                        (alias, estimate, model, provider),
+                        (alias, charge, model, provider),
                     )
                 await self._db.commit()
                 return len(stale)
