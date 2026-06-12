@@ -384,6 +384,26 @@ class TestLockFormatPreserving:
             "capture likely happened AFTER the file was tightened to 0o600"
         )
 
+    def test_capture_original_mode_reads_perm_bits(self, tmp_path: Path) -> None:
+        """WOR-715: _capture_original_mode returns the file's 0o777 bits."""
+        from worthless.cli.commands.lock import _capture_original_mode
+
+        f = tmp_path / ".env"
+        f.write_text("OPENAI_API_KEY=x\n")
+        f.chmod(0o640)
+        assert _capture_original_mode(str(f)) == 0o640
+
+    def test_capture_original_mode_missing_file_returns_none(self, tmp_path: Path) -> None:
+        """WOR-715: stat failure (vanished file / bad path) → None, not a crash.
+
+        This is the ``except OSError`` branch — proves lock degrades to
+        'mode unknown, leave as-is' instead of blowing up the whole command.
+        """
+        from worthless.cli.commands.lock import _capture_original_mode
+
+        missing = tmp_path / "nope" / ".env"  # parent dir doesn't exist → OSError
+        assert _capture_original_mode(str(missing)) is None
+
     def test_lock_warns_on_non_canonical_var_name(
         self, home_dir: WorthlessHome, tmp_path: Path
     ) -> None:

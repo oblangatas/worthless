@@ -291,6 +291,20 @@ async def _delete_superseded_location_enrollments(
             await repo.delete_enrolled(stale_alias)
 
 
+def _capture_original_mode(env_str: str) -> int | None:
+    """The ``.env``'s permission bits (``0o777``) before lock tightens it.
+
+    WOR-715: recorded so ``worthless uninstall`` (WOR-435) can restore the
+    original permissions, not just the contents. ``None`` on stat failure
+    (file vanished, EACCES on the dir) = "mode unknown — leave the file
+    as-is at restore" rather than crashing the whole lock.
+    """
+    try:
+        return Path(env_str).stat().st_mode & 0o777
+    except OSError:
+        return None
+
+
 async def _pass1_db_writes(
     repo: ShardRepository,
     candidates: list[tuple[str, str, str]],
@@ -313,11 +327,7 @@ async def _pass1_db_writes(
     # ``safe_rewrite`` and forces it to 0o600. During pass-1 the file is still
     # untouched, so this is the true original mode — capturing any later would
     # read the already-tightened 0o600 and silently record the wrong value.
-    # ``None`` on stat failure = "mode unknown, leave file as-is" at restore.
-    try:
-        original_mode: int | None = Path(env_str).stat().st_mode & 0o777
-    except OSError:
-        original_mode = None
+    original_mode = _capture_original_mode(env_str)
 
     for var_name, value, detected_provider in candidates:
         # Translate registry-name → wire-protocol. Post-HF1,

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import aiosqlite
 import pytest
+from hypothesis import example, given
+from hypothesis import strategies as st
 
 from worthless.storage.repository import EncryptedShard, ShardRepository, StoredShard
 from worthless.storage.schema import SCHEMA, migrate_db
@@ -601,6 +603,76 @@ async def test_add_enrollment_persists_original_mode(
         row = await cursor.fetchone()
     assert row is not None
     assert row[0] == 0o600, f"expected masked 0o600, got {row[0]:o}"
+
+
+@given(st.integers(min_value=0, max_value=0o177777))
+@example(0o100644)  # S_IFREG | rw-r--r--   (the raw stat().st_mode of a normal .env)
+@example(0o120777)  # S_IFLNK | rwxrwxrwx   (a symlink's st_mode)
+@example(0o102755)  # S_IFREG | setgid | rwxr-xr-x
+@example(0o101644)  # S_IFREG | sticky | rw-r--r--
+def test_perm_bits_strips_all_but_permission_bits(raw_mode: int) -> None:
+    """WOR-715 property: _perm_bits keeps ONLY the 0o777 permission bits.
+
+    No file-type (S_IFREG/S_IFLNK) or special (setuid/setgid/sticky) bit may
+    ever be persisted as original_mode — a refactor to ``& 0o7777`` (special
+    bits) or no mask (type bits) is caught here, not in production.
+    """
+    from worthless.storage.repository import _perm_bits
+
+    result = _perm_bits(raw_mode)
+    assert result is not None
+    assert result == raw_mode & 0o777  # low 9 permission bits preserved
+    assert result & ~0o777 == 0  # nothing above 0o777 survives
+    assert 0 <= result <= 0o777
+
+
+def test_perm_bits_none_passthrough() -> None:
+    """WOR-715: _perm_bits(None) stays None — 'mode unknown, leave file as-is'."""
+    from worthless.storage.repository import _perm_bits
+
+    assert _perm_bits(None) is None
+
+
+@pytest.mark.asyncio
+async def test_store_enrolled_relock_preserves_first_original_mode(
+    repo: ShardRepository,
+    tmp_db_path: str,
+    sample_split_result,
+) -> None:
+    """WOR-715: re-enrolling the same (alias, var, path) keeps the FIRST mode.
+
+    The true pre-lock mode is only knowable at the very first lock; a re-lock
+    would stat the already-tightened 0o600. ``INSERT OR IGNORE`` must keep the
+    original 0o644 — a future switch to UPSERT would silently record 0o600 as
+    the 'original', defeating the whole feature.
+    """
+    shard = stored_shard_from_split(sample_split_result)
+    await repo.store_enrolled(
+        "relock-alias",
+        shard,
+        var_name="OPENAI_API_KEY",
+        env_path="/tmp/relock/.env",  # noqa: S108
+        original_mode=0o644,
+    )
+    # Re-enroll the SAME tuple as if re-locking the now-0o600 file.
+    await repo.store_enrolled(
+        "relock-alias",
+        shard,
+        var_name="OPENAI_API_KEY",
+        env_path="/tmp/relock/.env",  # noqa: S108
+        original_mode=0o600,
+    )
+
+    async with aiosqlite.connect(tmp_db_path) as db:
+        cursor = await db.execute(
+            "SELECT original_mode FROM enrollments WHERE key_alias = ?", ("relock-alias",)
+        )
+        rows = await cursor.fetchall()
+    assert len(rows) == 1, f"expected exactly 1 enrollment row, got {rows}"
+    assert rows[0][0] == 0o644, (
+        f"re-lock must preserve the first-captured 0o644, got {oct(rows[0][0])} — "
+        "INSERT OR IGNORE was likely changed to an UPSERT"
+    )
 
 
 @pytest.mark.asyncio
