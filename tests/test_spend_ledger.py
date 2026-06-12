@@ -741,3 +741,98 @@ async def test_sweep_honors_per_key_override(tmp_path) -> None:
         assert await _committed(db, "k1") == 200_000, "sweep should honor the override"
     finally:
         await db.close()
+
+
+# ---------------------------------------------------------------------------
+# WOR-705 hardening (brutus PR #294): poisoned-row, sweep batching, floats
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_poisoned_text_override_fails_closed_to_global(tmp_path) -> None:
+    """worthless-8xdq: a non-numeric override (only reachable via direct SQL —
+    SQLite INTEGER affinity stores unconvertible text as text) must NOT crash
+    the settle transaction. It fails closed to the global floor.
+    """
+    db = await _open(tmp_path)
+    try:
+        # Text in the INTEGER-affinity column → stays text in SQLite.
+        await db.execute(
+            "INSERT OR REPLACE INTO enrollment_config (key_alias, ceiling_override) "
+            "VALUES ('k1', 'not-a-number')"
+        )
+        await db.commit()
+        ledger = SpendLedger(db)
+        h = await ledger.hold("k1", estimate=0, cap=10_000_000, provider="openai")
+        await ledger.settle_at_estimate(h)  # must not raise
+        assert await _committed(db, "k1") == GLOBAL_CEILING_TOKENS, (
+            "poisoned override must fail closed to the global floor, not crash"
+        )
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_poisoned_override_does_not_break_sweep(tmp_path) -> None:
+    """worthless-8xdq: one poisoned row must not crash/rollback the whole sweep
+    batch (which would leave every orphan unbilled indefinitely)."""
+    db = await _open(tmp_path)
+    try:
+        await db.execute(
+            "INSERT OR REPLACE INTO enrollment_config (key_alias, ceiling_override) "
+            "VALUES ('k1', 'garbage')"
+        )
+        await db.execute(
+            "INSERT INTO pending_charges (handle, key_alias, estimate, created_at, provider) "
+            "VALUES ('o1', 'k1', 0, datetime('now', '-1 hour'), 'openai')"
+        )
+        await db.commit()
+        ledger = SpendLedger(db)
+        assert await ledger.sweep(max_age_seconds=60) == 1  # must not raise
+        assert await _committed(db, "k1") == GLOBAL_CEILING_TOKENS
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_sweep_resolves_each_alias_own_ceiling(tmp_path) -> None:
+    """worthless-v2mr: batched ceiling resolution must still give each alias its
+    OWN ceiling — k1 (override 200K), k2 (override 300K), k3 (no override)."""
+    db = await _open(tmp_path)
+    try:
+        await _set_override(db, "k1", 200_000)
+        await _set_override(db, "k2", 300_000)
+        await _set_override(db, "k3", None)
+        for h, alias in (("a", "k1"), ("b", "k2"), ("c", "k3")):
+            await db.execute(
+                "INSERT INTO pending_charges (handle, key_alias, estimate, created_at, provider) "
+                "VALUES (?, ?, 0, datetime('now', '-1 hour'), 'openai')",
+                (h, alias),
+            )
+        await db.commit()
+        ledger = SpendLedger(db)
+        assert await ledger.sweep(max_age_seconds=60) == 3
+        assert await _committed(db, "k1") == 200_000
+        assert await _committed(db, "k2") == 300_000
+        assert await _committed(db, "k3") == GLOBAL_CEILING_TOKENS
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_float_override_truncates_down_conservatively(tmp_path) -> None:
+    """worthless-y14x: a float override (only via direct SQL) truncates toward
+    zero — conservative for a floor, never rounds the bill UP."""
+    db = await _open(tmp_path)
+    try:
+        await db.execute(
+            "INSERT OR REPLACE INTO enrollment_config (key_alias, ceiling_override) "
+            "VALUES ('k1', 200000.7)"
+        )
+        await db.commit()
+        ledger = SpendLedger(db)
+        h = await ledger.hold("k1", estimate=0, cap=10_000_000, provider="openai")
+        await ledger.settle_at_estimate(h)
+        assert await _committed(db, "k1") == 200_000, "float must truncate down, not up"
+    finally:
+        await db.close()

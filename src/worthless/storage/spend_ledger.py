@@ -128,10 +128,48 @@ class SpendLedger:
             (alias,),
         )
         row = await cur.fetchone()
-        override = row[0] if row else None
+        return self._effective_ceiling(row[0] if row else None)
+
+    @staticmethod
+    def _effective_ceiling(override: object) -> int:
+        """Clamp a raw stored override value to a safe int >= the global floor.
+
+        worthless-8xdq: SQLite INTEGER affinity does NOT reject text/blob/inf,
+        so a value forced in via direct SQL could be non-numeric. Coerce
+        defensively — any conversion failure fails CLOSED to the global floor
+        rather than crashing (and rolling back) the settle/sweep transaction.
+        worthless-y14x: a float truncates toward zero, conservative for a floor.
+        NULL → the global floor. The global is an inviolable minimum regardless
+        of what is stored.
+        """
         if override is None:
             return GLOBAL_CEILING_TOKENS
-        return max(int(override), GLOBAL_CEILING_TOKENS)
+        try:
+            value = int(override)  # type: ignore[arg-type]
+        except (TypeError, ValueError, OverflowError):
+            return GLOBAL_CEILING_TOKENS
+        return max(value, GLOBAL_CEILING_TOKENS)
+
+    async def _ceilings_for(self, aliases: set[str]) -> dict[str, int]:
+        """Batch form of :meth:`_ceiling_for` — one query for many aliases.
+
+        worthless-v2mr: the sweeper can process a large orphan batch after a
+        mass crash; a per-orphan SELECT inside the write lock serialises N
+        round-trips. Resolve them all in one query. Aliases absent from
+        enrollment_config, or with a NULL/garbage override, fall back to the
+        global floor via :meth:`_effective_ceiling`.
+        """
+        if not aliases:
+            return {}
+        ordered = list(aliases)
+        placeholders = ",".join("?" * len(ordered))
+        query = (
+            "SELECT key_alias, ceiling_override FROM enrollment_config "  # noqa: S608 — IN placeholders only; values are parameterized
+            f"WHERE key_alias IN ({placeholders})"
+        )
+        cur = await self._db.execute(query, ordered)
+        stored = {r[0]: r[1] for r in await cur.fetchall()}
+        return {a: self._effective_ceiling(stored.get(a)) for a in ordered}
 
     async def settle_at_estimate(self, handle: str) -> None:
         """Atomically swap the hold for one ``spend_log`` row at the hold's STORED
@@ -197,6 +235,9 @@ class SpendLedger:
                     (f"-{int(max_age_seconds)} seconds",),
                 )
                 stale = list(await cur.fetchall())
+                # worthless-v2mr: resolve every distinct alias's ceiling in ONE
+                # query rather than a per-orphan SELECT inside the write lock.
+                ceilings = await self._ceilings_for({alias for _, alias, *_ in stale})
                 for handle, alias, estimate, provider, model in stale:
                     # WOR-696 / worthless-osgt: orphans from SIGKILL'd or
                     # crashed BackgroundTasks bypass the normal settle floor.
@@ -205,7 +246,7 @@ class SpendLedger:
                     # stream-start and settle. Upward-only — honest large
                     # estimates pass through unchanged.
                     # WOR-705: per-key override (clamped to global) applies here too.
-                    charge = max(estimate, await self._ceiling_for(alias))
+                    charge = max(estimate, ceilings[alias])
                     await self._db.execute(
                         "DELETE FROM pending_charges WHERE handle = ?", (handle,)
                     )
