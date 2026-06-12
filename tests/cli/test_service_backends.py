@@ -63,8 +63,7 @@ class TestLaunchdBackend:
         assert status.state == ServiceState.NOT_INSTALLED
 
     def test_detect_stopped_unloaded(self, home: WorthlessHome, tmp_path: Path) -> None:
-        plist = tmp_path / "dev.worthless.proxy.plist"
-        plist.write_text("plist")
+        plist = _owned_launchd_plist(home, tmp_path)
         with (
             patch.object(launchd, "plist_path", return_value=plist),
             patch.object(launchd, "resolve_worthless_binary", return_value=tmp_path / "worthless"),
@@ -75,8 +74,7 @@ class TestLaunchdBackend:
         assert status.healthy is False
 
     def test_detect_running_healthy(self, home: WorthlessHome, tmp_path: Path) -> None:
-        plist = tmp_path / "dev.worthless.proxy.plist"
-        plist.write_text("plist")
+        plist = _owned_launchd_plist(home, tmp_path)
         with (
             patch.object(launchd, "plist_path", return_value=plist),
             patch.object(launchd, "resolve_worthless_binary", return_value=tmp_path / "worthless"),
@@ -88,8 +86,7 @@ class TestLaunchdBackend:
         assert status.healthy is True
 
     def test_detect_failed_unhealthy(self, home: WorthlessHome, tmp_path: Path) -> None:
-        plist = tmp_path / "dev.worthless.proxy.plist"
-        plist.write_text("plist")
+        plist = _owned_launchd_plist(home, tmp_path)
         with (
             patch.object(launchd, "plist_path", return_value=plist),
             patch.object(launchd, "_is_loaded", return_value=True),
@@ -205,8 +202,7 @@ class TestSystemdBackend:
         assert status.state == ServiceState.NOT_INSTALLED
 
     def test_detect_stopped_when_inactive(self, home: WorthlessHome, tmp_path: Path) -> None:
-        unit = tmp_path / "worthless-proxy.service"
-        unit.write_text("unit")
+        unit = _owned_systemd_unit(home, tmp_path)
         with (
             patch.object(systemd, "unit_path", return_value=unit),
             patch.object(systemd, "_active_state", return_value="inactive"),
@@ -215,8 +211,7 @@ class TestSystemdBackend:
         assert status.state == ServiceState.STOPPED
 
     def test_systemd_detect_running(self, home: WorthlessHome, tmp_path: Path) -> None:
-        unit = tmp_path / "worthless-proxy.service"
-        unit.write_text("unit")
+        unit = _owned_systemd_unit(home, tmp_path)
         with (
             patch.object(systemd, "unit_path", return_value=unit),
             patch.object(systemd, "_active_state", return_value="active"),
@@ -227,8 +222,7 @@ class TestSystemdBackend:
         assert status.healthy is True
 
     def test_systemd_detect_failed(self, home: WorthlessHome, tmp_path: Path) -> None:
-        unit = tmp_path / "worthless-proxy.service"
-        unit.write_text("unit")
+        unit = _owned_systemd_unit(home, tmp_path)
         with (
             patch.object(systemd, "unit_path", return_value=unit),
             patch.object(systemd, "_active_state", return_value="failed"),
