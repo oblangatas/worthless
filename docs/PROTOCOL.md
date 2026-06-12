@@ -69,7 +69,7 @@ All `401` responses return an identical body regardless of failure reason (anti-
 
 ### Shard custody
 
-- **Shard A** stays on the client machine (filesystem). In local mode, the proxy reads it directly from the `shard_a` directory — no network transmission. In remote mode (planned), the client sends Shard A via the `x-worthless-shard-a` header over TLS. A future MPC upgrade will eliminate Shard A transmission entirely, keeping it on the client at all times.
+- **Shard A** stays on the client machine (filesystem). In local mode, the proxy reads it directly from the `shard_a` directory - no network transmission. In remote mode (planned), the client sends Shard A via the `x-worthless-shard-a` header over TLS. A future MPC upgrade will eliminate Shard A transmission entirely, keeping it on the client at all times.
 - **Shard B** is encrypted at rest in SQLite using Fernet (AES-128-CBC + HMAC-SHA256). It is decrypted only in memory during key reconstruction.
 
 ### Gate before reconstruct

@@ -3,13 +3,13 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Features — Worthless</title>
+  <title>Features - Worthless</title>
   <meta name="description" content="Worthless protects local AI API keys with a format-preserving .env shard, local proxy, token guardrails, and LLM-key scanning." />
   <link rel="canonical" href="https://wless.io/features.html" />
   <meta name="theme-color" content="#4a6fa5" />
 
   <!-- Open Graph -->
-  <meta property="og:title" content="Features — Worthless" />
+  <meta property="og:title" content="Features - Worthless" />
   <meta property="og:description" content="Protect local AI API keys with a copied .env shard that cannot call the provider by itself." />
   <meta property="og:image" content="https://wless.io/og-image.png" />
   <meta property="og:image:width" content="1200" />
@@ -20,7 +20,7 @@
 
   <!-- Twitter Card -->
   <meta name="twitter:card" content="summary_large_image" />
-  <meta name="twitter:title" content="Features — Worthless" />
+  <meta name="twitter:title" content="Features - Worthless" />
   <meta name="twitter:description" content="Protect local AI API keys with a copied .env shard that cannot call the provider by itself." />
   <meta name="twitter:image" content="https://wless.io/og-image.png" />
 
@@ -78,6 +78,15 @@
     .nav-kofi:hover{background:#ff9c98}
     .nav-gh{font-size:.82rem;font-weight:500;color:var(--text2);text-decoration:none;padding:.4rem .85rem;border:1px solid var(--border);border-radius:7px;background:var(--white);transition:color .2s}
     .nav-gh:hover{color:var(--text)}
+    @media (max-width: 720px){
+      nav{height:auto;min-height:60px;flex-wrap:wrap;gap:.45rem .75rem;padding:.65rem 1rem}
+      .nav-logo{flex:1 0 auto}
+      .nav-links{order:3;width:100%;margin-left:0;overflow-x:auto;padding-bottom:.1rem;scrollbar-width:none}
+      .nav-links::-webkit-scrollbar{display:none}
+      .nav-links a{padding:.35rem .55rem;white-space:nowrap}
+      .nav-actions{margin-left:0;gap:.45rem}
+      .nav-kofi,.nav-gh{padding:.34rem .65rem}
+    }
 
     .page{max-width:900px;margin:0 auto;padding:4rem 2rem 6rem}
     .eyebrow{font-size:14px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--text2);margin-bottom:.6rem}

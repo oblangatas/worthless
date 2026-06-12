@@ -3,13 +3,13 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Blog — Worthless</title>
+  <title>Blog - Worthless</title>
   <meta name="description" content="Plain-English explainers on AI agent key leaks, post-leak protection, scanners, vaults, and local proxy guardrails." />
   <link rel="canonical" href="https://wless.io/blog/" />
   <meta name="theme-color" content="#4a6fa5" />
 
   <!-- Open Graph -->
-  <meta property="og:title" content="Blog — Worthless" />
+  <meta property="og:title" content="Blog - Worthless" />
   <meta property="og:description" content="Explain how AI keys leak and how Worthless changes what a copied .env value can do." />
   <meta property="og:image" content="https://wless.io/og-image.png" />
   <meta property="og:image:width" content="1200" />
@@ -20,7 +20,7 @@
 
   <!-- Twitter Card -->
   <meta name="twitter:card" content="summary_large_image" />
-  <meta name="twitter:title" content="Blog — Worthless" />
+  <meta name="twitter:title" content="Blog - Worthless" />
   <meta name="twitter:description" content="Explain how AI keys leak and how Worthless changes what a copied .env value can do." />
   <meta name="twitter:image" content="https://wless.io/og-image.png" />
 
@@ -78,7 +78,7 @@
     }
     .post-card:hover{border-color:var(--slate-pale);box-shadow:0 4px 20px rgba(74,111,165,.08);transform:translateY(-1px)}
 
-    .post-summary{display:flex;gap:1.25rem;padding:1.5rem 1.75rem;cursor:pointer;align-items:flex-start}
+    .post-summary{display:flex;gap:1.25rem;padding:1.5rem 1.75rem;align-items:flex-start}
     .post-emoji{font-size:2rem;flex-shrink:0;line-height:1;margin-top:.1rem}
     .post-meta{display:flex;gap:.65rem;align-items:center;margin-bottom:.4rem;flex-wrap:wrap}
     .post-tag{font-size:.65rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;padding:.18rem .55rem;border-radius:4px}
@@ -139,7 +139,16 @@
     .footer-links a{font-size:.77rem;color:var(--text3);text-decoration:none;transition:color .2s}
     .footer-links a:hover{color:var(--text2)}
 
-    @media(max-width:600px){.nav-links{display:none}.post-summary{flex-direction:column}}
+    @media (max-width: 720px){
+      nav{height:auto;min-height:60px;flex-wrap:wrap;gap:.45rem .75rem;padding:.65rem 1rem}
+      .nav-logo{flex:1 0 auto}
+      .nav-links{order:3;width:100%;margin-left:0;overflow-x:auto;padding-bottom:.1rem;scrollbar-width:none}
+      .nav-links::-webkit-scrollbar{display:none}
+      .nav-links a{padding:.35rem .55rem;white-space:nowrap}
+      .nav-actions{margin-left:0;gap:.45rem}
+      .nav-kofi,.nav-gh{padding:.34rem .65rem}
+    }
+    @media(max-width:600px){.post-summary{flex-direction:column}}
   </style>
 </head>
 <body>
@@ -167,7 +176,7 @@
 
   <!-- Post 0: Why I Built Worthless -->
   <div class="post-card" id="why-i-built-worthless" data-category="blue">
-    <div class="post-summary" onclick="togglePost('p0')">
+    <div class="post-summary">
       <div>
         <div class="post-meta">
 
@@ -176,8 +185,8 @@
         <div class="post-title">Why I built Worthless, make API keys worthless post leak</div>
       </div>
     </div>
-    <button class="expand-btn" id="btn-p0" onclick="togglePost('p0')">
-      <span class="chevron">▾</span>
+    <button class="expand-btn" id="btn-p0" type="button" aria-controls="p0" aria-expanded="false">
+      <span class="expand-label">Read article</span><span class="chevron" aria-hidden="true">▾</span>
     </button>
     <div class="post-full" id="p0">
       <div class="article">
@@ -210,7 +219,7 @@
 
   <!-- Post: The landscape -->
   <div class="post-card" id="the-landscape" data-category="blue">
-    <div class="post-summary" onclick="togglePost('p4')">
+    <div class="post-summary">
       <div>
         <div class="post-meta">
           <span class="post-date">April 17, 2026</span>
@@ -218,8 +227,8 @@
         <div class="post-title">Every tool protects your key. None protect you after it leaks</div>
       </div>
     </div>
-    <button class="expand-btn" id="btn-p4" onclick="togglePost('p4')">
-      <span class="chevron">▾</span>
+    <button class="expand-btn" id="btn-p4" type="button" aria-controls="p4" aria-expanded="false">
+      <span class="expand-label">Read article</span><span class="chevron" aria-hidden="true">▾</span>
     </button>
     <div class="post-full" id="p4">
       <div class="article">
@@ -259,7 +268,7 @@ worthless lock</code></pre>
 
   <!-- Post 1 -->
   <div class="post-card" id="introducing-worthless" data-category="blue">
-    <div class="post-summary" onclick="togglePost('p1')">
+    <div class="post-summary">
       <div>
         <div class="post-meta">
 
@@ -268,8 +277,8 @@ worthless lock</code></pre>
         <div class="post-title">Introducing Worthless, post-leak API key protection</div>
       </div>
     </div>
-    <button class="expand-btn" id="btn-p1" onclick="togglePost('p1')">
-      <span class="chevron">▾</span>
+    <button class="expand-btn" id="btn-p1" type="button" aria-controls="p1" aria-expanded="false">
+      <span class="expand-label">Read article</span><span class="chevron" aria-hidden="true">▾</span>
     </button>
     <div class="post-full" id="p1">
       <div class="article">
@@ -303,7 +312,7 @@ worthless wrap python app.py</code></pre>
 
   <!-- Post 2 -->
   <div class="post-card" id="split-key-crypto" data-category="blue">
-    <div class="post-summary" onclick="togglePost('p2')">
+    <div class="post-summary">
       <div>
         <div class="post-meta">
 
@@ -312,8 +321,8 @@ worthless wrap python app.py</code></pre>
         <div class="post-title">Why splitting a key makes it useless, the cryptography in plain English</div>
       </div>
     </div>
-    <button class="expand-btn" id="btn-p2" onclick="togglePost('p2')">
-      <span class="chevron">▾</span>
+    <button class="expand-btn" id="btn-p2" type="button" aria-controls="p2" aria-expanded="false">
+      <span class="expand-label">Read article</span><span class="chevron" aria-hidden="true">▾</span>
     </button>
     <div class="post-full" id="p2">
       <div class="article">
@@ -350,30 +359,6 @@ worthless wrap python app.py</code></pre>
   </div>
 </footer>
 
-<script>
-  function togglePost(id) {
-    const full = document.getElementById(id);
-    const btn = document.getElementById('btn-' + id);
-    const open = full.classList.contains('visible');
-    full.classList.toggle('visible', !open);
-    btn.classList.toggle('open', !open);
-  }
-  function filterPosts(cat) {
-    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
-    event.target.classList.add('active');
-    document.querySelectorAll('.post-card').forEach(c => {
-      c.classList.toggle('hidden', cat !== 'all' && c.dataset.category !== cat);
-    });
-  }
-
-  window.addEventListener('DOMContentLoaded', () => {
-    const h = location.hash;
-    if (h === '#why-i-built-worthless') togglePost('p0');
-    else if (h === '#the-landscape') togglePost('p4');
-    else if (h === '#introducing-worthless') togglePost('p1');
-    else if (h === '#split-key-crypto') togglePost('p2');
-    else if (h === '#real-leaks') togglePost('p3');
-  });
-</script>
+<script src="blog.js" defer></script>
 </body>
 </html>

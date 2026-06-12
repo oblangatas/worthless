@@ -29,7 +29,7 @@
       --line: #252b36;
       --text: #dfe7df;
       --muted: #8fa194;
-      --faint: #5d6e62;
+      --faint: #8a9b8f;
       --red: #ff4d4d;
       --green: #69e58f;
       --mono: "JetBrains Mono", ui-monospace, monospace;
@@ -58,6 +58,24 @@
       padding: 0 1.4rem;
       border-bottom: 1px solid var(--line);
       background: rgba(9, 11, 16, .88);
+    }
+    @media (max-width: 720px) {
+      .top {
+        flex-wrap: wrap;
+        height: auto;
+        gap: .45rem .75rem;
+        padding: .75rem 1rem;
+      }
+
+      .slash {
+        overflow-x: auto;
+        max-width: 100%;
+        scrollbar-width: none;
+      }
+
+      .slash::-webkit-scrollbar {
+        display: none;
+      }
     }
 
     .brand {

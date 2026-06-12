@@ -4,8 +4,7 @@ Run Worthless in CI to protect API keys during test runs and scan for exposed se
 
 ## Workflow
 
-Add this to `.github/workflows/worthless-ci.yml`, or copy from
-[`examples/ci/worthless-ci.yml`](../examples/ci/worthless-ci.yml):
+Add this to `.github/workflows/worthless-ci.yml`:
 
 ```yaml
 name: Worthless CI Gate
@@ -30,7 +29,9 @@ jobs:
         uses: astral-sh/setup-uv@v4
 
       - name: Install worthless
-        run: uv pip install worthless --system
+        run: |
+          curl -sSL https://worthless.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Enroll OpenAI key
         run: echo "$OPENAI_API_KEY" | worthless enroll --alias openai --provider openai --key-stdin

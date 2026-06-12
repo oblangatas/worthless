@@ -30,7 +30,7 @@
       --paper-deep: oklch(92.2% 0.038 224);
       --ink: oklch(29% 0.065 220);
       --ink-soft: oklch(47% 0.046 222);
-      --ink-faint: oklch(62% 0.035 226);
+      --ink-faint: oklch(54% 0.035 226);
       --accent: oklch(49% 0.105 205);
       --accent-dark: oklch(37% 0.095 205);
       --line: oklch(83% 0.035 215);
@@ -128,9 +128,24 @@
     }
 
     .nav-links .nav-early {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      white-space: nowrap;
       color: oklch(98% 0.01 220);
       background: oklch(42% 0.135 255);
       box-shadow: 0 10px 28px oklch(37% 0.12 250 / 0.2);
+    }
+
+    .nav-early-icon {
+      display: block;
+      width: 1rem;
+      height: 1rem;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
     }
 
     .nav-actions {
@@ -154,64 +169,49 @@
       flex: 0 0 auto;
     }
 
-    .audit-icons {
+    .audit-icons,
+    .audit-buttons {
       display: inline-flex;
       align-items: center;
-      gap: 0.24rem;
-      padding: 0.16rem;
-      border: 1px solid oklch(84% 0.036 215 / 0.78);
-      border-radius: 999px;
-      background: oklch(97% 0.018 218 / 0.58);
+      gap: 1rem;
     }
 
     .audit-icon {
       position: relative;
-      width: 30px;
-      height: 30px;
+      width: 28px;
+      height: 28px;
       display: inline-grid;
       place-items: center;
       padding: 0;
-      border-radius: 999px;
       border: 0;
       background: transparent;
       color: oklch(42% 0.08 205);
-      transition: background 180ms var(--ease), color 180ms var(--ease), transform 180ms var(--ease);
+      text-decoration: none;
+      transition: color 180ms var(--ease), opacity 180ms var(--ease), transform 180ms var(--ease);
+    }
+
+    .audit-icon::before {
+      content: "";
+      position: absolute;
+      inset: -8px;
     }
 
     .audit-icon:hover {
       transform: translateY(-1px);
-      background: oklch(92% 0.035 205 / 0.72);
       color: var(--accent-dark);
     }
 
+    .audit-icon:focus-visible {
+      outline: 2px solid currentColor;
+      outline-offset: 5px;
+      border-radius: 4px;
+    }
+
     .audit-icon svg {
-      width: 17px;
-      height: 17px;
+      width: 20px;
+      height: 20px;
       display: block;
-      fill: none;
-      stroke: currentColor;
-      stroke-width: 2.2;
-      stroke-linecap: round;
-      stroke-linejoin: round;
-    }
-
-    .audit-icon .solid {
       fill: currentColor;
-      stroke: none;
-    }
-
-    .audit-icon img {
-      width: 17px;
-      height: 17px;
-      display: block;
-      object-fit: contain;
-    }
-
-    .audit-icon .audit-letter {
-      font-size: 0.62rem;
-      font-weight: 800;
-      line-height: 1;
-      letter-spacing: 0;
     }
 
     .nav-actions .kofi {
@@ -219,7 +219,7 @@
       align-items: center;
       gap: 0.35rem;
       white-space: nowrap;
-      color: oklch(99% 0.01 30);
+      color: var(--ink);
       background: oklch(76% 0.14 24);
       border-radius: 8px;
     }
@@ -266,7 +266,7 @@
     }
 
     .eyebrow {
-      margin: 0 0 clamp(1.4rem, 4vh, 3.1rem);
+      margin: 0 0 clamp(0.65rem, 1.4vh, 1rem);
       font-size: clamp(0.76rem, 1vw, 0.9rem);
       font-weight: 800;
       letter-spacing: 0.12em;
@@ -290,7 +290,7 @@
 
     .subline {
       max-width: 690px;
-      margin: clamp(1.45rem, 3.2vh, 2.2rem) 0 0;
+      margin: clamp(2rem, 4.5vh, 3.2rem) 0 0;
       font-size: var(--intro-body-size);
       line-height: 1.45;
       color: oklch(39% 0.088 205);
@@ -298,9 +298,77 @@
       letter-spacing: 0;
     }
 
-    .subline strong {
+    .promise-explainer {
+      max-width: 690px;
+      margin-top: 0.2rem;
       color: oklch(34% 0.105 205);
+    }
+
+    .promise-explainer summary {
+      width: fit-content;
+      display: list-item;
+      color: inherit;
+      font-size: var(--intro-body-size);
+      line-height: 1.45;
       font-weight: 880;
+      cursor: pointer;
+      list-style: none;
+    }
+
+    .promise-explainer summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .promise-explainer:not([open]) > :not(summary) {
+      display: none;
+    }
+
+    .promise-explainer summary::after {
+      content: "+";
+      display: inline-grid;
+      place-items: center;
+      width: 1.1rem;
+      height: 1.1rem;
+      border: 1px solid oklch(65% 0.075 205);
+      border-radius: 999px;
+      font-size: 0.76rem;
+      line-height: 1;
+      margin-left: 0.45rem;
+      vertical-align: 0.12em;
+      flex: 0 0 auto;
+    }
+
+    .promise-explainer[open] summary::after {
+      content: "\2212";
+    }
+
+    .promise-explainer-copy {
+      max-width: 65ch;
+      margin-top: 0.75rem;
+      color: var(--ink-soft);
+      font-size: 0.86rem;
+      line-height: 1.65;
+    }
+
+    .promise-explainer-copy a {
+      color: oklch(36% 0.105 205);
+      font-weight: 800;
+      text-underline-offset: 0.18em;
+    }
+
+    .promise-audit {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 0.65rem;
+      margin-top: 1rem;
+      color: var(--ink-soft);
+    }
+
+    .promise-audit p {
+      margin: 0;
+      font-size: 0.84rem;
+      font-weight: 800;
     }
 
     .hero-actions {
@@ -308,7 +376,23 @@
       gap: 0.75rem;
       align-items: center;
       flex-wrap: wrap;
-      margin-top: clamp(1.9rem, 4vh, 2.8rem);
+      margin-top: clamp(2rem, 4.5vh, 3rem);
+    }
+
+    .install-block {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 0.55rem;
+    }
+
+    .install-eyebrow {
+      margin: 0;
+      color: var(--ink-faint);
+      font-size: 0.72rem;
+      font-weight: 800;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
     }
 
     .install {
@@ -327,15 +411,79 @@
       cursor: pointer;
       overflow: hidden;
       box-shadow: 0 14px 42px oklch(44% 0.09 205 / 0.09);
+      transition:
+        background 180ms var(--ease),
+        border-color 180ms var(--ease),
+        box-shadow 180ms var(--ease),
+        transform 180ms var(--ease);
+    }
+
+    .install:hover {
+      border-color: oklch(66% 0.085 205);
+      background: oklch(96% 0.035 205 / 0.94);
+      box-shadow: 0 16px 44px oklch(44% 0.09 205 / 0.14);
+      transform: translateY(-1px);
+    }
+
+    .install:active {
+      transform: translateY(0);
+    }
+
+    .install:focus-visible {
+      outline: 3px solid oklch(55% 0.12 205 / 0.72);
+      outline-offset: 4px;
     }
 
     .install.is-copied {
       border-color: oklch(70% 0.13 155);
+      background: oklch(95% 0.04 155 / 0.9);
+    }
+
+    .command-copy {
+      display: grid;
+      place-items: center;
+      padding: 0 0.92rem;
+    }
+
+    .command-copy > span {
+      grid-area: 1 / 1;
+      transition: opacity 140ms var(--ease);
     }
 
     .command-text {
-      padding: 0 0.92rem;
       white-space: nowrap;
+    }
+
+    .copy-success {
+      opacity: 0;
+      font-family: var(--sans);
+      font-weight: 800;
+    }
+
+    .install.is-copied .command-text {
+      opacity: 0;
+    }
+
+    .install.is-copied .copy-success {
+      opacity: 1;
+    }
+
+    .install-guide-link {
+      color: var(--ink-soft);
+      font-size: 0.8rem;
+      font-weight: 750;
+      text-underline-offset: 0.18em;
+    }
+
+    .copy-install-help {
+      margin: 0;
+      color: var(--ink-soft);
+      font-size: 0.78rem;
+      line-height: 1.45;
+    }
+
+    .copy-install-help[hidden] {
+      display: none;
     }
 
     .copy-divider {
@@ -359,6 +507,18 @@
       height: 17px;
       display: block;
       fill: currentColor;
+    }
+
+    .copy-affordance .copy-check {
+      display: none;
+    }
+
+    .install.is-copied .copy-affordance .copy-icon {
+      display: none;
+    }
+
+    .install.is-copied .copy-affordance .copy-check {
+      display: block;
     }
 
     .sr-only {
@@ -454,7 +614,7 @@
 
     .beat-number {
       display: block;
-      margin-bottom: 1.2rem;
+      margin-bottom: clamp(0.65rem, 1.4vh, 1rem);
       font-size: clamp(0.76rem, 1vw, 0.9rem);
       font-weight: 800;
       color: var(--ink-faint);
@@ -477,70 +637,6 @@
       color: var(--ink-soft);
       font-size: var(--intro-body-size);
       line-height: 1.7;
-    }
-
-    .beat-trust {
-      display: flex;
-      align-items: center;
-      gap: 0.55rem;
-      flex-wrap: wrap;
-      max-width: 640px;
-      margin-top: 1.6rem;
-      opacity: 0;
-      visibility: hidden;
-      transform: translateY(10px);
-      pointer-events: none;
-      transition: opacity 320ms var(--ease), transform 320ms var(--ease);
-    }
-
-    body[data-beat="3"] .beat-trust {
-      opacity: 1;
-      visibility: visible;
-      transform: translateY(0);
-      pointer-events: auto;
-    }
-
-    .beat-trust span {
-      color: var(--ink-soft);
-      font-size: 0.92rem;
-      font-weight: 750;
-    }
-
-    .beat-trust .audit-icons {
-      background: oklch(96% 0.024 208 / 0.66);
-    }
-
-    .beat-trust .audit-icon {
-      width: 34px;
-      height: 34px;
-    }
-
-    .beat-trust .audit-icon svg {
-      width: 18px;
-      height: 18px;
-    }
-
-    .beat-trust .audit-icon img {
-      width: 18px;
-      height: 18px;
-    }
-
-    .audit-buttons .audit-icon {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      width: 48px;
-      height: 48px;
-      border: 1px solid oklch(79% 0.052 205);
-      border-radius: 12px;
-      text-decoration: none;
-      color: var(--accent-dark);
-      background: oklch(96% 0.022 205 / 0.78);
-    }
-
-    .audit-buttons .audit-icon img {
-      width: 21px;
-      height: 21px;
     }
 
     .stage {
@@ -720,6 +816,8 @@
     }
 
     .trust-rail p span {
+      display: block;
+      margin-top: 0.16rem;
       color: var(--ink-faint);
       font-weight: 600;
     }
@@ -1128,25 +1226,15 @@
     }
 
     .footer-audit .audit-buttons {
-      gap: 0.42rem;
+      gap: 0.75rem;
     }
 
     .footer-audit .audit-icon {
-      width: 34px;
-      height: 34px;
-      border-color: oklch(55% 0.044 220);
-      background: oklch(28% 0.044 225);
+      color: oklch(82% 0.025 215);
     }
 
     .footer-audit .audit-icon:hover {
-      border-color: oklch(78% 0.045 205);
-      background: oklch(33% 0.05 220);
-    }
-
-    .footer-audit .audit-icon[data-audit="chatgpt"] img,
-    .footer-audit .audit-icon[data-audit="grok"] img {
-      filter: invert(1) brightness(1.7);
-      opacity: 0.94;
+      color: oklch(96% 0.02 205);
     }
 
     .footer-col h3 {
@@ -1233,6 +1321,13 @@
       }
     }
 
+    @media (max-aspect-ratio: 4 / 5) {
+      .hero {
+        align-items: start;
+        padding-top: max(7rem, 12svh);
+      }
+    }
+
     @media (max-width: 1100px) {
       .wild {
         min-height: auto;
@@ -1304,12 +1399,15 @@
         display: none;
       }
 
-      .kofi {
+      .nav-actions .kofi {
         gap: 0.26rem;
         flex: 0 0 auto;
-        min-width: 2.05rem;
+        width: 2.15rem;
+        height: 2.15rem;
+        min-width: 2.15rem;
         justify-content: center;
-        padding-inline: 0.42rem;
+        padding: 0;
+        border-radius: 999px;
       }
 
       .hero {
@@ -1338,9 +1436,13 @@
         flex-direction: column;
       }
 
+      .install-block {
+        max-width: 100%;
+      }
+
       .install,
       .hero-actions .button {
-        width: 100%;
+        max-width: 100%;
         justify-content: center;
       }
 
@@ -1349,9 +1451,12 @@
         font-size: 0.72rem;
       }
 
-      .command-text {
+      .command-copy {
         flex: 1 1 auto;
         min-width: 0;
+      }
+
+      .command-text {
         overflow: visible;
         white-space: normal;
         line-height: 1.35;
@@ -1413,11 +1518,6 @@
         display: none;
       }
 
-      .footer-audit .audit-icon {
-        width: 44px;
-        height: 44px;
-      }
-
       .waitlist {
         min-height: auto;
         padding: 5rem 1.25rem;
@@ -1474,16 +1574,34 @@
         flex: 1 1 auto;
       }
 
-      .beat-trust {
-        margin-top: 1.05rem;
+    }
+
+    @media (max-width: 520px) {
+      .nav-links .nav-early {
+        width: 2.15rem;
+        height: 2.15rem;
+        padding: 0;
       }
 
-      .beat-trust .audit-icons {
-        flex-basis: auto;
+      .nav-early-label {
+        display: none;
+      }
+
+      .nav-early-icon {
+        display: block;
+      }
+
+      .install-block,
+      .install {
+        width: 100%;
       }
     }
 
     @media (max-width: 370px) {
+      .nav-links a[href="memes.html"] {
+        display: none;
+      }
+
       h1,
       .beat h2,
       .waitlist h2 {
@@ -1528,6 +1646,20 @@
   </style>
 </head>
 <body data-beat="0">
+  <svg hidden aria-hidden="true" style="display: none">
+    <symbol id="audit-claude" viewBox="0 0 24 24">
+      <path d="m4.7144 15.9555 4.7174-2.6471.079-.2307-.079-.1275h-.2307l-.7893-.0486-2.6956-.0729-2.3375-.0971-2.2646-.1214-.5707-.1215-.5343-.7042.0546-.3522.4797-.3218.686.0608 1.5179.1032 2.2767.1578 1.6514.0972 2.4468.255h.3886l.0546-.1579-.1336-.0971-.1032-.0972L6.973 9.8356l-2.55-1.6879-1.3356-.9714-.7225-.4918-.3643-.4614-.1578-1.0078.6557-.7225.8803.0607.2246.0607.8925.686 1.9064 1.4754 2.4893 1.8336.3643.3035.1457-.1032.0182-.0728-.164-.2733-1.3539-2.4467-1.445-2.4893-.6435-1.032-.17-.6194c-.0607-.255-.1032-.4674-.1032-.7285L6.287.1335 6.6997 0l.9957.1336.419.3642.6192 1.4147 1.0018 2.2282 1.5543 3.0296.4553.8985.2429.8318.091.255h.1579v-.1457l.1275-1.706.2368-2.0947.2307-2.6957.0789-.7589.3764-.9107.7468-.4918.5828.2793.4797.686-.0668.4433-.2853 1.8517-.5586 2.9021-.3643 1.9429h.2125l.2429-.2429.9835-1.3053 1.6514-2.0643.7286-.8196.85-.9046.5464-.4311h1.0321l.759 1.1293-.34 1.1657-1.0625 1.3478-.8804 1.1414-1.2628 1.7-.7893 1.36.0729.1093.1882-.0183 2.8535-.607 1.5421-.2794 1.8396-.3157.8318.3886.091.3946-.3278.8075-1.967.4857-2.3072.4614-3.4364.8136-.0425.0304.0486.0607 1.5482.1457.6618.0364h1.621l3.0175.2247.7892.522.4736.6376-.079.4857-1.2142.6193-1.6393-.3886-3.825-.9107-1.3113-.3279h-.1822v.1093l1.0929 1.0686 2.0035 1.8092 2.5075 2.3314.1275.5768-.3218.4554-.34-.0486-2.2039-1.6575-.85-.7468-1.9246-1.621h-.1275v.17l.4432.6496 2.3436 3.5214.1214 1.0807-.17.3521-.6071.2125-.6679-.1214-1.3721-1.9246L14.38 17.959l-1.1414-1.9428-.1397.079-.674 7.2552-.3156.3703-.7286.2793-.6071-.4614-.3218-.7468.3218-1.4753.3886-1.9246.3157-1.53.2853-1.9004.17-.6314-.0121-.0425-.1397.0182-1.4328 1.9672-2.1796 2.9446-1.7243 1.8456-.4128.164-.7164-.3704.0667-.6618.4008-.5889 2.386-3.0357 1.4389-1.882.929-1.0868-.0062-.1579h-.0546l-6.3385 4.1164-1.1293.1457-.4857-.4554.0608-.7467.2307-.2429 1.9064-1.3114Z" />
+    </symbol>
+    <symbol id="audit-chatgpt" viewBox="0 0 41 41">
+      <path d="M37.5324 16.8707C37.9808 15.5241 38.1363 14.0974 37.9886 12.6859C37.8409 11.2744 37.3934 9.91076 36.676 8.68622C35.6126 6.83404 33.9882 5.3676 32.0373 4.4985C30.0864 3.62941 27.9098 3.40259 25.8215 3.85078C24.8796 2.7893 23.7219 1.94125 22.4257 1.36341C21.1295.785575 19.7249.491269 18.3058.500197C16.1708.495044 14.0893 1.16803 12.3614 2.42214C10.6335 3.67624 9.34853 5.44666 8.6917 7.47815C7.30085 7.76286 5.98686 8.3414 4.8377 9.17505C3.68854 10.0087 2.73073 11.0782 2.02839 12.312C.956464 14.1591.498905 16.2988.721698 18.4228C.944492 20.5467 1.83612 22.5449 3.268 24.1293C2.81966 25.4759 2.66413 26.9026 2.81182 28.3141C2.95951 29.7256 3.40701 31.0892 4.12437 32.3138C5.18791 34.1659 6.8123 35.6322 8.76321 36.5013C10.7141 37.3704 12.8907 37.5973 14.9789 37.1492C15.9208 38.2107 17.0786 39.0587 18.3747 39.6366C19.6709 40.2144 21.0755 40.5087 22.4946 40.4998C24.6307 40.5054 26.7133 39.8321 28.4418 38.5772C30.1704 37.3223 31.4556 35.5506 32.1119 33.5179C33.5027 33.2332 34.8167 32.6547 35.9659 31.821C37.115 30.9874 38.0728 29.9178 38.7752 28.684C39.8458 26.8371 40.3023 24.6979 40.0789 22.5748C39.8556 20.4517 38.9639 18.4544 37.5324 16.8707ZM22.4978 37.8849C20.7443 37.8874 19.0459 37.2733 17.6994 36.1501L25.9004 31.4156C26.1003 31.3019 26.2663 31.137 26.3813 30.9378C26.4964 30.7386 26.5563 30.5124 26.5549 30.2825V19.0542L29.9213 20.998C29.9656 21.0359 29.9867 21.0902 29.9867 21.0902V30.3889C29.9842 32.375 29.1946 34.2791 27.7909 35.6841C26.3872 37.0892 24.4838 37.8806 22.4978 37.8849ZM6.39227 31.0064C5.51397 29.4888 5.19742 27.7107 5.49804 25.9832L13.699 30.7248C13.8975 30.8408 14.1233 30.902 14.3532 30.902C14.583 30.902 14.8088 30.8408 15.0073 30.7248L24.731 25.1103V28.9979C24.731 29.0556 24.6829 29.1012 24.6829 29.1012L16.6317 33.7497C14.9096 34.7416 12.8643 35.0097 10.9447 34.4954C9.02506 33.9811 7.38785 32.7263 6.39227 31.0064ZM4.29707 13.6194C5.17156 12.0998 6.55279 10.9364 8.19885 10.3327V19.808C8.19885 20.0378 8.25334 20.2638 8.36823 20.4629C8.48312 20.6619 8.64893 20.8267 8.84863 20.9404L18.5723 26.5542L15.206 28.4979L7.04046 23.8557C5.32135 22.8601 4.06716 21.2235 3.55289 19.3046C3.03862 17.3858 3.30624 15.3413 4.29707 13.6194ZM31.955 20.0556L22.2312 14.4411L25.5976 12.4981L33.7631 17.1364C34.9967 17.849 36.0017 18.8982 36.6606 20.1613C37.3194 21.4244 37.6047 22.849 37.4832 24.2684C37.3617 25.6878 36.8382 27.0432 35.9743 28.1759C35.1103 29.3086 33.9415 30.1717 32.6047 30.6641V21.188C32.6047 20.9586 32.5474 20.7328 32.4332 20.5338C32.319 20.3348 32.154 20.1698 31.955 20.0556ZM35.3055 15.0128L27.1045 10.2712C26.906 10.1554 26.6803 10.0943 26.4504 10.0943C26.2206 10.0943 25.9948 10.1554 25.7963 10.2712L16.0726 15.8858V11.9982L24.1719 7.25025C25.4053 6.53903 26.8158 6.19376 28.2383 6.25482C29.6608 6.31589 31.0364 6.78077 32.2044 7.59508C33.3723 8.40939 34.2842 9.53945 34.8334 10.8531C35.3826 12.1667 35.5464 13.6095 35.3055 15.0128ZM14.2424 21.9419L10.8752 19.9981V10.6071C10.8752 9.18295 11.2173 7.78848 11.9819 6.58696C12.7466 5.38544 13.8377 4.42659 15.1275 3.82264C16.4173 2.99464 17.8524 2.99464 19.2649 3.1767C20.6775 3.35876 22.0089 3.93941 23.1034 4.85067L14.9024 9.58517C14.7025 9.69878 14.5366 9.86356 14.4215 10.0626C14.3065 10.2616 14.2466 10.4877 14.2479 10.7175L14.2424 21.9419ZM16.071 17.9991L20.4018 15.4978L24.7325 17.9975V22.9985L20.4018 25.4983L16.071 22.9985V17.9991Z" />
+    </symbol>
+    <symbol id="audit-gemini" viewBox="0 0 24 24">
+      <path d="M11.04 19.32Q12 21.51 12 24q0-2.49.93-4.68.96-2.19 2.58-3.81t3.81-2.55Q21.51 12 24 12q-2.49 0-4.68-.93a12.3 12.3 0 0 1-3.81-2.58 12.3 12.3 0 0 1-2.58-3.81Q12 2.49 12 0q0 2.49-.96 4.68-.93 2.19-2.55 3.81a12.3 12.3 0 0 1-3.81 2.58Q2.49 12 0 12q2.49 0 4.68.96 2.19.93 3.81 2.55t2.55 3.81" />
+    </symbol>
+    <symbol id="audit-grok" viewBox="0 0 24 24">
+      <path d="M14.234 10.162 22.977 0h-2.072l-7.591 8.824L7.251 0H.258l9.168 13.343L.258 24H2.33l8.016-9.318L16.749 24h6.993zm-2.837 3.299-.929-1.329L3.076 1.56h3.182l5.965 8.532.929 1.329 7.754 11.09h-3.182z" />
+    </symbol>
+  </svg>
   <nav class="nav" aria-label="Primary">
     <a class="brand" href="index.html">
       <img src="logo-transparent.png" alt="Worthless logo" />
@@ -1536,7 +1668,15 @@
     <div class="nav-links">
       <a href="https://docs.wless.io/">Docs</a>
       <a href="memes.html">Memes</a>
-      <a class="nav-early" href="#early-access">Early access</a>
+      <a class="nav-early" href="#early-access" aria-label="Early access">
+        <span class="nav-early-label">Early access</span>
+        <svg class="nav-early-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09Z" />
+          <path d="m12 15-3-3a22 22 0 0 1 2-3.95A12.87 12.87 0 0 1 22 2c0 2.72-.78 7.5-6.05 11a22.35 22.35 0 0 1-3.95 2Z" />
+          <path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0" />
+          <path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5" />
+        </svg>
+      </a>
     </div>
     <div class="nav-actions">
       <a class="ghost" href="https://github.com/shacharm2/worthless" target="_blank" rel="noopener">
@@ -1545,7 +1685,7 @@
         </svg>
         <span>GitHub</span>
       </a>
-      <a class="kofi" href="https://ko-fi.com/shacharme" target="_blank" rel="noopener"><span class="kofi-icon" aria-hidden="true">☕</span><span class="kofi-long">Buy me Ko-fi</span><span class="kofi-short">Ko-fi</span></a>
+      <a class="kofi" href="https://ko-fi.com/shacharme" target="_blank" rel="noopener" aria-label="Buy me a coffee on Ko-fi"><span class="kofi-icon" aria-hidden="true">☕</span><span class="kofi-long">Buy me Ko-fi</span><span class="kofi-short">Ko-fi</span></a>
     </div>
   </nav>
 
@@ -1557,28 +1697,58 @@
         <h1>
           <span>Worthless.</span>
         </h1>
-        <p class="subline">Your .env gets copied. The copied AI-key value alone cannot call the provider.<br /><strong>It's Worthless.</strong></p>
+        <p class="subline">Your API key just got leaked. Or stolen. Doesn't matter.</p>
+        <details class="promise-explainer">
+          <summary role="button" aria-expanded="false">Worthless makes leaked keys worthless. How?</summary>
+          <p class="promise-explainer-copy">
+            Worthless replaces each protected API key in your <code>.env</code> with a share that cannot call the provider alone.
+            Your app still works through a local proxy that holds the other share.
+            <a href="how-it-works.html">See how it works</a>.
+          </p>
+          <div class="promise-audit" aria-label="Audit Worthless with AI">
+            <p>Don’t trust us. Audit with AI.</p>
+            <div class="audit-icons">
+              <a class="audit-icon" href="https://claude.ai/new" data-audit="claude" aria-label="Audit with Claude" title="Audit with Claude">
+                <svg aria-hidden="true"><use href="#audit-claude"></use></svg>
+              </a>
+              <a class="audit-icon" href="https://chatgpt.com/" data-audit="chatgpt" aria-label="Audit with ChatGPT" title="Audit with ChatGPT">
+                <svg aria-hidden="true"><use href="#audit-chatgpt"></use></svg>
+              </a>
+              <a class="audit-icon" href="https://gemini.google.com/app" data-audit="gemini" aria-label="Audit with Gemini" title="Audit with Gemini">
+                <svg aria-hidden="true"><use href="#audit-gemini"></use></svg>
+              </a>
+              <a class="audit-icon" href="https://grok.com/" data-audit="grok" aria-label="Audit with Grok" title="Audit with Grok">
+                <svg aria-hidden="true"><use href="#audit-grok"></use></svg>
+              </a>
+            </div>
+          </div>
+        </details>
         <div class="hero-actions">
-          <button class="install" id="copy-install" type="button" title="Copy install command" aria-label="Copy install command: curl -sSL https://worthless.sh | sh">
-            <span class="command-text">curl -sSL https://worthless.sh | sh</span>
-            <span class="copy-divider" aria-hidden="true"></span>
-            <span class="copy-affordance" aria-hidden="true">
-              <svg viewBox="0 0 16 16">
-                <path d="M4.75 1.75A1.75 1.75 0 0 1 6.5 0h7.75A1.75 1.75 0 0 1 16 1.75v7.75a1.75 1.75 0 0 1-1.75 1.75h-1.5v-1.5h1.5a.25.25 0 0 0 .25-.25V1.75a.25.25 0 0 0-.25-.25H6.5a.25.25 0 0 0-.25.25v1.5h-1.5v-1.5Z" />
-                <path d="M0 6.5A1.75 1.75 0 0 1 1.75 4.75H9.5a1.75 1.75 0 0 1 1.75 1.75v7.75A1.75 1.75 0 0 1 9.5 16H1.75A1.75 1.75 0 0 1 0 14.25V6.5Zm1.75-.25a.25.25 0 0 0-.25.25v7.75c0 .14.11.25.25.25H9.5c.14 0 .25-.11.25-.25V6.5a.25.25 0 0 0-.25-.25H1.75Z" />
-              </svg>
-            </span>
-          </button>
+          <div class="install-block">
+            <p class="install-eyebrow">Protect your keys</p>
+            <button class="install" id="copy-install" type="button" title="Copy install command" aria-label="Copy install command: curl -sSL https://worthless.sh | sh">
+              <span class="command-copy">
+                <span class="command-text">curl -sSL https://worthless.sh | sh</span>
+                <span class="copy-success" aria-hidden="true">Copied</span>
+              </span>
+              <span class="copy-divider" aria-hidden="true"></span>
+              <span class="copy-affordance" aria-hidden="true">
+                <svg class="copy-icon" viewBox="0 0 16 16">
+                  <path d="M4.75 1.75A1.75 1.75 0 0 1 6.5 0h7.75A1.75 1.75 0 0 1 16 1.75v7.75a1.75 1.75 0 0 1-1.75 1.75h-1.5v-1.5h1.5a.25.25 0 0 0 .25-.25V1.75a.25.25 0 0 0-.25-.25H6.5a.25.25 0 0 0-.25.25v1.5h-1.5v-1.5Z" />
+                  <path d="M0 6.5A1.75 1.75 0 0 1 1.75 4.75H9.5a1.75 1.75 0 0 1 1.75 1.75v7.75A1.75 1.75 0 0 1 9.5 16H1.75A1.75 1.75 0 0 1 0 14.25V6.5Zm1.75-.25a.25.25 0 0 0-.25.25v7.75c0 .14.11.25.25.25H9.5c.14 0 .25-.11.25-.25V6.5a.25.25 0 0 0-.25-.25H1.75Z" />
+                </svg>
+                <svg class="copy-check" viewBox="0 0 16 16">
+                  <path d="M13.78 3.72a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 8.78a.75.75 0 1 1 1.06-1.06L6 10.44l6.72-6.72a.75.75 0 0 1 1.06 0Z" />
+                </svg>
+              </span>
+            </button>
+            <p class="copy-install-help" id="copy-install-help" hidden>
+              Copy unavailable. Use the install guide below.
+            </p>
+            <a class="install-guide-link" href="https://docs.wless.io/install/">Install guide</a>
+          </div>
           <span class="sr-only" id="copy-install-status" aria-live="polite"></span>
-          <a class="button" href="https://docs.wless.io/install/">Install guide</a>
-          <a class="button" href="https://github.com/shacharm2/worthless" target="_blank" rel="noopener">
-            <svg class="github-mark" viewBox="0 0 16 16" aria-hidden="true">
-              <path d="M8 0C3.58 0 0 3.67 0 8.19c0 3.62 2.29 6.69 5.47 7.77.4.08.55-.18.55-.4 0-.2-.01-.84-.01-1.53-2.01.38-2.53-.5-2.69-.96-.09-.24-.48-.96-.82-1.16-.28-.15-.68-.53-.01-.54.63-.01 1.08.59 1.23.84.72 1.24 1.87.89 2.33.68.07-.53.28-.89.51-1.09-1.78-.21-3.64-.91-3.64-4.04 0-.89.31-1.62.82-2.19-.08-.21-.36-1.04.08-2.16 0 0 .67-.22 2.2.84A7.37 7.37 0 0 1 8 3.98c.68 0 1.36.09 2 .27 1.53-1.06 2.2-.84 2.2-.84.44 1.12.16 1.95.08 2.16.51.57.82 1.3.82 2.19 0 3.14-1.87 3.83-3.65 4.04.29.26.54.76.54 1.54 0 1.11-.01 2-.01 2.27 0 .22.15.48.55.4A8.14 8.14 0 0 0 16 8.19C16 3.67 12.42 0 8 0Z" />
-            </svg>
-            <span>GitHub</span>
-          </a>
         </div>
-        <div class="hero-proof">Protected first. Your LLMs still work.</div>
       </div>
       <div class="scroll-hint">Scroll the leak</div>
     </section>
@@ -1596,23 +1766,6 @@
             <h2 id="beat-title">Not your real key.</h2>
             <p id="beat-body">Worthless leaves a lookalike in .env. The working route stays local.</p>
           </article>
-          <div class="beat-trust" aria-label="Audit with AI" aria-hidden="true" inert>
-            <span>Don’t trust us. Audit with AI.</span>
-            <div class="audit-icons">
-              <a class="audit-icon" href="#" data-audit="claude" aria-label="Audit with Claude" title="Audit with Claude">
-                <img src="https://cdn.simpleicons.org/claude/CC785C" alt="" aria-hidden="true" />
-              </a>
-              <a class="audit-icon" href="#" data-audit="chatgpt" aria-label="Audit with ChatGPT" title="Audit with ChatGPT">
-                <span class="audit-letter" aria-hidden="true">AI</span>
-              </a>
-              <a class="audit-icon" href="#" data-audit="gemini" aria-label="Audit with Gemini" title="Audit with Gemini">
-                <img src="https://cdn.simpleicons.org/googlegemini/8E75B2" alt="" aria-hidden="true" />
-              </a>
-              <a class="audit-icon" href="#" data-audit="grok" aria-label="Audit with Grok" title="Audit with Grok">
-                <img src="https://cdn.simpleicons.org/x/000000" alt="" aria-hidden="true" />
-              </a>
-            </div>
-          </div>
         </div>
 
         <div class="stage" aria-hidden="true">
@@ -1741,17 +1894,16 @@
     </style>
     <section class="limits-rail" aria-label="What Worthless does not protect against">
       <h2>What Worthless does not protect against</h2>
-      <p>Worthless aims to make a copied .env share useless on its own. It is not a sandbox for a machine that is already compromised, and it is not the only layer you need.</p>
       <ul>
-        <li><strong>A compromised machine.</strong> If an attacker controls the computer Worthless runs on, they can reach your key. Same trust boundary as a password manager.</li>
-        <li><strong>The provider's side.</strong> A breach or outage at OpenAI, Anthropic, or another upstream is outside what Worthless can affect.</li>
-        <li><strong>This early build's limits.</strong> The proof of concept is Python, with documented limits on how briefly key material lives in memory.</li>
+        <li><strong>Compromised machine.</strong></li>
+        <li><strong>Provider compromised.</strong></li>
+        <li><strong>Early build limits.</strong></li>
       </ul>
-      <p class="foot">Worthless is one layer, built to sit alongside a vault, secret scanning, and key rotation. Full threat model: <a href="https://docs.wless.io/security/">security model</a>.</p>
+      <p class="foot">Worthless is not a sandbox and not the only layer you need. Use it with a vault, secret scanning, and key rotation. Full threat model: <a href="https://docs.wless.io/security/">security model</a>.</p>
     </section>
 
     <section class="trust-rail" aria-label="Worthless positioning">
-      <p>Scanners find leaks. Vaults store secrets. Provider dashboards and gateways manage spend. <span>Worthless makes a copied .env AI key not a blank check.</span></p>
+      <p>Scanners find leaks. Vaults store secrets. Provider dashboards and gateways manage spend. <span>Worthless makes a copied .env AI-key value unusable on its own.</span></p>
       <div class="trust-actions">
         <a href="https://docs.wless.io/security/">Security model</a>
         <a href="https://docs.wless.io/protocol/">Protocol</a>
@@ -1770,17 +1922,17 @@
         <div class="footer-audit" aria-label="Trust check">
           <p>Don’t trust us. Audit with AI.</p>
           <div class="audit-buttons">
-            <a class="audit-icon" href="#" data-audit="claude" aria-label="Audit with Claude" title="Audit with Claude">
-              <img src="https://cdn.simpleicons.org/claude/CC785C" alt="" aria-hidden="true" />
+            <a class="audit-icon" href="https://claude.ai/new" data-audit="claude" aria-label="Audit with Claude" title="Audit with Claude">
+              <svg aria-hidden="true"><use href="#audit-claude"></use></svg>
             </a>
-            <a class="audit-icon" href="#" data-audit="chatgpt" aria-label="Audit with ChatGPT" title="Audit with ChatGPT">
-              <span class="audit-letter" aria-hidden="true">AI</span>
+            <a class="audit-icon" href="https://chatgpt.com/" data-audit="chatgpt" aria-label="Audit with ChatGPT" title="Audit with ChatGPT">
+              <svg aria-hidden="true"><use href="#audit-chatgpt"></use></svg>
             </a>
-            <a class="audit-icon" href="#" data-audit="gemini" aria-label="Audit with Gemini" title="Audit with Gemini">
-              <img src="https://cdn.simpleicons.org/googlegemini/8E75B2" alt="" aria-hidden="true" />
+            <a class="audit-icon" href="https://gemini.google.com/app" data-audit="gemini" aria-label="Audit with Gemini" title="Audit with Gemini">
+              <svg aria-hidden="true"><use href="#audit-gemini"></use></svg>
             </a>
-            <a class="audit-icon" href="#" data-audit="grok" aria-label="Audit with Grok" title="Audit with Grok">
-              <img src="https://cdn.simpleicons.org/x/000000" alt="" aria-hidden="true" />
+            <a class="audit-icon" href="https://grok.com/" data-audit="grok" aria-label="Audit with Grok" title="Audit with Grok">
+              <svg aria-hidden="true"><use href="#audit-grok"></use></svg>
             </a>
           </div>
         </div>
@@ -1815,156 +1967,6 @@
   </footer>
 
   <script src="news-feed.js" defer></script>
-  <script>
-    const sentinels = Array.from(document.querySelectorAll("[data-beat-target]"));
-    const hero = document.querySelector(".hero");
-    const cinema = document.querySelector(".cinema");
-    const beatCopy = document.getElementById("beat-copy");
-    const beatLabel = document.getElementById("beat-label");
-    const beatTitle = document.getElementById("beat-title");
-    const beatBody = document.getElementById("beat-body");
-    const beatTrust = document.querySelector(".beat-trust");
-    const beatTrustLinks = Array.from(document.querySelectorAll(".beat-trust a"));
-    const installCopy = document.getElementById("copy-install");
-    const installStatus = document.getElementById("copy-install-status");
-    const receiptRail = document.querySelector(".receipt-rail");
-    const receiptPause = document.getElementById("receipt-pause");
-    const installCommand = "curl -sSL https://worthless.sh | sh";
-    const beats = [
-      {
-        label: "Protect",
-        title: "Not your real key.",
-        body: "Worthless leaves a lookalike in .env. The working route stays local."
-      },
-      {
-        label: "Leak",
-        title: "Your AI pushes it.",
-        body: "A key-looking value lands in GitHub, chat, logs, or generated code."
-      },
-      {
-        label: "Try it",
-        title: "The leaked key fails.",
-        body: "Someone tries the copied .env value. It cannot call the provider alone."
-      },
-      {
-        label: "Continue",
-        title: "Your AI keeps working.",
-        body: "Your app still works through Worthless. Investigate, rotate if needed."
-      }
-    ];
-    let currentBeat = "0";
-
-    function setBeatTrustActive(active) {
-      if (!beatTrust) return;
-      beatTrust.setAttribute("aria-hidden", String(!active));
-      beatTrust.inert = !active;
-      beatTrustLinks.forEach((link) => {
-        link.tabIndex = active ? 0 : -1;
-      });
-    }
-
-    function setBeat(beat) {
-      const next = beats[Number(beat)];
-      if (!next || beat === currentBeat) return;
-      currentBeat = beat;
-      document.body.setAttribute("data-beat", beat);
-      document.documentElement.style.setProperty("--beat", beat);
-      beatLabel.textContent = next.label;
-      beatTitle.textContent = next.title;
-      beatBody.textContent = next.body;
-      setBeatTrustActive(beat === "3");
-    }
-
-    function clamp(value, min = 0, max = 1) {
-      return Math.min(max, Math.max(min, value));
-    }
-
-    function updateVisualTransition() {
-      const heroHeight = hero.getBoundingClientRect().height || window.innerHeight;
-      const heroProgress = clamp(window.scrollY / (heroHeight * 0.92));
-      const cinemaTop = cinema.getBoundingClientRect().top;
-      const terminalEnter = clamp((window.innerHeight - cinemaTop) / (window.innerHeight * 0.55));
-      const markOpacity = clamp(1 - heroProgress * 1.15);
-      document.documentElement.style.setProperty("--hero-mark-opacity", markOpacity.toFixed(3));
-      document.documentElement.style.setProperty("--terminal-enter", terminalEnter.toFixed(3));
-      document.documentElement.style.setProperty("--terminal-scale", (0.955 + terminalEnter * 0.045).toFixed(3));
-    }
-
-    const observer = new IntersectionObserver((entries) => {
-      const visible = entries
-        .filter((entry) => entry.isIntersecting)
-        .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
-      if (!visible) return;
-      const beat = visible.target.getAttribute("data-beat-target");
-      setBeat(beat);
-    }, {
-      rootMargin: "-35% 0px -45% 0px",
-      threshold: [0, 0.25, 0.5, 0.75, 1]
-    });
-    sentinels.forEach((el) => observer.observe(el));
-    setBeatTrustActive(false);
-
-    installCopy?.addEventListener("click", async () => {
-      const copyFromTextarea = () => {
-        const textarea = document.createElement("textarea");
-        textarea.value = installCommand;
-        textarea.setAttribute("readonly", "");
-        textarea.style.position = "fixed";
-        textarea.style.inset = "0 auto auto 0";
-        textarea.style.opacity = "0";
-        document.body.appendChild(textarea);
-        textarea.select();
-        let copied = false;
-        try {
-          copied = document.execCommand("copy");
-        } finally {
-          textarea.remove();
-        }
-        return copied;
-      };
-
-      try {
-        if (!navigator.clipboard?.writeText) {
-          throw new Error("Clipboard API unavailable");
-        }
-        await navigator.clipboard.writeText(installCommand);
-        installStatus.textContent = "Install command copied.";
-        installCopy.classList.add("is-copied");
-        window.setTimeout(() => installCopy.classList.remove("is-copied"), 1600);
-      } catch (_error) {
-        if (copyFromTextarea()) {
-          installStatus.textContent = "Install command copied.";
-          installCopy.classList.add("is-copied");
-          window.setTimeout(() => installCopy.classList.remove("is-copied"), 1600);
-        } else {
-          installStatus.textContent = "Copy unavailable. Select the install command text.";
-        }
-      }
-    });
-
-    receiptPause?.addEventListener("click", () => {
-      const paused = receiptRail?.classList.toggle("is-paused") || false;
-      receiptPause.setAttribute("aria-pressed", String(paused));
-      receiptPause.textContent = paused ? "Resume feed" : "Pause feed";
-    });
-
-    (function () {
-      const prompt = encodeURIComponent("Please audit the Worthless installer script before I run it. Check for data exfiltration, privilege escalation, persistence, obfuscation, and unsafe downloads. Raw script: https://raw.githubusercontent.com/shacharm2/worthless/main/install.sh");
-      const urls = {
-        claude: "https://claude.ai/new?q=" + prompt,
-        chatgpt: "https://chatgpt.com/?q=" + prompt,
-        gemini: "https://gemini.google.com/app?q=" + prompt,
-        grok: "https://grok.com/?q=" + prompt
-      };
-      document.querySelectorAll("[data-audit]").forEach((link) => {
-        link.href = urls[link.dataset.audit];
-        link.target = "_blank";
-        link.rel = "noopener noreferrer";
-      });
-    })();
-    updateVisualTransition();
-    window.addEventListener("scroll", updateVisualTransition, { passive: true });
-    window.addEventListener("resize", updateVisualTransition);
-  </script>
+  <script src="homepage.js" defer></script>
 </body>
 </html>
