@@ -33,8 +33,13 @@ logger = logging.getLogger(__name__)
 _DEFAULT_TOKEN_ESTIMATE: int = 4096
 
 
-def _extract_model(body: bytes) -> str | None:
-    """Best-effort model name from the request body, for hold bookkeeping only."""
+def extract_model(body: bytes) -> str | None:
+    """Best-effort model name from the request body, for hold bookkeeping only.
+
+    Public helper — also used by the proxy handler for the WOR-696
+    response-model mismatch audit. Returns ``None`` on parse failure,
+    non-dict payload, or missing/non-string ``model`` field.
+    """
     try:
         payload = json.loads(body)
     except (json.JSONDecodeError, ValueError):
@@ -229,7 +234,7 @@ class SpendCapRule:
 
             estimate = estimate_request_tokens(body)
             handle = await self.ledger.hold(
-                alias, estimate, row[0], provider=provider, model=_extract_model(body)
+                alias, estimate, row[0], provider=provider, model=extract_model(body)
             )
             if handle is None:
                 return GateResult(denial=spend_cap_error_response(provider=provider))

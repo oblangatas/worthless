@@ -23,6 +23,24 @@ DEFAULT_SIDECAR_PROTOCOL_VERSION: int = 1
 #: socket on a tmpfs volume shared by the proxy and sidecar uids.
 DEFAULT_SIDECAR_SOCKET_PATH: str = "/run/worthless/sidecar.sock"
 
+#: WOR-696 — token-count floor for every fail-closed metering path.
+#:
+#: ``settle_at_estimate`` (storage/spend_ledger.py) writes
+#: ``max(estimate, GLOBAL_CEILING_TOKENS)`` into ``spend_log`` whenever the
+#: actual usage is unreadable (mid-stream disconnect, malformed response,
+#: stream-duration kill, idle-chunk kill). Without the floor, a request
+#: that reserves 0 (e.g. no ``max_tokens``) settles at 0 and the cap
+#: counter doesn't move — the documented bypass WOR-696 closes.
+#:
+#: Value = the highest documented max-output across every model currently
+#: in production (gpt-5 family, Anthropic Opus 4.5). Direction of error
+#: is conservative — over-bill on the fallback path, never under-bill.
+#:
+#: NO model registry. NO ``is_known_model`` / ``ceiling_for`` helpers. The
+#: negative-existence guard test forbids any of those from coming back —
+#: the global ceiling makes per-model bookkeeping pointless friction.
+GLOBAL_CEILING_TOKENS: int = 128_000
+
 
 _PAAS_ENV_VARS: tuple[str, ...] = ("RENDER", "FLY_APP_NAME", "KUBERNETES_SERVICE_HOST")
 
@@ -185,6 +203,24 @@ class ProxySettings:
     )
     streaming_timeout: float = field(
         default_factory=lambda: float(os.environ.get("WORTHLESS_STREAMING_TIMEOUT", "300.0"))
+    )
+    # WOR-696: total wall-clock cap on a single streaming response. Anthropic's
+    # own docs recommend batch API beyond ~15min (system timeouts + open
+    # connection limits). 15min covers Claude Code agentic loops (8-12 min
+    # legit) while killing slow-drip attackers who keep streams open forever.
+    max_stream_duration_seconds: float = field(
+        default_factory=lambda: float(
+            os.environ.get("WORTHLESS_MAX_STREAM_DURATION_SECONDS", "900.0")
+        )
+    )
+    # WOR-696: hard cut when a stream goes silent between chunks. 90s covers
+    # Anthropic extended-thinking pauses (45-60s legit; documented `ping`
+    # events keep the connection alive) while killing slow-drip variants
+    # where an attacker drips bytes minutes apart.
+    max_idle_between_chunks_seconds: float = field(
+        default_factory=lambda: float(
+            os.environ.get("WORTHLESS_MAX_IDLE_BETWEEN_CHUNKS_SECONDS", "90.0")
+        )
     )
     allow_insecure: bool = field(default_factory=lambda: _env_bool("WORTHLESS_ALLOW_INSECURE"))
     sidecar_socket_path: str = field(

@@ -105,16 +105,20 @@ async def test_engine_settle_spend_calls_ledger(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_engine_settle_spend_at_estimate_calls_ledger(tmp_path) -> None:
-    """settle_spend_at_estimate(handle) bills the hold's STORED estimate."""
+    """settle_spend_at_estimate(handle) bills the hold's stored estimate when
+    that estimate is at or above the WOR-696 global ceiling floor. Scaled
+    above 128K so this test exercises the engine→ledger plumbing without
+    coupling to the floor logic (covered separately in test_spend_ledger.py).
+    """
     db, rule = await _seed_capped_db(tmp_path)
     try:
         engine = RulesEngine(rules=[rule])
-        handle = await rule.ledger.hold("k1", estimate=42, cap=1000, provider="openai")
+        handle = await rule.ledger.hold("k1", estimate=200_000, cap=1_000_000, provider="openai")
         assert handle is not None
         await engine.settle_spend_at_estimate(handle)
         async with db.execute("SELECT COALESCE(SUM(tokens),0) FROM spend_log") as cur:
             (total,) = await cur.fetchone()  # type: ignore[misc]
-            assert total == 42
+            assert total == 200_000
     finally:
         await db.close()
 
