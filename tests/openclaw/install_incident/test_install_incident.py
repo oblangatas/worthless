@@ -138,6 +138,13 @@ def test_lock_preserves_openclaw_file_mode(tmp_path):
     """``lock`` must not silently narrow ``openclaw.json``'s permissions. A
     group/world-readable config must keep its mode."""
     paths = seed(tmp_path)
+    # Pin the original mode explicitly. ``seed`` writes via ``write_text``, whose
+    # mode is ``0o666 & ~umask`` -- so ``before_mode`` would otherwise vary by
+    # runner umask (0o644 on macOS/umask 022; 0o600 on a restrictive CI umask).
+    # When the original is already 0o600 the "narrowing to 0o600" this invariant
+    # checks is invisible -> the xfail-strict flips to XPASS on those runners.
+    # A group-readable 0o644 is exactly the case the invariant is about.
+    paths["cfg"].chmod(0o644)
     before_mode = stat.S_IMODE(paths["cfg"].stat().st_mode)
     result = run_lock(paths)
     after_mode = stat.S_IMODE(paths["cfg"].stat().st_mode)
