@@ -676,6 +676,51 @@ async def test_store_enrolled_relock_preserves_first_original_mode(
 
 
 @pytest.mark.asyncio
+async def test_list_enrollments_surfaces_original_mode(
+    repo: ShardRepository,
+    sample_split_result,
+) -> None:
+    """WOR-435 plumbing: original_mode is readable via list_enrollments.
+
+    It's write-only on the WOR-715 branch (no SELECT surfaces it). The
+    uninstaller enumerates locked .env files and needs each one's original
+    mode to restore permissions, so the read path must carry it.
+    """
+    shard = stored_shard_from_split(sample_split_result)
+    await repo.store_enrolled(
+        "mode-read-alias",
+        shard,
+        var_name="OPENAI_API_KEY",
+        env_path="/tmp/read/.env",  # noqa: S108
+        original_mode=0o644,
+    )
+
+    records = await repo.list_enrollments("mode-read-alias")
+    assert len(records) == 1
+    assert records[0].original_mode == 0o644
+
+
+@pytest.mark.asyncio
+async def test_get_enrollment_surfaces_original_mode(
+    repo: ShardRepository,
+    sample_split_result,
+) -> None:
+    """WOR-435 plumbing: get_enrollment also carries original_mode."""
+    shard = stored_shard_from_split(sample_split_result)
+    await repo.store_enrolled(
+        "mode-get-alias",
+        shard,
+        var_name="OPENAI_API_KEY",
+        env_path="/tmp/get/.env",  # noqa: S108
+        original_mode=0o600,
+    )
+
+    rec = await repo.get_enrollment("mode-get-alias", env_path="/tmp/get/.env")  # noqa: S108
+    assert rec is not None
+    assert rec.original_mode == 0o600
+
+
+@pytest.mark.asyncio
 async def test_fetch_encrypted_returns_prefix_charset(
     repo: ShardRepository,
     sample_split_result,
