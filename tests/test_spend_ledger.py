@@ -653,3 +653,91 @@ async def test_sweep_preserves_legitimate_estimates_above_ceiling(tmp_path) -> N
 
     finally:
         await db.close()
+
+
+# ---------------------------------------------------------------------------
+# WOR-705: per-key ceiling override (raise-only + clamp-at-read)
+# ---------------------------------------------------------------------------
+
+
+async def _set_override(db: aiosqlite.Connection, alias: str, override: int | None) -> None:
+    """Seed enrollment_config with a per-key ceiling override (or NULL)."""
+    await db.execute(
+        "INSERT OR REPLACE INTO enrollment_config (key_alias, ceiling_override) VALUES (?, ?)",
+        (alias, override),
+    )
+    await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_settle_at_estimate_honors_per_key_override(tmp_path) -> None:
+    """A key with a 200K override floors there, not at the 128K global.
+
+    Use case: a heavy-reasoning customer running a model whose max-output
+    exceeds the global ceiling. Their no-max_tokens disconnect should bill
+    closer to reality (200K), not be under-floored at 128K.
+    """
+    db = await _open(tmp_path)
+    try:
+        await _set_override(db, "k1", 200_000)
+        ledger = SpendLedger(db)
+        # Tiny estimate (no max_tokens) — would floor at 128K globally.
+        h = await ledger.hold("k1", estimate=0, cap=10_000_000, provider="openai")
+        await ledger.settle_at_estimate(h)
+        assert await _committed(db, "k1") == 200_000, "override should raise the floor to 200K"
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_settle_at_estimate_null_override_falls_back_to_global(tmp_path) -> None:
+    """No override (NULL) → the global 128K ceiling applies, unchanged."""
+    db = await _open(tmp_path)
+    try:
+        await _set_override(db, "k1", None)
+        ledger = SpendLedger(db)
+        h = await ledger.hold("k1", estimate=0, cap=10_000_000, provider="openai")
+        await ledger.settle_at_estimate(h)
+        assert await _committed(db, "k1") == GLOBAL_CEILING_TOKENS
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_below_global_override_cannot_weaken_floor(tmp_path) -> None:
+    """SAFETY: a below-global override (from direct SQL, a stale row, any
+    source that bypassed write-validation) must NOT drop the floor below the
+    audited global. The read path clamps to GLOBAL_CEILING_TOKENS.
+    """
+    db = await _open(tmp_path)
+    try:
+        # 50K stored directly — bypasses the setter's raise-only validation.
+        await _set_override(db, "k1", 50_000)
+        ledger = SpendLedger(db)
+        h = await ledger.hold("k1", estimate=0, cap=10_000_000, provider="openai")
+        await ledger.settle_at_estimate(h)
+        assert await _committed(db, "k1") == GLOBAL_CEILING_TOKENS, (
+            "a below-global override must clamp UP to the global floor — "
+            "the global is an inviolable minimum at read time"
+        )
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_sweep_honors_per_key_override(tmp_path) -> None:
+    """The crash-orphan sweeper path also honors the per-key override."""
+    db = await _open(tmp_path)
+    try:
+        await _set_override(db, "k1", 200_000)
+        # Orphan hold (created an hour ago) with a zero estimate.
+        await db.execute(
+            "INSERT INTO pending_charges (handle, key_alias, estimate, created_at, provider) "
+            "VALUES ('orphan', 'k1', 0, datetime('now', '-1 hour'), 'openai')"
+        )
+        await db.commit()
+        ledger = SpendLedger(db)
+        assert await ledger.sweep(max_age_seconds=60) == 1
+        assert await _committed(db, "k1") == 200_000, "sweep should honor the override"
+    finally:
+        await db.close()

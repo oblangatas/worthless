@@ -110,6 +110,29 @@ class SpendLedger:
                 await self._db.rollback()
                 raise
 
+    async def _ceiling_for(self, alias: str) -> int:
+        """Per-key fail-closed ceiling for *alias*, clamped to the global floor.
+
+        WOR-705: an operator may raise the ceiling for one key via
+        ``enrollment_config.ceiling_override`` (e.g. a heavy-reasoning customer
+        whose model's max-output exceeds the global 128K). The override can only
+        RAISE the floor — a NULL, or any value below ``GLOBAL_CEILING_TOKENS``
+        however it got there (direct SQL, a pre-validation row), falls back to
+        the audited global. The global is an inviolable minimum at read time,
+        independent of the setter's write-side validation.
+
+        Runs on the same connection inside the caller's open transaction.
+        """
+        cur = await self._db.execute(
+            "SELECT ceiling_override FROM enrollment_config WHERE key_alias = ?",
+            (alias,),
+        )
+        row = await cur.fetchone()
+        override = row[0] if row else None
+        if override is None:
+            return GLOBAL_CEILING_TOKENS
+        return max(int(override), GLOBAL_CEILING_TOKENS)
+
     async def settle_at_estimate(self, handle: str) -> None:
         """Atomically swap the hold for one ``spend_log`` row at the hold's STORED
         estimate (fail-closed fallback when the provider's actual usage can't be
@@ -133,10 +156,11 @@ class SpendLedger:
                 # WOR-696: fail-closed metering. settle_at_estimate fires when
                 # the actual usage is unreadable (disconnect, parse fail, stream
                 # kill). The stored estimate may be tiny — or zero — for a
-                # request that omitted max_tokens. Charge at least the global
-                # ceiling so the cap counter moves honestly. Direction of error
-                # is conservative; we never under-bill on the fallback path.
-                charge = max(estimate, GLOBAL_CEILING_TOKENS)
+                # request that omitted max_tokens. Charge at least the ceiling
+                # so the cap counter moves honestly. Direction of error is
+                # conservative; we never under-bill on the fallback path.
+                # WOR-705: the ceiling is per-key (override) clamped to global.
+                charge = max(estimate, await self._ceiling_for(alias))
                 await self._db.execute("DELETE FROM pending_charges WHERE handle = ?", (handle,))
                 await self._db.execute(
                     "INSERT INTO spend_log (key_alias, tokens, model, provider)"
@@ -176,11 +200,12 @@ class SpendLedger:
                 for handle, alias, estimate, provider, model in stale:
                     # WOR-696 / worthless-osgt: orphans from SIGKILL'd or
                     # crashed BackgroundTasks bypass the normal settle floor.
-                    # Apply the same GLOBAL_CEILING_TOKENS floor here so the
-                    # sweeper backstop can't be exploited by killing the
-                    # proxy between stream-start and settle. Upward-only —
-                    # honest large estimates pass through unchanged.
-                    charge = max(estimate, GLOBAL_CEILING_TOKENS)
+                    # Apply the same ceiling floor here so the sweeper backstop
+                    # can't be exploited by killing the proxy between
+                    # stream-start and settle. Upward-only — honest large
+                    # estimates pass through unchanged.
+                    # WOR-705: per-key override (clamped to global) applies here too.
+                    charge = max(estimate, await self._ceiling_for(alias))
                     await self._db.execute(
                         "DELETE FROM pending_charges WHERE handle = ?", (handle,)
                     )

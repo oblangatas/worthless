@@ -14,6 +14,7 @@ from cryptography.fernet import Fernet, InvalidToken
 
 from worthless.crypto.kdf import derive_mac_secret
 from worthless.defaults import DEFAULT_SPEND_CAP_TOKENS
+from worthless.proxy.config import GLOBAL_CEILING_TOKENS
 from worthless.storage.models import EncryptedShard, EnrollmentRecord, StoredShard
 from worthless.storage.schema import init_db, migrate_db
 
@@ -628,6 +629,33 @@ class ShardRepository:
             cursor = await db.execute(
                 "UPDATE enrollment_config SET spend_cap = ? WHERE key_alias = ?",
                 (spend_cap, alias),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+
+    async def set_ceiling_override(self, alias: str, tokens: int) -> bool:
+        """Set a per-key fail-closed ceiling override for *alias* (WOR-705).
+
+        Raise-only: *tokens* must be an int ``>= GLOBAL_CEILING_TOKENS``. A
+        lower value can't weaken the cap — the ledger read path clamps to the
+        global floor regardless — so we reject it as meaningless rather than
+        silently store a no-op. ``bool`` is rejected explicitly (it is an
+        ``int`` subclass and ``True`` would otherwise slip through as ``1``).
+
+        Returns True if an enrollment_config row existed and was updated,
+        False if the alias has no row.
+        """
+        if isinstance(tokens, bool) or not isinstance(tokens, int):
+            raise ValueError("ceiling override must be an int (got a non-int)")
+        if tokens < GLOBAL_CEILING_TOKENS:
+            raise ValueError(
+                f"ceiling override must be >= GLOBAL_CEILING_TOKENS "
+                f"({GLOBAL_CEILING_TOKENS}); a lower value cannot weaken the cap"
+            )
+        async with self._connect() as db:
+            cursor = await db.execute(
+                "UPDATE enrollment_config SET ceiling_override = ? WHERE key_alias = ?",
+                (tokens, alias),
             )
             await db.commit()
             return cursor.rowcount > 0
