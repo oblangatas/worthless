@@ -17,11 +17,10 @@ Worthless exists to protect API keys, a vulnerability here has real consequences
 
 ### Response timeline
 
-Solo maintainer, response time is bounded by real life. Best-effort
-acknowledgment within one week. Triage, fix, and coordinated disclosure are
-handled proportional to severity; 90 days is the default
-coordinated-disclosure window by convention. If a report sits for longer than
-two weeks without reply, ping again or escalate publicly.
+Solo maintainer, response time is bounded by real life. Acknowledgment,
+triage, fix, and coordinated disclosure are all handled on a best-effort
+basis, proportional to severity, with no committed timeframe. If a report
+sits without reply for a while, ping again or escalate publicly.
 
 ### Scope
 
