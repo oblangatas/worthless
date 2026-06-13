@@ -151,6 +151,76 @@ def test_relock_refuses_when_env_already_has_worthless_base_url(
 # ---------------------------------------------------------------------------
 
 
+def test_relock_refuses_on_partial_lock_with_mixed_locked_and_plaintext_vars(
+    home_dir: WorthlessHome,
+    env_file_with_key: tuple[Path, str],
+) -> None:
+    """Partial-lock state — one provider already locked, a second provider's
+    key still plaintext (the BASE_URL never got written because lock failed
+    mid-flight before the Anthropic pass) — MUST refuse at the preflight
+    naming a locked var, NOT silently split the second plaintext key.
+
+    This is the worst version of the worthless-ftmg bug: a partial-failure
+    leaves the user with one shard-A in OPENAI_API_KEY + the matching
+    OPENAI_BASE_URL pointing at our proxy, and a fresh ANTHROPIC_API_KEY
+    plaintext sitting next to it. Without the gate, a re-lock would split
+    the OPENAI shard-A as if fresh (destroying the original) AND lock the
+    Anthropic key — but the operator would have no way to know the OpenAI
+    side just lost its only path back to plaintext.
+
+    Pinned: the gate names a locked var, exits 117 cleanly, and the .env
+    + DB are byte-identical so the operator can run ``worthless doctor``
+    to recover.
+    """
+    env_file, _key = env_file_with_key
+    env_file.write_text(
+        # Partially-locked: OPENAI is locked (shard-A + BASE_URL).
+        f"OPENAI_API_KEY={fake_openai_key()}\n"
+        "OPENAI_BASE_URL=http://127.0.0.1:8787/openai-deadbeef/v1\n"
+        # ANTHROPIC is still plaintext, no matching BASE_URL.
+        # This is what a partial-failure lock leaves behind: the second
+        # provider's pass never got the BASE_URL written.
+        f"ANTHROPIC_API_KEY={fake_openai_key()}\n"
+    )
+    pre_sum = _checksum(env_file)
+
+    result = runner.invoke(
+        app,
+        ["lock", "--env", str(env_file)],
+        env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+    )
+
+    # Exit 117 — operator gets the structured error, not a half-mutated state.
+    assert result.exit_code == ErrorCode.ENV_ALREADY_LOCKED.value, (
+        f"expected exit {ErrorCode.ENV_ALREADY_LOCKED.value}, got "
+        f"{result.exit_code}\n{result.output}"
+    )
+    # The refusal message names the locked var (OPENAI_BASE_URL is what trips
+    # the detector — naming it gives the operator a precise pointer).
+    assert "OPENAI_BASE_URL" in result.output, (
+        f"refusal must name the offending var so the operator can recover:\n{result.output}"
+    )
+    assert "worthless unlock" in result.output or "worthless doctor" in result.output, (
+        f"refusal must point at a recovery command:\n{result.output}"
+    )
+    # Critical invariant: ZERO side effects. The Anthropic plaintext key
+    # in particular must NOT have been split — a refused lock leaves the
+    # file byte-identical and the DB untouched.
+    assert _checksum(env_file) == pre_sum, (
+        ".env was mutated by a refused lock — Anthropic plaintext may have "
+        "been split. Recovery path is lost."
+    )
+    if home_dir.db_path.exists():
+        con = sqlite3.connect(str(home_dir.db_path))
+        try:
+            shards = con.execute("SELECT COUNT(*) FROM shards").fetchone()[0]
+            enrolled = con.execute("SELECT COUNT(*) FROM enrollments").fetchone()[0]
+        finally:
+            con.close()
+        assert shards == 0, f"refused lock wrote {shards} shards row(s)"
+        assert enrolled == 0, f"refused lock wrote {enrolled} enrollment(s)"
+
+
 def test_lock_proceeds_when_base_url_points_at_third_party(
     home_dir: WorthlessHome,
     env_file_with_key: tuple[Path, str],
