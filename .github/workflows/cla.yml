@@ -1,0 +1,41 @@
+name: CLA Assistant
+
+on:
+  issue_comment:
+    types: [created]
+  # zizmor: ignore[dangerous-triggers]
+  # pull_request_target is required by CLA Assistant so it can comment and set
+  # the CLA status check on pull requests opened from forks. This workflow runs
+  # no untrusted code from the PR head; it only posts comments and records the
+  # signer via the pinned action.
+  pull_request_target:
+    types: [opened, closed, synchronize]
+
+permissions: {}
+
+jobs:
+  cla:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: write
+      pull-requests: write
+      statuses: write
+    steps:
+      - name: CLA Assistant
+        if: >-
+          (github.event.comment.body == 'recreate-cla' ||
+           github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA')
+          || github.event_name == 'pull_request_target'
+        uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PERSONAL_ACCESS_TOKEN: ${{ secrets.CLA_SIGNATURES_TOKEN }}
+        with:
+          path-to-signatures: signatures/cla-signatures.json
+          path-to-document: https://github.com/shacharm2/worthless/blob/main/CLA.md
+          branch: cla-signatures
+          allowlist: shacharm2,dependabot[bot],*[bot]
+          custom-pr-sign-comment: I have read the CLA Document and I hereby sign the CLA
+          custom-notsigned-prcomment: 'Thanks for the pull request. Before we can merge it, please read and sign the [Contributor License Agreement](https://github.com/shacharm2/worthless/blob/main/CLA.md) by posting a comment with exactly the text below. You only sign once.'
+          custom-allsigned-prcomment: 'All contributors have signed the CLA. Thank you.'
