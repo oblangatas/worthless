@@ -38,7 +38,7 @@ UV_VERSION="0.11.7"
 # latest", and does NOT defend against a compromised Worker/origin (which
 # would serve a bad script AND a bad pin together). Wheel-hash verification is
 # a tracked follow-up. Override with `WORTHLESS_VERSION=x.y.z curl … | sh`.
-WORTHLESS_VERSION_PIN="0.3.7"
+WORTHLESS_VERSION_PIN="0.3.8"
 
 # SHA256 of https://astral.sh/uv/${UV_VERSION}/install.sh — bump with UV_VERSION.
 ASTRAL_INSTALLER_SHA256="efed99618cb5c31e4e36a700ab7c3698e83c0ae0f3c336714043d0f932c8d32c"
