@@ -12,7 +12,7 @@ Additive layers on pull requests. **CodeRabbit stays** for LLM-style review (int
 | **Gitleaks** | `sast.yml`, pre-commit | SARIF / hook | No |
 | **SonarCloud** | `tests.yml` → `sonarcloud` job | Scan + PR decoration (with `sonar.pullrequest.*`) | Summary comment when bound to GitHub |
 | **Snyk** | `snyk-security.yml` | Check | No |
-| **Dependabot** | `.github/dependabot.yml` | Opens separate dependency PRs | N/A |
+| **Dependabot** | `.github/dependabot.yml` | Opens separate dependency PRs | N/A (uv weekly + actions patch/minor auto; action **majors** manual) |
 | **Tests + coverage floors** | `tests.yml` | Matrix + `check-coverage-floors.py` | No |
 | **CodeRabbit** | GitHub App | Review / summary | Yes (LLM) |
 
