@@ -23,6 +23,17 @@ What it does:
 
 Your existing code works identically. The proxy reconstructs the key only when the rules engine approves the request — blow your spend cap, the key never forms.
 
+## One-line install (curl)
+
+No Python or pipx set up? Install with a single command. The script is version-pinned and verifies a SHA-256 of the download before it runs anything:
+
+```bash
+curl -sSL https://worthless.sh | sh
+# inspect first: curl -sSL 'https://worthless.sh?explain=1' | less
+```
+
+This installs the `worthless` CLI; then `cd your-project && worthless` exactly as above.
+
 ## Non-interactive (CI, scripts)
 
 ```bash
@@ -37,4 +48,4 @@ git clone https://github.com/shacharm2/worthless && cd worthless
 uv pip install -e .
 ```
 
-See the [README quickstart](../README.md#quickstart) for the full walkthrough and command reference.
+See the [README quickstart](https://github.com/shacharm2/worthless/blob/main/README.md#quickstart) for the full walkthrough and command reference.

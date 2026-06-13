@@ -27,7 +27,7 @@ the original key never touches disk.
 > **Planned** -- Cloud deployment (Railway, Render) requires a persistent
 > volume at `/data`. Template configs are in `deploy/` but the enrollment
 > workflow is not yet streamlined.
-> See the [README](../README.md) for current install options.
+> See the [GitHub repository](https://github.com/shacharm2/worthless) for current install options.
 
 ## From source (no Docker)
 
@@ -38,4 +38,4 @@ worthless lock
 worthless up
 ```
 
-The proxy runs on `localhost:8787`. See the [README](../README.md) for details.
+The proxy runs on `localhost:8787`. See the [GitHub repository](https://github.com/shacharm2/worthless) for details.

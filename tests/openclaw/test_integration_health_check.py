@@ -71,7 +71,7 @@ class TestHealthCheckNoConfig:
             proxy_port=8787,
         )
 
-        assert report.providers_missing == ("worthless-openai",)
+        assert report.providers_missing == ("openai",)
         assert report.providers_ok == ()
         assert report.providers_drifted == ()
         assert report.config_unreadable is False
@@ -90,7 +90,7 @@ class TestHealthCheckNoConfig:
             proxy_port=8787,
         )
 
-        assert set(report.providers_missing) == {"worthless-openai", "worthless-anthropic"}
+        assert set(report.providers_missing) == {"openai", "anthropic"}
         assert report.healthy is False
 
     def test_no_providers_empty_report(self) -> None:
@@ -118,7 +118,7 @@ class TestHealthCheckProviderOk:
         _write_config(
             config,
             {
-                "worthless-openai": {
+                "openai": {
                     "baseUrl": "http://127.0.0.1:8787/openai-aaaa1111/v1",
                     "apiKey": "sk-shard-a",
                     "api": "openai-completions",
@@ -134,7 +134,7 @@ class TestHealthCheckProviderOk:
             proxy_base_url="http://127.0.0.1:8787",  # pin host; skip Docker detection
         )
 
-        assert report.providers_ok == ("worthless-openai",)
+        assert report.providers_ok == ("openai",)
         assert report.providers_missing == ()
         assert report.providers_drifted == ()
         assert report.healthy is True
@@ -146,7 +146,7 @@ class TestHealthCheckProviderOk:
         _write_config(
             config,
             {
-                "worthless-openai": {
+                "openai": {
                     "baseUrl": "http://127.0.0.1:9090/openai-abc/v1",
                     "apiKey": "sk-shard-a",
                     "api": "openai-completions",
@@ -163,7 +163,7 @@ class TestHealthCheckProviderOk:
         )
 
         assert report.healthy is True
-        assert "worthless-openai" in report.providers_ok
+        assert "openai" in report.providers_ok
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +186,7 @@ class TestHealthCheckProviderMissing:
             proxy_port=8787,
         )
 
-        assert report.providers_missing == ("worthless-openai",)
+        assert report.providers_missing == ("openai",)
         assert report.healthy is False
 
     def test_one_present_one_missing(self, tmp_path: Path) -> None:
@@ -196,7 +196,7 @@ class TestHealthCheckProviderMissing:
         _write_config(
             config,
             {
-                "worthless-openai": {
+                "openai": {
                     "baseUrl": "http://127.0.0.1:8787/openai-aaaa1111/v1",
                     "apiKey": "sk-a",
                     "api": "openai-completions",
@@ -215,8 +215,8 @@ class TestHealthCheckProviderMissing:
             proxy_base_url="http://127.0.0.1:8787",  # pin host; skip Docker detection
         )
 
-        assert "worthless-openai" in report.providers_ok
-        assert "worthless-anthropic" in report.providers_missing
+        assert "openai" in report.providers_ok
+        assert "anthropic" in report.providers_missing
         assert report.healthy is False
 
 
@@ -236,7 +236,7 @@ class TestHealthCheckProviderDrifted:
         _write_config(
             config,
             {
-                "worthless-openai": {
+                "openai": {
                     "baseUrl": wrong_url,
                     "apiKey": "sk-a",
                     "api": "openai-completions",
@@ -254,7 +254,7 @@ class TestHealthCheckProviderDrifted:
 
         assert len(report.providers_drifted) == 1
         name, actual, expected = report.providers_drifted[0]
-        assert name == "worthless-openai"
+        assert name == "openai"
         assert actual == wrong_url
         assert expected == "http://127.0.0.1:8787/openai-aaaa1111/v1"
         assert report.healthy is False
@@ -266,7 +266,7 @@ class TestHealthCheckProviderDrifted:
         _write_config(
             config,
             {
-                "worthless-openai": {
+                "openai": {
                     "baseUrl": "http://127.0.0.1:8787/stale-alias/v1",
                     "apiKey": "sk-a",
                     "api": "openai-completions",
@@ -339,15 +339,15 @@ class TestHealthReportHealthy:
     """HC-06: ``OpenclawHealthReport.healthy`` reflects combined verdict."""
 
     def test_all_ok_is_healthy(self) -> None:
-        r = OpenclawHealthReport(providers_ok=("worthless-openai",))
+        r = OpenclawHealthReport(providers_ok=("openai",))
         assert r.healthy is True
 
     def test_missing_provider_not_healthy(self) -> None:
-        r = OpenclawHealthReport(providers_missing=("worthless-openai",))
+        r = OpenclawHealthReport(providers_missing=("openai",))
         assert r.healthy is False
 
     def test_drifted_provider_not_healthy(self) -> None:
-        r = OpenclawHealthReport(providers_drifted=(("worthless-openai", "x", "y"),))
+        r = OpenclawHealthReport(providers_drifted=(("openai", "x", "y"),))
         assert r.healthy is False
 
     def test_unreadable_not_healthy(self) -> None:

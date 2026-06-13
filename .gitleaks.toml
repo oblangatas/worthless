@@ -43,6 +43,7 @@ paths = [
     '''\.planning/ROADMAP\.md$''',
     '''tests/.*\.py$''',
     '''tests/.*\.sh$''',
+    '''scripts/verify-wless-internal-removed\.sh$''',
 ]
 # Public install docs (website/install-*.md) show sample `worthless status`
 # output with placeholder provider aliases like `anthropic-a1b2c3d4`.

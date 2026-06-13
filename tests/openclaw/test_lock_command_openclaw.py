@@ -106,8 +106,9 @@ def test_lock_with_openclaw_writes_openclaw_json_and_installs_skill(
     openclaw_present: dict[str, Path],
 ) -> None:
     """AC2: with OpenClaw staged at ~/.openclaw, ``lock`` populates the
-    config with ``worthless-openai`` and installs the skill folder, in
-    one invocation, with no prompts.
+    config with the ``openai`` entry (WOR-621 F1: lock rewrites the
+    provider's ORIGINAL id, not a ``worthless-*`` decoy) and installs the
+    skill folder, in one invocation, with no prompts.
     """
     result = runner.invoke(
         app,
@@ -119,10 +120,10 @@ def test_lock_with_openclaw_writes_openclaw_json_and_installs_skill(
 
     data = json.loads(openclaw_present["config_path"].read_text(encoding="utf-8"))
     providers = data["models"]["providers"]
-    assert "worthless-openai" in providers, providers
-    assert providers["worthless-openai"]["baseUrl"].startswith("http://127.0.0.1:")
-    assert providers["worthless-openai"]["baseUrl"].endswith("/v1")
-    assert providers["worthless-openai"]["apiKey"], "shard-A must be in apiKey"
+    assert "openai" in providers, providers
+    assert providers["openai"]["baseUrl"].startswith("http://127.0.0.1:")
+    assert providers["openai"]["baseUrl"].endswith("/v1")
+    assert providers["openai"]["apiKey"], "shard-A must be in apiKey"
 
     # Skill folder installed.
     skill_dir = openclaw_present["workspace"] / "skills" / "worthless"

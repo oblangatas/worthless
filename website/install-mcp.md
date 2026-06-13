@@ -73,4 +73,4 @@ Your editor works identically. Your key is never stored in plaintext.
 
 > [!NOTE]
 > **Planned: Cloud proxy.** A hosted proxy that eliminates the need to run locally
-> is planned. See the [roadmap](../ROADMAP.md) for timeline.
+> is planned. Track progress on [GitHub Issues](https://github.com/shacharm2/worthless/issues).

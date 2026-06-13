@@ -25,7 +25,9 @@ Run:
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
+import http.server
 import json
 import os
 import re
@@ -33,6 +35,8 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
+from collections.abc import Iterator
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[3]
@@ -115,12 +119,81 @@ def seed(root: Path) -> dict[str, Path]:
     }
 
 
-def run_lock(paths: dict[str, Path]) -> subprocess.CompletedProcess[str]:
-    """Invoke the real ``worthless lock`` CLI, as a user would."""
-    env = dict(os.environ)
+class _HealthzHandler(http.server.BaseHTTPRequestHandler):
+    """Answer ``GET /healthz`` with 200 + minimal JSON; 404 for anything else.
+
+    The minimum ``cli.process.check_proxy_health`` accepts as "healthy": a 200
+    with a JSON body (``mode`` / ``requests_proxied`` default if absent).
+    """
+
+    def do_GET(self) -> None:  # noqa: N802 — BaseHTTPRequestHandler API
+        if self.path == "/healthz":
+            body = b'{"mode": "up", "requests_proxied": 0}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, *_args: object) -> None:  # silence the access log
+        pass
+
+
+@contextlib.contextmanager
+def fake_proxy_health() -> Iterator[int]:
+    """Serve a healthy ``/healthz`` on an ephemeral 127.0.0.1 port; yield the port.
+
+    ``worthless lock`` aborts with WRTLS-109 (WOR-648 / WOR-621 F7) unless the
+    proxy answers ``check_proxy_health`` -- a gate that runs BEFORE the OpenClaw
+    integration these tests exercise. Without a healthy proxy ``lock`` no-ops, so
+    the invariants below pass/xfail VACUOUSLY (lock never reached the code under
+    test). This is the minimum that satisfies the gate so ``lock`` proceeds.
+
+    It does NOT proxy anything: ``lock`` only *probes* health before writing the
+    split + config; it never makes an upstream call. Pass the yielded port to
+    :func:`run_lock` via ``proxy_port``.
+    """
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _HealthzHandler)
+    port = srv.server_address[1]
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield port
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        thread.join(timeout=5)
+
+
+def run_lock(
+    paths: dict[str, Path], proxy_port: int | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Invoke the real ``worthless lock`` CLI, as a user would.
+
+    The child env is built HERMETICALLY: every inherited ``WORTHLESS_*`` var is
+    stripped, then only the vars this harness controls are set. Without this the
+    subprocess inherits whatever ``WORTHLESS_*`` a sibling test left in
+    ``os.environ`` -- e.g. a leaked ``WORTHLESS_OPENCLAW_BIN`` makes the audit gate
+    run against the seeded *plaintext* ``openclaw.json`` and exit 73, or a
+    ``monkeypatch.delenv("WORTHLESS_KEYRING_BACKEND")`` makes ``lock`` hit a real
+    keyring in headless CI. Under ``pytest-randomly`` + xdist that flipped the
+    xfail-strict invariants below to XPASS in CI only (never locally on macOS).
+    Stripping the namespace makes ``lock``'s exit deterministic regardless of order.
+
+    ``proxy_port`` (from :func:`fake_proxy_health`) points lock's WRTLS-109 health
+    probe at a fake-healthy proxy so the OpenClaw integration runs. Omit it only
+    when deliberately exercising the proxy-down abort path.
+    """
+    env = {k: v for k, v in os.environ.items() if not k.startswith("WORTHLESS_")}
     env["HOME"] = str(paths["home"])
     env["USERPROFILE"] = str(paths["home"])
     env["WORTHLESS_HOME"] = str(paths["whome"])
+    env["WORTHLESS_KEYRING_BACKEND"] = "null"
+    if proxy_port is not None:
+        env["WORTHLESS_PORT"] = str(proxy_port)
     return subprocess.run(
         ["uv", "run", "worthless", "lock", "--env", str(paths["env"])],
         cwd=str(REPO),
@@ -170,7 +243,8 @@ def scenario(name: str, description: str, make_unreadable: bool) -> dict:
         if make_unreadable:
             paths["cfg"].chmod(0o000)
 
-        result = run_lock(paths)
+        with fake_proxy_health() as _proxy_port:
+            result = run_lock(paths, proxy_port=_proxy_port)
 
         # Capture mode BEFORE read_json_lenient -- it chmods unreadable files to read.
         after_mode = stat.S_IMODE(paths["cfg"].stat().st_mode)

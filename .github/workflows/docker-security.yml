@@ -7,11 +7,23 @@ on:
       - 'deploy/**'
       - 'pyproject.toml'
       - 'src/**'
+      - 'tests/test_docker_e2e.py'
+      - 'tests/test_openclaw_e2e.py'
+      - 'tests/openclaw/**'
   pull_request:
     paths:
       - 'Dockerfile'
       - 'deploy/**'
+      - 'pyproject.toml'
+      - 'src/**'
       - 'tests/test_docker_e2e.py'
+      - 'tests/test_openclaw_e2e.py'
+      - 'tests/openclaw/**'
+      # WOR-621 F1/F7 load-bearing claim — any change here must re-prove
+      # "kill proxy → OpenClaw agent reaches nothing" end-to-end.
+      - 'tests/openclaw/install_incident/test_proxy_load_bearing.py'
+      - 'src/worthless/cli/commands/lock.py'
+      - 'src/worthless/openclaw/**'
   schedule:
     - cron: '0 6 * * 1'  # Monday 6am UTC — check if ignored CVEs have fixes
 
@@ -90,3 +102,13 @@ jobs:
 
       - name: Run OpenClaw/Compose E2E tests
         run: uv run pytest tests/test_openclaw_e2e.py -v -m openclaw --tb=short --timeout=360
+
+      # WOR-621 F1/F7/WOR-545: the load-bearing claim — "kill the proxy and
+      # an OpenClaw agent on a locked provider reaches nothing." Real proxy +
+      # pinned OpenClaw container + mock upstream; baseline reaches the mock
+      # with the reconstructed real key, `docker stop` proxy → agent turn
+      # fails AND mock captured nothing, restart → resumes. Excluded from
+      # tests.yml (`-m "not docker"`); this is the regression net so a
+      # future PR can't re-introduce the WOR-514 bypass and ship green.
+      - name: Run WOR-621 proxy-load-bearing behavioral test
+        run: uv run pytest tests/openclaw/install_incident/test_proxy_load_bearing.py -v -m "openclaw and docker" --tb=short --timeout=900

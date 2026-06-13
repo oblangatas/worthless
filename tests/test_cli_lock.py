@@ -338,6 +338,65 @@ class TestLockFormatPreserving:
             f"OPENROUTER_BASE_URL should point at local proxy after lock; got .env: {rewritten!r}"
         )
 
+    def test_lock_openrouter_key_without_base_url_routes_to_openrouter(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """An OpenRouter key with NO explicit ``*_BASE_URL`` must store the
+        OpenRouter upstream URL in the DB — not fall back to OpenAI's URL.
+
+        Live-container bug (PR #276 thermo-nuclear review): the upstream URL
+        for the DB row was resolved from the WIRE PROTOCOL (``openai``, because
+        OpenRouter speaks the OpenAI dialect) instead of the REGISTRY NAME
+        (``openrouter``). ``_resolve_upstream_base_url`` was called with the
+        protocol-collapsed ``provider`` value, so its
+        ``lookup_by_name("openai")`` fallback returned
+        ``https://api.openai.com/v1``. The proxy then forwarded the
+        reconstructed OpenRouter key to OpenAI → HTTP 401, chat dead.
+
+        The two existing OpenRouter tests both set ``OPENROUTER_BASE_URL``
+        explicitly, so they take the user-value path and never exercise this
+        fallback. This test omits ``*_BASE_URL`` on purpose to hit it.
+
+        Contract: ``provider`` column stays ``openai`` (wire protocol, for
+        adapter dispatch) while ``base_url`` is OpenRouter's upstream.
+        """
+        from worthless.storage.repository import ShardRepository
+
+        or_key = fake_key("sk-" + "or-v1-")
+
+        env = tmp_path / ".env"
+        # NOTE: deliberately NO OPENROUTER_BASE_URL — forces the registry fallback.
+        env.write_text(f"OPENROUTER_API_KEY={or_key}\n")
+
+        result = runner.invoke(
+            app,
+            ["lock", "--env", str(env)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+        )
+        assert result.exit_code == 0, result.output
+
+        async def _check():
+            repo = ShardRepository(str(home_dir.db_path), home_dir.fernet_key)
+            await repo.initialize()
+            aliases = await repo.list_keys()
+            assert len(aliases) == 1, f"expected 1 enrollment, got: {aliases}"
+            enc = await repo.fetch_encrypted(aliases[0])
+            return enc.base_url, enc.provider, aliases[0]
+
+        base_url_in_db, provider_in_db, alias = asyncio.run(_check())
+
+        assert base_url_in_db == "https://openrouter.ai/api/v1", (
+            f"OpenRouter key routed to the wrong upstream: {base_url_in_db!r}. "
+            "Expected openrouter.ai — the proxy would 401 against api.openai.com."
+        )
+        # Wire protocol stays openai (OpenRouter speaks the OpenAI dialect) so
+        # the proxy adapter formats requests correctly and the alias namespace
+        # stays stable across re-locks.
+        assert provider_in_db == "openai", (
+            f"provider column should stay 'openai' (wire protocol), got: {provider_in_db!r}"
+        )
+        assert alias.startswith("openai-")
+
     def test_lock_warns_on_non_canonical_var_name(
         self, home_dir: WorthlessHome, tmp_path: Path
     ) -> None:
