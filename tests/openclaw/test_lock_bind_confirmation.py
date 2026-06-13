@@ -80,29 +80,39 @@ def _patch_proxy_counter(
     monkeypatch: pytest.MonkeyPatch,
     lock_mod,  # noqa: ANN001 — module type opaque from this layer
     *,
-    before: int,
-    after: int,
-) -> None:
-    """Stub ``check_proxy_health`` so the counter delta is deterministic.
+    tick_on_fire: bool,
+) -> dict[str, int]:
+    """Wire a shared in-memory proxy counter:
 
-    The two values represent the two readings WOR-658 must take: one BEFORE
-    the synthetic request fires, one AFTER. F7's health gate also calls
-    ``check_proxy_health`` (it just inspects ``healthy``); both readings
-    return ``healthy=True`` so we never gate-fail before reaching
-    bind-confirmation territory.
+    * ``check_proxy_health`` returns ``state["counter"]`` (always healthy so
+      F7's pre-flight gate stays out of the way).
+    * ``_fire_synthetic_request`` increments the counter when
+      ``tick_on_fire=True`` (the GREEN happy path) and leaves it untouched
+      otherwise (silent-bypass failure mode).
+
+    Resilient to any call-count refactor in lock-flow: bind-confirmation
+    proves routing iff the counter the next ``check_proxy_health`` returns
+    is strictly greater than the one the previous read returned.
     """
-    calls = {"n": 0}
+    state = {"counter": 100}
 
     def fake_check_proxy_health(port):  # noqa: ANN001 — match real signature loosely
-        calls["n"] += 1
         return {
             "healthy": True,
             "port": port,
             "mode": "ok",
-            "requests_proxied": before if calls["n"] == 1 else after,
+            "requests_proxied": state["counter"],
         }
 
+    def fake_fire_synthetic_request(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202 — opaque stub
+        if tick_on_fire:
+            state["counter"] += 1
+
     monkeypatch.setattr(lock_mod, "check_proxy_health", fake_check_proxy_health)
+    monkeypatch.setattr(
+        lock_mod, "_fire_synthetic_request", fake_fire_synthetic_request, raising=False
+    )
+    return state
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +130,7 @@ def test_lock_sentinel_includes_bind_confirmation_on_success(
     proving the rewritten entry routes through the proxy."""
     from worthless.cli.commands import lock as lock_mod
 
-    _patch_proxy_counter(monkeypatch, lock_mod, before=5, after=6)
+    _patch_proxy_counter(monkeypatch, lock_mod, tick_on_fire=True)
     wl_home = openclaw_present["home"] / ".worthless"
 
     result = runner.invoke(
@@ -162,7 +172,7 @@ def test_lock_exits_nonzero_when_bind_confirmation_fails(
     ``worthless status`` shows DEGRADED."""
     from worthless.cli.commands import lock as lock_mod
 
-    _patch_proxy_counter(monkeypatch, lock_mod, before=5, after=5)
+    _patch_proxy_counter(monkeypatch, lock_mod, tick_on_fire=False)
     wl_home = openclaw_present["home"] / ".worthless"
 
     result = runner.invoke(
