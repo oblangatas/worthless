@@ -409,28 +409,58 @@ def test_launch_page_utility_text_meets_wcag_aa_contrast() -> None:
     how_it_works = (DOCS / "how-it-works.html").read_text(encoding="utf-8")
 
     assert "--ink-faint: oklch(54% 0.035 226);" in index
-    assert "color: var(--ink);" in index.split(".nav-actions .kofi {", 1)[1].split("}", 1)[0]
     assert "--text2: #586b82;" in how_it_works
-    assert "color: var(--text);" in how_it_works.split(".nav-kofi {", 1)[1].split("}", 1)[0]
 
 
-def test_homepage_mobile_navigation_keeps_primary_actions_visible() -> None:
+def test_primary_navigation_stays_focused_on_product_routes() -> None:
+    index = (DOCS / "index.html").read_text(encoding="utf-8")
+    features = (DOCS / "features.html").read_text(encoding="utf-8")
+    how_it_works = (DOCS / "how-it-works.html").read_text(encoding="utf-8")
+
+    homepage_nav = index.split('<nav class="nav" aria-label="Primary">', 1)[1].split("</nav>", 1)[0]
+    for page in (features, how_it_works):
+        primary_nav = page.split("<nav>", 1)[1].split("</nav>", 1)[0]
+        assert "memes.html" not in primary_nav
+        assert "ko-fi.com" not in primary_nav
+
+    assert "memes.html" not in homepage_nav
+    assert "ko-fi.com" not in homepage_nav
+    assert "#early-access" not in homepage_nav
+
+
+def test_homepage_omits_future_hosted_waitlist() -> None:
     index = (DOCS / "index.html").read_text(encoding="utf-8")
 
-    assert '.nav-links a[href="memes.html"]' in index
-    assert "@media (max-width: 520px)" in index
-    assert 'class="nav-early" href="#early-access" aria-label="Early access"' in index
-    assert '<span class="nav-early-label">Early access</span>' in index
-    assert 'class="nav-early-icon"' in index
-    nav_icon_rule = index.split(".nav-early-icon {", 1)[1].split("}", 1)[0]
-    assert "display: block;" in nav_icon_rule
-    assert "white-space: nowrap;" in index
-    assert 'aria-label="Buy me a coffee on Ko-fi"' in index
-    mobile_kofi_rule = index.split("@media (max-width: 820px)", 1)[1]
-    mobile_kofi_rule = mobile_kofi_rule.split("@media", 1)[0]
-    assert "width: 2.15rem;" in mobile_kofi_rule
-    assert "height: 2.15rem;" in mobile_kofi_rule
-    assert "border-radius: 999px;" in mobile_kofi_rule
+    for stale_copy in (
+        "Hosted Worthless",
+        "More secrets next.",
+        'id="early-access"',
+        "tally.so",
+    ):
+        assert stale_copy not in index
+
+
+def test_launch_copy_uses_bounded_supported_key_claims() -> None:
+    index = (DOCS / "index.html").read_text(encoding="utf-8")
+    features = (DOCS / "features.html").read_text(encoding="utf-8")
+    how_it_works = (DOCS / "how-it-works.html").read_text(encoding="utf-8")
+
+    assert "cannot call the provider on its own" in features
+    assert "cannot call the provider on its own" in how_it_works
+    assert "supported AI-provider key patterns" in features
+    assert "Docker, CI, and unusual SDK flows" in features
+    assert "Docker, CI, or unusual SDK flows" in how_it_works
+
+    for stale_copy in (
+        "Leaked half is useless.",
+        "They get random bytes. Useless",
+        "The leaked half is useless on its own.",
+        "That's the only change.",
+    ):
+        assert stale_copy not in features
+        assert stale_copy not in how_it_works
+
+    assert "Make copied .env AI keys useless" not in index
 
 
 def test_homepage_moves_the_hero_up_on_tall_viewports() -> None:
