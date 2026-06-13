@@ -55,3 +55,12 @@ AI agents, build logs, generated code, and repos can copy secrets out of a local
 - [Protocol](https://docs.wless.io/protocol/)
 - [GitHub](https://github.com/shacharm2/worthless)
 - [PyPI](https://pypi.org/project/worthless/)
+
+## Legal
+
+- [Legal](https://wless.io/legal.html): Index of legal and policy documents.
+- [Privacy Policy](https://wless.io/privacy.html): Self-hosted; no API keys, prompt content, or response content collected.
+- [Terms of Service](https://wless.io/terms.html): AS-IS terms, AGPL-3.0 anchored, Israeli law.
+- [Security](https://wless.io/security.html): Vulnerability reporting channel and best-effort posture.
+- [License](https://wless.io/license.html): AGPL-3.0-only, commercial license available on request.
+- [Subprocessors](https://wless.io/subprocessors.html): Third-party infrastructure for the website and contact email.

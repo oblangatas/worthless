@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Worthless: Subprocessors</title>
+  <meta name="description" content="The third-party infrastructure behind the wless.io website and Operator contact email." />
+  <link rel="canonical" href="https://wless.io/subprocessors.html" />
+  <meta name="robots" content="index, follow" />
+  <meta name="theme-color" content="#d5f4fb" />
+  <meta property="og:title" content="Worthless: Subprocessors" />
+  <meta property="og:description" content="The third-party infrastructure behind the wless.io website and Operator contact email." />
+  <meta property="og:image" content="https://wless.io/og-image.png" />
+  <meta property="og:url" content="https://wless.io/subprocessors.html" />
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="Worthless" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="Worthless: Subprocessors" />
+  <meta name="twitter:description" content="The third-party infrastructure behind the wless.io website and Operator contact email." />
+  <meta name="twitter:image" content="https://wless.io/og-image.png" />
+  <link rel="icon" type="image/x-icon" href="favicon.ico" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="legal.css" />
+</head>
+<body>
+  <header class="legal-top">
+    <a class="legal-home" href="index.html">
+      <img src="logo-transparent.png" alt="" aria-hidden="true" />
+      worthless
+    </a>
+    <nav class="legal-top-links" aria-label="Site">
+      <a href="legal.html">Legal</a>
+      <a href="privacy.html">Privacy</a>
+      <a href="index.html">Home</a>
+    </nav>
+  </header>
+
+  <main class="legal-doc">
+    <h1>Subprocessors</h1>
+    <p class="legal-meta">Third-party infrastructure for wless.io</p>
+    <p class="lead">Worthless is self-hosted, open-source software. The Operator does not run a hosted service and does not receive, store, or process your API keys, prompt content, or response content. There is no customer-data pipeline, and therefore no subprocessor that handles your provider keys or model traffic.</p>
+
+    <p>The wless.io website and the Operator's contact email rely on a small amount of standard third-party infrastructure that processes limited operational data, as described in the <a href="privacy.html">Privacy Policy</a>:</p>
+
+    <table>
+      <thead>
+        <tr><th>Service</th><th>Purpose</th><th>Data involved</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Static website host (GitHub Pages)</td>
+          <td>Serving the wless.io website</td>
+          <td>Standard server-log information (IP address, user agent, requested URL, timestamp)</td>
+        </tr>
+        <tr>
+          <td>GitHub</td>
+          <td>Source code, issues, and pull requests</td>
+          <td>Whatever GitHub collects from visitors and contributors, under GitHub's own privacy policy</td>
+        </tr>
+        <tr>
+          <td>Email provider</td>
+          <td>Receiving mail sent to wless.io addresses (legal@, privacy@, security@)</td>
+          <td>The contents of email you choose to send</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>The Software itself runs entirely on systems you control and connects directly to the LLM providers whose API keys you own. The Operator is not a subprocessor of that traffic.</p>
+
+    <p>If the Operator adds analytics or other processors in the future, the change will be disclosed in the <a href="privacy.html">Privacy Policy</a> at that time. For questions, contact <a href="mailto:privacy@wless.io">privacy@wless.io</a>.</p>
+  </main>
+
+  <footer class="legal-footer">
+    <div class="legal-footer-inner">
+      <nav class="footer-legal" aria-label="Legal">
+        <a href="legal.html">Legal</a>
+        <a href="privacy.html">Privacy Policy</a>
+        <a href="terms.html">Terms of Service</a>
+        <a href="security.html">Security</a>
+        <a href="license.html">License</a>
+        <a href="subprocessors.html">Subprocessors</a>
+      </nav>
+      <span class="legal-footer-note">Worthless is open source.</span>
+    </div>
+  </footer>
+</body>
+</html>

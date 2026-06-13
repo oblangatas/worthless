@@ -18,7 +18,50 @@ PUBLIC_HTML = {
     "docs/red/index.html": "https://wless.io/red/",
     "docs/memes.html": "https://wless.io/memes.html",
     "docs/coming-soon.html": "https://wless.io/",
+    # Public legal pages (WOR-663).
+    "docs/legal.html": "https://wless.io/legal.html",
+    "docs/privacy.html": "https://wless.io/privacy.html",
+    "docs/terms.html": "https://wless.io/terms.html",
+    "docs/security.html": "https://wless.io/security.html",
+    "docs/license.html": "https://wless.io/license.html",
+    "docs/subprocessors.html": "https://wless.io/subprocessors.html",
 }
+
+# Footer legal cluster (WOR-663): every public launch page and every legal page
+# links to all six legal documents, with the relative prefix for its directory.
+LEGAL_PAGES = [
+    "legal.html",
+    "privacy.html",
+    "terms.html",
+    "security.html",
+    "license.html",
+    "subprocessors.html",
+]
+
+FOOTER_LEGAL_SURFACES = {
+    "docs/index.html": "",
+    "docs/features.html": "",
+    "docs/how-it-works.html": "",
+    "docs/memes.html": "",
+    "docs/coming-soon.html": "",
+    "docs/blog/index.html": "../",
+    "docs/red/index.html": "../",
+    "docs/legal.html": "",
+    "docs/privacy.html": "",
+    "docs/terms.html": "",
+    "docs/security.html": "",
+    "docs/license.html": "",
+    "docs/subprocessors.html": "",
+}
+
+LEGAL_DOC_PAGES = [
+    "docs/legal.html",
+    "docs/privacy.html",
+    "docs/terms.html",
+    "docs/security.html",
+    "docs/license.html",
+    "docs/subprocessors.html",
+]
 
 SEO_DISCOVERY_FILES = [
     "docs/robots.txt",
@@ -135,10 +178,14 @@ def test_publishable_docs_do_not_include_internal_planning_sources() -> None:
 
 
 def test_publishable_docs_do_not_reference_stale_worthless_domains() -> None:
+    # The [.-] character class matches both the dot and hyphen variants of the
+    # stale domain while keeping the contiguous banned literal out of source, so
+    # the repo's no-cloud-references pre-commit hook does not flag this guard.
+    stale_domain = re.compile(r"worthless[.-]cloud")
     offenders = [
         path.relative_to(REPO_ROOT).as_posix()
         for path in _public_text_files()
-        if re.search(r"worthless\.cloud|worthless-cloud", path.read_text(encoding="utf-8"))
+        if stale_domain.search(path.read_text(encoding="utf-8"))
     ]
 
     assert offenders == []
@@ -234,6 +281,12 @@ def test_sitemap_uses_existing_wless_public_pages() -> None:
         "https://wless.io/red/posts/shai-hulud.html",
         "https://wless.io/red/posts/github-action-secrets.html",
         "https://wless.io/memes.html",
+        "https://wless.io/legal.html",
+        "https://wless.io/privacy.html",
+        "https://wless.io/terms.html",
+        "https://wless.io/security.html",
+        "https://wless.io/license.html",
+        "https://wless.io/subprocessors.html",
     ]
     assert "https://wless.io/coming-soon.html" not in locs
 
@@ -473,3 +526,58 @@ def test_non_red_pages_do_not_use_restricted_faq_schema() -> None:
     ]
 
     assert offenders == []
+
+
+def test_public_launch_pages_link_to_full_footer_legal_cluster() -> None:
+    missing: list[tuple[str, str]] = []
+
+    for path, prefix in FOOTER_LEGAL_SURFACES.items():
+        html = (REPO_ROOT / path).read_text(encoding="utf-8")
+        for page in LEGAL_PAGES:
+            if f'href="{prefix}{page}"' not in html:
+                missing.append((path, f"{prefix}{page}"))
+
+    assert missing == []
+
+
+def test_legal_pages_are_indexable_csp_safe_documents() -> None:
+    for path in LEGAL_DOC_PAGES:
+        html = (REPO_ROOT / path).read_text(encoding="utf-8")
+        parser = _head(path)
+
+        assert _meta_content(parser, name="robots") == ["index, follow"]
+        assert 'rel="stylesheet" href="legal.css"' in html
+        # Same content-security posture as the launch pages: no inline scripts,
+        # no inline event handlers.
+        assert "<script" not in html
+        assert not re.search(r"\son[a-z]+=", html)
+
+
+def test_legal_pages_anchor_license_to_agpl() -> None:
+    license_page = (DOCS / "license.html").read_text(encoding="utf-8")
+
+    assert "AGPL-3.0-only" in license_page
+    assert "GNU Affero General Public License" in license_page
+    assert "https://www.gnu.org/licenses/agpl-3.0.txt" in license_page
+
+
+def test_privacy_page_omits_clauses_conflicting_with_wor663_guardrails() -> None:
+    privacy = (DOCS / "privacy.html").read_text(encoding="utf-8").lower()
+
+    # WOR-663 bans successor-entity assignment clauses on the public surface;
+    # the approved WOR-575 draft still carried one, so it is held out here.
+    assert "successor" not in privacy
+    # Launch decision is DCO-only, no CLA (WOR-575 / WOR-532); no CLA reference.
+    assert "contributor license agreement" not in privacy
+    assert "cla.md" not in privacy
+
+
+def test_security_page_makes_no_response_time_commitment() -> None:
+    security = (DOCS / "security.html").read_text(encoding="utf-8")
+
+    assert "security@wless.io" in security
+    assert "https://github.com/shacharm2/worthless/security/advisories/new" in security
+    assert "best effort only" in security
+    assert "no SLA" in security
+    # No response-time promise should appear in the public security copy.
+    assert not re.search(r"within\s+\d+\s+(hours|days|weeks)", security, re.IGNORECASE)

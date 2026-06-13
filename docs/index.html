@@ -1272,6 +1272,21 @@
       font-size: 0.82rem;
     }
 
+    .footer-legal {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem 1.1rem;
+    }
+
+    .footer-legal a {
+      color: oklch(72% 0.026 220);
+      text-decoration: none;
+    }
+
+    .footer-legal a:hover {
+      color: oklch(88% 0.018 220);
+    }
+
     .sentinel {
       position: absolute;
       left: 0;
@@ -1962,7 +1977,14 @@
     </div>
     <div class="footer-bottom">
       <span>Worthless is open source.</span>
-      <span>License, security policy, and disclosure routes live in the repository.</span>
+      <nav class="footer-legal" aria-label="Legal">
+        <a href="legal.html">Legal</a>
+        <a href="privacy.html">Privacy Policy</a>
+        <a href="terms.html">Terms of Service</a>
+        <a href="security.html">Security</a>
+        <a href="license.html">License</a>
+        <a href="subprocessors.html">Subprocessors</a>
+      </nav>
     </div>
   </footer>
 
