@@ -22,6 +22,35 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 - Cap is per-key per-DB. Deleted DB row or filesystem-level tampering = no cap.
 - Per-alias concurrency is unbounded in this PR. 200 parallel just-under-threshold streams could burn 25.6M tokens before admission denies request #201. Tracked as a follow-up.
 
+## [0.3.8] — 2026-06-13
+
+The "agents and exits" release. Two headline additions: a zero-Python npm wrapper lets editors (Claude Code, Cursor, Windsurf) install the MCP server in under 30 seconds, and `worthless uninstall` gives every locked `.env` its original key back before removing itself — no stranded files, clean exit. Alongside that: a proxy kill switch stops OpenClaw agents dead when the proxy goes down, the spend cap is now exact per process, and the install pipeline closes three supply-chain attack surfaces that were confirmed reachable.
+
+### Added
+- **One-line MCP setup for editors** (WOR-229, #be567bc). `worthless-mcp` npm package: drop one JSON block into `.mcp.json` and Claude Code / Cursor / Windsurf discover and launch the MCP server automatically. No Python or uv needed on the editor side; the wrapper bootstraps uv and pins the Python package to the matching npm version.
+- **`worthless uninstall`** (WOR-435, #301). Reads every enrolled `.env` the tool ever locked, writes the original API key back, then removes itself. Leaves no stranded locked files and no user having to remember what the plaintext key was.
+- **Proxy kill switch for agents** (WOR-621 Phase 3, #276). Stopping the Worthless proxy now halts any OpenClaw agent that is mid-flight on a locked provider. Agents can't leak around a downed proxy.
+
+### Security
+- **Spend cap is exact per process** (WOR-662, #273). The proxy refuses to start with `WEB_CONCURRENCY > 1`. Two workers could each independently run up to the full cap; now the cap means what it says.
+- **Compromised proxy can no longer act as a key oracle** (#269). The locked vault stopped signing arbitrary upstream requests when the proxy process is breached — closes the master-key extraction path identified in the security audit.
+- **Install is resistant to supply-chain poisoning** (WOR-709 + WOR-673 + WOR-679, #284 + #281 + #280). Three surfaces closed: (1) `install.sh` skips a pipx path-confusion check that was an empirically-confirmed RCE vector when pipx lives in an untrusted directory; (2) poisoned `UV_*` / `PIP_*` env vars can't redirect the install to a malicious host; (3) CDN integrity verification now has its own exit code — retry loops can't silently swallow a poisoned artifact.
+- **Every commit to main is signed and author-verified** (WOR-589 + WOR-590, #305 + #308). A push-time hook and a pre-commit check enforce GPG-verified commits from the canonical author. A stolen GitHub token can't push unverifiable commits.
+
+### Fixed
+- **Error messages now show their reason** (worthless-k82c, #268). A parser bug was silently stripping the explanatory clause from error text — errors now say "because X", not just the error code.
+- **Post-lock scan can't freeze the terminal** (worthless-8vvg, #264). The prompt scan that runs after a successful `worthless lock` now exits on large repos instead of hanging indefinitely.
+- **14 dead documentation links repaired** (#303). Broken internal links that sent users to 404s are fixed; a CI guard blocks new dead links from shipping.
+
+### Changed
+- **CLI discloses "AS IS, no warranty" on first run** (WOR-488, #302). Shown once at first invocation. Honest, not noisy.
+- **SECURITY.md is honest about response scope** (#306). Best-effort response commitment, no overstatements about SLAs we can't guarantee.
+- **Dependabot tuned to batch non-major updates** (#326). Actions updates are grouped; semver-major bumps are held for manual review.
+
+### Docs & Infrastructure
+- **Install docs live in one place** (#309). The stale website copies are removed; `docs/install-*.md` is the single source and the website pulls from there.
+- **OpenClaw routing contract test** (WOR-621, #266). Tag-pinned integration test catches routing drift before it reaches production.
+
 ## [0.3.7] — 2026-05-30
 
 The "harden the whole front door" release. Everything merged since v0.3.6 ships at once: your API key now survives a proxy compromise (a crypto sidecar holds the key, not the proxy), OpenClaw runs fully containerised and `worthless lock` refuses to proceed when plaintext keys are present, and the entire install path — `worthless.sh`, the `?explain=1` audit, the PyPI publish, and the Worker deploy — is version-pinned and signed-tag-verified end to end. Plus a wave of `lock`/`doctor` fixes that tell you the truth instead of failing silently.
@@ -166,6 +195,7 @@ First release published to PyPI. `pip install worthless` now works.
 - Gate evaluation strictly precedes shard reconstruction (SR-03).
 - Published artifacts built via PyPI trusted publishing (OIDC, no long-lived tokens).
 
+[0.3.8]: https://github.com/shacharm2/worthless/releases/tag/v0.3.8
 [0.3.7]: https://github.com/shacharm2/worthless/releases/tag/v0.3.7
 [0.3.6]: https://github.com/shacharm2/worthless/releases/tag/v0.3.6
 [0.3.5]: https://github.com/shacharm2/worthless/releases/tag/v0.3.5
