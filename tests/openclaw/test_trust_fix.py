@@ -284,10 +284,13 @@ def test_lock_json_flag_propagates_to_sentinel(
     assert result.exit_code == 0, result.output
 
     # Sentinel still exists with the same fields a JSON consumer would
-    # expect (the report-format wire contract).
+    # expect (the report-format wire contract). The schema is documented
+    # as wire-stable, additive only (see ``sentinel.py``) — so we assert
+    # the core fields are present rather than an exact-match key set.
+    # WOR-658 adds ``bind_confirmation`` as an optional additive field.
     sentinel = read_sentinel(home_dir.base_dir)
     assert sentinel is not None
-    assert set(sentinel.keys()) == {"ts", "status", "openclaw", "alias_count", "events"}
+    assert {"ts", "status", "openclaw", "alias_count", "events"}.issubset(sentinel.keys())
 
 
 # ---------------------------------------------------------------------------
