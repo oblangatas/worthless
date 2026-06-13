@@ -3,7 +3,7 @@
 > [!NOTE]
 > **Planned** -- Team deployment with per-member spend caps and a shared dashboard
 > is not yet available. The documentation below describes the target-state design.
-> See the [README](../README.md) for current install options.
+> See the [GitHub repository](https://github.com/shacharm2/worthless) for current install options.
 
 ## Target-state features
 
@@ -24,4 +24,4 @@ worthless lock
 worthless wrap python your_app.py
 ```
 
-See the [README](../README.md) for the full quickstart.
+See the [GitHub repository](https://github.com/shacharm2/worthless) for the full quickstart.

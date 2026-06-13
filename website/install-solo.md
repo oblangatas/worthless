@@ -2,7 +2,7 @@
 
 > [!NOTE]
 > **Not yet available.** The one-line installer requires a PyPI package and domain
-> that are not yet published. Install from source -- see the [README](../README.md).
+> that are not yet published. Install from source -- see the [GitHub repository](https://github.com/shacharm2/worthless).
 
 ## Target-state install (coming soon)
 
@@ -31,4 +31,4 @@ worthless lock
 worthless wrap python your_app.py
 ```
 
-See the [README quickstart](../README.md#quickstart) for full walkthrough.
+See the [README quickstart](https://github.com/shacharm2/worthless#quickstart) for full walkthrough.
