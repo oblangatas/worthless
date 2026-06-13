@@ -345,7 +345,7 @@ def test_homepage_uses_approved_hero_tagline() -> None:
     index = (DOCS / "index.html").read_text(encoding="utf-8")
     coming_soon = (DOCS / "coming-soon.html").read_text(encoding="utf-8")
 
-    assert "Your API key just got leaked. Or stolen. Doesn't matter." in index
+    assert "Your API key just got leaked. Or stolen." in index
     assert (
         '<summary role="button" aria-expanded="false">'
         "Worthless makes leaked keys worthless. How?</summary>" in index
