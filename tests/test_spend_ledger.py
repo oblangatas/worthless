@@ -836,3 +836,56 @@ async def test_float_override_truncates_down_conservatively(tmp_path) -> None:
         assert await _committed(db, "k1") == 200_000, "float must truncate down, not up"
     finally:
         await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Upgrade-safety: proxy restarted on a DB that predates the ceiling_override
+# column (executescript(SCHEMA) never adds columns). The fail-closed settle /
+# sweep path must bill the global floor, not crash and orphan the charge.
+# ---------------------------------------------------------------------------
+
+
+async def _open_unmigrated(tmp_path) -> aiosqlite.Connection:
+    """Full schema, then DROP ceiling_override to mimic a pre-WOR-705 DB."""
+    db = await _open(tmp_path)
+    await db.execute("ALTER TABLE enrollment_config DROP COLUMN ceiling_override")
+    await db.commit()
+    return db
+
+
+@pytest.mark.asyncio
+async def test_settle_at_estimate_fails_closed_on_unmigrated_db(tmp_path) -> None:
+    """A missing ceiling_override column must NOT crash settle — it bills the
+    global floor. Otherwise the SELECT raises OperationalError, the txn rolls
+    back, the hold orphans, and the disconnect goes un-billed (under-billing).
+    """
+    db = await _open_unmigrated(tmp_path)
+    try:
+        ledger = SpendLedger(db)
+        h = await ledger.hold("k1", estimate=0, cap=10_000_000, provider="openai")
+        await ledger.settle_at_estimate(h)
+        assert await _committed(db, "k1") == GLOBAL_CEILING_TOKENS, (
+            "missing column must fail CLOSED to the global floor, not crash"
+        )
+        assert await _held(db, "k1") == 0, "hold must not be orphaned"
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_sweep_fails_closed_on_unmigrated_db(tmp_path) -> None:
+    """The sweeper backstop also bills the global floor when the column is
+    missing — it reads ceilings via the batch path, which must fail closed too.
+    """
+    db = await _open_unmigrated(tmp_path)
+    try:
+        await db.execute(
+            "INSERT INTO pending_charges (handle, key_alias, estimate, created_at, provider) "
+            "VALUES ('orphan', 'k1', 0, datetime('now', '-1 hour'), 'openai')"
+        )
+        await db.commit()
+        ledger = SpendLedger(db)
+        assert await ledger.sweep(max_age_seconds=60) == 1
+        assert await _committed(db, "k1") == GLOBAL_CEILING_TOKENS
+    finally:
+        await db.close()

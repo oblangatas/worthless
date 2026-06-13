@@ -123,11 +123,21 @@ class SpendLedger:
 
         Runs on the same connection inside the caller's open transaction.
         """
-        cur = await self._db.execute(
-            "SELECT ceiling_override FROM enrollment_config WHERE key_alias = ?",
-            (alias,),
-        )
-        row = await cur.fetchone()
+        try:
+            cur = await self._db.execute(
+                "SELECT ceiling_override FROM enrollment_config WHERE key_alias = ?",
+                (alias,),
+            )
+            row = await cur.fetchone()
+        except aiosqlite.OperationalError:
+            # Schema drift: e.g. the proxy was restarted on a DB enrolled by an
+            # older version, so executescript(SCHEMA) (CREATE TABLE IF NOT
+            # EXISTS) never added the ceiling_override column. Fail CLOSED to
+            # the global floor rather than crashing — and rolling back — the
+            # settle/sweep billing transaction (which would orphan the hold and
+            # under-bill). A prepare error does not abort the open txn, so the
+            # caller's DELETE+INSERT still commit at the global floor.
+            return GLOBAL_CEILING_TOKENS
         return self._effective_ceiling(row[0] if row else None)
 
     @staticmethod
@@ -167,8 +177,14 @@ class SpendLedger:
             "SELECT key_alias, ceiling_override FROM enrollment_config "  # noqa: S608 — IN placeholders only; values are parameterized
             f"WHERE key_alias IN ({placeholders})"
         )
-        cur = await self._db.execute(query, ordered)
-        stored = {r[0]: r[1] for r in await cur.fetchall()}
+        try:
+            cur = await self._db.execute(query, ordered)
+            stored = {r[0]: r[1] for r in await cur.fetchall()}
+        except aiosqlite.OperationalError:
+            # Schema drift (missing ceiling_override on an un-migrated DB):
+            # fail CLOSED to the global floor for every alias so the sweeper
+            # backstop still bills orphans instead of crashing. See _ceiling_for.
+            return {a: GLOBAL_CEILING_TOKENS for a in ordered}
         return {a: self._effective_ceiling(stored.get(a)) for a in ordered}
 
     async def settle_at_estimate(self, handle: str) -> None:

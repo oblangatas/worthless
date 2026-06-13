@@ -50,7 +50,7 @@ from worthless.proxy.rules import (
     _estimate_tokens,
     extract_model,
 )
-from worthless.storage.schema import SCHEMA
+from worthless.storage.schema import SCHEMA, migrate_db
 from worthless.storage.shard_reader import ShardReader
 
 logger = logging.getLogger(__name__)
@@ -183,6 +183,12 @@ async def _lifespan(app: FastAPI):
     await db.execute("PRAGMA journal_mode=WAL")
     await db.execute("PRAGMA busy_timeout=5000")
     await db.commit()
+    # executescript(SCHEMA) is CREATE TABLE IF NOT EXISTS only — it never adds
+    # new columns to a pre-existing table. A proxy restarted on a DB enrolled by
+    # an older version would lack columns like WOR-705's ceiling_override, which
+    # the fail-closed settle/sweep path reads on every disconnect. Apply
+    # forward-only migrations here too, mirroring ShardRepository.initialize().
+    await migrate_db(settings.db_path)
     app.state.db = db
 
     repo = ShardReader(settings.db_path)
