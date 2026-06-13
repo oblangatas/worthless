@@ -326,9 +326,7 @@ def test_ceiling_has_no_registry() -> None:
     # (e.g. worthless/proxy/registry/__init__.py) — iter_modules would
     # miss those silently.
     forbidden = ("is_known_model", "ceiling_for", "KNOWN_MODELS")
-    for module_info in pkgutil.walk_packages(
-        proxy_pkg.__path__, prefix="worthless.proxy."
-    ):
+    for module_info in pkgutil.walk_packages(proxy_pkg.__path__, prefix="worthless.proxy."):
         try:
             mod = __import__(module_info.name, fromlist=["_"])
         except Exception:  # noqa: S112 — modules with import-time side effects skip
@@ -935,3 +933,40 @@ async def test_cap_actually_denies_next_request_after_ceiling_settle() -> None:
         finally:
             await app.state.httpx_client.aclose()
             await db.close()
+
+
+@pytest.mark.asyncio
+async def test_lifespan_migrates_unmigrated_db() -> None:
+    """Root-cause guard: the proxy lifespan must apply forward migrations, not
+    only executescript(SCHEMA).
+
+    A DB enrolled by an older version lacks WOR-705's ceiling_override column.
+    executescript(SCHEMA) is CREATE TABLE IF NOT EXISTS only — it never adds it.
+    Without migrate_db in the lifespan, the fail-closed settle/sweep path reads
+    a missing column on every disconnect. Assert the column appears on startup.
+    """
+    with tempfile.TemporaryDirectory(prefix="ceiling-migrate-") as tmp:
+        db_path = str(Path(tmp) / "old.db")
+        async with aiosqlite.connect(db_path) as setup:
+            await setup.executescript(SCHEMA)
+            await setup.execute("ALTER TABLE enrollment_config DROP COLUMN ceiling_override")
+            await setup.commit()
+
+        settings = ProxySettings(
+            db_path=db_path,
+            fernet_key=bytearray(Fernet.generate_key()),
+            default_rate_limit_rps=10_000.0,
+            upstream_timeout=10.0,
+            streaming_timeout=30.0,
+            allow_insecure=True,
+        )
+        app = create_app(settings)
+        async with app.router.lifespan_context(app):
+            pass  # startup runs migrate_db
+
+        async with aiosqlite.connect(db_path) as check:
+            cur = await check.execute("PRAGMA table_info(enrollment_config)")
+            cols = {row[1] for row in await cur.fetchall()}
+        assert "ceiling_override" in cols, (
+            "proxy lifespan must migrate the DB on startup, not just apply SCHEMA"
+        )

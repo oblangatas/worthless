@@ -75,6 +75,7 @@ CREATE TABLE IF NOT EXISTS enrollment_config (
     token_budget_weekly  INTEGER,
     token_budget_monthly INTEGER,
     time_window          TEXT,
+    ceiling_override     INTEGER,
     created_at           TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -279,6 +280,8 @@ async def migrate_db(db_path: str) -> None:
             "token_budget_weekly": _ALTER + " token_budget_weekly INTEGER",
             "token_budget_monthly": _ALTER + " token_budget_monthly INTEGER",
             "time_window": _ALTER + " time_window TEXT",
+            # WOR-705: per-key fail-closed ceiling override (raise-only).
+            "ceiling_override": _ALTER + " ceiling_override INTEGER",
         }
         for col_name, stmt in _CONFIG_MIGRATIONS.items():
             if col_name not in config_columns:

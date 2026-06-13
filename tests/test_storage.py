@@ -761,3 +761,102 @@ async def test_migrate_no_backup_when_already_migrated(tmp_path) -> None:
     assert len(backups) == 0, (
         f"backup file created on no-op migration; got: {[p.name for p in backups]}"
     )
+
+
+# ------------------------------------------------------------------
+# WOR-705: per-key ceiling override — migration + setter
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_migrate_adds_ceiling_override(tmp_path) -> None:
+    """An OLD-shape enrollment_config (no ceiling_override) gains the column.
+
+    Builds a full-SCHEMA DB, then DROPs ceiling_override to simulate a
+    pre-WOR-705 database — so the ALTER path is genuinely exercised, not
+    satisfied trivially by the current SCHEMA.
+    """
+    db_path = str(tmp_path / "old_ceiling.db")
+    async with aiosqlite.connect(db_path) as db:
+        await db.executescript(SCHEMA)
+        await db.execute("ALTER TABLE enrollment_config DROP COLUMN ceiling_override")
+        await db.commit()
+        cursor = await db.execute("PRAGMA table_info(enrollment_config)")
+        before = {row[1] for row in await cursor.fetchall()}
+    assert "ceiling_override" not in before, "setup: column should be absent pre-migration"
+
+    await migrate_db(db_path)
+
+    async with aiosqlite.connect(db_path) as db:
+        cursor = await db.execute("PRAGMA table_info(enrollment_config)")
+        after = {row[1] for row in await cursor.fetchall()}
+    assert "ceiling_override" in after, "migration did not add ceiling_override"
+
+
+@pytest.mark.asyncio
+async def test_migrate_ceiling_override_idempotent(tmp_path) -> None:
+    """Migrating twice (column already present) does not error."""
+    db_path = str(tmp_path / "ceiling_idempotent.db")
+    async with aiosqlite.connect(db_path) as db:
+        await db.executescript(SCHEMA)
+        await db.commit()
+    await migrate_db(db_path)
+    await migrate_db(db_path)  # second run must not raise
+
+
+@pytest.mark.asyncio
+async def test_set_ceiling_override_persists(tmp_db_path: str, fernet_key: bytes) -> None:
+    """set_ceiling_override writes a valid override that reads back."""
+    repo = ShardRepository(tmp_db_path, fernet_key)
+    await repo.initialize()
+    async with aiosqlite.connect(tmp_db_path) as db:
+        await db.execute("INSERT INTO enrollment_config (key_alias) VALUES ('k1')")
+        await db.commit()
+
+    ok = await repo.set_ceiling_override("k1", 200_000)
+    assert ok is True
+
+    async with aiosqlite.connect(tmp_db_path) as db:
+        cursor = await db.execute(
+            "SELECT ceiling_override FROM enrollment_config WHERE key_alias = 'k1'"
+        )
+        (val,) = await cursor.fetchone()
+    assert val == 200_000
+
+
+@pytest.mark.asyncio
+async def test_set_ceiling_override_missing_alias_returns_false(
+    tmp_db_path: str, fernet_key: bytes
+) -> None:
+    """No enrollment_config row → setter reports no update (False)."""
+    repo = ShardRepository(tmp_db_path, fernet_key)
+    await repo.initialize()
+    ok = await repo.set_ceiling_override("nope", 200_000)
+    assert ok is False
+
+
+@pytest.mark.asyncio
+async def test_set_ceiling_override_rejects_below_global(
+    tmp_db_path: str, fernet_key: bytes
+) -> None:
+    """Raise-only: an override below the global ceiling is rejected."""
+    from worthless.proxy.config import GLOBAL_CEILING_TOKENS
+
+    repo = ShardRepository(tmp_db_path, fernet_key)
+    await repo.initialize()
+    with pytest.raises(ValueError):
+        await repo.set_ceiling_override("k1", GLOBAL_CEILING_TOKENS - 1)
+
+
+@pytest.mark.asyncio
+async def test_set_ceiling_override_rejects_nonpositive_and_bool(
+    tmp_db_path: str, fernet_key: bytes
+) -> None:
+    """Zero, negative, and bool (an int subclass) are all rejected."""
+    repo = ShardRepository(tmp_db_path, fernet_key)
+    await repo.initialize()
+    for bad in (0, -5):
+        with pytest.raises(ValueError):
+            await repo.set_ceiling_override("k1", bad)
+    with pytest.raises(ValueError):
+        await repo.set_ceiling_override("k1", True)  # bool is an int subclass

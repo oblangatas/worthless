@@ -23,6 +23,10 @@ __all__ = ["SpendLedger"]
 # 128-bit CSPRNG handle (SR-08: CSPRNG only — never the stdlib ``random``).
 _HANDLE_BYTES = 16
 
+# Largest value SQLite can store in a signed-64-bit INTEGER column. A charge
+# above this raises OverflowError on INSERT (brutus PR #294, _effective_ceiling).
+_SQLITE_INT64_MAX = 2**63 - 1
+
 
 class SpendLedger:
     """Hold / settle / refund / sweep over the ``pending_charges`` table."""
@@ -110,6 +114,91 @@ class SpendLedger:
                 await self._db.rollback()
                 raise
 
+    async def _ceiling_for(self, alias: str) -> int:
+        """Per-key fail-closed ceiling for *alias*, clamped to the global floor.
+
+        WOR-705: an operator may raise the ceiling for one key via
+        ``enrollment_config.ceiling_override`` (e.g. a heavy-reasoning customer
+        whose model's max-output exceeds the global 128K). The override can only
+        RAISE the floor — a NULL, or any value below ``GLOBAL_CEILING_TOKENS``
+        however it got there (direct SQL, a pre-validation row), falls back to
+        the audited global. The global is an inviolable minimum at read time,
+        independent of the setter's write-side validation.
+
+        Runs on the same connection inside the caller's open transaction.
+        """
+        try:
+            cur = await self._db.execute(
+                "SELECT ceiling_override FROM enrollment_config WHERE key_alias = ?",
+                (alias,),
+            )
+            row = await cur.fetchone()
+        except aiosqlite.OperationalError:
+            # Schema drift: e.g. the proxy was restarted on a DB enrolled by an
+            # older version, so executescript(SCHEMA) (CREATE TABLE IF NOT
+            # EXISTS) never added the ceiling_override column. Fail CLOSED to
+            # the global floor rather than crashing — and rolling back — the
+            # settle/sweep billing transaction (which would orphan the hold and
+            # under-bill). A prepare error does not abort the open txn, so the
+            # caller's DELETE+INSERT still commit at the global floor.
+            return GLOBAL_CEILING_TOKENS
+        return self._effective_ceiling(row[0] if row else None)
+
+    @staticmethod
+    def _effective_ceiling(override: object) -> int:
+        """Clamp a raw stored override value to a safe int >= the global floor.
+
+        worthless-8xdq: SQLite INTEGER affinity does NOT reject text/blob/inf,
+        so a value forced in via direct SQL could be non-numeric. Coerce
+        defensively — any conversion failure fails CLOSED to the global floor
+        rather than crashing (and rolling back) the settle/sweep transaction.
+        worthless-y14x: a float truncates toward zero, conservative for a floor.
+        brutus PR #294: a value >= 2**63 PARSES via int() but is too large for
+        SQLite's signed-64-bit INTEGER, so charging it would crash the spend_log
+        INSERT with OverflowError — which is NOT OperationalError, so the
+        settle/sweep guards would miss it and roll back (orphan + under-bill).
+        Treat a non-representable value as garbage → the global floor too.
+        NULL → the global floor. The global is an inviolable minimum regardless
+        of what is stored.
+        """
+        if override is None:
+            return GLOBAL_CEILING_TOKENS
+        try:
+            value = int(override)  # type: ignore[arg-type]
+        except (TypeError, ValueError, OverflowError):
+            return GLOBAL_CEILING_TOKENS
+        if value > _SQLITE_INT64_MAX:
+            # Not storable as a spend_log charge — fail closed, never crash.
+            return GLOBAL_CEILING_TOKENS
+        return max(value, GLOBAL_CEILING_TOKENS)
+
+    async def _ceilings_for(self, aliases: set[str]) -> dict[str, int]:
+        """Batch form of :meth:`_ceiling_for` — one query for many aliases.
+
+        worthless-v2mr: the sweeper can process a large orphan batch after a
+        mass crash; a per-orphan SELECT inside the write lock serialises N
+        round-trips. Resolve them all in one query. Aliases absent from
+        enrollment_config, or with a NULL/garbage override, fall back to the
+        global floor via :meth:`_effective_ceiling`.
+        """
+        if not aliases:
+            return {}
+        ordered = list(aliases)
+        placeholders = ",".join("?" * len(ordered))
+        query = (
+            "SELECT key_alias, ceiling_override FROM enrollment_config "  # noqa: S608 — IN placeholders only; values are parameterized
+            f"WHERE key_alias IN ({placeholders})"
+        )
+        try:
+            cur = await self._db.execute(query, ordered)
+            stored = {r[0]: r[1] for r in await cur.fetchall()}
+        except aiosqlite.OperationalError:
+            # Schema drift (missing ceiling_override on an un-migrated DB):
+            # fail CLOSED to the global floor for every alias so the sweeper
+            # backstop still bills orphans instead of crashing. See _ceiling_for.
+            return {a: GLOBAL_CEILING_TOKENS for a in ordered}
+        return {a: self._effective_ceiling(stored.get(a)) for a in ordered}
+
     async def settle_at_estimate(self, handle: str) -> None:
         """Atomically swap the hold for one ``spend_log`` row at the hold's STORED
         estimate (fail-closed fallback when the provider's actual usage can't be
@@ -133,10 +222,11 @@ class SpendLedger:
                 # WOR-696: fail-closed metering. settle_at_estimate fires when
                 # the actual usage is unreadable (disconnect, parse fail, stream
                 # kill). The stored estimate may be tiny — or zero — for a
-                # request that omitted max_tokens. Charge at least the global
-                # ceiling so the cap counter moves honestly. Direction of error
-                # is conservative; we never under-bill on the fallback path.
-                charge = max(estimate, GLOBAL_CEILING_TOKENS)
+                # request that omitted max_tokens. Charge at least the ceiling
+                # so the cap counter moves honestly. Direction of error is
+                # conservative; we never under-bill on the fallback path.
+                # WOR-705: the ceiling is per-key (override) clamped to global.
+                charge = max(estimate, await self._ceiling_for(alias))
                 await self._db.execute("DELETE FROM pending_charges WHERE handle = ?", (handle,))
                 await self._db.execute(
                     "INSERT INTO spend_log (key_alias, tokens, model, provider)"
@@ -173,14 +263,18 @@ class SpendLedger:
                     (f"-{int(max_age_seconds)} seconds",),
                 )
                 stale = list(await cur.fetchall())
+                # worthless-v2mr: resolve every distinct alias's ceiling in ONE
+                # query rather than a per-orphan SELECT inside the write lock.
+                ceilings = await self._ceilings_for({alias for _, alias, *_ in stale})
                 for handle, alias, estimate, provider, model in stale:
                     # WOR-696 / worthless-osgt: orphans from SIGKILL'd or
                     # crashed BackgroundTasks bypass the normal settle floor.
-                    # Apply the same GLOBAL_CEILING_TOKENS floor here so the
-                    # sweeper backstop can't be exploited by killing the
-                    # proxy between stream-start and settle. Upward-only —
-                    # honest large estimates pass through unchanged.
-                    charge = max(estimate, GLOBAL_CEILING_TOKENS)
+                    # Apply the same ceiling floor here so the sweeper backstop
+                    # can't be exploited by killing the proxy between
+                    # stream-start and settle. Upward-only — honest large
+                    # estimates pass through unchanged.
+                    # WOR-705: per-key override (clamped to global) applies here too.
+                    charge = max(estimate, ceilings[alias])
                     await self._db.execute(
                         "DELETE FROM pending_charges WHERE handle = ?", (handle,)
                     )
