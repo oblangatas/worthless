@@ -33,3 +33,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      - name: Docs image tags match released version (WOR-736)
+        # PR-time half of the docs version guard: fail a docs PR that pins a
+        # worthless-proxy:X.Y.Z image tag older than install.sh's pin. The
+        # release-driven-drift backstop is A1b in release-sync-check.yml.
+        run: python3 scripts/check_docs_versions.py

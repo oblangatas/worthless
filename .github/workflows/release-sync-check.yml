@@ -121,6 +121,20 @@ jobs:
           fi
           echo "OK: PyPI = tag = pyproject@tag = install.sh pin = $LATEST_VERSION"
 
+      # ===== Assertion 1b: docs image tags match the released version =======
+      - name: A1b — docs/ pinned image tags == released version
+        env:
+          LATEST_VERSION: ${{ steps.versions.outputs.latest_version }}
+        run: |
+          set -euo pipefail
+          # WOR-736: docs hardcode `worthless-proxy:X.Y.Z` image tags. Twice
+          # they lagged a release (0.3.1 in WOR-734, 0.3.3 in WOR-733) and
+          # pointed readers at an outdated image. Assert every pinned tag in
+          # docs/ equals the released version. The same script runs on docs
+          # PRs (docs-spike.yml) for PR-time prevention; THIS is the backstop
+          # for release-driven drift (a release moves, no docs PR fires).
+          python3 scripts/check_docs_versions.py "$LATEST_VERSION"
+
       # ===== Assertion 2a: worthless.sh content negotiation (curl) ==========
       - name: A2a — worthless.sh curl-UA serves install.sh @ latest tag
         env:
