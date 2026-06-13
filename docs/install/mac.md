@@ -42,7 +42,7 @@ worthless --version
 Expected output:
 
 ```text
-worthless 0.3.3
+worthless 0.3.8
 ```
 
 If you see "command not found", `~/.local/bin` isn't on your PATH yet.
