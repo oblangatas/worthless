@@ -752,6 +752,138 @@ async def _compensating_unwind(
     return errors
 
 
+def _fire_synthetic_request(host: str, port: int, alias: str) -> bool:
+    """WOR-658: send one minimal request to the proxy at the alias's URL so
+    the ``requests_proxied`` counter increments.
+
+    Returns ``True`` iff the request reached the proxy's handler (got an HTTP
+    response, any status). Returns ``False`` on network/connection errors —
+    those mean the proxy couldn't be reached at all, so the counter delta
+    cannot be interpreted as evidence either way and ``_confirm_bind`` will
+    classify the result as ``skipped`` rather than ``fail``.
+
+    HEAD over GET because some proxy handlers reject GET on a base path
+    while still recording the request. A 1 s timeout caps the bind-confirmation
+    cost so a hung upstream can't stall ``worthless lock``.
+    """
+    # Local import keeps lock.py's module-load cost untouched on the cold
+    # path (lock is in the hot CLI path; bind-confirmation only runs after
+    # a successful OpenClaw rewrite).
+    import httpx  # noqa: PLC0415
+
+    url = f"http://{host}:{port}/{alias}/v1/"
+    try:
+        with httpx.Client(timeout=1.0) as client:
+            client.head(url)
+    except (httpx.HTTPError, OSError):
+        return False
+    return True
+
+
+def _confirm_bind(
+    planned: list[_PlannedUpdate],
+    *,
+    host: str,
+    port: int,
+) -> dict[str, object]:
+    """WOR-658 bind-confirmation. Prove the rewritten OpenClaw entry actually
+    routes through the proxy by firing one synthetic request per alias and
+    observing the proxy's ``requests_proxied`` counter.
+
+    Returns a result block suitable for the sentinel:
+    * ``status == "pass"`` — counter incremented by at least 1; the rewrite
+      is in the path.
+    * ``status == "fail"`` — counter did not move; the rewrite is NOT routing,
+      lock must refuse to claim success (silent-bypass class, WOR-514).
+    * ``status == "skipped"`` — proxy unhealthy at the before- or after-read,
+      OR there was nothing to confirm (no aliases). Inconclusive, not a fail.
+    """
+    aliases = [p.alias for p in planned]
+    if not aliases:
+        return {"status": "skipped", "reason": "no_aliases", "delta": 0, "aliases": []}
+
+    try:
+        before_health = check_proxy_health(port)
+    except Exception:  # noqa: BLE001 — bind-confirmation must never crash lock
+        return {
+            "status": "skipped",
+            "reason": "proxy_check_raised_before",
+            "delta": 0,
+            "aliases": aliases,
+        }
+    if not before_health.get("healthy"):
+        return {
+            "status": "skipped",
+            "reason": "proxy_unhealthy_before",
+            "delta": 0,
+            "aliases": aliases,
+        }
+    before = int(before_health.get("requests_proxied", 0))
+
+    reached = 0
+    for alias in aliases:
+        try:
+            if _fire_synthetic_request(host, port, alias):
+                reached += 1
+        except Exception:  # noqa: BLE001 — never crash lock from this layer
+            logger.debug("bind-confirmation fire raised for %s", alias, exc_info=True)
+
+    try:
+        after_health = check_proxy_health(port)
+    except Exception:  # noqa: BLE001
+        return {
+            "status": "skipped",
+            "reason": "proxy_check_raised_after",
+            "delta": 0,
+            "aliases": aliases,
+        }
+    if not after_health.get("healthy"):
+        return {
+            "status": "skipped",
+            "reason": "proxy_unhealthy_after",
+            "delta": 0,
+            "aliases": aliases,
+        }
+    after = int(after_health.get("requests_proxied", 0))
+
+    delta = after - before
+
+    # Tri-state classify:
+    # * delta > 0                    → pass (counter moved; the request reached
+    #                                  the counter via the rewritten alias path)
+    # * reached == 0 AND delta == 0  → skipped: every fire failed at the
+    #                                  network layer, so the proxy never saw
+    #                                  the synthetic request. We can't tell
+    #                                  whether the rewrite routes — only that
+    #                                  the test harness didn't.
+    # * reached >  0 AND delta == 0  → fail: the proxy received the request
+    #                                  but did NOT count it. That's the
+    #                                  silent-bypass class (WOR-514) we care
+    #                                  about — the rewritten entry isn't
+    #                                  routing through Worthless.
+    if delta > 0:
+        return {
+            "status": "pass",
+            "delta": delta,
+            "aliases": aliases,
+            "reached": reached,
+        }
+    if reached == 0:
+        return {
+            "status": "skipped",
+            "reason": "synthetic_unreachable",
+            "delta": delta,
+            "aliases": aliases,
+            "reached": reached,
+        }
+    return {
+        "status": "fail",
+        "delta": delta,
+        "aliases": aliases,
+        "reached": reached,
+    }
+
+
 def _apply_openclaw(
     planned: list[_PlannedUpdate],
     console,  # noqa: ANN001 — Console type is opaque from this layer
@@ -831,13 +963,30 @@ def _apply_openclaw(
             if result.skill_installed:
                 console.print_hint("   • ~/.openclaw/workspace/skills/worthless/ — installed skill")
             console.print_hint("   • Undo: worthless unlock")
+
+        # WOR-658: prove the rewrite actually routes. A "fail" verdict here
+        # means lock-core succeeded on disk but the OpenClaw entry isn't
+        # routing through the proxy — silent-bypass class (WOR-514).
+        bind_confirmation = _confirm_bind(planned, host=_proxy_host, port=resolve_port(None))
         _write_lock_sentinel(
             home,
-            status="ok",
+            status="partial" if bind_confirmation["status"] == "fail" else "ok",
             openclaw="ok",
             alias_count=len(result.providers_set),
             events=tuple(e.to_dict() for e in result.events),
+            bind_confirmation=bind_confirmation,
         )
+        if bind_confirmation["status"] == "fail":
+            if not quiet:
+                console.print_failure(
+                    "[FAIL] Bind-confirmation: synthetic request did not "
+                    "reach the proxy. The rewritten OpenClaw entry is NOT "
+                    "routing — do NOT trust this lock."
+                )
+                console.print_warning(
+                    "   Run `worthless status` for details; `worthless doctor` may help."
+                )
+            return 87
         return 0
 
     # Detected + failed: the trust-failure path. Print [FAIL] block, write
@@ -1023,6 +1172,7 @@ def _write_lock_sentinel(
     openclaw: str,
     alias_count: int,
     events: tuple[dict[str, str], ...],
+    bind_confirmation: dict[str, object] | None = None,
 ) -> None:
     """Best-effort sentinel write. Failure is logged + swallowed."""
     try:
@@ -1034,6 +1184,7 @@ def _write_lock_sentinel(
             openclaw=openclaw,
             alias_count=alias_count,
             events=list(events),
+            bind_confirmation=bind_confirmation,
         )
     except OSError as exc:
         logger.warning("sentinel write failed: %s", exc)

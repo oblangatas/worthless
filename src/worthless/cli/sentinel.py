@@ -52,6 +52,7 @@ def write_sentinel(
     openclaw: str,
     alias_count: int,
     events: list[dict[str, Any]] | None = None,
+    bind_confirmation: dict[str, Any] | None = None,
 ) -> Path:
     """Atomically write the sentinel for the current ``worthless lock``/``unlock`` outcome.
 
@@ -64,6 +65,10 @@ def write_sentinel(
         alias_count: number of aliases the operation touched (lock: wired;
             unlock: removed).
         events: structured event payload, ``OpenclawIntegrationEvent.asdict()``-ish.
+        bind_confirmation: WOR-658 result block. ``None`` means lock did not
+            run bind-confirmation (e.g. OpenClaw absent, or this is an unlock
+            sentinel). Wire-stable additive field — unknown to older readers,
+            which ignore it.
 
     Returns:
         The path written.
@@ -75,13 +80,15 @@ def write_sentinel(
     """
     home_base_dir.mkdir(parents=True, exist_ok=True)
     target = sentinel_path(home_base_dir)
-    payload = {
+    payload: dict[str, Any] = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "status": status,
         "openclaw": openclaw,
         "alias_count": alias_count,
         "events": events or [],
     }
+    if bind_confirmation is not None:
+        payload["bind_confirmation"] = bind_confirmation
 
     fd, tmp_name = tempfile.mkstemp(
         prefix=f".{SENTINEL_FILENAME}.",

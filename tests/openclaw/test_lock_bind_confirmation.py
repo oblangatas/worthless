@@ -107,6 +107,9 @@ def _patch_proxy_counter(
     def fake_fire_synthetic_request(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202 — opaque stub
         if tick_on_fire:
             state["counter"] += 1
+        # Always "reached" in the mock — the proxy is conceptually present.
+        # Real-world classify: reached + no-tick = fail (silent bypass).
+        return True
 
     monkeypatch.setattr(lock_mod, "check_proxy_health", fake_check_proxy_health)
     monkeypatch.setattr(
