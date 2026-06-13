@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import aiosqlite
 import pytest
+from hypothesis import example, given
+from hypothesis import strategies as st
 
 from worthless.storage.repository import EncryptedShard, ShardRepository, StoredShard
 from worthless.storage.schema import SCHEMA, migrate_db
@@ -350,6 +352,78 @@ async def test_migrate_rules_columns_default_null(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_migrate_adds_original_mode_column(tmp_path) -> None:
+    """WOR-715: migration adds enrollments.original_mode to a pre-715 DB.
+
+    Simulates an install done before this ticket: enrollments WITHOUT
+    original_mode. After migrate_db the column exists and legacy rows
+    backfill NULL (= "mode unknown, leave file mode as-is" at uninstall).
+    """
+    db_path = str(tmp_path / "pre_wor715.db")
+
+    # Old enrollments schema: everything the current schema has EXCEPT
+    # original_mode, so the migration's only job here is to add it.
+    async with aiosqlite.connect(db_path) as db:
+        await db.executescript(
+            """
+            CREATE TABLE shards (
+                key_alias   TEXT PRIMARY KEY,
+                shard_b_enc BLOB NOT NULL,
+                commitment  BLOB NOT NULL,
+                nonce       BLOB NOT NULL,
+                provider    TEXT NOT NULL
+            );
+            CREATE TABLE enrollments (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                key_alias  TEXT NOT NULL,
+                var_name   TEXT NOT NULL,
+                env_path   TEXT,
+                decoy_hash TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(key_alias, var_name, env_path)
+            );
+            """
+        )
+        await db.execute(
+            "INSERT INTO shards (key_alias, shard_b_enc, commitment, nonce, provider) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("legacy-key", b"b", b"c", b"n", "openai"),
+        )
+        await db.execute(
+            "INSERT INTO enrollments (key_alias, var_name, env_path) VALUES (?, ?, ?)",
+            ("legacy-key", "OPENAI_API_KEY", "/home/alice/proj/.env"),
+        )
+        await db.commit()
+
+    await migrate_db(db_path)
+
+    async with aiosqlite.connect(db_path) as db:
+        cursor = await db.execute("PRAGMA table_info(enrollments)")
+        columns = {row[1] for row in await cursor.fetchall()}
+        assert "original_mode" in columns, "migration did not add enrollments.original_mode"
+
+        cursor = await db.execute(
+            "SELECT original_mode FROM enrollments WHERE key_alias = ?", ("legacy-key",)
+        )
+        row = await cursor.fetchone()
+    assert row is not None
+    assert row[0] is None, f"legacy row should backfill NULL, got {row[0]!r}"
+
+
+@pytest.mark.asyncio
+async def test_migrate_original_mode_idempotent(tmp_path) -> None:
+    """WOR-715: running the original_mode migration twice doesn't error."""
+    db_path = str(tmp_path / "original_mode_idempotent.db")
+
+    async with aiosqlite.connect(db_path) as db:
+        await db.executescript(SCHEMA)
+        await db.commit()
+
+    await migrate_db(db_path)
+    await migrate_db(db_path)  # second run must not raise
+
+
+@pytest.mark.asyncio
 async def test_spend_log_index_exists_after_migrate(tmp_path) -> None:
     """Migration creates idx_spend_log_alias_created index."""
     db_path = str(tmp_path / "index.db")
@@ -414,6 +488,236 @@ async def test_store_enrolled_with_prefix_charset(
     assert enc is not None
     assert enc.prefix == "sk-proj-"
     assert enc.charset == "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
+
+
+@pytest.mark.asyncio
+async def test_store_enrolled_persists_original_mode(
+    repo: ShardRepository,
+    tmp_db_path: str,
+    sample_split_result,
+) -> None:
+    """WOR-715: store_enrolled(original_mode=...) persists it on the enrollment row."""
+    shard = stored_shard_from_split(sample_split_result)
+    await repo.store_enrolled(
+        "mode-alias",
+        shard,
+        var_name="OPENAI_API_KEY",
+        env_path="/tmp/proj/.env",  # noqa: S108
+        original_mode=0o644,
+    )
+
+    async with aiosqlite.connect(tmp_db_path) as db:
+        cursor = await db.execute(
+            "SELECT original_mode FROM enrollments WHERE key_alias = ?", ("mode-alias",)
+        )
+        row = await cursor.fetchone()
+    assert row is not None
+    assert row[0] == 0o644
+
+
+@pytest.mark.asyncio
+async def test_store_enrolled_without_original_mode_is_null(
+    repo: ShardRepository,
+    tmp_db_path: str,
+    sample_split_result,
+) -> None:
+    """WOR-715: omitting original_mode stores NULL (= leave file mode as-is)."""
+    shard = stored_shard_from_split(sample_split_result)
+    await repo.store_enrolled(
+        "no-mode-alias",
+        shard,
+        var_name="OPENAI_API_KEY",
+        env_path="/tmp/proj2/.env",  # noqa: S108
+    )
+
+    async with aiosqlite.connect(tmp_db_path) as db:
+        cursor = await db.execute(
+            "SELECT original_mode FROM enrollments WHERE key_alias = ?", ("no-mode-alias",)
+        )
+        row = await cursor.fetchone()
+    assert row is not None
+    assert row[0] is None
+
+
+@pytest.mark.asyncio
+async def test_store_enrolled_masks_file_type_bits(
+    repo: ShardRepository,
+    tmp_db_path: str,
+    sample_split_result,
+) -> None:
+    """WOR-715: a raw st_mode (S_IFREG|0o644) is stored as permission bits only.
+
+    Guards the phase-3 capture: a naive ``env_path.stat().st_mode`` yields
+    ``0o100644``; the storage boundary must mask it to ``0o644`` so readers
+    and ``f"{mode:o}"`` see permission bits, not the file-type bits.
+    """
+    shard = stored_shard_from_split(sample_split_result)
+    await repo.store_enrolled(
+        "masked-alias",
+        shard,
+        var_name="OPENAI_API_KEY",
+        env_path="/tmp/proj3/.env",  # noqa: S108
+        original_mode=0o100644,  # S_IFREG | 0o644 — the raw stat().st_mode
+    )
+
+    async with aiosqlite.connect(tmp_db_path) as db:
+        cursor = await db.execute(
+            "SELECT original_mode FROM enrollments WHERE key_alias = ?", ("masked-alias",)
+        )
+        row = await cursor.fetchone()
+    assert row is not None
+    assert row[0] == 0o644, f"expected masked 0o644, got {row[0]:o}"
+
+
+@pytest.mark.asyncio
+async def test_add_enrollment_persists_original_mode(
+    repo: ShardRepository,
+    tmp_db_path: str,
+    sample_split_result,
+) -> None:
+    """WOR-715: the add_enrollment path (re-lock / extra location) also persists
+    the masked original_mode — lock.py uses this path, not only store_enrolled.
+    """
+    shard = stored_shard_from_split(sample_split_result)
+    # First location creates the shard + its enrollment.
+    await repo.store_enrolled(
+        "multi-loc-alias",
+        shard,
+        var_name="OPENAI_API_KEY",
+        env_path="/tmp/loc-a/.env",  # noqa: S108
+        original_mode=0o644,
+    )
+    # Second location enrolls via add_enrollment (no new shard).
+    await repo.add_enrollment(
+        "multi-loc-alias",
+        var_name="OPENAI_API_KEY",
+        env_path="/tmp/loc-b/.env",  # noqa: S108
+        original_mode=0o100600,  # raw st_mode; masks to 0o600
+    )
+
+    async with aiosqlite.connect(tmp_db_path) as db:
+        cursor = await db.execute(
+            "SELECT original_mode FROM enrollments WHERE key_alias = ? AND env_path = ?",
+            ("multi-loc-alias", "/tmp/loc-b/.env"),  # noqa: S108
+        )
+        row = await cursor.fetchone()
+    assert row is not None
+    assert row[0] == 0o600, f"expected masked 0o600, got {row[0]:o}"
+
+
+@given(st.integers(min_value=0, max_value=0o177777))
+@example(0o100644)  # S_IFREG | rw-r--r--   (the raw stat().st_mode of a normal .env)
+@example(0o120777)  # S_IFLNK | rwxrwxrwx   (a symlink's st_mode)
+@example(0o102755)  # S_IFREG | setgid | rwxr-xr-x
+@example(0o101644)  # S_IFREG | sticky | rw-r--r--
+def test_perm_bits_strips_all_but_permission_bits(raw_mode: int) -> None:
+    """WOR-715 property: _perm_bits keeps ONLY the 0o777 permission bits.
+
+    No file-type (S_IFREG/S_IFLNK) or special (setuid/setgid/sticky) bit may
+    ever be persisted as original_mode — a refactor to ``& 0o7777`` (special
+    bits) or no mask (type bits) is caught here, not in production.
+    """
+    from worthless.storage.repository import _perm_bits
+
+    result = _perm_bits(raw_mode)
+    assert result is not None
+    assert result == raw_mode & 0o777  # low 9 permission bits preserved
+    assert result & ~0o777 == 0  # nothing above 0o777 survives
+    assert 0 <= result <= 0o777
+
+
+def test_perm_bits_none_passthrough() -> None:
+    """WOR-715: _perm_bits(None) stays None — 'mode unknown, leave file as-is'."""
+    from worthless.storage.repository import _perm_bits
+
+    assert _perm_bits(None) is None
+
+
+@pytest.mark.asyncio
+async def test_store_enrolled_relock_preserves_first_original_mode(
+    repo: ShardRepository,
+    tmp_db_path: str,
+    sample_split_result,
+) -> None:
+    """WOR-715: re-enrolling the same (alias, var, path) keeps the FIRST mode.
+
+    The true pre-lock mode is only knowable at the very first lock; a re-lock
+    would stat the already-tightened 0o600. ``INSERT OR IGNORE`` must keep the
+    original 0o644 — a future switch to UPSERT would silently record 0o600 as
+    the 'original', defeating the whole feature.
+    """
+    shard = stored_shard_from_split(sample_split_result)
+    await repo.store_enrolled(
+        "relock-alias",
+        shard,
+        var_name="OPENAI_API_KEY",
+        env_path="/tmp/relock/.env",  # noqa: S108
+        original_mode=0o644,
+    )
+    # Re-enroll the SAME tuple as if re-locking the now-0o600 file.
+    await repo.store_enrolled(
+        "relock-alias",
+        shard,
+        var_name="OPENAI_API_KEY",
+        env_path="/tmp/relock/.env",  # noqa: S108
+        original_mode=0o600,
+    )
+
+    async with aiosqlite.connect(tmp_db_path) as db:
+        cursor = await db.execute(
+            "SELECT original_mode FROM enrollments WHERE key_alias = ?", ("relock-alias",)
+        )
+        rows = await cursor.fetchall()
+    assert len(rows) == 1, f"expected exactly 1 enrollment row, got {rows}"
+    assert rows[0][0] == 0o644, (
+        f"re-lock must preserve the first-captured 0o644, got {oct(rows[0][0])} — "
+        "INSERT OR IGNORE was likely changed to an UPSERT"
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_enrollments_surfaces_original_mode(
+    repo: ShardRepository,
+    sample_split_result,
+) -> None:
+    """WOR-435 plumbing: original_mode is readable via list_enrollments.
+
+    It's write-only on the WOR-715 branch (no SELECT surfaces it). The
+    uninstaller enumerates locked .env files and needs each one's original
+    mode to restore permissions, so the read path must carry it.
+    """
+    shard = stored_shard_from_split(sample_split_result)
+    await repo.store_enrolled(
+        "mode-read-alias",
+        shard,
+        var_name="OPENAI_API_KEY",
+        env_path="/tmp/read/.env",  # noqa: S108
+        original_mode=0o644,
+    )
+
+    records = await repo.list_enrollments("mode-read-alias")
+    assert len(records) == 1
+    assert records[0].original_mode == 0o644
+
+
+@pytest.mark.asyncio
+async def test_get_enrollment_surfaces_original_mode(
+    repo: ShardRepository,
+    sample_split_result,
+) -> None:
+    """WOR-435 plumbing: get_enrollment also carries original_mode."""
+    shard = stored_shard_from_split(sample_split_result)
+    await repo.store_enrolled(
+        "mode-get-alias",
+        shard,
+        var_name="OPENAI_API_KEY",
+        env_path="/tmp/get/.env",  # noqa: S108
+        original_mode=0o600,
+    )
+
+    rec = await repo.get_enrollment("mode-get-alias", env_path="/tmp/get/.env")  # noqa: S108
+    assert rec is not None
+    assert rec.original_mode == 0o600
 
 
 @pytest.mark.asyncio

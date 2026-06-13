@@ -344,6 +344,20 @@ async def _delete_superseded_location_enrollments(
             await repo.delete_enrolled(stale_alias)
 
 
+def _capture_original_mode(env_str: str) -> int | None:
+    """The ``.env``'s permission bits (``0o777``) before lock tightens it.
+
+    WOR-715: recorded so ``worthless uninstall`` (WOR-435) can restore the
+    original permissions, not just the contents. ``None`` on stat failure
+    (file vanished, EACCES on the dir) = "mode unknown — leave the file
+    as-is at restore" rather than crashing the whole lock.
+    """
+    try:
+        return Path(env_str).stat().st_mode & 0o777
+    except OSError:
+        return None
+
+
 async def _decide_oc_capture(
     *,
     repo: ShardRepository,
@@ -452,6 +466,12 @@ async def _pass1_db_writes(
     dropped the dead third element (``oc_original_base_url``) — the
     original URL lives inside the MAC-bound JSON record.
     """
+    # WOR-715: capture the .env's pre-lock permission bits ONCE, here in
+    # pass-1, BEFORE pass-2 (``_batch_rewrite``) rewrites the file via
+    # ``safe_rewrite`` and forces it to 0o600. During pass-1 the file is still
+    # untouched, so this is the true original mode — capturing any later would
+    # read the already-tightened 0o600 and silently record the wrong value.
+    original_mode = _capture_original_mode(env_str)
     # G3: snapshot openclaw.json BEFORE we touch the DB. We classify each
     # provider against this snapshot so a concurrent OpenClaw write doesn't
     # poison our capture, and so the DB write is the first mutation.
@@ -586,7 +606,9 @@ async def _pass1_db_writes(
                     oc_original_api_key_json=oc_capture_record,
                     oc_rollback_mac=oc_capture_mac,
                 )
-                await repo.add_enrollment(alias, var_name=var_name, env_path=env_str)
+                await repo.add_enrollment(
+                    alias, var_name=var_name, env_path=env_str, original_mode=original_mode
+                )
                 await _delete_superseded_location_enrollments(
                     repo,
                     alias=alias,
@@ -662,6 +684,7 @@ async def _pass1_db_writes(
                 prefix=sr.prefix,
                 charset=sr.charset,
                 base_url=upstream_base_url,
+                original_mode=original_mode,
                 oc_original_api_key_json=oc_capture_record,
                 oc_rollback_mac=oc_capture_mac,
             )

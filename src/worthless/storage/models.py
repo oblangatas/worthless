@@ -71,6 +71,10 @@ class EnrollmentRecord:
     env_path: str | None = None
     decoy_hash: str | None = field(default=None, repr=False)
     provider: str | None = None
+    # WOR-715/WOR-435: the .env's permission bits captured at lock time, so
+    # uninstall can restore the original mode. None = "not captured (pre-715
+    # install), leave the file mode as-is".
+    original_mode: int | None = None
 
 
 @dataclass

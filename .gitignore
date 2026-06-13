@@ -96,9 +96,10 @@ dist/
 .astro/
 
 # Internal — not published to the public repo (WOR-532)
+# /reviews/ = expert-panel artifacts. Blanket-ignored; keep one subfolder per
+# topic (reviews/<topic>/) so parallel panels never collide.
 .beads/
 tests/openclaw/_artifacts/
 .planning/
 .reviews/
-reviews/thermo-nuclear/
-reviews/wor-715-schema-existence/
+/reviews/

@@ -101,6 +101,7 @@ CREATE TABLE IF NOT EXISTS enrollments (
     var_name   TEXT NOT NULL,
     env_path   TEXT,
     decoy_hash TEXT,
+    original_mode INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(key_alias, var_name, env_path)
 );
@@ -294,11 +295,33 @@ async def _migrate_decoy_hash_column(db: aiosqlite.Connection) -> None:
             raise
 
 
+async def _migrate_original_mode_column(db: aiosqlite.Connection) -> None:
+    """WOR-715: add enrollments.original_mode (nullable, no backfill).
+
+    Stores the .env's pre-lock POSIX mode so uninstall can restore the
+    original permissions, not just the contents. ``safe_rewrite`` rewrites
+    every locked .env onto a fresh tmpfile created 0o600 + an explicit
+    ``fchmod(0o600)`` with no ``copymode`` from the original, so a once-0o644
+    .env becomes 0o600 on lock. Without this column uninstall would silently
+    leave it at 0o600. NULL = "mode unknown (pre-715 install), leave as-is".
+    """
+    cursor = await db.execute("PRAGMA table_info(enrollments)")
+    columns = {row[1] for row in await cursor.fetchall()}
+    if "original_mode" not in columns:
+        try:
+            await db.execute("ALTER TABLE enrollments ADD COLUMN original_mode INTEGER")
+            await db.commit()
+        except Exception as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
+
+
 async def migrate_db(db_path: str) -> None:
     """Apply forward-only migrations for existing databases."""
     async with aiosqlite.connect(db_path) as db:
         await _prune_old_spend_log(db)
         await _migrate_decoy_hash_column(db)
+        await _migrate_original_mode_column(db)
 
         cursor = await db.execute("PRAGMA table_info(shards)")
         shard_columns = {row[1] for row in await cursor.fetchall()}

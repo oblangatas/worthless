@@ -113,6 +113,10 @@ from worthless.cli.commands.revoke import register_revoke_commands  # noqa: E402
 
 register_revoke_commands(app)
 
+from worthless.cli.commands.uninstall import register_uninstall_commands  # noqa: E402
+
+register_uninstall_commands(app)
+
 from worthless.cli.commands.restore import register_restore_commands  # noqa: E402
 
 register_restore_commands(app)
