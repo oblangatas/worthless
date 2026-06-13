@@ -19,23 +19,19 @@ PUBLIC_HTML = {
     "docs/memes.html": "https://wless.io/memes.html",
     "docs/coming-soon.html": "https://wless.io/",
     # Public legal pages (WOR-663).
-    "docs/legal.html": "https://wless.io/legal.html",
     "docs/privacy.html": "https://wless.io/privacy.html",
     "docs/terms.html": "https://wless.io/terms.html",
     "docs/security.html": "https://wless.io/security.html",
     "docs/license.html": "https://wless.io/license.html",
-    "docs/subprocessors.html": "https://wless.io/subprocessors.html",
 }
 
 # Footer legal cluster (WOR-663): every public launch page and every legal page
 # links to all six legal documents, with the relative prefix for its directory.
 LEGAL_PAGES = [
-    "legal.html",
     "privacy.html",
     "terms.html",
     "security.html",
     "license.html",
-    "subprocessors.html",
 ]
 
 FOOTER_LEGAL_SURFACES = {
@@ -46,21 +42,17 @@ FOOTER_LEGAL_SURFACES = {
     "docs/coming-soon.html": "",
     "docs/blog/index.html": "../",
     "docs/red/index.html": "../",
-    "docs/legal.html": "",
     "docs/privacy.html": "",
     "docs/terms.html": "",
     "docs/security.html": "",
     "docs/license.html": "",
-    "docs/subprocessors.html": "",
 }
 
 LEGAL_DOC_PAGES = [
-    "docs/legal.html",
     "docs/privacy.html",
     "docs/terms.html",
     "docs/security.html",
     "docs/license.html",
-    "docs/subprocessors.html",
 ]
 
 SEO_DISCOVERY_FILES = [
@@ -281,12 +273,10 @@ def test_sitemap_uses_existing_wless_public_pages() -> None:
         "https://wless.io/red/posts/shai-hulud.html",
         "https://wless.io/red/posts/github-action-secrets.html",
         "https://wless.io/memes.html",
-        "https://wless.io/legal.html",
         "https://wless.io/privacy.html",
         "https://wless.io/terms.html",
         "https://wless.io/security.html",
         "https://wless.io/license.html",
-        "https://wless.io/subprocessors.html",
     ]
     assert "https://wless.io/coming-soon.html" not in locs
 

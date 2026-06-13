@@ -1180,8 +1180,8 @@
 
     .footer-inner {
       display: grid;
-      grid-template-columns: minmax(15rem, 1.05fr) repeat(3, minmax(9rem, 0.62fr));
-      gap: clamp(2rem, 5vw, 5rem);
+      grid-template-columns: minmax(13rem, 1fr) repeat(4, minmax(8rem, 0.6fr));
+      gap: clamp(1.5rem, 3vw, 3.5rem);
       align-items: start;
     }
 
@@ -1272,21 +1272,6 @@
       font-size: 0.82rem;
     }
 
-    .footer-legal {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 0.4rem 1.1rem;
-    }
-
-    .footer-legal a {
-      color: oklch(72% 0.026 220);
-      text-decoration: none;
-    }
-
-    .footer-legal a:hover {
-      color: oklch(88% 0.018 220);
-    }
-
     .sentinel {
       position: absolute;
       left: 0;
@@ -1361,6 +1346,14 @@
 
       .wild p {
         max-width: 620px;
+      }
+
+      .footer-inner {
+        grid-template-columns: 1fr 1fr;
+      }
+
+      .footer-intro {
+        grid-column: 1 / -1;
       }
     }
 
@@ -1974,17 +1967,16 @@
         <a href="https://docs.wless.io/recovery/">Recovery</a>
         <a href="https://github.com/shacharm2/worthless/security/advisories/new" target="_blank" rel="noopener">Responsible disclosure</a>
       </div>
-    </div>
-    <div class="footer-bottom">
-      <span>Worthless is open source.</span>
-      <nav class="footer-legal" aria-label="Legal">
-        <a href="legal.html">Legal</a>
+      <div class="footer-col">
+        <h3>Legal</h3>
         <a href="privacy.html">Privacy Policy</a>
         <a href="terms.html">Terms of Service</a>
         <a href="security.html">Security</a>
         <a href="license.html">License</a>
-        <a href="subprocessors.html">Subprocessors</a>
-      </nav>
+      </div>
+    </div>
+    <div class="footer-bottom">
+      <span>Worthless is open source.</span>
     </div>
   </footer>
 
