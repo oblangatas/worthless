@@ -84,10 +84,17 @@ def test_all_allowed_bots_pass() -> None:
         assert hook.is_allowed_author(email), email
 
 
-def test_fails_closed_when_git_errors(tmp_path, monkeypatch) -> None:
-    # cwd is not a git repo -> `git rev-list` exits non-zero -> must RAISE so
-    # the hook blocks the push, never silently pass it unchecked (fail closed).
+def test_fails_closed_when_git_errors(monkeypatch) -> None:
+    # Deterministic, environment-independent: simulate `git rev-list` exiting
+    # non-zero. Must RAISE so the hook blocks the push, never silently pass it
+    # unchecked (fail closed). Does NOT rely on tmp_path landing outside a repo.
+    def _git_fails(*_a, **_k) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            args=["git"], returncode=128, stdout="", stderr="fatal: not a git repository"
+        )
+
     monkeypatch.delenv("PRE_COMMIT_FROM_REF", raising=False)
     monkeypatch.delenv("PRE_COMMIT_TO_REF", raising=False)
+    monkeypatch.setattr(hook.subprocess, "run", _git_fails)
     with pytest.raises(RuntimeError):
-        hook.pushed_commits(cwd=str(tmp_path))
+        hook.pushed_commits()
