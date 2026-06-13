@@ -4,7 +4,7 @@
 > config → resolve → shape → gate → upstream → content-returns journey which was previously caught
 > only by a human hand-driving the OpenClaw GUI. Mapped to WOR-732.
 
-**Provenance.** Synthesized 2026-06-12 from `engineering/research/journey-testing/01..05`. OpenClaw
+**Provenance.** Synthesized 2026-06-12 from a multi-agent research effort during WOR-621 Phase 3 PR-1 (prior art across LiteLLM/Helicone/Portkey/OpenRouter, seam-coverage matrix, framework critique). Only the companion `testability.md` shipped in-tree alongside this design; the rest of the input research was not preserved. OpenClaw
 clone `/Users/shachar/Projects/worthless/openclaw` @ `2eae30e779cb694b776ba1f52bd24c644cbdd919`
 (tag `v2026.5.3-1`) — same build the seam map pins. worthless side: branch
 `feature/wor-715-lock-captures-mode`. Two critic-flagged coordinates were re-verified live during
