@@ -121,6 +121,16 @@ class WorthlessConsole:
         if not self.quiet:
             self._err.print(f"[yellow]{_rich_escape(message)}[/yellow]")
 
+    def print_notice(self, message: str) -> None:
+        """One-time informational notice to stderr (the AS-IS warranty
+        notice, WOR-488).
+
+        Shown unless ``--json`` (machine output). NOT suppressed by ``--quiet``:
+        a legal notice must be seen at least once, even by a quiet first run.
+        """
+        if not self.json_mode:
+            self._err.print(f"[yellow]{_rich_escape(message)}[/yellow]")
+
     def print_failure(self, message: str) -> None:
         """Red text to stderr for [FAIL] blocks (always shown — even in quiet).
 
