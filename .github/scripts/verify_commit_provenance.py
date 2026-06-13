@@ -10,6 +10,17 @@ cannot merge until it passes.
 
 The allowlist intentionally duplicates the hook's (client vs server are
 different checks); keep the two in sync.
+
+SCOPE: this gate assumes a SOLO-MAINTAINER repo (only the canonical identity
+commits). The server-side ``required_signatures`` ruleset is the actual hard
+gate; this adds the author-allowlist + per-commit feedback on top. If the repo
+ever accepts OUTSIDE CONTRIBUTIONS, revisit before then:
+  - the author-allowlist must become warn-only or drop (else every external
+    PR is blocked — no outside commit is signed by the canonical key);
+  - drop ``noreply@github.com`` (web-flow is "verified" for any user's web
+    edits, so a contributor's web edit would pass);
+  - run this checker from a TRUSTED copy (reusable workflow from ``main``),
+    not the PR's own copy, so a PR can't neutralize its own gate.
 """
 
 from __future__ import annotations
@@ -38,6 +49,10 @@ def evaluate(commits: list[dict]) -> list[str]:
 
     *commits* are items from the ``repos/{repo}/pulls/{pr}/commits`` API.
     """
+    if not commits:
+        # Fail closed: an empty or truncated response (pagination edge, API
+        # quirk) must NEVER pass a PR uninspected.
+        return ["::error::no commits returned for this PR; refusing to pass (fail-closed)"]
     problems: list[str] = []
     for item in commits:
         sha = (item.get("sha") or "")[:8] or "????????"

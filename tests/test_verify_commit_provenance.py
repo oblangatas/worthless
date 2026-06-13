@@ -68,6 +68,12 @@ def test_allowlist_helper() -> None:
     assert not checker.is_allowed_author("evil@example.com")
 
 
+def test_empty_commit_list_fails_closed() -> None:
+    # An empty/truncated API response must NOT pass a PR uninspected.
+    problems = checker.evaluate([])
+    assert problems
+
+
 def test_missing_fields_do_not_crash() -> None:
     # Defensive: a malformed API item must not raise, just flag.
     problems = checker.evaluate([{}])
