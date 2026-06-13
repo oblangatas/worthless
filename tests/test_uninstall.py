@@ -216,9 +216,9 @@ def test_uninstall_calls_openclaw_undo_with_restored_aliases(
     )
     assert result.exit_code == 0, result.output
     assert len(calls) == 1, "uninstall did not call _apply_openclaw_unlock exactly once"
-    assert calls[0], "OpenClaw undo called with an empty (provider, alias) list"
-    provider, alias = calls[0][0]
-    assert provider and alias, f"bad (provider, alias) tuple: {calls[0][0]!r}"
+    assert calls[0], "OpenClaw undo called with an empty OcRestore list"
+    restore = calls[0][0]
+    assert restore.provider and restore.alias, f"bad OcRestore (no provider/alias): {restore!r}"
 
 
 def test_uninstall_partial_rmtree_message_is_accurate(

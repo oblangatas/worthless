@@ -442,6 +442,41 @@ def _isolate_default_command_proxy(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _default_lock_proxy_probe_healthy(request, monkeypatch):
+    """Default the ``lock`` command's proxy pre-flight to "healthy" suite-wide.
+
+    F7 (WOR-648 / WOR-621 AC5) adds a proxy ``/healthz`` probe to the
+    OpenClaw-apply path in ``worthless.cli.commands.lock``: when OpenClaw is
+    detected on the host, ``lock`` aborts before writing ``openclaw.json`` if
+    the proxy is down. The bulk of the existing lock suite drives ``lock`` on
+    a host where OpenClaw IS present (a sandboxed ``~/.openclaw`` fixture, or
+    the developer's real install leaking through tests that don't pin ``HOME``)
+    but never starts a proxy — exactly the same neutralisation rationale as
+    ``_isolate_default_command_proxy`` above.
+
+    Without this default, every such test would now abort with
+    ``PROXY_NOT_RUNNING``. We therefore patch ``check_proxy_health`` in the
+    ``lock`` module's namespace to report healthy. Tests that exercise the
+    proxy-down abort (e.g. ``tests/openclaw/test_proxy_probe.py``) re-patch the
+    same name to "unhealthy"; pytest's ``monkeypatch`` stacks LIFO, so the
+    per-test override wins.
+
+    ``@pytest.mark.integration`` opts out so a real end-to-end run probes the
+    real proxy.
+    """
+    if request.node.get_closest_marker("integration"):
+        return
+
+    from worthless.cli.commands import lock as _lock_mod
+
+    monkeypatch.setattr(
+        _lock_mod,
+        "check_proxy_health",
+        lambda port: {"healthy": True, "port": port, "mode": "up", "requests_proxied": 0},
+    )
+
+
+@pytest.fixture(autouse=True)
 def detect_thread_leak(request):
     """Detect and fail on background thread leaks during test run.
 

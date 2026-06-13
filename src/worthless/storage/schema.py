@@ -50,6 +50,23 @@ CREATE TABLE IF NOT EXISTS shards (
     charset     TEXT,
     base_url    TEXT,
     shard_a_enc BLOB,
+    -- WOR-651/F4: shape-only OpenClaw rollback record so unlock (F2) can
+    -- restore the original provider entry WITHOUT ever storing the real key.
+    -- The full key-redacted original entry (including its baseUrl) lives in
+    -- ``oc_original_api_key_json`` and is MAC-bound via ``oc_rollback_mac``.
+    -- A prior ``oc_original_base_url`` column was dropped in G5-C: it
+    -- duplicated data already present in the MAC-bound JSON and was NOT
+    -- MAC-bound itself — a footgun. Stage A of unlock parses the URL from
+    -- the JSON record (the source of truth), never from a fast column.
+    oc_original_api_key_json TEXT,
+    -- WOR-621 F2 G2 (decision 4): HMAC-SHA256 tag (hex) over
+    -- ``oc_original_api_key_json``, keyed by the fernet-derived MAC subkey
+    -- (same subkey the ``decoy_hash`` column uses). Unlock recomputes and
+    -- constant-time-compares; a DB-write attacker who flips the JSON (e.g.
+    -- secretref→plaintext) leaves a stale tag here, so unlock refuses the
+    -- row → entry stays on the proxy, plaintext is never synthesized from a
+    -- tampered record.
+    oc_rollback_mac          TEXT,
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -99,19 +116,86 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_enrollments_null_path
 """
 
 
+async def _add_columns_if_missing(
+    db: aiosqlite.Connection,
+    migrations: dict[str, str],
+    existing_columns: set[str],
+) -> None:
+    """Run ``ALTER TABLE ... ADD COLUMN`` statements for each missing column.
+
+    Each entry in ``migrations`` is ``{col_name: full_ALTER_statement}``.
+    Columns already present in ``existing_columns`` are skipped. A racing
+    "duplicate column" error (two callers initialising the DB at once) is
+    swallowed; any other error propagates. Caller is responsible for the
+    enclosing ``db.commit()`` -- this helper does NOT commit so the caller
+    can batch multiple migrations into one transaction.
+
+    Extracts the pattern that ``_migrate_shard_format_columns`` and
+    ``_migrate_oc_rollback_columns`` both used to inline -- consolidating
+    drops cognitive complexity on the latter back under the SonarCloud
+    ceiling (PR #276 CodeRabbit nit).
+    """
+    for col_name, stmt in migrations.items():
+        if col_name in existing_columns:
+            continue
+        try:
+            await db.execute(stmt)
+        except Exception as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
+
+
 async def _migrate_shard_format_columns(db: aiosqlite.Connection, shard_columns: set[str]) -> None:
     """WOR-207: prefix/charset columns for format-preserving split."""
-    _SHARD_MIGRATIONS = {
-        "prefix": "ALTER TABLE shards ADD COLUMN prefix TEXT",
-        "charset": "ALTER TABLE shards ADD COLUMN charset TEXT",
+    await _add_columns_if_missing(
+        db,
+        {
+            "prefix": "ALTER TABLE shards ADD COLUMN prefix TEXT",
+            "charset": "ALTER TABLE shards ADD COLUMN charset TEXT",
+        },
+        shard_columns,
+    )
+    await db.commit()
+
+
+async def _migrate_oc_rollback_columns(db: aiosqlite.Connection, shard_columns: set[str]) -> None:
+    """WOR-651/F4 + WOR-621 F2 G2 + G5-C: OpenClaw rollback columns on ``shards``.
+
+    ``oc_original_api_key_json`` holds the full key-redacted original entry
+    (including its baseUrl) — shape-only / non-secret. ``oc_rollback_mac``
+    (G2) binds that JSON to a fernet-keyed HMAC so a DB-write attacker
+    can't flip the record (e.g. secretref→plaintext) without the next
+    unlock noticing.
+
+    G5-C drop: a prior ``oc_original_base_url`` column duplicated data
+    already in the MAC-bound JSON AND was NOT MAC-bound itself (a DB-write
+    attacker could flip it silently). Forward-only ALTER TABLE DROP COLUMN
+    removes it from any DB carrying it. SQLite ≥3.35 (March 2021). The
+    column is also removed from the SCHEMA DDL above so a fresh DB never
+    creates it. Stage A of unlock has always parsed the URL from the JSON
+    record (the source of truth), so the drop is byte-stable on restore.
+
+    Mirrors :func:`_migrate_shard_format_columns`: duplicate-column-tolerant
+    ALTERs, nullable, no backfill.
+    """
+    _oc_migrations = {
+        "oc_original_api_key_json": ("ALTER TABLE shards ADD COLUMN oc_original_api_key_json TEXT"),
+        "oc_rollback_mac": "ALTER TABLE shards ADD COLUMN oc_rollback_mac TEXT",
     }
-    for col_name, stmt in _SHARD_MIGRATIONS.items():
-        if col_name not in shard_columns:
-            try:
-                await db.execute(stmt)
-            except Exception as exc:
-                if "duplicate column" not in str(exc).lower():
-                    raise
+    await _add_columns_if_missing(db, _oc_migrations, shard_columns)
+    # G5-C: drop the dead duplicate column if present on an existing DB.
+    # SQLite ≥3.35 supports ALTER TABLE … DROP COLUMN; on older runtimes
+    # this raises and the column is left in place (the column being dead
+    # data already, leaving it costs nothing).
+    if "oc_original_base_url" in shard_columns:
+        try:
+            await db.execute("ALTER TABLE shards DROP COLUMN oc_original_base_url")
+        except Exception as exc:
+            msg = str(exc).lower()
+            # Pre-3.35 SQLite reports "near 'DROP': syntax error" — accept
+            # the column lingering rather than failing init.
+            if "syntax error" not in msg and "no such column" not in msg:
+                raise
     await db.commit()
 
 
@@ -242,6 +326,7 @@ async def migrate_db(db_path: str) -> None:
         cursor = await db.execute("PRAGMA table_info(shards)")
         shard_columns = {row[1] for row in await cursor.fetchall()}
         await _migrate_shard_format_columns(db, shard_columns)
+        await _migrate_oc_rollback_columns(db, shard_columns)
         await _migrate_base_url_column(db, db_path, shard_columns)
         await _migrate_shard_a_enc_column(db, shard_columns)
 

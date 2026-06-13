@@ -1065,3 +1065,441 @@ async def test_migrate_no_backup_when_already_migrated(tmp_path) -> None:
     assert len(backups) == 0, (
         f"backup file created on no-op migration; got: {[p.name for p in backups]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# WOR-651 / WOR-621 F4: OpenClaw rollback columns (shape-only, no key at rest)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fresh_db_has_oc_rollback_columns(tmp_path) -> None:
+    """A DB built from current SCHEMA includes the two OC rollback columns."""
+    db_path = str(tmp_path / "fresh_oc.db")
+    async with aiosqlite.connect(db_path) as db:
+        await db.executescript(SCHEMA)
+        await db.commit()
+
+    async with aiosqlite.connect(db_path) as db:
+        cursor = await db.execute("PRAGMA table_info(shards)")
+        columns = {row[1] for row in await cursor.fetchall()}
+
+    # G5-C: oc_original_base_url was dropped — the URL lives inside
+    # oc_original_api_key_json (the MAC-bound source of truth).
+    assert "oc_original_base_url" not in columns, "G5-C: oc_original_base_url must be gone"
+    assert "oc_original_api_key_json" in columns, "oc_original_api_key_json not in SCHEMA"
+
+
+@pytest.mark.asyncio
+async def test_migrate_adds_oc_rollback_columns(tmp_path) -> None:
+    """Migration adds both OC rollback columns to an old DB lacking them."""
+    db_path = str(tmp_path / "old_no_oc.db")
+
+    # Old shards table without the OC rollback columns. (enrollments is
+    # included because earlier migrations — decoy_hash — touch it.)
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        await db.execute(
+            "CREATE TABLE IF NOT EXISTS shards ("
+            "key_alias TEXT PRIMARY KEY, shard_b_enc BLOB NOT NULL, "
+            "commitment BLOB NOT NULL, nonce BLOB NOT NULL, "
+            "provider TEXT NOT NULL, "
+            "created_at TEXT NOT NULL DEFAULT (datetime('now')))"
+        )
+        await db.execute(
+            "CREATE TABLE IF NOT EXISTS enrollments ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "key_alias TEXT NOT NULL REFERENCES shards(key_alias), "
+            "var_name TEXT NOT NULL, env_path TEXT, "
+            "created_at TEXT NOT NULL DEFAULT (datetime('now')))"
+        )
+        await db.commit()
+
+    await migrate_db(db_path)
+
+    async with aiosqlite.connect(db_path) as db:
+        cursor = await db.execute("PRAGMA table_info(shards)")
+        columns = {row[1] for row in await cursor.fetchall()}
+
+    # G5-C: migration no longer adds oc_original_base_url; an existing
+    # old DB carrying that column will have it dropped (SQLite ≥3.35);
+    # an old DB without it stays without it.
+    assert "oc_original_base_url" not in columns, (
+        "G5-C: migration must not add oc_original_base_url"
+    )
+    assert "oc_original_api_key_json" in columns, "oc_original_api_key_json not added by migrate"
+
+
+@pytest.mark.asyncio
+async def test_migrate_oc_rollback_columns_idempotent(tmp_path) -> None:
+    """Running migrate twice on a fresh-schema DB doesn't error (idempotent)."""
+    db_path = str(tmp_path / "oc_idempotent.db")
+
+    async with aiosqlite.connect(db_path) as db:
+        await db.executescript(SCHEMA)
+        await db.commit()
+
+    await migrate_db(db_path)
+    await migrate_db(db_path)  # Second run must not raise on duplicate columns.
+
+    async with aiosqlite.connect(db_path) as db:
+        cursor = await db.execute("PRAGMA table_info(shards)")
+        columns = {row[1] for row in await cursor.fetchall()}
+    # G5-C: oc_original_base_url was dropped from the schema.
+    assert "oc_original_base_url" not in columns
+    assert "oc_original_api_key_json" in columns
+
+
+@pytest.mark.asyncio
+async def test_upsert_locked_shard_oc_rollback_roundtrips(
+    repo: ShardRepository,
+    sample_split_result,
+) -> None:
+    """upsert_locked_shard persists OC rollback fields; fetch_encrypted reads them back."""
+    from worthless.openclaw.integration import build_oc_rollback_apikey_record
+
+    shard = stored_shard_from_split(sample_split_result, provider="openai")
+    await repo.upsert_locked_shard(
+        "oc-roundtrip",
+        shard,
+        prefix="sk-",
+        charset="abc",
+        base_url="https://api.worthless.local/oc-roundtrip/v1",
+        oc_original_api_key_json=build_oc_rollback_apikey_record("plaintext"),
+    )
+
+    enc = await repo.fetch_encrypted("oc-roundtrip")
+    assert enc is not None
+    # G5-C: oc_original_base_url is gone; the URL is inside the
+    # oc_original_api_key_json record (see test_lock_capture_oc_rollback).
+    assert enc.oc_original_api_key_json == '{"kind":"plaintext"}'
+
+
+@pytest.mark.asyncio
+async def test_upsert_locked_shard_without_oc_rollback_defaults_none(
+    repo: ShardRepository,
+    sample_split_result,
+) -> None:
+    """Omitting the OC rollback params leaves the columns NULL (backward-compat)."""
+    shard = stored_shard_from_split(sample_split_result, provider="openai")
+    await repo.upsert_locked_shard(
+        "oc-omit",
+        shard,
+        prefix="sk-",
+        charset="abc",
+        base_url="https://api.worthless.local/oc-omit/v1",
+    )
+
+    enc = await repo.fetch_encrypted("oc-omit")
+    assert enc is not None
+    # G5-C: oc_original_base_url is gone from the row entirely.
+    assert enc.oc_original_api_key_json is None
+
+
+@pytest.mark.asyncio
+async def test_store_enrolled_oc_rollback_roundtrips(
+    repo: ShardRepository,
+    sample_split_result,
+) -> None:
+    """store_enrolled threads OC rollback fields through to fetch_encrypted."""
+    from worthless.openclaw.integration import build_oc_rollback_apikey_record
+
+    ref = {"source": "env", "provider": "openai", "id": "OPENAI_API_KEY"}
+    shard = stored_shard_from_split(sample_split_result, provider="openai")
+    await repo.store_enrolled(
+        "oc-enrolled",
+        shard,
+        var_name="OPENAI_API_KEY",
+        env_path=None,
+        base_url="https://api.openai.com/v1",
+        oc_original_api_key_json=build_oc_rollback_apikey_record("secretref", ref),
+    )
+
+    enc = await repo.fetch_encrypted("oc-enrolled")
+    assert enc is not None
+    # G5-C: oc_original_base_url is gone — apiKey record carries the shape.
+    import json as _json
+
+    decoded = _json.loads(enc.oc_original_api_key_json)
+    assert decoded == {"kind": "secretref", "ref": ref}
+
+
+def test_build_oc_rollback_apikey_record_plaintext_has_no_key() -> None:
+    """plaintext record is shape-only — equals {"kind":"plaintext"}, no key bytes."""
+    from worthless.openclaw.integration import build_oc_rollback_apikey_record
+
+    out = build_oc_rollback_apikey_record("plaintext")
+    assert out == '{"kind":"plaintext"}'
+    assert "sk-" not in out
+    assert "ref" not in out
+
+
+def test_build_oc_rollback_apikey_record_secretref_roundtrips() -> None:
+    """secretref record carries only the non-secret pointer, never a key."""
+    import json as _json
+
+    from worthless.openclaw.integration import build_oc_rollback_apikey_record
+
+    ref = {"source": "env", "provider": "openai", "id": "OPENAI_API_KEY"}
+    out = build_oc_rollback_apikey_record("secretref", ref)
+    decoded = _json.loads(out)
+    assert decoded == {"kind": "secretref", "ref": ref}
+    assert "sk-" not in out
+
+
+def test_build_oc_rollback_apikey_record_unknown_kind_raises() -> None:
+    """An unknown kind is rejected — no silent fallthrough."""
+    from worthless.openclaw.integration import build_oc_rollback_apikey_record
+
+    with pytest.raises(ValueError):
+        build_oc_rollback_apikey_record("ciphertext")
+
+
+@pytest.mark.asyncio
+async def test_oc_rollback_no_key_at_rest(
+    repo: ShardRepository,
+    tmp_db_path: str,
+    sample_api_key_bytes: bytes,
+    sample_split_result,
+) -> None:
+    """AC8: NEITHER the real client-held shard-A NOR the original plaintext
+    API key ever appears in the stored shards row, and a plaintext OC rollback
+    record carries no key bytes.
+
+    NON-VACUOUS: unlike the prior version (which generated a throwaway random
+    token the storage layer never saw, so the absence assertion was true by
+    construction), this stores the ACTUAL ``sample_split_result`` material and
+    checks for the REAL ``sample_split_result.shard_a`` bytes and the REAL
+    source key (``sample_api_key_bytes``, the input that was split). If the
+    storage layer ever persisted shard-A — or echoed the source key — into any
+    column, this test would FAIL.
+    """
+    from worthless.openclaw.integration import build_oc_rollback_apikey_record
+
+    # The real client-held shard-A from the same split that produced shard_b.
+    # The client keeps this; the server must never store it.
+    shard_a_bytes = bytes(sample_split_result.shard_a)
+
+    shard = stored_shard_from_split(sample_split_result, provider="openai")
+    await repo.upsert_locked_shard(
+        "no-key-at-rest",
+        shard,
+        prefix="sk-",
+        charset="abc",
+        base_url="https://api.worthless.local/no-key-at-rest/v1",
+        oc_original_api_key_json=build_oc_rollback_apikey_record("plaintext"),
+    )
+
+    # Read the ENTIRE raw row back and serialize every column.
+    async with aiosqlite.connect(tmp_db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("SELECT * FROM shards WHERE key_alias = 'no-key-at-rest'")
+        row = await cursor.fetchone()
+    assert row is not None
+
+    serialized = b"".join(
+        v if isinstance(v, bytes | bytearray) else str(v).encode() for v in tuple(row)
+    )
+    # Both the real shard-A AND the original plaintext key are absent — these
+    # are values the storage layer actually handled (shard-A's XOR sibling
+    # shard_b WAS stored), so the assertions have teeth.
+    assert shard_a_bytes not in serialized, "shard-A leaked into the stored row!"
+    assert bytes(sample_api_key_bytes) not in serialized, (
+        "original plaintext API key leaked into the stored row!"
+    )
+
+    oc_json = row["oc_original_api_key_json"]
+    assert oc_json == '{"kind":"plaintext"}'
+    assert "sk-" not in oc_json
+
+
+@pytest.mark.asyncio
+async def test_upsert_locked_shard_overwrites_existing_oc_rollback_record(
+    repo: ShardRepository,
+    sample_split_result,
+) -> None:
+    """A second upsert of the SAME alias with DIFFERENT oc_original_* values
+    overwrites the row — proving ON CONFLICT DO UPDATE SET oc_original_* =
+    excluded.* fires (previously only the first-insert path was covered)."""
+    from worthless.openclaw.integration import build_oc_rollback_apikey_record
+
+    shard = stored_shard_from_split(sample_split_result, provider="openai")
+    await repo.upsert_locked_shard(
+        "oc-overwrite",
+        shard,
+        prefix="sk-",
+        charset="abc",
+        base_url="https://api.worthless.local/oc-overwrite/v1",
+        oc_original_api_key_json=build_oc_rollback_apikey_record("plaintext"),
+    )
+
+    # Second upsert: same alias, DIFFERENT oc rollback record.
+    ref = {"source": "env", "provider": "anthropic", "id": "ANTHROPIC_API_KEY"}
+    await repo.upsert_locked_shard(
+        "oc-overwrite",
+        shard,
+        prefix="sk-",
+        charset="abc",
+        base_url="https://api.worthless.local/oc-overwrite/v1",
+        oc_original_api_key_json=build_oc_rollback_apikey_record("secretref", ref),
+    )
+
+    enc = await repo.fetch_encrypted("oc-overwrite")
+    assert enc is not None
+    # G5-C: oc_original_base_url is gone; the shape record carries the truth.
+    import json as _json
+
+    assert _json.loads(enc.oc_original_api_key_json) == {"kind": "secretref", "ref": ref}
+
+
+@pytest.mark.asyncio
+async def test_upsert_relock_omitting_oc_params_nulls_record(
+    repo: ShardRepository,
+    sample_split_result,
+) -> None:
+    """Re-locking the same alias while OMITTING the oc params silently NULLs
+    the previously-stored rollback record (excluded.* defaults to None).
+
+    This PINS the CURRENT behavior. F2 (unlock) will decide whether this
+    silent null-out is desired or whether re-lock should preserve the prior
+    rollback record; if F2 changes it, this test is the canary."""
+    from worthless.openclaw.integration import build_oc_rollback_apikey_record
+
+    shard = stored_shard_from_split(sample_split_result, provider="openai")
+    await repo.upsert_locked_shard(
+        "oc-relock",
+        shard,
+        prefix="sk-",
+        charset="abc",
+        base_url="https://api.worthless.local/oc-relock/v1",
+        oc_original_api_key_json=build_oc_rollback_apikey_record("plaintext"),
+    )
+
+    # Re-lock the SAME alias, omitting the oc params (they default to None).
+    await repo.upsert_locked_shard(
+        "oc-relock",
+        shard,
+        prefix="sk-",
+        charset="abc",
+        base_url="https://api.worthless.local/oc-relock/v1",
+    )
+
+    enc = await repo.fetch_encrypted("oc-relock")
+    assert enc is not None
+    # G5-C: oc_original_base_url is gone from the row entirely.
+    assert enc.oc_original_api_key_json is None
+
+
+@pytest.mark.asyncio
+async def test_store_enrolled_without_oc_rollback_defaults_none(
+    repo: ShardRepository,
+    sample_split_result,
+) -> None:
+    """store_enrolled without the oc params leaves both columns None."""
+    shard = stored_shard_from_split(sample_split_result, provider="openai")
+    await repo.store_enrolled(
+        "enrolled-no-oc",
+        shard,
+        var_name="OPENAI_API_KEY",
+        env_path=None,
+        base_url="https://api.openai.com/v1",
+    )
+
+    enc = await repo.fetch_encrypted("enrolled-no-oc")
+    assert enc is not None
+    # G5-C: oc_original_base_url is gone from the row entirely.
+    assert enc.oc_original_api_key_json is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_encrypted_legacy_row_predating_oc_columns_returns_none_fields(
+    tmp_path,
+    fernet_key: bytes,
+) -> None:
+    """A row stored in a DB that predates the oc_original_* columns reads back
+    with those fields as None after migration — graceful, not a KeyError."""
+    db_path = str(tmp_path / "legacy_no_oc.db")
+
+    # Build a minimal OLD-schema DB: shards WITHOUT oc_original_* (and without
+    # shard_a_enc), plus enrollments so earlier migrations have their target.
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        await db.execute(
+            "CREATE TABLE IF NOT EXISTS shards ("
+            "key_alias TEXT PRIMARY KEY, shard_b_enc BLOB NOT NULL, "
+            "commitment BLOB NOT NULL, nonce BLOB NOT NULL, "
+            "provider TEXT NOT NULL, "
+            "created_at TEXT NOT NULL DEFAULT (datetime('now')))"
+        )
+        await db.execute(
+            "CREATE TABLE IF NOT EXISTS enrollments ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "key_alias TEXT NOT NULL REFERENCES shards(key_alias), "
+            "var_name TEXT NOT NULL, env_path TEXT, "
+            "created_at TEXT NOT NULL DEFAULT (datetime('now')))"
+        )
+        await db.execute(
+            "INSERT INTO shards (key_alias, shard_b_enc, commitment, nonce, provider) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("legacy-oc", b"enc-b", b"commit", b"nonce", "openai"),
+        )
+        await db.commit()
+
+    # Migration adds the new columns (oc_original_*, shard_a_enc, base_url, ...).
+    await migrate_db(db_path)
+
+    repo = ShardRepository(db_path, fernet_key)
+    enc = await repo.fetch_encrypted("legacy-oc")
+    assert enc is not None
+    # G5-C: oc_original_base_url is gone from the row entirely.
+    assert enc.oc_original_api_key_json is None
+
+
+def test_encrypted_shard_repr_omits_oc_fields() -> None:
+    """SR-04 regression lock: repr() of an EncryptedShard with a non-None
+    oc_original_api_key_json must NOT leak the JSON into the string form.
+    (G5-C: oc_original_base_url is gone, so this now only covers the JSON.)"""
+    sensitive_json = '{"kind":"secretref","ref":{"id":"OPENAI_API_KEY"}}'
+    enc = EncryptedShard(
+        shard_b_enc=b"x" * 16,
+        commitment=b"c" * 8,
+        nonce=b"n" * 12,
+        provider="openai",
+        oc_original_api_key_json=sensitive_json,
+    )
+
+    text = repr(enc)
+    assert sensitive_json not in text
+    # Sanity: it is still a useful repr.
+    assert "EncryptedShard(" in text
+
+
+@pytest.mark.asyncio
+async def test_fetch_encrypted_against_hand_inserted_raw_row(
+    repo: ShardRepository,
+    tmp_db_path: str,
+) -> None:
+    """Hand-INSERT a shards row via raw SQL with a known
+    oc_original_api_key_json, then read it via fetch_encrypted. Pins the
+    SELECT column list independent of the write path (upsert/store_enrolled).
+    G5-C: oc_original_base_url is no longer a column."""
+    async with aiosqlite.connect(tmp_db_path) as db:
+        await db.execute(
+            "INSERT INTO shards "
+            "(key_alias, shard_b_enc, commitment, nonce, provider, "
+            "oc_original_api_key_json) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "hand-row",
+                b"enc-b",
+                b"commit",
+                b"nonce",
+                "openai",
+                '{"kind":"plaintext"}',
+            ),
+        )
+        await db.commit()
+
+    enc = await repo.fetch_encrypted("hand-row")
+    assert enc is not None
+    assert enc.oc_original_api_key_json == '{"kind":"plaintext"}'

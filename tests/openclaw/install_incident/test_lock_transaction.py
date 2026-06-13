@@ -74,11 +74,12 @@ def test_ac1_clean_config_providers_written_existing_preserved(openclaw_config, 
 
     assert result.detected
     assert not result.has_failure
-    assert "worthless-openai" in result.providers_set
+    # WOR-621 F1: lock rewrites the provider's ORIGINAL id (``openai``).
+    assert "openai" in result.providers_set
 
     written = _config.read_config(openclaw_config)
     providers = written["models"]["providers"]
-    assert "worthless-openai" in providers, "new provider missing"
+    assert "openai" in providers, "new provider missing"
     assert "existing-provider" in providers, "existing provider must NOT be clobbered"
 
 
@@ -570,14 +571,27 @@ def test_sp_ul_apply_unlock_skips_gracefully_on_uid_mismatch(openclaw_config, mo
         st_uid = os.geteuid() + 999
         st_mode = real_st.st_mode
 
-    aliases = [("openai", "worthless-openai"), ("anthropic", "worthless-anthropic")]
+    # WOR-621 F2 contract change: apply_unlock takes list[OcRestore], not
+    # a list of (provider, alias) tuples. The UID-mismatch guard fires
+    # BEFORE iterating restores, so the rollback payload is never consumed
+    # — what matters here is that ``apply_unlock`` accepts the new shape
+    # and surfaces CONFIG_UNREADABLE for each provider's ``r.provider``.
+    restores = [
+        _integration.OcRestore(
+            provider=p,
+            alias=f"{p}-deadbeef",
+            oc_original_api_key_json=None,
+            plaintext_key=None,
+        )
+        for p in ("openai", "anthropic")
+    ]
 
     with (
         patch("os.stat", return_value=_FakeStat()),
         patch("os.access", return_value=True),
         patch.object(_integration, "detect", return_value=mock_state),
     ):
-        result = _integration.apply_unlock(aliases)
+        result = _integration.apply_unlock(restores)
 
     # Must not raise — unlock-core L1/L2 contract
     sha_after = hashlib.sha256(openclaw_config.read_bytes()).hexdigest()
@@ -592,9 +606,13 @@ def test_sp_ul_apply_unlock_skips_gracefully_on_uid_mismatch(openclaw_config, mo
     assert all(reason == "config_unreadable" for _, reason in result.providers_skipped), (
         "all providers must be skipped with reason='config_unreadable'"
     )
-    assert all(
-        key == f"worthless-{p}" for (key, _), (p, _) in zip(result.providers_skipped, aliases)
-    ), "providers_skipped keys must use 'worthless-<provider>' format, not the alias"
+    # F1 contract change: providers_skipped keys are bare provider names
+    # (the entry F1 rewrites in place) — no longer the ``worthless-<provider>``
+    # decoy alias.
+    assert [key for key, _ in result.providers_skipped] == ["openai", "anthropic"], (
+        f"providers_skipped keys must be bare provider names; got "
+        f"{[k for k, _ in result.providers_skipped]!r}"
+    )
 
 
 def test_sp5_rollback_noop_when_original_was_absent(tmp_path):

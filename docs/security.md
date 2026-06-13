@@ -9,9 +9,9 @@ Threat model, architectural invariants, known limitations, and residual risk for
 the Python PoC. This file describes what is real today. Roadmap items live in
 Linear ([WOR-257](https://linear.app/plumbusai/issue/WOR-257)).
 
-- To report a vulnerability, see [/SECURITY.md](../SECURITY.md).
-- Contributor invariants (the SR-\* rules) live in [../CONTRIBUTING-security.md](../CONTRIBUTING-security.md).
-- For the install-time supply chain, see [install-security.md](install-security.md).
+- To report a vulnerability, see [SECURITY.md](https://github.com/shacharm2/worthless/blob/main/SECURITY.md).
+- Contributor invariants (the SR-\* rules) live in [CONTRIBUTING-security.md](https://github.com/shacharm2/worthless/blob/main/CONTRIBUTING-security.md).
+- For the install-time supply chain, see [install-security.md](/install-security/).
 
 ## TL;DR
 
@@ -104,12 +104,12 @@ certified under SOC 2, FIPS, ISO 27001, or any other framework.
 the full API key or Shard A. The server receives only Shard B, commitment, and
 nonce at enrollment time.
 
-**Code.** [`src/worthless/crypto/splitter.py`](../src/worthless/crypto/splitter.py)
+**Code.** [`src/worthless/crypto/splitter.py`](https://github.com/shacharm2/worthless/blob/main/src/worthless/crypto/splitter.py)
 exposes `split_key`. Server-side directories are determined by _exclusion_ from
 a client allowlist (`{"cli", "crypto"}`) — new packages land in the server
 bucket by default.
 
-**Tests.** [`tests/test_invariants.py`](../tests/test_invariants.py):
+**Tests.** [`tests/test_invariants.py`](https://github.com/shacharm2/worthless/blob/main/tests/test_invariants.py):
 
 - `TestSplitKeyNeverServerSide::test_ast_no_split_key_import` — AST scan of every server-side file
 - `test_grep_no_split_key_string` — catches dynamic imports (`getattr`, `importlib`)
@@ -126,13 +126,13 @@ a developer modifying the test suite would be caught in PR review, not by CI.
 every request **before** XOR reconstruction runs. A denied request results in
 zero KMS calls, zero Fernet decryption, and zero key material touched.
 
-**Code.** [`src/worthless/proxy/app.py`](../src/worthless/proxy/app.py) —
+**Code.** [`src/worthless/proxy/app.py`](https://github.com/shacharm2/worthless/blob/main/src/worthless/proxy/app.py) —
 `rules_engine.evaluate` runs, early-returns a `Response(...)` on denial, and
 only then calls `repo.decrypt_shard`. The repository exposes a two-step API:
 `fetch_encrypted()` returns an `EncryptedShard` (ciphertext only), then
 `decrypt_shard()` converts it to a `StoredShard`.
 
-**Tests.** [`tests/test_security_properties.py::TestGateBeforeDecrypt`](../tests/test_security_properties.py):
+**Tests.** [`tests/test_security_properties.py::TestGateBeforeDecrypt`](https://github.com/shacharm2/worthless/blob/main/tests/test_security_properties.py):
 
 - `test_evaluate_precedes_decrypt_in_proxy_handler` — static analysis: evaluate appears before decrypt_shard in the handler source
 - `test_fetch_encrypted_returns_encrypted_type` — `EncryptedShard` exposes ciphertext, not plaintext
@@ -150,13 +150,13 @@ reconstructed key is contained within a `secure_key` context manager, never
 returns to the proxy layer, never transits the network, and is zeroed
 immediately after the upstream HTTP call.
 
-**Code.** [`src/worthless/crypto/splitter.py::secure_key`](../src/worthless/crypto/splitter.py)
+**Code.** [`src/worthless/crypto/splitter.py::secure_key`](https://github.com/shacharm2/worthless/blob/main/src/worthless/crypto/splitter.py)
 is a `contextlib.contextmanager` that yields the key `bytearray` and calls
 `_zero_buf(key_buf)` in its `finally`. `_zero_buf` overwrites the buffer
 in-place (`buf[:] = bytearray(len(buf))`). The proxy's own `finally` block also
 zeros shard material.
 
-**Tests.** [`tests/test_invariants.py`](../tests/test_invariants.py):
+**Tests.** [`tests/test_invariants.py`](https://github.com/shacharm2/worthless/blob/main/tests/test_invariants.py):
 
 - `TestInvariant3ServerSideContainment::test_reconstruct_result_flows_through_secure_key`
 - `test_key_not_used_outside_secure_key_block` — `as k` alias never referenced after the with-block exits
@@ -250,7 +250,7 @@ written to `.env`.
    enrollment-time HMAC. Refuse with `UnsafeReason.VERIFY_FAILED`
    on mismatch.
 5. `rename(2)` tmp → final (atomic on POSIX filesystems that
-   `fs_check` has admitted — see [`UnsafeReason.FILESYSTEM`](https://github.com/plumbusai/worthless/blob/main/src/worthless/cli/fs_check.py)).
+   `fs_check` has admitted — see [`UnsafeReason.FILESYSTEM`](https://github.com/shacharm2/worthless/blob/main/src/worthless/cli/fs_check.py)).
 6. `fsync` parent directory.
 
 If the process is killed between steps 1 and 5, the `.env` is
@@ -474,7 +474,7 @@ addresses. Upstream error messages are sanitized via `_sanitize_upstream_error`
 
 - `pip-audit` runs in CI.
 - No SBOM, no reproducible builds, no second-reviewer gate on releases.
-- Install-time trust roots live in [install-security.md](install-security.md).
+- Install-time trust roots live in [install-security.md](/install-security/).
 
 ## Residual risk summary
 

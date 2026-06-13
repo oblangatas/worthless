@@ -81,26 +81,29 @@ def test_apply_lock_no_openclaw_returns_early(
 # ---------------------------------------------------------------------------
 
 
-def test_apply_lock_skips_provider_with_conflicting_baseurl(
+def test_apply_lock_rewrites_original_even_with_custom_baseurl(
     openclaw_present: dict[str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """F-CFG-13: pre-existing ``worthless-openai`` with a non-worthless
-    baseUrl is a conflict — skip that provider, emit PROVIDER_CONFLICT,
-    continue with others. Lock-core must remain unaffected.
+    """WOR-621 F1: a pre-existing ``openai`` entry with a custom (non-proxy)
+    baseUrl is REWRITTEN to point at the Worthless proxy — the user is
+    locking that key, so there is no PROVIDER_CONFLICT skip anymore. The
+    old decoy ``worthless-openai`` design (the WOR-514 bypass) is gone.
+
+    Lock-core must remain unaffected; both providers get written.
     """
     from worthless.openclaw import integration
     from worthless.openclaw.errors import OpenclawErrorCode
 
-    # Pre-poison: an existing worthless-openai entry pointing at the user's
-    # own gateway (not our proxy) — looks like manual tweaking we mustn't
-    # silently trample.
+    # Pre-existing `openai` entry pointing at the user's own gateway. Locking
+    # intentionally rewrites it. The custom baseUrl is stashed for restore by
+    # unlock (F2, a later feature).
     config_path = openclaw_present["config_path"]
     config_path.write_text(
         json.dumps(
             {
                 "models": {
                     "providers": {
-                        "worthless-openai": {
+                        "openai": {
                             "baseUrl": "https://my-own-gateway.example.com/v1",
                             "apiKey": "user-secret",
                         }
@@ -122,15 +125,17 @@ def test_apply_lock_skips_provider_with_conflicting_baseurl(
         ],
     )
 
-    # Detected, but worthless-openai skipped on conflict.
+    # Detected; the original `openai` entry was rewritten, not skipped.
     assert result.detected is True
-    assert "worthless-openai" not in result.providers_set
-    assert any(name == "worthless-openai" for name, _ in result.providers_skipped)
-    assert any(e.code == OpenclawErrorCode.PROVIDER_CONFLICT for e in result.events), [
+    assert "openai" in result.providers_set
+    assert not any(e.code == OpenclawErrorCode.PROVIDER_CONFLICT for e in result.events), [
         e.code for e in result.events
     ]
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    providers = data["models"]["providers"]
+    assert providers["openai"]["baseUrl"].endswith("/openai-aaaa1111/v1")
     # Anthropic still got written.
-    assert "worthless-anthropic" in result.providers_set
+    assert "anthropic" in result.providers_set
 
 
 def test_apply_lock_refuses_symlink_config(
@@ -172,7 +177,7 @@ def test_apply_lock_refuses_symlink_config(
 
     assert result.detected is True
     # Provider wasn't written; event surfaced.
-    assert "worthless-openai" not in result.providers_set
+    assert "openai" not in result.providers_set
     assert len(result.events) >= 1
 
 
@@ -195,7 +200,7 @@ def test_apply_lock_warns_on_world_writable_config(
     )
 
     assert result.detected is True
-    assert "worthless-openai" in result.providers_set
+    assert "openai" in result.providers_set
     # A warning event surfaced (at least one of CONFIG_UPDATED + a warning).
     assert any(e.level == "warn" for e in result.events), [(e.code, e.level) for e in result.events]
 
@@ -227,7 +232,7 @@ def test_apply_lock_warns_on_hardlinked_config(
     )
 
     # Lock-core proceeded — provider was written.
-    assert "worthless-openai" in result.providers_set
+    assert "openai" in result.providers_set
     # A warning event surfaced citing the hardlink count.
     hardlink_events = [
         e for e in result.events if e.level == "warn" and "hardlink" in e.detail.lower()
@@ -269,7 +274,7 @@ def test_apply_lock_recreates_deleted_config(
     assert result.detected is True
     # set_provider's atomic-write recreates the file.
     assert config_path.exists()
-    assert "worthless-openai" in result.providers_set
+    assert "openai" in result.providers_set
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +309,7 @@ def test_apply_lock_swallows_config_write_failure(
     )
 
     assert result.detected is True
-    assert "worthless-openai" not in result.providers_set
+    assert "openai" not in result.providers_set
     assert any(e.code == OpenclawErrorCode.WRITE_FAILED for e in result.events), [
         e.code for e in result.events
     ]
@@ -337,7 +342,7 @@ def test_apply_lock_swallows_skill_install_failure(
     )
 
     assert result.detected is True
-    assert "worthless-openai" in result.providers_set, "config write should still succeed"
+    assert "openai" in result.providers_set, "config write should still succeed"
     assert result.skill_installed is False
     assert any(e.code == OpenclawErrorCode.SKILL_INSTALL_FAILED for e in result.events)
 
@@ -359,7 +364,7 @@ def test_apply_lock_emits_config_updated_event_on_success(
     )
 
     assert result.detected is True
-    assert "worthless-openai" in result.providers_set
+    assert "openai" in result.providers_set
     updated_events = [e for e in result.events if e.code == OpenclawErrorCode.CONFIG_UPDATED]
     assert len(updated_events) >= 1, [e.code for e in result.events]
 
@@ -389,17 +394,15 @@ def test_apply_lock_is_idempotent(
 
     assert first.detected is True
     assert second.detected is True
-    assert first.providers_set == second.providers_set == ("worthless-openai",)
+    assert first.providers_set == second.providers_set == ("openai",)
 
     # Config file: provider entry must be present exactly once with
     # the same baseUrl after both calls.
     raw = openclaw_present["config_path"].read_text(encoding="utf-8")
     data = json.loads(raw)
     providers = data["models"]["providers"]
-    assert list(providers.keys()).count("worthless-openai") == 1
-    assert providers["worthless-openai"]["baseUrl"].endswith("/openai-aaaa1111/v1"), providers[
-        "worthless-openai"
-    ]
+    assert list(providers.keys()).count("openai") == 1
+    assert providers["openai"]["baseUrl"].endswith("/openai-aaaa1111/v1"), providers["openai"]
 
 
 # ---------------------------------------------------------------------------
@@ -410,8 +413,8 @@ def test_apply_lock_is_idempotent(
 def test_apply_lock_happy_path_writes_providers_and_installs_skill(
     openclaw_present: dict[str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Happy path: workspace exists + valid config + 2 aliases → both
-    ``worthless-openai`` and ``worthless-anthropic`` get written, skill
+    """Happy path: workspace exists + valid config + 2 aliases → both the
+    ``openai`` and ``anthropic`` entries get rewritten to the proxy, skill
     folder appears under workspace/skills/worthless/, events log shows
     the success sequence.
     """
@@ -427,16 +430,16 @@ def test_apply_lock_happy_path_writes_providers_and_installs_skill(
     )
 
     assert result.detected is True
-    assert set(result.providers_set) == {"worthless-openai", "worthless-anthropic"}
+    assert set(result.providers_set) == {"openai", "anthropic"}
     assert result.skill_installed is True
 
     # Config file mutated correctly.
     data = json.loads(openclaw_present["config_path"].read_text(encoding="utf-8"))
     providers = data["models"]["providers"]
-    assert providers["worthless-openai"]["baseUrl"].endswith("/openai-aaaa1111/v1")
-    assert providers["worthless-openai"]["apiKey"] == "sk-shard-a-openai"
-    assert providers["worthless-anthropic"]["baseUrl"].endswith("/anthropic-bbbb2222/v1")
-    assert providers["worthless-anthropic"]["apiKey"] == "sk-shard-a-anthropic"
+    assert providers["openai"]["baseUrl"].endswith("/openai-aaaa1111/v1")
+    assert providers["openai"]["apiKey"] == "sk-shard-a-openai"
+    assert providers["anthropic"]["baseUrl"].endswith("/anthropic-bbbb2222/v1")
+    assert providers["anthropic"]["apiKey"] == "sk-shard-a-anthropic"
 
     # Skill installed under workspace/skills/worthless/.
     skill_dir = openclaw_present["workspace"] / "skills" / "worthless"
@@ -462,7 +465,46 @@ def test_apply_lock_uses_custom_proxy_base_url(
     assert result.detected is True
     data = json.loads(openclaw_present["config_path"].read_text(encoding="utf-8"))
     providers = data["models"]["providers"]
-    assert providers["worthless-openai"]["baseUrl"] == "http://custom.host:9999/openai-cccc3333/v1"
+    assert providers["openai"]["baseUrl"] == "http://custom.host:9999/openai-cccc3333/v1"
+
+
+# ---------------------------------------------------------------------------
+# WOR-621 Phase 3 / F1 — rewrite the ORIGINAL entry, no `worthless-<id>` decoy
+# ---------------------------------------------------------------------------
+
+
+def test_apply_lock_rewrites_original_entry_no_worthless_alias(
+    openclaw_present: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F1 (WOR-621): lock must rewrite the provider under its ORIGINAL id so
+    OpenClaw actually routes through the proxy — NOT add a separate
+    ``worthless-<id>`` entry that OpenClaw never uses (the WOR-514 bypass).
+
+    After lock: ``providers['openai']`` points at the proxy with shard-A in
+    ``apiKey``, and there is NO ``worthless-openai`` key.
+    """
+    from worthless.openclaw import integration
+
+    monkeypatch.chdir(openclaw_present["home"])
+
+    result = integration.apply_lock(
+        planned_updates=[("openai", "openai-aaaa1111", "sk-shard-a-openai")],
+    )
+
+    assert result.detected is True
+
+    data = json.loads(openclaw_present["config_path"].read_text(encoding="utf-8"))
+    providers = data["models"]["providers"]
+
+    # The decoy must be gone: no separate worthless-<id> entry.
+    assert "worthless-openai" not in providers, (
+        "lock created a separate worthless-openai entry — the WOR-514 bypass; "
+        "it must rewrite the original 'openai' entry instead"
+    )
+    # The ORIGINAL provider id now carries the proxy address + shard-A.
+    assert "openai" in providers, providers
+    assert providers["openai"]["baseUrl"].endswith("/openai-aaaa1111/v1")
+    assert providers["openai"]["apiKey"] == "sk-shard-a-openai"
 
 
 # ---------------------------------------------------------------------------
@@ -474,7 +516,7 @@ def test_apply_lock_writes_models_array_and_api_field(openclaw_present: dict[str
     """Regression — daemon REJECTED config without ``models: []`` array.
 
     Live test against ghcr.io/openclaw/openclaw:latest reported:
-    ``models.providers.worthless-openai.models: Invalid input: expected
+    ``models.providers.openai.models: Invalid input: expected
     array, received undefined``. Without this the skill never registered
     in the real flow despite unit tests passing. Both ``models`` and
     ``api`` must be on every provider entry we write.
@@ -493,11 +535,11 @@ def test_apply_lock_writes_models_array_and_api_field(openclaw_present: dict[str
     providers = data["models"]["providers"]
 
     # AC: every entry has `models` array (empty is fine) so daemon accepts.
-    assert providers["worthless-openai"]["models"] == []
-    assert providers["worthless-anthropic"]["models"] == []
+    assert providers["openai"]["models"] == []
+    assert providers["anthropic"]["models"] == []
     # AC: `api` identifies the wire protocol per provider type.
-    assert providers["worthless-openai"]["api"] == "openai-completions"
-    assert providers["worthless-anthropic"]["api"] == "anthropic-messages"
+    assert providers["openai"]["api"] == "openai-completions"
+    assert providers["anthropic"]["api"] == "anthropic-messages"
 
 
 def test_apply_lock_preserves_existing_models_array(openclaw_present: dict[str, Path]) -> None:
@@ -515,7 +557,7 @@ def test_apply_lock_preserves_existing_models_array(openclaw_present: dict[str, 
             {
                 "models": {
                     "providers": {
-                        "worthless-openai": {
+                        "openai": {
                             "baseUrl": "http://127.0.0.1:8787/openai-aaaa1111/v1",
                             "apiKey": "sk-shard-old",
                             "api": "openai-completions",
@@ -536,7 +578,7 @@ def test_apply_lock_preserves_existing_models_array(openclaw_present: dict[str, 
     )
 
     data = json.loads(config_path.read_text(encoding="utf-8"))
-    entry = data["models"]["providers"]["worthless-openai"]
+    entry = data["models"]["providers"]["openai"]
     assert entry["models"] == [{"id": "gpt-4o", "name": "GPT-4o"}], "existing models clobbered"
     assert entry["apiKey"] == "sk-shard-new", "apiKey not refreshed"
 
@@ -563,7 +605,7 @@ def test_apply_lock_cross_host_refresh_on_non_default_port(
             {
                 "models": {
                     "providers": {
-                        "worthless-openai": {
+                        "openai": {
                             "baseUrl": "http://127.0.0.1:9090/openai-aaaa1111/v1",
                             "apiKey": "sk-shard-old",
                             "api": "openai-completions",
@@ -587,7 +629,7 @@ def test_apply_lock_cross_host_refresh_on_non_default_port(
     )
 
     data = json.loads(config_path.read_text(encoding="utf-8"))
-    entry = data["models"]["providers"]["worthless-openai"]
+    entry = data["models"]["providers"]["openai"]
     assert entry["apiKey"] == "sk-shard-new", (
         "apiKey not refreshed — port-based fallback must derive port from proxy_base_url, "
         "not hardcode 8787"
@@ -652,7 +694,7 @@ def test_ucfg10_malformed_json_emits_config_unreadable(
     )
 
     assert result.detected is True
-    assert "worthless-openai" not in result.providers_set
+    assert "openai" not in result.providers_set
     assert any(e.code == OpenclawErrorCode.CONFIG_UNREADABLE for e in result.events), [
         e.code for e in result.events
     ]
@@ -685,7 +727,7 @@ def test_ucfg11_models_is_array_emits_config_unreadable(
     )
 
     assert result.detected is True
-    assert "worthless-openai" not in result.providers_set
+    assert "openai" not in result.providers_set
     assert any(e.code == OpenclawErrorCode.CONFIG_UNREADABLE for e in result.events), [
         e.code for e in result.events
     ]
@@ -716,7 +758,7 @@ def test_ucfg12_providers_is_list_emits_config_unreadable(
     )
 
     assert result.detected is True
-    assert "worthless-openai" not in result.providers_set
+    assert "openai" not in result.providers_set
     assert any(e.code == OpenclawErrorCode.CONFIG_UNREADABLE for e in result.events), [
         e.code for e in result.events
     ]
@@ -758,6 +800,4 @@ def test_fxs47_home_mismatch_emits_warn_event_and_still_writes(
 
     # Write must still proceed despite the mismatch.
     data = json.loads(openclaw_present["config_path"].read_text(encoding="utf-8"))
-    assert "worthless-openai" in data["models"]["providers"], (
-        "HOME_MISMATCH should warn, not block the write"
-    )
+    assert "openai" in data["models"]["providers"], "HOME_MISMATCH should warn, not block the write"

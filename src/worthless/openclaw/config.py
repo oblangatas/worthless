@@ -383,6 +383,25 @@ def unset_provider(path: Path, provider: str) -> dict[str, Any]:
         return removed if isinstance(removed, dict) else {}
 
 
+def replace_provider(path: Path, provider: str, entry: dict[str, Any]) -> None:
+    """Overwrite ``models.providers.<provider>`` with EXACTLY ``entry``.
+
+    Unlike :func:`set_provider` (read-modify-merge, which preserves existing
+    fields), this replaces the entry wholesale. ``unlock`` needs this so the
+    fields ``lock`` added — ``api``, ``models`` — do not linger after a
+    restore, giving a byte-identical round-trip (WOR-621 F2).
+
+    flock + symlink refusal (F-CFG-15), same as :func:`set_provider` /
+    :func:`unset_provider`. Creates the file and parents when absent.
+    """
+    with _file_lock(path):
+        _refuse_if_symlink(path)
+        data = read_config(path, permission_as_missing=True)
+        providers = _ensure_providers(data)
+        providers[provider] = entry
+        _atomic_write_json(path, data)
+
+
 def get_provider(path: Path, provider: str) -> dict[str, Any] | None:
     """Return ``models.providers.<provider>`` or ``None`` if absent."""
     data = read_config(path)

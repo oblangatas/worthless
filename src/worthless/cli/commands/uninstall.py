@@ -23,7 +23,11 @@ import typer
 
 from worthless.cli._repo_factory import open_repo
 from worthless.cli.bootstrap import acquire_lock, get_home
-from worthless.cli.commands.unlock import _apply_openclaw_unlock, _unlock_batch
+from worthless.cli.commands.unlock import (
+    _apply_openclaw_unlock,
+    _build_oc_restores,
+    _unlock_batch,
+)
 from worthless.cli.console import get_console
 from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary
 from worthless.cli.keystore import delete_fernet_key
@@ -98,7 +102,7 @@ async def _restore_all(
 ) -> tuple[
     list[tuple[str, int | None]],
     list[tuple[str, str]],
-    list[tuple[str, str]],
+    list,
     list[str],
 ]:
     """Reconstruct + restore every locked .env, applying the mode policy.
@@ -107,7 +111,7 @@ async def _restore_all(
     - ``restored`` — ``(env_path, applied_mode)`` per file put back.
     - ``failed`` — ``(env_path, reason)`` per file that could NOT be restored
       (triggers the no-wipe key-shredder guard in the caller).
-    - ``unlocked`` — ``(provider, alias)`` tuples for OpenClaw symmetric undo.
+    - ``unlocked`` — ``OcRestore`` objects for OpenClaw symmetric undo.
     - ``enroll_only`` — aliases with no ``.env`` (from ``worthless enroll``);
       nothing to restore, so they DON'T block the wipe — surfaced as a warning.
 
@@ -133,11 +137,14 @@ async def _restore_all(
 
     restored: list[tuple[str, int | None]] = []
     failed: list[tuple[str, str]] = []
-    unlocked: list[tuple[str, str]] = []
+    # OcRestore objects for the OpenClaw symmetric undo — built by unlock's own
+    # _build_oc_restores so uninstall feeds _apply_openclaw_unlock exactly what
+    # it expects (WOR-621 changed the contract from (provider, alias) tuples).
+    unlocked: list = []
     for env_path, slot in by_path.items():
         try:
             planned = await _unlock_batch(slot["aliases"], home, repo, Path(env_path))
-            unlocked.extend((p.provider, p.alias) for p in planned)
+            unlocked.extend(await _build_oc_restores(planned, repo, console))
             target = _decide_mode(env_path, slot["mode"], assume_yes=assume_yes, console=console)
             if target is not None:
                 os.chmod(env_path, target)  # noqa: PTH101

@@ -224,9 +224,7 @@ class TestPostLockPromptAdvisoryOnly:
         _maybe_prompt_code_scan(tmp_path)
 
         captured = capsys.readouterr()
-        assert captured.err == "", (
-            f"happy path must stay silent; got stderr: {captured.err!r}"
-        )
+        assert captured.err == "", f"happy path must stay silent; got stderr: {captured.err!r}"
 
     def test_multi_reason_summary_sorts_most_frequent_first(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
@@ -425,8 +423,7 @@ class TestSkipBlockSanitisesAttackerControlledFilenames:
 
         assert result.exit_code == 2
         assert "\u202e" not in result.stderr, (
-            f"Bidi override leaked to terminal — Trojan Source unfixed. "
-            f"stderr={result.stderr!r}"
+            f"Bidi override leaked to terminal — Trojan Source unfixed. stderr={result.stderr!r}"
         )
 
     def test_clean_filename_passes_through_unchanged(
