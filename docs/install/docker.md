@@ -1,9 +1,9 @@
 ---
-title: "Install — Docker"
+title: "Docker — your app in a container"
 description: "When your app runs in a container — how the host CLI, Docker image, and host.docker.internal fit together."
 ---
 
-# Install with Docker
+# Docker — your app in a container
 
 The Docker image is a worthless **server** — not the CLI. The CLI is
 always installed natively on your host. The scenarios below spell out

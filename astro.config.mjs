@@ -32,6 +32,17 @@ export default defineConfig({
           ],
         },
         {
+          label: 'Install — by platform',
+          items: [
+            { label: 'Pick your platform', slug: 'install' },
+            { label: 'macOS', slug: 'install/mac' },
+            { label: 'Linux', slug: 'install/linux' },
+            { label: 'Windows (WSL2)', slug: 'install/wsl' },
+            { label: 'Docker (app in a container)', slug: 'install/docker' },
+            { label: 'Agent schema', slug: 'install/agent-schema' },
+          ],
+        },
+        {
           label: 'Reference',
           items: [
             { label: 'Wire Protocol', slug: 'protocol' },
