@@ -246,3 +246,155 @@ def test_uninstall_partial_rmtree_message_is_accurate(
     assert "and ~/.worthless removed" not in out, (
         "must NOT claim full removal when it didn't happen"
     )
+
+
+# --- PR1 hardening (WOR-713 tail) ------------------------------------------
+
+
+def test_uninstall_tty_human_declining_cancels(
+    home_dir: WorthlessHome, tmp_path, monkeypatch
+) -> None:
+    """jlco: at a TTY, declining the top-level confirm cancels cleanly —
+    nothing wiped, nothing restored.
+    """
+    import worthless.cli.commands.uninstall as uninstall_mod
+    from tests.helpers import fake_key
+
+    monkeypatch.setattr(uninstall_mod, "_stdin_is_tty", lambda: True)
+
+    key = fake_key("sk-")
+    env = tmp_path / ".env"
+    env.write_text(f"OPENAI_API_KEY={key}\n")
+    runner.invoke(app, ["lock", "--env", str(env)], env={"WORTHLESS_HOME": str(home_dir.base_dir)})
+
+    result = runner.invoke(
+        app, ["uninstall"], input="n\n", env={"WORTHLESS_HOME": str(home_dir.base_dir)}
+    )
+    assert result.exit_code == 0, f"TTY decline should be a clean cancel: {result.output}"
+    assert home_dir.base_dir.exists(), "declined uninstall must NOT wipe ~/.worthless"
+    assert key not in env.read_text(), "declined uninstall must NOT restore (still shard-A)"
+
+
+def test_uninstall_non_interactive_without_yes_refuses_cleanly(
+    home_dir: WorthlessHome, tmp_path, monkeypatch
+) -> None:
+    """jlco/security gate: a non-interactive caller (no TTY) without --yes must
+    get a CLEAN refusal that points at --yes — never a confirm that EOFs into an
+    internal error (WRTLS-199), and never a silent wipe.
+    """
+    import worthless.cli.commands.uninstall as uninstall_mod
+    from tests.helpers import fake_key
+
+    monkeypatch.setattr(uninstall_mod, "_stdin_is_tty", lambda: False)
+
+    env = tmp_path / ".env"
+    env.write_text(f"OPENAI_API_KEY={fake_key('sk-')}\n")
+    runner.invoke(app, ["lock", "--env", str(env)], env={"WORTHLESS_HOME": str(home_dir.base_dir)})
+
+    result = runner.invoke(app, ["uninstall"], env={"WORTHLESS_HOME": str(home_dir.base_dir)})
+    assert result.exit_code != 0, "non-interactive without --yes must refuse"
+    out = result.output.lower()
+    assert "--yes" in out, "refusal must tell the caller to pass --yes"
+    assert "internal error" not in out, "must NOT crash with WRTLS-199"
+    assert home_dir.base_dir.exists(), "refusal must NOT wipe ~/.worthless"
+
+
+def test_uninstall_stops_daemon_before_wipe(home_dir: WorthlessHome, tmp_path, monkeypatch) -> None:
+    """fzbi: uninstall stops a running proxy daemon (best-effort) during teardown
+    so it isn't left serving against a deleted ~/.worthless.
+    """
+    import worthless.cli.commands.uninstall as uninstall_mod
+    from tests.helpers import fake_key
+
+    calls: list[str] = []
+    monkeypatch.setattr(uninstall_mod, "_stop_daemon", lambda home, console: calls.append("stop"))
+
+    env = tmp_path / ".env"
+    env.write_text(f"OPENAI_API_KEY={fake_key('sk-')}\n")
+    runner.invoke(app, ["lock", "--env", str(env)], env={"WORTHLESS_HOME": str(home_dir.base_dir)})
+
+    result = runner.invoke(
+        app, ["uninstall", "--yes"], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
+    )
+    assert result.exit_code == 0, result.output
+    assert calls == ["stop"], "uninstall must call _stop_daemon (best-effort) during teardown"
+    assert not home_dir.base_dir.exists(), "wipe must still complete"
+
+
+def test_uninstall_openclaw_partial_failure_exits_73_but_still_wipes(
+    home_dir: WorthlessHome, tmp_path, monkeypatch
+) -> None:
+    """jl13: an OpenClaw-undo partial failure must SURFACE (exit 73) like unlock
+    does — but it must NOT block the wipe (best-effort, L1).
+    """
+    import worthless.cli.commands.uninstall as uninstall_mod
+    from tests.helpers import fake_key
+
+    # Real _apply_openclaw_unlock returns True on detected+failed; simulate it.
+    monkeypatch.setattr(
+        uninstall_mod, "_apply_openclaw_unlock", lambda unlocked, console, home: True
+    )
+
+    env = tmp_path / ".env"
+    env.write_text(f"OPENAI_API_KEY={fake_key('sk-')}\n")
+    runner.invoke(app, ["lock", "--env", str(env)], env={"WORTHLESS_HOME": str(home_dir.base_dir)})
+
+    result = runner.invoke(
+        app, ["uninstall", "--yes"], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
+    )
+    assert result.exit_code == 73, f"OpenClaw partial failure must exit 73: {result.output}"
+    assert not home_dir.base_dir.exists(), "wipe must still run despite OpenClaw failure"
+
+
+def test_zero_restore_keys_wipes_plaintext() -> None:
+    """gcmp: _zero_restore_keys zeros every held plaintext key in place; tolerates None."""
+    from worthless.cli.commands.uninstall import _zero_restore_keys
+
+    class _R:
+        pass
+
+    with_key = _R()
+    with_key.plaintext_key = bytearray(b"sk-secret-key")
+    secretref = _R()
+    secretref.plaintext_key = None  # SecretRef branch — nothing to zero
+
+    _zero_restore_keys([with_key, secretref])
+
+    assert with_key.plaintext_key == bytearray(len(b"sk-secret-key")), "key not zeroed"
+    assert secretref.plaintext_key is None  # didn't crash on None
+
+
+def test_uninstall_zeros_keys_when_a_restore_fails(
+    home_dir: WorthlessHome, tmp_path, monkeypatch
+) -> None:
+    """gcmp: on the restore-failure path (wipe aborts before the OpenClaw undo
+    that normally zeros keys), uninstall must still zero the built restores.
+    """
+    import worthless.cli.commands.uninstall as uninstall_mod
+    from tests.helpers import fake_key
+
+    real = uninstall_mod._zero_restore_keys
+    spied: list[list] = []
+
+    def _spy(restores):  # noqa: ANN001, ANN202
+        spied.append(list(restores))
+        real(restores)
+
+    monkeypatch.setattr(uninstall_mod, "_zero_restore_keys", _spy)
+
+    # Force the post-reconstruct chmod to fail → file collected as `failed` → guard aborts.
+    def _boom(*_a, **_k):
+        raise OSError("simulated chmod failure")
+
+    monkeypatch.setattr(uninstall_mod.os, "chmod", _boom)
+
+    env = tmp_path / ".env"
+    env.write_text(f"OPENAI_API_KEY={fake_key('sk-')}\n")
+    runner.invoke(app, ["lock", "--env", str(env)], env={"WORTHLESS_HOME": str(home_dir.base_dir)})
+
+    result = runner.invoke(
+        app, ["uninstall", "--yes"], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
+    )
+    assert result.exit_code != 0, "a failed restore must abort the wipe"
+    assert home_dir.base_dir.exists(), "shredder guard: home not wiped"
+    assert spied, "uninstall must zero built restore keys on the failure path"

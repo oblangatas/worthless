@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+import sys
 from collections import defaultdict
 from pathlib import Path
 
@@ -23,6 +24,7 @@ import typer
 
 from worthless.cli._repo_factory import open_repo
 from worthless.cli.bootstrap import acquire_lock, get_home
+from worthless.cli.commands.down import _stop_daemon
 from worthless.cli.commands.unlock import (
     _apply_openclaw_unlock,
     _build_oc_restores,
@@ -31,6 +33,7 @@ from worthless.cli.commands.unlock import (
 from worthless.cli.console import get_console
 from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary
 from worthless.cli.keystore import delete_fernet_key
+from worthless.crypto.types import zero_buf
 
 # ``0o700`` keeps only the owner's bits; ANDing with it strips every group and
 # other bit (and setuid/setgid/sticky), so a restored .env that holds the real
@@ -97,6 +100,21 @@ def _decide_mode(
     return safe
 
 
+def _zero_restore_keys(restores: list) -> None:
+    """Zero every reconstructed plaintext key held by built ``OcRestore``s.
+
+    On the happy path ``_apply_openclaw_unlock`` zeros these in its ``finally``.
+    But on the restore-failure path the wipe is aborted BEFORE that call, so the
+    reconstructed keys would otherwise linger in heap until GC. Zero them here so
+    a failed uninstall never leaves real key material in memory (SR-02).
+    ``zero_buf`` is idempotent, so re-zeroing an already-cleared buffer is safe.
+    """
+    for r in restores:
+        key = getattr(r, "plaintext_key", None)
+        if key is not None:
+            zero_buf(key)
+
+
 async def _restore_all(
     home, repo, *, assume_yes: bool, console
 ) -> tuple[
@@ -155,11 +173,38 @@ async def _restore_all(
     return restored, failed, unlocked, enroll_only
 
 
+def _stdin_is_tty() -> bool:
+    """Whether stdin is an interactive terminal (extracted for testability)."""
+    return sys.stdin.isatty()
+
+
 def _run_uninstall(*, assume_yes: bool) -> None:
     """Restore every locked .env, then (only if all succeeded) wipe Worthless."""
     console = get_console()
     home = get_home()
 
+    # jlco: confirm before this destructive op. A human at a TTY is asked; a
+    # non-interactive caller (piped/CI/agent) must pass --yes instead — we refuse
+    # cleanly rather than prompt, because typer.confirm on closed stdin raises
+    # Abort → a confusing internal error. Two audiences, no blocking prompt.
+    if not assume_yes:
+        if not _stdin_is_tty():
+            console.print_failure(
+                "Refusing to uninstall without confirmation in a non-interactive "
+                "shell. Re-run with --yes to confirm (this restores your real keys "
+                "to every locked .env, then removes Worthless)."
+            )
+            raise typer.Exit(code=1)
+        proceed = typer.confirm(
+            "This restores your real API keys into every locked .env and removes "
+            "Worthless from this machine. Continue?",
+            default=True,
+        )
+        if not proceed:
+            console.print_hint("Uninstall cancelled — nothing was changed.")
+            return
+
+    oc_partial = False
     with acquire_lock(home):
 
         async def _run():
@@ -180,7 +225,10 @@ def _run_uninstall(*, assume_yes: bool) -> None:
 
         if failed:
             # Key-shredder guard: a restore failed → DO NOT wipe. shard-B for the
-            # failed files is still in the DB for a retry.
+            # failed files is still in the DB for a retry. Zero any reconstructed
+            # keys built before the abort — the OpenClaw undo that normally zeros
+            # them never runs on this path (SR-02, bead worthless-gcmp).
+            _zero_restore_keys(unlocked)
             for env_path, why in failed:
                 console.print_warning(f"could NOT restore {env_path}: {why}")
             console.print_failure(
@@ -192,10 +240,19 @@ def _run_uninstall(*, assume_yes: bool) -> None:
                 "uninstall aborted: not all .env files restored",
             )
 
+        # fzbi: stop a running proxy daemon before wiping its home, so it isn't
+        # left serving against a deleted ~/.worthless. Best-effort — a daemon we
+        # can't stop must never block the teardown.
+        try:
+            _stop_daemon(home, console)
+        except Exception as exc:  # noqa: BLE001 — best-effort; never block the wipe
+            console.print_warning(f"could not stop the proxy daemon ({exc}); continuing.")
+
         # OpenClaw symmetric undo — best-effort, NEVER blocks the wipe (L1).
         # Removes worthless-* providers from openclaw.json so an OpenClaw-primary
-        # user isn't left pointing at the now-deleted proxy.
-        _apply_openclaw_unlock(unlocked, console, home)
+        # user isn't left pointing at the now-deleted proxy. A partial failure is
+        # surfaced as a non-zero exit AFTER the wipe (jl13), mirroring unlock.
+        oc_partial = _apply_openclaw_unlock(unlocked, console, home)
 
         delete_fernet_key(home.base_dir)
         home.bootstrapped_marker.unlink(missing_ok=True)
@@ -220,6 +277,11 @@ def _run_uninstall(*, assume_yes: bool) -> None:
             "keychain entry and ~/.worthless removed."
         )
 
+    # jl13: the wipe succeeded; surface an OpenClaw-undo partial failure as a
+    # non-zero exit (the [FAIL] detail was already printed), mirroring unlock.
+    if oc_partial:
+        raise typer.Exit(code=73)
+
 
 def register_uninstall_commands(app: typer.Typer) -> None:
     """Register the ``uninstall`` command on *app*."""
@@ -228,7 +290,10 @@ def register_uninstall_commands(app: typer.Typer) -> None:
     @error_boundary
     def uninstall(
         yes: bool = typer.Option(
-            False, "--yes", "-y", help="Skip the permission prompt (for agents / scripts)."
+            False,
+            "--yes",
+            "-y",
+            help="Skip all confirmation prompts (for agents / scripts).",
         ),
     ) -> None:
         """Restore every locked .env to its real key, then remove Worthless.
