@@ -83,19 +83,32 @@ def check_proxy_health(port: int) -> dict[str, object]:
     consumers.
 
     Returns: ``{"healthy": bool, "port": int, "mode": str | None,
-    "requests_proxied": int}``. ``healthy=False`` covers connection
-    refused, timeout, non-200, and non-JSON responses.
+    "requests_proxied": int}`` plus, when the responder is a worthless
+    proxy, ``"bind_probe_count": int`` (WOR-658). The bind_probe_count
+    key is INTENTIONALLY ABSENT when the healthz body doesn't include
+    it — that's the squatter-resistance signal lock-side uses to
+    distinguish a worthless proxy from a random HTTP server on the same
+    port. ``healthy=False`` covers connection refused, timeout, non-200,
+    and non-JSON responses.
     """
     try:
         resp = httpx.get(f"http://127.0.0.1:{port}/healthz", timeout=2.0)
         if resp.status_code == 200:
             data = resp.json()
-            return {
+            result: dict[str, object] = {
                 "healthy": True,
                 "port": port,
                 "mode": data.get("mode", "up"),
                 "requests_proxied": data.get("requests_proxied", 0),
             }
+            # WOR-658: only surface bind_probe_count when the responder
+            # actually included it. Missing field on a healthy responder
+            # = "this isn't a worthless proxy" → lock-side classifies
+            # the verdict as skipped (reason=proxy_unrecognised) instead
+            # of fail.
+            if "bind_probe_count" in data:
+                result["bind_probe_count"] = data["bind_probe_count"]
+            return result
     except Exception:  # noqa: S110 — proxy may not be running; absence is the expected default state  # nosec B110
         pass
 

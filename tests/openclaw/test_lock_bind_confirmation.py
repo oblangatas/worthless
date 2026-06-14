@@ -81,14 +81,21 @@ def _patch_proxy_counter(
     lock_mod,  # noqa: ANN001 — module type opaque from this layer
     *,
     tick_on_fire: bool,
+    include_probe_field: bool = True,
 ) -> dict[str, int]:
-    """Wire a shared in-memory proxy counter:
+    """Wire a shared in-memory probe counter:
 
     * ``check_proxy_health`` returns ``state["counter"]`` (always healthy so
-      F7's pre-flight gate stays out of the way).
+      F7's pre-flight gate stays out of the way) as ``bind_probe_count`` —
+      the new WOR-658 field. The presence of the field is the squatter-
+      resistance signal lock-side uses to recognise a worthless proxy.
     * ``_fire_synthetic_request`` increments the counter when
       ``tick_on_fire=True`` (the GREEN happy path) and leaves it untouched
       otherwise (silent-bypass failure mode).
+    * ``include_probe_field=False`` simulates a squatter on the port —
+      healthz answers 200 but without the ``bind_probe_count`` key. Lock
+      side must classify as ``skipped, reason=proxy_unrecognised``, NOT
+      treat the missing field as a failure.
 
     Resilient to any call-count refactor in lock-flow: bind-confirmation
     proves routing iff the counter the next ``check_proxy_health`` returns
@@ -97,12 +104,15 @@ def _patch_proxy_counter(
     state = {"counter": 100}
 
     def fake_check_proxy_health(port):  # noqa: ANN001 — match real signature loosely
-        return {
+        result: dict[str, object] = {
             "healthy": True,
             "port": port,
             "mode": "ok",
-            "requests_proxied": state["counter"],
+            "requests_proxied": 0,
         }
+        if include_probe_field:
+            result["bind_probe_count"] = state["counter"]
+        return result
 
     def fake_fire_synthetic_request(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202 — opaque stub
         if tick_on_fire:
@@ -186,9 +196,11 @@ def test_lock_exits_nonzero_when_bind_confirmation_fails(
             "WORTHLESS_HOME": str(wl_home),
         },
     )
-    assert result.exit_code != 0, (
-        "WOR-658: lock must refuse to claim success when the synthetic request "
-        "didn't tick requests_proxied. Silent-bypass class (WOR-514)."
+    assert result.exit_code == 91, (
+        "WOR-658: lock must exit 91 (bind-confirmation refusal) when the "
+        f"synthetic request didn't tick bind_probe_count. Got {result.exit_code}. "
+        "91 is distinct from 87 (CONFIG_UNREADABLE) and 73 (OpenClaw partial-fail) "
+        "so wrappers can tell 'lock didn't write' from 'lock wrote but routing is broken'."
     )
 
     sentinel = json.loads(sentinel_path(wl_home).read_text())
@@ -196,4 +208,54 @@ def test_lock_exits_nonzero_when_bind_confirmation_fails(
     assert bc.get("status") == "fail", (
         f"bind_confirmation.status must be 'fail' when counter delta == 0. "
         f"Got sentinel: {sentinel!r}"
+    )
+    # WOR-658 + api-designer finding: ``is_partial()`` must fire on the new
+    # bind-fail state. The sentinel pair we wrote (status=partial,
+    # openclaw=failed) is what ``is_partial`` already recognises.
+    assert sentinel["status"] == "partial"
+    assert sentinel["openclaw"] == "failed"
+
+
+# ---------------------------------------------------------------------------
+# Squatter-resistance: a foreign HTTP server on the port is NOT a worthless
+# proxy. Lock must not interpret its counter as proof of routing.
+# ---------------------------------------------------------------------------
+
+
+def test_lock_skipped_when_proxy_does_not_expose_bind_probe_count(
+    env_file: Path,
+    openclaw_present: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If ``/healthz`` answers 200 but the body lacks ``bind_probe_count``,
+    the responder is NOT a worthless proxy (it could be a random service
+    squatting on the port). Lock must classify the verdict as ``skipped``
+    with ``reason=proxy_unrecognised`` and exit 0 — refusing to manufacture
+    a fail verdict against an unrecognised peer.
+    """
+    from worthless.cli.commands import lock as lock_mod
+
+    _patch_proxy_counter(monkeypatch, lock_mod, tick_on_fire=True, include_probe_field=False)
+    wl_home = openclaw_present["home"] / ".worthless"
+
+    result = runner.invoke(
+        app,
+        ["lock", "--env", str(env_file)],
+        env={
+            "WORTHLESS_KEYRING_BACKEND": "null",
+            "WORTHLESS_HOME": str(wl_home),
+        },
+    )
+    assert result.exit_code == 0, (
+        f"WOR-658: lock must exit 0 (skipped, not fail) when /healthz lacks "
+        f"bind_probe_count — unrecognised peer is inconclusive, not a bypass. "
+        f"Got {result.exit_code}: {result.output}"
+    )
+
+    sentinel = json.loads(sentinel_path(wl_home).read_text())
+    bc = sentinel.get("bind_confirmation", {})
+    assert bc.get("status") == "skipped"
+    assert bc.get("reason") == "proxy_unrecognised", (
+        f"reason must name the squatter signal explicitly so doctor can "
+        f"surface the right remediation. Got: {bc!r}"
     )

@@ -20,8 +20,20 @@ Schema (wire-stable; keep additive only):
       "alias_count": 1,
       "events": [
         {"code": "openclaw.write_failed", "level": "error", "detail": "..."}
-      ]
+      ],
+      "bind_confirmation": {                     // WOR-658, optional
+        "status": "pass" | "fail" | "skipped",
+        "delta": 0,                              // bind_probe_count delta
+        "aliases": ["openai-abc123"],            // managed aliases tested
+        "reached": 1,                            // # probes that got HTTP
+        "reason": "proxy_unrecognised" | "..."   // present when skipped
+      }
     }
+
+The ``bind_confirmation`` block is absent on sentinels written by paths
+that do not run bind-confirmation (unlock, openclaw=absent, the failure
+branch before the OpenClaw integration runs, etc.) — additive-only
+contract: old readers ignore it, new readers gate on its presence.
 
 Atomic write via tempfile + ``os.replace`` — same pattern as Phase 1's
 ``_atomic_write_json`` in ``worthless.openclaw.config``. Crash mid-write

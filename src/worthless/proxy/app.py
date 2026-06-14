@@ -256,6 +256,14 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
     # proxy_auth_token is no longer used — kept for tests that set it to None
     # to indicate "target state: no stable token". The proxy ignores this field.
     app.state.proxy_auth_token = None
+    # WOR-658: dedicated counter for the bind-confirmation probe. Lives
+    # in-memory only — survives the process lifetime and resets on restart,
+    # exactly the lifecycle ``worthless lock`` cares about (it reads
+    # before + after within a single CLI invocation). Intentionally
+    # SEPARATE from ``requests_proxied`` (spend_log) so probe traffic can
+    # never inflate the real-traffic meter and a real-traffic burst can
+    # never fake a probe pass.
+    app.state.bind_probe_count = 0
 
     # Middleware stack (reverse order: last registered runs first)
     app.add_middleware(CORSMiddleware, allow_origins=[], allow_methods=["GET"], allow_headers=[])
@@ -288,7 +296,46 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
         # Expose the listening process PID so the CLI can write the
         # authoritative PID — the process actually bound to the port —
         # rather than whatever Popen returned on this platform.
-        return {"status": "ok", "requests_proxied": count, "pid": os.getpid()}
+        # WOR-658: surface ``bind_probe_count`` so ``worthless lock`` can
+        # observe a delta across the synthetic probe and also use the
+        # field's presence as proof the responder is a worthless proxy
+        # (a squatter on the port serving plain ``/healthz`` won't have
+        # this field — lock classifies that case as ``skipped``, not ``pass``).
+        bind_probe_count = getattr(request.app.state, "bind_probe_count", 0)
+        return {
+            "status": "ok",
+            "requests_proxied": count,
+            "pid": os.getpid(),
+            "bind_probe_count": bind_probe_count,
+        }
+
+    @app.get("/_bind_probe/{alias}")
+    @app.head("/_bind_probe/{alias}")
+    async def bind_probe(request: Request, alias: str) -> Response:  # noqa: ARG001
+        """WOR-658 bind-confirmation probe — intentionally public.
+
+        ``worthless lock`` fires one GET/HEAD per managed alias here
+        immediately after rewriting the OpenClaw config. We bump an
+        in-memory counter and return 204 No Content; the lock side reads
+        the delta on ``/healthz`` to prove the rewritten URL actually
+        routes through this proxy.
+
+        Security posture (this is by design — review carefully if changing):
+
+        * No auth, no body inspection, no upstream call. The probe is
+          BEFORE auth on purpose; the whole point is to exercise routing
+          without needing a real key.
+        * Response is identical for every alias (204, no body). No
+          information about which aliases are registered leaks here.
+        * Counter is in-memory and isolated from ``requests_proxied``.
+          Probe traffic can't pollute the spend ledger and a real-traffic
+          burst can't fake a probe pass.
+        * The presence of ``bind_probe_count`` in ``/healthz`` is the
+          lock side's signal that it's talking to a worthless proxy. A
+          squatter on the port answering plain ``/healthz`` won't have it.
+        """
+        request.app.state.bind_probe_count = getattr(request.app.state, "bind_probe_count", 0) + 1
+        return Response(status_code=204)
 
     @app.get("/readyz")
     async def readyz(request: Request) -> Response:
