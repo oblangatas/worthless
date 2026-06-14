@@ -222,6 +222,18 @@ class ProxySettings:
             os.environ.get("WORTHLESS_MAX_IDLE_BETWEEN_CHUNKS_SECONDS", "90.0")
         )
     )
+    # Sweeper background task: how often to run and how old a hold must be
+    # before it gets billed at estimate (fail-closed: bill orphans, never refund).
+    sweep_interval_seconds: float = field(
+        default_factory=lambda: float(
+            os.environ.get("WORTHLESS_SWEEP_INTERVAL_SECONDS", "60.0")
+        )
+    )
+    sweep_max_age_seconds: float = field(
+        default_factory=lambda: float(
+            os.environ.get("WORTHLESS_SWEEP_MAX_AGE_SECONDS", "300.0")
+        )
+    )
     allow_insecure: bool = field(default_factory=lambda: _env_bool("WORTHLESS_ALLOW_INSECURE"))
     sidecar_socket_path: str = field(
         default_factory=lambda: os.environ.get(

@@ -12,6 +12,7 @@ Architecture invariants enforced:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -52,6 +53,7 @@ from worthless.proxy.rules import (
 )
 from worthless.storage.schema import SCHEMA, migrate_db
 from worthless.storage.shard_reader import ShardReader
+from worthless.storage.spend_ledger import SpendLedger
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +170,27 @@ def _sanitize_upstream_error(status_code: int, body: bytes, provider: str) -> by
     return _error_body(status_code, "upstream provider error", "api_error", provider)
 
 
+async def _sweep_loop(ledger: SpendLedger, interval: float, max_age: float) -> None:
+    """Background task: periodically settle orphaned holds at their estimate.
+
+    Runs forever until cancelled (typically at proxy shutdown). Any exception
+    from ``ledger.sweep()`` is swallowed and logged so a transient DB error
+    never crashes the loop — the next iteration will retry.
+
+    Args:
+        ledger: The SpendLedger instance to sweep.
+        interval: Seconds between sweeps (WORTHLESS_SWEEP_INTERVAL_SECONDS).
+        max_age: Holds older than this many seconds are billed at estimate
+            (WORTHLESS_SWEEP_MAX_AGE_SECONDS).
+    """
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await ledger.sweep(max_age)
+        except Exception:  # noqa: BLE001
+            logger.warning("sweeper: sweep() raised an exception", exc_info=True)
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     """Startup/shutdown lifecycle for the proxy.
@@ -239,7 +262,24 @@ async def _lifespan(app: FastAPI):
     )
     app.state.rules_engine = rules_engine
 
+    # Sweeper background task: settle orphaned holds left by SIGKILL/crash.
+    # SpendCapRule's internal ledger shares the same db + db_lock, so we build
+    # a SpendLedger here with the same connection to avoid opening a second one.
+    ledger = SpendLedger(db, db_lock)
+    app.state.ledger = ledger
+    sweep_task = asyncio.create_task(
+        _sweep_loop(ledger, settings.sweep_interval_seconds, settings.sweep_max_age_seconds)
+    )
+
     yield
+
+    # Shutdown: cancel the sweeper before closing the DB so it can't race
+    # against db.close(). Both cancel() and await are required — just cancelling
+    # leaves the task running until the event loop is closed, causing a
+    # "task was destroyed but it is pending" warning.
+    sweep_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await sweep_task
 
     # Cleanup
     try:
