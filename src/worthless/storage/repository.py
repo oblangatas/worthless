@@ -13,7 +13,7 @@ from cryptography.fernet import Fernet, InvalidToken
 
 from worthless.crypto.kdf import derive_mac_secret
 from worthless.defaults import DEFAULT_SPEND_CAP_TOKENS
-from worthless.proxy.config import GLOBAL_CEILING_TOKENS
+from worthless.defaults import GLOBAL_CEILING_TOKENS
 from worthless.storage.models import EncryptedShard, EnrollmentRecord, StoredShard
 from worthless.storage.schema import init_db, migrate_db
 

@@ -10,6 +10,7 @@ from pathlib import Path
 
 from worthless._flags import fernet_ipc_only_enabled
 from worthless.cli.keystore import read_fernet_key
+from worthless.defaults import GLOBAL_CEILING_TOKENS  # noqa: F401 — re-exported for proxy consumers
 
 #: Capabilities the proxy expects from the sidecar HELLO frame (WOR-309).
 #: Caps shrinking across reconnects is fatal — see C3 in
@@ -22,24 +23,6 @@ DEFAULT_SIDECAR_PROTOCOL_VERSION: int = 1
 #: Default Unix Domain Socket path. Single-container deployment puts the
 #: socket on a tmpfs volume shared by the proxy and sidecar uids.
 DEFAULT_SIDECAR_SOCKET_PATH: str = "/run/worthless/sidecar.sock"
-
-#: WOR-696 — token-count floor for every fail-closed metering path.
-#:
-#: ``settle_at_estimate`` (storage/spend_ledger.py) writes
-#: ``max(estimate, GLOBAL_CEILING_TOKENS)`` into ``spend_log`` whenever the
-#: actual usage is unreadable (mid-stream disconnect, malformed response,
-#: stream-duration kill, idle-chunk kill). Without the floor, a request
-#: that reserves 0 (e.g. no ``max_tokens``) settles at 0 and the cap
-#: counter doesn't move — the documented bypass WOR-696 closes.
-#:
-#: Value = the highest documented max-output across every model currently
-#: in production (gpt-5 family, Anthropic Opus 4.5). Direction of error
-#: is conservative — over-bill on the fallback path, never under-bill.
-#:
-#: NO model registry. NO ``is_known_model`` / ``ceiling_for`` helpers. The
-#: negative-existence guard test forbids any of those from coming back —
-#: the global ceiling makes per-model bookkeeping pointless friction.
-GLOBAL_CEILING_TOKENS: int = 128_000
 
 
 _PAAS_ENV_VARS: tuple[str, ...] = ("RENDER", "FLY_APP_NAME", "KUBERNETES_SERVICE_HOST")
