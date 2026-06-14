@@ -186,7 +186,7 @@ class SpendLedger:
         ordered = list(aliases)
         placeholders = ",".join("?" * len(ordered))
         query = (
-            "SELECT key_alias, ceiling_override FROM enrollment_config "  # noqa: S608 — IN placeholders only; values are parameterized
+            "SELECT key_alias, ceiling_override FROM enrollment_config "  # noqa: S608  # nosec B608 — IN placeholders only; values are parameterized
             f"WHERE key_alias IN ({placeholders})"
         )
         try:
