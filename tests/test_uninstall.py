@@ -386,14 +386,16 @@ def test_uninstall_zeros_keys_when_a_restore_fails(
     env.write_text(f"OPENAI_API_KEY={fake_key('sk-')}\n")
     runner.invoke(app, ["lock", "--env", str(env)], env={"WORTHLESS_HOME": str(home_dir.base_dir)})
 
-    # Break chmod ONLY for the uninstall step (after lock, which needs real chmod
-    # on some platforms): the post-reconstruct chmod fails → file collected as
-    # `failed` → guard aborts → keys must be zeroed. Setting this before lock made
-    # lock itself fail on Linux/CI, so nothing was locked and the test was moot.
+    # Force a restore failure AFTER the OcRestores are built (so `unlocked` holds
+    # the keys to zero) but before the wipe. Fail _decide_mode, which runs right
+    # after _build_oc_restores — deterministic across platforms and Python
+    # versions. (Earlier this booped os.chmod, but chmod is only called when a
+    # mode clamp is needed, which depends on the captured original_mode — that
+    # platform-variance was the py3.13-only CI failure.)
     def _boom(*_a, **_k):
-        raise OSError("simulated chmod failure")
+        raise OSError("simulated restore failure")
 
-    monkeypatch.setattr(uninstall_mod.os, "chmod", _boom)
+    monkeypatch.setattr(uninstall_mod, "_decide_mode", _boom)
 
     result = runner.invoke(
         app, ["uninstall", "--yes"], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
