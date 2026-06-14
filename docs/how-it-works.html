@@ -90,24 +90,6 @@
     .nav-links { display: flex; gap: 0.1rem; margin-left: 1.5rem; }
     .nav-links a { font-size: 0.855rem; font-weight: 500; color: #0a9396; text-decoration: none; padding: 0.4rem 0.8rem; border-radius: 7px; transition: color 0.2s, background 0.2s; }
     .nav-links a:hover, .nav-links a.active { color: var(--text); background: var(--bg2); }
-    .nav-kofi {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.4rem;
-      font-size: 0.8rem;
-      font-weight: 600;
-      color: var(--text);
-      text-decoration: none;
-      padding: 0.38rem 0.85rem;
-      border-radius: 7px;
-      background: #ffb3b0;
-      transition: background 0.2s;
-      white-space: nowrap;
-    }
-
-    .nav-kofi:hover {
-      background: #ff9c98;
-    }
     .nav-gh { margin-left: auto; font-size: 0.82rem; font-weight: 500; color: var(--text2); text-decoration: none; padding: 0.4rem 0.85rem; border: 1px solid var(--border); border-radius: 7px; background: var(--white); transition: color 0.2s; }
     .nav-gh:hover { color: var(--text); }
     @media (max-width: 720px) {
@@ -116,7 +98,6 @@
       .nav-links { order: 3; width: 100%; margin-left: 0; overflow-x: auto; padding-bottom: 0.1rem; scrollbar-width: none; }
       .nav-links::-webkit-scrollbar { display: none; }
       .nav-links a { padding: 0.35rem 0.55rem; white-space: nowrap; }
-      .nav-kofi { margin-left: 0; padding: 0.34rem 0.65rem; }
       .nav-gh { margin-left: 0; padding: 0.34rem 0.65rem; }
     }
 
@@ -223,15 +204,13 @@
     <a href="features.html">Features</a>
     <a href="blog/index.html">Blog</a>
     <a href="red/index.html">Red Blog</a>
-    <a href="memes.html">Memes</a>
   </div>
-  <a href="https://ko-fi.com/shacharme" class="nav-kofi" target="_blank" rel="noopener">☕ Ko-fi</a>
   <a href="https://github.com/shacharm2/worthless" class="nav-gh" target="_blank" rel="noopener">GitHub</a>
 </nav>
 
 <div class="page">
   <div class="eyebrow">How it works</div>
-  <h1>Your key gets split. The leaked half is useless on its own.</h1>
+  <h1>A copied protected AI key cannot call the provider on its own.</h1>
 
   <div class="step">
     <div class="step-rail"><div class="step-num">01</div><div class="step-line"></div></div>
@@ -247,7 +226,7 @@
     <div class="step-body">
       <h2>Worthless splits it in half</h2>
       <p>Run <code>worthless lock</code>. Your key gets split into two random-looking pieces. One stays in your .env. The other goes to a local proxy on your machine. Neither piece works on its own.</p>
-      <p>Someone steals your .env? They get random bytes. The stored share reveals nothing about the original key.</p>
+      <p>If someone copies your .env, the protected value alone cannot call the provider. The stored share reveals nothing about the original key while the other share remains out of reach.</p>
       <details><summary>how does that work?</summary><p>It's called XOR secret sharing. Think of it like tearing a photo in half, each piece looks like random noise. You need both halves to see the picture. One half reveals zero bits about the original. The catch: only true while the other half stays out of reach.</p></details>
     </div>
   </div>
@@ -255,8 +234,8 @@
   <div class="step">
     <div class="step-rail"><div class="step-num">03</div><div class="step-line"></div></div>
     <div class="step-body">
-      <h2>Your app works exactly the same</h2>
-      <p>Run <code>worthless wrap python app.py</code> instead of <code>python app.py</code>. That's the only change. Your code reads environment variables like before. The proxy combines both halves for a split second, makes the API call, then destroys the key.</p>
+      <h2>Standard local SDK flows keep the same application code</h2>
+      <p>Run <code>worthless wrap python app.py</code> instead of <code>python app.py</code>. Your code reads environment variables like before. Docker, CI, or unusual SDK flows may also need documented environment or base-URL configuration. The proxy combines both halves for the upstream call, then drops the reconstructed key.</p>
       <details><summary>what happens under the hood?</summary><p>The proxy sits between your app and the API provider. When your app makes a request, the proxy combines both halves, makes the real API call, and passes the response back. The key reconstructs, calls the provider, then drops. Your app never sees it. (Python PoC: memory-zeroing has known limits, see <a href="https://docs.wless.io/security/">security model</a>.)</p></details>
     </div>
   </div>
