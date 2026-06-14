@@ -35,7 +35,7 @@ cd "$repo_root"
 # Clean up tempfiles on any exit. Without this, a sed/mv failure under
 # `set -eu` would leave pyproject.toml.tmp / SKILL.md.tmp /
 # CHANGELOG.md.tmp on disk for the user to clean up manually.
-trap 'rm -f pyproject.toml.tmp SKILL.md.tmp CHANGELOG.md.tmp install.sh.tmp package.json.tmp' EXIT
+trap 'rm -f pyproject.toml.tmp SKILL.md.tmp CHANGELOG.md.tmp install.sh.tmp package.json.tmp docs/*.tmp' EXIT
 
 # --- 1. Validate input -------------------------------------------------------
 
@@ -103,6 +103,28 @@ else
     echo "  ⚠ $mcp_pkg not found — skipping npm package version bump"
 fi
 
+# --- 4d. Update docs/ Docker image tags ------------------------------------
+# Sweeps pinned worthless-proxy:X.Y.Z tags across docs/ so check_docs_versions.py
+# passes on the release PR itself rather than waiting for the next 3am cron run.
+#
+# grep -rF: fixed-string match — version dots are literals, not regex wildcards.
+# --include: matches only .md/.mdx, the same types check_docs_versions.py validates.
+# for loop (not piped while): a piped subshell swallows set -eu, so sed/mv
+#   failures would silently leave docs un-bumped. Word-split is safe here because
+#   docs/ filenames never contain spaces or shell-special characters.
+docs_hits=$(grep -rlF "worthless-proxy:${current_version}" --include="*.md" --include="*.mdx" docs/ 2>/dev/null || true)
+if [ -n "$docs_hits" ]; then
+    # Escape dots on the LHS so the sed pattern treats them as literals.
+    escaped_current=$(printf '%s\n' "$current_version" | sed 's/[.]/\\./g')
+    for f in $docs_hits; do
+        sed -E "s|worthless-proxy:${escaped_current}|worthless-proxy:${new_version}|g" "$f" > "$f.tmp"
+        mv "$f.tmp" "$f"
+        echo "  ✓ $f: worthless-proxy:$new_version"
+    done
+else
+    echo "  ⚠ docs/: no pinned worthless-proxy:$current_version tags found — nothing to bump"
+fi
+
 # --- 5. Append CHANGELOG.md link reference ----------------------------------
 
 if grep -q "^\[$new_version\]:" CHANGELOG.md; then
@@ -165,13 +187,13 @@ Done. Next steps:
      and add a fresh empty '## [Unreleased]' above it.)
 
   2. Verify:
-     git diff pyproject.toml SKILL.md CHANGELOG.md
+     git diff pyproject.toml SKILL.md CHANGELOG.md docs/
 
   3. Run the version-drift test:
      uv run pytest tests/test_skill_md.py::TestVersionDrift -q
 
   4. Stage, commit (Conventional Commits), push:
-     git add pyproject.toml SKILL.md CHANGELOG.md uv.lock install.sh packages/worthless-mcp/package.json
+     git add pyproject.toml SKILL.md CHANGELOG.md uv.lock install.sh packages/worthless-mcp/package.json docs/
      git commit -m "chore(release): v$new_version"
      git push
 
