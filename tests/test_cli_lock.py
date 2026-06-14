@@ -404,6 +404,68 @@ class TestLockFormatPreserving:
         missing = tmp_path / "nope" / ".env"  # parent dir doesn't exist → OSError
         assert _capture_original_mode(str(missing)) is None
 
+    def test_lock_captures_setgid_bits_stripped_end_to_end(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """WOR-715 / Wave 4: setgid (0o2644) is stripped to 0o644 in original_mode."""
+        from tests.helpers import fake_key
+
+        env = tmp_path / ".env"
+        env.write_text(f"OPENAI_API_KEY={fake_key('sk-')}\n")
+        env.chmod(0o2644)  # setgid | rw-r--r--
+
+        result = runner.invoke(
+            app,
+            ["lock", "--env", str(env)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+        )
+        assert result.exit_code == 0, result.output[:400]
+
+        con = sqlite3.connect(str(home_dir.db_path))
+        try:
+            rows = con.execute(
+                "SELECT original_mode FROM enrollments WHERE env_path = ?",
+                (str(env.resolve()),),
+            ).fetchall()
+        finally:
+            con.close()
+        assert rows and rows[0][0] == 0o644, (
+            f"setgid must be stripped from captured mode; got {rows[0][0]!r}"
+        )
+
+    def test_lock_persists_null_original_mode_when_stat_unavailable(
+        self, home_dir: WorthlessHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """WOR-715 / Wave 4: OSError during capture → NULL original_mode in DB."""
+        from tests.helpers import fake_key
+
+        env = tmp_path / ".env"
+        env.write_text(f"OPENAI_API_KEY={fake_key('sk-')}\n")
+        env.chmod(0o644)
+
+        monkeypatch.setattr(
+            "worthless.cli.commands.lock._capture_original_mode",
+            lambda _path: None,
+        )
+
+        result = runner.invoke(
+            app,
+            ["lock", "--env", str(env)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+        )
+        assert result.exit_code == 0, result.output[:400]
+
+        con = sqlite3.connect(str(home_dir.db_path))
+        try:
+            rows = con.execute(
+                "SELECT original_mode FROM enrollments WHERE env_path = ?",
+                (str(env.resolve()),),
+            ).fetchall()
+        finally:
+            con.close()
+        assert rows, "expected enrollment row"
+        assert rows[0][0] is None, "stat failure must persist NULL original_mode"
+
     def test_lock_openrouter_key_without_base_url_routes_to_openrouter(
         self, home_dir: WorthlessHome, tmp_path: Path
     ) -> None:
