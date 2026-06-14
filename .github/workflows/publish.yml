@@ -54,15 +54,23 @@ jobs:
         # runners) instead of grep+sed, so dynamic versioning, comments, or
         # multi-line strings in pyproject.toml don't yield false-positive
         # matches.
+        #
+        # Uses packaging.version.Version for PEP 440-aware comparison so that
+        # re-tags like v0.3.8.0 (which PEP 440 treats as identical to 0.3.8)
+        # are accepted.  Strict equality first; packaging fallback only when
+        # the raw strings differ (covers the re-tag tombstone workaround).
         run: |
           set -euo pipefail
           PYPROJECT_VERSION=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
           TAG_VERSION="${GITHUB_REF_NAME#v}"
-          if [ "${PYPROJECT_VERSION}" != "${TAG_VERSION}" ]; then
+          if [ "${PYPROJECT_VERSION}" = "${TAG_VERSION}" ]; then
+            echo "OK: tag ${GITHUB_REF_NAME} matches pyproject ${PYPROJECT_VERSION}"
+          elif python3 -c "from packaging.version import Version; exit(0 if Version('${PYPROJECT_VERSION}') == Version('${TAG_VERSION}') else 1)" 2>/dev/null; then
+            echo "OK: tag ${GITHUB_REF_NAME} (${TAG_VERSION}) is PEP 440-equivalent to pyproject ${PYPROJECT_VERSION}"
+          else
             echo "::error title=Tag/pyproject version drift::Pushed tag ${GITHUB_REF_NAME} (=> ${TAG_VERSION}) does not match pyproject.toml version ${PYPROJECT_VERSION}. Bump pyproject.toml first or push a matching tag."
             exit 1
           fi
-          echo "OK: tag ${GITHUB_REF_NAME} matches pyproject ${PYPROJECT_VERSION}"
 
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6

@@ -175,8 +175,17 @@ Done. Next steps:
      git commit -m "chore(release): v$new_version"
      git push
 
-  5. After PR merges to main, tag and release:
-     gh release create v$new_version --generate-notes --title "v$new_version: <headline>"
-     # publish.yml fires automatically on the v* tag → PyPI
+  5. After PR merges to main — tag FIRST, release SECOND:
+     git checkout main && git pull --rebase
+     ./scripts/tag-release.sh $new_version "<headline>"
+     # ↑ GPG-signs the tag, verifies it locally, pushes it.
+     # publish.yml fires automatically on the push → PyPI + npm.
+
+     # WAIT for publish.yml to pass, then create the GitHub Release:
+     # gh release create v$new_version --title "v$new_version: <headline>" --generate-notes
+     #
+     # WARNING: NEVER run gh release create before pushing the signed tag.
+     # gh release create creates an unsigned tag that (a) fails the GPG gate
+     # in publish.yml and (b) permanently tombstones the tag name in GitHub.
 
 EOF
