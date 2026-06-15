@@ -51,5 +51,6 @@ gh api repos/shacharm2/worthless/code-scanning/default-setup -q .state
 
 ## Related
 
-- Testing lanes and marker matrix: `TESTING.md` (Wave 5 bead `worthless-4a48`)
+- **CI ↔ marker map:** [ci-marker-map.md](ci-marker-map.md) (Wave 5, `worthless-4a48`)
+- Testing lanes and marker matrix: `TESTING.md` (local; gitignored — sync from engineering/ci when publishing)
 - Layer 2 epic: beads `worthless-n3k7` and children
