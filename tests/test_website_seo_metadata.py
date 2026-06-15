@@ -169,6 +169,12 @@ def test_publishable_docs_do_not_include_internal_planning_sources() -> None:
     assert offenders == []
 
 
+def test_static_publish_tree_does_not_ship_markdown_docs() -> None:
+    markdown_files = sorted(path.relative_to(REPO_ROOT).as_posix() for path in DOCS.rglob("*.md"))
+
+    assert markdown_files == []
+
+
 def test_publishable_docs_do_not_reference_stale_worthless_domains() -> None:
     # The [.-] character class matches both the dot and hyphen variants of the
     # stale domain while keeping the contiguous banned literal out of source, so
@@ -461,6 +467,37 @@ def test_launch_copy_uses_bounded_supported_key_claims() -> None:
         assert stale_copy not in how_it_works
 
     assert "Make copied .env AI keys useless" not in index
+
+
+def test_blog_uses_bounded_supported_key_claims() -> None:
+    blog = (DOCS / "blog" / "index.html").read_text(encoding="utf-8")
+    expected_copy = (
+        "Why I built Worthless: change what a copied protected .env value can do",
+        "Different tools cover different leak stages",
+        "Introducing Worthless: scoped protection for copied .env AI-key values",
+        "Worthless changes what a copied protected .env value can do. "
+        "It does not protect a compromised host or attacker-controlled local code.",
+    )
+
+    assert "the copied .env value alone cannot call the provider" in blog.lower()
+    for approved_copy in expected_copy:
+        assert approved_copy in blog
+
+    for stale_copy in (
+        "change what a copied API key can do",
+        "None protect you after it leaks",
+        "post-leak API key protection",
+        "Worthless protects you after it leaks",
+        "Useless on its own.",
+        "They can't brute-force it.",
+        "They can't derive anything from it.",
+        "It's just random bytes.",
+        "Why splitting a key makes it useless",
+        'When we say "a leaked share is worthless,"',
+        "it's useless without the other half",
+        "Why is A useless alone?",
+    ):
+        assert stale_copy not in blog
 
 
 def test_homepage_moves_the_hero_up_on_tall_viewports() -> None:
