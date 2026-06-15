@@ -892,15 +892,11 @@ def _confirm_bind(
             "aliases": aliases,
             "reached": reached,
         }
-    if "bind_probe_count" not in after_health:
-        # Defensive — proxy was recognised before but vanished after.
-        return {
-            "status": "skipped",
-            "reason": "proxy_unrecognised_after",
-            "delta": 0,
-            "aliases": aliases,
-            "reached": reached,
-        }
+    # Note: we don't re-check "bind_probe_count in after_health" here. If
+    # BEFORE had the field, AFTER will too — both reads go through the
+    # same ``check_proxy_health`` against the same loopback responder. A
+    # responder swap mid-call is squatter territory which the BEFORE
+    # gate already classified.
     after = _coerce_counter(after_health.get("bind_probe_count"))
 
     delta = after - before
