@@ -71,7 +71,7 @@ jobs:
         # entrypoint).  See the .dockleignore comments for full
         # rationale.  Dockle reads .dockleignore from CWD, which is
         # the checkout root inside the action runner.
-        uses: erzz/dockle-action@69369bc745ee29813f730231a821bcd4f71cd290 # v1
+        uses: erzz/dockle-action@e8a7c41f36f1236ca3282b298d425ffbfdb2e922 # v1
         with:
           image: worthless-proxy:${{ github.sha }}
           exit-code: "1"
@@ -88,7 +88,7 @@ jobs:
       - name: Build image
         run: docker build -t worthless-proxy:test .
 
-      - uses: astral-sh/setup-uv@0c5e2b8115b80b4c7c5ddf6ffdd634974642d182 # v5
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
         with:
           enable-cache: true
 
