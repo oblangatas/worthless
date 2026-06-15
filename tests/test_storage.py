@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import aiosqlite
 import pytest
-from hypothesis import example, given
+from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
 
 from worthless.storage.repository import EncryptedShard, ShardRepository, StoredShard
@@ -673,6 +673,74 @@ async def test_store_enrolled_relock_preserves_first_original_mode(
         f"re-lock must preserve the first-captured 0o644, got {oct(rows[0][0])} — "
         "INSERT OR IGNORE was likely changed to an UPSERT"
     )
+
+
+@settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+@given(st.integers(min_value=0, max_value=0o777))
+@example(0o644)
+@example(0o600)
+@example(0o755)
+@pytest.mark.asyncio
+async def test_store_enrolled_original_mode_roundtrip_property(
+    repo: ShardRepository,
+    tmp_db_path: str,
+    sample_split_result,
+    mode: int,
+) -> None:
+    """WOR-715 / Wave 4: masked mode written by store_enrolled round-trips to DB."""
+    shard = stored_shard_from_split(sample_split_result)
+    alias = f"prop-{mode:o}"
+    await repo.store_enrolled(
+        alias,
+        shard,
+        var_name="OPENAI_API_KEY",
+        env_path="/tmp/prop/.env",  # noqa: S108
+        original_mode=mode,
+    )
+    async with aiosqlite.connect(tmp_db_path) as db:
+        cursor = await db.execute(
+            "SELECT original_mode FROM enrollments WHERE key_alias = ?", (alias,)
+        )
+        row = await cursor.fetchone()
+    assert row is not None
+    assert row[0] == mode
+
+
+@settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+@given(st.integers(min_value=0, max_value=0o777))
+@example(0o644)
+@example(0o755)
+@pytest.mark.asyncio
+async def test_add_enrollment_original_mode_roundtrip_property(
+    repo: ShardRepository,
+    tmp_db_path: str,
+    sample_split_result,
+    mode: int,
+) -> None:
+    """WOR-715 / Wave 4: add_enrollment path masks and persists original_mode."""
+    shard = stored_shard_from_split(sample_split_result)
+    await repo.store_enrolled(
+        "add-prop-alias",
+        shard,
+        var_name="OPENAI_API_KEY",
+        env_path="/tmp/add-prop-a/.env",  # noqa: S108
+        original_mode=0o644,
+    )
+    env_b = f"/tmp/add-prop-b-{mode:o}/.env"  # noqa: S108
+    await repo.add_enrollment(
+        "add-prop-alias",
+        var_name="OPENAI_API_KEY",
+        env_path=env_b,
+        original_mode=mode,
+    )
+    async with aiosqlite.connect(tmp_db_path) as db:
+        cursor = await db.execute(
+            "SELECT original_mode FROM enrollments WHERE key_alias = ? AND env_path = ?",
+            ("add-prop-alias", env_b),
+        )
+        row = await cursor.fetchone()
+    assert row is not None
+    assert row[0] == mode
 
 
 @pytest.mark.asyncio
