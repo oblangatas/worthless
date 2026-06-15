@@ -67,7 +67,7 @@ worthless --version
 Expected:
 
 ```text
-worthless 0.3.3
+worthless 0.3.8
 ```
 
 ## 3. First lock

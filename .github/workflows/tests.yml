@@ -149,7 +149,9 @@ jobs:
   sonarcloud:
     name: SonarCloud Scan
     needs: test
-    if: github.repository == 'shacharm2/worthless'
+    # Skip on Dependabot PRs: GitHub withholds Actions secrets (incl. SONAR_TOKEN)
+    # from Dependabot-triggered runs, so the scan can only fail there (worthless-uw3o).
+    if: github.repository == 'shacharm2/worthless' && github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

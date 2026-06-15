@@ -305,18 +305,24 @@ class TestGateBeforeReconstruct:
         alias, shard_a_utf8, _ = enrolled_alias
 
         with patch("worthless.proxy.app.reconstruct_key_fp", wraps=None) as mock_reconstruct:
+            from worthless.proxy.rules import GateResult
+
             proxy_app.state.rules_engine = type(
                 "MockEngine",
                 (),
                 {
                     "evaluate": AsyncMock(
-                        return_value=ErrorResponse(
-                            status_code=status_code,
-                            body=error_body,
-                            headers={"content-type": "application/json", **extra_headers},
+                        return_value=GateResult(
+                            denial=ErrorResponse(
+                                status_code=status_code,
+                                body=error_body,
+                                headers={"content-type": "application/json", **extra_headers},
+                            )
                         )
                     ),
                     "release_spend_reservation": AsyncMock(return_value=None),
+                    "refund_spend": AsyncMock(return_value=None),
+                    "settle_spend": AsyncMock(return_value=None),
                 },
             )()
 

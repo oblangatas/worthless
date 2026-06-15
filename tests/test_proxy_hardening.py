@@ -409,9 +409,11 @@ class TestGateBeforeDecrypt:
             call_order.append("ipc_open")
             return await orig_open(ciphertext, key_id=key_id)
 
+        from worthless.proxy.rules import GateResult
+
         async def mock_evaluate(_self, a, r, **kwargs):
             call_order.append("evaluate")
-            return None
+            return GateResult()
 
         proxy_app.state.repo.fetch_encrypted = mock_fetch
         fake_ipc.open = mock_open
@@ -419,8 +421,21 @@ class TestGateBeforeDecrypt:
         async def mock_release(_self, alias, amount):
             pass
 
+        async def mock_refund(_self, handle):
+            pass
+
+        async def mock_settle(_self, handle, actual):
+            pass
+
         proxy_app.state.rules_engine = type(
-            "MockEngine", (), {"evaluate": mock_evaluate, "release_spend_reservation": mock_release}
+            "MockEngine",
+            (),
+            {
+                "evaluate": mock_evaluate,
+                "release_spend_reservation": mock_release,
+                "refund_spend": mock_refund,
+                "settle_spend": mock_settle,
+            },
         )()
 
         respx.post("https://api.openai.com/v1/chat/completions").mock(
@@ -457,18 +472,24 @@ class TestGateBeforeDecrypt:
             return await orig_open(ciphertext, key_id=key_id)
 
         fake_ipc.open = mock_open
+        from worthless.proxy.rules import GateResult
+
         proxy_app.state.rules_engine = type(
             "MockEngine",
             (),
             {
                 "evaluate": AsyncMock(
-                    return_value=ErrorResponse(
-                        status_code=402,
-                        body=b'{"error": "spend cap exceeded"}',
-                        headers={"content-type": "application/json"},
+                    return_value=GateResult(
+                        denial=ErrorResponse(
+                            status_code=402,
+                            body=b'{"error": "spend cap exceeded"}',
+                            headers={"content-type": "application/json"},
+                        )
                     )
                 ),
                 "release_spend_reservation": AsyncMock(return_value=None),
+                "refund_spend": AsyncMock(return_value=None),
+                "settle_spend": AsyncMock(return_value=None),
             },
         )()
 
@@ -2123,18 +2144,24 @@ class TestTimingAttacks:
         alias, shard_a_utf8, _ = enrolled_alias
 
         # Set up rules engine to deny
+        from worthless.proxy.rules import GateResult
+
         proxy_app.state.rules_engine = type(
             "MockEngine",
             (),
             {
                 "evaluate": AsyncMock(
-                    return_value=ErrorResponse(
-                        status_code=402,
-                        body=b'{"error": "spend cap exceeded"}',
-                        headers={"content-type": "application/json"},
+                    return_value=GateResult(
+                        denial=ErrorResponse(
+                            status_code=402,
+                            body=b'{"error": "spend cap exceeded"}',
+                            headers={"content-type": "application/json"},
+                        )
                     )
                 ),
                 "release_spend_reservation": AsyncMock(return_value=None),
+                "refund_spend": AsyncMock(return_value=None),
+                "settle_spend": AsyncMock(return_value=None),
             },
         )()
 

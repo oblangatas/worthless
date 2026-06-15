@@ -92,6 +92,7 @@ CREATE TABLE IF NOT EXISTS enrollment_config (
     token_budget_weekly  INTEGER,
     token_budget_monthly INTEGER,
     time_window          TEXT,
+    ceiling_override     INTEGER,
     created_at           TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -101,8 +102,18 @@ CREATE TABLE IF NOT EXISTS enrollments (
     var_name   TEXT NOT NULL,
     env_path   TEXT,
     decoy_hash TEXT,
+    original_mode INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(key_alias, var_name, env_path)
+);
+
+CREATE TABLE IF NOT EXISTS pending_charges (
+    handle     TEXT PRIMARY KEY,
+    key_alias  TEXT NOT NULL,
+    estimate   INTEGER NOT NULL,
+    provider   TEXT NOT NULL,
+    model      TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_spend_log_alias ON spend_log (key_alias);
@@ -112,6 +123,8 @@ CREATE INDEX IF NOT EXISTS idx_enrollments_decoy_hash
     ON enrollments (decoy_hash) WHERE decoy_hash IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_enrollments_null_path
     ON enrollments (key_alias, var_name) WHERE env_path IS NULL;
+CREATE INDEX IF NOT EXISTS idx_pending_charges_alias ON pending_charges (key_alias);
+CREATE INDEX IF NOT EXISTS idx_pending_charges_created ON pending_charges (created_at);
 """
 
 
@@ -294,11 +307,63 @@ async def _migrate_decoy_hash_column(db: aiosqlite.Connection) -> None:
             raise
 
 
+async def _migrate_pending_charges(db: aiosqlite.Connection) -> None:
+    """Create the write-ahead pre-charge ledger table + indexes (WOR-659).
+
+    Pure-additive and idempotent. Committed independently so it lands even on
+    very old DBs that trip the enrollment_config early-return in migrate_db.
+    """
+    await db.executescript(
+        "CREATE TABLE IF NOT EXISTS pending_charges ("
+        " handle TEXT PRIMARY KEY, key_alias TEXT NOT NULL,"
+        " estimate INTEGER NOT NULL, provider TEXT NOT NULL, model TEXT,"
+        " created_at TEXT NOT NULL DEFAULT (datetime('now')));"
+        "CREATE INDEX IF NOT EXISTS idx_pending_charges_alias"
+        " ON pending_charges (key_alias);"
+        "CREATE INDEX IF NOT EXISTS idx_pending_charges_created"
+        " ON pending_charges (created_at);"
+    )
+    # Add the settle-metadata columns to a pre-existing (initial-shape) table.
+    cur = await db.execute("PRAGMA table_info(pending_charges)")
+    cols = {row[1] for row in await cur.fetchall()}
+    if "provider" not in cols:
+        await db.execute(
+            "ALTER TABLE pending_charges ADD COLUMN provider TEXT NOT NULL DEFAULT 'openai'"
+        )
+    if "model" not in cols:
+        await db.execute("ALTER TABLE pending_charges ADD COLUMN model TEXT")
+    await db.commit()
+
+
+async def _migrate_original_mode_column(db: aiosqlite.Connection) -> None:
+    """WOR-715: add enrollments.original_mode (nullable, no backfill).
+
+    Stores the .env's pre-lock POSIX mode so uninstall can restore the
+    original permissions, not just the contents. ``safe_rewrite`` rewrites
+    every locked .env onto a fresh tmpfile created 0o600 + an explicit
+    ``fchmod(0o600)`` with no ``copymode`` from the original, so a once-0o644
+    .env becomes 0o600 on lock. Without this column uninstall would silently
+    leave it at 0o600. NULL = "mode unknown (pre-715 install), leave as-is".
+    """
+    cursor = await db.execute("PRAGMA table_info(enrollments)")
+    columns = {row[1] for row in await cursor.fetchall()}
+    if "original_mode" not in columns:
+        try:
+            await db.execute("ALTER TABLE enrollments ADD COLUMN original_mode INTEGER")
+            await db.commit()
+        except Exception as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
+
+
 async def migrate_db(db_path: str) -> None:
     """Apply forward-only migrations for existing databases."""
     async with aiosqlite.connect(db_path) as db:
+        await _migrate_pending_charges(db)
+
         await _prune_old_spend_log(db)
         await _migrate_decoy_hash_column(db)
+        await _migrate_original_mode_column(db)
 
         cursor = await db.execute("PRAGMA table_info(shards)")
         shard_columns = {row[1] for row in await cursor.fetchall()}
@@ -323,6 +388,8 @@ async def migrate_db(db_path: str) -> None:
             "token_budget_weekly": _ALTER + " token_budget_weekly INTEGER",
             "token_budget_monthly": _ALTER + " token_budget_monthly INTEGER",
             "time_window": _ALTER + " time_window TEXT",
+            # WOR-705: per-key fail-closed ceiling override (raise-only).
+            "ceiling_override": _ALTER + " ceiling_override INTEGER",
         }
         for col_name, stmt in _CONFIG_MIGRATIONS.items():
             if col_name not in config_columns:

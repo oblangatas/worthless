@@ -24,11 +24,31 @@ from worthless.proxy.errors import (
     time_window_error_response,
     token_budget_error_response,
 )
+from worthless.proxy.estimation import estimate_request_tokens
+from worthless.storage.spend_ledger import SpendLedger
 
 logger = logging.getLogger(__name__)
 
 # Conservative upper bound for spend-cap reservation when max_tokens is absent.
 _DEFAULT_TOKEN_ESTIMATE: int = 4096
+
+
+def extract_model(body: bytes) -> str | None:
+    """Best-effort model name from the request body, for hold bookkeeping only.
+
+    Public helper — also used by the proxy handler for the WOR-696
+    response-model mismatch audit. Returns ``None`` on parse failure,
+    non-dict payload, or missing/non-string ``model`` field.
+    """
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if isinstance(payload, dict):
+        model = payload.get("model")
+        if isinstance(model, str):
+            return model
+    return None
 
 
 def _estimate_tokens(body: bytes) -> int:
@@ -71,13 +91,28 @@ def _release_into(reserved: dict[str, int], alias: str, amount: int) -> None:
         reserved[alias] = remaining
 
 
+@dataclass
+class GateResult:
+    """Outcome of the gate pipeline: a denial (``None`` = allow) plus the durable
+    spend-hold handle (``None`` = no cap configured / nothing held) to settle on
+    success or refund on failure at the request's exit."""
+
+    denial: ErrorResponse | None = None
+    spend_handle: str | None = None
+
+
 @runtime_checkable
 class Rule(Protocol):
-    """Protocol for a single rule in the gate-before-reconstruct pipeline."""
+    """Protocol for a single rule in the gate-before-reconstruct pipeline.
+
+    Most rules return ``ErrorResponse | None`` (deny / allow). ``SpendCapRule``
+    returns a ``GateResult`` so its durable spend-hold handle can thread out; the
+    engine normalises both.
+    """
 
     async def evaluate(
         self, alias: str, request: object, *, provider: str = "openai", body: bytes = b""
-    ) -> ErrorResponse | None: ...
+    ) -> ErrorResponse | GateResult | None: ...
 
 
 @dataclass
@@ -88,108 +123,125 @@ class RulesEngine:
 
     async def evaluate(
         self, alias: str, request: object, *, provider: str = "openai", body: bytes = b""
-    ) -> ErrorResponse | None:
+    ) -> GateResult:
+        spend_handle: str | None = None
         for rule in self.rules:
             result = await rule.evaluate(alias, request, provider=provider, body=body)
-            if result is not None:
-                return result
-        return None
+            if isinstance(result, GateResult):
+                if result.spend_handle is not None:
+                    spend_handle = result.spend_handle
+                denial = result.denial
+            else:
+                denial = result
+            if denial is not None:
+                # A later rule denied after the cap placed a durable hold — refund it,
+                # so a denied request leaves no pending charge behind. If the refund
+                # raises (transient DB error), KEEP the handle in the returned
+                # GateResult so app.py's `_release_reservations` seam can retry it on
+                # the denial exit path. Dropping it would orphan a pending_charges row.
+                if spend_handle is not None:
+                    try:
+                        await self._refund(spend_handle)
+                        spend_handle = None
+                    except Exception:
+                        logger.warning(
+                            "denial-time refund failed; handle preserved for caller retry",
+                            exc_info=True,
+                        )
+                return GateResult(denial=denial, spend_handle=spend_handle)
+        return GateResult(spend_handle=spend_handle)
 
-    async def release_spend_reservation(self, alias: str, amount: int) -> None:
-        """Release a spend reservation placed by SpendCapRule and/or
-        TokenBudgetRule during evaluate().
-
-        No-op if neither rule is in the rule list or amount is 0.
-        """
+    async def _refund(self, spend_handle: str | None) -> None:
+        if spend_handle is None:
+            return
         for rule in self.rules:
             if isinstance(rule, SpendCapRule):
-                await rule.release_reservation(alias, amount)
-            elif isinstance(rule, TokenBudgetRule):
+                await rule.ledger.refund(spend_handle)
+                return
+
+    async def refund_spend(self, spend_handle: str | None) -> None:
+        """Drop a durable spend hold (pre-spend failure path). No-op if None."""
+        await self._refund(spend_handle)
+
+    async def settle_spend(self, spend_handle: str | None, actual: int) -> None:
+        """Atomically convert a durable spend hold into recorded spend at *actual*.
+        No-op if there was no hold (uncapped alias)."""
+        if spend_handle is None:
+            return
+        for rule in self.rules:
+            if isinstance(rule, SpendCapRule):
+                await rule.ledger.settle(spend_handle, actual)
+                return
+
+    async def settle_spend_at_estimate(self, spend_handle: str | None) -> None:
+        """Settle a hold at its STORED estimate — fail-closed fallback when actual
+        usage can't be read (e.g. client disconnect mid-stream, response parse
+        failure). Bills the cap immediately rather than waiting for the sweeper.
+        No-op if there was no hold."""
+        if spend_handle is None:
+            return
+        for rule in self.rules:
+            if isinstance(rule, SpendCapRule):
+                await rule.ledger.settle_at_estimate(spend_handle)
+                return
+
+    async def release_spend_reservation(self, alias: str, amount: int) -> None:
+        """Release an in-memory token-budget reservation placed during evaluate().
+
+        SpendCapRule no longer uses this — its reservation is the durable ledger
+        hold, released via ``refund_spend`` / ``settle_spend``. No-op if amount is 0.
+        """
+        for rule in self.rules:
+            if isinstance(rule, TokenBudgetRule):
                 await rule.release_reservation(alias, amount)
 
 
 @dataclass
 class SpendCapRule:
-    """Denies requests when accumulated spend exceeds the configured cap.
+    """Denies a request whose estimated cost won't fit under the configured cap.
 
-    Queries spend_log and enrollment_config tables via a persistent aiosqlite
-    connection. Uses BEGIN IMMEDIATE to serialize concurrent reads (H-3).
-    Fails closed on any DB error (H-1/M-10).
-    Returns None if no cap is configured (NULL spend_cap) or spend is under cap.
-    Returns 402 ErrorResponse when cap is exceeded or on DB error.
-
-    Reservation mechanism (WOR-242): when a request passes the cap check, an
-    in-memory reservation of ``_estimate_tokens(body)`` tokens is held until
-    ``release_reservation`` is called.  Subsequent concurrent requests include
-    the reservation in their effective-total calculation, preventing the TOCTOU
-    overrun that arises when N requests all read the same stale DB total.
+    The reservation is a DURABLE write-ahead hold in the ledger (WOR-659): the
+    request's estimated cost is held in ``pending_charges`` BEFORE reconstruct, so
+    a single unaffordable request is denied up front and concurrent in-flight holds
+    are counted (``committed + held + estimate > cap`` → deny). The hold is settled
+    to actual usage on success or refunded on failure at the request's exit
+    (via the engine). Fails closed (402) on any DB/ledger error. Returns a
+    ``GateResult`` — no cap configured → allow with no handle.
     """
 
     db: aiosqlite.Connection
-    _reserved: dict[str, int] = field(default_factory=dict, init=False, repr=False)
-    _reserve_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    lock: asyncio.Lock | None = None
+    ledger: SpendLedger = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        # Construct the ledger ONCE, sharing the per-connection lock so its
+        # BEGIN IMMEDIATE can't collide with another rule's txn on this connection.
+        self.ledger = SpendLedger(self.db, lock=self.lock)
 
     async def evaluate(
         self, alias: str, request: object, *, provider: str = "openai", body: bytes = b""
-    ) -> ErrorResponse | None:
+    ) -> GateResult:
         try:
-            async with self._reserve_lock:
-                # BEGIN IMMEDIATE acquires a write lock, serialising concurrent
-                # readers on this connection (H-3).
-                await self.db.execute("BEGIN IMMEDIATE")
-                try:
-                    async with self.db.execute(
-                        "SELECT spend_cap FROM enrollment_config WHERE key_alias = ?",
-                        (alias,),
-                    ) as cur:
-                        row = await cur.fetchone()
+            # Plain SELECT (no BEGIN IMMEDIATE) — the atomic check-and-debit lives in
+            # ledger.hold; opening our own txn here would nest inside hold's and crash.
+            async with self.db.execute(
+                "SELECT spend_cap FROM enrollment_config WHERE key_alias = ?",
+                (alias,),
+            ) as cur:
+                row = await cur.fetchone()
+            if row is None or row[0] is None:
+                return GateResult()  # no cap configured → allow, nothing held
 
-                    if row is None:
-                        await self.db.execute("ROLLBACK")
-                        return None
-
-                    spend_cap = row[0]
-                    if spend_cap is None:
-                        await self.db.execute("ROLLBACK")
-                        return None
-
-                    async with self.db.execute(
-                        "SELECT COALESCE(SUM(tokens), 0) FROM spend_log WHERE key_alias = ?",
-                        (alias,),
-                    ) as cur:
-                        (total_tokens,) = await cur.fetchone()  # type: ignore[assignment]
-
-                    await self.db.execute("ROLLBACK")
-                except Exception:
-                    try:
-                        await self.db.execute("ROLLBACK")
-                    except Exception:  # noqa: S110  # nosec B110
-                        pass
-                    raise
-
-                # Include in-flight reservations from concurrent requests.
-                already_reserved = self._reserved.get(alias, 0)
-                if total_tokens + already_reserved >= spend_cap:
-                    return spend_cap_error_response(provider=provider)
-
-                # Reserve up to the remaining budget so concurrent requests
-                # correctly observe that capacity is taken.
-                remaining = int(spend_cap) - total_tokens - already_reserved
-                reservation = min(_estimate_tokens(body), remaining)
-                self._reserved[alias] = already_reserved + reservation
-
-            return None
+            estimate = estimate_request_tokens(body)
+            handle = await self.ledger.hold(
+                alias, estimate, row[0], provider=provider, model=extract_model(body)
+            )
+            if handle is None:
+                return GateResult(denial=spend_cap_error_response(provider=provider))
+            return GateResult(spend_handle=handle)
         except Exception:
-            return spend_cap_error_response(provider=provider)
-
-    async def release_reservation(self, alias: str, amount: int) -> None:
-        """Return *amount* reserved tokens to the available budget.
-
-        Called after the actual spend has been recorded (or when the upstream
-        request fails with no tokens consumed).  Safe to call with amount=0.
-        """
-        async with self._reserve_lock:
-            _release_into(self._reserved, alias, amount)
+            # Fail closed: any DB/ledger error denies the request.
+            return GateResult(denial=spend_cap_error_response(provider=provider))
 
 
 @dataclass
@@ -208,14 +260,20 @@ class TokenBudgetRule:
     """
 
     db: aiosqlite.Connection
+    lock: asyncio.Lock | None = None
     _reserved: dict[str, int] = field(default_factory=dict, init=False, repr=False)
-    _reserve_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _reserve_lock: asyncio.Lock = field(init=False, repr=False)
 
     _PERIODS: tuple[tuple[str, str], ...] = (
         ("daily", "-1 day"),
         ("weekly", "-7 days"),
         ("monthly", "-30 days"),
     )
+
+    def __post_init__(self) -> None:
+        # Share ONE lock per connection with the ledger / SpendCapRule so a
+        # BEGIN IMMEDIATE here can't nest inside another path's txn (concurrency).
+        self._reserve_lock = self.lock if self.lock is not None else asyncio.Lock()
 
     async def evaluate(
         self, alias: str, request: object, *, provider: str = "openai", body: bytes = b""

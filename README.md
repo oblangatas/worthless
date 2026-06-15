@@ -19,6 +19,8 @@
 
 When your `.env` leaks, the keys inside are placeholders. The real key never sits in your repo, your shell history, or your laptop's memory.
 
+> **Provided "AS IS", with no warranty of any kind**, to the fullest extent permitted by law (AGPL-3.0 sections 15-16). Worthless reduces the blast radius of a leaked key on a best-effort basis; it is not a guarantee. You run it at your own risk. See [`LICENSE`](LICENSE).
+
 ## Quickstart
 
 ```bash

@@ -1,6 +1,6 @@
 [project]
 name = "worthless"
-version = "0.3.7"
+version = "0.3.8"
 description = "Split-key reverse proxy that makes leaked API keys worthless"
 readme = "README.md"
 license = { text = "AGPL-3.0-only" }
