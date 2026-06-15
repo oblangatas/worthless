@@ -1143,6 +1143,30 @@ def _apply_lock_rollback(
     providers_set.clear()
 
 
+_ALLOWED_PROXY_HOSTS: frozenset[str] = frozenset(
+    {"127.0.0.1", "localhost", "::1", "host.docker.internal"}
+)
+
+
+def _validate_proxy_base_url(url: str) -> None:
+    """Raise ValueError if *url* does not resolve to a local proxy endpoint.
+
+    Rejects remote hosts to prevent SSRF / key exfiltration via a tampered
+    MCP config. Only applied to explicit caller-supplied overrides; the
+    auto-resolved Docker-bridge URL from _resolve_proxy_base_url() bypasses
+    this check by design.
+
+    Docker bridge IPs (172.16.0.0/12) are a known gap for manually supplied
+    URLs — file a follow-up if Docker bridge support is needed.
+    """
+    parts = urlsplit(url)
+    if parts.scheme != "http" or (parts.hostname or "") not in _ALLOWED_PROXY_HOSTS:
+        raise ValueError(
+            f"proxy_base_url must point to a local proxy endpoint "
+            f"(allowed hosts: {sorted(_ALLOWED_PROXY_HOSTS)}); got: {url!r}"
+        )
+
+
 def apply_lock(
     planned_updates: list[tuple[str, str, str]],
     *,
@@ -1170,6 +1194,9 @@ def apply_lock(
     Spec: ``engineering/research/openclaw/WOR-431-phase-2-spec.md``
     §"Phase 2.b" / §"`apply_lock()` contract".
     """
+    if proxy_base_url is not None:
+        _validate_proxy_base_url(proxy_base_url)
+
     # Resolve the proxy base URL here (not at import time) so the Docker
     # probe runs only when apply_lock is actually called.  Callers may
     # override for tests or custom proxy ports.

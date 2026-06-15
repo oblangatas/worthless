@@ -609,6 +609,7 @@ async def _pass1_db_writes(
                 await repo.add_enrollment(
                     alias, var_name=var_name, env_path=env_str, original_mode=original_mode
                 )
+                await repo.set_decoy_hash(alias, env_str, derived_shard_a.decode("utf-8"))
                 await _delete_superseded_location_enrollments(
                     repo,
                     alias=alias,
@@ -688,6 +689,7 @@ async def _pass1_db_writes(
                 oc_original_api_key_json=oc_capture_record,
                 oc_rollback_mac=oc_capture_mac,
             )
+            await repo.set_decoy_hash(alias, env_str, sr.shard_a.decode("utf-8"))
             planned_out.append(
                 _PlannedUpdate(
                     alias=alias,
@@ -1524,6 +1526,7 @@ def _enroll_single(
                 charset=sr.charset,
                 base_url=base_url,
             )
+            await repo.set_decoy_hash(alias, None, sr.shard_a.decode("utf-8"))
 
     try:
         asyncio.run(_enroll_async())

@@ -15,6 +15,7 @@ Covers attack vectors from 5 security reviews:
 
 from __future__ import annotations
 
+import asyncio
 import resource
 import sqlite3
 import stat
@@ -30,8 +31,8 @@ from worthless.cli.dotenv_rewriter import rewrite_env_key, scan_env_keys
 from worthless.cli.errors import WorthlessError
 from worthless.cli.process import disable_core_dumps, spawn_proxy
 from worthless.cli.scanner import scan_files
-from worthless.crypto.splitter import split_key
-from worthless.storage.repository import StoredShard
+from worthless.crypto.splitter import split_key, split_key_fp
+from worthless.storage.repository import ShardRepository, StoredShard
 
 
 # =====================================================================
@@ -482,3 +483,68 @@ class TestCoreDumpSuppression:
         disable_core_dumps()
         soft, hard = resource.getrlimit(resource.RLIMIT_CORE)
         assert soft == 0
+
+
+# =====================================================================
+# 17. DECOY HASH WRITTEN AT ENROLLMENT (WOR-624)
+# =====================================================================
+
+
+class TestDecoyHashWrittenAtEnrollment:
+    """Enrollment must persist a decoy hash in the DB for tripwire detection.
+
+    The proxy uses all_decoy_hashes() to detect a stolen shard-A being
+    replayed as a Bearer token. If enrollment never writes the hash, the
+    tripwire is permanently blind — a stolen .env gives an attacker free
+    unlimited proxy access.
+    """
+
+    def test_enroll_writes_decoy_hash_to_db(self, tmp_path: Path) -> None:
+        """all_decoy_hashes() must be non-empty after _enroll_single completes.
+
+        This test is RED before the fix: _enroll_single never calls
+        set_decoy_hash(), so the column stays NULL and the set is empty.
+        """
+        home = ensure_home(tmp_path / ".worthless")
+        _enroll_single("openai-decoy01", "sk-test-key-abcdef1234567890", "openai", home)
+        repo = ShardRepository(str(home.db_path), home.fernet_key)
+        asyncio.run(repo.initialize())
+        hashes = asyncio.run(repo.all_decoy_hashes())
+        assert hashes, (
+            "Expected a decoy hash in DB after enrollment; all_decoy_hashes() returned empty. "
+            "Fix: call repo.set_decoy_hash() inside _enroll_single after store_enrolled()."
+        )
+
+    def test_decoy_hash_matches_shard_a_used_at_enrollment(self, tmp_path: Path) -> None:
+        """is_known_decoy(shard_a) must return True for the exact shard produced.
+
+        Spies on split_key_fp to capture the shard_a value, then verifies
+        the DB recognises it. This pins the specific value — not just that
+        *something* was written.
+
+        RED before fix: set_decoy_hash() is never called, so is_known_decoy()
+        returns False regardless.
+        """
+        home = ensure_home(tmp_path / ".worthless")
+        key = "sk-test-key-abcdef1234567890"
+        captured: dict[str, str] = {}
+
+        def _spy_split(raw_key: str, prefix: str, provider: str):
+            result = split_key_fp(raw_key, prefix, provider)
+            captured["shard_a"] = result.shard_a.decode("utf-8")
+            return result
+
+        with patch("worthless.cli.commands.lock.split_key_fp", _spy_split):
+            _enroll_single("openai-decoy02", key, "openai", home)
+
+        shard_a_str = captured.get("shard_a")
+        assert shard_a_str is not None, "spy did not capture shard_a"
+
+        repo = ShardRepository(str(home.db_path), home.fernet_key)
+        asyncio.run(repo.initialize())
+        recognised = asyncio.run(repo.is_known_decoy(shard_a_str))
+        assert recognised, (
+            "is_known_decoy() must return True for the shard_a produced at enrollment. "
+            "Fix: call repo.set_decoy_hash(alias, env_path, sr.shard_a.decode('utf-8')) "
+            "inside _enroll_single after store_enrolled()."
+        )

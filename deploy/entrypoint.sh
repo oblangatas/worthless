@@ -85,10 +85,10 @@ fi
 if [ "${WORTHLESS_OPENCLAW_CONFIG_SHARED:-}" = "1" ]; then
   OPENCLAW_DIR="${HOME_DIR}/.openclaw"
   mkdir -p "$OPENCLAW_DIR" 2>/dev/null || true
-  chmod 777 "$OPENCLAW_DIR" 2>/dev/null || true
+  chmod 770 "$OPENCLAW_DIR" 2>/dev/null || true
   [ -f "${OPENCLAW_DIR}/openclaw.json" ] || {
     printf '{}' > "${OPENCLAW_DIR}/openclaw.json" 2>/dev/null || true
-    chmod 666 "${OPENCLAW_DIR}/openclaw.json" 2>/dev/null || true
+    chmod 660 "${OPENCLAW_DIR}/openclaw.json" 2>/dev/null || true
   }
 fi
 
