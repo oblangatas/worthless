@@ -11,10 +11,13 @@ Architecture invariants enforced:
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import logging
 import os
 import re
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -39,15 +42,18 @@ from worthless.proxy.metering import (
     extract_usage_openai,
     record_spend,
 )
+from worthless.proxy.response_model_audit import bounded_increment, extract_response_model
 from worthless.proxy.rules import (
     RateLimitRule,
     RulesEngine,
     SpendCapRule,
     TokenBudgetRule,
     _estimate_tokens,
+    extract_model,
 )
-from worthless.storage.schema import SCHEMA
+from worthless.storage.schema import SCHEMA, migrate_db
 from worthless.storage.shard_reader import ShardReader
+from worthless.storage.spend_ledger import SpendLedger
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +170,27 @@ def _sanitize_upstream_error(status_code: int, body: bytes, provider: str) -> by
     return _error_body(status_code, "upstream provider error", "api_error", provider)
 
 
+async def _sweep_loop(ledger: SpendLedger, interval: float, max_age: float) -> None:
+    """Background task: periodically settle orphaned holds at their estimate.
+
+    Runs forever until cancelled (typically at proxy shutdown). Any exception
+    from ``ledger.sweep()`` is swallowed and logged so a transient DB error
+    never crashes the loop — the next iteration will retry.
+
+    Args:
+        ledger: The SpendLedger instance to sweep.
+        interval: Seconds between sweeps (WORTHLESS_SWEEP_INTERVAL_SECONDS).
+        max_age: Holds older than this many seconds are billed at estimate
+            (WORTHLESS_SWEEP_MAX_AGE_SECONDS).
+    """
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await ledger.sweep(max_age)
+        except Exception:  # noqa: BLE001
+            logger.warning("sweeper: sweep() raised an exception", exc_info=True)
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     """Startup/shutdown lifecycle for the proxy.
@@ -179,6 +206,12 @@ async def _lifespan(app: FastAPI):
     await db.execute("PRAGMA journal_mode=WAL")
     await db.execute("PRAGMA busy_timeout=5000")
     await db.commit()
+    # executescript(SCHEMA) is CREATE TABLE IF NOT EXISTS only — it never adds
+    # new columns to a pre-existing table. A proxy restarted on a DB enrolled by
+    # an older version would lack columns like WOR-705's ceiling_override, which
+    # the fail-closed settle/sweep path reads on every disconnect. Apply
+    # forward-only migrations here too, mirroring ShardRepository.initialize().
+    await migrate_db(settings.db_path)
     app.state.db = db
 
     repo = ShardReader(settings.db_path)
@@ -210,28 +243,50 @@ async def _lifespan(app: FastAPI):
     )
     app.state.httpx_client = client
 
+    # One transaction lock per connection: every BEGIN IMMEDIATE path on `db`
+    # (the ledger inside SpendCapRule, and TokenBudgetRule) must share it, or two
+    # concurrent requests could nest a transaction on the one connection → crash.
+    db_lock = asyncio.Lock()
+    app.state.db_lock = db_lock
     rules_engine = RulesEngine(
         rules=[
-            TokenBudgetRule(db=db),
+            TokenBudgetRule(db=db, lock=db_lock),
             RateLimitRule(
                 default_rps=settings.default_rate_limit_rps,
                 db_path=settings.db_path,
             ),
             # LAST — TokenBudgetRule and SpendCapRule both place reservations;
             # SpendCapRule runs last to minimise denial-path leaks.
-            SpendCapRule(db=db),
+            SpendCapRule(db=db, lock=db_lock),
         ]
     )
     app.state.rules_engine = rules_engine
 
-    yield
+    # Sweeper background task: settle orphaned holds left by SIGKILL/crash.
+    # SpendCapRule's internal ledger shares the same db + db_lock, so we build
+    # a SpendLedger here with the same connection to avoid opening a second one.
+    ledger = SpendLedger(db, db_lock)
+    app.state.ledger = ledger
+    sweep_task = asyncio.create_task(
+        _sweep_loop(ledger, settings.sweep_interval_seconds, settings.sweep_max_age_seconds),
+        name="worthless-sweeper",
+    )
 
-    # Cleanup
     try:
-        await client.aclose()
-        await db.close()
+        yield
     finally:
-        await ipc.aclose()
+        # Cancel the sweeper before closing the DB — it MUST NOT race db.close().
+        # Both cancel() and await are required: cancel() alone leaves the task
+        # running until the event loop closes, causing "task was destroyed but it
+        # is pending" ResourceWarnings (caught as errors on Python 3.13+).
+        sweep_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await sweep_task
+        try:
+            await client.aclose()
+            await db.close()
+        finally:
+            await ipc.aclose()
 
 
 def create_app(settings: ProxySettings | None = None) -> FastAPI:
@@ -256,6 +311,12 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
     # proxy_auth_token is no longer used — kept for tests that set it to None
     # to indicate "target state: no stable token". The proxy ignores this field.
     app.state.proxy_auth_token = None
+    # WOR-696 T7: response-model mismatch counter. Dict keyed by
+    # (request_model, response_model) → int. Observation only — surfaces
+    # silent provider re-routes (gpt-4o-mini → gpt-5) in metrics. Init at
+    # app construction (not in lifespan) so tests that build app.state by
+    # hand still see it.
+    app.state.response_model_mismatch_counter = {}
 
     # Middleware stack (reverse order: last registered runs first)
     app.add_middleware(CORSMiddleware, allow_origins=[], allow_methods=["GET"], allow_headers=[])
@@ -366,22 +427,34 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
         # Starlette body-caching coupling — rules receive bytes, not stream)
         body = await request.body()
 
-        # Estimate max tokens for spend-cap reservation (WOR-242).
-        # Computed once here so error paths and spend recording can release it.
+        # WOR-696 T7: request model for the response-model mismatch audit.
+        # Shares the same helper the rules engine uses for hold bookkeeping
+        # (single source of truth for "best-effort model from body bytes").
+        _request_model = extract_model(body)
+
+        # Token-budget reservation amount (WOR-242). The spend CAP no longer uses
+        # this — its reservation is the durable ledger hold below.
         _spend_reservation = _estimate_tokens(body)
 
         # GATE: rules engine evaluates BEFORE any Fernet decrypt
-        denial = await rules_engine.evaluate(alias, request, provider=encrypted.provider, body=body)
-        if denial is not None:
-            # Zero shard_a before returning (SR-01/SR-02)
+        gate = await rules_engine.evaluate(alias, request, provider=encrypted.provider, body=body)
+        spend_handle = gate.spend_handle
+
+        async def _release_reservations() -> None:
+            """Failure / denial exit: drop the durable spend hold (if any) + the
+            in-memory token-budget reservation. Single seam for every exit path."""
+            await rules_engine.refund_spend(spend_handle)
+            await rules_engine.release_spend_reservation(alias, amount=_spend_reservation)
+
+        if gate.denial is not None:
+            # Zero shard_a before returning (SR-01/SR-02). The engine already
+            # refunded any spend hold on denial; this also drops the token budget.
             shard_a[:] = b"\x00" * len(shard_a)
-            # Release any reservation placed by an earlier rule in the chain
-            # (e.g. TokenBudgetRule reserves before RateLimitRule/SpendCapRule run).
-            await rules_engine.release_spend_reservation(alias, _spend_reservation)
+            await _release_reservations()
             return Response(
-                content=denial.body,
-                status_code=denial.status_code,
-                headers=denial.headers,
+                content=gate.denial.body,
+                status_code=gate.denial.status_code,
+                headers=gate.denial.headers,
                 media_type="application/json",
             )
 
@@ -389,7 +462,7 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
         adapter = get_adapter(clean_path)
         if adapter is None:
             shard_a[:] = b"\x00" * len(shard_a)
-            await rules_engine.release_spend_reservation(alias, _spend_reservation)
+            await _release_reservations()
             return _uniform_401()
 
         # Decrypt now that the gate has passed — over IPC to the sidecar.
@@ -399,11 +472,11 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
             plaintext_shard_b = await ipc.open(encrypted.shard_b_enc, key_id=alias)
         except IPCUnavailable:
             shard_a[:] = b"\x00" * len(shard_a)
-            await rules_engine.release_spend_reservation(alias, _spend_reservation)
+            await _release_reservations()
             return _make_gateway_response(503, "sidecar unavailable")
         except Exception:
             shard_a[:] = b"\x00" * len(shard_a)
-            await rules_engine.release_spend_reservation(alias, _spend_reservation)
+            await _release_reservations()
             return _uniform_401()
 
         # Reconstruct key inside secure_key context (body already read above)
@@ -426,7 +499,7 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
         except Exception:
             shard_a[:] = b"\x00" * len(shard_a)
             plaintext_shard_b[:] = b"\x00" * len(plaintext_shard_b)
-            await rules_engine.release_spend_reservation(alias, _spend_reservation)
+            await _release_reservations()
             return _uniform_401()
 
         # Build and send with stream=True for SSE support
@@ -451,13 +524,13 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
                 try:
                     upstream_resp = await httpx_client.send(upstream_req, stream=True)
                 except httpx.TimeoutException:
-                    await rules_engine.release_spend_reservation(alias, _spend_reservation)
+                    await _release_reservations()
                     return _make_gateway_response(504, "gateway timeout")
                 except httpx.ConnectError:
-                    await rules_engine.release_spend_reservation(alias, _spend_reservation)
+                    await _release_reservations()
                     return _make_gateway_response(502, "bad gateway")
                 except httpx.HTTPError:
-                    await rules_engine.release_spend_reservation(alias, _spend_reservation)
+                    await _release_reservations()
                     return _make_gateway_response(502, "bad gateway")
 
             # Relay response (key_buf is zeroed after secure_key exits)
@@ -466,8 +539,19 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
             clean_headers = _strip_worthless_headers(adapter_resp.headers)
             provider = encrypted.provider
 
-            async def _do_record_spend(data: bytes):
-                """Extract usage and record spend — shared by streaming and non-streaming."""
+            async def _do_record_spend(data: bytes, *, provider_succeeded: bool = True):
+                """Settle / record spend after the upstream call.
+
+                * If the provider reported usage, honour it (provider DID bill input
+                  tokens even on a 4xx error response).
+                * If usage is absent and provider FAILED (>= 400): refund the hold
+                  (capped) / skip (uncapped) — the provider rejected the call.
+                * If usage is absent and provider SUCCEEDED (200 but parse failure /
+                  mid-stream disconnect): settle at estimate (capped) so the cap is
+                  billed immediately — closes the cost-griefing window where the
+                  sweeper TTL would otherwise let an attacker pay only estimate via
+                  many aborted streams. For uncapped: warn-only, no phantom spend.
+                """
                 if provider == "anthropic":
                     usage = extract_usage_anthropic(data)
                 else:
@@ -479,19 +563,72 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
                     # python-logger-credential-disclosure rule fires on
                     # the word "Token" in log messages, but here we mean
                     # the LLM response usage-tokens count (for metering),
-                    # not an auth token. Renaming clears the rule
-                    # without needing a # nosemgrep annotation.
+                    # not an auth token.
                     logger.warning(
                         "Usage extraction failed for alias=%s provider=%s",
                         alias,
                         provider,
                     )
-                try:
-                    await record_spend(settings.db_path, alias, tokens, model, provider)
-                except Exception:
-                    logger.warning("Failed to record spend for alias=%s", alias)
-                # Release the spend reservation now that actual tokens are recorded (WOR-242).
-                await rules_engine.release_spend_reservation(alias, _spend_reservation)
+                if spend_handle is not None:
+                    if usage is not None:
+                        # Bill at provider-reported actual; on failure fall back to
+                        # admission estimate so the cap is still updated promptly.
+                        try:
+                            await rules_engine.settle_spend(spend_handle, tokens)
+                        except Exception:
+                            logger.warning(
+                                "settle failed for alias=%s; falling back to estimate",
+                                alias,
+                            )
+                            try:
+                                await rules_engine.settle_spend_at_estimate(spend_handle)
+                            except Exception:
+                                logger.warning(
+                                    "settle_at_estimate also failed for alias=%s; "
+                                    "sweeper is the last backstop",
+                                    alias,
+                                )
+                    elif provider_succeeded:
+                        # Success but unreadable usage (stream disconnect / parse fail):
+                        # bill at admission estimate immediately (closes cost-griefing).
+                        try:
+                            await rules_engine.settle_spend_at_estimate(spend_handle)
+                        except Exception:
+                            logger.warning(
+                                "settle_at_estimate failed for alias=%s; "
+                                "sweeper is the last backstop",
+                                alias,
+                            )
+                    else:
+                        # Upstream error (4xx/5xx) with no usage: refund — the user
+                        # must NOT pay for a request the provider rejected. A refund
+                        # failure must retry refund, never fall through to billing.
+                        try:
+                            await rules_engine.refund_spend(spend_handle)
+                        except Exception:
+                            logger.warning(
+                                "refund failed for alias=%s on upstream error; "
+                                "retrying refund, never billing",
+                                alias,
+                            )
+                            try:
+                                await rules_engine.refund_spend(spend_handle)
+                            except Exception:
+                                logger.warning(
+                                    "refund retry also failed for alias=%s; sweeper "
+                                    "will bill at estimate (worst-case soft-overcharge)",
+                                    alias,
+                                )
+                elif usage is not None or not provider_succeeded:
+                    # Uncapped: record actual usage when present; on error paths with
+                    # no usage, still record(0) as an audit trail of the failed call.
+                    try:
+                        await record_spend(settings.db_path, alias, tokens, model, provider)
+                    except Exception:
+                        logger.warning("Failed to record spend for alias=%s", alias)
+                # Else: uncapped + success + no usage → warn-only, no phantom spend.
+                # Release the in-memory token-budget reservation (WOR-242).
+                await rules_engine.release_spend_reservation(alias, amount=_spend_reservation)
 
             if adapter_resp.status_code >= 400:
                 sanitized_body = _sanitize_upstream_error(
@@ -502,42 +639,149 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
                     status_code=adapter_resp.status_code,
                     headers={"content-type": "application/json"},
                     media_type="application/json",
-                    background=BackgroundTask(_do_record_spend, adapter_resp.body),
+                    background=BackgroundTask(
+                        _do_record_spend, adapter_resp.body, provider_succeeded=False
+                    ),
                 )
 
             if adapter_resp.is_streaming and adapter_resp.stream is not None:
                 usage_collector = StreamingUsageCollector(provider=encrypted.provider)
+                # WOR-696: stream wall-clock + idle-chunk kills. Tests may pin
+                # tight values via app.state; production reads from settings.
+                # time.monotonic() — NOT wall clock — so system clock skew on a
+                # long stream doesn't falsely fire or skip the cap.
+                _max_stream_duration = float(
+                    getattr(
+                        app.state,
+                        "max_stream_duration_seconds",
+                        settings.max_stream_duration_seconds,
+                    )
+                )
+                _max_idle_between_chunks = float(
+                    getattr(
+                        app.state,
+                        "max_idle_between_chunks_seconds",
+                        settings.max_idle_between_chunks_seconds,
+                    )
+                )
 
                 async def _stream_with_metering() -> AsyncIterator[bytes]:
+                    start = time.monotonic()
+                    stream_iter = adapter_resp.stream.__aiter__()  # type: ignore[union-attr]
+                    # WOR-696 T7: response.model can only be observed once per
+                    # stream (it doesn't change mid-stream). Skip the per-chunk
+                    # audit after the first observation — saves ~9999 JSON
+                    # parses on a 10k-chunk stream.
+                    audit_done = False
                     try:
-                        async for chunk in adapter_resp.stream:  # type: ignore[union-attr]
+                        while True:
+                            kill_reason: tuple[str, float] | None = None
+                            if time.monotonic() - start > _max_stream_duration:
+                                kill_reason = (
+                                    "max_stream_duration_seconds",
+                                    _max_stream_duration,
+                                )
+                            else:
+                                try:
+                                    chunk = await asyncio.wait_for(
+                                        stream_iter.__anext__(),
+                                        timeout=_max_idle_between_chunks,
+                                    )
+                                except StopAsyncIteration:
+                                    break
+                                except asyncio.TimeoutError:
+                                    kill_reason = (
+                                        "max_idle_between_chunks_seconds",
+                                        _max_idle_between_chunks,
+                                    )
+                            if kill_reason is not None:
+                                logger.warning(
+                                    "WOR-696: stream killed at %s=%s for "
+                                    "alias=%s; settling at ceiling",
+                                    *kill_reason,
+                                    alias,
+                                )
+                                break
                             usage_collector.feed(chunk)
+                            if not audit_done:
+                                # extract_response_model() and the dict
+                                # mutation below both swallow internally; the
+                                # outer try is a final stream-boundary guard.
+                                try:
+                                    response_model = extract_response_model(chunk)
+                                    if response_model is not None:
+                                        audit_done = True
+                                        if _request_model and response_model != _request_model:
+                                            # Bounded counter (worthless-cchq):
+                                            # hostile upstream can't OOM by
+                                            # flooding unique model pairs.
+                                            bounded_increment(
+                                                app.state.response_model_mismatch_counter,
+                                                (_request_model, response_model),
+                                            )
+                                except Exception:
+                                    logger.debug(
+                                        "WOR-696: response-model audit failed",
+                                        exc_info=True,
+                                    )
                             yield chunk
                     finally:
-                        # Client disconnect or stream end: close upstream
+                        # On any exit (disconnect / end / kill), close upstream.
+                        # settle_at_estimate then runs in the BackgroundTask and
+                        # floors at GLOBAL_CEILING_TOKENS when usage is unreadable.
                         await upstream_resp.aclose()  # type: ignore[union-attr]
 
                 async def _record_metering():
                     usage = usage_collector.result()
-                    if usage is not None:
-                        await record_spend(
-                            settings.db_path,
-                            alias,
-                            usage.total_tokens,
-                            usage.model,
-                            encrypted.provider,
-                        )
+                    if spend_handle is not None:
+                        # Capped: settle hold to actual, or to estimate if usage is
+                        # unreadable (mid-stream client disconnect, SSE format change).
+                        # Settling at estimate IMMEDIATELY closes the cost-griefing
+                        # window where an attacker aborts streams to pay only estimate
+                        # via the sweeper TTL backstop.
+                        try:
+                            if usage is not None:
+                                await rules_engine.settle_spend(spend_handle, usage.total_tokens)
+                            else:
+                                logger.warning(
+                                    "Could not extract usage from streaming response "
+                                    "for alias=%s; settling at estimate",
+                                    alias,
+                                )
+                                await rules_engine.settle_spend_at_estimate(spend_handle)
+                        except Exception:
+                            logger.warning(
+                                "settle failed for alias=%s; falling back to estimate", alias
+                            )
+                            try:
+                                await rules_engine.settle_spend_at_estimate(spend_handle)
+                            except Exception:
+                                logger.warning(
+                                    "settle_at_estimate also failed for alias=%s; "
+                                    "sweeper is the last backstop",
+                                    alias,
+                                )
+                    elif usage is not None:
+                        try:
+                            await record_spend(
+                                settings.db_path,
+                                alias,
+                                usage.total_tokens,
+                                usage.model,
+                                encrypted.provider,
+                            )
+                        except Exception:
+                            logger.warning("Failed to record spend for alias=%s", alias)
                     else:
-                        # Zero friction: if we can't extract usage (provider
-                        # changed SSE format, etc.), log a warning but don't
-                        # penalize the user with phantom spend.
+                        # Uncapped + no usage: zero friction, don't penalise the user
+                        # with phantom spend (the cap mechanism isn't engaged here).
                         logger.warning(
                             "Could not extract usage from streaming response "
                             "for alias=%s; spend not recorded",
                             alias,
                         )
-                    # Release the spend reservation (WOR-242).
-                    await rules_engine.release_spend_reservation(alias, _spend_reservation)
+                    # Release the in-memory token-budget reservation (WOR-242).
+                    await rules_engine.release_spend_reservation(alias, amount=_spend_reservation)
 
                 return StreamingResponse(
                     _stream_with_metering(),

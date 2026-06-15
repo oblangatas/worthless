@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import aiosqlite
 import pytest
+from hypothesis import HealthCheck, example, given, settings
+from hypothesis import strategies as st
 
 from worthless.storage.repository import EncryptedShard, ShardRepository, StoredShard
 from worthless.storage.schema import SCHEMA, migrate_db
@@ -350,6 +352,78 @@ async def test_migrate_rules_columns_default_null(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_migrate_adds_original_mode_column(tmp_path) -> None:
+    """WOR-715: migration adds enrollments.original_mode to a pre-715 DB.
+
+    Simulates an install done before this ticket: enrollments WITHOUT
+    original_mode. After migrate_db the column exists and legacy rows
+    backfill NULL (= "mode unknown, leave file mode as-is" at uninstall).
+    """
+    db_path = str(tmp_path / "pre_wor715.db")
+
+    # Old enrollments schema: everything the current schema has EXCEPT
+    # original_mode, so the migration's only job here is to add it.
+    async with aiosqlite.connect(db_path) as db:
+        await db.executescript(
+            """
+            CREATE TABLE shards (
+                key_alias   TEXT PRIMARY KEY,
+                shard_b_enc BLOB NOT NULL,
+                commitment  BLOB NOT NULL,
+                nonce       BLOB NOT NULL,
+                provider    TEXT NOT NULL
+            );
+            CREATE TABLE enrollments (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                key_alias  TEXT NOT NULL,
+                var_name   TEXT NOT NULL,
+                env_path   TEXT,
+                decoy_hash TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(key_alias, var_name, env_path)
+            );
+            """
+        )
+        await db.execute(
+            "INSERT INTO shards (key_alias, shard_b_enc, commitment, nonce, provider) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("legacy-key", b"b", b"c", b"n", "openai"),
+        )
+        await db.execute(
+            "INSERT INTO enrollments (key_alias, var_name, env_path) VALUES (?, ?, ?)",
+            ("legacy-key", "OPENAI_API_KEY", "/home/alice/proj/.env"),
+        )
+        await db.commit()
+
+    await migrate_db(db_path)
+
+    async with aiosqlite.connect(db_path) as db:
+        cursor = await db.execute("PRAGMA table_info(enrollments)")
+        columns = {row[1] for row in await cursor.fetchall()}
+        assert "original_mode" in columns, "migration did not add enrollments.original_mode"
+
+        cursor = await db.execute(
+            "SELECT original_mode FROM enrollments WHERE key_alias = ?", ("legacy-key",)
+        )
+        row = await cursor.fetchone()
+    assert row is not None
+    assert row[0] is None, f"legacy row should backfill NULL, got {row[0]!r}"
+
+
+@pytest.mark.asyncio
+async def test_migrate_original_mode_idempotent(tmp_path) -> None:
+    """WOR-715: running the original_mode migration twice doesn't error."""
+    db_path = str(tmp_path / "original_mode_idempotent.db")
+
+    async with aiosqlite.connect(db_path) as db:
+        await db.executescript(SCHEMA)
+        await db.commit()
+
+    await migrate_db(db_path)
+    await migrate_db(db_path)  # second run must not raise
+
+
+@pytest.mark.asyncio
 async def test_spend_log_index_exists_after_migrate(tmp_path) -> None:
     """Migration creates idx_spend_log_alias_created index."""
     db_path = str(tmp_path / "index.db")
@@ -414,6 +488,334 @@ async def test_store_enrolled_with_prefix_charset(
     assert enc is not None
     assert enc.prefix == "sk-proj-"
     assert enc.charset == "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
+
+
+@pytest.mark.asyncio
+async def test_store_enrolled_persists_original_mode(
+    repo: ShardRepository,
+    tmp_db_path: str,
+    sample_split_result,
+) -> None:
+    """WOR-715: store_enrolled(original_mode=...) persists it on the enrollment row."""
+    shard = stored_shard_from_split(sample_split_result)
+    await repo.store_enrolled(
+        "mode-alias",
+        shard,
+        var_name="OPENAI_API_KEY",
+        env_path="/tmp/proj/.env",  # noqa: S108
+        original_mode=0o644,
+    )
+
+    async with aiosqlite.connect(tmp_db_path) as db:
+        cursor = await db.execute(
+            "SELECT original_mode FROM enrollments WHERE key_alias = ?", ("mode-alias",)
+        )
+        row = await cursor.fetchone()
+    assert row is not None
+    assert row[0] == 0o644
+
+
+@pytest.mark.asyncio
+async def test_store_enrolled_without_original_mode_is_null(
+    repo: ShardRepository,
+    tmp_db_path: str,
+    sample_split_result,
+) -> None:
+    """WOR-715: omitting original_mode stores NULL (= leave file mode as-is)."""
+    shard = stored_shard_from_split(sample_split_result)
+    await repo.store_enrolled(
+        "no-mode-alias",
+        shard,
+        var_name="OPENAI_API_KEY",
+        env_path="/tmp/proj2/.env",  # noqa: S108
+    )
+
+    async with aiosqlite.connect(tmp_db_path) as db:
+        cursor = await db.execute(
+            "SELECT original_mode FROM enrollments WHERE key_alias = ?", ("no-mode-alias",)
+        )
+        row = await cursor.fetchone()
+    assert row is not None
+    assert row[0] is None
+
+
+@pytest.mark.asyncio
+async def test_store_enrolled_masks_file_type_bits(
+    repo: ShardRepository,
+    tmp_db_path: str,
+    sample_split_result,
+) -> None:
+    """WOR-715: a raw st_mode (S_IFREG|0o644) is stored as permission bits only.
+
+    Guards the phase-3 capture: a naive ``env_path.stat().st_mode`` yields
+    ``0o100644``; the storage boundary must mask it to ``0o644`` so readers
+    and ``f"{mode:o}"`` see permission bits, not the file-type bits.
+    """
+    shard = stored_shard_from_split(sample_split_result)
+    await repo.store_enrolled(
+        "masked-alias",
+        shard,
+        var_name="OPENAI_API_KEY",
+        env_path="/tmp/proj3/.env",  # noqa: S108
+        original_mode=0o100644,  # S_IFREG | 0o644 — the raw stat().st_mode
+    )
+
+    async with aiosqlite.connect(tmp_db_path) as db:
+        cursor = await db.execute(
+            "SELECT original_mode FROM enrollments WHERE key_alias = ?", ("masked-alias",)
+        )
+        row = await cursor.fetchone()
+    assert row is not None
+    assert row[0] == 0o644, f"expected masked 0o644, got {row[0]:o}"
+
+
+@pytest.mark.asyncio
+async def test_add_enrollment_persists_original_mode(
+    repo: ShardRepository,
+    tmp_db_path: str,
+    sample_split_result,
+) -> None:
+    """WOR-715: the add_enrollment path (re-lock / extra location) also persists
+    the masked original_mode — lock.py uses this path, not only store_enrolled.
+    """
+    shard = stored_shard_from_split(sample_split_result)
+    # First location creates the shard + its enrollment.
+    await repo.store_enrolled(
+        "multi-loc-alias",
+        shard,
+        var_name="OPENAI_API_KEY",
+        env_path="/tmp/loc-a/.env",  # noqa: S108
+        original_mode=0o644,
+    )
+    # Second location enrolls via add_enrollment (no new shard).
+    await repo.add_enrollment(
+        "multi-loc-alias",
+        var_name="OPENAI_API_KEY",
+        env_path="/tmp/loc-b/.env",  # noqa: S108
+        original_mode=0o100600,  # raw st_mode; masks to 0o600
+    )
+
+    async with aiosqlite.connect(tmp_db_path) as db:
+        cursor = await db.execute(
+            "SELECT original_mode FROM enrollments WHERE key_alias = ? AND env_path = ?",
+            ("multi-loc-alias", "/tmp/loc-b/.env"),  # noqa: S108
+        )
+        row = await cursor.fetchone()
+    assert row is not None
+    assert row[0] == 0o600, f"expected masked 0o600, got {row[0]:o}"
+
+
+@given(st.integers(min_value=0, max_value=0o177777))
+@example(0o100644)  # S_IFREG | rw-r--r--   (the raw stat().st_mode of a normal .env)
+@example(0o120777)  # S_IFLNK | rwxrwxrwx   (a symlink's st_mode)
+@example(0o102755)  # S_IFREG | setgid | rwxr-xr-x
+@example(0o101644)  # S_IFREG | sticky | rw-r--r--
+def test_perm_bits_strips_all_but_permission_bits(raw_mode: int) -> None:
+    """WOR-715 property: _perm_bits keeps ONLY the 0o777 permission bits.
+
+    No file-type (S_IFREG/S_IFLNK) or special (setuid/setgid/sticky) bit may
+    ever be persisted as original_mode — a refactor to ``& 0o7777`` (special
+    bits) or no mask (type bits) is caught here, not in production.
+    """
+    from worthless.storage.repository import _perm_bits
+
+    result = _perm_bits(raw_mode)
+    assert result is not None
+    assert result == raw_mode & 0o777  # low 9 permission bits preserved
+    assert result & ~0o777 == 0  # nothing above 0o777 survives
+    assert 0 <= result <= 0o777
+
+
+def test_perm_bits_none_passthrough() -> None:
+    """WOR-715: _perm_bits(None) stays None — 'mode unknown, leave file as-is'."""
+    from worthless.storage.repository import _perm_bits
+
+    assert _perm_bits(None) is None
+
+
+@pytest.mark.asyncio
+async def test_store_enrolled_relock_preserves_first_original_mode(
+    repo: ShardRepository,
+    tmp_db_path: str,
+    sample_split_result,
+) -> None:
+    """WOR-715: re-enrolling the same (alias, var, path) keeps the FIRST mode.
+
+    The true pre-lock mode is only knowable at the very first lock; a re-lock
+    would stat the already-tightened 0o600. ``INSERT OR IGNORE`` must keep the
+    original 0o644 — a future switch to UPSERT would silently record 0o600 as
+    the 'original', defeating the whole feature.
+    """
+    shard = stored_shard_from_split(sample_split_result)
+    await repo.store_enrolled(
+        "relock-alias",
+        shard,
+        var_name="OPENAI_API_KEY",
+        env_path="/tmp/relock/.env",  # noqa: S108
+        original_mode=0o644,
+    )
+    # Re-enroll the SAME tuple as if re-locking the now-0o600 file.
+    await repo.store_enrolled(
+        "relock-alias",
+        shard,
+        var_name="OPENAI_API_KEY",
+        env_path="/tmp/relock/.env",  # noqa: S108
+        original_mode=0o600,
+    )
+
+    async with aiosqlite.connect(tmp_db_path) as db:
+        cursor = await db.execute(
+            "SELECT original_mode FROM enrollments WHERE key_alias = ?", ("relock-alias",)
+        )
+        rows = await cursor.fetchall()
+    assert len(rows) == 1, f"expected exactly 1 enrollment row, got {rows}"
+    assert rows[0][0] == 0o644, (
+        f"re-lock must preserve the first-captured 0o644, got {oct(rows[0][0])} — "
+        "INSERT OR IGNORE was likely changed to an UPSERT"
+    )
+
+
+@settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+@given(st.integers(min_value=0, max_value=0o777))
+@example(0o644)
+@example(0o600)
+@example(0o755)
+@pytest.mark.asyncio
+async def test_store_enrolled_original_mode_roundtrip_property(
+    repo: ShardRepository,
+    tmp_db_path: str,
+    sample_split_result,
+    mode: int,
+) -> None:
+    """WOR-715 / Wave 4: masked mode written by store_enrolled round-trips to DB."""
+    shard = stored_shard_from_split(sample_split_result)
+    alias = f"prop-{mode:o}"
+    await repo.store_enrolled(
+        alias,
+        shard,
+        var_name="OPENAI_API_KEY",
+        env_path="/tmp/prop/.env",  # noqa: S108
+        original_mode=mode,
+    )
+    async with aiosqlite.connect(tmp_db_path) as db:
+        cursor = await db.execute(
+            "SELECT original_mode FROM enrollments WHERE key_alias = ?", (alias,)
+        )
+        row = await cursor.fetchone()
+    assert row is not None
+    assert row[0] == mode
+
+
+@settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+@given(st.integers(min_value=0, max_value=0o777))
+@example(0o644)
+@example(0o755)
+@pytest.mark.asyncio
+async def test_add_enrollment_original_mode_roundtrip_property(
+    repo: ShardRepository,
+    tmp_db_path: str,
+    sample_split_result,
+    mode: int,
+) -> None:
+    """WOR-715 / Wave 4: add_enrollment path masks and persists original_mode."""
+    shard = stored_shard_from_split(sample_split_result)
+    await repo.store_enrolled(
+        "add-prop-alias",
+        shard,
+        var_name="OPENAI_API_KEY",
+        env_path="/tmp/add-prop-a/.env",  # noqa: S108
+        original_mode=0o644,
+    )
+    env_b = f"/tmp/add-prop-b-{mode:o}/.env"  # noqa: S108
+    await repo.add_enrollment(
+        "add-prop-alias",
+        var_name="OPENAI_API_KEY",
+        env_path=env_b,
+        original_mode=mode,
+    )
+    async with aiosqlite.connect(tmp_db_path) as db:
+        cursor = await db.execute(
+            "SELECT original_mode FROM enrollments WHERE key_alias = ? AND env_path = ?",
+            ("add-prop-alias", env_b),
+        )
+        row = await cursor.fetchone()
+    assert row is not None
+    assert row[0] == mode
+
+
+@settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+@given(st.integers(min_value=0, max_value=0o177777))
+@example(0o100644)
+@example(0o120777)
+@pytest.mark.asyncio
+async def test_store_enrolled_masks_raw_st_mode_property(
+    repo: ShardRepository,
+    tmp_db_path: str,
+    sample_split_result,
+    raw_mode: int,
+) -> None:
+    """WOR-715 Tier 1: raw stat().st_mode (type/special bits) masks to 0o777 in DB."""
+    shard = stored_shard_from_split(sample_split_result)
+    alias = f"raw-{raw_mode:o}"
+    await repo.store_enrolled(
+        alias,
+        shard,
+        var_name="OPENAI_API_KEY",
+        env_path="/tmp/raw/.env",  # noqa: S108
+        original_mode=raw_mode,
+    )
+    async with aiosqlite.connect(tmp_db_path) as db:
+        cursor = await db.execute(
+            "SELECT original_mode FROM enrollments WHERE key_alias = ?", (alias,)
+        )
+        row = await cursor.fetchone()
+    assert row is not None
+    assert row[0] == (raw_mode & 0o777)
+
+
+@pytest.mark.asyncio
+async def test_list_enrollments_surfaces_original_mode(
+    repo: ShardRepository,
+    sample_split_result,
+) -> None:
+    """WOR-435 plumbing: original_mode is readable via list_enrollments.
+
+    It's write-only on the WOR-715 branch (no SELECT surfaces it). The
+    uninstaller enumerates locked .env files and needs each one's original
+    mode to restore permissions, so the read path must carry it.
+    """
+    shard = stored_shard_from_split(sample_split_result)
+    await repo.store_enrolled(
+        "mode-read-alias",
+        shard,
+        var_name="OPENAI_API_KEY",
+        env_path="/tmp/read/.env",  # noqa: S108
+        original_mode=0o644,
+    )
+
+    records = await repo.list_enrollments("mode-read-alias")
+    assert len(records) == 1
+    assert records[0].original_mode == 0o644
+
+
+@pytest.mark.asyncio
+async def test_get_enrollment_surfaces_original_mode(
+    repo: ShardRepository,
+    sample_split_result,
+) -> None:
+    """WOR-435 plumbing: get_enrollment also carries original_mode."""
+    shard = stored_shard_from_split(sample_split_result)
+    await repo.store_enrolled(
+        "mode-get-alias",
+        shard,
+        var_name="OPENAI_API_KEY",
+        env_path="/tmp/get/.env",  # noqa: S108
+        original_mode=0o600,
+    )
+
+    rec = await repo.get_enrollment("mode-get-alias", env_path="/tmp/get/.env")  # noqa: S108
+    assert rec is not None
+    assert rec.original_mode == 0o600
 
 
 @pytest.mark.asyncio
@@ -761,3 +1163,540 @@ async def test_migrate_no_backup_when_already_migrated(tmp_path) -> None:
     assert len(backups) == 0, (
         f"backup file created on no-op migration; got: {[p.name for p in backups]}"
     )
+
+
+# ------------------------------------------------------------------
+# WOR-705: per-key ceiling override — migration + setter
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_migrate_adds_ceiling_override(tmp_path) -> None:
+    """An OLD-shape enrollment_config (no ceiling_override) gains the column.
+
+    Builds a full-SCHEMA DB, then DROPs ceiling_override to simulate a
+    pre-WOR-705 database — so the ALTER path is genuinely exercised, not
+    satisfied trivially by the current SCHEMA.
+    """
+    db_path = str(tmp_path / "old_ceiling.db")
+    async with aiosqlite.connect(db_path) as db:
+        await db.executescript(SCHEMA)
+        await db.execute("ALTER TABLE enrollment_config DROP COLUMN ceiling_override")
+        await db.commit()
+        cursor = await db.execute("PRAGMA table_info(enrollment_config)")
+        before = {row[1] for row in await cursor.fetchall()}
+    assert "ceiling_override" not in before, "setup: column should be absent pre-migration"
+
+    await migrate_db(db_path)
+
+    async with aiosqlite.connect(db_path) as db:
+        cursor = await db.execute("PRAGMA table_info(enrollment_config)")
+        after = {row[1] for row in await cursor.fetchall()}
+    assert "ceiling_override" in after, "migration did not add ceiling_override"
+
+
+@pytest.mark.asyncio
+async def test_migrate_ceiling_override_idempotent(tmp_path) -> None:
+    """Migrating twice (column already present) does not error."""
+    db_path = str(tmp_path / "ceiling_idempotent.db")
+    async with aiosqlite.connect(db_path) as db:
+        await db.executescript(SCHEMA)
+        await db.commit()
+    await migrate_db(db_path)
+    await migrate_db(db_path)  # second run must not raise
+
+
+@pytest.mark.asyncio
+async def test_set_ceiling_override_persists(tmp_db_path: str, fernet_key: bytes) -> None:
+    """set_ceiling_override writes a valid override that reads back."""
+    repo = ShardRepository(tmp_db_path, fernet_key)
+    await repo.initialize()
+    async with aiosqlite.connect(tmp_db_path) as db:
+        await db.execute("INSERT INTO enrollment_config (key_alias) VALUES ('k1')")
+        await db.commit()
+
+    ok = await repo.set_ceiling_override("k1", 200_000)
+    assert ok is True
+
+    async with aiosqlite.connect(tmp_db_path) as db:
+        cursor = await db.execute(
+            "SELECT ceiling_override FROM enrollment_config WHERE key_alias = 'k1'"
+        )
+        (val,) = await cursor.fetchone()
+    assert val == 200_000
+
+
+@pytest.mark.asyncio
+async def test_set_ceiling_override_missing_alias_returns_false(
+    tmp_db_path: str, fernet_key: bytes
+) -> None:
+    """No enrollment_config row → setter reports no update (False)."""
+    repo = ShardRepository(tmp_db_path, fernet_key)
+    await repo.initialize()
+    ok = await repo.set_ceiling_override("nope", 200_000)
+    assert ok is False
+
+
+@pytest.mark.asyncio
+async def test_set_ceiling_override_rejects_below_global(
+    tmp_db_path: str, fernet_key: bytes
+) -> None:
+    """Raise-only: an override below the global ceiling is rejected."""
+    from worthless.proxy.config import GLOBAL_CEILING_TOKENS
+
+    repo = ShardRepository(tmp_db_path, fernet_key)
+    await repo.initialize()
+    with pytest.raises(ValueError):
+        await repo.set_ceiling_override("k1", GLOBAL_CEILING_TOKENS - 1)
+
+
+@pytest.mark.asyncio
+async def test_set_ceiling_override_rejects_nonpositive_and_bool(
+    tmp_db_path: str, fernet_key: bytes
+) -> None:
+    """Zero, negative, and bool (an int subclass) are all rejected."""
+    repo = ShardRepository(tmp_db_path, fernet_key)
+    await repo.initialize()
+    for bad in (0, -5):
+        with pytest.raises(ValueError):
+            await repo.set_ceiling_override("k1", bad)
+    with pytest.raises(ValueError):
+        await repo.set_ceiling_override("k1", True)  # bool is an int subclass
+
+
+# ---------------------------------------------------------------------------
+# WOR-651 / WOR-621 F4: OpenClaw rollback columns (shape-only, no key at rest)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fresh_db_has_oc_rollback_columns(tmp_path) -> None:
+    """A DB built from current SCHEMA includes the two OC rollback columns."""
+    db_path = str(tmp_path / "fresh_oc.db")
+    async with aiosqlite.connect(db_path) as db:
+        await db.executescript(SCHEMA)
+        await db.commit()
+
+    async with aiosqlite.connect(db_path) as db:
+        cursor = await db.execute("PRAGMA table_info(shards)")
+        columns = {row[1] for row in await cursor.fetchall()}
+
+    # G5-C: oc_original_base_url was dropped — the URL lives inside
+    # oc_original_api_key_json (the MAC-bound source of truth).
+    assert "oc_original_base_url" not in columns, "G5-C: oc_original_base_url must be gone"
+    assert "oc_original_api_key_json" in columns, "oc_original_api_key_json not in SCHEMA"
+
+
+@pytest.mark.asyncio
+async def test_migrate_adds_oc_rollback_columns(tmp_path) -> None:
+    """Migration adds both OC rollback columns to an old DB lacking them."""
+    db_path = str(tmp_path / "old_no_oc.db")
+
+    # Old shards table without the OC rollback columns. (enrollments is
+    # included because earlier migrations — decoy_hash — touch it.)
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        await db.execute(
+            "CREATE TABLE IF NOT EXISTS shards ("
+            "key_alias TEXT PRIMARY KEY, shard_b_enc BLOB NOT NULL, "
+            "commitment BLOB NOT NULL, nonce BLOB NOT NULL, "
+            "provider TEXT NOT NULL, "
+            "created_at TEXT NOT NULL DEFAULT (datetime('now')))"
+        )
+        await db.execute(
+            "CREATE TABLE IF NOT EXISTS enrollments ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "key_alias TEXT NOT NULL REFERENCES shards(key_alias), "
+            "var_name TEXT NOT NULL, env_path TEXT, "
+            "created_at TEXT NOT NULL DEFAULT (datetime('now')))"
+        )
+        await db.commit()
+
+    await migrate_db(db_path)
+
+    async with aiosqlite.connect(db_path) as db:
+        cursor = await db.execute("PRAGMA table_info(shards)")
+        columns = {row[1] for row in await cursor.fetchall()}
+
+    # G5-C: migration no longer adds oc_original_base_url; an existing
+    # old DB carrying that column will have it dropped (SQLite ≥3.35);
+    # an old DB without it stays without it.
+    assert "oc_original_base_url" not in columns, (
+        "G5-C: migration must not add oc_original_base_url"
+    )
+    assert "oc_original_api_key_json" in columns, "oc_original_api_key_json not added by migrate"
+
+
+@pytest.mark.asyncio
+async def test_migrate_oc_rollback_columns_idempotent(tmp_path) -> None:
+    """Running migrate twice on a fresh-schema DB doesn't error (idempotent)."""
+    db_path = str(tmp_path / "oc_idempotent.db")
+
+    async with aiosqlite.connect(db_path) as db:
+        await db.executescript(SCHEMA)
+        await db.commit()
+
+    await migrate_db(db_path)
+    await migrate_db(db_path)  # Second run must not raise on duplicate columns.
+
+    async with aiosqlite.connect(db_path) as db:
+        cursor = await db.execute("PRAGMA table_info(shards)")
+        columns = {row[1] for row in await cursor.fetchall()}
+    # G5-C: oc_original_base_url was dropped from the schema.
+    assert "oc_original_base_url" not in columns
+    assert "oc_original_api_key_json" in columns
+
+
+@pytest.mark.asyncio
+async def test_upsert_locked_shard_oc_rollback_roundtrips(
+    repo: ShardRepository,
+    sample_split_result,
+) -> None:
+    """upsert_locked_shard persists OC rollback fields; fetch_encrypted reads them back."""
+    from worthless.openclaw.integration import build_oc_rollback_apikey_record
+
+    shard = stored_shard_from_split(sample_split_result, provider="openai")
+    await repo.upsert_locked_shard(
+        "oc-roundtrip",
+        shard,
+        prefix="sk-",
+        charset="abc",
+        base_url="https://api.worthless.local/oc-roundtrip/v1",
+        oc_original_api_key_json=build_oc_rollback_apikey_record("plaintext"),
+    )
+
+    enc = await repo.fetch_encrypted("oc-roundtrip")
+    assert enc is not None
+    # G5-C: oc_original_base_url is gone; the URL is inside the
+    # oc_original_api_key_json record (see test_lock_capture_oc_rollback).
+    assert enc.oc_original_api_key_json == '{"kind":"plaintext"}'
+
+
+@pytest.mark.asyncio
+async def test_upsert_locked_shard_without_oc_rollback_defaults_none(
+    repo: ShardRepository,
+    sample_split_result,
+) -> None:
+    """Omitting the OC rollback params leaves the columns NULL (backward-compat)."""
+    shard = stored_shard_from_split(sample_split_result, provider="openai")
+    await repo.upsert_locked_shard(
+        "oc-omit",
+        shard,
+        prefix="sk-",
+        charset="abc",
+        base_url="https://api.worthless.local/oc-omit/v1",
+    )
+
+    enc = await repo.fetch_encrypted("oc-omit")
+    assert enc is not None
+    # G5-C: oc_original_base_url is gone from the row entirely.
+    assert enc.oc_original_api_key_json is None
+
+
+@pytest.mark.asyncio
+async def test_store_enrolled_oc_rollback_roundtrips(
+    repo: ShardRepository,
+    sample_split_result,
+) -> None:
+    """store_enrolled threads OC rollback fields through to fetch_encrypted."""
+    from worthless.openclaw.integration import build_oc_rollback_apikey_record
+
+    ref = {"source": "env", "provider": "openai", "id": "OPENAI_API_KEY"}
+    shard = stored_shard_from_split(sample_split_result, provider="openai")
+    await repo.store_enrolled(
+        "oc-enrolled",
+        shard,
+        var_name="OPENAI_API_KEY",
+        env_path=None,
+        base_url="https://api.openai.com/v1",
+        oc_original_api_key_json=build_oc_rollback_apikey_record("secretref", ref),
+    )
+
+    enc = await repo.fetch_encrypted("oc-enrolled")
+    assert enc is not None
+    # G5-C: oc_original_base_url is gone — apiKey record carries the shape.
+    import json as _json
+
+    decoded = _json.loads(enc.oc_original_api_key_json)
+    assert decoded == {"kind": "secretref", "ref": ref}
+
+
+def test_build_oc_rollback_apikey_record_plaintext_has_no_key() -> None:
+    """plaintext record is shape-only — equals {"kind":"plaintext"}, no key bytes."""
+    from worthless.openclaw.integration import build_oc_rollback_apikey_record
+
+    out = build_oc_rollback_apikey_record("plaintext")
+    assert out == '{"kind":"plaintext"}'
+    assert "sk-" not in out
+    assert "ref" not in out
+
+
+def test_build_oc_rollback_apikey_record_secretref_roundtrips() -> None:
+    """secretref record carries only the non-secret pointer, never a key."""
+    import json as _json
+
+    from worthless.openclaw.integration import build_oc_rollback_apikey_record
+
+    ref = {"source": "env", "provider": "openai", "id": "OPENAI_API_KEY"}
+    out = build_oc_rollback_apikey_record("secretref", ref)
+    decoded = _json.loads(out)
+    assert decoded == {"kind": "secretref", "ref": ref}
+    assert "sk-" not in out
+
+
+def test_build_oc_rollback_apikey_record_unknown_kind_raises() -> None:
+    """An unknown kind is rejected — no silent fallthrough."""
+    from worthless.openclaw.integration import build_oc_rollback_apikey_record
+
+    with pytest.raises(ValueError):
+        build_oc_rollback_apikey_record("ciphertext")
+
+
+@pytest.mark.asyncio
+async def test_oc_rollback_no_key_at_rest(
+    repo: ShardRepository,
+    tmp_db_path: str,
+    sample_api_key_bytes: bytes,
+    sample_split_result,
+) -> None:
+    """AC8: NEITHER the real client-held shard-A NOR the original plaintext
+    API key ever appears in the stored shards row, and a plaintext OC rollback
+    record carries no key bytes.
+
+    NON-VACUOUS: unlike the prior version (which generated a throwaway random
+    token the storage layer never saw, so the absence assertion was true by
+    construction), this stores the ACTUAL ``sample_split_result`` material and
+    checks for the REAL ``sample_split_result.shard_a`` bytes and the REAL
+    source key (``sample_api_key_bytes``, the input that was split). If the
+    storage layer ever persisted shard-A — or echoed the source key — into any
+    column, this test would FAIL.
+    """
+    from worthless.openclaw.integration import build_oc_rollback_apikey_record
+
+    # The real client-held shard-A from the same split that produced shard_b.
+    # The client keeps this; the server must never store it.
+    shard_a_bytes = bytes(sample_split_result.shard_a)
+
+    shard = stored_shard_from_split(sample_split_result, provider="openai")
+    await repo.upsert_locked_shard(
+        "no-key-at-rest",
+        shard,
+        prefix="sk-",
+        charset="abc",
+        base_url="https://api.worthless.local/no-key-at-rest/v1",
+        oc_original_api_key_json=build_oc_rollback_apikey_record("plaintext"),
+    )
+
+    # Read the ENTIRE raw row back and serialize every column.
+    async with aiosqlite.connect(tmp_db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("SELECT * FROM shards WHERE key_alias = 'no-key-at-rest'")
+        row = await cursor.fetchone()
+    assert row is not None
+
+    serialized = b"".join(
+        v if isinstance(v, bytes | bytearray) else str(v).encode() for v in tuple(row)
+    )
+    # Both the real shard-A AND the original plaintext key are absent — these
+    # are values the storage layer actually handled (shard-A's XOR sibling
+    # shard_b WAS stored), so the assertions have teeth.
+    assert shard_a_bytes not in serialized, "shard-A leaked into the stored row!"
+    assert bytes(sample_api_key_bytes) not in serialized, (
+        "original plaintext API key leaked into the stored row!"
+    )
+
+    oc_json = row["oc_original_api_key_json"]
+    assert oc_json == '{"kind":"plaintext"}'
+    assert "sk-" not in oc_json
+
+
+@pytest.mark.asyncio
+async def test_upsert_locked_shard_overwrites_existing_oc_rollback_record(
+    repo: ShardRepository,
+    sample_split_result,
+) -> None:
+    """A second upsert of the SAME alias with DIFFERENT oc_original_* values
+    overwrites the row — proving ON CONFLICT DO UPDATE SET oc_original_* =
+    excluded.* fires (previously only the first-insert path was covered)."""
+    from worthless.openclaw.integration import build_oc_rollback_apikey_record
+
+    shard = stored_shard_from_split(sample_split_result, provider="openai")
+    await repo.upsert_locked_shard(
+        "oc-overwrite",
+        shard,
+        prefix="sk-",
+        charset="abc",
+        base_url="https://api.worthless.local/oc-overwrite/v1",
+        oc_original_api_key_json=build_oc_rollback_apikey_record("plaintext"),
+    )
+
+    # Second upsert: same alias, DIFFERENT oc rollback record.
+    ref = {"source": "env", "provider": "anthropic", "id": "ANTHROPIC_API_KEY"}
+    await repo.upsert_locked_shard(
+        "oc-overwrite",
+        shard,
+        prefix="sk-",
+        charset="abc",
+        base_url="https://api.worthless.local/oc-overwrite/v1",
+        oc_original_api_key_json=build_oc_rollback_apikey_record("secretref", ref),
+    )
+
+    enc = await repo.fetch_encrypted("oc-overwrite")
+    assert enc is not None
+    # G5-C: oc_original_base_url is gone; the shape record carries the truth.
+    import json as _json
+
+    assert _json.loads(enc.oc_original_api_key_json) == {"kind": "secretref", "ref": ref}
+
+
+@pytest.mark.asyncio
+async def test_upsert_relock_omitting_oc_params_nulls_record(
+    repo: ShardRepository,
+    sample_split_result,
+) -> None:
+    """Re-locking the same alias while OMITTING the oc params silently NULLs
+    the previously-stored rollback record (excluded.* defaults to None).
+
+    This PINS the CURRENT behavior. F2 (unlock) will decide whether this
+    silent null-out is desired or whether re-lock should preserve the prior
+    rollback record; if F2 changes it, this test is the canary."""
+    from worthless.openclaw.integration import build_oc_rollback_apikey_record
+
+    shard = stored_shard_from_split(sample_split_result, provider="openai")
+    await repo.upsert_locked_shard(
+        "oc-relock",
+        shard,
+        prefix="sk-",
+        charset="abc",
+        base_url="https://api.worthless.local/oc-relock/v1",
+        oc_original_api_key_json=build_oc_rollback_apikey_record("plaintext"),
+    )
+
+    # Re-lock the SAME alias, omitting the oc params (they default to None).
+    await repo.upsert_locked_shard(
+        "oc-relock",
+        shard,
+        prefix="sk-",
+        charset="abc",
+        base_url="https://api.worthless.local/oc-relock/v1",
+    )
+
+    enc = await repo.fetch_encrypted("oc-relock")
+    assert enc is not None
+    # G5-C: oc_original_base_url is gone from the row entirely.
+    assert enc.oc_original_api_key_json is None
+
+
+@pytest.mark.asyncio
+async def test_store_enrolled_without_oc_rollback_defaults_none(
+    repo: ShardRepository,
+    sample_split_result,
+) -> None:
+    """store_enrolled without the oc params leaves both columns None."""
+    shard = stored_shard_from_split(sample_split_result, provider="openai")
+    await repo.store_enrolled(
+        "enrolled-no-oc",
+        shard,
+        var_name="OPENAI_API_KEY",
+        env_path=None,
+        base_url="https://api.openai.com/v1",
+    )
+
+    enc = await repo.fetch_encrypted("enrolled-no-oc")
+    assert enc is not None
+    # G5-C: oc_original_base_url is gone from the row entirely.
+    assert enc.oc_original_api_key_json is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_encrypted_legacy_row_predating_oc_columns_returns_none_fields(
+    tmp_path,
+    fernet_key: bytes,
+) -> None:
+    """A row stored in a DB that predates the oc_original_* columns reads back
+    with those fields as None after migration — graceful, not a KeyError."""
+    db_path = str(tmp_path / "legacy_no_oc.db")
+
+    # Build a minimal OLD-schema DB: shards WITHOUT oc_original_* (and without
+    # shard_a_enc), plus enrollments so earlier migrations have their target.
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        await db.execute(
+            "CREATE TABLE IF NOT EXISTS shards ("
+            "key_alias TEXT PRIMARY KEY, shard_b_enc BLOB NOT NULL, "
+            "commitment BLOB NOT NULL, nonce BLOB NOT NULL, "
+            "provider TEXT NOT NULL, "
+            "created_at TEXT NOT NULL DEFAULT (datetime('now')))"
+        )
+        await db.execute(
+            "CREATE TABLE IF NOT EXISTS enrollments ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "key_alias TEXT NOT NULL REFERENCES shards(key_alias), "
+            "var_name TEXT NOT NULL, env_path TEXT, "
+            "created_at TEXT NOT NULL DEFAULT (datetime('now')))"
+        )
+        await db.execute(
+            "INSERT INTO shards (key_alias, shard_b_enc, commitment, nonce, provider) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("legacy-oc", b"enc-b", b"commit", b"nonce", "openai"),
+        )
+        await db.commit()
+
+    # Migration adds the new columns (oc_original_*, shard_a_enc, base_url, ...).
+    await migrate_db(db_path)
+
+    repo = ShardRepository(db_path, fernet_key)
+    enc = await repo.fetch_encrypted("legacy-oc")
+    assert enc is not None
+    # G5-C: oc_original_base_url is gone from the row entirely.
+    assert enc.oc_original_api_key_json is None
+
+
+def test_encrypted_shard_repr_omits_oc_fields() -> None:
+    """SR-04 regression lock: repr() of an EncryptedShard with a non-None
+    oc_original_api_key_json must NOT leak the JSON into the string form.
+    (G5-C: oc_original_base_url is gone, so this now only covers the JSON.)"""
+    sensitive_json = '{"kind":"secretref","ref":{"id":"OPENAI_API_KEY"}}'
+    enc = EncryptedShard(
+        shard_b_enc=b"x" * 16,
+        commitment=b"c" * 8,
+        nonce=b"n" * 12,
+        provider="openai",
+        oc_original_api_key_json=sensitive_json,
+    )
+
+    text = repr(enc)
+    assert sensitive_json not in text
+    # Sanity: it is still a useful repr.
+    assert "EncryptedShard(" in text
+
+
+@pytest.mark.asyncio
+async def test_fetch_encrypted_against_hand_inserted_raw_row(
+    repo: ShardRepository,
+    tmp_db_path: str,
+) -> None:
+    """Hand-INSERT a shards row via raw SQL with a known
+    oc_original_api_key_json, then read it via fetch_encrypted. Pins the
+    SELECT column list independent of the write path (upsert/store_enrolled).
+    G5-C: oc_original_base_url is no longer a column."""
+    async with aiosqlite.connect(tmp_db_path) as db:
+        await db.execute(
+            "INSERT INTO shards "
+            "(key_alias, shard_b_enc, commitment, nonce, provider, "
+            "oc_original_api_key_json) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "hand-row",
+                b"enc-b",
+                b"commit",
+                b"nonce",
+                "openai",
+                '{"kind":"plaintext"}',
+            ),
+        )
+        await db.commit()
+
+    enc = await repo.fetch_encrypted("hand-row")
+    assert enc is not None
+    assert enc.oc_original_api_key_json == '{"kind":"plaintext"}'

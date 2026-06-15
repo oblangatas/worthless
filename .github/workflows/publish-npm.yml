@@ -1,0 +1,68 @@
+name: Publish worthless-mcp to npm
+
+on: # zizmor: ignore[cache-poisoning]
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # environment gate required — mirrors publish.yml (PyPI) pattern.
+    # NPM_TOKEN (long-lived) is used for the initial package claim on npm.
+    # Once the package exists, migrate to npm provenance (--provenance flag +
+    # id-token: write) and remove NPM_TOKEN. Tracked in WOR-229 follow-up.
+    environment: npm-publish
+    defaults:
+      run:
+        working-directory: packages/worthless-mcp
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4
+        with:
+          # fetch-depth: 0 required — shallow clones strip the tag object and its
+          # GPG signature, causing verify-tag.sh to fail on an otherwise valid tag.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify tag GPG signature
+        # Mirror of the same gate in publish.yml (PyPI). npm publish must require
+        # the same signed-tag guarantee as PyPI — omitting it here would let an
+        # attacker with repo write push an unsigned v* tag to npm without GPG check.
+        working-directory: ${{ github.workspace }}
+        env:
+          MAINTAINER_PUBKEY: ${{ vars.MAINTAINER_GPG_PUBKEY }}
+          MAINTAINER_FINGERPRINT: ${{ vars.MAINTAINER_GPG_FINGERPRINT }}
+        run: bash .github/scripts/verify-tag.sh
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org/"
+
+      - name: Stamp version from tag
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          TAG="${REF_NAME#v}"
+          # Normalize 4-part PEP 440 re-tag to 3-part semver for npm.
+          # ${TAG%.0} strips a literal trailing ".0" — bash substitution, no code
+          # injection possible (no Python source interpolation).
+          # 0.3.8.0 → 0.3.8 | 0.3.8 → 0.3.8 (unchanged) | 0.3.8.1 → unchanged
+          SEMVER="${TAG%.0}"
+          echo "Publishing version: ${SEMVER} (from tag ${TAG})"
+          npm version "${SEMVER}" --no-git-tag-version --allow-same-version
+          if [[ "${SEMVER}" =~ (rc|a|b|alpha|beta) ]]; then
+            echo "DIST_TAG=next" >> "$GITHUB_ENV"
+          else
+            echo "DIST_TAG=latest" >> "$GITHUB_ENV"
+          fi
+
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --tag "${DIST_TAG}" # zizmor: ignore[use-trusted-publishing]

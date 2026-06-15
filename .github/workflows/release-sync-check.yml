@@ -121,6 +121,26 @@ jobs:
           fi
           echo "OK: PyPI = tag = pyproject@tag = install.sh pin = $LATEST_VERSION"
 
+      # ===== Assertion 1b: docs image tags match the released version =======
+      - name: A1b — docs/ pinned image tags == released version
+        # Run even if A1 / the resolve step failed: a transient PyPI/GH network
+        # blip must not silently skip this daily docs-drift backstop (the one
+        # run meant to catch a release that moved with no docs PR). If the
+        # network-resolved version is empty, check_docs_versions.py falls back
+        # to install.sh's in-repo pin — still a useful no-network check.
+        if: ${{ !cancelled() }}
+        env:
+          LATEST_VERSION: ${{ steps.versions.outputs.latest_version }}
+        run: |
+          set -euo pipefail
+          # WOR-736: docs hardcode `worthless-proxy:X.Y.Z` image tags. Twice
+          # they lagged a release (0.3.1 in WOR-734, 0.3.3 in WOR-733) and
+          # pointed readers at an outdated image. Assert every pinned tag in
+          # docs/ equals the released version. The same script runs on docs
+          # PRs (docs-spike.yml) for PR-time prevention; THIS is the backstop
+          # for release-driven drift (a release moves, no docs PR fires).
+          python3 scripts/check_docs_versions.py "$LATEST_VERSION"
+
       # ===== Assertion 2a: worthless.sh content negotiation (curl) ==========
       - name: A2a — worthless.sh curl-UA serves install.sh @ latest tag
         env:

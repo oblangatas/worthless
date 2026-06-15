@@ -222,6 +222,38 @@ class TestBatchLockAllOrNothingDbRolledBack:
             assert rows == [], f"shards table has orphan rows after a failed lock: {rows!r}"
 
 
+class TestVerifyHookAbortNoStaleOriginalMode:
+    """Wave 4 / chaos-engineer T1: verify-hook abort must not leave original_mode rows."""
+
+    def test_verify_hook_abort_leaves_no_original_mode_rows(
+        self,
+        home_dir: WorthlessHome,
+        three_key_env: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Pass-2 verify failure → compensating unwind removes enrollment + original_mode."""
+        _inject_verify_failure(monkeypatch)
+
+        result = runner.invoke(
+            app,
+            ["lock", "--env", str(three_key_env)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+        )
+        assert result.exit_code != 0, result.output
+
+        con = sqlite3.connect(str(home_dir.db_path))
+        try:
+            mode_rows = con.execute("SELECT original_mode FROM enrollments").fetchall()
+            enroll_rows = con.execute("SELECT 1 FROM enrollments").fetchall()
+        finally:
+            con.close()
+        assert enroll_rows == [], f"enrollment rows survived verify abort: {enroll_rows!r}"
+        assert mode_rows == [], (
+            "original_mode must not survive verify-hook abort — "
+            f"would landmine a future restore; got {mode_rows!r}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # 5. No ghost-tmp / staging artifacts + .env byte-identical on refusal
 # ---------------------------------------------------------------------------

@@ -8,8 +8,8 @@ description: "Supply-chain model for the curl|sh installer."
 Supply-chain model for `curl -sSL https://worthless.sh | sh`: which hosts
 the installer talks to, and what it verifies today.
 
-For general vulnerability reporting, see [SECURITY.md](../SECURITY.md).
-For the cryptographic architecture, see [security.md](security.md).
+For general vulnerability reporting, see [SECURITY.md](https://github.com/shacharm2/worthless/blob/main/SECURITY.md).
+For the cryptographic architecture, see [security.md](/security/).
 
 ## Trust roots
 

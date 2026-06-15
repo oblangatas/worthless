@@ -1,11 +1,11 @@
 #!/bin/sh
-# bump-version.sh — bump worthless's version in BOTH the places that need it
+# bump-version.sh — bump worthless's version in all the places that need it
 # atomically. Use BEFORE tagging a release.
 #
 # v0.3.4 shipped with a CI failure because pyproject.toml was bumped but
-# SKILL.md wasn't. tests/test_skill_md.py::TestVersionDrift catches this,
-# but only AFTER the broken commit lands. This script makes the bump
-# happen in one step so the test never has to fail.
+# SKILL.md wasn't. v0.3.8 shipped a CI failure because install.sh wasn't
+# bumped. This script owns every version string so the tests never have to
+# catch a release-day drift.
 #
 # Usage:
 #     ./scripts/bump-version.sh 0.3.5
@@ -15,12 +15,14 @@
 #   1. Validates the version arg (PEP 440-ish)
 #   2. Updates pyproject.toml `version = "X.Y.Z"`
 #   3. Updates SKILL.md `**Version**: X.Y.Z`
-#   4. Adds a `[X.Y.Z]: https://github.com/...releases/tag/vX.Y.Z` link
+#   4. Updates install.sh `WORTHLESS_VERSION_PIN="X.Y.Z"`
+#   5. Updates packages/worthless-mcp/package.json `"version": "X.Y.Z"`
+#   6. Adds a `[X.Y.Z]: https://github.com/...releases/tag/vX.Y.Z` link
 #      reference at the bottom of CHANGELOG.md (matches the existing
 #      pattern). Does NOT touch the body of CHANGELOG — you still write
 #      the release notes by hand or via a future release-please bot.
-#   5. Runs `uv sync` so the venv reflects the new version
-#   6. Prints a checklist of what to do next
+#   7. Runs `uv sync` so the venv reflects the new version
+#   8. Prints a checklist of what to do next
 #
 # Idempotent: re-running with the same version is a no-op.
 # Safe: makes no commits and no tags. You stage and commit yourself.
@@ -33,7 +35,9 @@ cd "$repo_root"
 # Clean up tempfiles on any exit. Without this, a sed/mv failure under
 # `set -eu` would leave pyproject.toml.tmp / SKILL.md.tmp /
 # CHANGELOG.md.tmp on disk for the user to clean up manually.
-trap 'rm -f pyproject.toml.tmp SKILL.md.tmp CHANGELOG.md.tmp' EXIT
+# docs/*.tmp uses find (not a named glob) because doc files live in subdirs
+# (docs/install/, etc.) and docs/*.tmp only matches the root level.
+trap 'rm -f pyproject.toml.tmp SKILL.md.tmp CHANGELOG.md.tmp install.sh.tmp package.json.tmp; find docs/ -name "*.tmp" -delete 2>/dev/null || true' EXIT
 
 # --- 1. Validate input -------------------------------------------------------
 
@@ -83,6 +87,44 @@ echo "  ✓ pyproject.toml: version = \"$new_version\""
 sed -E "s|^- \*\*Version\*\*: $current_version|- **Version**: $new_version|" SKILL.md > SKILL.md.tmp
 mv SKILL.md.tmp SKILL.md
 echo "  ✓ SKILL.md: **Version**: $new_version"
+
+# --- 4b. Update install.sh version pin -------------------------------------
+
+sed -E "s|^WORTHLESS_VERSION_PIN=\"$current_version\"|WORTHLESS_VERSION_PIN=\"$new_version\"|" install.sh > install.sh.tmp
+mv install.sh.tmp install.sh
+echo "  ✓ install.sh: WORTHLESS_VERSION_PIN=\"$new_version\""
+
+# --- 4c. Update packages/worthless-mcp/package.json ------------------------
+
+mcp_pkg="packages/worthless-mcp/package.json"
+if [ -f "$mcp_pkg" ]; then
+    sed -E "s|\"version\": \"$current_version\"|\"version\": \"$new_version\"|" "$mcp_pkg" > package.json.tmp
+    mv package.json.tmp "$mcp_pkg"
+    echo "  ✓ $mcp_pkg: \"version\": \"$new_version\""
+else
+    echo "  ⚠ $mcp_pkg not found — skipping npm package version bump"
+fi
+
+# --- 4d. Update docs/ Docker image tags ------------------------------------
+# Sweeps pinned worthless-proxy:X.Y.Z tags across docs/ so check_docs_versions.py
+# passes on the release PR itself rather than waiting for the next 3am cron run.
+if [ ! -d docs/ ]; then
+    echo "  ⚠ docs/: directory not found — skipping Docker image tag bump"
+else
+    # --include must come before the path: BSD grep (macOS) ignores it otherwise.
+    docs_hits=$(grep -rlF --include="*.md" --include="*.mdx" "worthless-proxy:${current_version}" docs/ || true)
+    if [ -n "$docs_hits" ]; then
+        # Escape dots on the LHS so the sed pattern treats them as literals.
+        escaped_current=$(printf '%s\n' "$current_version" | sed 's/[.]/\\./g')
+        for f in $docs_hits; do
+            sed -E "s|worthless-proxy:${escaped_current}|worthless-proxy:${new_version}|g" "$f" > "$f.tmp"
+            mv "$f.tmp" "$f"
+            echo "  ✓ $f: worthless-proxy:$new_version"
+        done
+    else
+        echo "  ⚠ docs/: no pinned worthless-proxy:$current_version tags found — nothing to bump"
+    fi
+fi
 
 # --- 5. Append CHANGELOG.md link reference ----------------------------------
 
@@ -146,18 +188,27 @@ Done. Next steps:
      and add a fresh empty '## [Unreleased]' above it.)
 
   2. Verify:
-     git diff pyproject.toml SKILL.md CHANGELOG.md
+     git diff pyproject.toml SKILL.md CHANGELOG.md docs/
 
   3. Run the version-drift test:
      uv run pytest tests/test_skill_md.py::TestVersionDrift -q
 
   4. Stage, commit (Conventional Commits), push:
-     git add pyproject.toml SKILL.md CHANGELOG.md uv.lock
+     git add pyproject.toml SKILL.md CHANGELOG.md uv.lock install.sh packages/worthless-mcp/package.json docs/
      git commit -m "chore(release): v$new_version"
      git push
 
-  5. After PR merges to main, tag and release:
-     gh release create v$new_version --generate-notes --title "v$new_version: <headline>"
-     # publish.yml fires automatically on the v* tag → PyPI
+  5. After PR merges to main — tag FIRST, release SECOND:
+     git checkout main && git pull --rebase
+     ./scripts/tag-release.sh $new_version "<headline>"
+     # ↑ GPG-signs the tag, verifies it locally, pushes it.
+     # publish.yml fires automatically on the push → PyPI + npm.
+
+     # WAIT for publish.yml to pass, then create the GitHub Release:
+     # gh release create v$new_version --title "v$new_version: <headline>" --generate-notes
+     #
+     # WARNING: NEVER run gh release create before pushing the signed tag.
+     # gh release create creates an unsigned tag that (a) fails the GPG gate
+     # in publish.yml and (b) permanently tombstones the tag name in GitHub.
 
 EOF

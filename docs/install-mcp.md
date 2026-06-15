@@ -3,42 +3,73 @@ title: "Install — Claude Code, Cursor, or Windsurf"
 description: "Run the Worthless proxy locally and point your editor's SDK at it."
 ---
 
-# Install -- Claude Code, Cursor, or Windsurf
+# Install — Claude Code, Cursor, or Windsurf
 
-Run the Worthless proxy locally, then point your editor's SDK at it.
+Worthless ships an MCP server exposing `lock`, `scan`, `status`, and `spend`
+tools to AI coding agents. The recommended install path needs only Node 18+;
+Python and `uv` are bootstrapped automatically on first run.
 
-> [!NOTE]
-> Worthless includes both an HTTP proxy and an MCP server. Your editor
-> talks to AI providers through the proxy via `BASE_URL`. The MCP server
-> (`worthless mcp`) exposes lock, scan, status, and spend tools for
-> agent-driven workflows (Claude Code, Cursor, Windsurf).
+## Recommended — npm wrapper via `.mcp.json`
 
-## Prerequisites
+Add to your project's `.mcp.json` (Claude Code, Cursor, and Windsurf all read
+this file):
 
-```bash
-git clone https://github.com/shacharm2/worthless && cd worthless
-uv pip install -e .
-worthless lock          # protect your .env keys
+```json
+{
+  "mcpServers": {
+    "worthless": {
+      "command": "npx",
+      "args": ["-y", "worthless-mcp"]
+    }
+  }
+}
 ```
 
-## Claude Code
+Restart your editor. On first launch, `worthless-mcp`:
 
-Option A — use `wrap` (recommended):
+1. Finds or installs `uv` (one-time, ~5 s).
+2. Runs `uvx worthless[mcp]==<pinned-version> mcp` — `uvx` caches the Python
+   environment, so subsequent starts are instant.
+3. Streams MCP protocol over stdio to the editor.
+
+Total cold-start install time: **< 30 s** on a fresh machine with Node only.
+No Python toolchain awareness required.
+
+### Available tools
+
+- `worthless_status()` — running proxy state, protected keys
+- `worthless_lock(env_path)` — split the real key, rewrite `.env` with a shard
+- `worthless_scan(paths, deep)` — find accidental key exposures
+- `worthless_spend(alias)` — per-provider spend readout
+
+## Alternative — manual CLI install
+
+If you already use `pipx` or want the full CLI (`worthless wrap`,
+`worthless up`, proxy mode), install the Python package directly:
 
 ```bash
-worthless wrap claude    # starts proxy, injects BASE_URL, launches Claude Code
+pipx install worthless
+# or: curl -sSL https://worthless.sh | sh
+worthless lock              # protect your .env keys
+worthless wrap claude       # starts proxy + launches Claude Code
 ```
 
-Option B — run the proxy separately:
+Then point your editor at the HTTP proxy:
 
 ```bash
-worthless up -d          # start proxy in background on port 8787
+worthless up -d             # background proxy on :8787
 export OPENAI_BASE_URL=http://localhost:8787
 export ANTHROPIC_BASE_URL=http://localhost:8787
-claude                   # SDK calls route through the proxy
 ```
 
 ## Cursor
+
+:::caution[Untested]
+We have **not** verified that Cursor honors a custom `OPENAI_BASE_URL` for its
+built-in AI features. These steps mirror the Claude Code approach and are a
+reasonable starting point — but treat them as unverified. Tried it? [Open an
+issue](https://github.com/shacharm2/worthless/issues) and tell us what happened.
+:::
 
 Start the proxy, then configure Cursor's environment:
 
@@ -52,9 +83,12 @@ In Cursor settings, add:
 OPENAI_BASE_URL=http://localhost:8787
 ```
 
-Or use `worthless wrap cursor` if Cursor supports being launched from the command line.
-
 ## Windsurf
+
+:::caution[Untested]
+Same as Cursor: we have **not** verified that Windsurf honors a custom
+`OPENAI_BASE_URL` for its built-in AI. Unverified starting point.
+:::
 
 Start the proxy, then configure Windsurf's environment:
 
@@ -68,6 +102,12 @@ In Windsurf settings, add:
 OPENAI_BASE_URL=http://localhost:8787
 ```
 
+## Run the proxy in Docker (alternative)
+
+You don't have to run the proxy locally. The same proxy ships as a signed
+container — see [Docker install](/install-docker/). Start it, then point your
+editor's `BASE_URL` at the mapped port (`localhost:8787`) exactly as above.
+
 ## How it works
 
 1. `worthless lock` splits your API key and replaces `.env` with shard-A (format-preserving, looks like a real key)
@@ -77,6 +117,6 @@ OPENAI_BASE_URL=http://localhost:8787
 
 Your editor works identically. Your key is never stored in plaintext.
 
-> [!NOTE]
-> **Planned: Cloud proxy.** A hosted proxy that eliminates the need to run locally
-> is planned. See the [roadmap](../ROADMAP.md) for timeline.
+:::note[Planned: Cloud proxy]
+A hosted proxy that eliminates the need to run locally is on the roadmap.
+:::

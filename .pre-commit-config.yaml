@@ -91,6 +91,17 @@ repos:
         files: '\.py$'
         stages: [pre-push]
 
+  # Commit provenance: reject unsigned / wrong-author commits at push time (WOR-589)
+  - repo: local
+    hooks:
+      - id: commit-provenance
+        name: "provenance: signed + canonical author (pre-push)"
+        language: system
+        entry: uv run python scripts/hooks/check_pushed_commit_provenance.py
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
+
   # Actionlint: GitHub Actions YAML syntax and logic errors
   - repo: https://github.com/rhysd/actionlint
     rev: v1.7.7

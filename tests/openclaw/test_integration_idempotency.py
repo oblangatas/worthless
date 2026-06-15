@@ -119,7 +119,8 @@ def test_idem42_crash_between_stages_then_reconcile(
     # First call: Stage A succeeds, Stage B fails.
     first = integration.apply_lock(planned_updates=planned)
     assert first.detected is True
-    assert "worthless-openai" in first.providers_set, "Stage A did not commit"
+    # WOR-621 F1: lock rewrites the provider's ORIGINAL id (``openai``).
+    assert "openai" in first.providers_set, "Stage A did not commit"
     assert first.skill_installed is False
     assert any(e.code == OpenclawErrorCode.SKILL_INSTALL_FAILED for e in first.events), (
         "expected SKILL_INSTALL_FAILED from first call"
@@ -138,7 +139,7 @@ def test_idem42_crash_between_stages_then_reconcile(
     # Second call: mock now lets through. Reconcile.
     second = integration.apply_lock(planned_updates=planned)
     assert second.detected is True
-    assert "worthless-openai" in second.providers_set
+    assert "openai" in second.providers_set
     assert second.skill_installed is True
     assert (skills_dir / "worthless" / "SKILL.md").exists()
     assert any(e.code == OpenclawErrorCode.CONFIG_UPDATED for e in second.events), [

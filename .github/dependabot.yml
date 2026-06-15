@@ -1,0 +1,40 @@
+# Dependabot — supply-chain PRs (additive to CodeRabbit; does not replace LLM review).
+# See engineering/ci/pr-security-stack.md
+
+version: 2
+
+updates:
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      python-dev:
+        patterns:
+          - ruff*
+          - pytest*
+          - mypy*
+          - pre-commit*
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    # Major action releases (v4→v6) often need manual review — patch/minor only here.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch

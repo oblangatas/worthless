@@ -127,8 +127,18 @@ def stack():
             _run(["docker", "run", "-d", "--name", name, "--network", net, mock_img], check=True)
         _run(
             [
-                "docker", "run", "-d", "--name", oc, "--network", net,
-                "-e", "OPENCLAW_ACCEPT_TERMS=yes", "--user", "node", OPENCLAW_IMAGE,
+                "docker",
+                "run",
+                "-d",
+                "--name",
+                oc,
+                "--network",
+                net,
+                "-e",
+                "OPENCLAW_ACCEPT_TERMS=yes",
+                "--user",
+                "node",
+                OPENCLAW_IMAGE,
             ],
             check=True,
         )
@@ -188,7 +198,8 @@ def test_openclaw_json_baseurl_is_authoritative_for_routing(stack, case):
     if case == "anthropic_rewrite":
         model = "anthro/claude-3-5-haiku"
         prov = {
-            "baseUrl": url_a, "api": "anthropic-messages",
+            "baseUrl": url_a,
+            "api": "anthropic-messages",
             "models": [{"id": "claude-3-5-haiku", "name": "Claude 3.5 Haiku"}],
         }
         r = _oc(oc, "config", "set", "models.providers.anthro", json.dumps(prov), "--strict-json")
@@ -223,7 +234,8 @@ def test_openclaw_json_baseurl_is_authoritative_for_routing(stack, case):
             stale = {
                 "providers": {
                     "openai": {
-                        "baseUrl": url_a + "/openai/v1", "api": "openai-completions",
+                        "baseUrl": url_a + "/openai/v1",
+                        "api": "openai-completions",
                         "apiKey": _high_entropy_key("sk-stale"),
                         "models": [{"id": "gpt-4o", "name": "gpt-4o"}],
                     }

@@ -40,16 +40,62 @@ Worthless scans for **LLM provider API key prefixes only** — currently `openai
 
 ## Installation & Setup
 
+### For AI agents — zero-Python install (recommended)
+
+Worthless is a Python package, but AI editors (Claude Code, Cursor, Windsurf) use
+`.mcp.json` for MCP discovery — they speak npm, not Python. The `worthless-mcp`
+npm package bridges this gap: it is a thin Node.js shim with no npm dependencies
+that handles the entire Python bootstrap invisibly. To the editor, Worthless looks
+identical to every other npm-managed MCP server it already knows how to start.
+
+**Why this path exists:** Without it, onboarding requires explaining Python, uv,
+uvx, and the `[mcp]` extra — four prerequisites before the first tool call. The
+npm wrapper collapses the install to four lines of JSON and a restart. No Python
+knowledge required at any point.
+
+**What `worthless-mcp` does at runtime:**
+1. Finds `uv` on PATH, or downloads and installs it silently (one-time, ~5 s).
+2. Runs `uvx worthless[mcp]==<pinned-version> mcp` — `uvx` caches the Python
+   environment, so every subsequent start is instant (cache hit, < 2 s).
+3. Streams MCP protocol over stdio directly to the editor. No HTTP port, no
+   proxy, no config beyond `.mcp.json`.
+
+**Requirements:** Node ≥ 18. No Python, pip, or virtualenv needed upfront — the
+wrapper provisions everything the first time it runs.
+
+Add to your project's `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "worthless": {
+      "command": "npx",
+      "args": ["-y", "worthless-mcp"]
+    }
+  }
+}
+```
+
+Restart your editor. Cold-start install time on a fresh machine with only Node:
+**< 30 s**. After restart, all four MCP tools are available with no further steps.
+
+> **Note for agents:** Do not invoke `worthless mcp` directly in shell — that
+> requires a separate Python install. The `.mcp.json` path above handles Python
+> transparently via `uvx` and is the correct agent entry point.
+
 ### Package Info
 - **Package name**: `worthless`
-- **Version**: 0.3.7
+- **npm wrapper**: `worthless-mcp`
+- **Version**: 0.3.8
 - **Entry point**: `worthless` (CLI command)
 - **Python**: 3.10+
 - **License**: AGPL-3.0
 - **Status**: Beta
 
-### Quick Install
+### Quick Install (human CLI)
 ```bash
+curl -sSL https://worthless.sh | sh   # fresh machine — installs uv + worthless
+# or, if you already have Python 3.10+:
 pipx install worthless
 # or: pip install worthless (in a virtualenv)
 # or: curl -sSL worthless.sh | sh
@@ -126,6 +172,21 @@ Reverses the `lock` operation. Reads shard-A from `.env`, fetches encrypted Shar
 - Removes DB records and enrollment data
 
 **Use case:** Temporary switch between `wrap`-mode and native SDK mode, or complete teardown.
+
+#### `worthless uninstall [OPTIONS]`
+**Restore every locked `.env` to its real key, undo OpenClaw, then remove Worthless.**
+
+Walks every `.env` Worthless locked on this machine, reconstructs each real key (reusing `unlock`), restores it in place, undoes the OpenClaw integration, then wipes the keychain entry and `~/.worthless`. Permissions are restored owner-only — a once-world-readable `.env` never comes back exposing the real key.
+
+**Options:**
+- `--yes` / `-y`: Skip the permission prompt (for agents / scripts); clamps loose modes to `0o600` by default.
+
+**Behavior:**
+- Restore-all-then-wipe: if ANY `.env` can't be restored, nothing is wiped (Shard B is kept for a retry)
+- Enroll-only keys (no `.env`) warn and are removed, but never block the uninstall
+- OpenClaw symmetric undo is best-effort and never blocks the wipe
+
+**Use case:** Clean, complete removal of Worthless with every project's real key handed back.
 
 #### `worthless scan [OPTIONS] [PATHS]`
 **Detect exposed API keys in files and environment.**
@@ -551,23 +612,37 @@ repos:
 
 ## Integration with AI Agents
 
-Agents (Claude Code, Cursor, OpenClaw) can invoke Worthless via:
+### Recommended: MCP server (native tool calls)
 
-1. **CLI shell commands** (primary):
-   ```bash
-   worthless status
-   worthless scan --deep
-   worthless scan --code             # detect hardcoded provider URLs before lock
-   worthless wrap pytest
-   ```
+Add to `.mcp.json` — works on any machine with Node ≥ 18, no Python required upfront:
 
-2. **MCP server** (when available):
-   ```text
-   Tool: worthless_status() -> {"keys": [...], "proxy": {...}}
-   Tool: worthless_scan(paths, deep) -> "key exposures found"
-   Tool: worthless_scan(paths, deep, code=True) -> includes code_findings
-   Tool: worthless_wrap(command, args) -> "command output"
-   ```
+```json
+{
+  "mcpServers": {
+    "worthless": {
+      "command": "npx",
+      "args": ["-y", "worthless-mcp"]
+    }
+  }
+}
+```
+
+After restart, agents get native MCP tools:
+```text
+Tool: worthless_status()            -> {"keys": [...], "proxy": {...}}
+Tool: worthless_lock(env_path)      -> {"protected_count": N}
+Tool: worthless_scan(paths, deep)   -> {"findings": [...], "summary": {...}}
+Tool: worthless_spend(alias)        -> {"spend": [...]}
+```
+
+### Alternative: CLI shell commands
+
+```bash
+worthless status
+worthless scan --deep
+worthless scan --code             # detect hardcoded provider URLs before lock
+worthless wrap pytest
+```
 
 Agents should:
 - Call `worthless status` to check if a proxy is running before issuing API calls

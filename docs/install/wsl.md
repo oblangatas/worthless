@@ -63,7 +63,7 @@ For best performance, install from your Linux home (~).
 
 ```bash
 worthless --version
-# worthless 0.3.3
+# worthless 0.3.8
 ```
 
 ## 3. First lock

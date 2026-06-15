@@ -4,12 +4,14 @@ on:
   pull_request:
     paths:
       - "website/**"
+      - "tests/test_website_publish_safety.py"
       - ".github/workflows/deploy-website.yml"
   push:
     branches:
       - main
     paths:
       - "website/**"
+      - "tests/test_website_publish_safety.py"
       - ".github/workflows/deploy-website.yml"
   workflow_dispatch:
 
@@ -46,6 +48,16 @@ jobs:
           grep -qx 'wless.io' website/CNAME
           grep -qx 'Canonical: https://wless.io/.well-known/security.txt' website/.well-known/security.txt
           grep -qx 'Sitemap: https://wless.io/sitemap.xml' website/robots.txt
+
+      - name: Set up uv + Python
+        uses: ./.github/actions/setup-uv-python
+
+      - name: Run website publish-safety tests
+        env:
+          UV_CACHE_DIR: /tmp/uv-cache
+        run: |
+          uv sync --extra test
+          uv run pytest -q tests/test_website_publish_safety.py
 
       - name: Upload website preview artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

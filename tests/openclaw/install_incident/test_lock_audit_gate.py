@@ -660,12 +660,38 @@ class TestAC12WOR545LoadBearingTestExists:
             "WOR-545: test_proxy_load_bearing.py must exist before Phase 1 merges"
         )
 
-    def test_load_bearing_test_has_xfail_mark(self) -> None:
-        """AC 12: test_proxy_load_bearing.py is marked xfail(strict=True)."""
+    def test_load_bearing_test_no_longer_carries_xfail(self) -> None:
+        """AC 12 inversion: Phase 1 originally pinned ``xfail(strict=True)``
+        on ``test_proxy_load_bearing.py`` because the proxy was bypassable.
+        F1 fixed that (lock now rewrites the original entry to the proxy)
+        and the xfail marker was removed when the test went green —
+        per WOR-545's success criterion in the PR-1 plan.
+
+        This meta-test inverts the original assertion: the marker must
+        STAY removed so a regression that re-introduces it (silently
+        accepting the WOR-514 bypass again) fails this gate.
+        """
         test_file = Path(__file__).parent / "test_proxy_load_bearing.py"
         content = test_file.read_text()
-        assert "xfail" in content
-        assert "strict=True" in content
+        assert "xfail" not in content, (
+            "WOR-545 regression: xfail marker must stay removed (F1 success "
+            "criterion). Re-introducing it means the proxy bypass is back."
+        )
+
+    def test_load_bearing_test_wired_in_docker_security_workflow(self) -> None:
+        """AC 12b: docker-security.yml runs the behavioral load-bearing test."""
+        workflow = Path(__file__).resolve().parents[3] / ".github/workflows/docker-security.yml"
+        content = workflow.read_text()
+        assert "test_proxy_load_bearing.py" in content, (
+            "WOR-621: load-bearing test must run in docker-security workflow"
+        )
+        assert "openclaw and docker" in content, (
+            'load-bearing pytest step must pass -m "openclaw and docker" '
+            "(pyproject addopts exclude docker/openclaw by default)"
+        )
+        assert "tests/openclaw/**" in content, (
+            "docker-security paths must include tests/openclaw/**"
+        )
 
 
 # =========================================================================== #
