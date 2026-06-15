@@ -224,3 +224,34 @@ class TestVersionDrift:
         assert skill_version == real_version, (
             f"SKILL.md says version {skill_version} but pyproject.toml says {real_version}"
         )
+
+    def test_docs_image_tags_match_pyproject(self) -> None:
+        """Every pinned ``worthless-proxy:X.Y.Z`` image tag in ``docs/`` must
+        match pyproject's version.
+
+        ``bump-version.sh`` owns these pins and ``scripts/check_docs_versions.py``
+        guards them at release time; this pins the same contract in the baseline
+        test lane so a forgotten bump can't ship (v0.3.8 left docs at 0.3.7 —
+        WOR-743 / worthless-zij5). Mirrors check_docs_versions.py — if you ever
+        ALLOWLIST a deliberately-old tag there, reflect it here.
+        """
+        pyproject = ROOT / "pyproject.toml"
+        match = re.search(r'^version\s*=\s*"([^"]+)"', pyproject.read_text(), re.MULTILINE)
+        assert match, "Could not find version in pyproject.toml"
+        real_version = match.group(1)
+
+        docs = ROOT / "docs"
+        tag_re = re.compile(r"worthless-proxy:(\d+\.\d+\.\d+)")
+        stale: list[str] = []
+        for doc in sorted([*docs.rglob("*.md"), *docs.rglob("*.mdx")]):
+            for lineno, line in enumerate(doc.read_text().splitlines(), 1):
+                for m in tag_re.finditer(line):
+                    found = m.group(1)
+                    if found != real_version:
+                        rel = doc.relative_to(ROOT)
+                        stale.append(f"{rel}:{lineno} :{found} (want :{real_version})")
+
+        assert not stale, (
+            f"docs/ pins worthless-proxy image tags that don't match pyproject {real_version}:\n"
+            + "\n".join(stale)
+        )

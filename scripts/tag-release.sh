@@ -64,6 +64,16 @@ if [ "$pyproject_version" != "$version" ]; then
     exit 1
 fi
 
+# Docs Docker image pins must match the release. bump-version.sh keeps these
+# in sync; this is the fail-closed gate in case it was skipped — a release must
+# not ship docs that tell users to pull a stale `worthless-proxy:` image
+# (worthless-zij5 / WOR-743).
+if ! python3 scripts/check_docs_versions.py "$version"; then
+    echo "ERROR: docs/ image pins above don't all match '$version' — tag NOT created."
+    echo "  Run ./scripts/bump-version.sh $version (then commit), or fix the listed files."
+    exit 1
+fi
+
 # Must not already exist locally
 if git rev-parse "$tag" >/dev/null 2>&1; then
     echo "ERROR: tag '$tag' already exists locally."
