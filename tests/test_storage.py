@@ -743,6 +743,36 @@ async def test_add_enrollment_original_mode_roundtrip_property(
     assert row[0] == mode
 
 
+@settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+@given(st.integers(min_value=0, max_value=0o177777))
+@example(0o100644)
+@example(0o120777)
+@pytest.mark.asyncio
+async def test_store_enrolled_masks_raw_st_mode_property(
+    repo: ShardRepository,
+    tmp_db_path: str,
+    sample_split_result,
+    raw_mode: int,
+) -> None:
+    """WOR-715 Tier 1: raw stat().st_mode (type/special bits) masks to 0o777 in DB."""
+    shard = stored_shard_from_split(sample_split_result)
+    alias = f"raw-{raw_mode:o}"
+    await repo.store_enrolled(
+        alias,
+        shard,
+        var_name="OPENAI_API_KEY",
+        env_path="/tmp/raw/.env",  # noqa: S108
+        original_mode=raw_mode,
+    )
+    async with aiosqlite.connect(tmp_db_path) as db:
+        cursor = await db.execute(
+            "SELECT original_mode FROM enrollments WHERE key_alias = ?", (alias,)
+        )
+        row = await cursor.fetchone()
+    assert row is not None
+    assert row[0] == (raw_mode & 0o777)
+
+
 @pytest.mark.asyncio
 async def test_list_enrollments_surfaces_original_mode(
     repo: ShardRepository,

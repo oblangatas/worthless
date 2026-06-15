@@ -421,6 +421,8 @@ class TestLockFormatPreserving:
         )
         assert result.exit_code == 0, result.output[:400]
 
+        assert (env.stat().st_mode & 0o777) == 0o600, "lock must tighten .env to 0o600"
+
         con = sqlite3.connect(str(home_dir.db_path))
         try:
             rows = con.execute(
