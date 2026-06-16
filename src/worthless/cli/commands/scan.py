@@ -9,6 +9,7 @@ import stat
 import sys
 import tempfile
 import time
+from collections import defaultdict
 from pathlib import Path
 
 import typer
@@ -21,7 +22,13 @@ from worthless.cli.key_patterns import KEY_PATTERN
 from worthless.cli.dotenv_rewriter import build_enrolled_locations
 from worthless.cli.keystore import PLACEHOLDER_FERNET_KEY
 from worthless.cli.orphans import FIX_PHRASE, PROBLEM_PHRASE, find_orphans
-from worthless.cli.scanner import ScanFinding, SkippedFile, format_sarif, scan_files
+from worthless.cli.scanner import (
+    HardcodedUrlFinding,
+    ScanFinding,
+    SkippedFile,
+    format_sarif,
+    scan_files,
+)
 from worthless.storage.repository import EnrollmentRecord, ShardRepository
 
 
@@ -286,28 +293,158 @@ _HONESTY_FOOTER = (
 )
 
 
-def _format_code_findings_human(findings: list[CodeFinding]) -> str:
+def _is_test_path(path: str) -> bool:
+    parts = path.replace("\\", "/").lower().split("/")
+    name = parts[-1] if parts else ""
+    return (
+        "tests" in parts
+        or name.startswith("test_")
+        or name.endswith("_test.py")
+        or name == "conftest.py"
+    )
+
+
+def _format_code_findings_human(
+    findings: list[CodeFinding],
+    *,
+    collapse_tests: bool = False,
+) -> str:
     """Render code findings + honesty footer for stderr output."""
     if not findings:
         return "No hardcoded provider URLs found.\n"
 
+    if collapse_tests:
+        display = [f for f in findings if not _is_test_path(f.file)]
+        test_count = len(findings) - len(display)
+    else:
+        display = findings
+        test_count = 0
+
     lines: list[str] = []
-    for f in findings:
+    if collapse_tests:
+        # One line per file, occurrence count — no per-line detail.
+        by_file: defaultdict[str, list[CodeFinding]] = defaultdict(list)
+        for f in display:
+            by_file[f.file].append(f)
+        for file, file_findings in by_file.items():
+            count = len(file_findings)
+            env_vars = ", ".join(sorted({f.suggested_env_var for f in file_findings}))
+            suffix = f" x{count}" if count > 1 else ""
+            lines.append(f"[code] {file}  ({env_vars}){suffix}")
+        if lines:
+            lines.append("")
+    else:
+        for f in display:
+            lines.append(
+                f"[code] {f.file}:{f.line}:{f.column}  {f.provider_name} ({f.suggested_env_var})"
+            )
+            lines.append(f"       {f.matched_url}")
+            # Show the offending source line (trimmed so it doesn't blow up the
+            # terminal). The user's eyes go straight to the arrow + line.
+            snippet = f.line_text.strip()
+            if len(snippet) > 200:
+                snippet = snippet[:197] + "..."
+            lines.append(f"       → {snippet}")
+            lines.append("")
+
+    if test_count:
+        noun = "finding" if test_count == 1 else "findings"
         lines.append(
-            f"[code] {f.file}:{f.line}:{f.column}  {f.provider_name} ({f.suggested_env_var})"
+            f"+ {test_count} test-file {noun} omitted. Run `worthless scan --code` to see them."
         )
-        lines.append(f"       {f.matched_url}")
-        # Show the offending source line (trimmed so it doesn't blow up the
-        # terminal). The user's eyes go straight to the arrow + line.
-        snippet = f.line_text.strip()
-        if len(snippet) > 200:
-            snippet = snippet[:197] + "..."
-        lines.append(f"       → {snippet}")
         lines.append("")
 
     lines.append(f"Found {len(findings)} hardcoded provider URL(s).")
     lines.append("")
     lines.append(_HONESTY_FOOTER)
+    return "\n".join(lines)
+
+
+_LOCK_BLOCK_SEP = "─" * 52
+
+
+def _format_lock_block_human(
+    findings: list[HardcodedUrlFinding],
+    *,
+    blocking: bool = True,
+    sanitize: object = None,
+) -> str:
+    """Collapsed pre-lock output + copy-pasteable AI fix prompt.
+
+    blocking=True  → "Can't lock" header (non-TTY / error path).
+    blocking=False → "Warning" header (TTY path where user can still proceed).
+    sanitize       → callable applied to file paths and URLs before display.
+    """
+    _san: object = sanitize if callable(sanitize) else (lambda x: x)
+
+    src = [f for f in findings if not _is_test_path(f.file)]
+    test_count = len(findings) - len(src)
+
+    lines: list[str] = []
+
+    # Header
+    if src:
+        file_count = len({f.file for f in src})
+        noun = "file" if file_count == 1 else "files"
+        verb = "has" if file_count == 1 else "have"
+        if blocking:
+            lines.append(f"Can't lock — {file_count} {noun} {verb} hardcoded provider URLs.")
+        else:
+            lines.append(f"Warning: {file_count} {noun} {verb} hardcoded provider URLs.")
+    else:
+        if blocking:
+            lines.append("Can't lock — hardcoded provider URLs in test files.")
+        else:
+            lines.append("Warning: hardcoded provider URLs detected in test files.")
+    lines.append("Those calls bypass worthless even after locking.")
+    lines.append("")
+
+    # Collapsed file list
+    by_file: defaultdict[str, list[HardcodedUrlFinding]] = defaultdict(list)
+    for f in src:
+        by_file[_san(f.file)].append(f)  # type: ignore[operator]
+    for safe_file, file_findings in by_file.items():
+        line_nums = ", ".join(str(f.line) for f in file_findings)
+        env_vars = ", ".join(sorted({f.provider.upper() + "_BASE_URL" for f in file_findings}))
+        ln_noun = "line" if len(file_findings) == 1 else "lines"
+        lines.append(f"  • {safe_file} — {env_vars} ({ln_noun} {line_nums})")
+    if test_count:
+        t_noun = "file" if test_count == 1 else "files"
+        lines.append(f"  + {test_count} test {t_noun} (safe to ignore)")
+    lines.append("")
+
+    # AI fix prompt — only when there are src findings worth fixing
+    if src:
+        prompt_bullets = []
+        for f in src:
+            env_var = f.provider.upper() + "_BASE_URL"
+            prompt_bullets.append(f"    • {_san(f.file)}:{f.line} — {env_var}")  # type: ignore[operator]
+
+        lines += (
+            [
+                "Paste this into Claude Code / Cursor to fix it:",
+                _LOCK_BLOCK_SEP,
+                "  worthless found hardcoded provider URLs I need to fix.",
+                "  Replace them with environment variables worthless uses.",
+                "",
+                "  Files and lines to fix:",
+            ]
+            + prompt_bullets
+            + [
+                "",
+                "  Before touching anything:",
+                "    • Read each file. Tell me if each change is safe.",
+                "    • Find how this project loads .env. Use that pattern.",
+                "    • If anything looks risky or unclear — stop and ask me.",
+                '    • Show me every change. Ask "ok to apply?" Wait for my yes.',
+                "",
+                "  Don't touch test files. Don't touch .env.",
+                _LOCK_BLOCK_SEP,
+                "Once fixed, re-run: worthless lock --env .env",
+                "",
+            ]
+        )
+
     return "\n".join(lines)
 
 

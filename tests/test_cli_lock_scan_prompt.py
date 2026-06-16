@@ -21,7 +21,13 @@ from typer.testing import CliRunner
 from worthless.cli.app import app
 from worthless.cli.bootstrap import WorthlessHome
 from worthless.cli.code_scanner import CodeFinding
+from worthless.cli.commands.scan import (
+    _format_code_findings_human,
+    _format_lock_block_human,
+    _is_test_path,
+)
 from worthless.cli.console import WorthlessConsole
+from worthless.cli.scanner import HardcodedUrlFinding
 from tests.helpers import fake_openai_key
 
 _SCAN_FN = "worthless.cli.commands.lock.scan_for_hardcoded_provider_urls"
@@ -107,8 +113,8 @@ class TestLockScanPromptHappyFlow:
 
         assert result.exit_code == 0, result.stderr
         # findings written via typer.echo(err=True) → captured in result.stderr
+        # post-lock uses collapse mode: env var shown, raw URL omitted (file-level summary)
         assert "OPENAI_BASE_URL" in result.stderr
-        assert "https://api.openai.com/v1" in result.stderr
 
     def test_user_answers_no_exits_cleanly(self, home_dir: WorthlessHome, tmp_path: Path) -> None:
         """N at the prompt → lock exits 0, no scan output."""
@@ -358,4 +364,209 @@ class TestLockScanPromptInsulation:
             )
 
         assert result.exit_code == 0
+
+
+# ---------------------------------------------------------------------------
+# _is_test_path unit tests (worthless-yvzn)
+# ---------------------------------------------------------------------------
+
+
+class TestIsTestPath:
+    def test_tests_dir_segment(self) -> None:
+        assert _is_test_path("tests/test_foo.py")
+        assert _is_test_path("/project/tests/helpers.py")
+
+    def test_test_prefix_filename(self) -> None:
+        assert _is_test_path("src/test_client.py")
+        assert _is_test_path("test_utils.py")
+
+    def test_test_suffix_filename(self) -> None:
+        assert _is_test_path("src/client_test.py")
+
+    def test_conftest(self) -> None:
+        assert _is_test_path("conftest.py")
+        assert _is_test_path("src/conftest.py")
+
+    def test_src_file_not_matched(self) -> None:
+        assert not _is_test_path("src/worthless/cli/commands/lock.py")
+        assert not _is_test_path("app/client.py")
+
+    def test_windows_path_normalised(self) -> None:
+        assert _is_test_path("project\\tests\\test_foo.py")
+
+
+# ---------------------------------------------------------------------------
+# collapse_tests formatter behaviour (worthless-yvzn)
+# ---------------------------------------------------------------------------
+
+
+def _make_src_finding(tmp_path: Path) -> CodeFinding:
+    return CodeFinding(
+        file=str(tmp_path / "src" / "app.py"),
+        line=10,
+        column=5,
+        matched_url="https://api.openai.com/v1",
+        provider_name="openai",
+        suggested_env_var="OPENAI_BASE_URL",
+        line_text='client = OpenAI(base_url="https://api.openai.com/v1")',
+    )
+
+
+def _make_test_finding(tmp_path: Path) -> CodeFinding:
+    return CodeFinding(
+        file=str(tmp_path / "tests" / "test_client.py"),
+        line=5,
+        column=1,
+        matched_url="https://api.openai.com/v1",
+        provider_name="openai",
+        suggested_env_var="OPENAI_BASE_URL",
+        line_text='base_url="https://api.openai.com/v1"',
+    )
+
+
+class TestFormatCodeFindingsCollapseTests:
+    def test_collapse_omits_test_findings_inline(self, tmp_path: Path) -> None:
+        findings = [_make_src_finding(tmp_path), _make_test_finding(tmp_path)]
+        output = _format_code_findings_human(findings, collapse_tests=True)
+
+        assert "src/app.py" in output
+        assert "test_client.py" not in output
+        assert "1 test-file finding omitted" in output
+
+    def test_collapse_shows_src_findings_inline(self, tmp_path: Path) -> None:
+        findings = [_make_src_finding(tmp_path), _make_test_finding(tmp_path)]
+        output = _format_code_findings_human(findings, collapse_tests=True)
+
+        assert "OPENAI_BASE_URL" in output
+        assert "[code]" in output
+
+    def test_collapse_false_shows_all(self, tmp_path: Path) -> None:
+        findings = [_make_src_finding(tmp_path), _make_test_finding(tmp_path)]
+        output = _format_code_findings_human(findings, collapse_tests=False)
+
+        assert "src/app.py" in output
+        assert "test_client.py" in output
+        assert "omitted" not in output
+
+    def test_all_test_findings_no_inline_detail(self, tmp_path: Path) -> None:
+        findings = [_make_test_finding(tmp_path)]
+        output = _format_code_findings_human(findings, collapse_tests=True)
+
+        assert "[code]" not in output
+        assert "1 test-file finding omitted" in output
+        assert "Found 1 hardcoded provider URL(s)." in output
+
+    def test_honesty_footer_always_present(self, tmp_path: Path) -> None:
+        findings = [_make_test_finding(tmp_path)]
+        output = _format_code_findings_human(findings, collapse_tests=True)
+
+        assert "NOTE" in output
+
+
+# ---------------------------------------------------------------------------
+# Post-lock integration: collapse_tests active on TTY path (worthless-yvzn)
+# ---------------------------------------------------------------------------
+
+
+class TestPostLockCollapseTests:
+    def test_test_file_finding_omitted_in_post_lock_output(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """Post-lock TTY scan: test-file findings appear as a count, not inline."""
+        env_file = _make_env_file(tmp_path)
+        with (
+            patch(_SCAN_FN, return_value=[_make_test_finding(tmp_path)]),
+            patch(_IS_TTY, return_value=True),
+        ):
+            result = runner.invoke(
+                app,
+                ["lock", "--env", str(env_file)],
+                env=_env(home_dir),
+                input="y\n",
+            )
+
+        assert result.exit_code == 0
+        assert "test_client.py" not in result.stderr
+        assert "omitted" in result.stderr
+
+    def test_src_finding_still_shown_inline(self, home_dir: WorthlessHome, tmp_path: Path) -> None:
+        """Post-lock TTY scan: src/ findings are still printed in full."""
+        env_file = _make_env_file(tmp_path)
+        with (
+            patch(_SCAN_FN, return_value=[_make_src_finding(tmp_path)]),
+            patch(_IS_TTY, return_value=True),
+        ):
+            result = runner.invoke(
+                app,
+                ["lock", "--env", str(env_file)],
+                env=_env(home_dir),
+                input="y\n",
+            )
+
+        assert result.exit_code == 0
+        assert "OPENAI_BASE_URL" in result.stderr
         assert "[OK]" in result.stderr  # console writes to stderr with mix_stderr=False
+
+
+# ---------------------------------------------------------------------------
+# Pre-lock block formatter unit tests (worthless-foh6)
+# ---------------------------------------------------------------------------
+
+
+def _make_hardcoded_finding(
+    file: str, line: int = 10, provider: str = "openai"
+) -> HardcodedUrlFinding:
+    return HardcodedUrlFinding(
+        file=file,
+        line=line,
+        url=f"https://api.{provider}.com/v1",
+        provider=provider,
+    )
+
+
+class TestFormatLockBlockHuman:
+    def test_blocking_true_header(self) -> None:
+        findings = [_make_hardcoded_finding("src/app.py")]
+        output = _format_lock_block_human(findings, blocking=True)
+        assert output.startswith("Can't lock")
+        assert "Warning" not in output
+
+    def test_blocking_false_header(self) -> None:
+        findings = [_make_hardcoded_finding("src/app.py")]
+        output = _format_lock_block_human(findings, blocking=False)
+        assert output.startswith("Warning")
+        assert "Can't lock" not in output
+
+    def test_src_finding_shows_file_and_env_var(self) -> None:
+        findings = [_make_hardcoded_finding("src/client.py", line=42, provider="anthropic")]
+        output = _format_lock_block_human(findings)
+        assert "src/client.py" in output
+        assert "ANTHROPIC_BASE_URL" in output
+        assert "42" in output
+
+    def test_ai_prompt_present_when_src_findings_exist(self) -> None:
+        findings = [_make_hardcoded_finding("src/app.py")]
+        output = _format_lock_block_human(findings)
+        assert "Paste this into Claude Code" in output
+        assert "worthless found hardcoded provider URLs" in output
+
+    def test_test_only_findings_no_ai_prompt(self) -> None:
+        findings = [_make_hardcoded_finding("tests/test_client.py")]
+        output = _format_lock_block_human(findings)
+        assert "Paste this into Claude Code" not in output
+        assert "test" in output.lower()
+
+    def test_test_count_line_present_when_mixed(self) -> None:
+        findings = [
+            _make_hardcoded_finding("src/app.py"),
+            _make_hardcoded_finding("tests/test_foo.py"),
+        ]
+        output = _format_lock_block_human(findings)
+        assert "test file" in output
+        assert "Paste this into Claude Code" in output
+
+    def test_sanitize_applied_to_file_path(self) -> None:
+        findings = [_make_hardcoded_finding("/secret/path/src/app.py")]
+        output = _format_lock_block_human(findings, sanitize=lambda p: "<redacted>")
+        assert "<redacted>" in output
+        assert "/secret/path" not in output

@@ -1748,7 +1748,7 @@ class TestLockHardcodedBaseUrlDetection:
         (tmp_path / "app.py").write_text('client = OpenAI(base_url="https://api.openai.com/v1")\n')
         result = self._run(home_dir, self._env(tmp_path))
         assert result.exit_code != 0, "Expected lock to fail with hardcoded base_url"
-        assert "(openai)" in result.output
+        assert "OPENAI_BASE_URL" in result.output
 
     def test_fails_ts_file_hardcoded_anthropic_url(
         self, home_dir: WorthlessHome, tmp_path: Path
@@ -1759,7 +1759,7 @@ class TestLockHardcodedBaseUrlDetection:
         )
         result = self._run(home_dir, self._env(tmp_path))
         assert result.exit_code != 0
-        assert "(anthropic)" in result.output
+        assert "ANTHROPIC_BASE_URL" in result.output
 
     def test_fails_openrouter_url(self, home_dir: WorthlessHome, tmp_path: Path) -> None:
         """Lock fails when OpenRouter's base URL is hardcoded."""
@@ -1768,7 +1768,7 @@ class TestLockHardcodedBaseUrlDetection:
         )
         result = self._run(home_dir, self._env(tmp_path))
         assert result.exit_code != 0
-        assert "(openrouter)" in result.output
+        assert "OPENROUTER_BASE_URL" in result.output
 
     def test_error_includes_line_number(self, home_dir: WorthlessHome, tmp_path: Path) -> None:
         """Error output includes file:line so the user can find the bypass."""
@@ -1782,7 +1782,7 @@ class TestLockHardcodedBaseUrlDetection:
         out = result.output
         # Rich wraps long paths at terminal width — check format components separately
         assert re.search(r":\d", out), "file:line format not in error output"
-        assert "(openai)" in out
+        assert "OPENAI_BASE_URL" in out
 
     def test_scans_subdirectory(self, home_dir: WorthlessHome, tmp_path: Path) -> None:
         """Lock scans recursively — catches bypasses in nested source files."""
@@ -1791,7 +1791,7 @@ class TestLockHardcodedBaseUrlDetection:
         (nested / "openai_client.py").write_text('BASE = "https://api.openai.com/v1"\n')
         result = self._run(home_dir, self._env(tmp_path))
         assert result.exit_code != 0
-        assert "(openai)" in result.output
+        assert "OPENAI_BASE_URL" in result.output
 
     def test_skips_node_modules(self, home_dir: WorthlessHome, tmp_path: Path) -> None:
         """Lock ignores node_modules — provider SDK source isn't user code."""
@@ -1840,7 +1840,7 @@ class TestLockHardcodedBaseUrlDetection:
         )
         result = self._run(home_dir, self._env(tmp_path))
         assert result.exit_code != 0
-        assert "(openai)" in result.output
+        assert "OPENAI_BASE_URL" in result.output
 
     # ------------------------------------------------------------------
     # Additional coverage — QA gap fills
@@ -1853,7 +1853,7 @@ class TestLockHardcodedBaseUrlDetection:
         )
         result = self._run(home_dir, self._env(tmp_path))
         assert result.exit_code != 0
-        assert "(groq)" in result.output
+        assert "GROQ_BASE_URL" in result.output
 
     def test_fails_together_url(self, home_dir: WorthlessHome, tmp_path: Path) -> None:
         """Together.ai is in the bundled registry — hardcoded Together URL must block lock."""
@@ -1862,7 +1862,7 @@ class TestLockHardcodedBaseUrlDetection:
         )
         result = self._run(home_dir, self._env(tmp_path))
         assert result.exit_code != 0
-        assert "(together)" in result.output
+        assert "TOGETHER_BASE_URL" in result.output
 
     def test_no_db_enrollment_when_scan_blocks(
         self, home_dir: WorthlessHome, tmp_path: Path
@@ -1902,7 +1902,7 @@ class TestLockHardcodedBaseUrlDetection:
             },
         )
         assert result.exit_code == 0, result.output
-        assert "(openai)" in result.output
+        assert "Proceeding with --allow-hardcoded-urls" in result.output
 
     def test_url_in_python_comment_triggers_block(
         self, home_dir: WorthlessHome, tmp_path: Path
@@ -1949,8 +1949,8 @@ class TestLockHardcodedBaseUrlDetection:
         )
         result = self._run(home_dir, self._env(tmp_path))
         assert result.exit_code != 0
-        assert "(openai)" in result.output
-        assert "(anthropic)" in result.output
+        assert "OPENAI_BASE_URL" in result.output
+        assert "ANTHROPIC_BASE_URL" in result.output
 
     def test_unreadable_source_file_does_not_crash(
         self, home_dir: WorthlessHome, tmp_path: Path
@@ -1989,14 +1989,14 @@ class TestLockHardcodedBaseUrlDetection:
         result = self._run(home_dir, self._env(tmp_path))
         assert result.exit_code == 0, result.output
 
-    def test_non_interactive_error_includes_flag_hint(
+    def test_non_interactive_error_includes_fix_guidance(
         self, home_dir: WorthlessHome, tmp_path: Path
     ) -> None:
-        """Non-interactive (no TTY) error output hints the user toward --allow-hardcoded-urls."""
+        """Non-interactive (no TTY) error output tells the user how to fix and re-run."""
         (tmp_path / "app.py").write_text('client = OpenAI(base_url="https://api.openai.com/v1")\n')
         result = self._run(home_dir, self._env(tmp_path))
         assert result.exit_code != 0
-        assert "--allow-hardcoded-urls" in result.output
+        assert "re-run: worthless lock" in result.output
 
     def test_no_false_positive_on_mismatched_quotes(
         self, home_dir: WorthlessHome, tmp_path: Path

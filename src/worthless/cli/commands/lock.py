@@ -19,7 +19,11 @@ import typer
 from worthless.cli._repo_factory import open_repo
 from worthless.cli.bootstrap import WorthlessHome, acquire_lock, get_home
 from worthless.cli.code_scanner import scan_for_hardcoded_provider_urls
-from worthless.cli.commands.scan import SCAN_TIME_BUDGET_S, _format_code_findings_human
+from worthless.cli.commands.scan import (
+    SCAN_TIME_BUDGET_S,
+    _format_code_findings_human,
+    _format_lock_block_human,
+)
 from worthless.cli.process import check_proxy_health, resolve_port
 from worthless.cli.console import WorthlessConsole, get_console
 from worthless.cli.scanner import SkippedFile, scan_source_for_hardcoded_provider_urls
@@ -979,7 +983,7 @@ def _maybe_prompt_code_scan(cwd: Path) -> None:
             confirmed = typer.confirm(f"\n{summary} Scan now?", default=True)
             if not confirmed:
                 return
-            typer.echo(_format_code_findings_human(findings), err=True)
+            typer.echo(_format_code_findings_human(findings, collapse_tests=True), err=True)
             typer.echo(
                 "\nRun `worthless scan --code` at any time to see this again with fix"
                 " instructions.",
@@ -1271,33 +1275,25 @@ def _lock_keys(
             exit_code=2,
         )
     if bypass_findings:
-        header = "worthless: hardcoded provider URLs detected — these bypass the proxy:"
-        detail_lines = [header]
-        for f in bypass_findings:
-            safe_file = _oc_audit.sanitise_for_message(f.file)
-            safe_url = _oc_audit.sanitise_for_message(f.url)
-            detail_lines.append(f"  {safe_file}:{f.line}  {safe_url}  ({f.provider})")
-        findings_text = "\n".join(detail_lines)
-
+        _san = _oc_audit.sanitise_for_message
         if allow_hardcoded_urls:
-            console.print_warning(findings_text)
             console.print_warning(
-                "Proceeding with --allow-hardcoded-urls. Ensure these are not "
-                "active production code paths that bypass the proxy."
+                _format_lock_block_human(bypass_findings, blocking=False, sanitize=_san)
             )
+            console.print_warning("Proceeding with --allow-hardcoded-urls.")
         elif sys.stdin.isatty():
-            console.print_warning(findings_text)
+            console.print_warning(
+                _format_lock_block_human(bypass_findings, blocking=False, sanitize=_san)
+            )
             if not typer.confirm(
-                "\nThese URLs will bypass the proxy. Are these intentional "
-                "(e.g. test fixtures or docs)? Proceed anyway?",
+                "Are these test fixtures or docs? Proceed anyway?",
                 default=False,
             ):
                 raise WorthlessError(ErrorCode.SCAN_ERROR, "Aborted.", exit_code=1)
         else:
             raise WorthlessError(
                 ErrorCode.SCAN_ERROR,
-                findings_text + "\nIf this is intentional (e.g. test fixtures), re-run with "
-                "--allow-hardcoded-urls to bypass this check.",
+                _format_lock_block_human(bypass_findings, blocking=True, sanitize=_san),
                 exit_code=1,
             )
 
