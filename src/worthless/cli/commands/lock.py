@@ -799,7 +799,12 @@ def _fire_synthetic_request(host: str, port: int, alias: str) -> bool:
     # a successful OpenClaw rewrite).
     import httpx  # noqa: PLC0415
 
-    url = f"http://{host}:{port}/_bind_probe/{alias}"
+    # NOSONAR python:S5332 — loopback-only probe; TLS is not provisioned at
+    # this layer and the proxy refuses non-loopback origins for /_bind_probe
+    # (see proxy/app.py: ``bind_probe`` returns 403 unless request.client.host
+    # is the local loopback range). Same shape as the long-standing
+    # ``check_proxy_health`` call at ``cli/process.py``.
+    url = f"http://{host}:{port}/_bind_probe/{alias}"  # NOSONAR
     try:
         with httpx.Client(timeout=1.0) as client:
             client.head(url)
