@@ -8,6 +8,8 @@ Catches stale docs before agents hit them.
 from __future__ import annotations
 
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import click.testing
@@ -229,29 +231,24 @@ class TestVersionDrift:
         """Every pinned ``worthless-proxy:X.Y.Z`` image tag in ``docs/`` must
         match pyproject's version.
 
-        ``bump-version.sh`` owns these pins and ``scripts/check_docs_versions.py``
-        guards them at release time; this pins the same contract in the baseline
-        test lane so a forgotten bump can't ship (v0.3.8 left docs at 0.3.7 —
-        WOR-743 / worthless-zij5). Mirrors check_docs_versions.py — if you ever
-        ALLOWLIST a deliberately-old tag there, reflect it here.
+        Runs the real release-time guard (``scripts/check_docs_versions.py``)
+        as a subprocess, so this test and the ``tag-release.sh`` gate share ONE
+        source of truth — same scan, same ``ALLOWLIST`` — with nothing to drift
+        (WOR-743 / worthless-zij5). v0.3.8 shipped docs stuck at 0.3.7; this
+        pins the contract in the baseline test lane on every PR.
         """
         pyproject = ROOT / "pyproject.toml"
         match = re.search(r'^version\s*=\s*"([^"]+)"', pyproject.read_text(), re.MULTILINE)
         assert match, "Could not find version in pyproject.toml"
         real_version = match.group(1)
 
-        docs = ROOT / "docs"
-        tag_re = re.compile(r"worthless-proxy:(\d+\.\d+\.\d+)")
-        stale: list[str] = []
-        for doc in sorted([*docs.rglob("*.md"), *docs.rglob("*.mdx")]):
-            for lineno, line in enumerate(doc.read_text().splitlines(), 1):
-                for m in tag_re.finditer(line):
-                    found = m.group(1)
-                    if found != real_version:
-                        rel = doc.relative_to(ROOT)
-                        stale.append(f"{rel}:{lineno} :{found} (want :{real_version})")
-
-        assert not stale, (
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "check_docs_versions.py"), real_version],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, (
             f"docs/ pins worthless-proxy image tags that don't match pyproject {real_version}:\n"
-            + "\n".join(stale)
+            f"{result.stdout}{result.stderr}"
         )
