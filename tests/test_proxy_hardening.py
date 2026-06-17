@@ -2277,6 +2277,90 @@ class TestSR09DeepEnforcement:
 # ------------------------------------------------------------------
 
 
+class TestDecoyHashCheck:
+    """WOR-640: proxy rejects stolen .env replay attacks via decoy tripwire.
+
+    At enrollment, HMAC-SHA256(shard_a) is stored as enrollments.decoy_hash.
+    On each request the proxy calls ipc.mac(shard_a_from_bearer) and compares
+    the hex result against app.state.decoy_hashes loaded at startup.
+    A match means the raw shard_a is being used as an API key — stolen .env replay.
+
+    Tests 1 is RED before the check is added to proxy_request().
+    Tests 2 and 3 guard against regressions in the happy path.
+    """
+
+    @respx.mock
+    async def test_decoy_bearer_token_returns_401(self, proxy_app, enrolled_alias):
+        """Bearer token whose HMAC matches a stored decoy hash → 401.
+
+        RED before fix: decoy check doesn't exist → request reaches upstream
+        (respx raises MockNotFoundError on unregistered URL) → proxy returns 5xx
+        → assertion fails.
+        GREEN after fix: decoy check fires, returns 401 before upstream call.
+        """
+        alias, shard_a_utf8, _ = enrolled_alias
+
+        fake_mac_hex = "ab" * 32  # 64-char HMAC hex
+        ipc = proxy_app.state.ipc_supervisor
+        ipc.set_mac_result(bytes.fromhex(fake_mac_hex))
+        proxy_app.state.decoy_hashes = frozenset({fake_mac_hex})
+
+        transport = httpx.ASGITransport(app=proxy_app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                f"/{alias}/v1/chat/completions",
+                headers={"Authorization": f"Bearer {shard_a_utf8}"},
+                json={"model": "gpt-4", "messages": []},
+            )
+
+        assert resp.status_code == 401
+
+    @respx.mock
+    async def test_non_decoy_bearer_passes_check(self, proxy_client, enrolled_alias):
+        """Legitimate Bearer token whose HMAC is NOT in the decoy set passes through."""
+        alias, shard_a_utf8, _ = enrolled_alias
+
+        # mac() returns a different hex than what is in the decoy set
+        ipc = proxy_client._transport.app.state.ipc_supervisor  # type: ignore[attr-defined]
+        ipc.set_mac_result(bytes.fromhex("cc" * 32))
+        proxy_client._transport.app.state.decoy_hashes = frozenset({"aa" * 32})
+
+        respx.post("https://api.openai.com/v1/chat/completions").mock(
+            return_value=httpx.Response(200, json={"id": "chatcmpl-ok", "choices": []})
+        )
+
+        resp = await proxy_client.post(
+            f"/{alias}/v1/chat/completions",
+            headers={"Authorization": f"Bearer {shard_a_utf8}"},
+            json={"model": "gpt-4", "messages": []},
+        )
+
+        assert resp.status_code == 200
+
+    @respx.mock
+    async def test_ipc_mac_error_does_not_block_request(self, proxy_client, enrolled_alias):
+        """If ipc.mac() raises, the decoy check is silently skipped — request proceeds."""
+        alias, shard_a_utf8, _ = enrolled_alias
+
+        # Non-empty decoy set so the check would run if IPC worked
+        app = proxy_client._transport.app  # type: ignore[attr-defined]
+        app.state.decoy_hashes = frozenset({"ff" * 32})
+        app.state.ipc_supervisor.fail_mac_with(Exception, "simulated IPC mac failure")
+
+        respx.post("https://api.openai.com/v1/chat/completions").mock(
+            return_value=httpx.Response(200, json={"id": "chatcmpl-ok", "choices": []})
+        )
+
+        resp = await proxy_client.post(
+            f"/{alias}/v1/chat/completions",
+            headers={"Authorization": f"Bearer {shard_a_utf8}"},
+            json={"model": "gpt-4", "messages": []},
+        )
+
+        # Best-effort: IPC errors must NOT block legitimate traffic
+        assert resp.status_code == 200
+
+
 class TestBadHeaderCharsCompleteness:
     """Verify _BAD_HEADER_CHARS covers all dangerous control characters."""
 

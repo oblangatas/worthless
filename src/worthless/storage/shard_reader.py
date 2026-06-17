@@ -37,6 +37,21 @@ class ShardReader:
             await db.execute("PRAGMA foreign_keys = ON")
             yield db
 
+    async def fetch_decoy_hashes(self) -> frozenset[str]:
+        """Return all stored decoy HMAC hex strings (WOR-640 startup preload).
+
+        These are pre-computed HMAC-SHA256 values written at enrollment by the
+        CLI. The proxy loads them once at startup and uses ipc.mac() at request
+        time to check whether an incoming Bearer token matches any stored hash.
+        No key material — only the hex strings already stored in the DB.
+        """
+        async with self._connect() as db:
+            cursor = await db.execute(
+                "SELECT decoy_hash FROM enrollments WHERE decoy_hash IS NOT NULL"
+            )
+            rows = await cursor.fetchall()
+            return frozenset(row[0] for row in rows)
+
     async def fetch_encrypted(self, alias: str) -> EncryptedShard | None:
         """Return ciphertext-at-rest for *alias*, or ``None``.
 

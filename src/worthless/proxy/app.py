@@ -216,6 +216,8 @@ async def _lifespan(app: FastAPI):
 
     repo = ShardReader(settings.db_path)
     app.state.repo = repo
+    # WOR-640: preload decoy hashes for O(1) per-request tripwire check.
+    app.state.decoy_hashes = await repo.fetch_decoy_hashes()
 
     # Allow tests to inject a pre-configured supervisor (avoids spawning a
     # real sidecar in unit tests). When absent, build one from settings and
@@ -486,6 +488,23 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
         shard_a: bytearray | None = _extract_shard_a(request)
         if shard_a is None:
             return _uniform_401()
+
+        # WOR-640: decoy tripwire — detect stolen .env replay attacks.
+        # At enrollment, HMAC-SHA256(shard_a) was stored in enrollments.decoy_hash
+        # and preloaded into app.state.decoy_hashes at startup.  We ask the sidecar
+        # to MAC the incoming Bearer value (best-effort: if IPC fails we let the
+        # request through rather than blocking legitimate traffic).
+        # SR-04: do NOT log the matched value — only the alias.
+        _decoy_hashes: frozenset[str] = getattr(request.app.state, "decoy_hashes", frozenset())
+        if _decoy_hashes:
+            try:
+                _mac_tag = await ipc.mac(bytes(shard_a))
+                if _mac_tag.hex() in _decoy_hashes:
+                    logger.warning("decoy bearer token detected for alias %r", alias)
+                    shard_a[:] = b"\x00" * len(shard_a)
+                    return _uniform_401()
+            except Exception:  # noqa: BLE001,S110  # nosec B110 — best-effort, IPC errors must not block requests
+                pass
 
         # Pre-read body ONCE before rules engine (WOR-182: eliminates
         # Starlette body-caching coupling — rules receive bytes, not stream)
