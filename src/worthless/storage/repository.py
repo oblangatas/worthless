@@ -13,6 +13,7 @@ from cryptography.fernet import Fernet, InvalidToken
 
 from worthless.crypto.kdf import derive_mac_secret
 from worthless.defaults import DEFAULT_SPEND_CAP_TOKENS
+from worthless.defaults import GLOBAL_CEILING_TOKENS
 from worthless.storage.models import EncryptedShard, EnrollmentRecord, StoredShard
 from worthless.storage.schema import init_db, migrate_db
 
@@ -25,6 +26,18 @@ class _Sentinel(Enum):
 
 
 _USE_DEFAULT = _Sentinel.USE_DEFAULT
+
+
+def _perm_bits(mode: int | None) -> int | None:
+    """Permission bits (``0o777``) of a POSIX ``st_mode``, or ``None``.
+
+    ``enrollments.original_mode`` must store permission bits only — not the
+    full ``st_mode``, which carries file-type bits (``S_IFREG`` = ``0o100000``).
+    ``chmod`` ignores the type bits, but storing them would make ``f"{mode:o}"``
+    print ``100644`` and any ``& 0o777``-assuming reader wrong. Mask at the
+    storage boundary so no caller can persist type bits by accident.
+    """
+    return None if mode is None else mode & 0o777
 
 
 class ShardRepository:
@@ -475,6 +488,7 @@ class ShardRepository:
         prefix: str | None = None,
         charset: str | None = None,
         base_url: str | None = None,
+        original_mode: int | None = None,
         oc_original_api_key_json: str | None = None,
         oc_rollback_mac: str | None = None,
     ) -> None:
@@ -519,11 +533,19 @@ class ShardRepository:
                     oc_rollback_mac,
                 ),
             )
+            # original_mode contract: INSERT OR IGNORE keeps the FIRST row for a
+            # (key_alias, var_name, env_path) tuple. That is correct on purpose —
+            # the true pre-lock mode is only knowable at the very first lock,
+            # before safe_rewrite tightens the file to 0o600. A re-lock would
+            # stat an already-0o600 file, so re-capturing would record the wrong
+            # value; keeping the first capture (or NULL, for pre-715 rows that
+            # were never captured) is the only correct behavior. Do NOT "fix"
+            # this into a backfill/UPSERT — it would persist 0o600 as "original".
             await db.execute(
                 "INSERT OR IGNORE INTO enrollments "
-                "(key_alias, var_name, env_path) "
-                "VALUES (?, ?, ?)",
-                (alias, var_name, env_path),
+                "(key_alias, var_name, env_path, original_mode) "
+                "VALUES (?, ?, ?, ?)",
+                (alias, var_name, env_path, _perm_bits(original_mode)),
             )
             await db.execute(
                 "INSERT OR IGNORE INTO enrollment_config"
@@ -534,7 +556,12 @@ class ShardRepository:
             await db.commit()
 
     async def add_enrollment(
-        self, alias: str, *, var_name: str, env_path: str | None = None
+        self,
+        alias: str,
+        *,
+        var_name: str,
+        env_path: str | None = None,
+        original_mode: int | None = None,
     ) -> None:
         """Add an enrollment row without touching the shards table.
 
@@ -543,9 +570,10 @@ class ShardRepository:
         """
         async with self._connect() as db:
             await db.execute(
-                "INSERT OR IGNORE INTO enrollments (key_alias, var_name, env_path) "
-                "VALUES (?, ?, ?)",
-                (alias, var_name, env_path),
+                "INSERT OR IGNORE INTO enrollments "
+                "(key_alias, var_name, env_path, original_mode) "
+                "VALUES (?, ?, ?, ?)",
+                (alias, var_name, env_path, _perm_bits(original_mode)),
             )
             await db.commit()
 
@@ -560,13 +588,15 @@ class ShardRepository:
         async with self._connect() as db:
             if env_path is None:
                 cursor = await db.execute(
-                    "SELECT key_alias, var_name, env_path, decoy_hash FROM enrollments "
+                    "SELECT key_alias, var_name, env_path, decoy_hash, original_mode "
+                    "FROM enrollments "
                     "WHERE key_alias = ? LIMIT 1",
                     (alias,),
                 )
             else:
                 cursor = await db.execute(
-                    "SELECT key_alias, var_name, env_path, decoy_hash FROM enrollments "
+                    "SELECT key_alias, var_name, env_path, decoy_hash, original_mode "
+                    "FROM enrollments "
                     "WHERE key_alias = ? AND env_path = ?",
                     (alias, env_path),
                 )
@@ -578,6 +608,7 @@ class ShardRepository:
                 var_name=row[1],
                 env_path=row[2],
                 decoy_hash=row[3],
+                original_mode=row[4],
             )
 
     async def find_enrollment_by_location(
@@ -586,7 +617,7 @@ class ShardRepository:
         """Return the enrollment for *var_name* + *env_path*, or ``None``."""
         async with self._connect() as db:
             cursor = await db.execute(
-                "SELECT key_alias, var_name, env_path, decoy_hash FROM enrollments "
+                "SELECT key_alias, var_name, env_path, decoy_hash, original_mode FROM enrollments "
                 "WHERE var_name = ? AND env_path = ?",
                 (var_name, env_path),
             )
@@ -598,6 +629,7 @@ class ShardRepository:
                 var_name=row[1],
                 env_path=row[2],
                 decoy_hash=row[3],
+                original_mode=row[4],
             )
 
     async def list_enrollments(
@@ -613,14 +645,16 @@ class ShardRepository:
         async with self._connect() as db:
             if alias is not None:
                 cursor = await db.execute(
-                    "SELECT e.key_alias, e.var_name, e.env_path, e.decoy_hash, s.provider "
+                    "SELECT e.key_alias, e.var_name, e.env_path, e.decoy_hash, s.provider, "
+                    "e.original_mode "
                     "FROM enrollments e LEFT JOIN shards s ON e.key_alias = s.key_alias "
                     "WHERE e.key_alias = ?",
                     (alias,),
                 )
             else:
                 cursor = await db.execute(
-                    "SELECT e.key_alias, e.var_name, e.env_path, e.decoy_hash, s.provider "
+                    "SELECT e.key_alias, e.var_name, e.env_path, e.decoy_hash, s.provider, "
+                    "e.original_mode "
                     "FROM enrollments e LEFT JOIN shards s ON e.key_alias = s.key_alias "
                     "ORDER BY e.key_alias"
                 )
@@ -632,6 +666,7 @@ class ShardRepository:
                     env_path=r[2],
                     decoy_hash=r[3],
                     provider=r[4],
+                    original_mode=r[5],
                 )
                 for r in rows
             ]
@@ -650,6 +685,33 @@ class ShardRepository:
             cursor = await db.execute(
                 "UPDATE enrollment_config SET spend_cap = ? WHERE key_alias = ?",
                 (spend_cap, alias),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+
+    async def set_ceiling_override(self, alias: str, tokens: int) -> bool:
+        """Set a per-key fail-closed ceiling override for *alias* (WOR-705).
+
+        Raise-only: *tokens* must be an int ``>= GLOBAL_CEILING_TOKENS``. A
+        lower value can't weaken the cap — the ledger read path clamps to the
+        global floor regardless — so we reject it as meaningless rather than
+        silently store a no-op. ``bool`` is rejected explicitly (it is an
+        ``int`` subclass and ``True`` would otherwise slip through as ``1``).
+
+        Returns True if an enrollment_config row existed and was updated,
+        False if the alias has no row.
+        """
+        if isinstance(tokens, bool) or not isinstance(tokens, int):
+            raise ValueError("ceiling override must be an int (got a non-int)")
+        if tokens < GLOBAL_CEILING_TOKENS:
+            raise ValueError(
+                f"ceiling override must be >= GLOBAL_CEILING_TOKENS "
+                f"({GLOBAL_CEILING_TOKENS}); a lower value cannot weaken the cap"
+            )
+        async with self._connect() as db:
+            cursor = await db.execute(
+                "UPDATE enrollment_config SET ceiling_override = ? WHERE key_alias = ?",
+                (tokens, alias),
             )
             await db.commit()
             return cursor.rowcount > 0

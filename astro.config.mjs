@@ -25,9 +25,21 @@ export default defineConfig({
           items: [
             { label: 'Solo Developer', slug: 'install-solo' },
             { label: 'Docker', slug: 'install-docker' },
+            { label: 'Self-Hosted', slug: 'install-self-hosted' },
             { label: 'Claude Code / Cursor / Windsurf', slug: 'install-mcp' },
             { label: 'GitHub Actions', slug: 'install-github-actions' },
             { label: 'Install Security', slug: 'install-security' },
+          ],
+        },
+        {
+          label: 'Install — by platform',
+          items: [
+            { label: 'Pick your platform', slug: 'install' },
+            { label: 'macOS', slug: 'install/mac' },
+            { label: 'Linux', slug: 'install/linux' },
+            { label: 'Windows (WSL2)', slug: 'install/wsl' },
+            { label: 'Docker (app in a container)', slug: 'install/docker' },
+            { label: 'Agent schema', slug: 'install/agent-schema' },
           ],
         },
         {

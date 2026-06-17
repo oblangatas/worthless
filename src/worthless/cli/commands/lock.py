@@ -19,7 +19,11 @@ import typer
 from worthless.cli._repo_factory import open_repo
 from worthless.cli.bootstrap import WorthlessHome, acquire_lock, get_home
 from worthless.cli.code_scanner import scan_for_hardcoded_provider_urls
-from worthless.cli.commands.scan import SCAN_TIME_BUDGET_S, _format_code_findings_human
+from worthless.cli.commands.scan import (
+    SCAN_TIME_BUDGET_S,
+    _format_code_findings_human,
+    _format_lock_block_human,
+)
 from worthless.cli.process import check_proxy_health, resolve_port
 from worthless.cli.console import WorthlessConsole, get_console
 from worthless.cli.scanner import SkippedFile, scan_source_for_hardcoded_provider_urls
@@ -344,6 +348,20 @@ async def _delete_superseded_location_enrollments(
             await repo.delete_enrolled(stale_alias)
 
 
+def _capture_original_mode(env_str: str) -> int | None:
+    """The ``.env``'s permission bits (``0o777``) before lock tightens it.
+
+    WOR-715: recorded so ``worthless uninstall`` (WOR-435) can restore the
+    original permissions, not just the contents. ``None`` on stat failure
+    (file vanished, EACCES on the dir) = "mode unknown — leave the file
+    as-is at restore" rather than crashing the whole lock.
+    """
+    try:
+        return Path(env_str).stat().st_mode & 0o777
+    except OSError:
+        return None
+
+
 async def _decide_oc_capture(
     *,
     repo: ShardRepository,
@@ -452,6 +470,12 @@ async def _pass1_db_writes(
     dropped the dead third element (``oc_original_base_url``) — the
     original URL lives inside the MAC-bound JSON record.
     """
+    # WOR-715: capture the .env's pre-lock permission bits ONCE, here in
+    # pass-1, BEFORE pass-2 (``_batch_rewrite``) rewrites the file via
+    # ``safe_rewrite`` and forces it to 0o600. During pass-1 the file is still
+    # untouched, so this is the true original mode — capturing any later would
+    # read the already-tightened 0o600 and silently record the wrong value.
+    original_mode = _capture_original_mode(env_str)
     # G3: snapshot openclaw.json BEFORE we touch the DB. We classify each
     # provider against this snapshot so a concurrent OpenClaw write doesn't
     # poison our capture, and so the DB write is the first mutation.
@@ -586,7 +610,9 @@ async def _pass1_db_writes(
                     oc_original_api_key_json=oc_capture_record,
                     oc_rollback_mac=oc_capture_mac,
                 )
-                await repo.add_enrollment(alias, var_name=var_name, env_path=env_str)
+                await repo.add_enrollment(
+                    alias, var_name=var_name, env_path=env_str, original_mode=original_mode
+                )
                 await _delete_superseded_location_enrollments(
                     repo,
                     alias=alias,
@@ -662,6 +688,7 @@ async def _pass1_db_writes(
                 prefix=sr.prefix,
                 charset=sr.charset,
                 base_url=upstream_base_url,
+                original_mode=original_mode,
                 oc_original_api_key_json=oc_capture_record,
                 oc_rollback_mac=oc_capture_mac,
             )
@@ -956,7 +983,7 @@ def _maybe_prompt_code_scan(cwd: Path) -> None:
             confirmed = typer.confirm(f"\n{summary} Scan now?", default=True)
             if not confirmed:
                 return
-            typer.echo(_format_code_findings_human(findings), err=True)
+            typer.echo(_format_code_findings_human(findings, collapse_tests=True), err=True)
             typer.echo(
                 "\nRun `worthless scan --code` at any time to see this again with fix"
                 " instructions.",
@@ -1248,33 +1275,25 @@ def _lock_keys(
             exit_code=2,
         )
     if bypass_findings:
-        header = "worthless: hardcoded provider URLs detected — these bypass the proxy:"
-        detail_lines = [header]
-        for f in bypass_findings:
-            safe_file = _oc_audit.sanitise_for_message(f.file)
-            safe_url = _oc_audit.sanitise_for_message(f.url)
-            detail_lines.append(f"  {safe_file}:{f.line}  {safe_url}  ({f.provider})")
-        findings_text = "\n".join(detail_lines)
-
+        _san = _oc_audit.sanitise_for_message
         if allow_hardcoded_urls:
-            console.print_warning(findings_text)
             console.print_warning(
-                "Proceeding with --allow-hardcoded-urls. Ensure these are not "
-                "active production code paths that bypass the proxy."
+                _format_lock_block_human(bypass_findings, blocking=False, sanitize=_san)
             )
+            console.print_warning("Proceeding with --allow-hardcoded-urls.")
         elif sys.stdin.isatty():
-            console.print_warning(findings_text)
+            console.print_warning(
+                _format_lock_block_human(bypass_findings, blocking=False, sanitize=_san)
+            )
             if not typer.confirm(
-                "\nThese URLs will bypass the proxy. Are these intentional "
-                "(e.g. test fixtures or docs)? Proceed anyway?",
+                "Are these test fixtures or docs? Proceed anyway?",
                 default=False,
             ):
                 raise WorthlessError(ErrorCode.SCAN_ERROR, "Aborted.", exit_code=1)
         else:
             raise WorthlessError(
                 ErrorCode.SCAN_ERROR,
-                findings_text + "\nIf this is intentional (e.g. test fixtures), re-run with "
-                "--allow-hardcoded-urls to bypass this check.",
+                _format_lock_block_human(bypass_findings, blocking=True, sanitize=_san),
                 exit_code=1,
             )
 

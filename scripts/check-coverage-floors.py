@@ -1,14 +1,29 @@
 #!/usr/bin/env python3
-"""Check per-module coverage floors from coverage.xml."""
+"""Check per-module coverage floors from coverage.xml.
+
+Floors (enforced on PR ``coverage-gate`` job):
+  - overall: 80%
+  - worthless.crypto: 95%
+  - worthless.proxy: 85%
+  - worthless.storage: 85%
+  - src/worthless/cli/commands/lock.py: 80%
+"""
 
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-FLOORS = {
+PACKAGE_FLOORS = {
     "worthless.crypto": 95.0,
     "worthless.proxy": 85.0,
+    "worthless.storage": 85.0,
 }
+
+# Single-file modules (coverage.xml <class filename="...">), not separate packages.
+FILE_FLOORS = {
+    "src/worthless/cli/commands/lock.py": 80.0,
+}
+
 OVERALL_FLOOR = 80.0
 
 
@@ -35,25 +50,45 @@ def main() -> int:
     else:
         print(f"OK: overall coverage {overall:.1f}% >= {OVERALL_FLOOR}%")
 
-    # Check per-module floors
-    seen_modules: set[str] = set()
+    # Check per-package floors
+    seen_packages: set[str] = set()
     for pkg in root.findall(".//package"):
         name = pkg.get("name", "").replace("/", ".").removeprefix("src.")
         rate = float(pkg.get("line-rate", 0)) * 100
-        for module, floor in FLOORS.items():
+        for module, floor in PACKAGE_FLOORS.items():
             if name == module or name.startswith(module + "."):
-                seen_modules.add(module)
+                seen_packages.add(module)
                 if rate < floor:
                     print(f"FAIL: {name} coverage {rate:.1f}% < {floor}%")
                     failed = True
                 else:
                     print(f"OK: {name} coverage {rate:.1f}% >= {floor}%")
 
-    # Check that all floor modules were found in coverage data
-    missing = set(FLOORS) - seen_modules
-    if missing:
-        for module in sorted(missing):
-            print(f"FAIL: floor module {module!r} not found in coverage data")
+    missing_packages = set(PACKAGE_FLOORS) - seen_packages
+    if missing_packages:
+        for module in sorted(missing_packages):
+            print(f"FAIL: floor package {module!r} not found in coverage data")
+        failed = True
+
+    # Check single-file module floors
+    seen_files: set[str] = set()
+    for cls in root.findall(".//class"):
+        filename = cls.get("filename", "")
+        if filename not in FILE_FLOORS:
+            continue
+        seen_files.add(filename)
+        rate = float(cls.get("line-rate", 0)) * 100
+        floor = FILE_FLOORS[filename]
+        if rate < floor:
+            print(f"FAIL: {filename} coverage {rate:.1f}% < {floor}%")
+            failed = True
+        else:
+            print(f"OK: {filename} coverage {rate:.1f}% >= {floor}%")
+
+    missing_files = set(FILE_FLOORS) - seen_files
+    if missing_files:
+        for filename in sorted(missing_files):
+            print(f"FAIL: floor file {filename!r} not found in coverage data")
         failed = True
 
     return 1 if failed else 0

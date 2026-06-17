@@ -1,3 +1,8 @@
+---
+title: "Install — Self-Hosted"
+description: "Run the Worthless proxy yourself — Docker Compose, cloud, or from source."
+---
+
 # Install -- Self-Hosted
 
 Run the Worthless proxy in Docker. The container is fully self-contained —
@@ -14,7 +19,7 @@ docker compose up -d
 The proxy starts on `localhost:8787`. Enroll your API keys:
 
 ```bash
-echo $OPENAI_API_KEY | docker compose exec -T proxy \
+printf '%s' "${OPENAI_API_KEY:?set OPENAI_API_KEY first}" | docker compose exec -T proxy \
   worthless enroll --alias openai --key-stdin --provider openai
 ```
 
@@ -23,11 +28,11 @@ the original key never touches disk.
 
 ## Cloud deploy
 
-> [!NOTE]
-> **Planned** -- Cloud deployment (Railway, Render) requires a persistent
-> volume at `/data`. Template configs are in `deploy/` but the enrollment
-> workflow is not yet streamlined.
-> See the [GitHub repository](https://github.com/shacharm2/worthless) for current install options.
+:::note[Planned]
+Cloud deployment (Railway, Render) requires a persistent volume at `/data`.
+Template configs are in [`deploy/`](https://github.com/shacharm2/worthless/tree/main/deploy)
+(`railway.toml`, `render.yaml`), but the enrollment workflow is not yet streamlined.
+:::
 
 ## From source (no Docker)
 
@@ -38,4 +43,4 @@ worthless lock
 worthless up
 ```
 
-The proxy runs on `localhost:8787`. See the [GitHub repository](https://github.com/shacharm2/worthless) for details.
+The proxy runs on `localhost:8787`. See the [README](https://github.com/shacharm2/worthless#readme) for the full command reference.

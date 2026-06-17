@@ -11,6 +11,7 @@ import typer
 from worthless.cli.console import WorthlessConsole, get_console, set_console
 from worthless.cli.default_command import run_default
 from worthless.cli.errors import WorthlessError, set_debug
+from worthless.cli.notice import maybe_show_as_is_notice
 from worthless.cli.platform import fail_if_windows
 
 
@@ -52,7 +53,11 @@ def _main(
 ) -> None:
     """Worthless — make leaked API keys worthless."""
     set_debug(debug)
-    set_console(WorthlessConsole(quiet=quiet, json_mode=json_output))
+    console = WorthlessConsole(quiet=quiet, json_mode=json_output)
+    set_console(console)
+
+    # Show the AS-IS / no-warranty notice once per install (WOR-488).
+    maybe_show_as_is_notice(console)
 
     # When no subcommand is given, run the magic default pipeline.
     if ctx.invoked_subcommand is None:
@@ -107,6 +112,10 @@ except ImportError:
 from worthless.cli.commands.revoke import register_revoke_commands  # noqa: E402
 
 register_revoke_commands(app)
+
+from worthless.cli.commands.uninstall import register_uninstall_commands  # noqa: E402
+
+register_uninstall_commands(app)
 
 from worthless.cli.commands.restore import register_restore_commands  # noqa: E402
 

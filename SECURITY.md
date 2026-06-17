@@ -17,11 +17,10 @@ Worthless exists to protect API keys, a vulnerability here has real consequences
 
 ### Response timeline
 
-Solo maintainer, response time is bounded by real life. Best-effort
-acknowledgment within one week. Triage, fix, and coordinated disclosure are
-handled proportional to severity; 90 days is the default
-coordinated-disclosure window by convention. If a report sits for longer than
-two weeks without reply, ping again or escalate publicly.
+Solo maintainer, response time is bounded by real life. Acknowledgment,
+triage, fix, and coordinated disclosure are all handled on a best-effort
+basis, proportional to severity, with no committed timeframe. If a report
+sits without reply for a while, ping again or escalate publicly.
 
 ### Scope
 
@@ -57,8 +56,11 @@ Your API key is split in two on the client using a format-preserving one-time
 pad. Shard A replaces the original key in your `.env`, it looks like a real
 key but is cryptographically useless alone. Shard B lives on the proxy,
 Fernet-encrypted at rest. Every request hits the rules engine **before** the
-key reconstructs: spend cap blown, rate limit exceeded, model not allowed =
-the key never forms and the request never leaves the proxy.
+key reconstructs: if a rule denies it (spend cap, rate limit, model not
+allowed), the key is not reconstructed and the request never leaves the proxy.
+Because the spend check estimates cost before each call, a single in-flight
+request can exceed a spend cap by up to the cost of one call before the next is
+denied.
 
 ## Full threat model
 

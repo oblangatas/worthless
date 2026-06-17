@@ -165,6 +165,15 @@ class WorthlessHome:
         return self.base_dir / ".bootstrapped"
 
     @property
+    def warranty_notice_marker(self) -> Path:
+        """Marker that the one-time AS-IS notice has been shown (WOR-488).
+
+        Deliberately separate from ``.bootstrapped`` (keystore init) so the
+        legal notice and the keystore lifecycle never couple.
+        """
+        return self.base_dir / ".warranty-ack"
+
+    @property
     def fernet_key(self) -> bytearray:
         """Read the Fernet key via keystore cascade (SR-01: mutable bytearray).
 

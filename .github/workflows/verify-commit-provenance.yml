@@ -1,0 +1,40 @@
+name: Commit provenance (signed + canonical author)
+
+# WOR-590: server-side gate — every commit in a PR must be a GitHub-verified
+# signed commit authored by the canonical identity or a known bot. Counterpart
+# to the WOR-589 pre-push hook (which is local + advisory). Add this job to the
+# required status checks in branch protection so a PR cannot merge until it
+# passes.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: commit-provenance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify commit signatures + authors
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    # workflow_dispatch has no PR number to inspect; only gate on pull_request.
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify commit provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python .github/scripts/verify_commit_provenance.py \
+            "${{ github.repository }}" "${{ github.event.pull_request.number }}"

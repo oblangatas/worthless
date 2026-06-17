@@ -86,7 +86,7 @@ Restart your editor. Cold-start install time on a fresh machine with only Node:
 ### Package Info
 - **Package name**: `worthless`
 - **npm wrapper**: `worthless-mcp`
-- **Version**: 0.3.7
+- **Version**: 0.3.8
 - **Entry point**: `worthless` (CLI command)
 - **Python**: 3.10+
 - **License**: AGPL-3.0
@@ -172,6 +172,21 @@ Reverses the `lock` operation. Reads shard-A from `.env`, fetches encrypted Shar
 - Removes DB records and enrollment data
 
 **Use case:** Temporary switch between `wrap`-mode and native SDK mode, or complete teardown.
+
+#### `worthless uninstall [OPTIONS]`
+**Restore every locked `.env` to its real key, undo OpenClaw, then remove Worthless.**
+
+Walks every `.env` Worthless locked on this machine, reconstructs each real key (reusing `unlock`), restores it in place, undoes the OpenClaw integration, then wipes the keychain entry and `~/.worthless`. Permissions are restored owner-only — a once-world-readable `.env` never comes back exposing the real key.
+
+**Options:**
+- `--yes` / `-y`: Skip the permission prompt (for agents / scripts); clamps loose modes to `0o600` by default.
+
+**Behavior:**
+- Restore-all-then-wipe: if ANY `.env` can't be restored, nothing is wiped (Shard B is kept for a retry)
+- Enroll-only keys (no `.env`) warn and are removed, but never block the uninstall
+- OpenClaw symmetric undo is best-effort and never blocks the wipe
+
+**Use case:** Clean, complete removal of Worthless with every project's real key handed back.
 
 #### `worthless scan [OPTIONS] [PATHS]`
 **Detect exposed API keys in files and environment.**
