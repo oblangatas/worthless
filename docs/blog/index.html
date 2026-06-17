@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Blog - Worthless</title>
-  <meta name="description" content="Plain-English explainers on AI agent key leaks, post-leak protection, scanners, vaults, and local proxy guardrails." />
+  <meta name="description" content="Plain-English explainers on AI agent key leaks, scanners, vaults, and how Worthless changes what a copied protected .env value can do." />
   <link rel="canonical" href="https://wless.io/blog/" />
   <meta name="theme-color" content="#4a6fa5" />
 
@@ -182,7 +182,7 @@
 
           <span class="post-date">April 17, 2026</span>
         </div>
-        <div class="post-title">Why I built Worthless, make API keys worthless post leak</div>
+        <div class="post-title">Why I built Worthless: change what a copied protected .env value can do</div>
       </div>
     </div>
     <button class="expand-btn" id="btn-p0" type="button" aria-controls="p0" aria-expanded="false">
@@ -204,10 +204,10 @@
         <p>Key rotation? You're playing whack-a-mole. Rotate after every leak, hope you catch it in time, pray the attacker didn't rack up a bill in the 47 seconds between leak and rotation.</p>
         <p>Then there's the Cloudflare approach: build an entire infrastructure layer with Workers, KV stores, custom auth, rate limiting, and hope your team maintains it. It works, but it's complex enough that most teams won't do it. And the ones that do spend weeks on it.</p>
 
-        <h2>What if leaked keys just didn't work?</h2>
+        <h2>What if a copied .env value could not call the provider alone?</h2>
         <p>That's the question I couldn't stop thinking about. Not "how do we prevent leaks" but "how do we change what a copied .env value can do."</p>
         <p>The answer turned out to be simple: split the key material. Your .env gets a shard. The local proxy keeps the matching material behind a separate boundary. Neither side works alone. When your app makes a legitimate API call, the proxy handles reconstruction for that request.</p>
-        <p>If someone steals your .env, they get one half of an XOR split. Useless on its own. They can't brute-force it. They can't derive anything from it. It's just random bytes.</p>
+        <p>If someone copies your .env, they get one half of an XOR split. The copied .env value alone cannot call the provider because it is missing the matching local material. This boundary does not protect a compromised machine or attacker-controlled local code.</p>
 
         <h2>That's Worthless</h2>
         <p>Two commands. Your key is split. Your .env now contains a shard that is not enough to call the provider by itself. The proxy handles reconstruction and local usage checks.</p>
@@ -224,7 +224,7 @@
         <div class="post-meta">
           <span class="post-date">April 17, 2026</span>
         </div>
-        <div class="post-title">Every tool protects your key. None protect you after it leaks</div>
+        <div class="post-title">Different tools cover different leak stages</div>
       </div>
     </div>
     <button class="expand-btn" id="btn-p4" type="button" aria-controls="p4" aria-expanded="false">
@@ -274,7 +274,7 @@ worthless lock</code></pre>
 
           <span class="post-date">April 13, 2026</span>
         </div>
-        <div class="post-title">Introducing Worthless, post-leak API key protection</div>
+        <div class="post-title">Introducing Worthless: scoped protection for copied .env AI-key values</div>
       </div>
     </div>
     <button class="expand-btn" id="btn-p1" type="button" aria-controls="p1" aria-expanded="false">
@@ -301,7 +301,7 @@ $ worthless wrap python app.py
 $ worthless unlock
 1 key(s) restored.</code></pre>
         <p>There is also a local usage gate: if the request violates your token or usage rule, Worthless can deny it before key material is reconstructed for that request.</p>
-        <blockquote>"Every secrets tool protects the key until your app uses it. Worthless protects you after it leaks."</blockquote>
+        <blockquote>"Worthless changes what a copied protected .env value can do. It does not protect a compromised host or attacker-controlled local code."</blockquote>
         <h2>Get started</h2>
         <pre><code>curl -sSL https://worthless.sh | sh
 worthless lock
@@ -318,7 +318,7 @@ worthless wrap python app.py</code></pre>
 
           <span class="post-date">April 13, 2026</span>
         </div>
-        <div class="post-title">Why splitting a key makes it useless, the cryptography in plain English</div>
+        <div class="post-title">Why splitting a key changes what a copied .env value can do</div>
       </div>
     </div>
     <button class="expand-btn" id="btn-p2" type="button" aria-controls="p2" aria-expanded="false">
@@ -326,9 +326,9 @@ worthless wrap python app.py</code></pre>
     </button>
     <div class="post-full" id="p2">
       <div class="article">
-        <p>When we say "a leaked share is worthless," we mean it in a precise mathematical sense. This post explains why, without requiring a cryptography background.</p>
+        <p>When we say a copied protected value cannot call the provider alone, we mean it in a precise, narrow sense. This post explains the cryptographic boundary without requiring a cryptography background.</p>
         <h2>The intuition: a lock with two keys</h2>
-        <p>Imagine a padlock that requires two keys simultaneously to open. If someone steals one, they can't open the lock. They have something real, but it's useless without the other half. Secret sharing is the mathematical equivalent.</p>
+        <p>Imagine a padlock that requires two keys simultaneously to open. If someone copies one, that piece cannot open the lock by itself. Secret sharing uses the same basic boundary.</p>
         <h2>The XOR method (2-of-2 sharing)</h2>
         <ol>
           <li>Generate a truly random string <strong>A</strong> the same length as your secret <strong>S</strong></li>
@@ -336,12 +336,12 @@ worthless wrap python app.py</code></pre>
           <li>Store A locally, B in your local proxy</li>
         </ol>
         <p>Reconstruction: <code>S = A XOR B</code>.</p>
-        <h3>Why is A useless alone?</h3>
+        <h3>What does A reveal on its own?</h3>
         <p>Because A is purely random. An attacker with only A sees that every possible value of S produces a valid B, the share A is statistically independent of S. It could have come from any secret equally well.</p>
-        <div class="info-box"><strong>Information-theoretic security.</strong> This is the same math as a one-time pad: the stored half on its own reveals nothing about the key. There is no brute force to run, because every possible key fits equally well. This protects the stored half, not your machine, see the <a href="https://docs.wless.io/security/">security model</a>.</div>
+        <div class="info-box"><strong>Information-theoretic security.</strong> Given only A, every possible value of S remains consistent with some B. This statement is about the stored half's information content, not the safety of your machine or local proxy. See the <a href="https://docs.wless.io/security/">security model</a>.</div>
         <h2>What Worthless does in practice</h2>
         <p>When you run <code>worthless lock</code>: your key is read, Share A is generated randomly, Share B is derived so A XOR B = key. A goes to local encrypted storage; B lives in your local proxy's memory. Your <code>.env</code> is updated to point at the proxy. The reconstructed key lives only for the upstream call, then drops. (Python PoC: memory-zeroing has known limits, see <a href="https://docs.wless.io/security/">security model</a>.)</p>
-        <div class="info-box success"><strong>Two independent protections:</strong><br/>1. Cryptographic split, a leaked share reveals nothing.<br/>2. Local usage guardrail, requests can be denied before reconstruction.</div>
+        <div class="info-box success"><strong>Two independent protections:</strong><br/>1. Cryptographic split, so a copied protected value alone cannot call the provider.<br/>2. Local usage guardrail, so requests can be denied before reconstruction.</div>
       </div>
     </div>
   </div>

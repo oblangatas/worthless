@@ -169,6 +169,12 @@ def test_publishable_docs_do_not_include_internal_planning_sources() -> None:
     assert offenders == []
 
 
+def test_static_publish_tree_does_not_ship_markdown_docs() -> None:
+    markdown_files = sorted(path.relative_to(REPO_ROOT).as_posix() for path in DOCS.rglob("*.md"))
+
+    assert markdown_files == []
+
+
 def test_publishable_docs_do_not_reference_stale_worthless_domains() -> None:
     # The [.-] character class matches both the dot and hyphen variants of the
     # stale domain while keeping the contiguous banned literal out of source, so
@@ -356,6 +362,21 @@ def test_homepage_uses_approved_hero_tagline() -> None:
     )
 
 
+def test_homepage_scroll_hint_invites_the_leak_story_accessibly() -> None:
+    index = (DOCS / "index.html").read_text(encoding="utf-8")
+
+    assert 'href="#leak-story" aria-label="Scroll to the leak story"' in index
+    assert '<span class="scroll-hint__text">Follow the leak</span>' in index
+    assert '<span class="scroll-hint__wick" aria-hidden="true"></span>' in index
+    assert '<section class="cinema" id="leak-story" aria-label="Leak story">' in index
+    assert ".scroll-hint:focus-visible" in index
+    assert "@keyframes leak-drop" in index
+    assert "prefers-reduced-motion: reduce" in index
+    assert ".scroll-hint__wick::after" in index
+    assert "animation: none;" in index
+    assert "Scroll the leak" not in index
+
+
 def test_homepage_explains_the_product_without_hiding_the_install_path() -> None:
     index = (DOCS / "index.html").read_text(encoding="utf-8")
     script = (DOCS / "homepage.js").read_text(encoding="utf-8")
@@ -412,7 +433,7 @@ def test_launch_page_utility_text_meets_wcag_aa_contrast() -> None:
     assert "--text2: #586b82;" in how_it_works
 
 
-def test_primary_navigation_stays_focused_on_product_routes() -> None:
+def test_homepage_primary_navigation_preserves_front_facing_brand_routes() -> None:
     index = (DOCS / "index.html").read_text(encoding="utf-8")
     features = (DOCS / "features.html").read_text(encoding="utf-8")
     how_it_works = (DOCS / "how-it-works.html").read_text(encoding="utf-8")
@@ -423,21 +444,45 @@ def test_primary_navigation_stays_focused_on_product_routes() -> None:
         assert "memes.html" not in primary_nav
         assert "ko-fi.com" not in primary_nav
 
-    assert "memes.html" not in homepage_nav
-    assert "ko-fi.com" not in homepage_nav
-    assert "#early-access" not in homepage_nav
+    assert 'href="memes.html"' in homepage_nav
+    assert 'href="https://ko-fi.com/shacharme"' in homepage_nav
+    assert 'href="#early-access"' in homepage_nav
+    assert 'aria-label="Buy me a coffee on Ko-fi"' in homepage_nav
+    mobile_rules = index.split("@media (max-width: 820px)", 1)[1].split(
+        "@media (max-width: 520px)", 1
+    )[0]
+    compact_rules = index.split("@media (max-width: 520px)", 1)[1].split(
+        "@media (max-width: 370px)", 1
+    )[0]
+    assert ".nav-actions .ghost {\n        display: none;" in mobile_rules
+    assert ".nav-actions .kofi {" in mobile_rules
+    assert "width: 2.15rem;" in mobile_rules
+    assert "height: 2.15rem;" in mobile_rules
+    assert ".nav-links .nav-early {" in compact_rules
+    assert "width: 2.15rem;" in compact_rules
+    assert ".nav-early-label {\n        display: none;" in compact_rules
 
 
-def test_homepage_omits_future_hosted_waitlist() -> None:
+def test_homepage_describes_hosted_early_access_as_a_separate_future_product() -> None:
     index = (DOCS / "index.html").read_text(encoding="utf-8")
 
-    for stale_copy in (
-        "Hosted Worthless",
+    assert 'id="early-access"' in index
+    assert "Hosted Worthless" in index
+    assert "A separate managed product we're exploring for later" in index
+    assert "not the open-source tool on this page" in index
+    assert (
+        "does not imply current hosted service, team support, or protection for every secret type"
+        in index
+    )
+    assert "Join early access" in index
+    assert "https://tally.so/r/WOpNVL" in index
+
+    for unsupported_copy in (
         "More secrets next.",
-        'id="early-access"',
-        "tally.so",
+        "all secret types",
+        "hosted today",
     ):
-        assert stale_copy not in index
+        assert unsupported_copy not in index
 
 
 def test_launch_copy_uses_bounded_supported_key_claims() -> None:
@@ -461,6 +506,43 @@ def test_launch_copy_uses_bounded_supported_key_claims() -> None:
         assert stale_copy not in how_it_works
 
     assert "Make copied .env AI keys useless" not in index
+
+
+def test_blog_uses_bounded_supported_key_claims() -> None:
+    blog = (DOCS / "blog" / "index.html").read_text(encoding="utf-8")
+    approved_description = (
+        "Plain-English explainers on AI agent key leaks, scanners, vaults, "
+        "and how Worthless changes what a copied protected .env value can do."
+    )
+    expected_copy = (
+        "Why I built Worthless: change what a copied protected .env value can do",
+        "Different tools cover different leak stages",
+        "Introducing Worthless: scoped protection for copied .env AI-key values",
+        "Worthless changes what a copied protected .env value can do. "
+        "It does not protect a compromised host or attacker-controlled local code.",
+    )
+
+    assert f'<meta name="description" content="{approved_description}" />' in blog
+    assert "the copied .env value alone cannot call the provider" in blog.lower()
+    for approved_copy in expected_copy:
+        assert approved_copy in blog
+
+    for stale_copy in (
+        "change what a copied API key can do",
+        "None protect you after it leaks",
+        "post-leak API key protection",
+        "post-leak protection",
+        "Worthless protects you after it leaks",
+        "Useless on its own.",
+        "They can't brute-force it.",
+        "They can't derive anything from it.",
+        "It's just random bytes.",
+        "Why splitting a key makes it useless",
+        'When we say "a leaked share is worthless,"',
+        "it's useless without the other half",
+        "Why is A useless alone?",
+    ):
+        assert stale_copy not in blog
 
 
 def test_homepage_moves_the_hero_up_on_tall_viewports() -> None:
