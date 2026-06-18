@@ -188,3 +188,29 @@ def test_doctor_json_recommends_uninstall_force_for_orphans(
     assert "uninstall --force" in flat, (
         f"doctor must recommend `worthless uninstall --force` for orphaned enrollments, got: {doc}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 7c — the HUMAN path: plain `worthless doctor` (no --json) must also survive a
+# missing fernet key, not crash WRTLS-102. The human debugging a broken install
+# is exactly who needs the diagnosis.
+# ---------------------------------------------------------------------------
+
+
+def test_doctor_text_mode_survives_missing_fernet_key(home_dir: WorthlessHome, tmp_path) -> None:
+    """7c (BUG-1, human path): `worthless doctor` (text mode) on a key-missing
+    install must NOT crash and must point the user at `uninstall --force`.
+    """
+    _lock_one(home_dir, tmp_path)
+    (home_dir.base_dir / "fernet.key").unlink()
+
+    result = runner.invoke(app, ["doctor"], env={"WORTHLESS_HOME": str(home_dir.base_dir)})
+
+    # print_warning goes to stderr; the module runner is mix_stderr=False, so
+    # combine both streams to assert on what the human actually sees.
+    out = (result.stdout + (result.stderr or "")).lower()
+    assert "wrtls-102" not in out, f"text doctor crashed on a missing key: {out}"
+    assert "internal error" not in out, f"text doctor crashed with WRTLS-199: {result.output}"
+    assert "uninstall --force" in out, (
+        f"text doctor must point a stuck human at `uninstall --force`, got: {result.output}"
+    )
