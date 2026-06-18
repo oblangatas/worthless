@@ -31,6 +31,7 @@ EXPECTED_CHECK_IDS = {
     "stranded_shards",
     "fernet_drift",
     "broken_status",
+    "bind_confirmation",  # WOR-658
 }
 
 

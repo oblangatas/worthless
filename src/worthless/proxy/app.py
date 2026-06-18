@@ -407,6 +407,11 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
         client_host = request.client.host if request.client else None
         if client_host not in ("127.0.0.1", "::1"):
             return Response(status_code=404)
+        # WOR-658 Fix 5: counter increment is atomic-by-construction —
+        # asyncio is cooperative + GIL holds across the synchronous
+        # ``getattr ... + 1`` and the assignment, with NO ``await`` between
+        # them. Adding any ``await`` between read and write would
+        # re-introduce a lost-update race; keep this body await-free.
         request.app.state.bind_probe_count = getattr(request.app.state, "bind_probe_count", 0) + 1
         return Response(status_code=204)
 

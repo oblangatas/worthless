@@ -330,3 +330,97 @@ def test_lock_skipped_when_proxy_does_not_expose_bind_probe_count(
         f"reason must name the squatter signal explicitly so doctor can "
         f"surface the right remediation. Got: {bc!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# WOR-658 Fix 12: user-facing wording stays approachable.
+# The substring "synthetic" survives only in code identifiers
+# (_fire_synthetic_request, reason="synthetic_unreachable") — NEVER in the
+# strings the human sees when lock prints a result. This guard catches a
+# future refactor that smuggles the engineer-term back in.
+# ---------------------------------------------------------------------------
+
+
+def test_lock_failure_message_does_not_use_engineer_speak(
+    env_file: Path,
+    openclaw_present: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The [FAIL] message reads to a non-engineer: 'test request' not
+    'synthetic request'. Regression guard for Fix 12."""
+    from worthless.cli.commands import lock as lock_mod
+
+    _patch_proxy_counter(monkeypatch, lock_mod, tick_on_fire=False)
+    wl_home = openclaw_present["home"] / ".worthless"
+
+    result = runner.invoke(
+        app,
+        ["lock", "--env", str(env_file)],
+        env={
+            "WORTHLESS_KEYRING_BACKEND": "null",
+            "WORTHLESS_HOME": str(wl_home),
+        },
+    )
+    out = result.output
+    assert "test request" in out.lower(), (
+        f"[FAIL] message must say 'test request' (Fix 12). Got:\n{out}"
+    )
+    assert "synthetic" not in out.lower(), (
+        f"User-facing strings must not say 'synthetic' — engineer-speak. Got:\n{out}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# WOR-658 Fix 9: surface inconclusive (skipped) bind-confirmation states.
+#
+# Without this, lock prints a green [OK] when the bind probe couldn't even
+# RUN — same silent-bypass class the feature was built to expose, just with
+# a different proximate cause (proxy died mid-confirm, healthz raised, etc.).
+# ---------------------------------------------------------------------------
+
+
+def test_lock_warns_on_skipped_bind_confirmation_inconclusive(
+    env_file: Path,
+    openclaw_present: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When bind-confirmation classifies skipped with an inconclusive
+    reason (proxy was up, then went away), lock emits a [WARN] line so the
+    user knows routing wasn't actually proven."""
+    from worthless.cli.commands import lock as lock_mod
+
+    # Fake the helpers so _confirm_bind returns skipped+proxy_unhealthy_after.
+    calls = {"n": 0}
+
+    def fake_health(_port):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {
+                "healthy": True,
+                "port": 0,
+                "mode": "ok",
+                "requests_proxied": 0,
+                "bind_probe_count": 5,
+            }
+        return {"healthy": False, "port": 0, "mode": None, "requests_proxied": 0}
+
+    monkeypatch.setattr(lock_mod, "check_proxy_health", fake_health)
+    monkeypatch.setattr(lock_mod, "_fire_synthetic_request", lambda *a, **k: True, raising=False)
+
+    wl_home = openclaw_present["home"] / ".worthless"
+    result = runner.invoke(
+        app,
+        ["lock", "--env", str(env_file)],
+        env={
+            "WORTHLESS_KEYRING_BACKEND": "null",
+            "WORTHLESS_HOME": str(wl_home),
+        },
+    )
+    assert result.exit_code == 0, "skipped is inconclusive, not a failure — exit 0"
+    out = result.output
+    assert "[WARN]" in out, (
+        f"Lock must emit [WARN] on skipped+inconclusive bind-confirmation (Fix 9). Got:\n{out}"
+    )
+    assert "inconclusive" in out.lower() or "wasn't proven" in out.lower(), (
+        f"[WARN] message must explain the state, not just say [WARN]. Got:\n{out}"
+    )

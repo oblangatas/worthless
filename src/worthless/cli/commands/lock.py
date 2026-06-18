@@ -1029,13 +1029,19 @@ def _finalise_openclaw_success(
     )
     if bind_failed:
         if not quiet:
+            # WOR-658 Fix 12: "test request" reads to a non-engineer; the
+            # term "synthetic" survives only in code identifiers, never the
+            # user-facing string. Regression-guarded in
+            # tests/openclaw/test_lock_bind_confirmation.py.
             console.print_failure(
-                "[FAIL] Bind-confirmation: synthetic request did not "
+                "[FAIL] Bind-confirmation: test request did not "
                 "reach the proxy. The rewritten OpenClaw entry is NOT "
                 "routing — do NOT trust this lock."
             )
             console.print_warning(
-                "   Run `worthless status` for details; `worthless doctor` may help."
+                "   Recover: restart OpenClaw + re-run `worthless lock`, "
+                "or `worthless unlock` to roll back. "
+                "`worthless doctor` will tell you which."
             )
         # Exit code 91 = bind-confirmation refusal. Distinct from
         # 87 (CONFIG_UNREADABLE: infra blocked before any write) and
@@ -1043,6 +1049,17 @@ def _finalise_openclaw_success(
         # now branch on "lock didn't write" (87) vs "lock wrote but
         # routing is broken" (91).
         return 91
+
+    # WOR-658 Fix 9: surface inconclusive skipped states with a [WARN] so
+    # the user knows lock didn't actually prove routing. Without this the
+    # silent-bypass class (WOR-514) still hides behind a green [OK].
+    bind_status = bind_confirmation["status"]
+    bind_reason = bind_confirmation.get("reason")
+    if not quiet and bind_status == "skipped" and bind_reason and bind_reason != "no_aliases":
+        console.print_warning(
+            f"[WARN] Bind-confirmation inconclusive ({bind_reason}) — "
+            "routing wasn't proven. Run `worthless doctor` to investigate."
+        )
     return 0
 
 

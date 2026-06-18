@@ -37,6 +37,34 @@ from worthless.storage.repository import EnrollmentRecord, ShardRepository
 _check_proxy_health = check_proxy_health
 
 
+def _bind_confirmation_message(sentinel: dict | None) -> str | None:
+    """WOR-658: render the bind_confirmation block as a one-line user-facing
+    reason (or ``None`` if absent or status=pass).
+
+    Tolerates absence — old (pre-WOR-658) sentinels lack the field.
+    """
+    if not sentinel:
+        return None
+    bc = sentinel.get("bind_confirmation")
+    if not isinstance(bc, dict):
+        return None
+    status = bc.get("status")
+    if status == "fail":
+        return (
+            "Proof-of-routing FAILED — the test request didn't reach the "
+            "proxy through the rewritten OpenClaw entry."
+        )
+    if status == "skipped":
+        reason = bc.get("reason")
+        if reason == "proxy_unrecognised":
+            return "The service answering /healthz isn't a worthless proxy — routing wasn't proven."
+        if reason in ("proxy_unhealthy_before", "proxy_unhealthy_after"):
+            return "Proof-of-routing inconclusive — proxy wasn't healthy."
+        if reason in ("proxy_check_raised_before", "proxy_check_raised_after"):
+            return "Proof-of-routing inconclusive — proxy health check errored."
+    return None  # status=pass, or shape we don't recognise — stay quiet
+
+
 def _resolve_home_for_status() -> WorthlessHome | None:
     """Load an existing home for status without hiding storage corruption."""
     env_home = os.environ.get("WORTHLESS_HOME")
@@ -193,13 +221,26 @@ def register_status_commands(app: typer.Typer) -> None:
             else:
                 sys.stderr.write("Proxy: not running\n")
 
+            # WOR-658: surface the bind-confirmation verdict from the sentinel
+            # so the user gets a specific reason, not just generic DEGRADED.
+            # Tolerates old (pre-WOR-658) sentinels that lack the field.
+            bind_reason = _bind_confirmation_message(sentinel)
+
             if degraded:
                 sys.stderr.write(
                     "\n[WARN] OpenClaw integration is broken — "
                     "your agent traffic may NOT be gated by worthless.\n"
-                    "       Run `worthless doctor` to repair, or "
-                    "`worthless unlock` to roll back.\n"
                 )
+                if bind_reason:
+                    sys.stderr.write(f"       {bind_reason}\n")
+                sys.stderr.write(
+                    "       Run `worthless doctor` to repair, or `worthless unlock` to roll back.\n"
+                )
+            elif bind_reason:
+                # Not DEGRADED but the bind-confirmation skipped inconclusively
+                # (e.g. proxy_unrecognised — a squatter on the port). Surface
+                # it so the user knows routing wasn't proven.
+                sys.stderr.write(f"\n[WARN] {bind_reason}\n")
             sys.stderr.flush()
 
         # Trust-fix exit: degraded sentinel = non-zero exit so callers
