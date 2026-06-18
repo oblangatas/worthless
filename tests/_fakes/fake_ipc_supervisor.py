@@ -78,7 +78,7 @@ class FakeIPCClient:
     async def attest(self, nonce: bytes, purpose: str | None = None) -> bytes:
         return b"FAKE-EVIDENCE"
 
-    async def mac(self, value: bytes) -> bytes:
+    async def mac(self, value: bytes | bytearray) -> bytes:
         return await self._supervisor.mac(value)
 
     async def aclose(self) -> None:
@@ -162,7 +162,7 @@ class FakeIPCSupervisor:
         # without touching shared state — matches real supervisor contract.
         return bytearray(plaintext)
 
-    async def mac(self, value: bytes) -> bytes:
+    async def mac(self, value: bytes | bytearray) -> bytes:
         """Return the configured HMAC tag, or raise if configured to fail."""
         if self._closed:
             raise IPCUnavailable("fake supervisor is closed")

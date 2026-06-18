@@ -545,7 +545,7 @@ class IPCSupervisor:
         # we return is the only mutable copy.
         return buf
 
-    async def mac(self, value: bytes) -> bytes:
+    async def mac(self, value: bytes | bytearray) -> bytes:
         """Compute HMAC-SHA256 of *value* via the sidecar (WOR-640 decoy check).
 
         The sidecar holds the MAC subkey; the proxy delegates so it never
