@@ -38,17 +38,17 @@ class ShardReader:
             yield db
 
     async def fetch_decoy_hashes(self) -> frozenset[str]:
-        """Return all stored decoy HMAC hex strings (WOR-640 startup preload).
+        """Return all RETIRED-decoy HMAC hex strings (WOR-640 startup preload).
 
-        These are pre-computed HMAC-SHA256 values written at enrollment by the
-        CLI. The proxy loads them once at startup and uses ipc.mac() at request
-        time to check whether an incoming Bearer token matches any stored hash.
+        These are HMAC-SHA256 values of shard-A halves that were retired when
+        their .env was unlocked. The proxy loads them once at startup and uses
+        ipc.mac() at request time to 401 a Bearer that matches one — a stolen
+        old .env replayed after rotation. The currently-active shard-A is NEVER
+        here (it is the legitimate Bearer), so live traffic is not blocked.
         No key material — only the hex strings already stored in the DB.
         """
         async with self._connect() as db:
-            cursor = await db.execute(
-                "SELECT decoy_hash FROM enrollments WHERE decoy_hash IS NOT NULL"
-            )
+            cursor = await db.execute("SELECT decoy_hash FROM retired_decoys")
             rows = await cursor.fetchall()
             return frozenset(row[0] for row in rows)
 

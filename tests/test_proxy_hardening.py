@@ -2280,12 +2280,14 @@ class TestSR09DeepEnforcement:
 class TestDecoyHashCheck:
     """WOR-640: proxy rejects stolen .env replay attacks via decoy tripwire.
 
-    At enrollment, HMAC-SHA256(shard_a) is stored as enrollments.decoy_hash.
-    On each request the proxy calls ipc.mac(shard_a_from_bearer) and compares
-    the hex result against app.state.decoy_hashes loaded at startup.
-    A match means the raw shard_a is being used as an API key — stolen .env replay.
+    When a .env is unlocked its shard-A is retired: HMAC-SHA256(shard_a) is
+    recorded in retired_decoys. On each request the proxy calls
+    ipc.mac(shard_a_from_bearer) and compares the hex against
+    app.state.decoy_hashes loaded at startup. A match means a retired (stolen)
+    shard-A is being replayed. The active shard-A is never retired, so these
+    tests inject app.state.decoy_hashes directly to exercise the proxy logic.
 
-    Tests 1 is RED before the check is added to proxy_request().
+    Test 1 is RED before the check is added to proxy_request().
     Tests 2 and 3 guard against regressions in the happy path.
     """
 

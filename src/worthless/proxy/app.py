@@ -490,10 +490,12 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
             return _uniform_401()
 
         # WOR-640: decoy tripwire — detect stolen .env replay attacks.
-        # At enrollment, HMAC-SHA256(shard_a) was stored in enrollments.decoy_hash
-        # and preloaded into app.state.decoy_hashes at startup.  We ask the sidecar
-        # to MAC the incoming Bearer value (best-effort: if IPC fails we let the
-        # request through rather than blocking legitimate traffic).
+        # When a .env is unlocked its shard-A is RETIRED: HMAC-SHA256(shard_a) is
+        # recorded in the retired_decoys table and preloaded into
+        # app.state.decoy_hashes at startup. The currently-active shard-A is never
+        # in this set, so a legitimate Bearer passes; a replayed retired one is
+        # caught. We ask the sidecar to MAC the incoming Bearer value (best-effort:
+        # if IPC fails we let the request through rather than block legit traffic).
         # SR-04: do NOT log the matched value — only the alias.
         _decoy_hashes: frozenset[str] = getattr(request.app.state, "decoy_hashes", frozenset())
         if _decoy_hashes:
