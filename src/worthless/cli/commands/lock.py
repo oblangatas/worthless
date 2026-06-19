@@ -1732,12 +1732,20 @@ def _lock_keys(
                 try:
                     loop.add_signal_handler(_sig, _request_unwind)
                 except (NotImplementedError, RuntimeError):
-                    # Windows ProactorEventLoop or a non-main-thread loop:
-                    # signal-driven cancellation is unavailable. Default
-                    # disposition still applies (SIGINT → KeyboardInterrupt,
-                    # also caught below); SIGTERM falls back to terminate. Record
-                    # only the signals that actually installed so cleanup can't
-                    # leak a handler when one of the two raises.
+                    # Signal-driven cancellation is unavailable here:
+                    #   * Windows ProactorEventLoop (NotImplementedError), or
+                    #   * a non-main-thread event loop (RuntimeError) — e.g. the
+                    #     MCP ``worthless_lock`` tool runs ``_lock_keys`` via
+                    #     ``run_in_executor`` (mcp/server.py).
+                    # Python delivers SIGINT/SIGTERM ONLY to the process main
+                    # thread, so a worker-thread lock receives NO interrupt at all
+                    # — it is NOT true that "default SIGINT → KeyboardInterrupt
+                    # still applies" off the main thread. On these paths
+                    # crash-safety rests on the atomic Pass-1 transaction
+                    # (WOR-646 Part 2), not the signal handler. Real mid-lock
+                    # interrupt safety for the MCP path is tracked in worthless-dqzj.
+                    # Record only the signals that actually installed so cleanup
+                    # can't leak a handler when one of the two raises.
                     continue
                 installed_signals.append(_sig)
 
