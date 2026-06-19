@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from pathlib import Path
 
 import typer
@@ -367,7 +368,7 @@ def _format_lock_block_human(
     findings: list[HardcodedUrlFinding],
     *,
     blocking: bool = True,
-    sanitize: object = None,
+    sanitize: Callable[[str], str] | None = None,
 ) -> str:
     """Collapsed pre-lock output + copy-pasteable AI fix prompt.
 
@@ -375,7 +376,7 @@ def _format_lock_block_human(
     blocking=False → "Warning" header (TTY path where user can still proceed).
     sanitize       → callable applied to file paths and URLs before display.
     """
-    _san: object = sanitize if callable(sanitize) else (lambda x: x)
+    _san: Callable[[str], str] = sanitize if callable(sanitize) else (lambda x: x)
 
     src = [f for f in findings if not _is_test_path(f.file)]
     test_count = len(findings) - len(src)
@@ -402,7 +403,7 @@ def _format_lock_block_human(
     # Collapsed file list
     by_file: defaultdict[str, list[HardcodedUrlFinding]] = defaultdict(list)
     for f in src:
-        by_file[_san(f.file)].append(f)  # type: ignore[operator]
+        by_file[_san(f.file)].append(f)
     for safe_file, file_findings in by_file.items():
         line_nums = ", ".join(str(f.line) for f in file_findings)
         env_vars = ", ".join(sorted({f.provider.upper() + "_BASE_URL" for f in file_findings}))
@@ -418,7 +419,7 @@ def _format_lock_block_human(
         prompt_bullets = []
         for f in src:
             env_var = f.provider.upper() + "_BASE_URL"
-            prompt_bullets.append(f"    • {_san(f.file)}:{f.line} — {env_var}")  # type: ignore[operator]
+            prompt_bullets.append(f"    • {_san(f.file)}:{f.line} — {env_var}")
 
         lines += (
             [
