@@ -941,8 +941,20 @@ def register_doctor_commands(app: typer.Typer) -> None:
             "--json",
             help="Emit a single machine-readable JSON document. Disables prompts.",
         ),
+        explain: str | None = typer.Option(
+            None,
+            "--explain",
+            help="Print the fix playbook for a check id (e.g. fernet_drift) and exit.",
+        ),
     ) -> None:
         """Diagnose and repair stuck DB/.env states (HF7 / worthless-3907)."""
+        if explain is not None:
+            # Static text only — works even under IPC_ONLY. Local import
+            # mirrors the JSON path below (the circular-import guard).
+            from worthless.cli.commands.doctor.runner import _doctor_explain
+
+            _doctor_explain(explain)
+            return
         # WOR-465 A4: under WORTHLESS_FERNET_IPC_ONLY=1 the doctor cannot
         # materialise home.fernet_key — the proxy uid cannot read the key
         # file by design, and the interactive prompts cannot be bracketed

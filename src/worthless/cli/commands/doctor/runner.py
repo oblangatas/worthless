@@ -17,6 +17,7 @@ import json
 import typer
 
 from worthless.cli.bootstrap import acquire_lock, get_home
+from worthless.cli.commands.doctor.checks._remediation import PLAYBOOKS
 from worthless.cli.commands.doctor.registry import (
     CheckContext,
     CheckResult,
@@ -51,6 +52,36 @@ def _aggregate(results: list[CheckResult]) -> dict:
     }
 
 
+def _stamp_remediation(results: list[CheckResult]) -> None:
+    """Attach a static fix playbook to every finding of a failing check.
+
+    Findings that already carry a ``remediation`` (e.g. openclaw's
+    per-finding ones) are left untouched.
+    """
+    for r in results:
+        if r.get("status") not in ("warn", "error"):
+            continue
+        play = PLAYBOOKS.get(r.get("check_id", ""))
+        if not play:
+            continue
+        for finding in r.get("findings") or []:
+            finding.setdefault("remediation", play)
+
+
+def _doctor_explain(check_id: str) -> None:
+    """Print the static fix playbook for *check_id*, or list known ids.
+
+    AI-less and side-effect-free — no home/keyring/ctx needed, so it works
+    even under WORTHLESS_FERNET_IPC_ONLY=1.
+    """
+    play = PLAYBOOKS.get(check_id)
+    if play is None:
+        known = ", ".join(sorted(PLAYBOOKS))
+        typer.echo(f"Unknown check '{check_id}'. Known checks: {known}", err=True)
+        raise typer.Exit(2)
+    typer.echo(play)
+
+
 def _doctor_run_json(*, fix: bool, dry_run: bool) -> None:
     """Run every registered check and emit a single JSON document.
 
@@ -82,4 +113,5 @@ def _doctor_run_json(*, fix: bool, dry_run: bool) -> None:
                     )
                 )
 
+    _stamp_remediation(results)
     typer.echo(json.dumps(_aggregate(results)))
