@@ -177,3 +177,58 @@ class TestSqlDriftGuard:
         store = _norm_stmt(ShardRepository.store_enrolled, pat)
         atomic = _norm_stmt(ShardRepository.upsert_locked_shard_and_enroll, pat)
         assert store == atomic, "enrollment_config INSERT drifted across methods"
+
+
+# ---------------------------------------------------------------------------
+# Non-vacuous rollback proof: a failure AFTER the shards INSERT but BEFORE
+# COMMIT must leave NO shard row. (Pins the atomicity against the
+# BEGIN-IMMEDIATE-under-default-isolation concern — confirms close-without-commit
+# discards the in-flight INSERT rather than committing an orphan.)
+# ---------------------------------------------------------------------------
+
+
+class TestAtomicWriteRollsBackMidTransaction:
+    @pytest.mark.asyncio
+    async def test_failure_after_shard_insert_leaves_no_row(
+        self,
+        repo: ShardRepository,
+        sample_split_result,
+        tmp_db_path: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import worthless.storage.repository as repo_mod
+
+        shard = stored_shard_from_split(sample_split_result)
+
+        # _perm_bits is evaluated as an argument to the enrollments INSERT —
+        # i.e. AFTER the shards INSERT has already executed inside the open
+        # transaction, but before COMMIT. Raising here exercises the exact
+        # mid-transaction failure window the orphan bug lived in.
+        def _boom(_mode: object) -> int:
+            raise RuntimeError("fail mid-transaction, after the shards INSERT")
+
+        monkeypatch.setattr(repo_mod, "_perm_bits", _boom)
+
+        with pytest.raises(RuntimeError):
+            await repo.upsert_locked_shard_and_enroll(
+                "rollback-probe",
+                shard,
+                var_name="OPENAI_API_KEY",
+                env_path="/a/.env",
+                prefix=_PREFIX,
+                charset=_CHARSET,
+                base_url=_BASE_URL,
+            )
+
+        async with aiosqlite.connect(tmp_db_path) as db:
+            n = (
+                await (
+                    await db.execute(
+                        "SELECT count(*) FROM shards WHERE key_alias = 'rollback-probe'"
+                    )
+                ).fetchone()
+            )[0]
+        assert n == 0, (
+            "shards INSERT was NOT rolled back when the transaction failed before "
+            "COMMIT — the atomicity guarantee is broken"
+        )
