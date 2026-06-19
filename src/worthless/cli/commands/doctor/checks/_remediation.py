@@ -43,4 +43,10 @@ PLAYBOOKS: dict[str, str] = {
         "Run `worthless doctor --fix` to clear the dead reference; restore the key from "
         "your original `.env` if you have it."
     ),
+    "bind_confirmation": (
+        "After `worthless lock`, the rewritten OpenClaw entry is not proven to route "
+        "through the proxy. Restart OpenClaw's daemon (its cached config may still point "
+        "at the old URL) or re-run `worthless lock`. If the proof was inconclusive, check "
+        "`WORTHLESS_PORT` and that the proxy is up (`worthless up`)."
+    ),
 }
