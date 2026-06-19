@@ -779,6 +779,304 @@ async def _compensating_unwind(
     return errors
 
 
+def _fire_synthetic_request(host: str, port: int, alias: str) -> bool:
+    """WOR-658: send one minimal request to the proxy's dedicated
+    bind-confirmation endpoint so the in-memory ``bind_probe_count``
+    counter increments.
+
+    Returns ``True`` iff the request reached the proxy's handler (got an HTTP
+    response, any status). Returns ``False`` on network/connection errors —
+    those mean the proxy couldn't be reached at all, so the counter delta
+    cannot be interpreted as evidence either way and ``_confirm_bind`` will
+    classify the result as ``skipped`` rather than ``fail``.
+
+    The endpoint ``/_bind_probe/{alias}`` is intentionally public on the
+    worthless proxy (no auth, no body) — its only purpose is to bump the
+    probe counter and return 204. A 1 s timeout caps the bind-confirmation
+    cost so a hung proxy can't stall ``worthless lock``.
+
+    HEAD over GET keeps the probe payload-free while still hitting the same
+    handler.
+    """
+    # Local import keeps lock.py's module-load cost untouched on the cold
+    # path (lock is in the hot CLI path; bind-confirmation only runs after
+    # a successful OpenClaw rewrite).
+    import httpx  # noqa: PLC0415
+
+    # NOSONAR python:S5332 — loopback-only probe; TLS is not provisioned at
+    # this layer and the proxy refuses non-loopback origins for /_bind_probe
+    # (see proxy/app.py: ``bind_probe`` returns 403 unless request.client.host
+    # is the local loopback range). Same shape as the long-standing
+    # ``check_proxy_health`` call at ``cli/process.py``.
+    url = f"http://{host}:{port}/_bind_probe/{alias}"  # NOSONAR
+    try:
+        with httpx.Client(timeout=1.0) as client:
+            client.head(url)
+    except (httpx.HTTPError, OSError):
+        return False
+    return True
+
+
+def _coerce_counter(value: object) -> int:
+    """Best-effort widen of ``check_proxy_health()``'s ``requests_proxied``.
+
+    The healthz JSON is loosely-typed (``dict[str, object]``-shaped at the
+    Python boundary). We accept ``int`` directly, parse numeric strings (any
+    older proxy that surfaced the count as a string still works), and fall
+    back to 0 for anything else so bind-confirmation can't crash lock just
+    because a future schema change altered the type.
+    """
+    if isinstance(value, bool):  # bool is an int subclass; reject by intent
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return 0
+    return 0
+
+
+def _confirm_bind(
+    planned: list[_PlannedUpdate],
+    *,
+    host: str,
+    port: int,
+) -> dict[str, object]:
+    """WOR-658 bind-confirmation. Prove the rewritten OpenClaw entry actually
+    routes through the proxy by firing one synthetic request per alias and
+    observing the proxy's ``requests_proxied`` counter.
+
+    Returns a result block suitable for the sentinel:
+    * ``status == "pass"`` — counter incremented by at least 1; the rewrite
+      is in the path.
+    * ``status == "fail"`` — counter did not move; the rewrite is NOT routing,
+      lock must refuse to claim success (silent-bypass class, WOR-514).
+    * ``status == "skipped"`` — proxy unhealthy at the before- or after-read,
+      OR there was nothing to confirm (no aliases). Inconclusive, not a fail.
+    """
+    aliases = [p.alias for p in planned]
+    if not aliases:
+        return {
+            "status": "skipped",
+            "reason": "no_aliases",
+            "delta": 0,
+            "aliases": [],
+            "reached": 0,
+        }
+
+    try:
+        before_health = check_proxy_health(port)
+    except Exception:  # noqa: BLE001 — bind-confirmation must never crash lock
+        return {
+            "status": "skipped",
+            "reason": "proxy_check_raised_before",
+            "delta": 0,
+            "aliases": aliases,
+            "reached": 0,
+        }
+    if not before_health.get("healthy"):
+        return {
+            "status": "skipped",
+            "reason": "proxy_unhealthy_before",
+            "delta": 0,
+            "aliases": aliases,
+            "reached": 0,
+        }
+    # WOR-658 squatter-resistance: missing ``bind_probe_count`` on the
+    # ``/healthz`` body means the responder isn't a worthless proxy. Don't
+    # interpret real-traffic ticks (requests_proxied) as proof of routing
+    # — a foreign service answering /healthz could have any counter shape.
+    if "bind_probe_count" not in before_health:
+        return {
+            "status": "skipped",
+            "reason": "proxy_unrecognised",
+            "delta": 0,
+            "aliases": aliases,
+            "reached": 0,
+        }
+    before = _coerce_counter(before_health.get("bind_probe_count"))
+
+    reached = 0
+    for alias in aliases:
+        try:
+            if _fire_synthetic_request(host, port, alias):
+                reached += 1
+        except Exception:  # noqa: BLE001 — never crash lock from this layer
+            logger.debug("bind-confirmation fire raised for %s", alias, exc_info=True)
+
+    try:
+        after_health = check_proxy_health(port)
+    except Exception:  # noqa: BLE001
+        return {
+            "status": "skipped",
+            "reason": "proxy_check_raised_after",
+            "delta": 0,
+            "aliases": aliases,
+            "reached": reached,
+        }
+    if not after_health.get("healthy"):
+        return {
+            "status": "skipped",
+            "reason": "proxy_unhealthy_after",
+            "delta": 0,
+            "aliases": aliases,
+            "reached": reached,
+        }
+    # CodeRabbit gate-10 finding: re-check the field on the AFTER read. If
+    # BEFORE had ``bind_probe_count`` but AFTER doesn't (responder swap /
+    # restart-to-a-different-server mid-call), ``_coerce_counter(None)`` would
+    # silently become 0 and ``delta = 0 - before`` would look like a large
+    # negative — misclassified as ``proxy_restarted``. Classify the missing
+    # field as its own ``proxy_unrecognised_after`` skip so the verdict names
+    # the real condition instead of guessing "restart".
+    if "bind_probe_count" not in after_health:
+        return {
+            "status": "skipped",
+            "reason": "proxy_unrecognised_after",
+            "delta": 0,
+            "aliases": aliases,
+            "reached": reached,
+        }
+    after = _coerce_counter(after_health.get("bind_probe_count"))
+
+    delta = after - before
+
+    # Tri-state classify:
+    # * delta > 0                    → pass (counter moved; the request reached
+    #                                  the counter via the rewritten alias path)
+    # * reached == 0 AND delta == 0  → skipped: every fire failed at the
+    #                                  network layer, so the proxy never saw
+    #                                  the synthetic request. We can't tell
+    #                                  whether the rewrite routes — only that
+    #                                  the test harness didn't.
+    # * reached >  0 AND delta == 0  → fail: the proxy received the request
+    #                                  but did NOT count it. That's the
+    #                                  silent-bypass class (WOR-514) we care
+    #                                  about — the rewritten entry isn't
+    #                                  routing through Worthless.
+    if delta > 0:
+        return {
+            "status": "pass",
+            "delta": delta,
+            "aliases": aliases,
+            "reached": reached,
+        }
+    if delta < 0:
+        # WOR-658 / Gate-3 chaos-engineer finding: the in-memory probe
+        # counter resets to 0 on proxy restart. If the proxy restarts
+        # between the before- and after-reads, ``after < before`` and
+        # the delta is large-negative. That's inconclusive (the proxy
+        # was probably fine — it just bounced), NOT a fail. Surfacing
+        # this as ``skipped`` keeps lock honest: we can't tell from
+        # this single observation whether the rewrite routes, and we
+        # refuse to manufacture a fail verdict against a moving target.
+        return {
+            "status": "skipped",
+            "reason": "proxy_restarted",
+            "delta": delta,
+            "aliases": aliases,
+            "reached": reached,
+        }
+    if reached == 0:
+        return {
+            "status": "skipped",
+            "reason": "synthetic_unreachable",
+            "delta": delta,
+            "aliases": aliases,
+            "reached": reached,
+        }
+    return {
+        "status": "fail",
+        "delta": delta,
+        "aliases": aliases,
+        "reached": reached,
+    }
+
+
+def _finalise_openclaw_success(
+    planned: list[_PlannedUpdate],
+    result,  # noqa: ANN001 — OpenclawApplyResult is opaque from this layer
+    console,  # noqa: ANN001 — Console type is opaque from this layer
+    quiet: bool,
+    home: WorthlessHome,
+    *,
+    proxy_host: str,
+) -> int:
+    """WOR-658: finalise the success branch of ``_apply_openclaw``.
+
+    Runs bind-confirmation, writes the sentinel with the correct paired
+    ``status``/``openclaw`` state, prints the user-visible result block,
+    and returns the exit code (0 on success, 91 on bind-fail).
+
+    Extracted so ``_apply_openclaw`` stays under the project's xenon
+    complexity ceiling — the bind-confirmation classify branches push it
+    over otherwise.
+    """
+    if not quiet:
+        console.print_success("[OK] OpenClaw integration:")
+        for provider_name in result.providers_set:
+            console.print_hint(f"   • ~/.openclaw/openclaw.json — added provider '{provider_name}'")
+        if result.skill_installed:
+            console.print_hint("   • ~/.openclaw/workspace/skills/worthless/ — installed skill")
+        console.print_hint("   • Undo: worthless unlock")
+
+    # WOR-658: prove the rewrite actually routes. A "fail" verdict here
+    # means lock-core succeeded on disk but the OpenClaw entry isn't
+    # routing through the proxy — silent-bypass class (WOR-514).
+    bind_confirmation = _confirm_bind(planned, host=proxy_host, port=resolve_port(None))
+    # Bind-fail is a partial-success state at the trust layer:
+    # lock-core wrote the .env + DB, but the OpenClaw config isn't
+    # routing. ``openclaw="failed"`` (paired with ``status="partial"``)
+    # makes ``is_partial()`` fire so ``worthless status`` reports
+    # DEGRADED across sessions — the very failure mode WOR-658 was
+    # built to make visible.
+    bind_failed = bind_confirmation["status"] == "fail"
+    _write_lock_sentinel(
+        home,
+        status="partial" if bind_failed else "ok",
+        openclaw="failed" if bind_failed else "ok",
+        alias_count=len(result.providers_set),
+        events=tuple(e.to_dict() for e in result.events),
+        bind_confirmation=bind_confirmation,
+    )
+    if bind_failed:
+        if not quiet:
+            # WOR-658 Fix 12: "test request" reads to a non-engineer; the
+            # term "synthetic" survives only in code identifiers, never the
+            # user-facing string. Regression-guarded in
+            # tests/openclaw/test_lock_bind_confirmation.py.
+            console.print_failure(
+                "[FAIL] Bind-confirmation: test request did not "
+                "reach the proxy. The rewritten OpenClaw entry is NOT "
+                "routing — do NOT trust this lock."
+            )
+            console.print_warning(
+                "   Recover: restart OpenClaw + re-run `worthless lock`, "
+                "or `worthless unlock` to roll back. "
+                "`worthless doctor` will tell you which."
+            )
+        # Exit code 91 = bind-confirmation refusal. Distinct from
+        # 87 (CONFIG_UNREADABLE: infra blocked before any write) and
+        # 73 (OpenClaw integration partial-fail). Wrapping scripts can
+        # now branch on "lock didn't write" (87) vs "lock wrote but
+        # routing is broken" (91).
+        return 91
+
+    # WOR-658 Fix 9: surface inconclusive skipped states with a [WARN] so
+    # the user knows lock didn't actually prove routing. Without this the
+    # silent-bypass class (WOR-514) still hides behind a green [OK].
+    bind_status = bind_confirmation["status"]
+    bind_reason = bind_confirmation.get("reason")
+    if not quiet and bind_status == "skipped" and bind_reason and bind_reason != "no_aliases":
+        console.print_warning(
+            f"[WARN] Bind-confirmation inconclusive ({bind_reason}) — "
+            "routing wasn't proven. Run `worthless doctor` to investigate."
+        )
+    return 0
+
+
 def _apply_openclaw(
     planned: list[_PlannedUpdate],
     console,  # noqa: ANN001 — Console type is opaque from this layer
@@ -848,24 +1146,9 @@ def _apply_openclaw(
     # (single-sourced — see integration.py docstring). Lock + unlock both
     # call this property.
     if not result.has_failure:
-        # Fully successful integration — record OK + enumerate to user.
-        if not quiet:
-            console.print_success("[OK] OpenClaw integration:")
-            for provider_name in result.providers_set:
-                console.print_hint(
-                    f"   • ~/.openclaw/openclaw.json — added provider '{provider_name}'"
-                )
-            if result.skill_installed:
-                console.print_hint("   • ~/.openclaw/workspace/skills/worthless/ — installed skill")
-            console.print_hint("   • Undo: worthless unlock")
-        _write_lock_sentinel(
-            home,
-            status="ok",
-            openclaw="ok",
-            alias_count=len(result.providers_set),
-            events=tuple(e.to_dict() for e in result.events),
+        return _finalise_openclaw_success(
+            planned, result, console, quiet, home, proxy_host=_proxy_host
         )
-        return 0
 
     # Detected + failed: the trust-failure path. Print [FAIL] block, write
     # sentinel as partial. Caller raises typer.Exit(openclaw_exit) after
@@ -1050,6 +1333,7 @@ def _write_lock_sentinel(
     openclaw: str,
     alias_count: int,
     events: tuple[dict[str, str], ...],
+    bind_confirmation: dict[str, object] | None = None,
 ) -> None:
     """Best-effort sentinel write. Failure is logged + swallowed."""
     try:
@@ -1061,6 +1345,7 @@ def _write_lock_sentinel(
             openclaw=openclaw,
             alias_count=alias_count,
             events=list(events),
+            bind_confirmation=bind_confirmation,
         )
     except OSError as exc:
         logger.warning("sentinel write failed: %s", exc)

@@ -49,7 +49,22 @@ def _make_e2e_env(
     env_file = project_dir / ".env"
     env_file.write_text(f"OPENAI_API_KEY={original_key}\n")
 
-    cli_env = {"WORTHLESS_HOME": str(worthless_home)}
+    # Pin HOME at the sandbox so ``openclaw.integration.detect()`` does NOT
+    # see the developer's real ``~/.openclaw`` and trigger F7's PROXY_NOT_RUNNING
+    # gate (WOR-648 / WOR-621 AC5). This test class is ``@pytest.mark.integration``,
+    # which opts out of the autouse ``check_proxy_health`` mock in
+    # ``tests/conftest.py``, so without HOME pinning, F7's real probe of
+    # ``WORTHLESS_PORT=1`` correctly returns "unhealthy" and ``lock`` exits 1
+    # before doing anything. The lifecycle being tested here (vanilla
+    # split → status → unlock) has no OpenClaw involvement.
+    home_sandbox = base_dir / "home"
+    home_sandbox.mkdir(parents=True, exist_ok=True)
+
+    cli_env = {
+        "WORTHLESS_HOME": str(worthless_home),
+        "HOME": str(home_sandbox),
+        "USERPROFILE": str(home_sandbox),
+    }
     if proxy_port is not None:
         cli_env["WORTHLESS_PORT"] = str(proxy_port)
     return env_file, worthless_home, original_key, cli_env

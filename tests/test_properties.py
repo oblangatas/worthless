@@ -6,7 +6,7 @@ import string
 
 import httpx
 import pytest
-from hypothesis import given, settings as hsettings
+from hypothesis import HealthCheck, given, settings as hsettings
 from hypothesis import strategies as st
 
 from tests.helpers import make_streaming_response
@@ -136,6 +136,12 @@ class TestStripInternalHeadersProperties:
 
 
 class TestPrepareRequestProperties:
+    # WOR-658 follow-up: input generation under xdist parallel load (10
+    # workers) hits Hypothesis's too_slow HealthCheck on some runs. The
+    # strategies themselves aren't slow — CPU contention from sibling tests
+    # is. Suppress the health check here; the property assertions are still
+    # exercised on every generated example.
+    @hsettings(suppress_health_check=[HealthCheck.too_slow])
     @given(body=st.binary(max_size=4096), headers=_SAFE_HEADERS, api_key=_API_KEYS)
     def test_openai_prepare_request_preserves_body_and_sets_auth(
         self, body: bytes, headers: dict[str, str], api_key: bytearray

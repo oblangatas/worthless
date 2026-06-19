@@ -1197,7 +1197,19 @@ def test_property_service_uids_accepts_any_positive_id_triple(
     crypto_uid=_VALID_UID,
     worthless_gid=_VALID_UID,
 )
-@_FIXTURE_SAFE  # share _share_files / monkeypatch across iterations (state-independent)
+@hsettings(
+    # Same as _FIXTURE_SAFE (share _share_files / monkeypatch across
+    # iterations, state-independent) PLUS deadline=None. WOR-658 follow-up:
+    # real spawn_sidecar dispatch can exceed Hypothesis's 200 ms per-example
+    # deadline under xdist parallel load (10 workers contending for CPU + fs).
+    # The test is about validation acceptance, not throughput, so timing
+    # variance shouldn't fail it. Inlined (rather than stacked on
+    # @_FIXTURE_SAFE) because Hypothesis rejects multiple @settings
+    # decorators on the same test.
+    max_examples=20,
+    deadline=None,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
 def test_property_spawn_sidecar_accepts_any_valid_uid_triple(
     _share_files: ShareFiles, proxy_uid: int, crypto_uid: int, worthless_gid: int
 ) -> None:

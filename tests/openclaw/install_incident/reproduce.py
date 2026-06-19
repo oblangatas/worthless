@@ -124,16 +124,46 @@ class _HealthzHandler(http.server.BaseHTTPRequestHandler):
 
     The minimum ``cli.process.check_proxy_health`` accepts as "healthy": a 200
     with a JSON body (``mode`` / ``requests_proxied`` default if absent).
+
+    WOR-658: surface ``bind_probe_count`` so lock-side bind-confirmation can
+    recognise this harness as a worthless-like proxy and observe a delta.
+    The probe endpoint is ``/_bind_probe/{alias}`` (GET + HEAD) — we count
+    it without forwarding, identical to the real proxy's behaviour.
     """
+
+    # Server-scoped (class attribute) so the count survives per-connection
+    # handlers and is visible across the two /healthz reads
+    # bind-confirmation makes. Reset by fake_proxy_health on each context-
+    # manager entry below.
+    bind_probe_count: int = 0
+
+    def _is_probe(self) -> bool:
+        return self.path.startswith("/_bind_probe/")
+
+    def do_HEAD(self) -> None:  # noqa: N802 — BaseHTTPRequestHandler API
+        if self._is_probe():
+            type(self).bind_probe_count += 1
+            self.send_response(204)
+            self.end_headers()
+        else:
+            self.send_response(404)
+            self.end_headers()
 
     def do_GET(self) -> None:  # noqa: N802 — BaseHTTPRequestHandler API
         if self.path == "/healthz":
-            body = b'{"mode": "up", "requests_proxied": 0}'
+            body = (
+                f'{{"mode": "up", "requests_proxied": 0, '
+                f'"bind_probe_count": {type(self).bind_probe_count}}}'
+            ).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif self._is_probe():
+            type(self).bind_probe_count += 1
+            self.send_response(204)
+            self.end_headers()
         else:
             self.send_response(404)
             self.end_headers()
@@ -156,6 +186,8 @@ def fake_proxy_health() -> Iterator[int]:
     split + config; it never makes an upstream call. Pass the yielded port to
     :func:`run_lock` via ``proxy_port``.
     """
+    # Reset the shared counter so prior contexts don't leak through.
+    _HealthzHandler.bind_probe_count = 0
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _HealthzHandler)
     port = srv.server_address[1]
     thread = threading.Thread(target=srv.serve_forever, daemon=True)

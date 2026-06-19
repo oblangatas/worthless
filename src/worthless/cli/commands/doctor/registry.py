@@ -98,6 +98,7 @@ def _build_all_checks() -> list:
     lands.
     """
     from worthless.cli.commands.doctor.checks import (
+        bind_confirmation,
         broken_status,
         fernet_drift,
         icloud_keychain,
@@ -117,6 +118,7 @@ def _build_all_checks() -> list:
         stranded_shards,
         fernet_drift,
         broken_status,
+        bind_confirmation,
     ]
 
 

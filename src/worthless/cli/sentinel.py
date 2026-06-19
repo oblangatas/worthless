@@ -20,8 +20,20 @@ Schema (wire-stable; keep additive only):
       "alias_count": 1,
       "events": [
         {"code": "openclaw.write_failed", "level": "error", "detail": "..."}
-      ]
+      ],
+      "bind_confirmation": {                     // WOR-658, optional
+        "status": "pass" | "fail" | "skipped",
+        "delta": 0,                              // bind_probe_count delta
+        "aliases": ["openai-abc123"],            // managed aliases tested
+        "reached": 1,                            // # probes that got HTTP
+        "reason": "proxy_unrecognised" | "..."   // present when skipped
+      }
     }
+
+The ``bind_confirmation`` block is absent on sentinels written by paths
+that do not run bind-confirmation (unlock, openclaw=absent, the failure
+branch before the OpenClaw integration runs, etc.) — additive-only
+contract: old readers ignore it, new readers gate on its presence.
 
 Atomic write via tempfile + ``os.replace`` — same pattern as Phase 1's
 ``_atomic_write_json`` in ``worthless.openclaw.config``. Crash mid-write
@@ -52,6 +64,7 @@ def write_sentinel(
     openclaw: str,
     alias_count: int,
     events: list[dict[str, Any]] | None = None,
+    bind_confirmation: dict[str, Any] | None = None,
 ) -> Path:
     """Atomically write the sentinel for the current ``worthless lock``/``unlock`` outcome.
 
@@ -64,6 +77,10 @@ def write_sentinel(
         alias_count: number of aliases the operation touched (lock: wired;
             unlock: removed).
         events: structured event payload, ``OpenclawIntegrationEvent.asdict()``-ish.
+        bind_confirmation: WOR-658 result block. ``None`` means lock did not
+            run bind-confirmation (e.g. OpenClaw absent, or this is an unlock
+            sentinel). Wire-stable additive field — unknown to older readers,
+            which ignore it.
 
     Returns:
         The path written.
@@ -75,13 +92,15 @@ def write_sentinel(
     """
     home_base_dir.mkdir(parents=True, exist_ok=True)
     target = sentinel_path(home_base_dir)
-    payload = {
+    payload: dict[str, Any] = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "status": status,
         "openclaw": openclaw,
         "alias_count": alias_count,
         "events": events or [],
     }
+    if bind_confirmation is not None:
+        payload["bind_confirmation"] = bind_confirmation
 
     fd, tmp_name = tempfile.mkstemp(
         prefix=f".{SENTINEL_FILENAME}.",
