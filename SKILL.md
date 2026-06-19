@@ -233,6 +233,8 @@ Proxy: http://127.0.0.1:8787 (running)
 
 `worthless doctor` runs eight checks: `recovery_import`, `orphan_db`, `openclaw`, `icloud_keychain`, `orphan_keychain`, `stranded_shards`, `fernet_drift`, `broken_status`. Read-only by default. `--fix` enables repair for all checks EXCEPT `fernet_drift` (drift is hardcoded `fixable=False` — only the user can pick which side is canonical, never the tool).
 
+Every finding from a failing check carries a `remediation` — the exact command to fix it. `worthless doctor --explain <check_id>` prints a check's fix playbook on demand without running anything (offline, no proxy/keyring needed); an unknown id lists the valid check ids.
+
 **JSON mode:**
 
 ```bash

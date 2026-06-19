@@ -8,7 +8,9 @@ description: "Action-first guide to every worthless doctor check_id — symptoms
 Every `worthless doctor` check has a short, action-first entry here. If
 you see one of these symptoms, jump straight to the matching `check_id`
 and run the command shown. JSON consumers (CI, agents) can scrape the
-same data from `worthless doctor --json`.
+same data from `worthless doctor --json`. Don't have the failure in front
+of you? `worthless doctor --explain <check_id>` prints a check's fix
+playbook without running anything.
 
 ## Decision tree
 
