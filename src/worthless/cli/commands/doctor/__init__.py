@@ -944,7 +944,10 @@ def register_doctor_commands(app: typer.Typer) -> None:
         explain: str | None = typer.Option(
             None,
             "--explain",
-            help="Print the fix playbook for a check id (e.g. fernet_drift) and exit.",
+            help=(
+                "Print a check's fix playbook (e.g. fernet_drift), or 'list' "
+                "to see all checks; then exit."
+            ),
         ),
     ) -> None:
         """Diagnose and repair stuck DB/.env states (HF7 / worthless-3907)."""

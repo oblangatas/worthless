@@ -68,16 +68,41 @@ def _stamp_remediation(results: list[CheckResult]) -> None:
             finding.setdefault("remediation", play)
 
 
+def _explain_verdict(play: str) -> str:
+    """The opening clause of a playbook — its plain-language verdict — for the catalog."""
+    flat = play.replace("\n", " ")
+    cut = len(flat)
+    for sep in (" — ", ". "):
+        i = flat.find(sep)
+        if i != -1:
+            cut = min(cut, i)
+    verdict = flat[:cut].strip()
+    if len(verdict) > 50:
+        verdict = verdict[:49].rsplit(" ", 1)[0] + "…"
+    return verdict
+
+
+def _doctor_explain_catalog(*, err: bool = False) -> None:
+    """List every check id with its one-line verdict (the `--explain list` view)."""
+    typer.echo("Worthless doctor checks — `--explain <id>` shows the full fix:", err=err)
+    for cid in sorted(PLAYBOOKS):
+        typer.echo(f"  {cid:<17} {_explain_verdict(PLAYBOOKS[cid])}", err=err)
+
+
 def _doctor_explain(check_id: str) -> None:
-    """Print the static fix playbook for *check_id*, or list known ids.
+    """Print one check's fix playbook, the catalog for `list`/`all`, or
+    the catalog + an error for an unknown id.
 
     AI-less and side-effect-free — no home/keyring/ctx needed, so it works
     even under WORTHLESS_FERNET_IPC_ONLY=1.
     """
+    if check_id in ("list", "all"):
+        _doctor_explain_catalog()
+        return
     play = PLAYBOOKS.get(check_id)
     if play is None:
-        known = ", ".join(sorted(PLAYBOOKS))
-        typer.echo(f"Unknown check '{check_id}'. Known checks: {known}", err=True)
+        typer.echo(f"Unknown check '{check_id}'.", err=True)
+        _doctor_explain_catalog(err=True)
         raise typer.Exit(2)
     typer.echo(play)
 

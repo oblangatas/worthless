@@ -10,7 +10,8 @@ you see one of these symptoms, jump straight to the matching `check_id`
 and run the command shown. JSON consumers (CI, agents) can scrape the
 same data from `worthless doctor --json`. Don't have the failure in front
 of you? `worthless doctor --explain <check_id>` prints a check's fix
-playbook without running anything.
+playbook without running anything — or `worthless doctor --explain list`
+to browse every check at a glance.
 
 ## Decision tree
 
