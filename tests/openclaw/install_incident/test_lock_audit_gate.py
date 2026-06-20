@@ -1202,6 +1202,17 @@ class TestSanitiseForMessage:
         """BOM (U+FEFF) is stripped."""
         assert sanitise_for_message("﻿path/to/file") == "path/to/file"
 
+    def test_line_paragraph_separators_stripped(self) -> None:
+        """Unicode line/paragraph separators (U+2028/U+2029) are stripped.
+
+        These are legal in filenames on APFS/ext4 but render as line breaks in
+        many LLM and terminal contexts — a crafted filename could otherwise
+        inject a new instruction line into the pasted AI fix prompt.
+        """
+        ls = " "  # LINE SEPARATOR
+        ps = " "  # PARAGRAPH SEPARATOR
+        assert sanitise_for_message(f"a{ls}b{ps}c") == "abc"
+
     def test_clean_string_unchanged(self) -> None:
         """Normal ASCII strings pass through unchanged."""
         s = "/home/user/.openclaw/models.json"

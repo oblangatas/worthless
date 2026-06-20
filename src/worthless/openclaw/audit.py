@@ -76,6 +76,7 @@ _SANITISE_RE = re.compile(
     # (Bandit B602, Semgrep bidi finding).
     "[\x00-\x1f\x7f\x80-\x9f"
     "\u200b-\u200f"  # zero-width space, ZWNJ, ZWJ, LRM, RLM
+    "\u2028-\u2029"  # LINE SEPARATOR, PARAGRAPH SEPARATOR
     "\u202a-\u202e"  # LRE, RLE, PDF, LRO, RLO
     "\u2066-\u2069"  # LRI, RLI, FSI, PDI
     "\ufeff"  # BOM
