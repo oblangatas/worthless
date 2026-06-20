@@ -74,7 +74,7 @@ more-itertools==11.0.2
     # via
     #   jaraco-classes
     #   jaraco-functools
-msgpack==1.1.2
+msgpack==1.2.1
     # via worthless
 psutil==7.2.2
     # via worthless
