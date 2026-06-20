@@ -116,6 +116,16 @@ CREATE TABLE IF NOT EXISTS pending_charges (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Decoy tripwire (WOR-640): HMACs of shard-A values that have been RETIRED
+-- (invalidated when their .env was unlocked). The proxy 401s any Bearer whose
+-- HMAC is here, catching a stolen old .env replayed after rotation. Standalone
+-- table — a retired decoy must outlive the enrollment row it came from, and the
+-- currently-active shard-A must NEVER be recorded (it is the legitimate bearer).
+CREATE TABLE IF NOT EXISTS retired_decoys (
+    decoy_hash TEXT PRIMARY KEY,
+    retired_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_spend_log_alias ON spend_log (key_alias);
 CREATE INDEX IF NOT EXISTS idx_spend_log_alias_created ON spend_log (key_alias, created_at);
 CREATE INDEX IF NOT EXISTS idx_enrollments_alias ON enrollments (key_alias);

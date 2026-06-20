@@ -28,6 +28,7 @@ Marked ``user_flow`` so the default test sweep skips it.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -131,6 +132,20 @@ def test_full_dogfood_lock_break_doctor_recover(
     assert "worthless doctor --fix" in diag_lower, (
         f"doctor must name the recovery command in its own output:\n{doctor_diag.output}"
     )
+
+    # Step 6b — doctor --json (WOR-753): the broken row now ships its fix.
+    # Real-journey dogfood of the remediation field — not a seeded unit.
+    json_runner = CliRunner(mix_stderr=False)
+    doctor_json = json_runner.invoke(app, ["doctor", "--json"], env=cli_env)
+    assert doctor_json.exit_code == 0, f"doctor --json failed:\n{doctor_json.output}"
+    payload = json.loads(doctor_json.stdout)
+    failing = [c for c in payload["checks"] if c["status"] in ("warn", "error")]
+    assert failing, f"broken state must surface a failing check:\n{doctor_json.stdout}"
+    for check in failing:
+        for finding in check["findings"]:
+            assert finding.get("remediation"), (
+                f"{check['check_id']} finding carries no fix command:\n{finding}"
+            )
 
     # Step 7 — doctor --fix --yes: purge
     doctor_fix = runner.invoke(app, ["doctor", "--fix", "--yes"], env=cli_env)

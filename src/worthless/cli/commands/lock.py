@@ -7,6 +7,7 @@ import hashlib
 import logging
 import os
 import re
+import signal
 import stat
 import sys
 import time
@@ -598,27 +599,13 @@ async def _pass1_db_writes(
                     provider=provider,
                     prior_record=db_shard.oc_original_api_key_json,
                 )
-                # INSERT OR REPLACE keeps shard_a_enc in sync with the auth token
-                # written to openclaw.json.  INSERT OR IGNORE would leave the old
-                # shard_b in DB on re-lock, causing XOR reconstruction to fail permanently.
-                await repo.upsert_locked_shard(
-                    alias,
-                    stored_decrypted,
-                    prefix=db_shard.prefix,
-                    charset=db_shard.charset,
-                    base_url=db_shard.base_url or upstream_base_url,
-                    oc_original_api_key_json=oc_capture_record,
-                    oc_rollback_mac=oc_capture_mac,
-                )
-                await repo.add_enrollment(
-                    alias, var_name=var_name, env_path=env_str, original_mode=original_mode
-                )
-                await _delete_superseded_location_enrollments(
-                    repo,
-                    alias=alias,
-                    var_name=var_name,
-                    env_path=env_str,
-                )
+                # WOR-646 Part 2: record the planned update BEFORE any DB write,
+                # then commit the in-place shard UPDATE + enrollment as ONE
+                # transaction. An interrupt before the commit rolls the UPDATE
+                # back wholesale (clean); after it, the row is already in
+                # ``planned`` for the unwind. The upsert is ON CONFLICT DO UPDATE
+                # (NOT INSERT OR REPLACE) so sibling enrollments aren't
+                # CASCADE-wiped; INSERT OR IGNORE would strand the old shard_b.
                 planned_out.append(
                     _PlannedUpdate(
                         alias=alias,
@@ -634,6 +621,25 @@ async def _pass1_db_writes(
                         was_fresh_enroll=False,
                         base_url_var=base_url_var,
                     )
+                )
+                await repo.upsert_locked_shard_and_enroll(
+                    alias,
+                    stored_decrypted,
+                    var_name=var_name,
+                    env_path=env_str,
+                    prefix=db_shard.prefix,
+                    charset=db_shard.charset,
+                    base_url=db_shard.base_url or upstream_base_url,
+                    original_mode=original_mode,
+                    write_config=False,
+                    oc_original_api_key_json=oc_capture_record,
+                    oc_rollback_mac=oc_capture_mac,
+                )
+                await _delete_superseded_location_enrollments(
+                    repo,
+                    alias=alias,
+                    var_name=var_name,
+                    env_path=env_str,
                 )
             finally:
                 zero_buf(verify_payload)
@@ -668,30 +674,12 @@ async def _pass1_db_writes(
                 provider=provider,
                 prior_record=None,
             )
-            # store_enrolled() handles enrollment rows; upsert_locked_shard()
-            # writes the shards row with shard_a_enc included from the first lock.
-            await repo.upsert_locked_shard(
-                alias,
-                stored,
-                prefix=sr.prefix,
-                charset=sr.charset,
-                base_url=upstream_base_url,
-                oc_original_api_key_json=oc_capture_record,
-                oc_rollback_mac=oc_capture_mac,
-            )
-            await repo.store_enrolled(
-                alias,
-                stored,
-                var_name=var_name,
-                env_path=env_str,
-                token_budget_daily=token_budget_daily,
-                prefix=sr.prefix,
-                charset=sr.charset,
-                base_url=upstream_base_url,
-                original_mode=original_mode,
-                oc_original_api_key_json=oc_capture_record,
-                oc_rollback_mac=oc_capture_mac,
-            )
+            # WOR-646 Part 2: record the planned update BEFORE the DB write, then
+            # write the shard + enrollment (+ config) as ONE atomic transaction.
+            # An interrupt before the commit leaves no row; after it, the row is
+            # already in ``planned`` for the unwind. Closes the orphan-shard
+            # window the prior two-commit sequence (upsert_locked_shard then
+            # store_enrolled) exposed under a real SIGINT.
             planned_out.append(
                 _PlannedUpdate(
                     alias=alias,
@@ -707,6 +695,20 @@ async def _pass1_db_writes(
                     was_fresh_enroll=True,
                     base_url_var=base_url_var,
                 )
+            )
+            await repo.upsert_locked_shard_and_enroll(
+                alias,
+                stored,
+                var_name=var_name,
+                env_path=env_str,
+                prefix=sr.prefix,
+                charset=sr.charset,
+                base_url=upstream_base_url,
+                original_mode=original_mode,
+                token_budget_daily=token_budget_daily,
+                write_config=True,
+                oc_original_api_key_json=oc_capture_record,
+                oc_rollback_mac=oc_capture_mac,
             )
             await _delete_superseded_location_enrollments(
                 repo,
@@ -1758,6 +1760,72 @@ def _lock_keys(
                     )
 
             planned: list[_PlannedUpdate] = []
+
+            # WOR-646: arm SIGINT/SIGTERM BEFORE Pass-1's first DB write so an
+            # interrupt mid-lock unwinds the rows it already created instead of
+            # orphaning them. We use the asyncio-native ``add_signal_handler``
+            # (NOT ``signal.signal``) because we're inside ``asyncio.run``: a
+            # C-level handler would race the loop's wakeup fd and the
+            # cancellation wouldn't be seen until an unrelated wakeup — the same
+            # reason ``sidecar/__main__.py`` uses ``add_signal_handler``. The
+            # handler cancels THIS task, so a ``CancelledError`` surfaces at the
+            # next ``await`` inside the try below and is caught alongside
+            # ordinary failures, routing through ``_compensating_unwind``.
+            #
+            # On 3.11+ ``asyncio.Runner`` installs its own SIGINT handler; our
+            # ``add_signal_handler`` cleanly overrides it for the lock window
+            # and never touches SIGTERM (which the Runner ignores) — so this is
+            # the only uniform SIGINT+SIGTERM path across 3.10–3.13.
+            loop = asyncio.get_running_loop()
+            this_task = asyncio.current_task()
+            installed_signals: list[int] = []
+            interrupted = False
+
+            def _request_unwind() -> None:
+                # One-shot: cancel on the FIRST signal only. The handler stays
+                # installed (but inert) through the rollback below, so a mashed
+                # Ctrl-C lands here as a no-op instead of re-cancelling the task
+                # — or, worse, hitting the default SIGINT disposition that
+                # ``remove_signal_handler`` would restore and raising
+                # KeyboardInterrupt mid-unwind, orphaning the rows we're
+                # deleting. Disarm happens only in ``finally``.
+                nonlocal interrupted
+                if interrupted or this_task is None:
+                    return
+                interrupted = True
+                this_task.cancel()
+
+            def _disarm_signals() -> None:
+                # Idempotent: pop so calling from both the except clause AND the
+                # finally (or a partial install) is a safe no-op the second time.
+                while installed_signals:
+                    sig = installed_signals.pop()
+                    try:
+                        loop.remove_signal_handler(sig)
+                    except (NotImplementedError, RuntimeError, ValueError):
+                        pass
+
+            for _sig in (signal.SIGINT, signal.SIGTERM):
+                try:
+                    loop.add_signal_handler(_sig, _request_unwind)
+                except (NotImplementedError, RuntimeError):
+                    # Signal-driven cancellation is unavailable here:
+                    #   * Windows ProactorEventLoop (NotImplementedError), or
+                    #   * a non-main-thread event loop (RuntimeError) — e.g. the
+                    #     MCP ``worthless_lock`` tool runs ``_lock_keys`` via
+                    #     ``run_in_executor`` (mcp/server.py).
+                    # Python delivers SIGINT/SIGTERM ONLY to the process main
+                    # thread, so a worker-thread lock receives NO interrupt at all
+                    # — it is NOT true that "default SIGINT → KeyboardInterrupt
+                    # still applies" off the main thread. On these paths
+                    # crash-safety rests on the atomic Pass-1 transaction
+                    # (WOR-646 Part 2), not the signal handler. Real mid-lock
+                    # interrupt safety for the MCP path is tracked in worthless-dqzj.
+                    # Record only the signals that actually installed so cleanup
+                    # can't leak a handler when one of the two raises.
+                    continue
+                installed_signals.append(_sig)
+
             try:
                 if not quiet:
                     # HF2 UX: name the keys so the user knows exactly which env
@@ -1793,7 +1861,19 @@ def _lock_keys(
                 return _LockResult(
                     total=len(planned), fresh_count=fresh_count, openclaw_exit=openclaw_exit
                 )
-            except Exception:
+            except (Exception, KeyboardInterrupt, asyncio.CancelledError) as exc:
+                # The signal handler is one-shot and stays installed here, so the
+                # rollback below runs uninterrupted by a mashed Ctrl-C; ``finally``
+                # disarms it. The interrupt types are caught EXPLICITLY (not a
+                # bare ``except BaseException``) so ``SystemExit`` keeps
+                # propagating. ``typer.Exit`` is a ``RuntimeError`` (an
+                # ``Exception``), so — exactly as before this change — it is
+                # caught and DOES unwind: the pre-existing post-flight recovery
+                # contract (``_openclaw_audit_postflight`` rewinds the DB rows
+                # after a ``.env`` commit for a recoverable re-lock). The
+                # ``isinstance`` guard below converts ONLY a genuine signal
+                # cancellation to ``KeyboardInterrupt``, leaving other exit codes
+                # (``typer.Exit`` 73/87, ``WorthlessError``) intact.
                 if planned:
                     unwind_errors = await _compensating_unwind(repo, planned)
                     if unwind_errors:
@@ -1801,8 +1881,17 @@ def _lock_keys(
                             f"Database may contain {len(unwind_errors)} stale row(s); "
                             "run `worthless unlock --all` to reconcile."
                         )
+                if isinstance(exc, asyncio.CancelledError):
+                    # Surface the signal-driven cancellation as a conventional
+                    # interrupt so the CLI exits cleanly instead of dumping an
+                    # asyncio ``CancelledError`` traceback — ``error_boundary``
+                    # handles ``Exception`` but not ``BaseException``.
+                    raise KeyboardInterrupt from None
                 raise
             finally:
+                # Idempotent backstop: removes handlers on the paths the except
+                # clause never runs (success, or an uncaught ``typer.Exit``).
+                _disarm_signals()
                 for p in planned:
                     p.zero()
 

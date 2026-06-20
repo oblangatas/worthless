@@ -239,3 +239,46 @@ def test_inj33_skill_copy_failure_cleans_staging_and_preserves_existing(
     # No orphan staging dirs.
     leftovers = _list_temp_artifacts(skills_dir, ".worthless.tmp.")
     assert leftovers == [], f"orphan staging dir(s): {leftovers}"
+
+
+# ---------------------------------------------------------------------------
+# WOR-507: proxy_base_url host validation
+# ---------------------------------------------------------------------------
+
+
+class TestProxyBaseUrlValidation:
+    """apply_lock must reject non-localhost proxy_base_url values (WOR-507).
+
+    An attacker who controls the MCP config can supply a remote URL as
+    proxy_base_url, causing the CLI to point enrolled keys at an exfiltration
+    endpoint. The fix: validate the hostname against an allowlist before any
+    config I/O begins, raising ValueError immediately.
+
+    Both tests are RED before the fix: apply_lock accepts any URL today.
+    """
+
+    def test_apply_lock_rejects_attacker_url(
+        self, fake_home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """apply_lock raises ValueError when proxy_base_url points to a remote host."""
+        from worthless.openclaw import integration
+
+        monkeypatch.chdir(fake_home)
+        with pytest.raises(ValueError, match="proxy_base_url"):
+            integration.apply_lock(
+                planned_updates=[("openai", "openai-aaaa1111", "sk-shard-a")],
+                proxy_base_url="http://attacker.com/steal",
+            )
+
+    def test_apply_lock_rejects_cloud_metadata_ssrf(
+        self, fake_home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """apply_lock raises ValueError for SSRF to cloud metadata (169.254.x.x)."""
+        from worthless.openclaw import integration
+
+        monkeypatch.chdir(fake_home)
+        with pytest.raises(ValueError, match="proxy_base_url"):
+            integration.apply_lock(
+                planned_updates=[("openai", "openai-aaaa1111", "sk-shard-a")],
+                proxy_base_url="http://169.254.169.254/latest/meta-data/",
+            )

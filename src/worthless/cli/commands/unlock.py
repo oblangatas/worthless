@@ -174,6 +174,11 @@ class _PlannedRestore:
     # MAC-bound source of truth); Stage A parses it from there.
     oc_original_api_key_json: str | None = None
     oc_rollback_mac: str | None = None
+    # WOR-640: the inert shard-A being retired by this unlock. Captured pass-1
+    # (while live), recorded into the decoy tripwire at pass-3 (after the .env
+    # is safely restored) so an aborted unlock never retires a still-active
+    # value. ponytail: shard-A is the inert half — plaintext in .env by design.
+    shard_a_value: str | None = field(default=None, repr=False)
 
     def zero(self) -> None:
         # Per CodeRabbit nitpick: reuse the imported `zero_buf` helper
@@ -236,6 +241,9 @@ async def _pass1_reconstruct(
                     # G5-C: dropped the dead third element (oc_original_base_url).
                     oc_original_api_key_json=encrypted.oc_original_api_key_json,
                     oc_rollback_mac=encrypted.oc_rollback_mac,
+                    # WOR-640: snapshot the inert shard-A before it is zeroed so
+                    # pass-3 can retire it into the decoy tripwire.
+                    shard_a_value=shard_a.decode("utf-8"),
                 )
             )
         finally:
@@ -286,6 +294,14 @@ async def _pass3_db_cleanup(
         await repo.delete_enrollment(p.alias, enrollment_env)
         remaining = [e for e in remaining if e.env_path != enrollment_env]
         if not remaining:
+            # WOR-640: the shard-A is invalidated only when its LAST enrollment
+            # is gone (the shard row is deleted just below). One alias can be
+            # enrolled in several .env files, all sharing the same shard-A —
+            # retiring it while another .env still uses it would 401 that live
+            # traffic. Done post-.env-restore so an aborted unlock never retires
+            # a still-active value.
+            if p.shard_a_value is not None:
+                await repo.record_retired_decoy(p.shard_a_value)
             (home.shard_a_dir / p.alias).unlink(missing_ok=True)
             await repo.delete_enrolled(p.alias)
 

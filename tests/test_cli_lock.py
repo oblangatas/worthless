@@ -1036,14 +1036,17 @@ class TestLockCommand:
         # Capture env_b pre-content (exactly the snapshot we expect restored).
         original_content = env_b.read_text()
 
-        # Sabotage enrollment (step 3) so step 1 (key) and step 2 (BASE_URL)
-        # are already on disk when the failure fires.
+        # Sabotage the atomic Pass-1 write (WOR-646 Part 2 folded the shard +
+        # enrollment into one transaction): the re-lock fails before `.env` is
+        # rewritten, so the compensating unwind must leave env_b byte-identical.
         from worthless.storage import repository as repo_mod
 
         async def _boom_on_enrollment(self, *args, **kwargs):
-            raise RuntimeError("db write failed after BASE_URL was persisted")
+            raise RuntimeError("db write failed during atomic Pass-1")
 
-        monkeypatch.setattr(repo_mod.ShardRepository, "add_enrollment", _boom_on_enrollment)
+        monkeypatch.setattr(
+            repo_mod.ShardRepository, "upsert_locked_shard_and_enroll", _boom_on_enrollment
+        )
 
         r2 = runner.invoke(app, ["lock", "--env", str(env_b)], env=env_vars)
         assert r2.exit_code == 1, r2.output
@@ -1209,13 +1212,13 @@ class TestLockErrorBranches:
     def test_lock_db_write_failure_exits_clean(
         self, home_dir: WorthlessHome, env_file: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """sqlite3.DatabaseError during store_enrolled -> exit_code=1 with WRTLS."""
+        """sqlite3.DatabaseError during the atomic Pass-1 write -> exit_code=1 with WRTLS."""
 
         async def _boom(self, *args, **kwargs):
             raise sqlite3.DatabaseError("disk I/O error")
 
         monkeypatch.setattr(
-            "worthless.storage.repository.ShardRepository.store_enrolled",
+            "worthless.storage.repository.ShardRepository.upsert_locked_shard_and_enroll",
             _boom,
         )
 

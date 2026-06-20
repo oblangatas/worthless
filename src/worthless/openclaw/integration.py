@@ -25,6 +25,7 @@ Predicate" and §"Failure modes" rows F01–F04, F36.
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import json
 import os
 import re
@@ -1195,6 +1196,41 @@ def _apply_lock_rollback(
     providers_set.clear()
 
 
+_ALLOWED_PROXY_HOSTS: frozenset[str] = frozenset(
+    # "proxy" is the worthless proxy's Docker Compose service name — OpenClaw
+    # reaches it over the internal network as http://proxy:8787 (see
+    # deploy/docker-compose.yml). A fixed internal hostname, safe like
+    # host.docker.internal.
+    {"127.0.0.1", "localhost", "::1", "host.docker.internal", "proxy"}
+)
+# Docker's default ``docker0`` bridge gateway lives in 172.17.0.0/16 — the
+# address _resolve_proxy_base_url() emits when OpenClaw runs in a container.
+# Scoped to the default-bridge /16 (not the full RFC-1918 172.16.0.0/12) so an
+# explicit override can't redirect to arbitrary private-range hosts.
+_DOCKER_BRIDGE_CIDR = ipaddress.ip_network("172.17.0.0/16")
+
+
+def _validate_proxy_base_url(url: str) -> None:
+    """Raise ValueError if *url* does not resolve to a local proxy endpoint.
+
+    Rejects remote hosts to prevent SSRF / key exfiltration via a tampered
+    MCP config. Allows localhost aliases and the Docker default-bridge gateway
+    range (172.17.0.0/16). Only applied to explicit caller-supplied overrides;
+    the auto-resolved URL from _resolve_proxy_base_url() bypasses this check.
+    """
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    try:
+        in_docker_bridge = ipaddress.ip_address(host) in _DOCKER_BRIDGE_CIDR
+    except ValueError:
+        in_docker_bridge = False
+    if parts.scheme != "http" or (host not in _ALLOWED_PROXY_HOSTS and not in_docker_bridge):
+        raise ValueError(
+            f"proxy_base_url must point to a local proxy endpoint "
+            f"(allowed hosts: {sorted(_ALLOWED_PROXY_HOSTS)} or 172.17.0.0/16); got: {url!r}"
+        )
+
+
 def preview_unrecognized(
     planned_updates: list[tuple[str, str, str]],
     *,
@@ -1260,6 +1296,9 @@ def apply_lock(
     Spec: ``engineering/research/openclaw/WOR-431-phase-2-spec.md``
     §"Phase 2.b" / §"`apply_lock()` contract".
     """
+    if proxy_base_url is not None:
+        _validate_proxy_base_url(proxy_base_url)
+
     # Resolve the proxy base URL here (not at import time) so the Docker
     # probe runs only when apply_lock is actually called.  Callers may
     # override for tests or custom proxy ports.
