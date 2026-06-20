@@ -1145,7 +1145,11 @@ def _apply_lock_rollback(
 
 
 _ALLOWED_PROXY_HOSTS: frozenset[str] = frozenset(
-    {"127.0.0.1", "localhost", "::1", "host.docker.internal"}
+    # "proxy" is the worthless proxy's Docker Compose service name — OpenClaw
+    # reaches it over the internal network as http://proxy:8787 (see
+    # deploy/docker-compose.yml). A fixed internal hostname, safe like
+    # host.docker.internal.
+    {"127.0.0.1", "localhost", "::1", "host.docker.internal", "proxy"}
 )
 # Docker's default ``docker0`` bridge gateway lives in 172.17.0.0/16 — the
 # address _resolve_proxy_base_url() emits when OpenClaw runs in a container.
