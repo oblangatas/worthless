@@ -886,97 +886,6 @@ def _classify_config_state(
     return "present"
 
 
-@dataclass(frozen=True)
-class LockPlan:
-    """Collect-then-decide representation of an ``apply_lock`` operation.
-
-    Built by :func:`build_lock_plan` and consumed by both ``--dry-run``
-    (display only) and the live write path (execute).  Having a single
-    function that produces this struct guarantees the two paths can never
-    diverge in their classification logic.
-
-    ``original_config`` is the config dict read *before* any writes.  The
-    live path stores this in :attr:`OpenclawApplyResult.original_config_snapshot`
-    so a caller can call :func:`rollback_config` on failure.
-    """
-
-    config_path: Path | None
-    config_state: Literal["missing", "unreadable", "present"]
-    providers_to_add: tuple[str, ...]
-    providers_to_skip: tuple[tuple[str, str], ...]
-    skill_to_install: bool
-    original_config: dict | None
-
-    def to_dict(self) -> dict:
-        """Return a JSON-serialisable representation for ``--dry-run`` output."""
-        return {
-            "config_path": str(self.config_path) if self.config_path else None,
-            "config_state": self.config_state,
-            "providers_to_add": list(self.providers_to_add),
-            "providers_to_skip": [list(p) for p in self.providers_to_skip],
-            "skill_to_install": self.skill_to_install,
-        }
-
-
-def build_lock_plan(
-    state: IntegrationState,
-    planned_updates: list[tuple[str, str, str]],
-    *,
-    proxy_base_url: str,
-) -> LockPlan:
-    """Return a :class:`LockPlan` without performing any writes.
-
-    Pure function used by both ``--dry-run`` (display) and the live path
-    (execute) so the two can never diverge in their classification logic.
-    """
-    config_path = _resolve_active_config_path(state, state.home_dir)
-    config_state = _classify_config_state(config_path)
-
-    if config_state == "unreadable":
-        return LockPlan(
-            config_path=config_path,
-            config_state="unreadable",
-            providers_to_add=(),
-            providers_to_skip=(),
-            skill_to_install=False,
-            original_config=None,
-        )
-
-    # Read the existing config once (for conflict detection + snapshot).
-    original_config: dict | None = None
-    if config_state == "present":
-        try:
-            original_config = _config_mod.read_config(config_path)
-        except Exception:
-            original_config = None
-
-    providers_to_add: list[str] = []
-    providers_to_skip: list[tuple[str, str]] = []
-
-    for provider, _alias, _shard_a in planned_updates:
-        provider_name = f"worthless-{provider}"
-        existing_entry = (
-            (original_config or {}).get("models", {}).get("providers", {}).get(provider_name)
-        )
-        if existing_entry is not None:
-            existing_url = existing_entry.get("baseUrl", "")
-            if existing_url and not _is_proxy_url(existing_url, proxy_base_url):
-                providers_to_skip.append((provider_name, "provider_conflict"))
-                continue
-        providers_to_add.append(provider_name)
-
-    skill_to_install = state.workspace_path is not None
-
-    return LockPlan(
-        config_path=config_path,
-        config_state=config_state,
-        providers_to_add=tuple(providers_to_add),
-        providers_to_skip=tuple(providers_to_skip),
-        skill_to_install=skill_to_install,
-        original_config=original_config,
-    )
-
-
 def rollback_config(config_path: Path | None, original_config: dict | None) -> None:
     """Atomically restore ``config_path`` to ``original_config``.
 
@@ -1768,8 +1677,9 @@ def health_check(
     """Check provider-wiring health against the live ``openclaw.json``.
 
     Reads ``openclaw.json`` once per provider (inside Phase 1's flock) and
-    compares each ``worthless-<provider>`` entry's ``baseUrl`` against the
-    expected URL for the current proxy host.
+    compares each provider's entry ``baseUrl`` against the expected URL for
+    the current proxy host. (WOR-621 F1: the entry is the bare provider name,
+    e.g. ``openai`` — not a ``worthless-<provider>`` decoy.)
 
     Used by ``worthless doctor`` (Phase 2.d) to surface drift without
     modifying any files. Pure read path — no writes, no network.
