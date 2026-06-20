@@ -261,3 +261,184 @@ def test_proxy_is_load_bearing_after_lock(loaded_stack):
     back_turn = _route(oc)
     assert back_turn.returncode == 0, f"agent turn failed after restart: {back_turn.stderr[-400:]}"
     assert len(_captured(mock_port)) >= 1, "proxy did not resume routing after restart"
+
+
+# --------------------------------------------------------------------------- #
+# WOR-650 — a config produced by REAL ``worthless lock --adopt`` of an
+# UNRECOGNIZED proxy entry must not just be schema-valid (proven in
+# test_adopt_recognition_docker.py) but actually ROUTE. We seed a foreign
+# proxy-shaped entry in the proxy container's own ~/.openclaw, run the real
+# adopt flow (with WORTHLESS_PROXY_HOST so the rewritten baseUrl is reachable
+# across the docker network), copy the ADOPTED config into a real OpenClaw
+# container, and drive a real agent turn — asserting the mock upstream sees the
+# reconstructed real key. "Same code so it routes" proven, not assumed.
+# --------------------------------------------------------------------------- #
+@pytest.fixture(scope="module")
+def adopted_stack():
+    project = f"wor650-{uuid.uuid4().hex[:8]}"
+    network = f"{project}_openclaw-net"
+    oc = f"{project}-openclaw-driver"
+    proxy = f"{project}-worthless-proxy-1"
+    mock = f"{project}-mock-upstream-1"
+    fake_key = fake_openai_key()
+    foreign = {
+        "gateway": {"port": 18789},
+        "agents": {"defaults": {"model": {"primary": _MODEL}}},
+        "models": {
+            "providers": {
+                "openai": {
+                    # proxy-shaped (same host:port lock will resolve) but an
+                    # alias this machine never created → unrecognized → adopted.
+                    "baseUrl": "http://proxy:8787/openai-foreign-xyz/v1",
+                    "apiKey": "sk-foreign-not-ours",
+                    "api": "openai-completions",
+                    "models": [{"id": "gpt-4o", "name": "gpt-4o"}],
+                }
+            }
+        },
+    }
+    try:
+        _run(
+            ["docker", "compose", "-f", str(COMPOSE_FILE), "-p", project, "up", "-d", "--build"],
+            check=True,
+            timeout=300,
+        )
+        if not wait_healthy(proxy, timeout=120):
+            pytest.fail(
+                f"worthless-proxy did not become healthy.\n{_run(['docker', 'logs', proxy]).stdout}"
+            )
+        mock_port = _host_port(mock, 9999)
+
+        reg = docker_exec(
+            proxy,
+            [
+                "worthless",
+                "providers",
+                "register",
+                "--name",
+                "openai-mock",
+                "--url",
+                "http://mock-upstream:9999/openai/v1",
+                "--protocol",
+                "openai",
+            ],
+        )
+        assert reg.returncode == 0, f"register failed: {reg.stderr}"
+        env = (
+            "OPENAI_API_KEY=" + fake_key + "\nOPENAI_BASE_URL=http://mock-upstream:9999/openai/v1\n"
+        )
+        assert (
+            docker_exec(proxy, ["sh", "-c", f"cat > /tmp/.env << 'EOF'\n{env}\nEOF"]).returncode
+            == 0
+        )  # noqa: S108
+
+        # Seed the UNRECOGNIZED entry in the proxy container's own ~/.openclaw
+        # so lock's integration detects + adopts it.
+        phome = docker_exec(proxy, ["sh", "-c", "echo $HOME"]).stdout.strip()
+        pcfg = f"{phome}/.openclaw/openclaw.json"
+        seed = json.dumps(foreign)
+        assert docker_exec(proxy, ["sh", "-c", f'mkdir -p "{phome}/.openclaw"']).returncode == 0
+        assert (
+            docker_exec(proxy, ["sh", "-c", f"cat > {pcfg} << 'EOF'\n{seed}\nEOF"]).returncode == 0
+        )
+
+        # The real adopt flow. WORTHLESS_PROXY_HOST makes the rewritten baseUrl
+        # the docker-network service name, reachable from the OpenClaw container.
+        lock = _run(
+            [
+                "docker",
+                "exec",
+                "-e",
+                "WORTHLESS_PROXY_HOST=proxy",
+                proxy,
+                "worthless",
+                "lock",
+                "--adopt",
+                "--env",
+                "/tmp/.env",  # noqa: S108
+            ],
+            timeout=180,
+        )
+        # set_provider writes BEFORE bind-confirmation, so the config is
+        # rewritten regardless of the bind verdict — assert on the rewrite.
+        adopted = docker_exec(proxy, ["sh", "-c", f"cat {pcfg}"]).stdout
+        entry = json.loads(adopted)["models"]["providers"]["openai"]
+        assert "foreign" not in entry["baseUrl"], (
+            f"lock --adopt did not rewrite the foreign entry (lock rc={lock.returncode}):\n"
+            f"{entry['baseUrl']}\n{lock.stdout}\n{lock.stderr}"
+        )
+        assert "proxy:8787" in entry["baseUrl"]
+        shard_a = entry["apiKey"]
+        assert shard_a and shard_a != fake_key, "adopted entry doesn't carry shard-A"
+
+        # Boot a real OpenClaw container (its own onboarded config — gateway,
+        # agent state) and transplant the *adopted provider entry* onto it via
+        # `config set`, exactly as loaded_stack does. Overwriting the whole
+        # config file instead clobbers the container's gateway and the agent
+        # falls back to embedded + hangs — so we apply only what lock produced.
+        prov = {k: v for k, v in entry.items() if k != "apiKey"}  # baseUrl, api, models
+        _run(
+            [
+                "docker",
+                "run",
+                "-d",
+                "--name",
+                oc,
+                "--network",
+                network,
+                "-e",
+                "OPENCLAW_ACCEPT_TERMS=yes",
+                "--user",
+                "node",
+                OPENCLAW_IMAGE,
+            ],
+            check=True,
+        )
+        _wait_oc(oc)
+        assert (
+            _oc(
+                oc, "config", "set", "models.providers.openai", json.dumps(prov), "--strict-json"
+            ).returncode
+            == 0
+        )
+        _oc(oc, "config", "set", "models.providers.openai.apiKey", shard_a)
+        _oc(oc, "config", "set", "agents.defaults.model.primary", _MODEL)
+        _run(["docker", "restart", oc], check=True)
+        _wait_oc(oc)
+
+        yield {"oc": oc, "mock_port": mock_port, "fake_key": fake_key, "shard_a": shard_a}
+    finally:
+        _run(["docker", "rm", "-f", oc], timeout=60)
+        _run(
+            [
+                "docker",
+                "compose",
+                "-f",
+                str(COMPOSE_FILE),
+                "-p",
+                project,
+                "down",
+                "-v",
+                "--remove-orphans",
+            ],
+            timeout=90,
+        )
+
+
+def test_adopted_config_routes_through_proxy(adopted_stack):
+    """A real ``lock --adopt`` of an unrecognized entry produces a config that
+    actually routes a real OpenClaw agent turn through the proxy, with the key
+    reconstructed upstream (the load-bearing proof, on the adopt path)."""
+    oc = adopted_stack["oc"]
+    mock_port = adopted_stack["mock_port"]
+    fake_key = adopted_stack["fake_key"]
+    shard_a = adopted_stack["shard_a"]
+
+    _clear(mock_port)
+    turn = _route(oc)
+    assert turn.returncode == 0, f"agent turn on the adopted config failed:\n{turn.stderr[-600:]}"
+    cap = _captured(mock_port)
+    assert len(cap) >= 1, "the ADOPTED config did not route to upstream through the proxy"
+    auths = " ".join(e.get("authorization", "") for e in cap)
+    assert fake_key in auths, "proxy did not reconstruct the real key from the ADOPTED config"
+    assert shard_a not in auths, "shard-A leaked upstream from the adopted config"
