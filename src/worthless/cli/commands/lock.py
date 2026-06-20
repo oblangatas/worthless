@@ -599,27 +599,13 @@ async def _pass1_db_writes(
                     provider=provider,
                     prior_record=db_shard.oc_original_api_key_json,
                 )
-                # INSERT OR REPLACE keeps shard_a_enc in sync with the auth token
-                # written to openclaw.json.  INSERT OR IGNORE would leave the old
-                # shard_b in DB on re-lock, causing XOR reconstruction to fail permanently.
-                await repo.upsert_locked_shard(
-                    alias,
-                    stored_decrypted,
-                    prefix=db_shard.prefix,
-                    charset=db_shard.charset,
-                    base_url=db_shard.base_url or upstream_base_url,
-                    oc_original_api_key_json=oc_capture_record,
-                    oc_rollback_mac=oc_capture_mac,
-                )
-                await repo.add_enrollment(
-                    alias, var_name=var_name, env_path=env_str, original_mode=original_mode
-                )
-                await _delete_superseded_location_enrollments(
-                    repo,
-                    alias=alias,
-                    var_name=var_name,
-                    env_path=env_str,
-                )
+                # WOR-646 Part 2: record the planned update BEFORE any DB write,
+                # then commit the in-place shard UPDATE + enrollment as ONE
+                # transaction. An interrupt before the commit rolls the UPDATE
+                # back wholesale (clean); after it, the row is already in
+                # ``planned`` for the unwind. The upsert is ON CONFLICT DO UPDATE
+                # (NOT INSERT OR REPLACE) so sibling enrollments aren't
+                # CASCADE-wiped; INSERT OR IGNORE would strand the old shard_b.
                 planned_out.append(
                     _PlannedUpdate(
                         alias=alias,
@@ -635,6 +621,25 @@ async def _pass1_db_writes(
                         was_fresh_enroll=False,
                         base_url_var=base_url_var,
                     )
+                )
+                await repo.upsert_locked_shard_and_enroll(
+                    alias,
+                    stored_decrypted,
+                    var_name=var_name,
+                    env_path=env_str,
+                    prefix=db_shard.prefix,
+                    charset=db_shard.charset,
+                    base_url=db_shard.base_url or upstream_base_url,
+                    original_mode=original_mode,
+                    write_config=False,
+                    oc_original_api_key_json=oc_capture_record,
+                    oc_rollback_mac=oc_capture_mac,
+                )
+                await _delete_superseded_location_enrollments(
+                    repo,
+                    alias=alias,
+                    var_name=var_name,
+                    env_path=env_str,
                 )
             finally:
                 zero_buf(verify_payload)
@@ -669,30 +674,12 @@ async def _pass1_db_writes(
                 provider=provider,
                 prior_record=None,
             )
-            # store_enrolled() handles enrollment rows; upsert_locked_shard()
-            # writes the shards row with shard_a_enc included from the first lock.
-            await repo.upsert_locked_shard(
-                alias,
-                stored,
-                prefix=sr.prefix,
-                charset=sr.charset,
-                base_url=upstream_base_url,
-                oc_original_api_key_json=oc_capture_record,
-                oc_rollback_mac=oc_capture_mac,
-            )
-            await repo.store_enrolled(
-                alias,
-                stored,
-                var_name=var_name,
-                env_path=env_str,
-                token_budget_daily=token_budget_daily,
-                prefix=sr.prefix,
-                charset=sr.charset,
-                base_url=upstream_base_url,
-                original_mode=original_mode,
-                oc_original_api_key_json=oc_capture_record,
-                oc_rollback_mac=oc_capture_mac,
-            )
+            # WOR-646 Part 2: record the planned update BEFORE the DB write, then
+            # write the shard + enrollment (+ config) as ONE atomic transaction.
+            # An interrupt before the commit leaves no row; after it, the row is
+            # already in ``planned`` for the unwind. Closes the orphan-shard
+            # window the prior two-commit sequence (upsert_locked_shard then
+            # store_enrolled) exposed under a real SIGINT.
             planned_out.append(
                 _PlannedUpdate(
                     alias=alias,
@@ -708,6 +695,20 @@ async def _pass1_db_writes(
                     was_fresh_enroll=True,
                     base_url_var=base_url_var,
                 )
+            )
+            await repo.upsert_locked_shard_and_enroll(
+                alias,
+                stored,
+                var_name=var_name,
+                env_path=env_str,
+                prefix=sr.prefix,
+                charset=sr.charset,
+                base_url=upstream_base_url,
+                original_mode=original_mode,
+                token_budget_daily=token_budget_daily,
+                write_config=True,
+                oc_original_api_key_json=oc_capture_record,
+                oc_rollback_mac=oc_capture_mac,
             )
             await _delete_superseded_location_enrollments(
                 repo,
@@ -1731,12 +1732,20 @@ def _lock_keys(
                 try:
                     loop.add_signal_handler(_sig, _request_unwind)
                 except (NotImplementedError, RuntimeError):
-                    # Windows ProactorEventLoop or a non-main-thread loop:
-                    # signal-driven cancellation is unavailable. Default
-                    # disposition still applies (SIGINT → KeyboardInterrupt,
-                    # also caught below); SIGTERM falls back to terminate. Record
-                    # only the signals that actually installed so cleanup can't
-                    # leak a handler when one of the two raises.
+                    # Signal-driven cancellation is unavailable here:
+                    #   * Windows ProactorEventLoop (NotImplementedError), or
+                    #   * a non-main-thread event loop (RuntimeError) — e.g. the
+                    #     MCP ``worthless_lock`` tool runs ``_lock_keys`` via
+                    #     ``run_in_executor`` (mcp/server.py).
+                    # Python delivers SIGINT/SIGTERM ONLY to the process main
+                    # thread, so a worker-thread lock receives NO interrupt at all
+                    # — it is NOT true that "default SIGINT → KeyboardInterrupt
+                    # still applies" off the main thread. On these paths
+                    # crash-safety rests on the atomic Pass-1 transaction
+                    # (WOR-646 Part 2), not the signal handler. Real mid-lock
+                    # interrupt safety for the MCP path is tracked in worthless-dqzj.
+                    # Record only the signals that actually installed so cleanup
+                    # can't leak a handler when one of the two raises.
                     continue
                 installed_signals.append(_sig)
 

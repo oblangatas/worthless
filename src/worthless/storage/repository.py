@@ -555,6 +555,116 @@ class ShardRepository:
             )
             await db.commit()
 
+    async def upsert_locked_shard_and_enroll(
+        self,
+        alias: str,
+        shard: StoredShard,
+        *,
+        var_name: str,
+        env_path: str | None,
+        prefix: str,
+        charset: str,
+        base_url: str,
+        original_mode: int | None = None,
+        spend_cap: int | None | _Sentinel = _USE_DEFAULT,
+        token_budget_daily: int | None = None,
+        write_config: bool = True,
+        oc_original_api_key_json: str | None = None,
+        oc_rollback_mac: str | None = None,
+    ) -> None:
+        """WOR-646 Part 2: shard UPSERT + enrollment (+ config) in ONE transaction.
+
+        Pass-1 used to write a key's shard row (``upsert_locked_shard``) and its
+        enrollment row (``store_enrolled`` / ``add_enrollment``) as two separate
+        ``commit()``s on two connections. A SIGINT/cancellation landing between
+        them committed a shard with no enrollment — an orphan the compensating
+        unwind (which only rewinds recorded ``_PlannedUpdate``s) could not see.
+
+        Folding both into a single ``BEGIN IMMEDIATE … COMMIT`` makes the unit
+        atomic: an interrupt before the commit rolls back BOTH rows (clean), and
+        a re-lock's in-place shard UPDATE is reverted wholesale on rollback —
+        no separate prior-row snapshot needed. The caller records the
+        ``_PlannedUpdate`` BEFORE calling this so any committed row is always
+        covered by the unwind.
+
+        ``write_config`` mirrors the prior split: the fresh-enroll path wrote an
+        ``enrollment_config`` row (``store_enrolled``); the re-lock path did not
+        (``add_enrollment``). The shard write is always the ON CONFLICT DO UPDATE
+        upsert so re-lock patches the row in place (NOT INSERT OR REPLACE, which
+        would CASCADE-wipe sibling enrollments).
+
+        Sealing of shard-B happens BEFORE ``BEGIN`` (it may round-trip through
+        the sidecar in IPC mode); the transaction is local-sqlite only.
+        """
+        if prefix is None:
+            raise ValueError(
+                "prefix is required routing metadata — use '' for keys with no prefix."
+            )
+        if charset is None:
+            raise ValueError("charset is required routing metadata.")
+        if base_url is None:
+            raise ValueError("base_url is required routing metadata.")
+
+        shard_b_bytes = memoryview(shard.shard_b).tobytes()
+        if self._ipc is not None:
+            shard_b_enc = await self._ipc.seal(shard_b_bytes)
+        else:
+            fernet = self._get_fernet()
+            shard_b_enc = fernet.encrypt(shard_b_bytes)
+
+        effective_cap: int | None
+        if spend_cap is _USE_DEFAULT:
+            effective_cap = DEFAULT_SPEND_CAP_TOKENS
+        else:
+            effective_cap = spend_cap  # type: ignore[assignment]
+
+        async with self._connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            await db.execute(
+                "INSERT INTO shards "
+                "(key_alias, shard_b_enc, commitment, nonce, provider, prefix, charset, "
+                " base_url, shard_a_enc, oc_original_api_key_json, "
+                " oc_rollback_mac) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?) "
+                "ON CONFLICT(key_alias) DO UPDATE SET "
+                "  shard_b_enc = excluded.shard_b_enc, "
+                "  commitment  = excluded.commitment, "
+                "  nonce       = excluded.nonce, "
+                "  provider    = excluded.provider, "
+                "  prefix      = excluded.prefix, "
+                "  charset     = excluded.charset, "
+                "  base_url    = excluded.base_url, "
+                "  shard_a_enc = NULL, "
+                "  oc_original_api_key_json = excluded.oc_original_api_key_json, "
+                "  oc_rollback_mac          = excluded.oc_rollback_mac",
+                (
+                    alias,
+                    shard_b_enc,
+                    memoryview(shard.commitment).tobytes(),
+                    memoryview(shard.nonce).tobytes(),
+                    shard.provider,
+                    prefix,
+                    charset,
+                    base_url,
+                    oc_original_api_key_json,
+                    oc_rollback_mac,
+                ),
+            )
+            await db.execute(
+                "INSERT OR IGNORE INTO enrollments "
+                "(key_alias, var_name, env_path, original_mode) "
+                "VALUES (?, ?, ?, ?)",
+                (alias, var_name, env_path, _perm_bits(original_mode)),
+            )
+            if write_config:
+                await db.execute(
+                    "INSERT OR IGNORE INTO enrollment_config"
+                    " (key_alias, spend_cap, token_budget_daily)"
+                    " VALUES (?, ?, ?)",
+                    (alias, effective_cap, token_budget_daily),
+                )
+            await db.commit()
+
     async def add_enrollment(
         self,
         alias: str,

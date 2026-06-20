@@ -267,3 +267,110 @@ class TestSignalArmingDegradesGracefully:
         assert len(enrollments) == 2, (
             f"degraded (no-signal) lock did not enroll both keys: {enrollments!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# 5. DETERMINISTIC seam: interrupt the exact commit→record window, 100% of runs
+# ---------------------------------------------------------------------------
+
+
+class TestDeterministicCommitRecordSeam:
+    def test_interrupt_mid_atomic_write_leaves_no_partial(
+        self,
+        home_dir: WorthlessHome,
+        two_key_env: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Interrupt INSIDE the atomic Pass-1 write — it must leave no row at all.
+
+        Part 2 folds a key's shard + enrollment into ONE transaction and records
+        the rollback entry BEFORE issuing it. We fire SIGINT with no intervening
+        yield, so the cancellation is delivered at the first ``await`` inside the
+        atomic write (connect / BEGIN / execute) — mid-transaction, before its
+        single COMMIT. The connection closes without committing, so the key
+        leaves ZERO rows: never the orphaned shard (shard committed, enrollment
+        missing) the pre-Part-2 two-commit sequence produced under a real SIGINT.
+
+        Deterministic: reproduces on 100% of runs (vs the chaos storm's ~3%).
+        """
+        from worthless.storage.repository import ShardRepository
+
+        real_atomic = ShardRepository.upsert_locked_shard_and_enroll
+        fired = {"done": False}
+
+        async def _interrupt_mid_atomic_write(self, *args: object, **kwargs: object):  # noqa: ANN001
+            if not fired["done"]:
+                fired["done"] = True
+                # No yield before the real call: the cancel lands at the first
+                # await INSIDE it — mid-transaction, before the lone COMMIT.
+                os.kill(os.getpid(), signal.SIGINT)
+            return await real_atomic(self, *args, **kwargs)
+
+        monkeypatch.setattr(
+            ShardRepository, "upsert_locked_shard_and_enroll", _interrupt_mid_atomic_write
+        )
+
+        result = runner.invoke(
+            app,
+            ["lock", "--env", str(two_key_env)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+        )
+        assert result.exit_code != 0, result.output
+
+        shard_aliases = {r[0] for r in _shard_rows(home_dir)}
+        enrolled = {e.key_alias for e in asyncio.run(_repo(home_dir).list_enrollments())}
+        # Atomic + record-first ⇒ shards and enrollments move together: no shard
+        # without an enrollment (orphan), no enrollment without a shard.
+        assert shard_aliases == enrolled, (
+            "interrupt mid-atomic-write left a partial state — "
+            f"shards={shard_aliases!r} enrollments={enrolled!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 6. Adversarial surface: when the ROLLBACK ITSELF fails, the user must be told
+#    how to recover (surface-test-audit gap — the only path that prints the
+#    "run `worthless unlock --all`" recovery instruction).
+# ---------------------------------------------------------------------------
+
+
+class TestUnwindFailureWarnsToReconcile:
+    def test_rollback_failure_warns_user_to_run_unlock_all(
+        self,
+        home_dir: WorthlessHome,
+        two_key_env: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Interrupt + the compensating rollback ALSO fails → the user must see the
+        recovery instruction, not be left with stale rows and no guidance.
+
+        Fires SIGINT after Pass-1 (so ``planned`` is populated and the unwind runs),
+        then sabotages ``delete_enrollment`` so ``_compensating_unwind`` accumulates
+        errors and the "Database may contain N stale row(s) … run `worthless unlock
+        --all`" warning fires. This is the only code path that prints that message.
+        """
+        from worthless.storage.repository import ShardRepository
+
+        _inject_signal_after_pass1(monkeypatch, signal.SIGINT)
+
+        async def _delete_boom(self, *args: object, **kwargs: object) -> bool:
+            raise RuntimeError("delete failed during compensating unwind")
+
+        monkeypatch.setattr(ShardRepository, "delete_enrollment", _delete_boom)
+
+        result = runner.invoke(
+            app,
+            ["lock", "--env", str(two_key_env)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+        )
+
+        assert result.exit_code != 0, result.output
+        # print_warning routes through Rich, which soft-wraps at the console width
+        # and can split a token across lines — collapse all whitespace first, then
+        # require the CONTIGUOUS recovery phrase so a future refactor can't satisfy
+        # the check by scattering the two tokens across unrelated messages.
+        normalized = " ".join(result.output.split())
+        assert "stale row(s); run `worthless unlock --all` to reconcile" in normalized, (
+            "after a failed rollback the user was NOT shown the single recovery "
+            f"instruction; output was:\n{result.output}"
+        )
