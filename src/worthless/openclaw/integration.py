@@ -828,8 +828,11 @@ def _is_proxy_url(url: str, proxy_base_url: str) -> bool:
     Without the secondary check the existing entry would be misclassified as
     a third-party conflict and silently skipped, leaving the ``apiKey`` stale.
 
-    Architectural follow-up tracked in WOR-487 — replace the port-based
-    heuristic with an explicit ``managedBy`` marker on each entry.
+    "Is this URL proxy-shaped?" is a *shape* test, not an ownership claim —
+    WOR-650 layers DB-backed recognition on top (parse the alias, look it up
+    in the ``shards`` table) to decide whether a proxy-shaped entry is one
+    Worthless created. (The explicit-marker idea from WOR-487 is impossible —
+    OpenClaw's ``.strict()`` schema rejects unknown keys.)
     """
     if not isinstance(url, str):
         return False
@@ -841,6 +844,42 @@ def _is_proxy_url(url: str, proxy_base_url: str) -> bool:
     if port is None:
         return False
     return re.match(rf"^https?://[^/]*:{port}/", url) is not None
+
+
+# WOR-650 recognition helpers. The alias is parsed from an attacker/
+# user-controllable ``baseUrl``, so the regex is restricted to the real alias
+# charset (junk -> None, never echoed) and any value that reaches a log /
+# event / sentinel is control-char-stripped and length-capped.
+_ALIAS_FROM_BASE_URL_RE = re.compile(r"/([A-Za-z0-9_-]+)/v1(?:/|$)")
+_MAX_ALIAS_LOG_LEN = 64
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f\x1b]")
+
+
+def _alias_from_base_url(base_url: str) -> str | None:
+    """Extract the key alias from a worthless proxy ``baseUrl``.
+
+    ``http://127.0.0.1:8787/openai-stale/v1`` -> ``openai-stale``. Restricted
+    to the worthless alias charset (``[A-Za-z0-9_-]``) so a malicious baseUrl
+    yields ``None`` (no recognition, no echo) rather than arbitrary bytes.
+    Returns ``None`` when the URL does not match.
+    """
+    if not isinstance(base_url, str):
+        return None
+    m = _ALIAS_FROM_BASE_URL_RE.search(base_url)
+    return m.group(1) if m else None
+
+
+def _sanitize_alias_for_log(alias: str) -> str:
+    """Make an alias safe to put in an event detail / stdout / sentinel.
+
+    Strips control + ANSI-escape bytes (terminal-injection defense) and caps
+    length (sentinel / terminal DoS defense). The extraction regex already
+    bounds the charset; this is belt-and-suspenders for any other caller.
+    """
+    cleaned = _CONTROL_CHARS_RE.sub("", alias)
+    if len(cleaned) > _MAX_ALIAS_LOG_LEN:
+        cleaned = cleaned[:_MAX_ALIAS_LOG_LEN] + "…"
+    return cleaned
 
 
 def _classify_config_state(
@@ -938,6 +977,98 @@ def _get_provider_for_lock(
         return None, exc
 
 
+@dataclass(frozen=True)
+class AdoptionPolicy:
+    """WOR-650: how ``apply_lock`` treats an existing OpenClaw provider entry
+    that isn't recognized as one Worthless created on this machine.
+
+    ``managed_aliases`` — the aliases in this machine's ``shards`` DB
+    (``repo.list_keys()``), snapshotted by the caller BEFORE this lock's DB
+    writes. ``None`` = recognition data unavailable (DB unreadable/migrating);
+    treated fail-safe as "not recognized", never silently "recognized".
+
+    ``adopt_unrecognized`` — the consent. True when the user passed ``--adopt``
+    / ``--yes``, ran non-interactively, or confirmed at the prompt. When False,
+    an unrecognized proxy-shaped entry is SKIPPED (left in place), not
+    overwritten.
+
+    NOT a security boundary: after a DB reset it can't tell ours from foreign,
+    so it only chooses inform-vs-silent and skip-vs-write-when-unconsented. No
+    code gates reconstruction on it; a planted entry is neutralized anyway —
+    lock overwrites the baseUrl with Worthless's own proxy URL.
+    """
+
+    managed_aliases: set[str] | None = None
+    adopt_unrecognized: bool = False
+
+
+def _classify_adoption(
+    existing: object,
+    *,
+    provider: str,
+    resolved_proxy_base_url: str,
+    policy: AdoptionPolicy | None,
+) -> tuple[bool, OpenclawIntegrationEvent | None]:
+    """Decide how to treat an existing entry under the adoption policy.
+
+    Returns ``(skip, event)``: ``skip=True`` -> leave the entry, do NOT
+    overwrite (unconsented unrecognized proxy-shaped entry); ``skip=False`` ->
+    overwrite (recognized re-lock, real key, un-parseable, or consented
+    adoption); ``event`` -> an info event to record, or ``None`` for the silent
+    paths. Recognized + real-key paths are byte-identical to pre-WOR-650
+    behavior. The parsed alias is attacker-controllable, so it is sanitized
+    before it enters any event.
+    """
+    if policy is None or not isinstance(existing, dict):
+        return False, None
+    url = existing.get("baseUrl", "")
+    if not isinstance(url, str) or not url or not _is_proxy_url(url, resolved_proxy_base_url):
+        return False, None  # real key / no URL -> overwrite silently
+    alias = _alias_from_base_url(url)
+    if alias is None:
+        return False, None  # un-parseable -> can't name it -> overwrite silently
+    managed = policy.managed_aliases
+    if managed is not None and alias in managed:
+        return False, None  # recognized re-lock -> silent
+    safe = _sanitize_alias_for_log(alias)
+    extra = {"provider": provider, "alias": safe}
+    if managed is None:
+        detail = (
+            f"could not check this machine's records for '{provider}' (alias "
+            f"{safe!r}); proceeding without recognition."
+            if policy.adopt_unrecognized
+            else f"skipped '{provider}': could not check this machine's records "
+            f"(alias {safe!r}). Re-run with --adopt to take it over."
+        )
+        return (not policy.adopt_unrecognized), OpenclawIntegrationEvent(
+            code=OpenclawErrorCode.PROVIDER_RECOGNITION_UNAVAILABLE,
+            level="info",
+            detail=detail,
+            extra=extra,
+        )
+    if policy.adopt_unrecognized:
+        return False, OpenclawIntegrationEvent(
+            code=OpenclawErrorCode.PROVIDER_ADOPTED_UNRECOGNIZED,
+            level="info",
+            detail=(
+                f"re-linking an existing '{provider}' entry (alias {safe!r}) not in "
+                f"this machine's records — likely a synced config, reinstall, or new "
+                f"machine. Routing it through Worthless."
+            ),
+            extra=extra,
+        )
+    return True, OpenclawIntegrationEvent(
+        code=OpenclawErrorCode.PROVIDER_ADOPTION_SKIPPED,
+        level="info",
+        detail=(
+            f"skipped '{provider}': an existing proxy-shaped entry (alias {safe!r}) "
+            f"isn't in this machine's records and wasn't adopted. Re-run with --adopt "
+            f"to take it over."
+        ),
+        extra=extra,
+    )
+
+
 def _apply_lock_write_providers(
     config_path: Path,
     resolved_proxy_base_url: str,
@@ -945,6 +1076,7 @@ def _apply_lock_write_providers(
     events: list[OpenclawIntegrationEvent],
     providers_set: list[str],
     providers_skipped: list[tuple[str, str]],
+    policy: AdoptionPolicy | None = None,
 ) -> bool:
     """Stage A of apply_lock: write each provider entry.
 
@@ -971,12 +1103,23 @@ def _apply_lock_write_providers(
             providers_skipped.append((provider_name, "config_unreadable"))
             continue
 
-        # No conflict-skip here: locking a provider MEANS rewriting its real
-        # entry (which holds the live key the user chose to lock), so a
-        # non-proxy baseUrl is expected and intentionally overwritten. The
-        # original is stashed for restore in F2 (unlock). DB-driven
-        # recognition — so a user's UNRELATED proxy-shaped entry is never
-        # adopted — lands in F3.
+        # WOR-650 F3: DB-backed recognition. Classify the SAME read we are about
+        # to overwrite (TOCTOU-safe — no separate snapshot). Recognized re-locks
+        # and real keys overwrite silently as before; an unrecognized
+        # proxy-shaped entry is adopted-with-notice (consented) or skipped
+        # (unconsented). Never let recognition gate the overwrite of a key the
+        # user explicitly chose to lock.
+        skip_adopt, adopt_event = _classify_adoption(
+            _existing,
+            provider=provider,
+            resolved_proxy_base_url=resolved_proxy_base_url,
+            policy=policy,
+        )
+        if adopt_event is not None:
+            events.append(adopt_event)
+        if skip_adopt:
+            providers_skipped.append((provider_name, "unrecognized_not_adopted"))
+            continue
 
         try:
             _config_mod.set_provider(
@@ -1056,6 +1199,7 @@ def apply_lock(
     planned_updates: list[tuple[str, str, str]],
     *,
     proxy_base_url: str | None = None,
+    adoption_policy: AdoptionPolicy | None = None,
 ) -> OpenclawApplyResult:
     """Wire OpenClaw to route through worthless. Idempotent. Best-effort.
 
@@ -1245,6 +1389,7 @@ def apply_lock(
         events,
         providers_set,
         providers_skipped,
+        adoption_policy,
     )
 
     # ---- Transactional rollback on write failure -------------------------
