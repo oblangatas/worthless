@@ -1213,6 +1213,16 @@ class TestSanitiseForMessage:
         ps = " "  # PARAGRAPH SEPARATOR
         assert sanitise_for_message(f"a{ls}b{ps}c") == "abc"
 
+    def test_word_joiner_and_alm_stripped(self) -> None:
+        """Zero-width WORD JOINER (U+2060) and ARABIC LETTER MARK (U+061C) are stripped.
+
+        Invisible formatting characters in the same family as U+200B-200F — defense
+        in depth against invisible-glyph filename spoofing.
+        """
+        wj = "⁠"  # WORD JOINER
+        alm = "؜"  # ARABIC LETTER MARK
+        assert sanitise_for_message(f"a{wj}b{alm}c") == "abc"
+
     def test_clean_string_unchanged(self) -> None:
         """Normal ASCII strings pass through unchanged."""
         s = "/home/user/.openclaw/models.json"
