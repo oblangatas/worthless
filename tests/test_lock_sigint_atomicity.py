@@ -325,3 +325,52 @@ class TestDeterministicCommitRecordSeam:
             "interrupt mid-atomic-write left a partial state — "
             f"shards={shard_aliases!r} enrollments={enrolled!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# 6. Adversarial surface: when the ROLLBACK ITSELF fails, the user must be told
+#    how to recover (surface-test-audit gap — the only path that prints the
+#    "run `worthless unlock --all`" recovery instruction).
+# ---------------------------------------------------------------------------
+
+
+class TestUnwindFailureWarnsToReconcile:
+    def test_rollback_failure_warns_user_to_run_unlock_all(
+        self,
+        home_dir: WorthlessHome,
+        two_key_env: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Interrupt + the compensating rollback ALSO fails → the user must see the
+        recovery instruction, not be left with stale rows and no guidance.
+
+        Fires SIGINT after Pass-1 (so ``planned`` is populated and the unwind runs),
+        then sabotages ``delete_enrollment`` so ``_compensating_unwind`` accumulates
+        errors and the "Database may contain N stale row(s) … run `worthless unlock
+        --all`" warning fires. This is the only code path that prints that message.
+        """
+        from worthless.storage.repository import ShardRepository
+
+        _inject_signal_after_pass1(monkeypatch, signal.SIGINT)
+
+        async def _delete_boom(self, *args: object, **kwargs: object) -> bool:
+            raise RuntimeError("delete failed during compensating unwind")
+
+        monkeypatch.setattr(ShardRepository, "delete_enrollment", _delete_boom)
+
+        result = runner.invoke(
+            app,
+            ["lock", "--env", str(two_key_env)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+        )
+
+        assert result.exit_code != 0, result.output
+        # print_warning routes through Rich, which soft-wraps at the console width
+        # and can split a token across lines — collapse all whitespace first, then
+        # require the CONTIGUOUS recovery phrase so a future refactor can't satisfy
+        # the check by scattering the two tokens across unrelated messages.
+        normalized = " ".join(result.output.split())
+        assert "stale row(s); run `worthless unlock --all` to reconcile" in normalized, (
+            "after a failed rollback the user was NOT shown the single recovery "
+            f"instruction; output was:\n{result.output}"
+        )
