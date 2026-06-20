@@ -22,12 +22,14 @@ from worthless.cli.app import app
 from worthless.cli.bootstrap import WorthlessHome
 from worthless.cli.code_scanner import CodeFinding
 from worthless.cli.commands.scan import (
+    _format_ai_prompt_block,
     _format_code_findings_human,
+    _format_human,
     _format_lock_block_human,
     _is_test_path,
 )
 from worthless.cli.console import WorthlessConsole
-from worthless.cli.scanner import HardcodedUrlFinding
+from worthless.cli.scanner import HardcodedUrlFinding, ScanFinding
 from tests.helpers import fake_openai_key
 
 _SCAN_FN = "worthless.cli.commands.lock.scan_for_hardcoded_provider_urls"
@@ -570,3 +572,52 @@ class TestFormatLockBlockHuman:
         output = _format_lock_block_human(findings, sanitize=lambda p: "<redacted>")
         assert "<redacted>" in output
         assert "/secret/path" not in output
+
+
+class TestScanOutputSanitisesPaths:
+    """worthless-dmj2: every scan output surface that emits an attacker-influenceable
+    file path strips bidi / separator characters first, so a crafted filename can't
+    spoof terminal output or inject a line into the copy-paste AI prompt.
+    """
+
+    # filename carrying a LINE SEPARATOR (U+2028) and an RLO bidi override (U+202E)
+    _EVIL = f"src/evil{chr(0x2028)}{chr(0x202E)}inject.py"
+
+    def _code_finding(self) -> CodeFinding:
+        return CodeFinding(
+            file=self._EVIL,
+            line=3,
+            column=1,
+            matched_url="https://api.openai.com/v1",
+            provider_name="openai",
+            suggested_env_var="OPENAI_BASE_URL",
+            line_text='x = "https://api.openai.com/v1"',
+        )
+
+    def test_ai_prompt_block_strips_path(self) -> None:
+        out = _format_ai_prompt_block([self._code_finding()])
+        assert chr(0x2028) not in out
+        assert chr(0x202E) not in out
+
+    def test_verbose_findings_strip_path(self) -> None:
+        out = _format_code_findings_human([self._code_finding()])
+        assert chr(0x2028) not in out
+        assert chr(0x202E) not in out
+
+    def test_collapsed_findings_strip_path(self) -> None:
+        out = _format_code_findings_human([self._code_finding()], collapse_tests=True)
+        assert chr(0x2028) not in out
+        assert chr(0x202E) not in out
+
+    def test_key_scan_output_strips_path(self) -> None:
+        evil = ScanFinding(
+            file=self._EVIL,
+            line=3,
+            var_name="OPENAI_API_KEY",
+            provider="openai",
+            is_protected=True,
+            value_preview="sk-****",
+        )
+        out = _format_human([evil])
+        assert chr(0x2028) not in out
+        assert chr(0x202E) not in out
