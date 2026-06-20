@@ -30,7 +30,7 @@ PLAYBOOKS: dict[str, str] = {
         "can't run, point `WORTHLESS_OPENCLAW_BIN` at the openclaw binary.)"
     ),
     "icloud_keychain": (
-        "Your key is safe — this is cleanup. A Fernet key (the secret that encrypts your "
+        "Your key isn't lost — this is cleanup. A Fernet key (the secret that encrypts your "
         "keys) is in iCloud Keychain, so it syncs across your Macs. Run "
         "`worthless doctor --fix` to move it to a local-only entry that won't sync."
     ),
