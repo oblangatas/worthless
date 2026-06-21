@@ -122,7 +122,10 @@ def _validate_in_container(cfg_path: Path) -> tuple[bool, str]:
         )
         r = _run(["docker", "exec", c, "openclaw", "config", "get", "models"], timeout=120)
         out = r.stdout + r.stderr
-        return ("Config invalid" not in out), out
+        # Require the command to actually succeed — otherwise a Docker/OpenClaw
+        # failure whose output lacks "Config invalid" (container died, exec
+        # error) would false-pass the schema guard.
+        return (r.returncode == 0 and "Config invalid" not in out), out
     finally:
         _run(["docker", "rm", "-f", c])
 

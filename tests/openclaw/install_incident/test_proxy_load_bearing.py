@@ -401,8 +401,8 @@ def adopted_stack():
             ).returncode
             == 0
         )
-        _oc(oc, "config", "set", "models.providers.openai.apiKey", shard_a)
-        _oc(oc, "config", "set", "agents.defaults.model.primary", _MODEL)
+        assert _oc(oc, "config", "set", "models.providers.openai.apiKey", shard_a).returncode == 0
+        assert _oc(oc, "config", "set", "agents.defaults.model.primary", _MODEL).returncode == 0
         _run(["docker", "restart", oc], check=True)
         _wait_oc(oc)
 
