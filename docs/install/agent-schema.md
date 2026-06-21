@@ -27,7 +27,7 @@ expectations:
   first_lock_requires_human_interaction: <bool — does the agent need to hand control back to a human>
   subsequent_command_keychain_popups: <int — should be 0>
   proxy_starts_automatically_on_lock: <bool>
-  proxy_survives_reboot: <bool — currently false on every platform>
+  proxy_survives_reboot: <bool — true after `worthless service install` on macOS/Linux; false otherwise>
 proxy:
   url_template: <string with <alias> placeholder>
   port: <int>
@@ -39,7 +39,7 @@ limitations:
 
 | Key | Used in | Purpose | Sub-keys |
 |---|---|---|---|
-| `service_install` | `linux.md` | systemd user-unit text + enable + linger so an agent can fulfill "survive reboot" without inferring from prose. Will also appear in `mac.md` once WOR-174 ships launchd integration. | `unit_path: <string>`, `unit_text: <multiline string — full unit file>`, `enable_commands: <list of shell strings — run all in order>` |
+| `service_install` | `mac.md`, `linux.md` | Managed install via `worthless service install` (preferred). Legacy manual unit copy-paste removed from guides. | `command: <string>`, `verify: <string>`, `uninstall: <string>` |
 | `post_lock_required_step` | `docker.md` | Captures the `127.0.0.1` → `host.docker.internal` `.env` rewrite that today's `worthless lock` doesn't auto-do for containers. | `description: <string>`, `sed_command: <string — runnable as-is>`, `linux_extra: <string — Docker-on-Linux-without-Desktop addendum>` |
 | `other_scenarios` | `docker.md` | Lists alternate Docker scenarios (compose stack, team server) with their container URL overrides. | List of `{id: <string>, container_url_template: <string with <alias> placeholder>}` |
 | `scenario` | `docker.md` | Names the YAML block's default scenario (Scenario A — app in container, worthless on host). | — |

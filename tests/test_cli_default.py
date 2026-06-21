@@ -204,7 +204,7 @@ class TestHappyPaths:
         pid_file.write_text(f"{os.getpid()}\n8787\n")
 
         monkeypatch.setattr(
-            "worthless.cli.default_command.check_pid",
+            "worthless.cli.commands.service.proxy_state.check_pid",
             lambda pid: True,
         )
 

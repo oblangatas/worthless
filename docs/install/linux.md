@@ -115,43 +115,26 @@ SDK snippet. Same on every platform.
 |---|---|---|
 | Close terminal | Proxy keeps running | Nothing |
 | `worthless down` | Proxy stops | `worthless up` |
-| Reboot machine | **Proxy is gone** | `worthless up` |
-| Logout / login | Depends on your session manager — usually proxy dies | `worthless up` |
+| Reboot machine | **Proxy is gone** unless service installed | `worthless service start` or `worthless up` |
+| Logout / login | Proxy dies unless linger enabled | `worthless service install` enables linger |
 
-### Why no auto-start? (the reboot gap)
-
-WOR-175 (Linux systemd user service) ships
-the install/uninstall commands in v1.1. Until then, write your own
-systemd user unit. Copy-paste this into
-`~/.config/systemd/user/worthless-proxy.service` (replace
-`/home/youruser` with your actual `$HOME`):
-
-```ini
-[Unit]
-Description=Worthless local proxy
-After=network.target
-
-[Service]
-ExecStart=/home/youruser/.local/bin/worthless up
-Restart=on-failure
-RestartSec=5s
-
-[Install]
-WantedBy=default.target
-```
-
-Then enable it:
+### Survive reboot (recommended)
 
 ```bash
-systemctl --user daemon-reload
-systemctl --user enable --now worthless-proxy.service
-loginctl enable-linger "$USER"   # so the unit survives logout
+worthless service install    # writes ~/.config/systemd/user/worthless-proxy.service + linger
+worthless service status
 ```
 
-If you don't want a service file (e.g. ephemeral dev machine), the
-fallback is the same shell-rc opt-in pattern — but be aware silently
-auto-spawning daemons from your `.bashrc` is a tradeoff worth knowing
-about, not the recommended path.
+`install` runs `loginctl enable-linger` so the user unit survives
+logout on headless servers. Requires a readable Fernet key at
+`~/.worthless/fernet.key` (default on Linux without DBus).
+
+```bash
+worthless service stop
+worthless service uninstall
+```
+
+Without `service install`, run `worthless up` manually after reboot.
 
 ## 7. Uninstall (manual, until WOR-435 ships)
 
@@ -200,7 +183,9 @@ commands:
   install: "curl -sSL https://worthless.sh | sh"
   verify: "worthless --version"
   first_lock: "worthless"
-  proxy_restart: "worthless up"
+  proxy_restart: "worthless service start"
+  service_install: "worthless service install --yes"
+  service_status: "worthless --json service status"
 expectations:
   install_succeeds_silently: true
   # Servers (no DBus): 0. GNOME/KDE desktop with keyring: 1. Strict YAML
@@ -210,31 +195,16 @@ expectations:
   first_lock_requires_human_interaction: false   # true on GNOME/KDE if keyring is locked
   subsequent_command_keychain_popups: 0
   proxy_starts_automatically_on_lock: true
-  proxy_survives_reboot: false
+  proxy_survives_reboot: true   # after `worthless service install`; false without it
 proxy:
   url_template: "http://127.0.0.1:8787/<alias>/v1"
   port: 8787
 service_install:
-  # Agents must run all three for "survives reboot" — the unit alone isn't enough.
-  unit_path: "~/.config/systemd/user/worthless-proxy.service"
-  unit_text: |
-    [Unit]
-    Description=Worthless local proxy
-    After=network.target
-
-    [Service]
-    ExecStart=%h/.local/bin/worthless up
-    Restart=on-failure
-    RestartSec=5s
-
-    [Install]
-    WantedBy=default.target
-  enable_commands:
-    - "systemctl --user daemon-reload"
-    - "systemctl --user enable --now worthless-proxy.service"
-    - "loginctl enable-linger \"$USER\""   # REQUIRED on headless boxes; without it the unit dies on logout
+  command: "worthless service install --yes"
+  verify: "worthless --json service status"   # expect state=running, healthy=true
+  uninstall: "worthless service uninstall --yes"
 limitations:
-  - "Manual `worthless up` after reboot UNLESS service_install applied — WOR-175 ships managed install/uninstall in v1.1"
+  - "Without service_install, manual `worthless up` after reboot"
   - "service_install is per-user; if app runs as a different user, install worthless under that user too"
   - "On servers with no DBus session, fernet key lives at ~/.worthless/.fernet-key (mode 0600)"
   - "uv tool uninstall doesn't purge keystore — WOR-435"

@@ -68,7 +68,7 @@ Honest list — these are tracked, not unknown.
 
 | Limitation | Tracked as |
 |---|---|
-| Proxy doesn't auto-restart on reboot — you must run `worthless up` after every boot | WOR-174 (macOS launchd) + WOR-175 (Linux systemd), v1.1 |
+| Proxy doesn't auto-restart on reboot unless you run `worthless service install` | Fixed by `worthless service install` (macOS launchd / Linux systemd) |
 | Docker containers can't reach `127.0.0.1:8787` from inside — edit `.env` to use `host.docker.internal:8787` | v1.2 work |
 | `worthless up &` may exit prematurely instead of staying attached | `worthless-n8tj`, v0.3.4 |
 | Stale orphan proxy can confuse `worthless up` PID detection | `worthless-6gkb`, v0.3.4 |

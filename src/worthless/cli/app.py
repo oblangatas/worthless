@@ -131,3 +131,7 @@ register_providers_commands(app)
 from worthless.cli.commands.doctor import register_doctor_commands  # noqa: E402
 
 register_doctor_commands(app)
+
+from worthless.cli.commands.service import register_service_commands  # noqa: E402
+
+register_service_commands(app)

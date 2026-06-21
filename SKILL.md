@@ -29,7 +29,7 @@ metadata:
 Worthless protects API keys in three scenarios:
 
 1. **Local Development**: `worthless wrap` starts an ephemeral proxy and runs your command through it. Lock has already rewritten `*_BASE_URL` in your `.env` to point at the proxy, so your SDK picks it up via dotenv. The proxy reconstructs the real key only when the request passes the rules engine, then cleans up on exit.
-2. **Daemon Mode**: `worthless up` starts a persistent local proxy on port 8787 (configurable) that stays running and protects all enrolled keys.
+2. **Daemon Mode**: `worthless up` starts a persistent local proxy on port 8787 (configurable) that stays running and protects all enrolled keys. On macOS/Linux, `worthless service install` registers the same foreground `worthless up` path with launchd or systemd so it survives logout/reboot.
 3. **CI/CD & Sidecar**: The proxy is designed to run as a sidecar container or process, protecting keys across environments with per-key spending limits and time-window gates.
 
 ### Scope (important for agents)
@@ -318,6 +318,29 @@ Reads the PID file (`~/.worthless/proxy.pid`), sends SIGTERM to the process grou
 - Idempotent: succeeds even if proxy is not running
 - Graceful: gives proxy time to flush logs and close connections
 - Process-tree aware: kills all child processes spawned by the proxy
+
+#### `worthless service [SUBCOMMAND]`
+**Install and manage a persistent proxy via the OS supervisor (macOS launchd / Linux systemd user unit).**
+
+Runs foreground `worthless up` (sidecar-supervised) under a platform unit — not the legacy sidecar-less daemon path. Windows is unsupported (`WRTLS-*` error). If a service is installed but stopped, bare `worthless` hints `worthless service start` instead of spawning a duplicate proxy.
+
+**Subcommands:**
+- `install`: Write unit/plist, enable linger (Linux), start, verify `/healthz`
+- `uninstall`: Stop, disable, remove unit (keys in `~/.worthless/` stay intact)
+- `status`: Install state + proxy health (`--json` for agents)
+- `start` / `stop` / `restart`: Control an installed unit
+- `logs`: Tail service logs (`--follow` / `-f`)
+
+**Examples:**
+```bash
+worthless service install              # interactive confirm
+worthless service install --yes        # non-interactive
+worthless service status --json
+worthless service start
+worthless service logs -f
+```
+
+**Interaction with default command:** Bare `worthless` starts a supervised proxy for the session; `worthless service install` is opt-in persistence (post-lock banner in a future release points here).
 
 #### `worthless revoke [OPTIONS] ALIAS`
 **Wipe an enrolled key (delete shards and all DB records).**

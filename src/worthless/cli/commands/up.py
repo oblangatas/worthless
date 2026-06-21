@@ -37,7 +37,9 @@ from worthless.cli.process import (
     disable_core_dumps,
     fernet_transport,
     finalize_fernet_transport,
+    is_service_managed,
     pid_path,
+    poll_health,
     poll_health_pid,
     prepare_proxy_env,
     proxy_cmd,
@@ -421,7 +423,10 @@ def _supervise_proxy_with_sidecar(
         console=console,
     )
 
-    console.print_success(f"Proxy running on 127.0.0.1:{actual_port} (Ctrl+C to stop)")
+    if is_service_managed():
+        console.print_hint(f"Proxy running on 127.0.0.1:{actual_port} (service-managed)")
+    else:
+        console.print_success(f"Proxy running on 127.0.0.1:{actual_port} (Ctrl+C to stop)")
 
     # Watch both processes. If BOTH die in the same tick, ``proxy.poll()``
     # short-circuits the loop (proxy dead → exit) and we miss attribution
@@ -456,7 +461,8 @@ def _supervise_proxy_with_sidecar(
             "sidecar terminated unexpectedly during session",
         )
 
-    console.print_warning("Proxy stopped.")
+    if not is_service_managed():
+        console.print_warning("Proxy stopped.")
 
 
 def register_up_commands(app: typer.Typer) -> None:
@@ -478,6 +484,19 @@ def register_up_commands(app: typer.Typer) -> None:
         home = get_home()
 
         actual_port = _resolve_port(port)
+
+        # launchd/systemd may invoke ``up`` while a prior instance is still
+        # dying. Exit 0 only when our pidfile points at a live process and
+        # /healthz succeeds — a foreign listener must not short-circuit start.
+        if is_service_managed():
+            pid_file = pid_path(home)
+            existing = read_pid(pid_file) if pid_file.exists() else None
+            if (
+                existing is not None
+                and check_pid(existing[0])
+                and poll_health(actual_port, timeout=2.0)
+            ):
+                return
 
         # Daemon + sidecar IPC handle inheritance is unsolved. Reject
         # early — silently spawning a proxy without a sidecar would break
