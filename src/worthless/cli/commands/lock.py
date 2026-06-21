@@ -1094,7 +1094,10 @@ def _openclaw_proxy_base_url() -> tuple[str, str]:
     the service name, not 127.0.0.1) and the resolved ``--port``.
     """
     proxy_host = os.environ.get("WORTHLESS_PROXY_HOST", "127.0.0.1")
-    return proxy_host, f"http://{proxy_host}:{resolve_port(None)}"
+    # NOSONAR python:S5332 — loopback proxy: the host is constrained to local
+    # endpoints by _validate_proxy_base_url, and only shard-A (inert without
+    # shard-B) ever transits. Matches the suppression on the health-probe URL.
+    return proxy_host, f"http://{proxy_host}:{resolve_port(None)}"  # NOSONAR python:S5332
 
 
 _ADOPTION_EVENT_CODES = frozenset(
