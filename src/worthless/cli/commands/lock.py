@@ -1364,6 +1364,16 @@ def _print_lock_result(
 ) -> None:
     """Emit the post-lock user-facing summary (called only when quiet=False)."""
     if fresh_count or relock_count:
+        # WOR-779: the seatbelt click — lead with a plain verdict (Verdict →
+        # Proof → Next) so the user reads "you're protected" before the
+        # per-key detail. lock locks ALL unprotected keys, so reaching here
+        # means the .env is now worthless to an attacker.
+        total = fresh_count + relock_count
+        total_noun = "key" if total == 1 else "keys"
+        console.print_success(
+            f"🔒 You're protected. {total} {total_noun} locked — a stolen "
+            f"{env_path.name} is now worthless to an attacker."
+        )
         if fresh_count:
             # [OK] text prefix is the accessibility carrier — color/glyph
             # reinforce but are never the sole signal (monochrome, CI logs,
@@ -1386,6 +1396,8 @@ def _print_lock_result(
             console.print_hint(
                 "Next: run `worthless wrap <command>` or `worthless up` for daemon mode"
             )
+        # WOR-779: closure — the "pull anytime" reassurance home.
+        console.print_hint("Check anytime with `worthless status`.")
         _maybe_prompt_code_scan(Path.cwd())
     else:
         console.print_warning("No unprotected API keys found.")
