@@ -13,6 +13,7 @@ import json
 import logging
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -29,6 +30,7 @@ from worthless.proxy.app import (
     _AUTH_BODY,
     _BAD_HEADER_CHARS,
     _extract_alias_and_path,
+    _refresh_decoy_hashes,
     create_app,
 )
 from worthless.proxy.config import DeployMode, ProxySettings
@@ -2361,6 +2363,32 @@ class TestDecoyHashCheck:
 
         # Best-effort: IPC errors must NOT block legitimate traffic
         assert resp.status_code == 200
+
+
+class TestDecoyReload:
+    """worthless-ibw1: the decoy tripwire refreshes after startup, so a key
+    retired mid-session is caught without a proxy restart."""
+
+    async def test_refresh_picks_up_newly_retired_decoy(self) -> None:
+        app = SimpleNamespace(state=SimpleNamespace(decoy_hashes=frozenset()))
+        reader = SimpleNamespace(fetch_decoy_hashes=AsyncMock(return_value=frozenset({"de" * 32})))
+        await _refresh_decoy_hashes(app, reader)
+        assert app.state.decoy_hashes == frozenset({"de" * 32}), (
+            "a decoy added after startup must land in the in-memory tripwire on refresh"
+        )
+
+    async def test_refresh_keeps_old_set_on_db_error(self) -> None:
+        old = frozenset({"ab" * 32})
+        app = SimpleNamespace(state=SimpleNamespace(decoy_hashes=old))
+
+        async def boom() -> frozenset[str]:
+            raise RuntimeError("db gone")
+
+        reader = SimpleNamespace(fetch_decoy_hashes=boom)
+        await _refresh_decoy_hashes(app, reader)  # must not raise
+        assert app.state.decoy_hashes == old, (
+            "a transient fetch error must keep the current set, never blank the tripwire"
+        )
 
 
 class TestBadHeaderCharsCompleteness:
