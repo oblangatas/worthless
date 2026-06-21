@@ -336,7 +336,15 @@ async def _delete_superseded_location_enrollments(
     var_name: str,
     env_path: str,
 ) -> None:
-    """Remove stale enrollments for a var/path after a rotated key is locked."""
+    """Remove stale enrollments for a var/path after a rotated key is locked.
+
+    exx5/WOR-646: each stale alias's enrollment + now-unreferenced shard is
+    removed in ONE atomic transaction (``delete_superseded_enrollment_atomic``),
+    so a SIGINT mid-cleanup on a rotation re-lock can't strand the old alias's
+    ``shards`` row (enrollment gone, shard not). The stale set is computed
+    first; the "any enrollment left for this alias?" check that gates the shard
+    delete runs inside the transaction, not here.
+    """
     enrollments = await repo.list_enrollments()
     stale_aliases = {
         e.key_alias
@@ -344,9 +352,7 @@ async def _delete_superseded_location_enrollments(
         if e.var_name == var_name and e.env_path == env_path and e.key_alias != alias
     }
     for stale_alias in stale_aliases:
-        await repo.delete_enrollment(stale_alias, env_path)
-        if not await repo.list_enrollments(stale_alias):
-            await repo.delete_enrolled(stale_alias)
+        await repo.delete_superseded_enrollment_atomic(stale_alias, env_path=env_path)
 
 
 def _capture_original_mode(env_str: str) -> int | None:
