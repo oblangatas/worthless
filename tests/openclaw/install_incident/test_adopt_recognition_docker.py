@@ -38,15 +38,13 @@ REPO = Path(__file__).resolve().parents[3]
 OC_IMAGE = "ghcr.io/openclaw/openclaw:2026.5.3-1"
 
 
-def _image_present(ref: str) -> bool:
-    return subprocess.run(["docker", "image", "inspect", ref], capture_output=True).returncode == 0
-
-
 pytestmark = [
     pytest.mark.openclaw,
     pytest.mark.docker,
     pytest.mark.skipif(not docker_available(), reason="Docker not available"),
-    pytest.mark.skipif(not _image_present(OC_IMAGE), reason=f"{OC_IMAGE} not present"),
+    # No image-present guard: `docker run` below auto-pulls OC_IMAGE, matching
+    # test_proxy_load_bearing.py. A local-presence skipif made this silently
+    # skip in CI (which never pre-pulls the image) — defeating the CI wiring.
     pytest.mark.timeout(300),
 ]
 
