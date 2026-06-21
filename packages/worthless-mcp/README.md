@@ -1,6 +1,6 @@
 # worthless-mcp
 
-Zero-Python install wrapper for the [Worthless](https://github.com/shacharm2/worthless) MCP server. Thin Node.js shim so Claude Code, Cursor, and Windsurf can auto-install Worthless's MCP tools straight from `.mcp.json` without requiring Python on the host.
+Zero-Python install wrapper for the [Worthless](https://github.com/shacharm2/worthless) MCP server. Thin Node.js shim so AI editors can auto-install Worthless's MCP tools from their MCP config without requiring Python on the host. Verified on Claude Code (`.mcp.json`); Cursor and Windsurf support MCP via their own config paths but are unverified.
 
 ## Install
 

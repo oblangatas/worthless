@@ -9,8 +9,13 @@ description: "Zero-to-working-proxy install guides for macOS, Linux, WSL2, and D
 |---|---|---|
 | **macOS** (Apple Silicon or Intel) | [macOS guide](/install/mac/) | ~2 min on a fast network |
 | **Linux** (Ubuntu / Debian / Alpine) | [Linux guide](/install/linux/) | ~1-2 min on a fast network |
-| **Windows + WSL2** | [WSL2 guide](/install/wsl/) | ~2-3 min on a fast network |
+| **Windows + WSL2** † | [WSL2 guide](/install/wsl/) | ~2-3 min on a fast network |
 | **Docker** (your app runs in a container) | [Docker guide](/install/docker/) | ~5 min (one-time per project) |
+
+> **† WSL2 is not exercised in CI.** The underlying install is identical to
+> Linux (which *is* CI-tested), but the WSL-specific layer — localhost
+> forwarding, file-backed keystore, `/mnt/c` detection — is verified by hand,
+> not automated. macOS, Linux, and Docker installs all run in CI.
 
 > **Note:** Worthless is **always installed natively on your host**,
 > even if your app runs in Docker. The Docker image is for self-hosting

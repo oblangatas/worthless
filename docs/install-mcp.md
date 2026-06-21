@@ -11,8 +11,9 @@ Python and `uv` are bootstrapped automatically on first run.
 
 ## Recommended — npm wrapper via `.mcp.json`
 
-Add to your project's `.mcp.json` (Claude Code, Cursor, and Windsurf all read
-this file):
+Add to your project's `.mcp.json`. **Verified on Claude Code.** Cursor and
+Windsurf also support MCP servers but read config from their own paths — treat
+the block below as a Claude Code recipe until we've verified the others:
 
 ```json
 {
