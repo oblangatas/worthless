@@ -139,6 +139,32 @@ class TestLaunchdBackend:
             status = launchd.detect_status(home, 8787)
         assert status.state == ServiceState.NOT_INSTALLED
 
+    def test_detect_matches_symlinked_home(self, tmp_path: Path) -> None:
+        """Plist stores unresolved symlink path; detect_status still finds RUNNING."""
+        real_home = tmp_path / "real-worthless-home"
+        real_home.mkdir()
+        link_home = tmp_path / "linked-home"
+        link_home.symlink_to(real_home, target_is_directory=True)
+        home = WorthlessHome(base_dir=link_home)
+
+        plist = tmp_path / "dev.worthless.proxy.plist"
+        plist.write_text(
+            templates.render_launchd_plist(
+                binary="/usr/local/bin/worthless",
+                worthless_home=str(link_home),
+                log_path=str(link_home / "proxy.log"),
+            )
+        )
+        with (
+            patch.object(launchd, "plist_path", return_value=plist),
+            patch.object(launchd, "resolve_worthless_binary", return_value=tmp_path / "worthless"),
+            patch.object(launchd, "_is_loaded", return_value=True),
+            patch.object(launchd, "poll_health", return_value=True),
+        ):
+            status = launchd.detect_status(home, 8787)
+        assert status.state == ServiceState.RUNNING
+        assert status.healthy is True
+
 
 class TestSystemdBackend:
     def test_install_writes_unit_enables_linger(self, home: WorthlessHome, tmp_path: Path) -> None:
@@ -242,6 +268,30 @@ class TestSystemdBackend:
         with patch.object(systemd, "unit_path", return_value=unit):
             status = systemd.detect_status(home, 8787)
         assert status.state == ServiceState.NOT_INSTALLED
+
+    def test_detect_matches_symlinked_home(self, tmp_path: Path) -> None:
+        """Unit stores unresolved symlink path; detect_status still finds RUNNING."""
+        real_home = tmp_path / "real-worthless-home"
+        real_home.mkdir()
+        link_home = tmp_path / "linked-home"
+        link_home.symlink_to(real_home, target_is_directory=True)
+        home = WorthlessHome(base_dir=link_home)
+
+        unit = tmp_path / "worthless-proxy.service"
+        unit.write_text(
+            templates.render_systemd_unit(
+                binary="/usr/local/bin/worthless",
+                worthless_home=str(link_home),
+            )
+        )
+        with (
+            patch.object(systemd, "unit_path", return_value=unit),
+            patch.object(systemd, "_active_state", return_value="active"),
+            patch.object(systemd, "poll_health", return_value=True),
+        ):
+            status = systemd.detect_status(home, 8787)
+        assert status.state == ServiceState.RUNNING
+        assert status.healthy is True
 
 
 def _owned_launchd_plist(home: WorthlessHome, tmp_path: Path) -> Path:

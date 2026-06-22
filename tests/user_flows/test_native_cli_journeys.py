@@ -108,20 +108,35 @@ def test_default_second_invocation_skips_supervised_start(
     env_file.write_text(f"OPENAI_API_KEY={fake_openai_key()}\n")
     monkeypatch.chdir(project)
 
-    proxy_checks = {"count": 0}
+    runtime_checks = {"count": 0}
     supervised_calls: list[int] = []
 
-    def mock_proxy_is_running(home: WorthlessHome):
-        if proxy_checks["count"] == 0:
-            proxy_checks["count"] += 1
-            return False, None, 0
-        return True, 4242, 8787
+    def mock_detect_runtime(home: WorthlessHome, *, port: int | None = None) -> ProxyRuntimeState:
+        if runtime_checks["count"] == 0:
+            runtime_checks["count"] += 1
+            return ProxyRuntimeState(
+                running=False,
+                pid=None,
+                port=0,
+                source="none",
+                service_state=None,
+            )
+        return ProxyRuntimeState(
+            running=True,
+            pid=4242,
+            port=8787,
+            source="health",
+            service_state=None,
+        )
 
     def mock_supervised(*args: object, **kwargs: object) -> int:
         supervised_calls.append(4242)
         return 4242
 
-    monkeypatch.setattr("worthless.cli.default_command._proxy_is_running", mock_proxy_is_running)
+    monkeypatch.setattr(
+        "worthless.cli.default_command.detect_proxy_runtime",
+        mock_detect_runtime,
+    )
     monkeypatch.setattr(
         "worthless.cli.default_command.start_supervised_proxy",
         mock_supervised,

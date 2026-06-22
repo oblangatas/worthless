@@ -32,7 +32,7 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 - **`worthless uninstall --force` on a broken install does NOT recover your keys** (WOR-713). When the `fernet.key` or `worthless.db` is gone, the locked secrets can't be reconstructed — `--force` wipes the unrecoverable remains so the machine is left clean, but those API keys are lost. Rotate them at the provider.
 
 ### Changed
-- **Bare `worthless` now starts the sidecar-supervised proxy path** (WOR-717). The default command spawns detached `worthless up` instead of the legacy sidecar-less `start_daemon` helper. The latter remains for internal compatibility but is deprecated for v1.2 removal.
+- **Bare `worthless` now starts the sidecar-supervised proxy path** (WOR-717). The default command spawns detached `worthless up` instead of the legacy sidecar-less `start_daemon` helper. The latter remains for internal compatibility but is deprecated for v1.2 removal. Service unit detection compares `WORTHLESS_HOME` by realpath so symlinked install paths (e.g. `/tmp` vs `/private/tmp`) match. **Does not yet** include foreign-unit guards on service mutators or default-command exit **2** when a platform service is stopped/failed — both land in wave 3b (#292).
 
 ## [0.3.8] — 2026-06-13
 
