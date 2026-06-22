@@ -199,6 +199,15 @@ footer {
   font: 700 .82rem var(--mono);
 }
 
+footer nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .4rem 1rem;
+  justify-content: center;
+  margin-top: .7rem;
+  font-weight: 500;
+}
+
 footer a { text-decoration: none; }
 
 @media (max-width: 640px) {

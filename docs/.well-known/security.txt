@@ -3,4 +3,4 @@ Contact: mailto:security@wless.io
 Expires: 2027-04-15T00:00:00.000Z
 Preferred-Languages: en
 Canonical: https://wless.io/.well-known/security.txt
-Policy: https://github.com/shacharm2/worthless/blob/main/SECURITY.md
+Policy: https://wless.io/security.html

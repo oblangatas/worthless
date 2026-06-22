@@ -225,7 +225,7 @@ def test_security_txt_uses_advisory_contact_and_policy() -> None:
     assert "Contact: https://github.com/shacharm2/worthless/security/advisories/new" in security_txt
     assert "Contact: mailto:security@wless.io" in security_txt
     assert "Canonical: https://wless.io/.well-known/security.txt" in security_txt
-    assert "Policy: https://github.com/shacharm2/worthless/blob/main/SECURITY.md" in security_txt
+    assert "Policy: https://wless.io/security.html" in security_txt
 
 
 def test_mobile_nav_wraps_on_launch_pages() -> None:
