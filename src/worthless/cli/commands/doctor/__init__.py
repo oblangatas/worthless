@@ -60,7 +60,7 @@ from worthless.cli.orphans import FIX_PHRASE, PROBLEM_PHRASE, find_orphans, is_o
 from worthless.openclaw import integration as _oc_integration
 from worthless.openclaw import skill as _oc_skill
 from worthless.openclaw.errors import OpenclawIntegrationError
-from worthless.openclaw.integration import IntegrationState
+from worthless.openclaw.integration import IntegrationState, _alias_from_base_url
 from worthless.storage.repository import EnrollmentRecord, ShardRepository
 from worthless.crypto.splitter import reconstruct_key_fp
 
@@ -332,19 +332,6 @@ def _read_worthless_providers_from_config(config_path: Path) -> dict[str, dict]:
         }
 
     return {}
-
-
-_ALIAS_FROM_BASE_URL_RE = re.compile(r"/([^/]+)/v1(?:/|$)")
-
-
-def _alias_from_base_url(base_url: str) -> str | None:
-    """Extract the key alias from a worthless proxy baseUrl.
-
-    ``http://127.0.0.1:8787/openai-stale/v1`` -> ``openai-stale``
-    Returns ``None`` when the URL does not match the expected pattern.
-    """
-    m = _ALIAS_FROM_BASE_URL_RE.search(base_url)
-    return m.group(1) if m else None
 
 
 def _check_openclaw_apikey_consistency(

@@ -112,3 +112,10 @@ jobs:
       # future PR can't re-introduce the WOR-514 bypass and ship green.
       - name: Run WOR-621 proxy-load-bearing behavioral test
         run: uv run pytest tests/openclaw/install_incident/test_proxy_load_bearing.py -v -m "openclaw and docker" --tb=short --timeout=900
+
+      # WOR-650: real `worthless lock --adopt` must produce a config the REAL
+      # OpenClaw binary accepts after adopting an unrecognized proxy entry —
+      # both providers. Closes the "passes in mock, OpenClaw rejects the shape
+      # live" gap. Lean (one short-lived container, no proxy stack).
+      - name: Run WOR-650 adopt-recognition live test
+        run: uv run pytest tests/openclaw/install_incident/test_adopt_recognition_docker.py -v -m "openclaw and docker" --tb=short --timeout=300
