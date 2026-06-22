@@ -270,3 +270,28 @@ class TestLockVerdictFirst:
         # Proof + accessibility carrier preserved.
         assert "no longer contains a usable secret" in low, result.output
         assert "[OK]" in result.output, result.output
+
+    def test_partial_openclaw_failure_does_not_claim_protected(self, monkeypatch, capsys) -> None:
+        """Honesty (worst-component verdict): on a partial OpenClaw failure the
+        .env IS split but agent traffic is NOT gated — lock must NOT print the
+        green "You're protected" verdict above the caller's LOCK FAILED footer.
+        The factual [OK] split line still prints."""
+        from worthless.cli.commands import lock as lock_mod
+        from worthless.cli.console import WorthlessConsole
+
+        # _maybe_prompt_code_scan would scan cwd / prompt — stub it out.
+        monkeypatch.setattr(lock_mod, "_maybe_prompt_code_scan", lambda *_a, **_k: None)
+        console = WorthlessConsole(quiet=False, json_mode=False)
+        lock_mod._print_lock_result(
+            console,
+            fresh_count=1,
+            relock_count=0,
+            env_path=Path(".env"),
+            home_base_dir=Path.home() / ".worthless",
+            openclaw_failed=True,
+        )
+        err = " ".join(capsys.readouterr().err.split()).lower()
+        assert "you're protected" not in err, err
+        assert "check anytime" not in err, err
+        # The factual split line is true even on a partial failure — keep it.
+        assert "no longer contains a usable secret" in err, err

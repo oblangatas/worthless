@@ -183,7 +183,7 @@ def _status_verdict(
         b_noun = "key" if broken == 1 else "keys"
         return "attention", (
             f"🟡 Attention — {broken} {b_noun} can't be restored "
-            f"(the .env line is gone). Run `worthless doctor`."
+            f"(the .env line is gone) — see below."
         )
 
     if proxy_healthy:
