@@ -28,6 +28,12 @@ from worthless.cli.keystore import (
 )
 
 
+def _write_fernet_key_file(path: Path, content: bytes) -> None:
+    """Write a fernet.key that passes ``_validate_fernet_file`` (mode 0o600)."""
+    path.write_bytes(content)
+    path.chmod(0o600)
+
+
 # ------------------------------------------------------------------
 # Constants
 # ------------------------------------------------------------------
@@ -241,7 +247,7 @@ class TestReadFernetKeyCascade:
         monkeypatch.delenv("WORTHLESS_FERNET_FD", raising=False)
 
         fernet_path = tmp_path / "fernet.key"
-        fernet_path.write_bytes(b"file-key-value\n")
+        _write_fernet_key_file(fernet_path, b"file-key-value\n")
 
         with patch("worthless.cli.keystore.keyring_available", return_value=False):
             result = read_fernet_key(home_dir=tmp_path)
@@ -288,7 +294,7 @@ class TestReadFernetKeyCascade:
         monkeypatch.delenv("WORTHLESS_FERNET_FD", raising=False)
 
         fernet_path = tmp_path / "fernet.key"
-        fernet_path.write_bytes(b"file-fallback-value\n")
+        _write_fernet_key_file(fernet_path, b"file-fallback-value\n")
 
         with (
             patch("worthless.cli.keystore.keyring_available", return_value=True),
@@ -330,7 +336,7 @@ class TestReadFernetKeyCascade:
         monkeypatch.setenv("WORTHLESS_SERVICE_MANAGED", "1")
 
         fernet_path = tmp_path / "fernet.key"
-        fernet_path.write_bytes(b"launchd-synced-key\n")
+        _write_fernet_key_file(fernet_path, b"launchd-synced-key\n")
         fernet_path.chmod(0o600)
 
         with (
@@ -350,7 +356,7 @@ class TestReadFernetKeyCascade:
         monkeypatch.setenv("WORTHLESS_SERVICE_MANAGED", "1")
 
         fernet_path = tmp_path / "fernet.key"
-        fernet_path.write_bytes(b"synced-file-key\n")
+        _write_fernet_key_file(fernet_path, b"synced-file-key\n")
         fernet_path.chmod(0o600)
 
         with (
@@ -421,7 +427,7 @@ class TestReturnTypeBytearray:
             ctx = _combined()
         else:  # file
             fernet_path = tmp_path / "fernet.key"
-            fernet_path.write_bytes(b"some-key\n")
+            _write_fernet_key_file(fernet_path, b"some-key\n")
             ctx = patch("worthless.cli.keystore.keyring_available", return_value=False)
 
         with ctx:

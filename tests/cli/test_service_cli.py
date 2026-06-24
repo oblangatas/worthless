@@ -139,18 +139,19 @@ class TestServiceInstall:
 
     def test_stop_invokes_backend(self, home_dir: Path) -> None:
         mock_backend = MagicMock()
+        mock_home = MagicMock()
+        mock_home.base_dir = home_dir
         with (
             patch("worthless.cli.commands.service._backend", return_value=mock_backend),
-            patch("worthless.cli.commands.service.get_home") as mock_home,
+            patch("worthless.cli.commands.service.get_home", return_value=mock_home),
         ):
-            mock_home.return_value.base_dir = home_dir
             result = runner.invoke(
                 app,
                 ["service", "stop"],
                 env={"WORTHLESS_HOME": str(home_dir)},
             )
         assert result.exit_code == 0, result.output
-        mock_backend.stop.assert_called_once_with()
+        mock_backend.stop.assert_called_once_with(mock_home)
 
     def test_start_invokes_backend(self, home_dir: Path) -> None:
         mock_backend = MagicMock()

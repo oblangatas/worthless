@@ -168,15 +168,27 @@ class TestServiceManagedLockIdempotency:
             supervised_calls.append(1)
             return 4242
 
-        def mock_proxy_is_running(_home: WorthlessHome) -> tuple[bool, int | None, int]:
+        def mock_detect_proxy_runtime(
+            _home: WorthlessHome, *, port: int | None = None
+        ) -> ProxyRuntimeState:
             if proxy_checks["count"] == 0:
                 proxy_checks["count"] += 1
-                return False, None, 0
-            return True, 4242, 8787
+                return ProxyRuntimeState(
+                    running=False,
+                    pid=None,
+                    port=8787,
+                    source="none",
+                )
+            return ProxyRuntimeState(
+                running=True,
+                pid=4242,
+                port=8787,
+                source="health",
+            )
 
         monkeypatch.setattr(
-            "worthless.cli.default_command._proxy_is_running",
-            mock_proxy_is_running,
+            "worthless.cli.default_command.detect_proxy_runtime",
+            mock_detect_proxy_runtime,
         )
         monkeypatch.setattr(
             "worthless.cli.default_command.start_supervised_proxy",

@@ -321,7 +321,7 @@ def read_fernet_key(home_dir: Path | None = None) -> bytearray:
                 "401 under launchd). Run `worthless doctor` and resolve fernet_drift, "
                 "or sync Keychain to fernet.key before `worthless service install`.",
             )
-        return _read_fernet_file(fernet_path, validate=_service_managed())
+        return _read_fernet_file(fernet_path, validate=True)
     raise WorthlessError(
         ErrorCode.KEY_NOT_FOUND,
         "No Fernet key found. Run 'worthless enroll' or set WORTHLESS_FERNET_KEY.",
