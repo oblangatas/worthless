@@ -1,5 +1,5 @@
 # NOTE: pin patch versions; update quarterly or on CVE.
-FROM python:3.13-slim-bookworm@sha256:e4fa1f978c539608a10cdf74700ac32a3f719dfc6e8b6b6001da82deb36302a2 AS builder
+FROM python:3.13-slim-bookworm@sha256:fcbd8dfc2605ba7c2eca646846c5e892b2931e41f6227985154a596f26ab8ed7 AS builder
 
 WORKDIR /build
 COPY pyproject.toml ./
@@ -11,7 +11,7 @@ RUN apt-get update \
     && pip install --no-cache-dir .
 
 # -----------------------------------------------------------
-FROM python:3.13-slim-bookworm@sha256:e4fa1f978c539608a10cdf74700ac32a3f719dfc6e8b6b6001da82deb36302a2
+FROM python:3.13-slim-bookworm@sha256:fcbd8dfc2605ba7c2eca646846c5e892b2931e41f6227985154a596f26ab8ed7
 
 RUN apt-get update \
     && apt-get upgrade -y --no-install-recommends \

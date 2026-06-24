@@ -34,7 +34,10 @@ def _session_user() -> str:
     except OSError:
         import pwd
 
-        return pwd.getpwuid(os.getuid()).pw_name
+        try:
+            return pwd.getpwuid(os.getuid()).pw_name
+        except KeyError:
+            return str(os.getuid())
 
 
 def unit_path() -> Path:

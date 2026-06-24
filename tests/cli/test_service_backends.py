@@ -718,3 +718,15 @@ class TestSystemdSessionUser:
         fake_passwd = type("Passwd", (), {"pw_name": "runner"})()
         monkeypatch.setattr(pwd, "getpwuid", lambda uid: fake_passwd)
         assert systemd._session_user() == "runner"
+
+    def test_session_user_falls_back_to_uid_without_passwd_entry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("USER", raising=False)
+        monkeypatch.delenv("LOGNAME", raising=False)
+        monkeypatch.setattr(systemd.os, "getlogin", MagicMock(side_effect=OSError(25)))
+        monkeypatch.setattr(systemd.os, "getuid", lambda: 65534)
+        monkeypatch.setattr(
+            pwd, "getpwuid", MagicMock(side_effect=KeyError("getpwuid(): uid not found"))
+        )
+        assert systemd._session_user() == "65534"
