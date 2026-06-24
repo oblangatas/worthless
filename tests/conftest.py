@@ -19,6 +19,7 @@ from hypothesis import HealthCheck, settings
 
 
 from worthless.cli import default_command  # used by _isolate_default_command_proxy autouse fixture
+from worthless.cli.commands.service.proxy_state import ProxyRuntimeState
 from worthless.cli.bootstrap import WorthlessHome, ensure_home
 from worthless.crypto import SplitResult
 from worthless.crypto.splitter import split_key
@@ -398,9 +399,11 @@ def _isolate_default_command_proxy(request, monkeypatch):
     """Stop ``run_default()`` from spawning a real proxy daemon mid-test.
 
     Tests that hit the bare ``worthless`` no-args entry point flow through
-    ``default_command.run_default()`` → ``_proxy_is_running`` → ``poll_health(8787)``
-    → ``start_supervised_proxy(..., port=8787, ...)``. Under pytest-xdist, four workers
-    racing for the same port produces non-deterministic state: one wins the
+    ``default_command.run_default()`` → ``_proxy_is_running`` /
+    ``_service_start_hint`` → ``detect_proxy_runtime`` → ``poll_health(8787)``
+    and platform service queries → ``start_supervised_proxy(...)``. Under
+    pytest-xdist, four workers racing for the same port produces non-deterministic
+    state: one wins the
     bind, the others see a "running" daemon belonging to a different test's
     home, and assertions diverge. The same race also leaves orphan uvicorn
     children if a worker fails between spawn and cleanup.
@@ -431,6 +434,9 @@ def _isolate_default_command_proxy(request, monkeypatch):
       synthetic PID lets such probes fail honestly.
     - ``poll_health`` returns ``True`` so callers that only check
       "responsive?" don't loop.
+    - ``detect_proxy_runtime`` returns a neutral "not running, no service"
+      state so ``_service_start_hint`` never hits live sockets or launchd/systemd
+      (Q5 / WOR-717 review — closes the ~1s ``poll_health`` leak).
 
     Closes worthless-ba1c.
     """
@@ -451,6 +457,52 @@ def _isolate_default_command_proxy(request, monkeypatch):
         default_command,
         "poll_health",
         lambda port, timeout=10.0: True,
+    )
+    monkeypatch.setattr(
+        default_command,
+        "detect_proxy_runtime",
+        lambda home, *, port=None: ProxyRuntimeState(
+            running=False,
+            pid=None,
+            port=0,
+            source="none",
+            service_state=None,
+        ),
+    )
+
+
+@pytest.fixture(autouse=True)
+def _default_lock_proxy_probe_healthy(request, monkeypatch):
+    """Default the ``lock`` command's proxy pre-flight to "healthy" suite-wide.
+
+    F7 (WOR-648 / WOR-621 AC5) adds a proxy ``/healthz`` probe to the
+    OpenClaw-apply path in ``worthless.cli.commands.lock``: when OpenClaw is
+    detected on the host, ``lock`` aborts before writing ``openclaw.json`` if
+    the proxy is down. The bulk of the existing lock suite drives ``lock`` on
+    a host where OpenClaw IS present (a sandboxed ``~/.openclaw`` fixture, or
+    the developer's real install leaking through tests that don't pin ``HOME``)
+    but never starts a proxy — exactly the same neutralisation rationale as
+    ``_isolate_default_command_proxy`` above.
+
+    Without this default, every such test would now abort with
+    ``PROXY_NOT_RUNNING``. We therefore patch ``check_proxy_health`` in the
+    ``lock`` module's namespace to report healthy. Tests that exercise the
+    proxy-down abort (e.g. ``tests/openclaw/test_proxy_probe.py``) re-patch the
+    same name to "unhealthy"; pytest's ``monkeypatch`` stacks LIFO, so the
+    per-test override wins.
+
+    ``@pytest.mark.integration`` opts out so a real end-to-end run probes the
+    real proxy.
+    """
+    if request.node.get_closest_marker("integration"):
+        return
+
+    from worthless.cli.commands import lock as _lock_mod
+
+    monkeypatch.setattr(
+        _lock_mod,
+        "check_proxy_health",
+        lambda port: {"healthy": True, "port": port, "mode": "up", "requests_proxied": 0},
     )
 
 
