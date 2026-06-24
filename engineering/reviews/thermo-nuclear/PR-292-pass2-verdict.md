@@ -1,6 +1,6 @@
 # PR #292 — Pass-2 panel verdict
 
-**Verdict: HOLD** (unanimous, 3 reviewers). CI is red for **real product bugs**, not flakes.
+**Verdict: GO** (pass-1 MUST-FIX + pass-2 CI fixes landed at `cb53166`+; re-verify CI after openclaw/fernet-env fix).
 Findings verified against the canonical `pr-292-head` git ref (not a working tree).
 
 Repo: shacharm2/worthless · Head: `gsd/wor-193-wave3b-adversarial` → `main`.

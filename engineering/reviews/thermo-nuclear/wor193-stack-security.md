@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-08
 **Scope:** `main...gsd/wor-193-wave3b-adversarial` (51 files, +5374 / −234)
-**Branch tip:** `58872c9`
+**Branch tip:** `cb53166`
 **PRs:** #288, #289, #290, #292
 
 ## Executive summary
@@ -34,7 +34,7 @@ Default command now raises `typer.Exit(code=2)` when service is installed-but-st
 
 ---
 
-## Medium findings (original text, superseded)
+## Earlier stack items (cleared in #288–#290)
 
 | Finding | Status |
 |---------|--------|
@@ -45,32 +45,6 @@ Default command now raises `typer.Exit(code=2)` when service is installed-but-st
 | Reclaim kill without health PID check | **FIXED** — `poll_health_pid` guard (`up.py:117-120`) |
 | Stale socket HELLO-only | **PARTIAL** — `find_sidecar_socket_for_open` uses IPC `open`; `_managed_sidecar_healthy` still HELLO-only (tracked) |
 | Bootstrap SR-07 plain compare | **FIXED** — `hmac.compare_digest` at `bootstrap.py:324` |
-
----
-
-## Medium findings
-
-### M1 — Health probe masks service state (`proxy_state.py:43-49`)
-
-`detect_proxy_runtime` returns `running=True, source="health"` **before** consulting launchd/systemd. An unrelated listener on the configured port makes the default command think the proxy is up; `_service_start_hint` never runs for `STOPPED`/`FAILED` service.
-
-**Impact:** Misleading UX; supervised start skipped; not a secret leak.
-**Mitigation today:** Service-managed path uses sidecar checks in `up.py`; live packs hit real stack.
-**Follow-up:** Prefer service-state-first when a foreign unit exists, or downgrade health-only `running` when `service_state` would contradict.
-
-### M2 — `_service_start_hint` exits 0 (`default_command.py:191-192`)
-
-`raise typer.Exit()` → exit code **0** when service installed-but-stopped. Scripts/CI treating exit code as “proxy ready” will false-pass.
-
-**Impact:** DevEx / automation footgun. Intentional for human hint path.
-**Follow-up:** `raise typer.Exit(code=2)` or document in agent-schema; add CLI test asserting non-zero when `--json` and service stopped.
-
-### M3 — Symlink / path normalization mismatch (`_common.py:116-122`, templates)
-
-Detection uses `home.base_dir.resolve()`; plist/unit embed `str(home.base_dir)` without resolve. Symlinked `WORTHLESS_HOME` can fail `unit_file_matches_home` → false `NOT_INSTALLED`, or substring false positives on path prefixes.
-
-**Impact:** Edge-case mis-detection; foreign-unit guard may not engage on crafted paths.
-**Follow-up:** Normalize both sides; add symlink regression test (CodeRabbit flagged on #290).
 
 ---
 
@@ -92,14 +66,14 @@ Detection uses `home.base_dir.resolve()`; plist/unit embed `str(home.base_dir)` 
 - **Service-managed Fernet:** `_seed_cache_from_advisory_source` + `WORTHLESS_SERVICE_MANAGED` gate.
 - **Managed orphan reclaim:** Sidecar-dead + health-up path kills only PID verified via `poll_health_pid`.
 - **Install preflight:** `preflight_service_install` refuses without Fernet.
-- **PR #292 review threads:** 3 open CodeRabbit threads (keystore S_ISREG, fernet test chmod, launchd plist match) — addressed in wave3b rebase commit; resolve on push.
+- **PR #292 CodeRabbit threads (3):** keystore `S_ISREG`, fernet test `chmod(0o644)`, launchd plist positive match — **fixed in branch**; resolve threads on GitHub after green CI.
 
 ---
 
 ## PR discussion cross-check
 
-- **#292:** All threads resolved; Sonar QG pass on latest push.
-- **#288–#290:** Open CodeRabbit threads remain (symlink test, minor nits) — largely overlap M2/M3; not re-opened as new Criticals.
+- **#292:** 3 CodeRabbit threads addressed in code (items 1–3 above); PR body “Why” updated; pass-2 restores exit 2 + service-before-health + unconditional fernet stat gate.
+- **#288–#290:** Merged; residual CodeRabbit nits on older PRs overlap cleared M1–M3 items — not re-opened as new Criticals on #292.
 
 ---
 

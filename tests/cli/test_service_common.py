@@ -25,7 +25,9 @@ from worthless.cli.errors import ErrorCode, WorthlessError
 def home(tmp_path: Path) -> WorthlessHome:
     base = tmp_path / ".worthless"
     base.mkdir()
-    (base / "fernet.key").write_bytes(b"x" * 32)
+    fernet = base / "fernet.key"
+    fernet.write_bytes(b"x" * 32)
+    fernet.chmod(0o600)
     return WorthlessHome(base_dir=base)
 
 
