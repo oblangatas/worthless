@@ -68,6 +68,54 @@ def test_user_override_beats_pin(tmp_path: Path) -> None:
     )
 
 
+def test_older_uv_tool_install_upgrades_via_pinned_force_install(
+    tmp_path: Path,
+) -> None:
+    """An older uv-installed Worthless must upgrade through the pinned path.
+
+    A repeat installer run is both an idempotency path and an upgrade path.
+    Same version should short-circuit; older versions must run
+    `uv tool install --force worthless==<pin>`, never bare `uv tool upgrade`.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_happy_path_stubs(bin_dir)
+    pin = read_install_pin()
+    write_stub(
+        bin_dir,
+        "uv",
+        f"""printf 'uv %s\\n' "$*" >> "$HOME/uv-invocations.log"
+case "$1" in
+  --version) echo "uv 0.11.7" ;;
+  tool) shift; case "$1" in
+    list) echo "worthless v0.1.0" ;;
+    install)
+      [ "$2" = "--force" ] || exit 2
+      [ "$3" = "worthless=={pin}" ] || exit 3
+      echo "installed $3" ;;
+    upgrade) echo "unexpected upgrade" >&2; exit 4 ;;
+    *) echo "uv tool: unhandled: $*" >&2; exit 1 ;;
+  esac ;;
+  run) echo "worthless {pin}" ;;
+  *) echo "uv: unhandled: $*" >&2; exit 1 ;;
+esac""",
+    )
+
+    result = run_install(bin_dir)
+
+    assert result.returncode == 0, (
+        f"older installed version must upgrade cleanly.\nstdout: {result.stdout}\n"
+        f"stderr: {result.stderr}"
+    )
+    log = (tmp_path / "uv-invocations.log").read_text()
+    assert f"tool install --force worthless=={pin}" in log, (
+        f"pin-bump upgrades must use pinned force install.\nuv log:\n{log}"
+    )
+    assert "tool upgrade" not in log, f"must not use uv tool upgrade for pin bumps.\nuv log:\n{log}"
+    assert f"worthless {pin} already installed" not in result.stdout
+    assert f"worthless {pin}" in result.stdout
+
+
 def test_empty_pin_fails_closed(tmp_path: Path) -> None:
     """An installer with no baked pin AND no override must FAIL CLOSED with an
     internal error — never silently install latest."""
@@ -634,6 +682,38 @@ def test_success_with_persistent_rc_but_missing_parent_path_says_open_terminal(
     assert "Make permanent" not in result.stdout, (
         "rc already contains ~/.local/bin, so don't tell the user to append it again"
     )
+
+
+def test_success_with_stale_worthless_on_path_warns_about_shadowing(
+    tmp_path: Path,
+) -> None:
+    """A stale PATH binary must not be reported as a clean install success.
+
+    Real users can have an older pip/manual/dev `worthless` earlier on PATH.
+    The installer smoke test proves the uv-installed tool works, but the next
+    command the user types may still hit the stale binary. That should be an
+    actionable warning, not "Done! 'worthless' is on your PATH."
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_happy_path_stubs(bin_dir)
+    write_stub(bin_dir, "worthless", 'echo "worthless 0.1.0"')
+
+    result = run_install(bin_dir)
+
+    assert result.returncode == 0, (
+        f"install must still succeed, got {result.returncode}\nstderr: {result.stderr}"
+    )
+    assert "different 'worthless' first on PATH" in result.stderr, (
+        f"must warn that a stale binary shadows the fresh install.\nstderr: {result.stderr}"
+    )
+    assert "worthless 0.1.0" in result.stdout
+    assert "worthless 0.3.0" in result.stdout
+    assert "is on your PATH" not in result.stdout, (
+        f"must not claim a clean PATH success when PATH resolves a stale binary.\n"
+        f"stdout: {result.stdout}"
+    )
+    assert "Activate in this shell" in result.stdout
 
 
 # ---------------------------------------------------------------------------
