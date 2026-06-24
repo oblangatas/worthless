@@ -15,7 +15,7 @@ from worthless.defaults import GLOBAL_CEILING_TOKENS  # noqa: F401 — re-export
 #: Capabilities the proxy expects from the sidecar HELLO frame (WOR-309).
 #: Caps shrinking across reconnects is fatal — see C3 in
 #: ``.research/10-security-signoff.md``.
-DEFAULT_SIDECAR_CAPS: frozenset[str] = frozenset({"open", "seal", "attest"})
+DEFAULT_SIDECAR_CAPS: frozenset[str] = frozenset({"open", "seal", "attest", "mac"})
 
 #: IPC protocol version (msgpack envelope schema). Bump on breaking changes.
 DEFAULT_SIDECAR_PROTOCOL_VERSION: int = 1
@@ -208,14 +208,10 @@ class ProxySettings:
     # Sweeper background task: how often to run and how old a hold must be
     # before it gets billed at estimate (fail-closed: bill orphans, never refund).
     sweep_interval_seconds: float = field(
-        default_factory=lambda: float(
-            os.environ.get("WORTHLESS_SWEEP_INTERVAL_SECONDS", "60.0")
-        )
+        default_factory=lambda: float(os.environ.get("WORTHLESS_SWEEP_INTERVAL_SECONDS", "60.0"))
     )
     sweep_max_age_seconds: float = field(
-        default_factory=lambda: float(
-            os.environ.get("WORTHLESS_SWEEP_MAX_AGE_SECONDS", "300.0")
-        )
+        default_factory=lambda: float(os.environ.get("WORTHLESS_SWEEP_MAX_AGE_SECONDS", "300.0"))
     )
     allow_insecure: bool = field(default_factory=lambda: _env_bool("WORTHLESS_ALLOW_INSECURE"))
     sidecar_socket_path: str = field(

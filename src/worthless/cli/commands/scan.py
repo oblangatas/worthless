@@ -30,6 +30,7 @@ from worthless.cli.scanner import (
     format_sarif,
     scan_files,
 )
+from worthless.openclaw.audit import sanitise_for_message
 from worthless.storage.repository import EnrollmentRecord, ShardRepository
 
 
@@ -162,7 +163,8 @@ def _format_human(
                 pass
 
         var_part = f" ({f.var_name})" if f.var_name else ""
-        lines.append(f"  {f.file}:{f.line}  {f.provider}{var_part}  {status}  {preview}")
+        safe_file = sanitise_for_message(f.file)
+        lines.append(f"  {safe_file}:{f.line}  {f.provider}{var_part}  {status}  {preview}")
 
         if f.is_protected:
             protected_count += 1
@@ -352,13 +354,14 @@ def _format_code_findings_human(
             count = len(file_findings)
             env_vars = ", ".join(sorted({f.suggested_env_var for f in file_findings}))
             suffix = f" x{count}" if count > 1 else ""
-            lines.append(f"[code] {file}  ({env_vars}){suffix}")
+            lines.append(f"[code] {sanitise_for_message(file)}  ({env_vars}){suffix}")
         if lines:
             lines.append("")
     else:
         for f in display:
+            safe_file = sanitise_for_message(f.file)
             lines.append(
-                f"[code] {f.file}:{f.line}:{f.column}  {f.provider_name} ({f.suggested_env_var})"
+                f"[code] {safe_file}:{f.line}:{f.column}  {f.provider_name} ({f.suggested_env_var})"
             )
             lines.append(f"       {f.matched_url}")
             # Show the offending source line (trimmed so it doesn't blow up the
@@ -480,7 +483,7 @@ def _format_ai_prompt_block(findings: list[CodeFinding]) -> str:
     bullets = []
     for f in findings:
         bullets.append(
-            f"- {f.file}:{f.line}  → use environment variable "
+            f"- {sanitise_for_message(f.file)}:{f.line}  → use environment variable "
             f"{f.suggested_env_var} (default to {f.matched_url!r} when unset)"
         )
 

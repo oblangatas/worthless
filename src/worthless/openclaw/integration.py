@@ -25,6 +25,7 @@ Predicate" and §"Failure modes" rows F01–F04, F36.
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import json
 import os
 import re
@@ -828,8 +829,11 @@ def _is_proxy_url(url: str, proxy_base_url: str) -> bool:
     Without the secondary check the existing entry would be misclassified as
     a third-party conflict and silently skipped, leaving the ``apiKey`` stale.
 
-    Architectural follow-up tracked in WOR-487 — replace the port-based
-    heuristic with an explicit ``managedBy`` marker on each entry.
+    "Is this URL proxy-shaped?" is a *shape* test, not an ownership claim —
+    WOR-650 layers DB-backed recognition on top (parse the alias, look it up
+    in the ``shards`` table) to decide whether a proxy-shaped entry is one
+    Worthless created. (The explicit-marker idea from WOR-487 is impossible —
+    OpenClaw's ``.strict()`` schema rejects unknown keys.)
     """
     if not isinstance(url, str):
         return False
@@ -841,6 +845,42 @@ def _is_proxy_url(url: str, proxy_base_url: str) -> bool:
     if port is None:
         return False
     return re.match(rf"^https?://[^/]*:{port}/", url) is not None
+
+
+# WOR-650 recognition helpers. The alias is parsed from an attacker/
+# user-controllable ``baseUrl``, so the regex is restricted to the real alias
+# charset (junk -> None, never echoed) and any value that reaches a log /
+# event / sentinel is control-char-stripped and length-capped.
+_ALIAS_FROM_BASE_URL_RE = re.compile(r"/([A-Za-z0-9_-]+)/v1(?:/|$)")
+_MAX_ALIAS_LOG_LEN = 64
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f\x1b]")
+
+
+def _alias_from_base_url(base_url: str) -> str | None:
+    """Extract the key alias from a worthless proxy ``baseUrl``.
+
+    ``http://127.0.0.1:8787/openai-stale/v1`` -> ``openai-stale``. Restricted
+    to the worthless alias charset (``[A-Za-z0-9_-]``) so a malicious baseUrl
+    yields ``None`` (no recognition, no echo) rather than arbitrary bytes.
+    Returns ``None`` when the URL does not match.
+    """
+    if not isinstance(base_url, str):
+        return None
+    m = _ALIAS_FROM_BASE_URL_RE.search(base_url)
+    return m.group(1) if m else None
+
+
+def _sanitize_alias_for_log(alias: str) -> str:
+    """Make an alias safe to put in an event detail / stdout / sentinel.
+
+    Strips control + ANSI-escape bytes (terminal-injection defense) and caps
+    length (sentinel / terminal DoS defense). The extraction regex already
+    bounds the charset; this is belt-and-suspenders for any other caller.
+    """
+    cleaned = _CONTROL_CHARS_RE.sub("", alias)
+    if len(cleaned) > _MAX_ALIAS_LOG_LEN:
+        cleaned = cleaned[:_MAX_ALIAS_LOG_LEN] + "…"
+    return cleaned
 
 
 def _classify_config_state(
@@ -884,97 +924,6 @@ def _classify_config_state(
         # the write path surface the error.
         return "present"
     return "present"
-
-
-@dataclass(frozen=True)
-class LockPlan:
-    """Collect-then-decide representation of an ``apply_lock`` operation.
-
-    Built by :func:`build_lock_plan` and consumed by both ``--dry-run``
-    (display only) and the live write path (execute).  Having a single
-    function that produces this struct guarantees the two paths can never
-    diverge in their classification logic.
-
-    ``original_config`` is the config dict read *before* any writes.  The
-    live path stores this in :attr:`OpenclawApplyResult.original_config_snapshot`
-    so a caller can call :func:`rollback_config` on failure.
-    """
-
-    config_path: Path | None
-    config_state: Literal["missing", "unreadable", "present"]
-    providers_to_add: tuple[str, ...]
-    providers_to_skip: tuple[tuple[str, str], ...]
-    skill_to_install: bool
-    original_config: dict | None
-
-    def to_dict(self) -> dict:
-        """Return a JSON-serialisable representation for ``--dry-run`` output."""
-        return {
-            "config_path": str(self.config_path) if self.config_path else None,
-            "config_state": self.config_state,
-            "providers_to_add": list(self.providers_to_add),
-            "providers_to_skip": [list(p) for p in self.providers_to_skip],
-            "skill_to_install": self.skill_to_install,
-        }
-
-
-def build_lock_plan(
-    state: IntegrationState,
-    planned_updates: list[tuple[str, str, str]],
-    *,
-    proxy_base_url: str,
-) -> LockPlan:
-    """Return a :class:`LockPlan` without performing any writes.
-
-    Pure function used by both ``--dry-run`` (display) and the live path
-    (execute) so the two can never diverge in their classification logic.
-    """
-    config_path = _resolve_active_config_path(state, state.home_dir)
-    config_state = _classify_config_state(config_path)
-
-    if config_state == "unreadable":
-        return LockPlan(
-            config_path=config_path,
-            config_state="unreadable",
-            providers_to_add=(),
-            providers_to_skip=(),
-            skill_to_install=False,
-            original_config=None,
-        )
-
-    # Read the existing config once (for conflict detection + snapshot).
-    original_config: dict | None = None
-    if config_state == "present":
-        try:
-            original_config = _config_mod.read_config(config_path)
-        except Exception:
-            original_config = None
-
-    providers_to_add: list[str] = []
-    providers_to_skip: list[tuple[str, str]] = []
-
-    for provider, _alias, _shard_a in planned_updates:
-        provider_name = f"worthless-{provider}"
-        existing_entry = (
-            (original_config or {}).get("models", {}).get("providers", {}).get(provider_name)
-        )
-        if existing_entry is not None:
-            existing_url = existing_entry.get("baseUrl", "")
-            if existing_url and not _is_proxy_url(existing_url, proxy_base_url):
-                providers_to_skip.append((provider_name, "provider_conflict"))
-                continue
-        providers_to_add.append(provider_name)
-
-    skill_to_install = state.workspace_path is not None
-
-    return LockPlan(
-        config_path=config_path,
-        config_state=config_state,
-        providers_to_add=tuple(providers_to_add),
-        providers_to_skip=tuple(providers_to_skip),
-        skill_to_install=skill_to_install,
-        original_config=original_config,
-    )
 
 
 def rollback_config(config_path: Path | None, original_config: dict | None) -> None:
@@ -1029,6 +978,98 @@ def _get_provider_for_lock(
         return None, exc
 
 
+@dataclass(frozen=True)
+class AdoptionPolicy:
+    """WOR-650: how ``apply_lock`` treats an existing OpenClaw provider entry
+    that isn't recognized as one Worthless created on this machine.
+
+    ``managed_aliases`` — the aliases in this machine's ``shards`` DB
+    (``repo.list_keys()``), snapshotted by the caller BEFORE this lock's DB
+    writes. ``None`` = recognition data unavailable (DB unreadable/migrating);
+    treated fail-safe as "not recognized", never silently "recognized".
+
+    ``adopt_unrecognized`` — the consent. True when the user passed ``--adopt``
+    / ``--yes``, ran non-interactively, or confirmed at the prompt. When False,
+    an unrecognized proxy-shaped entry is SKIPPED (left in place), not
+    overwritten.
+
+    NOT a security boundary: after a DB reset it can't tell ours from foreign,
+    so it only chooses inform-vs-silent and skip-vs-write-when-unconsented. No
+    code gates reconstruction on it; a planted entry is neutralized anyway —
+    lock overwrites the baseUrl with Worthless's own proxy URL.
+    """
+
+    managed_aliases: set[str] | None = None
+    adopt_unrecognized: bool = False
+
+
+def _classify_adoption(
+    existing: object,
+    *,
+    provider: str,
+    resolved_proxy_base_url: str,
+    policy: AdoptionPolicy | None,
+) -> tuple[bool, OpenclawIntegrationEvent | None]:
+    """Decide how to treat an existing entry under the adoption policy.
+
+    Returns ``(skip, event)``: ``skip=True`` -> leave the entry, do NOT
+    overwrite (unconsented unrecognized proxy-shaped entry); ``skip=False`` ->
+    overwrite (recognized re-lock, real key, un-parseable, or consented
+    adoption); ``event`` -> an info event to record, or ``None`` for the silent
+    paths. Recognized + real-key paths are byte-identical to pre-WOR-650
+    behavior. The parsed alias is attacker-controllable, so it is sanitized
+    before it enters any event.
+    """
+    if policy is None or not isinstance(existing, dict):
+        return False, None
+    url = existing.get("baseUrl", "")
+    if not isinstance(url, str) or not url or not _is_proxy_url(url, resolved_proxy_base_url):
+        return False, None  # real key / no URL -> overwrite silently
+    alias = _alias_from_base_url(url)
+    if alias is None:
+        return False, None  # un-parseable -> can't name it -> overwrite silently
+    managed = policy.managed_aliases
+    if managed is not None and alias in managed:
+        return False, None  # recognized re-lock -> silent
+    safe = _sanitize_alias_for_log(alias)
+    extra = {"provider": provider, "alias": safe}
+    if managed is None:
+        detail = (
+            f"could not check this machine's records for '{provider}' (alias "
+            f"{safe!r}); proceeding without recognition."
+            if policy.adopt_unrecognized
+            else f"skipped '{provider}': could not check this machine's records "
+            f"(alias {safe!r}). Re-run with --adopt to take it over."
+        )
+        return (not policy.adopt_unrecognized), OpenclawIntegrationEvent(
+            code=OpenclawErrorCode.PROVIDER_RECOGNITION_UNAVAILABLE,
+            level="info",
+            detail=detail,
+            extra=extra,
+        )
+    if policy.adopt_unrecognized:
+        return False, OpenclawIntegrationEvent(
+            code=OpenclawErrorCode.PROVIDER_ADOPTED_UNRECOGNIZED,
+            level="info",
+            detail=(
+                f"re-linking an existing '{provider}' entry (alias {safe!r}) not in "
+                f"this machine's records — likely a synced config, reinstall, or new "
+                f"machine. Routing it through Worthless."
+            ),
+            extra=extra,
+        )
+    return True, OpenclawIntegrationEvent(
+        code=OpenclawErrorCode.PROVIDER_ADOPTION_SKIPPED,
+        level="info",
+        detail=(
+            f"skipped '{provider}': an existing proxy-shaped entry (alias {safe!r}) "
+            f"isn't in this machine's records and wasn't adopted. Re-run with --adopt "
+            f"to take it over."
+        ),
+        extra=extra,
+    )
+
+
 def _apply_lock_write_providers(
     config_path: Path,
     resolved_proxy_base_url: str,
@@ -1036,6 +1077,7 @@ def _apply_lock_write_providers(
     events: list[OpenclawIntegrationEvent],
     providers_set: list[str],
     providers_skipped: list[tuple[str, str]],
+    policy: AdoptionPolicy | None = None,
 ) -> bool:
     """Stage A of apply_lock: write each provider entry.
 
@@ -1062,12 +1104,23 @@ def _apply_lock_write_providers(
             providers_skipped.append((provider_name, "config_unreadable"))
             continue
 
-        # No conflict-skip here: locking a provider MEANS rewriting its real
-        # entry (which holds the live key the user chose to lock), so a
-        # non-proxy baseUrl is expected and intentionally overwritten. The
-        # original is stashed for restore in F2 (unlock). DB-driven
-        # recognition — so a user's UNRELATED proxy-shaped entry is never
-        # adopted — lands in F3.
+        # WOR-650 F3: DB-backed recognition. Classify the SAME read we are about
+        # to overwrite (TOCTOU-safe — no separate snapshot). Recognized re-locks
+        # and real keys overwrite silently as before; an unrecognized
+        # proxy-shaped entry is adopted-with-notice (consented) or skipped
+        # (unconsented). Never let recognition gate the overwrite of a key the
+        # user explicitly chose to lock.
+        skip_adopt, adopt_event = _classify_adoption(
+            _existing,
+            provider=provider,
+            resolved_proxy_base_url=resolved_proxy_base_url,
+            policy=policy,
+        )
+        if adopt_event is not None:
+            events.append(adopt_event)
+        if skip_adopt:
+            providers_skipped.append((provider_name, "unrecognized_not_adopted"))
+            continue
 
         try:
             _config_mod.set_provider(
@@ -1143,10 +1196,83 @@ def _apply_lock_rollback(
     providers_set.clear()
 
 
+_ALLOWED_PROXY_HOSTS: frozenset[str] = frozenset(
+    # "proxy" is the worthless proxy's Docker Compose service name — OpenClaw
+    # reaches it over the internal network as http://proxy:8787 (see
+    # deploy/docker-compose.yml). A fixed internal hostname, safe like
+    # host.docker.internal.
+    {"127.0.0.1", "localhost", "::1", "host.docker.internal", "proxy"}
+)
+# Docker's default ``docker0`` bridge gateway lives in 172.17.0.0/16 — the
+# address _resolve_proxy_base_url() emits when OpenClaw runs in a container.
+# Scoped to the default-bridge /16 (not the full RFC-1918 172.16.0.0/12) so an
+# explicit override can't redirect to arbitrary private-range hosts.
+_DOCKER_BRIDGE_CIDR = ipaddress.ip_network("172.17.0.0/16")
+
+
+def _validate_proxy_base_url(url: str) -> None:
+    """Raise ValueError if *url* does not resolve to a local proxy endpoint.
+
+    Rejects remote hosts to prevent SSRF / key exfiltration via a tampered
+    MCP config. Allows localhost aliases and the Docker default-bridge gateway
+    range (172.17.0.0/16). Only applied to explicit caller-supplied overrides;
+    the auto-resolved URL from _resolve_proxy_base_url() bypasses this check.
+    """
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    try:
+        in_docker_bridge = ipaddress.ip_address(host) in _DOCKER_BRIDGE_CIDR
+    except ValueError:
+        in_docker_bridge = False
+    if parts.scheme != "http" or (host not in _ALLOWED_PROXY_HOSTS and not in_docker_bridge):
+        raise ValueError(
+            f"proxy_base_url must point to a local proxy endpoint "
+            f"(allowed hosts: {sorted(_ALLOWED_PROXY_HOSTS)} or 172.17.0.0/16); got: {url!r}"
+        )
+
+
+def preview_unrecognized(
+    planned_updates: list[tuple[str, str, str]],
+    *,
+    proxy_base_url: str,
+    managed_aliases: set[str] | None,
+) -> list[str]:
+    """Provider names whose existing OpenClaw entry would be adopted-or-skipped.
+
+    WOR-650: the CLI calls this BEFORE any write so it can prompt the human
+    once for the unrecognized proxy-shaped entries (a synced config, reinstall,
+    or something else). Read-only — it classifies each planned provider via the
+    same read + :func:`_classify_adoption` path the real write uses, with a
+    no-consent probe policy, and returns the providers that produced an
+    adoption event. The binding decision is still re-made at write time off its
+    own read inside :func:`apply_lock` (TOCTOU-safe).
+    """
+    state = detect()
+    if not state.present:
+        return []
+    config_path = _resolve_active_config_path(state, state.home_dir)
+    probe = AdoptionPolicy(managed_aliases=managed_aliases, adopt_unrecognized=False)
+    unrecognized: list[str] = []
+    for provider, _alias, _shard in planned_updates:
+        existing, read_err = _get_provider_for_lock(config_path, provider)
+        if read_err is not None:
+            continue
+        _skip, event = _classify_adoption(
+            existing,
+            provider=provider,
+            resolved_proxy_base_url=proxy_base_url,
+            policy=probe,
+        )
+        if event is not None:
+            unrecognized.append(provider)
+    return unrecognized
+
+
 def apply_lock(
     planned_updates: list[tuple[str, str, str]],
     *,
     proxy_base_url: str | None = None,
+    adoption_policy: AdoptionPolicy | None = None,
 ) -> OpenclawApplyResult:
     """Wire OpenClaw to route through worthless. Idempotent. Best-effort.
 
@@ -1170,6 +1296,9 @@ def apply_lock(
     Spec: ``engineering/research/openclaw/WOR-431-phase-2-spec.md``
     §"Phase 2.b" / §"`apply_lock()` contract".
     """
+    if proxy_base_url is not None:
+        _validate_proxy_base_url(proxy_base_url)
+
     # Resolve the proxy base URL here (not at import time) so the Docker
     # probe runs only when apply_lock is actually called.  Callers may
     # override for tests or custom proxy ports.
@@ -1336,6 +1465,7 @@ def apply_lock(
         events,
         providers_set,
         providers_skipped,
+        adoption_policy,
     )
 
     # ---- Transactional rollback on write failure -------------------------
@@ -1768,8 +1898,9 @@ def health_check(
     """Check provider-wiring health against the live ``openclaw.json``.
 
     Reads ``openclaw.json`` once per provider (inside Phase 1's flock) and
-    compares each ``worthless-<provider>`` entry's ``baseUrl`` against the
-    expected URL for the current proxy host.
+    compares each provider's entry ``baseUrl`` against the expected URL for
+    the current proxy host. (WOR-621 F1: the entry is the bare provider name,
+    e.g. ``openai`` — not a ``worthless-<provider>`` decoy.)
 
     Used by ``worthless doctor`` (Phase 2.d) to surface drift without
     modifying any files. Pure read path — no writes, no network.

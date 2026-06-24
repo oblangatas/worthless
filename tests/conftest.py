@@ -19,6 +19,7 @@ from hypothesis import HealthCheck, settings
 
 
 from worthless.cli import default_command  # used by _isolate_default_command_proxy autouse fixture
+from worthless.cli.commands.service.proxy_state import ProxyRuntimeState
 from worthless.cli.bootstrap import WorthlessHome, ensure_home
 from worthless.crypto import SplitResult
 from worthless.crypto.splitter import split_key
@@ -385,9 +386,11 @@ def _isolate_default_command_proxy(request, monkeypatch):
     """Stop ``run_default()`` from spawning a real proxy daemon mid-test.
 
     Tests that hit the bare ``worthless`` no-args entry point flow through
-    ``default_command.run_default()`` → ``_proxy_is_running`` → ``poll_health(8787)``
-    → ``start_daemon(..., port=8787, ...)``. Under pytest-xdist, four workers
-    racing for the same port produces non-deterministic state: one wins the
+    ``default_command.run_default()`` → ``_proxy_is_running`` /
+    ``_service_start_hint`` → ``detect_proxy_runtime`` → ``poll_health(8787)``
+    and platform service queries → ``start_supervised_proxy(...)``. Under
+    pytest-xdist, four workers racing for the same port produces non-deterministic
+    state: one wins the
     bind, the others see a "running" daemon belonging to a different test's
     home, and assertions diverge. The same race also leaves orphan uvicorn
     children if a worker fails between spawn and cleanup.
@@ -404,7 +407,7 @@ def _isolate_default_command_proxy(request, monkeypatch):
     ``@pytest.mark.integration`` (already a registered marker in
     pyproject.toml) and own their own daemon teardown.
 
-    Tests that monkeypatch ``start_daemon`` / ``poll_health`` themselves
+    Tests that monkeypatch ``start_supervised_proxy`` / ``poll_health`` themselves
     still work — pytest's ``monkeypatch`` stacks LIFO within a single test,
     so the per-test override wins over this fixture's default. Verified
     against ``tests/test_cli_default.py`` which already does this for
@@ -413,11 +416,14 @@ def _isolate_default_command_proxy(request, monkeypatch):
     Mock return values are chosen to match the real shapes:
     - ``_proxy_is_running`` returns ``(running=False, pid=None, port=0)``
       — same tuple production code returns when the daemon is absent.
-    - ``start_daemon`` returns ``_FAKE_DAEMON_PID`` (12345). PID 0 would
+    - ``start_supervised_proxy`` returns ``_FAKE_DAEMON_PID`` (12345). PID 0 would
       hijack ``os.kill`` liveness probes (POSIX-reserved); a non-zero
       synthetic PID lets such probes fail honestly.
     - ``poll_health`` returns ``True`` so callers that only check
       "responsive?" don't loop.
+    - ``detect_proxy_runtime`` returns a neutral "not running, no service"
+      state so ``_service_start_hint`` never hits live sockets or launchd/systemd
+      (Q5 / WOR-717 review — closes the ~1s ``poll_health`` leak).
 
     Closes worthless-ba1c.
     """
@@ -431,13 +437,24 @@ def _isolate_default_command_proxy(request, monkeypatch):
     )
     monkeypatch.setattr(
         default_command,
-        "start_daemon",
+        "start_supervised_proxy",
         lambda *_a, **_kw: _FAKE_DAEMON_PID,
     )
     monkeypatch.setattr(
         default_command,
         "poll_health",
         lambda port, timeout=10.0: True,
+    )
+    monkeypatch.setattr(
+        default_command,
+        "detect_proxy_runtime",
+        lambda home, *, port=None: ProxyRuntimeState(
+            running=False,
+            pid=None,
+            port=0,
+            source="none",
+            service_state=None,
+        ),
     )
 
 

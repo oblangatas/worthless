@@ -75,9 +75,11 @@ _SANITISE_RE = re.compile(
     # here to avoid embedding bidi control chars in the source file itself
     # (Bandit B602, Semgrep bidi finding).
     "[\x00-\x1f\x7f\x80-\x9f"
+    "\u061c"  # ALM (Arabic Letter Mark)
     "\u200b-\u200f"  # zero-width space, ZWNJ, ZWJ, LRM, RLM
     "\u2028-\u2029"  # LINE SEPARATOR, PARAGRAPH SEPARATOR
     "\u202a-\u202e"  # LRE, RLE, PDF, LRO, RLO
+    "\u2060"  # WORD JOINER
     "\u2066-\u2069"  # LRI, RLI, FSI, PDI
     "\ufeff"  # BOM
     "]"

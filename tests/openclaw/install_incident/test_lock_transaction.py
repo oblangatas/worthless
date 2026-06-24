@@ -125,46 +125,6 @@ def test_ac3_shared_env_set_aborts_before_writes(openclaw_config, mock_state):
 
 
 # ---------------------------------------------------------------------------
-# AC4  build_lock_plan on clean config → config_state="present", no writes
-# ---------------------------------------------------------------------------
-
-
-def test_ac4_build_lock_plan_clean_no_writes(openclaw_config, mock_state):
-    from worthless.openclaw.integration import LockPlan, build_lock_plan
-
-    original_bytes = openclaw_config.read_bytes()
-
-    plan = build_lock_plan(mock_state, PLANNED, proxy_base_url=PROXY_URL)
-
-    assert isinstance(plan, LockPlan)
-    assert plan.config_state == "present"
-    assert "worthless-openai" in plan.providers_to_add
-    assert openclaw_config.read_bytes() == original_bytes, "build_lock_plan must not write"
-
-
-# ---------------------------------------------------------------------------
-# AC5  build_lock_plan on unreadable config → config_state="unreadable", no writes
-# ---------------------------------------------------------------------------
-
-
-def test_ac5_build_lock_plan_unreadable_config_state(openclaw_config, mock_state):
-    from worthless.openclaw.integration import build_lock_plan
-
-    original_bytes = openclaw_config.read_bytes()
-
-    real_st = openclaw_config.stat()
-    mock_st = MagicMock()
-    mock_st.st_uid = os.geteuid() + 1
-    mock_st.st_mode = real_st.st_mode
-
-    with patch("os.stat", return_value=mock_st):
-        plan = build_lock_plan(mock_state, PLANNED, proxy_base_url=PROXY_URL)
-
-    assert plan.config_state == "unreadable"
-    assert openclaw_config.read_bytes() == original_bytes
-
-
-# ---------------------------------------------------------------------------
 # AC6  post-flight (mid-loop) failure → original_config snapshot exposed
 # ---------------------------------------------------------------------------
 
@@ -216,28 +176,6 @@ def test_ac7_relock_is_idempotent(openclaw_config, mock_state):
         assert not r1.has_failure
         r2 = _integration.apply_lock(PLANNED, proxy_base_url=PROXY_URL)
         assert not r2.has_failure
-
-
-# ---------------------------------------------------------------------------
-# AC8  build_lock_plan and apply_lock share same config_state classification
-# ---------------------------------------------------------------------------
-
-
-def test_ac8_plan_shape_same_for_dry_run_and_live(openclaw_config, mock_state):
-    from worthless.openclaw.integration import LockPlan, build_lock_plan
-
-    plan = build_lock_plan(mock_state, PLANNED, proxy_base_url=PROXY_URL)
-
-    assert isinstance(plan, LockPlan)
-    for field in (
-        "config_state",
-        "providers_to_add",
-        "providers_to_skip",
-        "skill_to_install",
-        "config_path",
-        "original_config",
-    ):
-        assert hasattr(plan, field), f"LockPlan missing field: {field}"
 
 
 # ---------------------------------------------------------------------------
@@ -471,21 +409,6 @@ def test_a8_partial_write_rolled_back_to_original(openclaw_config, mock_state):
     # Config must be rolled back — not partial state with only openai written
     current = json.loads(openclaw_config.read_text())
     assert current == original_data, "partial write must be rolled back to pre-mutation state"
-
-
-# A9  build_lock_plan produces JSON-serialisable plan with required fields
-def test_a9_lock_plan_to_json_has_required_fields(openclaw_config, mock_state):
-    from worthless.openclaw.integration import build_lock_plan
-
-    plan = build_lock_plan(mock_state, PLANNED, proxy_base_url=PROXY_URL)
-
-    plan_dict = plan.to_dict()
-    serialized = json.dumps(plan_dict)  # must not raise
-    parsed = json.loads(serialized)
-
-    assert "providers_to_add" in parsed
-    assert "config_state" in parsed
-    assert parsed["config_state"] in ("missing", "unreadable", "present")
 
 
 # A10  UID mismatch detected without PermissionError (positive-signal test)

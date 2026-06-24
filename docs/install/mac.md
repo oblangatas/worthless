@@ -96,25 +96,31 @@ SDK snippet. Same on every platform.
 |---|---|---|
 | Close terminal | Proxy keeps running (background) | Nothing |
 | `worthless down` | Proxy stops | `worthless up` to restart |
-| Reboot Mac | **Proxy is gone** | `worthless up` from a terminal |
+| Reboot Mac | **Proxy is gone** unless service installed | `worthless service start` or `worthless up` |
 | Wake from sleep | Proxy keeps running | Nothing |
 | Switch projects (`cd`) | Each project's `.env` has its own proxy URL | Nothing — same daemon serves all |
 
-### Why no auto-start? (the reboot gap)
+### Survive reboot (recommended)
 
-The reboot gap is real. Until WOR-174 ships a launchd LaunchAgent
-in v1.1, you manually `worthless up` after every reboot.
-
-If you want a less-manual workaround in the meantime — knowing that
-silently auto-spawning a daemon on shell open is a tradeoff — you can
-opt in via your shell rc:
+Install a per-user LaunchAgent that runs foreground `worthless up`
+(sidecar + proxy) at login and restarts on crash:
 
 ```bash
-# OPT-IN, NOT recommended unless you understand the tradeoff:
-# echo 'worthless up &> /dev/null &' >> ~/.zshrc
+worthless service install    # writes ~/Library/LaunchAgents/dev.worthless.proxy.plist
+worthless service status     # running + /healthz ok
 ```
 
-The proper fix lands when WOR-174 installs a managed LaunchAgent.
+Requires a readable Fernet key (Keychain **Always Allow** on first
+lock, or file-backed `~/.worthless/fernet.key`). If install fails
+with `WRTLS-102`, run `worthless doctor` before retrying.
+
+```bash
+worthless service stop       # pause without removing the agent
+worthless service uninstall  # remove plist + bootout
+```
+
+Without `service install`, you must run `worthless up` manually after
+every reboot.
 
 ## 7. Uninstall (manual, until WOR-435 ships)
 
@@ -141,7 +147,8 @@ After WOR-435 ships, this becomes one command: `worthless uninstall`.
 | "command not found: worthless" | `~/.local/bin` not on PATH | `export PATH="$HOME/.local/bin:$PATH"` or restart terminal |
 | Multiple popups during step 3 | Bug — should be 1 | File issue with `worthless --version` + `sw_vers -productVersion` |
 | App gets `connection refused` on `127.0.0.1:8787` | Proxy not running | `worthless up` |
-| App gets `connection refused` after reboot | Proxy died with the boot — see §6 | `worthless up` |
+| App gets `connection refused` after reboot | Proxy died with the boot — see §6 | `worthless service start` or `worthless up` |
+| `worthless service install` fails WRTLS-102 | Fernet key not readable by launchd | `worthless doctor`; ensure Keychain Always Allow or file-backed key |
 | Proxy started but `/healthz` reports a different PID | Stale orphan proxy on port 8787 | `worthless down` then `worthless up` (tracked as `worthless-6gkb`) |
 
 ## What worthless does NOT defend against
@@ -171,19 +178,25 @@ commands:
   install: "curl -sSL https://worthless.sh | sh"
   verify: "worthless --version"
   first_lock: "worthless"
-  proxy_restart: "worthless up"
+  proxy_restart: "worthless service start"
+  service_install: "worthless service install --yes"
+  service_status: "worthless --json service status"
 expectations:
   install_succeeds_silently: true
   first_lock_keychain_popups: 1
   first_lock_requires_human_interaction: true   # popup needs "Always Allow" click — agent must hand back to human
   subsequent_command_keychain_popups: 0
   proxy_starts_automatically_on_lock: true
-  proxy_survives_reboot: false
+  proxy_survives_reboot: true   # after `worthless service install`; false without it
 proxy:
   url_template: "http://127.0.0.1:8787/<alias>/v1"
   port: 8787
+service_install:
+  command: "worthless service install --yes"
+  verify: "worthless --json service status"   # expect state=running, healthy=true
+  uninstall: "worthless service uninstall --yes"
 limitations:
-  - "Manual `worthless up` after every reboot — WOR-174"
+  - "Without service_install, manual `worthless up` after every reboot"
   - "First-lock popup requires user to click Always Allow"
   - "uv tool uninstall doesn't purge keychain — WOR-435"
 ```

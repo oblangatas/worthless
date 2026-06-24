@@ -13,6 +13,7 @@ Contract:
 from __future__ import annotations
 
 import json
+import sqlite3
 
 import typer
 
@@ -24,8 +25,86 @@ from worthless.cli.commands.doctor.registry import (
     ensure_registered,
 )
 from worthless.cli.commands.doctor.schema import SCHEMA_VERSION
+from worthless.cli.errors import WorthlessError
 from worthless.cli.keystore import read_fernet_key
 from worthless.storage.repository import ShardRepository
+
+
+def _count_enrollments(home) -> int:  # noqa: ANN001 — WorthlessHome opaque here
+    """Best-effort enrollment count straight from SQLite (no key needed).
+
+    Used to size the 'fernet key missing' diagnosis when the key is gone and a
+    ``ShardRepository`` can't be opened.
+    """
+    try:
+        con = sqlite3.connect(str(home.db_path))
+        try:
+            return int(con.execute("SELECT COUNT(*) FROM enrollments").fetchone()[0])
+        finally:
+            con.close()
+    except Exception:  # noqa: BLE001 — diagnosis must never crash
+        return -1  # count unavailable (e.g. corrupt DB) — distinct from a real "none"
+
+
+def _fernet_missing_result(home) -> CheckResult:  # noqa: ANN001
+    """Diagnose a broken install: fernet.key gone while enrollments remain.
+
+    BUG-1: the locked keys can't be reconstructed, so the only way forward is a
+    forced removal — surfaced here so ``doctor --json`` (a) doesn't crash and
+    (b) points the user at ``worthless uninstall --force``.
+    """
+    n = _count_enrollments(home)
+    # n < 0 = the count itself failed (e.g. corrupt DB) — still a broken,
+    # unrecoverable install, NOT "0 enrollments". Only a confirmed 0 is a warn.
+    count_phrase = "an unknown number of" if n < 0 else str(n)
+    return CheckResult(
+        check_id="fernet_key_missing",
+        status="warn" if n == 0 else "error",
+        findings=[
+            {
+                "issue": "fernet_key_missing",
+                "enrollments": n,
+                "message": (
+                    f"fernet.key is missing but {count_phrase} enrollment(s) exist — the "
+                    "locked keys cannot be reconstructed (unrecoverable)."
+                ),
+                "recommendation": "worthless uninstall --force",
+            }
+        ],
+        summary=f"Fernet key missing; {count_phrase} enrollment(s) unrecoverable.",
+        fixable=False,
+        fixed=[],
+        skipped_reason=None,
+    )
+
+
+def _broken_install_result() -> CheckResult:
+    """Diagnose an install that can't even be opened — ``get_home()`` itself raised.
+
+    BUG-1 (corrupt DB / unreadable bootstrap): ``get_home()`` runs DB init and
+    throws WRTLS-103 before any check can run, so there is no ``home`` to count
+    against. Mirror the text-mode handler: the locked keys can't be
+    reconstructed, so the machine-facing diagnostic must still emit valid JSON
+    pointing at the forced removal instead of crashing.
+    """
+    return CheckResult(
+        check_id="broken_install",
+        status="error",
+        findings=[
+            {
+                "issue": "broken_install",
+                "message": (
+                    "Worthless can't be read (encryption key or database "
+                    "missing/unreadable) — the locked keys cannot be reconstructed."
+                ),
+                "recommendation": "worthless uninstall --force",
+            }
+        ],
+        summary="Worthless install unreadable; locked keys unrecoverable.",
+        fixable=False,
+        fixed=[],
+        skipped_reason=None,
+    )
 
 
 def _aggregate(results: list[CheckResult]) -> dict:
@@ -115,8 +194,23 @@ def _doctor_run_json(*, fix: bool, dry_run: bool) -> None:
     invocations and the iCloud-migration state machine that flock guards
     does not fire in JSON mode (no migration is performed in --json).
     """
-    home = get_home()
-    fernet_key = bytearray(read_fernet_key(home.base_dir))  # SR-01: mutable for zeroing
+    try:
+        home = get_home()
+    except WorthlessError:
+        # BUG-1: the install itself can't be opened (corrupt DB / unreadable
+        # bootstrap) — get_home() runs DB init and raises WRTLS-103 before any
+        # check can run. Mirror the text path: emit valid JSON pointing at the
+        # fix, never crash the machine-facing diagnostic.
+        typer.echo(json.dumps(_aggregate([_broken_install_result()])))
+        return
+    try:
+        fernet_key = bytearray(read_fernet_key(home.base_dir))  # SR-01: mutable for zeroing
+    except WorthlessError:
+        # BUG-1: the fernet key is unreadable (missing / corrupt) — a broken
+        # install whose locked keys can't be reconstructed. Don't crash the
+        # diagnostic; emit a single finding that points at the fix.
+        typer.echo(json.dumps(_aggregate([_fernet_missing_result(home)])))
+        return
     repo = ShardRepository(str(home.db_path), fernet_key)
 
     with acquire_lock(home):

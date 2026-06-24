@@ -60,7 +60,7 @@ from worthless.cli.orphans import FIX_PHRASE, PROBLEM_PHRASE, find_orphans, is_o
 from worthless.openclaw import integration as _oc_integration
 from worthless.openclaw import skill as _oc_skill
 from worthless.openclaw.errors import OpenclawIntegrationError
-from worthless.openclaw.integration import IntegrationState
+from worthless.openclaw.integration import IntegrationState, _alias_from_base_url
 from worthless.storage.repository import EnrollmentRecord, ShardRepository
 from worthless.crypto.splitter import reconstruct_key_fp
 
@@ -332,19 +332,6 @@ def _read_worthless_providers_from_config(config_path: Path) -> dict[str, dict]:
         }
 
     return {}
-
-
-_ALIAS_FROM_BASE_URL_RE = re.compile(r"/([^/]+)/v1(?:/|$)")
-
-
-def _alias_from_base_url(base_url: str) -> str | None:
-    """Extract the key alias from a worthless proxy baseUrl.
-
-    ``http://127.0.0.1:8787/openai-stale/v1`` -> ``openai-stale``
-    Returns ``None`` when the URL does not match the expected pattern.
-    """
-    m = _ALIAS_FROM_BASE_URL_RE.search(base_url)
-    return m.group(1) if m else None
 
 
 def _check_openclaw_apikey_consistency(
@@ -839,7 +826,21 @@ def _doctor_run(*, fix: bool, yes: bool, dry_run: bool) -> None:
     A clean state on all four reports ``No issues found.`` and exits 0.
     """
     console = get_console()
-    home = get_home()
+
+    # BUG-1: a broken install — a corrupt DB (crashes get_home's init) or a
+    # missing/unreadable encryption key — can't be diagnosed by the checks below
+    # and would crash the very tool meant to help (WRTLS-102/103). Surface it in
+    # plain English and point at the fix instead of crashing. (--json does too.)
+    try:
+        home = get_home()
+        _ = home.fernet_key
+    except WorthlessError:
+        console.print_warning(
+            "Worthless looks broken — it can't be read (encryption key or database "
+            "missing/unreadable), so your locked keys can't be reconstructed. Remove "
+            "it with 'worthless uninstall --force', then rotate those keys at your provider."
+        )
+        return
 
     with _doctor_lock(home), acquire_lock(home):
         # ----------- check 1: recovery file imports -----------

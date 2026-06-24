@@ -336,7 +336,15 @@ async def _delete_superseded_location_enrollments(
     var_name: str,
     env_path: str,
 ) -> None:
-    """Remove stale enrollments for a var/path after a rotated key is locked."""
+    """Remove stale enrollments for a var/path after a rotated key is locked.
+
+    exx5/WOR-646: each stale alias's enrollment + now-unreferenced shard is
+    removed in ONE atomic transaction (``delete_superseded_enrollment_atomic``),
+    so a SIGINT mid-cleanup on a rotation re-lock can't strand the old alias's
+    ``shards`` row (enrollment gone, shard not). The stale set is computed
+    first; the "any enrollment left for this alias?" check that gates the shard
+    delete runs inside the transaction, not here.
+    """
     enrollments = await repo.list_enrollments()
     stale_aliases = {
         e.key_alias
@@ -344,9 +352,7 @@ async def _delete_superseded_location_enrollments(
         if e.var_name == var_name and e.env_path == env_path and e.key_alias != alias
     }
     for stale_alias in stale_aliases:
-        await repo.delete_enrollment(stale_alias, env_path)
-        if not await repo.list_enrollments(stale_alias):
-            await repo.delete_enrolled(stale_alias)
+        await repo.delete_superseded_enrollment_atomic(stale_alias, env_path=env_path)
 
 
 def _capture_original_mode(env_str: str) -> int | None:
@@ -1023,6 +1029,13 @@ def _finalise_openclaw_success(
         if result.skill_installed:
             console.print_hint("   • ~/.openclaw/workspace/skills/worthless/ — installed skill")
         console.print_hint("   • Undo: worthless unlock")
+        # WOR-650: tell the user when an unrecognized entry was adopted or
+        # skipped. The detail strings already name the benign cause and the
+        # --adopt remedy; on the normal recognized/real-key path there are no
+        # adoption events so this is silent.
+        for event in result.events:
+            if event.code in _ADOPTION_EVENT_CODES:
+                console.print_hint(f"   • {event.detail}")
 
     # WOR-658: prove the rewrite actually routes. A "fail" verdict here
     # means lock-core succeeded on disk but the OpenClaw entry isn't
@@ -1079,11 +1092,73 @@ def _finalise_openclaw_success(
     return 0
 
 
+def _openclaw_proxy_base_url() -> tuple[str, str]:
+    """``(proxy_host, proxy_base_url)`` for OpenClaw config writes.
+
+    Single-sourced so the WOR-650 consent preview and the actual write agree
+    on the URL. Honours ``WORTHLESS_PROXY_HOST`` (all-container Docker writes
+    the service name, not 127.0.0.1) and the resolved ``--port``.
+    """
+    proxy_host = os.environ.get("WORTHLESS_PROXY_HOST", "127.0.0.1")
+    # NOSONAR python:S5332 — loopback proxy: the host is constrained to local
+    # endpoints by _validate_proxy_base_url, and only shard-A (inert without
+    # shard-B) ever transits. Matches the suppression on the health-probe URL.
+    return proxy_host, f"http://{proxy_host}:{resolve_port(None)}"  # NOSONAR python:S5332
+
+
+_ADOPTION_EVENT_CODES = frozenset(
+    {
+        OpenclawErrorCode.PROVIDER_ADOPTED_UNRECOGNIZED,
+        OpenclawErrorCode.PROVIDER_ADOPTION_SKIPPED,
+        OpenclawErrorCode.PROVIDER_RECOGNITION_UNAVAILABLE,
+    }
+)
+
+
+def _resolve_adoption_policy(
+    planned: list[_PlannedUpdate],
+    *,
+    managed_aliases: set[str] | None,
+    adopt: bool,
+    console,  # noqa: ANN001 — Console type is opaque from this layer
+    quiet: bool,
+):
+    """WOR-650: decide whether to adopt unrecognized OpenClaw proxy entries.
+
+    ``--adopt`` or a non-interactive shell → adopt (the agent/CI path: the
+    overwrite neutralizes any planted entry and the structured event is the
+    record). Interactive without ``--adopt`` → preview the foreign entries and,
+    if any, prompt once. ``managed_aliases is None`` (DB snapshot failed) is
+    threaded straight through — :func:`_classify_adoption` renders it as the
+    fail-safe ``recognition_unavailable`` state, never as "recognized".
+    """
+    AdoptionPolicy = _openclaw_integration.AdoptionPolicy
+    if adopt or not sys.stdin.isatty():
+        return AdoptionPolicy(managed_aliases=managed_aliases, adopt_unrecognized=True)
+    _, proxy_base_url = _openclaw_proxy_base_url()
+    unrecognized = _openclaw_integration.preview_unrecognized(
+        [(p.provider, p.alias, "") for p in planned],
+        proxy_base_url=proxy_base_url,
+        managed_aliases=managed_aliases,
+    )
+    if not unrecognized:
+        return AdoptionPolicy(managed_aliases=managed_aliases, adopt_unrecognized=False)
+    if not quiet:
+        names = ", ".join(sorted(set(unrecognized)))
+        console.print_warning(
+            f"OpenClaw has proxy-shaped entries not created on this machine: {names}. "
+            "These may be your own synced config — or left by something else."
+        )
+    decision = typer.confirm("Route them through Worthless?", default=False)
+    return AdoptionPolicy(managed_aliases=managed_aliases, adopt_unrecognized=decision)
+
+
 def _apply_openclaw(
     planned: list[_PlannedUpdate],
     console,  # noqa: ANN001 — Console type is opaque from this layer
     quiet: bool,
     home: WorthlessHome,
+    adoption_policy=None,  # noqa: ANN001 — AdoptionPolicy is opaque from this layer
 ) -> int:
     """OpenClaw integration call + sentinel write. Returns exit code (0/73/87).
 
@@ -1120,11 +1195,12 @@ def _apply_openclaw(
     # Also honour WORTHLESS_PROXY_HOST so all-container Docker deployments
     # write the Docker-internal service name (e.g. "proxy") instead of
     # 127.0.0.1, which is unreachable inside the openclaw container.
-    _proxy_host = os.environ.get("WORTHLESS_PROXY_HOST", "127.0.0.1")
-    proxy_base_url = f"http://{_proxy_host}:{resolve_port(None)}"
+    _proxy_host, proxy_base_url = _openclaw_proxy_base_url()
     try:
         result = _openclaw_integration.apply_lock(
-            planned_updates=triples, proxy_base_url=proxy_base_url
+            planned_updates=triples,
+            proxy_base_url=proxy_base_url,
+            adoption_policy=adoption_policy,
         )
     except OpenclawIntegrationError as exc:
         # apply_lock's contract is "never raise". If it does, treat as
@@ -1515,6 +1591,7 @@ def _lock_keys(
     quiet: bool = False,
     keys_only: bool = False,
     allow_hardcoded_urls: bool = False,
+    adopt: bool = False,
 ) -> int:
     """Transactional multi-key lock.
 
@@ -1619,6 +1696,15 @@ def _lock_keys(
 
         async with open_repo(home) as repo:
             await repo.initialize()
+
+            # WOR-650: snapshot the aliases this machine created (the shards
+            # table) BEFORE pass-1 adds this lock's new aliases, so recognition
+            # judges the *existing* OpenClaw entry against prior state. None =
+            # the snapshot failed → fail-safe recognition_unavailable downstream.
+            try:
+                managed_aliases: set[str] | None = set(await repo.list_keys())
+            except Exception:  # noqa: BLE001 — recognition is best-effort, never blocks lock
+                managed_aliases = None
 
             env_str = str(env_path.resolve())
             all_enrollments = await repo.list_enrollments()
@@ -1794,7 +1880,14 @@ def _lock_keys(
                 # by the verification gauntlet): detected+failed returns non-zero
                 # openclaw_exit so the caller can raise typer.Exit(openclaw_exit)
                 # AFTER lock-core's .env/DB writes are fully committed.
-                openclaw_exit = _apply_openclaw(planned, console, quiet, home)
+                adoption_policy = _resolve_adoption_policy(
+                    planned,
+                    managed_aliases=managed_aliases,
+                    adopt=adopt,
+                    console=console,
+                    quiet=quiet,
+                )
+                openclaw_exit = _apply_openclaw(planned, console, quiet, home, adoption_policy)
                 fresh_count = sum(1 for p in planned if p.was_fresh_enroll)
                 return _LockResult(
                     total=len(planned), fresh_count=fresh_count, openclaw_exit=openclaw_exit
@@ -1965,6 +2058,14 @@ def register_lock_commands(app: typer.Typer) -> None:
                 "A warning is always printed."
             ),
         ),
+        adopt: bool = typer.Option(
+            False,
+            "--adopt",
+            help=(
+                "Take over pre-existing OpenClaw proxy entries not created on "
+                "this machine without prompting (e.g. a synced config or reinstall)."
+            ),
+        ),
     ) -> None:
         """Protect API keys in a .env file."""
         # Pre-announce the macOS Keychain dialog so users aren't surprised by a
@@ -1987,6 +2088,7 @@ def register_lock_commands(app: typer.Typer) -> None:
                 token_budget_daily=token_budget_daily,
                 keys_only=keys_only,
                 allow_hardcoded_urls=allow_hardcoded_urls,
+                adopt=adopt,
             )
 
     @app.command()

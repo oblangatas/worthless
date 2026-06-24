@@ -455,3 +455,114 @@ class TestUpDuplicateDetection:
         assert result.exit_code == 1, f"Expected rejection, got: {result.output}"
         assert "WRTLS-107" in result.output
         assert "already running" in result.output.lower()
+
+
+class TestStartSupervisedProxy:
+    """Unit tests for ``start_supervised_proxy`` (WOR-717 new code)."""
+
+    def test_returns_pid_from_health_probe(
+        self, home_with_key: WorthlessHome, tmp_path: Path
+    ) -> None:
+        from worthless.cli.commands.up import start_supervised_proxy
+
+        binary = tmp_path / "worthless"
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+        log_file = tmp_path / "proxy.log"
+        console = MagicMock()
+
+        with (
+            patch(
+                "worthless.cli.commands.service._common.resolve_worthless_binary",
+                return_value=binary,
+            ),
+            patch("worthless.cli.commands.up.subprocess.Popen") as mock_popen,
+            patch("worthless.cli.commands.up.poll_health_pid", return_value=4242),
+        ):
+            pid = start_supervised_proxy(home_with_key, 8787, log_file, console)
+
+        assert pid == 4242
+        mock_popen.assert_called_once()
+        popen_kwargs = mock_popen.call_args.kwargs
+        assert popen_kwargs["env"]["WORTHLESS_HOME"] == str(home_with_key.base_dir)
+        assert popen_kwargs["env"]["WORTHLESS_PORT"] == "8787"
+        assert popen_kwargs["start_new_session"] is True
+        console.print_success.assert_called_once()
+
+    def test_health_timeout_uses_pidfile(
+        self, home_with_key: WorthlessHome, tmp_path: Path
+    ) -> None:
+        from worthless.cli.commands.up import start_supervised_proxy
+
+        binary = tmp_path / "worthless"
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+        log_file = tmp_path / "proxy.log"
+        console = MagicMock()
+        pf = pid_path(home_with_key)
+        write_pid(pf, 7777, 8787)
+
+        with (
+            patch(
+                "worthless.cli.commands.service._common.resolve_worthless_binary",
+                return_value=binary,
+            ),
+            patch("worthless.cli.commands.up.subprocess.Popen"),
+            patch("worthless.cli.commands.up.poll_health_pid", return_value=None),
+        ):
+            pid = start_supervised_proxy(home_with_key, 8787, log_file, console)
+
+        assert pid == 7777
+        console.print_warning.assert_called_once()
+
+    def test_health_timeout_without_pidfile_returns_zero(
+        self, home_with_key: WorthlessHome, tmp_path: Path
+    ) -> None:
+        from worthless.cli.commands.up import start_supervised_proxy
+
+        binary = tmp_path / "worthless"
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+        log_file = tmp_path / "proxy.log"
+        console = MagicMock()
+        pid_path(home_with_key).unlink(missing_ok=True)
+
+        with (
+            patch(
+                "worthless.cli.commands.service._common.resolve_worthless_binary",
+                return_value=binary,
+            ),
+            patch("worthless.cli.commands.up.subprocess.Popen"),
+            patch("worthless.cli.commands.up.poll_health_pid", return_value=None),
+        ):
+            pid = start_supervised_proxy(home_with_key, 8787, log_file, console)
+
+        assert pid == 0
+        console.print_warning.assert_called_once()
+
+    def test_spawn_failure_exits(self, home_with_key: WorthlessHome, tmp_path: Path) -> None:
+        import typer
+
+        from worthless.cli.commands.up import start_supervised_proxy
+
+        binary = tmp_path / "worthless"
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+        log_file = tmp_path / "proxy.log"
+        console = MagicMock()
+
+        with (
+            patch(
+                "worthless.cli.commands.service._common.resolve_worthless_binary",
+                return_value=binary,
+            ),
+            patch(
+                "worthless.cli.commands.up.subprocess.Popen",
+                side_effect=OSError("exec failed"),
+            ),
+            pytest.raises(typer.Exit) as exc_info,
+        ):
+            start_supervised_proxy(home_with_key, 8787, log_file, console)
+
+        assert exc_info.value.exit_code == 1
+        console.print_error.assert_called_once()

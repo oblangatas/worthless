@@ -459,13 +459,13 @@ def test_apply_lock_uses_custom_proxy_base_url(
 
     result = integration.apply_lock(
         planned_updates=[("openai", "openai-cccc3333", "sk-shard")],
-        proxy_base_url="http://custom.host:9999",
+        proxy_base_url="http://127.0.0.1:9999",
     )
 
     assert result.detected is True
     data = json.loads(openclaw_present["config_path"].read_text(encoding="utf-8"))
     providers = data["models"]["providers"]
-    assert providers["openai"]["baseUrl"] == "http://custom.host:9999/openai-cccc3333/v1"
+    assert providers["openai"]["baseUrl"] == "http://127.0.0.1:9999/openai-cccc3333/v1"
 
 
 # ---------------------------------------------------------------------------

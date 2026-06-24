@@ -48,7 +48,14 @@ services:
       - worthless-data:/data
       - worthless-secrets:/secrets
     networks:
-      - openclaw-net
+      openclaw-net:
+        # `proxy` mirrors the production deploy/docker-compose.yml service
+        # name, which is the host real `worthless lock` writes + the only
+        # container hostname integration.py's SSRF allowlist permits. The
+        # service name `worthless-proxy` still resolves for tests that wire
+        # the provider manually (test_proxy_is_load_bearing_after_lock).
+        aliases:
+          - proxy
     depends_on:
       mock-upstream:
         condition: service_healthy

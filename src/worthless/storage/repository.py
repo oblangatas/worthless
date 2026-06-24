@@ -665,6 +665,57 @@ class ShardRepository:
                 )
             await db.commit()
 
+    async def delete_superseded_enrollment_atomic(
+        self, alias: str, *, env_path: str | None
+    ) -> bool:
+        """exx5/WOR-646: drop a superseded ``(alias, env_path)`` enrollment and
+        its now-unreferenced shard in ONE transaction.
+
+        After a key-ROTATION re-lock, the NEW alias is enrolled at
+        ``(var_name, env_path)`` and the OLD alias's enrollment there is stale.
+        Removing it used to be two separate commits —
+        :meth:`delete_enrollment` then a conditional :meth:`delete_enrolled` —
+        so a SIGINT between them left the old alias's ``shards`` row orphaned
+        (enrollment gone, shard not). The compensating unwind only covers the
+        new alias (``planned``), never the superseded one, so the orphan
+        survived. This is the one spot Part 2's atomicity claim still had an
+        asterisk.
+
+        Folding both into a single ``BEGIN IMMEDIATE … COMMIT`` makes it
+        atomic: an interrupt before the commit leaves the old rows fully intact
+        (a harmless duplicate the next lock reconciles), after it they are
+        fully gone — never half-deleted. This is the cleanup's OWN transaction,
+        NOT the new key's: a failure here can't roll back the freshly-locked
+        key (which would unprotect a live secret).
+
+        The shard is deleted ONLY when no enrollment for *alias* remains — an
+        unconditional ``DELETE FROM shards`` would CASCADE-wipe a shard still
+        locked from another ``.env`` path. The "any left?" check runs inside
+        the transaction so it sees a consistent view under the write lock.
+        Returns True if the shard was removed.
+        """
+        async with self._connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            if env_path is None:
+                await db.execute(
+                    "DELETE FROM enrollments WHERE key_alias = ? AND env_path IS NULL",
+                    (alias,),
+                )
+            else:
+                await db.execute(
+                    "DELETE FROM enrollments WHERE key_alias = ? AND env_path = ?",
+                    (alias, env_path),
+                )
+            cursor = await db.execute(
+                "SELECT 1 FROM enrollments WHERE key_alias = ? LIMIT 1", (alias,)
+            )
+            shard_removed = False
+            if await cursor.fetchone() is None:
+                del_cursor = await db.execute("DELETE FROM shards WHERE key_alias = ?", (alias,))
+                shard_removed = del_cursor.rowcount > 0
+            await db.commit()
+            return shard_removed
+
     async def add_enrollment(
         self,
         alias: str,
@@ -878,37 +929,33 @@ class ShardRepository:
     # Decoy hash registry (WOR-31)
     # ------------------------------------------------------------------
 
-    async def set_decoy_hash(self, alias: str, env_path: str | None, decoy_value: str) -> None:
-        """Store the HMAC-SHA256 hash of *decoy_value* on the enrollment row."""
-        h = await self._compute_decoy_hash(decoy_value)
+    async def record_retired_decoy(self, retired_value: str) -> None:
+        """Record the HMAC of a now-RETIRED shard-A in the decoy tripwire set.
+
+        Called at unlock — the moment a shard-A is invalidated. NEVER call this
+        with a currently-active shard-A: that value is the legitimate Bearer
+        token and recording it would make the proxy 401 all live traffic.
+        """
+        h = await self._compute_decoy_hash(retired_value)
         async with self._connect() as db:
-            if env_path is None:
-                await db.execute(
-                    "UPDATE enrollments SET decoy_hash = ? "
-                    "WHERE key_alias = ? AND env_path IS NULL",
-                    (h, alias),
-                )
-            else:
-                await db.execute(
-                    "UPDATE enrollments SET decoy_hash = ? WHERE key_alias = ? AND env_path = ?",
-                    (h, alias, env_path),
-                )
+            await db.execute(
+                "INSERT OR IGNORE INTO retired_decoys (decoy_hash) VALUES (?)",
+                (h,),
+            )
             await db.commit()
 
     async def is_known_decoy(self, value: str) -> bool:
-        """Return True if *value* matches any stored decoy hash."""
+        """Return True if *value* matches a retired-decoy hash."""
         h = await self._compute_decoy_hash(value)
         async with self._connect() as db:
             cursor = await db.execute(
-                "SELECT 1 FROM enrollments WHERE decoy_hash = ? LIMIT 1",
+                "SELECT 1 FROM retired_decoys WHERE decoy_hash = ? LIMIT 1",
                 (h,),
             )
             return await cursor.fetchone() is not None
 
     async def all_decoy_hashes(self) -> set[str]:
-        """Return the set of all non-NULL decoy_hash values (for batch checks)."""
+        """Return the set of all retired-decoy hashes (for the proxy tripwire)."""
         async with self._connect() as db:
-            cursor = await db.execute(
-                "SELECT decoy_hash FROM enrollments WHERE decoy_hash IS NOT NULL"
-            )
+            cursor = await db.execute("SELECT decoy_hash FROM retired_decoys")
             return {row[0] for row in await cursor.fetchall()}

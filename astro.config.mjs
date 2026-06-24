@@ -48,6 +48,8 @@ export default defineConfig({
             { label: 'Wire Protocol', slug: 'protocol' },
             { label: 'Security Model', slug: 'security' },
             { label: 'Recovery', slug: 'recovery' },
+            { label: 'Uninstall', slug: 'uninstall' },
+            { label: 'Uninstall Contract', slug: 'uninstall-contract' },
           ],
         },
       ],

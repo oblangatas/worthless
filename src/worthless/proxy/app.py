@@ -191,6 +191,27 @@ async def _sweep_loop(ledger: SpendLedger, interval: float, max_age: float) -> N
             logger.warning("sweeper: sweep() raised an exception", exc_info=True)
 
 
+async def _refresh_decoy_hashes(app: FastAPI, reader: ShardReader) -> None:
+    """Re-read the retired-decoy set into ``app.state.decoy_hashes`` (worthless-ibw1).
+
+    The set is preloaded once at startup; without this a shard-A retired by
+    ``unlock`` *while the proxy is running* would not be in the tripwire until a
+    restart. Best-effort: a transient DB error keeps the current set rather than
+    blanking the tripwire.
+    """
+    try:
+        app.state.decoy_hashes = await reader.fetch_decoy_hashes()
+    except Exception:  # noqa: BLE001
+        logger.warning("decoy reload: fetch_decoy_hashes() raised", exc_info=True)
+
+
+async def _decoy_reload_loop(app: FastAPI, reader: ShardReader, interval: float) -> None:
+    """Background task: refresh the decoy tripwire on *interval* until cancelled."""
+    while True:
+        await asyncio.sleep(interval)
+        await _refresh_decoy_hashes(app, reader)
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     """Startup/shutdown lifecycle for the proxy.
@@ -216,6 +237,8 @@ async def _lifespan(app: FastAPI):
 
     repo = ShardReader(settings.db_path)
     app.state.repo = repo
+    # WOR-640: preload decoy hashes for O(1) per-request tripwire check.
+    app.state.decoy_hashes = await repo.fetch_decoy_hashes()
 
     # Allow tests to inject a pre-configured supervisor (avoids spawning a
     # real sidecar in unit tests). When absent, build one from settings and
@@ -271,17 +294,25 @@ async def _lifespan(app: FastAPI):
         _sweep_loop(ledger, settings.sweep_interval_seconds, settings.sweep_max_age_seconds),
         name="worthless-sweeper",
     )
+    # worthless-ibw1: refresh the decoy tripwire on the same cadence so a key
+    # retired mid-session is caught without a proxy restart.
+    decoy_reload_task = asyncio.create_task(
+        _decoy_reload_loop(app, repo, settings.sweep_interval_seconds),
+        name="worthless-decoy-reload",
+    )
 
     try:
         yield
     finally:
-        # Cancel the sweeper before closing the DB — it MUST NOT race db.close().
-        # Both cancel() and await are required: cancel() alone leaves the task
-        # running until the event loop closes, causing "task was destroyed but it
-        # is pending" ResourceWarnings (caught as errors on Python 3.13+).
+        # Cancel background tasks before closing the DB — they MUST NOT race
+        # db.close(). Both cancel() and await are required: cancel() alone leaves
+        # the task running until the event loop closes, causing "task was
+        # destroyed but it is pending" ResourceWarnings (errors on Python 3.13+).
         sweep_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await sweep_task
+        decoy_reload_task.cancel()
+        for _bg in (sweep_task, decoy_reload_task):
+            with contextlib.suppress(asyncio.CancelledError):
+                await _bg
         try:
             await client.aclose()
             await db.close()
@@ -486,6 +517,25 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
         shard_a: bytearray | None = _extract_shard_a(request)
         if shard_a is None:
             return _uniform_401()
+
+        # WOR-640: decoy tripwire — detect stolen .env replay attacks.
+        # When a .env is unlocked its shard-A is RETIRED: HMAC-SHA256(shard_a) is
+        # recorded in the retired_decoys table and preloaded into
+        # app.state.decoy_hashes at startup. The currently-active shard-A is never
+        # in this set, so a legitimate Bearer passes; a replayed retired one is
+        # caught. We ask the sidecar to MAC the incoming Bearer value (best-effort:
+        # if IPC fails we let the request through rather than block legit traffic).
+        # SR-04: do NOT log the matched value — only the alias.
+        _decoy_hashes: frozenset[str] = getattr(request.app.state, "decoy_hashes", frozenset())
+        if _decoy_hashes:
+            try:
+                _mac_tag = await ipc.mac(shard_a)
+                if _mac_tag.hex() in _decoy_hashes:
+                    logger.warning("decoy bearer token detected for alias %r", alias)
+                    shard_a[:] = b"\x00" * len(shard_a)
+                    return _uniform_401()
+            except Exception:  # noqa: BLE001,S110  # nosec B110 — best-effort, IPC errors must not block requests
+                pass
 
         # Pre-read body ONCE before rules engine (WOR-182: eliminates
         # Starlette body-caching coupling — rules receive bytes, not stream)

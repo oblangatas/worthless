@@ -15,6 +15,7 @@ Covers attack vectors from 5 security reviews:
 
 from __future__ import annotations
 
+import asyncio
 import resource
 import sqlite3
 import stat
@@ -26,12 +27,13 @@ from cryptography.fernet import Fernet
 
 from worthless.cli.bootstrap import ensure_home
 from worthless.cli.commands.lock import _enroll_single, _lock_keys
+from worthless.cli.commands.unlock import _unlock_batch
 from worthless.cli.dotenv_rewriter import rewrite_env_key, scan_env_keys
 from worthless.cli.errors import WorthlessError
 from worthless.cli.process import disable_core_dumps, spawn_proxy
 from worthless.cli.scanner import scan_files
-from worthless.crypto.splitter import split_key
-from worthless.storage.repository import StoredShard
+from worthless.crypto.splitter import split_key, split_key_fp
+from worthless.storage.repository import ShardRepository, StoredShard
 
 
 # =====================================================================
@@ -482,3 +484,149 @@ class TestCoreDumpSuppression:
         disable_core_dumps()
         soft, hard = resource.getrlimit(resource.RLIMIT_CORE)
         assert soft == 0
+
+
+# =====================================================================
+# 17. RETIRED-DECOY TRIPWIRE (WOR-624 / WOR-640)
+# =====================================================================
+
+
+class TestRetiredDecoyTripwire:
+    """The decoy tripwire records only RETIRED shard-A values, never active ones.
+
+    A shard-A is the legitimate Bearer token while its enrollment is live, so
+    recording it as a decoy would make the proxy 401 all real traffic (the
+    original WOR-640 bug). A shard-A becomes a decoy only when *unlock* retires
+    it — then a stolen copy of the old .env replayed at the proxy is caught.
+    """
+
+    def test_fresh_lock_does_not_retire_active_shard_a(self, tmp_path: Path) -> None:
+        """A fresh lock must NOT record the active shard-A as a decoy.
+
+        Regression guard for the bug where the active Bearer token was its own
+        decoy hash → every legitimate request got a 401. After lock the tripwire
+        set must be empty and the active shard-A must NOT be a known decoy.
+        """
+        home = ensure_home(tmp_path / ".worthless")
+        env_file = tmp_path / ".env"
+        env_file.write_text("OPENAI_API_KEY=sk-proj-a3x7bK9mQ2rT4vU5wE1dF6gH8jL0pN2sR\n")
+        captured: dict[str, str] = {}
+
+        def _spy_split(raw_key: str, prefix: str, provider: str):
+            result = split_key_fp(raw_key, prefix, provider)
+            captured["shard_a"] = result.shard_a.decode("utf-8")
+            return result
+
+        with patch("worthless.cli.commands.lock.split_key_fp", _spy_split):
+            assert _lock_keys(env_file, home) == 1
+
+        repo = ShardRepository(str(home.db_path), home.fernet_key)
+        asyncio.run(repo.initialize())
+        assert asyncio.run(repo.all_decoy_hashes()) == set(), (
+            "Fresh lock must retire nothing; the tripwire set must be empty."
+        )
+        assert not asyncio.run(repo.is_known_decoy(captured["shard_a"])), (
+            "The ACTIVE shard-A is the legitimate Bearer token and must never "
+            "be a known decoy — recording it would 401 all live traffic."
+        )
+
+    def test_record_and_recognise_retired_decoy(self, tmp_path: Path) -> None:
+        """record_retired_decoy() round-trips: the value becomes a known decoy,
+        a different value does not."""
+        home = ensure_home(tmp_path / ".worthless")
+        repo = ShardRepository(str(home.db_path), home.fernet_key)
+        asyncio.run(repo.initialize())
+
+        asyncio.run(repo.record_retired_decoy("sk-retired-shard-a-value-000"))
+        assert asyncio.run(repo.is_known_decoy("sk-retired-shard-a-value-000"))
+        assert not asyncio.run(repo.is_known_decoy("sk-some-other-value-999"))
+        assert asyncio.run(repo.all_decoy_hashes()), "retired decoy must appear in the set"
+
+    def test_unlock_retires_shard_a_into_tripwire(self, tmp_path: Path) -> None:
+        """Unlocking a locked .env must retire its shard-A into the tripwire.
+
+        Full lock → unlock cycle: capture the active shard-A at lock, unlock the
+        alias, then assert the (now-retired) shard-A is a known decoy.
+        """
+        home = ensure_home(tmp_path / ".worthless")
+        env_file = tmp_path / ".env"
+        env_file.write_text("OPENAI_API_KEY=sk-proj-a3x7bK9mQ2rT4vU5wE1dF6gH8jL0pN2sR\n")
+        captured: dict[str, str] = {}
+
+        def _spy_split(raw_key: str, prefix: str, provider: str):
+            result = split_key_fp(raw_key, prefix, provider)
+            captured["shard_a"] = result.shard_a.decode("utf-8")
+            return result
+
+        with patch("worthless.cli.commands.lock.split_key_fp", _spy_split):
+            assert _lock_keys(env_file, home) == 1
+
+        repo = ShardRepository(str(home.db_path), home.fernet_key)
+        asyncio.run(repo.initialize())
+        # Before unlock: not yet retired.
+        assert not asyncio.run(repo.is_known_decoy(captured["shard_a"]))
+
+        conn = sqlite3.connect(str(home.db_path))
+        try:
+            aliases = [r[0] for r in conn.execute("SELECT key_alias FROM shards")]
+        finally:
+            conn.close()
+        assert aliases, "lock should have stored at least one shard"
+
+        asyncio.run(_unlock_batch(aliases, home, repo, env_file))
+
+        assert asyncio.run(repo.is_known_decoy(captured["shard_a"])), (
+            "Unlock must retire the shard-A into the decoy tripwire so a stolen "
+            "copy of the old .env is caught on replay."
+        )
+
+    def test_shared_shard_a_retired_only_when_last_enrollment_unlocked(
+        self, tmp_path: Path
+    ) -> None:
+        """A shard-A shared across two .env files stays live until the LAST one
+        is unlocked.
+
+        One alias enrolled in two .envs shares the same shard-A bearer. Retiring
+        it after unlocking only the first would 401 the still-legitimate second
+        .env. The decoy must appear only once the final enrollment is gone.
+        """
+        home = ensure_home(tmp_path / ".worthless")
+        key = "sk-proj-a3x7bK9mQ2rT4vU5wE1dF6gH8jL0pN2sR"
+        captured: dict[str, str] = {}
+
+        def _spy_split(raw_key: str, prefix: str, provider: str):
+            result = split_key_fp(raw_key, prefix, provider)
+            captured["shard_a"] = result.shard_a.decode("utf-8")
+            return result
+
+        env1 = tmp_path / "a" / ".env"
+        env1.parent.mkdir()
+        env1.write_text(f"OPENAI_API_KEY={key}\n")
+        env2 = tmp_path / "b" / ".env"
+        env2.parent.mkdir()
+        env2.write_text(f"OPENAI_API_KEY={key}\n")
+
+        with patch("worthless.cli.commands.lock.split_key_fp", _spy_split):
+            assert _lock_keys(env1, home) == 1  # fresh enroll
+        assert _lock_keys(env2, home) == 1  # re-lock same key → 2nd enrollment
+
+        repo = ShardRepository(str(home.db_path), home.fernet_key)
+        asyncio.run(repo.initialize())
+        conn = sqlite3.connect(str(home.db_path))
+        try:
+            aliases = [r[0] for r in conn.execute("SELECT key_alias FROM shards")]
+        finally:
+            conn.close()
+
+        # Unlock only the first .env — shard-A is still live in env2.
+        asyncio.run(_unlock_batch(aliases, home, repo, env1))
+        assert not asyncio.run(repo.is_known_decoy(captured["shard_a"])), (
+            "shard-A must NOT be retired while it is still the live bearer in a "
+            "second .env — that would 401 legitimate traffic."
+        )
+
+        # Unlock the last .env — now the shard-A is fully retired.
+        asyncio.run(_unlock_batch(aliases, home, repo, env2))
+        assert asyncio.run(repo.is_known_decoy(captured["shard_a"])), (
+            "Once the final enrollment is unlocked the shard-A is retired."
+        )

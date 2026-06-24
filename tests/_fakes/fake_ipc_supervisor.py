@@ -78,6 +78,9 @@ class FakeIPCClient:
     async def attest(self, nonce: bytes, purpose: str | None = None) -> bytes:
         return b"FAKE-EVIDENCE"
 
+    async def mac(self, value: bytes | bytearray) -> bytes:
+        return await self._supervisor.mac(value)
+
     async def aclose(self) -> None:
         return None
 
@@ -115,6 +118,9 @@ class FakeIPCSupervisor:
         self.connect_calls = 0
         self.aclose_calls = 0
         self.open_calls = 0
+        self._mac_result: bytes | None = None
+        self._fail_mac_with: type[BaseException] | None = None
+        self._fail_mac_message: str = "fake sidecar mac configured to fail"
 
     # ------------------------------------------------------------------
     # Public IPCSupervisor surface
@@ -156,6 +162,14 @@ class FakeIPCSupervisor:
         # without touching shared state — matches real supervisor contract.
         return bytearray(plaintext)
 
+    async def mac(self, value: bytes | bytearray) -> bytes:
+        """Return the configured HMAC tag, or raise if configured to fail."""
+        if self._closed:
+            raise IPCUnavailable("fake supervisor is closed")
+        if self._fail_mac_with is not None:
+            raise self._fail_mac_with(self._fail_mac_message)
+        return self._mac_result if self._mac_result is not None else b"\x00" * 32
+
     # ------------------------------------------------------------------
     # Test configuration knobs
     # ------------------------------------------------------------------
@@ -187,10 +201,24 @@ class FakeIPCSupervisor:
         self._fail_connect_with = exc_class
         self._fail_connect_message = message
 
+    def set_mac_result(self, result: bytes) -> None:
+        """Pin the bytes returned by ``mac()`` for the duration of the test."""
+        self._mac_result = bytes(result)
+
+    def fail_mac_with(
+        self,
+        exc_class: type[BaseException] = Exception,
+        message: str = "fake sidecar mac configured to fail",
+    ) -> None:
+        """Configure ``mac()`` to raise ``exc_class(message)`` on every call."""
+        self._fail_mac_with = exc_class
+        self._fail_mac_message = message
+
     def clear_failures(self) -> None:
         """Reset all configured failure modes."""
         self._fail_open_with = None
         self._fail_connect_with = None
+        self._fail_mac_with = None
 
     # ------------------------------------------------------------------
     # Internal hook used by both ``open()`` and ``FakeIPCClient.open()``

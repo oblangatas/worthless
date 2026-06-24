@@ -31,8 +31,16 @@ from worthless.cli.platform import IS_WINDOWS, check_pid_alive, popen_platform_k
 
 logger = logging.getLogger(__name__)
 
+# Set by launchd/systemd units installed via ``worthless service install``.
+_SERVICE_MANAGED_ENV = "WORTHLESS_SERVICE_MANAGED"
+
 # Regex to capture the port from uvicorn's startup line
 _UVICORN_PORT_RE = re.compile(r"Uvicorn running on http://[\d.]+:(\d+)")
+
+
+def is_service_managed() -> bool:
+    """True when ``worthless up`` is supervised by launchd or systemd."""
+    return os.environ.get(_SERVICE_MANAGED_ENV, "").strip() == "1"
 
 
 # ---------------------------------------------------------------------------

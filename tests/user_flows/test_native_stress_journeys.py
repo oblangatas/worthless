@@ -13,6 +13,7 @@ from dotenv import dotenv_values
 from tests.helpers import fake_key, fake_openai_key
 from tests.user_flows.helpers import scrubbed_cli_env
 from worthless.cli.app import app
+from worthless.cli.bootstrap import WorthlessHome
 
 
 runner = CliRunner(mix_stderr=False)
@@ -100,3 +101,78 @@ def test_unlock_tampered_locked_env_fails_without_destroying_state(tmp_path: Pat
     status_output = _combined_output(status)
     assert status.exit_code == 0, status_output
     assert "PROTECTED" in status_output
+
+
+@pytest.mark.user_flow
+@pytest.mark.adversarial
+@pytest.mark.integration
+def test_default_supervised_spawn_failure_does_not_leak_key_material(
+    home_with_key: WorthlessHome,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """W3-ADV-2: spawn failure must not echo provider keys from the exception path."""
+    secret = fake_openai_key()
+    monkeypatch.setenv("OPENAI_API_KEY", secret)
+
+    def _boom(*_a, **_k):
+        raise OSError(f"supervised spawn failed: {secret}")
+
+    monkeypatch.setattr(
+        "worthless.cli.default_command._proxy_is_running",
+        lambda home: (False, None, 0),
+    )
+    monkeypatch.setattr(
+        "worthless.cli.default_command.start_supervised_proxy",
+        _boom,
+    )
+
+    result = _invoke(["--yes"], home_with_key.base_dir)
+    output = _combined_output(result)
+
+    assert result.exit_code != 0, output
+    assert secret not in output
+    assert "Traceback" not in output
+
+
+@pytest.mark.user_flow
+@pytest.mark.adversarial
+@pytest.mark.integration
+def test_foreign_health_listener_skips_supervised_spawn_under_stress(
+    home_with_key: WorthlessHome,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """STRESS matrix P0: something else on the port must not trigger double bind."""
+    project = tmp_path / "project"
+    project.mkdir()
+    env_file = project / ".env"
+    secret = fake_openai_key()
+    env_file.write_text(f"OPENAI_API_KEY={secret}\n")
+    monkeypatch.chdir(project)
+
+    spawn_attempts = 0
+
+    def _track_spawn(*_a, **_k):
+        nonlocal spawn_attempts
+        spawn_attempts += 1
+        return 4242
+
+    monkeypatch.setattr(
+        "worthless.cli.default_command._proxy_is_running",
+        lambda home: (True, None, 8787),
+    )
+    monkeypatch.setattr(
+        "worthless.cli.default_command.start_supervised_proxy",
+        _track_spawn,
+    )
+    monkeypatch.setattr(
+        "worthless.cli.default_command.poll_health", lambda port, timeout=10.0: True
+    )
+
+    for _ in range(5):
+        result = _invoke(["--yes"], home_with_key.base_dir)
+        output = _combined_output(result)
+        assert result.exit_code == 0, output
+        assert secret not in output
+
+    assert spawn_attempts == 0

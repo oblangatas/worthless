@@ -13,6 +13,7 @@ import json
 import logging
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -29,6 +30,7 @@ from worthless.proxy.app import (
     _AUTH_BODY,
     _BAD_HEADER_CHARS,
     _extract_alias_and_path,
+    _refresh_decoy_hashes,
     create_app,
 )
 from worthless.proxy.config import DeployMode, ProxySettings
@@ -2275,6 +2277,118 @@ class TestSR09DeepEnforcement:
 # ------------------------------------------------------------------
 # ATK-5: _BAD_HEADER_CHARS completeness
 # ------------------------------------------------------------------
+
+
+class TestDecoyHashCheck:
+    """WOR-640: proxy rejects stolen .env replay attacks via decoy tripwire.
+
+    When a .env is unlocked its shard-A is retired: HMAC-SHA256(shard_a) is
+    recorded in retired_decoys. On each request the proxy calls
+    ipc.mac(shard_a_from_bearer) and compares the hex against
+    app.state.decoy_hashes loaded at startup. A match means a retired (stolen)
+    shard-A is being replayed. The active shard-A is never retired, so these
+    tests inject app.state.decoy_hashes directly to exercise the proxy logic.
+
+    Test 1 is RED before the check is added to proxy_request().
+    Tests 2 and 3 guard against regressions in the happy path.
+    """
+
+    @respx.mock
+    async def test_decoy_bearer_token_returns_401(self, proxy_app, enrolled_alias):
+        """Bearer token whose HMAC matches a stored decoy hash → 401.
+
+        RED before fix: decoy check doesn't exist → request reaches upstream
+        (respx raises MockNotFoundError on unregistered URL) → proxy returns 5xx
+        → assertion fails.
+        GREEN after fix: decoy check fires, returns 401 before upstream call.
+        """
+        alias, shard_a_utf8, _ = enrolled_alias
+
+        fake_mac_hex = "ab" * 32  # 64-char HMAC hex
+        ipc = proxy_app.state.ipc_supervisor
+        ipc.set_mac_result(bytes.fromhex(fake_mac_hex))
+        proxy_app.state.decoy_hashes = frozenset({fake_mac_hex})
+
+        transport = httpx.ASGITransport(app=proxy_app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                f"/{alias}/v1/chat/completions",
+                headers={"Authorization": f"Bearer {shard_a_utf8}"},
+                json={"model": "gpt-4", "messages": []},
+            )
+
+        assert resp.status_code == 401
+
+    @respx.mock
+    async def test_non_decoy_bearer_passes_check(self, proxy_client, enrolled_alias):
+        """Legitimate Bearer token whose HMAC is NOT in the decoy set passes through."""
+        alias, shard_a_utf8, _ = enrolled_alias
+
+        # mac() returns a different hex than what is in the decoy set
+        ipc = proxy_client._transport.app.state.ipc_supervisor  # type: ignore[attr-defined]
+        ipc.set_mac_result(bytes.fromhex("cc" * 32))
+        proxy_client._transport.app.state.decoy_hashes = frozenset({"aa" * 32})
+
+        respx.post("https://api.openai.com/v1/chat/completions").mock(
+            return_value=httpx.Response(200, json={"id": "chatcmpl-ok", "choices": []})
+        )
+
+        resp = await proxy_client.post(
+            f"/{alias}/v1/chat/completions",
+            headers={"Authorization": f"Bearer {shard_a_utf8}"},
+            json={"model": "gpt-4", "messages": []},
+        )
+
+        assert resp.status_code == 200
+
+    @respx.mock
+    async def test_ipc_mac_error_does_not_block_request(self, proxy_client, enrolled_alias):
+        """If ipc.mac() raises, the decoy check is silently skipped — request proceeds."""
+        alias, shard_a_utf8, _ = enrolled_alias
+
+        # Non-empty decoy set so the check would run if IPC worked
+        app = proxy_client._transport.app  # type: ignore[attr-defined]
+        app.state.decoy_hashes = frozenset({"ff" * 32})
+        app.state.ipc_supervisor.fail_mac_with(Exception, "simulated IPC mac failure")
+
+        respx.post("https://api.openai.com/v1/chat/completions").mock(
+            return_value=httpx.Response(200, json={"id": "chatcmpl-ok", "choices": []})
+        )
+
+        resp = await proxy_client.post(
+            f"/{alias}/v1/chat/completions",
+            headers={"Authorization": f"Bearer {shard_a_utf8}"},
+            json={"model": "gpt-4", "messages": []},
+        )
+
+        # Best-effort: IPC errors must NOT block legitimate traffic
+        assert resp.status_code == 200
+
+
+class TestDecoyReload:
+    """worthless-ibw1: the decoy tripwire refreshes after startup, so a key
+    retired mid-session is caught without a proxy restart."""
+
+    async def test_refresh_picks_up_newly_retired_decoy(self) -> None:
+        app = SimpleNamespace(state=SimpleNamespace(decoy_hashes=frozenset()))
+        reader = SimpleNamespace(fetch_decoy_hashes=AsyncMock(return_value=frozenset({"de" * 32})))
+        await _refresh_decoy_hashes(app, reader)
+        assert app.state.decoy_hashes == frozenset({"de" * 32}), (
+            "a decoy added after startup must land in the in-memory tripwire on refresh"
+        )
+
+    async def test_refresh_keeps_old_set_on_db_error(self) -> None:
+        old = frozenset({"ab" * 32})
+        app = SimpleNamespace(state=SimpleNamespace(decoy_hashes=old))
+
+        async def boom() -> frozenset[str]:
+            raise RuntimeError("db gone")
+
+        reader = SimpleNamespace(fetch_decoy_hashes=boom)
+        await _refresh_decoy_hashes(app, reader)  # must not raise
+        assert app.state.decoy_hashes == old, (
+            "a transient fetch error must keep the current set, never blank the tripwire"
+        )
 
 
 class TestBadHeaderCharsCompleteness:
