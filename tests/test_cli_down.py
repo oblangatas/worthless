@@ -15,16 +15,25 @@ from typer.testing import CliRunner
 from worthless.cli.app import app
 from worthless.cli.process import write_pid
 
+from tests.fixtures.dirty_home import make_bootstrapped_home
+
 runner = CliRunner()
+
+_DOWN_FERNET_ENV = "dGVzdC1rZXktdGVzdC1rZXktdGVzdGtleTE="
+
+
+def _down_env(home: Path) -> dict[str, str]:
+    """Env for ``down`` tests — bootstrapped home + env Fernet bypasses keyring."""
+    return {
+        "WORTHLESS_HOME": str(home),
+        "WORTHLESS_FERNET_KEY": _DOWN_FERNET_ENV,
+    }
 
 
 @pytest.fixture()
 def home_dir(tmp_path: Path) -> Path:
-    """Create a minimal WORTHLESS_HOME with Fernet key."""
-    base = tmp_path / ".worthless"
-    base.mkdir()
-    (base / "fernet.key").write_bytes(b"dummykey")
-    return base
+    """Post-bootstrap home with secure fernet.key (mode 0o600 on Unix)."""
+    return make_bootstrapped_home(tmp_path / ".worthless").base_dir
 
 
 # ---------------------------------------------------------------------------
@@ -36,7 +45,7 @@ class TestDownNotRunning:
     """down with no running proxy is idempotent (exit 0)."""
 
     def test_no_pid_file(self, home_dir: Path) -> None:
-        result = runner.invoke(app, ["down"], env={"WORTHLESS_HOME": str(home_dir)})
+        result = runner.invoke(app, ["down"], env=_down_env(home_dir))
         assert result.exit_code == 0
         assert "not running" in result.output.lower()
 
@@ -45,7 +54,7 @@ class TestDownNotRunning:
         # Use a PID in valid range but not alive (high but under _MAX_VALID_PID)
         write_pid(pid_file, 3_999_999, 8787)
 
-        result = runner.invoke(app, ["down"], env={"WORTHLESS_HOME": str(home_dir)})
+        result = runner.invoke(app, ["down"], env=_down_env(home_dir))
         assert result.exit_code == 0
         assert "stale" in result.output.lower()
         assert not pid_file.exists()
@@ -55,7 +64,7 @@ class TestDownNotRunning:
         pid_file = home_dir / "proxy.pid"
         pid_file.write_text("garbage\n")
 
-        result = runner.invoke(app, ["down"], env={"WORTHLESS_HOME": str(home_dir)})
+        result = runner.invoke(app, ["down"], env=_down_env(home_dir))
         assert result.exit_code == 0
         assert not pid_file.exists()
 
@@ -86,7 +95,7 @@ class TestDownGraceful:
         )
         monkeypatch.setattr("worthless.cli.commands.down._POLL_INTERVAL", 0.01)
 
-        result = runner.invoke(app, ["down"], env={"WORTHLESS_HOME": str(home_dir)})
+        result = runner.invoke(app, ["down"], env=_down_env(home_dir))
         assert result.exit_code == 0
         assert "stopped" in result.output.lower()
         assert not pid_file.exists()
@@ -117,7 +126,7 @@ class TestDownForceKill:
         monkeypatch.setattr("worthless.cli.commands.down._TERM_TIMEOUT", 0.1)
         monkeypatch.setattr("worthless.cli.commands.down._POLL_INTERVAL", 0.02)
 
-        result = runner.invoke(app, ["down"], env={"WORTHLESS_HOME": str(home_dir)})
+        result = runner.invoke(app, ["down"], env=_down_env(home_dir))
         assert result.exit_code == 0
         assert not pid_file.exists()
         # First call: graceful (force=False), second: force kill (force=True)
@@ -138,7 +147,7 @@ class TestDownForceKill:
         monkeypatch.setattr("worthless.cli.commands.down._TERM_TIMEOUT", 0.1)
         monkeypatch.setattr("worthless.cli.commands.down._POLL_INTERVAL", 0.02)
 
-        result = runner.invoke(app, ["down"], env={"WORTHLESS_HOME": str(home_dir)})
+        result = runner.invoke(app, ["down"], env=_down_env(home_dir))
         assert result.exit_code == 0
         assert not pid_file.exists()
 
@@ -165,7 +174,7 @@ class TestDownErrors:
         monkeypatch.setattr("worthless.cli.commands.down.check_pid", lambda pid: True)
         monkeypatch.setattr("worthless.cli.commands.down.kill_tree", _deny)
 
-        result = runner.invoke(app, ["down"], env={"WORTHLESS_HOME": str(home_dir)})
+        result = runner.invoke(app, ["down"], env=_down_env(home_dir))
         assert result.exit_code == 1
         assert "WRTLS" in result.output
 
@@ -190,7 +199,7 @@ class TestDownErrors:
 
         monkeypatch.setattr("worthless.cli.commands.down.check_pid", dying_pid)
 
-        result = runner.invoke(app, ["down"], env={"WORTHLESS_HOME": str(home_dir)})
+        result = runner.invoke(app, ["down"], env=_down_env(home_dir))
         assert result.exit_code == 0
         assert not pid_file.exists()
 
@@ -224,7 +233,7 @@ class TestDownDangerousPids:
         finally:
             os.close(fd)
 
-        result = runner.invoke(app, ["down"], env={"WORTHLESS_HOME": str(home_dir)})
+        result = runner.invoke(app, ["down"], env=_down_env(home_dir))
         assert result.exit_code == 0, description
         assert not pid_file.exists()
 
@@ -238,7 +247,7 @@ class TestDownPidFileTampering:
         pid_file = home_dir / "proxy.pid"
         pid_file.write_bytes(b"123\x004567\n8787\n")
 
-        result = runner.invoke(app, ["down"], env={"WORTHLESS_HOME": str(home_dir)})
+        result = runner.invoke(app, ["down"], env=_down_env(home_dir))
         assert result.exit_code == 0
         assert not pid_file.exists()
 
@@ -249,7 +258,7 @@ class TestDownPidFileTampering:
         write_pid(pid_file, 12345, 8787)
         pid_file.chmod(0o000)
 
-        result = runner.invoke(app, ["down"], env={"WORTHLESS_HOME": str(home_dir)})
+        result = runner.invoke(app, ["down"], env=_down_env(home_dir))
         assert result.exit_code == 0
 
     def test_empty_pid_file(self, home_dir: Path) -> None:
@@ -257,7 +266,7 @@ class TestDownPidFileTampering:
         pid_file = home_dir / "proxy.pid"
         pid_file.write_bytes(b"")
 
-        result = runner.invoke(app, ["down"], env={"WORTHLESS_HOME": str(home_dir)})
+        result = runner.invoke(app, ["down"], env=_down_env(home_dir))
         assert result.exit_code == 0
         assert not pid_file.exists()
 
@@ -266,7 +275,7 @@ class TestDownPidFileTampering:
         pid_file = home_dir / "proxy.pid"
         pid_file.write_text("12345\n")
 
-        result = runner.invoke(app, ["down"], env={"WORTHLESS_HOME": str(home_dir)})
+        result = runner.invoke(app, ["down"], env=_down_env(home_dir))
         assert result.exit_code == 0
         assert not pid_file.exists()
 
@@ -278,7 +287,7 @@ class TestDownPidFileTampering:
         pid_file = home_dir / "proxy.pid"
         pid_file.symlink_to(real_file)
 
-        result = runner.invoke(app, ["down"], env={"WORTHLESS_HOME": str(home_dir)})
+        result = runner.invoke(app, ["down"], env=_down_env(home_dir))
         assert result.exit_code == 0
         # The symlink itself should be removed
         assert not pid_file.exists()
@@ -315,7 +324,7 @@ class TestDownWindows:
         monkeypatch.setattr("worthless.cli.commands.down.check_pid", check_pid_dying)
         monkeypatch.setattr("worthless.cli.commands.down._POLL_INTERVAL", 0.01)
 
-        result = runner.invoke(app, ["down"], env={"WORTHLESS_HOME": str(home_dir)})
+        result = runner.invoke(app, ["down"], env=_down_env(home_dir))
         assert result.exit_code == 0
         assert not pid_file.exists()
         assert 12345 in kill_calls
@@ -407,5 +416,5 @@ class TestDownJson:
     """down --json outputs machine-readable format."""
 
     def test_json_not_running(self, home_dir: Path) -> None:
-        result = runner.invoke(app, ["--json", "down"], env={"WORTHLESS_HOME": str(home_dir)})
+        result = runner.invoke(app, ["--json", "down"], env=_down_env(home_dir))
         assert result.exit_code == 0

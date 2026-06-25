@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
+import shutil
 import signal
 import subprocess  # nosec B404 — required for daemon process management
 import sys
@@ -55,6 +57,142 @@ from worthless.cli.sidecar_lifecycle import (
     split_to_tmpfs,
 )
 from worthless.crypto.types import zero_buf
+from worthless.sidecar.health import (
+    find_sidecar_socket_for_open,
+    list_sidecar_sockets,
+    probe_socket,
+)
+
+
+async def _sidecar_open_probe_material(home: WorthlessHome) -> tuple[bytes, bytes] | None:
+    """Return ciphertext + key_id for the first enrolled alias, or None."""
+    if not home.db_path.is_file():
+        return None
+    from worthless.cli.keystore import read_fernet_key
+    from worthless.storage.repository import ShardRepository
+
+    key = read_fernet_key(home.base_dir)
+    try:
+        repo = ShardRepository(str(home.db_path), key)
+        aliases = await repo.list_keys()
+        if not aliases:
+            return None
+        alias = aliases[0]
+        enc = await repo.fetch_encrypted(alias)
+        if enc is None:
+            return None
+        return enc.shard_b_enc, alias.encode()
+    finally:
+        zero_buf(key)
+
+
+def _managed_sidecar_healthy(home: WorthlessHome) -> bool:
+    """True when the newest sidecar under ``home/run/*/`` can serve decrypt IPC.
+
+    When enrollments exist, verifies IPC ``open`` (not HELLO-only) so a stale
+    Fernet sidecar from a prior session is not treated as healthy (WOR-749).
+    Without enrollments, falls back to HELLO probe on the newest socket only.
+    """
+    run_root = home.base_dir / "run"
+    sockets = list_sidecar_sockets(run_root)
+    if not sockets:
+        return False
+    if not home.db_path.is_file():
+        probe = None
+    else:
+        try:
+            probe = asyncio.run(_sidecar_open_probe_material(home))
+        except Exception:
+            probe = None
+    if probe is not None:
+        ciphertext, key_id = probe
+        try:
+            asyncio.run(
+                find_sidecar_socket_for_open(
+                    run_root,
+                    ciphertext=ciphertext,
+                    key_id=key_id,
+                    timeout=2.0,
+                )
+            )
+            return True
+        except Exception:
+            return False
+    return probe_socket(sockets[0])
+
+
+def _service_managed_session_owns_port(home: WorthlessHome, port: int) -> bool:
+    """True when a prior managed ``up`` owns *port* — not a stale orphan (worthless-6gkb).
+
+    launchd idempotent start must not treat ``GET /healthz`` alone as success: an
+    orphan uvicorn on the port would skip sidecar spawn and every proxied request
+    401s because IPC decrypt never runs.
+
+    ``poll_health_pid`` returns the listener's self-reported PID from ``/healthz``
+    JSON, not an OS-level port→PID attribution. That is sufficient within
+    worthless's loopback same-UID threat model (worthless-wfz7).
+    """
+    if not is_service_managed():
+        return False
+    if not poll_health(port, timeout=2.0):
+        return False
+    if not _managed_sidecar_healthy(home):
+        return False
+    info = read_pid(pid_path(home))
+    if info is None:
+        return False
+    stored_pid, _stored_port = info
+    if not check_pid(stored_pid):
+        return False
+    resolved = poll_health_pid(port, timeout=1.0)
+    return resolved == stored_pid
+
+
+def _reclaim_managed_proxy_without_sidecar(
+    home: WorthlessHome,
+    port: int,
+    pid_file: Path,
+    console,
+) -> None:
+    """Stop a proxy-only orphan so managed ``up`` can respawn sidecar+proxy."""
+    if not is_service_managed():
+        return
+    if _managed_sidecar_healthy(home):
+        return
+    if not poll_health(port, timeout=1.0):
+        cleanup_stale_pid(pid_file)
+        return
+    info = read_pid(pid_file)
+    if info is not None:
+        existing_pid, _existing_port = info
+        if check_pid(existing_pid):
+            listener_pid = poll_health_pid(port, timeout=1.0)
+            if listener_pid != existing_pid:
+                cleanup_stale_pid(pid_file)
+                return
+            console.print_warning(
+                f"Reclaiming proxy PID {existing_pid} — /healthz up but sidecar IPC dead"
+            )
+            if not check_pid(existing_pid):
+                cleanup_stale_pid(pid_file)
+                return
+            try:
+                os.kill(existing_pid, signal.SIGTERM)
+            except OSError:
+                pass
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and check_pid(existing_pid):
+                time.sleep(0.2)
+            if check_pid(existing_pid):
+                try:
+                    os.kill(existing_pid, signal.SIGKILL)
+                except OSError:
+                    pass
+    cleanup_stale_pid(pid_file)
+    run_root = home.base_dir / "run"
+    if run_root.is_dir():
+        shutil.rmtree(run_root, ignore_errors=True)
+
 
 # Poll cadence for the foreground supervisor. ``time.sleep`` is interrupted
 # by signals, so ``_shutdown`` flips within one tick of Ctrl+C.
@@ -135,7 +273,7 @@ def start_daemon(
         Sidecar-less daemon start. Prefer ``start_supervised_proxy`` (default
         command) or foreground ``worthless up``. Target removal v1.2.
 
-    Returns the daemon PID on success. Importable by other modules
+    Returns the daemon PID on success.  Importable by other modules
     (e.g. legacy tests) that need to start the proxy programmatically.
     """
     cmd = proxy_cmd(port)
@@ -546,17 +684,10 @@ def register_up_commands(app: typer.Typer) -> None:
         actual_port = _resolve_port(port)
 
         # launchd/systemd may invoke ``up`` while a prior instance is still
-        # dying. Exit 0 only when our pidfile points at a live process and
-        # /healthz succeeds — a foreign listener must not short-circuit start.
-        if is_service_managed():
-            pid_file = pid_path(home)
-            existing = read_pid(pid_file) if pid_file.exists() else None
-            if (
-                existing is not None
-                and check_pid(existing[0])
-                and poll_health(actual_port, timeout=2.0)
-            ):
-                return
+        # dying. Exit 0 only when OUR pidfile matches the healthy listener —
+        # not when a stale orphan holds /healthz (worthless-6gkb).
+        if _service_managed_session_owns_port(home, actual_port):
+            return
 
         # Daemon + sidecar IPC handle inheritance is unsolved. Reject
         # early — silently spawning a proxy without a sidecar would break
@@ -568,8 +699,10 @@ def register_up_commands(app: typer.Typer) -> None:
                 "(`worthless up` without `-d`).",
             )
 
-        # Check PID file for existing proxy
         pid_file = pid_path(home)
+        _reclaim_managed_proxy_without_sidecar(home, actual_port, pid_file, console)
+
+        # Check PID file for existing proxy
         if pid_file.exists():
             info = read_pid(pid_file)
             if info is not None:

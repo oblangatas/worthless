@@ -115,6 +115,81 @@ def _drop_to_proxy_if_root() -> None:
         pass
 
 
+def probe_socket(socket_path: Path, *, timeout: float = _TOTAL_BUDGET_S) -> bool:
+    """Return True when *socket_path* accepts an IPC HELLO handshake."""
+    try:
+        st = socket_path.stat()
+    except OSError:
+        return False
+    if not stat.S_ISSOCK(st.st_mode):
+        return False
+    try:
+        return asyncio.run(asyncio.wait_for(_probe(socket_path), timeout=timeout)) == 0
+    except asyncio.TimeoutError:
+        return False
+
+
+async def probe_socket_async(socket_path: Path, *, timeout: float = _TOTAL_BUDGET_S) -> bool:
+    """Async variant for callers already inside an event loop."""
+    try:
+        st = socket_path.stat()
+    except OSError:
+        return False
+    if not stat.S_ISSOCK(st.st_mode):
+        return False
+    try:
+        return await asyncio.wait_for(_probe(socket_path), timeout=timeout) == 0
+    except asyncio.TimeoutError:
+        return False
+
+
+def list_sidecar_sockets(run_root: Path) -> list[Path]:
+    """Return ``sidecar.sock`` paths under ``run_root/<session>/``, newest first."""
+    if not run_root.is_dir():
+        return []
+    sockets: list[tuple[float, Path]] = []
+    for session in run_root.iterdir():
+        if not session.is_dir():
+            continue
+        sock = session / "sidecar.sock"
+        try:
+            st = sock.stat()
+        except OSError:
+            continue
+        if stat.S_ISSOCK(st.st_mode):
+            sockets.append((st.st_mtime, sock))
+    return [sock for _mtime, sock in sorted(sockets, reverse=True)]
+
+
+async def find_sidecar_socket_for_open(
+    run_root: Path,
+    *,
+    ciphertext: bytes,
+    key_id: bytes | None = None,
+    timeout: float = 3.0,
+) -> Path:
+    """Pick the sidecar socket that can decrypt *ciphertext* (not just HELLO).
+
+    Stale ``run/<pid>/`` dirs can leave sockets that answer HELLO but hold an
+    old Fernet key — live-pack preflight must verify ``open``, not probe alone.
+    """
+    from worthless.ipc.client import IPCClient, IPCError
+
+    last_err: Exception | None = None
+    for sock in list_sidecar_sockets(run_root):
+        if not await probe_socket_async(sock, timeout=min(timeout, _TOTAL_BUDGET_S)):
+            continue
+        try:
+            async with IPCClient(sock, timeout=timeout) as client:
+                await client.open(ciphertext, key_id=key_id)
+            return sock
+        except (IPCError, asyncio.TimeoutError, OSError) as exc:
+            last_err = exc
+    if last_err is not None:
+        raise last_err
+    raise FileNotFoundError(f"no sidecar socket under {run_root}")
+
+
 def main() -> int:
     """Entry point. Returns the exit code; does NOT call ``sys.exit``."""
     _drop_to_proxy_if_root()

@@ -237,11 +237,17 @@ def test_lock_with_uid_mismatch_outputs_failure_and_exits_73(
     """
     real_uid = openclaw_present["config_path"].stat().st_uid
     monkeypatch.setattr(os, "geteuid", lambda: real_uid + 1)
+    # Route Fernet through env so the SP4 geteuid mock does not trip keystore
+    # ownership validation on fernet.key (this test targets OpenClaw UID mismatch).
+    fernet_env = (home_dir.base_dir / "fernet.key").read_bytes().strip().decode()
 
     result = runner.invoke(
         app,
         ["lock", "--env", str(env_file)],
-        env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+        env={
+            "WORTHLESS_HOME": str(home_dir.base_dir),
+            "WORTHLESS_FERNET_KEY": fernet_env,
+        },
     )
 
     assert result.exit_code == 73, (

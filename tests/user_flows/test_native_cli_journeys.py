@@ -108,22 +108,32 @@ def test_default_second_invocation_skips_supervised_start(
     env_file.write_text(f"OPENAI_API_KEY={fake_openai_key()}\n")
     monkeypatch.chdir(project)
 
-    runtime_checks = {"count": 0}
+    proxy_checks = {"count": 0}
     supervised_calls: list[int] = []
 
-    def mock_proxy_is_running(home: WorthlessHome) -> tuple[bool, int | None, int]:
-        if runtime_checks["count"] == 0:
-            runtime_checks["count"] += 1
-            return False, None, 0
-        return True, 4242, 8787
+    def mock_detect_runtime(_home: WorthlessHome) -> ProxyRuntimeState:
+        if proxy_checks["count"] == 0:
+            proxy_checks["count"] += 1
+            return ProxyRuntimeState(
+                running=False,
+                pid=None,
+                port=8787,
+                source="none",
+            )
+        return ProxyRuntimeState(
+            running=True,
+            pid=4242,
+            port=8787,
+            source="health",
+        )
 
     def mock_supervised(*args: object, **kwargs: object) -> int:
         supervised_calls.append(4242)
         return 4242
 
     monkeypatch.setattr(
-        "worthless.cli.default_command._proxy_is_running",
-        mock_proxy_is_running,
+        "worthless.cli.default_command.detect_proxy_runtime",
+        mock_detect_runtime,
     )
     monkeypatch.setattr(
         "worthless.cli.default_command.start_supervised_proxy",
@@ -178,10 +188,51 @@ def test_default_with_stopped_service_hints_without_supervised_start(
 
     result = _invoke(["--yes"], home)
     output = _combined_output(result)
-    assert result.exit_code == 0, output
+    assert result.exit_code == 2, output
     assert not supervised_calls, output
     normalized = output.lower().replace("\n", " ")
     assert "worthless service" in normalized and "start" in normalized
+
+
+@pytest.mark.user_flow
+def test_default_with_failed_service_hints_without_supervised_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Installed but failed service: hint restart/status, exit 2, no supervised spawn."""
+    home = tmp_path / ".worthless"
+    project = tmp_path / "project"
+    project.mkdir()
+    env_file = project / ".env"
+    env_file.write_text(f"OPENAI_API_KEY={fake_openai_key()}\n")
+    monkeypatch.chdir(project)
+
+    lock = _invoke(["lock", "--env", str(env_file)], home)
+    assert lock.exit_code == 0, _combined_output(lock)
+
+    supervised_calls: list[int] = []
+
+    monkeypatch.setattr(
+        "worthless.cli.default_command.start_supervised_proxy",
+        lambda *a, **kw: supervised_calls.append(1),
+    )
+    monkeypatch.setattr(
+        "worthless.cli.default_command.detect_proxy_runtime",
+        lambda home: ProxyRuntimeState(
+            running=False,
+            pid=None,
+            port=8787,
+            source="service",
+            service_state=ServiceState.FAILED,
+        ),
+    )
+
+    result = _invoke(["--yes"], home)
+    output = _combined_output(result)
+    assert result.exit_code == 2, output
+    assert not supervised_calls, output
+    normalized = output.lower().replace("\n", " ")
+    assert "service" in normalized and ("restart" in normalized or "status" in normalized)
 
 
 @pytest.mark.user_flow

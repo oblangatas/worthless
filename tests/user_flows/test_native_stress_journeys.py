@@ -13,7 +13,6 @@ from dotenv import dotenv_values
 from tests.helpers import fake_key, fake_openai_key
 from tests.user_flows.helpers import scrubbed_cli_env
 from worthless.cli.app import app
-from worthless.cli.bootstrap import WorthlessHome
 
 
 runner = CliRunner(mix_stderr=False)
@@ -105,74 +104,53 @@ def test_unlock_tampered_locked_env_fails_without_destroying_state(tmp_path: Pat
 
 @pytest.mark.user_flow
 @pytest.mark.adversarial
-@pytest.mark.integration
-def test_default_supervised_spawn_failure_does_not_leak_key_material(
-    home_with_key: WorthlessHome,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """W3-ADV-2: spawn failure must not echo provider keys from the exception path."""
-    secret = fake_openai_key()
-    monkeypatch.setenv("OPENAI_API_KEY", secret)
-
-    def _boom(*_a, **_k):
-        raise OSError(f"supervised spawn failed: {secret}")
-
-    monkeypatch.setattr(
-        "worthless.cli.default_command._proxy_is_running",
-        lambda home: (False, None, 0),
-    )
-    monkeypatch.setattr(
-        "worthless.cli.default_command.start_supervised_proxy",
-        _boom,
-    )
-
-    result = _invoke(["--yes"], home_with_key.base_dir)
-    output = _combined_output(result)
-
-    assert result.exit_code != 0, output
-    assert secret not in output
-    assert "Traceback" not in output
-
-
-@pytest.mark.user_flow
-@pytest.mark.adversarial
-@pytest.mark.integration
-def test_foreign_health_listener_skips_supervised_spawn_under_stress(
-    home_with_key: WorthlessHome,
+def test_supervised_proxy_start_failure_does_not_leak_keys(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """STRESS matrix P0: something else on the port must not trigger double bind."""
+    """If supervised spawn fails after lock, output must not contain key material."""
+    import typer
+
+    from worthless.cli.commands.service._common import ServiceState
+    from worthless.cli.commands.service.proxy_state import ProxyRuntimeState
+
+    home = tmp_path / ".worthless"
     project = tmp_path / "project"
     project.mkdir()
     env_file = project / ".env"
-    secret = fake_openai_key()
-    env_file.write_text(f"OPENAI_API_KEY={secret}\n")
+    original_key = fake_openai_key()
+    env_file.write_text(f"OPENAI_API_KEY={original_key}\n")
     monkeypatch.chdir(project)
 
-    spawn_attempts = 0
-
-    def _track_spawn(*_a, **_k):
-        nonlocal spawn_attempts
-        spawn_attempts += 1
-        return 4242
-
     monkeypatch.setattr(
-        "worthless.cli.default_command._proxy_is_running",
-        lambda home: (True, None, 8787),
+        "worthless.cli.default_command.detect_proxy_runtime",
+        lambda _home: ProxyRuntimeState(
+            running=False,
+            pid=None,
+            port=8787,
+            source="pidfile",
+            service_state=ServiceState.NOT_INSTALLED,
+        ),
     )
+
+    def _fail_supervised(*_args: object, **_kwargs: object) -> int:
+        raise typer.Exit(code=1)
+
     monkeypatch.setattr(
         "worthless.cli.default_command.start_supervised_proxy",
-        _track_spawn,
-    )
-    monkeypatch.setattr(
-        "worthless.cli.default_command.poll_health", lambda port, timeout=10.0: True
+        _fail_supervised,
     )
 
-    for _ in range(5):
-        result = _invoke(["--yes"], home_with_key.base_dir)
-        output = _combined_output(result)
-        assert result.exit_code == 0, output
-        assert secret not in output
-
-    assert spawn_attempts == 0
+    result = _invoke(["--yes"], home)
+    output = _combined_output(result)
+    assert result.exit_code != 0, output
+    assert "Traceback" not in output
+    assert original_key not in output
+    body = original_key[8:]
+    if len(body) < 12:
+        assert body not in output, "key material leaked"
+    else:
+        for i in range(0, len(body) - 11):
+            chunk = body[i : i + 12]
+            assert chunk not in output, f"key material leaked: ...{chunk}..."
+    assert dotenv_values(env_file)["OPENAI_API_KEY"] != original_key

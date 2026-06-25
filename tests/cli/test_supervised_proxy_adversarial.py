@@ -26,15 +26,13 @@ from worthless.cli.commands.up import start_supervised_proxy
 from worthless.cli.default_command import _ensure_proxy_running
 from worthless.cli.errors import WorthlessError
 
+from tests.fixtures.dirty_home import make_bootstrapped_home
 from tests.helpers import fake_openai_key
 
 
 @pytest.fixture()
 def home(tmp_path: Path) -> WorthlessHome:
-    base = tmp_path / ".worthless"
-    base.mkdir()
-    (base / "fernet.key").write_bytes(b"x" * 32)
-    return WorthlessHome(base_dir=base)
+    return make_bootstrapped_home(tmp_path / ".worthless")
 
 
 @pytest.mark.adversarial
@@ -174,14 +172,22 @@ class TestDetectProxyRuntimeAdversarial:
         assert state.source == "health"
 
         supervised_calls: list[int] = []
-
-        monkeypatch.setattr(
-            "worthless.cli.default_command._proxy_is_running",
-            lambda home: (True, None, state.port),
+        runtime = ProxyRuntimeState(
+            running=True,
+            pid=None,
+            port=state.port,
+            source="health",
         )
-        with patch(
-            "worthless.cli.default_command.start_supervised_proxy",
-            side_effect=lambda *a, **k: supervised_calls.append(1) or 1,
+
+        with (
+            patch(
+                "worthless.cli.default_command.detect_proxy_runtime",
+                return_value=runtime,
+            ),
+            patch(
+                "worthless.cli.default_command.start_supervised_proxy",
+                side_effect=lambda *a, **k: supervised_calls.append(1) or 1,
+            ),
         ):
             running, _pid, port = _ensure_proxy_running(home, MagicMock())
 
@@ -292,6 +298,57 @@ class TestStartSupervisedProxyAdversarial:
 class TestDefaultCommandStress:
     """Chaos-lite: rapid phase-2 calls must not double-spawn under mocked runtime."""
 
+    def test_ensure_proxy_running_skips_spawn_when_health_reports_running(
+        self, home: WorthlessHome
+    ) -> None:
+        """Regression: health source must short-circuit before start_supervised_proxy."""
+        runtime = ProxyRuntimeState(
+            running=True,
+            pid=None,
+            port=8787,
+            source="health",
+        )
+        supervised_calls: list[int] = []
+
+        with (
+            patch(
+                "worthless.cli.default_command.detect_proxy_runtime",
+                return_value=runtime,
+            ),
+            patch(
+                "worthless.cli.default_command.start_supervised_proxy",
+                side_effect=lambda *a, **k: supervised_calls.append(1) or 1,
+            ),
+        ):
+            running, pid, port = _ensure_proxy_running(home, MagicMock())
+
+        assert running is True
+        assert pid is None
+        assert port == 8787
+        assert not supervised_calls
+
+    def test_ensure_proxy_running_exits_2_when_service_stopped(self, home: WorthlessHome) -> None:
+        runtime = ProxyRuntimeState(
+            running=False,
+            pid=None,
+            port=8787,
+            source="service",
+            service_state=ServiceState.STOPPED,
+        )
+
+        with (
+            patch(
+                "worthless.cli.default_command.detect_proxy_runtime",
+                return_value=runtime,
+            ),
+            patch("worthless.cli.default_command.start_supervised_proxy") as mock_spawn,
+            pytest.raises(typer.Exit) as exc_info,
+        ):
+            _ensure_proxy_running(home, MagicMock())
+
+        assert exc_info.value.exit_code == 2
+        mock_spawn.assert_not_called()
+
     def test_rapid_ensure_proxy_running_idempotent(
         self, home: WorthlessHome, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -310,8 +367,8 @@ class TestDefaultCommandStress:
             return 4242
 
         monkeypatch.setattr(
-            "worthless.cli.default_command._proxy_is_running",
-            lambda home: (True, runtime.pid, runtime.port),
+            "worthless.cli.default_command.detect_proxy_runtime",
+            lambda home: runtime,
         )
         monkeypatch.setattr(
             "worthless.cli.default_command.start_supervised_proxy",

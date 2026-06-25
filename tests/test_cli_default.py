@@ -19,6 +19,7 @@ import pytest
 from typer.testing import CliRunner
 
 from worthless.cli.bootstrap import WorthlessHome
+from worthless.cli.commands.service.proxy_state import ProxyRuntimeState
 from worthless.cli.errors import ErrorCode, WorthlessError
 
 from tests.helpers import fake_anthropic_key, fake_openai_key
@@ -210,8 +211,10 @@ class TestHappyPaths:
             mock_supervised,
         )
         monkeypatch.setattr(
-            "worthless.cli.default_command._proxy_is_running",
-            lambda home: (True, 12345, 8787),
+            "worthless.cli.default_command.detect_proxy_runtime",
+            lambda home, port=None: ProxyRuntimeState(
+                running=True, pid=12345, port=8787, source="health"
+            ),
         )
 
         result = _invoke_default(
@@ -597,8 +600,10 @@ class TestSidecarSupervisedProxyStart:
             mock_supervised,
         )
         monkeypatch.setattr(
-            "worthless.cli.default_command._proxy_is_running",
-            lambda home: (True, 12345, 8787),
+            "worthless.cli.default_command.detect_proxy_runtime",
+            lambda home, port=None: ProxyRuntimeState(
+                running=True, pid=12345, port=8787, source="health"
+            ),
         )
 
         result = _invoke_default({"WORTHLESS_HOME": str(home_with_key.base_dir)})

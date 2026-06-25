@@ -88,6 +88,19 @@ if _profile in ("ci", "extended"):
     settings.load_profile(_profile)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_fernet_storage_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drop developer-shell exports that redirect keystore paths away from tmp_path.
+
+    Common on dogfood machines: ``WORTHLESS_FERNET_KEY_PATH``,
+    ``WORTHLESS_SERVICE_MANAGED=1``, or a leftover ``WORTHLESS_FERNET_KEY``.
+    Individual tests opt back in via ``monkeypatch.setenv``.
+    """
+    monkeypatch.delenv("WORTHLESS_FERNET_KEY_PATH", raising=False)
+    monkeypatch.delenv("WORTHLESS_FERNET_KEY", raising=False)
+    monkeypatch.delenv("WORTHLESS_SERVICE_MANAGED", raising=False)
+
+
 def make_repo(home: WorthlessHome) -> ShardRepository:
     """Build a ShardRepository from a WorthlessHome (test helper)."""
     return ShardRepository(str(home.db_path), home.fernet_key)

@@ -7,6 +7,8 @@ All tests should fail with ImportError until the module is implemented.
 from __future__ import annotations
 
 import logging
+import os
+import stat
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -20,12 +22,19 @@ from worthless.cli.keystore import (
     _SERVICE,
     _USERNAME,
     _keyring_username,
+    _read_fernet_file,
     keyring_available,
     delete_fernet_key,
     migrate_file_to_keyring,
     read_fernet_key,
     store_fernet_key,
 )
+
+
+def _write_fernet_key_file(path: Path, content: bytes) -> None:
+    """Write a fernet.key that passes ``_validate_fernet_file`` (mode 0o600)."""
+    path.write_bytes(content)
+    path.chmod(0o600)
 
 
 # ------------------------------------------------------------------
@@ -241,7 +250,7 @@ class TestReadFernetKeyCascade:
         monkeypatch.delenv("WORTHLESS_FERNET_FD", raising=False)
 
         fernet_path = tmp_path / "fernet.key"
-        fernet_path.write_bytes(b"file-key-value\n")
+        _write_fernet_key_file(fernet_path, b"file-key-value\n")
 
         with patch("worthless.cli.keystore.keyring_available", return_value=False):
             result = read_fernet_key(home_dir=tmp_path)
@@ -288,7 +297,7 @@ class TestReadFernetKeyCascade:
         monkeypatch.delenv("WORTHLESS_FERNET_FD", raising=False)
 
         fernet_path = tmp_path / "fernet.key"
-        fernet_path.write_bytes(b"file-fallback-value\n")
+        _write_fernet_key_file(fernet_path, b"file-fallback-value\n")
 
         with (
             patch("worthless.cli.keystore.keyring_available", return_value=True),
@@ -298,6 +307,154 @@ class TestReadFernetKeyCascade:
             result = read_fernet_key(home_dir=tmp_path)
 
         assert result == bytearray(b"file-fallback-value")
+
+    def test_keyring_error_with_file_refuses_silent_fallback_interactive(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Interactive sessions must not silently read stale fernet.key (WOR-464)."""
+        monkeypatch.delenv("WORTHLESS_FERNET_KEY", raising=False)
+        monkeypatch.delenv("WORTHLESS_FERNET_FD", raising=False)
+        monkeypatch.delenv("WORTHLESS_SERVICE_MANAGED", raising=False)
+
+        fernet_path = tmp_path / "fernet.key"
+        fernet_path.write_bytes(b"stale-file-key\n")
+
+        with (
+            patch("worthless.cli.keystore.keyring_available", return_value=True),
+            patch("worthless.cli.keystore.keyring") as mock_kr,
+        ):
+            mock_kr.get_password.side_effect = RuntimeError("access denied")
+            with pytest.raises(WorthlessError) as exc_info:
+                read_fernet_key(home_dir=tmp_path)
+
+        assert exc_info.value.code == ErrorCode.KEY_NOT_FOUND
+        assert "refusing" in str(exc_info.value).lower()
+
+    def test_keyring_error_with_file_allowed_under_service_managed(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """LaunchAgent sets WORTHLESS_SERVICE_MANAGED=1; synced fernet.key is OK."""
+        monkeypatch.delenv("WORTHLESS_FERNET_KEY", raising=False)
+        monkeypatch.delenv("WORTHLESS_FERNET_FD", raising=False)
+        monkeypatch.setenv("WORTHLESS_SERVICE_MANAGED", "1")
+
+        fernet_path = tmp_path / "fernet.key"
+        _write_fernet_key_file(fernet_path, b"launchd-synced-key\n")
+        fernet_path.chmod(0o600)
+
+        with (
+            patch("worthless.cli.keystore.keyring_available", return_value=True),
+            patch("worthless.cli.keystore.keyring") as mock_kr,
+        ):
+            mock_kr.get_password.side_effect = RuntimeError("access denied")
+            result = read_fernet_key(home_dir=tmp_path)
+
+        assert result == bytearray(b"launchd-synced-key")
+
+    def test_service_managed_prefers_file_over_keyring(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """WOR-748: launchd must use synced fernet.key, not a stale keyring entry."""
+        monkeypatch.delenv("WORTHLESS_FERNET_KEY", raising=False)
+        monkeypatch.setenv("WORTHLESS_SERVICE_MANAGED", "1")
+
+        fernet_path = tmp_path / "fernet.key"
+        _write_fernet_key_file(fernet_path, b"synced-file-key\n")
+        fernet_path.chmod(0o600)
+
+        with (
+            patch("worthless.cli.keystore.keyring_available", return_value=True),
+            patch("worthless.cli.keystore.keyring") as mock_kr,
+        ):
+            mock_kr.get_password.return_value = "stale-keyring-key"
+            result = read_fernet_key(home_dir=tmp_path)
+
+        assert result == bytearray(b"synced-file-key")
+        mock_kr.get_password.assert_not_called()
+
+    def test_service_managed_rejects_loose_fernet_file_perms(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """worthless-l3qj: world-readable fernet.key must fail under SERVICE_MANAGED."""
+        monkeypatch.delenv("WORTHLESS_FERNET_KEY", raising=False)
+        monkeypatch.setenv("WORTHLESS_SERVICE_MANAGED", "1")
+
+        fernet_path = tmp_path / "fernet.key"
+        fernet_path.write_bytes(b"leaked-key\n")
+        fernet_path.chmod(0o644)
+
+        with pytest.raises(WorthlessError) as exc_info:
+            read_fernet_key(home_dir=tmp_path)
+
+        assert exc_info.value.code == ErrorCode.KEY_NOT_FOUND
+        assert "0o600" in exc_info.value.message
+
+
+class TestIpcOnlyFernetStatGate:
+    """Container topology: relax uid check for crypto-owned 0400, reject 0440."""
+
+    def test_ipc_only_accepts_foreign_owned_0400(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("WORTHLESS_FERNET_IPC_ONLY", "1")
+        monkeypatch.delenv("WORTHLESS_FERNET_KEY", raising=False)
+        monkeypatch.delenv("WORTHLESS_SERVICE_MANAGED", raising=False)
+
+        fernet_path = tmp_path / "fernet.key"
+        fernet_path.write_bytes(b"crypto-owned-key\n")
+        foreign_uid = os.geteuid() + 1 if os.geteuid() < 65534 else max(1, os.geteuid() - 1)
+        try:
+            os.chown(fernet_path, foreign_uid, os.getgid())
+            fernet_path.chmod(0o400)
+            result = _read_fernet_file(fernet_path, validate=True)
+        except (OSError, PermissionError):
+            foreign_stat = os.stat_result(
+                (
+                    stat.S_IFREG | 0o400,
+                    0,
+                    0,
+                    0,
+                    foreign_uid,
+                    os.getgid(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                )
+            )
+            original_lstat = Path.lstat
+
+            def _lstat(self: Path):
+                if self == fernet_path:
+                    return foreign_stat
+                return original_lstat(self)
+
+            monkeypatch.setattr(Path, "lstat", _lstat)
+            with patch("worthless.cli.keystore.keyring_available", return_value=False):
+                result = read_fernet_key(home_dir=tmp_path)
+
+        assert result == bytearray(b"crypto-owned-key")
+
+    def test_ipc_only_rejects_group_readable_0440(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("WORTHLESS_FERNET_IPC_ONLY", "1")
+        monkeypatch.delenv("WORTHLESS_FERNET_KEY", raising=False)
+        monkeypatch.delenv("WORTHLESS_SERVICE_MANAGED", raising=False)
+
+        fernet_path = tmp_path / "fernet.key"
+        fernet_path.write_bytes(b"group-readable-key\n")
+        fernet_path.chmod(0o440)
+
+        with (
+            patch("worthless.cli.keystore.keyring_available", return_value=False),
+            pytest.raises(WorthlessError) as exc_info,
+        ):
+            read_fernet_key(home_dir=tmp_path)
+
+        assert exc_info.value.code == ErrorCode.KEY_NOT_FOUND
+        assert "0o400" in exc_info.value.message
 
 
 # ------------------------------------------------------------------
@@ -340,7 +497,7 @@ class TestReturnTypeBytearray:
             ctx = _combined()
         else:  # file
             fernet_path = tmp_path / "fernet.key"
-            fernet_path.write_bytes(b"some-key\n")
+            _write_fernet_key_file(fernet_path, b"some-key\n")
             ctx = patch("worthless.cli.keystore.keyring_available", return_value=False)
 
         with ctx:

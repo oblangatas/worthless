@@ -11,6 +11,7 @@ from worthless.cli.commands.service._common import (
     ServiceState,
     ServiceStatus,
     atomic_write_text,
+    refuse_foreign_unit,
     resolve_worthless_binary,
     run_cmd,
     service_paths,
@@ -94,6 +95,8 @@ def detect_status(home: WorthlessHome, port: int) -> ServiceStatus:
 
 
 def install(home: WorthlessHome, *, port: int | None = None) -> None:
+    path = plist_path()
+    refuse_foreign_unit(path, home)
     binary = resolve_worthless_binary()
     log_path, worthless_home = service_paths(home)
     actual_port = resolve_port(port)
@@ -103,7 +106,6 @@ def install(home: WorthlessHome, *, port: int | None = None) -> None:
         log_path=str(log_path),
         port=actual_port if port is not None or os.environ.get("WORTHLESS_PORT") else None,
     )
-    path = plist_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(path, content, mode=0o600)
 
@@ -117,20 +119,24 @@ def install(home: WorthlessHome, *, port: int | None = None) -> None:
 
 def uninstall(home: WorthlessHome) -> None:
     path = plist_path()
+    refuse_foreign_unit(path, home)
     if _is_loaded():
         run_cmd(["launchctl", "bootout", _launchctl_domain(), str(path)], check=False)
     if path.is_file():
         path.unlink()
 
 
-def stop() -> None:
-    if not plist_path().is_file():
+def stop(home: WorthlessHome) -> None:
+    path = plist_path()
+    refuse_foreign_unit(path, home)
+    if not path.is_file():
         raise WorthlessError(ErrorCode.PROXY_NOT_RUNNING, "Service is not installed.")
-    run_cmd(["launchctl", "bootout", _launchctl_domain(), str(plist_path())], check=False)
+    run_cmd(["launchctl", "bootout", _launchctl_domain(), str(path)], check=False)
 
 
 def start(home: WorthlessHome) -> None:
     path = plist_path()
+    refuse_foreign_unit(path, home)
     if not path.is_file():
         raise WorthlessError(
             ErrorCode.PROXY_NOT_RUNNING,
@@ -143,6 +149,7 @@ def start(home: WorthlessHome) -> None:
 
 
 def restart(home: WorthlessHome) -> None:
+    refuse_foreign_unit(plist_path(), home)
     start(home)
 
 

@@ -28,6 +28,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import typer
 
+from tests.fixtures.dirty_home import write_secure_fernet_key
 from worthless.cli.bootstrap import WorthlessHome
 from worthless.cli.errors import ErrorCode, WorthlessError
 from worthless.cli.sidecar_lifecycle import ShareFiles, SidecarHandle
@@ -148,7 +149,7 @@ def home(tmp_path: Path) -> WorthlessHome:
     base.mkdir()
     # Plant a 44-byte fernet key so build_proxy_env / split_to_tmpfs work
     # under the keyring-unavailable code path.
-    (base / "fernet.key").write_bytes(b"A" * 44)
+    write_secure_fernet_key(base / "fernet.key", b"A" * 44)
     return WorthlessHome(base_dir=base)
 
 

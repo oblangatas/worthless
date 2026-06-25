@@ -145,7 +145,13 @@ def unit_file_matches_home(path: Path, home: WorthlessHome) -> bool:
         expected = home.base_dir.resolve()
     except OSError:
         return False
-    content = path.read_text()
+    try:
+        content = path.read_text()
+    except OSError as exc:
+        raise WorthlessError(
+            ErrorCode.INVALID_INPUT,
+            f"Cannot read service unit at {path}. Fix permissions or remove it manually.",
+        ) from exc
     for raw in _worthless_home_paths_in_unit(content):
         try:
             if Path(raw).resolve() == expected:
@@ -153,6 +159,19 @@ def unit_file_matches_home(path: Path, home: WorthlessHome) -> bool:
         except OSError:
             continue
     return False
+
+
+def refuse_foreign_unit(path: Path, home: WorthlessHome) -> None:
+    """Refuse mutating a unit/plist that belongs to another ``WORTHLESS_HOME``."""
+    if not path.is_file():
+        return
+    if unit_file_matches_home(path, home):
+        return
+    raise WorthlessError(
+        ErrorCode.INVALID_INPUT,
+        "An existing worthless service unit belongs to a different "
+        "WORTHLESS_HOME. Remove or migrate it manually before continuing.",
+    )
 
 
 def current_platform_backend_name() -> str:
