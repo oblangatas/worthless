@@ -2,7 +2,7 @@
 
 > Manual proof on a real machine. **Not CI.** Record pass/fail per ticket before claiming “works live.”
 >
-> **Dev branch (epic tip):** `gsd/wor-193-wave3b-adversarial` (PR #292) — install from here, not `main`.
+> **Install from:** `main` (PR #292 merged `876d102`). Use editable install from your checkout: `uv sync && uv pip install -e .`
 >
 > **Verification lanes:** Adversarial + dirty pytest = **WOR-724** (`wor-193-wave-verification.md`). Chaos + repeat-run dirty = **WOR-725**. Live packs here = **L7**.
 
@@ -18,7 +18,7 @@
 
 | Prerequisite | Check |
 |--------------|-------|
-| On epic tip branch | `git checkout gsd/wor-193-wave3b-adversarial && git pull` |
+| On `main` (or release tag) | `git checkout main && git pull` |
 | Editable install | `uv sync && uv pip install -e .` |
 | `worthless` on PATH | `which worthless` points at this checkout’s venv |
 | Fernet key + enrollment | `~/.worthless/fernet.key` exists; at least one key locked or enrolled |
@@ -245,7 +245,7 @@ Runnable script: `engineering/testing/scripts/service-lifecycle-live-linux.sh`
 **Requires:** Docker (mock-upstream on `:9999`), editable install, ports `8787` + `9999` free, `unset WORTHLESS_HOME` (uses `~/.worthless` + `providers.toml`).
 
 ```bash
-cd /path/to/worthless-wor193-service
+cd /path/to/worthless
 unset WORTHLESS_HOME
 uv sync && uv pip install -e .
 bash engineering/testing/scripts/service-lock-roundtrip-live-macos.sh

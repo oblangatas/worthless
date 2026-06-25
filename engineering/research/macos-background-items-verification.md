@@ -7,7 +7,7 @@ public API exposes Background Items list state.
 ## Environment
 
 - macOS, user `shachar`, `gui/502`
-- Branch: `gsd/wor-193-wave3b-adversarial` (editable install)
+- Branch: `main` (editable install from checkout)
 - Label: `dev.worthless.proxy`
 - Plist: `~/Library/LaunchAgents/dev.worthless.proxy.plist`
 
