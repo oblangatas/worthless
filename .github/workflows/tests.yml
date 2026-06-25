@@ -120,6 +120,43 @@ jobs:
           gh pr comment "${{ github.event.pull_request.number }}" --body-file /tmp/cov-comment.md --edit-last || \
           gh pr comment "${{ github.event.pull_request.number }}" --body-file /tmp/cov-comment.md
 
+  test-macos:
+    name: Test (macos, py3.13)
+    runs-on: macos-15
+    timeout-minutes: 20
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up uv + Python
+        uses: ./.github/actions/setup-uv-python
+        with:
+          python-version: "3.13"
+
+      # macOS runner minutes bill at ~10x Linux, so we run only the storage /
+      # lock / MCP unit files this WOR-646 work touches — enough to prove the
+      # DB + rotation-cleanup + MCP-reconcile logic is OS-agnostic, without
+      # paying 10x for the whole suite. Linux remains the full-matrix gate.
+      - name: Run storage/lock/MCP unit tests on macOS
+        env:
+          UV_CACHE_DIR: /tmp/uv-cache
+          HYPOTHESIS_PROFILE: ci
+          WORTHLESS_SIDECAR_READY_TIMEOUT_SECS: "20"
+        run: |
+          uv sync --extra dev --extra test --extra mcp
+          uv run pytest -n auto --dist loadscope \
+            tests/test_lock_write_invariants.py \
+            tests/test_lock_sigint_atomicity.py \
+            tests/test_mcp_server.py \
+            tests/test_storage.py \
+            tests/test_storage_ipc.py \
+            -m "not live and not docker and not user_flow and not real_ipc and not quarantine"
+
   coverage-gate:
     name: Per-module coverage gate
     if: github.event_name == 'pull_request'
