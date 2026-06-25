@@ -1141,6 +1141,16 @@ class TestReleaseSyncTrustAnchor:
             "(worthless-xn4l)."
         )
 
+    def test_live_marketing_check_requires_beta_version_label(self, release_sync_text: str):
+        """The live marketing drift check must verify the public beta label.
+
+        The website shows the CLI beta version near the install command. If a
+        release bumps PyPI/tag/install.sh but the website label lags, the daily
+        sync check must fail instead of silently shipping stale launch copy.
+        """
+        assert "Beta CLI · v${EXPECT} · runs locally" in release_sync_text
+        assert "wless.io version drift" in release_sync_text
+
 
 # ------------------------------------------------------------------
 # Release-sync-check workflow: BEHAVIOURAL tests (worthless-xn4l)

@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Security Model: Worthless</title>
+  <meta name="description" content="Plain-English Worthless security model, scope, platforms, provider support, and limitations." />
+  <meta name="robots" content="noindex, follow" />
+  <link rel="canonical" href="https://wless.io/red/security-model.html" />
+  <meta name="theme-color" content="#f4f7fb" />
+  <meta property="og:title" content="Security Model: Worthless" />
+  <meta property="og:description" content="Plain-English Worthless security model, scope, platforms, provider support, and limitations." />
+  <meta property="og:image" content="https://wless.io/og-image.png" />
+  <meta property="og:url" content="https://wless.io/red/security-model.html" />
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="Worthless" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="Security Model: Worthless" />
+  <meta name="twitter:description" content="Plain-English Worthless security model, scope, platforms, provider support, and limitations." />
+  <meta name="twitter:image" content="https://wless.io/og-image.png" />
+  <link rel="icon" type="image/x-icon" href="../favicon.ico" />
+  <style>
+    body { margin: 0; font-family: Inter, system-ui, sans-serif; background: #f4f7fb; color: #243042; line-height: 1.65; }
+    header, main, footer { max-width: 980px; margin: 0 auto; padding: 2rem 1.3rem; }
+    nav { display: flex; gap: .9rem; flex-wrap: wrap; font-size: .9rem; }
+    footer nav { justify-content: center; margin-top: .7rem; }
+    a { color: #9e2a2b; font-weight: 700; text-decoration: none; }
+    h1 { font-size: clamp(2.2rem, 6vw, 4.6rem); line-height: .96; letter-spacing: -.055em; margin: 2rem 0 1rem; }
+    .lead { max-width: 70ch; color: #5d6b7f; font-size: 1.05rem; }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; margin-top: 2rem; }
+    section { border: 1px solid #dce4ee; border-radius: 8px; background: #fbfcff; padding: 1rem; }
+    h2 { margin-top: 0; letter-spacing: -.03em; }
+    p, li { color: #536176; }
+    ul { padding-left: 1.2rem; }
+    code { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: .9em; background: #e9eef7; padding: .08rem .28rem; border-radius: 4px; }
+    @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <header>
+    <nav>
+      <a href="../index.html">Home</a>
+      <a href="index.html">Red Blog</a>
+      <a href="claims.html">Proof & limits</a>
+      <a href="incidents.html">Incident notes</a>
+    </nav>
+    <h1>Security model.</h1>
+    <p class="lead">Worthless changes what copied locked AI-key material can do. It does not make the leak fine.</p>
+  </header>
+
+  <main class="grid">
+    <section>
+      <h2>What is in scope</h2>
+      <ul>
+        <li>Supported AI keys that have been locked before exposure.</li>
+        <li>Local developer workflows on macOS, Linux, and WSL.</li>
+        <li>Accidental `.env` exposure to Git, chat, generated code, logs, screenshots, or support threads.</li>
+        <li>The copied key-looking value, because it is not the complete provider credential.</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>How requests still work</h2>
+      <p>Your app routes through a local proxy. The proxy uses the stored local material to make an upstream provider call when policy allows it. A token-budget guardrail can deny before reconstruction, but that is not a hard spend cap.</p>
+    </section>
+
+    <section>
+      <h2>Operational scope</h2>
+      <ul>
+        <li>No cloud account required for the local launch path.</li>
+        <li>The true provider registry centers OpenAI, Anthropic, OpenRouter, Groq, Together, and Ollama.</li>
+        <li>Scanner behavior is LLM-provider-focused. It is not a replacement for gitleaks or trufflehog.</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Out of scope</h2>
+      <ul>
+        <li>Not a general vault.</li>
+        <li>Not native Windows support.</li>
+        <li>Not broad credential protection for non-LLM services today.</li>
+        <li>Not protection against full same-user host compromise.</li>
+        <li>Not protection if attacker-controlled code can use the same local working route.</li>
+      </ul>
+    </section>
+  </main>
+
+  <footer>
+    Stable URL for references: <a href="https://wless.io/red/security-model.html">https://wless.io/red/security-model.html</a>
+    <nav aria-label="Legal">
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../security.html">Security</a>
+      <a href="../license.html">License</a>
+    </nav>
+  </footer>
+</body>
+</html>
