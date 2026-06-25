@@ -23,8 +23,10 @@ jobs:
     name: Verify commit signatures + authors
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    # workflow_dispatch has no PR number to inspect; only gate on pull_request.
-    if: github.event_name == 'pull_request'
+    # Gate production-bound PRs. Staging branches such as website-dev still
+    # carry pre-WOR-589 history, so their sync PRs cannot be evaluated with the
+    # PR commits API without flagging inherited historical commits.
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
     steps:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
