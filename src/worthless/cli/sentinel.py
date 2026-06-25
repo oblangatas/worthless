@@ -27,6 +27,7 @@ Schema (wire-stable; keep additive only):
         "aliases": ["openai-abc123"],            // managed aliases tested
         "reached": 1,                            // # probes that got HTTP
         "reason": "proxy_unrecognised" | "..."   // present when skipped
+        "not_routing": ["openai-abc123"]         // WOR-650, present on per-alias fail
       }
     }
 
@@ -74,6 +75,10 @@ def write_sentinel(
             succeeded but the OpenClaw stage hit a detected+failed condition).
         openclaw: ``"ok"`` | ``"failed"`` | ``"absent"`` — the OpenClaw stage
             outcome. ``"absent"`` means OpenClaw was not detected on this host.
+            ``"failed"`` (paired with ``status="partial"``) covers any
+            incomplete-protection state: routing not proven (bind-fail) OR an
+            unrecognized entry left in place (WOR-650 adoption skip). The
+            ``events`` array carries the precise reason.
         alias_count: number of aliases the operation touched (lock: wired;
             unlock: removed).
         events: structured event payload, ``OpenclawIntegrationEvent.asdict()``-ish.
