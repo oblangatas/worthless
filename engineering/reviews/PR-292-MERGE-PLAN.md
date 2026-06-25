@@ -19,7 +19,7 @@ This is the single checklist. Do not re-derive from chat.
 | Thermo-nuclear **code quality** | **Approve** | `engineering/reviews/thermo-nuclear/wor193-stack-code-quality.md` |
 | Claude / handoff review | **Done in-session** | `engineering/reviews/thermo-nuclear/PR-292-claude-handoff.md` (update base ref: `main`, not 717-integration) |
 | CodeRabbit | **14/14 threads resolved** | Last open: fernet `chmod(0o644)` — fixed + resolved via API |
-| CI | **Re-running on `a71802f`** | `gh pr checks 292` — wait for Test + User flows + docker-e2e + Windows smoke |
+| CI | **Re-running after push** | `gh pr checks 292` — fixed adversarial mocks, IPC fernet gate, Windows down smoke |
 
 ---
 
@@ -32,14 +32,13 @@ This is the single checklist. Do not re-derive from chat.
 
 ---
 
-## CI triage (if still red after `a71802f`)
+## CI triage (addressed in latest commit)
 
-| Job | Likely cause | Fix |
+| Job | Cause | Fix |
 |-----|--------------|-----|
-| Test ubuntu py3.10/3.13 | Stale mock (`_proxy_is_running` vs `detect_proxy_runtime`) | **Fixed in `a71802f`** |
-| User flows macOS/ubuntu | default_command exit 2 / double detect | **Fixed in `cb53166`** |
-| docker-e2e | May be infra/flake or unrelated stack | Inspect log; not always wave3b |
-| Smoke windows py3.13 | Platform-specific | Inspect log |
+| Test ubuntu py3.10/3.13 | Stale `_proxy_is_running` mock in adversarial tests | Mock `detect_proxy_runtime`; regression tests added |
+| docker-e2e | `validate=True` rejected crypto-owned `0400` fernet | IPC-only stat gate in `keystore._validate_fernet_file` |
+| Smoke windows py3.13 | `ensure_home` fernet stat gate on NTFS | Skip POSIX stat on Windows; `dirty_home` + env key in down tests |
 
 **Local verify (wave3b scope):**
 

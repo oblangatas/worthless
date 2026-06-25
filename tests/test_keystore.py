@@ -7,6 +7,8 @@ All tests should fail with ImportError until the module is implemented.
 from __future__ import annotations
 
 import logging
+import os
+import stat
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -20,6 +22,7 @@ from worthless.cli.keystore import (
     _SERVICE,
     _USERNAME,
     _keyring_username,
+    _read_fernet_file,
     keyring_available,
     delete_fernet_key,
     migrate_file_to_keyring,
@@ -385,6 +388,73 @@ class TestReadFernetKeyCascade:
 
         assert exc_info.value.code == ErrorCode.KEY_NOT_FOUND
         assert "0o600" in exc_info.value.message
+
+
+class TestIpcOnlyFernetStatGate:
+    """Container topology: relax uid check for crypto-owned 0400, reject 0440."""
+
+    def test_ipc_only_accepts_foreign_owned_0400(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("WORTHLESS_FERNET_IPC_ONLY", "1")
+        monkeypatch.delenv("WORTHLESS_FERNET_KEY", raising=False)
+        monkeypatch.delenv("WORTHLESS_SERVICE_MANAGED", raising=False)
+
+        fernet_path = tmp_path / "fernet.key"
+        fernet_path.write_bytes(b"crypto-owned-key\n")
+        foreign_uid = os.geteuid() + 1 if os.geteuid() < 65534 else max(1, os.geteuid() - 1)
+        try:
+            os.chown(fernet_path, foreign_uid, os.getgid())
+            fernet_path.chmod(0o400)
+            result = _read_fernet_file(fernet_path, validate=True)
+        except (OSError, PermissionError):
+            foreign_stat = os.stat_result(
+                (
+                    stat.S_IFREG | 0o400,
+                    0,
+                    0,
+                    0,
+                    foreign_uid,
+                    os.getgid(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                )
+            )
+            original_lstat = Path.lstat
+
+            def _lstat(self: Path):
+                if self == fernet_path:
+                    return foreign_stat
+                return original_lstat(self)
+
+            monkeypatch.setattr(Path, "lstat", _lstat)
+            with patch("worthless.cli.keystore.keyring_available", return_value=False):
+                result = read_fernet_key(home_dir=tmp_path)
+
+        assert result == bytearray(b"crypto-owned-key")
+
+    def test_ipc_only_rejects_group_readable_0440(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("WORTHLESS_FERNET_IPC_ONLY", "1")
+        monkeypatch.delenv("WORTHLESS_FERNET_KEY", raising=False)
+        monkeypatch.delenv("WORTHLESS_SERVICE_MANAGED", raising=False)
+
+        fernet_path = tmp_path / "fernet.key"
+        fernet_path.write_bytes(b"group-readable-key\n")
+        fernet_path.chmod(0o440)
+
+        with (
+            patch("worthless.cli.keystore.keyring_available", return_value=False),
+            pytest.raises(WorthlessError) as exc_info,
+        ):
+            read_fernet_key(home_dir=tmp_path)
+
+        assert exc_info.value.code == ErrorCode.KEY_NOT_FOUND
+        assert "0o400" in exc_info.value.message
 
 
 # ------------------------------------------------------------------

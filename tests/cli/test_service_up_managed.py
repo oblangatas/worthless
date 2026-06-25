@@ -48,6 +48,7 @@ class TestServiceManagedUp:
         mock_health.assert_called_once()
         mock_start.assert_not_called()
 
+    @pytest.mark.adversarial
     def test_up_starts_when_healthy_orphan_without_pidfile(self, home: WorthlessHome) -> None:
         """worthless-6gkb: /healthz up but no pidfile → must spawn sidecar+proxy."""
         with (
@@ -67,6 +68,7 @@ class TestServiceManagedUp:
         assert result.exit_code == 0
         mock_start.assert_called_once()
 
+    @pytest.mark.adversarial
     def test_up_starts_when_healthz_ok_but_sidecar_dead(self, home: WorthlessHome) -> None:
         """Proxy-only orphan: /healthz + pidfile but sidecar IPC dead → respawn."""
         pid_file = home.base_dir / "proxy.pid"
@@ -219,6 +221,7 @@ class TestReclaimManagedProxyWithoutSidecar:
             _reclaim_managed_proxy_without_sidecar(home, 8787, pid_file, console)
         mock_cleanup.assert_called_once_with(pid_file)
 
+    @pytest.mark.adversarial
     def test_kills_proxy_orphan_when_sidecar_dead(self, home: WorthlessHome) -> None:
         from worthless.cli.commands.up import _reclaim_managed_proxy_without_sidecar
 
@@ -239,6 +242,7 @@ class TestReclaimManagedProxyWithoutSidecar:
         mock_cleanup.assert_called_once_with(pid_file)
         console.print_warning.assert_not_called()
 
+    @pytest.mark.adversarial
     def test_sends_sigterm_to_live_orphan_proxy(self, home: WorthlessHome) -> None:
         from worthless.cli.commands.up import _reclaim_managed_proxy_without_sidecar
 

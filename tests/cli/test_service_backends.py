@@ -307,6 +307,7 @@ class TestRefuseForeignUnit:
             unit.chmod(0o600)
 
 
+@pytest.mark.adversarial
 class TestForeignUnitMutators:
     """Install/uninstall/start/stop must not touch another WORTHLESS_HOME's unit."""
 

@@ -11,6 +11,8 @@ from pathlib import Path
 
 import keyring
 
+from worthless._flags import fernet_ipc_only_enabled
+from worthless.cli.platform import IS_WINDOWS
 from worthless.cli.errors import ErrorCode, WorthlessError
 
 # WOR-456: on macOS, route writes through our own ctypes wrapper that
@@ -228,6 +230,9 @@ def _fernet_file_path(home_dir: Path | None) -> Path:
 
 def _validate_fernet_file(path: Path) -> None:
     """Reject world-readable or foreign-owned fernet.key before read (worthless-l3qj)."""
+    if IS_WINDOWS:
+        # NTFS ACLs — POSIX mode/uid checks are not meaningful on Windows.
+        return
     try:
         st = path.lstat()
     except OSError as exc:
@@ -240,12 +245,20 @@ def _validate_fernet_file(path: Path) -> None:
             ErrorCode.KEY_NOT_FOUND,
             "fernet.key is not a regular file — refusing to read.",
         )
+    mode = stat.S_IMODE(st.st_mode)
+    if fernet_ipc_only_enabled():
+        if mode != 0o400:
+            raise WorthlessError(
+                ErrorCode.KEY_NOT_FOUND,
+                f"fernet.key must be mode 0o400 under WORTHLESS_FERNET_IPC_ONLY "
+                f"(found {mode:#o}) — refusing to read.",
+            )
+        return
     if st.st_uid != os.geteuid():
         raise WorthlessError(
             ErrorCode.KEY_NOT_FOUND,
             "fernet.key is not owned by the current user — refusing to read.",
         )
-    mode = stat.S_IMODE(st.st_mode)
     if mode != 0o600:
         raise WorthlessError(
             ErrorCode.KEY_NOT_FOUND,
