@@ -41,7 +41,7 @@ from worthless.cli.errors import (
     sanitize_exception,
 )
 from worthless.cli.key_patterns import CANONICAL_KEY_VAR_RE, detect_prefix
-from worthless.cli.keystore import keyring_available
+from worthless.cli.keystore import keyring_available, sync_fernet_for_launchd
 from worthless.cli.providers import lookup_by_name, lookup_by_url
 from worthless.crypto.reconstruction import (
     _verify_commitment,  # noqa: PLC2701 — intentional internal use for re-lock guard
@@ -1585,6 +1585,13 @@ def _openclaw_audit_postflight(gate: _oc_audit.AuditGateHandle) -> None:
         raise typer.Exit(code=87)
 
 
+def _sync_fernet_after_lock(home: WorthlessHome) -> None:
+    """Copy canonical Fernet key to fernet.key after lock (WOR-748)."""
+    if sys.platform not in ("darwin", "linux"):
+        return
+    sync_fernet_for_launchd(home.base_dir)
+
+
 def _lock_keys(
     env_path: Path,
     home: WorthlessHome,
@@ -1964,6 +1971,7 @@ def _lock_keys(
         )
         raise typer.Exit(code=result.openclaw_exit)
 
+    _sync_fernet_after_lock(home)
     return result.fresh_count + relock_count
 
 

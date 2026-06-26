@@ -13,6 +13,7 @@ from typer.testing import CliRunner
 from worthless.cli.app import app
 from worthless.cli.commands.service._common import ServiceState, ServiceStatus
 from worthless.cli.errors import ErrorCode, WorthlessError
+from tests.fixtures.dirty_home import write_secure_fernet_key
 
 runner = CliRunner()
 
@@ -21,7 +22,7 @@ runner = CliRunner()
 def home_dir(tmp_path: Path) -> Path:
     base = tmp_path / ".worthless"
     base.mkdir()
-    (base / "fernet.key").write_bytes(b"x" * 32)
+    write_secure_fernet_key(base / "fernet.key", b"x" * 32)
     return base
 
 

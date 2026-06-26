@@ -157,6 +157,7 @@ markers = [
     "quarantine: flaky tests under investigation (non-blocking in CI)",
     "live: tests hitting real LLM providers (requires API keys, costs money)",
     "adversarial: security-focused tests — race conditions, PID reuse, injection, fuzz",
+    "dirty_env: dirty-home adversarial scenarios (WOR-724/725) — opt-in via -m dirty_env",
     "docker: Docker container end-to-end tests (requires running Docker daemon)",
     "e2e: end-to-end smoke tests — full lifecycle (lock, proxy, healthz)",
     "openclaw: OpenClaw integration tests (requires Docker + network pull)",

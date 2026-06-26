@@ -188,15 +188,10 @@ sync_fernet_for_launchd() {
   lp_step "sync canonical Fernet → ~/.worthless/fernet.key (for launchd)"
   (cd "$REPO_ROOT" && uv run python -c "
 from worthless.cli.bootstrap import ensure_home
-from worthless.cli.keystore import _write_key_file, read_fernet_key
-from worthless.crypto.types import zero_buf
+from worthless.cli.keystore import sync_fernet_for_launchd
 
 home = ensure_home()
-key = read_fernet_key(home.base_dir)
-try:
-    _write_key_file(bytes(key), home.base_dir)
-finally:
-    zero_buf(key)
+sync_fernet_for_launchd(home.base_dir)
 ")
   if [[ ! -f "${HOME}/.worthless/fernet.key" ]]; then
     lp_fail "fernet.key missing after sync — launchd will hit WRTLS-102"

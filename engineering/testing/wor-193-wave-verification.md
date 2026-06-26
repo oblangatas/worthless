@@ -66,11 +66,11 @@
 | W3-ADV-10 | Trap without unlock → next run dirty (**WOR-747**) | new dirty_env journey | backlog |
 | W3-ADV-11 | `WORTHLESS_HOME` mismatch vs plist | `test_service_backends.py` | backlog |
 | W3-ADV-12 | SIGKILL mid supervised up → stale pidfile | stress journey | backlog |
-| W3-ADV-13 | launchd env: file-only fernet path | keystore + service | partial |
+| W3-ADV-13 | launchd env: file-only fernet path | keystore + service | **done** (WOR-748 sync) |
 | W3-ADV-14 | lock → service install → 401 class regression | integration | backlog |
 | W3-ADV-15 | Dummy `/healthz` on port → default **and** service up (STRESS P0) | user_flow / service | backlog |
 | W3-ADV-16 | Same as W3-ADV-10; blocks **WOR-749** | dirty_env | backlog |
-| W3-ADV-17 | Fernet drift preflight before install | live script + pytest | partial |
+| W3-ADV-17 | Fernet drift preflight before install | `test_fernet_sync.py` + live script | **done** (preflight gate) |
 
 ---
 
@@ -84,7 +84,7 @@ Fixture: `tests/fixtures/dirty_home.py` (shipped #292; dirty_env journeys still 
 | W3-DIRTY-2 | Stale lock files | lock/up recover or clear error | backlog |
 | W3-DIRTY-3 | DB row + missing shard_a (S-05) | honest status + doctor | backlog |
 | W3-DIRTY-4 | Stale `proxy.pid`, no process | up coherent (not bare healthz) | backlog |
-| W3-DIRTY-5 | Keyring shard + wrong `fernet.key` | managed vs interactive split | partial |
+| W3-DIRTY-5 | Keyring shard + wrong `fernet.key` | managed vs interactive split | **done** (`test_fernet_sync.py`) |
 
 Run: `uv run pytest -m dirty_env` (marker registered; journeys mostly backlog).
 

@@ -13,8 +13,10 @@ from pathlib import Path
 
 from worthless.cli.bootstrap import WorthlessHome
 from worthless.cli.errors import ErrorCode, WorthlessError
+from worthless.cli.keystore import PLACEHOLDER_FERNET_KEY, sync_fernet_for_launchd
 from worthless.cli.process import poll_health
 from worthless.crypto.types import zero_buf
+from worthless.storage.repository import ShardRepository
 
 
 class ServiceState(str, Enum):
@@ -85,8 +87,28 @@ def run_cmd(
     )
 
 
+def _assert_no_fernet_drift_for_service_install(home: WorthlessHome) -> None:
+    """W3-ADV-17: refuse install when keyring and file disagree (WOR-464)."""
+    from worthless.cli.commands.doctor.checks import fernet_drift
+    from worthless.cli.commands.doctor.registry import CheckContext
+
+    repo = ShardRepository(str(home.db_path), PLACEHOLDER_FERNET_KEY)
+    ctx = CheckContext(home=home, repo=repo, fix=False, dry_run=False)
+    result = fernet_drift.run(ctx)
+    if result.get("status") == "error":
+        raise WorthlessError(
+            ErrorCode.KEY_NOT_FOUND,
+            f"{result.get('summary', 'Fernet key drift detected')} "
+            "Run `worthless doctor --explain fernet_drift` before "
+            "`worthless service install`.",
+        )
+
+
 def preflight_service_install(home: WorthlessHome) -> None:
     """Refuse install when the proxy cannot start (no Fernet key)."""
+    if current_platform_backend_name() in ("launchd", "systemd"):
+        _assert_no_fernet_drift_for_service_install(home)
+        sync_fernet_for_launchd(home.base_dir)
     try:
         key = home.fernet_key
     except WorthlessError as exc:

@@ -12,8 +12,9 @@ from pathlib import Path
 import keyring
 
 from worthless._flags import fernet_ipc_only_enabled
-from worthless.cli.platform import IS_WINDOWS
 from worthless.cli.errors import ErrorCode, WorthlessError
+from worthless.cli.platform import IS_WINDOWS
+from worthless.crypto.types import zero_buf
 
 # WOR-456: on macOS, route writes through our own ctypes wrapper that
 # explicitly pins ``kSecAttrSynchronizable=kCFBooleanFalse`` so Fernet keys
@@ -281,6 +282,32 @@ def _write_key_file(key: bytes, home_dir: Path | None) -> None:
     finally:
         os.close(fd)
     logger.info("Fernet key stored in file")
+
+
+def sync_fernet_for_launchd(home_dir: Path | None = None) -> None:
+    """Write the canonical Fernet key to ``fernet.key`` for service-managed startup.
+
+    LaunchAgents and systemd user units read the on-disk file under
+    ``WORTHLESS_SERVICE_MANAGED=1``. Interactive sessions store the canonical
+    key in the OS keyring after enroll/lock; this sync copies keyring → file
+    so headless restarts decrypt with the same bytes (WOR-748).
+
+    Reads via the **interactive** cascade (keyring before file), even when
+    ``WORTHLESS_SERVICE_MANAGED`` is set in the caller's environment, so a
+    stale ``fernet.key`` never wins over the keyring during sync.
+    """
+    saved_managed = os.environ.get("WORTHLESS_SERVICE_MANAGED")
+    try:
+        if saved_managed is not None:
+            os.environ.pop("WORTHLESS_SERVICE_MANAGED", None)
+        key = read_fernet_key(home_dir)
+        try:
+            _write_key_file(bytes(key), home_dir)
+        finally:
+            zero_buf(key)
+    finally:
+        if saved_managed is not None:
+            os.environ["WORTHLESS_SERVICE_MANAGED"] = saved_managed
 
 
 def _service_managed() -> bool:
