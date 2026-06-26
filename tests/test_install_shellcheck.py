@@ -10,10 +10,11 @@ import subprocess
 
 import pytest
 
-from tests._install_helpers import INSTALL_FIXTURES, INSTALL_SH
+from tests._install_helpers import INSTALL_FIXTURES, INSTALL_SH, UNINSTALL_SH
 
 SHELL_SCRIPTS = [
     INSTALL_SH,
+    UNINSTALL_SH,
     INSTALL_FIXTURES / "verify_install.sh",
     INSTALL_FIXTURES / "verify_uv_reuse.sh",
 ]
