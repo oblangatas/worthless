@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Live pack: lock → service install → proxied request → upstream receives real key.
+# Live pack: lock → service install → proxied request → restart → proxied again.
 # Manual L7 proof (not CI). Uses mock-upstream in Docker on localhost:9999.
 #
 # Cleanup on exit: service uninstall, worthless down, unlock+remove temp project dir.
@@ -363,8 +363,6 @@ dump_proxy_log() {
   lp_log_tail "~/.worthless/proxy.log" "${HOME}/.worthless/proxy.log" 30
 }
 
-lp_phase "Sidecar IPC decrypt preflight"
-lp_step "alias ${ALIAS} — find socket that can open shard_b_enc"
 sidecar_decrypt_preflight() {
   (cd "$REPO_ROOT" && uv run python -c "
 import asyncio, os, sys
@@ -402,38 +400,46 @@ asyncio.run(main())
 " "$ALIAS")
 }
 
-sidecar_ready=false
-deadline=$((SECONDS + 60))
-while ((SECONDS < deadline)); do
-  if sidecar_decrypt_preflight 2>/dev/null; then
-    sidecar_ready=true
-    break
+wait_sidecar_decrypt_preflight() {
+  local label="${1:-sidecar IPC decrypt}"
+  local sidecar_ready=false
+  local deadline=$((SECONDS + 60))
+  while ((SECONDS < deadline)); do
+    if sidecar_decrypt_preflight 2>/dev/null; then
+      sidecar_ready=true
+      break
+    fi
+    sleep 1
+  done
+  if [[ "$sidecar_ready" != true ]]; then
+    lp_fail "${label} failed after 60s"
+    sidecar_decrypt_preflight || true
+    lp_diag \
+      "WORTHLESS_FERNET_IPC_ONLY=${WORTHLESS_FERNET_IPC_ONLY:-unset}" \
+      "which worthless: $(command -v worthless 2>/dev/null || echo missing)"
+    if [[ -f "$PLIST" ]]; then
+      lp_step "launchd ProgramArguments:"
+      grep -A2 'ProgramArguments' "$PLIST" || true
+    fi
+    if command -v pgrep >/dev/null 2>&1; then
+      lp_step "running worthless processes:"
+      pgrep -fl 'worthless' 2>/dev/null || true
+    fi
+    if [[ -d "${HOME}/.worthless/run" ]]; then
+      lp_step "sidecar sockets:"
+      find "${HOME}/.worthless/run" -name sidecar.sock 2>/dev/null || true
+    fi
+    dump_proxy_log
+    return 1
   fi
-  sleep 1
-done
-if [[ "$sidecar_ready" != true ]]; then
-  lp_fail "sidecar IPC decrypt failed after 60s"
-  sidecar_decrypt_preflight || true
-  lp_diag \
-    "WORTHLESS_FERNET_IPC_ONLY=${WORTHLESS_FERNET_IPC_ONLY:-unset}" \
-    "which worthless: $(command -v worthless 2>/dev/null || echo missing)"
-  if [[ -f "$PLIST" ]]; then
-    lp_step "launchd ProgramArguments:"
-    grep -A2 'ProgramArguments' "$PLIST" || true
-  fi
-  if command -v pgrep >/dev/null 2>&1; then
-    lp_step "running worthless processes:"
-    pgrep -fl 'worthless' 2>/dev/null || true
-  fi
-  if [[ -d "${HOME}/.worthless/run" ]]; then
-    lp_step "sidecar sockets:"
-    find "${HOME}/.worthless/run" -name sidecar.sock 2>/dev/null || true
-  fi
-  dump_proxy_log
-  exit 1
-fi
-sidecar_decrypt_preflight
-lp_ok "sidecar IPC decrypt preflight passed"
+  sidecar_decrypt_preflight
+  lp_ok "${label} passed"
+  return 0
+}
+
+lp_phase "Sidecar IPC decrypt preflight"
+lp_step "alias ${ALIAS} — find socket that can open shard_b_enc"
+wait_sidecar_decrypt_preflight "sidecar IPC decrypt preflight" || exit 1
 
 lp_phase "Proxied request roundtrip"
 
@@ -461,48 +467,52 @@ curl_expect_2xx() {
   rm -f "$tmp"
 }
 
-lp_step "clear mock-upstream capture buffer"
-curl_expect_2xx DELETE "${MOCK_URL}/captured-headers"
+run_proxied_roundtrip() {
+  local label="${1:-initial}"
+  lp_step "clear mock-upstream capture buffer (${label})"
+  curl_expect_2xx DELETE "${MOCK_URL}/captured-headers"
 
-lp_step "POST /${ALIAS}/v1/chat/completions via launchd proxy :${PORT}"
-RESP_FILE="$(mktemp)"
-HTTP_STATUS=""
-deadline=$((SECONDS + 45))
-while ((SECONDS < deadline)); do
-  HTTP_STATUS="$(
-    curl -s -o "$RESP_FILE" -w '%{http_code}' \
-      -X POST "http://127.0.0.1:${PORT}/${ALIAS}/v1/chat/completions" \
-      -H "Authorization: Bearer ${SHARD_A}" \
-      -H "Content-Type: application/json" \
-      -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}'
-  )"
-  if [[ "$HTTP_STATUS" == "200" ]]; then
+  lp_step "POST /${ALIAS}/v1/chat/completions via launchd proxy :${PORT} (${label})"
+  local resp_file
+  resp_file="$(mktemp)"
+  local http_status=""
+  local deadline=$((SECONDS + 45))
+  while ((SECONDS < deadline)); do
+    http_status="$(
+      curl -s -o "$resp_file" -w '%{http_code}' \
+        -X POST "http://127.0.0.1:${PORT}/${ALIAS}/v1/chat/completions" \
+        -H "Authorization: Bearer ${SHARD_A}" \
+        -H "Content-Type: application/json" \
+        -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}'
+    )"
+    if [[ "$http_status" == "200" ]]; then
+      break
+    fi
+    if [[ "$http_status" == "503" || "$http_status" == "502" || "$http_status" == "504" ]]; then
+      sleep 1
+      continue
+    fi
     break
+  done
+  if [[ "$http_status" != "200" ]]; then
+    lp_fail "proxy returned HTTP ${http_status} (${label})"
+    cat "$resp_file" 2>/dev/null || true
+    if [[ "$http_status" == "401" ]]; then
+      lp_diag \
+        "401 under launchd → Fernet mismatch or sidecar not up (${label})" \
+        "re-run after: worthless doctor; script syncs keyring→fernet.key"
+    fi
+    dump_proxy_log
+    rm -f "$resp_file"
+    return 1
   fi
-  if [[ "$HTTP_STATUS" == "503" || "$HTTP_STATUS" == "502" || "$HTTP_STATUS" == "504" ]]; then
-    sleep 1
-    continue
-  fi
-  break
-done
-if [[ "$HTTP_STATUS" != "200" ]]; then
-  lp_fail "proxy returned HTTP ${HTTP_STATUS}"
-  cat "$RESP_FILE" 2>/dev/null || true
-  if [[ "$HTTP_STATUS" == "401" ]]; then
-    lp_diag \
-      "401 under launchd → orphan proxy without sidecar (re-run)" \
-      "or Fernet mismatch (worthless doctor; script syncs keyring→file)"
-  fi
-  dump_proxy_log
-  rm -f "$RESP_FILE"
-  exit 1
-fi
-rm -f "$RESP_FILE"
-lp_ok "proxy returned HTTP 200"
+  rm -f "$resp_file"
+  lp_ok "proxy returned HTTP 200 (${label})"
 
-lp_step "verify mock-upstream received real API key (not shard-A)"
-RECEIVED="$(
-  cd "$REPO_ROOT" && uv run python -c "
+  lp_step "verify mock-upstream received real API key (${label})"
+  local received
+  received="$(
+    cd "$REPO_ROOT" && uv run python -c "
 import json, urllib.request
 data = json.load(urllib.request.urlopen('${MOCK_URL}/captured-headers'))
 headers = data.get('headers') or []
@@ -511,14 +521,25 @@ if not headers:
 auth = headers[-1].get('authorization', '').replace('Bearer ', '')
 print(auth)
 "
-)"
+  )"
 
-if [[ "$RECEIVED" != "$REAL_KEY" ]]; then
-  lp_fail "upstream got wrong key (expected ${REAL_KEY:0:10}..., got ${RECEIVED:0:10}...)"
-  dump_proxy_log
-  exit 1
-fi
-lp_ok "mock-upstream Authorization matches enrolled key"
+  if [[ "$received" != "$REAL_KEY" ]]; then
+    lp_fail "upstream got wrong key (${label}; expected ${REAL_KEY:0:10}..., got ${received:0:10}...)"
+    dump_proxy_log
+    return 1
+  fi
+  lp_ok "mock-upstream Authorization matches enrolled key (${label})"
+}
+
+run_proxied_roundtrip "initial install" || exit 1
+
+lp_phase "Launchd restart → proxied request (WOR-749 post-restart)"
+lp_step "worthless service restart (fresh launchd job — reads fernet.key from disk)"
+worthless service restart
+wait_proxy_healthy
+lp_ok "GET /healthz after service restart"
+wait_sidecar_decrypt_preflight "sidecar IPC decrypt after restart" || exit 1
+run_proxied_roundtrip "after service restart" || exit 1
 
 lp_step "worthless service uninstall --yes (cleanup before trap)"
 worthless service uninstall --yes

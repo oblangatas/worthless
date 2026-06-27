@@ -241,7 +241,7 @@ Runnable script: `engineering/testing/scripts/service-lifecycle-live-linux.sh`
 ## Pack — Service lock roundtrip (keys through service-managed proxy)
 
 **Linear:** [WOR-720](https://linear.app/plumbusai/issue/WOR-720) acceptance gap vs lifecycle-only proof
-**Proves:** `worthless lock` → `worthless service install` → proxied chat request → mock upstream receives reconstructed **real** key (not shard-A).
+**Proves:** `worthless lock` → `worthless service install` → proxied chat request → **`worthless service restart`** → proxied chat again → mock upstream receives reconstructed **real** key (not shard-A) both times.
 **Requires:** Docker (mock-upstream on `:9999`), editable install, ports `8787` + `9999` free, `unset WORTHLESS_HOME` (uses `~/.worthless` + `providers.toml`).
 
 ```bash
@@ -256,6 +256,7 @@ bash engineering/testing/scripts/service-lock-roundtrip-live-macos.sh
 | L-lock-1 | Provider registered + lock splits `.env` | ☑ | 2026-06-08 |
 | L-lock-2 | Service install + healthz | ☑ | 2026-06-08 |
 | L-lock-3 | Proxy forwards; upstream auth = real key | ☑ | 2026-06-08 |
+| L-lock-3b | After `service restart`, proxied POST still 200 + real key | ☑ | 2026-06-08 post-restart phase |
 | L-lock-4 | Service uninstall cleans plist | ☑ | 2026-06-08 |
 
 ---
