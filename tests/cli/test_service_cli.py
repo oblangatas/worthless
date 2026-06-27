@@ -11,6 +11,7 @@ import pytest
 from typer.testing import CliRunner
 
 from worthless.cli.app import app
+from worthless.cli.bootstrap import WorthlessHome
 from worthless.cli.commands.service._common import ServiceState, ServiceStatus
 from worthless.cli.errors import ErrorCode, WorthlessError
 from tests.fixtures.dirty_home import write_secure_fernet_key
@@ -45,7 +46,7 @@ class TestServiceInstall:
             ),
             patch("worthless.cli.commands.service.get_home") as mock_home,
         ):
-            mock_home.return_value.base_dir = home_dir
+            mock_home.return_value = WorthlessHome(base_dir=home_dir)
             result = runner.invoke(
                 app,
                 ["--json", "service", "install", "--yes"],
