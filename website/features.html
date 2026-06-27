@@ -3,13 +3,37 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Features — Worthless</title>
-  <meta name="description" content="Full feature breakdown for Worthless — split-key cryptography, budget enforcement, pre-commit scanning, and more." />
+  <title>Features - Worthless</title>
+  <meta name="description" content="Worthless protects local AI API keys with a format-preserving .env shard, local proxy, token guardrails, and LLM-key scanning." />
+  <link rel="canonical" href="https://wless.io/features.html" />
+  <meta name="theme-color" content="#4a6fa5" />
+
+  <!-- Open Graph -->
+  <meta property="og:title" content="Features - Worthless" />
+  <meta property="og:description" content="Protect local AI API keys with a copied .env shard that cannot call the provider by itself." />
+  <meta property="og:image" content="https://wless.io/og-image.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:url" content="https://wless.io/features.html" />
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="Worthless" />
+
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="Features - Worthless" />
+  <meta name="twitter:description" content="Protect local AI API keys with a copied .env shard that cannot call the provider by itself." />
+  <meta name="twitter:image" content="https://wless.io/og-image.png" />
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/x-icon" href="favicon.ico" />
+  <link rel="apple-touch-icon" href="apple-touch-icon.png" />
+  <link rel="manifest" href="site.webmanifest" />
+
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
   <style>
     :root {
-      /* Soothing palette — soft blue-grays, no harsh tones */
+      /* Soothing palette, soft blue-grays, no harsh tones */
       --bg: #eef6ff;
       --bg2: #eef3fb;
       --white: #ffffff;
@@ -44,12 +68,23 @@
     body{font-family:'Inter',system-ui,sans-serif;background:linear-gradient(to bottom, #eef6ff 0%, #ffffff 25%, #ffffff 75%, #eef6ff 100%);color:var(--text);line-height:1.6}
     nav{position:sticky;top:0;z-index:100;height:60px;display:flex;align-items:center;padding:0 2.5rem;background:rgba(248,250,253,.92);backdrop-filter:blur(14px);border-bottom:1px solid var(--border-soft)}
     .nav-logo{font-size:.95rem;font-weight:700;color:#005f73;text-decoration:none;display:flex;align-items:center;gap:.55rem}
-    .nav-icon{width:26px;height:26px;background:#0a9396;border-radius:7px;display:grid;place-items:center;color:white;font-size:12px;font-weight:700}
+    .nav-icon{width:26px;height:26px;border-radius:7px;flex-shrink:0;overflow:hidden}
+    .nav-icon img{width:100%;height:100%;object-fit:cover}
     .nav-links{display:flex;gap:.1rem;margin-left:1.5rem}
     .nav-links a{font-size:.855rem;font-weight:500;color:#0a9396;text-decoration:none;padding:.4rem .8rem;border-radius:7px;transition:color .2s,background .2s}
     .nav-links a:hover,.nav-links a.active{color:var(--text);background:var(--bg2)}
-    .nav-gh{margin-left:auto;font-size:.82rem;font-weight:500;color:var(--text2);text-decoration:none;padding:.4rem .85rem;border:1px solid var(--border);border-radius:7px;background:var(--white);transition:color .2s}
+    .nav-actions{margin-left:auto;display:flex;align-items:center;gap:.6rem}
+    .nav-gh{font-size:.82rem;font-weight:500;color:var(--text2);text-decoration:none;padding:.4rem .85rem;border:1px solid var(--border);border-radius:7px;background:var(--white);transition:color .2s}
     .nav-gh:hover{color:var(--text)}
+    @media (max-width: 720px){
+      nav{height:auto;min-height:60px;flex-wrap:wrap;gap:.45rem .75rem;padding:.65rem 1rem}
+      .nav-logo{flex:1 0 auto}
+      .nav-links{order:3;width:100%;margin-left:0;overflow-x:auto;padding-bottom:.1rem;scrollbar-width:none}
+      .nav-links::-webkit-scrollbar{display:none}
+      .nav-links a{padding:.35rem .55rem;white-space:nowrap}
+      .nav-actions{margin-left:0;gap:.45rem}
+      .nav-gh{padding:.34rem .65rem}
+    }
 
     .page{max-width:900px;margin:0 auto;padding:4rem 2rem 6rem}
     .eyebrow{font-size:14px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--text2);margin-bottom:.6rem}
@@ -111,135 +146,104 @@
 </head>
 <body>
 <nav>
-  <a href="index.html" class="nav-logo"><div class="nav-icon">W</div>worthless</a>
+  <a href="index.html" class="nav-logo"><div class="nav-icon"><img src="logo-transparent.png" alt="Worthless logo" /></div>worthless</a>
   <div class="nav-links">
     <a href="how-it-works.html">How it works</a>
     <a href="features.html" class="active">Features</a>
     <a href="blog/index.html">Blog</a>
+    <a href="red/index.html">Red Blog</a>
   </div>
-  <a href="https://github.com/shacharm2/worthless" class="nav-gh" target="_blank" rel="noopener">GitHub</a>
+  <div class="nav-actions">
+    <a href="https://github.com/shacharm2/worthless" class="nav-gh" target="_blank" rel="noopener">GitHub</a>
+  </div>
 </nav>
 
 <div class="page">
   <div class="eyebrow">Features</div>
-  <h1>Everything included.<br />Nothing to configure.</h1>
-  <p class="intro">Install it, lock your keys, and run your app. The details below explain what each protection layer actually does.</p>
+  <h1>A copied protected AI key cannot call the provider on its own.</h1>
+  <p class="intro">AI agents can run <code>git add -A</code> and push your .env to GitHub. Worthless replaces supported AI-provider keys with split shares, so the copied value alone is not enough to call the provider. Standard local SDK flows usually need a wrapper command, not application-code changes.</p>
 
   <div class="feat-section">
-    <div class="feat-header">
-      <h2>✂️ Split-key cryptography</h2>
-      <span class="badge b-sec">Security</span>
-    </div>
-    <p>Keys are split using XOR-based secret sharing (a one-time pad variant). This is information-theoretically secure — a stolen share reveals nothing about the original key, even with unlimited compute.</p>
-    <table class="dtable">
-      <tr><td>Algorithm</td><td>XOR / one-time pad secret sharing (2-of-2)</td></tr>
-      <tr><td>Security model</td><td>Information-theoretic — cannot be broken by brute force</td></tr>
-      <tr><td>Share A</td><td>Local filesystem, encrypted at rest</td></tr>
-      <tr><td>Share B</td><td>Proxy process memory only — never written to disk</td></tr>
-      <tr><td>Key in memory</td><td>Reconstructed ephemerally, zeroed immediately after use</td></tr>
-      <tr><td>Cloud dependency</td><td>None — everything runs locally</td></tr>
-    </table>
+    <h2>The protected value in your .env cannot call the provider alone</h2>
+    <p>Your .env has one half of an XOR split. The other half lives in your local proxy. The stored half reveals nothing about the original key, but this protection depends on the other half and the machine running Worthless staying out of the attacker's control.</p>
   </div>
 
   <div class="feat-section">
-    <div class="feat-header">
-      <h2>💸 Budget enforcement</h2>
-      <span class="badge b-cost">Cost control</span>
-    </div>
-    <p>Set a spending cap per key. When the counter reaches your limit, the proxy refuses to reconstruct the key — even if both shares are available. Hard stop at the infrastructure layer.</p>
-    <table class="dtable">
-      <tr><td>Enforcement layer</td><td>Proxy — happens before key reconstruction</td></tr>
-      <tr><td>Bypass possible?</td><td>No — the app cannot override the proxy</td></tr>
-      <tr><td>Scope</td><td>Per-key spending counter</td></tr>
-      <tr><td>Reset</td><td>Manual (<code>worthless reset-budget</code>)</td></tr>
-    </table>
+    <h2>Local usage guardrails</h2>
+    <p>Set local token or usage limits that apply before Worthless reconstructs the key. A local guardrail, not a provider-side dollar cap; provider billing rules still apply.</p>
   </div>
 
   <div class="feat-section">
-    <div class="feat-header">
-      <h2>🔍 Pre-commit scanning</h2>
-      <span class="badge b-sec">Prevention</span>
-    </div>
-    <p>Built-in <code>pre-commit</code> hook scans staged files for raw API keys before any commit lands in git history. First line of defense; the split-key proxy is the second.</p>
-    <table class="dtable">
-      <tr><td>Integration</td><td>pre-commit framework (.pre-commit-config.yaml)</td></tr>
-      <tr><td>Detects</td><td>OpenAI, Anthropic, AWS, Stripe, and common patterns</td></tr>
-      <tr><td>Action</td><td>Commit is blocked — not just warned</td></tr>
-      <tr><td>CI support</td><td>Works in GitHub Actions via pre-commit.ci</td></tr>
-    </table>
+    <h2>Usually no application-code changes</h2>
+    <p>For standard local SDK flows, run <code>worthless wrap python app.py</code> and keep reading environment variables as before. Docker, CI, and unusual SDK flows may need documented environment or base-URL configuration.</p>
   </div>
 
   <div class="feat-section">
-    <div class="feat-header">
-      <h2>🧩 Zero code changes</h2>
-      <span class="badge b-ux">Drop-in</span>
-    </div>
-    <p>Prefix any command with <code>worthless wrap</code>. Your application reads environment variables exactly as before. No SDK changes, no import changes.</p>
-    <table class="dtable">
-      <tr><td>Before</td><td><code>python app.py</code></td></tr>
-      <tr><td>After</td><td><code>worthless wrap python app.py</code></td></tr>
-      <tr><td>Works with</td><td>Python, Node.js, Ruby, Docker, any shell command</td></tr>
-    </table>
+    <h2>Pre-commit scanning for supported AI keys</h2>
+    <p>The built-in hook checks supported AI-provider key patterns before they hit git and blocks a matching commit. It is not a general secret scanner; use tools such as Gitleaks or TruffleHog for other credentials.</p>
   </div>
 
   <div class="feat-section">
-    <div class="feat-header">
-      <h2>🔄 Fully reversible</h2>
-      <span class="badge b-ux">Portability</span>
-    </div>
-    <p><code>worthless unlock</code> restores your original <code>.env</code> exactly as before. Proxy stops. Shares deleted. No dependency on Worthless remaining installed.</p>
-    <table class="dtable">
-      <tr><td>Command</td><td><code>worthless unlock</code></td></tr>
-      <tr><td>Result</td><td>Original .env restored, proxy stopped, shares deleted</td></tr>
-      <tr><td>Lock-in</td><td>None</td></tr>
-    </table>
+    <h2>Fully reversible</h2>
+    <p><code>worthless unlock</code>, original .env restored, proxy stopped, shares deleted. Don't like it? One command and it's gone. Zero lock-in.</p>
   </div>
 
   <div class="feat-section">
-    <div class="feat-header">
-      <h2>🏠 Self-hosted &amp; open source</h2>
-      <span class="badge b-prv">Privacy</span>
-    </div>
-    <p>No cloud. No account. No keys touching anyone else's server. AGPL-3.0 licensed. Zero telemetry.</p>
-    <table class="dtable">
-      <tr><td>License</td><td>AGPL-3.0</td></tr>
-      <tr><td>Cloud services</td><td>None required</td></tr>
-      <tr><td>Telemetry</td><td>Zero</td></tr>
-    </table>
+    <h2>Self-hosted. Open source. No cloud.</h2>
+    <p>Your keys never touch anyone else's server. AGPL-3.0. Zero telemetry. No account needed.</p>
+  </div>
+
+  <div class="feat-section">
+    <h2>What Worthless does not protect against</h2>
+    <p>Worthless aims to make a copied <code>.env</code> share useless on its own. It is not a sandbox for a machine that is already compromised, and it is not the only layer you need.</p>
+    <ul>
+      <li><strong>A compromised machine.</strong> If an attacker controls the computer Worthless runs on, they can reach your key. Same trust boundary as a password manager.</li>
+      <li><strong>The provider's side.</strong> A breach or outage at OpenAI, Anthropic, or another upstream is outside what Worthless can affect.</li>
+      <li><strong>This early build's limits.</strong> The proof of concept is Python, with documented limits on how briefly key material lives in memory.</li>
+    </ul>
+    <p>Worthless is one layer, built to sit alongside a vault, secret scanning, and key rotation. Full threat model: <a href="https://docs.wless.io/security/">security model</a>.</p>
   </div>
 
   <!-- Comparison -->
   <div class="eyebrow" style="margin-top:1rem">Comparison</div>
   <h2 style="font-size:1.1rem;margin-top:.4rem;margin-bottom:.25rem">How Worthless compares</h2>
   <p style="font-size:.875rem;color:var(--text2);margin-bottom:0">Against common alternatives in the secrets/security space.</p>
+  <div style="overflow-x:auto;">
   <table class="ctable">
     <thead>
       <tr><td>Capability</td><td>worthless</td><td>Vault / Secrets Mgr</td><td>detect-secrets</td><td>.gitignore</td></tr>
     </thead>
     <tbody>
-      <tr><td>Prevents commits with raw keys</td><td class="ty">✓</td><td class="tn">✗</td><td class="ty">✓</td><td class="tp">Partial</td></tr>
-      <tr><td>Post-leak protection</td><td class="ty">✓</td><td class="tn">✗</td><td class="tn">✗</td><td class="tn">✗</td></tr>
-      <tr><td>Leaked key is cryptographically useless</td><td class="ty">✓</td><td class="tn">✗</td><td class="tn">✗</td><td class="tn">✗</td></tr>
-      <tr><td>Budget / hard spending cap</td><td class="ty">✓</td><td class="tn">✗</td><td class="tn">✗</td><td class="tn">✗</td></tr>
-      <tr><td>Zero code changes</td><td class="ty">✓</td><td class="tn">✗</td><td class="ty">✓</td><td class="ty">✓</td></tr>
-      <tr><td>Fully self-hosted</td><td class="ty">✓</td><td class="tp">Optional</td><td class="ty">✓</td><td class="ty">✓</td></tr>
-      <tr><td>Open source</td><td class="ty">✓</td><td class="ty">✓</td><td class="ty">✓</td><td>—</td></tr>
+      <tr><td>Prevents commits w/ detected raw keys</td><td class="ty">&#10003;</td><td class="tn">&#10007;</td><td class="ty">&#10003;</td><td class="tp">Partial</td></tr>
+      <tr><td>Post-leak protection</td><td class="ty">&#10003;</td><td class="tn">&#10007;</td><td class="tn">&#10007;</td><td class="tn">&#10007;</td></tr>
+      <tr><td>Copied protected AI-key value cannot call the provider alone</td><td class="ty">&#10003;</td><td class="tn">&#10007;</td><td class="tn">&#10007;</td><td class="tn">&#10007;</td></tr>
+      <tr><td>Local usage guardrail (pre-reconstruction)</td><td class="ty">&#10003;</td><td class="tn">&#10007;</td><td class="tn">&#10007;</td><td class="tn">&#10007;</td></tr>
+      <tr><td>No application-code changes in standard local SDK flows</td><td class="ty">&#10003;</td><td class="tn">&#10007;</td><td class="ty">&#10003;</td><td class="ty">&#10003;</td></tr>
+      <tr><td>Fully self-hosted</td><td class="ty">&#10003;</td><td class="tp">Optional</td><td class="ty">&#10003;</td><td class="ty">&#10003;</td></tr>
+      <tr><td>Open source</td><td class="ty">&#10003;</td><td class="ty">&#10003;</td><td class="ty">&#10003;</td><td>-</td></tr>
     </tbody>
   </table>
+  </div>
 
   <div class="page-cta">
     <h2>Ready to make your keys worthless?</h2>
     <p>Install in one command. Protect your first key in under a minute.</p>
     <div class="cta-row">
-      <a href="https://pypi.org/project/worthless" class="btn-calm" target="_blank" rel="noopener">pip install worthless ↗</a>
-      <a href="how-it-works.html" class="btn-ghost">How it works →</a>
+      <a href="https://docs.wless.io/install/" class="btn-calm">Install guide &#8599;</a>
+      <a href="how-it-works.html" class="btn-ghost">How it works &#8594;</a>
     </div>
   </div>
 </div>
 
   <footer style="justify-content: flex-start; gap: 1.5rem;">
-    <span class="footer-copy">Open source · AGPL-3.0</span>
-    <a href="https://ko-fi.com/shacharme" target="_blank" rel="noopener" class="footer-copy" style="text-decoration: none; border-left: 1px solid var(--border-soft); padding-left: 1.5rem;">Buy me a Ko-fi ☕</a>
+    <span class="footer-copy">Open source &middot; AGPL-3.0</span>
+    <a href="https://ko-fi.com/shacharme" target="_blank" rel="noopener" class="footer-copy" style="text-decoration: none; border-left: 1px solid var(--border-soft); padding-left: 1.5rem;">Buy me a Ko-fi &#9749;</a>
+    <nav class="footer-links" aria-label="Legal" style="margin-left: auto; flex-wrap: wrap;">
+      <a href="privacy.html">Privacy Policy</a>
+      <a href="terms.html">Terms of Service</a>
+      <a href="security.html">Security</a>
+      <a href="license.html">License</a>
+    </nav>
   </footer>
 </body>
 </html>

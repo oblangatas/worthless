@@ -3,8 +3,32 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Blog — Worthless</title>
-  <meta name="description" content="Deep dives on API key security, secret management, and developer tooling from the Worthless team." />
+  <title>Blog - Worthless</title>
+  <meta name="description" content="Plain-English explainers on AI agent key leaks, scanners, vaults, and how Worthless changes what a copied protected .env value can do." />
+  <link rel="canonical" href="https://wless.io/blog/" />
+  <meta name="theme-color" content="#4a6fa5" />
+
+  <!-- Open Graph -->
+  <meta property="og:title" content="Blog - Worthless" />
+  <meta property="og:description" content="Explain how AI keys leak and how Worthless changes what a copied .env value can do." />
+  <meta property="og:image" content="https://wless.io/og-image.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:url" content="https://wless.io/blog/" />
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="Worthless" />
+
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="Blog - Worthless" />
+  <meta name="twitter:description" content="Explain how AI keys leak and how Worthless changes what a copied .env value can do." />
+  <meta name="twitter:image" content="https://wless.io/og-image.png" />
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/x-icon" href="../favicon.ico" />
+  <link rel="apple-touch-icon" href="../apple-touch-icon.png" />
+  <link rel="manifest" href="../site.webmanifest" />
+
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:ital,wght@0,300;0,400;0,500;0,600;0,700;0,800;1,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
   <style>
@@ -24,11 +48,15 @@
 
     nav{position:sticky;top:0;z-index:100;height:60px;display:flex;align-items:center;padding:0 2.5rem;gap:2rem;background:rgba(248,250,253,.9);backdrop-filter:blur(14px);border-bottom:1px solid var(--border-soft)}
     .nav-logo{font-size:.95rem;font-weight:700;color:var(--text);text-decoration:none;display:flex;align-items:center;gap:.55rem}
-    .nav-icon{width:26px;height:26px;background:var(--slate);border-radius:7px;display:grid;place-items:center;color:white;font-size:12px;font-weight:700}
+    .nav-icon{width:26px;height:26px;border-radius:7px;flex-shrink:0;overflow:hidden}
+    .nav-icon img{width:100%;height:100%;object-fit:cover}
     .nav-links{display:flex;gap:.1rem;margin-left:1.5rem}
     .nav-links a{font-size:.855rem;font-weight:500;color:var(--text2);text-decoration:none;padding:.4rem .8rem;border-radius:7px;transition:color .2s,background .2s}
     .nav-links a:hover,.nav-links a.active{color:var(--text);background:var(--bg2)}
-    .nav-gh{margin-left:auto;font-size:.82rem;font-weight:500;color:var(--text2);text-decoration:none;padding:.4rem .85rem;border:1px solid var(--border);border-radius:7px;background:var(--white);transition:color .2s}
+    .nav-actions{margin-left:auto;display:flex;align-items:center;gap:.65rem}
+    .nav-kofi{display:inline-flex;align-items:center;gap:0.4rem;font-size:0.8rem;font-weight:600;color:white;text-decoration:none;padding:0.38rem 0.85rem;border-radius:7px;background:#ffb3b0;transition:background 0.2s;white-space:nowrap}
+    .nav-kofi:hover{background:#ff9c98}
+    .nav-gh{font-size:.82rem;font-weight:500;color:var(--text2);text-decoration:none;padding:.4rem .85rem;border:1px solid var(--border);border-radius:7px;background:var(--white);transition:color .2s}
     .nav-gh:hover{color:var(--text)}
 
     /* Blog header */
@@ -50,19 +78,28 @@
     }
     .post-card:hover{border-color:var(--slate-pale);box-shadow:0 4px 20px rgba(74,111,165,.08);transform:translateY(-1px)}
 
-    .post-summary{display:flex;gap:1.25rem;padding:1.5rem 1.75rem;cursor:pointer;align-items:flex-start}
+    .post-summary{display:flex;gap:1.25rem;padding:1.5rem 1.75rem;align-items:flex-start}
     .post-emoji{font-size:2rem;flex-shrink:0;line-height:1;margin-top:.1rem}
     .post-meta{display:flex;gap:.65rem;align-items:center;margin-bottom:.4rem;flex-wrap:wrap}
-    .post-tag{font-size:.65rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;padding:.18rem .55rem;border-radius:4px;background:var(--slate-fog);color:var(--slate)}
+    .post-tag{font-size:.65rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;padding:.18rem .55rem;border-radius:4px}
+    .post-tag.blue{background:#e0f2fe;color:#0369a1}
+    .post-tag.red{background:var(--red-soft);color:var(--red-text)}
+    .post-tag.meme{background:#fef3c7;color:#92400e}
+
+    .filters{display:flex;gap:.5rem;justify-content:center;margin-bottom:2rem}
+    .filter-btn{font-size:.8rem;font-weight:600;padding:.4rem 1rem;border-radius:20px;border:1px solid var(--border);background:var(--white);color:var(--text2);cursor:pointer;transition:all .2s;font-family:inherit}
+    .filter-btn:hover{border-color:var(--slate-pale);color:var(--text)}
+    .filter-btn.active{background:var(--slate);color:white;border-color:var(--slate)}
+    .post-card.hidden{display:none}
     .post-date,.post-read{font-size:.75rem;color:var(--text3)}
     .post-title{font-size:1rem;font-weight:700;color:var(--text);margin-bottom:.35rem;line-height:1.35;letter-spacing:-.02em}
     .post-excerpt{font-size:.86rem;color:var(--text2);line-height:1.65}
 
     .expand-btn{
       width:100%;background:none;border:none;border-top:1px solid var(--border-soft);
-      color:var(--slate);font-size:.8rem;font-weight:600;font-family:inherit;
-      padding:.65rem 1.75rem;cursor:pointer;display:flex;align-items:center;
-      gap:.5rem;transition:background .15s;
+      color:var(--text3);font-size:.75rem;font-family:inherit;
+      padding:.4rem 1.75rem;cursor:pointer;display:flex;justify-content:center;
+      transition:color .15s;
     }
     .expand-btn:hover{background:var(--slate-fog)}
     .chevron{margin-left:auto;transition:transform .3s;display:inline-block}
@@ -102,58 +139,159 @@
     .footer-links a{font-size:.77rem;color:var(--text3);text-decoration:none;transition:color .2s}
     .footer-links a:hover{color:var(--text2)}
 
-    @media(max-width:600px){.nav-links{display:none}.post-summary{flex-direction:column}}
+    @media (max-width: 720px){
+      nav{height:auto;min-height:60px;flex-wrap:wrap;gap:.45rem .75rem;padding:.65rem 1rem}
+      .nav-logo{flex:1 0 auto}
+      .nav-links{order:3;width:100%;margin-left:0;overflow-x:auto;padding-bottom:.1rem;scrollbar-width:none}
+      .nav-links::-webkit-scrollbar{display:none}
+      .nav-links a{padding:.35rem .55rem;white-space:nowrap}
+      .nav-actions{margin-left:0;gap:.45rem}
+      .nav-kofi,.nav-gh{padding:.34rem .65rem}
+    }
+    @media(max-width:600px){.post-summary{flex-direction:column}}
   </style>
 </head>
 <body>
 
 <nav>
-  <a href="../index.html" class="nav-logo"><div class="nav-icon">W</div>worthless</a>
+  <a href="../index.html" class="nav-logo"><div class="nav-icon"><img src="../logo-transparent.png" alt="Worthless logo" /></div>worthless</a>
   <div class="nav-links">
     <a href="../how-it-works.html">How it works</a>
     <a href="../features.html">Features</a>
     <a href="index.html" class="active">Blog</a>
+    <a href="../red/index.html">Red Blog</a>
+    <a href="../memes.html">Memes</a>
   </div>
-  <a href="https://github.com/shacharm2/worthless" class="nav-gh" target="_blank" rel="noopener">GitHub</a>
+  <div class="nav-actions">
+    <a href="https://ko-fi.com/shacharme" class="nav-kofi" target="_blank" rel="noopener">☕ Ko-fi</a>
+    <a href="https://github.com/shacharm2/worthless" class="nav-gh" target="_blank" rel="noopener">GitHub</a>
+  </div>
 </nav>
 
-<div class="blog-hdr">
-  <div class="eyebrow">Worthless Blog</div>
-  <h1>Security, keys &amp; code.</h1>
-  <p>Deep dives on API key security, secret management, and developer tooling.</p>
+<div style="max-width:720px;margin:0 auto;padding:3rem 2rem 0;">
+  <h1 style="font-size:1.4rem;font-weight:700;color:var(--text);letter-spacing:-.02em;">Blog</h1>
 </div>
 
 <div class="posts">
 
-  <!-- Post 1 -->
-  <div class="post-card" id="introducing-worthless">
-    <div class="post-summary" onclick="togglePost('p1')">
-      <div class="post-emoji">🚀</div>
+  <!-- Post 0: Why I Built Worthless -->
+  <div class="post-card" id="why-i-built-worthless" data-category="blue">
+    <div class="post-summary">
       <div>
         <div class="post-meta">
-          <span class="post-tag">Launch</span>
-          <span class="post-date">April 13, 2026</span>
-          <span class="post-read">· 5 min</span>
+
+          <span class="post-date">April 17, 2026</span>
         </div>
-        <div class="post-title">Introducing Worthless — post-leak API key protection</div>
-        <div class="post-excerpt">We built Worthless because every other tool protects your key until you use it. We protect you after it leaks.</div>
+        <div class="post-title">Why I built Worthless: change what a copied protected .env value can do</div>
       </div>
     </div>
-    <button class="expand-btn" id="btn-p1" onclick="togglePost('p1')">
-      Read article <span class="chevron">▾</span>
+    <button class="expand-btn" id="btn-p0" type="button" aria-controls="p0" aria-expanded="false">
+      <span class="expand-label">Read article</span><span class="chevron" aria-hidden="true">▾</span>
+    </button>
+    <div class="post-full" id="p0">
+      <div class="article">
+        <h2>The problem nobody solved</h2>
+        <p>API keys leak. Constantly. Not because developers are careless, but because the entire AI ecosystem runs on plaintext secrets in .env files, and every tool in the chain is designed to move fast and break things.</p>
+        <p>AI agents run <code>git add .</code> and push your .env to GitHub. CI pipelines print keys in logs. Package managers get compromised and exfiltrate environment variables. One copied key can turn into provider abuse before the owner notices.</p>
+
+        <h2>How many keys are out there right now?</h2>
+        <p>Public repos, build logs, local tool histories, and generated code can all expose AI-provider keys. A scanner may catch many leaks, but one missed leak can still become a real incident.</p>
+        <p>The practical lesson is simple: keep scanning, but also change what a copied .env value can do.</p>
+        <p>And API key risk can change when provider capabilities change. Google's Gemini API keys <a href="https://trufflesecurity.com/blog/google-api-keys-werent-secrets-but-then-gemini-changed-the-rules">showed how API key risk can change</a> across provider contexts.</p>
+
+        <h2>The solutions don't work</h2>
+        <p>Vaults protect keys at rest. Great. But the moment you use the key, it's in memory, in environment variables, in places where it can leak. A vault doesn't help when your CI pipeline logs the key, or when a compromised npm package reads process.env.</p>
+        <p>Key rotation? You're playing whack-a-mole. Rotate after every leak, hope you catch it in time, pray the attacker didn't rack up a bill in the 47 seconds between leak and rotation.</p>
+        <p>Then there's the Cloudflare approach: build an entire infrastructure layer with Workers, KV stores, custom auth, rate limiting, and hope your team maintains it. It works, but it's complex enough that most teams won't do it. And the ones that do spend weeks on it.</p>
+
+        <h2>What if a copied .env value could not call the provider alone?</h2>
+        <p>That's the question I couldn't stop thinking about. Not "how do we prevent leaks" but "how do we change what a copied .env value can do."</p>
+        <p>The answer turned out to be simple: split the key material. Your .env gets a shard. The local proxy keeps the matching material behind a separate boundary. Neither side works alone. When your app makes a legitimate API call, the proxy handles reconstruction for that request.</p>
+        <p>If someone copies your .env, they get one half of an XOR split. The copied .env value alone cannot call the provider because it is missing the matching local material. This boundary does not protect a compromised machine or attacker-controlled local code.</p>
+
+        <h2>That's Worthless</h2>
+        <p>Two commands. Your key is split. Your .env now contains a shard that is not enough to call the provider by itself. The proxy handles reconstruction and local usage checks.</p>
+        <p>No vault. No complex infrastructure. No key rotation dance. Just a copied .env value that is not a provider credential on its own.</p>
+        <p><code>curl -sSL https://worthless.sh | sh</code></p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Post: The landscape -->
+  <div class="post-card" id="the-landscape" data-category="blue">
+    <div class="post-summary">
+      <div>
+        <div class="post-meta">
+          <span class="post-date">April 17, 2026</span>
+        </div>
+        <div class="post-title">Different tools cover different leak stages</div>
+      </div>
+    </div>
+    <button class="expand-btn" id="btn-p4" type="button" aria-controls="p4" aria-expanded="false">
+      <span class="expand-label">Read article</span><span class="chevron" aria-hidden="true">▾</span>
+    </button>
+    <div class="post-full" id="p4">
+      <div class="article">
+        <p>Let's get this out of the way: the tools below are good. Some are great. You should probably use them. This isn't a "we're better" post. It's a "we do a different thing" post.</p>
+
+        <h2>What everyone does</h2>
+        <p>The entire secrets management industry is built around one idea: keep the key from leaking. Encrypt it at rest. Inject it at runtime. Scan for it in commits. Rotate it when it slips through. And honestly? That works. Most of the time.</p>
+        <p>Until it doesn't. And it doesn't more often than anyone admits.</p>
+
+        <h2>1Password / Doppler / Infisical</h2>
+        <p>Solid vaults. You store your secrets in them, they inject into your environment at runtime. 1Password even has CLI integration that's genuinely nice to use. Doppler syncs across environments. Infisical is open source and self-hostable.</p>
+        <p>The catch: your key still ends up in <code>process.env</code>. A compromised package reads it. A bad <code>console.log</code> prints it. The vault did its job perfectly. The key still leaked.</p>
+
+        <h2>GitGuardian / GitHub Secret Scanning</h2>
+        <p>These scan your repos for leaked secrets and alert you. GitGuardian catches keys in commits, PRs, even Slack messages. GitHub's built-in scanning works on push and can block the commit entirely.</p>
+        <p>Genuinely useful. Use them. But they're reactive. They tell you after the key is out there. You still need to rotate, pray nobody used it in the window, and figure out how it slipped through.</p>
+
+        <h2>Cloudflare's approach</h2>
+        <p>Cloudflare recently <a href="https://x.com/cloudflare/status/2043692614445133933">showed their API key protection setup</a>. It's impressive: Workers, KV stores, custom auth layers, rate limiting, the works. A proper engineering effort.</p>
+        <p>But look at it. That's a serious infrastructure project. How many teams are going to build and maintain that? Most of us are shipping features, not building security infrastructure from scratch. If you're Cloudflare, you have the team for it. If you're three people and a Slack channel, you don't.</p>
+
+        <h2>HashiCorp Vault</h2>
+        <p>The gold standard for secrets management. Dynamic secrets, lease-based access, audit logging, the whole thing. If you're running a 200-person engineering org with a dedicated platform team, Vault is probably the right answer.</p>
+        <p>If you're a solo dev or a small team building with AI APIs, Vault is like buying a forklift to move a chair.</p>
+
+        <h2>So where does Worthless fit?</h2>
+        <p>All of the above protect the key before it leaks. Worthless reduces what a copied local AI-key value can do after it leaks.</p>
+        <p>Your key gets split. Your .env has one half. Your local proxy has the other. Neither works alone. The reconstructed key lives only for the upstream call, then drops. (Python PoC: memory-zeroing has known limits, see <a href="https://docs.wless.io/security/">security model</a>.)</p>
+        <p>Use a vault AND Worthless. Use GitGuardian AND Worthless. Complementary, not competing. Vaults guard at rest. Worthless makes copied .env key material less useful after one slips through.</p>
+        <p>Two commands:</p>
+        <pre><code>curl -sSL https://worthless.sh | sh
+worthless lock</code></pre>
+        <p>That's the setup path. No cloud account is required. Your .env gets a key-looking shard, and you get back to shipping.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Post 1 -->
+  <div class="post-card" id="introducing-worthless" data-category="blue">
+    <div class="post-summary">
+      <div>
+        <div class="post-meta">
+
+          <span class="post-date">April 13, 2026</span>
+        </div>
+        <div class="post-title">Introducing Worthless: scoped protection for copied .env AI-key values</div>
+      </div>
+    </div>
+    <button class="expand-btn" id="btn-p1" type="button" aria-controls="p1" aria-expanded="false">
+      <span class="expand-label">Read article</span><span class="chevron" aria-hidden="true">▾</span>
     </button>
     <div class="post-full" id="p1">
       <div class="article">
         <p>Every developer knows the feeling. You paste an API key into your code "just for testing," it ends up in a git commit, and seconds later it's live on GitHub. Bots scan repos constantly. Your bills spike. You rotate. Repeat next month.</p>
-        <h2>The gap in the market</h2>
-        <p>There are two categories of tools that help with API key security:</p>
+        <h2>What exists today</h2>
+        <p>Two kinds of tools deal with API key security:</p>
         <ol>
-          <li><strong>Pre-leak prevention</strong> — Vault, dotenv, GitHub secret scanning. These keep keys out of code and logs.</li>
-          <li><strong>Post-leak response</strong> — rotating the key, monitoring for abuse, revoking tokens.</li>
+          <li><strong>Pre-leak prevention</strong>, Vault, dotenv, GitHub secret scanning. These keep keys out of code and logs.</li>
+          <li><strong>Post-leak response</strong>, rotating the key, monitoring for abuse, revoking tokens.</li>
         </ol>
-        <p>What's missing is the middle: <strong>what if the key leaks, but it's already useless?</strong></p>
+        <p>What's missing is the middle: <strong>what if the copied .env value is not enough to call the provider?</strong></p>
         <h2>How Worthless works</h2>
-        <p>Worthless splits your API key into two cryptographic shares. Neither share reveals anything about the original key — you need both to reconstruct it. Reconstruction happens in memory only, for milliseconds, and only when your app actually needs to make an API call.</p>
+        <p>Worthless splits your API key into two cryptographic shares. Neither share reveals anything about the original, you need both. Reconstruction happens in memory, scoped to one call.</p>
         <pre><code>$ worthless lock
 1 key(s) protected.
 
@@ -162,10 +300,10 @@ $ worthless wrap python app.py
 
 $ worthless unlock
 1 key(s) restored.</code></pre>
-        <p>There's also a budget enforcement layer: if your spending limit is hit, the key simply never forms — even if your code tries to use it. A hard stop.</p>
-        <blockquote>"Every secrets tool protects the key until your app uses it. Worthless protects you after it leaks."</blockquote>
+        <p>There is also a local usage gate: if the request violates your token or usage rule, Worthless can deny it before key material is reconstructed for that request.</p>
+        <blockquote>"Worthless changes what a copied protected .env value can do. It does not protect a compromised host or attacker-controlled local code."</blockquote>
         <h2>Get started</h2>
-        <pre><code>pip install worthless
+        <pre><code>curl -sSL https://worthless.sh | sh
 worthless lock
 worthless wrap python app.py</code></pre>
       </div>
@@ -173,87 +311,41 @@ worthless wrap python app.py</code></pre>
   </div>
 
   <!-- Post 2 -->
-  <div class="post-card" id="split-key-crypto">
-    <div class="post-summary" onclick="togglePost('p2')">
-      <div class="post-emoji">🔑</div>
+  <div class="post-card" id="split-key-crypto" data-category="blue">
+    <div class="post-summary">
       <div>
         <div class="post-meta">
-          <span class="post-tag">Deep Dive</span>
+
           <span class="post-date">April 13, 2026</span>
-          <span class="post-read">· 8 min</span>
         </div>
-        <div class="post-title">Why splitting a key makes it useless: the cryptography explained</div>
-        <div class="post-excerpt">A plain English explanation of secret sharing — why two shares together reconstruct a secret, but neither reveals anything alone.</div>
+        <div class="post-title">Why splitting a key changes what a copied .env value can do</div>
       </div>
     </div>
-    <button class="expand-btn" id="btn-p2" onclick="togglePost('p2')">
-      Read article <span class="chevron">▾</span>
+    <button class="expand-btn" id="btn-p2" type="button" aria-controls="p2" aria-expanded="false">
+      <span class="expand-label">Read article</span><span class="chevron" aria-hidden="true">▾</span>
     </button>
     <div class="post-full" id="p2">
       <div class="article">
-        <p>When we say "a leaked share is worthless," we mean it in a precise mathematical sense. This post explains why — without requiring a cryptography background.</p>
+        <p>When we say a copied protected value cannot call the provider alone, we mean it in a precise, narrow sense. This post explains the cryptographic boundary without requiring a cryptography background.</p>
         <h2>The intuition: a lock with two keys</h2>
-        <p>Imagine a padlock that requires two keys simultaneously to open. If someone steals one, they can't open the lock. They have something real — but it's useless without the other half. Secret sharing is the mathematical equivalent.</p>
+        <p>Imagine a padlock that requires two keys simultaneously to open. If someone copies one, that piece cannot open the lock by itself. Secret sharing uses the same basic boundary.</p>
         <h2>The XOR method (2-of-2 sharing)</h2>
         <ol>
           <li>Generate a truly random string <strong>A</strong> the same length as your secret <strong>S</strong></li>
           <li>Compute <strong>B = S XOR A</strong></li>
-          <li>Store A locally, B in the proxy</li>
+          <li>Store A locally, B in your local proxy</li>
         </ol>
-        <p>Reconstruction: <code>S = A XOR B</code>. Simple. Brilliant.</p>
-        <h3>Why is A useless alone?</h3>
-        <p>Because A is purely random. An attacker with only A sees that every possible value of S produces a valid B — the share A is statistically independent of S. It could have come from any secret equally well.</p>
-        <div class="info-box"><strong>Information-theoretic security.</strong> This is called one-time pad secret sharing. It cannot be broken even with unlimited computational power — no brute force is possible because every guess is equally valid.</div>
+        <p>Reconstruction: <code>S = A XOR B</code>.</p>
+        <h3>What does A reveal on its own?</h3>
+        <p>Because A is purely random. An attacker with only A sees that every possible value of S produces a valid B, the share A is statistically independent of S. It could have come from any secret equally well.</p>
+        <div class="info-box"><strong>Information-theoretic security.</strong> Given only A, every possible value of S remains consistent with some B. This statement is about the stored half's information content, not the safety of your machine or local proxy. See the <a href="https://docs.wless.io/security/">security model</a>.</div>
         <h2>What Worthless does in practice</h2>
-        <p>When you run <code>worthless lock</code>: your key is read, Share A is generated randomly, Share B is derived so A XOR B = key. A goes to local encrypted storage; B lives in proxy memory. Your <code>.env</code> is updated to point at the proxy. The full key exists for milliseconds, then memory is zeroed.</p>
-        <div class="info-box success"><strong>Two independent protections:</strong><br/>1. Cryptographic split — a leaked share reveals nothing.<br/>2. Budget enforcement — even with full key access, spending is capped.</div>
+        <p>When you run <code>worthless lock</code>: your key is read, Share A is generated randomly, Share B is derived so A XOR B = key. A goes to local encrypted storage; B lives in your local proxy's memory. Your <code>.env</code> is updated to point at the proxy. The reconstructed key lives only for the upstream call, then drops. (Python PoC: memory-zeroing has known limits, see <a href="https://docs.wless.io/security/">security model</a>.)</p>
+        <div class="info-box success"><strong>Two independent protections:</strong><br/>1. Cryptographic split, so a copied protected value alone cannot call the provider.<br/>2. Local usage guardrail, so requests can be denied before reconstruction.</div>
       </div>
     </div>
   </div>
 
-  <!-- Post 3 -->
-  <div class="post-card" id="real-leaks">
-    <div class="post-summary" onclick="togglePost('p3')">
-      <div class="post-emoji">🔥</div>
-      <div>
-        <div class="post-meta">
-          <span class="post-tag">Security</span>
-          <span class="post-date">April 13, 2026</span>
-          <span class="post-read">· 6 min</span>
-        </div>
-        <div class="post-title">5 real API key leaks that cost companies thousands</div>
-        <div class="post-excerpt">From accidental git commits to supply chain attacks — real incidents and what we learned from each one.</div>
-      </div>
-    </div>
-    <button class="expand-btn" id="btn-p3" onclick="togglePost('p3')">
-      Read article <span class="chevron">▾</span>
-    </button>
-    <div class="post-full" id="p3">
-      <div class="article">
-        <p>API key leaks are more common than people admit. Most companies quietly rotate and move on. Here are five categories of real incidents that show exactly how these leaks happen and what they cost.</p>
-        <h2>1. The .env commit</h2>
-        <div class="incident"><h4>What happened</h4><p>A founder adds their OpenAI key to <code>.env</code> while scaffolding a demo, runs <code>git add .</code> before adding <code>.env</code> to <code>.gitignore</code>, and pushes to a public repo. Within 4 minutes, a bot catches it. By the time they rotate, $2,300 in credits is consumed.</p></div>
-        <p><strong>With Worthless:</strong> the <code>.env</code> would contain only a useless key share.</p>
-        <h2>2. The compromised dependency</h2>
-        <div class="incident"><h4>What happened</h4><p>A popular npm package is compromised via a maintainer account takeover. The malicious version reads <code>process.env</code> and exfiltrates all environment variables. Hundreds of developers lose keys within hours.</p></div>
-        <p><strong>With Worthless:</strong> the exfiltrated env var would be a key share — useless without the other half in a separate process.</p>
-        <h2>3. The CI log exposure</h2>
-        <div class="incident"><h4>What happened</h4><p>A developer uses <code>echo $AWS_SECRET_KEY</code> to debug a failing CI step on a public repo. The log is visible to everyone. A scraper catches it in 30 minutes. An EC2 fleet is spun up for crypto mining. Bill: $14,000 in 48 hours.</p></div>
-        <p><strong>With Worthless:</strong> the exposed env var would be a random-looking share. Logging it leaks only meaningless data.</p>
-        <h2>4. The contractor offboarding gap</h2>
-        <div class="incident"><h4>What happened</h4><p>A contractor keeps a copy of the <code>.env</code> after leaving. Three months later, the company discovers the Stripe API key has been used to pull transaction data. They had access for months before anyone noticed unusual API activity.</p></div>
-        <p><strong>With Worthless:</strong> the contractor's copy contains a share tied to a local proxy — which is no longer running. Worthless without the other half.</p>
-        <h2>5. The bug report screenshot</h2>
-        <div class="incident"><h4>What happened</h4><p>A developer files a GitHub issue with a terminal screenshot that includes a Sendgrid API key partially visible in the corner. It's on a public issue for 6 days before anyone notices.</p></div>
-        <p><strong>With Worthless:</strong> the visible string would be a random-looking share. A screenshot exposes nothing usable.</p>
-        <hr/>
-        <p>In every case, the attacker got a real, complete API key stored in plaintext. Worthless changes that — what gets leaked is never the whole key.</p>
-        <pre><code>pip install worthless
-worthless lock
-worthless wrap python app.py</code></pre>
-      </div>
-    </div>
-  </div>
 
 </div>
 
@@ -265,23 +357,14 @@ worthless wrap python app.py</code></pre>
     <a href="https://github.com/shacharm2/worthless" target="_blank" rel="noopener">GitHub</a>
     <a href="../features.html">Features</a>
   </div>
+  <nav class="footer-links" aria-label="Legal" style="flex-basis: 100%; flex-wrap: wrap; margin-top: 0.4rem;">
+    <a href="../privacy.html">Privacy Policy</a>
+    <a href="../terms.html">Terms of Service</a>
+    <a href="../security.html">Security</a>
+    <a href="../license.html">License</a>
+  </nav>
 </footer>
 
-<script>
-  function togglePost(id) {
-    const full = document.getElementById(id);
-    const btn = document.getElementById('btn-' + id);
-    const open = full.classList.contains('visible');
-    full.classList.toggle('visible', !open);
-    btn.classList.toggle('open', !open);
-    btn.childNodes[0].textContent = open ? 'Read article ' : 'Collapse ';
-  }
-  window.addEventListener('DOMContentLoaded', () => {
-    const h = location.hash;
-    if (h === '#introducing-worthless') togglePost('p1');
-    else if (h === '#split-key-crypto') togglePost('p2');
-    else if (h === '#real-leaks') togglePost('p3');
-  });
-</script>
+<script src="blog.js" defer></script>
 </body>
 </html>
