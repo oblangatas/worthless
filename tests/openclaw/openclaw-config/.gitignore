@@ -1,0 +1,14 @@
+# OpenClaw runtime artifacts created by the daemon during e2e tests.
+# These are written into the bind-mounted config dir and must not be committed.
+agents/
+canvas/
+identity/
+plugin-skills/
+tasks/
+workspace/
+update-check.json
+*.bak
+*.bak.*
+*.last-good
+sessions/
+logs/

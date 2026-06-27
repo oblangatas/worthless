@@ -1,0 +1,33 @@
+{
+  "gateway": {
+    "port": 18789,
+    "authToken": "oc-gw-SECRET-must-survive"
+  },
+  "channels": {
+    "discord": {
+      "enabled": true,
+      "botToken": "discord-bot-token-must-survive"
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "openai/gpt-4o"
+      }
+    }
+  },
+  "models": {
+    "providers": {
+      "openai": {
+        "baseUrl": "https://api.openai.com/v1",
+        "apiKey": "<key-shaped-redacted>",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "gpt-4o"
+          }
+        ]
+      }
+    }
+  }
+}

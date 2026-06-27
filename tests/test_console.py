@@ -180,6 +180,67 @@ class TestConsoleWrapper:
         captured = capsys.readouterr()
         assert captured.err == ""
 
+    # --- worthless-k82c: bracketed tokens in messages must survive rich rendering ---
+
+    def test_print_error_preserves_bracketed_tokens(self, capsys):
+        """k82c: ``[truncated]`` and similar bracketed tokens must NOT be eaten
+        by rich's markup interpreter. Without escape(), rich treats
+        ``[truncated]`` as an unrecognized style tag and silently drops it
+        — meaning a user's "WRTLS-106: ... giant.py [truncated]" error loses
+        the critical reason word."""
+        from worthless.cli.console import WorthlessConsole
+        from worthless.cli.errors import ErrorCode, WorthlessError
+
+        c = WorthlessConsole(quiet=False, json_mode=False)
+        # An error body with multiple bracketed tokens — the live shape from
+        # _lock_keys's skip block after a hang-class skip.
+        msg = "scan incomplete:\n  giant.py  [truncated]\n  slow.py  [timeout]"
+        err = WorthlessError(ErrorCode.SCAN_ERROR, msg)
+        c.print_error(err)
+        captured = capsys.readouterr()
+        assert "[truncated]" in captured.err
+        assert "[timeout]" in captured.err
+        assert "giant.py" in captured.err
+        # And the error-code prefix is still produced (style wrapper intact).
+        assert "WRTLS-106" in captured.err
+
+    def test_print_warning_preserves_bracketed_tokens(self, capsys):
+        """k82c: warnings carry the same kind of free-form bracketed content
+        as errors (paths, reasons, findings)."""
+        from worthless.cli.console import WorthlessConsole
+
+        c = WorthlessConsole(quiet=False, json_mode=False)
+        c.print_warning("orphan rows:\n  alias-foo  [BROKEN]")
+        captured = capsys.readouterr()
+        assert "[BROKEN]" in captured.err
+
+    def test_print_failure_preserves_bracketed_tokens(self, capsys):
+        """k82c: trust-fix [FAIL] blocks contain bracketed status tokens."""
+        from worthless.cli.console import WorthlessConsole
+
+        c = WorthlessConsole(quiet=False, json_mode=False)
+        c.print_failure("[FAIL] OpenClaw integration did NOT complete.")
+        captured = capsys.readouterr()
+        assert "[FAIL]" in captured.err
+
+    def test_print_hint_preserves_bracketed_tokens(self, capsys):
+        """k82c: hints occasionally include bracketed example tokens."""
+        from worthless.cli.console import WorthlessConsole
+
+        c = WorthlessConsole(quiet=False, json_mode=False)
+        c.print_hint("Re-run with [debug] mode for more detail")
+        captured = capsys.readouterr()
+        assert "[debug]" in captured.err
+
+    def test_print_success_preserves_bracketed_tokens(self, capsys):
+        """k82c: success messages may include bracketed counts ([1/3])."""
+        from worthless.cli.console import WorthlessConsole
+
+        c = WorthlessConsole(quiet=False, json_mode=False)
+        c.print_success("Locked [3/3] keys.")
+        captured = capsys.readouterr()
+        assert "[3/3]" in captured.err
+
     def test_no_color_respected(self):
         from worthless.cli.console import WorthlessConsole
 
@@ -211,11 +272,21 @@ class TestAppEntryPoint:
         assert result.exit_code == 0
         assert "worthless" in result.output.lower() or "api" in result.output.lower()
 
-    def test_no_args_runs_default_command(self):
+    def test_no_args_runs_default_command(self, home_dir):
+        # No xdist_group marker needed: the autouse `_isolate_default_command_proxy`
+        # fixture in conftest.py stubs the daemon path for every test, so two
+        # workers can run this in parallel without racing port 8787.
+        # Isolated WORTHLESS_HOME: without it the no-args path resolves the
+        # developer's real ~/.worthless and run_default aborts with WRTLS-102
+        # on a dogfooding box whose Fernet key lives only in the keyring.
         from typer.testing import CliRunner
 
         from worthless.cli.app import app
 
         runner = CliRunner()
-        result = runner.invoke(app, [])
-        assert result.exit_code == 0
+        result = runner.invoke(app, [], env={"WORTHLESS_HOME": str(home_dir.base_dir)})
+        assert result.exit_code == 0, (
+            f"worthless with no args failed:\n"
+            f"output:\n{result.output}\n"
+            f"exception: {result.exception!r}"
+        )

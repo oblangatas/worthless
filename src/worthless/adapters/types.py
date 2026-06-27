@@ -84,6 +84,7 @@ class ProviderAdapter(Protocol):
         body: bytes,
         headers: dict[str, str],
         api_key: bytearray,
+        base_url: str,
     ) -> AdapterRequest: ...
 
     async def relay_response(self, response: httpx.Response) -> AdapterResponse: ...
@@ -97,6 +98,20 @@ def strip_internal_headers(headers: dict[str, str]) -> dict[str, str]:
         if not (low := k.lower()).startswith(INTERNAL_HEADER_PREFIX)
         and low not in _HOP_BY_HOP_HEADERS
     }
+
+
+# Headers that describe the encoding/framing of THIS specific transfer.
+# Once httpx auto-decompresses upstream body via aread()/aiter_bytes(),
+# the original Content-Encoding no longer matches the forwarded bytes;
+# Content-Length is wrong for the same reason. Strip both so the SDK
+# client doesn't try to gunzip plain JSON (M2 / Blocker #3 / 8rqs PR #127).
+# worthless-yo9o (P2 follow-up) deepens this to true raw passthrough.
+_BODY_ENCODING_HEADERS = frozenset({"content-encoding", "content-length"})
+
+
+def _filter_response_headers(headers: dict[str, str]) -> dict[str, str]:
+    """Drop body-encoding headers that no longer match the (decompressed) body."""
+    return {k: v for k, v in headers.items() if k.lower() not in _BODY_ENCODING_HEADERS}
 
 
 async def relay_response(response: httpx.Response) -> AdapterResponse:
@@ -120,7 +135,7 @@ async def relay_response(response: httpx.Response) -> AdapterResponse:
         await response.aread()
     return AdapterResponse(
         status_code=response.status_code,
-        headers=dict(response.headers),
+        headers=_filter_response_headers(dict(response.headers)),
         body=response.content,
         is_streaming=False,
     )

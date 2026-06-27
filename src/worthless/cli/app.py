@@ -11,6 +11,8 @@ import typer
 from worthless.cli.console import WorthlessConsole, get_console, set_console
 from worthless.cli.default_command import run_default
 from worthless.cli.errors import WorthlessError, set_debug
+from worthless.cli.notice import maybe_show_as_is_notice
+from worthless.cli.platform import fail_if_windows
 
 
 def _version_callback(value: bool) -> None:
@@ -51,11 +53,16 @@ def _main(
 ) -> None:
     """Worthless — make leaked API keys worthless."""
     set_debug(debug)
-    set_console(WorthlessConsole(quiet=quiet, json_mode=json_output))
+    console = WorthlessConsole(quiet=quiet, json_mode=json_output)
+    set_console(console)
 
-    # When no subcommand is given, run the magic default pipeline
+    # Show the AS-IS / no-warranty notice once per install (WOR-488).
+    maybe_show_as_is_notice(console)
+
+    # When no subcommand is given, run the magic default pipeline.
     if ctx.invoked_subcommand is None:
         try:
+            fail_if_windows()
             interactive = hasattr(sys.stdin, "isatty") and sys.stdin.isatty()
             run_default(interactive=interactive, yes=yes, json_mode=json_output)
         except WorthlessError as exc:
@@ -105,3 +112,26 @@ except ImportError:
 from worthless.cli.commands.revoke import register_revoke_commands  # noqa: E402
 
 register_revoke_commands(app)
+
+from worthless.cli.commands.uninstall import register_uninstall_commands  # noqa: E402
+
+register_uninstall_commands(app)
+
+from worthless.cli.commands.restore import register_restore_commands  # noqa: E402
+
+register_restore_commands(app)
+
+# Both subcommand groups landed in parallel: 8rqs added `providers` for
+# the multi-provider registry; main added `doctor` for orphan-row purging
+# (HF7). Keep both registrations.
+from worthless.cli.commands.providers import register_providers_commands  # noqa: E402
+
+register_providers_commands(app)
+
+from worthless.cli.commands.doctor import register_doctor_commands  # noqa: E402
+
+register_doctor_commands(app)
+
+from worthless.cli.commands.service import register_service_commands  # noqa: E402
+
+register_service_commands(app)

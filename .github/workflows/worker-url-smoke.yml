@@ -1,0 +1,104 @@
+name: Worker URL smoke (curl|sh delivery)
+
+# Post-deploy smoke that validates end-to-end delivery: curl the Worker,
+# pipe to sh, confirm worthless lands on PATH. WOR-349 Phase 6.1.
+#
+# Why this is separate from install-docker.yml:
+#   - install-docker.yml runs on PR against `install.sh` from the repo
+#     and asserts script-content properties (lock lifecycle, no-Python
+#     preinstalled, Alpine compat, 7 fixtures × 2 distros, ~25 min).
+#   - Once install-docker.yml is green AND deploy-worker.yml's smoke has
+#     byte-compared the Worker's served bytes (sha256 body+header) to
+#     the build artifact, the only thing left to verify is "the
+#     curl|sh delivery path itself completes" — that is what this is.
+#   - Forking the install-docker matrix to take a target URL would
+#     re-run all 7×2 script-content assertions through a different
+#     delivery channel against byte-identical bytes. ~22 min of
+#     redundant work for no new coverage.
+#
+# Trigger model:
+#   - workflow_call so deploy-worker.yml can chain post-preview-deploy
+#     with the workers.dev URL (WOR-391 will wire the consumer side).
+#   - workflow_dispatch so an operator can target any URL on demand.
+#
+# Hermeticity:
+#   - Runs inside `ubuntu:24.04` docker container with only curl + ca
+#     certs preinstalled. The host runner is GitHub-hosted ephemeral.
+#     Even if the Worker served malicious bytes, blast radius is one
+#     throwaway container.
+
+on:
+  workflow_call:
+    inputs:
+      target_url:
+        description: "Worker URL to curl (must end with /)."
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: "Worker URL to curl (e.g. https://worthless-sh-preview.<acct>.workers.dev/)."
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: worker-url-smoke-${{ inputs.target_url }}
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    name: curl|sh against ${{ inputs.target_url }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Validate target_url shape
+        env:
+          URL: ${{ inputs.target_url }}
+        run: |
+          # Reject anything that isn't https:// — pipe-to-sh over plain
+          # http would be a soft failure on a curl|sh integrity test.
+          case "${URL}" in
+            https://*) ;;
+            *)
+              echo "::error::target_url must start with https:// (got: ${URL})"
+              exit 1
+              ;;
+          esac
+
+      - name: curl|sh inside hermetic ubuntu:24.04
+        env:
+          URL: ${{ inputs.target_url }}
+        # Threading $URL through env (not inline ${{ }} interpolation in
+        # the shell body) per GitHub's security-hardening guide. The URL
+        # appears in the docker invocation as $URL — bash inside the
+        # container reads it from its environment.
+        run: |
+          set -euxo pipefail
+          docker run --rm \
+            -e URL="${URL}" \
+            ubuntu:24.04 \
+            bash -c '
+              set -euxo pipefail
+              apt-get update >/dev/null
+              apt-get install -y --no-install-recommends curl ca-certificates >/dev/null
+
+              # The curl|sh path under test. install.sh fetches uv into
+              # ~/.local/bin and runs `uv tool install worthless`, which
+              # places the worthless binary at ~/.local/bin/worthless.
+              curl -fsSL "$URL" | sh
+
+              # install.sh prints PATH activation guidance for the user
+              # shell but does not mutate the current shell. Use the
+              # absolute path to avoid relying on inherited PATH.
+              if [ ! -x "$HOME/.local/bin/worthless" ]; then
+                echo "::error::worthless binary not at \$HOME/.local/bin/worthless after curl|sh" >&2
+                ls -la "$HOME/.local/bin/" || true
+                exit 1
+              fi
+
+              VERSION_OUTPUT=$("$HOME/.local/bin/worthless" --version 2>&1)
+              echo "Installed: ${VERSION_OUTPUT}"
+            '

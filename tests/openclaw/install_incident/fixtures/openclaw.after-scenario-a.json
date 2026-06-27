@@ -1,0 +1,39 @@
+{
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "openai/gpt-4o"
+      }
+    }
+  },
+  "channels": {
+    "discord": {
+      "botToken": "discord-bot-token-must-survive",
+      "enabled": true
+    }
+  },
+  "gateway": {
+    "authToken": "oc-gw-SECRET-must-survive",
+    "port": 18789
+  },
+  "models": {
+    "providers": {
+      "openai": {
+        "api": "openai-completions",
+        "apiKey": "<key-shaped-redacted>",
+        "baseUrl": "https://api.openai.com/v1",
+        "models": [
+          {
+            "id": "gpt-4o"
+          }
+        ]
+      },
+      "worthless-openai": {
+        "api": "openai-completions",
+        "apiKey": "<key-shaped-redacted>",
+        "baseUrl": "http://127.0.0.1:8787/openai-558dd0d8/v1",
+        "models": []
+      }
+    }
+  }
+}

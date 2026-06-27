@@ -1,0 +1,12 @@
+{
+  "models": {
+    "providers": {
+      "worthless-test": {
+        "baseUrl": "http://worthless-proxy:8787/v1",
+        "apiKey": "PLACEHOLDER_SHARD_A",
+        "api": "openai-completions",
+        "models": [{"id": "gpt-4o", "name": "GPT-4o via Worthless"}]
+      }
+    }
+  }
+}

@@ -14,8 +14,9 @@ if TYPE_CHECKING:
 import os
 import re
 import signal
-import subprocess
+import subprocess  # nosec B404
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Generator
@@ -24,13 +25,89 @@ from pathlib import Path
 
 import httpx
 
+from worthless.cli.errors import ErrorCode, WorthlessError
 from worthless.cli.keystore import keyring_available
 from worthless.cli.platform import IS_WINDOWS, check_pid_alive, popen_platform_kwargs
 
 logger = logging.getLogger(__name__)
 
+# Set by launchd/systemd units installed via ``worthless service install``.
+_SERVICE_MANAGED_ENV = "WORTHLESS_SERVICE_MANAGED"
+
 # Regex to capture the port from uvicorn's startup line
 _UVICORN_PORT_RE = re.compile(r"Uvicorn running on http://[\d.]+:(\d+)")
+
+
+def is_service_managed() -> bool:
+    """True when ``worthless up`` is supervised by launchd or systemd."""
+    return os.environ.get(_SERVICE_MANAGED_ENV, "").strip() == "1"
+
+
+# ---------------------------------------------------------------------------
+# Port resolution — canonical chain shared by ``lock``, ``up``, ``wrap``,
+# and the default-command flow. One source of truth so all four commands
+# write/bind/probe the same port for a given config.
+# ---------------------------------------------------------------------------
+
+
+def resolve_port(port_arg: int | None) -> int:
+    """Resolve the proxy port from argument, env var, or default.
+
+    Priority: explicit ``port_arg`` > ``WORTHLESS_PORT`` env > ``8787`` default.
+
+    All consumers (``lock`` for the .env BASE_URL, ``up`` for the daemon
+    bind, ``wrap`` for the ephemeral proxy bind) share this function so
+    they agree on which port a child loading .env will reach.
+
+    Raises:
+        WorthlessError: when ``WORTHLESS_PORT`` is set to a non-integer
+            value. Without this guard the underlying ``int()`` call would
+            surface a raw ``ValueError`` traceback to every command —
+            ``lock``, ``up``, ``wrap``, and the default flow. Caught
+            here so the user sees a single-line CLI error.
+    """
+    if port_arg is not None:
+        return port_arg
+    env_port = os.environ.get("WORTHLESS_PORT")
+    if env_port:
+        try:
+            return int(env_port)
+        except ValueError as exc:
+            raise WorthlessError(
+                ErrorCode.BOOTSTRAP_FAILED,
+                f"WORTHLESS_PORT must be an integer, got {env_port!r}. "
+                f"Unset it (`unset WORTHLESS_PORT`) or set it to a port number.",
+            ) from exc
+    return 8787
+
+
+def check_proxy_health(port: int) -> dict[str, object]:
+    """Hit ``/healthz`` on *port* and return a status dict.
+
+    Shared probe used by ``status`` (display health to the user),
+    ``wrap`` (distinguish ``worthless up`` collision from a foreign
+    process), the MCP server, and the default-command flow. Single
+    canonical implementation so the heuristic doesn't drift across
+    consumers.
+
+    Returns: ``{"healthy": bool, "port": int, "mode": str | None,
+    "requests_proxied": int}``. ``healthy=False`` covers connection
+    refused, timeout, non-200, and non-JSON responses.
+    """
+    try:
+        resp = httpx.get(f"http://127.0.0.1:{port}/healthz", timeout=2.0)
+        if resp.status_code == 200:
+            data = resp.json()
+            return {
+                "healthy": True,
+                "port": port,
+                "mode": data.get("mode", "up"),
+                "requests_proxied": data.get("requests_proxied", 0),
+            }
+    except Exception:  # noqa: S110 — proxy may not be running; absence is the expected default state  # nosec B110
+        pass
+
+    return {"healthy": False, "port": port, "mode": None, "requests_proxied": 0}
 
 
 # ---------------------------------------------------------------------------
@@ -43,12 +120,29 @@ def build_proxy_env(home: WorthlessHome) -> dict[str, str]:
 
     When OS keyring is available, omits WORTHLESS_FERNET_KEY — the proxy
     reads from keyring directly via ``read_fernet_key()``.
+
+    Forwards ``WORTHLESS_KEYRING_BACKEND`` so the proxy child inherits the
+    parent's keyring opt-out choice. Without this, a production user who
+    set ``WORTHLESS_KEYRING_BACKEND=null`` in their shell would get
+    file-fallback in the CLI but the proxy child would still try the
+    real OS keyring (defeating the override). Same forwarding handles
+    the test-suite case (conftest sets the var; this propagates it).
+    (WOR-463)
     """
+    # Derive bind host without importing proxy.config (circular import risk).
+    # Mirror logic from proxy/config.py _read_default_host so the env dict
+    # is the single source of truth for the child process bind address.
+    _host = os.environ.get("WORTHLESS_HOST", "").strip()
+    if not _host:
+        _mode = os.environ.get("WORTHLESS_DEPLOY_MODE", "loopback").strip().lower()
+        _host = "0.0.0.0" if _mode in ("lan", "public") else "127.0.0.1"  # noqa: S104  # nosec B104
     env: dict[str, str] = {
         "WORTHLESS_DB_PATH": str(home.db_path),
-        "WORTHLESS_SHARD_A_DIR": str(home.shard_a_dir),
-        "WORTHLESS_ALLOW_ALIAS_INFERENCE": "true",
+        "WORTHLESS_HOME": str(home.base_dir),
+        "WORTHLESS_HOST": _host,
     }
+    if "WORTHLESS_KEYRING_BACKEND" in os.environ:
+        env["WORTHLESS_KEYRING_BACKEND"] = os.environ["WORTHLESS_KEYRING_BACKEND"]
     if not keyring_available():
         env["WORTHLESS_FERNET_KEY"] = home.fernet_key.decode()
     return env
@@ -168,8 +262,15 @@ def prepare_proxy_env(
     return full_env
 
 
-def proxy_cmd(port: int) -> list[str]:
-    """Build the uvicorn command for the proxy."""
+def proxy_cmd(port: int, host: str = "127.0.0.1") -> list[str]:
+    """Build the uvicorn command for the proxy.
+
+    Args:
+        port: Port for uvicorn to bind.
+        host: Bind address.  Callers should derive this from
+            ``build_proxy_env()["WORTHLESS_HOST"]`` so the env dict
+            is the single source of truth for the bind address.
+    """
     return [
         sys.executable,
         "-m",
@@ -177,7 +278,7 @@ def proxy_cmd(port: int) -> list[str]:
         "worthless.proxy.app:create_app",
         "--factory",
         "--host",
-        "127.0.0.1",
+        host,
         "--port",
         str(port),
     ]
@@ -204,7 +305,7 @@ def spawn_proxy(
     Returns:
         (process, actual_port).
     """
-    cmd = proxy_cmd(port)
+    cmd = proxy_cmd(port, host=env.get("WORTHLESS_HOST", "127.0.0.1"))
 
     with fernet_transport(env) as (fernet_key, fernet_fd, fernet_fds):
         full_env = prepare_proxy_env(env, fernet_fd, liveness_fd=liveness_fd)
@@ -215,7 +316,7 @@ def spawn_proxy(
 
         platform_kwargs = popen_platform_kwargs(detach=True, pass_fds=tuple(pass_fds))
 
-        proc = subprocess.Popen(
+        proc = subprocess.Popen(  # nosec B603
             cmd,
             env=full_env,
             stdout=subprocess.PIPE,
@@ -237,13 +338,13 @@ def spawn_proxy(
 
 def _parse_uvicorn_port(proc: subprocess.Popen, timeout: float = 15.0) -> int:
     """Read uvicorn stdout until we find the port announcement."""
-    assert proc.stdout is not None
+    assert proc.stdout is not None  # nosec B101
 
     # Read output in a thread so we can impose a deadline
     lines: list[str] = []
 
     def _reader():
-        assert proc.stdout is not None
+        assert proc.stdout is not None  # nosec B101
         for raw in proc.stdout:
             line = raw.decode("utf-8", errors="replace").strip()
             lines.append(line)
@@ -269,26 +370,67 @@ def _parse_uvicorn_port(proc: subprocess.Popen, timeout: float = 15.0) -> int:
 # Health polling
 # ---------------------------------------------------------------------------
 
+# Reject PIDs outside the valid range for any mainstream OS.
+# Linux default pid_max is 4194304; macOS uses 99998. Shared by
+# `poll_health_pid` (below) and `check_pid` (further down).
+MAX_VALID_PID: int = 4_194_304
 
-def poll_health(port: int, timeout: float = 10.0) -> bool:
-    """Poll ``GET /healthz`` until 200 or *timeout*.
 
-    Returns True if healthy, False if timeout.
+def _iter_healthz_responses(port: int, timeout: float) -> Generator[httpx.Response, None, None]:
+    """Yield each 200 response from ``GET /healthz`` until *timeout*.
+
+    Swallows connection/timeout/OS errors so callers see only successful
+    responses. Private: call ``poll_health`` for liveness or
+    ``poll_health_pid`` for authoritative PID resolution.
     """
     deadline = time.monotonic() + timeout
     url = f"http://127.0.0.1:{port}/healthz"
-
     with httpx.Client(timeout=2.0) as client:
         while time.monotonic() < deadline:
             try:
                 resp = client.get(url)
                 if resp.status_code == 200:
-                    return True
-            except (httpx.ConnectError, httpx.TimeoutException, OSError):
+                    yield resp
+            except (httpx.HTTPError, OSError):
                 pass
             time.sleep(0.3)
 
+
+def poll_health(port: int, timeout: float = 10.0) -> bool:
+    """Return True if ``GET /healthz`` returns 200 within *timeout* seconds."""
+    for _resp in _iter_healthz_responses(port, timeout):
+        return True
     return False
+
+
+def poll_health_pid(port: int, timeout: float = 10.0) -> int | None:
+    """Poll ``GET /healthz`` and return the proxy's self-reported PID.
+
+    The listening process exposes ``os.getpid()`` in the healthz payload. This
+    is **not** an OS-level port→PID attribution (no ``lsof``/``ss``); callers
+    must assume the payload is honest. That matches worthless's loopback
+    same-UID threat model (worthless-wfz7).
+
+    Returns the PID on success, ``None`` on timeout, non-200 response,
+    malformed JSON, a payload missing the ``pid`` field, or a ``pid`` out
+    of the valid range ``[2, MAX_VALID_PID]`` (in which case the caller
+    is expected to fall back to its own best guess).
+    """
+    for resp in _iter_healthz_responses(port, timeout):
+        try:
+            payload = resp.json()
+        except (ValueError, TypeError, httpx.HTTPError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        raw_pid = payload.get("pid")
+        # bool subclasses int in Python — reject True/False.
+        if isinstance(raw_pid, bool) or not isinstance(raw_pid, int):
+            return None
+        if raw_pid < 2 or raw_pid > MAX_VALID_PID:
+            return None
+        return raw_pid
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -302,12 +444,32 @@ def pid_path(home: WorthlessHome) -> Path:
 
 
 def write_pid(pid_path: Path, pid: int, port: int) -> None:
-    """Write PID file with ``pid\\nport`` format (0600 permissions)."""
-    fd = os.open(str(pid_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    """Write PID file with ``pid\\nport`` format (0600 permissions).
+
+    Writes atomically via a per-caller tmp file + ``os.replace`` — a
+    racing ``read_pid`` can see the old content or the new, never a torn
+    (truncated) state. The tmp name is unique per writer so two
+    concurrent ``worthless up`` invocations can't clobber each other's
+    in-flight tmp files and race the rename.
+    """
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=pid_path.name + ".",
+        suffix=".tmp",
+        dir=str(pid_path.parent),
+    )
+    tmp_path = Path(tmp_name)
     try:
+        # mkstemp already creates at 0600 on POSIX; be explicit to guard
+        # against umask / future cross-platform drift.
+        tmp_path.chmod(0o600)
         os.write(fd, f"{pid}\n{port}\n".encode())
-    finally:
+    except Exception:
         os.close(fd)
+        tmp_path.unlink(missing_ok=True)
+        raise
+    else:
+        os.close(fd)
+    tmp_path.replace(pid_path)
 
 
 def read_pid(pid_path: Path) -> tuple[int, int] | None:
@@ -320,11 +482,6 @@ def read_pid(pid_path: Path) -> tuple[int, int] | None:
         return int(parts[0]), int(parts[1])
     except (FileNotFoundError, ValueError, IndexError, OSError):
         return None
-
-
-# Reject PIDs outside the valid range for any mainstream OS.
-# Linux default pid_max is 4194304; macOS uses 99998.
-MAX_VALID_PID: int = 4_194_304
 
 
 def check_pid(pid: int) -> bool:

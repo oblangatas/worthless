@@ -17,6 +17,48 @@ def zero_buf(buf: bytearray) -> None:
 
 
 @dataclass(frozen=True, slots=True)
+class FormatPreservingSplitResult:
+    """Result of format-preserving key split (SR-12).
+
+    Shard-A preserves the original key's prefix, charset, and length.
+    All byte fields use ``bytearray`` (SR-01) for secure zeroing.
+    """
+
+    shard_a: bytearray  # UTF-8 encoded: prefix + randomized body
+    shard_b: bytearray  # UTF-8 encoded: body only (no prefix)
+    commitment: bytearray
+    nonce: bytearray
+    prefix: str  # The preserved prefix (not secret — public metadata)
+    charset: str  # The charset used for the split (not secret)
+
+    @property
+    def shard_a_str(self) -> str:
+        """Shard-A as a string (for writing to .env)."""
+        return self.shard_a.decode("utf-8")
+
+    @property
+    def shard_b_str(self) -> str:
+        """Shard-B as a string."""
+        return self.shard_b.decode("utf-8")
+
+    def zero(self) -> None:
+        """Zero all secret material in-place (SR-02)."""
+        for buf in (self.shard_a, self.shard_b, self.commitment, self.nonce):
+            zero_buf(buf)
+
+    def __repr__(self) -> str:
+        return (
+            "FormatPreservingSplitResult("
+            "shard_a=<redacted>, "
+            "shard_b=<redacted>, "
+            "commitment=<redacted>, "
+            "nonce=<redacted>, "
+            f"prefix={self.prefix!r}, "
+            f"charset_len={len(self.charset)})"
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class SplitResult:
     """Result of splitting an API key into two XOR shards with HMAC commitment.
 
@@ -53,6 +95,3 @@ class SplitResult:
             "commitment=<redacted>, "
             "nonce=<redacted>)"
         )
-
-    def __str__(self) -> str:
-        return self.__repr__()

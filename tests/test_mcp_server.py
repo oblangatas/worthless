@@ -101,6 +101,78 @@ class TestWorthlessScan:
         result = json.loads(await worthless_scan())
         assert result["summary"]["total"] == 0
 
+    @pytest.mark.asyncio
+    async def test_scan_envelope_has_skipped_and_scan_incomplete(self, tmp_path: Path) -> None:
+        """c5kc: MCP scan envelope always carries ``skipped`` + ``scan_incomplete``
+        so the calling agent can tell ``no findings`` (clean) apart from
+        ``no findings because I couldn't read everything`` (partial)."""
+        env_file = _make_env_file(tmp_path, "FOO=bar\n")
+        result = json.loads(await worthless_scan(paths=[str(env_file)]))
+
+        # Additive fields must be present even on a clean scan.
+        assert "skipped" in result
+        assert "scan_incomplete" in result
+        assert result["skipped"] == []
+        assert result["scan_incomplete"] is False
+
+    @pytest.mark.asyncio
+    async def test_scan_offloaded_to_worker_thread(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """c5kc / CodeRabbit follow-up: scan_files is synchronous and runs for
+        up to 30 s; calling it inline would block the FastMCP event loop and
+        starve other concurrent MCP tools. This test pins that the MCP tool
+        actually offloads to a worker thread.
+
+        If a future refactor accidentally re-inlines the call (drops
+        ``await asyncio.to_thread(...)``), this test fails because
+        ``scan_files`` would then run on the main event-loop thread.
+        """
+        import threading
+
+        main_thread_id = threading.get_ident()
+        called_from: dict[str, int] = {}
+
+        def tracking_scan_files(*args, **kwargs):
+            called_from["thread"] = threading.get_ident()
+            return []
+
+        # Patch the symbol where the MCP tool imports it from.
+        import worthless.cli.scanner as scanner_mod
+
+        monkeypatch.setattr(scanner_mod, "scan_files", tracking_scan_files)
+
+        env_file = _make_env_file(tmp_path, "FOO=bar\n")
+        await worthless_scan(paths=[str(env_file)])
+
+        assert "thread" in called_from, "scan_files was never called"
+        assert called_from["thread"] != main_thread_id, (
+            "scan_files ran on the event-loop thread — would block other MCP tools. "
+            "Wrap the call in `await asyncio.to_thread(scan_files, ...)`."
+        )
+
+    @pytest.mark.asyncio
+    async def test_scan_truncated_file_marks_scan_incomplete(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """c5kc: an oversize file scans its prefix and surfaces ``truncated``
+        in the envelope so the agent doesn't read ``0 findings`` as clean."""
+        import worthless.cli.scanner as scanner_mod
+
+        # Tiny cap so we don't have to write 5 MB to disk in CI.
+        monkeypatch.setattr(scanner_mod, "MAX_SCAN_FILE_BYTES", 256)
+
+        env_file = tmp_path / ".env"
+        env_file.write_bytes(b"# placeholder\n" + b"x" * 1024)
+
+        result = json.loads(await worthless_scan(paths=[str(env_file)]))
+
+        assert result["scan_incomplete"] is True
+        assert any(s["reason"] == "truncated" for s in result["skipped"])
+        # Skip notice path + reason only — never any bytes of file content.
+        for s in result["skipped"]:
+            assert set(s.keys()) == {"file", "reason"}
+
 
 # ---------------------------------------------------------------------------
 # worthless_lock

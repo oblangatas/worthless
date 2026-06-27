@@ -3,7 +3,15 @@ name: Pre-release
 on:
   push:
     tags:
-      - "v*"
+      # Pre-release qualifiers only: v1.2.3rc1, v1.2.3a1, v1.2.3b2, v1.2.3-rc1, v1.2.3-beta1.
+      # Final release tags (v1.2.3) are excluded so pre-release CI doesn't produce
+      # spurious red checks on every published release.
+      - "v*rc*"
+      - "v*a*"
+      - "v*b*"
+      - "v*-rc*"
+      - "v*-alpha*"
+      - "v*-beta*"
   workflow_dispatch:
 
 permissions:
@@ -21,13 +29,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
-        with:
-          python-version: "3.13"
-
-      - name: Install uv
-        run: python -m pip install --disable-pip-version-check uv
+      - name: Set up uv + Python
+        uses: ./.github/actions/setup-uv-python
 
       - name: Run mutmut on crypto and proxy
         env:
@@ -47,13 +50,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
-        with:
-          python-version: "3.13"
-
-      - name: Install uv
-        run: python -m pip install --disable-pip-version-check uv
+      - name: Set up uv + Python
+        uses: ./.github/actions/setup-uv-python
 
       - name: Run pip-audit
         env:
@@ -73,13 +71,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
-        with:
-          python-version: "3.13"
-
-      - name: Install uv
-        run: python -m pip install --disable-pip-version-check uv
+      - name: Set up uv + Python
+        uses: ./.github/actions/setup-uv-python
 
       - name: Run full test suite
         env:

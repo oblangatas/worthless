@@ -1,0 +1,77 @@
+name: Worker wire-level attacks (raw-socket UA probes)
+
+# Wire-level coverage for the 9 runtime-defended attack sentinels from
+# WOR-374 (8 unique byte sequences — two sentinels share input bytes,
+# see scripts/wire-attack-probes.py docstring), paired with the
+# `it.fails` regression sentinels in
+# `workers/worthless-sh/test/ua-edge-cases.test.ts`. WOR-349 Phase 6.3.
+#
+# Why a separate workflow from worker-url-smoke.yml:
+#   - worker-url-smoke validates "curl|sh delivery completes" — a
+#     positive happy-path check.
+#   - worker-wire-attacks validates "Worker stays safe under raw-byte
+#     adversarial UAs" — a negative safety floor.
+#   - Different urgency on failure: a smoke regression blocks deploy;
+#     a wire-attack regression is a security alarm. Keeping them in
+#     separate workflows keeps the failure surface clean.
+#
+# Why a Python helper script (and not curl):
+#   - curl 7.83+ rejects raw CR/LF in `-H` values, which means the
+#     CRLF/LF probes never leave the client. The whole point of
+#     "wire-level" is bypassing client-side validation. The helper
+#     opens a TLS socket and writes the request bytes directly.
+#
+# Trigger model mirrors worker-url-smoke.yml: workflow_call (so
+# deploy-worker.yml can chain post-preview-deploy) + workflow_dispatch
+# (operators).
+
+on:
+  workflow_call:
+    inputs:
+      target_url:
+        description: "https URL of the deployed Worker (must end with /)."
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: "https URL of the deployed Worker (e.g. preview workers.dev URL)."
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: worker-wire-attacks-${{ inputs.target_url }}
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    name: Raw-socket UA probes against ${{ inputs.target_url }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Validate target_url shape
+        env:
+          URL: ${{ inputs.target_url }}
+        run: |
+          case "${URL}" in
+            https://*) ;;
+            *)
+              echo "::error::target_url must start with https:// (got: ${URL})"
+              exit 1
+              ;;
+          esac
+
+      - name: Run wire-attack probes
+        env:
+          URL: ${{ inputs.target_url }}
+        # Standard Python 3 is preinstalled on ubuntu-24.04 runners; no
+        # uv/setup needed. The script uses only stdlib (socket, ssl).
+        run: python3 scripts/wire-attack-probes.py "${URL}"

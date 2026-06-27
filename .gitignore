@@ -11,17 +11,24 @@ node_modules/
 
 # Environment variables
 .env
+.env.*
 docker-compose.env
 .mcp.json
 
-# Editor directories and files
+# Editor / IDE / agent tool directories
+.cursor/
+.gemini/
 .idea
+.kiro/
+.opencode/
+.qodo/
 .vscode
-*.suo
-*.ntvs*
 *.njsproj
+*.ntvs*
 *.sln
+*.suo
 *.sw?
+opencode.json
 
 # OS specific
 .DS_Store
@@ -30,18 +37,16 @@ docker-compose.env
 .dolt/
 *.db
 
-# Editor/tool directories
-.cursor/
-.gemini/
-.kiro/
-.opencode/
-.qodo/
-opencode.json
-
 # Developer tooling (symlinked from private repo)
 CLAUDE.md
 AGENTS.md
 TESTING.md
+
+# Internal security docs — symlinked from private worthless-cloud (WOR-593).
+# Public repo: these enumerate threat models / attack surface, so they live
+# private and are symlinked back in via worthless-cloud/config/worthless/link.sh.
+/security-audit
+/engineering/modules.md
 
 # Project management (local-only)
 ccpm/
@@ -54,6 +59,8 @@ LOCAL_MODE.md
 __pycache__/
 *.pyc
 *.egg-info/
+.venvs/
+.codewiki-home/
 
 # Mutmut working directory
 mutants/
@@ -65,6 +72,9 @@ htmlcov/
 .hypothesis/
 testsprite_prd.md
 testsprite_tests/
+
+# Live end-to-end gate evidence (local-only; CI re-runs from scratch)
+.worthless/
 
 # Milestone phase archives (full history in git, only summaries tracked)
 .planning/milestones/v1.0-phases/**
@@ -79,3 +89,19 @@ testsprite_tests/
 history.md
 .gitnexus
 docs-standalone/
+.planning/launch-cleanup-state.json
+
+# Starlight / Astro docs site
+dist/
+.astro/
+
+# Internal — not published to the public repo (WOR-532)
+# /reviews/ = expert-panel artifacts. Blanket-ignored; keep one subfolder per
+# topic (reviews/<topic>/) so parallel panels never collide.
+.beads/
+
+testsprite_tests/tmp/config.json
+tests/openclaw/_artifacts/
+.planning/
+.reviews/
+/reviews/

@@ -21,20 +21,30 @@ classifiers = [
 ]
 
 dependencies = [
-    "cryptography>=46.0.5",
+    "cryptography>=48.0.1",
     "aiosqlite>=0.22.1",
     "httpx>=0.28",
-    "fastapi>=0.136.1,<0.136.3",
+    "fastapi>=0.115.12",
     "uvicorn[standard]>=0.34",
-    "typer[all]>=0.15",
+    "typer>=0.15",
     "python-dotenv>=1.0",
     "psutil>=5.9",
     "keyring>=25.0",
-    "starlette>=1.0.1",
+    "msgpack>=1.0",
+    # TOML reader for the provider registry (worthless-8rqs). Stdlib `tomllib`
+    # is 3.11+; for 3.10 we fall back to the `tomli` backport at runtime.
+    "tomli>=2.0; python_version < '3.11'",
+    "starlette>=1.3.1",
 ]
 
 [project.scripts]
 worthless = "worthless.cli.app:app"
+docs-generate = "worthless.dev.docs:generate_docs"
+test-unit = "worthless.testing.runners:unit"
+test-docker = "worthless.testing.runners:docker"
+test-live = "worthless.testing.runners:live"
+test-openclaw = "worthless.testing.runners:openclaw"
+test-all = "worthless.testing.runners:all_tests"
 
 [project.urls]
 Homepage = "https://github.com/shacharm2/worthless"
@@ -54,7 +64,9 @@ dev = [
     "ruff>=0.8",
 ]
 test = [
+    "anthropic>=0.40",
     "hypothesis>=6.0",
+    "openai>=1.54",
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "pytest-benchmark>=5.0",
@@ -83,7 +95,6 @@ fuzz = [
 [dependency-groups]
 dev = [
     {include-group = "test"},
-    "cyclonedx-bom>=7.3.0",
     "deptry>=0.22",
     "pip-audit>=2.8",
     "pip-licenses>=5.5.5",
@@ -94,7 +105,9 @@ dev = [
     "xenon>=0.9.3",
 ]
 test = [
+    "anthropic>=0.40",
     "hypothesis>=6.0",
+    "openai>=1.54",
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "pytest-benchmark>=5.0",
@@ -117,11 +130,24 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+worthless = ["providers.toml"]
+# OpenClaw skill assets ship with the wheel; loaded at runtime via
+# Path(__file__).parent / "skill_assets" in worthless.openclaw.skill.
+# Without this, SKILL.md is dropped from sdists/wheels and install()
+# fails with FileNotFoundError on a wheel-installed worthless.
+"worthless.openclaw.skill_assets" = ["*.md"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 timeout = 30
-addopts = "--strict-config --strict-markers -n auto --dist loadscope --reruns 1 -m 'not live and not docker'"
+# WOR-582: real_ipc tests spawn real subprocess sidecars; run concurrently
+# under `-n auto` they crash xdist workers nondeterministically. Excluded from
+# the default parallel run here and run serially instead (CI: dedicated -n0
+# step; locally: `uv run pytest -m real_ipc -n0`). Root cause tracked in
+# WOR-582; this is the interim quarantine.
+addopts = "--strict-config --strict-markers -n auto --dist loadscope --reruns 1 -m 'not live and not docker and not user_flow and not real_ipc'"
 markers = [
     "benchmark: performance and latency regression checks",
     "contract: schema-driven API and protocol checks",
@@ -133,6 +159,9 @@ markers = [
     "adversarial: security-focused tests — race conditions, PID reuse, injection, fuzz",
     "docker: Docker container end-to-end tests (requires running Docker daemon)",
     "e2e: end-to-end smoke tests — full lifecycle (lock, proxy, healthz)",
+    "openclaw: OpenClaw integration tests (requires Docker + network pull)",
+    "real_ipc: opt out of the autouse FakeIPCSupervisor injection — these tests bring their own real or subprocess sidecar (WOR-309 Phase 5)",
+    "user_flow: end-to-end user-flow tests — real keyring, real CLI, real fs. Run with `pytest -m user_flow`. See Linear WOR-439 for the full suite scope.",
 ]
 
 [tool.coverage.run]
@@ -177,10 +206,16 @@ ignore = [
 "tests/**" = ["S101", "S110", "B"]
 # Docker e2e tests shell out to `docker` CLI extensively — partial path and /tmp are intentional
 "tests/test_docker_e2e.py" = ["S607", "S108"]
+# OpenClaw integration tests shell out to docker CLI
+"tests/test_openclaw_e2e.py" = ["S607", "S108"]
+# Smoke tests invoke the CLI via subprocess — partial path is intentional
+"tests/smoke/*.py" = ["S607"]
 # Deploy static tests use bash -n for entrypoint syntax validation
 "tests/test_deploy_static.py" = ["S607"]
 # Eval scripts shell out to claude CLI
 "tests/evals/eval_skill_md.py" = ["S607"]
+# OpenClaw install-incident reproduction shells out to the uv/worthless CLI
+"tests/openclaw/install_incident/*.py" = ["S607"]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "random".msg = "Use the 'secrets' module for cryptographic randomness. The 'random' module is banned (CRYP-04)."
@@ -189,12 +224,17 @@ ignore = [
 # Only scan src/ — dev/test/qa deps are CLI tools, not imported by app code
 optional_dependencies_dev_groups = ["dev", "test", "qa", "fuzz"]
 [tool.deptry.per_rule_ignores]
+# tomllib: stdlib in Python 3.11+ (provider registry uses it conditionally;
+# 3.10 falls back to the `tomli` backport, which IS a runtime dep).
+DEP001 = ["tomllib"]
 # uvicorn: runtime ASGI server invoked via CLI, never imported
 # python-dotenv: planned refactor to replace custom parser (worthless-ic6)
 DEP002 = ["uvicorn", "python-dotenv"]
 # starlette: transitive dep of fastapi, but we import ASGI types directly
-# rich: transitive dep of typer[all], but we import directly for console output
+# rich: transitive dep of typer (bundled in typer>=0.12), but we import directly for console output
 DEP003 = ["starlette", "rich"]
+# pytest: imported in testing/runners.py for test-* CLI entrypoints
+DEP004 = ["pytest"]
 
 [tool.bandit]
 targets = ["src"]
@@ -222,10 +262,3 @@ exclude = ["**/__pycache__"]
 typeCheckingMode = "basic"
 # Strict mode on the crypto module — typed boundaries are a security guarantee
 strict = ["src/worthless/crypto"]
-
-[tool.uv]
-override-dependencies = [
-    "idna>=3.15",
-    "lxml>=6.1.0",  # cyclonedx-python-lib 9.x pins <6 but lxml 6 is API-compatible
-    "urllib3>=2.7.0",
-]

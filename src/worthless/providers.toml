@@ -1,0 +1,37 @@
+# Bundled provider registry — worthless-8rqs.
+#
+# Maps known LLM-provider upstream URLs to their wire protocol so
+# `worthless lock` can auto-detect protocol when scanning .env files.
+#
+# Schema (per entry):
+#   name     — friendly identifier; used as the alias prefix and in CLI output
+#   url      — the unique key; lookups match exact strings (no normalization)
+#   protocol — wire protocol the upstream speaks: "openai" or "anthropic"
+#
+# To add a provider locally without modifying this file, drop a TOML at
+# ~/.worthless/providers.toml with the same schema; user entries take
+# precedence on URL conflict. Or upstream a PR adding it here.
+
+[provider.openai]
+url = "https://api.openai.com/v1"
+protocol = "openai"
+
+[provider.anthropic]
+url = "https://api.anthropic.com/v1"
+protocol = "anthropic"
+
+[provider.openrouter]
+url = "https://openrouter.ai/api/v1"
+protocol = "openai"
+
+[provider.groq]
+url = "https://api.groq.com/openai/v1"
+protocol = "openai"
+
+[provider.together]
+url = "https://api.together.xyz/v1"
+protocol = "openai"
+
+[provider.ollama]
+url = "http://localhost:11434/v1"
+protocol = "openai"

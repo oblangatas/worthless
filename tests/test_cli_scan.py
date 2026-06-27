@@ -13,9 +13,23 @@ from typer.testing import CliRunner
 
 from worthless.cli.app import app
 from worthless.cli.bootstrap import WorthlessHome
+from worthless.cli.key_patterns import KEY_PATTERN
 
 from tests.helpers import fake_openai_key as _fake_openai_key
 from tests.helpers import fake_anthropic_key as _fake_anthropic_key
+
+
+def _strip_env_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Remove env vars whose value matches any known API key pattern.
+
+    The deep-scan env dump reads the entire process environment, so a real
+    developer's shell (e.g. CLAUDE_CODE_OAUTH_TOKEN, HF_TOKEN) can leak
+    pattern-matching values into "clean dir" tests. Filter by value, not name.
+    """
+    for key, value in list(os.environ.items()):
+        if KEY_PATTERN.search(value):
+            monkeypatch.delenv(key, raising=False)
+
 
 runner = CliRunner(mix_stderr=False)
 
@@ -88,6 +102,28 @@ class TestFakeKeyGuard:
         assert shannon_entropy(_fake_anthropic_key()) >= ENTROPY_THRESHOLD
 
 
+class TestEntropyThresholdRegression:
+    """The entropy gate is slated for replacement; this is a thin shim that
+    just pins the user-visible contract: real-shape provider keys clear
+    whatever threshold ships, common placeholders fall below it. When the
+    gate is removed/replaced, delete this class.
+    """
+
+    def test_real_shape_key_admitted(self) -> None:
+        from worthless.cli.dotenv_rewriter import shannon_entropy
+        from worthless.cli.key_patterns import ENTROPY_THRESHOLD
+
+        real_shape = "sk-or-v1-" + "a8b3c9d2e1f70" * 4 + "abcde"
+        assert shannon_entropy(real_shape) >= ENTROPY_THRESHOLD
+
+    def test_common_placeholders_rejected(self) -> None:
+        from worthless.cli.dotenv_rewriter import shannon_entropy
+        from worthless.cli.key_patterns import ENTROPY_THRESHOLD
+
+        for placeholder in ("sk-your-key-here", "sk-aaaa", "sk-PLACEHOLDER_VALUE"):
+            assert shannon_entropy(placeholder) < ENTROPY_THRESHOLD, placeholder
+
+
 # ---------------------------------------------------------------------------
 # Tests: basic scan
 # ---------------------------------------------------------------------------
@@ -152,15 +188,21 @@ class TestScanFormats:
         assert len(sarif["runs"]) == 1
         assert len(sarif["runs"][0]["results"]) >= 1
 
-    def test_format_json_valid_array(self, file_with_key: Path) -> None:
-        """--json should produce a JSON array of findings on stdout."""
+    def test_format_json_valid_object(self, file_with_key: Path) -> None:
+        """--json produces {schema_version, findings, orphans} object on stdout (HF5)."""
         result = runner.invoke(app, ["scan", "--json", str(file_with_key)])
         assert result.exit_code == 1
-        findings = json.loads(result.stdout)
-        assert isinstance(findings, list)
-        assert len(findings) >= 1
-        assert "provider" in findings[0]
-        assert "is_protected" in findings[0]
+        data = json.loads(result.stdout)
+        assert isinstance(data, dict)
+        # Contract test: pin EXACT schema_version. A future shape change
+        # bumps this to 3 and the test fails on purpose so the CHANGELOG +
+        # SKILL.md update can't be skipped. CodeRabbit PR #131.
+        assert data["schema_version"] == 2
+        assert isinstance(data["findings"], list)
+        assert len(data["findings"]) >= 1
+        assert "provider" in data["findings"][0]
+        assert "is_protected" in data["findings"][0]
+        assert "orphans" in data and isinstance(data["orphans"], list)
 
     def test_quiet_suppresses_output(self, file_with_key: Path) -> None:
         """--quiet should produce no stderr output (exit code only)."""
@@ -332,10 +374,7 @@ class TestScanDeep:
         (tmp_path / "config.yml").write_text("database: postgres\n")
         (tmp_path / ".env").write_text("APP_NAME=myapp\n")
         monkeypatch.chdir(tmp_path)
-        # Strip real API keys from env so the env dump doesn't find them
-        for key in list(os.environ):
-            if "API_KEY" in key or "SECRET" in key:
-                monkeypatch.delenv(key, raising=False)
+        _strip_env_secrets(monkeypatch)
         result = runner.invoke(app, ["scan", "--deep"])
         assert result.exit_code == 0
 
@@ -434,12 +473,13 @@ class TestScanShowSuffixFormat:
         assert result.exit_code == 0
 
     def test_show_suffix_combined_with_json(self, file_with_key: Path) -> None:
-        """--show-suffix with --json should still produce valid JSON."""
+        """--show-suffix with --json produces valid JSON object (HF5 shape)."""
         result = runner.invoke(app, ["scan", "--show-suffix", "--json", str(file_with_key)])
         assert result.exit_code == 1
-        findings = json.loads(result.stdout)
-        assert isinstance(findings, list)
-        assert len(findings) >= 1
+        data = json.loads(result.stdout)
+        assert isinstance(data, dict)
+        assert isinstance(data["findings"], list)
+        assert len(data["findings"]) >= 1
 
 
 # ---------------------------------------------------------------------------
@@ -551,9 +591,7 @@ class TestCollectDeepPaths:
     ) -> None:
         """Deep scan in dir with no .yml/.yaml/.toml/.json -> still works."""
         monkeypatch.chdir(tmp_path)
-        for key in list(os.environ):
-            if "API_KEY" in key or "SECRET" in key:
-                monkeypatch.delenv(key, raising=False)
+        _strip_env_secrets(monkeypatch)
         result = runner.invoke(app, ["scan", "--deep"])
         assert result.exit_code == 0
 

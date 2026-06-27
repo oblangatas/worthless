@@ -1,0 +1,11 @@
+// Cloudflare Workers config for static-only Astro/Starlight site.
+// Per https://developers.cloudflare.com/workers/static-assets/migration-guides/migrate-from-pages/
+// No `main` field = pure static assets, no Worker code.
+{
+  "name": "worthless-docs",
+  "compatibility_date": "2026-04-26",
+  "assets": {
+    "directory": "./dist/",
+    "not_found_handling": "404-page"
+  }
+}

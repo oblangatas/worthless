@@ -22,14 +22,14 @@ import pytest
 import uvicorn
 from cryptography.fernet import Fernet
 
+from tests._fakes import pin_shard_b
 from tests.helpers import fake_anthropic_key, fake_openai_key
-from worthless.cli.enroll_stub import enroll_stub
+from worthless.crypto.splitter import split_key_fp
 from worthless.proxy.app import create_app
 from worthless.proxy.config import ProxySettings
+from worthless.storage.repository import ShardRepository, StoredShard
 
 # Import mock app from harness (same mock upstream)
-import worthless.adapters.anthropic as _anth_mod
-import worthless.adapters.openai as _oai_mod
 
 # Inline the mock app to avoid importing scripts/ with sys.path hacks
 from starlette.applications import Starlette
@@ -88,11 +88,25 @@ _mock_app = Starlette(
 )
 
 
-def _free_port() -> int:
-    """Return an OS-assigned ephemeral port."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+def _bind_listening_socket() -> tuple[socket.socket, int]:
+    """Bind to an ephemeral port and KEEP THE SOCKET OPEN.
+
+    Closing the socket between port allocation and uvicorn startup creates
+    a TOCTOU race under pytest-xdist: two workers can each call
+    ``socket.bind(0)``, the kernel hands them the same port from the
+    ephemeral pool (the close immediately released it), and whichever
+    uvicorn binds second dies with ``EADDRINUSE``. Discovered via flake on
+    PR #146 CI 2026-05-07 (errno 98 on 127.0.0.1:60261). WOR-459.
+
+    Returning the live socket lets uvicorn take ownership directly via
+    ``Server.run(sockets=[sock])`` — the port stays reserved by THIS
+    process from bind() through uvicorn handover, no window for collision.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(128)
+    return sock, sock.getsockname()[1]
 
 
 @pytest.fixture(scope="module")
@@ -100,48 +114,73 @@ def live_proxy():
     """Start mock upstream + real proxy, yield base URL, tear down."""
     tmpdir = tempfile.mkdtemp(prefix="worthless-contract-")
     db_path = str(Path(tmpdir) / "worthless.db")
-    shard_a_dir = str(Path(tmpdir) / "shard_a")
     fernet_key = Fernet.generate_key()
 
-    mock_port = _free_port()
-    proxy_port = _free_port()
+    mock_sock, mock_port = _bind_listening_socket()
+    proxy_sock, proxy_port = _bind_listening_socket()
 
-    # Enroll fake keys
+    # Enroll fake keys and collect shard_a tokens for Bearer auth
+    shard_a_tokens: dict[str, str] = {}
+    # Capture each alias's plaintext shard-B so we can later pin it into
+    # the autouse FakeIPCSupervisor — without this the fake returns the
+    # wrong plaintext, reconstruction fails, and the proxy 401s.
+    plaintexts: dict[str, bytes] = {}
+
+    prefixes = {"openai": "sk-proj-", "anthropic": "sk-ant-api03-"}
+    # 8rqs Phase 5+6: each enrollment carries its own base_url. Point both at
+    # the local mock upstream so the per-enrollment routing in proxy/app.py
+    # delivers the request there.
+    mock_upstream = f"http://127.0.0.1:{mock_port}"
+    enrollment_base_urls = {
+        "openai": f"{mock_upstream}/v1",
+        "anthropic": f"{mock_upstream}/v1",
+    }
+
     async def _enroll():
+        repo = ShardRepository(db_path, fernet_key)
+        await repo.initialize()
         for provider, key_fn in [("openai", fake_openai_key), ("anthropic", fake_anthropic_key)]:
-            await enroll_stub(
-                alias=f"{provider}-contract",
-                api_key=key_fn(),
+            api_key = key_fn()
+            prefix = prefixes[provider]
+            sr = split_key_fp(api_key, prefix=prefix, provider=provider)
+            shard = StoredShard(
+                shard_b=bytearray(sr.shard_b),
+                commitment=bytearray(sr.commitment),
+                nonce=bytearray(sr.nonce),
                 provider=provider,
-                db_path=db_path,
-                fernet_key=fernet_key,
-                shard_a_dir=shard_a_dir,
             )
+            await repo.store_enrolled(
+                f"{provider}-contract",
+                shard,
+                var_name=f"{provider.upper()}_API_KEY",
+                env_path=None,
+                prefix=sr.prefix,
+                charset=sr.charset,
+                base_url=enrollment_base_urls[provider],
+            )
+            shard_a_tokens[provider] = sr.shard_a.decode("utf-8")
+            plaintexts[f"{provider}-contract"] = bytes(sr.shard_b)
 
     asyncio.run(_enroll())
 
-    # Save originals before patching — restore in finally to prevent xdist pollution
-    _oai_original = _oai_mod.UPSTREAM_URL
-    _anth_original = _anth_mod.UPSTREAM_URL
-
     try:
-        # Patch upstream URLs to mock
-        mock_upstream = f"http://127.0.0.1:{mock_port}"
-        _oai_mod.UPSTREAM_URL = f"{mock_upstream}/v1/chat/completions"
-        _anth_mod.UPSTREAM_URL = f"{mock_upstream}/v1/messages"
-
         # Create proxy app
         settings = ProxySettings(
             db_path=db_path,
             fernet_key=bytearray(fernet_key),
-            shard_a_dir=shard_a_dir,
             allow_insecure=True,
-            allow_alias_inference=True,
             default_rate_limit_rps=100.0,
         )
         proxy_app = create_app(settings)
 
-        # Start both servers in background threads
+        for alias, pt in plaintexts.items():
+            pin_shard_b(proxy_app, alias, pt)
+
+        # Start both servers in background threads.
+        # `sockets=[sock]` hands the pre-bound listening socket to uvicorn
+        # so the port is never released between allocation and bind — closes
+        # the WOR-459 TOCTOU race window. host/port in Config become
+        # advisory in this mode; we keep them for log-readability.
         mock_server = uvicorn.Server(
             uvicorn.Config(_mock_app, host="127.0.0.1", port=mock_port, log_level="error")
         )
@@ -149,8 +188,12 @@ def live_proxy():
             uvicorn.Config(proxy_app, host="127.0.0.1", port=proxy_port, log_level="error")
         )
 
-        mock_thread = threading.Thread(target=mock_server.run, daemon=True)
-        proxy_thread = threading.Thread(target=proxy_server.run, daemon=True)
+        mock_thread = threading.Thread(
+            target=mock_server.run, kwargs={"sockets": [mock_sock]}, daemon=True
+        )
+        proxy_thread = threading.Thread(
+            target=proxy_server.run, kwargs={"sockets": [proxy_sock]}, daemon=True
+        )
         mock_thread.start()
         proxy_thread.start()
 
@@ -166,7 +209,7 @@ def live_proxy():
                 raise RuntimeError(f"{label} did not start within 6 seconds")
         base_url = f"http://127.0.0.1:{proxy_port}"
 
-        yield base_url
+        yield base_url, shard_a_tokens
 
         # Teardown
         mock_server.should_exit = True
@@ -174,10 +217,6 @@ def live_proxy():
         mock_thread.join(timeout=3)
         proxy_thread.join(timeout=3)
     finally:
-        # Always restore upstream URLs — prevents cross-test pollution under xdist
-        _oai_mod.UPSTREAM_URL = _oai_original
-        _anth_mod.UPSTREAM_URL = _anth_original
-
         import shutil
 
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -189,18 +228,21 @@ def live_proxy():
 
 
 class TestHealthEndpoints:
-    def test_root_returns_200(self, live_proxy: str) -> None:
-        r = httpx.get(f"{live_proxy}/")
+    def test_root_returns_200(self, live_proxy) -> None:
+        base_url, _ = live_proxy
+        r = httpx.get(f"{base_url}/")
         assert r.status_code == 200
         assert r.json()["status"] == "ok"
 
-    def test_healthz_returns_200(self, live_proxy: str) -> None:
-        r = httpx.get(f"{live_proxy}/healthz")
+    def test_healthz_returns_200(self, live_proxy) -> None:
+        base_url, _ = live_proxy
+        r = httpx.get(f"{base_url}/healthz")
         assert r.status_code == 200
         assert r.json()["status"] == "ok"
 
-    def test_readyz_returns_200(self, live_proxy: str) -> None:
-        r = httpx.get(f"{live_proxy}/readyz")
+    def test_readyz_returns_200(self, live_proxy) -> None:
+        base_url, _ = live_proxy
+        r = httpx.get(f"{base_url}/readyz")
         assert r.status_code == 200
         assert r.json()["status"] == "ok"
 
@@ -211,9 +253,11 @@ class TestHealthEndpoints:
 
 
 class TestOpenAIProxy:
-    def test_chat_completions_returns_200(self, live_proxy: str) -> None:
+    def test_chat_completions_returns_200(self, live_proxy) -> None:
+        base_url, tokens = live_proxy
         r = httpx.post(
-            f"{live_proxy}/v1/chat/completions",
+            f"{base_url}/openai-contract/v1/chat/completions",
+            headers={"authorization": f"Bearer {tokens['openai']}"},
             json={"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}]},
         )
         assert r.status_code == 200
@@ -221,9 +265,11 @@ class TestOpenAIProxy:
         assert "choices" in body
         assert "usage" in body
 
-    def test_chat_completions_no_worthless_headers_leaked(self, live_proxy: str) -> None:
+    def test_chat_completions_no_worthless_headers_leaked(self, live_proxy) -> None:
+        base_url, tokens = live_proxy
         r = httpx.post(
-            f"{live_proxy}/v1/chat/completions",
+            f"{base_url}/openai-contract/v1/chat/completions",
+            headers={"authorization": f"Bearer {tokens['openai']}"},
             json={"model": "gpt-4", "messages": []},
         )
         assert r.status_code == 200
@@ -239,9 +285,11 @@ class TestOpenAIProxy:
 
 
 class TestAnthropicProxy:
-    def test_messages_returns_200(self, live_proxy: str) -> None:
+    def test_messages_returns_200(self, live_proxy) -> None:
+        base_url, tokens = live_proxy
         r = httpx.post(
-            f"{live_proxy}/v1/messages",
+            f"{base_url}/anthropic-contract/v1/messages",
+            headers={"authorization": f"Bearer {tokens['anthropic']}"},
             json={
                 "model": "claude-3-5-sonnet-20241022",
                 "messages": [{"role": "user", "content": "hi"}],
@@ -253,9 +301,11 @@ class TestAnthropicProxy:
         assert "content" in body
         assert "usage" in body
 
-    def test_messages_no_worthless_headers_leaked(self, live_proxy: str) -> None:
+    def test_messages_no_worthless_headers_leaked(self, live_proxy) -> None:
+        base_url, tokens = live_proxy
         r = httpx.post(
-            f"{live_proxy}/v1/messages",
+            f"{base_url}/anthropic-contract/v1/messages",
+            headers={"authorization": f"Bearer {tokens['anthropic']}"},
             json={
                 "model": "claude-3-5-sonnet-20241022",
                 "messages": [{"role": "user", "content": "hi"}],
@@ -285,21 +335,21 @@ class TestAntiEnumeration:
             ("GET", "/.env"),
         ],
     )
-    def test_unknown_paths_return_uniform_401(
-        self, live_proxy: str, method: str, path: str
-    ) -> None:
-        r = httpx.request(method, f"{live_proxy}{path}")
+    def test_unknown_paths_return_uniform_401(self, live_proxy, method: str, path: str) -> None:
+        base_url, _ = live_proxy
+        r = httpx.request(method, f"{base_url}{path}")
         assert r.status_code == 401, f"{method} {path} returned {r.status_code}"
         body = r.json()
         assert body["error"]["type"] == "authentication_error"
 
-    def test_all_401s_have_identical_body(self, live_proxy: str) -> None:
+    def test_all_401s_have_identical_body(self, live_proxy) -> None:
+        base_url, _ = live_proxy
         bodies = []
         for path in ["/v1/models", "/nonexistent", "/admin", "/.env"]:
-            r = httpx.get(f"{live_proxy}{path}")
+            r = httpx.get(f"{base_url}{path}")
             assert r.status_code == 401
             bodies.append(r.text)
-        assert len(set(bodies)) == 1, "401 responses differ — anti-enumeration broken"
+        assert len(set(bodies)) == 1, "401 responses differ -- anti-enumeration broken"
 
 
 # ---------------------------------------------------------------------------
@@ -308,11 +358,13 @@ class TestAntiEnumeration:
 
 
 class TestResponseFormat:
-    def test_health_returns_json_content_type(self, live_proxy: str) -> None:
-        r = httpx.get(f"{live_proxy}/healthz")
+    def test_health_returns_json_content_type(self, live_proxy) -> None:
+        base_url, _ = live_proxy
+        r = httpx.get(f"{base_url}/healthz")
         assert "application/json" in r.headers.get("content-type", "")
 
-    def test_401_returns_json_content_type(self, live_proxy: str) -> None:
-        r = httpx.get(f"{live_proxy}/v1/models")
+    def test_401_returns_json_content_type(self, live_proxy) -> None:
+        base_url, _ = live_proxy
+        r = httpx.get(f"{base_url}/v1/models")
         assert r.status_code == 401
         assert "application/json" in r.headers.get("content-type", "")

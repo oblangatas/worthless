@@ -7,11 +7,23 @@ on:
       - 'deploy/**'
       - 'pyproject.toml'
       - 'src/**'
+      - 'tests/test_docker_e2e.py'
+      - 'tests/test_openclaw_e2e.py'
+      - 'tests/openclaw/**'
   pull_request:
     paths:
       - 'Dockerfile'
       - 'deploy/**'
+      - 'pyproject.toml'
+      - 'src/**'
       - 'tests/test_docker_e2e.py'
+      - 'tests/test_openclaw_e2e.py'
+      - 'tests/openclaw/**'
+      # WOR-621 F1/F7 load-bearing claim — any change here must re-prove
+      # "kill proxy → OpenClaw agent reaches nothing" end-to-end.
+      - 'tests/openclaw/install_incident/test_proxy_load_bearing.py'
+      - 'src/worthless/cli/commands/lock.py'
+      - 'src/worthless/openclaw/**'
   schedule:
     - cron: '0 6 * * 1'  # Monday 6am UTC — check if ignored CVEs have fixes
 
@@ -33,25 +45,33 @@ jobs:
       - name: Build image
         run: docker build -t worthless-proxy:${{ github.sha }} .
 
-      - name: Trivy vulnerability scan (fixable only)
-        uses: aquasecurity/trivy-action@1f0aa582c8c8f5f7639610d6d38baddfea4fdcee # v0.9.2
+      # Grype (Anchore) replaces Trivy (Aqua) after the TeamPCP supply-chain
+      # compromise of aquasecurity/trivy-action in Feb-Mar 2026. Same
+      # archetype (OSS, OS-pkg + language-dep coverage), different vendor
+      # and codebase, currently clean.
+      - name: Grype vulnerability scan (fixable only, fail on HIGH+)
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
         with:
-          image-ref: worthless-proxy:${{ github.sha }}
-          severity: CRITICAL,HIGH
-          exit-code: "1"
-          format: table
-          ignore-unfixed: "true"
+          image: worthless-proxy:${{ github.sha }}
+          severity-cutoff: high
+          only-fixed: true
+          fail-build: true
 
-      - name: Trivy full scan (including unfixed — informational)
-        uses: aquasecurity/trivy-action@1f0aa582c8c8f5f7639610d6d38baddfea4fdcee # v0.9.2
+      - name: Grype full scan (including unfixed — informational)
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
         with:
-          image-ref: worthless-proxy:${{ github.sha }}
-          severity: CRITICAL,HIGH
-          exit-code: "0"
-          format: table
+          image: worthless-proxy:${{ github.sha }}
+          severity-cutoff: high
+          only-fixed: false
+          fail-build: false
 
       - name: Dockle best-practice lint
-        uses: erzz/dockle-action@69369bc745ee29813f730231a821bcd4f71cd290 # v1
+        # ``.dockleignore`` in the repo root skips CIS-DI-0001 (image
+        # runs root by default — INTENTIONAL for WOR-310's priv-drop
+        # entrypoint).  See the .dockleignore comments for full
+        # rationale.  Dockle reads .dockleignore from CWD, which is
+        # the checkout root inside the action runner.
+        uses: erzz/dockle-action@e8a7c41f36f1236ca3282b298d425ffbfdb2e922 # v1
         with:
           image: worthless-proxy:${{ github.sha }}
           exit-code: "1"
@@ -68,7 +88,7 @@ jobs:
       - name: Build image
         run: docker build -t worthless-proxy:test .
 
-      - uses: astral-sh/setup-uv@0c5e2b8115b80b4c7c5ddf6ffdd634974642d182 # v5
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
         with:
           enable-cache: true
 
@@ -79,3 +99,23 @@ jobs:
         run: uv run pytest tests/test_docker_e2e.py -v -m docker --tb=short
         env:
           WORTHLESS_DOCKER_IMAGE: worthless-proxy:test
+
+      - name: Run OpenClaw/Compose E2E tests
+        run: uv run pytest tests/test_openclaw_e2e.py -v -m openclaw --tb=short --timeout=360
+
+      # WOR-621 F1/F7/WOR-545: the load-bearing claim — "kill the proxy and
+      # an OpenClaw agent on a locked provider reaches nothing." Real proxy +
+      # pinned OpenClaw container + mock upstream; baseline reaches the mock
+      # with the reconstructed real key, `docker stop` proxy → agent turn
+      # fails AND mock captured nothing, restart → resumes. Excluded from
+      # tests.yml (`-m "not docker"`); this is the regression net so a
+      # future PR can't re-introduce the WOR-514 bypass and ship green.
+      - name: Run WOR-621 proxy-load-bearing behavioral test
+        run: uv run pytest tests/openclaw/install_incident/test_proxy_load_bearing.py -v -m "openclaw and docker" --tb=short --timeout=900
+
+      # WOR-650: real `worthless lock --adopt` must produce a config the REAL
+      # OpenClaw binary accepts after adopting an unrecognized proxy entry —
+      # both providers. Closes the "passes in mock, OpenClaw rejects the shape
+      # live" gap. Lean (one short-lived container, no proxy stack).
+      - name: Run WOR-650 adopt-recognition live test
+        run: uv run pytest tests/openclaw/install_incident/test_adopt_recognition_docker.py -v -m "openclaw and docker" --tb=short --timeout=300

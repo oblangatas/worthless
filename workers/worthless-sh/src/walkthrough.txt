@@ -1,0 +1,74 @@
+== Verify the bytes match what the Worker serves ==
+  curl -sSL worthless.sh | sha256sum         # body hash
+  curl -sSI worthless.sh | grep -i sha256    # header value
+The two MUST match. Mismatch = abort and report.
+(This catches transit tampering. Not origin compromise — see README.)
+==================================================================
+
+Walkthrough for worthless install.sh
+=====================================
+
+What you would have piped into sh, in plain English. Read this first if
+you'd rather audit than execute.
+
+Source: https://github.com/shacharm2/worthless
+
+----------------------------------------------------------------------
+
+Step 1 — Header + exit codes
+  Four documented exit codes so wrappers and CI can branch:
+    10 = network failure (curl / Astral CDN / PyPI unreachable)
+    20 = unsupported platform (Windows native, macOS <11, glibc <2.17)
+    30 = pipx-installed worthless detected, would conflict
+    40 = internal failure (uv crash, smoke test failed)
+  Anything not 0 is a clean signal — no half-installed state.
+
+Step 2 — Platform detection
+  Reads `uname -s` + `sw_vers`. macOS older than Big Sur (11) is rejected
+  because uv's bundled Python needs >=11. Native Windows shells exit 20
+  with a link to the WSL guide. WSL itself is fully supported.
+
+Step 3 — pipx-conflict check
+  If `pipx list` shows worthless, refuses to continue (exit 30). A pipx
+  shim on PATH would mask the uv binary and double-management is the
+  bug class people open issues about. Fix: `pipx uninstall worthless`.
+
+Step 4 — uv install with sha256 pin
+  The crown-jewel security step. Downloads the pinned Astral uv installer
+  (UV_VERSION=0.11.7) and verifies its sha256 against a hash baked into
+  this script. If upstream ever serves different bytes, exit 40 — no
+  substitute, no fallback. Catches a compromised upstream before running
+  its code.
+
+Step 5 — Install or upgrade worthless
+  `uv tool install worthless` fetches the latest release from PyPI into
+  ~/.local/bin/worthless, isolated by uv. Pin a specific release with
+  `WORTHLESS_VERSION=x.y.z curl -sSL worthless.sh | sh` if you want a
+  fixed version. Re-runs fall through to `uv tool upgrade`, so the
+  script is idempotent. Network failures exit 10 with proxy/mirror hints.
+
+Step 6 — Smoke test
+  Runs `uv run --no-project worthless --version` to confirm the binary
+  starts. Failure exits 40 ("installed but won't run") — usually a
+  corrupt cache. Error message links to `worthless doctor`.
+
+Step 7 — PATH activation
+  Detects shell (bash / zsh / fish) and prints the exact line to add to
+  your rc file if ~/.local/bin isn't already on PATH. The script never
+  edits your shell rc on your behalf — that's your call.
+
+Step 8 — Done banner
+  Prints install path, one next command (cd your-project && worthless
+  lock), audit URL (?explain=1, this page), and the GitHub source.
+
+What it does NOT do
+-------------------
+  No sudo. No writes outside $HOME. No telemetry. No shell-rc edits.
+  Network calls: Astral CDN (uv installer) + PyPI (worthless). Both
+  pinned, both verifiable.
+
+Still uncertain? Read the raw script:
+  curl -sSL worthless.sh
+A specific release tag (pick one from the releases page):
+  https://github.com/shacharm2/worthless/releases
+Issues: https://github.com/shacharm2/worthless/issues

@@ -1,0 +1,52 @@
+# Service lifecycle live pack — systemd user session in Docker (manual L7, not CI).
+# syntax=docker/dockerfile:1.7
+FROM ubuntu:24.04@sha256:c4a8d5503dfb2a3eb8ab5f807da5bc69a85730fb49b5cfca2330194ebcc41c7b
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV container=docker
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        dbus-user-session \
+        git \
+        systemd \
+        systemd-sysv \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /lib/systemd/systemd /sbin/init
+
+# Trim default systemd image services (jrei/systemd-ubuntu pattern).
+RUN cd /lib/systemd/system/sysinit.target.wants/ \
+    && for i in *; do \
+         [ "$i" = "systemd-tmpfiles-setup.service" ] || rm -f "$i"; \
+       done \
+    && rm -f /lib/systemd/system/multi-user.target.wants/* \
+    && rm -f /etc/systemd/system/*.wants/* \
+    && rm -f /lib/systemd/system/local-fs.target.wants/* \
+    && rm -f /lib/systemd/system/sockets.target.wants/*udev* \
+    && rm -f /lib/systemd/system/sockets.target.wants/*initctl*
+
+# uv (same pin flow as Dockerfile.ubuntu-with-uv)
+WORKDIR /work
+COPY install.sh /work/install.sh
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=shared \
+    UV_VERSION="$(awk -F'"' '/^UV_VERSION=/{print $2}' /work/install.sh)" \
+    && ASTRAL_INSTALLER_SHA256="$(awk -F'"' '/^ASTRAL_INSTALLER_SHA256=/{print $2}' /work/install.sh)" \
+    && test -n "$UV_VERSION" -a -n "$ASTRAL_INSTALLER_SHA256" \
+    && curl -LsSf --fail \
+        "https://astral.sh/uv/${UV_VERSION}/install.sh" \
+        -o /tmp/uv-installer.sh \
+    && echo "${ASTRAL_INSTALLER_SHA256}  /tmp/uv-installer.sh" | sha256sum -c - \
+    && UV_INSTALL_VERSION="$UV_VERSION" sh /tmp/uv-installer.sh \
+    && rm /tmp/uv-installer.sh \
+    && test -x /root/.local/bin/uv
+
+ENV PATH="/root/.local/bin:${PATH}"
+
+COPY engineering/testing/scripts/service-lifecycle-docker-entrypoint.sh /usr/local/bin/service-lifecycle-docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/service-lifecycle-docker-entrypoint.sh
+
+STOPSIGNAL SIGRTMIN+3
+VOLUME [ "/sys/fs/cgroup" ]
+CMD ["/sbin/init"]

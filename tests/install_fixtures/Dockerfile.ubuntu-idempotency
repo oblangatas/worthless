@@ -1,0 +1,43 @@
+# Bare Ubuntu image that runs install.sh TWICE and asserts the on-disk
+# state is identical between runs (WOR-317).
+#
+# The pinned WORTHLESS_VERSION is critical: without it, a new release
+# published to PyPI between the two runs would change the diff and false-fail.
+# Bump in lockstep with the project's pyproject.toml version.
+#
+# Per-test docker build budget is 420s (set in tests/test_install_docker.py)
+# to cover cold-cache pulls of pinned base-image digests under xdist -n 2.
+FROM ubuntu:24.04@sha256:c4a8d5503dfb2a3eb8ab5f807da5bc69a85730fb49b5cfca2330194ebcc41c7b
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# install.sh dependencies — same minimum set as Dockerfile.ubuntu-bare,
+# plus coreutils (find -printf for the snapshot script).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        coreutils \
+        curl \
+        tar \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN ! command -v python3 \
+    && ! command -v python \
+    && ! command -v pipx \
+    && ! command -v uv
+
+# Pin the worthless version so PyPI drift between the two install.sh runs
+# cannot make the snapshots disagree. The fixture tests idempotency
+# (run install.sh twice → identical state) — both runs MUST install the
+# same version. The pinned version must EXIST on PyPI; the fixture
+# therefore lags pyproject.toml by one release across the tag-publish
+# boundary. Bump procedure: pyproject → tag/publish v{N} → CI passes
+# (this fixture still on v{N-1}) → follow-up PR bumps this line to v{N}.
+ENV WORTHLESS_VERSION=0.3.2
+
+WORKDIR /work
+COPY install.sh /work/install.sh
+COPY tests/install_fixtures/verify_idempotency.sh /work/verify_idempotency.sh
+RUN chmod +x /work/install.sh /work/verify_idempotency.sh
+
+CMD ["/bin/sh", "/work/verify_idempotency.sh"]

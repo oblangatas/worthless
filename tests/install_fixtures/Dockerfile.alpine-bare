@@ -1,0 +1,29 @@
+# Bare Alpine image — NO python3, NO uv. Uses musl libc (not glibc).
+# Verified working: uv fetches a musl-compatible Python via PBS, install
+# completes, `worthless --help` loads cleanly (no segfault, no Traceback).
+# Watch zstd below — busybox tar can't unzstd, which silently breaks
+# modern PBS tarballs (.tar.zst).
+FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+
+# install.sh needs:
+#   curl + ca-certs (TLS)
+#   bash  (install.sh is sh-compat but uv sub-shells prefer bash)
+#   tar + zstd  (modern PBS tarballs are .tar.zst; busybox tar can't unzstd)
+RUN apk add --no-cache \
+        bash \
+        ca-certificates \
+        curl \
+        tar \
+        zstd
+
+RUN ! command -v python3 \
+    && ! command -v python \
+    && ! command -v pipx \
+    && ! command -v uv
+
+WORKDIR /work
+COPY install.sh /work/install.sh
+COPY tests/install_fixtures/verify_install.sh /work/verify_install.sh
+RUN chmod +x /work/install.sh /work/verify_install.sh
+
+CMD ["/bin/sh", "-c", "sh /work/install.sh && sh /work/verify_install.sh"]

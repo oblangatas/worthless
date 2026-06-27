@@ -1,0 +1,24 @@
+# Bare Debian 12 image — NO python3, NO uv.
+# Validates install.sh on a second glibc distro.
+FROM debian:12-slim@sha256:f9c6a2fd2ddbc23e336b6257a5245e31f996953ef06cd13a59fa0a1df2d5c252
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        tar \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN ! command -v python3 \
+    && ! command -v python \
+    && ! command -v pipx \
+    && ! command -v uv
+
+WORKDIR /work
+COPY install.sh /work/install.sh
+COPY tests/install_fixtures/verify_install.sh /work/verify_install.sh
+RUN chmod +x /work/install.sh /work/verify_install.sh
+
+CMD ["/bin/sh", "-c", "sh /work/install.sh && sh /work/verify_install.sh"]

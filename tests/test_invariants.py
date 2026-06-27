@@ -361,3 +361,99 @@ class TestInvariant3ServerSideContainment:
                             f"secure_key block ends at line {with_end_line} — "
                             f"key material may escape containment (Invariant #3)"
                         )
+
+
+# ---------------------------------------------------------------------------
+# Invariant #4: proxy never accesses shard-A files (SR-09)
+# ---------------------------------------------------------------------------
+
+_PROXY_DIR = _SRC_ROOT / "proxy"
+
+
+def _collect_proxy_python_files() -> list[Path]:
+    """Collect all .py files under the proxy package."""
+    return sorted(_PROXY_DIR.rglob("*.py"))
+
+
+class TestInvariant4ShardAIsolation:
+    """Invariant #4: proxy never accesses shard-A files (SR-09).
+
+    After the format-preserving split migration, shard-A is delivered via the
+    Authorization header, not read from disk.  The proxy must have zero
+    references to shard_a_dir, shard_a_path, or WORTHLESS_SHARD_A_DIR.
+    """
+
+    proxy_files = _collect_proxy_python_files()
+
+    _SHARD_A_AST_NAMES = {"shard_a_dir", "shard_a_path", "WORTHLESS_SHARD_A_DIR"}
+
+    @pytest.mark.parametrize(
+        "py_file",
+        proxy_files,
+        ids=[str(f.relative_to(_SRC_ROOT)) for f in proxy_files],
+    )
+    def test_ast_no_shard_a_dir_in_proxy(self, py_file: Path) -> None:
+        """AST scan: no proxy module references shard_a_dir."""
+        source, tree = _get_cached(py_file)
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name) and node.id in self._SHARD_A_AST_NAMES:
+                pytest.fail(
+                    f"{py_file.relative_to(_SRC_ROOT)}:{node.lineno} references "
+                    f"'{node.id}' — proxy must not access shard-A files (SR-09)"
+                )
+            if isinstance(node, ast.Attribute) and node.attr in self._SHARD_A_AST_NAMES:
+                pytest.fail(
+                    f"{py_file.relative_to(_SRC_ROOT)}:{node.lineno} references "
+                    f"'.{node.attr}' — proxy must not access shard-A files (SR-09)"
+                )
+
+    @pytest.mark.parametrize(
+        "py_file",
+        proxy_files,
+        ids=[str(f.relative_to(_SRC_ROOT)) for f in proxy_files],
+    )
+    def test_grep_no_shard_a_file_access_in_proxy(self, py_file: Path) -> None:
+        """Grep scan: no proxy file references shard-A file/directory access patterns.
+
+        Catches dynamic access patterns that AST scanning misses.
+        The proxy legitimately uses ``shard_a`` as a variable for the header-sourced
+        value; this test targets file-system access patterns specifically.
+        """
+        _FILE_ACCESS_PATTERNS = re.compile(
+            r"shard_a_dir|shard_a_path|WORTHLESS_SHARD_A_DIR|shard_a_file"
+        )
+        source, _ = _get_cached(py_file)
+        for lineno, line in enumerate(source.splitlines(), 1):
+            stripped = line.lstrip()
+            if stripped.startswith("#"):
+                continue
+            match = _FILE_ACCESS_PATTERNS.search(line)
+            if match:
+                pytest.fail(
+                    f"{py_file.relative_to(_SRC_ROOT)}:{lineno} contains '{match.group()}' — "
+                    f"proxy must not access shard-A files (SR-09)"
+                )
+
+    def test_proxy_files_found(self) -> None:
+        """At least one proxy .py file must exist for these tests to be meaningful."""
+        assert self.proxy_files, (
+            f"No .py files found under {_PROXY_DIR} — "
+            f"invariant tests are vacuously true and need updating"
+        )
+
+    def test_build_proxy_env_excludes_shard_a_dir(self, tmp_path: Path) -> None:
+        """build_proxy_env must NOT pass WORTHLESS_SHARD_A_DIR to proxy."""
+        from worthless.cli.bootstrap import ensure_home
+        from worthless.cli.process import build_proxy_env
+
+        home = ensure_home(tmp_path / ".worthless")
+        env = build_proxy_env(home)
+        assert "WORTHLESS_SHARD_A_DIR" not in env, (
+            "build_proxy_env includes WORTHLESS_SHARD_A_DIR — "
+            "proxy must not receive shard-A directory path (SR-09)"
+        )
+        assert "WORTHLESS_ALLOW_ALIAS_INFERENCE" not in env, (
+            "build_proxy_env includes WORTHLESS_ALLOW_ALIAS_INFERENCE — "
+            "alias inference from files is removed (SR-09)"
+        )

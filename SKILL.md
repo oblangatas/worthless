@@ -1,3 +1,25 @@
+---
+name: worthless
+description: Split-key proxy that makes leaked API keys worthless. Run `worthless lock` to protect LLM API keys with an enforced spend cap — if the cap is hit, the key never reconstructs.
+homepage: https://wless.io
+metadata:
+  openclaw:
+    emoji: 🛡️
+    requires:
+      bins: [worthless]
+    install:
+      - id: uv
+        kind: shell
+        command: uv tool install worthless
+        bins: [worthless]
+        label: Install worthless (uv — recommended)
+      - id: pip
+        kind: shell
+        command: pip install worthless
+        bins: [worthless]
+        label: Install worthless (pip)
+---
+
 # Worthless Agent Discovery File (SKILL.md)
 
 **Worthless** is a split-key reverse proxy that makes leaked API keys worthless. API keys are split into two information-theoretically secure shards: one stays on the user's machine, one is encrypted on the proxy. The real key only reconstructs in memory for a single API call, then is zeroed. If spending limits are hit, the key never forms at all.
@@ -6,27 +28,81 @@
 
 Worthless protects API keys in three scenarios:
 
-1. **Local Development**: `worthless wrap` runs your code through an ephemeral proxy that intercepts API calls, injects the real key only when needed, and cleans up on exit.
-2. **Daemon Mode**: `worthless up` starts a persistent local proxy on port 8787 (configurable) that stays running and protects all enrolled keys.
+1. **Local Development**: `worthless wrap` starts an ephemeral proxy and runs your command through it. Lock has already rewritten `*_BASE_URL` in your `.env` to point at the proxy, so your SDK picks it up via dotenv. The proxy reconstructs the real key only when the request passes the rules engine, then cleans up on exit.
+2. **Daemon Mode**: `worthless up` starts a persistent local proxy on port 8787 (configurable) that stays running and protects all enrolled keys. On macOS/Linux, `worthless service install` registers the same foreground `worthless up` path with launchd or systemd so it survives logout/reboot.
 3. **CI/CD & Sidecar**: The proxy is designed to run as a sidecar container or process, protecting keys across environments with per-key spending limits and time-window gates.
+
+### Scope (important for agents)
+
+Worthless scans for **LLM provider API key prefixes only** — currently `openai` (`sk-`, `sk-proj-`), `anthropic` (`sk-ant-`), `google` (`AIza`), and `xai` (`xai-`). It will NOT detect general secrets: cloud-provider tokens (AWS, GCP, Azure), GitHub Personal Access Tokens, npm tokens, Cloudflare API tokens, database passwords, JWT signing keys, etc. If the user asks for a broad "find all secrets" or full `.env` audit, clarify the boundary and recommend [gitleaks](https://github.com/gitleaks/gitleaks) or [trufflehog](https://github.com/trufflesecurity/trufflehog) as a companion tool. `worthless scan --json` returns `{"schema_version": 2, "findings": [...], "orphans": [...]}` — `findings` are `.env` keys (each with `is_protected`), `orphans` are DB enrollments whose `.env` line was deleted (run `worthless doctor --fix` to clean them up). Both arrays are empty when nothing matches; an empty `findings` on a `.env` full of cloud tokens is correct behaviour, not a miss. Agents iterating findings: `for f in result["findings"]`. Guard against future shape breaks: `assert result["schema_version"] >= 2`. (HF5 changed shape from a bare findings array — schema 1.) `worthless scan --code` is a separate, opt-in scan that detects hardcoded provider base URLs (routing bypasses) in source files — it does NOT scan for key-prefix patterns and does NOT overlap with the default `.env` scan. Both scans have distinct limits: `--code` cannot detect runtime-composed URLs, IP literals, regional endpoints, or env-var interpolation.
 
 ---
 
 ## Installation & Setup
 
+### For AI agents — zero-Python install (recommended)
+
+Worthless is a Python package, but AI editors discover MCP servers via a JSON
+config — they speak npm, not Python. `.mcp.json` is the **Claude Code** path
+(verified); Cursor uses `~/.cursor/mcp.json` (also verified — the server
+appears with its 4 tools); Windsurf uses its own config path and is
+unverified. The `worthless-mcp`
+npm package bridges this gap: it is a thin Node.js shim with no npm dependencies
+that handles the entire Python bootstrap invisibly. To the editor, Worthless looks
+identical to every other npm-managed MCP server it already knows how to start.
+
+**Why this path exists:** Without it, onboarding requires explaining Python, uv,
+uvx, and the `[mcp]` extra — four prerequisites before the first tool call. The
+npm wrapper collapses the install to four lines of JSON and a restart. No Python
+knowledge required at any point.
+
+**What `worthless-mcp` does at runtime:**
+1. Finds `uv` on PATH, or downloads and installs it silently (one-time, ~5 s).
+2. Runs `uvx worthless[mcp]==<pinned-version> mcp` — `uvx` caches the Python
+   environment, so every subsequent start is instant (cache hit, < 2 s).
+3. Streams MCP protocol over stdio directly to the editor. No HTTP port, no
+   proxy, no config beyond `.mcp.json`.
+
+**Requirements:** Node ≥ 18. No Python, pip, or virtualenv needed upfront — the
+wrapper provisions everything the first time it runs.
+
+Add to your project's `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "worthless": {
+      "command": "npx",
+      "args": ["-y", "worthless-mcp"]
+    }
+  }
+}
+```
+
+Restart your editor. Cold-start install time on a fresh machine with only Node:
+**< 30 s**. After restart, all four MCP tools are available with no further steps.
+
+> **Note for agents:** Do not invoke `worthless mcp` directly in shell — that
+> requires a separate Python install. The `.mcp.json` path above handles Python
+> transparently via `uvx` and is the correct agent entry point.
+
 ### Package Info
 - **Package name**: `worthless`
+- **npm wrapper**: `worthless-mcp`
 - **Version**: 0.3.8
 - **Entry point**: `worthless` (CLI command)
 - **Python**: 3.10+
 - **License**: AGPL-3.0
-- **Status**: Pre-release
+- **Status**: Beta
 
-### Quick Install
+### Quick Install (human CLI)
 ```bash
+curl -sSL https://worthless.sh | sh   # fresh machine — installs uv + worthless
+# or, if you already have Python 3.10+:
 pipx install worthless
 # or: pip install worthless (in a virtualenv)
 # or: curl -sSL worthless.sh | sh
+#     inspect first: curl -sSL 'https://worthless.sh?explain=1' | less
 ```
 
 ### First-Time Setup (the magic way)
@@ -66,14 +142,13 @@ All commands are available via `worthless <command> [OPTIONS]`.
 ### Core Commands
 
 #### `worthless lock [OPTIONS]`
-**Scan `.env`, split API keys, store shards, rewrite `.env` with cryptographic decoys.**
+**Scan `.env`, split API keys, store shard-B, rewrite `.env` with shard-A.**
 
 Scans the current `.env` and `.env.local` files for high-entropy values that match known API key patterns (OpenAI, Anthropic, etc.). For each detected key:
-1. Splits the key into two information-theoretic shards using XOR secret sharing
-2. Stores Shard A unencrypted in `~/.worthless/shards_a/<alias>`
-3. Stores Shard B encrypted in the SQLite database at `~/.worthless/worthless.db`
-4. Replaces the original key in `.env` with a format-correct but cryptographically useless decoy
-5. Records the location (file, line, variable name) for later recovery
+1. Splits the key into two information-theoretic shards using format-preserving XOR secret sharing
+2. Stores Shard B encrypted in the SQLite database at `~/.worthless/worthless.db`
+3. Replaces the original key in `.env` with shard-A (format-preserving — same prefix, charset, and length as the original key)
+4. Records the location (file, line, variable name) for later recovery
 
 **Options:**
 - `--env, -e PATH`: Path to .env file (default: `.env`)
@@ -89,7 +164,7 @@ Scans the current `.env` and `.env.local` files for high-entropy values that mat
 #### `worthless unlock [OPTIONS]`
 **Reconstruct original API keys from shards and restore `.env`.**
 
-Reverses the `lock` operation. Locates Shard A files, fetches encrypted Shard B from the database, XOR-merges them to recover the original key, and restores it to `.env`.
+Reverses the `lock` operation. Reads shard-A from `.env`, fetches encrypted Shard B from the database, XOR-merges them to recover the original key, and restores the original key to `.env`.
 
 **Options:**
 - (None — unlocks all enrolled keys)
@@ -97,25 +172,46 @@ Reverses the `lock` operation. Locates Shard A files, fetches encrypted Shard B 
 **Behavior:**
 - If multiple `.env` files have the same key enrolled, prompts for disambiguation
 - Zeros key material from memory after restoration
-- Removes shard files and DB records
+- Removes DB records and enrollment data
 
 **Use case:** Temporary switch between `wrap`-mode and native SDK mode, or complete teardown.
 
-#### `worthless scan [OPTIONS] [PATHS]`
-**Detect exposed API keys with decoy awareness.**
+#### `worthless uninstall [OPTIONS]`
+**Restore every locked `.env` to its real key, undo OpenClaw, then remove Worthless.**
 
-Scans files for high-entropy strings that match known API key patterns. Ignores decoys that were created by Worthless (checks Shannon entropy + format coherence).
+Walks every `.env` Worthless locked on this machine, reconstructs each real key (reusing `unlock`), restores it in place, undoes the OpenClaw integration, then wipes the keychain entry and `~/.worthless`. Permissions are restored owner-only — a once-world-readable `.env` never comes back exposing the real key.
+
+**Options:**
+- `--yes` / `-y`: Skip the permission prompt (for agents / scripts); clamps loose modes to `0o600` by default.
+
+**Behavior:**
+- Restore-all-then-wipe: if ANY `.env` can't be restored, nothing is wiped (Shard B is kept for a retry)
+- Enroll-only keys (no `.env`) warn and are removed, but never block the uninstall
+- OpenClaw symmetric undo is best-effort and never blocks the wipe
+
+**Use case:** Clean, complete removal of Worthless with every project's real key handed back.
+
+#### `worthless scan [OPTIONS] [PATHS]`
+**Detect exposed API keys in files and environment.**
+
+Scans files for high-entropy strings that match known API key patterns. Ignores shard-A values that were created by Worthless (checks Shannon entropy + format coherence).
 
 **Options:**
 - `--deep`: Scan beyond `.env`/`.env.local` — includes `*.yml`, `*.yaml`, `*.toml`, `*.json` in project root, plus env var dump
 - `--format {sarif|human}`: Output format (default: human-readable)
+- `--code`: Opt-in source-code scan. Walks project source files and matches hardcoded LLM provider base URLs (from the bundled registry) case-insensitively. Warn-only; always exits 0. Skips `.venv`, `node_modules`, `vendor`, `dist`, `build`, `__pycache__`, lockfiles, minified files, and files >1 MB. Respects `.gitignore` via `git ls-files` when inside a git repo. Scanned extensions: `.py`, `.js`, `.ts`, `.tsx`, `.mjs`, `.cjs`, `.jsx`, `.go`, `.rs`, `.rb`, `.java`, `.kt`, `.swift`, `.toml`, `.yaml`, `.yml`, `.json`, `.md`. **Does NOT detect**: runtime-composed URLs (e.g. `"https://api." + "openai.com/v1"`), IP literals, regional/Azure/Bedrock endpoints, env-var interpolation (e.g. `base_url=os.environ["OPENAI_BASE_URL"]`), or vendored SDKs.
+- `--ai-prompt` / `--no-ai-prompt`: When `--code` finds hardcoded URLs, emits a copy-pasteable prompt block on stderr addressed to the active AI agent (Claude Code, Cursor, etc.), instructing it to replace each hardcoded URL with the suggested env var. On by default when `--code` is active. Suppress with `--no-ai-prompt`. Never emitted on zero findings.
 - `PATHS`: Explicit file/directory paths to scan
+
+**JSON output with `--code --json`:** Adds `"code_findings": [...]` to the existing `{"schema_version": 2, "findings": [...], "orphans": [...]}` envelope. Each entry: `{file, line, column, matched_url, provider_name, suggested_env_var, line_text}`. Note: `line_text` has API keys redacted as `[REDACTED]`.
+
+**SARIF output:** Intentionally omits code findings. SARIF covers `.env`-key surface only.
 
 **Output:**
 - Lists findings with file, line, value preview, and confidence level
 - SARIF format for CI/CD integration
 
-**Use case:** Security audit before deploying; detect accidentally-committed keys in Git history.
+**Use case:** Security audit before deploying; detect accidentally-committed keys in Git history; detect hardcoded provider URLs that bypass the proxy.
 
 #### `worthless status [OPTIONS]`
 **List enrolled keys and check proxy health.**
@@ -134,10 +230,41 @@ Locked keys:
 Proxy: http://127.0.0.1:8787 (running)
 ```
 
+### worthless doctor
+
+**Diagnose and repair stuck states across all known failure modes. WOR-464 adds a check registry + `--json` machine-readable output.**
+
+`worthless doctor` runs eight checks: `recovery_import`, `orphan_db`, `openclaw`, `icloud_keychain`, `orphan_keychain`, `stranded_shards`, `fernet_drift`, `broken_status`. Read-only by default. `--fix` enables repair for all checks EXCEPT `fernet_drift` (drift is hardcoded `fixable=False` — only the user can pick which side is canonical, never the tool).
+
+Every finding from a failing check carries a `remediation` — the exact command to fix it. `worthless doctor --explain <check_id>` prints a check's fix playbook on demand without running anything (offline, no proxy/keyring needed); an unknown id lists the valid check ids.
+
+**JSON mode:**
+
+```bash
+worthless doctor --json
+```
+
+Emits a single document on stdout:
+
+```json
+{"schema_version": "1",
+ "ok": true,
+ "checks": [{"check_id": "orphan_db", "status": "ok", "findings": [],
+             "summary": "No orphan enrollments found.",
+             "fixable": true, "fixed": [], "skipped_reason": null}, ...],
+ "summary": {"total": 8, "warn": 0, "error": 0, "fixed": 0}}
+```
+
+`schema_version` is bumped only on breaking shape changes. New `check_id` values, new finding keys, and new optional fields are additive.
+
+**Troubleshooting tree:** `docs/troubleshooting.md` has one section per `check_id` with the user-visible symptom and the exact command to run.
+
+The detailed text-mode output is documented under the `worthless doctor [OPTIONS]` subsection further down.
+
 #### `worthless wrap [OPTIONS] COMMAND [ARGS...]`
 **Ephemeral proxy + child process lifecycle.**
 
-Starts a temporary reverse proxy on a random port, injects `{PROVIDER}_BASE_URL` environment variables (e.g., `OPENAI_BASE_URL=http://127.0.0.1:XXXXX`), spawns a child process with those env vars, waits for the child to exit, and cleans up the proxy.
+Starts a temporary reverse proxy on the same port `worthless lock` wrote into your `.env` (default `8787`, override with `WORTHLESS_PORT`), spawns a child process with the parent environment unchanged, waits for the child to exit, and cleans up the proxy. Pre-8rqs, wrap synthesised `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` into the child env. Post-8rqs (Phase 8), `worthless lock` writes the per-enrollment `*_BASE_URL` directly into your `.env` (preserving your var names — `OPENROUTER_BASE_URL` stays `OPENROUTER_BASE_URL`), so your SDK picks them up via dotenv. Wrap is a passthrough on the env side; on the network side, it binds the port your `.env` already points at so `wrap` and `up` are alternatives — running both at once produces a clean error, not a silent collision.
 
 The child's API SDK calls automatically route through the proxy. No code changes required.
 
@@ -195,10 +322,33 @@ Reads the PID file (`~/.worthless/proxy.pid`), sends SIGTERM to the process grou
 - Graceful: gives proxy time to flush logs and close connections
 - Process-tree aware: kills all child processes spawned by the proxy
 
+#### `worthless service [SUBCOMMAND]`
+**Install and manage a persistent proxy via the OS supervisor (macOS launchd / Linux systemd user unit).**
+
+Runs foreground `worthless up` (sidecar-supervised) under a platform unit — not the legacy sidecar-less daemon path. Windows is unsupported (`WRTLS-*` error). If a service is installed but stopped, bare `worthless` hints `worthless service start` instead of spawning a duplicate proxy.
+
+**Subcommands:**
+- `install`: Write unit/plist, enable linger (Linux), start, verify `/healthz`
+- `uninstall`: Stop, disable, remove unit (keys in `~/.worthless/` stay intact)
+- `status`: Install state + proxy health (`--json` for agents)
+- `start` / `stop` / `restart`: Control an installed unit
+- `logs`: Tail service logs (`--follow` / `-f`)
+
+**Examples:**
+```bash
+worthless service install              # interactive confirm
+worthless service install --yes        # non-interactive
+worthless service status --json
+worthless service start
+worthless service logs -f
+```
+
+**Interaction with default command:** Bare `worthless` starts a supervised proxy for the session; `worthless service install` is opt-in persistence (post-lock banner in a future release points here).
+
 #### `worthless revoke [OPTIONS] ALIAS`
 **Wipe an enrolled key (delete shards and all DB records).**
 
-Permanently deletes Shard A from disk (with zero-fill to resist recovery), deletes Shard B and all associated records (enrollments, spend logs, time windows) from the database in a single atomic transaction.
+Deletes Shard B and all associated records (enrollments, spend logs, time windows) from the database in a single atomic transaction. Removes shard-A from `.env` if still present.
 
 **Options:**
 - (None — takes alias as argument)
@@ -208,7 +358,6 @@ Permanently deletes Shard A from disk (with zero-fill to resist recovery), delet
 - Example: `openai-69ccc444`, `anthropic-a1b2c3d4`
 
 **Behavior:**
-- Zeroes Shard A contents before unlink (best-effort on CoW filesystems; full-disk encryption is the real protection)
 - Atomic DB cleanup: all related records removed in one transaction
 - Idempotent: succeeds even if alias doesn't exist
 
@@ -224,6 +373,84 @@ Lower-level than `lock` — enrolls one key by alias without scanning `.env`. De
 - `--provider, -p NAME`: Provider name (required)
 
 **Use case:** `echo "$OPENAI_KEY" | worthless enroll --alias ci-openai --provider openai --key-stdin`
+
+#### `worthless restore TARGET`
+**Atomically rewrite a `.env` from stdin bytes (recovery path).**
+
+Thin wrapper around `safe_restore` for ops runbooks and recovery scripts that need to stamp known-good bytes onto a `.env` while bypassing only the DELTA blowup-ratio gate. Every other invariant still fires (SYMLINK, CONTAINMENT, BASENAME, SNIFF, SIZE, TOCTOU, PATH_IDENTITY, FILESYSTEM).
+
+**Arguments:**
+- `TARGET`: Path to the `.env` file to restore.
+
+**Behavior:**
+- Reads replacement bytes from stdin; empty stdin refuses.
+- On any invariant violation: `.env` is byte-identical (unchanged), exit code 1.
+
+**Use case:** `cat backup.env | worthless restore ./.env`
+
+#### `worthless providers list|register [OPTIONS]`
+**Manage the LLM-provider registry (URL → wire-protocol mapping).**
+
+The registry maps known upstream URLs (e.g., `https://api.openai.com/v1`) to a wire protocol (`openai` / `anthropic`) so `worthless lock` can auto-detect protocol when scanning `.env` files.
+
+**Subcommands:**
+- `list` — Print the merged registry: bundled + optional `~/.worthless/providers.toml`. Use the global `--json` flag for machine-readable output.
+- `register --name NAME --url URL --protocol {openai,anthropic} [--force]` — Append a custom provider to `~/.worthless/providers.toml`. Refuses bundled-name conflicts; refuses bundled-URL conflicts unless `--force`.
+
+**Bundled providers:** openai, anthropic, openrouter, groq, together, ollama. Add more locally via `register` without modifying the package.
+
+**Use case:** Lock keys from any OpenAI-protocol-compatible provider (OpenRouter, Groq, Together, Ollama, internal LLM gateways). The proxy uses each enrollment's stored URL at request time, so multiple providers coexist in one `.env`.
+
+#### `worthless doctor [OPTIONS]`
+**Diagnose and repair stuck states. Safe to run at any time.**
+
+Runs three checks in sequence:
+
+1. **Recovery file imports** — if a sibling Mac ran `--fix` and wrote recovery files to `~/.worthless/recovery/`, import any missing keys into this Mac's local keychain automatically.
+2. **iCloud-synced keychain entries** — Worthless keys should stay on this Mac only. If any have been synced across your Apple devices via iCloud Keychain, doctor lists them and (`--fix`) migrates them to device-local storage. A one-time recovery copy is saved to `~/.worthless/recovery/` before migration so a second Mac can re-import. The migration prompts with an explicit multi-device warning before any changes.
+3. **Orphan DB rows** — DB enrollment rows whose `.env` line was deleted by the user. Surfaces and (`--fix`) purges them. Closes the dogfood-discovered stuck state where `worthless unlock` says "no enrolled keys" but `worthless status` lists them as PROTECTED.
+
+**Options:**
+
+| Flag | Meaning |
+|---|---|
+| *(no flags)* | Read-only diagnose mode — lists all findings, exit 0, no writes |
+| `--fix` | Repair mode — prompts for confirmation before any changes |
+| `--fix --yes` / `-y` | Repair without prompt (CI / non-interactive) |
+| `--fix --dry-run` | Show planned actions, leave everything intact |
+
+**Example output (clean state):**
+
+```
+$ worthless doctor
+No issues found.
+```
+
+**Example output (iCloud finding):**
+
+```
+$ worthless doctor
+Found 2 Worthless key(s) stored in iCloud Keychain (syncs across your Apple devices).
+Worthless keys should stay on this Mac only.
+Run: worthless doctor --fix
+```
+
+**Example output (orphan finding):**
+
+```
+$ worthless doctor
+Can't restore openai-abc123: .env line deleted.
+Run: worthless doctor --fix
+```
+
+**User-facing wording:** plain English throughout — `"can't restore"`, `"stored in iCloud Keychain"`, `"this Mac only"`. No engineer jargon. The fix command name is always named so the user sees the recovery path.
+
+**Note:** Full check registry + `--json` output land in WOR-464. For now, all output is human-readable text.
+
+**Use cases:**
+- `.env` line manually deleted → `worthless doctor --fix` purges the orphan row.
+- Keys appearing in iCloud Keychain → `worthless doctor --fix` migrates to device-local storage (multi-device warning shown first).
+- Moved to a new Mac → `worthless doctor` auto-imports recovery files left by the originating Mac.
 
 #### `worthless mcp [OPTIONS]`
 **Start the MCP server (stdio transport).**
@@ -321,8 +548,8 @@ Show enrolled keys and proxy health. Returns JSON:
 ### `worthless_lock(env_path: str = ".env") -> str`
 Lock all keys in a `.env` file. Returns summary of keys locked.
 
-### `worthless_scan(paths: list[str], deep: bool) -> str`
-Scan files for exposed keys. Returns SARIF or human-readable findings.
+### `worthless_scan(paths: list[str], deep: bool, code: bool = False) -> str`
+Scan files for exposed keys. Returns SARIF or human-readable findings. Pass `code=True` to also scan source files for hardcoded provider base URLs; adds `"code_findings"` array to JSON output. Does NOT detect runtime-composed URLs, IP literals, regional endpoints, or env-var interpolation.
 
 ### `worthless_spend(alias: str | None = None) -> str`
 Token spend history. Pass alias for one key, omit for all. Returns JSON.
@@ -333,8 +560,7 @@ Token spend history. Pass alias for one key, omit for all. Returns JSON.
 
 - `WORTHLESS_PORT`: Default port for `worthless up` (default: 8787)
 - `WORTHLESS_DEBUG`: Enable debug logging (when set)
-- `OPENAI_BASE_URL`: (Set by `wrap` and `up`) Proxy endpoint for OpenAI SDK
-- `ANTHROPIC_BASE_URL`: (Set by `wrap` and `up`) Proxy endpoint for Anthropic SDK
+- `*_BASE_URL` (e.g., `OPENAI_BASE_URL`, `OPENROUTER_BASE_URL`): Set in your `.env` by `worthless lock` to point each enrolled key at the local proxy. Your SDK reads them via dotenv. Var names are preserved — lock does not rename `OPENROUTER_BASE_URL` to `OPENAI_BASE_URL`. Pre-8rqs these were synthesised by `wrap`; post-8rqs they live in `.env`.
 
 ---
 
@@ -355,7 +581,6 @@ All tables are ACID-transactional. Key deletion via `revoke` is atomic: all reco
 
 - `~/.worthless/`: Home directory for Worthless state
   - `worthless.db`: SQLite database (shards, enrollments, spend logs, rules)
-  - `shards_a/`: Unencrypted Shard A files (one per enrolled key)
   - `proxy.pid`: PID and port of running proxy (when `up -d` is active)
   - `proxy.log`: Proxy logs (when `up -d` is active)
 
@@ -380,7 +605,8 @@ worthless down                    # stop when done
 
 ### Audit for exposed keys
 ```bash
-worthless scan --deep
+worthless scan --deep             # .env and config files
+worthless scan --code             # source files — hardcoded provider URLs (routing bypasses)
 ```
 
 ### Permanently delete a key
@@ -394,7 +620,7 @@ worthless unlock
 # Your .env now has the real key
 # Use it directly (not through proxy)
 worthless lock
-# Split again, back to decoy
+# Split again, back to shard-A
 ```
 
 ### Pre-commit hook (scan before every commit)
@@ -414,34 +640,86 @@ repos:
 
 ## Integration with AI Agents
 
-Agents (Claude Code, Cursor, OpenClaw) can invoke Worthless via:
+### Recommended: MCP server (native tool calls)
 
-1. **CLI shell commands** (primary):
-   ```bash
-   worthless status
-   worthless scan --deep
-   worthless wrap pytest
-   ```
+Add to `.mcp.json` — works on any machine with Node ≥ 18, no Python required upfront:
 
-2. **MCP server** (when available):
-   ```
-   Tool: worthless_status() -> {"keys": [...], "proxy": {...}}
-   Tool: worthless_scan(paths, deep) -> "key exposures found"
-   Tool: worthless_wrap(command, args) -> "command output"
-   ```
+```json
+{
+  "mcpServers": {
+    "worthless": {
+      "command": "npx",
+      "args": ["-y", "worthless-mcp"]
+    }
+  }
+}
+```
+
+After restart, agents get native MCP tools:
+```text
+Tool: worthless_status()            -> {"keys": [...], "proxy": {...}}
+Tool: worthless_lock(env_path)      -> {"protected_count": N}
+Tool: worthless_scan(paths, deep)   -> {"findings": [...], "summary": {...}}
+Tool: worthless_spend(alias)        -> {"spend": [...]}
+```
+
+### Alternative: CLI shell commands
+
+```bash
+worthless status
+worthless scan --deep
+worthless scan --code             # detect hardcoded provider URLs before lock
+worthless wrap pytest
+```
 
 Agents should:
 - Call `worthless status` to check if a proxy is running before issuing API calls
 - Use `worthless scan` to audit code before committing
+- Run `worthless scan --code` before `lock` to surface any hardcoded provider URLs that would bypass the proxy at runtime. When `--code` finds URLs, a copy-pasteable prompt block is emitted to stderr — act on it directly to replace each hardcoded URL with the suggested env var.
 - Use `worthless wrap` to transparently route agent code through the proxy, gaining all spending/rate/time controls
 - Call `worthless lock` before version control to ensure keys are never committed
 
 ---
 
+## Security FAQ
+
+**What if my `.env` file leaks?**
+The attacker gets shard-A — a string that looks like a real API key but is cryptographically useless on its own. Without shard-B (encrypted in the proxy's database), they cannot reconstruct the original key. They cannot call any provider with it.
+
+**What if the server (proxy) is compromised?**
+The attacker gets shard-B (encrypted with Fernet) and potentially the Fernet key. They can decrypt shard-B, but shard-B alone is worthless — they still need shard-A from the client's `.env`. Compromising both the client machine AND the server is required to reconstruct a key.
+
+**What if someone intercepts the request between my app and the proxy?**
+The proxy runs on localhost (`127.0.0.1`). Traffic never leaves your machine. An attacker would need local access to your machine — at which point they could read `.env` directly anyway.
+
+**Does the proxy see my prompts or responses?**
+The proxy forwards requests and responses transparently. It does NOT log, store, or inspect prompt content or response content. It only extracts token counts from responses for spend metering.
+
+**What does worthless NOT protect against?**
+- An attacker with access to both your machine AND the server (they get both shards)
+- An attacker who can read your `.env` AND intercept the proxy's database (same as above)
+- Provider-side breaches (worthless protects the key in transit, not at the provider)
+- Keys used outside worthless (if you also paste the key into a script, that copy is not protected)
+- Source code that hardcodes a provider base URL (e.g. `base_url="https://api.openai.com/v1"`) — those calls bypass the proxy entirely at runtime. Use `worthless scan --code` to surface these before running `lock`.
+
+**What about `.env` file permissions?**
+`worthless lock` removes group and other permissions from `.env` after writing shard-A (owner-only access). If your `.env` was world-readable before, lock fixes that.
+
 ## Security Notes
 
-- **Shard A** is stored unencrypted on your machine in `~/.worthless/shards_a/`. Full-disk encryption is required for protection at rest.
+- **Shard A** lives in your `.env` file as a format-preserving value (same prefix, charset, and length as the original key). It is sent to the proxy per-request via standard auth headers.
 - **Shard B** is encrypted in the database, but only an encryption boundary — not a trust boundary. The proxy should run on trusted infrastructure.
 - **Key Reconstruction** happens only in proxy memory during a single API call. Key is zero-filled immediately after use.
 - **Spend Cap** is best-effort pre-check, not a hard enforcement boundary (production fix pending).
-- For production deployments, see [SECURITY_RULES.md](SECURITY_RULES.md) for crypto constraints and threat model.
+- For production deployments, see [docs/security.md](docs/security.md) for the threat model and [CONTRIBUTING-security.md](CONTRIBUTING-security.md) for crypto invariants.
+
+## Install (per-platform with machine-readable surface)
+
+When installing this tool for a user, agents should use the platform-specific guide. Each guide ends with a `## For AI agents` section containing a fenced YAML block with the actionable surface (install/verify/lock commands, expected popup counts, proxy URL templates, known limitations):
+
+- [docs/install/mac.md](docs/install/mac.md) — macOS
+- [docs/install/linux.md](docs/install/linux.md) — Linux (Ubuntu / Debian / Alpine)
+- [docs/install/wsl.md](docs/install/wsl.md) — Windows (WSL2)
+- [docs/install/docker.md](docs/install/docker.md) — Docker (host-CLI + container-app, compose stack, team server)
+
+Schema and stability contract: [docs/install/agent-schema.md](docs/install/agent-schema.md).

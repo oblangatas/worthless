@@ -56,7 +56,7 @@ repos:
     rev: v2.4.2
     hooks:
       - id: codespell
-        args: ["--skip=*.lock,*.json", "--ignore-words-list=shard,shards,te"]
+        args: ["--skip=*.lock,*.json", "--ignore-words-list=shard,shards,te,fpr"]
 
   # Pyright: static type checking (basic mode src/, strict on crypto/)
   - repo: local
@@ -91,6 +91,17 @@ repos:
         files: '\.py$'
         stages: [pre-push]
 
+  # Commit provenance: reject unsigned / wrong-author commits at push time (WOR-589)
+  - repo: local
+    hooks:
+      - id: commit-provenance
+        name: "provenance: signed + canonical author (pre-push)"
+        language: system
+        entry: uv run python scripts/hooks/check_pushed_commit_provenance.py
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
+
   # Actionlint: GitHub Actions YAML syntax and logic errors
   - repo: https://github.com/rhysd/actionlint
     rev: v1.7.7
@@ -109,7 +120,7 @@ repos:
       - id: pip-licenses
         name: "licenses: no GPL/AGPL deps"
         language: system
-        entry: uv run pip-licenses --allow-only "MIT;MIT License;DFSG approved; MIT License;BSD License;BSD-2-Clause;BSD-3-Clause;3-Clause BSD License;BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0;Apache Software License;Apache Software License; BSD License;Apache Software License; MIT License;Apache-2.0;Apache-2.0 OR BSD-2-Clause;Apache-2.0 OR BSD-3-Clause;ISC License (ISCL);Python Software Foundation License;PSF-2.0;Mozilla Public License 2.0 (MPL 2.0);MPL-2.0;The Unlicense (Unlicense);CC0 1.0 Universal (CC0 1.0) Public Domain Dedication;Historical Permission Notice and Disclaimer (HPND);UNKNOWN;GNU Lesser General Public License v2 or later (LGPLv2+);GNU General Public License v3 or later (GPLv3+);GNU Affero General Public License v3"
+        entry: uv run pip-licenses --allow-only "MIT;MIT License;DFSG approved; MIT License;BSD License;BSD-2-Clause;BSD-3-Clause;3-Clause BSD License;BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0;Apache Software License;Apache Software License; BSD License;Apache Software License; MIT License;Apache-2.0;Apache-2.0 OR BSD-2-Clause;Apache-2.0 OR BSD-3-Clause;ISC License (ISCL);Python Software Foundation License;PSF-2.0;Mozilla Public License 2.0 (MPL 2.0);MPL-2.0;MPL-2.0 AND MIT;The Unlicense (Unlicense);CC0 1.0 Universal (CC0 1.0) Public Domain Dedication;Historical Permission Notice and Disclaimer (HPND);UNKNOWN;GNU Lesser General Public License v2 or later (LGPLv2+);LGPL-2.1-or-later;GNU General Public License v3 or later (GPLv3+);GNU Affero General Public License v3"
         pass_filenames: false
         stages: [pre-push]
 
@@ -161,6 +172,17 @@ repos:
         pass_filenames: false
         files: '(pyproject\.toml|uv\.lock)$'
 
+      # Keep requirements.txt (the Snyk badge's scan source) in sync with
+      # uv.lock. Snyk's live badge can't parse uv.lock, so the README badge
+      # points at this exported, parseable manifest (?targetFile=requirements.txt).
+      # --no-dev scopes it to the runtime tree users actually install.
+      - id: uv-export-requirements
+        name: "supply chain: export requirements.txt for Snyk badge"
+        language: system
+        entry: uv export --no-dev --no-hashes --format requirements-txt -o requirements.txt
+        pass_filenames: false
+        files: '(pyproject\.toml|uv\.lock)$'
+
   # deptry: catches missing, unused, and transitive deps.
   # Anti-slopsquatting — detects imports of packages not in your dependency tree
   # (LLMs hallucinate package names; attackers register them).
@@ -178,9 +200,27 @@ repos:
       - id: uv-audit
         name: "supply chain: vulnerability scan"
         language: system
-        entry: sh -c 'uv export --frozen --no-emit-project | uv run pip-audit --disable-pip -r /dev/stdin'
+        # Ignore list — each entry MUST cite its tracking ticket.
+        # Re-check quarterly; drop an ID once the upstream fix lands.
+        #   GHSA-58qw-9mgm-455v : pip 26.0.1 tarball handling (dev-only; no fix
+        #                        available as of 2026-04-24). Tracked in beads
+        #                        worthless-lwvs. Drop when pip patches.
+        entry: sh -c 'uv export --frozen --no-emit-project | uv run pip-audit --disable-pip -r /dev/stdin --ignore-vuln GHSA-58qw-9mgm-455v'
         pass_filenames: false
         stages: [pre-push]
+
+  # ── Lock command regression gate ───────────────────────────────
+  # Run the re-lock tests whenever lock.py changes. Prevents the tuple-order
+  # class of bug that already landed once (WOR-504) — tests exist but only
+  # catch regressions if they actually run.
+  - repo: local
+    hooks:
+      - id: test-lock-rerun
+        name: "test: lock re-run contract (TestLockRerun)"
+        language: system
+        entry: uv run pytest tests/test_cli_lock.py::TestLockRerun -x -q --tb=short
+        pass_filenames: false
+        files: 'src/worthless/cli/commands/lock\.py$'
 
   # ── 7. Conventional commits ────────────────────────────────────
   - repo: https://github.com/compilerla/conventional-pre-commit

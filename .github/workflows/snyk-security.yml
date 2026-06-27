@@ -1,0 +1,42 @@
+# Snyk Open Source (SCA) scan — powers the vulnerability badge on README.
+# Code/SAST, IaC, and container scans from the Snyk template were removed:
+# Semgrep + Bandit + CodeQL already cover SAST, and we have no container
+# registry targets to monitor.
+
+name: Snyk Security
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  snyk:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    env:
+      SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Set up Snyk CLI
+        uses: snyk/actions/setup@8e119fbb6c251787721d34ba683ed48eba792766
+      - name: Set up uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+      # Snyk's Python scanner can't read uv.lock, so it would otherwise resolve
+      # its own tree from pyproject.toml and report versions we don't ship.
+      # Export the locked runtime deps to a format Snyk parses natively.
+      - name: Export locked runtime deps for Snyk
+        run: uv export --no-dev --no-hashes --format requirements-txt -o requirements.txt
+      # Uploads the project snapshot to Snyk.io so the dashboard reflects our
+      # actual locked tree. Non-fatal — a transient upload failure must not
+      # fail the build.
+      - name: Snyk Open Source monitor
+        run: snyk monitor --file=requirements.txt --package-manager=pip
+        continue-on-error: true

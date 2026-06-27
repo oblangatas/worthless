@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "openai": {
+      "token": "<key-shaped-redacted>",
+      "cachedAt": "2026-05-17T10:00:00Z"
+    }
+  }
+}

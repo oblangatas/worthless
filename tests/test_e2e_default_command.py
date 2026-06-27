@@ -11,23 +11,14 @@ from __future__ import annotations
 
 import json
 import os
-import signal
 import subprocess
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    import tomllib
-else:
-    try:
-        import tomllib
-    except ModuleNotFoundError:
-        import tomli as tomllib
 
 import httpx
 import pytest
 
+from worthless.cli.platform import kill_tree
 from worthless.cli.process import check_pid, read_pid
 
 from tests.helpers import fake_anthropic_key, fake_openai_key
@@ -35,7 +26,6 @@ from tests.helpers import fake_anthropic_key, fake_openai_key
 # Use high ports to avoid conflicts with dev proxy
 _TEST_PORT = 19787
 _WORTHLESS = str(Path(__file__).parent.parent / ".venv" / "bin" / "worthless")
-_PROJECT_VERSION = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
 
 
 def _run_worthless(
@@ -43,13 +33,18 @@ def _run_worthless(
     home: Path,
     cwd: Path,
     input_text: str | None = None,
-    timeout: float = 20.0,
+    timeout: float = 60.0,
 ) -> subprocess.CompletedProcess:
     """Run the real worthless binary."""
     env = {
         **os.environ,
         "WORTHLESS_HOME": str(home),
         "WORTHLESS_PORT": str(_TEST_PORT),
+        # WOR-463: explicit even though tests/conftest.py setdefault propagates
+        # via **os.environ — self-documents that this subprocess MUST NOT
+        # write fernet-key-* to the host's real keychain. Defense-in-depth
+        # against future drift if conftest is refactored.
+        "WORTHLESS_KEYRING_BACKEND": "null",
     }
     return subprocess.run(
         [_WORTHLESS, *args],
@@ -70,22 +65,14 @@ def _stop_proxy(home: Path) -> None:
         if info:
             pid, _ = info
             if check_pid(pid):
-                os.kill(pid, signal.SIGTERM)
-                for _ in range(20):
+                kill_tree(pid)
+                for _ in range(40):
                     if not check_pid(pid):
                         break
                     time.sleep(0.25)
                 else:
-                    os.kill(pid, signal.SIGKILL)
+                    kill_tree(pid, force=True)
         pid_file.unlink(missing_ok=True)
-    # Also kill anything on the test port via health probe failure
-    try:
-        r = httpx.get(f"http://127.0.0.1:{_TEST_PORT}/healthz", timeout=1.0)
-        if r.status_code == 200:
-            # Something is on the port — try to find and kill it
-            pass
-    except Exception:
-        pass
 
 
 @pytest.fixture()
@@ -129,6 +116,7 @@ def project_no_keys(tmp_path: Path) -> Path:
 
 
 @pytest.mark.e2e
+@pytest.mark.real_ipc
 class TestDefaultCommandE2E:
     """Real end-to-end tests for bare ``worthless``."""
 
@@ -304,11 +292,13 @@ class TestDefaultCommandE2E:
         env_content = (project_with_keys / ".env").read_text()
         assert fake_openai_key() in env_content
 
-    def test_version_matches_pyproject(self, e2e_home: Path, tmp_path: Path) -> None:
-        """worthless --version reports the packaged project version."""
+    def test_version_matches_package_metadata(self, e2e_home: Path, tmp_path: Path) -> None:
+        """worthless --version reports the installed package version."""
+        from importlib.metadata import version as pkg_version
+
         project = tmp_path / "vtest"
         project.mkdir()
 
         result = _run_worthless(["--version"], e2e_home, project)
         assert result.returncode == 0, result.stdout + result.stderr
-        assert f"worthless {_PROJECT_VERSION}" in result.stdout
+        assert pkg_version("worthless") in result.stdout

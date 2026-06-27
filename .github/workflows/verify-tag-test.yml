@@ -1,0 +1,62 @@
+name: Verify-tag fixture tests (WOR-323)
+
+# Regression gate for the deploy-worker.yml `Verify tag GPG signature` step.
+# Runs `.github/scripts/test-verify-tag-multikey.sh`, which extracts the
+# actual `run:` block from the deploy workflow and asserts 7 input cases
+# behave as expected.
+#
+# Triggers on changes to either:
+#   - the deploy workflow (the code under test), or
+#   - the test script itself (so test changes still get exercised).
+#
+# This is the durable counterpart to the ephemeral /tmp script used during
+# WOR-323 development. Without it, a future PR that simplifies the awk
+# pattern or drops the PUB_COUNT check could silently re-open the
+# multi-key armor decoy attack with no CI signal.
+
+on:
+  pull_request:
+    paths:
+      - ".github/scripts/verify-tag.sh"
+      - ".github/scripts/test-verify-tag-multikey.sh"
+      - ".github/workflows/verify-tag-test.yml"
+      - ".github/workflows/deploy-worker.yml"
+  push:
+    branches: [main]
+    paths:
+      - ".github/scripts/verify-tag.sh"
+      - ".github/scripts/test-verify-tag-multikey.sh"
+      - ".github/workflows/verify-tag-test.yml"
+      - ".github/workflows/deploy-worker.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-tag-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: GPG verify-tag fixture cases
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify gpg is present
+        # ubuntu-24.04 ships gpg by default; this is a defensive assertion
+        # so a future runner image change that drops gpg gets a clear error
+        # instead of a silent test pass against a different binary.
+        run: |
+          set -eu
+          gpg --version | head -1
+          which gpg
+
+      - name: Run multi-key fixture tests
+        run: bash .github/scripts/test-verify-tag-multikey.sh

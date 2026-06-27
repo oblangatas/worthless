@@ -1,0 +1,170 @@
+name: Flake radar (nightly)
+
+# Hammers the unit suite 30x under pytest-xdist nightly and surfaces tests
+# that fail >=3/30 as a rolling "Flake radar" issue. Tests that fail >=3
+# times across the run are repeat offenders worth attention; everything
+# else is acceptable noise.
+#
+# Public repo on standard runners = unlimited GHA minutes (verified). Wall
+# time ~20-30 min/night, $0/month.
+#
+# Why this exists: PR #146 hit a TOCTOU port-binding flake on
+# tests/test_contract.py::test_401_returns_json_content_type (errno 98 on
+# 127.0.0.1:60261). Single-run PR CI cannot catch this class. Reruns mask
+# it. Nightly hammer surfaces it deterministically. (WOR-458)
+
+on:
+  schedule:
+    - cron: "17 3 * * *"   # 03:17 UTC daily — off-peak, off-the-hour
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write           # upsert rolling flake report issue
+
+concurrency:
+  group: flake-radar
+  cancel-in-progress: false
+
+jobs:
+  hammer:
+    name: Hammer suite 30x and report repeat offenders
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up uv + Python
+        uses: ./.github/actions/setup-uv-python
+
+      - name: Sync deps
+        env:
+          UV_CACHE_DIR: /tmp/uv-cache
+        run: uv sync --extra dev --extra test
+
+      - name: Hammer suite 30 times
+        env:
+          UV_CACHE_DIR: /tmp/uv-cache
+        run: |
+          set -uo pipefail   # NOT -e: failing iterations are the SIGNAL
+          : > flakes-raw.txt
+          ITERATIONS=30
+          for i in $(seq 1 "$ITERATIONS"); do
+            echo "===== iter $i / $ITERATIONS ====="
+            # -o "addopts=..." overrides pyproject.toml's `--reruns 1` so
+            # we observe RAW flake rate, not retry-masked rate. Excludes
+            # docker/live/user_flow (need real services) and quarantine
+            # (already-known flakes — they're handled separately).
+            uv run pytest \
+              -n auto --dist loadscope \
+              -m "not docker and not live and not user_flow and not quarantine" \
+              -o "addopts=--strict-config --strict-markers" \
+              --tb=line -q --no-header 2>&1 \
+              | tee "iter-$i.log" \
+              | grep -E '^FAILED ' >> flakes-raw.txt || true
+          done
+          echo "===== aggregating ====="
+          # Each FAILED line is `FAILED tests/foo.py::test_bar - <msg>`;
+          # collapse the trailing message so we group by test ID only.
+          awk '{
+            sub(/ - .*/, "");
+            print
+          }' flakes-raw.txt | sort | uniq -c | sort -rn > flake-report.txt
+          echo "===== flake-report.txt ====="
+          cat flake-report.txt || echo "(empty — clean run)"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: flake-radar-${{ github.run_id }}
+          path: |
+            flake-report.txt
+            flakes-raw.txt
+            iter-*.log
+          retention-days: 30
+
+      - name: Identify repeat offenders (>=3 / 30)
+        id: offenders
+        run: |
+          set -uo pipefail
+          # awk: count is field 1; test ID is fields 2..NF
+          awk '$1 >= 3 { count=$1; $1=""; sub(/^ +/,""); printf "%4d  %s\n", count, $0 }' \
+            flake-report.txt > offenders.txt || true
+          if [ -s offenders.txt ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "----- repeat offenders -----"
+            cat offenders.txt
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "(no repeat offenders this run — clean)"
+          fi
+
+      - name: Upsert rolling flake report issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TITLE: "[flake-radar] Latest nightly flake report"
+          # Pass step output via env, not template-expansion, so an
+          # attacker-controlled value can't smuggle shell into the
+          # `run` block. (zizmor: template-injection guard.)
+          OFFENDERS_FOUND: ${{ steps.offenders.outputs.found }}
+        run: |
+          set -euo pipefail
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          DATE_UTC=$(date -u +"%Y-%m-%d %H:%M UTC")
+
+          {
+            echo "_Updated automatically by \`.github/workflows/flake-radar.yml\` (WOR-458)._"
+            echo
+            echo "**Last run**: ${DATE_UTC}"
+            echo "**Workflow run**: ${RUN_URL}"
+            echo "**Iterations**: 30 (xdist parallel)"
+            echo
+            if [ "${OFFENDERS_FOUND}" = "true" ]; then
+              echo "## ⚠️ Repeat offenders (failed ≥3 of 30 runs)"
+              echo
+              echo '```'
+              cat offenders.txt
+              echo '```'
+              echo
+              echo "These tests failed often enough that the racing/timing/cleanup bug they hide should be fixed — or they should be marked \`@pytest.mark.quarantine\` until a human can investigate."
+            else
+              echo "## ✅ Clean run — no repeat offenders"
+              echo
+              echo "No test failed ≥3 times across the 30 hammer iterations."
+            fi
+            echo
+            echo "## Full report"
+            echo
+            echo '```'
+            if [ -s flake-report.txt ]; then
+              cat flake-report.txt
+            else
+              echo "(empty — every iteration green)"
+            fi
+            echo '```'
+            echo
+            echo "<sub>Raw per-iteration logs are attached to the workflow run as artifact \`flake-radar-${GITHUB_RUN_ID}\` (30-day retention).</sub>"
+          } > body.md
+
+          # Upsert: find an open issue whose title is EXACTLY $TITLE.
+          # gh issue list --search does substring match; require exact in jq.
+          EXISTING=$(gh issue list \
+            --state open \
+            --search "${TITLE} in:title" \
+            --json number,title \
+            --jq "[.[] | select(.title == \"${TITLE}\")][0].number // empty")
+          if [ -n "${EXISTING}" ]; then
+            echo "Updating issue #${EXISTING}"
+            gh issue edit "${EXISTING}" --body-file body.md
+          else
+            echo "Creating new rolling issue"
+            gh issue create \
+              --title "${TITLE}" \
+              --label "flaky" \
+              --body-file body.md
+          fi

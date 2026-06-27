@@ -45,6 +45,28 @@ class MockAsyncByteStream(httpx.AsyncByteStream):
             yield chunk
 
 
+def verify_upstream_response_openai(data: dict) -> None:
+    """Assert 200/429 from an OpenAI-protocol upstream and 'choices' on 200."""
+    status = data["status"]
+    body = data.get("body", {})
+    assert status in (200, 429), (
+        f"Expected 200 or 429 from OpenAI-protocol upstream, got {status}. body: {body}"
+    )
+    if status == 200:
+        assert "choices" in body, f"Missing 'choices' in 200 response: {body}"
+
+
+def verify_upstream_response_anthropic(data: dict) -> None:
+    """Assert 200/429/529 from an Anthropic-protocol upstream and 'content' on 200."""
+    status = data["status"]
+    body = data.get("body", {})
+    assert status in (200, 429, 529), (
+        f"Expected 200/429/529 from Anthropic upstream, got {status}. body: {body}"
+    )
+    if status == 200:
+        assert "content" in body, f"Missing 'content' in 200 response: {body}"
+
+
 def make_streaming_response(
     chunks: list[bytes],
     status_code: int = 200,

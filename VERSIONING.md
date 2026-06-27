@@ -2,43 +2,44 @@
 
 ## Rule
 
-Phase number = minor version. Sub-phases = patch version.
+Worthless follows [SemVer](https://semver.org/) for PyPI releases:
 
 ```
-Phase N     → v0.N.0
-Phase N.X   → v0.N.X
+MAJOR.MINOR.PATCH
 ```
 
-Git tags are created on the commit that completes each phase (UAT passed or merge commit).
+- **PATCH** — backwards-compatible bug fixes, doc updates
+- **MINOR** — backwards-compatible new features
+- **MAJOR** — breaking changes to CLI, config, or proxy protocol
+
+Git tags `vMAJOR.MINOR.PATCH` trigger `.github/workflows/publish.yml`, which publishes the matching release to PyPI via [trusted publishing](https://docs.pypi.org/trusted-publishers/).
 
 ## Current Version
 
-**v0.3.1** — Phase 3.1: Proxy Hardening (UAT passed 2026-03-25)
+**v0.3.0** — first PyPI release (2026-04-18).
 
-## Version History
+## Release History
 
-| Version | Phase | Description | Status |
-|---------|-------|-------------|--------|
-| `v0.1.0` | Phase 1 | Crypto Core & Storage | Done |
-| `v0.2.0` | Phase 2 | Provider Adapters | Done |
-| `v0.3.0` | Phase 3 | Proxy Service | Done |
-| `v0.3.1` | Phase 3.1 | Proxy Hardening | Done |
-| `v0.4.0` | Phase 4 | CLI | Next |
-| `v0.5.0` | Phase 5 | Security Posture Docs | Planned |
-| `v0.9.0` | — | Cleanup, housekeeping, polish | Planned |
-| `v1.0.0` | — | PoC milestone complete | Planned |
+| Version | Date       | Highlights                                                                 |
+|---------|------------|----------------------------------------------------------------------------|
+| `v0.3.0`| 2026-04-18 | First PyPI publish. Magic default command, format-preserving key split (WOR-207 P1–P2), Anthropic auth, CodeQL hardening. |
+
+## Historical (pre-PyPI) tags
+
+Tags `v0.1.0`, `v0.2.0`, `v0.3.0` (legacy), `v0.3.1`, `v1.0` were created during PoC development as phase/milestone markers and **were never published to PyPI**. They remain in the repo as historical anchors only. The first tag pushed to the `publish.yml` pipeline is `v0.3.0` (this release).
 
 ## Milestones
 
-| Milestone | Version Range | Goal |
-|-----------|---------------|------|
-| PoC | `v0.1.0` → `v1.0.0` | Python + SQLite, prove the architecture |
-| Harden | `v1.1.0+` | Rust reconstruction service, production hardening |
-| Attack | `v1.x.0+` | Pen-testing, red team, security audit |
+| Milestone | Goal                                                |
+|-----------|-----------------------------------------------------|
+| PoC       | Python + SQLite, prove the architecture — complete  |
+| v1.x      | CLI + proxy maturity, PyPI-published — current      |
+| Harden    | Rust reconstruction service, production hardening   |
+| Attack    | Pen-testing, red team, security audit               |
 
 ## For Agents
 
-- **Check `Current Version` above** to know what's built and tested.
-- **Worktree branches** inherit the version they branched from. Testing or CI work on top of `v0.3.1` is still `v0.3.1` unless it adds new phase-level functionality.
-- **When completing a phase**, update `Current Version` in this file and create a git tag.
-- **Don't invent versions.** If your work doesn't complete a phase, don't tag it.
+- **Check `Current Version` above** to know what ships on PyPI.
+- **Do not tag releases without confirmation.** Tagging `vX.Y.Z` on `main` fires the publish workflow and burns that version on PyPI forever (PyPI rejects re-uploads of the same version).
+- **Pre-release dry runs**: push `vX.Y.Zrc1` to test the publish pipeline without burning the final version number.
+- **Update this file** and `pyproject.toml` in the same commit as any version bump — a CI drift test compares them.

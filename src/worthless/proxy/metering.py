@@ -49,7 +49,7 @@ def extract_usage_openai(data: bytes) -> UsageInfo | None:
                     return UsageInfo(total_tokens=total, model=chunk.get("model"))
             except (json.JSONDecodeError, ValueError):
                 continue
-    except Exception:  # noqa: S110 — best-effort SSE decode; malformed response must not raise
+    except Exception:  # noqa: S110 — best-effort SSE decode; malformed response must not raise  # nosec B110
         pass
 
     return None
@@ -90,9 +90,11 @@ def extract_usage_anthropic(data: bytes) -> UsageInfo | None:
         if isinstance(parsed, dict) and "usage" in parsed:
             usage = parsed["usage"]
             input_tokens = usage.get("input_tokens", 0)
+            cache_creation = usage.get("cache_creation_input_tokens", 0)
+            cache_read = usage.get("cache_read_input_tokens", 0)
             output_tokens = usage.get("output_tokens", 0)
             return UsageInfo(
-                total_tokens=input_tokens + output_tokens,
+                total_tokens=input_tokens + cache_creation + cache_read + output_tokens,
                 model=parsed.get("model"),
             )
     except (json.JSONDecodeError, ValueError):
@@ -110,7 +112,12 @@ def extract_usage_anthropic(data: bytes) -> UsageInfo | None:
     start = _find_sse_event_data(lines, "message_start")
     if start:
         msg = start.get("message", {})
-        input_tokens = msg.get("usage", {}).get("input_tokens", 0)
+        usage = msg.get("usage", {})
+        input_tokens = (
+            usage.get("input_tokens", 0)
+            + usage.get("cache_creation_input_tokens", 0)
+            + usage.get("cache_read_input_tokens", 0)
+        )
         model = msg.get("model")
 
     delta = _find_sse_event_data(lines, "message_delta", reverse=True)
@@ -186,7 +193,11 @@ class StreamingUsageCollector:
                     return
                 usage = msg.get("usage")
                 if isinstance(usage, dict):
-                    self._input_tokens = usage.get("input_tokens", 0)
+                    self._input_tokens = (
+                        usage.get("input_tokens", 0)
+                        + usage.get("cache_creation_input_tokens", 0)
+                        + usage.get("cache_read_input_tokens", 0)
+                    )
                 self._model = msg.get("model", self._model)
             elif self._pending_event == "message_delta":
                 usage = parsed.get("usage")

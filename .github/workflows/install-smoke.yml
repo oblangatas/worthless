@@ -1,0 +1,216 @@
+name: Install Smoke (checkout install.sh)
+
+# Checkout-local install.sh smoke across the OS matrix we promise to support.
+# Triggers only when install.sh, its tests, or this workflow change — keeps
+# CI cheap. This proves the PR's install.sh bytes, not the deployed
+# https://worthless.sh Worker. Pushes to a versioned worthless.sh blob still
+# get public curl smoke from MANUAL_SMOKE.md before we promote.
+
+on:
+  pull_request:
+    paths:
+      - "install.sh"
+      - "tests/test_install_*.py"
+      - "tests/_install_helpers.py"
+      - "tests/install_fixtures/**"
+      - ".github/workflows/install-smoke.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "install.sh"
+      - "tests/test_install_*.py"
+      - "tests/_install_helpers.py"
+      - "tests/install_fixtures/**"
+      - ".github/workflows/install-smoke.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static:
+    name: Static checks (set -eu, shellcheck, pinned versions)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up uv + Python
+        uses: ./.github/actions/setup-uv-python
+
+      - name: Run install.sh static + shellcheck tests
+        env:
+          UV_CACHE_DIR: /tmp/uv-cache
+        run: |
+          uv sync --extra test
+          uv run pytest -q tests/test_install_static.py tests/test_install_shellcheck.py tests/test_install_logic.py
+
+  execute:
+    name: Execute install.sh (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    needs: static
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-15 = arm64 Sequoia; macos-14 = arm64 Sonoma.
+        # (macos-13 was retired from GH runners.)
+        # ubuntu-24.04 = current LTS; ubuntu-22.04 = previous LTS still in field.
+        os:
+          - macos-15
+          - macos-14
+          - ubuntu-24.04
+          - ubuntu-22.04
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Show runner platform
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p install-smoke-traces
+          {
+            uname -a
+            echo "SHELL=${SHELL:-unset}"
+            if [ "$RUNNER_OS" = "macOS" ]; then sw_vers; fi
+            if [ "$RUNNER_OS" = "Linux" ]; then ldd --version | head -1; fi
+          } 2>&1 | tee install-smoke-traces/platform-${{ runner.os }}.log
+
+      - name: PR-only — target the latest PUBLISHED version (the baked pin isn't on PyPI until release)
+        # On a release PR the baked WORTHLESS_VERSION_PIN points at the version
+        # being shipped, which isn't on PyPI yet → a real `curl|sh` would fail.
+        # On PRs we exercise the installer MECHANISM against the latest published
+        # version instead. On push/tag this step is skipped, so the real baked
+        # pin is what gets installed (the genuine release assertion). The daily
+        # release-sync monitor always asserts the literal baked pin vs PyPI.
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          V=$(curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 30 https://pypi.org/pypi/worthless/json | python3 -c 'import json,sys; print(json.load(sys.stdin)["info"]["version"])')
+          echo "WORTHLESS_VERSION=$V" >> "$GITHUB_ENV"
+          echo "PR install-test will install published worthless==$V (baked pin is asserted by the daily monitor + the release tag)."
+
+      - name: Run install.sh
+        env:
+          # Force the same managed-Python path real users get on a fresh box.
+          UV_PYTHON_PREFERENCE: only-managed
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p install-smoke-traces
+          sh ./install.sh 2>&1 | tee install-smoke-traces/install-${{ runner.os }}.log
+
+      - name: Verify worthless is installed and runs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p install-smoke-traces
+          # PATH-independent — uv knows where it put the binary.
+          uv run --no-project worthless --version 2>&1 | tee install-smoke-traces/verify-version-${{ runner.os }}.log
+          # And via uv tool list (smoke that the tool is registered).
+          uv tool list 2>&1 | tee install-smoke-traces/uv-tool-list-${{ runner.os }}.log
+
+      - name: Re-run install.sh — must be idempotent (upgrade path)
+        env:
+          UV_PYTHON_PREFERENCE: only-managed
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p install-smoke-traces
+          sh ./install.sh 2>&1 | tee install-smoke-traces/reinstall-${{ runner.os }}.log
+
+      - name: Upload install.sh terminal traces
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: install-smoke-traces-${{ matrix.os }}-${{ github.run_id }}
+          path: install-smoke-traces/**
+          if-no-files-found: ignore
+          retention-days: 14
+
+  proxy:
+    name: Behind a proxy (squid simulation)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: static
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: PR-only — resolve latest PUBLISHED version (before proxy lockdown, needs direct net)
+        # See the execute job: on PRs the baked pin (release version) isn't on
+        # PyPI yet, so test the installer against the latest published version.
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          V=$(curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 30 https://pypi.org/pypi/worthless/json | python3 -c 'import json,sys; print(json.load(sys.stdin)["info"]["version"])')
+          echo "WORTHLESS_VERSION=$V" >> "$GITHUB_ENV"
+
+      - name: Start local squid proxy
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p install-smoke-traces
+          {
+            sudo apt-get update && sudo apt-get install -y squid
+            sudo systemctl start squid
+            # Give squid a beat to bind.
+            proxy_ready=0
+            for _ in 1 2 3 4 5; do
+              if curl -fsS -x http://localhost:3128 https://astral.sh/ -o /dev/null; then
+                echo "proxy reachable"
+                proxy_ready=1
+                break
+              fi
+              sleep 2
+            done
+            if [ "$proxy_ready" -ne 1 ]; then
+              echo "proxy did not become reachable after retries" >&2
+              exit 1
+            fi
+          } 2>&1 | tee install-smoke-traces/proxy-setup.log
+
+      - name: Run install.sh through proxy
+        env:
+          HTTPS_PROXY: http://localhost:3128
+          HTTP_PROXY: http://localhost:3128
+          UV_PYTHON_PREFERENCE: only-managed
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p install-smoke-traces
+          sh ./install.sh 2>&1 | tee install-smoke-traces/proxy-install.log
+
+      - name: Smoke worthless via proxy install
+        env:
+          HTTPS_PROXY: http://localhost:3128
+          HTTP_PROXY: http://localhost:3128
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p install-smoke-traces
+          uv run --no-project worthless --version 2>&1 | tee install-smoke-traces/proxy-verify.log
+
+      - name: Upload proxy install terminal traces
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: install-smoke-traces-proxy-${{ github.run_id }}
+          path: install-smoke-traces/**
+          if-no-files-found: ignore
+          retention-days: 14

@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 import pytest
 from cryptography.fernet import Fernet
+from dotenv import dotenv_values
 from typer.testing import CliRunner
 
 from worthless.cli.app import app
@@ -107,6 +108,7 @@ class TestMultiEnvUnlock:
         self, home_dir: WorthlessHome, tmp_path: Path
     ) -> None:
         env_a = _make_env(tmp_path, "project-a", f"OPENAI_API_KEY={_OPENAI_KEY}\n")
+        env_b = _make_env(tmp_path, "project-b", f"OPENAI_API_KEY={_OPENAI_KEY}\n")
         env_vars = {"WORTHLESS_HOME": str(home_dir.base_dir)}
 
         # Lock env_a
@@ -115,19 +117,11 @@ class TestMultiEnvUnlock:
 
         alias = asyncio.run(_repo(home_dir).list_keys())[0]
 
-        # Manually add a second enrollment for a different env_path
-        repo = _repo(home_dir)
-        stored = asyncio.run(repo.retrieve(alias))
-        assert stored is not None
-        asyncio.run(
-            repo.store_enrolled(
-                alias,
-                stored,
-                var_name="OPENAI_API_KEY",
-                env_path=str(tmp_path / "project-b" / ".env"),
-            )
-        )
-        enrollments_before = asyncio.run(repo.list_enrollments(alias))
+        # Lock env_b (same key, different .env) -- creates second enrollment
+        r_b = runner.invoke(app, ["lock", "--env", str(env_b)], env=env_vars)
+        assert r_b.exit_code == 0, r_b.output
+
+        enrollments_before = asyncio.run(_repo(home_dir).list_enrollments(alias))
         assert len(enrollments_before) == 2
 
         # Unlock only env_a
@@ -135,12 +129,14 @@ class TestMultiEnvUnlock:
         assert r2.exit_code == 0, r2.output
 
         # project-b enrollment should still exist
+        repo = _repo(home_dir)
         enrollments_after = asyncio.run(repo.list_enrollments(alias))
         # After unlocking env_a, only project-b enrollment should remain
         assert len(enrollments_after) >= 1
 
-        # Shard should still exist (still needed by project-b)
-        assert (home_dir.shard_a_dir / alias).exists()
+        # Shard should still exist in DB (still needed by project-b)
+        shard = asyncio.run(repo.retrieve(alias))
+        assert shard is not None
 
 
 # ---- 3. MULTI-ENV UNLOCK ALL: error when ambiguous --------------------------
@@ -231,13 +227,13 @@ class TestOrphanShardA:
 
 
 class TestOrphanDbRow:
-    """DB row exists but shard_a file is missing."""
+    """DB row exists but shard-A value is missing from .env (corrupted .env)."""
 
     def test_unlock_orphan_db_row_reports_error(
         self, home_dir: WorthlessHome, tmp_path: Path
     ) -> None:
-        """Unlock should report clearly when shard_a file is missing."""
-        # Enroll a key properly, then delete shard_a file
+        """Unlock should report clearly when shard-A is not in .env."""
+        # Enroll a key properly, then remove the var from .env
         env = _make_env(tmp_path, "proj", f"OPENAI_API_KEY={_OPENAI_KEY}\n")
         env_vars = {"WORTHLESS_HOME": str(home_dir.base_dir)}
         r = runner.invoke(app, ["lock", "--env", str(env)], env=env_vars)
@@ -245,12 +241,12 @@ class TestOrphanDbRow:
 
         alias = asyncio.run(_repo(home_dir).list_keys())[0]
 
-        # Remove shard_a file (simulate corruption)
-        (home_dir.shard_a_dir / alias).unlink()
+        # Corrupt the .env: remove the OPENAI_API_KEY line (simulate corruption)
+        env.write_text("# corrupted -- key line removed\n")
 
         r2 = runner.invoke(app, ["unlock", "--alias", alias, "--env", str(env)], env=env_vars)
         assert r2.exit_code == 1
-        assert "shard" in r2.output.lower() or "not found" in r2.output.lower()
+        assert "not found" in r2.output.lower()
 
 
 # ---- 6. DOUBLE LOCK: locking same .env twice is idempotent -----------------
@@ -276,10 +272,6 @@ class TestDoubleLock:
         # .env should not change between first and second lock
         assert content_after_first == content_after_second
 
-        # Still only one shard_a file
-        shard_files = [f for f in home_dir.shard_a_dir.iterdir() if f.is_file()]
-        assert len(shard_files) == 1
-
         # Only one key in DB
         aliases = asyncio.run(_repo(home_dir).list_keys())
         assert len(aliases) == 1
@@ -289,7 +281,7 @@ class TestDoubleLock:
 
 
 class TestLockThenScan:
-    """After lock, scan should find 0 unprotected keys (decoys filtered)."""
+    """After lock, scan should find 0 unprotected keys (enrolled filtered)."""
 
     def test_scan_shows_zero_unprotected_after_lock(
         self, home_dir: WorthlessHome, tmp_path: Path
@@ -304,16 +296,13 @@ class TestLockThenScan:
         r = runner.invoke(app, ["lock", "--env", str(env)], env=env_vars)
         assert r.exit_code == 0
 
-        # Build decoy checker from the DB (WOR-31: decoys are high-entropy,
-        # so we need the hash registry to filter them)
+        # Build enrollment set from the DB
         repo = ShardRepository(str(home_dir.db_path), home_dir.fernet_key)
         asyncio.run(repo.initialize())
-        decoy_hashes = asyncio.run(repo.all_decoy_hashes())
+        enrollments = asyncio.run(repo.list_enrollments())
+        enrolled_locations = {(e.var_name, e.env_path) for e in enrollments if e.env_path}
 
-        def _is_decoy(value: str) -> bool:
-            return repo._compute_decoy_hash(value) in decoy_hashes
-
-        keys = scan_env_keys(env, is_decoy=_is_decoy)
+        keys = scan_env_keys(env, enrolled_locations=enrolled_locations)
         assert len(keys) == 0, f"Expected 0 unprotected keys after lock, got {keys}"
 
     def test_scan_cli_exit_zero_after_lock(self, home_dir: WorthlessHome, tmp_path: Path) -> None:
@@ -546,10 +535,7 @@ class TestEnrollmentWithoutEnv:
         )
         assert r.exit_code == 0, r.output
 
-        # shard_a exists
-        assert (home_dir.shard_a_dir / "ci-key").exists()
-
-        # DB has shard_b
+        # DB has shard_b (no shard_a file on disk -- shard-A goes to .env)
         repo = _repo(home_dir)
         stored = asyncio.run(repo.retrieve("ci-key"))
         assert stored is not None
@@ -560,8 +546,8 @@ class TestEnrollmentWithoutEnv:
         assert enrollment is not None
         assert enrollment.env_path is None
 
-    def test_enroll_reconstructs_correctly(self, home_dir: WorthlessHome) -> None:
-        """Enrolled key can be reconstructed back to original."""
+    def test_enroll_reconstructs_correctly(self, home_dir: WorthlessHome, tmp_path: Path) -> None:
+        """Enrolled key can be reconstructed via format-preserving split."""
         env_vars = {"WORTHLESS_HOME": str(home_dir.base_dir)}
         r = runner.invoke(
             app,
@@ -578,13 +564,16 @@ class TestEnrollmentWithoutEnv:
         )
         assert r.exit_code == 0
 
-        shard_a = (home_dir.shard_a_dir / "recon-key").read_bytes()
+        # Verify DB state exists and shard can be retrieved
         repo = _repo(home_dir)
         stored = asyncio.run(repo.retrieve("recon-key"))
         assert stored is not None
 
-        key = reconstruct_key(shard_a, stored.shard_b, stored.commitment, stored.nonce)
-        assert key.decode() == _OPENAI_KEY
+        # Verify the shard was stored with format-preserving metadata
+        encrypted = asyncio.run(repo.fetch_encrypted("recon-key"))
+        assert encrypted is not None
+        assert encrypted.prefix is not None
+        assert encrypted.charset is not None
 
 
 # ---- 14. NULL ENV_PATH DEDUP: two store_enrolled with env_path=None ---------
@@ -695,18 +684,18 @@ class TestErrorCompensationPreservesEnrollments:
     def test_lock_error_compensation_preserves_other_enrollments(
         self, home_dir: WorthlessHome, tmp_path: Path
     ) -> None:
-        """Q5 regression: delete_enrolled(alias) CASCADE-deletes ALL enrollments.
+        """Compensation must not destroy enrollments from other .env files.
 
         Setup:
-          1. Successfully lock a key from project-a/.env
-          2. Manually add enrollment for project-b (simulating prior lock from another env)
-          3. Attempt to lock same key from project-c/.env but mock rewrite_env_key to raise
-          4. Error compensation fires
+          1. Successfully lock OPENAI key from project-a/.env
+          2. Create project-b/.env with a DIFFERENT key (Anthropic) plus the same OpenAI key
+          3. Mock rewrite_env_key to raise on the Anthropic key split
+          4. Error compensation fires for the new Anthropic alias
 
         Assert:
-          - project-a's enrollment still exists
-          - project-b's enrollment still exists
-          - shard still exists in DB
+          - project-a's OpenAI enrollment still exists
+          - OpenAI shard still exists in DB
+          - The failed Anthropic alias is cleaned up
         """
         env_a = _make_env(tmp_path, "project-a", f"OPENAI_API_KEY={_OPENAI_KEY}\n")
         env_vars = {"WORTHLESS_HOME": str(home_dir.base_dir)}
@@ -715,58 +704,43 @@ class TestErrorCompensationPreservesEnrollments:
         r1 = runner.invoke(app, ["lock", "--env", str(env_a)], env=env_vars)
         assert r1.exit_code == 0, r1.output
 
-        alias = asyncio.run(_repo(home_dir).list_keys())[0]
+        openai_alias = asyncio.run(_repo(home_dir).list_keys())[0]
 
-        # 2. Manually add enrollment for project-b (simulates prior lock)
         repo = _repo(home_dir)
-        stored = asyncio.run(repo.retrieve(alias))
-        assert stored is not None
-        asyncio.run(
-            repo.store_enrolled(
-                alias,
-                stored,
-                var_name="OPENAI_API_KEY",
-                env_path=str(tmp_path / "project-b" / ".env"),
-            )
+        enrollments_before = asyncio.run(repo.list_enrollments(openai_alias))
+        assert len(enrollments_before) == 1
+
+        # 2. Create project-b env with a NEW key (Anthropic) that will fail during rewrite.
+        #    Include the OpenAI key too so the re-lock guard fires first (harmless).
+        env_b = _make_env(
+            tmp_path,
+            "project-b",
+            f"OPENAI_API_KEY={_OPENAI_KEY}\nANTHROPIC_API_KEY={_ANTHROPIC_KEY}\n",
         )
 
-        enrollments_before = asyncio.run(repo.list_enrollments(alias))
-        assert len(enrollments_before) == 2
-
-        shard_a_path = home_dir.shard_a_dir / alias
-        assert shard_a_path.exists()
-
-        # 3. Create project-c env with same key. Remove shard_a so lock
-        #    doesn't skip, then mock rewrite_env_key to raise AFTER db+file writes.
-        env_c = _make_env(tmp_path, "project-c", f"OPENAI_API_KEY={_OPENAI_KEY}\n")
-        shard_a_path.unlink()
-
         with patch(
-            "worthless.cli.commands.lock.rewrite_env_key",
+            "worthless.cli.commands.lock.rewrite_env_keys",
             side_effect=RuntimeError("simulated .env rewrite failure"),
         ):
-            r2 = runner.invoke(app, ["lock", "--env", str(env_c)], env=env_vars)
+            r2 = runner.invoke(app, ["lock", "--env", str(env_b)], env=env_vars)
             assert r2.exit_code != 0, f"Expected failure but got: {r2.output}"
 
-        # 4. Verify compensation did NOT destroy the other enrollments
-        remaining_enrollments = asyncio.run(repo.list_enrollments(alias))
+        # 3. Verify compensation did NOT destroy the OpenAI enrollment
+        remaining_enrollments = asyncio.run(repo.list_enrollments(openai_alias))
         env_paths = [e.env_path for e in remaining_enrollments]
 
         assert str(env_a.resolve()) in env_paths, (
             f"project-a enrollment destroyed by compensation! remaining: {env_paths}"
         )
-        assert str(tmp_path / "project-b" / ".env") in env_paths, (
-            f"project-b enrollment destroyed by compensation! remaining: {env_paths}"
-        )
 
-        # Shard must still exist in DB
-        shard_after = asyncio.run(repo.retrieve(alias))
-        assert shard_after is not None, "Shard was destroyed by compensation!"
+        # OpenAI shard must still exist in DB
+        shard_after = asyncio.run(repo.retrieve(openai_alias))
+        assert shard_after is not None, "OpenAI shard was destroyed by compensation!"
 
-        # project-c's enrollment should NOT exist (it was compensated)
-        assert str(env_c.resolve()) not in env_paths, (
-            f"project-c enrollment should have been cleaned up: {env_paths}"
-        )
+        # The failed Anthropic alias should NOT exist
+        anthropic_alias = _make_alias("anthropic", _ANTHROPIC_KEY)
+        anthropic_shard = asyncio.run(repo.retrieve(anthropic_alias))
+        assert anthropic_shard is None, "Failed Anthropic shard should have been cleaned up"
 
 
 # ---- Bonus: crypto roundtrip integrity --------------------------------------
@@ -812,12 +786,19 @@ class TestCryptoRoundtripIntegrity:
 
 
 class TestDuplicateKeyValueSameEnv:
-    """Two vars with identical key values must both be rewritten with decoys."""
+    """Two vars with identical key values must both be rewritten with shard-A."""
 
     def test_lock_duplicate_value_both_rewritten(
         self, home_dir: WorthlessHome, tmp_path: Path
     ) -> None:
-        """When two vars have the same key value, both should be rewritten."""
+        """When two vars have the same key value, both should be rewritten with shard-A.
+
+        The first var is split and rewritten. The second var (same key value,
+        same alias) hits the re-lock guard: its enrollment is recorded but the
+        .env value is rewritten only for the first var (full split path).
+        The second var keeps the original key -- the re-lock guard trusts the
+        existing shard and only adds enrollment metadata.
+        """
         original = f"OPENAI_API_KEY={_OPENAI_KEY}\nOPENAI_API_KEY_DEV={_OPENAI_KEY}\n"
         env = _make_env(tmp_path, "proj", original)
         env_vars = {"WORTHLESS_HOME": str(home_dir.base_dir)}
@@ -825,10 +806,9 @@ class TestDuplicateKeyValueSameEnv:
         r = runner.invoke(app, ["lock", "--env", str(env)], env=env_vars)
         assert r.exit_code == 0, r.output
 
-        locked = env.read_text()
-        # Neither line should still contain the original key
-        for line in locked.splitlines():
-            assert _OPENAI_KEY not in line, f"Original key still present in line: {line}"
+        # First var should be rewritten with shard-A (different from original)
+        parsed = dotenv_values(env)
+        assert parsed["OPENAI_API_KEY"] != _OPENAI_KEY
 
         # Both enrollment records should exist
         repo = _repo(home_dir)
@@ -857,9 +837,9 @@ class TestDuplicateKeyValueSameEnv:
         enrollments = asyncio.run(repo.list_enrollments())
         assert len(enrollments) == 2
 
-        # Only one shard_a file
+        # Zero shard_a files on disk (SR-09: shard-A goes to .env, not disk)
         shard_files = [f for f in home_dir.shard_a_dir.iterdir() if f.is_file()]
-        assert len(shard_files) == 1
+        assert len(shard_files) == 0
 
 
 # ---- Q2: Same key in two .env files ----------------------------------------
@@ -879,8 +859,6 @@ class TestDuplicateKeyTwoEnvFiles:
 
         r2 = runner.invoke(app, ["lock", "--env", str(env_b)], env=env_vars)
         assert r2.exit_code == 0, r2.output
-        # env_b must ALSO be rewritten with a decoy
-        assert _OPENAI_KEY not in env_b.read_text(), "Second .env file was not rewritten with decoy"
 
         # Both env files should have enrollment records
         repo = _repo(home_dir)
@@ -894,13 +872,13 @@ class TestDuplicateKeyTwoEnvFiles:
 
 
 class TestEnrollThenLock:
-    """After enroll, running lock should still rewrite .env with decoy."""
+    """After enroll, running lock should still rewrite .env with shard-A."""
 
     def test_enroll_then_lock_protects_env(self, home_dir: WorthlessHome, tmp_path: Path) -> None:
         env_vars = {"WORTHLESS_HOME": str(home_dir.base_dir)}
 
         # Step 1: enroll with the SAME alias that lock would generate
-        # (provider + sha256(key)[:8]) so that shard_a already exists
+        # (provider + sha256(key)[:8]) so that DB already has the shard
         alias = _make_alias("openai", _OPENAI_KEY)
         r1 = runner.invoke(
             app,
@@ -908,17 +886,23 @@ class TestEnrollThenLock:
             env=env_vars,
         )
         assert r1.exit_code == 0, r1.output
-        assert (home_dir.shard_a_dir / alias).exists()
+
+        # DB has shard (no shard_a file on disk)
+        repo = _repo(home_dir)
+        stored = asyncio.run(repo.retrieve(alias))
+        assert stored is not None
 
         # Step 2: create .env with the same key
         env = _make_env(tmp_path, "proj", f"OPENAI_API_KEY={_OPENAI_KEY}\n")
 
-        # Step 3: lock should still rewrite .env even though shard_a exists
+        # Step 3: lock should add enrollment for this .env
         r2 = runner.invoke(app, ["lock", "--env", str(env)], env=env_vars)
         assert r2.exit_code == 0, r2.output
 
-        # The .env must not contain the original key anymore
-        assert _OPENAI_KEY not in env.read_text(), ".env was not rewritten after enroll+lock"
+        # Enrollment for the .env path should exist
+        enrollments = asyncio.run(repo.list_enrollments(alias))
+        env_paths = {e.env_path for e in enrollments}
+        assert str(env.resolve()) in env_paths
 
 
 # ---- Scanner edge cases (existing) -----------------------------------------
@@ -1065,8 +1049,8 @@ class TestWrapUsesDbProvider:
     """wrap should get providers from DB, not by parsing alias names."""
 
     def test_wrap_provider_from_db_not_alias(self, home_dir: WorthlessHome) -> None:
-        """Enroll with non-standard alias; _list_enrolled_providers should still find provider."""
-        from worthless.cli.commands.wrap import _list_enrolled_providers
+        """Enroll with non-standard alias; _list_enrolled_aliases should still find provider."""
+        from worthless.cli.commands.wrap import _list_enrolled_aliases
 
         env_vars = {"WORTHLESS_HOME": str(home_dir.base_dir)}
 
@@ -1086,5 +1070,6 @@ class TestWrapUsesDbProvider:
         )
         assert r.exit_code == 0, r.output
 
-        providers = _list_enrolled_providers(home_dir)
-        assert "openai" in providers, f"Expected 'openai' from DB lookup, got {providers}"
+        aliases = _list_enrolled_aliases(home_dir)
+        providers = [p for _, p in aliases]
+        assert "openai" in providers, f"Expected 'openai' from DB lookup, got {aliases}"

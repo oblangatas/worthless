@@ -1,0 +1,2 @@
+Error: secrets configure requires an interactive TTY.
+EXIT_CODE:1

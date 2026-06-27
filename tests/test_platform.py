@@ -13,6 +13,7 @@ from worthless.cli.platform import (
     IS_WINDOWS,
     check_pid_alive,
     kill_tree,
+    pid_in_tree,
     popen_platform_kwargs,
     warn_windows_once,
 )
@@ -232,3 +233,54 @@ class TestWarnWindowsOnce:
         plat._warned = False
         warn_windows_once()
         assert capsys.readouterr().err == ""
+
+
+# ---------------------------------------------------------------------------
+# pid_in_tree — "does this PID belong to the tree rooted at that one?"
+# ---------------------------------------------------------------------------
+
+
+class TestPidInTree:
+    """``pid_in_tree`` answers: is the candidate PID the root, or a descendant?
+
+    Owns the psutil encapsulation for process-tree membership so command
+    modules don't have to import psutil directly.
+    """
+
+    def test_identity_root(self) -> None:
+        assert pid_in_tree(os.getpid(), os.getpid()) is True
+
+    def test_unrelated_pid_returns_false(self) -> None:
+        # Our own process has no descendants (we didn't spawn anything in-test),
+        # so a valid-but-unrelated PID like PID 1 (init/launchd) should read as
+        # "not in our tree".
+        assert pid_in_tree(os.getpid(), 1) is False
+
+    def test_dead_root_returns_false(self) -> None:
+        # 99_999_999 is far above realistic pid_max; psutil.Process raises.
+        # Conservative: return False rather than raise.
+        assert pid_in_tree(99_999_999, 1) is False
+
+    def test_permission_denied_returns_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        class _DeniedProcess:
+            def __init__(self, _pid: int) -> None:
+                raise psutil.AccessDenied()
+
+        monkeypatch.setattr("worthless.cli.platform.psutil.Process", _DeniedProcess)
+        assert pid_in_tree(os.getpid(), 12345) is False
+
+    def test_descendant_detected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Fake a child process on the root and assert it's recognised."""
+        fake_child = MagicMock()
+        fake_child.pid = 54321
+
+        class _Root:
+            def __init__(self, _pid: int) -> None:
+                pass
+
+            def children(self, recursive: bool = False) -> list:  # noqa: ARG002
+                return [fake_child]
+
+        monkeypatch.setattr("worthless.cli.platform.psutil.Process", _Root)
+        assert pid_in_tree(os.getpid(), 54321) is True
+        assert pid_in_tree(os.getpid(), 99999) is False

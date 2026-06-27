@@ -199,6 +199,108 @@ class TestProxyErrorSanitization:
 
 
 # ---------------------------------------------------------------------------
+# _sanitize_upstream_error allowlist unit tests (Fix 6)
+# ---------------------------------------------------------------------------
+
+
+class TestSanitizeUpstreamErrorAllowlist:
+    """Direct unit tests for _sanitize_upstream_error's allowlist behaviour."""
+
+    def test_wellformed_preserves_code_type_param_scrubs_message(self):
+        """(a) Well-formed body: code, type, param preserved; message scrubbed."""
+        body = json.dumps(
+            {
+                "error": {
+                    "message": "secret internal reason: sk-live-abc123",
+                    "type": "invalid_request_error",
+                    "code": "context_length_exceeded",
+                    "param": "messages",
+                }
+            }
+        ).encode()
+        result = json.loads(_sanitize_upstream_error(400, body, "openai"))
+        assert result["error"]["message"] == "upstream provider error"
+        assert result["error"]["type"] == "invalid_request_error"
+        assert result["error"]["code"] == "context_length_exceeded"
+        assert result["error"]["param"] == "messages"
+        assert "sk-live" not in json.dumps(result)
+
+    def test_missing_error_key_returns_generic(self):
+        """(b) Missing `error` key -> returns generic body."""
+        body = json.dumps({"message": "oops", "status": 500}).encode()
+        result = json.loads(_sanitize_upstream_error(500, body, "openai"))
+        assert result["error"]["message"] == "upstream provider error"
+
+    def test_error_not_a_dict_returns_generic(self):
+        """(c) `error` is not a dict -> returns generic body."""
+        body = json.dumps({"error": "just a string"}).encode()
+        result = json.loads(_sanitize_upstream_error(400, body, "openai"))
+        assert result["error"]["message"] == "upstream provider error"
+
+    def test_extra_top_level_keys_stripped(self):
+        """(d) Body has extra top-level keys -> they are stripped."""
+        body = json.dumps(
+            {
+                "error": {"message": "bad", "type": "server_error"},
+                "internal_trace_id": "abc-123",
+                "request_id": "req-xyz",
+            }
+        ).encode()
+        result = json.loads(_sanitize_upstream_error(500, body, "openai"))
+        assert "internal_trace_id" not in result
+        assert "request_id" not in result
+        assert list(result.keys()) == ["error"]
+
+    def test_unknown_error_keys_stripped_allowlist_regression(self):
+        """(e) Upstream error has extra unknown keys -> they are stripped (allowlist regression)."""
+        body = json.dumps(
+            {
+                "error": {
+                    "message": "leaked detail: key=sk-secret",
+                    "type": "api_error",
+                    "code": "rate_limit_exceeded",
+                    "param": None,
+                    "internal_field": "sensitive data",
+                    "stack_trace": "Traceback ...",
+                    "request_id": "req-abc",
+                }
+            }
+        ).encode()
+        result = json.loads(_sanitize_upstream_error(429, body, "openai"))
+        error = result["error"]
+        assert "internal_field" not in error
+        assert "stack_trace" not in error
+        assert "request_id" not in error
+        assert error["message"] == "upstream provider error"
+        assert error["type"] == "api_error"
+        assert error["code"] == "rate_limit_exceeded"
+        # param is None so it should NOT be included (allowlist skips None values)
+        assert "param" not in error
+
+    def test_completely_unparsable_bytes_returns_generic(self):
+        """(f) Completely unparsable bytes -> returns generic body."""
+        result = json.loads(_sanitize_upstream_error(500, b"\xff\xfe\x00", "openai"))
+        assert result["error"]["message"] == "upstream provider error"
+
+    def test_null_values_excluded_from_allowlist(self):
+        """Allowlist skips keys whose upstream value is None/null."""
+        body = json.dumps(
+            {
+                "error": {
+                    "message": "bad",
+                    "type": "invalid_request_error",
+                    "code": None,
+                    "param": None,
+                }
+            }
+        ).encode()
+        result = json.loads(_sanitize_upstream_error(400, body, "openai"))
+        assert result["error"]["type"] == "invalid_request_error"
+        assert "code" not in result["error"]
+        assert "param" not in result["error"]
+
+
+# ---------------------------------------------------------------------------
 # CLI catch-all handler tests
 # ---------------------------------------------------------------------------
 

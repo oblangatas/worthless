@@ -1,0 +1,55 @@
+# syntax=docker/dockerfile:1.7
+# Post-install lock-lifecycle e2e image. Builds on the same bare-Ubuntu
+# baseline as Dockerfile.ubuntu-bare (proves the fresh-box AC), then runs
+# install.sh at build time and layers on python3 for orchestration.
+#
+# python3 is installed AFTER install.sh so the fresh-box invariant (no
+# python3 present when curl|sh runs) still holds during the AC check.
+FROM ubuntu:24.04@sha256:c4a8d5503dfb2a3eb8ab5f807da5bc69a85730fb49b5cfca2330194ebcc41c7b
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        tar \
+    && rm -rf /var/lib/apt/lists/*
+
+# Guard: the fresh-box AC requires no python/pipx/uv before install.sh.
+RUN ! command -v python3 \
+    && ! command -v python \
+    && ! command -v pipx \
+    && ! command -v uv
+
+WORKDIR /work
+COPY install.sh /work/install.sh
+RUN chmod +x /work/install.sh
+
+# Run install.sh at build time — mirrors what a user would `curl | sh`.
+# UV_PYTHON_PREFERENCE=only-managed matches install-smoke.yml so we exercise
+# the same managed-Python path CI users see on a fresh box.
+# Cache uv's download dir between builds (PBS Python tarballs + wheels)
+# so matrix re-runs don't re-fetch ~50MB from astral.sh each time.
+ENV UV_PYTHON_PREFERENCE=only-managed
+# PR-only override: CI passes WORTHLESS_VERSION=<latest published> as a build-arg
+# so a release PR's not-yet-published baked pin doesn't fail the build. Empty on
+# push/tag → install.sh uses its baked WORTHLESS_VERSION_PIN.
+ARG WORTHLESS_VERSION=""
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=shared \
+    WORTHLESS_VERSION="${WORTHLESS_VERSION}" sh /work/install.sh
+
+# Harness-only tooling. Added AFTER install.sh so its absence is proven
+# during the fresh-box AC check above; the e2e orchestration then needs
+# python3 to talk to the proxy and mock-upstream over HTTP.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY tests/install_fixtures/lock_e2e.py /work/lock_e2e.py
+
+# install.sh drops the worthless binary in /root/.local/bin; the CMD shell
+# starts without sourcing rc files, so prepend it explicitly.
+ENV PATH="/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+CMD ["python3", "/work/lock_e2e.py"]

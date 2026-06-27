@@ -1,0 +1,45 @@
+--- configure --plan-out ---
+Error: secrets configure requires an interactive TTY.
+EXIT_CODE:1
+--- test if --plan-out produced output ---
+Error: secrets configure requires an interactive TTY.
+EXIT:1
+--- plan.json content ---
+NO_PLAN_FILE
+--- apply --from and --yes availability ---
+
+🦞 OpenClaw 2026.5.3-1 (unknown) — One CLI to rule them all, and one more restart because you changed the port.
+
+Usage: openclaw secrets apply [options]
+
+Apply a previously generated secrets plan
+
+Options:
+  --allow-exec   Allow exec SecretRef checks (may execute provider commands)
+                 (default: false)
+  --dry-run      Validate/preflight only (default: false)
+  --from <path>  Path to plan JSON
+  -h, --help     Display help for command
+  --json         Output JSON (default: false)
+
+🦞 OpenClaw 2026.5.3-1 (unknown) — Like having a senior engineer on call, except I don't bill hourly or sigh audibly.
+
+Usage: openclaw secrets configure [options]
+
+Interactive secrets helper (provider setup + SecretRef mapping + preflight)
+
+Options:
+  --agent <id>           Agent id for auth-profiles targets (default: configured
+                         default agent)
+  --allow-exec           Allow exec SecretRef preflight checks (may execute
+                         provider commands) (default: false)
+  --apply                Apply changes immediately after preflight (default:
+                         false)
+  -h, --help             Display help for command
+  --json                 Output JSON (default: false)
+  --plan-out <path>      Write generated plan JSON to a file
+  --providers-only       Configure secrets.providers only, skip credential
+                         mapping (default: false)
+  --skip-provider-setup  Skip provider setup and only map credential fields to
+                         existing providers (default: false)
+  --yes                  Skip apply confirmation prompt (default: false)

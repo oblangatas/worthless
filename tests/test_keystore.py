@@ -7,6 +7,8 @@ All tests should fail with ImportError until the module is implemented.
 from __future__ import annotations
 
 import logging
+import os
+import stat
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -20,12 +22,19 @@ from worthless.cli.keystore import (
     _SERVICE,
     _USERNAME,
     _keyring_username,
+    _read_fernet_file,
     keyring_available,
     delete_fernet_key,
     migrate_file_to_keyring,
     read_fernet_key,
     store_fernet_key,
 )
+
+
+def _write_fernet_key_file(path: Path, content: bytes) -> None:
+    """Write a fernet.key that passes ``_validate_fernet_file`` (mode 0o600)."""
+    path.write_bytes(content)
+    path.chmod(0o600)
 
 
 # ------------------------------------------------------------------
@@ -48,6 +57,20 @@ class TestConstants:
 
 class TestKeyringAvailable:
     """Backend detection: reject fail/null/plaintext, accept real backends."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_backend_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Tests in this class assert the BACKEND-DETECTION behaviour.
+
+        The session-wide ``WORTHLESS_KEYRING_BACKEND=null`` setdefault from
+        ``conftest.py`` (WOR-463) would short-circuit ``keyring_available``
+        BEFORE the backend check runs, breaking the
+        ``test_macos_keychain_returns_true`` / ``test_secretservice_returns_true``
+        cases. Delenv it for this class so backend-detection logic is what
+        the tests actually exercise. The env-override path is covered by
+        ``TestKeyringBackendEnvOverride`` below.
+        """
+        monkeypatch.delenv("WORTHLESS_KEYRING_BACKEND", raising=False)
 
     @staticmethod
     def _make_backend(module: str, qualname: str) -> object:
@@ -227,7 +250,7 @@ class TestReadFernetKeyCascade:
         monkeypatch.delenv("WORTHLESS_FERNET_FD", raising=False)
 
         fernet_path = tmp_path / "fernet.key"
-        fernet_path.write_bytes(b"file-key-value\n")
+        _write_fernet_key_file(fernet_path, b"file-key-value\n")
 
         with patch("worthless.cli.keystore.keyring_available", return_value=False):
             result = read_fernet_key(home_dir=tmp_path)
@@ -274,7 +297,7 @@ class TestReadFernetKeyCascade:
         monkeypatch.delenv("WORTHLESS_FERNET_FD", raising=False)
 
         fernet_path = tmp_path / "fernet.key"
-        fernet_path.write_bytes(b"file-fallback-value\n")
+        _write_fernet_key_file(fernet_path, b"file-fallback-value\n")
 
         with (
             patch("worthless.cli.keystore.keyring_available", return_value=True),
@@ -284,6 +307,154 @@ class TestReadFernetKeyCascade:
             result = read_fernet_key(home_dir=tmp_path)
 
         assert result == bytearray(b"file-fallback-value")
+
+    def test_keyring_error_with_file_refuses_silent_fallback_interactive(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Interactive sessions must not silently read stale fernet.key (WOR-464)."""
+        monkeypatch.delenv("WORTHLESS_FERNET_KEY", raising=False)
+        monkeypatch.delenv("WORTHLESS_FERNET_FD", raising=False)
+        monkeypatch.delenv("WORTHLESS_SERVICE_MANAGED", raising=False)
+
+        fernet_path = tmp_path / "fernet.key"
+        fernet_path.write_bytes(b"stale-file-key\n")
+
+        with (
+            patch("worthless.cli.keystore.keyring_available", return_value=True),
+            patch("worthless.cli.keystore.keyring") as mock_kr,
+        ):
+            mock_kr.get_password.side_effect = RuntimeError("access denied")
+            with pytest.raises(WorthlessError) as exc_info:
+                read_fernet_key(home_dir=tmp_path)
+
+        assert exc_info.value.code == ErrorCode.KEY_NOT_FOUND
+        assert "refusing" in str(exc_info.value).lower()
+
+    def test_keyring_error_with_file_allowed_under_service_managed(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """LaunchAgent sets WORTHLESS_SERVICE_MANAGED=1; synced fernet.key is OK."""
+        monkeypatch.delenv("WORTHLESS_FERNET_KEY", raising=False)
+        monkeypatch.delenv("WORTHLESS_FERNET_FD", raising=False)
+        monkeypatch.setenv("WORTHLESS_SERVICE_MANAGED", "1")
+
+        fernet_path = tmp_path / "fernet.key"
+        _write_fernet_key_file(fernet_path, b"launchd-synced-key\n")
+        fernet_path.chmod(0o600)
+
+        with (
+            patch("worthless.cli.keystore.keyring_available", return_value=True),
+            patch("worthless.cli.keystore.keyring") as mock_kr,
+        ):
+            mock_kr.get_password.side_effect = RuntimeError("access denied")
+            result = read_fernet_key(home_dir=tmp_path)
+
+        assert result == bytearray(b"launchd-synced-key")
+
+    def test_service_managed_prefers_file_over_keyring(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """WOR-748: launchd must use synced fernet.key, not a stale keyring entry."""
+        monkeypatch.delenv("WORTHLESS_FERNET_KEY", raising=False)
+        monkeypatch.setenv("WORTHLESS_SERVICE_MANAGED", "1")
+
+        fernet_path = tmp_path / "fernet.key"
+        _write_fernet_key_file(fernet_path, b"synced-file-key\n")
+        fernet_path.chmod(0o600)
+
+        with (
+            patch("worthless.cli.keystore.keyring_available", return_value=True),
+            patch("worthless.cli.keystore.keyring") as mock_kr,
+        ):
+            mock_kr.get_password.return_value = "stale-keyring-key"
+            result = read_fernet_key(home_dir=tmp_path)
+
+        assert result == bytearray(b"synced-file-key")
+        mock_kr.get_password.assert_not_called()
+
+    def test_service_managed_rejects_loose_fernet_file_perms(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """worthless-l3qj: world-readable fernet.key must fail under SERVICE_MANAGED."""
+        monkeypatch.delenv("WORTHLESS_FERNET_KEY", raising=False)
+        monkeypatch.setenv("WORTHLESS_SERVICE_MANAGED", "1")
+
+        fernet_path = tmp_path / "fernet.key"
+        fernet_path.write_bytes(b"leaked-key\n")
+        fernet_path.chmod(0o644)
+
+        with pytest.raises(WorthlessError) as exc_info:
+            read_fernet_key(home_dir=tmp_path)
+
+        assert exc_info.value.code == ErrorCode.KEY_NOT_FOUND
+        assert "0o600" in exc_info.value.message
+
+
+class TestIpcOnlyFernetStatGate:
+    """Container topology: relax uid check for crypto-owned 0400, reject 0440."""
+
+    def test_ipc_only_accepts_foreign_owned_0400(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("WORTHLESS_FERNET_IPC_ONLY", "1")
+        monkeypatch.delenv("WORTHLESS_FERNET_KEY", raising=False)
+        monkeypatch.delenv("WORTHLESS_SERVICE_MANAGED", raising=False)
+
+        fernet_path = tmp_path / "fernet.key"
+        fernet_path.write_bytes(b"crypto-owned-key\n")
+        foreign_uid = os.geteuid() + 1 if os.geteuid() < 65534 else max(1, os.geteuid() - 1)
+        try:
+            os.chown(fernet_path, foreign_uid, os.getgid())
+            fernet_path.chmod(0o400)
+            result = _read_fernet_file(fernet_path, validate=True)
+        except (OSError, PermissionError):
+            foreign_stat = os.stat_result(
+                (
+                    stat.S_IFREG | 0o400,
+                    0,
+                    0,
+                    0,
+                    foreign_uid,
+                    os.getgid(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                )
+            )
+            original_lstat = Path.lstat
+
+            def _lstat(self: Path):
+                if self == fernet_path:
+                    return foreign_stat
+                return original_lstat(self)
+
+            monkeypatch.setattr(Path, "lstat", _lstat)
+            with patch("worthless.cli.keystore.keyring_available", return_value=False):
+                result = read_fernet_key(home_dir=tmp_path)
+
+        assert result == bytearray(b"crypto-owned-key")
+
+    def test_ipc_only_rejects_group_readable_0440(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("WORTHLESS_FERNET_IPC_ONLY", "1")
+        monkeypatch.delenv("WORTHLESS_FERNET_KEY", raising=False)
+        monkeypatch.delenv("WORTHLESS_SERVICE_MANAGED", raising=False)
+
+        fernet_path = tmp_path / "fernet.key"
+        fernet_path.write_bytes(b"group-readable-key\n")
+        fernet_path.chmod(0o440)
+
+        with (
+            patch("worthless.cli.keystore.keyring_available", return_value=False),
+            pytest.raises(WorthlessError) as exc_info,
+        ):
+            read_fernet_key(home_dir=tmp_path)
+
+        assert exc_info.value.code == ErrorCode.KEY_NOT_FOUND
+        assert "0o400" in exc_info.value.message
 
 
 # ------------------------------------------------------------------
@@ -326,7 +497,7 @@ class TestReturnTypeBytearray:
             ctx = _combined()
         else:  # file
             fernet_path = tmp_path / "fernet.key"
-            fernet_path.write_bytes(b"some-key\n")
+            _write_fernet_key_file(fernet_path, b"some-key\n")
             ctx = patch("worthless.cli.keystore.keyring_available", return_value=False)
 
         with ctx:
@@ -673,3 +844,97 @@ class TestMigrateFileToKeyring:
 
         assert result is True
         assert not fernet_path.exists(), "fernet.key should be removed after successful migration"
+
+
+# ------------------------------------------------------------------
+# WOR-463: WORTHLESS_KEYRING_BACKEND env-var escape hatch
+# ------------------------------------------------------------------
+
+
+class TestKeyringBackendEnvOverride:
+    """``WORTHLESS_KEYRING_BACKEND=null`` short-circuits the keyring path.
+
+    Two audiences:
+    1. Tests that subprocess-spawn ``worthless`` — the parent pytest's
+       ``keyring.set_keyring(null)`` doesn't propagate; the env var does.
+    2. Production users who don't trust their OS keyring — explicit opt-out.
+    """
+
+    def test_null_value_returns_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Set the var to ``"null"`` → ``keyring_available()`` is False."""
+        monkeypatch.setenv("WORTHLESS_KEYRING_BACKEND", "null")
+        assert keyring_available() is False
+
+    def test_null_value_short_circuits_before_backend_lookup(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Backend lookup is never invoked when the env var forces null.
+
+        Otherwise we'd hit the OS keyring API on every CLI startup just
+        to discover the user opted out — defeats the perf/safety point.
+        """
+        monkeypatch.setenv("WORTHLESS_KEYRING_BACKEND", "null")
+        with patch("worthless.cli.keystore.keyring") as mock_kr:
+            mock_kr.get_keyring.side_effect = AssertionError(
+                "keyring.get_keyring should NOT be called when env var forces null"
+            )
+            assert keyring_available() is False
+
+    def test_other_value_does_not_short_circuit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Only the literal value ``"null"`` triggers the gate.
+
+        Future expansion may support other backend names; until then,
+        unrecognized values fall through to normal backend detection so
+        a typo doesn't silently disable the keyring.
+        """
+        monkeypatch.setenv("WORTHLESS_KEYRING_BACKEND", "macos")  # not "null"
+        backend_cls = type(
+            "Keyring",
+            (),
+            {"__module__": "keyring.backends.macOS", "__qualname__": "Keyring"},
+        )
+        with patch("worthless.cli.keystore.keyring") as mock_kr:
+            mock_kr.get_keyring.return_value = backend_cls()
+            assert keyring_available() is True
+
+    def test_unset_does_not_short_circuit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When the var is unset, backend detection runs normally."""
+        monkeypatch.delenv("WORTHLESS_KEYRING_BACKEND", raising=False)
+        backend_cls = type(
+            "Keyring",
+            (),
+            {"__module__": "keyring.backends.macOS", "__qualname__": "Keyring"},
+        )
+        with patch("worthless.cli.keystore.keyring") as mock_kr:
+            mock_kr.get_keyring.return_value = backend_cls()
+            assert keyring_available() is True
+
+    def test_store_fernet_key_does_not_call_set_password_when_null(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """End-to-end: env-var-null means no real keyring write happens.
+
+        This is the critical no-leak invariant. A test subprocess running
+        ``worthless lock`` against a tmp home_dir must NOT pollute the
+        host's keychain even if a real OS keyring is available.
+        """
+        monkeypatch.setenv("WORTHLESS_KEYRING_BACKEND", "null")
+        with patch("worthless.cli.keystore.keyring") as mock_kr:
+            store_fernet_key(b"some-key-bytes", home_dir=tmp_path)
+            mock_kr.set_password.assert_not_called()
+        # File fallback should have happened instead.
+        assert (tmp_path / "fernet.key").exists()
+        assert (tmp_path / "fernet.key").read_bytes() == b"some-key-bytes"
+
+    def test_logs_info_when_forcing_null(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Production users who force the override should see it in logs."""
+        monkeypatch.setenv("WORTHLESS_KEYRING_BACKEND", "null")
+        with caplog.at_level(logging.INFO, logger="worthless.cli.keystore"):
+            keyring_available()
+        assert any(
+            "WORTHLESS_KEYRING_BACKEND" in rec.message
+            for rec in caplog.records
+            if rec.levelno >= logging.INFO
+        ), "Expected INFO log when env var forces null backend"

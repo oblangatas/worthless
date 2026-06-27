@@ -1,0 +1,44 @@
+# syntax=docker/dockerfile:1.7
+# Debian 12 counterpart to Dockerfile.ubuntu-bare-lock-e2e. Same shape:
+# fresh-box AC guard → install.sh at build time → add python3 for
+# orchestration → run lock_e2e.py. Catches glibc-version drift that
+# Ubuntu-only coverage would miss.
+FROM debian:12-slim@sha256:f9c6a2fd2ddbc23e336b6257a5245e31f996953ef06cd13a59fa0a1df2d5c252
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        tar \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN ! command -v python3 \
+    && ! command -v python \
+    && ! command -v pipx \
+    && ! command -v uv
+
+WORKDIR /work
+COPY install.sh /work/install.sh
+RUN chmod +x /work/install.sh
+
+ENV UV_PYTHON_PREFERENCE=only-managed
+# PR-only override: CI passes WORTHLESS_VERSION=<latest published> as a build-arg
+# so a release PR's not-yet-published baked pin doesn't fail the build. Empty on
+# push/tag → install.sh uses its baked WORTHLESS_VERSION_PIN.
+ARG WORTHLESS_VERSION=""
+# Cache uv's download dir between builds (PBS Python tarballs + wheels)
+# so matrix re-runs don't re-fetch ~50MB from astral.sh each time.
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=shared \
+    WORTHLESS_VERSION="${WORTHLESS_VERSION}" sh /work/install.sh
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY tests/install_fixtures/lock_e2e.py /work/lock_e2e.py
+
+ENV PATH="/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+CMD ["python3", "/work/lock_e2e.py"]

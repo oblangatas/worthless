@@ -1,0 +1,125 @@
+name: Install Docker (bare-Ubuntu integration)
+
+# Per-PR Docker integration test: validates that a fresh box without Python
+# can install worthless via curl|sh in a hermetic environment (no
+# Python/pipx/uv pre-installed). Slow (~3-5 min including image build +
+# Python download).
+#
+# The PR trigger is intentionally UNFILTERED so this check always reports —
+# a path-scoped *required* status check that never runs would block every PR
+# that doesn't touch these paths forever (worthless-kp4u). The Detect step
+# below no-ops the 40-min run on PRs that don't touch install-relevant paths,
+# so an irrelevant PR costs one API call, not a full matrix. Pushes to main
+# keep the path filter: post-merge validation only fires on relevant changes.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    paths:
+      - "install.sh"
+      - "tests/test_install_*.py"
+      - "tests/_install_helpers.py"
+      - "tests/install_fixtures/**"
+      - "tests/openclaw/mock-upstream/**"
+      - "src/worthless/cli/**"
+      - "src/worthless/proxy/**"
+      - ".github/workflows/install-docker.yml"
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  install-matrix:
+    name: install.sh host matrix (distros, lock lifecycle, app container)
+    runs-on: ubuntu-24.04
+    # 7 install fixtures + 2 lock-lifecycle fixtures + 3 host/app-container
+    # journeys = 12 docker-marked tests.
+    # ubuntu-idempotency runs install.sh TWICE (~2x install fixture time). On
+    # the first PR run BuildKit caches are cold, so PBS Python + wheels are
+    # fetched per-fixture. 40m gives margin without being absurd.
+    timeout-minutes: 40
+    steps:
+      - name: Detect install-relevant changes
+        id: detect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Non-PR events (push to main) only reach here on relevant paths
+          # (see on.push.paths), so always run the matrix for them.
+          relevant=true
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            relevant=false
+            # Fail open: a transient `gh pr diff` error must not fail this
+            # required check and block unrelated PRs — run the full matrix.
+            if ! files="$(gh pr diff "${{ github.event.pull_request.number }}" \
+              --name-only --repo "${{ github.repository }}")"; then
+              echo "::warning::Could not read PR diff; running the full install matrix (fail-open)."
+              relevant=true
+              files=""
+            fi
+            while IFS= read -r f; do
+              [ -z "$f" ] && continue
+              case "$f" in
+                install.sh) relevant=true ;;
+                tests/test_install_*.py|tests/_install_helpers.py) relevant=true ;;
+                tests/install_fixtures/*|tests/openclaw/mock-upstream/*) relevant=true ;;
+                src/worthless/cli/*|src/worthless/proxy/*) relevant=true ;;
+                .github/workflows/install-docker.yml) relevant=true ;;
+              esac
+            done <<< "$files"
+          fi
+          echo "relevant=$relevant" >> "$GITHUB_OUTPUT"
+          if [ "$relevant" = "true" ]; then
+            echo "Install-relevant paths changed — running the full docker matrix."
+          else
+            echo "No install-relevant paths changed — passing without the 40-min run."
+          fi
+
+      - name: Check out repository
+        if: steps.detect.outputs.relevant == 'true'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up uv + Python (pytest harness only; not used inside container)
+        if: steps.detect.outputs.relevant == 'true'
+        uses: ./.github/actions/setup-uv-python
+
+      - name: PR-only — resolve the latest PUBLISHED version for the docker install tests
+        # The baked pin (release version) isn't on PyPI until the tag is pushed.
+        # On PRs the docker tests install the latest published version instead —
+        # the harness reads $WORTHLESS_VERSION and passes it into the containers
+        # (runtime -e for the matrix, build-arg for the lock-e2e images). On
+        # push/tag this is skipped → the baked pin is exercised (real release).
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          V=$(curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 30 https://pypi.org/pypi/worthless/json | python3 -c 'import json,sys; print(json.load(sys.stdin)["info"]["version"])')
+          echo "WORTHLESS_VERSION=$V" >> "$GITHUB_ENV"
+          echo "Docker install tests will target published worthless==$V (baked pin tested by the daily monitor + the release tag)."
+
+      - name: Run docker-marked integration tests in parallel
+        if: steps.detect.outputs.relevant == 'true'
+        env:
+          UV_CACHE_DIR: /tmp/uv-cache
+          # Force BuildKit so RUN --mount=type=cache directives in fixtures
+          # (WOR-320) are not silently stripped by the legacy builder.
+          DOCKER_BUILDKIT: "1"
+          COMPOSE_DOCKER_CLI_BUILD: "1"
+        # -n 2 --dist load: 9 install + 2 lock-lifecycle tests, one module →
+        # `loadscope` would pin them all to one worker. `load` distributes
+        # individual items. Docker daemon serializes layer commits anyway;
+        # 2 concurrent builds is the sweet spot — higher counts thrash disk
+        # I/O without speedup.
+        run: |
+          uv sync --extra test
+          uv run pytest -m docker -q -n 2 --dist load tests/test_install_docker.py

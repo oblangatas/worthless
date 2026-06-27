@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "status": "findings",
+  "resolution": {
+    "refsChecked": 0,
+    "skippedExecRefs": 0,
+    "resolvabilityComplete": true
+  },
+  "filesScanned": [
+    "/home/node/.openclaw/agents/main/agent/auth-profiles.json",
+    "/home/node/.openclaw/agents/main/agent/models.json",
+    "/home/node/.openclaw/openclaw.json"
+  ],
+  "summary": {
+    "plaintextCount": 3,
+    "unresolvedRefCount": 0,
+    "shadowedRefCount": 0,
+    "legacyResidueCount": 0
+  },
+  "findings": [
+    {
+      "code": "PLAINTEXT_FOUND",
+      "severity": "warn",
+      "file": "/home/node/.openclaw/openclaw.json",
+      "jsonPath": "gateway.auth.token",
+      "message": "gateway.auth.token is stored as plaintext."
+    },
+    {
+      "code": "PLAINTEXT_FOUND",
+      "severity": "warn",
+      "file": "/home/node/.openclaw/agents/main/agent/models.json",
+      "jsonPath": "providers.anthropic.apiKey",
+      "message": "models.json provider apiKey is stored as plaintext.",
+      "provider": "anthropic"
+    },
+    {
+      "code": "PLAINTEXT_FOUND",
+      "severity": "warn",
+      "file": "/home/node/.openclaw/agents/main/agent/models.json",
+      "jsonPath": "providers.custom-api-openai-com.apiKey",
+      "message": "models.json provider apiKey is stored as plaintext.",
+      "provider": "custom-api-openai-com"
+    }
+  ]
+}

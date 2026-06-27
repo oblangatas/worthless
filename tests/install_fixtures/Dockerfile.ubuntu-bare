@@ -1,0 +1,31 @@
+# Bare Ubuntu image — NO python3 installed. Validates the fresh-box AC:
+# "fresh non-Python Linux box → curl install.sh | sh → worthless --version works."
+# Keep this image minimal. Adding python3 here defeats the test.
+FROM ubuntu:24.04@sha256:c4a8d5503dfb2a3eb8ab5f807da5bc69a85730fb49b5cfca2330194ebcc41c7b
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Bare minimum required by install.sh: curl + ca-certs (TLS) + tar (uv extracts tarballs).
+# Nothing else. Especially: no python3, no pipx, no uv.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        tar \
+    && rm -rf /var/lib/apt/lists/*
+
+# Sanity: prove python3 is genuinely absent so the test fails noisily if the
+# base image ever changes upstream.
+RUN ! command -v python3 \
+    && ! command -v python \
+    && ! command -v pipx \
+    && ! command -v uv
+
+WORKDIR /work
+COPY install.sh /work/install.sh
+COPY tests/install_fixtures/verify_install.sh /work/verify_install.sh
+RUN chmod +x /work/install.sh /work/verify_install.sh
+
+# install.sh puts uv + worthless in $HOME/.local/bin; verify_install.sh
+# re-exports PATH and runs a richer check battery than `--version` alone.
+CMD ["/bin/sh", "-c", "sh /work/install.sh && sh /work/verify_install.sh"]

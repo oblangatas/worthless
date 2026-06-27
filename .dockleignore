@@ -1,0 +1,11 @@
+# WOR-310 Phase B intentionally drops the ``USER worthless`` directive
+# so deploy/start.py can run as root briefly, resolve the two service
+# uids (worthless-proxy=10001, worthless-crypto=10002), chown the
+# share files, and call setresuid before exec'ing uvicorn.  Dockle's
+# CIS-DI-0001 check ("last user should not be root") sees the
+# image-default and fires WARN — but the runtime never actually runs
+# as root past the priv-drop dance.  The runtime security claim is
+# verified by the two-uid integration tests in
+# tests/test_install_docker.py and the priv-drop unit suite in
+# tests/cli/test_sidecar_lifecycle_priv_drop.py.
+CIS-DI-0001

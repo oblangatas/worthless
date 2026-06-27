@@ -1,0 +1,53 @@
+# syntax=docker/dockerfile:1.7
+# Ubuntu 24.04 with uv pre-installed.
+# Validates that install.sh reuses an existing uv rather than reinstalling.
+FROM ubuntu:24.04@sha256:c4a8d5503dfb2a3eb8ab5f807da5bc69a85730fb49b5cfca2330194ebcc41c7b
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        coreutils \
+        curl \
+        tar \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /work
+COPY install.sh /work/install.sh
+COPY tests/install_fixtures/verify_install.sh /work/verify_install.sh
+COPY tests/install_fixtures/verify_uv_reuse.sh /work/verify_uv_reuse.sh
+RUN chmod +x /work/install.sh /work/verify_install.sh /work/verify_uv_reuse.sh
+
+# Pre-install uv to $HOME/.local/bin (same place install.sh would put it).
+# Pin to the SAME version install.sh pins via UV_VERSION (currently 0.11.7),
+# AND verify SHA256 against ASTRAL_INSTALLER_SHA256 — both extracted from
+# install.sh at build time so a UV_VERSION bump in install.sh propagates
+# without manual edits here.
+#
+# Why fetch-then-verify instead of `curl … | sh`: a raw pipe executes
+# whatever the CDN serves at fetch time. Pinning the digest (SR-supply-chain)
+# means a compromised astral.sh cannot slip into our test matrix even though
+# install.sh itself is hardened.
+#
+# The pinned UV_VERSION + ASTRAL_INSTALLER_SHA256 still need to track upstream
+# releases — bump procedure is in MANUAL_SMOKE.md §"Bumping UV_VERSION" and
+# §"Bumping base image digests".
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=shared \
+    UV_VERSION="$(awk -F'"' '/^UV_VERSION=/{print $2}' /work/install.sh)" \
+    && ASTRAL_INSTALLER_SHA256="$(awk -F'"' '/^ASTRAL_INSTALLER_SHA256=/{print $2}' /work/install.sh)" \
+    && test -n "$UV_VERSION" -a -n "$ASTRAL_INSTALLER_SHA256" \
+    && curl -LsSf --fail \
+        "https://astral.sh/uv/${UV_VERSION}/install.sh" \
+        -o /tmp/uv-installer.sh \
+    && echo "${ASTRAL_INSTALLER_SHA256}  /tmp/uv-installer.sh" | sha256sum -c - \
+    && UV_INSTALL_VERSION="$UV_VERSION" sh /tmp/uv-installer.sh \
+    && rm /tmp/uv-installer.sh \
+    && test -x "$HOME/.local/bin/uv"
+
+RUN ! command -v python3 \
+    && ! command -v python \
+    && ! command -v pipx \
+    && test -x /root/.local/bin/uv
+
+CMD ["/bin/sh", "/work/verify_uv_reuse.sh"]

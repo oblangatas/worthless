@@ -1,0 +1,41 @@
+# GitHub auto-generated release-notes categories (WOR-598).
+# `gh release create --generate-notes` and the Releases UI group merged PRs
+# into these sections by label. PRs are auto-labelled by branch prefix +
+# security file paths (PR #219), so the buckets below mostly fill themselves.
+# A maintainer then curates the grouped draft into the story-first CHANGELOG.md
+# (single source of truth); the GitHub Release body mirrors that section.
+changelog:
+  exclude:
+    labels:
+      - ignore-for-release
+    authors:
+      - dependabot[bot]
+  categories:
+    - title: 🔒 Security & Hardening
+      labels:
+        - security
+        - hardening
+    - title: ✨ Features
+      labels:
+        - feature
+        - feat
+        - enhancement
+    - title: 🐛 Fixes
+      labels:
+        - fix
+        - bug
+    - title: 🧪 Tests & CI
+      labels:
+        - test
+        - ci
+        - chore
+    - title: 📝 Docs
+      labels:
+        - docs
+        - documentation
+    - title: 📦 Dependencies
+      labels:
+        - dependencies
+    - title: Other Changes
+      labels:
+        - "*"

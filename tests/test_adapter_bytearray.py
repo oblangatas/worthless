@@ -16,6 +16,7 @@ class TestOpenAIAdapterBytearray:
             body=b'{"model": "gpt-4"}',
             headers={"content-type": "application/json"},
             api_key=key,
+            base_url="https://api.openai.com/v1",
         )
         assert result.headers["authorization"] == "Bearer sk-test-key-12345"
 
@@ -28,6 +29,7 @@ class TestOpenAIAdapterBytearray:
             body=b'{"model": "gpt-4"}',
             headers={},
             api_key=key,
+            base_url="https://api.openai.com/v1",
         )
         assert bytes(key) == original
 
@@ -42,6 +44,7 @@ class TestAnthropicAdapterBytearray:
             body=b'{"model": "claude-3-5-sonnet"}',
             headers={"content-type": "application/json"},
             api_key=key,
+            base_url="https://api.anthropic.com/v1",
         )
         assert result.headers["x-api-key"] == "sk-ant-test-key-12345"
 
@@ -53,6 +56,7 @@ class TestAnthropicAdapterBytearray:
             body=b'{"model": "claude-3-5-sonnet"}',
             headers={},
             api_key=key,
+            base_url="https://api.anthropic.com/v1",
         )
         assert bytes(key) == original
 
@@ -63,5 +67,6 @@ class TestAnthropicAdapterBytearray:
             body=b"{}",
             headers={},
             api_key=key,
+            base_url="https://api.anthropic.com/v1",
         )
         assert "anthropic-version" in result.headers

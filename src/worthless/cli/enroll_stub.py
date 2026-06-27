@@ -19,7 +19,7 @@ async def enroll_stub(
     db_path: str,
     fernet_key: bytes,
     shard_a_dir: str | None = None,
-) -> bytes:
+) -> bytearray:
     """Enroll a key by splitting and storing shard_b.
 
     Returns shard_a bytes (caller is responsible for secure storage).
@@ -48,7 +48,7 @@ async def enroll_stub(
     await repo.initialize()
     await repo.store(alias, shard)
 
-    shard_a = bytes(sr.shard_a)  # nosemgrep: sr01-key-material-not-bytearray
+    shard_a = bytearray(sr.shard_a)
 
     if shard_a_dir:
         Path(shard_a_dir).mkdir(parents=True, exist_ok=True)

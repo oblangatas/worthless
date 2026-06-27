@@ -9,9 +9,7 @@ Covers:
 
 from __future__ import annotations
 
-import base64
 import json
-from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import aiosqlite
@@ -19,12 +17,14 @@ import httpx
 import pytest
 import respx
 
-from worthless.crypto import split_key
+from worthless.crypto.splitter import split_key_fp
 from worthless.proxy.app import create_app
 from worthless.proxy.config import ProxySettings
 from worthless.proxy.metering import extract_usage_anthropic
 from worthless.proxy.rules import RateLimitRule, RulesEngine, SpendCapRule
 from worthless.storage.repository import ShardRepository, StoredShard
+
+from tests._fakes import pin_shard_b
 
 
 # ------------------------------------------------------------------
@@ -35,12 +35,15 @@ PROXY_BODY = b'{"model": "gpt-4", "messages": []}'
 OPENAI_COMPLETIONS = "https://api.openai.com/v1/chat/completions"
 
 
-def _proxy_headers(alias: str, shard_a_b64: str) -> dict[str, str]:
+def _proxy_headers(alias: str, shard_a_utf8: str) -> dict[str, str]:
     return {
-        "x-worthless-key": alias,
-        "x-worthless-shard-a": shard_a_b64,
+        "authorization": f"Bearer {shard_a_utf8}",
         "content-type": "application/json",
     }
+
+
+def _proxy_url(alias: str, path: str = "/v1/chat/completions") -> str:
+    return f"/{alias}{path}"
 
 
 @pytest.fixture()
@@ -52,31 +55,7 @@ def proxy_settings(tmp_db_path: str, fernet_key: bytes, tmp_path) -> ProxySettin
         upstream_timeout=10.0,
         streaming_timeout=30.0,
         allow_insecure=True,
-        shard_a_dir=str(tmp_path / "shard_a"),
-        allow_alias_inference=True,
     )
-
-
-@pytest.fixture()
-async def enrolled_alias(repo, proxy_settings: ProxySettings, sample_api_key_bytes: bytes):
-    """Enroll a test key and return (alias, shard_a_b64, raw_api_key)."""
-    alias = "test-key"
-    sr = split_key(sample_api_key_bytes)
-
-    shard = StoredShard(
-        shard_b=bytearray(sr.shard_b),
-        commitment=bytearray(sr.commitment),
-        nonce=bytearray(sr.nonce),
-        provider="openai",
-    )
-    await repo.store(alias, shard)
-
-    shard_a_dir = Path(proxy_settings.shard_a_dir)
-    shard_a_dir.mkdir(parents=True, exist_ok=True)
-    (shard_a_dir / alias).write_bytes(bytes(sr.shard_a))
-
-    shard_a_b64 = base64.b64encode(bytes(sr.shard_a)).decode()
-    return alias, shard_a_b64, sample_api_key_bytes
 
 
 @pytest.fixture()
@@ -98,6 +77,35 @@ async def proxy_app(proxy_settings: ProxySettings, repo):
     yield app
     await app.state.httpx_client.aclose()
     await db.close()
+
+
+@pytest.fixture()
+async def enrolled_alias(repo, proxy_settings: ProxySettings, proxy_app):
+    """Enroll a test key and return (alias, shard_a_utf8, raw_api_key).
+
+    WOR-309: pins the per-alias plaintext shard-B onto the FakeIPCSupervisor
+    attached to ``proxy_app.state.ipc_supervisor`` so the proxy's IPC-based
+    decrypt round-trips to the real shard-B (the fake otherwise returns a
+    DEFAULT plaintext that fails reconstruction → 401).
+    """
+    alias = "test-key"
+    api_key = "sk-test-key-1234567890abcdef"
+    sr = split_key_fp(api_key, prefix="sk-", provider="openai")
+
+    shard = StoredShard(
+        shard_b=bytearray(sr.shard_b),
+        commitment=bytearray(sr.commitment),
+        nonce=bytearray(sr.nonce),
+        provider="openai",
+    )
+    await repo.store(
+        alias, shard, prefix=sr.prefix, charset=sr.charset, base_url="https://api.openai.com/v1"
+    )
+
+    pin_shard_b(proxy_app, alias, sr.shard_b)
+
+    shard_a_utf8 = sr.shard_a.decode("utf-8")
+    return alias, shard_a_utf8, api_key.encode()
 
 
 @pytest.fixture()
@@ -147,7 +155,7 @@ class TestErrorResponseMetering:
     async def test_4xx_records_spend(
         self, proxy_client: httpx.AsyncClient, enrolled_alias, proxy_settings
     ):
-        alias, shard_a_b64, _ = enrolled_alias
+        alias, shard_a_utf8, _ = enrolled_alias
         respx.post(OPENAI_COMPLETIONS).mock(
             return_value=httpx.Response(
                 400,
@@ -167,8 +175,8 @@ class TestErrorResponseMetering:
 
         with patch("worthless.proxy.app.record_spend", new_callable=AsyncMock) as mock_record:
             resp = await proxy_client.post(
-                "/v1/chat/completions",
-                headers=_proxy_headers(alias, shard_a_b64),
+                _proxy_url(alias),
+                headers=_proxy_headers(alias, shard_a_utf8),
                 content=PROXY_BODY,
             )
 
@@ -179,7 +187,7 @@ class TestErrorResponseMetering:
     async def test_5xx_records_spend(
         self, proxy_client: httpx.AsyncClient, enrolled_alias, proxy_settings
     ):
-        alias, shard_a_b64, _ = enrolled_alias
+        alias, shard_a_utf8, _ = enrolled_alias
         respx.post(OPENAI_COMPLETIONS).mock(
             return_value=httpx.Response(
                 500,
@@ -189,8 +197,8 @@ class TestErrorResponseMetering:
 
         with patch("worthless.proxy.app.record_spend", new_callable=AsyncMock) as mock_record:
             resp = await proxy_client.post(
-                "/v1/chat/completions",
-                headers=_proxy_headers(alias, shard_a_b64),
+                _proxy_url(alias),
+                headers=_proxy_headers(alias, shard_a_utf8),
                 content=PROXY_BODY,
             )
 
@@ -202,13 +210,13 @@ class TestErrorResponseMetering:
         self, proxy_client: httpx.AsyncClient, enrolled_alias
     ):
         """502 from connection failure should NOT meter --- no tokens consumed."""
-        alias, shard_a_b64, _ = enrolled_alias
+        alias, shard_a_utf8, _ = enrolled_alias
         respx.post(OPENAI_COMPLETIONS).mock(side_effect=httpx.ConnectError("Connection refused"))
 
         with patch("worthless.proxy.app.record_spend", new_callable=AsyncMock) as mock_record:
             resp = await proxy_client.post(
-                "/v1/chat/completions",
-                headers=_proxy_headers(alias, shard_a_b64),
+                _proxy_url(alias),
+                headers=_proxy_headers(alias, shard_a_utf8),
                 content=PROXY_BODY,
             )
 
@@ -219,7 +227,7 @@ class TestErrorResponseMetering:
     async def test_error_passes_correct_token_count(
         self, proxy_client: httpx.AsyncClient, enrolled_alias, proxy_settings
     ):
-        alias, shard_a_b64, _ = enrolled_alias
+        alias, shard_a_utf8, _ = enrolled_alias
         respx.post(OPENAI_COMPLETIONS).mock(
             return_value=httpx.Response(
                 400,
@@ -239,8 +247,8 @@ class TestErrorResponseMetering:
 
         with patch("worthless.proxy.app.record_spend", new_callable=AsyncMock) as mock_record:
             resp = await proxy_client.post(
-                "/v1/chat/completions",
-                headers=_proxy_headers(alias, shard_a_b64),
+                _proxy_url(alias),
+                headers=_proxy_headers(alias, shard_a_utf8),
                 content=PROXY_BODY,
             )
 
@@ -254,13 +262,13 @@ class TestErrorResponseMetering:
         self, proxy_client: httpx.AsyncClient, enrolled_alias, proxy_settings
     ):
         """Error with empty body should still call record_spend with 0 tokens (audit trail)."""
-        alias, shard_a_b64, _ = enrolled_alias
+        alias, shard_a_utf8, _ = enrolled_alias
         respx.post(OPENAI_COMPLETIONS).mock(return_value=httpx.Response(500, text=""))
 
         with patch("worthless.proxy.app.record_spend", new_callable=AsyncMock) as mock_record:
             resp = await proxy_client.post(
-                "/v1/chat/completions",
-                headers=_proxy_headers(alias, shard_a_b64),
+                _proxy_url(alias),
+                headers=_proxy_headers(alias, shard_a_utf8),
                 content=PROXY_BODY,
             )
 
@@ -272,13 +280,13 @@ class TestErrorResponseMetering:
     @respx.mock
     async def test_timeout_does_not_meter(self, proxy_client: httpx.AsyncClient, enrolled_alias):
         """504 from timeout should NOT meter --- no tokens consumed."""
-        alias, shard_a_b64, _ = enrolled_alias
+        alias, shard_a_utf8, _ = enrolled_alias
         respx.post(OPENAI_COMPLETIONS).mock(side_effect=httpx.ReadTimeout("Read timed out"))
 
         with patch("worthless.proxy.app.record_spend", new_callable=AsyncMock) as mock_record:
             resp = await proxy_client.post(
-                "/v1/chat/completions",
-                headers=_proxy_headers(alias, shard_a_b64),
+                _proxy_url(alias),
+                headers=_proxy_headers(alias, shard_a_utf8),
                 content=PROXY_BODY,
             )
 
@@ -290,7 +298,7 @@ class TestErrorResponseMetering:
         self, proxy_client: httpx.AsyncClient, enrolled_alias
     ):
         """If record_spend raises, the response must still return 200 (spend silently untracked)."""
-        alias, shard_a_b64, _ = enrolled_alias
+        alias, shard_a_utf8, _ = enrolled_alias
         respx.post(OPENAI_COMPLETIONS).mock(
             return_value=httpx.Response(200, json={"choices": [], "usage": {"total_tokens": 5}})
         )
@@ -301,8 +309,8 @@ class TestErrorResponseMetering:
             side_effect=Exception("DB locked"),
         ):
             resp = await proxy_client.post(
-                "/v1/chat/completions",
-                headers=_proxy_headers(alias, shard_a_b64),
+                _proxy_url(alias),
+                headers=_proxy_headers(alias, shard_a_utf8),
                 content=PROXY_BODY,
             )
 
@@ -518,12 +526,14 @@ class TestAnthropicNonStreamingMetering:
 # ------------------------------------------------------------------
 
 
-def _make_asgi_scope(headers: list[tuple[bytes, bytes]]) -> dict:
-    """Build a raw ASGI scope for POST /v1/chat/completions."""
+def _make_asgi_scope(
+    headers: list[tuple[bytes, bytes]], path: str = "/test-key/v1/chat/completions"
+) -> dict:
+    """Build a raw ASGI scope for POST /<alias>/v1/chat/completions."""
     return {
         "type": "http",
         "method": "POST",
-        "path": "/v1/chat/completions",
+        "path": path,
         "query_string": b"",
         "headers": headers,
         "scheme": "http",
@@ -548,11 +558,10 @@ async def _invoke_asgi(app, scope: dict) -> int:
     return status_code
 
 
-def _asgi_headers(alias: str, shard_a_b64: str, extra: list[tuple[bytes, bytes]] | None = None):
-    """Build ASGI header list with standard proxy headers plus optional extras."""
+def _asgi_headers(alias: str, shard_a_utf8: str, extra: list[tuple[bytes, bytes]] | None = None):
+    """Build ASGI header list with Authorization: Bearer and optional extras."""
     headers = [
-        (b"x-worthless-key", alias.encode()),
-        (b"x-worthless-shard-a", shard_a_b64.encode()),
+        (b"authorization", f"Bearer {shard_a_utf8}".encode()),
         (b"content-type", b"application/json"),
     ]
     if extra:
@@ -570,76 +579,74 @@ class TestMalformedHeaderValues:
     )
     async def test_malformed_value_rejected(self, proxy_app, enrolled_alias, bad_value):
         """Uses raw ASGI scope to bypass httpx client-side header validation."""
-        alias, shard_a_b64, _ = enrolled_alias
+        alias, shard_a_utf8, _ = enrolled_alias
         scope = _make_asgi_scope(
-            _asgi_headers(alias, shard_a_b64, [(b"x-custom", bad_value.encode("latin-1"))])
+            _asgi_headers(alias, shard_a_utf8, [(b"x-custom", bad_value.encode("latin-1"))]),
+            path=f"/{alias}/v1/chat/completions",
         )
         assert await _invoke_asgi(proxy_app, scope) == 401
 
-    async def test_null_in_worthless_key_rejected(self, proxy_app, enrolled_alias):
-        alias, shard_a_b64, _ = enrolled_alias
+    async def test_null_in_authorization_rejected(self, proxy_app, enrolled_alias):
+        alias, shard_a_utf8, _ = enrolled_alias
         scope = _make_asgi_scope(
             [
-                (b"x-worthless-key", (alias + "\x00").encode("latin-1")),
-                (b"x-worthless-shard-a", shard_a_b64.encode()),
+                (b"authorization", f"Bearer {shard_a_utf8}\x00".encode("latin-1")),
                 (b"content-type", b"application/json"),
-            ]
-        )
-        assert await _invoke_asgi(proxy_app, scope) == 401
-
-    async def test_null_in_shard_a_rejected(self, proxy_app, enrolled_alias):
-        alias, shard_a_b64, _ = enrolled_alias
-        scope = _make_asgi_scope(
-            [
-                (b"x-worthless-key", alias.encode()),
-                (b"x-worthless-shard-a", (shard_a_b64 + "\x00").encode("latin-1")),
-                (b"content-type", b"application/json"),
-            ]
+            ],
+            path=f"/{alias}/v1/chat/completions",
         )
         assert await _invoke_asgi(proxy_app, scope) == 401
 
     async def test_crlf_injection_rejected(self, proxy_app, enrolled_alias):
-        alias, shard_a_b64, _ = enrolled_alias
+        alias, shard_a_utf8, _ = enrolled_alias
         scope = _make_asgi_scope(
-            _asgi_headers(alias, shard_a_b64, [(b"x-custom", b"inject\r\nX-Evil: true")])
+            _asgi_headers(alias, shard_a_utf8, [(b"x-custom", b"inject\r\nX-Evil: true")]),
+            path=f"/{alias}/v1/chat/completions",
         )
         assert await _invoke_asgi(proxy_app, scope) == 401
 
     async def test_bare_null_byte_rejected(self, proxy_app, enrolled_alias):
-        alias, shard_a_b64, _ = enrolled_alias
-        scope = _make_asgi_scope(_asgi_headers(alias, shard_a_b64, [(b"x-custom", b"\x00")]))
+        alias, shard_a_utf8, _ = enrolled_alias
+        scope = _make_asgi_scope(
+            _asgi_headers(alias, shard_a_utf8, [(b"x-custom", b"\x00")]),
+            path=f"/{alias}/v1/chat/completions",
+        )
         assert await _invoke_asgi(proxy_app, scope) == 401
 
     @respx.mock
     async def test_empty_value_passes(self, proxy_app, enrolled_alias):
         """Empty string header value is valid and must not be rejected."""
-        alias, shard_a_b64, _ = enrolled_alias
+        alias, shard_a_utf8, _ = enrolled_alias
         respx.post(OPENAI_COMPLETIONS).mock(
             return_value=httpx.Response(200, json={"choices": [], "usage": {"total_tokens": 5}})
         )
-        scope = _make_asgi_scope(_asgi_headers(alias, shard_a_b64, [(b"x-custom", b"")]))
+        scope = _make_asgi_scope(
+            _asgi_headers(alias, shard_a_utf8, [(b"x-custom", b"")]),
+            path=f"/{alias}/v1/chat/completions",
+        )
         assert await _invoke_asgi(proxy_app, scope) == 200
 
     @respx.mock
     async def test_tab_value_passes(self, proxy_app, enrolled_alias):
         """Tab character in header value is valid per RFC 7230."""
-        alias, shard_a_b64, _ = enrolled_alias
+        alias, shard_a_utf8, _ = enrolled_alias
         respx.post(OPENAI_COMPLETIONS).mock(
             return_value=httpx.Response(200, json={"choices": [], "usage": {"total_tokens": 5}})
         )
         scope = _make_asgi_scope(
-            _asgi_headers(alias, shard_a_b64, [(b"x-custom", b"value\twith\ttabs")])
+            _asgi_headers(alias, shard_a_utf8, [(b"x-custom", b"value\twith\ttabs")]),
+            path=f"/{alias}/v1/chat/completions",
         )
         assert await _invoke_asgi(proxy_app, scope) == 200
 
     @respx.mock
     async def test_normal_values_pass(self, proxy_client: httpx.AsyncClient, enrolled_alias):
         """Legitimate header values must not be rejected (false-positive check)."""
-        alias, shard_a_b64, _ = enrolled_alias
+        alias, shard_a_utf8, _ = enrolled_alias
         respx.post(OPENAI_COMPLETIONS).mock(
             return_value=httpx.Response(200, json={"choices": [], "usage": {"total_tokens": 5}})
         )
-        headers = _proxy_headers(alias, shard_a_b64)
+        headers = _proxy_headers(alias, shard_a_utf8)
         headers.update(
             {
                 "x-custom": "perfectly-normal-value",
@@ -647,7 +654,7 @@ class TestMalformedHeaderValues:
             }
         )
         resp = await proxy_client.post(
-            "/v1/chat/completions",
+            _proxy_url(alias),
             headers=headers,
             content=PROXY_BODY,
         )

@@ -114,6 +114,112 @@ class TestRewriteEnvKey:
         assert "new_value" in content
 
 
+class TestAddOrRewriteEnvKey:
+    """Tests for add_or_rewrite_env_key — create or update a variable."""
+
+    def test_creates_file_and_adds_key(self, tmp_path: Path):
+        from worthless.cli.dotenv_rewriter import add_or_rewrite_env_key
+
+        env_file = tmp_path / ".env"
+        env_file.write_text("")
+        add_or_rewrite_env_key(env_file, "NEW_KEY", "new_value")
+        content = env_file.read_text()
+        assert "NEW_KEY=new_value" in content
+
+    def test_updates_existing_key(self, tmp_path: Path):
+        from worthless.cli.dotenv_rewriter import add_or_rewrite_env_key
+
+        env_file = tmp_path / ".env"
+        env_file.write_text("MY_KEY=old\nOTHER=keep\n")
+        add_or_rewrite_env_key(env_file, "MY_KEY", "new")
+        content = env_file.read_text()
+        assert "new" in content
+        assert "old" not in content
+        assert "OTHER=keep" in content
+
+    def test_unicode_value(self, tmp_path: Path):
+        from worthless.cli.dotenv_rewriter import add_or_rewrite_env_key
+
+        env_file = tmp_path / ".env"
+        env_file.write_text("")
+        add_or_rewrite_env_key(env_file, "UNICODE", "héllo-wörld")
+        content = env_file.read_text()
+        assert "héllo-wörld" in content
+
+    def test_empty_value(self, tmp_path: Path):
+        from worthless.cli.dotenv_rewriter import add_or_rewrite_env_key
+
+        env_file = tmp_path / ".env"
+        env_file.write_text("")
+        add_or_rewrite_env_key(env_file, "EMPTY", "")
+        content = env_file.read_text()
+        assert "EMPTY=" in content
+
+
+class TestRemoveEnvKey:
+    """Tests for remove_env_key — remove a variable from .env."""
+
+    def test_removes_existing_key(self, tmp_path: Path):
+        from worthless.cli.dotenv_rewriter import remove_env_key
+
+        env_file = tmp_path / ".env"
+        env_file.write_text("KEEP=yes\nREMOVE=me\nALSO_KEEP=yes\n")
+        remove_env_key(env_file, "REMOVE")
+        content = env_file.read_text()
+        assert "REMOVE" not in content
+        assert "KEEP=yes" in content
+        assert "ALSO_KEEP=yes" in content
+
+    def test_noop_when_key_missing(self, tmp_path: Path):
+        from worthless.cli.dotenv_rewriter import remove_env_key
+
+        env_file = tmp_path / ".env"
+        env_file.write_text("FOO=bar\n")
+        remove_env_key(env_file, "NONEXISTENT")
+        assert env_file.read_text() == "FOO=bar\n"
+
+    def test_removes_quoted_key(self, tmp_path: Path):
+        from worthless.cli.dotenv_rewriter import remove_env_key
+
+        env_file = tmp_path / ".env"
+        env_file.write_text('MY_VAR="quoted_value"\nOTHER=keep\n')
+        remove_env_key(env_file, "MY_VAR")
+        content = env_file.read_text()
+        assert "MY_VAR" not in content
+        assert "OTHER=keep" in content
+
+
+class TestBuildEnrolledLocations:
+    """Tests for build_enrolled_locations — set of (var_name, env_path) from enrollments."""
+
+    def test_builds_set_from_enrollments(self):
+        from worthless.cli.dotenv_rewriter import build_enrolled_locations
+        from worthless.storage.repository import EnrollmentRecord
+
+        enrollments = [
+            EnrollmentRecord(key_alias="a", var_name="KEY_A", env_path="/path/a/.env"),
+            EnrollmentRecord(key_alias="b", var_name="KEY_B", env_path="/path/b/.env"),
+        ]
+        result = build_enrolled_locations(enrollments)
+        assert result == {("KEY_A", "/path/a/.env"), ("KEY_B", "/path/b/.env")}
+
+    def test_excludes_none_env_path(self):
+        from worthless.cli.dotenv_rewriter import build_enrolled_locations
+        from worthless.storage.repository import EnrollmentRecord
+
+        enrollments = [
+            EnrollmentRecord(key_alias="a", var_name="KEY_A", env_path="/path/.env"),
+            EnrollmentRecord(key_alias="b", var_name="KEY_B", env_path=None),
+        ]
+        result = build_enrolled_locations(enrollments)
+        assert result == {("KEY_A", "/path/.env")}
+
+    def test_empty_enrollments(self):
+        from worthless.cli.dotenv_rewriter import build_enrolled_locations
+
+        assert build_enrolled_locations([]) == set()
+
+
 class TestScanRewriteParity:
     """Verify scan_env_keys and rewrite_env_key agree on var names.
 

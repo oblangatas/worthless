@@ -1,0 +1,50 @@
+name: Docs site (Starlight build)
+
+# PR-only build verification. Cloudflare Workers Static Assets handles
+# the actual deploy on every push to main that touches docs sources.
+# This job exists to fail PRs that would break the docs build.
+
+on:
+  pull_request:
+    paths:
+      - 'docs/**'
+      - 'src/content.config.ts'
+      - 'astro.config.mjs'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'wrangler.jsonc'
+      - '.github/workflows/docs-spike.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Docs image tags match released version (WOR-736)
+        # PR-time half of the docs version guard: fail a docs PR that pins a
+        # worthless-proxy:X.Y.Z image tag older than install.sh's pin. The
+        # release-driven-drift backstop is A1b in release-sync-check.yml.
+        run: python3 scripts/check_docs_versions.py
+      - name: Link check the built site (WOR-736)
+        # Fail a docs PR with a dead INTERNAL link in the built site — the
+        # README/ROADMAP/security-doc 404 class that bit us repeatedly.
+        # --offline checks local links only: deterministic, no external
+        # rate-limit flakiness. --root-dir resolves absolute /slug links
+        # against the astro dist/ built above. Verified 0 errors locally.
+        uses: lycheeverse/lychee-action@8646ba30535128ac92d33dfc9133794bfdd9b411 # v2.8.0
+        with:
+          args: "--offline --root-dir ${{ github.workspace }}/dist --no-progress dist"
+          fail: true

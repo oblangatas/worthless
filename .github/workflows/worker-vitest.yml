@@ -1,0 +1,82 @@
+name: Worker vitest (PR gate)
+
+# Runs the workers/worthless-sh/ vitest suite on every PR that touches
+# the Worker subproject. Today vitest only runs as part of
+# `deploy-worker.yml`, which fires on tag-push (production deploy) — so
+# a broken vitest test only surfaces AFTER it lands on main and
+# someone cuts a release. WOR-339 closes that gap.
+#
+# Trigger model:
+#   - pull_request: catch breakage at review time, before merge.
+#   - push to main: catch the rare case where main lands a worker change
+#     via a non-PR path (direct push from a maintainer with bypass).
+#   - workflow_dispatch: operator-triggered re-runs.
+#
+# Path filter is intentionally narrow:
+#   - workers/worthless-sh/**     — Worker code + tests + scripts
+#   - install.sh                  — embedded into the bundle by
+#                                    embed-assets.mjs at build time;
+#                                    a change here changes served bytes.
+#   - .github/workflows/worker-vitest.yml
+#                                  — so workflow edits gate themselves.
+#
+# What this does NOT cover (intentional):
+#   - The post-deploy walkthrough sha256 smoke test in deploy-worker.yml
+#     stays as-is — that validates the deployed Worker, not unit tests.
+#   - The wire-attack probes in worker-wire-attacks.yml run on a separate
+#     trigger and have their own PR gate.
+
+on:
+  pull_request:
+    paths:
+      - "workers/worthless-sh/**"
+      - "install.sh"
+      - ".github/workflows/worker-vitest.yml"
+  push:
+    branches: [main]
+    paths:
+      - "workers/worthless-sh/**"
+      - "install.sh"
+      - ".github/workflows/worker-vitest.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: worker-vitest-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vitest:
+    name: Worker vitest suite
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          # fetch-depth: 1 — vitest does not need git history.
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: ./.github/actions/setup-node-worker
+
+      - name: Install Worker deps
+        working-directory: workers/worthless-sh
+        # `npm ci --include=optional` is defensive against a known npm bug
+        # where rolldown's platform-specific native binding is sometimes
+        # not installed on a fresh `npm ci` even though it is listed in
+        # optionalDependencies. Without --include=optional the test run
+        # can fail with `Cannot find module '@rolldown/binding-linux-x64-gnu'`.
+        run: npm ci --include=optional
+
+      - name: Run vitest suite
+        working-directory: workers/worthless-sh
+        # `npm test` runs the `pretest` hook (embed:assets) automatically
+        # before invoking vitest. embed:assets reads the canonical
+        # install.sh + walkthrough.txt and produces src/embedded.ts —
+        # gitignored, regenerated every run, so PRs that change either
+        # source file get tested against fresh embedded constants.
+        run: npm test

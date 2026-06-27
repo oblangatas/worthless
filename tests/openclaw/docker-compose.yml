@@ -1,0 +1,119 @@
+services:
+  mock-upstream:
+    build:
+      context: ./mock-upstream
+    ports:
+      - "127.0.0.1::9999"
+    networks:
+      - openclaw-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9999/healthz')"]
+      interval: 5s
+      timeout: 3s
+      start_period: 2s
+      retries: 3
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+
+  worthless-proxy:
+    build:
+      context: ../../
+      dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1::8787"
+    environment:
+      WORTHLESS_DEPLOY_MODE: "lan"
+      WORTHLESS_ALLOW_INSECURE: "true"
+      # WOR-310: deploy/start.py::_resolve_bind() returns 127.0.0.1
+      # for `lan` mode (only `public` auto-binds 0.0.0.0).  Real LAN
+      # users explicitly set WORTHLESS_HOST to their iface; the
+      # openclaw test stack needs all interfaces so host-side httpx
+      # reaches uvicorn through the docker-published port.
+      WORTHLESS_HOST: "0.0.0.0"
+      # 8rqs Phase 5+6 removed the global per-provider URL overrides.
+      # The mock-upstream is now reached via per-enrollment base_url
+      # stored at lock time — see the openclaw_stack fixture in
+      # tests/test_openclaw_e2e.py for the registry-register +
+      # OPENAI_BASE_URL/ANTHROPIC_BASE_URL injection flow.
+      WORTHLESS_FERNET_KEY_PATH: /secrets/fernet.key
+    volumes:
+      - worthless-data:/data
+      - worthless-secrets:/secrets
+    networks:
+      openclaw-net:
+        # `proxy` mirrors the production deploy/docker-compose.yml service
+        # name, which is the host real `worthless lock` writes + the only
+        # container hostname integration.py's SSRF allowlist permits. The
+        # service name `worthless-proxy` still resolves for tests that wire
+        # the provider manually (test_proxy_is_load_bearing_after_lock).
+        aliases:
+          - proxy
+    depends_on:
+      mock-upstream:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+      # WOR-466: Docker resets tmpfs gid to root(0); probe drops to uid=10001
+      # before stat() so without gid=10001 it gets EACCES on the dir.
+      - /run/worthless:uid=0,gid=10001,mode=0770
+    # WOR-310: drop all caps EXCEPT the six the runtime needs briefly
+    # during entrypoint bootstrap + priv-drop dance (the preexec_fn
+    # clears the bounding set before exec, so post-drop has zero caps).
+    #   * SETUID/SETGID — setres*/setgroups
+    #   * SETPCAP       — prctl(PR_CAPBSET_DROP)
+    #   * DAC_OVERRIDE  — root must write to /data which is owned by
+    #                     worthless-proxy (uid 10001) — without DAC
+    #                     override root is "other" and mkdir EACCES.
+    #   * CHOWN         — chown bootstrap output to worthless-proxy.
+    #   * FOWNER        — chmod fernet.key (non-root-owned file).
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+      - SETPCAP
+      - DAC_OVERRIDE
+      - CHOWN
+      - FOWNER
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+
+  # OpenClaw Gateway — opt-in via: docker compose --profile openclaw up
+  # Requires ghcr.io/openclaw/openclaw:latest to be pullable.
+  openclaw:
+    image: ghcr.io/openclaw/openclaw:latest
+    profiles:
+      - openclaw
+    ports:
+      - "127.0.0.1::18789"
+    environment:
+      OPENCLAW_ACCEPT_TERMS: "yes"
+    volumes:
+      - ./openclaw-config:/home/node/.openclaw
+    networks:
+      - openclaw-net
+    depends_on:
+      worthless-proxy:
+        condition: service_healthy
+
+networks:
+  openclaw-net:
+    driver: bridge
+
+volumes:
+  worthless-data:
+  worthless-secrets:

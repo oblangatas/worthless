@@ -1,0 +1,49 @@
+# Post-install lock-lifecycle stack: mock-upstream (fake OpenAI) + a
+# container that has worthless installed via install.sh. The worthless
+# container runs lock_e2e.py which locks a fake key, starts the proxy,
+# sends a request, and asserts mock-upstream received the reconstructed
+# real key. See tests/test_install_docker.py :: test_bare_ubuntu_lock_*.
+services:
+  mock-upstream:
+    build:
+      context: ../openclaw/mock-upstream
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:9999/healthz')",
+        ]
+      interval: 3s
+      timeout: 3s
+      start_period: 2s
+      retries: 5
+    networks:
+      - lock-e2e-net
+
+  worthless-installed:
+    build:
+      context: ../..
+      dockerfile: tests/install_fixtures/${LOCK_E2E_DOCKERFILE:-Dockerfile.ubuntu-bare-lock-e2e}
+      args:
+        # PR-only: install.sh's baked pin (release version) isn't on PyPI yet, so
+        # CI sets WORTHLESS_VERSION to the latest published version. Empty on
+        # push/tag → the Dockerfile falls back to install.sh's baked pin.
+        WORTHLESS_VERSION: ${WORTHLESS_VERSION:-}
+    environment:
+      # Upstream redirection now lives in .env (OPENAI_BASE_URL) — written by
+      # lock_e2e.py and stored per-enrollment by `worthless lock`. WORTHLESS_-
+      # UPSTREAM_OPENAI_URL was ripped in PR #127 (post-8rqs). Only thing
+      # still required here: allow http:// upstream so the proxy can talk
+      # to the mock without TLS.
+      WORTHLESS_ALLOW_INSECURE: "true"
+    depends_on:
+      mock-upstream:
+        condition: service_healthy
+    networks:
+      - lock-e2e-net
+
+networks:
+  lock-e2e-net:
+    driver: bridge

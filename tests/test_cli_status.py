@@ -130,7 +130,7 @@ class TestStatusProxy:
             def json(self):
                 return {"status": "ok", "mode": "up"}
 
-        with patch("worthless.cli.commands.status.httpx") as mock_httpx:
+        with patch("worthless.cli.process.httpx") as mock_httpx:
             mock_httpx.get.return_value = MockResponse()
             result = runner.invoke(
                 app,
@@ -153,7 +153,7 @@ class TestStatusProxy:
             def json(self):
                 return {"status": "ok", "mode": "up"}
 
-        with patch("worthless.cli.commands.status.httpx") as mock_httpx:
+        with patch("worthless.cli.process.httpx") as mock_httpx:
             mock_httpx.get.return_value = MockResponse()
             result = runner.invoke(
                 app,
@@ -187,7 +187,7 @@ class TestStatusRequestsProxied:
             def json(self):
                 return {"status": "ok", "mode": "up", "requests_proxied": 42}
 
-        with patch("worthless.cli.commands.status.httpx") as mock_httpx:
+        with patch("worthless.cli.process.httpx") as mock_httpx:
             mock_httpx.get.return_value = MockResponse()
             result = runner.invoke(
                 app,
@@ -211,7 +211,7 @@ class TestStatusRequestsProxied:
             def json(self):
                 return {"status": "ok", "mode": "up", "requests_proxied": 7}
 
-        with patch("worthless.cli.commands.status.httpx") as mock_httpx:
+        with patch("worthless.cli.process.httpx") as mock_httpx:
             mock_httpx.get.return_value = MockResponse()
             result = runner.invoke(
                 app,
@@ -234,7 +234,7 @@ class TestStatusRequestsProxied:
             def json(self):
                 return {"status": "ok", "mode": "up", "requests_proxied": 0}
 
-        with patch("worthless.cli.commands.status.httpx") as mock_httpx:
+        with patch("worthless.cli.process.httpx") as mock_httpx:
             mock_httpx.get.return_value = MockResponse()
             result = runner.invoke(
                 app,
@@ -245,3 +245,151 @@ class TestStatusRequestsProxied:
         assert result.exit_code == 0
         output = result.stderr + result.stdout
         assert "0" in output
+
+
+# ---------------------------------------------------------------------------
+# WOR-658: status surfaces bind_confirmation state from the sentinel.
+#
+# Lock writes a ``bind_confirmation`` block into the sentinel after the
+# OpenClaw rewrite (pass / fail / skipped + reason). The whole point of
+# persisting it is so ``worthless status`` can show the user DEGRADED with
+# an actionable reason across terminal sessions — the original lock exit
+# code is long gone by the time the user runs status. Without these tests
+# the feature is silent and the user has no cue that routing isn't proven.
+# ---------------------------------------------------------------------------
+
+
+class TestStatusSurfacesBindConfirmation:
+    """The status command MUST read bind_confirmation from the sentinel and
+    show the user a human-readable reason — not just generic DEGRADED."""
+
+    def _write_sentinel(self, home: WorthlessHome, payload: dict) -> None:
+        from worthless.cli.sentinel import sentinel_path
+
+        sentinel_path(home.base_dir).write_text(json.dumps(payload, sort_keys=True))
+
+    def test_status_shows_bind_fail_reason_in_human_output(
+        self, home_with_key: WorthlessHome
+    ) -> None:
+        """bind_confirmation.status == 'fail' → human output names the cause."""
+        self._write_sentinel(
+            home_with_key,
+            {
+                "ts": "2026-06-15T00:00:00+00:00",
+                "status": "partial",
+                "openclaw": "failed",
+                "alias_count": 1,
+                "events": [],
+                "bind_confirmation": {
+                    "status": "fail",
+                    "delta": 0,
+                    "reached": 1,
+                    "aliases": ["openai-abc"],
+                },
+            },
+        )
+
+        result = runner.invoke(
+            app,
+            ["status"],
+            env={"WORTHLESS_HOME": str(home_with_key.base_dir)},
+        )
+        out = result.stderr + result.stdout
+        assert "routing" in out.lower() or "not reach" in out.lower(), (
+            f"status must explain WHY DEGRADED on bind-fail. Got:\n{out}"
+        )
+        assert result.exit_code != 0
+
+    def test_status_names_squatter_reason_in_human_output(
+        self, home_with_key: WorthlessHome
+    ) -> None:
+        """proxy_unrecognised → human output points at the unrecognised peer."""
+        self._write_sentinel(
+            home_with_key,
+            {
+                "ts": "2026-06-15T00:00:00+00:00",
+                "status": "ok",
+                "openclaw": "ok",
+                "alias_count": 1,
+                "events": [],
+                "bind_confirmation": {
+                    "status": "skipped",
+                    "reason": "proxy_unrecognised",
+                    "delta": 0,
+                    "reached": 0,
+                    "aliases": ["openai-abc"],
+                },
+            },
+        )
+
+        result = runner.invoke(
+            app,
+            ["status"],
+            env={"WORTHLESS_HOME": str(home_with_key.base_dir)},
+        )
+        out = result.stderr + result.stdout
+        assert "unrecogn" in out.lower() or "worthless proxy" in out.lower(), (
+            f"skipped/unrecognised must surface a distinct message. Got:\n{out}"
+        )
+        # CodeRabbit gate-10: pin the exit contract. skipped/unrecognised is
+        # NOT a degraded state (status=ok, openclaw=ok) — it's inconclusive,
+        # so status must exit 0, not the 73 reserved for true DEGRADED.
+        assert result.exit_code == 0, (
+            f"skipped/unrecognised is inconclusive, not DEGRADED — must exit 0. "
+            f"Got {result.exit_code}"
+        )
+
+    def test_status_quiet_when_bind_confirmation_passes(self, home_with_key: WorthlessHome) -> None:
+        """status=ok + bind=pass → no DEGRADED, no [WARN]."""
+        self._write_sentinel(
+            home_with_key,
+            {
+                "ts": "2026-06-15T00:00:00+00:00",
+                "status": "ok",
+                "openclaw": "ok",
+                "alias_count": 1,
+                "events": [],
+                "bind_confirmation": {
+                    "status": "pass",
+                    "delta": 1,
+                    "reached": 1,
+                    "aliases": ["openai-abc"],
+                },
+            },
+        )
+
+        result = runner.invoke(
+            app,
+            ["status"],
+            env={"WORTHLESS_HOME": str(home_with_key.base_dir)},
+        )
+        out = result.stderr + result.stdout
+        assert "[WARN]" not in out
+        assert "DEGRADED" not in out.upper()
+        assert result.exit_code == 0
+
+    # Fix 13: backward-compat — old sentinels lack bind_confirmation field.
+    def test_status_tolerates_old_sentinel_without_bind_confirmation(
+        self, home_with_key: WorthlessHome
+    ) -> None:
+        """Sentinel written by a pre-WOR-658 lock has no bind_confirmation key.
+        Status must read it cleanly (no KeyError, no crash)."""
+        self._write_sentinel(
+            home_with_key,
+            {
+                "ts": "2026-06-15T00:00:00+00:00",
+                "status": "ok",
+                "openclaw": "ok",
+                "alias_count": 1,
+                "events": [],
+                # bind_confirmation intentionally absent
+            },
+        )
+
+        result = runner.invoke(
+            app,
+            ["status"],
+            env={"WORTHLESS_HOME": str(home_with_key.base_dir)},
+        )
+        assert result.exit_code == 0
+        assert "Traceback" not in (result.stderr + result.stdout)

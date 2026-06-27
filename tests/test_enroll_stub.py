@@ -27,12 +27,12 @@ async def _retrieve(db_path: str, fernet_key: bytes, alias: str):
 class TestEnrollStub:
     """Core enroll_stub behaviour."""
 
-    def test_returns_shard_a_bytes(self, tmp_db_path: str, fernet_key: bytes) -> None:
-        """enroll_stub returns shard_a bytes for the caller to store."""
+    def test_returns_shard_a_bytearray(self, tmp_db_path: str, fernet_key: bytes) -> None:
+        """enroll_stub returns shard_a as bytearray (SR-01: zeroable)."""
         shard_a = asyncio.run(
             enroll_stub("test-alias", _TEST_KEY, "openai", tmp_db_path, fernet_key)
         )
-        assert isinstance(shard_a, bytes)
+        assert isinstance(shard_a, bytearray)
         assert len(shard_a) > 0
 
     def test_shard_b_stored_in_db(self, tmp_db_path: str, fernet_key: bytes) -> None:
@@ -128,8 +128,8 @@ class TestEnrollStubMultipleKeys:
             enroll_stub("key-anthropic", _TEST_KEY_2, "anthropic", tmp_db_path, fernet_key)
         )
 
-        assert isinstance(shard_a_1, bytes)
-        assert isinstance(shard_a_2, bytes)
+        assert isinstance(shard_a_1, bytearray)
+        assert isinstance(shard_a_2, bytearray)
 
         # Both are retrievable
         stored_1 = asyncio.run(_retrieve(tmp_db_path, fernet_key, "key-openai"))

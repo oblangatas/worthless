@@ -1,6 +1,11 @@
 name: Publish to PyPI
 
 on:
+  # LOAD-BEARING: push-tags-only. Do NOT add workflow_dispatch or
+  # workflow_call — the GPG signed-tag verify step in the build job is
+  # guarded on `github.event_name == 'push'`, so any other trigger would
+  # publish to PyPI WITHOUT a signature check. tests/test_deploy_static.py
+  # (TestPublishTagVerification) enforces this.
   push:
     tags:
       - "v*"
@@ -18,7 +23,58 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
+          # Need full history so `git verify-tag` can read the signed tag
+          # object; a shallow clone strips signatures (mirrors deploy-worker.yml).
+          fetch-depth: 0
           persist-credentials: false
+
+      - name: Verify tag GPG signature (fatal — must precede pyproject parse + build)
+        # FIRST step after checkout, BY DESIGN. PyPI must publish only from a
+        # tag the maintainer GPG-signed: deploy-worker.yml already fails closed
+        # on an unsigned tag; this closes the same gap on the publish side.
+        # It must run BEFORE the next step (which parses attacker-controlled
+        # pyproject.toml) and before `python -m build` (which runs build hooks).
+        # Reuses the same verify-tag.sh + repo Variables as deploy-worker.yml.
+        if: github.event_name == 'push'
+        env:
+          MAINTAINER_PUBKEY: ${{ vars.MAINTAINER_GPG_PUBKEY }}
+          MAINTAINER_FINGERPRINT: ${{ vars.MAINTAINER_GPG_FINGERPRINT }}
+        run: bash .github/scripts/verify-tag.sh
+
+      - name: Verify tag matches pyproject version
+        # Single sync invariant in the resolve-latest install.sh model:
+        # pushed git tag MUST equal the version pinned in pyproject.toml.
+        # Without this guard, `skip-existing: true` (set on the publish step)
+        # silently dupe-accepts a stale-version build on every v* tag — the
+        # exact bug WOR-300 hit on v0.3.1 / v0.3.1-rc1 (pyproject said 0.3.0,
+        # tag said 0.3.1, PyPI accepted-and-discarded the duplicate). Failing
+        # fast here makes the desync impossible.
+        #
+        # Uses tomllib (Python 3.11+, available system-wide on ubuntu-latest
+        # runners) instead of grep+sed, so dynamic versioning, comments, or
+        # multi-line strings in pyproject.toml don't yield false-positive
+        # matches.
+        #
+        # Uses packaging.version.Version for PEP 440-aware comparison so that
+        # re-tags like v0.3.8.0 (which PEP 440 treats as identical to 0.3.8)
+        # are accepted.  Strict equality first; packaging fallback only when
+        # the raw strings differ (covers the re-tag tombstone workaround).
+        run: |
+          set -euo pipefail
+          PYPROJECT_VERSION=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          # Injection-safe: TAG_VERSION is attacker-controlled (the git tag name).
+          # Export both vars; Python reads them via os.environ — the Python source
+          # string never contains ${TAG_VERSION} so shell expansion cannot inject code.
+          export PYPROJECT_VERSION TAG_VERSION
+          if [ "${PYPROJECT_VERSION}" = "${TAG_VERSION}" ]; then
+            echo "OK: tag ${GITHUB_REF_NAME} matches pyproject ${PYPROJECT_VERSION}"
+          elif python3 -c "import os,sys; from packaging.version import Version; sys.exit(0 if Version(os.environ['PYPROJECT_VERSION'])==Version(os.environ['TAG_VERSION']) else 1)"; then
+            echo "OK: tag ${GITHUB_REF_NAME} (${TAG_VERSION}) is PEP 440-equivalent to pyproject ${PYPROJECT_VERSION}"
+          else
+            echo "::error title=Tag/pyproject version drift::Pushed tag ${GITHUB_REF_NAME} (=> ${TAG_VERSION}) does not match pyproject.toml version ${PYPROJECT_VERSION}. Bump pyproject.toml first or push a matching tag."
+            exit 1
+          fi
 
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
@@ -54,6 +110,11 @@ jobs:
           path: dist/
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@76f52bc884231f62b54f72e44af3222aff7e3a45 # v1.12.4
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
         with:
           print-hash: true
+          attestations: true
+          # Idempotent: if the version already exists on PyPI (e.g. when a
+          # canonical tag is pushed after a successful pre-release upload),
+          # skip the upload and exit clean instead of failing the workflow.
+          skip-existing: true

@@ -1,0 +1,320 @@
+name: Publish Docker image to GHCR
+
+# WOR-236 — on every v* tag, build multi-arch image, Grype release-gate,
+# push to ghcr.io/<owner>/worthless-proxy, sign with cosign, flip visibility
+# public, smoke-test with signature verification.
+# See .planning/ghcr-publish-spec.md for the full rationale.
+#
+# !!! DO NOT RENAME THIS FILE !!!
+# The cosign keyless signature embeds this workflow's full path in the
+# Fulcio certificate SAN. Every `cosign verify` command users have
+# copy-pasted from the README includes `publish-docker.yml` in the
+# identity regex. Renaming this file silently breaks ALL verify commands
+# for ALL previously-published images — a one-way supply-chain door.
+# If you MUST rename, bump a major version and announce new verify syntax.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# Workflow-scoped minimum. Per-job permissions widen as needed.
+permissions:
+  contents: read
+
+# Never cancel a release mid-push — idempotent re-run is safer than a
+# half-pushed manifest list.
+concurrency:
+  group: publish-docker-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-push:
+    name: Build, scan, and push multi-arch image
+    runs-on: ubuntu-latest
+    # amd64 scan-build (~3m) + arm64 QEMU scan-build (~8-12m) + multi-arch
+    # push (~10-14m) + cosign (~30s). 35m budget absorbs QEMU variance.
+    timeout-minutes: 35
+    env:
+      ARM64_TAR: /tmp/worthless-proxy-arm64.tar
+    permissions:
+      contents: read
+      packages: write
+      # id-token: write enables cosign keyless signing via OIDC.
+      # No long-lived keys; signature binds image digest to this workflow.
+      id-token: write
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      digest: ${{ steps.push.outputs.digest }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up QEMU (arm64 emulation on amd64 runner)
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          # zizmor cache-poisoning: tag-only publish workflow, no cache reuse.
+          cache-binary: false
+
+      # Install cosign early so a broken installer pin fails in <30s
+      # instead of after 10+ minutes of QEMU build time.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          # Use repository_owner (not github.actor) so a bot-pushed tag or
+          # a scheduled re-dispatch still authenticates correctly. The
+          # GITHUB_TOKEN is what carries auth; username is a label.
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image metadata (tags + labels)
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/worthless-proxy
+          # metadata-action handles pre-release semantics natively —
+          # do NOT hand-roll !contains(ref, '-'). latest=auto means
+          # full-semver tags get :latest, pre-releases do not.
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+          flavor: |
+            latest=auto
+
+      # Scan-before-push gate: amd64 loads to daemon, arm64 writes tarball
+      # (foreign-arch daemon load is unreliable across runner images).
+      - name: Build amd64 image locally for vulnerability scan
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: worthless-proxy:scan-${{ github.sha }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      # Grype (Anchore) replaces Trivy (Aqua) after the TeamPCP supply-chain
+      # compromise of aquasecurity/trivy-action in Feb-Mar 2026. Different
+      # vendor, different codebase, different CI pipeline — limits blast
+      # radius of any one scanner repo being compromised. Same archetype:
+      # OSS, OS-pkg + language-dep coverage, fails on fixable CRITICAL.
+      - name: Grype release-gate amd64 (fail on critical)
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        with:
+          image: worthless-proxy:scan-${{ github.sha }}
+          severity-cutoff: critical
+          only-fixed: true
+          fail-build: true
+
+      # arm64-specific CVEs (different Debian slim package variants) would
+      # otherwise ship unscanned. Build arm64 to a local OCI tarball (more
+      # portable than `load: true`, which depends on the daemon's image
+      # store accepting foreign-arch images — varies across runner images).
+      # Grype reads the tarball via its `docker-archive:` scheme.
+      - name: Build arm64 image to tarball for vulnerability scan
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/arm64
+          push: false
+          outputs: type=docker,dest=${{ env.ARM64_TAR }}
+          tags: worthless-proxy:scan-arm64-${{ github.sha }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Grype release-gate arm64 (fail on critical)
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        with:
+          # docker-archive: scheme tells Grype to read the tarball directly
+          # (via its internal libs). No daemon load needed for foreign arch.
+          image: docker-archive:${{ env.ARM64_TAR }}
+          severity-cutoff: critical
+          only-fixed: true
+          fail-build: true
+
+      # Sign-before-tag invariant: we push by DIGEST ONLY (no human-readable
+      # tags) so the image exists at sha256:... but is not yet pullable via
+      # :X.Y.Z / :X.Y / :latest. We sign the digest next; only if signing
+      # succeeds do we promote the digest to tags. This guarantees every
+      # published human tag in GHCR points at a signed digest — no race
+      # window where a transient sigstore outage leaves a tagged-unsigned
+      # release visible to users.
+      - name: Push multi-arch manifest list by digest (no tags)
+        id: push
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: false
+          outputs: type=image,name=ghcr.io/${{ github.repository_owner }}/worthless-proxy,push-by-digest=true,name-canonical=true,push=true
+          labels: ${{ steps.meta.outputs.labels }}
+          # Provenance + SBOM attestations attached to the manifest list.
+          provenance: true
+          sbom: true
+          # No GHA cache — tag-only workflow runs infrequently; cache
+          # would be theatre. Revisit if arm64 emulation pushes >20 min.
+
+      # Cosign keyless signing via OIDC. See docs/install-docker.md for the
+      # matching `cosign verify` command — keep the identity regex there in
+      # sync with the SAN format embedded by Fulcio on this workflow file.
+      - name: Sign digest with cosign (keyless, OIDC)
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/worthless-proxy
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          # Retry up to 3x with backoff. Rekor and Fulcio are external
+          # sigstore services — transient 5xx would otherwise block the
+          # release. cosign sign is idempotent by digest, so retrying is
+          # safe. If all 3 fail, we exit 1 without promoting to tags —
+          # the image exists at sha256:... but is not pullable by any
+          # canonical tag, preserving the sign-before-tag invariant.
+          for attempt in 1 2 3; do
+            if cosign sign --yes "${IMAGE}@${DIGEST}"; then
+              exit 0
+            fi
+            echo "cosign sign attempt ${attempt} failed; sleeping 20s before retry..."
+            sleep 20
+          done
+          echo "::error::cosign sign failed after 3 attempts — image exists at ${IMAGE}@${DIGEST} but no human tags were created. Re-run the workflow or delete the orphan digest."
+          exit 1
+
+      # Only reached if signing succeeded. Promote the signed digest to
+      # all the tags metadata-action produced (:X.Y.Z, :X.Y, :latest).
+      # docker buildx imagetools create operates on the manifest list, so
+      # every arch in the list inherits the tag pointer atomically.
+      - name: Promote signed digest to human tags
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/worthless-proxy
+          DIGEST: ${{ steps.push.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          tag_args=""
+          while IFS= read -r tag; do
+            [ -n "$tag" ] && tag_args="${tag_args} --tag ${tag}"
+          done <<< "$TAGS"
+          if [ -z "$tag_args" ]; then
+            echo "::error::No tags produced by metadata-action — nothing to promote."
+            exit 1
+          fi
+          # shellcheck disable=SC2086
+          docker buildx imagetools create ${tag_args} "${IMAGE}@${DIGEST}"
+
+  visibility:
+    name: Flip GHCR package visibility to public
+    needs: build-push
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      packages: write
+    # Signal-visible fail-open: continue-on-error keeps the RELEASE green
+    # (publish itself already succeeded), but the JOB goes red so the
+    # maintainer actually sees that a manual visibility flip is needed.
+    # Silent warnings in release workflows are write-only memory.
+    continue-on-error: true
+
+    steps:
+      - name: Set package visibility to public (org or user fallback)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set +e
+          # Try org path first, fall back to user path. PATCH to an
+          # already-public package is idempotent (204). Only hit the
+          # error-annotation path if BOTH paths fail.
+          gh api -X PATCH \
+            -H "Accept: application/vnd.github+json" \
+            "/orgs/${OWNER}/packages/container/worthless-proxy/visibility" \
+            -f visibility=public
+          org_rc=$?
+          if [ "$org_rc" -ne 0 ]; then
+            echo "Org path failed (rc=$org_rc), trying user path..."
+            gh api -X PATCH \
+              -H "Accept: application/vnd.github+json" \
+              "/users/${OWNER}/packages/container/worthless-proxy/visibility" \
+              -f visibility=public
+            user_rc=$?
+            if [ "$user_rc" -ne 0 ]; then
+              echo "::error::Automatic visibility flip failed — package likely still private. Run manually:"
+              echo "  gh api -X PATCH /orgs/${OWNER}/packages/container/worthless-proxy/visibility -f visibility=public"
+              echo "  (or /users/${OWNER}/... for user accounts)"
+              echo "Or via UI: https://github.com/${OWNER}?tab=packages"
+              # Exit 1 so the job shows red in the Actions tab — surfaces
+              # the manual action in PR checks and the release view.
+              # continue-on-error at job level keeps the workflow green.
+              exit 1
+            fi
+          fi
+          echo "Package visibility set to public."
+
+  smoke:
+    name: Smoke-test published image from GHCR
+    # Depend only on build-push. Visibility flip runs in parallel; smoke
+    # authenticates with GITHUB_TOKEN + packages:read, so private images
+    # are pullable even if the flip job is still running or failed.
+    needs: build-push
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      IMAGE_REF: ghcr.io/${{ github.repository_owner }}/worthless-proxy:${{ needs.build-push.outputs.version }}
+    permissions:
+      contents: read
+      packages: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          # zizmor cache-poisoning: publish workflow, do not populate cache.
+          enable-cache: false
+
+      - name: Install test dependencies
+        run: uv sync --group test
+
+      - name: Log in to GHCR (read-only pull path)
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Exercises the exact `cosign verify` command documented in the
+      # README so signature-verify regressions (e.g. identity regex drift,
+      # wrong workflow ref embedded) fail CI before any user sees them.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+
+      - name: Verify signature of published image (pre-pull)
+        run: |
+          cosign verify "${IMAGE_REF}" \
+            --certificate-identity-regexp 'https://github.com/${{ github.repository_owner }}/worthless/\.github/workflows/publish-docker\.yml@refs/tags/v.*' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-github-workflow-repository ${{ github.repository }}
+
+      - name: Pull published image from registry
+        run: docker pull "${IMAGE_REF}"
+
+      - name: Run Docker smoke tests against published image
+        env:
+          WORTHLESS_DOCKER_IMAGE: ${{ env.IMAGE_REF }}
+        run: |
+          uv run pytest tests/test_docker_e2e.py -v -m docker \
+            -k "container_starts_healthy or enroll_and_healthz or runs_as_non_root" \
+            --tb=short

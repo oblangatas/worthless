@@ -1,0 +1,122 @@
+name: Pip-audit canary (weekly)
+
+# Non-blocking weekly pip-audit signal. WOR-349 Phase 6.2.
+#
+# Why this exists in addition to pre-release.yml:
+#   - pre-release.yml runs `pip-audit` as a release-blocking gate. A new
+#     CVE landing on a Sunday would only surface when someone tries to
+#     cut a release.
+#   - This canary surfaces dependency vulnerabilities continuously into
+#     a single rolling issue so they can be triaged off-release-path.
+#   - Signal feeds WOR-333 (dependency hardening). NOT a release gate.
+#
+# Design choices:
+#   - continue-on-error semantics via explicit `set +e`: the step always
+#     exits 0 so the issue-posting step runs even when vulns are found.
+#   - Single rolling issue (matched by title prefix) so we never spam
+#     the issue tracker; weekly run edits the body in place.
+#   - issues: write is the only elevated permission; contents: read is
+#     enough for checkout. No deploy/secret access.
+
+on:
+  schedule:
+    # Mondays 06:00 UTC. Different hour from scheduled.yml to spread
+    # runner load.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: pip-audit-canary
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: Run pip-audit and post to rolling issue
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up uv + Python
+        uses: ./.github/actions/setup-uv-python
+
+      - name: Run pip-audit (capture, never fail step)
+        id: audit
+        env:
+          UV_CACHE_DIR: /tmp/uv-cache
+        run: |
+          uv sync --extra qa
+          set +e
+          uv run pip-audit --format columns > audit.txt 2>&1
+          EXIT=$?
+          set -e
+          echo "exit=${EXIT}" >> "$GITHUB_OUTPUT"
+          if [ "${EXIT}" -eq 0 ]; then
+            echo "status=clean" >> "$GITHUB_OUTPUT"
+            echo "icon=:white_check_mark:" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=vulnerable" >> "$GITHUB_OUTPUT"
+            echo "icon=:rotating_light:" >> "$GITHUB_OUTPUT"
+          fi
+          echo "----- pip-audit output -----"
+          cat audit.txt
+
+      - name: Build issue body
+        env:
+          STATUS: ${{ steps.audit.outputs.status }}
+          ICON: ${{ steps.audit.outputs.icon }}
+          EXIT: ${{ steps.audit.outputs.exit }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # Build the issue body in a heredoc; pip-audit output goes
+          # inside a fenced code block so any shell-looking content is
+          # rendered, not interpreted by markdown.
+          {
+            echo "# Weekly pip-audit canary"
+            echo
+            echo "**Status:** ${ICON} \`${STATUS}\` (exit ${EXIT})"
+            echo "**Last run:** $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "**Workflow:** ${RUN_URL}"
+            echo
+            echo "## pip-audit output"
+            echo
+            echo '```'
+            cat audit.txt
+            echo '```'
+            echo
+            echo "## What this is"
+            echo
+            echo "Non-blocking weekly canary. Signal feeds WOR-333 (dependency hardening)."
+            echo "Releases are gated by \`pre-release.yml\`'s fatal pip-audit step — this issue does NOT block them."
+            echo "If vulnerabilities appear here, file individual remediation tickets and link them to WOR-333."
+          } > body.md
+          echo "----- issue body -----"
+          cat body.md
+
+      - name: Upsert rolling issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TITLE: "[canary] Weekly pip-audit report"
+        run: |
+          # Find an open issue whose title matches exactly. `gh issue
+          # list --search` does substring matching, so we filter the
+          # JSON to require an exact title match.
+          EXISTING=$(gh issue list \
+            --state open \
+            --search "${TITLE} in:title" \
+            --json number,title \
+            --jq "[.[] | select(.title == \"${TITLE}\")][0].number // empty")
+          if [ -n "${EXISTING}" ]; then
+            echo "Updating issue #${EXISTING}"
+            gh issue edit "${EXISTING}" --body-file body.md
+          else
+            echo "Creating new rolling issue"
+            gh issue create --title "${TITLE}" --body-file body.md
+          fi

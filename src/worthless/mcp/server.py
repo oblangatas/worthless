@@ -77,8 +77,8 @@ async def worthless_status() -> str:
     and whether the local proxy is currently running.
     """
     # Deferred: avoid pulling typer/rich CLI stack at MCP server startup.
-    # TODO(WOR-126): move _list_enrolled_keys, _check_proxy_health into
-    # worthless.services.status so both CLI and MCP import public API.
+    # TODO(WOR-126): move _check_proxy_health, _list_enrolled_keys into
+    # worthless.services.status so both CLI and MCP import a shared public API.
     from worthless.cli.commands.status import (
         _check_proxy_health,
         _discover_proxy_port,
@@ -88,11 +88,13 @@ async def worthless_status() -> str:
     home = resolve_home()
 
     keys: list[dict[str, str]] = []
-    if home is not None:
-        keys = _list_enrolled_keys(home)
-
     proxy_info: dict[str, Any] = {"healthy": False, "port": None, "mode": None}
     if home is not None:
+        # _list_enrolled_keys calls asyncio.run() internally, raising
+        # RuntimeError inside FastMCP's running event loop. Run in a thread
+        # executor — the same pattern used by worthless_lock in this file.
+        loop = asyncio.get_running_loop()
+        keys = await loop.run_in_executor(None, _list_enrolled_keys, home)
         port = _discover_proxy_port(home)
         if port is not None:
             proxy_info = _check_proxy_health(port)
@@ -115,12 +117,15 @@ async def worthless_scan(
         deep: Extended scan — also checks *.yml, *.yaml, *.toml, *.json,
               and live environment variables.
     """
+    import time
+
     from worthless.cli.commands.scan import (
-        _build_decoy_checker_async,
+        SCAN_TIME_BUDGET_S,
         _collect_deep_paths,
         _collect_fast_paths,
+        _load_db_state_async,
     )
-    from worthless.cli.scanner import scan_files
+    from worthless.cli.scanner import SkippedFile, scan_files
 
     explicit = [Path(p) for p in (paths or [])]
 
@@ -131,9 +136,31 @@ async def worthless_scan(
         else:
             scan_paths = _collect_fast_paths(explicit)
 
-        is_decoy = await _build_decoy_checker_async()
-        decoy_checker_available = is_decoy is not None
-        findings = scan_files(scan_paths, is_decoy=is_decoy)
+        # HF5: scan also returns orphan rows; MCP server only needs enrolled
+        # locations for now (orphan-flagging in MCP would be a future bead).
+        enrolled, _orphans = await _load_db_state_async()
+        enrollment_checker_available = enrolled is not None
+
+        # c5kc: same fail-closed contract as the CLI — bounded per-file read
+        # plus a wall-clock deadline so an MCP-driven scan over a huge or slow
+        # file can't freeze the calling agent. Skipped files are surfaced so
+        # the agent doesn't misread "0 findings" as "clean" on a partial scan.
+        #
+        # scan_files is synchronous and can run for up to SCAN_TIME_BUDGET_S
+        # seconds. Calling it inline would block the FastMCP event loop and
+        # starve other concurrent MCP tool calls — offload to a thread executor
+        # (same pattern worthless_status / worthless_lock use in this file).
+        # ``skipped`` is mutated in-place inside the executor; the reference
+        # we read after the await sees the same list.
+        skipped: list[SkippedFile] = []
+        deadline = time.monotonic() + SCAN_TIME_BUDGET_S
+        findings = await asyncio.to_thread(
+            scan_files,
+            scan_paths,
+            enrolled_locations=enrolled,
+            deadline=deadline,
+            skipped=skipped,
+        )
 
         items = [
             {
@@ -158,7 +185,13 @@ async def worthless_scan(
                     "protected": protected,
                     "unprotected": unprotected,
                 },
-                "decoy_checker_available": decoy_checker_available,
+                "enrollment_checker_available": enrollment_checker_available,
+                # Additive fields (c5kc): tell the calling agent which files
+                # couldn't be fully scanned and whether the result is partial.
+                # Agents should treat scan_incomplete=true as "I don't know if
+                # you're clean" — same fail-closed semantics as CLI exit code 2.
+                "skipped": [{"file": s.file, "reason": s.reason} for s in skipped],
+                "scan_incomplete": bool(skipped),
             }
         )
     finally:
@@ -171,7 +204,7 @@ async def worthless_lock(env_path: str = ".env") -> str:
     """Protect API keys in a .env file.
 
     Splits detected keys into shards, stores them encrypted, and replaces
-    the originals with format-preserving decoys. This is a protective
+    the originals with format-preserving shard-A values. This is a protective
     mutation — it makes your keys MORE secure.
 
     Args:

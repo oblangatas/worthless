@@ -1,36 +1,24 @@
-"""Smoke tests for SECURITY_POSTURE.md structure and completeness.
+"""Smoke tests for the consolidated security documentation.
 
-These tests validate that the security posture document exists, covers all
-required sections, and does not overclaim compliance certifications.
+Validates that the split between the root SECURITY.md (disclosure policy) and
+docs/security.md (threat model + invariants + residual risk) stays honest:
 
-Most tests skip gracefully when SECURITY_POSTURE.md does not yet exist —
-they become active once Plan 05-02 creates the document.
+- SECURITY.md exists and points disclosure at a real channel.
+- docs/security.md covers the three architectural invariants, cites the
+  CI-enforcing tests, lists known limitations, and does not overclaim any
+  compliance certification.
+- CONTRIBUTING-security.md carries the SR-* contributor invariants.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-_POSTURE_PATH = _REPO_ROOT / "SECURITY_POSTURE.md"
 _SECURITY_PATH = _REPO_ROOT / "SECURITY.md"
-
-_skip_no_posture = pytest.mark.skipif(
-    not _POSTURE_PATH.exists(),
-    reason="SECURITY_POSTURE.md not yet created",
-)
-
-
-def _posture_text() -> str:
-    """Read SECURITY_POSTURE.md content (only called when file exists)."""
-    return _POSTURE_PATH.read_text()
-
-
-# ---------------------------------------------------------------------------
-# SECURITY.md (no skip — created in this phase)
-# ---------------------------------------------------------------------------
+_THREAT_MODEL_PATH = _REPO_ROOT / "docs" / "security.md"
+_CONTRIB_RULES_PATH = _REPO_ROOT / "CONTRIBUTING-security.md"
 
 
 class TestSecurityMd:
@@ -41,115 +29,83 @@ class TestSecurityMd:
             "SECURITY.md not found at repo root — vulnerability disclosure policy is missing"
         )
 
-
-# ---------------------------------------------------------------------------
-# SECURITY_POSTURE.md structure
-# ---------------------------------------------------------------------------
-
-
-@_skip_no_posture
-class TestSecurityPostureStructure:
-    """Validate required sections and content in SECURITY_POSTURE.md."""
-
-    def test_has_table_of_contents(self) -> None:
-        text = _posture_text()
-        assert "Table of Contents" in text or "## Contents" in text, (
-            "SECURITY_POSTURE.md must have a Table of Contents"
+    def test_links_to_threat_model(self) -> None:
+        text = _SECURITY_PATH.read_text()
+        assert "docs/security.md" in text, (
+            "SECURITY.md must link to docs/security.md for the full threat model"
         )
 
-    def test_has_glossary(self) -> None:
-        text = _posture_text()
-        assert "Glossary" in text, "SECURITY_POSTURE.md must have a Glossary section"
+
+class TestThreatModelDoc:
+    """docs/security.md is the consolidated threat model (real today)."""
+
+    def _text(self) -> str:
+        assert _THREAT_MODEL_PATH.exists(), (
+            "docs/security.md must exist — it is the consolidated threat model"
+        )
+        return _THREAT_MODEL_PATH.read_text()
 
     def test_covers_all_three_invariants(self) -> None:
-        text = _posture_text()
-        assert "Client-Side Splitting" in text or "client-side split" in text.lower(), (
-            "SECURITY_POSTURE.md must cover Invariant 1: Client-Side Splitting"
-        )
-        assert "Gate Before Reconstruction" in text or "gate before reconstruct" in text.lower(), (
-            "SECURITY_POSTURE.md must cover Invariant 2: Gate Before Reconstruction"
-        )
-        assert "Server-Side Direct Upstream" in text or "server-side direct" in text.lower(), (
-            "SECURITY_POSTURE.md must cover Invariant 3: Server-Side Direct Upstream Call"
-        )
+        text = self._text().lower()
+        assert "client-side splitting" in text
+        assert "gate before reconstruction" in text
+        assert "server-side containment" in text or "server-side direct" in text
 
-    def test_covers_all_security_rules(self) -> None:
-        text = _posture_text()
-        for rule_num in range(1, 9):
-            rule_id = f"SR-{rule_num:02d}"
-            assert rule_id in text, f"SECURITY_POSTURE.md must reference {rule_id}"
-
-    def test_uses_defined_confidence_scale(self) -> None:
-        text = _posture_text()
-        assert "Enforced" in text, "Must use 'Enforced' confidence level"
-        assert "Best-effort" in text or "Best-Effort" in text, (
-            "Must use 'Best-effort' confidence level"
-        )
-        assert "Planned" in text, "Must use 'Planned' confidence level"
+    def test_has_trust_boundary(self) -> None:
+        text = self._text().lower()
+        assert "trust boundary" in text
 
     def test_has_known_limitations(self) -> None:
-        text = _posture_text()
-        assert "Known Limitation" in text or "Limitations" in text, (
-            "SECURITY_POSTURE.md must have Known Limitations section"
-        )
-
-    def test_has_rust_mitigation(self) -> None:
-        text = _posture_text()
-        assert "Rust" in text or "zeroize" in text, (
-            "SECURITY_POSTURE.md must reference Rust or zeroize as mitigation path"
-        )
+        text = self._text()
+        assert "Known limitations" in text or "Known Limitations" in text
 
     def test_has_non_goals(self) -> None:
-        text = _posture_text()
-        has_non_goals = any(
-            phrase in text
-            for phrase in ("Non-Goals", "Out of Scope", "Does NOT protect", "Non-goals")
-        )
-        assert has_non_goals, "SECURITY_POSTURE.md must have Non-Goals or Out of Scope section"
+        text = self._text().lower()
+        assert "non-goals" in text or "out of scope" in text
 
-    def test_cites_test_evidence(self) -> None:
-        text = _posture_text()
-        assert "test_invariants" in text, (
-            "SECURITY_POSTURE.md must cite test_invariants.py as evidence"
-        )
-        assert "test_security_properties" in text, (
-            "SECURITY_POSTURE.md must cite test_security_properties.py as evidence"
-        )
-
-    def test_has_trust_boundary_diagram(self) -> None:
-        text = _posture_text()
-        has_diagram = "Trust Boundary" in text or "trust boundary" in text
-        assert has_diagram, "SECURITY_POSTURE.md must have a trust boundary diagram"
-
-    def test_has_residual_risk_table(self) -> None:
-        text = _posture_text()
-        assert "Residual Risk" in text or "residual risk" in text, (
-            "SECURITY_POSTURE.md must have a Residual Risk section"
-        )
+    def test_has_residual_risk(self) -> None:
+        text = self._text().lower()
+        assert "residual risk" in text
 
     def test_has_changelog(self) -> None:
-        text = _posture_text()
-        assert "Changelog" in text or "Change Log" in text, (
-            "SECURITY_POSTURE.md must have a Changelog section"
+        text = self._text()
+        assert "Changelog" in text or "Change Log" in text
+
+    def test_cites_test_evidence(self) -> None:
+        text = self._text()
+        assert "test_invariants" in text, (
+            "docs/security.md must cite test_invariants.py as invariant evidence"
+        )
+        assert "test_security_properties" in text, (
+            "docs/security.md must cite test_security_properties.py as invariant evidence"
         )
 
-    def test_has_last_verified_date(self) -> None:
-        text = _posture_text()
-        assert "Last verified:" in text or "Last reviewed:" in text, (
-            "SECURITY_POSTURE.md must have a 'Last verified:' or 'Last reviewed:' date"
+    def test_has_rust_mitigation_path(self) -> None:
+        text = self._text()
+        assert "Rust" in text or "zeroize" in text, (
+            "docs/security.md must reference the Rust / zeroize hardening path"
         )
-
-    def test_links_to_security_md(self) -> None:
-        text = _posture_text()
-        assert "SECURITY.md" in text, "SECURITY_POSTURE.md must link to SECURITY.md"
 
     def test_no_compliance_overclaiming(self) -> None:
-        text = _posture_text().lower()
-        overclaims = []
-        for claim in ("soc 2 certified", "fips validated", "iso 27001 certified"):
-            if claim in text:
-                overclaims.append(claim)
-        assert not overclaims, (
-            f"SECURITY_POSTURE.md overclaims compliance: {overclaims} — "
-            f"Worthless is not certified for any of these"
+        text = self._text().lower()
+        overclaims = [
+            claim
+            for claim in ("soc 2 certified", "fips validated", "iso 27001 certified")
+            if claim in text
+        ]
+        assert not overclaims, f"docs/security.md overclaims compliance: {overclaims}"
+
+
+class TestContributorRules:
+    """CONTRIBUTING-security.md must carry the SR-* contributor invariants."""
+
+    def test_rules_file_exists(self) -> None:
+        assert _CONTRIB_RULES_PATH.exists(), (
+            "CONTRIBUTING-security.md missing — SR-* invariants must live somewhere"
         )
+
+    def test_covers_core_security_rules(self) -> None:
+        text = _CONTRIB_RULES_PATH.read_text()
+        for rule_num in range(1, 9):
+            rule_id = f"SR-{rule_num:02d}"
+            assert rule_id in text, f"CONTRIBUTING-security.md must reference {rule_id}"

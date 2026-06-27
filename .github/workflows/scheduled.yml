@@ -20,13 +20,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
-        with:
-          python-version: "3.13"
-
-      - name: Install uv
-        run: python -m pip install --disable-pip-version-check uv
+      - name: Set up uv + Python
+        uses: ./.github/actions/setup-uv-python
 
       - name: Run mutmut on crypto
         env:
@@ -46,13 +41,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
-        with:
-          python-version: "3.13"
-
-      - name: Install uv
-        run: python -m pip install --disable-pip-version-check uv
+      - name: Set up uv + Python
+        uses: ./.github/actions/setup-uv-python
 
       - name: Run property tests
         env:
@@ -74,13 +64,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
-        with:
-          python-version: "3.13"
-
-      - name: Install uv
-        run: python -m pip install --disable-pip-version-check uv
+      - name: Set up uv + Python
+        uses: ./.github/actions/setup-uv-python
 
       - name: Run contract tests
         env:
@@ -102,7 +87,7 @@ jobs:
           fetch-depth: 0  # full history required for git scan
 
       - name: TruffleHog secret scan
-        uses: trufflesecurity/trufflehog@bff3d2670b362bbb4a0bcdeffea146cbc2ad3abd # main
+        uses: trufflesecurity/trufflehog@9b6b5326bfe25dbd856eccc8a8275eb5dea7bd52 # main
         with:
           path: ./
           base: ""

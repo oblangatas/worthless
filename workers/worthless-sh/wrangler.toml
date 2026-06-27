@@ -1,0 +1,64 @@
+name = "worthless-sh"
+main = "src/index.ts"
+compatibility_date = "2026-04-01"
+compatibility_flags = ["nodejs_compat"]
+
+# NB: no `[[rules]]` block. install.sh + walkthrough.txt are embedded
+# via `scripts/embed-assets.mjs` (base64 → src/embedded.ts) at build
+# time, NOT via Wrangler's Text/Data module rules. Cloudflare's WAF on
+# api.cloudflare.com inspects multipart upload parts and 403's the
+# request when bytes match shell-injection signatures, regardless of
+# Content-Type. Base64 sidesteps this — the upload contains only JS
+# source. See scripts/embed-assets.mjs and ADR-001 for full rationale.
+# Runtime contract (bytes served to curl) is unchanged.
+
+[vars]
+# Browser fail-safe redirect target. Read by Worker code AND by tests
+# (`_helpers.ts` exposes it as `REDIRECT_URL`).
+REDIRECT_URL = "https://wless.io"
+# Verifiability metadata stamped into response headers
+# `X-Worthless-Script-Tag` and `X-Worthless-Script-Commit`. The deploy
+# pipeline (Phase 5 / WOR-323) overrides these per release.
+SCRIPT_TAG = "v0.0.0-dev"
+SCRIPT_COMMIT = "0000000000000000000000000000000000000000"
+SCRIPT_BUILD_PROVENANCE = "dev-build"
+
+# Bare `[vars]` is read by vitest's pool; named envs by `wrangler deploy --env`.
+# Wrangler 4 does NOT inherit top-level vars into env blocks, so the
+# REDIRECT_URL repetition below is required, not an oversight.
+
+[env.preview]
+name = "worthless-sh-preview"
+
+[env.preview.vars]
+REDIRECT_URL = "https://wless.io"
+SCRIPT_TAG = "preview"
+SCRIPT_COMMIT = "preview"
+SCRIPT_BUILD_PROVENANCE = "preview-build"
+
+[env.production]
+name = "worthless-sh"
+# Disable the *.workers.dev fallback subdomain for production.
+# Without this, the Worker is also reachable at
+# `worthless-sh.<account>.workers.dev` — a parallel surface that
+# bypasses the worthless.sh route, security headers anchored at
+# the apex, and any zone-level WAF rules. Production must only be
+# reachable via the worthless.sh route.
+workers_dev = false
+
+[env.production.vars]
+REDIRECT_URL = "https://wless.io"
+# SCRIPT_TAG and SCRIPT_COMMIT are injected at deploy time by the
+# .github/workflows/deploy-worker.yml workflow via `wrangler deploy --var`.
+
+# Production route — wired in WOR-300 now that DNS is live (AAAA on
+# apex `@` → `100::`, Proxied, added 2026-04-28) and WOR-323 hardening
+# has landed in this branch. Wrangler claims `worthless.sh/*` for this
+# Worker on the first production tag push that survives the fail-closed
+# GPG verify gate. Until MAINTAINER_GPG_PUBKEY + MAINTAINER_GPG_FINGERPRINT
+# repo Variables are set (tracked in WOR-401), any v* tag push fails
+# closed at .github/scripts/verify-tag.sh — deploy never runs, route
+# never claims.
+[[env.production.routes]]
+pattern = "worthless.sh/*"
+zone_name = "worthless.sh"

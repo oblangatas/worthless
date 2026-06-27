@@ -1,0 +1,28 @@
+# PR auto-labeler — branch prefix → type label, file paths → security overlay.
+# Reuses existing GitHub labels where they match; only 4 new ones needed.
+
+enhancement:
+  - head-branch: ["^feature/"]
+
+bug:
+  - head-branch: ["^fix/"]
+
+refactor:
+  - head-branch: ["^refactor/"]
+
+chore:
+  - head-branch: ["^chore/", "^ci/"]
+
+documentation:
+  - head-branch: ["^docs/"]
+
+test:
+  - head-branch: ["^test/"]
+
+security:
+  - changed-files:
+    - any-glob-to-any-file:
+      - "src/worthless/crypto/**"
+      - "src/worthless/openclaw/**"
+      - "SECURITY_RULES.md"
+      - ".gitleaks.toml"

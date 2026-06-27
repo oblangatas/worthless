@@ -78,14 +78,14 @@ latency, number of SSE chunks, or error message wording.
 
 ## Hard Constraints
 
-- **No custom auth headers.** Do not send `Authorization`, `x-api-key`,
-  `x-worthless-key`, or `x-worthless-shard-a`. The proxy infers everything.
+- **No custom auth headers.** Do not send `Authorization` or `x-api-key`.
+  The proxy infers everything via alias lookup.
 - **Do not assert on LLM content.** Assert on status codes, JSON structure,
   and headers only.
 - **Uniform 401 is intentional.** Do not flag identical error responses or
   try to differentiate auth failure reasons. Anti-enumeration by design.
 - **No TLS testing.** Harness runs `allow_insecure=True`.
-- **No alias enumeration.** Do not brute-force `x-worthless-key` values.
+- **No alias enumeration.** Do not brute-force alias values.
 - **No real API keys.** The harness uses generated fake keys.
 - **Upstream errors are sanitized.** The proxy strips provider error
   messages and returns generic text. Not a bug.

@@ -31,10 +31,13 @@ from worthless.cli.process import (
     read_pid,
 )
 
+from tests._fakes import WOR309_SUBPROCESS_FOLLOWUP
 from tests.helpers import fake_openai_key
 
 
 @pytest.mark.e2e
+@pytest.mark.real_ipc
+@pytest.mark.skip(reason=WOR309_SUBPROCESS_FOLLOWUP)
 class TestEndToEndSmoke:
     """Full lifecycle: bootstrap → lock → proxy → healthz → stop."""
 

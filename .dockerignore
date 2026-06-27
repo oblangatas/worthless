@@ -6,6 +6,8 @@ __pycache__
 dist/
 build/
 tests/
+# Installer e2e fixtures (Dockerfile.ubuntu-bare-lock-e2e COPYs these).
+!tests/install_fixtures/
 docs/
 .planning/
 .beads/

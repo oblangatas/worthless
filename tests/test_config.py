@@ -8,7 +8,6 @@ from unittest.mock import patch
 
 import pytest
 
-from worthless.cli.errors import ErrorCode, WorthlessError
 from worthless.proxy.config import ProxySettings, _read_fernet_key
 
 
@@ -37,12 +36,11 @@ class TestDefaults:
         s = ProxySettings()
         assert s.db_path == str(Path.home() / ".worthless" / "worthless.db")
 
-    def test_default_fernet_key_empty(self) -> None:
-        with patch(
-            "worthless.proxy.config.read_fernet_key",
-            side_effect=WorthlessError(ErrorCode.KEY_NOT_FOUND, "no key"),
-        ):
-            s = ProxySettings()
+    def test_default_fernet_key_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Class-attr injection is bulletproof against the py3.10 xdist
+        # patch-state race that bit PR #112 — see ``ProxySettings`` docstring.
+        monkeypatch.setattr(ProxySettings, "_fernet_reader", staticmethod(lambda: bytearray()))
+        s = ProxySettings()
         assert s.fernet_key == bytearray()
 
     def test_default_rate_limit_rps(self) -> None:
@@ -60,10 +58,6 @@ class TestDefaults:
     def test_default_allow_insecure_false(self) -> None:
         s = ProxySettings()
         assert s.allow_insecure is False
-
-    def test_default_shard_a_dir(self) -> None:
-        s = ProxySettings()
-        assert s.shard_a_dir == str(Path.home() / ".worthless" / "shard_a")
 
 
 # ---------------------------------------------------------------------------
@@ -93,11 +87,6 @@ class TestCustomValues:
         monkeypatch.setenv("WORTHLESS_STREAMING_TIMEOUT", "600.0")
         s = ProxySettings()
         assert s.streaming_timeout == 600.0
-
-    def test_custom_shard_a_dir(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("WORTHLESS_SHARD_A_DIR", "/tmp/shards")  # noqa: S108
-        s = ProxySettings()
-        assert s.shard_a_dir == "/tmp/shards"  # noqa: S108
 
 
 # ---------------------------------------------------------------------------
@@ -135,12 +124,14 @@ class TestFernetKeyEnv:
         assert s.fernet_key == bytearray(b"abc123secret")
 
     def test_fernet_env_empty_string(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Empty WORTHLESS_FERNET_KEY env behaves like no key set.
+
+        Class-attr injection on ``ProxySettings._fernet_reader`` sidesteps
+        the py3.10 xdist patch-state race that bit PR #112.
+        """
         monkeypatch.setenv("WORTHLESS_FERNET_KEY", "")
-        with patch(
-            "worthless.proxy.config.read_fernet_key",
-            side_effect=WorthlessError(ErrorCode.KEY_NOT_FOUND, "no key"),
-        ):
-            s = ProxySettings()
+        monkeypatch.setattr(ProxySettings, "_fernet_reader", staticmethod(lambda: bytearray()))
+        s = ProxySettings()
         assert s.fernet_key == bytearray()
 
 
@@ -226,16 +217,24 @@ class TestFernetFdFallback:
 
 
 class TestValidation:
-    """ProxySettings.validate() should raise on missing fernet key."""
+    """ProxySettings.validate() — post-WOR-309 contract.
 
-    def test_missing_fernet_raises(self) -> None:
-        with patch(
-            "worthless.proxy.config.read_fernet_key",
-            side_effect=WorthlessError(ErrorCode.KEY_NOT_FOUND, "no key"),
-        ):
-            s = ProxySettings()
-        with pytest.raises(ValueError, match="Fernet key not available"):
-            s.validate()
+    The proxy no longer holds the Fernet key; the sidecar does. ``validate()``
+    therefore MUST NOT raise when the key is unavailable: the proxy boots
+    fine and delegates decrypt over IPC. Asserting the absence of a raise
+    is the new regression guard.
+    """
+
+    def test_missing_fernet_does_not_raise(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """WOR-309: ``validate()`` ignores a missing Fernet key.
+
+        Pre-WOR-309 this raised ``ValueError`` because the proxy needed the
+        key to decrypt shard-B. Post-WOR-309 the sidecar holds the key and
+        the proxy only reads ciphertext-at-rest, so a missing key is fine.
+        """
+        monkeypatch.setattr(ProxySettings, "_fernet_reader", staticmethod(lambda: bytearray()))
+        s = ProxySettings()
+        s.validate()  # MUST NOT raise — the proxy never decrypts
 
     def test_valid_fernet_passes(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("WORTHLESS_FERNET_KEY", "valid-key")

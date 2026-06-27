@@ -1,0 +1,45 @@
+# Bare Ubuntu image hardened with a non-root user (WOR-318).
+# Validates that install.sh works without sudo / root — install.sh writes
+# to $HOME/.local/bin and $HOME/.cache/uv, both rooted at the invoking
+# user's home, so it should already work. This fixture proves it.
+#
+# Pinned digest matches Dockerfile.ubuntu-bare so the bare-vs-nonroot
+# delta is purely the privilege drop, not a different base image.
+FROM ubuntu:24.04@sha256:c4a8d5503dfb2a3eb8ab5f807da5bc69a85730fb49b5cfca2330194ebcc41c7b
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# System-wide deps still need root. Same minimum set as Dockerfile.ubuntu-bare.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        tar \
+    && rm -rf /var/lib/apt/lists/*
+
+# Sanity: same fresh-box invariants as Dockerfile.ubuntu-bare.
+RUN ! command -v python3 \
+    && ! command -v python \
+    && ! command -v pipx \
+    && ! command -v uv
+
+# Create the unprivileged user. No sudo group, no shell escape — just a
+# normal interactive user with a home dir. install.sh will write into
+# $HOME/.local/bin which we own.
+RUN useradd --create-home --shell /bin/bash worthless
+
+WORKDIR /home/worthless
+COPY --chown=worthless:worthless install.sh /home/worthless/install.sh
+COPY --chown=worthless:worthless tests/install_fixtures/verify_install.sh /home/worthless/verify_install.sh
+RUN chmod +x /home/worthless/install.sh /home/worthless/verify_install.sh
+
+# Drop privileges. Everything below this line runs as `worthless`, with
+# no path to escalate. install.sh + verify_install.sh must succeed under
+# this constraint.
+USER worthless
+
+# install.sh + verify_install.sh both honor $HOME — verify reuses the
+# bare-fixture script unchanged. Cache mount intentionally omitted: this
+# fixture's install runs at container start (CMD), not build time, so a
+# BuildKit cache mount would be a no-op.
+CMD ["/bin/sh", "-c", "sh /home/worthless/install.sh && sh /home/worthless/verify_install.sh"]
