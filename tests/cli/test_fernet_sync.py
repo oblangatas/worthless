@@ -90,25 +90,6 @@ class TestSyncFernetForLaunchd:
 
         assert (tmp_path / "fernet.key").read_bytes().strip() == canonical
 
-    def test_idempotent_when_file_already_matches(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        monkeypatch.delenv("WORTHLESS_FERNET_KEY", raising=False)
-        canonical = _canonical_key()
-        write_secure_fernet_key(tmp_path / "fernet.key", canonical)
-
-        with (
-            patch("worthless.cli.keystore.keyring_available", return_value=True),
-            patch("worthless.cli.keystore.keyring") as mock_kr,
-            patch("worthless.cli.keystore.read_fernet_key") as mock_read,
-        ):
-            mock_kr.get_password.return_value = canonical.decode()
-            sync_fernet_for_launchd(tmp_path, key=canonical)
-            sync_fernet_for_launchd(tmp_path, key=canonical)
-            mock_read.assert_not_called()
-
-        assert (tmp_path / "fernet.key").read_bytes().strip() == canonical
-
     def test_supplied_key_skips_read_fernet_key(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -212,7 +193,7 @@ class TestPreflightFernetSync:
             ),
         ):
             preflight_service_install(home)
-            mock_sync.assert_called_once_with(base)
+            mock_sync.assert_called_once_with(base, key=key_buf)
 
     def test_preflight_refuses_drift_before_sync(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

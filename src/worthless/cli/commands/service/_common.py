@@ -96,11 +96,6 @@ def _fernet_drift_check_result(home: WorthlessHome):
     return fernet_drift.run(ctx)
 
 
-def _fernet_drift_detected(home: WorthlessHome) -> bool:
-    """True when keyring and ``fernet.key`` both exist but disagree (WOR-464)."""
-    return _fernet_drift_check_result(home).get("status") == "error"
-
-
 def _assert_no_fernet_drift_for_service_install(home: WorthlessHome) -> None:
     """W3-ADV-17: refuse install when keyring and file disagree (WOR-464)."""
     result = _fernet_drift_check_result(home)
@@ -115,9 +110,9 @@ def _assert_no_fernet_drift_for_service_install(home: WorthlessHome) -> None:
 
 def preflight_service_install(home: WorthlessHome) -> None:
     """Refuse install when the proxy cannot start (no Fernet key)."""
-    if current_platform_backend_name() in ("launchd", "systemd"):
+    managed = current_platform_backend_name() in ("launchd", "systemd")
+    if managed:
         _assert_no_fernet_drift_for_service_install(home)
-        sync_fernet_for_launchd(home.base_dir)
     try:
         key = home.fernet_key
     except WorthlessError as exc:
@@ -128,7 +123,11 @@ def preflight_service_install(home: WorthlessHome) -> None:
             "Run `worthless doctor`. On macOS, ensure Keychain 'Always Allow' "
             "or use file-backed storage (WORTHLESS_FERNET_KEY_PATH).",
         ) from exc
-    zero_buf(key)
+    try:
+        if managed:
+            sync_fernet_for_launchd(home.base_dir, key=key)
+    finally:
+        zero_buf(key)
 
 
 def verify_proxy_health(port: int, *, timeout: float = 15.0) -> None:

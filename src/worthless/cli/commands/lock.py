@@ -42,7 +42,11 @@ from worthless.cli.errors import (
 )
 from worthless.cli.key_patterns import CANONICAL_KEY_VAR_RE, detect_prefix
 from worthless._flags import fernet_ipc_only_enabled
-from worthless.cli.keystore import keyring_available, sync_fernet_for_launchd
+from worthless.cli.keystore import (
+    _fernet_file_bytes,
+    keyring_available,
+    sync_fernet_for_launchd,
+)
 from worthless.cli.providers import lookup_by_name, lookup_by_url
 from worthless.crypto.reconstruction import (
     _verify_commitment,  # noqa: PLC2701 — intentional internal use for re-lock guard
@@ -1603,18 +1607,12 @@ def _sync_fernet_after_lock(home: WorthlessHome) -> None:
 
     key = home.fernet_key
     try:
-        fernet_path = home.base_dir / "fernet.key"
-        if fernet_path.is_file():
-            try:
-                on_disk = fernet_path.read_bytes().strip()
-            except OSError:
-                on_disk = None
-            if on_disk is not None and on_disk != key:
-                logger.debug(
-                    "Skipping post-lock fernet sync — file bytes differ from "
-                    "canonical key (WOR-464)"
-                )
-                return
+        on_disk = _fernet_file_bytes(home.fernet_key_path)
+        if on_disk is not None and on_disk != key:
+            logger.debug(
+                "Skipping post-lock fernet sync — file bytes differ from canonical key (WOR-464)"
+            )
+            return
         sync_fernet_for_launchd(home.base_dir, key=key)
     finally:
         zero_buf(key)
