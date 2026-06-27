@@ -1,0 +1,263 @@
+/* Worthless legal pages: quiet, document-style surface.
+   Reuses the homepage paper/ink palette so legal pages read as part of the site
+   while staying plain and readable, not a marketing layout. */
+
+:root {
+  --paper: oklch(97.4% 0.018 225);
+  --paper-deep: oklch(92.2% 0.038 224);
+  --ink: oklch(29% 0.065 220);
+  --ink-soft: oklch(47% 0.046 222);
+  --ink-faint: oklch(54% 0.035 226);
+  --accent: oklch(49% 0.105 205);
+  --accent-dark: oklch(37% 0.095 205);
+  --line: oklch(83% 0.035 215);
+  --sans: "Inter", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--paper);
+  -webkit-text-size-adjust: 100%;
+  overflow-x: hidden;
+}
+
+body {
+  margin: 0;
+  font-family: var(--sans);
+  color: var(--ink);
+  background: var(--paper);
+  line-height: 1.65;
+  overflow-wrap: break-word;
+}
+
+/* Quiet header: brand returns home, a couple of orientation links. */
+.legal-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  max-width: 54rem;
+  margin: 0 auto;
+  padding: 1.5rem clamp(1.15rem, 5vw, 2rem) 0;
+}
+
+.legal-top .legal-home {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 700;
+  font-size: 0.95rem;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.legal-top .legal-home img {
+  height: 1.4rem;
+  width: auto;
+  display: block;
+}
+
+.legal-top .legal-top-links {
+  display: flex;
+  gap: 1.25rem;
+  flex-wrap: wrap;
+}
+
+.legal-top .legal-top-links a {
+  font-size: 0.8rem;
+  color: var(--ink-soft);
+  text-decoration: none;
+}
+
+.legal-top .legal-top-links a:hover {
+  color: var(--accent-dark);
+}
+
+/* Readable document column. */
+main.legal-doc {
+  max-width: 46rem;
+  margin: 0 auto;
+  padding: 2rem clamp(1.15rem, 5vw, 2rem) 4rem;
+}
+
+.legal-doc h1 {
+  font-size: clamp(1.8rem, 3.4vw, 2.4rem);
+  line-height: 1.15;
+  letter-spacing: -0.01em;
+  margin: 0.6rem 0 0.35rem;
+}
+
+.legal-doc .legal-meta {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  color: var(--ink-faint);
+  margin: 0 0 1.6rem;
+}
+
+.legal-doc .lead {
+  font-size: 1.05rem;
+  color: var(--ink-soft);
+}
+
+.legal-doc h2 {
+  font-size: 1.2rem;
+  margin: 2.2rem 0 0.6rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--line);
+}
+
+.legal-doc h2:first-of-type {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.legal-doc h3 {
+  font-size: 1rem;
+  margin: 1.4rem 0 0.4rem;
+}
+
+.legal-doc p {
+  margin: 0.75rem 0;
+}
+
+.legal-doc ul,
+.legal-doc ol {
+  margin: 0.6rem 0;
+  padding-left: 1.4rem;
+}
+
+.legal-doc li {
+  margin: 0.3rem 0;
+}
+
+.legal-doc a {
+  color: var(--accent-dark);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.legal-doc a:hover {
+  color: var(--accent);
+}
+
+.legal-doc strong {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.legal-doc hr {
+  border: 0;
+  border-top: 1px solid var(--line);
+  margin: 2rem 0;
+}
+
+.legal-doc table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 1rem 0;
+  font-size: 0.92rem;
+}
+
+.legal-doc th,
+.legal-doc td {
+  border: 1px solid var(--line);
+  padding: 0.5rem 0.7rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.legal-doc th {
+  background: var(--paper-deep);
+}
+
+.legal-doc code {
+  font-family: var(--mono);
+  font-size: 0.88em;
+  background: var(--paper-deep);
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+}
+
+/* Legal hub: a plain list of the policy documents. */
+.legal-hub-list {
+  list-style: none;
+  padding: 0;
+  margin: 1.5rem 0;
+}
+
+.legal-hub-list li {
+  margin: 0;
+  border-top: 1px solid var(--line);
+}
+
+.legal-hub-list li:last-child {
+  border-bottom: 1px solid var(--line);
+}
+
+.legal-hub-list a {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.9rem 0.25rem;
+  text-decoration: none;
+  color: var(--ink);
+}
+
+.legal-hub-list a:hover {
+  color: var(--accent-dark);
+}
+
+.legal-hub-list .hub-title {
+  font-weight: 700;
+  font-size: 1rem;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.legal-hub-list .hub-desc {
+  font-size: 0.85rem;
+  color: var(--ink-faint);
+}
+
+/* Quiet legal footer cluster, shared shape with the launch pages. */
+.legal-footer {
+  border-top: 1px solid var(--line);
+  background: var(--paper-deep);
+}
+
+.legal-footer .legal-footer-inner {
+  max-width: 54rem;
+  margin: 0 auto;
+  padding: 1.6rem clamp(1.15rem, 5vw, 2rem);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem 1.5rem;
+  flex-wrap: wrap;
+}
+
+.legal-footer .footer-legal {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1.1rem;
+}
+
+.legal-footer .footer-legal a {
+  font-size: 0.8rem;
+  color: var(--ink-soft);
+  text-decoration: none;
+}
+
+.legal-footer .footer-legal a:hover {
+  color: var(--accent-dark);
+}
+
+.legal-footer .legal-footer-note {
+  font-size: 0.8rem;
+  color: var(--ink-faint);
+}
