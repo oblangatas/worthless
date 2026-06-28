@@ -11,6 +11,8 @@ RUN apt-get update \
         curl \
         dbus-user-session \
         git \
+        lsof \
+        procps \
         systemd \
         systemd-sysv \
     && rm -rf /var/lib/apt/lists/* \
@@ -45,7 +47,9 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=shared \
 ENV PATH="/root/.local/bin:${PATH}"
 
 COPY engineering/testing/scripts/service-lifecycle-docker-entrypoint.sh /usr/local/bin/service-lifecycle-docker-entrypoint.sh
-RUN chmod +x /usr/local/bin/service-lifecycle-docker-entrypoint.sh
+COPY engineering/testing/scripts/service-lock-roundtrip-docker-entrypoint.sh /usr/local/bin/service-lock-roundtrip-docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/service-lifecycle-docker-entrypoint.sh \
+    && chmod +x /usr/local/bin/service-lock-roundtrip-docker-entrypoint.sh
 
 STOPSIGNAL SIGRTMIN+3
 VOLUME [ "/sys/fs/cgroup" ]

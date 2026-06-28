@@ -13,6 +13,7 @@
 | WOR-747 | Unlock before temp dir delete in roundtrip script |
 | WOR-748 | Fernet sync for launchd in roundtrip script | **PASS** (pytest + sync in script) |
 | WOR-749 | `service-lock-roundtrip-live-macos.sh` PASS | **PASS** @ `9251514`+ (2026-06-08, macOS) |
+| WOR-749 (Linux) | `run-service-lock-roundtrip-linux-docker.sh` PASS | **PASS** @ branch HEAD (2026-06-08, Docker/systemd) |
 
 ## Before you start
 
