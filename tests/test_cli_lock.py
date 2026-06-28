@@ -2338,7 +2338,7 @@ class TestOpenClawGateWiredIntoLock:
         effects: .env is untouched (gate-before-write, SR-03)."""
         original_env = env_file.read_text(encoding="utf-8")
 
-        def _blocking_preflight(managed_aliases: object) -> None:
+        def _blocking_preflight(managed_aliases: object, proxy_base_url: object) -> None:
             raise typer.Exit(code=73)
 
         monkeypatch.setattr(
@@ -2366,7 +2366,7 @@ class TestOpenClawGateWiredIntoLock:
         postflight = MagicMock()
         monkeypatch.setattr(
             "worthless.cli.commands.lock._openclaw_audit_preflight",
-            lambda managed_aliases: sentinel,
+            lambda managed_aliases, proxy_base_url: sentinel,
         )
         monkeypatch.setattr("worthless.cli.commands.lock._openclaw_audit_postflight", postflight)
 

@@ -818,8 +818,9 @@ def _is_proxy_url(url: str, proxy_base_url: str) -> bool:
     1. Primary: the URL starts with the *current* resolved proxy base URL.
        This is the exact match and the common fast path.
 
-    2. Secondary: the URL is on the same port as ``proxy_base_url`` (regardless
-       of host).  This handles the scenario where a previous ``lock`` wrote
+    2. Secondary: the URL is on the same port as ``proxy_base_url`` AND on an
+       allowed proxy host (loopback / Docker bridge — NOT any host; see the
+       security note below).  This handles the scenario where a previous ``lock`` wrote
        the entry with a different host alias — e.g. ``http://127.0.0.1:<port>/…``
        when Docker was absent, and the current run resolves to
        ``http://172.17.0.1:<port>`` via the Docker bridge.  The port is derived
@@ -841,11 +842,23 @@ def _is_proxy_url(url: str, proxy_base_url: str) -> bool:
     if url.startswith(proxy_base_url.rstrip("/") + "/"):
         return True
     # Derive the fallback port from proxy_base_url so non-default deployments
-    # (--port / WORTHLESS_PORT) work too.
+    # (--port / WORTHLESS_PORT) work too. SECURITY (WOR-777 / brutus): the host
+    # is NOT arbitrary — it must be a loopback / Docker-bridge proxy host, or an
+    # attacker baseUrl like ``https://evil.com:<port>/<alias>/v1`` would read as
+    # proxy-shaped and (a) get its plaintext finding demoted past the audit gate,
+    # (b) get neutralized. Same allowlist as :func:`_validate_proxy_base_url`.
     port = urlsplit(proxy_base_url).port
     if port is None:
         return False
-    return re.match(rf"^https?://[^/]*:{port}/", url) is not None
+    parts = urlsplit(url)
+    if parts.port != port:
+        return False
+    host = parts.hostname or ""
+    try:
+        in_docker_bridge = ipaddress.ip_address(host) in _DOCKER_BRIDGE_CIDR
+    except ValueError:
+        in_docker_bridge = False
+    return host in _ALLOWED_PROXY_HOSTS or in_docker_bridge
 
 
 # WOR-650 recognition helpers. The alias is parsed from an attacker/

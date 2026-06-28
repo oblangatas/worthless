@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Literal
 
 from worthless.cli.key_patterns import KEY_PATTERN
-from worthless.openclaw.integration import _alias_from_base_url
+from worthless.openclaw.integration import _alias_from_base_url, _is_proxy_url
 
 # --- Constants ----------------------------------------------------------------
 
@@ -374,24 +374,31 @@ def check_auth_profiles_direct(
 def recognize_managed_providers(
     files_scanned: Sequence[str],
     managed_aliases: set[str] | None,
+    proxy_base_url: str,
 ) -> set[tuple[str, str]]:
-    """Return ``{(file, provider)}`` whose proxy ``baseUrl`` alias is worthless-managed.
+    """Return ``{(file, provider)}`` that are worthless's own managed entries.
 
     worthless writes both an inert shard-A ``apiKey`` and a proxy ``baseUrl``
-    (``…/<alias>/v1``) into the user's real provider entry (F1/WOR-647).  The
-    audit flags that shard-A as plaintext; this recognizes the entry as one
-    worthless created by parsing the alias from ``baseUrl`` and matching it
-    against this machine's ``shards`` keys (``managed_aliases``).  Recognized
-    pairs are demoted to advisory by :func:`classify_findings`, so a re-lock
-    (rotation) is not blocked by worthless's own shard-A (bead worthless-b8me).
+    (``http://<proxy-host>:<port>/<alias>/v1``) into the user's real provider
+    entry (F1/WOR-647).  The audit flags that shard-A as plaintext; this
+    recognizes the entry as one worthless created and lets
+    :func:`classify_findings` demote it to advisory, so a re-lock (rotation) is
+    not blocked by worthless's own shard-A (bead worthless-b8me).
+
+    Recognition requires BOTH (SECURITY — WOR-777 / brutus):
+    1. the ``baseUrl`` is worthless-proxy-shaped — host:port match the proxy
+       (:func:`~worthless.openclaw.integration._is_proxy_url`), NOT just any host
+       carrying the alias token.  Without the host pin, an attacker-controlled
+       ``https://evil.com/<alias>/v1`` (the alias is ``provider-sha256(key)[:8]``,
+       computable by anyone holding the key) would smuggle a real plaintext key
+       past the gate.
+    2. the parsed alias is in this machine's ``shards`` keys (``managed_aliases``).
 
     ``managed_aliases`` falsy (``None`` = DB snapshot failed, or empty) -> empty
     set: never trust an entry we cannot confirm we created (fail-safe, mirrors
-    :class:`~worthless.openclaw.integration.AdoptionPolicy`).  Recognition keys
-    on the worthless proxy alias, NOT the provider name, so a real key pasted
-    under ``providers.openai`` with a non-proxy ``baseUrl`` is never recognized.
-    Handles both the models.json shape (``providers.<X>``) and the openclaw.json
-    shape (``models.providers.<X>``).
+    :class:`~worthless.openclaw.integration.AdoptionPolicy`).  Handles both the
+    models.json shape (``providers.<X>``) and the openclaw.json shape
+    (``models.providers.<X>``).
     """
     if not managed_aliases:
         return set()
@@ -410,11 +417,14 @@ def recognize_managed_providers(
         if not isinstance(providers, dict):
             continue
         for name, entry in providers.items():
-            if isinstance(entry, dict):
-                base_url = entry.get("baseUrl")
-                alias = _alias_from_base_url(base_url) if isinstance(base_url, str) else None
-                if alias is not None and alias in managed_aliases:
-                    recognized.add((path_str, name))
+            if not isinstance(entry, dict):
+                continue
+            base_url = entry.get("baseUrl")
+            if not isinstance(base_url, str) or not _is_proxy_url(base_url, proxy_base_url):
+                continue  # host:port not our proxy -> not ours, never recognize
+            alias = _alias_from_base_url(base_url)
+            if alias is not None and alias in managed_aliases:
+                recognized.add((path_str, name))
     return recognized
 
 
@@ -505,6 +515,8 @@ def run_and_classify(
     openclaw_bin: Path,
     timeout: float = _DEFAULT_TIMEOUT,
     managed_aliases: set[str] | None = None,
+    *,
+    proxy_base_url: str,
 ) -> tuple[AuditResult, AuditClassification]:
     """Run the audit and classify findings in one call.
 
@@ -519,13 +531,18 @@ def run_and_classify(
             worthless's own provider entries (alias parsed from ``baseUrl``) so
             its inert shard-A is not mistaken for a leak on re-lock. ``None``
             (DB unavailable) recognizes nothing — fail-safe.
+        proxy_base_url: the worthless proxy base (``http://127.0.0.1:<port>``).
+            Required: recognition only trusts an entry whose ``baseUrl`` host:port
+            match the proxy, so an attacker host carrying a managed alias cannot
+            smuggle a real key past the gate (WOR-777 / brutus). Keyword-only so
+            no caller silently omits the host pin.
 
     Raises:
         AuditGateError: on subprocess failure (propagated from :func:`run_audit`).
     """
     result = run_audit(openclaw_bin, timeout=timeout)
     direct_blocking: list[BlockingFinding] = check_auth_profiles_direct(result.files_scanned)
-    recognized = recognize_managed_providers(result.files_scanned, managed_aliases)
+    recognized = recognize_managed_providers(result.files_scanned, managed_aliases, proxy_base_url)
     classification = classify_findings(result, direct_blocking, recognized_managed=recognized)
     return result, classification
 

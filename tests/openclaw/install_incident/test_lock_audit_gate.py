@@ -512,7 +512,7 @@ class TestAC10DoctorSurface:
             "worthless.cli.commands.doctor.checks.openclaw._oc_audit.resolve_openclaw_bin",
             side_effect=AuditGateError("openclaw binary not found — set WORTHLESS_OPENCLAW_BIN"),
         ):
-            findings = _audit_gate_findings()
+            findings = _audit_gate_findings(None, "http://127.0.0.1:8787")
 
         assert len(findings) == 1
         assert findings[0]["exit_code"] == 87
@@ -533,7 +533,7 @@ class TestAC10DoctorSurface:
                 side_effect=AuditGateError("openclaw secrets audit exited 1"),
             ),
         ):
-            findings = _audit_gate_findings()
+            findings = _audit_gate_findings(None, "http://127.0.0.1:8787")
 
         assert len(findings) == 1
         assert findings[0]["exit_code"] == 87
@@ -569,7 +569,7 @@ class TestAC10DoctorSurface:
                 return_value=(MagicMock(), mock_classification),
             ),
         ):
-            findings = _audit_gate_findings()
+            findings = _audit_gate_findings(None, "http://127.0.0.1:8787")
 
         assert len(findings) == 1
         assert findings[0]["exit_code"] == 73
@@ -598,7 +598,7 @@ class TestAC10DoctorSurface:
                 return_value=(MagicMock(), mock_classification),
             ),
         ):
-            findings = _audit_gate_findings()
+            findings = _audit_gate_findings(None, "http://127.0.0.1:8787")
 
         assert findings == []
 
@@ -621,7 +621,7 @@ class TestAC10DoctorSurface:
                 return_value=(MagicMock(), recognized_clean),
             ) as mock_rc,
         ):
-            findings = _audit_gate_findings({"openai-a1b2c3d4"})
+            findings = _audit_gate_findings({"openai-a1b2c3d4"}, "http://127.0.0.1:8787")
 
         assert findings == []
         assert mock_rc.call_args.kwargs.get("managed_aliases") == {"openai-a1b2c3d4"}
@@ -892,7 +892,7 @@ class TestAdversarial:
             return_value=(MagicMock(), mock_classification),
         ):
             with pytest.raises(typer.Exit) as exc_info:
-                _openclaw_audit_postflight(gate, None)
+                _openclaw_audit_postflight(gate, None, "http://127.0.0.1:8787")
 
         assert exc_info.value.exit_code == 87
 
@@ -1070,7 +1070,9 @@ class TestRunAndClassifyWiring:
         fake_bin.chmod(0o755)
 
         with patch("subprocess.run", return_value=proc):
-            _result, classification = run_and_classify(fake_bin)
+            _result, classification = run_and_classify(
+                fake_bin, proxy_base_url="http://127.0.0.1:8787"
+            )
 
         assert len(classification.blocking) == 1
         assert classification.blocking[0].source == "auth-profiles-direct"
@@ -1104,7 +1106,9 @@ class TestRunAndClassifyWiring:
         fake_bin.chmod(0o755)
 
         with patch("subprocess.run", return_value=proc):
-            _result, classification = run_and_classify(fake_bin)
+            _result, classification = run_and_classify(
+                fake_bin, proxy_base_url="http://127.0.0.1:8787"
+            )
 
         assert len(classification.blocking) == 0
         assert len(classification.unknown_codes) == 0
@@ -1142,7 +1146,7 @@ class TestDoctorUnknownCodes:
                 return_value=(MagicMock(), mock_classification),
             ),
         ):
-            findings = _audit_gate_findings()
+            findings = _audit_gate_findings(None, "http://127.0.0.1:8787")
 
         assert len(findings) == 1
         assert findings[0]["exit_code"] == 87
