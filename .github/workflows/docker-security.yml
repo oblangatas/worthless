@@ -10,6 +10,14 @@ on:
       - 'tests/test_docker_e2e.py'
       - 'tests/test_openclaw_e2e.py'
       - 'tests/openclaw/**'
+      - 'tests/openclaw/install_incident/test_proxy_load_bearing.py'
+      - 'src/worthless/cli/commands/lock.py'
+      - 'src/worthless/cli/commands/service/**'
+      - 'src/worthless/cli/keystore.py'
+      - 'tests/cli/test_fernet_sync.py'
+      - 'engineering/testing/scripts/run-service-lock-roundtrip-linux-docker.sh'
+      - 'engineering/testing/scripts/service-lock-roundtrip-live-linux.sh'
+      - 'tests/install_fixtures/Dockerfile.service-lifecycle-live-linux'
   pull_request:
     paths:
       - 'Dockerfile'
@@ -23,7 +31,13 @@ on:
       # "kill proxy → OpenClaw agent reaches nothing" end-to-end.
       - 'tests/openclaw/install_incident/test_proxy_load_bearing.py'
       - 'src/worthless/cli/commands/lock.py'
+      - 'src/worthless/cli/commands/service/**'
+      - 'src/worthless/cli/keystore.py'
       - 'src/worthless/openclaw/**'
+      - 'tests/cli/test_fernet_sync.py'
+      - 'engineering/testing/scripts/run-service-lock-roundtrip-linux-docker.sh'
+      - 'engineering/testing/scripts/service-lock-roundtrip-live-linux.sh'
+      - 'tests/install_fixtures/Dockerfile.service-lifecycle-live-linux'
   schedule:
     - cron: '0 6 * * 1'  # Monday 6am UTC — check if ignored CVEs have fixes
 
@@ -119,3 +133,20 @@ jobs:
       # live" gap. Lean (one short-lived container, no proxy stack).
       - name: Run WOR-650 adopt-recognition live test
         run: uv run pytest tests/openclaw/install_incident/test_adopt_recognition_docker.py -v -m "openclaw and docker" --tb=short --timeout=300
+
+  # WOR-749 Linux: lock → systemd service → proxied POST → mock upstream gets
+  # real key (privileged systemd container). macOS launchd roundtrip stays
+  # manual L7 — Keychain + LaunchAgent on shared GHA macOS runners is flaky.
+  service-lock-roundtrip-linux:
+    name: service lock roundtrip (Linux Docker)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Run WOR-749 Linux lock roundtrip live pack
+        run: bash engineering/testing/scripts/run-service-lock-roundtrip-linux-docker.sh
+        env:
+          LIVE_PACK_NO_COLOR: "1"
