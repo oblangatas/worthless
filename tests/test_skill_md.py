@@ -55,8 +55,13 @@ def skill_commands(skill_content: str) -> list[str]:
             body = skill_content[end + 4 :]
 
     # Match patterns like `worthless lock`, `worthless up`, etc.
-    # Exclude things inside URLs, code comments, or variable names
-    pattern = r"(?:^|\s)`?worthless\s+([a-z][\w-]*)`?"
+    # Exclude things inside URLs, code comments, or variable names.
+    # NOTE: the gap after `worthless` is [ \t]+ (NOT \s+) on purpose — \s
+    # matches newlines, so a line-ending "worthless" would bind to the first
+    # word of the next line. That made prose like "...worthless\nappears with
+    # its 4 tools" parse "appears" as a (non-existent) command. Real command
+    # references are always written inline (`worthless lock`), same line.
+    pattern = r"(?:^|\s)`?worthless[ \t]+([a-z][\w-]*)`?"
     matches = re.findall(pattern, body)
     # Deduplicate preserving order
     seen: set[str] = set()
