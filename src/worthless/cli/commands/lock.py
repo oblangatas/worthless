@@ -1545,9 +1545,27 @@ def _print_lock_result(
     relock_count: int,
     env_path: Path,
     home_base_dir: Path,
+    openclaw_failed: bool = False,
 ) -> None:
-    """Emit the post-lock user-facing summary (called only when quiet=False)."""
+    """Emit the post-lock user-facing summary (called only when quiet=False).
+
+    ``openclaw_failed`` (WOR-779 honesty): on a partial OpenClaw failure the
+    ``.env`` IS split, but agent traffic is NOT gated — so the derived verdict
+    is NOT "you're protected". Suppress the verdict headline + the breezy
+    closure (the caller's ``LOCK FAILED`` block carries the real,
+    worst-component verdict); the factual ``[OK] split`` line still prints.
+    """
     if fresh_count or relock_count:
+        # WOR-779: the seatbelt click — lead with a plain verdict (Verdict →
+        # Proof → Next). The verdict is DERIVED: on a partial OpenClaw failure
+        # we must NOT claim "you're protected" above the LOCK FAILED footer.
+        total = fresh_count + relock_count
+        total_noun = "key" if total == 1 else "keys"
+        if not openclaw_failed:
+            console.print_success(
+                f"🔒 You're protected. {total} {total_noun} locked — a stolen "
+                f"{env_path.name} is now worthless to an attacker."
+            )
         if fresh_count:
             # [OK] text prefix is the accessibility carrier — color/glyph
             # reinforce but are never the sole signal (monochrome, CI logs,
@@ -1566,10 +1584,16 @@ def _print_lock_result(
             typer.echo(
                 f"Warning: using non-default home {home_base_dir} (WORTHLESS_HOME is set)", err=True
             )
-        if fresh_count:
+        # WOR-779 (CR): the daemon-mode "Next:" cue is a success next-step — keep
+        # it off the partial-failure path so nothing above LOCK FAILED reads as OK.
+        if fresh_count and not openclaw_failed:
             console.print_hint(
                 "Next: run `worthless wrap <command>` or `worthless up` for daemon mode"
             )
+        # WOR-779: closure — the "pull anytime" reassurance home. Suppressed on
+        # a partial failure — don't reassure when the lock didn't fully succeed.
+        if not openclaw_failed:
+            console.print_hint("Check anytime with `worthless status`.")
         _maybe_prompt_code_scan(Path.cwd())
     else:
         console.print_warning("No unprotected API keys found.")
@@ -2021,7 +2045,14 @@ def _lock_keys(
             env_path.chmod(current & ~(stat.S_IRWXG | stat.S_IRWXO))
 
     if not quiet:
-        _print_lock_result(console, result.fresh_count, relock_count, env_path, home.base_dir)
+        _print_lock_result(
+            console,
+            result.fresh_count,
+            relock_count,
+            env_path,
+            home.base_dir,
+            openclaw_failed=bool(result.openclaw_exit),
+        )
 
     # Trust-fix (2026-05-08 verification gauntlet): when OpenClaw was
     # detected on this host AND the integration stage failed, the user is

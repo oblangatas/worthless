@@ -111,6 +111,21 @@ def _collect_deep_paths(explicit_paths: list[Path]) -> tuple[list[Path], Path | 
     return paths, tmp_path
 
 
+def _scan_verdict_line(protected: int, unprotected: int, total: int, broken: int) -> str:
+    """WOR-779: the one-line verdict scan leads with (verdict-first)."""
+    if unprotected > 0:
+        return (
+            f"{protected} of {total} keys protected — "
+            f"{unprotected} still exposed in .env. Run `worthless lock`."
+        )
+    if broken:
+        return (
+            f"{protected} of {total} keys are protected — "
+            f"but {broken} can't be restored (see below)."
+        )
+    return f"All {total} keys are protected — a leaked .env is worthless to an attacker."
+
+
 def _format_human(
     findings: list[ScanFinding],
     orphans: list[EnrollmentRecord] | None = None,
@@ -178,6 +193,12 @@ def _format_human(
             lines.append("Run: worthless lock")
         else:
             lines.append("See: docs.worthless.dev/ci-setup")
+
+    # WOR-779: lead with a plain verdict ("am I safe?") before the per-finding
+    # detail. scan is the only surface that sees plaintext-in-.env, so the
+    # honest exposure count lives here — status defers to it.
+    lines.insert(0, "")
+    lines.insert(0, _scan_verdict_line(protected_count, unprotected_count, total, len(orphans)))
 
     return "\n".join(lines) + "\n"
 

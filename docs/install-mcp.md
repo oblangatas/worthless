@@ -11,8 +11,10 @@ Python and `uv` are bootstrapped automatically on first run.
 
 ## Recommended — npm wrapper via `.mcp.json`
 
-Add to your project's `.mcp.json` (Claude Code, Cursor, and Windsurf all read
-this file):
+Add this to your editor's MCP config. **Verified on Claude Code** (`.mcp.json`)
+**and Cursor** (`~/.cursor/mcp.json` — appears as `worthless` with all 4 tools
+enabled under Settings → MCP). Windsurf reads its own config path and is
+unverified:
 
 ```json
 {
@@ -63,6 +65,16 @@ export ANTHROPIC_BASE_URL=http://localhost:8787
 ```
 
 ## Cursor
+
+:::tip[MCP tools — verified]
+The `worthless-mcp` block above works in Cursor. Drop it into
+`~/.cursor/mcp.json`; Cursor connects the server and Settings → MCP shows
+**`worthless`, 4 tools enabled** (`worthless_status`, `worthless_scan`,
+`worthless_lock`, `worthless_spend`). Verified on macOS.
+:::
+
+The section below is a **different** integration — pointing Cursor's *built-in*
+AI at the proxy via `OPENAI_BASE_URL` — which we have **not** verified:
 
 :::caution[Untested]
 We have **not** verified that Cursor honors a custom `OPENAI_BASE_URL` for its

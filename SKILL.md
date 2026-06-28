@@ -42,8 +42,11 @@ Worthless scans for **LLM provider API key prefixes only** — currently `openai
 
 ### For AI agents — zero-Python install (recommended)
 
-Worthless is a Python package, but AI editors (Claude Code, Cursor, Windsurf) use
-`.mcp.json` for MCP discovery — they speak npm, not Python. The `worthless-mcp`
+Worthless is a Python package, but AI editors discover MCP servers via a JSON
+config — they speak npm, not Python. `.mcp.json` is the **Claude Code** path
+(verified); Cursor uses `~/.cursor/mcp.json` (also verified — worthless
+appears with its 4 tools); Windsurf uses its own config path and is
+unverified. The `worthless-mcp`
 npm package bridges this gap: it is a thin Node.js shim with no npm dependencies
 that handles the entire Python bootstrap invisibly. To the editor, Worthless looks
 identical to every other npm-managed MCP server it already knows how to start.

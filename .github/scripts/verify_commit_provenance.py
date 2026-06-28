@@ -26,10 +26,19 @@ ever accepts OUTSIDE CONTRIBUTIONS, revisit before then:
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 
-CANONICAL_AUTHOR = "4841128+shacharm2@users.noreply.github.com"
+# Canonical operator identity. GitHub noreply emails are
+# "<account-id>+<username>@users.noreply.github.com"; pin the stable numeric
+# ACCOUNT ID (rename-proof, unspoofable) rather than the username, so a rename
+# (shacharm2 -> oblangatas) doesn't block the operator. Keep in sync with
+# scripts/hooks/check_pushed_commit_provenance.py.
+CANONICAL_AUTHOR_ID = "4841128"
+_CANONICAL_AUTHOR_RE = re.compile(
+    rf"^{CANONICAL_AUTHOR_ID}\+[A-Za-z0-9-]+@users\.noreply\.github\.com$"
+)
 ALLOWED_BOT_AUTHORS = frozenset(
     {
         "noreply@anthropic.com",  # Claude
@@ -41,7 +50,7 @@ ALLOWED_BOT_AUTHORS = frozenset(
 
 
 def is_allowed_author(email: str) -> bool:
-    return email == CANONICAL_AUTHOR or email in ALLOWED_BOT_AUTHORS
+    return bool(_CANONICAL_AUTHOR_RE.match(email)) or email in ALLOWED_BOT_AUTHORS
 
 
 def evaluate(commits: list[dict]) -> list[str]:

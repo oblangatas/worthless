@@ -11,15 +11,30 @@ Checks each commit the push would add:
      GitHub web-flow merge commits are committed by ``GitHub`` but authored by
      the operator, which is fine).
   2. The commit carries a usable signature (``git %G?`` in {G, U}).
+
+For local non-main staging pushes, set ``WORTHLESS_PROVENANCE_BASE_REF`` to
+verify ``base..target`` explicitly, for example
+``WORTHLESS_PROVENANCE_BASE_REF=origin/website-dev``. This is local-hook only;
+CI does not honor this environment variable.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 
-CANONICAL_AUTHOR = "4841128+shacharm2@users.noreply.github.com"
+# Canonical operator identity. GitHub noreply emails have the form
+# "<account-id>+<username>@users.noreply.github.com". We pin the stable numeric
+# ACCOUNT ID — which a username rename cannot change and which cannot be spoofed
+# (it is the account's permanent identifier) — NOT the username, so a rename
+# (e.g. shacharm2 -> oblangatas) doesn't lock the operator out of their own
+# provenance check.
+CANONICAL_AUTHOR_ID = "4841128"
+_CANONICAL_AUTHOR_RE = re.compile(
+    rf"^{CANONICAL_AUTHOR_ID}\+[A-Za-z0-9-]+@users\.noreply\.github\.com$"
+)
 ALLOWED_BOT_AUTHORS = frozenset(
     {
         "noreply@anthropic.com",  # Claude
@@ -34,7 +49,7 @@ _GOOD_SIG = frozenset({"G", "U"})
 
 def is_allowed_author(email: str) -> bool:
     """True if *email* is the canonical operator identity or an allowed bot."""
-    return email == CANONICAL_AUTHOR or email in ALLOWED_BOT_AUTHORS
+    return bool(_CANONICAL_AUTHOR_RE.match(email)) or email in ALLOWED_BOT_AUTHORS
 
 
 def _git(*args: str, cwd: str | None = None) -> str:
@@ -68,9 +83,12 @@ def pushed_commits(cwd: str | None = None) -> list[str]:
     the hook BLOCKS the push rather than silently passing it unchecked. An
     empty range (zero new commits) is legitimate and returns ``[]``.
     """
+    explicit_base = os.environ.get("WORTHLESS_PROVENANCE_BASE_REF") or ""
     frm = os.environ.get("PRE_COMMIT_FROM_REF") or ""
     to = os.environ.get("PRE_COMMIT_TO_REF") or "HEAD"
-    if frm and set(frm) != {"0"}:  # all-zero from-ref == brand-new branch
+    if explicit_base:
+        rng = f"{explicit_base}..{to}"
+    elif frm and set(frm) != {"0"}:  # all-zero from-ref == brand-new branch
         rng = f"{frm}..{to}"
     else:
         rng = "origin/main..HEAD"
@@ -99,6 +117,13 @@ def main() -> int:
     for sha in shas:
         violations.extend(check_commit(sha))
     if not violations:
+        if os.environ.get("WORTHLESS_PROVENANCE_BASE_REF") and not shas:
+            print(
+                "pre-push WARNING: explicit provenance base produced 0 commit(s); "
+                "nothing was checked",
+                file=sys.stderr,
+            )
+        print(f"pre-push: {len(shas)} commit(s) checked, provenance OK", file=sys.stderr)
         return 0
     print("pre-push BLOCKED: commit provenance check failed (WOR-589)", file=sys.stderr)
     for problem in violations:

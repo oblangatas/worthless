@@ -2,7 +2,7 @@
 
 > **Source of truth** for service testing lanes. Synced to Linear: WOR-193, WOR-724, WOR-725, WOR-747–749, and the [ship plan doc](https://linear.app/plumbusai/document/wor-193-service-lifecycle-research-and-ship-plan-ee56bb0580d5).
 >
-> **Branch tip:** `gsd/wor-193-wave3b-adversarial` (PR #292)
+> **Branch tip:** `main` @ `876d102` (PR #292 merged 2026-06-25)
 
 ## Four verification lanes
 
@@ -41,7 +41,7 @@
 | **1a** | WOR-720 | #288 | Done | `test_service_*` templates | karen |
 | **2** | WOR-721 | #289 | Done | WOR-717 integration + default | code-reviewer |
 | **3** | WOR-723 | #290 | Done | W3-UF/SB added | regression-dog |
-| **3b** | **WOR-724** | **#292** | **active** | W3-ADV/DIRTY/CONTRACT tables below | security-reviewer |
+| **3b** | **WOR-724** | **#292** | **Done** (`876d102`) | W3-ADV/DIRTY/CONTRACT tables below | security-reviewer |
 | **4+1b** | WOR-725 | #292 tail | backlog | W4-CHAOS/DIRTY + 1b AC + WOR-747–749 live | chaos-engineer |
 | **5** | WOR-726 | #293 | backlog | banner, `service doctor` user_flow | ux-researcher |
 | **6** | WOR-727 | #294 | backlog | full stack merge, release-gates Track A | Jenny |
@@ -56,7 +56,7 @@
 |----|------|------|--------|
 | W3-ADV-1 | Foreign unit on every service mutator | `test_service_backends.py` | **done** |
 | W3-ADV-2 | Supervised spawn failure → no key leak | `test_native_stress_journeys.py` | **done** |
-| W3-ADV-3 | `/healthz` OK, no pidfile → must spawn (6gkb) | `test_service_up_managed.py` | uncommitted |
+| W3-ADV-3 | `/healthz` OK, no pidfile → must spawn (6gkb) | `test_service_up_managed.py` | **pytest done**; P2 reclaim in `up.py` backlog |
 | W3-ADV-4 | `/healthz` OK, pidfile matches → idempotent no-op | `test_service_up_managed.py` | partial |
 | W3-ADV-5 | Fernet keyring vs stale file; SERVICE_MANAGED gate | `test_keystore.py` | done |
 | W3-ADV-6 | Fernet drift → install/lock fails loud | `test_service_cli.py` / doctor | backlog |
@@ -76,7 +76,7 @@
 
 ## WOR-724 close bar — dirty dev (L3+)
 
-Fixture: `tests/fixtures/dirty_home.py` (planned — seeds mess, asserts recovery).
+Fixture: `tests/fixtures/dirty_home.py` (shipped #292; dirty_env journeys still backlog).
 
 | ID | Seeds | Assert | Status |
 |----|-------|--------|--------|
@@ -86,7 +86,7 @@ Fixture: `tests/fixtures/dirty_home.py` (planned — seeds mess, asserts recover
 | W3-DIRTY-4 | Stale `proxy.pid`, no process | up coherent (not bare healthz) | backlog |
 | W3-DIRTY-5 | Keyring shard + wrong `fernet.key` | managed vs interactive split | partial |
 
-Run: `uv run pytest -m dirty_env` (marker registered when fixture lands).
+Run: `uv run pytest -m dirty_env` (marker registered; journeys mostly backlog).
 
 ---
 
@@ -133,8 +133,8 @@ uv run pytest -m dirty_env -o addopts= -q
 # L2 user journeys
 uv run pytest tests/user_flows/test_native_cli_journeys.py -m user_flow -o addopts= -q
 
-# L6 CI
-gh pr checks 292
+# L6 CI (main)
+gh run list --branch main --limit 3
 ```
 
 ---

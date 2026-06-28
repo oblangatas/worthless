@@ -98,3 +98,43 @@ def test_fails_closed_when_git_errors(monkeypatch) -> None:
     monkeypatch.setattr(hook.subprocess, "run", _git_fails)
     with pytest.raises(RuntimeError):
         hook.pushed_commits()
+
+
+def test_explicit_base_ref_overrides_pre_commit_range(monkeypatch) -> None:
+    seen: list[list[str]] = []
+
+    def _git_ok(args, **_kwargs) -> subprocess.CompletedProcess:
+        seen.append(args)
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout="abc123\n",
+            stderr="",
+        )
+
+    monkeypatch.setenv("WORTHLESS_PROVENANCE_BASE_REF", "origin/website-dev")
+    monkeypatch.setenv("PRE_COMMIT_FROM_REF", "origin/main")
+    monkeypatch.setenv("PRE_COMMIT_TO_REF", "HEAD")
+    monkeypatch.setattr(hook.subprocess, "run", _git_ok)
+
+    assert hook.pushed_commits() == ["abc123"]
+    assert seen == [["git", "rev-list", "origin/website-dev..HEAD"]]
+
+
+def test_success_path_reports_checked_commit_count(monkeypatch, capsys) -> None:
+    monkeypatch.delenv("WORTHLESS_PROVENANCE_BASE_REF", raising=False)
+    monkeypatch.setattr(hook, "pushed_commits", lambda: ["abc123", "def456"])
+    monkeypatch.setattr(hook, "check_commit", lambda _sha: [])
+
+    assert hook.main() == 0
+    assert "pre-push: 2 commit(s) checked, provenance OK" in capsys.readouterr().err
+
+
+def test_explicit_base_empty_range_warns(monkeypatch, capsys) -> None:
+    monkeypatch.setenv("WORTHLESS_PROVENANCE_BASE_REF", "origin/website-dev")
+    monkeypatch.setattr(hook, "pushed_commits", lambda: [])
+
+    assert hook.main() == 0
+    err = capsys.readouterr().err
+    assert "explicit provenance base produced 0 commit(s)" in err
+    assert "pre-push: 0 commit(s) checked, provenance OK" in err
