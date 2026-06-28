@@ -483,12 +483,26 @@ class TestOwnedUnitMutators:
 
     def test_launchd_restart_owned_plist(self, home: WorthlessHome, tmp_path: Path) -> None:
         plist = _owned_launchd_plist(home, tmp_path)
+        calls: list[list[str]] = []
+
+        def fake_run(args: list[str], **kwargs):
+            calls.append(args)
+            result = MagicMock()
+            result.returncode = 0
+            return result
+
         with (
             patch.object(launchd, "plist_path", return_value=plist),
-            patch.object(launchd, "start") as mock_start,
+            patch.object(launchd, "run_cmd", side_effect=fake_run),
+            patch.object(launchd, "_is_loaded", return_value=True),
+            patch.object(launchd, "verify_proxy_health"),
+            patch.object(launchd.os, "getuid", return_value=501),
         ):
             launchd.restart(home)
-        mock_start.assert_called_once_with(home)
+
+        assert ["launchctl", "bootout", "gui/501", str(plist)] in calls
+        assert ["launchctl", "bootstrap", "gui/501", str(plist)] in calls
+        assert ["launchctl", "kickstart", "-k", "gui/501/dev.worthless.proxy"] in calls
 
     def test_launchd_stop_owned_plist(self, home: WorthlessHome, tmp_path: Path) -> None:
         plist = _owned_launchd_plist(home, tmp_path)

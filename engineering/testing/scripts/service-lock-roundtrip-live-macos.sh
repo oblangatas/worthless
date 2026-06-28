@@ -9,7 +9,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Bare-metal live pack: lock must encrypt in-process, not via a stale sidecar IPC.
-unset WORTHLESS_FERNET_IPC_ONLY WORTHLESS_KEYRING_BACKEND
+unset WORTHLESS_FERNET_IPC_ONLY WORTHLESS_KEYRING_BACKEND WORTHLESS_FERNET_KEY WORTHLESS_SERVICE_MANAGED
 # shellcheck source=engineering/testing/scripts/_live-pack-lib.sh
 source "${SCRIPT_DIR}/_live-pack-lib.sh"
 # shellcheck source=/dev/null
@@ -73,20 +73,7 @@ fi
 worthless down 2>/dev/null || true
 
 kill_port_listeners() {
-  local port=$1
-  command -v lsof >/dev/null 2>&1 || return 0
-  local pids
-  pids="$(lsof -ti "tcp:${port}" -sTCP:LISTEN 2>/dev/null || true)"
-  [[ -n "$pids" ]] || return 0
-  echo "Killing stale listener(s) on port ${port}: ${pids}"
-  # shellcheck disable=SC2086
-  kill -TERM ${pids} 2>/dev/null || true
-  sleep 0.5
-  pids="$(lsof -ti "tcp:${port}" -sTCP:LISTEN 2>/dev/null || true)"
-  if [[ -n "$pids" ]]; then
-    # shellcheck disable=SC2086
-    kill -KILL ${pids} 2>/dev/null || true
-  fi
+  lp_kill_worthless_port_listeners "$1"
 }
 
 ensure_proxy_port_free() {
@@ -453,10 +440,11 @@ curl_expect_2xx() {
   if [[ -n "$data" ]]; then
     status="$(curl -s -o "$tmp" -w '%{http_code}' -X "$method" "$url" \
       -H "Content-Type: application/json" \
-      -d "$data")"
+      -d "$data" || true)"
   else
-    status="$(curl -s -o "$tmp" -w '%{http_code}' -X "$method" "$url")"
+    status="$(curl -s -o "$tmp" -w '%{http_code}' -X "$method" "$url" || true)"
   fi
+  status="${status:-000}"
   if [[ "$status" -lt 200 || "$status" -ge 300 ]]; then
     lp_fail "${method} ${url} → HTTP ${status}"
     cat "$tmp" 2>/dev/null || true
@@ -483,12 +471,14 @@ run_proxied_roundtrip() {
         -X POST "http://127.0.0.1:${PORT}/${ALIAS}/v1/chat/completions" \
         -H "Authorization: Bearer ${SHARD_A}" \
         -H "Content-Type: application/json" \
-        -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}'
+        -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}' \
+        || true
     )"
+    http_status="${http_status:-000}"
     if [[ "$http_status" == "200" ]]; then
       break
     fi
-    if [[ "$http_status" == "503" || "$http_status" == "502" || "$http_status" == "504" ]]; then
+    if [[ "$http_status" == "000" || "$http_status" == "503" || "$http_status" == "502" || "$http_status" == "504" ]]; then
       sleep 1
       continue
     fi

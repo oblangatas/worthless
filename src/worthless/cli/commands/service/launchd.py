@@ -149,8 +149,19 @@ def start(home: WorthlessHome) -> None:
 
 
 def restart(home: WorthlessHome) -> None:
-    refuse_foreign_unit(plist_path(), home)
-    start(home)
+    """Unload and rebootstrap the LaunchAgent so env/plist state is re-read."""
+    path = plist_path()
+    refuse_foreign_unit(path, home)
+    if not path.is_file():
+        raise WorthlessError(
+            ErrorCode.PROXY_NOT_RUNNING,
+            "Service is not installed. Run `worthless service install` first.",
+        )
+    if _is_loaded():
+        run_cmd(["launchctl", "bootout", _launchctl_domain(), str(path)], check=False)
+    run_cmd(["launchctl", "bootstrap", _launchctl_domain(), str(path)])
+    run_cmd(["launchctl", "kickstart", "-k", _service_target()])
+    verify_proxy_health(resolve_port(None))
 
 
 def tail_logs(home: WorthlessHome, *, follow: bool) -> None:

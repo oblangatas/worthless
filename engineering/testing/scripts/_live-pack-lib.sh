@@ -77,3 +77,29 @@ lp_log_tail() {
   printf "── %s (last %s lines) ──\n" "$label" "$lines"
   tail -"${lines}" "$path" 2>/dev/null || echo "  (missing: ${path})"
 }
+
+# Kill only worthless listeners on port; fail if a foreign process owns it.
+lp_kill_worthless_port_listeners() {
+  local port=$1
+  command -v lsof >/dev/null 2>&1 || return 0
+  local pids
+  pids="$(lsof -ti "tcp:${port}" -sTCP:LISTEN 2>/dev/null || true)"
+  [[ -n "$pids" ]] || return 0
+  local pid args
+  for pid in $pids; do
+    args="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+    if [[ "$args" != *worthless* ]]; then
+      lp_fail "port ${port} is occupied by non-worthless process ${pid}: ${args}"
+      return 1
+    fi
+  done
+  echo "Killing stale worthless listener(s) on port ${port}: ${pids}"
+  # shellcheck disable=SC2086
+  kill -TERM ${pids} 2>/dev/null || true
+  sleep 0.5
+  pids="$(lsof -ti "tcp:${port}" -sTCP:LISTEN 2>/dev/null || true)"
+  if [[ -n "$pids" ]]; then
+    # shellcheck disable=SC2086
+    kill -KILL ${pids} 2>/dev/null || true
+  fi
+}
