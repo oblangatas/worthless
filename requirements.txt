@@ -36,7 +36,7 @@ cryptography==49.0.0
     #   worthless
 exceptiongroup==1.2.2 ; python_full_version < '3.11'
     # via anyio
-fastapi==0.136.1
+fastapi==0.138.1
     # via worthless
 h11==0.16.0
     # via
