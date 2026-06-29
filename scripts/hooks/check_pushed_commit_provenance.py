@@ -24,7 +24,14 @@ import os
 import subprocess
 import sys
 
-CANONICAL_AUTHOR = "4841128+shacharm2@users.noreply.github.com"
+# Canonical operator identities. shacharm2 = pre-rename history; oblangatas =
+# current (the GitHub username was renamed 2026-06, same account + signing key).
+CANONICAL_AUTHORS = frozenset(
+    {
+        "4841128+shacharm2@users.noreply.github.com",
+        "4841128+oblangatas@users.noreply.github.com",
+    }
+)
 ALLOWED_BOT_AUTHORS = frozenset(
     {
         "noreply@anthropic.com",  # Claude
@@ -39,7 +46,7 @@ _GOOD_SIG = frozenset({"G", "U"})
 
 def is_allowed_author(email: str) -> bool:
     """True if *email* is the canonical operator identity or an allowed bot."""
-    return email == CANONICAL_AUTHOR or email in ALLOWED_BOT_AUTHORS
+    return email in CANONICAL_AUTHORS or email in ALLOWED_BOT_AUTHORS
 
 
 def _git(*args: str, cwd: str | None = None) -> str:
