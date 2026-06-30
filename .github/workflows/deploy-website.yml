@@ -29,7 +29,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  WEBSITE_RELEASE_SOURCE: f38a4b212a73910d331bf450d64db01e2294ad8a
+  WEBSITE_RELEASE_SOURCE: 2f7392ff135005f352e13a8b76cd5c0551f74edb
 
 jobs:
   validate:
