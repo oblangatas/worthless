@@ -44,6 +44,13 @@ No Python toolchain awareness required.
 - `worthless_scan(paths, deep)` — find accidental key exposures
 - `worthless_spend(alias)` — per-provider spend readout
 
+> **`worthless_lock` interrupt safety.** Over MCP the lock runs in a worker
+> thread, where OS interrupts (SIGINT/SIGTERM) aren't delivered — so the CLI's
+> mid-lock rollback-on-Ctrl-C does **not** apply here. Crash-safety still holds
+> via atomic writes (an interrupted lock can't leave a half-written key). The
+> tool's JSON includes `state_consistent`; if it's `false`, run
+> `worthless doctor` to reconcile before trusting the result.
+
 ## Alternative — manual CLI install
 
 If you already use `pipx` or want the full CLI (`worthless wrap`,

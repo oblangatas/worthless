@@ -200,6 +200,42 @@ class TestWorthlessLock:
         assert result["protected_count"] == 1
         # Original key should no longer be in the file
         assert fake_key not in env_file.read_text()
+        # dqzj: a clean lock reconciles to a consistent state — no false orphan.
+        assert result["state_consistent"] is True
+        assert "orphan_shards" not in result
+
+    @pytest.mark.asyncio
+    async def test_lock_surfaces_orphan_shard(self, tmp_path: Path) -> None:
+        """dqzj: a shards row with no enrollment is surfaced, not silently 'ok'.
+
+        The MCP lock runs off the main thread (no interrupt rollback). If the DB
+        carries an orphan shard (a half-written/legacy mixed state), the result
+        must flag it and point at `doctor` rather than returning a bare success.
+        """
+        import aiosqlite
+
+        from worthless.storage.schema import init_db
+
+        home = _make_home(tmp_path)
+        db_path = str(home / "worthless.db")
+        await init_db(db_path)
+        # An orphan: a shard with NO enrollment row (no shard-A, useless, but junk).
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute(
+                "INSERT INTO shards (key_alias, shard_b_enc, commitment, nonce, provider) "
+                "VALUES (?, ?, ?, ?, ?)",
+                ("orphan-alias", b"b", b"c", b"n", "openai"),
+            )
+            await db.commit()
+
+        env_file = _make_env_file(tmp_path, "FOO=bar\n")  # no keys → protected_count 0
+        with patch.dict(os.environ, {"WORTHLESS_HOME": str(home)}):
+            result = json.loads(await worthless_lock(env_path=str(env_file)))
+
+        assert result["protected_count"] == 0
+        assert result["state_consistent"] is False
+        assert result["orphan_shards"] == ["orphan-alias"]
+        assert "doctor" in result["hint"]
 
 
 # ---------------------------------------------------------------------------

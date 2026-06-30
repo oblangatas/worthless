@@ -64,6 +64,29 @@ async def _query_spend(db_path: Path, alias: str | None) -> list[dict[str, Any]]
         ]
 
 
+async def _list_orphan_shards(db_path: Path) -> list[str]:
+    """Return shard aliases that have NO enrollment row — a mixed/partial state.
+
+    A ``shards`` row with no matching ``enrollments`` row is a lone shard-B: a
+    half-written state no other ``doctor`` check looks for (its checks are
+    disk-vs-DB and ``.env``-vs-DB). The atomic Pass-1 writes (WOR-646 Part 2)
+    and atomic superseded cleanup (worthless-exx5) prevent this on the normal
+    and rotation paths, so this is defense-in-depth — it surfaces a legacy row
+    or a future regression, not a known live gap. A lone shard is
+    cryptographically useless (no shard-A) but should still be reconciled.
+    """
+    if not db_path.exists():
+        return []
+    query = (
+        "SELECT s.key_alias FROM shards s "
+        "LEFT JOIN enrollments e ON s.key_alias = e.key_alias "
+        "WHERE e.key_alias IS NULL ORDER BY s.key_alias"
+    )
+    async with aiosqlite.connect(str(db_path)) as db:
+        rows = await db.execute_fetchall(query)
+        return [r[0] for r in rows]
+
+
 # ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
@@ -207,6 +230,13 @@ async def worthless_lock(env_path: str = ".env") -> str:
     the originals with format-preserving shard-A values. This is a protective
     mutation — it makes your keys MORE secure.
 
+    Interrupt safety: this MCP path runs the lock in a worker thread, where
+    Python delivers no SIGINT/SIGTERM, so the CLI's mid-lock signal rollback
+    does NOT apply here. Crash-safety instead comes from atomic writes
+    (WOR-646 Part 2). As a backstop, the response carries ``state_consistent``;
+    if it is ``false``, an orphan/partial state was detected — run
+    ``worthless doctor`` to reconcile before trusting the result.
+
     Args:
         env_path: Path to the .env file to protect.
     """
@@ -215,16 +245,32 @@ async def worthless_lock(env_path: str = ".env") -> str:
     home = get_home()
     path = Path(env_path)
 
-    # _lock_keys is sync and calls asyncio.run() internally,
-    # so run it in a thread to avoid nested event loop errors.
-    def _do_lock() -> int:
+    # _lock_keys is sync and calls asyncio.run() internally, so run it in a
+    # thread to avoid nested event loop errors. dqzj/WOR-646: the orphan-state
+    # reconciliation runs INSIDE the same acquire_lock() critical section, so
+    # state_consistent/orphan_shards describe exactly the state THIS lock left —
+    # not a snapshot another command could have mutated after the lock released
+    # (CodeRabbit: the post-lock read was a TOCTOU window).
+    def _do_lock() -> tuple[int, list[str]]:
         with acquire_lock(home):
-            return _lock_keys(path, home)
+            count = _lock_keys(path, home)
+            orphans = asyncio.run(_list_orphan_shards(home.db_path))
+            return count, orphans
 
     loop = asyncio.get_running_loop()
-    count = await loop.run_in_executor(None, _do_lock)
+    count, orphans = await loop.run_in_executor(None, _do_lock)
 
-    return json.dumps({"protected_count": count})
+    # The MCP path runs off the main thread, so no interrupt-driven rollback
+    # could fire here; surface any mixed state instead of a bare, possibly-
+    # misleading success — so the agent is told to run `doctor`, not trust "ok".
+    result: dict[str, Any] = {
+        "protected_count": count,
+        "state_consistent": not orphans,
+    }
+    if orphans:
+        result["orphan_shards"] = orphans
+        result["hint"] = "Mixed state detected — run `worthless doctor` to reconcile."
+    return json.dumps(result)
 
 
 @mcp.tool()
