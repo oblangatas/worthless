@@ -4,9 +4,12 @@
 //
 //   - GET / + curl-family UA  → 200 text/plain, body = install.sh
 //   - GET /?explain=1 + curl  → 200 text/plain, body = walkthrough
+//   - GET /uninstall + curl   → 200 text/plain, body = uninstall.sh
+//   - GET /uninstall?explain=1 + curl → 200 text/plain, body = uninstall walkthrough
 //   - GET / + browser/missing → 302 to REDIRECT_URL (fail-safe)
+//   - GET /uninstall + browser → 302 to the uninstall docs page (fail-safe)
 //   - GET /.well-known/security.txt → 200 text/plain (RFC 9116)
-//   - Any other path          → 404 (never the install script body)
+//   - Any other path          → 404 (never a script body)
 //   - POST/PUT/DELETE/PATCH   → 405 Method Not Allowed (Allow header set)
 //   - HEAD                    → mirrors GET status + content-length, no body
 //   - OPTIONS                 → 204, no wildcard CORS, no Origin echo
@@ -35,7 +38,12 @@
 // avoids tripping Cloudflare's WAF on api.cloudflare.com, which rejects
 // multipart upload parts containing shell-injection signatures. See
 // wrangler.toml comment for the full story.
-import { INSTALL_SH_B64, WALKTHROUGH_B64 } from "./embedded";
+import {
+  INSTALL_SH_B64,
+  WALKTHROUGH_B64,
+  UNINSTALL_SH_B64,
+  UNINSTALL_WALKTHROUGH_B64,
+} from "./embedded";
 import { isCurlFamily } from "./ua";
 
 export interface Env {
@@ -72,6 +80,14 @@ const WALKTHROUGH_BYTES = b64ToBytes(WALKTHROUGH_B64);
 const WALKTHROUGH_LENGTH = WALKTHROUGH_BYTES.byteLength;
 const WALKTHROUGH = DECODER.decode(WALKTHROUGH_BYTES);
 
+const UNINSTALL_SH_BYTES = b64ToBytes(UNINSTALL_SH_B64);
+const UNINSTALL_SH_LENGTH = UNINSTALL_SH_BYTES.byteLength;
+const UNINSTALL_SH = DECODER.decode(UNINSTALL_SH_BYTES);
+
+const UNINSTALL_WALKTHROUGH_BYTES = b64ToBytes(UNINSTALL_WALKTHROUGH_B64);
+const UNINSTALL_WALKTHROUGH_LENGTH = UNINSTALL_WALKTHROUGH_BYTES.byteLength;
+const UNINSTALL_WALKTHROUGH = DECODER.decode(UNINSTALL_WALKTHROUGH_BYTES);
+
 const TEXT_PLAIN = "text/plain; charset=utf-8";
 const NO_STORE = "no-store";
 const CACHEABLE = "public, max-age=300, must-revalidate";
@@ -79,11 +95,17 @@ const HSTS = "max-age=63072000; includeSubDomains; preload";
 const CSP_NONE = "default-src 'none'";
 const ALLOW_READONLY = "GET, HEAD, OPTIONS";
 
+// Browsers hitting /uninstall go to the uninstall docs page (not the marketing
+// site), so a human gets the guide for the script curl users receive.
+const UNINSTALL_DOCS_URL = "https://docs.wless.io/uninstall";
+
 // sha256 is computed lazily on first request (Web Crypto digest is async)
 // and cached for the isolate's lifetime. Body is static, so the value is
 // stable across the cache.
 let installSha256Cache: string | null = null;
 let walkthroughSha256Cache: string | null = null;
+let uninstallSha256Cache: string | null = null;
+let uninstallWalkthroughSha256Cache: string | null = null;
 
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
   // Copy into a fresh ArrayBuffer to satisfy the BufferSource typing
@@ -109,6 +131,18 @@ async function getWalkthroughSha256(): Promise<string> {
   if (walkthroughSha256Cache !== null) return walkthroughSha256Cache;
   walkthroughSha256Cache = await sha256Hex(WALKTHROUGH_BYTES);
   return walkthroughSha256Cache;
+}
+
+async function getUninstallSha256(): Promise<string> {
+  if (uninstallSha256Cache !== null) return uninstallSha256Cache;
+  uninstallSha256Cache = await sha256Hex(UNINSTALL_SH_BYTES);
+  return uninstallSha256Cache;
+}
+
+async function getUninstallWalkthroughSha256(): Promise<string> {
+  if (uninstallWalkthroughSha256Cache !== null) return uninstallWalkthroughSha256Cache;
+  uninstallWalkthroughSha256Cache = await sha256Hex(UNINSTALL_WALKTHROUGH_BYTES);
+  return uninstallWalkthroughSha256Cache;
 }
 
 // ---- security.txt (RFC 9116) --------------------------------------------
@@ -184,6 +218,36 @@ function buildWalkthroughHeaders(sha: string): Headers {
   h.set("Cache-Control", CACHEABLE);
   h.set("Vary", "User-Agent, Accept-Encoding");
   h.set("ETag", `W/"walkthrough-${sha}"`);
+  h.set("Content-Security-Policy", CSP_NONE);
+  return withSecurityHeaders(h);
+}
+
+// Uninstall-script + walkthrough headers mirror the install ones exactly,
+// only the body length / sha / ETag label differ. Kept as separate builders
+// (rather than parameterising the install ones) so the heavily-tested install
+// path is untouched by this addition.
+function buildUninstallHeaders(env: Env, sha: string): Headers {
+  const h = new Headers();
+  h.set("Content-Type", TEXT_PLAIN);
+  h.set("Content-Length", String(UNINSTALL_SH_LENGTH));
+  h.set("Cache-Control", CACHEABLE);
+  h.set("Vary", "User-Agent, Accept-Encoding");
+  h.set("ETag", `"${sha}"`);
+  h.set("X-Worthless-Script-Sha256", sha);
+  h.set("X-Worthless-Script-Tag", env.SCRIPT_TAG);
+  h.set("X-Worthless-Script-Commit", env.SCRIPT_COMMIT);
+  h.set("X-Worthless-Build-Provenance", env.SCRIPT_BUILD_PROVENANCE);
+  h.set("Content-Security-Policy", CSP_NONE);
+  return withSecurityHeaders(h);
+}
+
+function buildUninstallWalkthroughHeaders(sha: string): Headers {
+  const h = new Headers();
+  h.set("Content-Type", TEXT_PLAIN);
+  h.set("Content-Length", String(UNINSTALL_WALKTHROUGH_LENGTH));
+  h.set("Cache-Control", CACHEABLE);
+  h.set("Vary", "User-Agent, Accept-Encoding");
+  h.set("ETag", `W/"uninstall-walkthrough-${sha}"`);
   h.set("Content-Security-Policy", CSP_NONE);
   return withSecurityHeaders(h);
 }
@@ -383,8 +447,28 @@ async function handle(req: Request, env: Env): Promise<Response> {
     return respond(isHead, 200, buildSecurityTxtHeaders(body), body);
   }
 
-  // Route: anything other than `/` → 404. We do NOT serve the install
-  // script from `/install.sh` or other conveniences; that would create a
+  // Route: /uninstall — the standalone uninstaller, symmetric to `/`. Curl
+  // gets the script, ?explain=1 the walkthrough, browsers the docs page. Like
+  // `/`, this is an explicit served path (the 404 note below excludes it).
+  if (path === "/uninstall") {
+    if (!isCurlFamily(ua)) {
+      return respond(isHead, 302, buildRedirectHeaders(UNINSTALL_DOCS_URL), null);
+    }
+    if (url.searchParams.get("explain") === "1") {
+      const sha = await getUninstallWalkthroughSha256();
+      return respond(
+        isHead,
+        200,
+        buildUninstallWalkthroughHeaders(sha),
+        UNINSTALL_WALKTHROUGH,
+      );
+    }
+    const sha = await getUninstallSha256();
+    return respond(isHead, 200, buildUninstallHeaders(env, sha), UNINSTALL_SH);
+  }
+
+  // Route: anything other than `/` or `/uninstall` → 404. We do NOT serve the
+  // scripts from `/install.sh` or other conveniences; that would create a
   // parallel install vector that bypasses the cache-key, audit, and
   // "what you see at worthless.sh" trust contract.
   if (path !== "/") {

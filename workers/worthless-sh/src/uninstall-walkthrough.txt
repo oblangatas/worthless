@@ -1,0 +1,67 @@
+== Verify the bytes match what the Worker serves ==
+  curl -sSL worthless.sh/uninstall | sha256sum         # body hash
+  curl -sSI worthless.sh/uninstall | grep -i sha256    # header value
+The two MUST match. Mismatch = abort and report.
+(This catches transit tampering. Not origin compromise — see README.)
+==================================================================
+
+Walkthrough for worthless uninstall.sh
+=======================================
+
+What you would have piped into sh, in plain English. Read this first if
+you'd rather audit than execute.
+
+Source: https://github.com/shacharm2/worthless
+
+----------------------------------------------------------------------
+
+The honest summary
+  Removing Worthless is the reverse of installing it. If the `worthless`
+  program still runs, this script lets IT restore your real keys first,
+  then removes the program. If the program is broken or gone, a plain
+  shell script CANNOT unscramble your split keys (only the program's
+  crypto can) — so it wipes the leftovers and tells you to rotate those
+  keys at your provider. It never claims to have restored a key it could
+  not.
+
+Exit codes
+  0  = removed cleanly
+  1  = refused (no --yes in a non-interactive shell, or you declined)
+  20 = unsupported platform (Windows native)
+  40 = wipe failed (something couldn't be removed; clean up manually)
+
+Step 1 — Hermetic setup
+  Same hardening as install.sh: scrubs ~48 redirect / MitM / loader env
+  vars and locks PATH to system dirs + ~/.local/bin, so a poisoned PATH
+  can't hijack the rm / security / uv calls this script makes.
+
+Step 2 — Confirm
+  Asks once before removing anything (reads /dev/tty, so `curl | sh`
+  works). In a non-interactive shell it refuses unless you pass --yes:
+    curl -sSL worthless.sh/uninstall | sh -s -- --yes
+
+Step 3 — Mode 1: a working `worthless`
+  If `worthless --version` runs, the script calls `worthless uninstall`,
+  which restores your real key into every locked .env, undoes the
+  OpenClaw changes, and wipes ~/.worthless + the keychain entry. Then
+  this script removes the installed tool (`uv tool uninstall worthless`).
+
+Step 4 — Mode 2: broken or missing `worthless`
+  No working binary → the keys CANNOT be reconstructed here. The script:
+   - lists the .env files that held locked keys (read from the plaintext
+     path column in the local database) so you know what to rotate;
+   - deletes the OS keychain entry — confirm the exact entry first with:
+     curl -sSL worthless.sh/uninstall | sh -s -- --print-keychain-account
+   - removes ~/.worthless and the installed tool;
+   - tells you to rotate those keys at your provider.
+
+What it does NOT do
+-------------------
+  No sudo. No telemetry. It only removes ~/.worthless,
+  Worthless's own keychain entry, and the worthless tool. It NEVER
+  reconstructs keys in shell, and never claims a restore it couldn't do.
+
+Still uncertain? Read the raw script:
+  curl -sSL worthless.sh/uninstall
+Docs: https://docs.wless.io/uninstall
+Issues: https://github.com/shacharm2/worthless/issues

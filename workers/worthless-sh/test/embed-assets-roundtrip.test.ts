@@ -1,11 +1,18 @@
 import { describe, it, expect } from "vitest";
-import { INSTALL_SH_B64, WALKTHROUGH_B64 } from "../src/embedded";
+import {
+  INSTALL_SH_B64,
+  WALKTHROUGH_B64,
+  UNINSTALL_SH_B64,
+  UNINSTALL_WALKTHROUGH_B64,
+} from "../src/embedded";
 // Vite `?raw` reads the on-disk file at bundle time and inlines it as a
 // string constant. Works in the Cloudflare Workers test runtime because
 // the file content is resolved by Vite before the bundle reaches the
 // Workers pool — no `node:fs` at runtime.
 import installShSource from "../../../install.sh?raw";
 import walkthroughSource from "../src/walkthrough.txt?raw";
+import uninstallShSource from "../../../uninstall.sh?raw";
+import uninstallWalkthroughSource from "../src/uninstall-walkthrough.txt?raw";
 import { b64ToBytes } from "./_helpers";
 
 // WOR-404 — embed:assets round-trip pin.
@@ -37,6 +44,18 @@ describe("embed:assets round-trip (WOR-404)", () => {
   it("decoded WALKTHROUGH_B64 byte-equals on-disk walkthrough.txt", () => {
     const decoded = b64ToBytes(WALKTHROUGH_B64);
     const source = new TextEncoder().encode(walkthroughSource);
+    expect(decoded).toEqual(source);
+  });
+
+  it("decoded UNINSTALL_SH_B64 byte-equals on-disk uninstall.sh", () => {
+    const decoded = b64ToBytes(UNINSTALL_SH_B64);
+    const source = new TextEncoder().encode(uninstallShSource);
+    expect(decoded).toEqual(source);
+  });
+
+  it("decoded UNINSTALL_WALKTHROUGH_B64 byte-equals on-disk uninstall-walkthrough.txt", () => {
+    const decoded = b64ToBytes(UNINSTALL_WALKTHROUGH_B64);
+    const source = new TextEncoder().encode(uninstallWalkthroughSource);
     expect(decoded).toEqual(source);
   });
 });

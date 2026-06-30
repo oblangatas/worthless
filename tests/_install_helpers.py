@@ -9,6 +9,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 INSTALL_SH = REPO_ROOT / "install.sh"
+UNINSTALL_SH = REPO_ROOT / "uninstall.sh"
 INSTALL_FIXTURES = REPO_ROOT / "tests" / "install_fixtures"
 
 EXIT_NETWORK = 10
@@ -137,6 +138,46 @@ def run_install(
     )
 
 
+def run_uninstall(
+    bin_dir: Path,
+    *,
+    worthless_home: Path,
+    args: tuple[str, ...] = ("--yes",),
+    env_extra: dict[str, str] | None = None,
+    timeout: int = 15,
+) -> subprocess.CompletedProcess[str]:
+    """Run uninstall.sh with ``bin_dir`` first on PATH; return CompletedProcess.
+
+    ``worthless_home`` points the script at a sandbox home (never the real
+    ``~/.worthless``). ``WORTHLESS_TRUST_PATH=1`` keeps our stub ``bin_dir`` from
+    being shadowed by the script's own system-dir PATH lockdown, exactly like
+    ``run_install``.
+    """
+    base_path = "/usr/bin:/bin:/usr/sbin:/sbin"
+    env = {
+        "PATH": f"{bin_dir}:{base_path}",
+        "HOME": str(bin_dir.parent),
+        "SHELL": "/bin/zsh",
+        "WORTHLESS_KEYRING_BACKEND": "null",
+        "WORTHLESS_TRUST_PATH": "1",
+        "WORTHLESS_HOME": str(worthless_home),
+    }
+    if env_extra:
+        env.update(env_extra)
+    return subprocess.run(  # noqa: S603
+        ["sh", str(UNINSTALL_SH), *args],  # noqa: S607
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+        # New session => no controlling terminal => the confirm()'s /dev/tty read
+        # can't block. The no---yes path then refuses deterministically instead
+        # of hanging a CI run waiting on a prompt.
+        start_new_session=True,
+    )
+
+
 __all__ = [
     "EXIT_INTEGRITY",
     "EXIT_INTERNAL",
@@ -146,9 +187,11 @@ __all__ = [
     "INSTALL_FIXTURES",
     "INSTALL_SH",
     "REPO_ROOT",
+    "UNINSTALL_SH",
     "install_sh_with_pin",
     "read_install_pin",
     "run_install",
+    "run_uninstall",
     "write_happy_path_stubs",
     "write_stub",
 ]
