@@ -311,7 +311,7 @@ def test_live_declined_adoption_warns_and_leaves_openclaw_valid_config(tmp_path,
     )
     # 3. The foreign entry is LEFT IN PLACE (the bypass the WARN warns about).
     entry = json.loads(cfg.read_text(encoding="utf-8"))["models"]["providers"][provider]
-    assert "foreign" in entry["baseUrl"], (
+    assert entry["baseUrl"] == foreign_url, (
         f"a declined entry must survive verbatim; got {entry['baseUrl']}"
     )
     # 4. Sentinel is DEGRADED so `worthless status` reports it across sessions.

@@ -867,6 +867,19 @@ def _classify_bind_per_alias(
     identically; the only new verdict is a ``fail`` that names the aliases
     whose probe did NOT register.
     """
+    if delta < 0:
+        # Proxy bounced between the before/after reads (its in-memory counters
+        # reset to 0). That's inconclusive REGARDLESS of per-alias staleness —
+        # the restart signal wins, so we never manufacture a 'fail' against a
+        # moving target. Without this, an alias mix of previously-counted +
+        # fresh entries would fall through to 'fail' on a bounced proxy.
+        return {
+            "status": "skipped",
+            "reason": "proxy_restarted",
+            "delta": delta,
+            "aliases": aliases,
+            "reached": reached,
+        }
     not_routing = [
         a
         for a in aliases
@@ -875,16 +888,9 @@ def _classify_bind_per_alias(
     if not not_routing:
         return {"status": "pass", "delta": delta, "aliases": aliases, "reached": reached}
     if len(not_routing) == len(aliases):
-        # Nothing ticked — same inconclusive shapes _confirm_bind uses for the
-        # global counter so callers/sentinel readers see consistent reasons.
-        if delta < 0:
-            return {
-                "status": "skipped",
-                "reason": "proxy_restarted",
-                "delta": delta,
-                "aliases": aliases,
-                "reached": reached,
-            }
+        # Nothing ticked and the proxy didn't restart — if nothing even reached
+        # it, that's inconclusive (same shape _confirm_bind uses for the global
+        # counter so callers/sentinel readers see consistent reasons).
         if reached == 0:
             return {
                 "status": "skipped",

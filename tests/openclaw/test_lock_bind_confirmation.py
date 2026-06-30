@@ -588,6 +588,42 @@ def test_confirm_bind_per_alias_unreachable_is_skipped(
     assert result.get("reason") == "synthetic_unreachable", result
 
 
+def test_confirm_bind_per_alias_restart_wins_over_partial_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CodeRabbit (Major): a proxy restart is inconclusive even when only SOME
+    aliases look stale. ``before`` has a previously-counted alias (o-1=100) while
+    we confirm [o-1, a-1]; the proxy bounces (delta<0) and re-probes both to ~1,
+    so a-1 looks 'routed' (1 > 0) but o-1 looks stale (1 <= 100). The restart
+    signal must WIN → skipped/proxy_restarted, never a 'fail' against a bounced
+    proxy."""
+    planned = [
+        SimpleNamespace(provider="openai", alias="o-1"),
+        SimpleNamespace(provider="anthropic", alias="a-1"),
+    ]
+    _seq_health(
+        monkeypatch,
+        {
+            "healthy": True,
+            "mode": "ok",
+            "requests_proxied": 0,
+            "bind_probe_count": 100,
+            "bind_probe_aliases": {"o-1": 100},
+        },
+        # Bounced: counter + per-alias map reset, then the fires re-probe both to ~1.
+        {
+            "healthy": True,
+            "mode": "ok",
+            "requests_proxied": 0,
+            "bind_probe_count": 2,
+            "bind_probe_aliases": {"o-1": 1, "a-1": 1},
+        },
+    )
+    result = lock_mod._confirm_bind(planned, host="127.0.0.1", port=1)
+    assert result["status"] == "skipped", result
+    assert result.get("reason") == "proxy_restarted", result
+
+
 # ---------------------------------------------------------------------------
 # WOR-650 follow-up — a declined adoption (entry left in place) must NOT read
 # as a clean [OK]/pass: header is [WARN], sentinel is DEGRADED, and the
