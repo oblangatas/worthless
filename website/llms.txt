@@ -53,7 +53,7 @@ AI agents, build logs, generated code, and repos can copy secrets out of a local
 - [Install guide](https://docs.wless.io/install/)
 - [Security model](https://docs.wless.io/security/)
 - [Protocol](https://docs.wless.io/protocol/)
-- [GitHub](https://github.com/shacharm2/worthless)
+- [GitHub](https://github.com/oblangatas/worthless)
 - [PyPI](https://pypi.org/project/worthless/)
 
 ## Legal
