@@ -25,6 +25,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from hypothesis import given, strategies as st
 from typer.testing import CliRunner
 
 from worthless.cli.app import app
@@ -622,6 +623,96 @@ def test_confirm_bind_per_alias_restart_wins_over_partial_stale(
     result = lock_mod._confirm_bind(planned, host="127.0.0.1", port=1)
     assert result["status"] == "skipped", result
     assert result.get("reason") == "proxy_restarted", result
+
+
+# ---------------------------------------------------------------------------
+# WOR-650 follow-up — adversarial / property coverage of the per-alias verdict.
+# The cases above are hand-picked; these hammer the invariants with hypothesis
+# and pin garbage-input safety, so a future refactor can't quietly let a
+# negative delta 'fail', a non-rising alias 'pass', or garbage counters slip a
+# false pass.
+# ---------------------------------------------------------------------------
+
+
+@st.composite
+def _alias_readings(draw: st.DrawFn) -> tuple[list[str], dict[str, int], dict[str, int]]:
+    """Random aliases, each with a before/after counter (>=0, as a real proxy
+    surfaces them)."""
+    aliases = draw(
+        st.lists(
+            st.text(alphabet="abcdefghijklmnop-", min_size=1, max_size=6),
+            min_size=1,
+            max_size=6,
+            unique=True,
+        )
+    )
+    before = {a: draw(st.integers(min_value=0, max_value=500)) for a in aliases}
+    after = {a: draw(st.integers(min_value=0, max_value=500)) for a in aliases}
+    return aliases, before, after
+
+
+@given(
+    readings=_alias_readings(),
+    delta=st.integers(min_value=-1000, max_value=1000),
+    reached=st.integers(min_value=0, max_value=10),
+)
+def test_property_negative_delta_is_never_a_fail(
+    readings: tuple[list[str], dict[str, int], dict[str, int]],
+    delta: int,
+    reached: int,
+) -> None:
+    """Invariant: a bounced proxy (delta<0) is NEVER classified 'fail', whatever
+    the per-alias staleness. The restart signal always wins."""
+    aliases, before, after = readings
+    result = lock_mod._classify_bind_per_alias(aliases, before, after, delta=delta, reached=reached)
+    if delta < 0:
+        assert result["status"] != "fail", (delta, result)
+
+
+@given(
+    readings=_alias_readings(),
+    delta=st.integers(min_value=-1000, max_value=1000),
+    reached=st.integers(min_value=0, max_value=10),
+)
+def test_property_pass_implies_every_alias_strictly_rose(
+    readings: tuple[list[str], dict[str, int], dict[str, int]],
+    delta: int,
+    reached: int,
+) -> None:
+    """Invariant: 'pass' is returned ONLY when every confirmed alias's own
+    counter strictly increased, and only on a non-negative delta. This is what
+    stops one alias's tick from covering for another's."""
+    aliases, before, after = readings
+    result = lock_mod._classify_bind_per_alias(aliases, before, after, delta=delta, reached=reached)
+    if result["status"] == "pass":
+        assert delta >= 0, (delta, result)
+        for a in aliases:
+            assert lock_mod._coerce_counter(after.get(a)) > lock_mod._coerce_counter(
+                before.get(a)
+            ), (a, before, after)
+
+
+def test_classify_garbage_counters_never_false_pass() -> None:
+    """A buggy or hostile healthz returning non-int / negative per-alias counts
+    must never manufacture a 'pass'. _coerce_counter neutralises each to 0, so
+    the alias reads as not-routing."""
+    for after_val in (None, "garbage", True, -5, "-9", [], {}):
+        result = lock_mod._classify_bind_per_alias(
+            ["o-1"], {"o-1": 0}, {"o-1": after_val}, delta=1, reached=1
+        )
+        assert result["status"] != "pass", (after_val, result)
+
+
+def test_coerce_counter_clamps_negatives_and_garbage() -> None:
+    """Counters are monotonic from 0; negatives and non-numerics widen to 0 so
+    they can't read as a routing increase."""
+    assert lock_mod._coerce_counter(7) == 7
+    assert lock_mod._coerce_counter("7") == 7
+    assert lock_mod._coerce_counter(-1) == 0
+    assert lock_mod._coerce_counter("-1") == 0
+    assert lock_mod._coerce_counter(True) == 0
+    assert lock_mod._coerce_counter(None) == 0
+    assert lock_mod._coerce_counter("nan") == 0
 
 
 # ---------------------------------------------------------------------------

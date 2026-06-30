@@ -837,12 +837,16 @@ def _coerce_counter(value: object) -> int:
     if isinstance(value, bool):  # bool is an int subclass; reject by intent
         return 0
     if isinstance(value, int):
-        return value
+        # Probe counters are monotonic from 0; a negative is garbage (or a
+        # hostile healthz trying to manufacture an apparent "rise" off a
+        # negative base). Clamp so it can never read as routing.
+        return value if value >= 0 else 0
     if isinstance(value, str):
         try:
-            return int(value)
+            parsed = int(value)
         except ValueError:
             return 0
+        return parsed if parsed >= 0 else 0
     return 0
 
 
