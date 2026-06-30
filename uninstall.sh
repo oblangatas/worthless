@@ -24,7 +24,6 @@ EXIT_REFUSED=1
 EXIT_PLATFORM=20
 EXIT_INTERNAL=40
 
-DOCS_URL="https://docs.wless.io"
 UNINSTALL_DOCS_URL="https://docs.wless.io/uninstall"
 
 # Where Worthless keeps its state. Honored so two installs (staging/prod) or a
@@ -120,13 +119,14 @@ detect_os() {
 # No tty available (CI/automation) and no --yes => refuse rather than guess.
 confirm() {
     [ "$ASSUME_YES" = "1" ] && return 0
-    if [ -e /dev/tty ] && [ -r /dev/tty ]; then
-        printf "This removes Worthless from this machine. Continue? [y/N] " > /dev/tty
-        read reply < /dev/tty || reply=""
-        case "$reply" in
-            y|Y|yes|YES|Yes) return 0 ;;
-            *) die "$EXIT_REFUSED" "Aborted — nothing was removed." ;;
-        esac
+    if [ -e /dev/tty ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
+        if printf "This removes Worthless from this machine. Continue? [y/N] " > /dev/tty 2>/dev/null \
+            && read reply < /dev/tty 2>/dev/null; then
+            case "$reply" in
+                y|Y|yes|YES|Yes) return 0 ;;
+                *) die "$EXIT_REFUSED" "Aborted — nothing was removed." ;;
+            esac
+        fi
     fi
     die "$EXIT_REFUSED" "Refusing to uninstall unattended without confirmation." \
         "Re-run with --yes:" \
