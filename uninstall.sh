@@ -119,14 +119,19 @@ detect_os() {
 # No tty available (CI/automation) and no --yes => refuse rather than guess.
 confirm() {
     [ "$ASSUME_YES" = "1" ] && return 0
-    if [ -e /dev/tty ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
-        if printf "This removes Worthless from this machine. Continue? [y/N] " > /dev/tty 2>/dev/null \
-            && read reply < /dev/tty 2>/dev/null; then
-            case "$reply" in
-                y|Y|yes|YES|Yes) return 0 ;;
-                *) die "$EXIT_REFUSED" "Aborted — nothing was removed." ;;
-            esac
-        fi
+    # Probe for a usable controlling terminal in a SUBSHELL. With no controlling
+    # tty (curl|sh under CI/automation), opening /dev/tty fails with ENXIO; a
+    # bare `>/dev/tty` redirect would be a FATAL error under `set -e` (exit 2) —
+    # and `[ -w /dev/tty ]` lies (the node is mode-writable even when unopenable).
+    # Isolating the open in `( ... )` keeps that failure from killing the script:
+    # the subshell dies, the `if` sees non-zero, and we refuse cleanly (exit 1).
+    if ( exec 3<>/dev/tty ) 2>/dev/null; then
+        printf "This removes Worthless from this machine. Continue? [y/N] " > /dev/tty
+        read reply < /dev/tty 2>/dev/null || reply=""
+        case "$reply" in
+            y|Y|yes|YES|Yes) return 0 ;;
+            *) die "$EXIT_REFUSED" "Aborted — nothing was removed." ;;
+        esac
     fi
     die "$EXIT_REFUSED" "Refusing to uninstall unattended without confirmation." \
         "Re-run with --yes:" \
