@@ -86,7 +86,6 @@ lp_port_foreign_listeners_block() {
   pids="$(lsof -ti "tcp:${port}" -sTCP:LISTEN 2>/dev/null || true)"
   [[ -n "$pids" ]] || return 0
   for pid in $pids; do
-    kill -0 "$pid" 2>/dev/null || continue
     args="$(ps -p "$pid" -o args= 2>/dev/null || true)"
     [[ -n "$args" ]] || continue
     if [[ "$args" != *worthless* ]]; then
@@ -106,7 +105,6 @@ lp_kill_worthless_port_listeners() {
   [[ -n "$pids" ]] || return 0
   local pid args
   for pid in $pids; do
-    kill -0 "$pid" 2>/dev/null || continue
     args="$(ps -p "$pid" -o args= 2>/dev/null || true)"
     [[ -n "$args" ]] || continue
     if [[ "$args" != *worthless* ]]; then
@@ -121,7 +119,6 @@ lp_kill_worthless_port_listeners() {
   pids="$(lsof -ti "tcp:${port}" -sTCP:LISTEN 2>/dev/null || true)"
   if [[ -n "$pids" ]]; then
     for pid in $pids; do
-      kill -0 "$pid" 2>/dev/null || continue
       args="$(ps -p "$pid" -o args= 2>/dev/null || true)"
       [[ -n "$args" ]] || continue
       if [[ "$args" != *worthless* ]]; then
