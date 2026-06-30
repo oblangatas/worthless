@@ -150,6 +150,51 @@ def _discover_proxy_port(home: WorthlessHome) -> int | None:
     return None
 
 
+def _status_verdict(
+    keys: list[dict[str, str]], proxy_healthy: bool, degraded: bool
+) -> tuple[str, str | None]:
+    """WOR-779: derive the worst-component verdict. Returns ``(enum, header)``.
+
+    Honest tiering — status is cwd-independent: it sees enrolled keys + the
+    proxy, NEVER this folder's ``.env``. So it must not claim about plaintext
+    (``scan`` owns that). The two axes are kept separate:
+
+      * confidentiality  — is a stolen ``.env`` worthless? (locked / BROKEN)
+      * availability      — can apps reach the keys right now? (proxy up/down)
+
+    🔴 ``at_risk`` is reserved for a real failure (degraded routing). A locked
+    key with the proxy down is SAFE AT REST — that's 🟡 ``protected_at_rest``,
+    never 🔴: calling an availability outage a security risk trains the user
+    to ignore red. A BROKEN enrollment is data-loss (🟡 ``attention``), not a
+    leak. The verdict is derived, so a green banner is unreachable when any
+    component is bad.
+    """
+    if not keys:
+        return "empty", None
+
+    n = len(keys)
+    noun = "key" if n == 1 else "keys"
+
+    if degraded:
+        return "at_risk", "🔴 At risk — OpenClaw routing is broken (details below)."
+
+    broken = sum(1 for k in keys if k["status"] == "BROKEN")
+    if broken:
+        b_noun = "key" if broken == 1 else "keys"
+        return "attention", (
+            f"🟡 Attention — {broken} {b_noun} can't be restored "
+            f"(the .env line is gone) — see below."
+        )
+
+    if proxy_healthy:
+        return "protected", f"🟢 You're protected — {n} {noun} locked, proxy up."
+
+    return "protected_at_rest", (
+        f"🟡 Protected at rest — {n} {noun} locked (a stolen .env is worthless), "
+        f"but the proxy is down so your apps can't reach them. Run `worthless up`."
+    )
+
+
 def register_status_commands(app: typer.Typer) -> None:
     """Register the status command on the Typer app."""
 
@@ -161,9 +206,15 @@ def register_status_commands(app: typer.Typer) -> None:
             "--json",
             help="Emit machine-readable JSON (alias for the top-level --json).",
         ),
+        quiet_flag: bool = typer.Option(
+            False,
+            "--quiet",
+            help="Suppress the reassurance prose; keep the exit code.",
+        ),
     ) -> None:
         """Show enrolled keys and proxy health."""
         console = get_console()
+        quiet = console.quiet or quiet_flag
 
         home = _resolve_home_for_status()
 
@@ -189,9 +240,16 @@ def register_status_commands(app: typer.Typer) -> None:
             sentinel = read_sentinel(home.base_dir)
         degraded = is_partial(sentinel)
 
+        # WOR-779: derive the worst-component verdict from what status can
+        # honestly see (enrolled keys + proxy + sentinel). The exit code below
+        # stays 0/73 — the verdict header carries the 🟢/🟡 nuance a binary
+        # exit can't, while machines read the `verdict` enum from --json.
+        verdict, header = _status_verdict(keys, bool(proxy_info["healthy"]), degraded)
+
         # Output. Sub-command --json mirrors scan/wrap; honors top-level --json too.
         if console.json_mode or json_output:
             result = {
+                "verdict": verdict,
                 "keys": keys,
                 "proxy": proxy_info,
                 "sentinel": sentinel,
@@ -199,9 +257,18 @@ def register_status_commands(app: typer.Typer) -> None:
             }
             sys.stdout.write(json.dumps(result, default=str) + "\n")
             sys.stdout.flush()
-        else:
+        elif not quiet:
+            # WOR-779: lead with the glanceable verdict, then the detail.
+            if header:
+                sys.stderr.write(header + "\n\n")
+
             if not keys:
-                console.print_warning("No keys enrolled.")
+                # Keep the "No keys enrolled" signal AND nudge to lock
+                # (the post-install / fresh-install confidence gap).
+                console.print_warning(
+                    "No keys enrolled — nothing protected yet. "
+                    "Run `worthless lock` to protect your API keys."
+                )
             else:
                 lines = ["Enrolled keys:"]
                 for k in keys:
@@ -245,6 +312,15 @@ def register_status_commands(app: typer.Typer) -> None:
                 # (e.g. proxy_unrecognised — a squatter on the port). Surface
                 # it so the user knows routing wasn't proven.
                 sys.stderr.write(f"\n[WARN] {bind_reason}\n")
+
+            # WOR-779: honesty disclaimer. status is cwd-independent — it never
+            # read this folder's .env, so a green verdict must NOT imply it did.
+            # Point the user at the surface that actually checks for plaintext.
+            if keys:
+                sys.stderr.write(
+                    "\nChecks enrolled keys + proxy. To scan this folder's .env "
+                    "for stray plaintext: `worthless scan`.\n"
+                )
             sys.stderr.flush()
 
         # Trust-fix exit: degraded sentinel = non-zero exit so callers

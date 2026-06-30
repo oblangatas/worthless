@@ -34,7 +34,7 @@ Then `cd` into your project and run `worthless`. It detects keys in your `.env`,
 
 The Worker emits an `X-Worthless-Script-Sha256` header so you can [verify the bytes you ran match the bytes the Worker advertised](https://docs.wless.io/install-security/) before piping into `sh`. The check catches transit/cache tampering, not origin compromise, cosign-signed release manifests for that are tracked in [WOR-303](https://linear.app/plumbusai/issue/WOR-303).
 
-Full install options (Docker, MCP for Claude Code / Cursor / Windsurf, GitHub Actions, the verified-install flow, kill-switch runbook): **[docs.wless.io](https://docs.wless.io)**
+Full install options (Docker, MCP for AI editors — Claude Code & Cursor verified, Windsurf unverified, GitHub Actions, the verified-install flow, kill-switch runbook): **[docs.wless.io](https://docs.wless.io)**
 
 ## Scope
 
@@ -73,7 +73,7 @@ PyPI version, signed git tag (`vX.Y.Z`), and the `X-Worthless-Script-Tag` header
 
 ## Documentation
 
-Everything lives at **[docs.wless.io](https://docs.wless.io)**, install guides, the security model, wire protocol, recovery runbook, the verified-install flow, and the agent skill file (Claude Code / Cursor / Windsurf).
+Everything lives at **[docs.wless.io](https://docs.wless.io)**, install guides, the security model, wire protocol, recovery runbook, the verified-install flow, and the agent skill file (Claude Code & Cursor verified; Windsurf unverified).
 
 ## For AI coding agents
 
@@ -90,7 +90,7 @@ Add to your project's `.mcp.json` (Node ≥ 18, no Python needed upfront):
 }
 ```
 
-Restart Claude Code / Cursor / Windsurf — MCP tools appear immediately. On first run, `worthless-mcp` bootstraps `uv` and installs the Python package automatically. Install time < 30 s.
+Restart Claude Code or Cursor and the MCP tools appear immediately — verified on both; Windsurf reads MCP config from its own path and is unverified. On first run, `worthless-mcp` bootstraps `uv` and installs the Python package automatically. Install time < 30 s.
 
 Available tools: `worthless_status`, `worthless_lock`, `worthless_scan`, `worthless_spend`.
 

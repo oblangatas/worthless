@@ -19,6 +19,7 @@ from hypothesis import HealthCheck, settings
 
 
 from worthless.cli import default_command  # used by _isolate_default_command_proxy autouse fixture
+from worthless.cli.commands.service.proxy_state import ProxyRuntimeState
 from worthless.cli.bootstrap import WorthlessHome, ensure_home
 from worthless.crypto import SplitResult
 from worthless.crypto.splitter import split_key
@@ -85,6 +86,19 @@ settings.register_profile(
 _profile = os.environ.get("HYPOTHESIS_PROFILE")
 if _profile in ("ci", "extended"):
     settings.load_profile(_profile)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_fernet_storage_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drop developer-shell exports that redirect keystore paths away from tmp_path.
+
+    Common on dogfood machines: ``WORTHLESS_FERNET_KEY_PATH``,
+    ``WORTHLESS_SERVICE_MANAGED=1``, or a leftover ``WORTHLESS_FERNET_KEY``.
+    Individual tests opt back in via ``monkeypatch.setenv``.
+    """
+    monkeypatch.delenv("WORTHLESS_FERNET_KEY_PATH", raising=False)
+    monkeypatch.delenv("WORTHLESS_FERNET_KEY", raising=False)
+    monkeypatch.delenv("WORTHLESS_SERVICE_MANAGED", raising=False)
 
 
 def make_repo(home: WorthlessHome) -> ShardRepository:
@@ -385,9 +399,11 @@ def _isolate_default_command_proxy(request, monkeypatch):
     """Stop ``run_default()`` from spawning a real proxy daemon mid-test.
 
     Tests that hit the bare ``worthless`` no-args entry point flow through
-    ``default_command.run_default()`` → ``_proxy_is_running`` → ``poll_health(8787)``
-    → ``start_supervised_proxy(..., port=8787, ...)``. Under pytest-xdist, four workers
-    racing for the same port produces non-deterministic state: one wins the
+    ``default_command.run_default()`` → ``_proxy_is_running`` /
+    ``_service_start_hint`` → ``detect_proxy_runtime`` → ``poll_health(8787)``
+    and platform service queries → ``start_supervised_proxy(...)``. Under
+    pytest-xdist, four workers racing for the same port produces non-deterministic
+    state: one wins the
     bind, the others see a "running" daemon belonging to a different test's
     home, and assertions diverge. The same race also leaves orphan uvicorn
     children if a worker fails between spawn and cleanup.
@@ -418,6 +434,9 @@ def _isolate_default_command_proxy(request, monkeypatch):
       synthetic PID lets such probes fail honestly.
     - ``poll_health`` returns ``True`` so callers that only check
       "responsive?" don't loop.
+    - ``detect_proxy_runtime`` returns a neutral "not running, no service"
+      state so ``_service_start_hint`` never hits live sockets or launchd/systemd
+      (Q5 / WOR-717 review — closes the ~1s ``poll_health`` leak).
 
     Closes worthless-ba1c.
     """
@@ -438,6 +457,17 @@ def _isolate_default_command_proxy(request, monkeypatch):
         default_command,
         "poll_health",
         lambda port, timeout=10.0: True,
+    )
+    monkeypatch.setattr(
+        default_command,
+        "detect_proxy_runtime",
+        lambda home, *, port=None: ProxyRuntimeState(
+            running=False,
+            pid=None,
+            port=0,
+            source="none",
+            service_state=None,
+        ),
     )
 
 

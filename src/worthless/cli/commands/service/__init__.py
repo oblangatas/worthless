@@ -166,7 +166,7 @@ def register_service_commands(app: typer.Typer) -> None:
     def service_stop() -> None:
         """Stop an installed service without removing it."""
         fail_if_windows()
-        _backend().stop()
+        _backend().stop(get_home())
         get_console().print_success("Service stopped.")
 
     @service_group.command("restart")

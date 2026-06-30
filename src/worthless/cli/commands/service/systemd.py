@@ -11,9 +11,11 @@ from worthless.cli.commands.service._common import (
     ServiceState,
     ServiceStatus,
     atomic_write_text,
+    refuse_foreign_unit,
     resolve_worthless_binary,
     run_cmd,
     service_paths,
+    unit_file_matches_home,
     verify_proxy_health,
 )
 from worthless.cli.errors import ErrorCode, WorthlessError
@@ -33,7 +35,10 @@ def _session_user() -> str:
     except OSError:
         import pwd
 
-        return pwd.getpwuid(os.getuid()).pw_name
+        try:
+            return pwd.getpwuid(os.getuid()).pw_name
+        except KeyError:
+            return str(os.getuid())
 
 
 def unit_path() -> Path:
@@ -83,7 +88,7 @@ def _active_state() -> str:
 
 def detect_status(home: WorthlessHome, port: int) -> ServiceStatus:
     path = unit_path()
-    if not path.is_file():
+    if not unit_file_matches_home(path, home):
         return ServiceStatus(
             state=ServiceState.NOT_INSTALLED,
             unit_path=None,
@@ -118,6 +123,8 @@ def detect_status(home: WorthlessHome, port: int) -> ServiceStatus:
 
 
 def install(home: WorthlessHome, *, port: int | None = None) -> None:
+    path = unit_path()
+    refuse_foreign_unit(path, home)
     binary = resolve_worthless_binary()
     _, worthless_home = service_paths(home)
     actual_port = resolve_port(port)
@@ -126,7 +133,6 @@ def install(home: WorthlessHome, *, port: int | None = None) -> None:
         worthless_home=worthless_home,
         port=actual_port if port is not None or os.environ.get("WORTHLESS_PORT") else None,
     )
-    path = unit_path()
     atomic_write_text(path, content, mode=0o600)
     _ensure_linger()
     _systemctl("daemon-reload")
@@ -136,20 +142,25 @@ def install(home: WorthlessHome, *, port: int | None = None) -> None:
 
 def uninstall(home: WorthlessHome) -> None:
     path = unit_path()
+    refuse_foreign_unit(path, home)
     if path.is_file():
         _systemctl("disable", "--now", SYSTEMD_UNIT, check=False)
         path.unlink(missing_ok=True)
         _systemctl("daemon-reload", check=False)
 
 
-def stop() -> None:
-    if not unit_path().is_file():
+def stop(home: WorthlessHome) -> None:
+    path = unit_path()
+    refuse_foreign_unit(path, home)
+    if not path.is_file():
         raise WorthlessError(ErrorCode.PROXY_NOT_RUNNING, "Service is not installed.")
     _systemctl("stop", SYSTEMD_UNIT)
 
 
 def start(home: WorthlessHome) -> None:
-    if not unit_path().is_file():
+    path = unit_path()
+    refuse_foreign_unit(path, home)
+    if not path.is_file():
         raise WorthlessError(
             ErrorCode.PROXY_NOT_RUNNING,
             "Service is not installed. Run `worthless service install` first.",
@@ -159,7 +170,9 @@ def start(home: WorthlessHome) -> None:
 
 
 def restart(home: WorthlessHome) -> None:
-    if not unit_path().is_file():
+    path = unit_path()
+    refuse_foreign_unit(path, home)
+    if not path.is_file():
         raise WorthlessError(
             ErrorCode.PROXY_NOT_RUNNING,
             "Service is not installed. Run `worthless service install` first.",

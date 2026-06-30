@@ -41,7 +41,12 @@ from worthless.cli.errors import (
     sanitize_exception,
 )
 from worthless.cli.key_patterns import CANONICAL_KEY_VAR_RE, detect_prefix
-from worthless.cli.keystore import keyring_available
+from worthless._flags import fernet_ipc_only_enabled
+from worthless.cli.keystore import (
+    _fernet_file_bytes,
+    keyring_available,
+    sync_fernet_for_launchd,
+)
 from worthless.cli.providers import lookup_by_name, lookup_by_url
 from worthless.crypto.reconstruction import (
     _verify_commitment,  # noqa: PLC2701 — intentional internal use for re-lock guard
@@ -336,7 +341,15 @@ async def _delete_superseded_location_enrollments(
     var_name: str,
     env_path: str,
 ) -> None:
-    """Remove stale enrollments for a var/path after a rotated key is locked."""
+    """Remove stale enrollments for a var/path after a rotated key is locked.
+
+    exx5/WOR-646: each stale alias's enrollment + now-unreferenced shard is
+    removed in ONE atomic transaction (``delete_superseded_enrollment_atomic``),
+    so a SIGINT mid-cleanup on a rotation re-lock can't strand the old alias's
+    ``shards`` row (enrollment gone, shard not). The stale set is computed
+    first; the "any enrollment left for this alias?" check that gates the shard
+    delete runs inside the transaction, not here.
+    """
     enrollments = await repo.list_enrollments()
     stale_aliases = {
         e.key_alias
@@ -344,9 +357,7 @@ async def _delete_superseded_location_enrollments(
         if e.var_name == var_name and e.env_path == env_path and e.key_alias != alias
     }
     for stale_alias in stale_aliases:
-        await repo.delete_enrollment(stale_alias, env_path)
-        if not await repo.list_enrollments(stale_alias):
-            await repo.delete_enrolled(stale_alias)
+        await repo.delete_superseded_enrollment_atomic(stale_alias, env_path=env_path)
 
 
 def _capture_original_mode(env_str: str) -> int | None:
@@ -1431,9 +1442,27 @@ def _print_lock_result(
     relock_count: int,
     env_path: Path,
     home_base_dir: Path,
+    openclaw_failed: bool = False,
 ) -> None:
-    """Emit the post-lock user-facing summary (called only when quiet=False)."""
+    """Emit the post-lock user-facing summary (called only when quiet=False).
+
+    ``openclaw_failed`` (WOR-779 honesty): on a partial OpenClaw failure the
+    ``.env`` IS split, but agent traffic is NOT gated — so the derived verdict
+    is NOT "you're protected". Suppress the verdict headline + the breezy
+    closure (the caller's ``LOCK FAILED`` block carries the real,
+    worst-component verdict); the factual ``[OK] split`` line still prints.
+    """
     if fresh_count or relock_count:
+        # WOR-779: the seatbelt click — lead with a plain verdict (Verdict →
+        # Proof → Next). The verdict is DERIVED: on a partial OpenClaw failure
+        # we must NOT claim "you're protected" above the LOCK FAILED footer.
+        total = fresh_count + relock_count
+        total_noun = "key" if total == 1 else "keys"
+        if not openclaw_failed:
+            console.print_success(
+                f"🔒 You're protected. {total} {total_noun} locked — a stolen "
+                f"{env_path.name} is now worthless to an attacker."
+            )
         if fresh_count:
             # [OK] text prefix is the accessibility carrier — color/glyph
             # reinforce but are never the sole signal (monochrome, CI logs,
@@ -1452,10 +1481,16 @@ def _print_lock_result(
             typer.echo(
                 f"Warning: using non-default home {home_base_dir} (WORTHLESS_HOME is set)", err=True
             )
-        if fresh_count:
+        # WOR-779 (CR): the daemon-mode "Next:" cue is a success next-step — keep
+        # it off the partial-failure path so nothing above LOCK FAILED reads as OK.
+        if fresh_count and not openclaw_failed:
             console.print_hint(
                 "Next: run `worthless wrap <command>` or `worthless up` for daemon mode"
             )
+        # WOR-779: closure — the "pull anytime" reassurance home. Suppressed on
+        # a partial failure — don't reassure when the lock didn't fully succeed.
+        if not openclaw_failed:
+            console.print_hint("Check anytime with `worthless status`.")
         _maybe_prompt_code_scan(Path.cwd())
     else:
         console.print_warning("No unprotected API keys found.")
@@ -1571,6 +1606,34 @@ def _openclaw_audit_postflight(
             err=True,
         )
         raise typer.Exit(code=87)
+
+
+def _sync_fernet_after_lock(home: WorthlessHome) -> None:
+    """Copy canonical Fernet key to fernet.key after lock (WOR-748).
+
+    Skipped under Docker IPC-only (sidecar owns ``fernet.key``; proxy cannot
+    overwrite) and when on-disk ``fernet.key`` disagrees with the canonical
+    key already loaded for this lock (WOR-464 — never auto-pick a side).
+
+    Uses the ``home.fernet_key`` cache so lock does not fire a second
+    keyring read (HF2 contract).
+    """
+    if sys.platform not in ("darwin", "linux"):
+        return
+    if fernet_ipc_only_enabled():
+        return
+
+    key = home.fernet_key
+    try:
+        on_disk = _fernet_file_bytes(home.fernet_key_path)
+        if on_disk is not None and on_disk != key:
+            logger.debug(
+                "Skipping post-lock fernet sync — file bytes differ from canonical key (WOR-464)"
+            )
+            return
+        sync_fernet_for_launchd(home.base_dir, key=key)
+    finally:
+        zero_buf(key)
 
 
 def _lock_keys(
@@ -1931,7 +1994,14 @@ def _lock_keys(
             env_path.chmod(current & ~(stat.S_IRWXG | stat.S_IRWXO))
 
     if not quiet:
-        _print_lock_result(console, result.fresh_count, relock_count, env_path, home.base_dir)
+        _print_lock_result(
+            console,
+            result.fresh_count,
+            relock_count,
+            env_path,
+            home.base_dir,
+            openclaw_failed=bool(result.openclaw_exit),
+        )
 
     # Trust-fix (2026-05-08 verification gauntlet): when OpenClaw was
     # detected on this host AND the integration stage failed, the user is
@@ -1951,6 +2021,7 @@ def _lock_keys(
         )
         raise typer.Exit(code=result.openclaw_exit)
 
+    _sync_fernet_after_lock(home)
     return result.fresh_count + relock_count
 
 

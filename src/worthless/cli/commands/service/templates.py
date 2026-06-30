@@ -27,6 +27,9 @@ def render_launchd_plist(
         "    <string>1</string>",
         "    <key>WORTHLESS_HOME</key>",
         f"    <string>{worthless_home}</string>",
+        # launchd has no UnsetEnvironment; empty string overrides inherited login env.
+        "    <key>WORTHLESS_FERNET_KEY</key>",
+        "    <string></string>",
     ]
     if port is not None:
         env_entries.extend(

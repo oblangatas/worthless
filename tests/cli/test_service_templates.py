@@ -18,6 +18,10 @@ def test_launchd_plist_contains_managed_env_and_up() -> None:
     assert "WORTHLESS_HOME" in content
     assert "WORTHLESS_PORT" in content
     assert "<true/>" in content  # KeepAlive / RunAtLoad
+    assert "WORTHLESS_FERNET_KEY" in content
+    assert "<key>WORTHLESS_FERNET_KEY</key>" in content
+    assert "<string></string>" in content
+    assert "poison-env-key" not in content
 
 
 def test_systemd_unit_hardening_directives() -> None:

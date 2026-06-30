@@ -531,3 +531,66 @@ class TestObservabilityAndCascadePaths:
         )
         assert home._cached_fernet_key is not None
         assert bytes(home._cached_fernet_key) == env_key.encode()
+
+
+class TestStaleFernetFileCacheSeed:
+    """WOR-748: stale fernet.key must not poison lock while launchd uses synced file."""
+
+    def test_ensure_home_seeds_keyring_when_file_differs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        base = tmp_path / ".worthless"
+        base.mkdir()
+        (base / ".bootstrapped").write_text("")
+
+        canonical = b"canonical-keyring-value-padded-to-44b!!"
+        stale = b"stale-file-key-value-padded-to-44-bytes!!"
+        (base / "fernet.key").write_bytes(stale + b"\n")
+
+        with (
+            patch("worthless.cli.bootstrap.keyring_available", return_value=True),
+            patch("worthless.cli.keystore.keyring_available", return_value=True),
+            patch(
+                "keyring.get_password",
+                return_value=canonical.decode(),
+            ),
+        ):
+            home = ensure_home(base_dir=base)
+            assert bytes(home.fernet_key) == canonical
+
+
+class TestServiceManagedCacheSeed:
+    """WOR-749: service-managed ensure_home seeds cache via read_fernet_key (file-first)."""
+
+    def test_ensure_home_seeds_from_file_under_service_managed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        base = tmp_path / ".worthless"
+        base.mkdir()
+        (base / ".bootstrapped").write_text("")
+        synced = b"synced-launchd-key-value-padded-to-44b!!!"
+        fernet = base / "fernet.key"
+        fernet.write_bytes(synced + b"\n")
+        fernet.chmod(0o600)
+        monkeypatch.setenv("WORTHLESS_SERVICE_MANAGED", "1")
+
+        with patch("worthless.cli.bootstrap.keyring_available", return_value=True):
+            home = ensure_home(base_dir=base)
+
+        assert bytes(home.fernet_key) == synced
+
+    def test_service_managed_seed_deferred_when_read_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        base = tmp_path / ".worthless"
+        base.mkdir()
+        (base / ".bootstrapped").write_text("")
+        monkeypatch.setenv("WORTHLESS_SERVICE_MANAGED", "1")
+
+        with patch(
+            "worthless.cli.bootstrap.read_fernet_key",
+            side_effect=WorthlessError(ErrorCode.KEY_NOT_FOUND, "no key"),
+        ):
+            home = ensure_home(base_dir=base)
+
+        assert home._cached_fernet_key is None

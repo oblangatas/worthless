@@ -11,8 +11,10 @@ import pytest
 from typer.testing import CliRunner
 
 from worthless.cli.app import app
+from worthless.cli.bootstrap import WorthlessHome
 from worthless.cli.commands.service._common import ServiceState, ServiceStatus
 from worthless.cli.errors import ErrorCode, WorthlessError
+from tests.fixtures.dirty_home import write_secure_fernet_key
 
 runner = CliRunner()
 
@@ -21,7 +23,7 @@ runner = CliRunner()
 def home_dir(tmp_path: Path) -> Path:
     base = tmp_path / ".worthless"
     base.mkdir()
-    (base / "fernet.key").write_bytes(b"x" * 32)
+    write_secure_fernet_key(base / "fernet.key", b"x" * 32)
     return base
 
 
@@ -44,7 +46,7 @@ class TestServiceInstall:
             ),
             patch("worthless.cli.commands.service.get_home") as mock_home,
         ):
-            mock_home.return_value.base_dir = home_dir
+            mock_home.return_value = WorthlessHome(base_dir=home_dir)
             result = runner.invoke(
                 app,
                 ["--json", "service", "install", "--yes"],
@@ -139,18 +141,19 @@ class TestServiceInstall:
 
     def test_stop_invokes_backend(self, home_dir: Path) -> None:
         mock_backend = MagicMock()
+        mock_home = MagicMock()
+        mock_home.base_dir = home_dir
         with (
             patch("worthless.cli.commands.service._backend", return_value=mock_backend),
-            patch("worthless.cli.commands.service.get_home") as mock_home,
+            patch("worthless.cli.commands.service.get_home", return_value=mock_home),
         ):
-            mock_home.return_value.base_dir = home_dir
             result = runner.invoke(
                 app,
                 ["service", "stop"],
                 env={"WORTHLESS_HOME": str(home_dir)},
             )
         assert result.exit_code == 0, result.output
-        mock_backend.stop.assert_called_once_with()
+        mock_backend.stop.assert_called_once_with(mock_home)
 
     def test_start_invokes_backend(self, home_dir: Path) -> None:
         mock_backend = MagicMock()

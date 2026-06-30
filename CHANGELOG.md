@@ -31,6 +31,9 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 - Per-alias concurrency is unbounded in this PR. 200 parallel just-under-threshold streams could burn 25.6M tokens before admission denies request #201. Tracked as a follow-up.
 - **`worthless uninstall --force` on a broken install does NOT recover your keys** (WOR-713). When the `fernet.key` or `worthless.db` is gone, the locked secrets can't be reconstructed — `--force` wipes the unrecoverable remains so the machine is left clean, but those API keys are lost. Rotate them at the provider.
 
+### Changed
+- **Bare `worthless` now starts the sidecar-supervised proxy path** (WOR-717). The default command spawns detached `worthless up` instead of the legacy sidecar-less `start_daemon` helper. The latter remains for internal compatibility but is deprecated for v1.2 removal. Service unit detection compares `WORTHLESS_HOME` by realpath so symlinked install paths (e.g. `/tmp` vs `/private/tmp`) match. **Does not yet** include foreign-unit guards on service mutators or default-command exit **2** when a platform service is stopped/failed — both land in wave 3b (#292).
+
 ## [0.3.8] — 2026-06-13
 
 The "agents and exits" release. Two headline additions: a zero-Python npm wrapper lets editors (Claude Code, Cursor, Windsurf) install the MCP server in under 30 seconds, and `worthless uninstall` gives every locked `.env` its original key back before removing itself — no stranded files, clean exit. Alongside that: a proxy kill switch stops OpenClaw agents dead when the proxy goes down, the spend cap is now exact per process, and the install pipeline closes three supply-chain attack surfaces that were confirmed reachable.

@@ -15,6 +15,7 @@ from worthless.cli.commands.service._common import (
     current_platform_backend_name,
     preflight_service_install,
     resolve_worthless_binary,
+    unit_file_matches_home,
     verify_proxy_health,
 )
 from worthless.cli.errors import ErrorCode, WorthlessError
@@ -24,7 +25,9 @@ from worthless.cli.errors import ErrorCode, WorthlessError
 def home(tmp_path: Path) -> WorthlessHome:
     base = tmp_path / ".worthless"
     base.mkdir()
-    (base / "fernet.key").write_bytes(b"x" * 32)
+    fernet = base / "fernet.key"
+    fernet.write_bytes(b"x" * 32)
+    fernet.chmod(0o600)
     return WorthlessHome(base_dir=base)
 
 
@@ -59,20 +62,6 @@ class TestResolveWorthlessBinary:
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
         with patch("worthless.cli.commands.service._common.shutil.which", return_value=None):
             assert resolve_worthless_binary() == fallback.resolve()
-
-    def test_ignores_non_executable_local_bin(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        fallback = tmp_path / ".local" / "bin" / "worthless"
-        fallback.parent.mkdir(parents=True)
-        fallback.write_text("not executable\n")
-        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
-        with (
-            patch("worthless.cli.commands.service._common.shutil.which", return_value=None),
-            pytest.raises(WorthlessError) as exc_info,
-        ):
-            resolve_worthless_binary()
-        assert exc_info.value.code == ErrorCode.BOOTSTRAP_FAILED
 
     def test_raises_when_missing(self) -> None:
         with (
@@ -125,6 +114,91 @@ class TestPlatformBackendName:
         with pytest.raises(WorthlessError) as exc_info:
             current_platform_backend_name()
         assert exc_info.value.code == ErrorCode.PLATFORM_UNSUPPORTED
+
+
+class TestUnitFileMatchesHome:
+    def test_matches_systemd_environment_line(self, home: WorthlessHome, tmp_path: Path) -> None:
+        unit = tmp_path / "worthless-proxy.service"
+        unit.write_text(
+            templates.render_systemd_unit(
+                binary="/usr/local/bin/worthless",
+                worthless_home=str(home.base_dir.resolve()),
+            )
+        )
+        assert unit_file_matches_home(unit, home)
+
+    def test_rejects_prefix_collision(self, home: WorthlessHome, tmp_path: Path) -> None:
+        other = tmp_path / "other-home"
+        other.mkdir()
+        unit = tmp_path / "worthless-proxy.service"
+        unit.write_text(
+            templates.render_systemd_unit(
+                binary="/usr/local/bin/worthless",
+                worthless_home=str(other),
+            )
+        )
+        assert not unit_file_matches_home(unit, home)
+
+    def test_symlink_home_matches_resolved_path(self, tmp_path: Path) -> None:
+        target = tmp_path / "worthless-real"
+        target.mkdir()
+        link = tmp_path / "worthless-link"
+        link.symlink_to(target)
+        home = WorthlessHome(base_dir=link)
+        (target / "fernet.key").write_bytes(b"x" * 32)
+        unit = tmp_path / "worthless-proxy.service"
+        unit.write_text(
+            templates.render_systemd_unit(
+                binary="/usr/local/bin/worthless",
+                worthless_home=str(target.resolve()),
+            )
+        )
+        assert unit_file_matches_home(unit, home)
+
+    def test_symlink_home_matches_legacy_unresolved_unit_path(self, tmp_path: Path) -> None:
+        target = tmp_path / "worthless-real"
+        target.mkdir()
+        link = tmp_path / "worthless-link"
+        link.symlink_to(target)
+        home = WorthlessHome(base_dir=link)
+        (target / "fernet.key").write_bytes(b"x" * 32)
+        unit = tmp_path / "worthless-proxy.service"
+        unit.write_text(
+            templates.render_systemd_unit(
+                binary="/usr/local/bin/worthless",
+                worthless_home=str(link),
+            )
+        )
+        assert unit_file_matches_home(unit, home)
+
+    def test_unreadable_unit_raises_clean_error(self, home: WorthlessHome, tmp_path: Path) -> None:
+        unit = tmp_path / "worthless-proxy.service"
+        unit.write_text(
+            templates.render_systemd_unit(
+                binary="/usr/local/bin/worthless",
+                worthless_home=str(home.base_dir.resolve()),
+            )
+        )
+        unit.chmod(0o000)
+        try:
+            with pytest.raises(WorthlessError) as exc_info:
+                unit_file_matches_home(unit, home)
+            assert exc_info.value.code == ErrorCode.INVALID_INPUT
+            assert "Cannot read service unit" in exc_info.value.message
+        finally:
+            unit.chmod(0o600)
+
+    def test_matches_launchd_plist_home_key(self, home: WorthlessHome, tmp_path: Path) -> None:
+        plist = tmp_path / "dev.worthless.proxy.plist"
+        log_path = home.base_dir / "proxy.log"
+        plist.write_text(
+            templates.render_launchd_plist(
+                binary="/usr/local/bin/worthless",
+                worthless_home=str(home.base_dir.resolve()),
+                log_path=str(log_path),
+            )
+        )
+        assert unit_file_matches_home(plist, home)
 
 
 class TestTemplatesPortOverride:

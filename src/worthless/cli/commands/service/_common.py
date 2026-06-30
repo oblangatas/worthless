@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess  # nosec B404
 import sys
@@ -12,8 +13,10 @@ from pathlib import Path
 
 from worthless.cli.bootstrap import WorthlessHome
 from worthless.cli.errors import ErrorCode, WorthlessError
+from worthless.cli.keystore import PLACEHOLDER_FERNET_KEY, sync_fernet_for_launchd
 from worthless.cli.process import poll_health
 from worthless.crypto.types import zero_buf
+from worthless.storage.repository import ShardRepository
 
 
 class ServiceState(str, Enum):
@@ -84,8 +87,32 @@ def run_cmd(
     )
 
 
+def _fernet_drift_check_result(home: WorthlessHome):
+    from worthless.cli.commands.doctor.checks import fernet_drift
+    from worthless.cli.commands.doctor.registry import CheckContext
+
+    repo = ShardRepository(str(home.db_path), PLACEHOLDER_FERNET_KEY)
+    ctx = CheckContext(home=home, repo=repo, fix=False, dry_run=False)
+    return fernet_drift.run(ctx)
+
+
+def _assert_no_fernet_drift_for_service_install(home: WorthlessHome) -> None:
+    """W3-ADV-17: refuse install when keyring and file disagree (WOR-464)."""
+    result = _fernet_drift_check_result(home)
+    if result.get("status") == "error":
+        raise WorthlessError(
+            ErrorCode.KEY_NOT_FOUND,
+            f"{result.get('summary', 'Fernet key drift detected')} "
+            "Run `worthless doctor --explain fernet_drift` before "
+            "`worthless service install`.",
+        )
+
+
 def preflight_service_install(home: WorthlessHome) -> None:
     """Refuse install when the proxy cannot start (no Fernet key)."""
+    managed = current_platform_backend_name() in ("launchd", "systemd")
+    if managed:
+        _assert_no_fernet_drift_for_service_install(home)
     try:
         key = home.fernet_key
     except WorthlessError as exc:
@@ -96,7 +123,11 @@ def preflight_service_install(home: WorthlessHome) -> None:
             "Run `worthless doctor`. On macOS, ensure Keychain 'Always Allow' "
             "or use file-backed storage (WORTHLESS_FERNET_KEY_PATH).",
         ) from exc
-    zero_buf(key)
+    try:
+        if managed:
+            sync_fernet_for_launchd(home.base_dir, key=key)
+    finally:
+        zero_buf(key)
 
 
 def verify_proxy_health(port: int, *, timeout: float = 15.0) -> None:
@@ -111,6 +142,66 @@ def service_paths(home: WorthlessHome) -> tuple[Path, str]:
     """Return (log_path, worthless_home_str) for unit templates."""
     log_path = home.base_dir / "proxy.log"
     return log_path, str(home.base_dir)
+
+
+_LAUNCHD_HOME_RE = re.compile(
+    r"<key>WORTHLESS_HOME</key>\s*<string>([^<]+)</string>",
+    re.DOTALL,
+)
+_SYSTEMD_HOME_RE = re.compile(r"Environment=WORTHLESS_HOME=([^\s\n]+)")
+
+
+def _worthless_home_paths_in_unit(content: str) -> list[str]:
+    """Extract ``WORTHLESS_HOME`` path(s) embedded in a launchd plist or systemd unit."""
+    paths: list[str] = []
+    launchd_match = _LAUNCHD_HOME_RE.search(content)
+    if launchd_match:
+        paths.append(launchd_match.group(1))
+    systemd_match = _SYSTEMD_HOME_RE.search(content)
+    if systemd_match:
+        paths.append(systemd_match.group(1))
+    return paths
+
+
+def unit_file_matches_home(path: Path, home: WorthlessHome) -> bool:
+    """Return True when *path* is a unit/plist for this ``WORTHLESS_HOME``.
+
+    Install writes ``str(home.base_dir)`` (often unresolved, e.g. ``/tmp/...``).
+    Match by realpath so symlink aliases like ``/tmp`` → ``/private/tmp`` still match.
+    """
+    if not path.is_file():
+        return False
+    try:
+        expected = home.base_dir.resolve()
+    except OSError:
+        return False
+    try:
+        content = path.read_text()
+    except OSError as exc:
+        raise WorthlessError(
+            ErrorCode.INVALID_INPUT,
+            f"Cannot read service unit at {path}. Fix permissions or remove it manually.",
+        ) from exc
+    for raw in _worthless_home_paths_in_unit(content):
+        try:
+            if Path(raw).resolve() == expected:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def refuse_foreign_unit(path: Path, home: WorthlessHome) -> None:
+    """Refuse mutating a unit/plist that belongs to another ``WORTHLESS_HOME``."""
+    if not path.is_file():
+        return
+    if unit_file_matches_home(path, home):
+        return
+    raise WorthlessError(
+        ErrorCode.INVALID_INPUT,
+        "An existing worthless service unit belongs to a different "
+        "WORTHLESS_HOME. Remove or migrate it manually before continuing.",
+    )
 
 
 def current_platform_backend_name() -> str:

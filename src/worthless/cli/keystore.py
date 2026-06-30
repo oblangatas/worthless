@@ -5,12 +5,16 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import stat
 import sys
 from pathlib import Path
 
 import keyring
 
+from worthless._flags import fernet_ipc_only_enabled
 from worthless.cli.errors import ErrorCode, WorthlessError
+from worthless.cli.platform import IS_WINDOWS
+from worthless.crypto.types import zero_buf
 
 # WOR-456: on macOS, route writes through our own ctypes wrapper that
 # explicitly pins ``kSecAttrSynchronizable=kCFBooleanFalse`` so Fernet keys
@@ -204,7 +208,7 @@ def read_fernet_key_from_file(home_dir: Path | None = None) -> bytearray:
     """
     fernet_path = _fernet_file_path(home_dir)
     try:
-        return bytearray(fernet_path.read_bytes().strip())
+        return _read_fernet_file(fernet_path, validate=True)
     except FileNotFoundError as exc:
         # Skip the upfront ``exists()`` stat: ``read_bytes`` already
         # raises on a missing file, and the TOCTOU race is harmless
@@ -225,7 +229,51 @@ def _fernet_file_path(home_dir: Path | None) -> Path:
     return home_dir / "fernet.key"
 
 
-def _write_key_file(key: bytes, home_dir: Path | None) -> None:
+def _validate_fernet_file(path: Path) -> None:
+    """Reject world-readable or foreign-owned fernet.key before read (worthless-l3qj)."""
+    if IS_WINDOWS:
+        # NTFS ACLs — POSIX mode/uid checks are not meaningful on Windows.
+        return
+    try:
+        st = path.lstat()
+    except OSError as exc:
+        raise WorthlessError(
+            ErrorCode.KEY_NOT_FOUND,
+            f"Cannot read Fernet key file at {path}.",
+        ) from exc
+    if not stat.S_ISREG(st.st_mode):
+        raise WorthlessError(
+            ErrorCode.KEY_NOT_FOUND,
+            "fernet.key is not a regular file — refusing to read.",
+        )
+    mode = stat.S_IMODE(st.st_mode)
+    if fernet_ipc_only_enabled():
+        if mode != 0o400:
+            raise WorthlessError(
+                ErrorCode.KEY_NOT_FOUND,
+                f"fernet.key must be mode 0o400 under WORTHLESS_FERNET_IPC_ONLY "
+                f"(found {mode:#o}) — refusing to read.",
+            )
+        return
+    if st.st_uid != os.geteuid():
+        raise WorthlessError(
+            ErrorCode.KEY_NOT_FOUND,
+            "fernet.key is not owned by the current user — refusing to read.",
+        )
+    if mode != 0o600:
+        raise WorthlessError(
+            ErrorCode.KEY_NOT_FOUND,
+            f"fernet.key must be mode 0o600 (found {mode:#o}) — refusing to read.",
+        )
+
+
+def _read_fernet_file(path: Path, *, validate: bool) -> bytearray:
+    if validate:
+        _validate_fernet_file(path)
+    return bytearray(path.read_bytes().strip())
+
+
+def _write_key_file(key: bytes | bytearray, home_dir: Path | None) -> None:
     """Write key to file with 0o600 permissions."""
     fernet_path = _fernet_file_path(home_dir)
     fd = os.open(str(fernet_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -236,10 +284,80 @@ def _write_key_file(key: bytes, home_dir: Path | None) -> None:
     logger.info("Fernet key stored in file")
 
 
+def _fernet_file_bytes(path: Path) -> bytes | None:
+    """Return on-disk Fernet bytes when readable; ``None`` if absent or unreadable."""
+    try:
+        return path.read_bytes().strip()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return None
+
+
+def sync_fernet_for_launchd(
+    home_dir: Path | None = None,
+    *,
+    key: bytes | bytearray | None = None,
+) -> None:
+    """Write the canonical Fernet key to ``fernet.key`` for service-managed startup.
+
+    LaunchAgents and systemd user units read the on-disk file under
+    ``WORTHLESS_SERVICE_MANAGED=1``. Interactive sessions store the canonical
+    key in the OS keyring after enroll/lock; this sync copies keyring → file
+    so headless restarts decrypt with the same bytes (WOR-748).
+
+    When *key* is supplied (e.g. from ``WorthlessHome.fernet_key`` cache after
+    ``lock``), no second keystore read occurs — preserving the HF2 one-read
+    contract.
+
+    Reads via the **interactive** cascade (keyring before file), even when
+    ``WORTHLESS_SERVICE_MANAGED`` is set in the caller's environment, so a
+    stale ``fernet.key`` never wins over the keyring during sync.
+    """
+    owned_buf: bytearray | None = None
+    saved_managed = os.environ.get("WORTHLESS_SERVICE_MANAGED")
+    saved_env_key = os.environ.get("WORTHLESS_FERNET_KEY")
+    try:
+        if key is None:
+            if saved_managed is not None:
+                os.environ.pop("WORTHLESS_SERVICE_MANAGED", None)
+            # Sync must copy keyring → file, not inherit a poison shell env.
+            if saved_env_key is not None:
+                os.environ.pop("WORTHLESS_FERNET_KEY", None)
+            owned_buf = read_fernet_key(home_dir)
+            key_bytes = owned_buf
+        else:
+            key_bytes = key
+
+        fernet_path = _fernet_file_path(home_dir)
+        existing = _fernet_file_bytes(fernet_path)
+        if existing is not None and existing == key_bytes:
+            return
+
+        _write_key_file(key_bytes, home_dir)
+    finally:
+        if owned_buf is not None:
+            zero_buf(owned_buf)
+        if saved_managed is not None:
+            os.environ["WORTHLESS_SERVICE_MANAGED"] = saved_managed
+        if saved_env_key is not None:
+            os.environ["WORTHLESS_FERNET_KEY"] = saved_env_key
+
+
+def _service_managed() -> bool:
+    return os.environ.get("WORTHLESS_SERVICE_MANAGED", "").strip() == "1"
+
+
 def read_fernet_key(home_dir: Path | None = None) -> bytearray:
     """Read Fernet key from storage backends.
 
-    Order: env var -> keyring -> file -> error.
+    Order (interactive): env var -> keyring -> file -> error.
+    Order (``WORTHLESS_SERVICE_MANAGED=1``): env var -> file -> keyring -> error.
+
+    LaunchAgents cannot reliably use Keychain on every restart; the live
+    pack syncs Keychain → ``fernet.key`` before ``service install``. Prefer
+    the file under service-managed so decrypt matches what ``lock`` wrote.
+
     Returns bytearray per SR-01 (mutable, can be zeroed).
 
     Note: pipe fd transport (WORTHLESS_FERNET_FD) is handled by
@@ -250,21 +368,34 @@ def read_fernet_key(home_dir: Path | None = None) -> bytearray:
     if env_val:
         return bytearray(env_val.encode())
 
-    # 2. Keyring (namespaced username only — no legacy fallback)
+    fernet_path = _fernet_file_path(home_dir)
+
+    # 2. File first under launchd/systemd (WOR-748)
+    if _service_managed() and fernet_path.exists():
+        return _read_fernet_file(fernet_path, validate=True)
+
+    # 3. Keyring (namespaced username only — no legacy fallback)
+    keyring_read_failed = False
     if keyring_available():
         try:
             value = keyring.get_password(_SERVICE, _keyring_username(home_dir))
             if value is not None:
                 return bytearray(value.encode())
         except Exception:
-            logger.debug("Keyring read failed, falling back to file")
+            keyring_read_failed = True
+            logger.debug("Keyring read failed", exc_info=True)
 
-    # 3. File
-    fernet_path = _fernet_file_path(home_dir)
+    # 4. File (interactive fallback, or service-managed when sync not run yet)
     if fernet_path.exists():
-        return bytearray(fernet_path.read_bytes().strip())
-
-    # 4. Error
+        if keyring_read_failed and not _service_managed():
+            raise WorthlessError(
+                ErrorCode.KEY_NOT_FOUND,
+                "Keyring read failed and a fernet.key file also exists — refusing "
+                "silent file fallback in an interactive session (stale file causes "
+                "401 under launchd). Run `worthless doctor` and resolve fernet_drift, "
+                "or sync Keychain to fernet.key before `worthless service install`.",
+            )
+        return _read_fernet_file(fernet_path, validate=True)
     raise WorthlessError(
         ErrorCode.KEY_NOT_FOUND,
         "No Fernet key found. Run 'worthless enroll' or set WORTHLESS_FERNET_KEY.",

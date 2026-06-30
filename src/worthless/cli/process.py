@@ -91,32 +91,19 @@ def check_proxy_health(port: int) -> dict[str, object]:
     consumers.
 
     Returns: ``{"healthy": bool, "port": int, "mode": str | None,
-    "requests_proxied": int}`` plus, when the responder is a worthless
-    proxy, ``"bind_probe_count": int`` (WOR-658). The bind_probe_count
-    key is INTENTIONALLY ABSENT when the healthz body doesn't include
-    it — that's the squatter-resistance signal lock-side uses to
-    distinguish a worthless proxy from a random HTTP server on the same
-    port. ``healthy=False`` covers connection refused, timeout, non-200,
-    and non-JSON responses.
+    "requests_proxied": int}``. ``healthy=False`` covers connection
+    refused, timeout, non-200, and non-JSON responses.
     """
     try:
         resp = httpx.get(f"http://127.0.0.1:{port}/healthz", timeout=2.0)
         if resp.status_code == 200:
             data = resp.json()
-            result: dict[str, object] = {
+            return {
                 "healthy": True,
                 "port": port,
                 "mode": data.get("mode", "up"),
                 "requests_proxied": data.get("requests_proxied", 0),
             }
-            # WOR-658: only surface bind_probe_count when the responder
-            # actually included it. Missing field on a healthy responder
-            # = "this isn't a worthless proxy" → lock-side classifies
-            # the verdict as skipped (reason=proxy_unrecognised) instead
-            # of fail.
-            if "bind_probe_count" in data:
-                result["bind_probe_count"] = data["bind_probe_count"]
-            return result
     except Exception:  # noqa: S110 — proxy may not be running; absence is the expected default state  # nosec B110
         pass
 
@@ -419,10 +406,10 @@ def poll_health(port: int, timeout: float = 10.0) -> bool:
 def poll_health_pid(port: int, timeout: float = 10.0) -> int | None:
     """Poll ``GET /healthz`` and return the proxy's self-reported PID.
 
-    The listening process exposes ``os.getpid()`` in the healthz payload so
-    the CLI can record an authoritative PID — the one actually bound to the
-    port — rather than whatever ``subprocess.Popen(...).pid`` returns on
-    this platform.
+    The listening process exposes ``os.getpid()`` in the healthz payload. This
+    is **not** an OS-level port→PID attribution (no ``lsof``/``ss``); callers
+    must assume the payload is honest. That matches worthless's loopback
+    same-UID threat model (worthless-wfz7).
 
     Returns the PID on success, ``None`` on timeout, non-200 response,
     malformed JSON, a payload missing the ``pid`` field, or a ``pid`` out

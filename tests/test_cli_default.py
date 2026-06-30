@@ -13,13 +13,13 @@ Pipeline phases:
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
 from worthless.cli.bootstrap import WorthlessHome
+from worthless.cli.commands.service.proxy_state import ProxyRuntimeState
 from worthless.cli.errors import ErrorCode, WorthlessError
 
 from tests.helpers import fake_anthropic_key, fake_openai_key
@@ -199,21 +199,30 @@ class TestHappyPaths:
         """Already enrolled + proxy running: one-line status, no prompts."""
         monkeypatch.chdir(tmp_path)
 
-        # Plant a PID file with our PID to simulate running proxy
-        pid_file = home_with_key.base_dir / "proxy.pid"
-        pid_file.write_text(f"{os.getpid()}\n8787\n")
+        supervised_called = False
+
+        def mock_supervised(*args, **kwargs):
+            nonlocal supervised_called
+            supervised_called = True
+            return 54321
 
         monkeypatch.setattr(
-            "worthless.cli.commands.service.proxy_state.check_pid",
-            lambda pid: True,
+            "worthless.cli.default_command.start_supervised_proxy",
+            mock_supervised,
+        )
+        monkeypatch.setattr(
+            "worthless.cli.default_command.detect_proxy_runtime",
+            lambda home, port=None: ProxyRuntimeState(
+                running=True, pid=12345, port=8787, source="health"
+            ),
         )
 
         result = _invoke_default(
             {"WORTHLESS_HOME": str(home_with_key.base_dir)},
         )
         assert result.exit_code == 0, result.output + result.stderr
+        assert not supervised_called
         combined = result.stdout + result.stderr
-        # Should not prompt for anything
         assert "[y/N]" not in combined
 
     def test_fresh_install_env_local_detected(
@@ -591,8 +600,10 @@ class TestSidecarSupervisedProxyStart:
             mock_supervised,
         )
         monkeypatch.setattr(
-            "worthless.cli.default_command._proxy_is_running",
-            lambda home: (True, 12345, 8787),
+            "worthless.cli.default_command.detect_proxy_runtime",
+            lambda home, port=None: ProxyRuntimeState(
+                running=True, pid=12345, port=8787, source="health"
+            ),
         )
 
         result = _invoke_default({"WORTHLESS_HOME": str(home_with_key.base_dir)})

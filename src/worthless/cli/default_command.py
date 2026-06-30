@@ -28,7 +28,7 @@ from worthless.cli.console import get_console
 from worthless.cli.dotenv_rewriter import build_enrolled_locations, scan_env_keys
 from worthless.cli.errors import ErrorCode, WorthlessError
 from worthless.cli.commands.service._common import ServiceState
-from worthless.cli.commands.service.proxy_state import detect_proxy_runtime
+from worthless.cli.commands.service.proxy_state import ProxyRuntimeState, detect_proxy_runtime
 
 logger = logging.getLogger(__name__)
 
@@ -71,21 +71,19 @@ def _proxy_is_running(home: WorthlessHome) -> tuple[bool, int | None, int]:
     return False, None, 0
 
 
-def _service_start_hint(home: WorthlessHome, console) -> bool:
-    """If a platform service is installed but down, tell the user and stop."""
-    runtime = detect_proxy_runtime(home)
+def _raise_if_service_requires_start(runtime: ProxyRuntimeState, console) -> None:
+    """Stop default command when a platform service is installed but not running."""
     if runtime.service_state == ServiceState.STOPPED:
         console.print_hint(
             "  Proxy not running. Service is installed but stopped — run `worthless service start`."
         )
-        return True
+        raise typer.Exit(code=2)
     if runtime.service_state == ServiceState.FAILED:
         console.print_hint(
             "  Proxy not running. Service failed — "
             "run `worthless service status` or `worthless service restart`."
         )
-        return True
-    return False
+        raise typer.Exit(code=2)
 
 
 def show_detected_keys(
@@ -187,11 +185,10 @@ def _run_enrollment_if_needed(
 
 def _ensure_proxy_running(home: WorthlessHome, console) -> tuple[bool, int | None, int]:
     """Phase 2: start sidecar-supervised proxy if needed; return (running, pid, port)."""
-    running, pid, port = _proxy_is_running(home)
-    if not running and _service_start_hint(home, console):
-        raise typer.Exit()
-    if running:
-        return running, pid, port
+    runtime = detect_proxy_runtime(home)
+    if runtime.running:
+        return True, runtime.pid, runtime.port
+    _raise_if_service_requires_start(runtime, console)
 
     actual_port = resolve_port(None)
     log_file = home.base_dir / "proxy.log"

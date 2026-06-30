@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hmac
 import logging
 import os
 import secrets
@@ -22,12 +23,16 @@ from worthless._flags import (
 )
 from worthless.cli.errors import ErrorCode, WorthlessError, sanitize_exception
 from worthless.cli.keystore import (
+    _SERVICE,
+    _keyring_username,
+    keyring_available,
     migrate_file_to_keyring,
     read_fernet_key,
     read_fernet_key_from_file,
     store_fernet_key,
 )
 from worthless.cli.platform import IS_WINDOWS
+from worthless.crypto.types import zero_buf
 from worthless.ipc.client import IPCClient, IPCError
 from worthless.proxy.config import DEFAULT_SIDECAR_SOCKET_PATH
 
@@ -287,10 +292,24 @@ def _first_run_keystore(home: WorthlessHome) -> None:
 def _seed_cache_from_advisory_source(home: WorthlessHome) -> None:
     """Pre-populate the key cache from env or file when present.
 
-    Both branches defer to the lazy keyring fetch on disappearance
-    (best-effort recovery from a TOCTOU race; not an operator-visible
-    state transition).
+    When both keyring and ``fernet.key`` exist, seed from the keyring if they
+    differ. A stale file left from a prior ``service install`` sync must not
+    poison ``worthless lock`` while launchd reads the synced file (WOR-748).
+
+    Under ``WORTHLESS_SERVICE_MANAGED=1``, seed via :func:`read_fernet_key`
+    so ``split_to_tmpfs`` uses the same file-first key launchd will read
+    (WOR-749).
     """
+    if os.environ.get("WORTHLESS_SERVICE_MANAGED", "").strip() == "1":
+        try:
+            home._seed_cached_fernet_key(read_fernet_key(home.base_dir))
+        except WorthlessError:
+            logger.debug(
+                "ensure_home: service-managed fernet cache seed deferred to lazy fetch",
+                exc_info=True,
+            )
+        return
+
     if os.environ.get("WORTHLESS_FERNET_KEY"):
         try:
             _ = home.fernet_key
@@ -303,6 +322,30 @@ def _seed_cache_from_advisory_source(home: WorthlessHome) -> None:
                 "deferring to lazy keyring fetch"
             )
         return
+
+    if keyring_available() and home.fernet_key_path.exists():
+        try:
+            import keyring
+
+            kr_val = keyring.get_password(_SERVICE, _keyring_username(home.base_dir))
+            if kr_val is not None:
+                file_key = read_fernet_key_from_file(home.base_dir)
+                kr_buf = bytearray(kr_val.encode())
+                try:
+                    if not hmac.compare_digest(file_key, kr_buf):
+                        logger.warning(
+                            "fernet.key differs from keyring; using keyring for this session"
+                        )
+                        home._seed_cached_fernet_key(kr_buf)
+                        return
+                finally:
+                    zero_buf(file_key)
+                    zero_buf(kr_buf)
+        except Exception:
+            logger.debug(
+                "ensure_home: keyring/file compare failed during cache seed",
+                exc_info=True,
+            )
 
     try:
         key = read_fernet_key_from_file(home.base_dir)
