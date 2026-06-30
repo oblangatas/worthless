@@ -851,7 +851,13 @@ def _is_proxy_url(url: str, proxy_base_url: str) -> bool:
     if port is None:
         return False
     parts = urlsplit(url)
-    if parts.port != port:
+    try:
+        url_port = parts.port
+    except ValueError:
+        # Malformed port (e.g. an attacker host like '127.0.0.1:8787.evil.com')
+        # makes urlsplit raise on .port access — treat as not-our-proxy, never crash.
+        return False
+    if url_port != port:
         return False
     host = parts.hostname or ""
     try:

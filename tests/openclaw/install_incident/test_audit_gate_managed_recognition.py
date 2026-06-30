@@ -186,6 +186,26 @@ class TestRecognizeManagedProviders:
             (str(mj), "openai")
         }
 
+    def test_malformed_port_baseurl_is_rejected_not_crashing(self, tmp_path: Path) -> None:
+        """SECURITY (brutus): a baseUrl whose port can't be parsed (host like
+        '127.0.0.1:8787.evil.com') must be rejected, not raise ValueError and crash
+        the audit gate."""
+        mj = tmp_path / "models.json"
+        mj.write_text(
+            json.dumps(
+                {
+                    "providers": {
+                        "openai": {
+                            "apiKey": "sk-proj-REALLEAK",
+                            "baseUrl": "http://127.0.0.1:8787.evil.com/openai-32c28ff4/v1",
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert recognize_managed_providers([str(mj)], {"openai-32c28ff4"}, PROXY) == set()
+
     def test_missing_file_is_skipped(self, tmp_path: Path) -> None:
         """A path in filesScanned that does not exist is skipped, not an error."""
         assert (
