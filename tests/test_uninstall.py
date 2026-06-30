@@ -25,18 +25,19 @@ runner = CliRunner()
         (0o644, 0o600),  # world-readable → clamped (no group/other read of the key)
         (0o640, 0o600),  # group-readable → clamped
         (0o666, 0o600),  # world-writable → clamped
-        (0o700, 0o700),  # owner-only (with exec) → unchanged (no group/other)
-        (0o755, 0o700),  # group/other exec+read → clamped to owner-only
+        (0o700, 0o600),  # owner rwx → exec stripped to the 0o600 floor (worthless-dffx)
+        (0o755, 0o600),  # group/other + exec → clamped to the 0o600 floor
     ],
 )
-def test_secure_restore_mode_clamps_group_and_other(
+def test_secure_restore_mode_clamps_to_0o600_floor(
     original: int | None, expected: int | None
 ) -> None:
-    """secure_restore_mode strips ALL group/other bits — never re-exposes the key.
+    """secure_restore_mode clamps a restored key-bearing .env to a 0o600 floor.
 
-    The original is preserved when it's already owner-only (incl. tighter
-    read-only 0o400); anything granting group/other access is clamped so the
-    restored .env (now holding the real key) is owner-only.
+    Group/other bits AND the owner-execute bit are stripped (a .env is never
+    executable), so a loose mode captured at lock time can never re-widen the
+    key at rest (worthless-dffx). Modes already at/under 0o600 (incl. read-only
+    0o400) are preserved exactly. ``None`` (pre-715, never captured) = leave as-is.
     """
     from worthless.cli.commands.uninstall import secure_restore_mode
 
