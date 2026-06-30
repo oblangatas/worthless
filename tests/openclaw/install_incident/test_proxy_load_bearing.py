@@ -359,6 +359,16 @@ def retired_replay_stack():
         assert unlocked.returncode == 0, f"unlock failed: {unlocked.stderr}"
         relocked = _dexec(proxy, ["worthless", "lock", "--env", "/tmp/.env"], timeout=120)  # noqa: S108
         assert relocked.returncode == 0, f"re-lock failed: {relocked.stderr}"
+        # Prove the rotation actually moved the secret: the freshly-locked shard-A
+        # must DIFFER from the retired one OpenClaw still holds. Otherwise a
+        # same-split regeneration bug would make the decoy reject the *live* key
+        # and this test would celebrate that catastrophe as a pass.
+        new_shard_a = _dexec(
+            proxy, ["sh", "-c", "grep '^OPENAI_API_KEY=' /tmp/.env | cut -d= -f2-"], timeout=30
+        ).stdout.strip()
+        assert new_shard_a and new_shard_a != shard_a, (
+            "re-lock did not rotate shard-A — the retired token is still the live key"
+        )
 
         # Restart the proxy so it preloads the now-populated retired_decoys set
         # (also exercises the startup-preload path), and OpenClaw to drop caches.
@@ -416,11 +426,14 @@ def test_replayed_retired_shard_a_refused_by_decoy(retired_replay_stack):
 
     after = _run(["docker", "logs", proxy])
     delta = after.stdout[len(before.stdout) :] + after.stderr[len(before.stderr) :]
-    assert "decoy bearer token detected" in delta, (
-        "proxy did NOT log a decoy detection for THIS replayed retired shard-A — "
-        f"the 401 may be the commitment backstop, not the tripwire.\n{delta[-800:]}"
+    # Assert the decoy line and THIS alias co-occur on the same log record — a
+    # bare "decoy fired somewhere" + "alias appears somewhere" pair would pass
+    # even if the tripwire fired for a different alias. The proxy emits both in
+    # one statement: `decoy bearer token detected for alias '<alias>'`.
+    assert f"decoy bearer token detected for alias '{alias}'" in delta, (
+        "proxy did NOT log a decoy detection for THIS alias's replayed retired "
+        f"shard-A — the 401 may be the commitment backstop, not the tripwire.\n{delta[-800:]}"
     )
-    assert alias in delta, f"decoy log did not name the expected alias {alias!r}"
 
 
 # --------------------------------------------------------------------------- #
