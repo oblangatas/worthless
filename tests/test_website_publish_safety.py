@@ -239,7 +239,9 @@ def test_website_security_txt_is_rfc9116_public_surface() -> None:
     security_txt = (WEBSITE / ".well-known" / "security.txt").read_text(encoding="utf-8")
 
     assert "Contact: mailto:security@wless.io" in security_txt
-    assert "Contact: https://github.com/shacharm2/worthless/security/advisories/new" in security_txt
+    assert (
+        "Contact: https://github.com/oblangatas/worthless/security/advisories/new" in security_txt
+    )
     assert "Expires:" in security_txt
     assert "Canonical: https://wless.io/.well-known/security.txt" in security_txt
     assert "Policy: https://wless.io/security.html" in security_txt
