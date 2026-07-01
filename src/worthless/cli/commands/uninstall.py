@@ -4,7 +4,7 @@ Assembles existing primitives rather than duplicating crypto:
 - enumerate locked .env files via ``ShardRepository.list_enrollments`` (each
   carries the ``original_mode`` captured by ``lock`` per WOR-715);
 - reconstruct + restore each key reusing ``unlock``'s ``_unlock_batch``;
-- restore the original file mode, clamped to owner-only (``secure_restore_mode``),
+- restore the original file mode, clamped to a 0o600 floor (``secure_restore_mode``),
   informing the user when a loose mode was tightened (human gets asked);
 - wipe keychain + ``~/.worthless`` — but ONLY after every restore succeeds
   (the restore-ALL-then-wipe key-shredder guard: a wipe that runs after a
@@ -26,6 +26,7 @@ import typer
 from worthless.cli._repo_factory import open_repo
 from worthless.cli.bootstrap import WorthlessHome, acquire_lock
 from worthless.cli.commands.down import _stop_daemon
+from worthless.cli.commands.service import uninstall_service
 from worthless.cli.commands.unlock import (
     _apply_openclaw_unlock,
     _build_oc_restores,
@@ -34,12 +35,15 @@ from worthless.cli.commands.unlock import (
 from worthless.cli.console import get_console
 from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary
 from worthless.cli.keystore import delete_fernet_key
+from worthless.cli.platform import IS_WINDOWS
 from worthless.crypto.types import zero_buf
 
-# ``0o700`` keeps only the owner's bits; ANDing with it strips every group and
-# other bit (and setuid/setgid/sticky), so a restored .env that holds the real
-# reconstructed key can never be read by another local user.
-_OWNER_ONLY_MASK = 0o700
+# A restored .env holds the real reconstructed key, so clamp its mode to a hard
+# 0o600 floor: ANDing with ``0o600`` keeps at most owner read+write and strips
+# execute, group, other, and setuid/setgid/sticky. Even a loose 0o666 captured
+# at lock time can never re-widen the key at rest (worthless-dffx). A .env is
+# never executable, so dropping the owner-execute bit too is safe.
+_OWNER_ONLY_MASK = 0o600
 
 
 def secure_restore_mode(original_mode: int | None) -> int | None:
@@ -347,6 +351,18 @@ def _run_uninstall(*, assume_yes: bool, force: bool = False) -> None:
 
         _report_outcomes(console, restored, missing, enroll_only)
         _guard_failed_restores(console, failed, unlocked, force=force)
+
+        # WOR-795: tear down the launchd/systemd service unit BEFORE stopping the
+        # daemon and wiping. A KeepAlive/RunAtLoad unit would otherwise relaunch
+        # `worthless up`, which re-creates ~/.worthless within seconds — making the
+        # uninstall silently not stick. Best-effort, *nix-only (no unit on Windows),
+        # a clean no-op when no service was installed; it must never block the wipe.
+        # (Service-unit lifecycle is WOR-193's — we only call its teardown primitive.)
+        if not IS_WINDOWS:
+            try:
+                uninstall_service(home)
+            except Exception as exc:  # noqa: BLE001 — best-effort; never block the wipe
+                console.print_warning(f"could not remove the service unit ({exc}); continuing.")
 
         # fzbi: stop a running proxy daemon before wiping its home. Best-effort —
         # a daemon we can't stop must never block the teardown.

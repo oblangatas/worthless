@@ -25,18 +25,19 @@ runner = CliRunner()
         (0o644, 0o600),  # world-readable → clamped (no group/other read of the key)
         (0o640, 0o600),  # group-readable → clamped
         (0o666, 0o600),  # world-writable → clamped
-        (0o700, 0o700),  # owner-only (with exec) → unchanged (no group/other)
-        (0o755, 0o700),  # group/other exec+read → clamped to owner-only
+        (0o700, 0o600),  # owner rwx → exec stripped to the 0o600 floor (worthless-dffx)
+        (0o755, 0o600),  # group/other + exec → clamped to the 0o600 floor
     ],
 )
-def test_secure_restore_mode_clamps_group_and_other(
+def test_secure_restore_mode_clamps_to_0o600_floor(
     original: int | None, expected: int | None
 ) -> None:
-    """secure_restore_mode strips ALL group/other bits — never re-exposes the key.
+    """secure_restore_mode clamps a restored key-bearing .env to a 0o600 floor.
 
-    The original is preserved when it's already owner-only (incl. tighter
-    read-only 0o400); anything granting group/other access is clamped so the
-    restored .env (now holding the real key) is owner-only.
+    Group/other bits AND the owner-execute bit are stripped (a .env is never
+    executable), so a loose mode captured at lock time can never re-widen the
+    key at rest (worthless-dffx). Modes already at/under 0o600 (incl. read-only
+    0o400) are preserved exactly. ``None`` (pre-715, never captured) = leave as-is.
     """
     from worthless.cli.commands.uninstall import secure_restore_mode
 
@@ -126,6 +127,58 @@ def test_uninstall_aborts_wipe_when_a_restore_fails(
         sqlite3.connect(str(home_dir.db_path)).execute("SELECT COUNT(*) FROM shards").fetchone()[0]
     )
     assert n_shards >= 1, "shard-B deleted despite the abort"
+
+
+def test_uninstall_removes_the_service_unit(home_dir: WorthlessHome, tmp_path, monkeypatch) -> None:
+    """WOR-795: uninstall best-effort tears down the launchd/systemd service unit
+    (so a KeepAlive unit can't respawn `worthless up` and recreate ~/.worthless),
+    and the home is still wiped afterwards.
+    """
+    import worthless.cli.commands.uninstall as uninstall_mod
+    from tests.helpers import fake_key
+
+    env = tmp_path / ".env"
+    env.write_text(f"OPENAI_API_KEY={fake_key('sk-')}\n")
+    runner.invoke(app, ["lock", "--env", str(env)], env={"WORTHLESS_HOME": str(home_dir.base_dir)})
+
+    calls: list = []
+
+    monkeypatch.setattr(uninstall_mod, "IS_WINDOWS", False)
+    monkeypatch.setattr(uninstall_mod, "uninstall_service", lambda home: calls.append(home))  # noqa: ANN001
+
+    result = runner.invoke(
+        app, ["uninstall", "--yes"], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
+    )
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1, "uninstall must tear down the service unit exactly once"
+    assert not home_dir.base_dir.exists(), "home must still be wiped after service teardown"
+
+
+def test_uninstall_service_teardown_failure_does_not_block(
+    home_dir: WorthlessHome, tmp_path, monkeypatch
+) -> None:
+    """WOR-795: a service-teardown that raises (no unit installed, permission, …)
+    is best-effort — it must NOT block the uninstall, same class as stopping the
+    daemon. This also covers the no-service no-op path.
+    """
+    import worthless.cli.commands.uninstall as uninstall_mod
+    from tests.helpers import fake_key
+
+    env = tmp_path / ".env"
+    env.write_text(f"OPENAI_API_KEY={fake_key('sk-')}\n")
+    runner.invoke(app, ["lock", "--env", str(env)], env={"WORTHLESS_HOME": str(home_dir.base_dir)})
+
+    def _boom(home) -> None:  # noqa: ANN001
+        raise RuntimeError("no unit / cannot remove")
+
+    monkeypatch.setattr(uninstall_mod, "IS_WINDOWS", False)
+    monkeypatch.setattr(uninstall_mod, "uninstall_service", _boom)
+
+    result = runner.invoke(
+        app, ["uninstall", "--yes"], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
+    )
+    assert result.exit_code == 0, "a service-teardown error must not block uninstall"
+    assert not home_dir.base_dir.exists(), "home must still be wiped despite a teardown error"
 
 
 def test_uninstall_enroll_only_key_warns_but_does_not_block(

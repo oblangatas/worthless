@@ -28,6 +28,7 @@ If step 2 finds a recoverable key that didn't restore, uninstall **stops before 
 | `~/.worthless/.bootstrapped` marker | First run | **Deleted** — removed with `~/.worthless/` |
 | OpenClaw provider entries in `openclaw.json` | `worthless lock` rewrites them to route through the proxy | **Restored** — put back to point at the real provider with the real key |
 | Running proxy daemon (default port `8787`) | `worthless up` / `worthless wrap` | **Stopped** before the wipe |
+| launchd / systemd service unit (auto-start on boot/login) | `worthless service install` | **Removed** (best-effort, before the wipe) so it can't relaunch the proxy and recreate `~/.worthless` |
 
 ## What uninstall does NOT do
 
@@ -36,6 +37,7 @@ Honesty matters as much as the removal itself:
 - **It does not back up your `.env`.** Restore happens during uninstall, but Worthless keeps no separate copy. If your `.env` was already corrupted or deleted, see [Recovery](/recovery/).
 - **It cannot recover keys from a broken install.** If the encryption key or database is already gone, the keys are unreconstructable. `--force` wipes the remains so the machine is clean, but those keys are lost — rotate them at the provider.
 - **It does not touch anything it didn't install.** Providers you manage yourself, unrelated files, and other tools' config are left untouched. Uninstall only reverses what `worthless lock` did.
+- **It does not remove the `worthless` program itself.** `worthless uninstall` clears Worthless's *state*; the installed binary stays so you can reinstall or re-lock without re-downloading. Remove it separately with `uv tool uninstall worthless` (or `pipx uninstall worthless`). The `curl worthless.sh/uninstall | sh` one-liner does both — state *and* binary — in one shot, since a website-channel user shouldn't need to know about uv.
 
 ## Exit codes
 
