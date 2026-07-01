@@ -1626,6 +1626,43 @@
     }
 
     @media (max-width: 520px) {
+      .nav {
+        height: auto;
+        min-height: 86px;
+        align-items: center;
+        flex-wrap: wrap;
+        row-gap: 0.2rem;
+        padding: 0.6rem 0.75rem 0.5rem;
+      }
+
+      .brand {
+        order: 1;
+      }
+
+      .nav-actions {
+        order: 2;
+        margin-left: auto;
+      }
+
+      .nav-links {
+        order: 3;
+        flex: 1 0 100%;
+        width: 100%;
+        margin-left: 0;
+        overflow-x: auto;
+        overscroll-behavior-x: contain;
+        padding-bottom: 0.1rem;
+        scrollbar-width: none;
+      }
+
+      .nav-links::-webkit-scrollbar {
+        display: none;
+      }
+
+      .nav-links a {
+        flex: 0 0 auto;
+      }
+
       .nav-links .nav-early {
         width: 2.15rem;
         height: 2.15rem;
@@ -1638,6 +1675,10 @@
 
       .nav-early-icon {
         display: block;
+      }
+
+      .hero {
+        padding-top: 8rem;
       }
 
       .install-block,
@@ -1715,6 +1756,8 @@
     </a>
     <div class="nav-links">
       <a href="https://docs.wless.io/">Docs</a>
+      <a href="blog/index.html">Blog</a>
+      <a href="red/index.html">Red Blog</a>
       <a href="memes.html">Memes</a>
       <a class="nav-early" href="#early-access" aria-label="Early access">
         <span class="nav-early-label">Early access</span>
