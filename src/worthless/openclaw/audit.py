@@ -27,6 +27,7 @@ import re
 import shutil
 import stat
 import subprocess  # nosec B404
+import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -65,25 +66,22 @@ _AUTH_PROFILES_MAX_DEPTH = 6
 #: confirmed by M0 probe against the real container.
 _PROVIDER_APIKEY_RE = re.compile(r"^providers\.(?P<provider>[^.]+)\.apiKey$")
 
-#: Strips ASCII control chars, C1 controls, and Unicode bidi/direction-override
-#: characters from user-facing strings to prevent terminal log injection.
-#: Covers: C0 (U+0000–001F), DEL (U+007F), C1 (U+0080–009F),
-#: zero-width/direction marks (U+200B–200F), bidi embeddings/overrides
-#: (U+202A–202E), bidi isolates (U+2066–2069), and BOM (U+FEFF).
-_SANITISE_RE = re.compile(
-    # Literal Unicode bidi/direction-override characters are written as \u escapes
-    # here to avoid embedding bidi control chars in the source file itself
-    # (Bandit B602, Semgrep bidi finding).
-    "[\x00-\x1f\x7f\x80-\x9f"
-    "\u061c"  # ALM (Arabic Letter Mark)
-    "\u200b-\u200f"  # zero-width space, ZWNJ, ZWJ, LRM, RLM
-    "\u2028-\u2029"  # LINE SEPARATOR, PARAGRAPH SEPARATOR
-    "\u202a-\u202e"  # LRE, RLE, PDF, LRO, RLO
-    "\u2060"  # WORD JOINER
-    "\u2066-\u2069"  # LRI, RLI, FSI, PDI
-    "\ufeff"  # BOM
-    "]"
-)
+#: Unicode general categories stripped from user-facing strings to prevent
+#: terminal log injection. Category-based (worthless-1tbt) rather than a fixed
+#: code-point blocklist, so it can't drift out of date as new format chars are
+#: assigned, and it closes gaps the old regex missed (SOFT HYPHEN U+00AD,
+#: deprecated format U+206A–206F, invisible math U+2061–2064, interlinear
+#: U+FFF9–FFFB, tag chars U+E0000–E007F, ...):
+#:   Cc  C0/C1 control chars — incl. ESC (U+001B), which defeats every
+#:       ANSI/OSC/DCS escape sequence at the source.
+#:   Cf  format chars — bidi overrides/isolates/marks, zero-width chars, BOM,
+#:       tag chars, soft hyphen, interlinear annotation.
+#:   Zl/Zp  LINE / PARAGRAPH SEPARATOR (U+2028/2029).
+#: Deliberately does NOT strip strong RTL *letters* (category Lo): a Hebrew/
+#: Arabic filename is legitimate content; stripping it would be a false positive.
+#: Pure-RTL-letter visual reordering (no control char) is therefore NOT defended
+#: here — only control/format/separator chars are.
+_SANITISE_STRIP_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
 
 # --- Data classes -------------------------------------------------------------
 
@@ -501,5 +499,13 @@ def format_gate_error_message(
 
 
 def sanitise_for_message(value: str) -> str:
-    """Strip control characters and terminal escapes from a user-facing string."""
-    return _SANITISE_RE.sub("", value)
+    """Strip control / format / separator characters from a user-facing string.
+
+    Removes every Unicode control (Cc), format (Cf), and line/paragraph
+    separator (Zl/Zp) code point so attacker-influenced text (file paths, JSON
+    paths, scanned source lines) cannot smuggle ANSI escapes, bidi overrides,
+    zero-width chars, or record-splitting separators into a terminal. Strong RTL
+    letters and other visible scripts are preserved. Display-only: callers keep
+    the raw value for filesystem and machine-readable output.
+    """
+    return "".join(ch for ch in value if unicodedata.category(ch) not in _SANITISE_STRIP_CATEGORIES)
