@@ -22,12 +22,16 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
 
 from worthless.cli.app import app
+from worthless.cli.commands import lock as lock_mod
 from worthless.cli.sentinel import sentinel_path
+from worthless.openclaw.errors import OpenclawErrorCode
+from worthless.openclaw.integration import OpenclawApplyResult, OpenclawIntegrationEvent
 
 from tests.helpers import fake_openai_key
 
@@ -424,3 +428,300 @@ def test_lock_warns_on_skipped_bind_confirmation_inconclusive(
     assert "inconclusive" in out.lower() or "wasn't proven" in out.lower(), (
         f"[WARN] message must explain the state, not just say [WARN]. Got:\n{out}"
     )
+
+
+# ---------------------------------------------------------------------------
+# WOR-650 follow-up — per-alias bind verdict. The global counter ticking
+# proves "a probe reached the proxy", not "THIS alias's rewrite routes". When
+# the proxy reports per-alias counts, _confirm_bind must require EACH confirmed
+# alias to tick — so a probe for one alias can't vouch for another.
+# ---------------------------------------------------------------------------
+
+
+def _seq_health(monkeypatch, before: dict, after: dict) -> None:
+    """Stub check_proxy_health to return ``before`` on the first call and
+    ``after`` on every later call, and make every synthetic fire 'reach'."""
+    calls = {"n": 0}
+
+    def fake_health(port):  # noqa: ANN001
+        calls["n"] += 1
+        return dict(before if calls["n"] == 1 else after, port=port)
+
+    monkeypatch.setattr(lock_mod, "check_proxy_health", fake_health)
+    monkeypatch.setattr(lock_mod, "_fire_synthetic_request", lambda *a, **k: True, raising=False)
+
+
+def test_confirm_bind_passes_when_each_alias_routes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Per-alias happy path: every confirmed alias's OWN count moves → pass."""
+    planned = [
+        SimpleNamespace(provider="openai", alias="o-1"),
+        SimpleNamespace(provider="anthropic", alias="a-1"),
+    ]
+    _seq_health(
+        monkeypatch,
+        {
+            "healthy": True,
+            "mode": "ok",
+            "requests_proxied": 0,
+            "bind_probe_count": 0,
+            "bind_probe_aliases": {},
+        },
+        {
+            "healthy": True,
+            "mode": "ok",
+            "requests_proxied": 0,
+            "bind_probe_count": 2,
+            "bind_probe_aliases": {"o-1": 1, "a-1": 1},
+        },
+    )
+    result = lock_mod._confirm_bind(planned, host="127.0.0.1", port=1)
+    assert result["status"] == "pass", result
+
+
+def test_confirm_bind_partial_route_is_fail_not_masked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The case the global counter masked: lock TWO providers, only one alias's
+    probe registers. The global delta is 1 (>0) — old logic would say 'pass'.
+    Per-alias says 'fail' and NAMES the alias whose probe didn't register, so
+    one alias's tick can't be mistaken for another's on a multi-provider lock.
+    (Probe attribution, not full route validation — see _classify_bind_per_alias.)"""
+    planned = [
+        SimpleNamespace(provider="openai", alias="o-1"),
+        SimpleNamespace(provider="anthropic", alias="a-1"),
+    ]
+    _seq_health(
+        monkeypatch,
+        {
+            "healthy": True,
+            "mode": "ok",
+            "requests_proxied": 0,
+            "bind_probe_count": 0,
+            "bind_probe_aliases": {},
+        },
+        # Only o-1 ticked; a-1 never routed. Global delta = 1 > 0.
+        {
+            "healthy": True,
+            "mode": "ok",
+            "requests_proxied": 0,
+            "bind_probe_count": 1,
+            "bind_probe_aliases": {"o-1": 1},
+        },
+    )
+    result = lock_mod._confirm_bind(planned, host="127.0.0.1", port=1)
+    assert result["status"] == "fail", (
+        f"global delta>0 must NOT pass when a confirmed alias didn't tick. Got {result!r}"
+    )
+    assert result["not_routing"] == ["a-1"], result
+    assert result["delta"] == 1, "global delta WOULD have passed under the old logic"
+
+
+def test_confirm_bind_falls_back_to_global_without_per_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Older proxy that doesn't surface bind_probe_aliases → the global
+    tri-state still applies (graceful degradation, no per-alias regression)."""
+    planned = [SimpleNamespace(provider="openai", alias="o-1")]
+    _seq_health(
+        monkeypatch,
+        {"healthy": True, "mode": "ok", "requests_proxied": 0, "bind_probe_count": 0},
+        {"healthy": True, "mode": "ok", "requests_proxied": 0, "bind_probe_count": 1},
+    )
+    result = lock_mod._confirm_bind(planned, host="127.0.0.1", port=1)
+    assert result["status"] == "pass", result
+
+
+def test_confirm_bind_per_alias_proxy_restart_is_skipped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Per-alias path, hostile: the proxy restarts mid-flight so its in-memory
+    counters reset (delta < 0, alias map empty). That's inconclusive, NOT a
+    fail — we refuse to manufacture a 'not routing' verdict against a bounced
+    proxy. Mirrors the global-counter restart guard, but on the per-alias path."""
+    planned = [SimpleNamespace(provider="openai", alias="o-1")]
+    _seq_health(
+        monkeypatch,
+        {
+            "healthy": True,
+            "mode": "ok",
+            "requests_proxied": 0,
+            "bind_probe_count": 500,
+            "bind_probe_aliases": {},
+        },
+        # Restart: counter + per-alias map reset to ~0 between before/after reads.
+        {
+            "healthy": True,
+            "mode": "ok",
+            "requests_proxied": 0,
+            "bind_probe_count": 1,
+            "bind_probe_aliases": {},
+        },
+    )
+    result = lock_mod._confirm_bind(planned, host="127.0.0.1", port=1)
+    assert result["status"] == "skipped", result
+    assert result.get("reason") == "proxy_restarted", result
+
+
+def test_confirm_bind_per_alias_unreachable_is_skipped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Per-alias path, hostile: every synthetic fire fails at the network layer
+    (reached == 0), so the proxy never saw the probe. Inconclusive
+    (synthetic_unreachable), NOT a fail — the test harness, not the rewrite,
+    is what didn't reach the proxy."""
+    planned = [SimpleNamespace(provider="openai", alias="o-1")]
+
+    def fake_health(port):  # noqa: ANN001
+        return {
+            "healthy": True,
+            "mode": "ok",
+            "requests_proxied": 0,
+            "bind_probe_count": 5,
+            "bind_probe_aliases": {},
+            "port": port,
+        }
+
+    monkeypatch.setattr(lock_mod, "check_proxy_health", fake_health)
+    # Every fire fails to reach the proxy.
+    monkeypatch.setattr(lock_mod, "_fire_synthetic_request", lambda *a, **k: False, raising=False)
+
+    result = lock_mod._confirm_bind(planned, host="127.0.0.1", port=1)
+    assert result["status"] == "skipped", result
+    assert result.get("reason") == "synthetic_unreachable", result
+
+
+def test_confirm_bind_per_alias_restart_wins_over_partial_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CodeRabbit (Major): a proxy restart is inconclusive even when only SOME
+    aliases look stale. ``before`` has a previously-counted alias (o-1=100) while
+    we confirm [o-1, a-1]; the proxy bounces (delta<0) and re-probes both to ~1,
+    so a-1 looks 'routed' (1 > 0) but o-1 looks stale (1 <= 100). The restart
+    signal must WIN → skipped/proxy_restarted, never a 'fail' against a bounced
+    proxy."""
+    planned = [
+        SimpleNamespace(provider="openai", alias="o-1"),
+        SimpleNamespace(provider="anthropic", alias="a-1"),
+    ]
+    _seq_health(
+        monkeypatch,
+        {
+            "healthy": True,
+            "mode": "ok",
+            "requests_proxied": 0,
+            "bind_probe_count": 100,
+            "bind_probe_aliases": {"o-1": 100},
+        },
+        # Bounced: counter + per-alias map reset, then the fires re-probe both to ~1.
+        {
+            "healthy": True,
+            "mode": "ok",
+            "requests_proxied": 0,
+            "bind_probe_count": 2,
+            "bind_probe_aliases": {"o-1": 1, "a-1": 1},
+        },
+    )
+    result = lock_mod._confirm_bind(planned, host="127.0.0.1", port=1)
+    assert result["status"] == "skipped", result
+    assert result.get("reason") == "proxy_restarted", result
+
+
+# ---------------------------------------------------------------------------
+# WOR-650 follow-up — a declined adoption (entry left in place) must NOT read
+# as a clean [OK]/pass: header is [WARN], sentinel is DEGRADED, and the
+# skipped provider is NOT bind-probed (probing it would fake a pass).
+# ---------------------------------------------------------------------------
+
+
+def test_finalise_warns_and_degrades_when_entry_left_in_place(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    skip_evt = OpenclawIntegrationEvent(
+        code=OpenclawErrorCode.PROVIDER_ADOPTION_SKIPPED,
+        level="info",
+        detail="skipped 'openai': proxy-shaped entry wasn't adopted. Re-run with --adopt.",
+        extra={"provider": "openai"},
+    )
+    result = OpenclawApplyResult(
+        detected=True,
+        config_path=None,
+        workspace_path=None,
+        skill_path=None,
+        providers_set=("anthropic",),
+        providers_skipped=(("openai", "unrecognized_not_adopted"),),
+        skill_installed=False,
+        events=(skip_evt,),
+    )
+    planned = [
+        SimpleNamespace(provider="openai", alias="openai-foreign"),
+        SimpleNamespace(provider="anthropic", alias="anthropic-x"),
+    ]
+
+    class _Console:
+        def __init__(self) -> None:
+            self.success: list[str] = []
+            self.hint: list[str] = []
+            self.warning: list[str] = []
+            self.failure: list[str] = []
+
+        def print_success(self, m: str) -> None:
+            self.success.append(m)
+
+        def print_hint(self, m: str) -> None:
+            self.hint.append(m)
+
+        def print_warning(self, m: str) -> None:
+            self.warning.append(m)
+
+        def print_failure(self, m: str) -> None:
+            self.failure.append(m)
+
+    console = _Console()
+
+    confirm_calls: dict[str, object] = {}
+
+    def fake_confirm_bind(planned_arg, *, host, port):  # noqa: ANN001, ANN202
+        confirm_calls["planned"] = planned_arg
+        return {
+            "status": "skipped",
+            "reason": "no_aliases",
+            "delta": 0,
+            "aliases": [],
+            "reached": 0,
+        }
+
+    monkeypatch.setattr(lock_mod, "_confirm_bind", fake_confirm_bind)
+
+    sentinel_calls: dict[str, object] = {}
+
+    def fake_write_sentinel(home, **kwargs):  # noqa: ANN001, ANN003, ANN202
+        sentinel_calls.update(kwargs)
+        return tmp_path / "sentinel.json"
+
+    monkeypatch.setattr(lock_mod, "_write_lock_sentinel", fake_write_sentinel)
+
+    rc = lock_mod._finalise_openclaw_success(
+        planned,
+        result,
+        console,
+        False,
+        SimpleNamespace(base_dir=tmp_path),
+        proxy_host="127.0.0.1",
+    )
+
+    # 1. No bare [OK] header — a [WARN] incomplete header instead.
+    assert not any("[OK] OpenClaw integration:" in m for m in console.success), (
+        f"declined adoption must NOT print a clean [OK]. success={console.success!r}"
+    )
+    assert any(m.startswith("[WARN] OpenClaw integration incomplete") for m in console.warning), (
+        f"expected a [WARN] incomplete header. warnings={console.warning!r}"
+    )
+    # 2. Sentinel is DEGRADED — the partial/failed pair is_partial() recognises.
+    assert sentinel_calls["status"] == "partial"
+    assert sentinel_calls["openclaw"] == "failed"
+    # 3. Only the provider actually written is bind-confirmed; the skipped one
+    #    isn't probed (firing for it would manufacture a false pass).
+    confirmed_aliases = [p.alias for p in confirm_calls["planned"]]
+    assert confirmed_aliases == ["anthropic-x"], (
+        f"skipped 'openai' must not be probed; confirmed={confirmed_aliases!r}"
+    )
+    # 4. Exit code stays 0 — the interactive user chose to decline.
+    assert rc == 0

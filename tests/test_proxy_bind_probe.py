@@ -221,3 +221,66 @@ async def test_healthz_bind_probe_count_present_proves_worthless_proxy(
     # The lock-side check is "if 'bind_probe_count' in healthz: trust the
     # delta on this port, else: skipped, reason=proxy_unrecognised".
     assert "bind_probe_count" in body
+
+
+# ---------------------------------------------------------------------------
+# WOR-650 follow-up: per-alias probe counts so lock can tell WHICH alias a
+# probe named (not merely that some probe reached the proxy) — proves per-alias
+# acknowledgment, not that the rewrite is a working route. Alias names are
+# loopback-only (more sensitive than the bare count).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_healthz_surfaces_bind_probe_aliases_on_loopback(
+    client: httpx.AsyncClient,
+) -> None:
+    """/healthz surfaces ``bind_probe_aliases`` (a dict) to loopback callers.
+    Additive — existing fields unchanged."""
+    async with client as c:
+        await c.get("/_bind_probe/openai-seen")
+        body = (await c.get("/healthz")).json()
+    assert "bind_probe_aliases" in body, (
+        f"WOR-650: loopback /healthz must surface per-alias counts; got keys={list(body)}"
+    )
+    assert isinstance(body["bind_probe_aliases"], dict)
+    assert body["bind_probe_aliases"].get("openai-seen") == 1
+    # The global counter is still there — the squatter-resistance signal.
+    assert "bind_probe_count" in body
+
+
+@pytest.mark.asyncio
+async def test_bind_probe_increments_per_alias_independently(
+    client: httpx.AsyncClient,
+) -> None:
+    """Each alias gets its OWN tally — a probe for one alias never ticks
+    another. This is what lets _confirm_bind reject a global-counter pass
+    that doesn't prove the specific provider routes."""
+    async with client as c:
+        await c.get("/_bind_probe/alias-1")
+        await c.head("/_bind_probe/alias-1")
+        await c.get("/_bind_probe/alias-2")
+        per_alias = (await c.get("/healthz")).json()["bind_probe_aliases"]
+    assert per_alias.get("alias-1") == 2, f"alias-1 probed twice; got {per_alias!r}"
+    assert per_alias.get("alias-2") == 1, f"alias-2 probed once; got {per_alias!r}"
+
+
+@pytest.mark.asyncio
+async def test_healthz_omits_alias_names_for_non_loopback(
+    proxy_app,
+) -> None:
+    """Alias names reveal which providers are locked, so a non-loopback
+    /healthz reader gets the bare count but NOT the names. (The probe itself
+    is already 404 for non-loopback, so the dict would be empty regardless —
+    but the field must be absent so a remote reader can't enumerate aliases
+    on a host that DID lock via loopback.)"""
+    transport = httpx.ASGITransport(
+        app=proxy_app, client=("203.0.113.42", 51234)
+    )  # documentation IP range; non-loopback
+    async with httpx.AsyncClient(transport=transport, base_url="http://probe.test") as c:
+        body = (await c.get("/healthz")).json()
+    assert "bind_probe_count" in body, "non-loopback still gets the bare count"
+    assert "bind_probe_aliases" not in body, (
+        "WOR-650: alias names must NOT be exposed to non-loopback /healthz "
+        f"readers (provider-enumeration leak). Got keys={list(body)}"
+    )

@@ -161,6 +161,7 @@ markers = [
     "docker: Docker container end-to-end tests (requires running Docker daemon)",
     "e2e: end-to-end smoke tests — full lifecycle (lock, proxy, healthz)",
     "openclaw: OpenClaw integration tests (requires Docker + network pull)",
+    "playwright: browser-driven GUI tests (requires playwright + a Chromium build)",
     "real_ipc: opt out of the autouse FakeIPCSupervisor injection — these tests bring their own real or subprocess sidecar (WOR-309 Phase 5)",
     "user_flow: end-to-end user-flow tests — real keyring, real CLI, real fs. Run with `pytest -m user_flow`. See Linear WOR-439 for the full suite scope.",
 ]

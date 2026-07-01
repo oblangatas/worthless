@@ -23,7 +23,11 @@ from __future__ import annotations
 
 import json
 import os
+import pty
+import re
+import select
 import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -174,3 +178,148 @@ def test_live_adopt_produces_openclaw_valid_config(tmp_path, provider) -> None:
 
     ok, out = _validate_in_container(cfg)
     assert ok, f"real OpenClaw rejected our adopted config:\n{out}"
+
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _lock_decline(home: Path, whome: Path, env: Path, port: int) -> tuple[int, str]:
+    """Run the REAL ``worthless lock`` (no ``--adopt``) under a PTY and answer
+    'n' to every prompt. Returns ``(exit_code, combined_output)``.
+
+    A PTY is REQUIRED: ``_resolve_adoption_policy`` only prompts when
+    ``sys.stdin.isatty()`` is true; a plain pipe is the non-interactive (CI)
+    path which auto-adopts. To exercise a real human DECLINE we give lock a
+    controlling terminal and feed it 'n'.
+
+    Two real prompts surface on this path: the adoption consent AND a
+    post-lock "scan for hardcoded provider URLs?" prompt — so we feed several
+    'n' lines (extra lines are discarded once the process exits). We invoke the
+    venv entrypoint directly (not ``uv run``) for reliable PTY stdin
+    passthrough, and bound the read loop with a wall-clock deadline so a missed
+    prompt can never hang the suite (the body would otherwise block forever).
+    """
+    e = {k: v for k, v in os.environ.items() if not k.startswith("WORTHLESS_")}
+    e.update(
+        HOME=str(home),
+        USERPROFILE=str(home),
+        WORTHLESS_HOME=str(whome),
+        WORTHLESS_KEYRING_BACKEND="null",
+        WORTHLESS_PORT=str(port),
+    )
+    worthless_bin = str(Path(sys.executable).parent / "worthless")
+    master, slave = pty.openpty()
+    try:
+        proc = subprocess.Popen(
+            [worthless_bin, "lock", "--env", str(env)],
+            cwd=str(REPO),
+            env=e,
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            text=False,
+        )
+        os.close(slave)
+        os.write(master, b"n\n" * 4)  # decline adoption + the URL-scan prompt
+        chunks: list[bytes] = []
+        deadline = time.monotonic() + 150
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select([master], [], [], 1.0)
+            if ready:
+                try:
+                    data = os.read(master, 4096)
+                except OSError:  # slave closed on child exit
+                    break
+                if not data:
+                    break
+                chunks.append(data)
+            elif proc.poll() is not None:
+                break
+        if proc.poll() is None:
+            proc.kill()
+        rc = proc.wait(timeout=30)
+        return rc, b"".join(chunks).decode(errors="replace")
+    finally:
+        os.close(master)
+
+
+@pytest.mark.parametrize("provider", ["openai", "anthropic"])
+def test_live_declined_adoption_warns_and_leaves_openclaw_valid_config(tmp_path, provider) -> None:
+    """LIVE decline mirror of the adopt test (WOR-650 follow-up).
+
+    When the user DECLINES adopting an unrecognized proxy-shaped entry, the
+    foreign entry is LEFT IN PLACE — OpenClaw will keep routing through it, so
+    the .env-only lock is incomplete. This proves, against the REAL CLI and the
+    REAL OpenClaw binary, that:
+
+    1. lock does NOT print a clean ``[OK] OpenClaw integration:`` — it prints a
+       ``[WARN] ... incomplete`` header (the honesty fix);
+    2. the sentinel is DEGRADED (``status=partial`` / ``openclaw=failed``) so
+       ``worthless status`` reports it across sessions;
+    3. the foreign entry SURVIVES verbatim (the bypass the WARN names); and
+    4. that left-in-place config is one the REAL OpenClaw binary still loads —
+       i.e. OpenClaw WILL route through the foreign baseUrl. The warning
+       describes a real state, not theatre.
+    """
+    spec = _PROVIDERS[provider]
+    home = tmp_path / "home"
+    (home / ".openclaw").mkdir(parents=True)
+    whome = tmp_path / "whome"
+    project = tmp_path / "project"
+    project.mkdir()
+    env = project / ".env"
+    env.write_text(f"{spec['var']}={spec['key']}\n", encoding="utf-8")
+    cfg = home / ".openclaw" / "openclaw.json"
+
+    with fake_proxy_health() as port:
+        foreign_url = f"http://127.0.0.1:{port}/{provider}-foreign/v1"
+        cfg.write_text(
+            json.dumps(
+                {
+                    "models": {
+                        "providers": {
+                            provider: {
+                                "baseUrl": foreign_url,
+                                "apiKey": "sk-foreign-not-ours",
+                                "api": spec["api"],
+                                "models": [{"id": "m", "name": "m"}],
+                            }
+                        }
+                    }
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        rc, out = _lock_decline(home, whome, env, port)
+
+    # Strip ANSI colour so substring checks see the plain text (the real CLI
+    # colourises, which splits "[WARN]" with escape codes).
+    clean = _ANSI_RE.sub("", out)
+
+    # 0. The interactive decline path actually ran (not some other skip reason).
+    assert "not created on this machine" in clean, f"adoption prompt path didn't run:\n{clean}"
+    # 1. Declining is a user choice, not a lock error.
+    assert rc == 0, f"decline should exit 0; got {rc}\n{clean}"
+    # 2. Output must NOT read as a clean success; it must WARN. (The "[OK] N key
+    #    split" line is lock-CORE's summary — distinct from the OpenClaw header.)
+    assert "[OK] OpenClaw integration:" not in clean, (
+        f"declined adoption printed a bare [OK] OpenClaw header:\n{clean}"
+    )
+    assert "[WARN]" in clean and "incomplete" in clean.lower(), (
+        f"expected a [WARN] ... incomplete header on decline:\n{clean}"
+    )
+    # 3. The foreign entry is LEFT IN PLACE (the bypass the WARN warns about).
+    entry = json.loads(cfg.read_text(encoding="utf-8"))["models"]["providers"][provider]
+    assert entry["baseUrl"] == foreign_url, (
+        f"a declined entry must survive verbatim; got {entry['baseUrl']}"
+    )
+    # 4. Sentinel is DEGRADED so `worthless status` reports it across sessions.
+    sentinel = json.loads((whome / "last-lock-status.json").read_text(encoding="utf-8"))
+    assert sentinel["status"] == "partial" and sentinel["openclaw"] == "failed", (
+        f"declined adoption must leave a DEGRADED sentinel; got {sentinel}"
+    )
+    # 5. The left-in-place config is one the REAL OpenClaw binary loads — so
+    #    OpenClaw WILL use the foreign baseUrl. The bypass is real, not theory.
+    ok, vout = _validate_in_container(cfg)
+    assert ok, f"real OpenClaw rejected the left-in-place config:\n{vout}"
