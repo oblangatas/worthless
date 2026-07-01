@@ -206,6 +206,26 @@ class TestRecognizeManagedProviders:
         )
         assert recognize_managed_providers([str(mj)], {"openai-32c28ff4"}, PROXY) == set()
 
+    def test_bracketed_non_ipv6_host_is_rejected_not_crashing(self, tmp_path: Path) -> None:
+        """SECURITY (brutus): a bracketed non-IPv6 host makes urlsplit raise on
+        Python 3.12+ (the proxy runs 3.12; CI runs 3.13) — recognition must reject
+        it (return set()), never let ValueError escape and crash the gate."""
+        mj = tmp_path / "models.json"
+        mj.write_text(
+            json.dumps(
+                {
+                    "providers": {
+                        "openai": {
+                            "apiKey": "sk-proj-REALLEAK",
+                            "baseUrl": "http://[evil.com]:8787/openai-32c28ff4/v1",
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert recognize_managed_providers([str(mj)], {"openai-32c28ff4"}, PROXY) == set()
+
     def test_missing_file_is_skipped(self, tmp_path: Path) -> None:
         """A path in filesScanned that does not exist is skipped, not an error."""
         assert (

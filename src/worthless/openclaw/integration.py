@@ -850,16 +850,19 @@ def _is_proxy_url(url: str, proxy_base_url: str) -> bool:
     port = urlsplit(proxy_base_url).port
     if port is None:
         return False
-    parts = urlsplit(url)
+    # SECURITY (WOR-777 / brutus): ``url`` is attacker-influenced. On Python
+    # 3.12+ ``urlsplit`` / ``.hostname`` / ``.port`` eagerly reject malformed
+    # hosts — a bracketed non-IPv6 host ``http://[evil.com]:<port>/…`` (raises in
+    # urlsplit itself) or a non-numeric port ``127.0.0.1:8787.evil.com`` (raises
+    # on ``.port``) — with ValueError. A crafted config must read as
+    # "not our proxy" (return False), never crash the gate.
     try:
-        url_port = parts.port
+        parts = urlsplit(url)
+        if parts.port != port:
+            return False
+        host = parts.hostname or ""
     except ValueError:
-        # Malformed port (e.g. an attacker host like '127.0.0.1:8787.evil.com')
-        # makes urlsplit raise on .port access — treat as not-our-proxy, never crash.
         return False
-    if url_port != port:
-        return False
-    host = parts.hostname or ""
     try:
         in_docker_bridge = ipaddress.ip_address(host) in _DOCKER_BRIDGE_CIDR
     except ValueError:
