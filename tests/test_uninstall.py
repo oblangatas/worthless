@@ -143,12 +143,8 @@ def test_uninstall_removes_the_service_unit(home_dir: WorthlessHome, tmp_path, m
 
     calls: list = []
 
-    class _FakeBackend:
-        def uninstall(self, home) -> None:  # noqa: ANN001
-            calls.append(home)
-
     monkeypatch.setattr(uninstall_mod, "IS_WINDOWS", False)
-    monkeypatch.setattr(uninstall_mod, "_service_backend", lambda: _FakeBackend())
+    monkeypatch.setattr(uninstall_mod, "uninstall_service", lambda home: calls.append(home))  # noqa: ANN001
 
     result = runner.invoke(
         app, ["uninstall", "--yes"], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
@@ -172,12 +168,11 @@ def test_uninstall_service_teardown_failure_does_not_block(
     env.write_text(f"OPENAI_API_KEY={fake_key('sk-')}\n")
     runner.invoke(app, ["lock", "--env", str(env)], env={"WORTHLESS_HOME": str(home_dir.base_dir)})
 
-    class _BoomBackend:
-        def uninstall(self, home) -> None:  # noqa: ANN001
-            raise RuntimeError("no unit / cannot remove")
+    def _boom(home) -> None:  # noqa: ANN001
+        raise RuntimeError("no unit / cannot remove")
 
     monkeypatch.setattr(uninstall_mod, "IS_WINDOWS", False)
-    monkeypatch.setattr(uninstall_mod, "_service_backend", lambda: _BoomBackend())
+    monkeypatch.setattr(uninstall_mod, "uninstall_service", _boom)
 
     result = runner.invoke(
         app, ["uninstall", "--yes"], env={"WORTHLESS_HOME": str(home_dir.base_dir)}

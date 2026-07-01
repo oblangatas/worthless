@@ -26,7 +26,7 @@ import typer
 from worthless.cli._repo_factory import open_repo
 from worthless.cli.bootstrap import WorthlessHome, acquire_lock
 from worthless.cli.commands.down import _stop_daemon
-from worthless.cli.commands.service import _backend as _service_backend
+from worthless.cli.commands.service import uninstall_service
 from worthless.cli.commands.unlock import (
     _apply_openclaw_unlock,
     _build_oc_restores,
@@ -360,7 +360,7 @@ def _run_uninstall(*, assume_yes: bool, force: bool = False) -> None:
         # (Service-unit lifecycle is WOR-193's — we only call its teardown primitive.)
         if not IS_WINDOWS:
             try:
-                _service_backend().uninstall(home)
+                uninstall_service(home)
             except Exception as exc:  # noqa: BLE001 — best-effort; never block the wipe
                 console.print_warning(f"could not remove the service unit ({exc}); continuing.")
 
