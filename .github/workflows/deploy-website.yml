@@ -2,10 +2,16 @@ name: Deploy website
 
 on:
   pull_request:
+    branches:
+      - main
+      - website-dev
     paths:
       - "website/**"
       - "tests/test_website_publish_safety.py"
       - ".github/workflows/deploy-website.yml"
+      - ".github/workflows/release-sync-check.yml"
+      - "tests/test_deploy_static.py"
+      - "scripts/verify-wless-internal-removed.sh"
   push:
     branches:
       - main
@@ -22,6 +28,9 @@ concurrency:
   group: "github-pages"
   cancel-in-progress: false
 
+env:
+  WEBSITE_RELEASE_SOURCE: 1b88af75acbd254a142d7e335e85f5787bdc76e9
+
 jobs:
   validate:
     name: Validate website
@@ -30,24 +39,88 @@ jobs:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          fetch-depth: 0
           persist-credentials: false
+
+      - name: Validate release source freeze
+        if: github.event_name == 'pull_request' && github.base_ref == 'main'
+        run: |
+          git remote set-branches --add origin website-dev
+          git fetch --no-tags --depth=1 origin website-dev
+          test "$(git rev-parse origin/website-dev)" = "$WEBSITE_RELEASE_SOURCE"
+
+      - name: Validate release source tree
+        if: github.event_name == 'pull_request' && github.base_ref == 'main'
+        run: |
+          rm -rf /tmp/website-release-source
+          mkdir -p /tmp/website-release-source
+          git archive "$WEBSITE_RELEASE_SOURCE:website" | tar -xf - -C /tmp/website-release-source
+          diff -qr /tmp/website-release-source website
+
+      - name: Validate release PR scope
+        if: github.event_name == 'pull_request' && github.base_ref == 'main'
+        run: |
+          git fetch --no-tags origin main
+          git diff --name-only origin/main...HEAD > /tmp/changed-files
+          if grep -Ev '^(website/|tests/test_website_publish_safety.py$|tests/test_deploy_static.py$|scripts/verify-wless-internal-removed\.sh$|\.github/workflows/deploy-website\.yml$|\.github/workflows/release-sync-check\.yml$)' /tmp/changed-files; then
+            echo "Release PR changes files outside the approved website release scope."
+            exit 1
+          fi
 
       - name: Validate static website files
         run: |
+          WEBSITE_VERSION=$(python3 - <<'PY'
+          import re
+          from pathlib import Path
+          text = Path("pyproject.toml").read_text(encoding="utf-8")
+          match = re.search(r'^version = "([^"]+)"', text, re.MULTILINE)
+          if not match:
+              raise SystemExit("pyproject.toml missing project.version")
+          print(match.group(1))
+          PY
+          )
           test -f website/index.html
           test -f website/CNAME
           test -f website/robots.txt
           test -f website/sitemap.xml
           test -f website/llms.txt
+          test -f website/homepage.js
           test -f website/features.html
           test -f website/how-it-works.html
           test -f website/coming-soon.html
           test -f website/memes.html
+          test -f website/privacy.html
+          test -f website/terms.html
+          test -f website/security.html
+          test -f website/license.html
+          test -f website/legal.css
+          test -f website/blog/blog.js
           test -f website/blog/index.html
+          test -f website/red/index.html
+          test -f website/red/red-posts.js
+          test -f website/red/claims.html
+          test -f website/red/incidents.html
+          test -f website/red/security-model.html
+          test -f website/red/posts/post.css
+          test -f website/red/posts/package-before-build.html
+          test -f website/red/posts/bitwarden-cli-npm.html
+          test -f website/red/posts/axios-rat.html
+          test -f website/red/posts/trapdoor.html
+          test -f website/red/posts/shai-hulud.html
+          test -f website/red/posts/github-action-secrets.html
           test -f website/.well-known/security.txt
+          test ! -e website/PROTOCOL.md
+          test ! -e website/install-openclaw.md
+          test ! -e website/news-feed.md
+          test -z "$(find website -name '*.md' -type f -print -quit)"
           grep -qx 'wless.io' website/CNAME
           grep -qx 'Canonical: https://wless.io/.well-known/security.txt' website/.well-known/security.txt
           grep -qx 'Sitemap: https://wless.io/sitemap.xml' website/robots.txt
+          grep -q 'Follow the leak' website/index.html
+          grep -q 'Hosted Worthless' website/index.html
+          grep -q "Beta CLI · v${WEBSITE_VERSION} · runs locally" website/index.html
+          grep -q "Worthless CLI beta · v${WEBSITE_VERSION}" website/index.html
+          grep -q 'Tally' website/privacy.html
 
       - name: Set up uv + Python
         uses: ./.github/actions/setup-uv-python
@@ -59,12 +132,26 @@ jobs:
           uv sync --extra test
           uv run pytest -q tests/test_website_publish_safety.py
 
+      - name: Validate Pages artifact contents
+        run: |
+          tar -cf /tmp/website-preview.tar -C website .
+          tar -tf /tmp/website-preview.tar | grep -qx './.well-known/security.txt'
+          if tar -tf /tmp/website-preview.tar | grep -Eq '(^|/)(\.git|\.github|\.env|\.planning|research|adversarial|planning|superpowers)(/|$)'; then
+            echo "Pages artifact contains a prohibited internal path."
+            exit 1
+          fi
+          if tar -tf /tmp/website-preview.tar | grep -E '\.md$'; then
+            echo "Pages artifact contains public Markdown."
+            exit 1
+          fi
+
       - name: Upload website preview artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: website-preview
           path: website
           if-no-files-found: error
+          include-hidden-files: true
 
   deploy:
     name: Deploy to GitHub Pages
