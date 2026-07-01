@@ -25,6 +25,8 @@ from pathlib import Path
 
 import pytest
 
+from worthless.proxy.config import DEFAULT_SIDECAR_CAPS
+
 pytestmark = pytest.mark.docker
 
 
@@ -130,7 +132,10 @@ def test_container_roundtrip_succeeds_across_uid_boundary(built_image: str) -> N
 
     assert "handshake" in steps, f"handshake step missing.\n{detail}"
     assert steps["handshake"]["ok"] is True
-    assert sorted(steps["handshake"]["caps"]) == ["attest", "open", "seal"]
+    # Assert against the canonical expected set (worthless-l8ef): a hardcoded
+    # list silently drifted when the sidecar gained the ``mac`` cap. Tying the
+    # test to DEFAULT_SIDECAR_CAPS makes test and config impossible to diverge.
+    assert sorted(steps["handshake"]["caps"]) == sorted(DEFAULT_SIDECAR_CAPS)
 
     assert "seal" in steps and steps["seal"]["ok"] is True, detail
     assert steps["seal"]["ct_len"] > 0
