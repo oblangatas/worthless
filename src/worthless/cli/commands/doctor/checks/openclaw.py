@@ -23,12 +23,19 @@ from worthless.openclaw import integration as _oc_integration
 check_id = "openclaw"
 
 
-def _audit_gate_findings() -> list[dict]:
+def _audit_gate_findings(managed_aliases: set[str] | None, proxy_base_url: str) -> list[dict]:
     """Run the secrets audit gate and return doctor findings.
 
     Returns a list of finding dicts describing any exit-73 (plaintext) or
     exit-87 (subprocess failure) conditions that would block ``worthless lock``.
     Returns an empty list when the gate would pass.
+
+    ``managed_aliases`` (this machine's ``shards`` keys) lets the gate recognize
+    worthless's own inert shard-A (WOR-777) so doctor's prediction matches what
+    ``worthless lock`` would actually do — no false "key exposed" alarm on an
+    entry worthless created. ``None`` recognizes nothing (fail-safe).
+    ``proxy_base_url`` host-pins that recognition to the worthless proxy, so an
+    attacker baseUrl on a foreign host is never trusted (WOR-777 / brutus).
     """
     try:
         openclaw_bin = _oc_audit.resolve_openclaw_bin()
@@ -46,7 +53,9 @@ def _audit_gate_findings() -> list[dict]:
         ]
 
     try:
-        _, classification = _oc_audit.run_and_classify(openclaw_bin)
+        _, classification = _oc_audit.run_and_classify(
+            openclaw_bin, managed_aliases=managed_aliases, proxy_base_url=proxy_base_url
+        )
     except _oc_audit.AuditGateError as exc:
         return [
             {
@@ -123,7 +132,13 @@ def run(ctx: CheckContext) -> CheckResult:
     port = resolve_port(None)
     provider_issues = _check_providers(state, healthy, port=port)
 
-    audit_findings = _audit_gate_findings()
+    # WOR-777: snapshot this machine's managed aliases so the audit gate
+    # recognizes worthless's own shard-A (matches what `worthless lock` does).
+    try:
+        managed_aliases: set[str] | None = set(asyncio.run(ctx.repo.list_keys()))
+    except Exception:  # noqa: BLE001 — recognition is best-effort, never blocks the check
+        managed_aliases = None
+    audit_findings = _audit_gate_findings(managed_aliases, f"http://127.0.0.1:{port}")
 
     all_issues = skill_issues + provider_issues
     # Promote plain-string integration issues to the same structured shape as

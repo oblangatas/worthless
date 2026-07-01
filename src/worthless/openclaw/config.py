@@ -383,6 +383,34 @@ def unset_provider(path: Path, provider: str) -> dict[str, Any]:
         return removed if isinstance(removed, dict) else {}
 
 
+def unset_models_json_provider(path: Path, provider: str) -> dict[str, Any]:
+    """Remove a ROOT-level ``providers.<provider>`` entry from an agent models.json.
+
+    models.json is OpenClaw's per-agent runtime PROJECTION — providers live at
+    the document root (``{"providers": {...}}``), NOT nested under ``models.``
+    like openclaw.json. This is the WOR-777 Layer-2 counterpart to
+    :func:`unset_provider`: deleting worthless's stale entry here forces OpenClaw
+    to regenerate it from the (already-rotated) openclaw.json on the next agent
+    turn, instead of merge-preserving the old shard-A.
+
+    Returns the removed entry, or ``{}`` if the file or entry is absent. Other
+    providers are left untouched; the rewrite is atomic and serialized via the
+    same inter-process flock + symlink refusal (F-CFG-15) as
+    :func:`unset_provider`. Raises :class:`OpenclawConfigError` on a symlinked or
+    unreadable existing file (the caller surfaces that as a partial failure).
+    """
+    with _file_lock(path):
+        _refuse_if_symlink(path)
+        data = read_config(path)
+        providers = data.get("providers") if isinstance(data, dict) else None
+        if not isinstance(providers, dict) or provider not in providers:
+            return {}
+
+        removed = providers.pop(provider)
+        _atomic_write_json(path, data)
+        return removed if isinstance(removed, dict) else {}
+
+
 def replace_provider(path: Path, provider: str, entry: dict[str, Any]) -> None:
     """Overwrite ``models.providers.<provider>`` with EXACTLY ``entry``.
 

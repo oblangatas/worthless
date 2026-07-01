@@ -2338,7 +2338,7 @@ class TestOpenClawGateWiredIntoLock:
         effects: .env is untouched (gate-before-write, SR-03)."""
         original_env = env_file.read_text(encoding="utf-8")
 
-        def _blocking_preflight() -> None:
+        def _blocking_preflight(managed_aliases: object, proxy_base_url: object) -> None:
             raise typer.Exit(code=73)
 
         monkeypatch.setattr(
@@ -2365,7 +2365,8 @@ class TestOpenClawGateWiredIntoLock:
         sentinel = object()
         postflight = MagicMock()
         monkeypatch.setattr(
-            "worthless.cli.commands.lock._openclaw_audit_preflight", lambda: sentinel
+            "worthless.cli.commands.lock._openclaw_audit_preflight",
+            lambda managed_aliases, proxy_base_url: sentinel,
         )
         monkeypatch.setattr("worthless.cli.commands.lock._openclaw_audit_postflight", postflight)
 
@@ -2376,4 +2377,5 @@ class TestOpenClawGateWiredIntoLock:
         assert result.exit_code == 0, (
             f"lock failed with gate handle present:\n{result.stdout}\n{result.exception!r}"
         )
-        postflight.assert_called_once_with(sentinel)
+        postflight.assert_called_once()
+        assert postflight.call_args.args[0] is sentinel

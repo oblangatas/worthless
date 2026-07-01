@@ -134,6 +134,21 @@ jobs:
       - name: Run WOR-650 adopt-recognition live test
         run: uv run pytest tests/openclaw/install_incident/test_adopt_recognition_docker.py -v -m "openclaw and docker" --tb=short --timeout=300
 
+      # WOR-777: re-locking a key must reach the OpenClaw RUNTIME, not just
+      # rewrite openclaw.json. A co-located OpenClaw + worthless + mock-upstream
+      # container drives a REAL agent chat: re-lock with a new key, then assert
+      # the mock receives the NEW key and never the old (the rotation guarantee),
+      # and that an exported env key cannot shadow the proxy entry. The image is
+      # built here as a HARD prerequisite so the test can never silently skip
+      # (its skipif checks for worthless-oc-test:local).
+      - name: Build co-located OpenClaw+worthless image (WOR-777 rotation test)
+        run: |
+          uv build --wheel
+          docker build -f tests/openclaw/Dockerfile.oc-worthless -t worthless-oc-test:local dist/
+
+      - name: Run WOR-777 rotation load-bearing test
+        run: uv run pytest tests/openclaw/install_incident/test_rotation_load_bearing.py -v -m "openclaw and docker" --tb=short --timeout=900
+
   # WOR-749 Linux: lock → systemd service → proxied POST → mock upstream gets
   # real key (privileged systemd container). macOS launchd roundtrip stays
   # manual L7 — Keychain + LaunchAgent on shared GHA macOS runners is flaky.
