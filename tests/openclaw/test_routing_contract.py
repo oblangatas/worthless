@@ -259,3 +259,48 @@ def test_openclaw_json_baseurl_is_authoritative_for_routing(stack, case):
         f"mockB(proxy)={b}. OpenClaw routing behavior may have changed for {OPENCLAW_IMAGE} — "
         f"re-verify the lock design against engineering/research/openclaw/routing-behavior.md."
     )
+
+
+def test_wrong_baseurl_misroutes_where_bind_confirmation_cannot_see(stack):
+    """Adversarial (WOR-650, weakest-spot #2): bind-confirmation is a proxy
+    SELF-TEST — it proves the proxy acknowledged a ``/_bind_probe/{alias}`` hit,
+    NOT that OpenClaw's real request routes to the INTENDED upstream. So a
+    baseUrl that's wrong (foreign / typo'd / a left-in-place declined entry)
+    silently routes traffic AWAY from where lock intended, and the self-test
+    probe can't see it. The ONLY thing that catches a wrong-but-reachable
+    baseUrl is an e2e route test like this one.
+
+    Setup: lock INTENDS the proxy = mockB, but ``openclaw.json`` holds a WRONG
+    baseUrl = mockA (the shape a declined adoption leaves behind). Assert the
+    intended proxy (mockB) receives ZERO traffic — the agent turn silently went
+    to mockA instead. This is the concrete demonstration of why the PR's table
+    marks bind-confirmation "self-test, not route."
+    """
+    oc, mock_a, mock_b = stack["oc"], stack["mock_a"], stack["mock_b"]
+    url_a = stack["url_a"]  # the WRONG target; the intended proxy (url_b) is deliberately unused
+
+    _exec(oc, ["sh", "-c", "rm -f /home/node/.openclaw/agents/main/agent/models.json"])
+    _oc(oc, "config", "unset", "models.mode")
+    _oc(oc, "config", "unset", "models.providers.openai")
+
+    model = "openai/gpt-4o"
+    # The WRONG baseUrl: points at mockA (foreign), NOT the intended proxy mockB.
+    prov = {"baseUrl": url_a + "/openai/v1", "api": "openai-completions", "models": []}
+    r = _oc(oc, "config", "set", "models.providers.openai", json.dumps(prov), "--strict-json")
+    assert r.returncode == 0, f"openai provider set failed: {r.stderr}"
+    _oc(oc, "config", "set", "models.providers.openai.apiKey", _high_entropy_key("sk-proj"))
+    _oc(oc, "config", "set", "agents.defaults.model.primary", model)
+    _restart(oc)
+
+    _clear(mock_a)
+    _clear(mock_b)
+    _route_gateway(oc, model)
+    a, b = _hits(mock_a), _hits(mock_b)
+    assert b == 0, (
+        f"a wrong baseUrl must NOT reach the intended proxy (mockB); got mockB={b}. "
+        f"If this fires, routing no longer follows openclaw.json literally for {OPENCLAW_IMAGE}."
+    )
+    assert a >= 1, (
+        f"the turn should have gone to the wrong target (mockA={a}>=1) — proving a wrong baseUrl "
+        f"silently misroutes, exactly the gap bind-confirmation's self-test cannot catch."
+    )
