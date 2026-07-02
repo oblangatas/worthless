@@ -241,9 +241,20 @@ DEP004 = ["pytest"]
 targets = ["src"]
 
 [tool.mutmut]
-paths_to_mutate = [
+# WOR-650: the honesty verdict + per-alias bind-confirmation live in
+# cli/commands/lock.py and proxy/app.py. They were copied (also_copy) but never
+# mutated, so a future operator flip / renamed reason code had no mutation net —
+# these files are now the net's declared scope (renamed from the deprecated
+# paths_to_mutate). NOTE: mutmut 3.x's stats phase collides with this repo's
+# pytest addopts (-n auto + strict markers), so a full `mutmut run` needs
+# reconciliation before it can gate in CI. Until then the enforced net is the
+# hypothesis properties in tests/openclaw/test_lock_bind_confirmation.py plus
+# scripts/mutation_spine_sweep.py (8/8 canonical spine mutations verified killed).
+source_paths = [
     "src/worthless/adapters",
     "src/worthless/crypto",
+    "src/worthless/cli/commands/lock.py",
+    "src/worthless/proxy/app.py",
 ]
 also_copy = [
     "src/worthless/__init__.py",
