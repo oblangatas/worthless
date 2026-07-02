@@ -693,26 +693,18 @@ def test_property_pass_implies_every_alias_strictly_rose(
 
 
 def test_classify_garbage_counters_never_false_pass() -> None:
-    """A buggy or hostile healthz returning non-int / negative per-alias counts
-    must never manufacture a 'pass'. _coerce_counter neutralises each to 0, so
-    the alias reads as not-routing."""
+    """A buggy or hostile healthz returning non-int / negative per-alias AFTER
+    counts must never manufacture a 'pass'. Whether _coerce_counter widens a
+    garbage value to 0 or passes a negative through unchanged (see
+    test_confirm_bind_unit.py::test_coerce_counter_handles_loose_json_shape —
+    negatives pass through by design; delta-classify handles signs), it can
+    never exceed a non-negative 'before', so the alias still reads as
+    not-routing."""
     for after_val in (None, "garbage", True, -5, "-9", [], {}):
         result = lock_mod._classify_bind_per_alias(
             ["o-1"], {"o-1": 0}, {"o-1": after_val}, delta=1, reached=1
         )
         assert result["status"] != "pass", (after_val, result)
-
-
-def test_coerce_counter_clamps_negatives_and_garbage() -> None:
-    """Counters are monotonic from 0; negatives and non-numerics widen to 0 so
-    they can't read as a routing increase."""
-    assert lock_mod._coerce_counter(7) == 7
-    assert lock_mod._coerce_counter("7") == 7
-    assert lock_mod._coerce_counter(-1) == 0
-    assert lock_mod._coerce_counter("-1") == 0
-    assert lock_mod._coerce_counter(True) == 0
-    assert lock_mod._coerce_counter(None) == 0
-    assert lock_mod._coerce_counter("nan") == 0
 
 
 # ---------------------------------------------------------------------------
