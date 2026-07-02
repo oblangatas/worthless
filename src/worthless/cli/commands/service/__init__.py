@@ -7,7 +7,7 @@ import sys
 
 import typer
 
-from worthless.cli.bootstrap import get_home
+from worthless.cli.bootstrap import WorthlessHome, get_home
 from worthless.cli.commands.service import launchd, systemd
 from worthless.cli.commands.service._common import (
     ServiceState,
@@ -27,6 +27,18 @@ def _backend():
     if name == "launchd":
         return launchd
     return systemd
+
+
+def uninstall_service(home: WorthlessHome) -> None:
+    """Remove the installed launchd/systemd unit for *home*.
+
+    Public entrypoint so other commands (e.g. ``worthless uninstall``) can tear
+    down the service unit without reaching into the private ``_backend``. Platform
+    policy stays with the caller: the ``service uninstall`` command refuses on
+    Windows via ``fail_if_windows``, and ``worthless uninstall`` guards on
+    ``IS_WINDOWS`` — there is no unit to remove on Windows.
+    """
+    _backend().uninstall(home)
 
 
 def register_service_commands(app: typer.Typer) -> None:
@@ -98,7 +110,7 @@ def register_service_commands(app: typer.Typer) -> None:
         if not yes and not console.json_mode:
             if not typer.confirm("Remove the worthless user service?", default=False):
                 raise typer.Exit(code=0)
-        _backend().uninstall(home)
+        uninstall_service(home)
         if console.json_mode:
             sys.stdout.write(json.dumps({"installed": False}) + "\n")
         else:

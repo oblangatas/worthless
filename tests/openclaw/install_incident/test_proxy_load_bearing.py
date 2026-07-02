@@ -75,6 +75,12 @@ def _oc(container: str, *args: str, timeout: int = 120) -> subprocess.CompletedP
     return _run(["docker", "exec", container, "node", "openclaw.mjs", *args], timeout=timeout)
 
 
+def _dexec(container: str, cmd: list[str], *, timeout: int = 120) -> subprocess.CompletedProcess:
+    """``docker exec`` with a timeout — the shared ``docker_exec`` helper has
+    none, so a hung ``worthless lock``/``unlock`` would stall the module."""
+    return _run(["docker", "exec", container, *cmd], timeout=timeout)
+
+
 def _wait_oc(container: str, tries: int = 30) -> None:
     for _ in range(tries):
         if _oc(container, "config", "get", "gateway", timeout=30).returncode == 0:
@@ -261,6 +267,173 @@ def test_proxy_is_load_bearing_after_lock(loaded_stack):
     back_turn = _route(oc)
     assert back_turn.returncode == 0, f"agent turn failed after restart: {back_turn.stderr[-400:]}"
     assert len(_captured(mock_port)) >= 1, "proxy did not resume routing after restart"
+
+
+# --------------------------------------------------------------------------- #
+# WOR-791 — a stolen .env replayed AFTER rotation is refused at the proxy door
+# by the decoy tripwire, end-to-end through a real OpenClaw agent. Automated
+# form of the manual GUI proof in ./evidence/: lock a key, retire it (unlock),
+# re-lock so the alias is live again, point OpenClaw at the now-RETIRED shard-A,
+# and drive a real agent turn. The turn must fail AND the proxy must log the
+# decoy hit — proving it was the tripwire, not the commitment-mismatch backstop
+# (both return the same uniform 401 by design, so the log is the only tell).
+# --------------------------------------------------------------------------- #
+@pytest.fixture(scope="module")
+def retired_replay_stack():
+    project = f"wor791-{uuid.uuid4().hex[:8]}"
+    network = f"{project}_openclaw-net"
+    oc = f"{project}-openclaw-driver"
+    proxy = f"{project}-worthless-proxy-1"
+    fake_key = fake_openai_key()
+    alias = _make_alias("openai", fake_key)
+
+    try:
+        _run(
+            ["docker", "compose", "-f", str(COMPOSE_FILE), "-p", project, "up", "-d", "--build"],
+            check=True,
+            timeout=300,
+        )
+        if not wait_healthy(proxy, timeout=120):
+            pytest.fail(f"worthless-proxy not healthy.\n{_run(['docker', 'logs', proxy]).stdout}")
+
+        # Register a (never-reached) upstream, then lock — shard-A to .env.
+        # All setup calls are timed (_dexec) so a hung lock can't stall the module.
+        _dexec(
+            proxy,
+            [
+                "worthless",
+                "providers",
+                "register",
+                "--name",
+                "openai-mock",
+                "--url",
+                "http://mock-upstream:9999/openai/v1",
+                "--protocol",
+                "openai",
+            ],
+            timeout=60,
+        )
+        env = (
+            "OPENAI_API_KEY=" + fake_key + "\nOPENAI_BASE_URL=http://mock-upstream:9999/openai/v1\n"
+        )
+        _dexec(proxy, ["sh", "-c", f"cat > /tmp/.env << 'EOF'\n{env}\nEOF"], timeout=30)  # noqa: S108
+        lock = _dexec(proxy, ["worthless", "lock", "--env", "/tmp/.env"], timeout=120)  # noqa: S108
+        assert lock.returncode == 0, f"lock failed: {lock.stderr}"
+        shard_a = _dexec(
+            proxy, ["sh", "-c", "grep '^OPENAI_API_KEY=' /tmp/.env | cut -d= -f2-"], timeout=30
+        ).stdout.strip()
+        assert shard_a and shard_a != fake_key, "lock did not replace the key with shard-A"
+
+        # Boot OpenClaw; wire its provider to the proxy alias with this shard-A.
+        _run(
+            [
+                "docker",
+                "run",
+                "-d",
+                "--name",
+                oc,
+                "--network",
+                network,
+                "-e",
+                "OPENCLAW_ACCEPT_TERMS=yes",
+                "--user",
+                "node",
+                OPENCLAW_IMAGE,
+            ],
+            check=True,
+        )
+        _wait_oc(oc)
+        prov = {
+            "baseUrl": f"http://worthless-proxy:8787/{alias}/v1",
+            "api": "openai-completions",
+            "models": [],
+        }
+        _oc(oc, "config", "set", "models.providers.openai", json.dumps(prov), "--strict-json")
+        _oc(oc, "config", "set", "models.providers.openai.apiKey", shard_a)
+        _oc(oc, "config", "set", "agents.defaults.model.primary", _MODEL)
+
+        # ROTATE: unlock retires this shard-A; re-lock makes the alias live again
+        # with a fresh shard-A. OpenClaw still holds the OLD (retired) one — the
+        # stolen-old-.env replay an attacker would attempt.
+        unlocked = _dexec(proxy, ["worthless", "unlock", "--env", "/tmp/.env"], timeout=120)  # noqa: S108
+        assert unlocked.returncode == 0, f"unlock failed: {unlocked.stderr}"
+        relocked = _dexec(proxy, ["worthless", "lock", "--env", "/tmp/.env"], timeout=120)  # noqa: S108
+        assert relocked.returncode == 0, f"re-lock failed: {relocked.stderr}"
+        # Prove the rotation actually moved the secret: the freshly-locked shard-A
+        # must DIFFER from the retired one OpenClaw still holds. Otherwise a
+        # same-split regeneration bug would make the decoy reject the *live* key
+        # and this test would celebrate that catastrophe as a pass.
+        new_shard_a = _dexec(
+            proxy, ["sh", "-c", "grep '^OPENAI_API_KEY=' /tmp/.env | cut -d= -f2-"], timeout=30
+        ).stdout.strip()
+        assert new_shard_a and new_shard_a != shard_a, (
+            "re-lock did not rotate shard-A — the retired token is still the live key"
+        )
+
+        # Restart the proxy so it preloads the now-populated retired_decoys set
+        # (also exercises the startup-preload path), and OpenClaw to drop caches.
+        _run(["docker", "restart", proxy], check=True, timeout=60)
+        assert wait_healthy(proxy, timeout=120), "proxy did not recover after restart"
+        _run(["docker", "restart", oc], check=True, timeout=60)
+        _wait_oc(oc)
+
+        yield {"oc": oc, "proxy": proxy, "alias": alias, "shard_a": shard_a}
+    finally:
+        # Nest so the compose teardown runs even if driver removal raises
+        # (e.g. timeout) — otherwise the stack leaks in CI.
+        try:
+            _run(["docker", "rm", "-f", oc], timeout=60)
+        finally:
+            _run(
+                [
+                    "docker",
+                    "compose",
+                    "-f",
+                    str(COMPOSE_FILE),
+                    "-p",
+                    project,
+                    "down",
+                    "-v",
+                    "--remove-orphans",
+                ],
+                timeout=90,
+            )
+
+
+def test_replayed_retired_shard_a_refused_by_decoy(retired_replay_stack):
+    """A real OpenClaw agent replaying a RETIRED shard-A is refused at the proxy
+    door, and the proxy logs the decoy hit (WOR-791).
+
+    The agent turn must fail (the stolen key never reconstructs) AND the proxy
+    must log ``decoy bearer token detected`` — proving the *tripwire* fired
+    before reconstruction, not the commitment-mismatch backstop. Both return the
+    same uniform 401 by design (anti-enumeration), so the log line is the only
+    discriminator. This is the CI form of the manual GUI proof in ./evidence/.
+    """
+    oc = retired_replay_stack["oc"]
+    proxy = retired_replay_stack["proxy"]
+    alias = retired_replay_stack["alias"]
+
+    # Baseline the proxy log so we assert only on what THIS agent turn produces,
+    # not on decoy hits from any earlier traffic in the container's history.
+    before = _run(["docker", "logs", proxy])
+
+    turn = _route(oc)
+    assert turn.returncode != 0, (
+        "agent turn SUCCEEDED while presenting a RETIRED shard-A — the decoy "
+        f"tripwire failed to refuse the replay.\n{turn.stdout[-400:]}"
+    )
+
+    after = _run(["docker", "logs", proxy])
+    delta = after.stdout[len(before.stdout) :] + after.stderr[len(before.stderr) :]
+    # Assert the decoy line and THIS alias co-occur on the same log record — a
+    # bare "decoy fired somewhere" + "alias appears somewhere" pair would pass
+    # even if the tripwire fired for a different alias. The proxy emits both in
+    # one statement: `decoy bearer token detected for alias '<alias>'`.
+    assert f"decoy bearer token detected for alias '{alias}'" in delta, (
+        "proxy did NOT log a decoy detection for THIS alias's replayed retired "
+        f"shard-A — the 401 may be the commitment backstop, not the tripwire.\n{delta[-800:]}"
+    )
 
 
 # --------------------------------------------------------------------------- #

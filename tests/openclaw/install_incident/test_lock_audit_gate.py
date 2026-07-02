@@ -1466,3 +1466,69 @@ class TestScanOutputPathsSanitised:
         (category Lo) are NOT stripped -- only control/format/separator chars."""
         rtl_name = "סוד.env"  # Hebrew letters, a valid filename
         assert sanitise_for_message(rtl_name) == rtl_name
+
+
+class TestSanitiseCategoryHardening:
+    """worthless-1tbt: sanitise_for_message strips by Unicode CATEGORY
+    (Cc/Cf/Zl/Zp), not a fixed code-point list. These pin the gaps the old
+    fixed-range regex left through (FAIL on the regex, pass on the category
+    filter) plus the false-positive guards that must hold either way.
+    Code points are built with chr() so no invisible char lives in the source.
+    """
+
+    # Invisible format/control chars the OLD regex (max coverage U+FEFF, plus a
+    # few hand-added points) leaves through but a terminal/LLM can act on.
+    GAP_CODEPOINTS = [
+        (0x00AD, "SOFT HYPHEN"),
+        (0x2061, "FUNCTION APPLICATION"),
+        (0x2064, "INVISIBLE PLUS"),
+        (0x206A, "INHIBIT SYMMETRIC SWAPPING"),
+        (0x206F, "NOMINAL DIGIT SHAPES"),
+        (0xFFF9, "INTERLINEAR ANNOTATION ANCHOR"),
+        (0xE0001, "LANGUAGE TAG"),
+        (0xE0041, "TAG LATIN CAPITAL A"),
+    ]
+
+    @pytest.mark.parametrize("cp,name", GAP_CODEPOINTS)
+    def test_gap_codepoint_stripped(self, cp: int, name: str) -> None:
+        ch = chr(cp)
+        assert sanitise_for_message(f"a{ch}b") == "ab", f"{name} (U+{cp:04X}) leaked"
+
+    def test_strict_superset_of_old_regex(self) -> None:
+        """No regression: every code point the old regex stripped is still stripped."""
+        old_stripped = (
+            set(range(0x00, 0x20))
+            | {0x7F}
+            | set(range(0x80, 0xA0))
+            | {0x061C}
+            | set(range(0x200B, 0x2010))
+            | set(range(0x2028, 0x202F))
+            | {0x2060}
+            | set(range(0x2066, 0x206A))
+            | {0xFEFF}
+        )
+        structural = {0x09, 0x0A, 0x0D}  # tab/newlines: both impls strip; fine for 1-line msgs
+        leaked = [
+            hex(cp)
+            for cp in old_stripped - structural
+            if sanitise_for_message(f"x{chr(cp)}y") != "xy"
+        ]
+        assert not leaked, f"category filter misses what the regex stripped: {leaked}"
+
+    def test_rtl_letters_preserved(self) -> None:
+        """FALSE-POSITIVE GUARD: Hebrew/Arabic *letters* (cat Lo) survive intact."""
+        for name in ("סוד.env", "مفتاح.txt"):
+            assert sanitise_for_message(name) == name
+
+    def test_visible_scripts_preserved(self) -> None:
+        for s in ("café", "日本語", "emoji-😀", "naïve"):
+            assert sanitise_for_message(s) == s
+
+    def test_nbsp_and_normal_space_preserved(self) -> None:
+        """Zs spaces (NBSP U+00A0, normal) are separators, not control/format."""
+        assert sanitise_for_message("a b c") == "a b c"
+
+    def test_idempotent(self) -> None:
+        s = f"x{chr(0x202E)}{chr(0x00AD)}{chr(0xE0001)}y"
+        once = sanitise_for_message(s)
+        assert sanitise_for_message(once) == once

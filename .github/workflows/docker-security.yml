@@ -10,6 +10,7 @@ on:
       - 'tests/test_docker_e2e.py'
       - 'tests/test_openclaw_e2e.py'
       - 'tests/openclaw/**'
+      - 'tests/docker/test_container_smoke.py'
       - 'tests/openclaw/install_incident/test_proxy_load_bearing.py'
       - 'src/worthless/cli/commands/lock.py'
       - 'src/worthless/cli/commands/service/**'
@@ -27,6 +28,7 @@ on:
       - 'tests/test_docker_e2e.py'
       - 'tests/test_openclaw_e2e.py'
       - 'tests/openclaw/**'
+      - 'tests/docker/test_container_smoke.py'
       # WOR-621 F1/F7 load-bearing claim — any change here must re-prove
       # "kill proxy → OpenClaw agent reaches nothing" end-to-end.
       - 'tests/openclaw/install_incident/test_proxy_load_bearing.py'
@@ -113,6 +115,9 @@ jobs:
         run: uv run pytest tests/test_docker_e2e.py -v -m docker --tb=short
         env:
           WORTHLESS_DOCKER_IMAGE: worthless-proxy:test
+
+      - name: Run sidecar smoke test (handshake caps — worthless-l8ef)
+        run: uv run pytest tests/docker/test_container_smoke.py -v -m docker --tb=short
 
       - name: Run OpenClaw/Compose E2E tests
         run: uv run pytest tests/test_openclaw_e2e.py -v -m openclaw --tb=short --timeout=360
