@@ -16,7 +16,10 @@ blocking.  These tests are RED until ``recognize_managed_providers`` and the
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+
+import pytest
 
 from worthless.openclaw.audit import (
     AuditFinding,
@@ -225,6 +228,17 @@ class TestRecognizeManagedProviders:
             encoding="utf-8",
         )
         assert recognize_managed_providers([str(mj)], {"openai-32c28ff4"}, PROXY) == set()
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="named pipes are POSIX-only")
+    @pytest.mark.timeout(10)
+    def test_named_pipe_is_skipped_not_hung(self, tmp_path: Path) -> None:
+        """SECURITY (brutus): a FIFO planted at a scanned path must never be
+        read — with no writer, read_text() blocks forever, hanging worthless
+        lock's pre-flight audit gate indefinitely. Mirrors the existing
+        snapshot_hashes guard."""
+        fifo = tmp_path / "models.json"
+        os.mkfifo(fifo)
+        assert recognize_managed_providers([str(fifo)], {"openai-32c28ff4"}, PROXY) == set()
 
     def test_missing_file_is_skipped(self, tmp_path: Path) -> None:
         """A path in filesScanned that does not exist is skipped, not an error."""

@@ -1277,7 +1277,14 @@ def _apply_lock_neutralize_models_json(
     openclaw_dir = config_path.parent
     for mj_path in _agent_models_json_paths(openclaw_dir, env):
         try:
+            # Never block on a FIFO/device/socket planted at an agent path — it
+            # can't be a real projection, and read_config would hang forever.
+            # Mirrors audit.recognize_managed_providers / snapshot_hashes.
+            if mj_path.exists() and not stat.S_ISREG(mj_path.stat().st_mode):
+                continue
             data = _config_mod.read_config(mj_path)
+        except OSError:
+            continue  # stat probe vanished/unreadable -> nothing to rotate
         except OpenclawConfigError as exc:
             events.append(
                 OpenclawIntegrationEvent(

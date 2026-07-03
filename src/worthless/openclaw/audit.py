@@ -403,6 +403,11 @@ def recognize_managed_providers(
     recognized: set[tuple[str, str]] = set()
     for path_str in files_scanned:
         try:
+            # Never block on a FIFO/device/socket planted at a scanned path — it
+            # can't be a real projection, and read_text would hang forever.
+            # Mirrors the guard in snapshot_hashes.
+            if not stat.S_ISREG(Path(path_str).stat().st_mode):
+                continue
             data = json.loads(Path(path_str).read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue

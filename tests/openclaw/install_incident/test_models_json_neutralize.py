@@ -15,6 +15,7 @@ RED until ``config.unset_models_json_provider`` and
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -162,6 +163,22 @@ class TestNeutralizeModelsJson:
             _config_path(oc), PROXY, ["openai"], events, env={"OPENCLAW_AGENT_DIR": str(custom)}
         )
         assert "openai" not in json.loads((custom / "models.json").read_text())["providers"]
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="named pipes are POSIX-only")
+    @pytest.mark.timeout(10)
+    def test_named_pipe_is_skipped_not_hung(self, tmp_path: Path) -> None:
+        """SECURITY (brutus): a FIFO planted at an agent models.json path must
+        never be read — with no writer, read_config() blocks forever, hanging
+        worthless lock indefinitely. Treated as absent (silent), matching a
+        genuinely-missing file — a FIFO can never be a real projection worthless
+        itself wrote."""
+        oc = _openclaw_dir(tmp_path)
+        fifo = oc / "agents" / "main" / "agent" / "models.json"
+        fifo.parent.mkdir(parents=True, exist_ok=True)
+        os.mkfifo(fifo)
+        events: list[OpenclawIntegrationEvent] = []
+        _apply_lock_neutralize_models_json(_config_path(oc), PROXY, ["openai"], events)
+        assert events == []
 
     def test_uncleanable_symlinked_models_json_emits_error_event(self, tmp_path: Path) -> None:
         """An EXISTING but uncleanable models.json (symlink attack vector) is a
