@@ -8,6 +8,7 @@ on:
   pull_request:
     paths:
       - 'docs/**'
+      - 'public/**'
       - 'src/content.config.ts'
       - 'astro.config.mjs'
       - 'package.json'
