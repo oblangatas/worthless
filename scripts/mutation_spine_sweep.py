@@ -96,7 +96,7 @@ def _dirty(rel: str) -> bool:
     return subprocess.run(["git", "diff", "--quiet", "--", rel], cwd=ROOT).returncode != 0
 
 
-def _run_fast() -> int:
+def _run_fast() -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
             "uv",
@@ -114,7 +114,7 @@ def _run_fast() -> int:
         capture_output=True,
         text=True,
         timeout=600,
-    ).returncode
+    )
 
 
 def main() -> int:
@@ -133,12 +133,22 @@ def main() -> int:
             continue
         path.write_text(src.replace(old, new, 1))
         try:
-            rc = _run_fast()
+            try:
+                proc = _run_fast()
+            except subprocess.TimeoutExpired:
+                proc = None
         finally:
             subprocess.run(["git", "checkout", "--", rel], cwd=ROOT, check=True)
-        status = "KILLED" if rc != 0 else "SURVIVED"
+        status = "TIMEOUT" if proc is None else ("KILLED" if proc.returncode != 0 else "SURVIVED")
         results.append((label, status))
         print(f"{status:9} {label}")
+        if status != "KILLED":
+            # Surface the suite's own output so a SURVIVED/TIMEOUT result is
+            # diagnosable without re-running the mutation by hand.
+            if proc:
+                print(f"{proc.stdout[-2000:]}{proc.stderr[-2000:]}")
+            else:
+                print("(timed out; no output captured)")
 
     bad = [lbl for lbl, s in results if s != "KILLED"]
     print(f"\n=== {len(results) - len(bad)}/{len(results)} mutations KILLED ===")
