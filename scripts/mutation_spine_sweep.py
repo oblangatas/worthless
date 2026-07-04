@@ -132,11 +132,16 @@ def main() -> int:
             print(f"BAD-ANCHOR({src.count(old)}) {label}")
             continue
         path.write_text(src.replace(old, new, 1))
+        proc = None
+        timeout_tail = None
         try:
-            try:
-                proc = _run_fast()
-            except subprocess.TimeoutExpired:
-                proc = None
+            proc = _run_fast()
+        except subprocess.TimeoutExpired as exc:
+            # TimeoutExpired still carries whatever it captured before the
+            # kill (capture_output=True) — keep it so a TIMEOUT is
+            # diagnosable too, not just a static placeholder.
+            out, err = (exc.stdout or "")[-2000:], (exc.stderr or "")[-2000:]
+            timeout_tail = f"STDOUT:\n{out}\nSTDERR:\n{err}"
         finally:
             subprocess.run(["git", "checkout", "--", rel], cwd=ROOT, check=True)
         status = "TIMEOUT" if proc is None else ("KILLED" if proc.returncode != 0 else "SURVIVED")
@@ -146,9 +151,9 @@ def main() -> int:
             # Surface the suite's own output so a SURVIVED/TIMEOUT result is
             # diagnosable without re-running the mutation by hand.
             if proc:
-                print(f"{proc.stdout[-2000:]}{proc.stderr[-2000:]}")
+                print(f"STDOUT:\n{proc.stdout[-2000:]}\nSTDERR:\n{proc.stderr[-2000:]}")
             else:
-                print("(timed out; no output captured)")
+                print(timeout_tail)
 
     bad = [lbl for lbl, s in results if s != "KILLED"]
     print(f"\n=== {len(results) - len(bad)}/{len(results)} mutations KILLED ===")
