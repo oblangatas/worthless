@@ -65,9 +65,10 @@ from typer.testing import CliRunner
 
 from worthless.cli.app import app
 from worthless.cli.bootstrap import WorthlessHome
+from worthless.cli.commands.lock import _make_alias
 from worthless.cli.errors import ErrorCode
 
-from tests.helpers import fake_openai_key
+from tests.helpers import fake_key, fake_openai_key
 
 runner = CliRunner()
 
@@ -303,3 +304,249 @@ def test_idempotent_relock_with_matching_db_row_is_not_refused(
     )
     assert second.exit_code != ErrorCode.ENV_ALREADY_LOCKED.value
     assert _checksum(env_file) == pre_sum, ".env mutated on idempotent re-lock"
+
+
+# ---------------------------------------------------------------------------
+# WOR-798 — re-lock must pick up a corrected upstream base_url, not keep the
+# stale one from the first lock (lock.py:643 used
+# `db_shard.base_url or upstream_base_url`, so the `or` kept any pre-existing
+# stored value even when a freshly-resolved, corrected URL was available).
+# ---------------------------------------------------------------------------
+
+
+def test_relock_picks_up_corrected_upstream_base_url(
+    home_dir: WorthlessHome,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Re-lock with a corrected *_BASE_URL must overwrite the stale DB row,
+    not silently keep the URL from the first lock (bug: lock.py:643 used
+    `db_shard.base_url or upstream_base_url`).
+    """
+    # `providers register` resolves its write path via `Path.home()`, not
+    # `WORTHLESS_HOME` — pin HOME to the same tmp root `home_dir` uses so the
+    # registration below can't touch the real developer `~/.worthless`.
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    # detect_provider() keys off the key's own prefix, not the env var name —
+    # an OpenRouter-shaped key is needed so detected_provider == "openrouter".
+    key = fake_key("sk-or-v1-")
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        f"OPENROUTER_API_KEY={key}\nOPENROUTER_BASE_URL=https://openrouter.ai/api/v1\n"
+    )
+    first = runner.invoke(
+        app,
+        ["lock", "--env", str(env_file)],
+        env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+    )
+    assert first.exit_code == 0, first.output
+
+    # Register a second, corrected upstream and point the .env at it, keeping
+    # the same key value so lock treats it as a re-lock of the same alias.
+    registered = runner.invoke(
+        app,
+        [
+            "providers",
+            "register",
+            "--name",
+            "openrouter-eu",
+            "--url",
+            "https://eu.openrouter.ai/api/v1",
+            "--protocol",
+            "openai",
+        ],
+        env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+    )
+    assert registered.exit_code == 0, registered.output
+
+    env_file.write_text(
+        f"OPENROUTER_API_KEY={key}\nOPENROUTER_BASE_URL=https://eu.openrouter.ai/api/v1\n"
+    )
+    second = runner.invoke(
+        app,
+        ["lock", "--env", str(env_file)],
+        env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+    )
+    assert second.exit_code == 0, second.output
+
+    alias = _make_alias("openai", key)
+    conn = sqlite3.connect(str(home_dir.base_dir / "worthless.db"))
+    try:
+        row = conn.execute("SELECT base_url FROM shards WHERE key_alias = ?", (alias,)).fetchone()
+    finally:
+        conn.close()
+    assert row is not None, f"no shards row for alias {alias!r}"
+    assert row[0] == "https://eu.openrouter.ai/api/v1", (
+        f"re-lock did not pick up corrected base_url; DB still has {row[0]!r}"
+    )
+
+
+def test_relock_with_unregistered_base_url_fails_loud_not_stale(
+    home_dir: WorthlessHome,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Edge case 1: second lock's *_BASE_URL points at an unregistered URL.
+
+    `_resolve_upstream_base_url` already raises INVALID_INPUT for this
+    (lock.py:196-202) — confirm re-lock fails loud exactly like fresh-enroll,
+    and the fix introduces no new stale-fallback path around that raise.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    key = fake_key("sk-or-v1-")
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        f"OPENROUTER_API_KEY={key}\nOPENROUTER_BASE_URL=https://openrouter.ai/api/v1\n"
+    )
+    first = runner.invoke(
+        app,
+        ["lock", "--env", str(env_file)],
+        env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+    )
+    assert first.exit_code == 0, first.output
+
+    alias = _make_alias("openai", key)
+    conn = sqlite3.connect(str(home_dir.base_dir / "worthless.db"))
+    try:
+        pre_base_url = conn.execute(
+            "SELECT base_url FROM shards WHERE key_alias = ?", (alias,)
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    env_file.write_text(
+        f"OPENROUTER_API_KEY={key}\n"
+        "OPENROUTER_BASE_URL=https://not-a-registered-upstream.example.com/v1\n"
+    )
+    second = runner.invoke(
+        app,
+        ["lock", "--env", str(env_file)],
+        env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+    )
+    # `WorthlessError.exit_code` defaults to 1 unless the raise site opts into
+    # a specific process exit code (`ENV_ALREADY_LOCKED` does; the unknown-
+    # upstream-URL raise in `_resolve_upstream_base_url` does not) — so "fails
+    # loud exactly like fresh-enroll" means non-zero exit + the WRTLS-112
+    # message, not a specific numeric exit code.
+    assert second.exit_code != 0, (
+        f"expected re-lock to fail loud on an unregistered upstream URL, "
+        f"got exit 0\n{second.output}"
+    )
+    assert f"WRTLS-{ErrorCode.INVALID_INPUT.value}" in second.output, (
+        f"failure must be the INVALID_INPUT unknown-upstream-URL error, "
+        f"not something else:\n{second.output}"
+    )
+
+    conn = sqlite3.connect(str(home_dir.base_dir / "worthless.db"))
+    try:
+        post_base_url = conn.execute(
+            "SELECT base_url FROM shards WHERE key_alias = ?", (alias,)
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert post_base_url == pre_base_url, (
+        "a refused re-lock must not mutate the stored base_url — "
+        f"was {pre_base_url!r}, now {post_base_url!r}"
+    )
+
+
+def test_relock_without_base_url_var_falls_back_to_registry_default(
+    home_dir: WorthlessHome,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Edge case 2: second lock's .env has no *_BASE_URL at all (var deleted).
+
+    Resolution falls back to the registry default. Re-lock must correctly
+    overwrite a previously-custom base_url back to the registry default
+    rather than keeping the stale custom value.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    key = fake_key("sk-or-v1-")
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        f"OPENROUTER_API_KEY={key}\nOPENROUTER_BASE_URL=https://eu.openrouter.ai/api/v1\n"
+    )
+    registered = runner.invoke(
+        app,
+        [
+            "providers",
+            "register",
+            "--name",
+            "openrouter-eu2",
+            "--url",
+            "https://eu.openrouter.ai/api/v1",
+            "--protocol",
+            "openai",
+        ],
+        env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+    )
+    assert registered.exit_code == 0, registered.output
+
+    first = runner.invoke(
+        app,
+        ["lock", "--env", str(env_file)],
+        env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+    )
+    assert first.exit_code == 0, first.output
+
+    # Var deleted entirely — no *_BASE_URL left in the .env.
+    env_file.write_text(f"OPENROUTER_API_KEY={key}\n")
+    second = runner.invoke(
+        app,
+        ["lock", "--env", str(env_file)],
+        env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+    )
+    assert second.exit_code == 0, second.output
+
+    alias = _make_alias("openai", key)
+    conn = sqlite3.connect(str(home_dir.base_dir / "worthless.db"))
+    try:
+        row = conn.execute("SELECT base_url FROM shards WHERE key_alias = ?", (alias,)).fetchone()
+    finally:
+        conn.close()
+    assert row[0] == "https://openrouter.ai/api/v1", (
+        "re-lock with the *_BASE_URL var removed must fall back to the "
+        f"registry default, not keep the stale custom URL; got {row[0]!r}"
+    )
+
+
+def test_relock_with_unchanged_base_url_is_a_column_noop(
+    home_dir: WorthlessHome,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Edge case 3 (regression guard): a re-lock with an unchanged base_url
+    is a no-op on that column — companion assertion, not new behavior.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    key = fake_key("sk-or-v1-")
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        f"OPENROUTER_API_KEY={key}\nOPENROUTER_BASE_URL=https://openrouter.ai/api/v1\n"
+    )
+    first = runner.invoke(
+        app,
+        ["lock", "--env", str(env_file)],
+        env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+    )
+    assert first.exit_code == 0, first.output
+
+    second = runner.invoke(
+        app,
+        ["lock", "--env", str(env_file)],
+        env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+    )
+    assert second.exit_code == 0, second.output
+
+    alias = _make_alias("openai", key)
+    conn = sqlite3.connect(str(home_dir.base_dir / "worthless.db"))
+    try:
+        row = conn.execute("SELECT base_url FROM shards WHERE key_alias = ?", (alias,)).fetchone()
+    finally:
+        conn.close()
+    assert row[0] == "https://openrouter.ai/api/v1"
