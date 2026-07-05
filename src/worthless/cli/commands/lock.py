@@ -851,6 +851,70 @@ def _coerce_counter(value: object) -> int:
     return 0
 
 
+def _classify_bind_per_alias(
+    aliases: list[str],
+    before_aliases: dict[str, object],
+    after_aliases: dict[str, object],
+    *,
+    delta: int,
+    reached: int,
+) -> dict[str, object]:
+    """WOR-650 follow-up: per-alias bind verdict.
+
+    Pass iff EVERY confirmed alias's own probe count moved — so on a
+    multi-provider lock a tick for one alias can't be mistaken for another's
+    (the global counter can't tell them apart). Honest scope: this proves the
+    proxy acknowledged a probe for each alias, NOT that each provider's rewrite
+    is a working route — the probe hits ``/_bind_probe``, not the real
+    ``/{alias}/v1`` path, so a typo'd baseUrl could still pass here; end-to-end
+    routing is proven by the live e2e tests. Mirrors :func:`_confirm_bind`'s
+    skip reasons so the per-alias path classifies restart / unreachable
+    identically; the only new verdict is a ``fail`` that names the aliases
+    whose probe did NOT register.
+    """
+    if delta < 0:
+        # Proxy bounced between the before/after reads (its in-memory counters
+        # reset to 0). That's inconclusive REGARDLESS of per-alias staleness —
+        # the restart signal wins, so we never manufacture a 'fail' against a
+        # moving target. Without this, an alias mix of previously-counted +
+        # fresh entries would fall through to 'fail' on a bounced proxy.
+        return {
+            "status": "skipped",
+            "reason": "proxy_restarted",
+            "delta": delta,
+            "aliases": aliases,
+            "reached": reached,
+        }
+    not_routing = [
+        a
+        for a in aliases
+        if _coerce_counter(after_aliases.get(a)) <= _coerce_counter(before_aliases.get(a))
+    ]
+    if not not_routing:
+        return {"status": "pass", "delta": delta, "aliases": aliases, "reached": reached}
+    if len(not_routing) == len(aliases):
+        # Nothing ticked and the proxy didn't restart — if nothing even reached
+        # it, that's inconclusive (same shape _confirm_bind uses for the global
+        # counter so callers/sentinel readers see consistent reasons).
+        if reached == 0:
+            return {
+                "status": "skipped",
+                "reason": "synthetic_unreachable",
+                "delta": delta,
+                "aliases": aliases,
+                "reached": reached,
+            }
+    # Proxy was reachable but one or more confirmed aliases didn't tick — those
+    # rewrites aren't routing. The silent-bypass class we refuse to pass.
+    return {
+        "status": "fail",
+        "delta": delta,
+        "aliases": aliases,
+        "reached": reached,
+        "not_routing": not_routing,
+    }
+
+
 def _confirm_bind(
     planned: list[_PlannedUpdate],
     *,
@@ -956,7 +1020,22 @@ def _confirm_bind(
 
     delta = after - before
 
-    # Tri-state classify:
+    # WOR-650 follow-up: when the proxy reports per-alias counts, base the
+    # verdict on THEM — the global delta only proves "a probe reached the
+    # proxy", not "THIS alias's rewrite routes". Older proxies omit the field;
+    # fall back to the global tri-state below.
+    before_aliases = before_health.get("bind_probe_aliases")
+    after_aliases = after_health.get("bind_probe_aliases")
+    if isinstance(before_aliases, dict) and isinstance(after_aliases, dict):
+        return _classify_bind_per_alias(
+            aliases,
+            before_aliases,
+            after_aliases,
+            delta=delta,
+            reached=reached,
+        )
+
+    # Tri-state classify (global counter — older proxy without per-alias data):
     # * delta > 0                    → pass (counter moved; the request reached
     #                                  the counter via the rewritten alias path)
     # * reached == 0 AND delta == 0  → skipped: every fire failed at the
@@ -1023,12 +1102,32 @@ def _finalise_openclaw_success(
     ``status``/``openclaw`` state, prints the user-visible result block,
     and returns the exit code (0 on success, 91 on bind-fail).
 
+    WOR-650 follow-up: if an unrecognized entry was left in place (adoption
+    declined / DB snapshot unavailable without --adopt), the header is
+    ``[WARN]`` not ``[OK]`` and the sentinel is DEGRADED — but the exit code
+    stays 0 (the interactive user made that choice; it isn't a lock error).
+
     Extracted so ``_apply_openclaw`` stays under the project's xenon
     complexity ceiling — the bind-confirmation classify branches push it
     over otherwise.
     """
+    # WOR-650 follow-up: an entry left in place (interactive decline, or DB
+    # snapshot unavailable without --adopt) means lock REWIRED .env to the
+    # proxy but did NOT neutralize a foreign openclaw.json entry — that
+    # provider's agent traffic still escapes Worthless. Both skip paths append
+    # the same reason, so it's the one honest signal that something survived.
+    # The output must NOT read as a clean [OK] when this happened.
+    adoption_skipped = any(
+        reason == "unrecognized_not_adopted" for _, reason in result.providers_skipped
+    )
+
     if not quiet:
-        console.print_success("[OK] OpenClaw integration:")
+        if adoption_skipped:
+            console.print_warning(
+                "[WARN] OpenClaw integration incomplete — an entry was left in place:"
+            )
+        else:
+            console.print_success("[OK] OpenClaw integration:")
         for provider_name in result.providers_set:
             console.print_hint(f"   • ~/.openclaw/openclaw.json — added provider '{provider_name}'")
         if result.skill_installed:
@@ -1042,10 +1141,19 @@ def _finalise_openclaw_success(
             if event.code in _ADOPTION_EVENT_CODES:
                 console.print_hint(f"   • {event.detail}")
 
-    # WOR-658: prove the rewrite actually routes. A "fail" verdict here
-    # means lock-core succeeded on disk but the OpenClaw entry isn't
-    # routing through the proxy — silent-bypass class (WOR-514).
-    bind_confirmation = _confirm_bind(planned, host=proxy_host, port=resolve_port(None))
+    # WOR-658: fire a self-test probe at the proxy for each written alias. A
+    # "fail" here means the proxy didn't acknowledge the probe — the entry
+    # almost certainly isn't reaching a live worthless proxy. Honest scope:
+    # this checks proxy reachability + per-alias acknowledgment, NOT that
+    # OpenClaw's rewrite is a working route (see _classify_bind_per_alias); the
+    # live e2e tests prove actual routing.
+    #
+    # WOR-650 follow-up: confirm ONLY the providers we actually wrote. A
+    # skipped (unadopted) provider's entry still points elsewhere, so probing
+    # its alias would tick the counter and read as a (misleading) "pass".
+    set_providers = set(result.providers_set)
+    confirmed_planned = [p for p in planned if p.provider in set_providers]
+    bind_confirmation = _confirm_bind(confirmed_planned, host=proxy_host, port=resolve_port(None))
     # Bind-fail is a partial-success state at the trust layer:
     # lock-core wrote the .env + DB, but the OpenClaw config isn't
     # routing. ``openclaw="failed"`` (paired with ``status="partial"``)
@@ -1053,10 +1161,16 @@ def _finalise_openclaw_success(
     # DEGRADED across sessions — the very failure mode WOR-658 was
     # built to make visible.
     bind_failed = bind_confirmation["status"] == "fail"
+    # DEGRADED when routing couldn't be proven (bind-fail) OR an entry was left
+    # in place (adoption skip). Either way the protection is incomplete, so the
+    # cross-session sentinel must say so — the same partial/failed pair
+    # ``is_partial()`` already recognises, so no schema change. ``worthless
+    # status`` then reports "your agent traffic may NOT be gated" until cleared.
+    degraded = bind_failed or adoption_skipped
     _write_lock_sentinel(
         home,
-        status="partial" if bind_failed else "ok",
-        openclaw="failed" if bind_failed else "ok",
+        status="partial" if degraded else "ok",
+        openclaw="failed" if degraded else "ok",
         alias_count=len(result.providers_set),
         events=tuple(e.to_dict() for e in result.events),
         bind_confirmation=bind_confirmation,

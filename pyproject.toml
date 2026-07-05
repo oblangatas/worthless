@@ -161,6 +161,7 @@ markers = [
     "docker: Docker container end-to-end tests (requires running Docker daemon)",
     "e2e: end-to-end smoke tests — full lifecycle (lock, proxy, healthz)",
     "openclaw: OpenClaw integration tests (requires Docker + network pull)",
+    "playwright: browser-driven GUI tests (requires playwright + a Chromium build)",
     "real_ipc: opt out of the autouse FakeIPCSupervisor injection — these tests bring their own real or subprocess sidecar (WOR-309 Phase 5)",
     "user_flow: end-to-end user-flow tests — real keyring, real CLI, real fs. Run with `pytest -m user_flow`. See Linear WOR-439 for the full suite scope.",
 ]
@@ -241,9 +242,20 @@ DEP004 = ["pytest"]
 targets = ["src"]
 
 [tool.mutmut]
-paths_to_mutate = [
+# WOR-650: the honesty verdict + per-alias bind-confirmation live in
+# cli/commands/lock.py and proxy/app.py. They were copied (also_copy) but never
+# mutated, so a future operator flip / renamed reason code had no mutation net —
+# these files are now the net's declared scope (renamed from the deprecated
+# paths_to_mutate). NOTE: mutmut 3.x's stats phase collides with this repo's
+# pytest addopts (-n auto + strict markers), so a full `mutmut run` needs
+# reconciliation before it can gate in CI. Until then the enforced net is the
+# hypothesis properties in tests/openclaw/test_lock_bind_confirmation.py plus
+# scripts/mutation_spine_sweep.py (8/8 canonical spine mutations verified killed).
+source_paths = [
     "src/worthless/adapters",
     "src/worthless/crypto",
+    "src/worthless/cli/commands/lock.py",
+    "src/worthless/proxy/app.py",
 ]
 also_copy = [
     "src/worthless/__init__.py",

@@ -356,6 +356,17 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
     # never inflate the real-traffic meter and a real-traffic burst can
     # never fake a probe pass.
     app.state.bind_probe_count = 0
+    # WOR-650 follow-up: per-alias probe counts. The global counter above moves
+    # on *any* probe — a probe for alias X ticks it just as well as one for
+    # alias Y. Recording per-alias lets ``worthless lock`` tell which alias a
+    # probe named, so on a multi-provider lock one alias's tick can't be
+    # mistaken for another's. NOTE (honest scope): this proves the proxy is up,
+    # is a worthless proxy, and acknowledged a probe for this alias — NOT that
+    # the provider's openclaw.json rewrite is a working route. The probe hits
+    # ``/_bind_probe``, not the real ``/{alias}/v1`` traffic path; actual
+    # end-to-end routing is proven by the live gateway + Playwright e2e tests.
+    # Same in-memory, reset-on-restart lifecycle as the counter.
+    app.state.bind_probe_aliases = {}
 
     # Middleware stack (reverse order: last registered runs first)
     app.add_middleware(CORSMiddleware, allow_origins=[], allow_methods=["GET"], allow_headers=[])
@@ -394,16 +405,25 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
         # (a squatter on the port serving plain ``/healthz`` won't have
         # this field — lock classifies that case as ``skipped``, not ``pass``).
         bind_probe_count = getattr(request.app.state, "bind_probe_count", 0)
-        return {
+        body: dict[str, object] = {
             "status": "ok",
             "requests_proxied": count,
             "pid": os.getpid(),
             "bind_probe_count": bind_probe_count,
         }
+        # WOR-650 follow-up: per-alias probe counts let lock confirm a SPECIFIC
+        # alias routed. Alias names are more sensitive than the bare count —
+        # they reveal which providers are locked — so surface them ONLY to
+        # loopback callers. Lock always reads via 127.0.0.1; a remote /healthz
+        # reader (non-loopback Docker bind) still gets the count, not the names.
+        client_host = request.client.host if request.client else None
+        if client_host in ("127.0.0.1", "::1"):
+            body["bind_probe_aliases"] = dict(getattr(request.app.state, "bind_probe_aliases", {}))
+        return body
 
     @app.get("/_bind_probe/{alias}")
     @app.head("/_bind_probe/{alias}")
-    async def bind_probe(request: Request, alias: str) -> Response:  # noqa: ARG001
+    async def bind_probe(request: Request, alias: str) -> Response:
         """WOR-658 bind-confirmation probe — loopback-only.
 
         ``worthless lock`` fires one GET/HEAD per managed alias here
@@ -427,7 +447,9 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
           purpose; the whole point is to exercise routing without
           needing a real key.
         * Response is identical for every alias (204, no body). No
-          information about which aliases are registered leaks here.
+          information about which aliases are registered leaks in the RESPONSE.
+          The per-alias tally we record is surfaced only on the loopback
+          ``/healthz`` path (see ``healthz``), never echoed back to the caller.
         * Counter is in-memory and isolated from ``requests_proxied``.
           Probe traffic can't pollute the spend ledger and a real-traffic
           burst can't fake a probe pass.
@@ -444,6 +466,16 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
         # them. Adding any ``await`` between read and write would
         # re-introduce a lost-update race; keep this body await-free.
         request.app.state.bind_probe_count = getattr(request.app.state, "bind_probe_count", 0) + 1
+        # Per-alias tally, same await-free invariant. ponytail: cap distinct
+        # aliases at 256 to bound memory on this unauth (loopback) endpoint — a
+        # real lock probes a handful; only the key set is capped, existing
+        # aliases always tick. Lift the cap if a deployment ever locks >256.
+        per_alias = getattr(request.app.state, "bind_probe_aliases", None)
+        if per_alias is None:
+            per_alias = {}
+            request.app.state.bind_probe_aliases = per_alias
+        if alias in per_alias or len(per_alias) < 256:
+            per_alias[alias] = per_alias.get(alias, 0) + 1
         return Response(status_code=204)
 
     @app.get("/readyz")

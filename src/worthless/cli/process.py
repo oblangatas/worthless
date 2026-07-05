@@ -98,12 +98,29 @@ def check_proxy_health(port: int) -> dict[str, object]:
         resp = httpx.get(f"http://127.0.0.1:{port}/healthz", timeout=2.0)
         if resp.status_code == 200:
             data = resp.json()
-            return {
+            result: dict[str, object] = {
                 "healthy": True,
                 "port": port,
                 "mode": data.get("mode", "up"),
                 "requests_proxied": data.get("requests_proxied", 0),
             }
+            # WOR-658: only surface bind_probe_count when the responder
+            # actually included it. Missing field on a healthy responder
+            # = "this isn't a worthless proxy" → lock-side classifies
+            # the verdict as skipped (reason=proxy_unrecognised) instead
+            # of fail. (Restores the surfacing dropped by #292/WOR-193
+            # wave3b — _confirm_bind reads it, so without this line live
+            # bind-confirmation is silently inert.)
+            if "bind_probe_count" in data:
+                result["bind_probe_count"] = data["bind_probe_count"]
+            # WOR-650 follow-up: per-alias probe counts (loopback /healthz
+            # only). Present iff this responder is a worthless proxy AND we
+            # read it over loopback — lets _confirm_bind tell which alias a
+            # probe named (so one alias's tick can't vouch for another), NOT
+            # that the rewrite is a working route. See _classify_bind_per_alias.
+            if "bind_probe_aliases" in data:
+                result["bind_probe_aliases"] = data["bind_probe_aliases"]
+            return result
     except Exception:  # noqa: S110 — proxy may not be running; absence is the expected default state  # nosec B110
         pass
 
