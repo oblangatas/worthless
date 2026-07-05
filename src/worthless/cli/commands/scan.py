@@ -30,6 +30,13 @@ from worthless.cli.scanner import (
     format_sarif,
     scan_files,
 )
+from worthless.cli.confusables import (
+    MARKER,
+    WARN_CODE,
+    ConfusableHit,
+    confusable_hits,
+    footnote,
+)
 from worthless.openclaw.audit import sanitise_for_message
 from worthless.storage.repository import EnrollmentRecord, ShardRepository
 
@@ -345,6 +352,17 @@ def _format_code_findings_human(
         test_count = 0
 
     lines: list[str] = []
+    # WOR-800: flag look-alike (confusable) filenames with an ASCII marker +
+    # a one-time footnote. Marker is appended OUTSIDE the scrubbed path so it
+    # can't reintroduce the terminal-injection surface #376 closed.
+    confusables: dict[str, ConfusableHit] = {}
+
+    def _mark(path: str) -> str:
+        hits = confusable_hits(path)
+        for h in hits:
+            confusables.setdefault(h.codepoint, h)
+        return f"  {MARKER}" if hits else ""
+
     if collapse_tests:
         # One line per file, occurrence count — no per-line detail.
         by_file: defaultdict[str, list[CodeFinding]] = defaultdict(list)
@@ -354,14 +372,15 @@ def _format_code_findings_human(
             count = len(file_findings)
             env_vars = ", ".join(sorted({f.suggested_env_var for f in file_findings}))
             suffix = f" x{count}" if count > 1 else ""
-            lines.append(f"[code] {sanitise_for_message(file)}  ({env_vars}){suffix}")
+            lines.append(f"[code] {sanitise_for_message(file)}  ({env_vars}){suffix}{_mark(file)}")
         if lines:
             lines.append("")
     else:
         for f in display:
             safe_file = sanitise_for_message(f.file)
             lines.append(
-                f"[code] {safe_file}:{f.line}:{f.column}  {f.provider_name} ({f.suggested_env_var})"
+                f"[code] {safe_file}:{f.line}:{f.column}  "
+                f"{f.provider_name} ({f.suggested_env_var}){_mark(f.file)}"
             )
             lines.append(f"       {sanitise_for_message(f.matched_url)}")
             # Show the offending source line (trimmed so it doesn't blow up the
@@ -379,6 +398,11 @@ def _format_code_findings_human(
         lines.append(
             f"+ {test_count} test-file {noun} omitted. Run `worthless scan --code` to see them."
         )
+        lines.append("")
+
+    if confusables:
+        for h in confusables.values():
+            lines.append(footnote(h))
         lines.append("")
 
     lines.append(f"Found {len(findings)} hardcoded provider URL(s).")
@@ -527,19 +551,37 @@ def _format_skipped_human(skipped: list[SkippedFile]) -> str:
 
 
 def _code_findings_to_json(findings: list[CodeFinding]) -> list[dict[str, object]]:
-    """Serialize code findings for JSON output."""
-    return [
-        {
-            "file": f.file,
-            "line": f.line,
-            "column": f.column,
-            "matched_url": f.matched_url,
-            "provider_name": f.provider_name,
-            "suggested_env_var": f.suggested_env_var,
-            "line_text": f.line_text,
-        }
-        for f in findings
-    ]
+    """Serialize code findings for JSON output. ``file`` stays raw (display-only
+    invariant); confusable look-alike names surface as a structured ``warnings``
+    entry (WOR-800) — a machine flag, never a glyph in the terminal."""
+    out: list[dict[str, object]] = []
+    for f in findings:
+        hits = confusable_hits(f.file)
+        warnings = (
+            [
+                {
+                    "code": WARN_CODE,
+                    "confusable_chars": [
+                        {"codepoint": h.codepoint, "script": h.script} for h in hits
+                    ],
+                }
+            ]
+            if hits
+            else []
+        )
+        out.append(
+            {
+                "file": f.file,
+                "line": f.line,
+                "column": f.column,
+                "matched_url": f.matched_url,
+                "provider_name": f.provider_name,
+                "suggested_env_var": f.suggested_env_var,
+                "line_text": f.line_text,
+                "warnings": warnings,
+            }
+        )
+    return out
 
 
 def register_scan_commands(app: typer.Typer) -> None:
