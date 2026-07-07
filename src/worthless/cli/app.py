@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import sys
-import traceback
 from importlib.metadata import version as pkg_version
 
 import typer
 
-from worthless.cli.console import WorthlessConsole, get_console, set_console
+from worthless.cli.console import WorthlessConsole, set_console
 from worthless.cli.default_command import run_default
-from worthless.cli.errors import WorthlessError, set_debug
+from worthless.cli.errors import error_boundary, set_debug
+from worthless.cli.log_redaction import install_redaction_filter
 from worthless.cli.notice import maybe_show_as_is_notice
 from worthless.cli.platform import fail_if_windows
 
@@ -36,6 +36,7 @@ app = typer.Typer(
 
 
 @app.callback(invoke_without_command=True)
+@error_boundary
 def _main(
     ctx: typer.Context,
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress non-error output"),
@@ -52,6 +53,7 @@ def _main(
     ),
 ) -> None:
     """Worthless — make leaked API keys worthless."""
+    install_redaction_filter()
     set_debug(debug)
     console = WorthlessConsole(quiet=quiet, json_mode=json_output)
     set_console(console)
@@ -60,17 +62,14 @@ def _main(
     maybe_show_as_is_notice(console)
 
     # When no subcommand is given, run the magic default pipeline.
+    # WOR-277: no inner try/except here — @error_boundary above already
+    # catches WorthlessError (with its UnsafeRewriteRefused hint) AND any
+    # other exception (sanitized, not a raw traceback) for the whole
+    # callback, so this is the one command that no longer skips it.
     if ctx.invoked_subcommand is None:
-        try:
-            fail_if_windows()
-            interactive = hasattr(sys.stdin, "isatty") and sys.stdin.isatty()
-            run_default(interactive=interactive, yes=yes, json_mode=json_output)
-        except WorthlessError as exc:
-            if debug:
-                traceback.print_exc(file=sys.stderr)
-            else:
-                get_console().print_error(exc)
-            raise typer.Exit(code=exc.exit_code) from exc
+        fail_if_windows()
+        interactive = hasattr(sys.stdin, "isatty") and sys.stdin.isatty()
+        run_default(interactive=interactive, yes=yes, json_mode=json_output)
 
 
 # -- Register command modules --------------------------------------------------

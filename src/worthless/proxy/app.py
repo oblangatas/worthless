@@ -52,6 +52,7 @@ from worthless.proxy.rules import (
     extract_model,
 )
 from worthless.storage.schema import SCHEMA, migrate_db
+from worthless.cli.log_redaction import install_redaction_filter
 from worthless.storage.shard_reader import ShardReader
 from worthless.storage.spend_ledger import SpendLedger
 
@@ -326,6 +327,12 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
     Args:
         settings: Proxy settings. If None, loads from environment.
     """
+    # WOR-277: uvicorn's own Config.configure_logging() has already run by
+    # the time this factory is invoked (uvicorn is launched with
+    # `--factory worthless.proxy.app:create_app`), so attaching here is not
+    # racing uvicorn's dictConfig — it runs strictly after it.
+    install_redaction_filter()
+
     if settings is None:
         settings = ProxySettings()
 
@@ -583,7 +590,19 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
         _spend_reservation = _estimate_tokens(body)
 
         # GATE: rules engine evaluates BEFORE any Fernet decrypt
-        gate = await rules_engine.evaluate(alias, request, provider=encrypted.provider, body=body)
+        # WOR-277: every concrete rule fails closed internally (returns a
+        # Denial rather than raising), so this should be unreachable in
+        # practice — but unlike every other step in this handler, it had no
+        # try/except at all: an exception here would skip zeroing shard_a
+        # (SR-01/SR-02) AND propagate as a raw, unhandled exception. Fail
+        # closed the same way the general-exception branches below do.
+        try:
+            gate = await rules_engine.evaluate(
+                alias, request, provider=encrypted.provider, body=body
+            )
+        except Exception:
+            shard_a[:] = b"\x00" * len(shard_a)
+            return _uniform_401()
         spend_handle = gate.spend_handle
 
         async def _release_reservations() -> None:
