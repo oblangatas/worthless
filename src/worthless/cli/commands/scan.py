@@ -508,8 +508,12 @@ def _format_ai_prompt_block(findings: list[CodeFinding]) -> str:
     sep = "─" * 68
     bullets = []
     for f in findings:
+        # WOR-800: carry the look-alike marker into the AI-agent prompt too, so
+        # an agent acting on this list can't be steered to a confusable path
+        # without the same warning the human list shows.
+        mark = f"  {MARKER}" if confusable_hits(f.file) else ""
         bullets.append(
-            f"- {sanitise_for_message(f.file)}:{f.line}  → use environment variable "
+            f"- {sanitise_for_message(f.file)}:{f.line}{mark}  → use environment variable "
             f"{f.suggested_env_var} (default to {f.matched_url!r} when unset)"
         )
 

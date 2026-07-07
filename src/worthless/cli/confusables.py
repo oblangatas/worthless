@@ -65,17 +65,16 @@ def confusable_hits(name: str) -> list[ConfusableHit]:
                 scripts.setdefault(sc, []).append(ch)
         if len(scripts) < 2:
             continue  # single-script (or scriptless) token — not confusable
-        # Latin is the expected baseline in the threat model (a Latin-looking
-        # name carrying homoglyphs), so the non-Latin letters are the impostors
-        # regardless of count. Anchoring on Latin avoids tie-break ambiguity and
-        # the accusation flipping when homoglyphs outnumber genuine Latin letters
-        # (CodeRabbit #419). Fall back to majority only when Latin is absent.
-        dominant = "LATIN" if "LATIN" in scripts else max(scripts, key=lambda s: len(scripts[s]))
+        # Latin is the expected baseline (a Latin-looking name carrying
+        # homoglyphs); the non-Latin letters are the impostors regardless of
+        # count. With no Latin present there is no baseline to trust, so every
+        # confusable letter is suspect (CodeRabbit + Cursor, #419).
+        baseline = "LATIN" if "LATIN" in scripts else None
         for ch in token:
             if not ch.isalpha():
                 continue
             sc = _script(ch)
-            if sc in _CONFUSABLE_SCRIPTS and sc != dominant:
+            if sc in _CONFUSABLE_SCRIPTS and sc != baseline:
                 hits.append(ConfusableHit(ch, f"U+{ord(ch):04X}", sc.capitalize()))
     return hits
 
@@ -84,6 +83,6 @@ def footnote(hit: ConfusableHit) -> str:
     """One-line human legend for a confusable hit. ASCII except the letter itself
     (a printable non-control glyph), which is the evidence a human adjudicates."""
     return (
-        f"{MARKER} {WARN_CODE}: {hit.script} '{hit.char}' ({hit.codepoint}) mixed "
-        "with Latin in a filename - may impersonate a look-alike name."
+        f"{MARKER} {WARN_CODE}: {hit.script} '{hit.char}' ({hit.codepoint}) in a "
+        "mixed-script filename - may impersonate a look-alike name."
     )

@@ -12,8 +12,12 @@ invisible chars the #376 scrubber removes).
 from __future__ import annotations
 
 from worthless.cli.code_scanner import CodeFinding
-from worthless.cli.commands.scan import _code_findings_to_json, _format_code_findings_human
-from worthless.cli.confusables import confusable_hits
+from worthless.cli.commands.scan import (
+    _code_findings_to_json,
+    _format_ai_prompt_block,
+    _format_code_findings_human,
+)
+from worthless.cli.confusables import MARKER, confusable_hits, footnote
 
 CYRILLIC_O = chr(0x043E)  # 'о' — look-alike of Latin 'o'
 GREEK_OMICRON = chr(0x03BF)  # 'ο' — look-alike of Latin 'o'
@@ -129,3 +133,25 @@ def test_tie_token_names_the_non_latin_letter() -> None:
     assert [h.script for h in hits] == ["Cyrillic"], (
         f"tie must name the Cyrillic look-alike, got {[(h.char, h.script) for h in hits]}"
     )
+
+
+def test_no_latin_token_reports_all_confusable_letters() -> None:
+    """Cursor #419: Greek + Cyrillic with NO Latin has no baseline, so every
+    confusable letter is reported (not an arbitrary majority pick)."""
+    token = chr(0x03BF) + chr(0x0440)  # Greek omicron + Cyrillic er
+    scripts = {h.script for h in confusable_hits(token + ".py")}
+    assert scripts == {"Greek", "Cyrillic"}, f"expected both, got {scripts}"
+
+
+def test_footnote_does_not_hardcode_with_latin() -> None:
+    """Cursor #419: footnote must not claim 'with Latin' when there is no Latin."""
+    hit = confusable_hits(chr(0x03BF) + chr(0x0440) + ".py")[0]
+    text = footnote(hit)
+    assert "with Latin" not in text
+    assert "mixed-script" in text
+
+
+def test_ai_prompt_block_marks_confusable_file() -> None:
+    """Cursor #419: the copy-to-AI-agent prompt carries the marker too."""
+    assert MARKER in _format_ai_prompt_block([_cf(f"src/c{CYRILLIC_O}nfig.py")])
+    assert MARKER not in _format_ai_prompt_block([_cf("src/config.py")])
