@@ -6,6 +6,7 @@ Docker-gated tests live in test_lock_audit_gate_docker.py.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
@@ -503,6 +504,62 @@ class TestAC10DoctorSurface:
     Tests call the actual doctor check function (checks/openclaw._audit_gate_findings)
     with subprocess-layer mocks so no real openclaw binary is required.
     """
+
+    def test_doctor_uses_resolved_proxy_base_url_not_hardcoded_loopback(
+        self, tmp_path: Path
+    ) -> None:
+        """CodeRabbit (PR #387): doctor must use the SAME resolved proxy base URL
+        as ``worthless lock`` (``_resolve_proxy_base_url()``), not a hardcoded
+        ``http://127.0.0.1:<port>``. In a Docker install the proxy resolves to a
+        docker-bridge address; hardcoding loopback means doctor can never
+        recognize a legitimately worthless-managed entry there — reintroducing
+        the exact false "key exposed" alarm this PR fixes, but only for doctor,
+        and only in Docker."""
+        from worthless.cli.bootstrap import ensure_home
+        from worthless.cli.commands.doctor.checks import openclaw as _oc_check_mod
+        from worthless.cli.commands.doctor.registry import CheckContext
+        from worthless.openclaw.integration import IntegrationState
+        from worthless.storage.repository import ShardRepository
+
+        fake_home = ensure_home(tmp_path / ".worthless")
+        repo = ShardRepository(str(fake_home.db_path), bytes(fake_home.fernet_key))
+        asyncio.run(repo.initialize())
+        ctx = CheckContext(home=fake_home, repo=repo, fix=False, dry_run=False)
+
+        present_state = IntegrationState(
+            present=True,
+            config_path=None,
+            workspace_path=None,  # _check_skill short-circuits safely on None
+            skill_path=None,
+            home_dir=tmp_path,
+            notes=(),
+        )
+        docker_bridge_url = "http://172.17.0.1:8787"
+        captured: dict = {}
+
+        def _capture_audit_findings(managed_aliases, proxy_base_url):
+            captured["proxy_base_url"] = proxy_base_url
+            return []
+
+        with (
+            patch.object(_oc_check_mod._oc_integration, "detect", return_value=present_state),
+            patch.object(
+                _oc_check_mod,
+                "_audit_gate_findings",
+                side_effect=_capture_audit_findings,
+            ),
+            patch.object(
+                _oc_check_mod._oc_integration,
+                "_resolve_proxy_base_url",
+                return_value=docker_bridge_url,
+            ),
+        ):
+            _oc_check_mod.run(ctx)
+
+        assert captured.get("proxy_base_url") == docker_bridge_url, (
+            f"doctor passed {captured.get('proxy_base_url')!r} to the audit gate — "
+            f"expected the resolved proxy base {docker_bridge_url!r}, not a hardcoded loopback"
+        )
 
     def test_doctor_reports_exit_87_when_binary_unavailable(self) -> None:
         """Doctor surfaces exit-87 state when openclaw binary cannot be resolved."""

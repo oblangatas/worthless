@@ -138,7 +138,12 @@ def run(ctx: CheckContext) -> CheckResult:
         managed_aliases: set[str] | None = set(asyncio.run(ctx.repo.list_keys()))
     except Exception:  # noqa: BLE001 — recognition is best-effort, never blocks the check
         managed_aliases = None
-    audit_findings = _audit_gate_findings(managed_aliases, f"http://127.0.0.1:{port}")
+    # CodeRabbit (PR #387): must match the SAME resolved proxy base lock uses
+    # (Docker-bridge aware) — a hardcoded loopback would make doctor unable to
+    # recognize a worthless-managed entry in a Docker install, reintroducing
+    # the false "key exposed" alarm this PR fixes.
+    proxy_base_url = _oc_integration._resolve_proxy_base_url()
+    audit_findings = _audit_gate_findings(managed_aliases, proxy_base_url)
 
     all_issues = skill_issues + provider_issues
     # Promote plain-string integration issues to the same structured shape as

@@ -860,6 +860,11 @@ def _is_proxy_url(url: str, proxy_base_url: str) -> bool:
         parts = urlsplit(url)
         if parts.port != port:
             return False
+        # CodeRabbit (WOR-777): scheme must match too — worthless's proxy is
+        # http-only (_DEFAULT_PROXY_BASE_URL), so an https:// entry on the same
+        # host:port cannot be a real worthless-written entry.
+        if parts.scheme != urlsplit(proxy_base_url).scheme:
+            return False
         host = parts.hostname or ""
     except ValueError:
         return False

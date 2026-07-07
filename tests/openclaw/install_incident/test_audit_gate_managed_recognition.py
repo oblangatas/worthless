@@ -168,6 +168,27 @@ class TestRecognizeManagedProviders:
         )
         assert recognize_managed_providers([str(mj)], {"openai-32c28ff4"}, PROXY) == set()
 
+    def test_scheme_mismatch_same_host_port_not_recognized(self, tmp_path: Path) -> None:
+        """CodeRabbit (PR #387): the fallback host/port match must also require the
+        SAME scheme as the proxy. worthless's proxy is http-only (_DEFAULT_PROXY_BASE_URL);
+        an ``https://`` entry on the same host:port cannot be a real worthless-written
+        entry — recognizing it anyway would demote a real key past the audit gate."""
+        mj = tmp_path / "models.json"
+        mj.write_text(
+            json.dumps(
+                {
+                    "providers": {
+                        "openai": {
+                            "apiKey": "sk-proj-REALLEAK",
+                            "baseUrl": "https://127.0.0.1:8787/openai-32c28ff4/v1",
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert recognize_managed_providers([str(mj)], {"openai-32c28ff4"}, PROXY) == set()
+
     def test_docker_bridge_host_is_recognized(self, tmp_path: Path) -> None:
         """Cross-environment: worthless wrote a docker-bridge host on the proxy port —
         still ours. The host-pin allows loopback + the Docker bridge, not arbitrary hosts."""
