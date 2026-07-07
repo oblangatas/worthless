@@ -27,6 +27,7 @@ from worthless.cli.commands.doctor.registry import (
 from worthless.cli.commands.doctor.schema import SCHEMA_VERSION
 from worthless.cli.errors import WorthlessError
 from worthless.cli.keystore import read_fernet_key
+from worthless.crypto.types import zero_buf
 from worthless.storage.repository import ShardRepository
 
 
@@ -211,26 +212,29 @@ def _doctor_run_json(*, fix: bool, dry_run: bool) -> None:
         # diagnostic; emit a single finding that points at the fix.
         typer.echo(json.dumps(_aggregate([_fernet_missing_result(home)])))
         return
-    repo = ShardRepository(str(home.db_path), fernet_key)
+    try:
+        repo = ShardRepository(str(home.db_path), fernet_key)
 
-    with acquire_lock(home):
-        ctx = CheckContext(home=home, repo=repo, fix=fix, dry_run=dry_run)
-        results: list[CheckResult] = []
-        for check_module in ensure_registered():
-            try:
-                results.append(check_module.run(ctx))
-            except Exception as exc:  # noqa: BLE001 - SR-04 scrub
-                results.append(
-                    CheckResult(
-                        check_id=getattr(check_module, "check_id", "unknown"),
-                        status="error",
-                        findings=[],
-                        summary=f"check crashed: {type(exc).__name__}",
-                        fixable=False,
-                        fixed=[],
-                        skipped_reason=None,
+        with acquire_lock(home):
+            ctx = CheckContext(home=home, repo=repo, fix=fix, dry_run=dry_run)
+            results: list[CheckResult] = []
+            for check_module in ensure_registered():
+                try:
+                    results.append(check_module.run(ctx))
+                except Exception as exc:  # noqa: BLE001 - SR-04 scrub
+                    results.append(
+                        CheckResult(
+                            check_id=getattr(check_module, "check_id", "unknown"),
+                            status="error",
+                            findings=[],
+                            summary=f"check crashed: {type(exc).__name__}",
+                            fixable=False,
+                            fixed=[],
+                            skipped_reason=None,
+                        )
                     )
-                )
 
-    _stamp_remediation(results)
-    typer.echo(json.dumps(_aggregate(results)))
+        _stamp_remediation(results)
+        typer.echo(json.dumps(_aggregate(results)))
+    finally:
+        zero_buf(fernet_key)
