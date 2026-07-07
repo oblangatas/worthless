@@ -65,7 +65,12 @@ def confusable_hits(name: str) -> list[ConfusableHit]:
                 scripts.setdefault(sc, []).append(ch)
         if len(scripts) < 2:
             continue  # single-script (or scriptless) token — not confusable
-        dominant = max(scripts, key=lambda s: len(scripts[s]))
+        # Latin is the expected baseline in the threat model (a Latin-looking
+        # name carrying homoglyphs), so the non-Latin letters are the impostors
+        # regardless of count. Anchoring on Latin avoids tie-break ambiguity and
+        # the accusation flipping when homoglyphs outnumber genuine Latin letters
+        # (CodeRabbit #419). Fall back to majority only when Latin is absent.
+        dominant = "LATIN" if "LATIN" in scripts else max(scripts, key=lambda s: len(scripts[s]))
         for ch in token:
             if not ch.isalpha():
                 continue

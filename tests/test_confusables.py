@@ -109,3 +109,23 @@ def test_json_warning_structured_and_path_raw() -> None:
 
 def test_json_clean_name_no_warning() -> None:
     assert _code_findings_to_json([_cf("config.py")])[0]["warnings"] == []
+
+
+def test_majority_flip_names_the_cyrillic_impostor_not_latin() -> None:
+    """CodeRabbit #419: when homoglyphs OUTNUMBER genuine Latin, the reported
+    culprit must still be the non-Latin impostor, not the genuine Latin letters.
+    4 Cyrillic + 2 Latin in one token."""
+    cyr = chr(0x0441) + chr(0x043E) + chr(0x0440) + chr(0x0435)  # с о р е
+    hits = confusable_hits(cyr + "fg.py")
+    assert hits, "must still fire"
+    assert all(h.script == "Cyrillic" for h in hits), (
+        f"must name the Cyrillic impostor, got {[(h.char, h.script) for h in hits]}"
+    )
+
+
+def test_tie_token_names_the_non_latin_letter() -> None:
+    """A 1-Cyrillic + 1-Latin tie must name the Cyrillic look-alike."""
+    hits = confusable_hits(chr(0x043E) + "b.txt")  # о + b
+    assert [h.script for h in hits] == ["Cyrillic"], (
+        f"tie must name the Cyrillic look-alike, got {[(h.char, h.script) for h in hits]}"
+    )
