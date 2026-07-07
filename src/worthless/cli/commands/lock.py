@@ -640,7 +640,7 @@ async def _pass1_db_writes(
                     env_path=env_str,
                     prefix=db_shard.prefix,
                     charset=db_shard.charset,
-                    base_url=db_shard.base_url or upstream_base_url,
+                    base_url=upstream_base_url,
                     original_mode=original_mode,
                     write_config=False,
                     oc_original_api_key_json=oc_capture_record,
