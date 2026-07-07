@@ -27,10 +27,17 @@ already installs the ``[mcp]`` extra via ``uv sync --extra mcp``.
 
 from __future__ import annotations
 
+import asyncio
+import os
 import sys
 from pathlib import Path
 
 import pytest
+
+# The stdio handshake spawns a child and talks MCP over pipes; if the child
+# never speaks, bound the whole exchange so CI fails in seconds rather than
+# hanging until the global job timeout.
+_HANDSHAKE_TIMEOUT_S = 30.0
 
 # The handshake needs the `mcp` client library (the project's [mcp] extra).
 pytest.importorskip("mcp", reason="mcp extra not installed")
@@ -66,6 +73,20 @@ def _worthless_executable() -> Path:
     return candidate
 
 
+def _child_env(bin_dir: Path) -> dict[str, str]:
+    """Environment for the ``worthless mcp`` child process.
+
+    Inherit the real environment — Windows needs SYSTEMROOT/COMSPEC and every
+    platform needs a working base PATH — but strip any ``WORTHLESS_*`` dogfood
+    exports so a developer's local config can't change what the child does.
+    The venv bin dir is prepended so the console script resolves to the package
+    under test rather than a stray install on PATH.
+    """
+    env = {k: v for k, v in os.environ.items() if not k.startswith("WORTHLESS_")}
+    env["PATH"] = os.pathsep.join([str(bin_dir), env.get("PATH", "")])
+    return env
+
+
 @pytest.mark.asyncio
 async def test_mcp_stdio_server_exposes_exactly_the_four_tools() -> None:
     """Spawn ``worthless mcp`` and assert tools/list returns exactly 4 tools.
@@ -83,18 +104,22 @@ async def test_mcp_stdio_server_exposes_exactly_the_four_tools() -> None:
     server = StdioServerParameters(
         command=str(worthless_bin),
         args=["mcp"],
-        # No secrets needed: tools/list is metadata only. Pass an explicit
-        # (empty) env so the child can't inherit dogfood exports that would
-        # change behaviour.
-        env={"PATH": str(worthless_bin.parent)},
+        # tools/list is metadata only, so no secrets are needed — but the child
+        # still needs a real base environment to spawn (see _child_env).
+        env=_child_env(worthless_bin.parent),
     )
 
-    async with stdio_client(server) as (read, write):
-        async with ClientSession(read, write) as session:
-            # Real MCP lifecycle: negotiate protocol/capabilities first.
-            await session.initialize()
-            # Then discover the advertised tool surface.
-            tools_result = await session.list_tools()
+    async def _handshake() -> object:
+        async with stdio_client(server) as (read, write):
+            async with ClientSession(read, write) as session:
+                # Real MCP lifecycle: negotiate protocol/capabilities first.
+                await session.initialize()
+                # Then discover the advertised tool surface.
+                return await session.list_tools()
+
+    # Bound the spawn + handshake: a child that never completes the MCP
+    # lifecycle fails this test fast instead of hanging the CI job.
+    tools_result = await asyncio.wait_for(_handshake(), timeout=_HANDSHAKE_TIMEOUT_S)
 
     served = {tool.name for tool in tools_result.tools}
 
