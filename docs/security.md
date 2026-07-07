@@ -288,6 +288,31 @@ zeroed via `ctypes.memset` on function exit, and the process sets
 materialize them in a coredump. The comparison uses
 `hmac.compare_digest`.
 
+## Retired-key tripwire (decoy)
+
+`worthless lock`/`unlock` retires the shard-A being replaced (HMAC-hashed,
+stored in `retired_decoys`). If that *old* shard-A is ever presented to the
+proxy again — e.g. from a leaked git history entry, a CI log, or a stale
+backup — the request is refused before reconstruction and the proxy logs
+`decoy bearer token detected for alias '<alias>'`.
+
+This is **best-effort telemetry, not the enforcement mechanism**. The actual
+refusal on any stolen shard-A (retired or forged) is the commitment/HMAC
+mismatch at reconstruction (see [T-10](#t-10-reconstruction-verify)) — the
+tripwire's only job is to distinguish *this specific* 401 from that one, so
+an operator watching logs learns "someone replayed an old key" instead of a
+generic auth failure. Internally called "decoy" for historical reasons; it
+is not a planted honeytoken, just a hash of a real, no-longer-valid shard-A.
+
+**It does not watch the currently active shard-A.** A live key's shard-A is
+expected to be presented on every request — there is no way to distinguish
+an attacker replaying a freshly leaked *active* `.env` from your own
+legitimate traffic. **If you suspect your `.env` leaked, re-lock it
+immediately** (see [Recovery](/recovery/)) — that retires the exposed
+shard-A into the tripwire and any further replay of it is caught. Until you
+rotate, a leaked active key is bounded by your spend cap and rules engine,
+not by the decoy.
+
 ## Threat model: non-goals
 
 Worthless does **not** protect against:
@@ -314,6 +339,7 @@ Worthless does **not** protect against:
 
    The non-goal is proxy-process RCE. The wall's coverage is Fernet-key isolation, not key-reconstruction prevention.
 8. **Nation-state adversaries with physical access.** Hardware, cold-boot, and electromagnetic side channels are out of scope.
+9. **Replay of the currently active shard-A.** The [retired-key tripwire](#retired-key-tripwire-decoy) only fires on shard-A values that have been rotated out — it does not, and cannot, distinguish an attacker replaying a freshly leaked *active* `.env` from your own legitimate traffic. Re-lock immediately on a suspected leak to close this window.
 
 ## Known limitations (Python PoC)
 
