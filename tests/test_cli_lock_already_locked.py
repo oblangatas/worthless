@@ -86,6 +86,16 @@ def _checksum(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _stored_base_url(home_dir: WorthlessHome, alias: str) -> str | None:
+    """Read the ``shards.base_url`` column for *alias* — ``None`` if no row."""
+    conn = sqlite3.connect(str(home_dir.base_dir / "worthless.db"))
+    try:
+        row = conn.execute("SELECT base_url FROM shards WHERE key_alias = ?", (alias,)).fetchone()
+    finally:
+        conn.close()
+    return row[0] if row else None
+
+
 # ---------------------------------------------------------------------------
 # Re-lock refused
 # ---------------------------------------------------------------------------
@@ -371,14 +381,10 @@ def test_relock_picks_up_corrected_upstream_base_url(
     assert second.exit_code == 0, second.output
 
     alias = _make_alias("openai", key)
-    conn = sqlite3.connect(str(home_dir.base_dir / "worthless.db"))
-    try:
-        row = conn.execute("SELECT base_url FROM shards WHERE key_alias = ?", (alias,)).fetchone()
-    finally:
-        conn.close()
+    row = _stored_base_url(home_dir, alias)
     assert row is not None, f"no shards row for alias {alias!r}"
-    assert row[0] == "https://eu.openrouter.ai/api/v1", (
-        f"re-lock did not pick up corrected base_url; DB still has {row[0]!r}"
+    assert row == "https://eu.openrouter.ai/api/v1", (
+        f"re-lock did not pick up corrected base_url; DB still has {row!r}"
     )
 
 
@@ -408,13 +414,7 @@ def test_relock_with_unregistered_base_url_fails_loud_not_stale(
     assert first.exit_code == 0, first.output
 
     alias = _make_alias("openai", key)
-    conn = sqlite3.connect(str(home_dir.base_dir / "worthless.db"))
-    try:
-        pre_base_url = conn.execute(
-            "SELECT base_url FROM shards WHERE key_alias = ?", (alias,)
-        ).fetchone()[0]
-    finally:
-        conn.close()
+    pre_base_url = _stored_base_url(home_dir, alias)
 
     env_file.write_text(
         f"OPENROUTER_API_KEY={key}\n"
@@ -439,13 +439,7 @@ def test_relock_with_unregistered_base_url_fails_loud_not_stale(
         f"not something else:\n{second.output}"
     )
 
-    conn = sqlite3.connect(str(home_dir.base_dir / "worthless.db"))
-    try:
-        post_base_url = conn.execute(
-            "SELECT base_url FROM shards WHERE key_alias = ?", (alias,)
-        ).fetchone()[0]
-    finally:
-        conn.close()
+    post_base_url = _stored_base_url(home_dir, alias)
     assert post_base_url == pre_base_url, (
         "a refused re-lock must not mutate the stored base_url — "
         f"was {pre_base_url!r}, now {post_base_url!r}"
@@ -503,14 +497,10 @@ def test_relock_without_base_url_var_falls_back_to_registry_default(
     assert second.exit_code == 0, second.output
 
     alias = _make_alias("openai", key)
-    conn = sqlite3.connect(str(home_dir.base_dir / "worthless.db"))
-    try:
-        row = conn.execute("SELECT base_url FROM shards WHERE key_alias = ?", (alias,)).fetchone()
-    finally:
-        conn.close()
-    assert row[0] == "https://openrouter.ai/api/v1", (
+    row = _stored_base_url(home_dir, alias)
+    assert row == "https://openrouter.ai/api/v1", (
         "re-lock with the *_BASE_URL var removed must fall back to the "
-        f"registry default, not keep the stale custom URL; got {row[0]!r}"
+        f"registry default, not keep the stale custom URL; got {row!r}"
     )
 
 
@@ -544,9 +534,5 @@ def test_relock_with_unchanged_base_url_is_a_column_noop(
     assert second.exit_code == 0, second.output
 
     alias = _make_alias("openai", key)
-    conn = sqlite3.connect(str(home_dir.base_dir / "worthless.db"))
-    try:
-        row = conn.execute("SELECT base_url FROM shards WHERE key_alias = ?", (alias,)).fetchone()
-    finally:
-        conn.close()
-    assert row[0] == "https://openrouter.ai/api/v1"
+    row = _stored_base_url(home_dir, alias)
+    assert row == "https://openrouter.ai/api/v1"
