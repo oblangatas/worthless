@@ -204,6 +204,31 @@ class TestScanFormats:
         assert "is_protected" in data["findings"][0]
         assert "orphans" in data and isinstance(data["orphans"], list)
 
+    def test_format_json_never_contains_raw_key_value(self, file_with_key: Path) -> None:
+        """WOR-277 success criterion: scan --json findings carry only a
+        {prefix}...{suffix} preview — the raw matched key must never
+        appear anywhere in the JSON output."""
+        secret = _fake_openai_key()
+        result = runner.invoke(app, ["scan", "--json", str(file_with_key)])
+        assert result.exit_code == 1
+        assert secret not in result.stdout
+        data = json.loads(result.stdout)
+        assert secret not in json.dumps(data)
+        preview = data["findings"][0]["value_preview"]
+        assert preview != secret
+        assert "*" in preview, f"expected a masked preview, got {preview!r}"
+        assert len(preview) < len(secret)
+
+    def test_format_sarif_never_contains_raw_key_value(self, file_with_key: Path) -> None:
+        """WOR-277 success criterion: scan --format sarif must never emit
+        the raw matched key value anywhere in the SARIF document."""
+        secret = _fake_openai_key()
+        result = runner.invoke(app, ["scan", "--format", "sarif", str(file_with_key)])
+        assert result.exit_code == 1
+        assert secret not in result.stdout
+        sarif = json.loads(result.stdout)
+        assert secret not in json.dumps(sarif)
+
     def test_quiet_suppresses_output(self, file_with_key: Path) -> None:
         """--quiet should produce no stderr output (exit code only)."""
         result = runner.invoke(app, ["-q", "scan", str(file_with_key)])
