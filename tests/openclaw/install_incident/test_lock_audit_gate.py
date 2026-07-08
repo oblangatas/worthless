@@ -6,6 +6,7 @@ Docker-gated tests live in test_lock_audit_gate_docker.py.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
@@ -504,6 +505,60 @@ class TestAC10DoctorSurface:
     with subprocess-layer mocks so no real openclaw binary is required.
     """
 
+    def test_doctor_uses_the_single_sourced_proxy_base_url(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CodeRabbit + BugBot (PR #387): doctor must use the SAME resolved
+        proxy base URL — host AND port — that a real ``worthless lock`` would
+        write. Three review passes each found a variant of doctor/lock/the
+        audit gate disagreeing on this URL; this pins doctor against the
+        single-sourced :func:`resolve_openclaw_proxy_base_url`, covering both
+        ``WORTHLESS_PROXY_HOST`` (host) and ``WORTHLESS_PORT`` (port) in one
+        assertion so the two can't silently re-drift independently."""
+        from worthless.cli.bootstrap import ensure_home
+        from worthless.cli.commands.doctor.checks import openclaw as _oc_check_mod
+        from worthless.cli.commands.doctor.registry import CheckContext
+        from worthless.openclaw.integration import IntegrationState
+        from worthless.storage.repository import ShardRepository
+
+        monkeypatch.setenv("WORTHLESS_PROXY_HOST", "proxy")  # all-container Docker service name
+        monkeypatch.setenv("WORTHLESS_PORT", "9123")
+
+        fake_home = ensure_home(tmp_path / ".worthless")
+        repo = ShardRepository(str(fake_home.db_path), bytes(fake_home.fernet_key))
+        asyncio.run(repo.initialize())
+        ctx = CheckContext(home=fake_home, repo=repo, fix=False, dry_run=False)
+
+        present_state = IntegrationState(
+            present=True,
+            config_path=None,
+            workspace_path=None,  # _check_skill short-circuits safely on None
+            skill_path=None,
+            home_dir=tmp_path,
+            notes=(),
+        )
+        captured: dict = {}
+
+        def _capture_audit_findings(managed_aliases, proxy_base_url):
+            captured["proxy_base_url"] = proxy_base_url
+            return []
+
+        with (
+            patch.object(_oc_check_mod._oc_integration, "detect", return_value=present_state),
+            patch.object(
+                _oc_check_mod,
+                "_audit_gate_findings",
+                side_effect=_capture_audit_findings,
+            ),
+        ):
+            _oc_check_mod.run(ctx)
+
+        assert captured.get("proxy_base_url") == "http://proxy:9123", (
+            f"doctor passed {captured.get('proxy_base_url')!r} — expected "
+            "'http://proxy:9123' (the WORTHLESS_PROXY_HOST + WORTHLESS_PORT-aware, "
+            "single-sourced value a real worthless lock would write)"
+        )
+
     def test_doctor_reports_exit_87_when_binary_unavailable(self) -> None:
         """Doctor surfaces exit-87 state when openclaw binary cannot be resolved."""
         from worthless.cli.commands.doctor.checks.openclaw import _audit_gate_findings
@@ -512,7 +567,7 @@ class TestAC10DoctorSurface:
             "worthless.cli.commands.doctor.checks.openclaw._oc_audit.resolve_openclaw_bin",
             side_effect=AuditGateError("openclaw binary not found — set WORTHLESS_OPENCLAW_BIN"),
         ):
-            findings = _audit_gate_findings()
+            findings = _audit_gate_findings(None, "http://127.0.0.1:8787")
 
         assert len(findings) == 1
         assert findings[0]["exit_code"] == 87
@@ -533,7 +588,7 @@ class TestAC10DoctorSurface:
                 side_effect=AuditGateError("openclaw secrets audit exited 1"),
             ),
         ):
-            findings = _audit_gate_findings()
+            findings = _audit_gate_findings(None, "http://127.0.0.1:8787")
 
         assert len(findings) == 1
         assert findings[0]["exit_code"] == 87
@@ -569,7 +624,7 @@ class TestAC10DoctorSurface:
                 return_value=(MagicMock(), mock_classification),
             ),
         ):
-            findings = _audit_gate_findings()
+            findings = _audit_gate_findings(None, "http://127.0.0.1:8787")
 
         assert len(findings) == 1
         assert findings[0]["exit_code"] == 73
@@ -598,9 +653,33 @@ class TestAC10DoctorSurface:
                 return_value=(MagicMock(), mock_classification),
             ),
         ):
-            findings = _audit_gate_findings()
+            findings = _audit_gate_findings(None, "http://127.0.0.1:8787")
 
         assert findings == []
+
+    def test_doctor_forwards_managed_aliases_for_recognition(self) -> None:
+        """WOR-777: doctor passes managed_aliases so the gate recognizes
+        worthless's own shard-A — its prediction matches ``worthless lock`` and
+        it does not false-alarm "key exposed" on an entry worthless created."""
+        from worthless.openclaw.audit import AuditClassification
+
+        from worthless.cli.commands.doctor.checks.openclaw import _audit_gate_findings
+
+        recognized_clean = AuditClassification(blocking=(), advisory_count=1, unknown_codes=())
+        with (
+            patch(
+                "worthless.cli.commands.doctor.checks.openclaw._oc_audit.resolve_openclaw_bin",
+                return_value=Path("/usr/local/bin/openclaw"),
+            ),
+            patch(
+                "worthless.cli.commands.doctor.checks.openclaw._oc_audit.run_and_classify",
+                return_value=(MagicMock(), recognized_clean),
+            ) as mock_rc,
+        ):
+            findings = _audit_gate_findings({"openai-a1b2c3d4"}, "http://127.0.0.1:8787")
+
+        assert findings == []
+        assert mock_rc.call_args.kwargs.get("managed_aliases") == {"openai-a1b2c3d4"}
 
 
 # --------------------------------------------------------------------------- #
@@ -868,7 +947,7 @@ class TestAdversarial:
             return_value=(MagicMock(), mock_classification),
         ):
             with pytest.raises(typer.Exit) as exc_info:
-                _openclaw_audit_postflight(gate)
+                _openclaw_audit_postflight(gate, None, "http://127.0.0.1:8787")
 
         assert exc_info.value.exit_code == 87
 
@@ -1046,7 +1125,9 @@ class TestRunAndClassifyWiring:
         fake_bin.chmod(0o755)
 
         with patch("subprocess.run", return_value=proc):
-            _result, classification = run_and_classify(fake_bin)
+            _result, classification = run_and_classify(
+                fake_bin, proxy_base_url="http://127.0.0.1:8787"
+            )
 
         assert len(classification.blocking) == 1
         assert classification.blocking[0].source == "auth-profiles-direct"
@@ -1080,7 +1161,9 @@ class TestRunAndClassifyWiring:
         fake_bin.chmod(0o755)
 
         with patch("subprocess.run", return_value=proc):
-            _result, classification = run_and_classify(fake_bin)
+            _result, classification = run_and_classify(
+                fake_bin, proxy_base_url="http://127.0.0.1:8787"
+            )
 
         assert len(classification.blocking) == 0
         assert len(classification.unknown_codes) == 0
@@ -1118,7 +1201,7 @@ class TestDoctorUnknownCodes:
                 return_value=(MagicMock(), mock_classification),
             ),
         ):
-            findings = _audit_gate_findings()
+            findings = _audit_gate_findings(None, "http://127.0.0.1:8787")
 
         assert len(findings) == 1
         assert findings[0]["exit_code"] == 87

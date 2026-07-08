@@ -81,6 +81,26 @@ def resolve_port(port_arg: int | None) -> int:
     return 8787
 
 
+def resolve_openclaw_proxy_base_url(port: int | None = None) -> str:
+    """Resolve the proxy base URL written into OpenClaw's provider entries.
+
+    Host: ``WORTHLESS_PROXY_HOST`` env var (all-container Docker deployments
+    write the internal service name, not ``127.0.0.1``) else loopback.
+    Port: explicit ``port`` if given, else :func:`resolve_port`.
+
+    Single-sourced so ``worthless lock``'s actual openclaw.json write, the
+    WOR-650 adopt-consent preview, the WOR-777 audit-gate recognition, and
+    ``worthless doctor``'s prediction of what lock would do all agree on the
+    same URL. Three independent review passes on PR #387 (CodeRabbit,
+    Cursor BugBot, a security-engineer) each found a variant of the same bug
+    where a call site hand-rolled this formula and drifted — duplicating it
+    per call site is what caused the drift, not coincidence.
+    """
+    host = os.environ.get("WORTHLESS_PROXY_HOST", "127.0.0.1")
+    resolved_port = port if port is not None else resolve_port(None)
+    return f"http://{host}:{resolved_port}"  # NOSONAR python:S5332 — loopback/internal-only proxy
+
+
 def check_proxy_health(port: int) -> dict[str, object]:
     """Hit ``/healthz`` on *port* and return a status dict.
 
