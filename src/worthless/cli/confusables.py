@@ -55,6 +55,7 @@ def confusable_hits(name: str) -> list[ConfusableHit]:
     minority-script letters (the ones most likely to be the impersonating glyph).
     """
     hits: list[ConfusableHit] = []
+    seen: set[str] = set()  # dedupe by code point across the whole name (CodeRabbit #419)
     for token in _SEPARATORS.split(name):
         scripts: dict[str, list[str]] = {}
         for ch in token:
@@ -75,7 +76,10 @@ def confusable_hits(name: str) -> list[ConfusableHit]:
                 continue
             sc = _script(ch)
             if sc in _CONFUSABLE_SCRIPTS and sc != baseline:
-                hits.append(ConfusableHit(ch, f"U+{ord(ch):04X}", sc.capitalize()))
+                cp = f"U+{ord(ch):04X}"
+                if cp not in seen:
+                    seen.add(cp)
+                    hits.append(ConfusableHit(ch, cp, sc.capitalize()))
     return hits
 
 

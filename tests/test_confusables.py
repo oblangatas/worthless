@@ -155,3 +155,16 @@ def test_ai_prompt_block_marks_confusable_file() -> None:
     """Cursor #419: the copy-to-AI-agent prompt carries the marker too."""
     assert MARKER in _format_ai_prompt_block([_cf(f"src/c{CYRILLIC_O}nfig.py")])
     assert MARKER not in _format_ai_prompt_block([_cf("src/config.py")])
+
+
+def test_repeated_confusable_char_deduped_by_codepoint() -> None:
+    """CodeRabbit #419: a repeated confusable char yields ONE hit and no
+    duplicate JSON entries; distinct confusables are still both reported."""
+    name = "c" + chr(0x043E) + chr(0x043E) + "nfig.py"  # two Cyrillic о
+    hits = confusable_hits(name)
+    assert len(hits) == 1 and hits[0].codepoint == "U+043E"
+    name2 = "c" + chr(0x043E) + chr(0x0430) + "nfig.py"  # о + а (distinct)
+    assert len({h.codepoint for h in confusable_hits(name2)}) == 2
+    j = _code_findings_to_json([_cf(name)])[0]
+    cps = [c["codepoint"] for c in j["warnings"][0]["confusable_chars"]]
+    assert cps == ["U+043E"], f"expected one entry, got {cps}"
