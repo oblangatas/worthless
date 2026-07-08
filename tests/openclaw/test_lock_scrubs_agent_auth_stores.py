@@ -362,8 +362,15 @@ def test_scrub_refuses_symlinked_auth_store_file(
     exact protection ``openclaw.json``'s own writer already has via
     ``_refuse_if_symlink``.
     """
-    decoy_target = tmp_path / "decoy.txt"
-    decoy_target.write_text("not json, should never be touched\n", encoding="utf-8")
+    # Valid-but-irrelevant JSON (no "providers" key) — WOR-777's separate
+    # models.json-rotation neutralize step also reads this same path, and
+    # by its own deliberate design treats genuinely UNPARSABLE content as
+    # a loud error (a stale rotation is high-visibility; it must never
+    # silently pass). A plain-text decoy would trip THAT check instead of
+    # exercising the write-side symlink refusal this test targets, so the
+    # decoy here must parse cleanly while still being obviously "untouched".
+    decoy_target = tmp_path / "decoy.json"
+    decoy_target.write_text('{"marker": "not touched"}\n', encoding="utf-8")
 
     main_models = openclaw_with_agent_caches["main_models"]
     main_models.unlink()
@@ -373,7 +380,7 @@ def test_scrub_refuses_symlinked_auth_store_file(
     assert result.exit_code == 0, (
         f"a planted symlink must degrade to best-effort skip, not crash lock:\n{result.output}"
     )
-    assert decoy_target.read_text() == "not json, should never be touched\n", (
+    assert decoy_target.read_text() == '{"marker": "not touched"}\n', (
         "scrub followed the symlink and clobbered a file outside the agent dir"
     )
     assert main_models.is_symlink(), "the symlink itself should be left alone, not replaced"
