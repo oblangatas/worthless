@@ -92,6 +92,9 @@ class TestRedactingFilterLazyArgs:
         logger.addHandler(capture)
         logger.addFilter(RedactingFilter())
 
+        # _SECRET is a hardcoded-looking but non-functional placeholder used
+        # deliberately to exercise the redaction path under test — not a
+        # real credential. lgtm[py/clear-text-logging-sensitive-data]
         logger.info('%s - "%s" %d', "127.0.0.1", f"GET /x?api_key={_SECRET} HTTP/1.1", 200)
 
         assert len(capture.lines) == 1
@@ -109,6 +112,98 @@ class TestRedactingFilterLazyArgs:
         logger.info('%s - "%s" %d', "127.0.0.1", "GET /health HTTP/1.1", 200)
 
         assert capture.lines == ['127.0.0.1 - "GET /health HTTP/1.1" 200']
+
+
+class _RecordCapturingHandler(logging.Handler):
+    """Keeps the actual LogRecord objects, not just rendered text, so a
+    test can inspect record.exc_text/exc_info/stack_info directly."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+class TestRedactingFilterExcInfoAndStackInfo:
+    """CodeRabbit review (PR #426): the filter only touched record.msg and
+    record.args — a traceback logged via exc_info=True renders
+    independently (inside a Formatter, from record.exc_info) and could
+    still leak a key even though msg/args were already clean.
+    proxy/app.py has real ``exc_info=True`` call sites (lines 192, 206,
+    890), so this isn't hypothetical."""
+
+    def test_traceback_message_is_redacted(self) -> None:
+        logger = logging.getLogger("test.wor277.exc_info")
+        logger.propagate = False
+        logger.setLevel(logging.DEBUG)
+        capture = _RecordCapturingHandler()
+        logger.addHandler(capture)
+        logger.addFilter(RedactingFilter())
+
+        try:
+            raise RuntimeError(f"upstream call failed with key {_SECRET}")
+        except RuntimeError:
+            logger.warning("sweeper: sweep() raised an exception", exc_info=True)
+
+        assert len(capture.records) == 1
+        record = capture.records[0]
+        # exc_info is cleared so no formatter can re-derive raw text from it.
+        assert record.exc_info is None
+        assert record.exc_text is not None
+        assert _SECRET not in record.exc_text
+        assert "[REDACTED]" in record.exc_text
+
+        # Prove the fully formatted text a real handler would emit (msg +
+        # cached exc_text) never contains the secret either.
+        formatted = logging.Formatter().format(record)
+        assert _SECRET not in formatted
+
+    def test_stack_info_is_redacted(self) -> None:
+        """A real ``stack_info=True`` call only ever captures literal
+        call-frame source locations (file/line/function) — never an
+        interpolated runtime value — so there is nothing a real call
+        could put here for the filter to redact. Construct the record
+        directly instead, to test the mechanism itself as defense in
+        depth (some non-stdlib caller could plausibly set stack_info to
+        text containing a repr with a key in it)."""
+        record = logging.LogRecord(
+            name="test.wor277.stack_info",
+            level=logging.WARNING,
+            pathname=__file__,
+            lineno=1,
+            msg="ok",
+            args=(),
+            exc_info=None,
+        )
+        record.stack_info = f"Stack (most recent call last):\n  key={_SECRET}"
+
+        RedactingFilter().filter(record)
+
+        assert _SECRET not in record.stack_info
+        assert "[REDACTED]" in record.stack_info
+
+    def test_second_filter_pass_on_same_record_is_a_no_op(self) -> None:
+        """Handler-attached filters run once per handler a record
+        propagates to — a record hitting a second handler must not crash
+        now that exc_info is already None after the first pass."""
+        logger = logging.getLogger("test.wor277.exc_info_twice")
+        logger.propagate = False
+        logger.setLevel(logging.DEBUG)
+        capture = _RecordCapturingHandler()
+        redacting_filter = RedactingFilter()
+        logger.addHandler(capture)
+        logger.addFilter(redacting_filter)
+
+        try:
+            raise RuntimeError(f"boom {_SECRET}")
+        except RuntimeError:
+            logger.warning("test", exc_info=True)
+
+        record = capture.records[0]
+        assert redacting_filter.filter(record) is True  # simulate a 2nd dispatch
+        assert _SECRET not in (record.exc_text or "")
 
 
 class TestInstallRedactionFilter:

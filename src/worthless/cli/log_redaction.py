@@ -24,6 +24,8 @@ _AUTH_HEADER_RE = re.compile(r"(?i)(authorization[\"']?\s*[:=]\s*[\"']?Bearer\s+
 _API_KEY_HEADER_RE = re.compile(r"(?i)(x-api-key[\"']?\s*[:=]\s*[\"']?)[^\s\"']+")
 _QUERY_PARAM_RE = re.compile(r"(?i)([?&](?:api[-_]?key|key)=)[^&\s\"']+")
 
+_EXC_FORMATTER = logging.Formatter()
+
 
 def _redact(text: str) -> str:
     text = KEY_PATTERN.sub(_REDACTED, text)
@@ -59,6 +61,25 @@ class RedactingFilter(logging.Filter):
                 record.args = tuple(_redact(a) if isinstance(a, str) else a for a in record.args)
             except TypeError:
                 pass  # non-iterable args (rare) — leave as-is rather than crash
+
+        # logger.warning(..., exc_info=True) renders a traceback the same
+        # way msg/args render — a key in an exception's own message
+        # survives an unredacted traceback otherwise. proxy/app.py has
+        # reachable exc_info=True call sites (CodeRabbit review, PR #426).
+        # Render early, redact, cache the result, and clear exc_info so no
+        # formatter downstream can re-derive raw text from it — same
+        # cache-then-neutralize pattern as record.msg/args above. Safe to
+        # run more than once on the same record (e.g. multiple handlers):
+        # exc_info is None on any pass after the first, so it's a no-op.
+        if record.exc_info:
+            try:
+                record.exc_text = _redact(_EXC_FORMATTER.formatException(record.exc_info))
+            except Exception:
+                record.exc_text = _REDACTED
+            record.exc_info = None
+        if record.stack_info:
+            record.stack_info = _redact(str(record.stack_info))
+
         return True
 
 

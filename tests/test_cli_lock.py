@@ -1465,6 +1465,7 @@ class TestEnrollCommand:
         """Passing --key alongside --key-stdin must still be rejected —
         the mere presence of a raw key value on the command line is the
         violation, regardless of what else is passed."""
+        key = fake_openai_key()
         result = runner.invoke(
             app,
             [
@@ -1472,16 +1473,23 @@ class TestEnrollCommand:
                 "--alias",
                 "both-flags-test",
                 "--key",
-                fake_openai_key(),
+                key,
                 "--key-stdin",
                 "--provider",
                 "openai",
             ],
-            input=f"{fake_openai_key()}\n",
+            input=f"{key}\n",
             env={"WORTHLESS_HOME": str(home_dir.base_dir)},
         )
         assert result.exit_code != 0
         assert "--key-stdin" in result.output
+        assert key not in result.output
+
+        # Nothing should have been enrolled — the rejection must happen
+        # before any DB write, same as the --key-only rejection path.
+        repo = _repo(home_dir)
+        aliases = asyncio.run(repo.list_keys())
+        assert "both-flags-test" not in aliases
 
     def test_enroll_explicit_args(self, home_dir: WorthlessHome) -> None:
         """Enroll with explicit alias, key, and provider."""
