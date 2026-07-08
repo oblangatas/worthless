@@ -306,9 +306,37 @@ def detect_unshardable_credentials() -> list[UnshardableCredentialFinding]:
     return findings
 
 
+def detection_caveats() -> list[str]:
+    """Human-readable notes about detection coverage gaps.
+
+    A clean scan (0 findings) must never read as "verified clean" when
+    part of the scan genuinely couldn't run — the whole point of this
+    feature is honesty about what ``lock`` can and can't see. Keychain
+    access (surfaces 1 and 3) is macOS-only; on any other platform those
+    two surfaces are silently skipped by ``_keychain_service_present``,
+    so callers surface this explicitly rather than let a 0-finding result
+    imply they were checked and came back clean.
+    """
+    if sys.platform != "darwin":
+        return [
+            "keychain-based surfaces (Claude Code, Codex) could not be "
+            "checked — keychain access is macOS-only"
+        ]
+    return []
+
+
 def _clear_file(location: str) -> bool:
+    path = Path(location)
+    if path.is_symlink():
+        # Unlinking would remove only the link, silently leaving the real
+        # credential live at whatever it points to — the scan would then
+        # report a clean clear while the token still fully exists. Refuse
+        # rather than declare a false victory (matches
+        # _clear_auth_profile_entries's F-CFG-15 symlink handling).
+        logger.warning("refusing to clear %s — it is a symlink (F-CFG-15)", location)
+        return False
     try:
-        Path(location).unlink()
+        path.unlink()
         return True
     except FileNotFoundError:
         return True  # already gone — idempotent

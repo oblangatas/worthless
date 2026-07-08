@@ -340,3 +340,80 @@ def test_doctor_fix_clears_unshardable_credential_via_cli(
     check = next(c for c in payload["checks"] if c["check_id"] == "unshardable_credentials")
     assert any(f["surface_id"] == "gemini_cli_file" for f in check["fixed"])
     assert not creds_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# Security-review follow-ups: a 0-finding scan must never read as "verified
+# clean" when part of the scan genuinely couldn't run, and clearing a
+# leaf credential file must refuse a symlink rather than silently declare
+# victory while the real token lives on at the link's target.
+# ---------------------------------------------------------------------------
+
+
+def test_clear_file_refuses_symlink_instead_of_declaring_false_victory(
+    sandboxed_home: Path, tmp_path: Path
+) -> None:
+    """If a leaf credential file (e.g. ~/.claude/.credentials.json) is
+    ITSELF a symlink, unlinking it only removes the link — the real
+    credential at the target survives untouched. Clearing must refuse
+    (report not-cleared) rather than report success on a token that's
+    still fully live.
+    """
+    decoy_target = tmp_path / "decoy-real-token.json"
+    decoy_target.write_text('{"access_token": "still-live"}\n', encoding="utf-8")
+
+    creds_path = sandboxed_home / ".claude" / ".credentials.json"
+    creds_path.parent.mkdir(parents=True)
+    creds_path.symlink_to(decoy_target)
+
+    finding = uc.UnshardableCredentialFinding(
+        surface_id="claude_cli_file",
+        description="Claude Code CLI OAuth credentials file",
+        location=str(creds_path),
+        clear_kind="file",
+    )
+    cleared = uc.clear_unshardable_credential(finding)
+
+    assert cleared is False, "clearing a symlinked credential file must not report success"
+    assert creds_path.is_symlink(), "the symlink itself should be left alone, not removed"
+    assert decoy_target.read_text() == '{"access_token": "still-live"}\n', (
+        "the real credential at the symlink's target must be untouched"
+    )
+
+
+def test_detection_caveats_flags_keychain_surfaces_unverifiable_on_non_darwin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 0-finding scan on a non-macOS host must not imply the keychain
+    surfaces (Claude Code, Codex) were checked and came back clean — they
+    were never checked at all.
+    """
+    monkeypatch.setattr(uc.sys, "platform", "linux")
+    caveats = uc.detection_caveats()
+    assert caveats, "non-darwin must surface a caveat about unverifiable keychain surfaces"
+    assert "keychain" in caveats[0].lower()
+    assert "macos" in caveats[0].lower()
+
+
+def test_doctor_summary_includes_caveat_note_when_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The doctor check's summary text carries the caveat forward — a
+    clean scan must read as 'clean, with a coverage gap', never as a
+    plain, unqualified 'all clear'.
+    """
+    from worthless.cli.commands.doctor.checks import unshardable_credentials as check_mod
+    from worthless.storage.repository import ShardRepository
+
+    monkeypatch.setattr(check_mod, "detect_unshardable_credentials", lambda: [])
+    monkeypatch.setattr(check_mod, "detection_caveats", lambda: ["keychain surfaces unchecked"])
+
+    fake_home = ensure_home(tmp_path / ".worthless")
+    ctx = check_mod.CheckContext(
+        home=fake_home,
+        repo=ShardRepository(str(fake_home.db_path), bytes(fake_home.fernet_key)),
+        fix=False,
+        dry_run=False,
+    )
+    result = check_mod.run(ctx)
+    assert "keychain surfaces unchecked" in result["summary"]

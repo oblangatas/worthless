@@ -23,6 +23,7 @@ from worthless.openclaw.unshardable_credentials import (
     VERTEX_REAUTH_COMMAND,
     clear_unshardable_credential,
     detect_unshardable_credentials,
+    detection_caveats,
 )
 
 check_id = "unshardable_credentials"
@@ -40,13 +41,21 @@ def _clear_finding(finding) -> dict | None:  # noqa: ANN001 - UnshardableCredent
     return entry
 
 
-def _summarize(n: int) -> str:
-    if n == 0:
-        return "No unshardable OAuth/token credentials found."
-    return (
-        f"{n} unshardable credential{'s' if n != 1 else ''} found (OAuth/token — "
-        "the proxy is not load-bearing for these; lock cannot protect them)"
+def _summarize(n: int, caveats: list[str]) -> str:
+    base = (
+        "No unshardable OAuth/token credentials found."
+        if n == 0
+        else (
+            f"{n} unshardable credential{'s' if n != 1 else ''} found (OAuth/token — "
+            "the proxy is not load-bearing for these; lock cannot protect them)"
+        )
     )
+    # A 0-finding scan must never read as "verified clean" when part of it
+    # couldn't run at all — that's the one thing that would undermine this
+    # check's entire reason for existing.
+    if caveats:
+        base += " NOTE: " + "; ".join(caveats) + "."
+    return base
 
 
 def run(ctx: CheckContext) -> CheckResult:
@@ -65,7 +74,7 @@ def run(ctx: CheckContext) -> CheckResult:
         check_id=check_id,
         status=status,
         findings=findings,
-        summary=_summarize(len(findings_data)),
+        summary=_summarize(len(findings_data), detection_caveats()),
         fixable=True,
         fixed=fixed,
         skipped_reason=None,
