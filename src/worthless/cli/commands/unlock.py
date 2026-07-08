@@ -472,13 +472,19 @@ async def _build_oc_restores(
             continue
 
         kind = parsed["apiKey"]["kind"]
-        plaintext_key: bytearray | None = None
+        # Read the key back from the just-restored .env regardless of
+        # `kind` — WOR-796's agent-cache restore needs the real key value
+        # independent of whatever shape openclaw.json's OWN entry happens
+        # to be (a `secretref`-kind entry can still have had a literal real
+        # key scrubbed out of its agent cache). Bugbot catch: this used to
+        # only re-read for `kind == "plaintext"`, silently leaving a
+        # `secretref`-kind provider's agent cache scrubbed forever even
+        # after a successful unlock.
+        plaintext_key = _reread_plaintext_from_env(p)
         if kind == "plaintext":
-            # Read the key back from the just-restored .env. pass-2 wrote
-            # the reconstructed plaintext moments ago. If the .env is gone
-            # (recovery mode / user deleted it) we can't restore the OC
-            # plaintext branch — fall through fail-safe.
-            plaintext_key = _reread_plaintext_from_env(p)
+            # pass-2 wrote the reconstructed plaintext moments ago. If the
+            # .env is gone (recovery mode / user deleted it) we can't
+            # restore the OC plaintext branch — fall through fail-safe.
             if plaintext_key is None:
                 console.print_warning(
                     f"OpenClaw {p.provider!r}: cannot re-read plaintext key "

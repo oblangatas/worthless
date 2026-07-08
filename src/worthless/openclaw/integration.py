@@ -2028,8 +2028,7 @@ def _apply_unlock_stage_a(
     events: list[OpenclawIntegrationEvent],
     providers_restored: list[str],
     providers_skipped: list[tuple[str, str]],
-    home_dir: Path | None = None,
-    config: dict | None = None,
+    agent_cache_blocked: set[str],
 ) -> bool:
     """Stage A of apply_unlock: restore each provider's ORIGINAL entry.
 
@@ -2041,144 +2040,219 @@ def _apply_unlock_stage_a(
     Fail-CLOSED (decision 3): a corrupt/missing record, or a plaintext
     restore with no reconstructed key, leaves the provider on the proxy and
     is surfaced as a skip — never a silent pass, never a bad/plaintext
-    write. The reconstructed key is zeroed on every exit (decision 1).
+    write.
 
     Returns ``True`` if a write failure occurred and rollback is required.
     Mutates providers_restored / providers_skipped / events in place.
+
+    Deliberately does NOT touch the WOR-796 agent-cache surface, and does
+    NOT zero ``restore.plaintext_key`` — the caller (:func:`apply_unlock`)
+    needs it intact afterward for :func:`_restore_agent_auth_stores_after_unlock`,
+    which must run only once this whole stage's rollback outcome is known
+    (a mid-stage rollback here reverts EVERY provider processed so far —
+    restoring an earlier provider's agent cache to plaintext before that is
+    decided would leave it exposed under a later provider's failure).
+
+    *agent_cache_blocked* is mutated with any provider whose openclaw.json
+    restore hit a REAL problem (tamper, unreadable config, corrupt key) —
+    restoring ITS agent cache to plaintext would leave it mismatched
+    against an openclaw.json entry that's still on the proxy. The benign
+    "no original entry existed" no-op (``record is None`` with no MAC) is
+    deliberately NOT added here — that provider's agent cache is still
+    safe and expected to restore, even though it never touches
+    ``providers_restored`` (there's nothing for THIS function to do in
+    openclaw.json for it either way).
     """
     for restore in restores:
         provider = restore.provider
         plaintext_key = restore.plaintext_key
-        # WOR-796: undo scrub_agent_auth_stores for this provider. Fires
-        # independently of openclaw.json's OWN restore below — auth-profiles
-        # .json/models.json can cache a real key even when openclaw.json
-        # never had a prior entry for this provider at all (the record/kind
-        # branching below is openclaw.json-specific and would otherwise
-        # never reach this provider). Best-effort, never raises.
-        if home_dir is not None and restore.var_name and plaintext_key is not None:
+        record = restore.oc_original_api_key_json
+        try:
+            if record is None:
+                # G5-C clarification: distinguish "never captured" from
+                # "captured then nulled." Lock writes (record=None, mac=None)
+                # together when there was no openclaw entry to capture
+                # (no_entry / relock_no_prior branches in _decide_oc_capture)
+                # — that's a clean no-op for this provider, not a failure.
+                # An attacker who nulls only the record while leaving the
+                # MAC intact still fails the (record is None AND mac is not
+                # None) tamper check below; the fernet key keeps them out
+                # of forging a matching MAC on (None, *).
+                if restore.expected_mac is None:
+                    # Genuine no-rollback-captured. Skip silently.
+                    continue
+                raise ValueError("rollback mac present but record missing — tamper")
+            # G5-A (Gap 3a): enforce the G2 MAC tamper-bind HERE — the
+            # lowest layer that touches the record — so a caller that
+            # bypasses _build_oc_restores cannot skip the gate. The CLI
+            # populates both fields from the DB + a fresh
+            # ShardRepository._compute_decoy_hash; both-None falls
+            # back to shape-only per G1 (legacy pre-G2 rows).
+            entry = _parse_oc_rollback_entry_record(
+                record,
+                expected_mac=restore.expected_mac,
+                recomputed_mac=restore.recomputed_mac,
+            )
+        except ValueError as exc:
+            events.append(
+                OpenclawIntegrationEvent(
+                    code=OpenclawErrorCode.CONFIG_UNREADABLE,
+                    level="error",
+                    detail=f"refusing to restore {provider}: invalid rollback record ({exc})",
+                    extra={"provider": provider},
+                )
+            )
+            providers_skipped.append((provider, "rollback_record_invalid"))
+            agent_cache_blocked.add(provider)
+            continue
+
+        apikey_shape = entry["apiKey"]
+        if apikey_shape["kind"] == "secretref":
+            entry["apiKey"] = apikey_shape["ref"]
+        else:  # plaintext — substitute the client-reconstructed key
+            if plaintext_key is None:
+                events.append(
+                    OpenclawIntegrationEvent(
+                        code=OpenclawErrorCode.CONFIG_UNREADABLE,
+                        level="error",
+                        detail=(
+                            f"refusing to restore {provider}: plaintext record "
+                            "but no reconstructed key supplied"
+                        ),
+                        extra={"provider": provider},
+                    )
+                )
+                providers_skipped.append((provider, "missing_plaintext_key"))
+                agent_cache_blocked.add(provider)
+                continue
+            try:
+                entry["apiKey"] = plaintext_key.decode("utf-8")
+            except UnicodeDecodeError:
+                events.append(
+                    OpenclawIntegrationEvent(
+                        code=OpenclawErrorCode.CONFIG_UNREADABLE,
+                        level="error",
+                        detail=(
+                            f"refusing to restore {provider}: reconstructed key "
+                            "is not valid UTF-8 (corrupt shard?)"
+                        ),
+                        extra={"provider": provider},
+                    )
+                )
+                providers_skipped.append((provider, "rollback_record_invalid"))
+                agent_cache_blocked.add(provider)
+                continue
+
+        try:
+            _config_mod.replace_provider(config_path, provider, entry)
+        except OpenclawConfigError as exc:
+            events.append(
+                OpenclawIntegrationEvent(
+                    code=OpenclawErrorCode.CONFIG_UNREADABLE,
+                    level="error",
+                    detail=f"could not restore {provider} in {config_path}: {exc}",
+                    extra={"provider": provider},
+                )
+            )
+            providers_skipped.append((provider, "config_unreadable"))
+            agent_cache_blocked.add(provider)
+            continue
+        except OSError as exc:
+            events.append(
+                OpenclawIntegrationEvent(
+                    code=OpenclawErrorCode.WRITE_FAILED,
+                    level="error",
+                    detail=f"failed to write {config_path}: {exc}",
+                    extra={"provider": provider},
+                )
+            )
+            providers_skipped.append((provider, "write_failed"))
+            return True  # rollback needed
+
+        providers_restored.append(provider)
+        events.append(
+            OpenclawIntegrationEvent(
+                code=OpenclawErrorCode.CONFIG_UPDATED,
+                level="info",
+                detail=f"restored {provider} in {config_path}",
+                extra={"provider": provider},
+            )
+        )
+    return False
+
+
+def _agent_cache_eligible_providers(
+    restores: list[OcRestore],
+    config_missing: bool,
+    rollback_needed: bool,
+    agent_cache_blocked: set[str],
+) -> set[str] | None:
+    """Which providers' agent caches are safe to restore. Extracted to
+    keep :func:`apply_unlock` under xenon's budget.
+
+    - ``config_missing``: Stage A never ran at all — nothing to roll back,
+      restore unconditionally (``None``).
+    - ``rollback_needed``: a write failure rolled openclaw.json back to its
+      pre-unlock snapshot for EVERY provider processed this stage — block
+      everyone rather than risk a plaintext cache next to a locked entry.
+    - otherwise: every provider except the ones Stage A specifically
+      flagged as a real problem (tamper/unreadable/corrupt) is eligible —
+      includes providers with no original openclaw.json entry at all (a
+      benign no-op for Stage A, never added to ``providers_restored``, but
+      still fully safe to restore in the agent cache).
+    """
+    if config_missing:
+        return None
+    if rollback_needed:
+        return set()
+    return {r.provider for r in restores} - agent_cache_blocked
+
+
+def _restore_agent_auth_stores_after_unlock(
+    restores: list[OcRestore],
+    home_dir: Path | None,
+    config: dict | None,
+    eligible: set[str] | None,
+) -> None:
+    """WOR-796: restore the agent-cache surface for each eligible provider,
+    then zero every restore's plaintext_key — the single point where all
+    restores are known final, deliberately called only AFTER Stage A's
+    rollback outcome (if any) is resolved.
+
+    *eligible* is ``None`` to restore unconditionally for every restore —
+    Stage A never ran this pass (openclaw.json missing/unreadable/symlinked),
+    so there is nothing there to roll back and the agent cache is a fully
+    separate surface. Otherwise *eligible* is the set of providers whose
+    openclaw.json restore is FINAL (Stage A completed with no rollback) —
+    ``rollback_config`` reverts the WHOLE file to its pre-unlock snapshot,
+    so restoring an earlier provider's cache to plaintext before knowing
+    the stage won't roll back would leave that cache exposed while
+    openclaw.json reverts to its locked shape for every provider (Bugbot
+    HIGH finding).
+    """
+    try:
+        if home_dir is None:
+            return
+        for restore in restores:
+            if eligible is not None and restore.provider not in eligible:
+                continue
+            plaintext_key = restore.plaintext_key
+            if not restore.var_name or plaintext_key is None:
+                continue
             try:
                 restore_agent_auth_stores(
                     home_dir,
-                    provider,
+                    restore.provider,
                     restore.var_name,
                     plaintext_key.decode("utf-8"),
                     config,
                 )
             except UnicodeDecodeError:
                 pass
-        try:
-            record = restore.oc_original_api_key_json
-            try:
-                if record is None:
-                    # G5-C clarification: distinguish "never captured" from
-                    # "captured then nulled." Lock writes (record=None, mac=None)
-                    # together when there was no openclaw entry to capture
-                    # (no_entry / relock_no_prior branches in _decide_oc_capture)
-                    # — that's a clean no-op for this provider, not a failure.
-                    # An attacker who nulls only the record while leaving the
-                    # MAC intact still fails the (record is None AND mac is not
-                    # None) tamper check below; the fernet key keeps them out
-                    # of forging a matching MAC on (None, *).
-                    if restore.expected_mac is None:
-                        # Genuine no-rollback-captured. Skip silently.
-                        continue
-                    raise ValueError("rollback mac present but record missing — tamper")
-                # G5-A (Gap 3a): enforce the G2 MAC tamper-bind HERE — the
-                # lowest layer that touches the record — so a caller that
-                # bypasses _build_oc_restores cannot skip the gate. The CLI
-                # populates both fields from the DB + a fresh
-                # ShardRepository._compute_decoy_hash; both-None falls
-                # back to shape-only per G1 (legacy pre-G2 rows).
-                entry = _parse_oc_rollback_entry_record(
-                    record,
-                    expected_mac=restore.expected_mac,
-                    recomputed_mac=restore.recomputed_mac,
-                )
-            except ValueError as exc:
-                events.append(
-                    OpenclawIntegrationEvent(
-                        code=OpenclawErrorCode.CONFIG_UNREADABLE,
-                        level="error",
-                        detail=f"refusing to restore {provider}: invalid rollback record ({exc})",
-                        extra={"provider": provider},
-                    )
-                )
-                providers_skipped.append((provider, "rollback_record_invalid"))
-                continue
-
-            apikey_shape = entry["apiKey"]
-            if apikey_shape["kind"] == "secretref":
-                entry["apiKey"] = apikey_shape["ref"]
-            else:  # plaintext — substitute the client-reconstructed key
-                if plaintext_key is None:
-                    events.append(
-                        OpenclawIntegrationEvent(
-                            code=OpenclawErrorCode.CONFIG_UNREADABLE,
-                            level="error",
-                            detail=(
-                                f"refusing to restore {provider}: plaintext record "
-                                "but no reconstructed key supplied"
-                            ),
-                            extra={"provider": provider},
-                        )
-                    )
-                    providers_skipped.append((provider, "missing_plaintext_key"))
-                    continue
-                try:
-                    entry["apiKey"] = plaintext_key.decode("utf-8")
-                except UnicodeDecodeError:
-                    events.append(
-                        OpenclawIntegrationEvent(
-                            code=OpenclawErrorCode.CONFIG_UNREADABLE,
-                            level="error",
-                            detail=(
-                                f"refusing to restore {provider}: reconstructed key "
-                                "is not valid UTF-8 (corrupt shard?)"
-                            ),
-                            extra={"provider": provider},
-                        )
-                    )
-                    providers_skipped.append((provider, "rollback_record_invalid"))
-                    continue
-
-            try:
-                _config_mod.replace_provider(config_path, provider, entry)
-            except OpenclawConfigError as exc:
-                events.append(
-                    OpenclawIntegrationEvent(
-                        code=OpenclawErrorCode.CONFIG_UNREADABLE,
-                        level="error",
-                        detail=f"could not restore {provider} in {config_path}: {exc}",
-                        extra={"provider": provider},
-                    )
-                )
-                providers_skipped.append((provider, "config_unreadable"))
-                continue
-            except OSError as exc:
-                events.append(
-                    OpenclawIntegrationEvent(
-                        code=OpenclawErrorCode.WRITE_FAILED,
-                        level="error",
-                        detail=f"failed to write {config_path}: {exc}",
-                        extra={"provider": provider},
-                    )
-                )
-                providers_skipped.append((provider, "write_failed"))
-                return True  # rollback needed
-
-            providers_restored.append(provider)
-            events.append(
-                OpenclawIntegrationEvent(
-                    code=OpenclawErrorCode.CONFIG_UPDATED,
-                    level="info",
-                    detail=f"restored {provider} in {config_path}",
-                    extra={"provider": provider},
-                )
-            )
-        finally:
-            if plaintext_key is not None:
-                zero_buf(plaintext_key)
-    return False
+    finally:
+        for restore in restores:
+            if restore.plaintext_key is not None:
+                zero_buf(restore.plaintext_key)
 
 
 # ---------------------------------------------------------------------------
@@ -2317,9 +2391,12 @@ def apply_unlock(
     # Extracted to _apply_unlock_stage_a to keep apply_unlock within xenon.
     # SM-2 symmetry: snapshot the config first; on a mid-restore write
     # failure, roll back so we never leave a half-restored config.
+    original_config_snapshot: dict | None = None
+    agent_cache_blocked: set[str] = set()
+    rollback_needed = False
     if not config_missing:
         try:
-            original_config_snapshot: dict | None = _config_mod.read_config(config_path)
+            original_config_snapshot = _config_mod.read_config(config_path)
         except (OpenclawConfigError, OSError):
             original_config_snapshot = None
         rollback_needed = _apply_unlock_stage_a(
@@ -2328,8 +2405,7 @@ def apply_unlock(
             events,
             providers_restored,
             providers_skipped,
-            home_dir=state.home_dir,
-            config=original_config_snapshot,
+            agent_cache_blocked,
         )
         if rollback_needed and original_config_snapshot is not None:
             try:
@@ -2351,6 +2427,19 @@ def apply_unlock(
             for restored in list(providers_restored):
                 providers_skipped.append((restored, "rolled_back"))
             providers_restored.clear()
+
+    # WOR-796 (Bugbot fixes): restore the agent-cache surface now that
+    # Stage A's rollback outcome (if any) is fully resolved — see
+    # _restore_agent_auth_stores_after_unlock's docstring for why this must
+    # run AFTER, never during/before, Stage A's per-provider loop.
+    _restore_agent_auth_stores_after_unlock(
+        restores,
+        state.home_dir,
+        original_config_snapshot,
+        eligible=_agent_cache_eligible_providers(
+            restores, config_missing, rollback_needed, agent_cache_blocked
+        ),
+    )
 
     # ---- Stage B: uninstall skill folder ---------------------------------
     skill_uninstalled = False

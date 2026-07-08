@@ -377,3 +377,199 @@ def test_scrub_refuses_symlinked_auth_store_file(
         "scrub followed the symlink and clobbered a file outside the agent dir"
     )
     assert main_models.is_symlink(), "the symlink itself should be left alone, not replaced"
+
+
+# ---------------------------------------------------------------------------
+# Bugbot findings on the RESTORE side (PR #424 review): the agent-cache
+# surface must restore correctly regardless of what openclaw.json's OWN
+# entry looked like before lock, must still restore when Stage A never
+# runs at all, and must never restore to plaintext before we're sure
+# openclaw.json's own restore won't be rolled back.
+# ---------------------------------------------------------------------------
+
+
+def test_unlock_restores_agent_cache_even_when_original_entry_was_secretref(
+    home_dir: WorthlessHome,
+    env_file: Path,
+    openclaw_with_agent_caches: dict[str, Path],
+    real_key: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A provider whose ORIGINAL openclaw.json entry was already a
+    SecretRef (not a literal key) still had a literal real key cached in
+    its agent auth stores — scrubbed by lock like any other provider.
+    Bugbot catch: unlock only re-read the reconstructed key for
+    ``kind == "plaintext"`` entries, silently leaving a secretref-kind
+    provider's agent cache scrubbed forever even after a clean unlock.
+    """
+    monkeypatch.setenv("EXISTING_VAR", "sk-something-unrelated-1234567890")
+    openclaw_dir = openclaw_with_agent_caches["openclaw_dir"]
+    original_ref = {"$ref": {"source": "env", "provider": "openai", "id": "EXISTING_VAR"}}
+    _write_json(
+        openclaw_dir / "openclaw.json",
+        {
+            "models": {
+                "providers": {
+                    "openai": {"baseUrl": "https://api.openai.com/v1", "apiKey": original_ref}
+                }
+            }
+        },
+    )
+
+    locked = _lock(env_file, home_dir)
+    assert locked.exit_code == 0, locked.output
+
+    unlocked = _unlock(env_file, home_dir)
+    assert unlocked.exit_code == 0, unlocked.output
+
+    # openclaw.json's own entry restored to the ORIGINAL secretref — never
+    # downgraded to plaintext.
+    after = json.loads((openclaw_dir / "openclaw.json").read_text())
+    assert after["models"]["providers"]["openai"]["apiKey"] == original_ref
+
+    # The agent cache — a fully separate surface — must ALSO be restored,
+    # even though openclaw.json's own entry never needed the real key.
+    models = json.loads(openclaw_with_agent_caches["main_models"].read_text())
+    assert models["providers"]["openai"]["apiKey"] == real_key, (
+        "agent cache was not restored for a provider whose original "
+        "openclaw.json entry was a secretref"
+    )
+
+
+def test_unlock_restores_agent_cache_even_when_openclaw_json_is_missing(
+    home_dir: WorthlessHome,
+    env_file: Path,
+    openclaw_with_agent_caches: dict[str, Path],
+    real_key: str,
+) -> None:
+    """WOR-621 RT-03: openclaw.json can be deleted between lock and unlock
+    — Stage A is skipped entirely in that case (nothing there to restore).
+    Bugbot catch: the agent cache is a fully separate surface Stage A
+    never touches anyway, so it must still get restored even when Stage A
+    itself never runs.
+    """
+    locked = _lock(env_file, home_dir)
+    assert locked.exit_code == 0, locked.output
+
+    (openclaw_with_agent_caches["openclaw_dir"] / "openclaw.json").unlink()
+
+    unlocked = _unlock(env_file, home_dir)
+    assert unlocked.exit_code == 0, unlocked.output
+
+    models = json.loads(openclaw_with_agent_caches["main_models"].read_text())
+    assert models["providers"]["openai"]["apiKey"] == real_key, (
+        "agent cache was not restored when openclaw.json was missing at unlock time"
+    )
+
+
+def test_unlock_rollback_does_not_leave_agent_cache_exposed_in_plaintext(
+    sandboxed_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bugbot HIGH finding: the agent-cache restore used to run BEFORE
+    openclaw.json's own per-provider restore succeeded. If a LATER
+    provider's write then failed, ``rollback_config`` reverts openclaw.json
+    for EVERY provider processed this stage — but an EARLIER provider's
+    agent cache would already have been restored to plaintext, leaving a
+    plaintext key in the agent cache next to a config entry that reverted
+    back to its locked (proxy) shape.
+
+    Exercises ``_apply_unlock_stage_a`` / ``_restore_agent_auth_stores_after_unlock``
+    directly (not the full CLI) for precise control over which provider's
+    write fails.
+    """
+    from worthless.openclaw import integration as oc_integration
+
+    openclaw_dir = sandboxed_home / ".openclaw"
+    (openclaw_dir / "workspace").mkdir(parents=True)
+    original_openai_entry = {"baseUrl": "https://api.openai.com/v1", "apiKey": "sk-original-openai"}
+    original_anthropic_entry = {
+        "baseUrl": "https://api.anthropic.com/v1",
+        "apiKey": "sk-ant-original",
+    }
+    config_path = openclaw_dir / "openclaw.json"
+    _write_json(
+        config_path,
+        {
+            "models": {
+                "providers": {
+                    "openai": original_openai_entry,
+                    "anthropic": original_anthropic_entry,
+                }
+            }
+        },
+    )
+
+    agent_dir = openclaw_dir / "agents" / "main" / "agent"
+    _write_json(
+        agent_dir / "models.json",
+        {
+            "providers": {
+                "openai": {"apiKey": "${OPENAI_API_KEY}", "baseUrl": "https://api.openai.com/v1"}
+            }
+        },
+    )
+    _write_json(agent_dir / "auth-profiles.json", {"profiles": {}})
+
+    restores = [
+        oc_integration.OcRestore(
+            provider="openai",
+            alias="openai-alias",
+            oc_original_api_key_json=oc_integration.build_oc_rollback_entry_record(
+                original_openai_entry
+            ),
+            plaintext_key=bytearray(b"sk-original-openai"),
+            var_name="OPENAI_API_KEY",
+        ),
+        oc_integration.OcRestore(
+            provider="anthropic",
+            alias="anthropic-alias",
+            oc_original_api_key_json=oc_integration.build_oc_rollback_entry_record(
+                original_anthropic_entry
+            ),
+            plaintext_key=bytearray(b"sk-ant-original"),
+            var_name="ANTHROPIC_API_KEY",
+        ),
+    ]
+
+    # Force the SECOND provider's openclaw.json write to fail.
+    real_replace_provider = oc_integration._config_mod.replace_provider
+    call_count = {"n": 0}
+
+    def _flaky_replace_provider(path, provider, entry):
+        call_count["n"] += 1
+        if call_count["n"] == 2:
+            raise OSError("simulated disk failure")
+        return real_replace_provider(path, provider, entry)
+
+    monkeypatch.setattr(oc_integration._config_mod, "replace_provider", _flaky_replace_provider)
+
+    # Snapshot BEFORE Stage A runs — matches apply_unlock's own SM-2
+    # symmetry (read the pre-unlock config before any per-provider write).
+    original_snapshot = json.loads(config_path.read_text())
+
+    events: list = []
+    providers_restored: list[str] = []
+    providers_skipped: list[tuple[str, str]] = []
+    agent_cache_blocked: set[str] = set()
+    rollback_needed = oc_integration._apply_unlock_stage_a(
+        config_path, restores, events, providers_restored, providers_skipped, agent_cache_blocked
+    )
+    assert rollback_needed is True, "the second provider's OSError must trigger a rollback"
+
+    oc_integration.rollback_config(config_path, original_snapshot)
+
+    oc_integration._restore_agent_auth_stores_after_unlock(
+        restores,
+        sandboxed_home,
+        None,
+        eligible=set() if rollback_needed else set(providers_restored),
+    )
+
+    # THE ASSERTION: openai's agent cache must STILL be scrubbed (${VAR}),
+    # NOT restored to plaintext, even though its own openclaw.json write
+    # succeeded before anthropic's failed and triggered the rollback.
+    models = json.loads((agent_dir / "models.json").read_text())
+    assert models["providers"]["openai"]["apiKey"] == "${OPENAI_API_KEY}", (
+        "agent cache was restored to plaintext even though the whole-stage "
+        "rollback reverted openclaw.json back to its locked shape"
+    )
