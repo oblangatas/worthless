@@ -590,18 +590,24 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
         _spend_reservation = _estimate_tokens(body)
 
         # GATE: rules engine evaluates BEFORE any Fernet decrypt
-        # WOR-277: every concrete rule fails closed internally (returns a
-        # Denial rather than raising), so this should be unreachable in
-        # practice — but unlike every other step in this handler, it had no
-        # try/except at all: an exception here would skip zeroing shard_a
-        # (SR-01/SR-02) AND propagate as a raw, unhandled exception. Fail
-        # closed the same way the general-exception branches below do.
+        # WOR-277: SpendCapRule/TokenBudgetRule/TimeWindowRule each fail
+        # closed internally (return a Denial rather than raising), but
+        # RateLimitRule.evaluate() has no try/except of its own — a
+        # transient error there (e.g. its _load_limit DB read) propagates
+        # here uncaught (code-reviewer, PR #426; confirmed by reading
+        # rules.py directly rather than assuming). If TokenBudgetRule ran
+        # first and placed an in-memory reservation, it must be released
+        # here too, or it leaks forever (no sweeper exists for it, unlike
+        # the durable spend-cap hold). This was also the one step in this
+        # handler with no try/except at all, skipping shard_a zeroing
+        # (SR-01/SR-02) and propagating a raw, unhandled exception.
         try:
             gate = await rules_engine.evaluate(
                 alias, request, provider=encrypted.provider, body=body
             )
         except Exception:
             shard_a[:] = b"\x00" * len(shard_a)
+            await rules_engine.release_spend_reservation(alias, amount=_spend_reservation)
             return _uniform_401()
         spend_handle = gate.spend_handle
 

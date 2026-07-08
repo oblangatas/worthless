@@ -18,7 +18,7 @@ import respx
 from worthless.crypto.splitter import split_key_fp
 from worthless.proxy.app import create_app
 from worthless.proxy.config import ProxySettings
-from worthless.proxy.rules import RateLimitRule, RulesEngine, SpendCapRule
+from worthless.proxy.rules import RateLimitRule, RulesEngine, SpendCapRule, TokenBudgetRule
 from worthless.storage.repository import ShardRepository, StoredShard
 
 from tests._fakes import pin_shard_b
@@ -239,6 +239,57 @@ class TestShardAIsolation:
         field_names = [f.name for f in dataclasses.fields(ProxySettings)]
         for name in field_names:
             assert "shard_a" not in name.lower(), f"ProxySettings has shard_a field: {name}"
+
+
+# ------------------------------------------------------------------
+# 2b. WOR-277: a later rule raising must not leak an earlier rule's
+#     in-memory reservation
+# ------------------------------------------------------------------
+
+
+class TestRulesEngineExceptionReleasesReservation:
+    """If a rule raises after an earlier rule already placed an in-memory
+    token-budget reservation, the reservation must still be released.
+    code-reviewer (PR #426) found RateLimitRule.evaluate() has no
+    try/except of its own, unlike SpendCapRule/TokenBudgetRule/
+    TimeWindowRule, which all fail closed internally — so a rule raising
+    mid-pipeline, after an earlier rule reserved tokens, is genuinely
+    reachable, not theoretical. There's no sweeper for this in-memory
+    reservation (unlike the durable spend-cap hold), so a leak here is
+    permanent for the life of the process and self-inflicts denials on
+    every future request for that alias.
+    """
+
+    async def test_reservation_released_when_later_rule_raises(
+        self, proxy_app, proxy_client: httpx.AsyncClient, enrolled_alias
+    ) -> None:
+        alias, shard_a_utf8, _ = enrolled_alias
+        db = proxy_app.state.db
+
+        # A real budget so TokenBudgetRule actually places a reservation.
+        await db.execute(
+            "INSERT INTO enrollment_config (key_alias, token_budget_daily) VALUES (?, ?)",
+            (alias, 1_000_000),
+        )
+        await db.commit()
+
+        class _AlwaysRaises:
+            async def evaluate(self, alias, request, *, provider="openai", body=b""):
+                raise RuntimeError("simulated transient rule failure (e.g. RateLimitRule DB read)")
+
+        token_budget_rule = TokenBudgetRule(db=db)
+        proxy_app.state.rules_engine = RulesEngine(rules=[token_budget_rule, _AlwaysRaises()])
+
+        resp = await proxy_client.post(
+            f"/{alias}/v1/chat/completions",
+            headers={"authorization": f"Bearer {shard_a_utf8}"},
+            content=b'{"model": "gpt-4", "messages": []}',
+        )
+
+        assert resp.status_code == 401  # _uniform_401(), same as every sibling except-branch
+        assert token_budget_rule._reserved.get(alias, 0) == 0, (
+            f"reservation leaked after the pipeline raised: {token_budget_rule._reserved}"
+        )
 
 
 # ------------------------------------------------------------------
