@@ -1366,14 +1366,48 @@ def _openclaw_state_dir(home_dir: Path) -> Path:
     return home_dir / ".openclaw"
 
 
-def _agent_auth_store_dirs(state_dir: Path) -> list[Path]:
-    """Every ``agents/<id>/agent/`` dir under *state_dir*.
+def _agent_dir_overrides(config: dict | None) -> list[Path]:
+    """Extra agent working dirs from openclaw.json's ``agents.list[].agentDir``.
+
+    Real OpenClaw's ``resolveEffectiveAgentDir`` (``agent-dirs.ts``) uses a
+    configured ``agentDir`` AS THE EFFECTIVE AGENT DIRECTORY ITSELF — no
+    ``agent/`` subdir appended, unlike the default
+    ``<state_dir>/agents/<id>/agent/`` convention. Without reading this
+    override, an agent configured with a custom ``agentDir`` is invisible
+    to directory listing entirely: its ``auth-profiles.json``/``models.json``
+    would never be scanned, and a real key there would survive silently
+    while ``lock`` still reports success.
+    """
+    if not isinstance(config, dict):
+        return []
+    agents_cfg = config.get("agents")
+    if not isinstance(agents_cfg, dict):
+        return []
+    agent_list = agents_cfg.get("list")
+    if not isinstance(agent_list, list):
+        return []
+    overrides: list[Path] = []
+    for entry in agent_list:
+        if not isinstance(entry, dict):
+            continue
+        agent_dir = entry.get("agentDir")
+        if isinstance(agent_dir, str) and agent_dir.strip():
+            overrides.append(Path(agent_dir.strip()).expanduser())
+    return overrides
+
+
+def _agent_auth_store_dirs(state_dir: Path, config: dict | None = None) -> list[Path]:
+    """Every dir holding an ``auth-profiles.json``/``models.json`` pair.
 
     ``main`` is always included even if not yet created; any other agent id
-    is discovered by listing ``agents/`` — real OpenClaw's own discovery
-    (``auth-store-paths.ts`` / ``storage-scan.ts``) globs every directory
-    under ``agents/``, not just a configured allowlist, so a second agent
+    is discovered by listing ``<state_dir>/agents/`` — real OpenClaw's own
+    discovery (``auth-store-paths.ts`` / ``storage-scan.ts``) globs every
+    directory there, not just a configured allowlist, so a second agent
     that was never explicitly configured is still in scope for the scrub.
+    *config* (parsed ``openclaw.json``, if available) additionally
+    contributes any ``agents.list[].agentDir`` overrides — see
+    :func:`_agent_dir_overrides` for why that's a distinct discovery path,
+    not covered by listing ``agents/``.
     """
     agents_root = state_dir / "agents"
     dirs = {agents_root / "main" / "agent"}
@@ -1381,64 +1415,78 @@ def _agent_auth_store_dirs(state_dir: Path) -> list[Path]:
         for entry in agents_root.iterdir():
             if entry.is_dir():
                 dirs.add(entry / "agent")
+    dirs.update(_agent_dir_overrides(config))
     return sorted(dirs)
 
 
 def _scrub_models_json(path: Path, provider: str, secret_ref: str) -> bool:
     """Replace a literal real-key ``providers.<provider>.apiKey`` with
     *secret_ref*. Returns True if a real key was found and replaced.
-    Best-effort: any read/parse failure means "nothing to scrub" here.
+    Best-effort: any read/parse/lock/symlink failure means "nothing to
+    scrub" here — this must never raise (L1/L2 contract), so a detected
+    symlink degrades to a no-op rather than propagating and aborting the
+    rest of ``lock``.
+
+    flock + symlink refusal (F-CFG-15), same protection as
+    :func:`worthless.openclaw.config.set_provider` — an attacker who can
+    plant ``models.json`` as a symlink must not be able to redirect this
+    write at an arbitrary file via ``os.replace``.
     """
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        with _config_mod._file_lock(path):
+            _config_mod._refuse_if_symlink(path)
+            data = json.loads(path.read_text(encoding="utf-8"))
+            providers = data.get("providers")
+            if not isinstance(providers, dict):
+                return False
+            entry = providers.get(provider)
+            if not isinstance(entry, dict):
+                return False
+            current = entry.get("apiKey")
+            if not isinstance(current, str) or not KEY_PATTERN.search(current):
+                return False
+            entry["apiKey"] = secret_ref
+            _config_mod._atomic_write_json(path, data)
+            return True
+    except (OSError, ValueError, OpenclawConfigError):
         return False
-    providers = data.get("providers")
-    if not isinstance(providers, dict):
-        return False
-    entry = providers.get(provider)
-    if not isinstance(entry, dict):
-        return False
-    current = entry.get("apiKey")
-    if not isinstance(current, str) or not KEY_PATTERN.search(current):
-        return False
-    entry["apiKey"] = secret_ref
-    _config_mod._atomic_write_json(path, data)
-    return True
 
 
 def _scrub_auth_profiles_json(path: Path, provider: str, secret_ref: str) -> bool:
     """Replace a literal real-key ``profiles.<id>.key`` with *secret_ref*
     for every ``type: api_key`` credential matching *provider* (the
     canonical field is ``key``, not ``apiKey``). Same best-effort contract
-    as :func:`_scrub_models_json`.
+    and flock + symlink refusal as :func:`_scrub_models_json`.
     """
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        with _config_mod._file_lock(path):
+            _config_mod._refuse_if_symlink(path)
+            data = json.loads(path.read_text(encoding="utf-8"))
+            profiles = data.get("profiles")
+            if not isinstance(profiles, dict):
+                return False
+            changed = False
+            for cred in profiles.values():
+                if not isinstance(cred, dict) or cred.get("provider") != provider:
+                    continue
+                if cred.get("type") != "api_key":
+                    continue
+                current = cred.get("key")
+                if isinstance(current, str) and KEY_PATTERN.search(current):
+                    cred["key"] = secret_ref
+                    changed = True
+            if changed:
+                _config_mod._atomic_write_json(path, data)
+            return changed
+    except (OSError, ValueError, OpenclawConfigError):
         return False
-    profiles = data.get("profiles")
-    if not isinstance(profiles, dict):
-        return False
-    changed = False
-    for cred in profiles.values():
-        if not isinstance(cred, dict) or cred.get("provider") != provider:
-            continue
-        if cred.get("type") != "api_key":
-            continue
-        current = cred.get("key")
-        if isinstance(current, str) and KEY_PATTERN.search(current):
-            cred["key"] = secret_ref
-            changed = True
-    if changed:
-        _config_mod._atomic_write_json(path, data)
-    return changed
 
 
 def scrub_agent_auth_stores(
     home_dir: Path,
     planned_updates: list[tuple[str, str, str]],
     env_var_by_alias: dict[str, str],
+    config: dict | None = None,
 ) -> list[OpenclawIntegrationEvent]:
     """Scrub any literal real key cached in OpenClaw's OWN per-agent
     ``auth-profiles.json`` / ``models.json``, replacing it with an env
@@ -1465,10 +1513,16 @@ def scrub_agent_auth_stores(
     project ``.env``, a different file) or the freshly-written ref
     resolves empty once OpenClaw reloads (fails closed — breaks that
     provider's traffic, but leaks nothing).
+
+    *config* (parsed ``openclaw.json``, if the caller already has it) is
+    passed to :func:`_agent_auth_store_dirs` so a custom
+    ``agents.list[].agentDir`` override is scanned too — otherwise an
+    agent configured with a non-default working directory is invisible
+    to the scrub entirely, and its cached real key survives silently.
     """
     events: list[OpenclawIntegrationEvent] = []
     state_dir = _openclaw_state_dir(home_dir)
-    agent_dirs = _agent_auth_store_dirs(state_dir)
+    agent_dirs = _agent_auth_store_dirs(state_dir, config)
 
     seed_vars: dict[str, str] = {}
     for provider, alias, shard_a_str in planned_updates:
@@ -1516,52 +1570,68 @@ def _restore_models_json(path: Path, provider: str, secret_ref: str, plaintext: 
     """Undo :func:`_scrub_models_json`: swap the EXACT *secret_ref* back to
     *plaintext*. Matching the exact ref (not "any env ref") avoids
     clobbering some other SecretRef the user configured independently.
+    Same best-effort contract + flock + symlink refusal (F-CFG-15) as the
+    scrub side — never raises.
     """
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        with _config_mod._file_lock(path):
+            _config_mod._refuse_if_symlink(path)
+            data = json.loads(path.read_text(encoding="utf-8"))
+            providers = data.get("providers")
+            if not isinstance(providers, dict):
+                return False
+            entry = providers.get(provider)
+            if not isinstance(entry, dict) or entry.get("apiKey") != secret_ref:
+                return False
+            entry["apiKey"] = plaintext
+            _config_mod._atomic_write_json(path, data)
+            return True
+    except (OSError, ValueError, OpenclawConfigError):
         return False
-    providers = data.get("providers")
-    if not isinstance(providers, dict):
-        return False
-    entry = providers.get(provider)
-    if not isinstance(entry, dict) or entry.get("apiKey") != secret_ref:
-        return False
-    entry["apiKey"] = plaintext
-    _config_mod._atomic_write_json(path, data)
-    return True
 
 
 def _restore_auth_profiles_json(path: Path, provider: str, secret_ref: str, plaintext: str) -> bool:
-    """Undo :func:`_scrub_auth_profiles_json`, same exact-ref matching."""
+    """Undo :func:`_scrub_auth_profiles_json`, same exact-ref matching,
+    best-effort contract, and flock + symlink refusal.
+    """
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        with _config_mod._file_lock(path):
+            _config_mod._refuse_if_symlink(path)
+            data = json.loads(path.read_text(encoding="utf-8"))
+            profiles = data.get("profiles")
+            if not isinstance(profiles, dict):
+                return False
+            changed = False
+            for cred in profiles.values():
+                if not isinstance(cred, dict) or cred.get("provider") != provider:
+                    continue
+                if cred.get("key") == secret_ref:
+                    cred["key"] = plaintext
+                    changed = True
+            if changed:
+                _config_mod._atomic_write_json(path, data)
+            return changed
+    except (OSError, ValueError, OpenclawConfigError):
         return False
-    profiles = data.get("profiles")
-    if not isinstance(profiles, dict):
-        return False
-    changed = False
-    for cred in profiles.values():
-        if not isinstance(cred, dict) or cred.get("provider") != provider:
-            continue
-        if cred.get("key") == secret_ref:
-            cred["key"] = plaintext
-            changed = True
-    if changed:
-        _config_mod._atomic_write_json(path, data)
-    return changed
 
 
-def restore_agent_auth_stores(home_dir: Path, provider: str, var_name: str, plaintext: str) -> bool:
+def restore_agent_auth_stores(
+    home_dir: Path,
+    provider: str,
+    var_name: str,
+    plaintext: str,
+    config: dict | None = None,
+) -> bool:
     """Undo :func:`scrub_agent_auth_stores` for one provider: swap the
     exact ``${var_name}`` ref this tool wrote back to *plaintext*.
-    Best-effort: never raises.
+    Best-effort: never raises. *config* is threaded to
+    :func:`_agent_auth_store_dirs` for the same ``agentDir``-override
+    reason as the scrub side — see :func:`_agent_dir_overrides`.
     """
     state_dir = _openclaw_state_dir(home_dir)
     secret_ref = f"${{{var_name}}}"
     changed = False
-    for agent_dir in _agent_auth_store_dirs(state_dir):
+    for agent_dir in _agent_auth_store_dirs(state_dir, config):
         if _restore_models_json(agent_dir / "models.json", provider, secret_ref, plaintext):
             changed = True
         if _restore_auth_profiles_json(
@@ -1648,12 +1718,18 @@ def _apply_lock_scrub_agent_stores(
     planned_updates: list[tuple[str, str, str]],
     providers_set: list[str],
     env_var_by_alias: dict[str, str] | None,
+    original_config: dict | None,
 ) -> list[OpenclawIntegrationEvent]:
     """Stage A2 of apply_lock: scrub agent auth stores for cleanly-written
     providers. WOR-796. Only providers whose openclaw.json write actually
     succeeded (survived any Stage A rollback) — a provider we didn't
     cleanly write there shouldn't have its separate agent-cache entry
     touched either. Extracted to keep apply_lock within xenon's budget.
+
+    *original_config* is the already-read pre-write openclaw.json snapshot
+    (read for the Stage A rollback path) — reused here so
+    ``agents.list[].agentDir`` overrides are discovered without a second
+    read of the same file.
     """
     if not env_var_by_alias or state.home_dir is None:
         return []
@@ -1664,7 +1740,9 @@ def _apply_lock_scrub_agent_stores(
     ]
     if not written_updates:
         return []
-    return scrub_agent_auth_stores(state.home_dir, written_updates, env_var_by_alias)
+    return scrub_agent_auth_stores(
+        state.home_dir, written_updates, env_var_by_alias, original_config
+    )
 
 
 def apply_lock(
@@ -1901,7 +1979,9 @@ def apply_lock(
     # ---- Stage A2: scrub the real key cached in agent auth stores --------
     # WOR-796. Extracted to keep apply_lock within xenon's complexity budget.
     events.extend(
-        _apply_lock_scrub_agent_stores(state, planned_updates, providers_set, env_var_by_alias)
+        _apply_lock_scrub_agent_stores(
+            state, planned_updates, providers_set, env_var_by_alias, original_config
+        )
     )
 
     # ---- Stage B: install skill ------------------------------------------
@@ -1949,6 +2029,7 @@ def _apply_unlock_stage_a(
     providers_restored: list[str],
     providers_skipped: list[tuple[str, str]],
     home_dir: Path | None = None,
+    config: dict | None = None,
 ) -> bool:
     """Stage A of apply_unlock: restore each provider's ORIGINAL entry.
 
@@ -1977,7 +2058,11 @@ def _apply_unlock_stage_a(
         if home_dir is not None and restore.var_name and plaintext_key is not None:
             try:
                 restore_agent_auth_stores(
-                    home_dir, provider, restore.var_name, plaintext_key.decode("utf-8")
+                    home_dir,
+                    provider,
+                    restore.var_name,
+                    plaintext_key.decode("utf-8"),
+                    config,
                 )
             except UnicodeDecodeError:
                 pass
@@ -2244,6 +2329,7 @@ def apply_unlock(
             providers_restored,
             providers_skipped,
             home_dir=state.home_dir,
+            config=original_config_snapshot,
         )
         if rollback_needed and original_config_snapshot is not None:
             try:

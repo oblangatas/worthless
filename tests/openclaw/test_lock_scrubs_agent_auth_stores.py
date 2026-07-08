@@ -299,3 +299,81 @@ def test_scrub_refuses_lowercase_var_name_and_ignores_unplanned_providers(
     assert models_path.read_bytes() == before_anthropic, (
         "scrub touched an unrelated provider that was never in planned_updates"
     )
+
+
+# ---------------------------------------------------------------------------
+# Adversarial-review follow-ups: a custom ``agentDir`` override must still be
+# scanned (silent-bypass gap), and a symlinked auth store file must be
+# refused rather than followed (F-CFG-15, matches openclaw.json's own writer).
+# ---------------------------------------------------------------------------
+
+
+def test_lock_scrubs_agent_with_custom_agentdir_override(
+    home_dir: WorthlessHome,
+    env_file: Path,
+    sandboxed_home: Path,
+    real_key: str,
+    tmp_path: Path,
+) -> None:
+    """Real OpenClaw resolves an agent's working directory from
+    ``openclaw.json``'s ``agents.list[].agentDir`` when set — a completely
+    different discovery path than listing ``<state_dir>/agents/``. Without
+    reading that override, an agent configured with a custom directory is
+    invisible to the scrub: its cached real key survives untouched while
+    `lock` still reports success.
+    """
+    openclaw_dir = sandboxed_home / ".openclaw"
+    (openclaw_dir / "workspace").mkdir(parents=True)
+
+    custom_dir = tmp_path / "custom-agent-workdir"
+    custom_dir.mkdir()
+    _write_json(
+        custom_dir / "models.json",
+        {"providers": {"openai": {"apiKey": real_key, "baseUrl": "https://api.openai.com/v1"}}},
+    )
+    _write_json(
+        openclaw_dir / "openclaw.json",
+        {
+            "models": {"providers": {}},
+            "agents": {"list": [{"id": "custom", "agentDir": str(custom_dir)}]},
+        },
+    )
+
+    result = _lock(env_file, home_dir)
+    assert result.exit_code == 0, result.output
+
+    custom_models = json.loads((custom_dir / "models.json").read_text())
+    entry = custom_models["providers"]["openai"]
+    assert entry["apiKey"] == "${OPENAI_API_KEY}", (
+        f"custom agentDir's models.json was never scanned — real key survived: {entry!r}"
+    )
+    assert entry["baseUrl"] == "https://api.openai.com/v1"
+
+
+def test_scrub_refuses_symlinked_auth_store_file(
+    home_dir: WorthlessHome,
+    env_file: Path,
+    openclaw_with_agent_caches: dict[str, Path],
+    tmp_path: Path,
+) -> None:
+    """An attacker who can write under ``~/.openclaw/agents/`` must not be
+    able to plant ``models.json`` as a symlink to an arbitrary file and have
+    the scrub's ``os.replace`` clobber the link TARGET (F-CFG-15) — the
+    exact protection ``openclaw.json``'s own writer already has via
+    ``_refuse_if_symlink``.
+    """
+    decoy_target = tmp_path / "decoy.txt"
+    decoy_target.write_text("not json, should never be touched\n", encoding="utf-8")
+
+    main_models = openclaw_with_agent_caches["main_models"]
+    main_models.unlink()
+    main_models.symlink_to(decoy_target)
+
+    result = _lock(env_file, home_dir)
+    assert result.exit_code == 0, (
+        f"a planted symlink must degrade to best-effort skip, not crash lock:\n{result.output}"
+    )
+    assert decoy_target.read_text() == "not json, should never be touched\n", (
+        "scrub followed the symlink and clobbered a file outside the agent dir"
+    )
+    assert main_models.is_symlink(), "the symlink itself should be left alone, not replaced"
