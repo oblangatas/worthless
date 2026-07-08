@@ -96,11 +96,16 @@ def install_redaction_filter() -> None:
       covers any *future* ``worthless.*`` module logger call that isn't
       otherwise wired to a handler, without introducing new output that
       doesn't exist today.
-    - the root logger's own handlers (if any exist): a filter attached
-      to a HANDLER runs for every record that propagates to it
-      regardless of originating logger, unlike a filter attached to a
-      Logger object (which only fires for that exact logger, never its
-      descendants — verified empirically, not from memory of the docs).
+    - the root logger's own handlers (if any exist AT CALL TIME): a
+      filter attached to a HANDLER runs for every record that
+      propagates to it regardless of originating logger, unlike a
+      filter attached to a Logger object (which only fires for that
+      exact logger, never its descendants — verified empirically, not
+      from memory of the docs). This is a snapshot, not a standing
+      guarantee like the uvicorn.access/error attachment above: a
+      handler added to root AFTER this function runs (e.g. an APM/
+      tracing library instrumenting logging at its own startup) is
+      invisible to it. No such dependency exists in this project today.
     """
     targets: list[logging.Filterer] = [
         logging.getLogger("uvicorn.access"),
