@@ -35,7 +35,7 @@ from worthless.cli.app import app
 from worthless.cli.bootstrap import WorthlessHome
 from worthless.cli.sentinel import is_partial, read_sentinel, sentinel_path, write_sentinel
 
-from tests.helpers import fake_openai_key
+from tests.helpers import fake_anthropic_key, fake_openai_key
 
 runner = CliRunner()
 
@@ -501,3 +501,67 @@ def test_atomic_sentinel_write_preserves_prior_on_replace_failure(
     # No leftover .tmp files.
     leftover = list(home.glob(".last-lock-status.json.*.tmp"))
     assert leftover == [], leftover
+
+
+# ---------------------------------------------------------------------------
+# WOR-652 — the agent config provably carries each alias's own shard-A,
+# never a stale token or the real key.
+# ---------------------------------------------------------------------------
+
+
+def test_lock_writes_same_shard_a_to_env_and_openclaw_config(
+    home_dir: WorthlessHome,
+    openclaw_present: dict[str, Path],
+    tmp_path: Path,
+) -> None:
+    """WOR-652: one ``lock`` run writes each alias's OWN shard-A into BOTH
+    ``.env`` and ``openclaw.json`` — byte-identical, distinct per alias, and
+    never the real plaintext key.
+
+    This guards the two claims the ``apply_lock`` docstring used to get
+    wrong (it writes shard-A, *per alias* — not one shared "16x2" proxy
+    token) against a source-swap at ``integration.py`` that would drop a
+    stale placeholder, the live key, or one shared token into the agent
+    config. The cross-alias distinctness assert is the part with teeth: a
+    single-alias identity check cannot catch "same token for every provider".
+    """
+    real = {"openai": fake_openai_key(), "anthropic": fake_anthropic_key()}
+    env_var = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"OPENAI_API_KEY={real['openai']}\nANTHROPIC_API_KEY={real['anthropic']}\n")
+
+    result = runner.invoke(
+        app,
+        ["lock", "--env", str(env_file)],
+        env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+    )
+    assert result.exit_code == 0, result.output
+
+    # shard-A as written back to .env (format-preserving replacement of each real key).
+    env_lines = {
+        k: v
+        for line in env_file.read_text().splitlines()
+        if "=" in line and not line.lstrip().startswith("#")
+        for k, v in [line.split("=", 1)]
+    }
+    # Providers ACTUALLY written to the agent config (a skipped provider is
+    # simply absent here, so we never assert None == None on it).
+    providers = json.loads(openclaw_present["config_path"].read_text(encoding="utf-8"))["models"][
+        "providers"
+    ]
+    assert set(providers) == {"openai", "anthropic"}, providers
+
+    shard_a: dict[str, str] = {}
+    for name, entry in providers.items():
+        config_apikey = entry["apiKey"]
+        env_shard_a = env_lines[env_var[name]]
+        assert config_apikey, f"{name}: apiKey must be non-empty"
+        assert config_apikey == env_shard_a, f"{name}: config apiKey != .env shard-A"
+        assert config_apikey != real[name], f"{name}: LEAKED the real plaintext key"
+        assert config_apikey.startswith("sk-"), f"{name}: not format-preserving"
+        shard_a[name] = config_apikey
+
+    # The real teeth: each alias got its OWN shard-A — NOT one shared token.
+    assert shard_a["openai"] != shard_a["anthropic"], (
+        "same shard-A written to every provider — the old 'shared token' lie regressed"
+    )

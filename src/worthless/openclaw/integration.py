@@ -1281,12 +1281,14 @@ def apply_lock(
     structured events in the returned :class:`OpenclawApplyResult`.
 
     Args:
-        planned_updates: list of ``(provider, alias, auth_token)`` triples
-            for keys that were just locked.  ``auth_token`` is the stable
-            proxy auth token (worthless-16x2) — an opaque URL-safe base64
-            string — NOT shard-A.  The same token is written to every
-            provider entry so all aliases share one secret, rotated on
-            ``worthless relock``.
+        planned_updates: list of ``(provider, alias, shard_a)`` triples for
+            keys that were just locked.  ``shard_a`` is that alias's shard-A
+            — the same format-preserving half written to ``.env`` — written
+            PER-ALIAS (each alias gets its own; they do NOT share one token).
+            Safe to sit in the config only insofar as it cannot be logged to
+            a leak (SR-04) and cannot reconstruct the key without shard-B; it
+            remains a LIVE replay credential until the key is retired (see the
+            retired-key tripwire in ``proxy/app.py``).
         proxy_base_url: override for the proxy host. Defaults to
             ``http://127.0.0.1:8787`` (the canonical worthless port).
 
