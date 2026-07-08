@@ -43,6 +43,7 @@ class OpenclawErrorCode(str, Enum):
     # WOR-777 Layer 2: agent models.json projection rotation (re-lock).
     MODELS_JSON_STALE_REMOVED = "openclaw.models_json_stale_removed"
     MODELS_JSON_STALE_NOT_REMOVED = "openclaw.models_json_stale_not_removed"
+    AGENT_AUTH_STORE_SCRUBBED = "openclaw.agent_auth_store_scrubbed"
 
 
 @dataclass(frozen=True)

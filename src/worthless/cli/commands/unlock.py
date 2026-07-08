@@ -363,6 +363,23 @@ async def _unlock_batch(
             p.zero()
 
 
+def _reread_plaintext_from_env(p: _PlannedRestore) -> bytearray | None:
+    """Re-read the just-restored plaintext key from ``.env`` via ``var_name``.
+
+    pass-2 already restored the plaintext moments ago; this gives callers
+    (openclaw.json's ``kind: plaintext`` restore, and WOR-796's
+    agent-auth-store restore) an owned, zeroable copy. ``None`` if the
+    ``.env``/``var_name`` are unavailable or the value is gone.
+    """
+    if p.env_path is None or not p.env_path.exists() or not p.var_name:
+        return None
+    parsed_env = dotenv_values(p.env_path)
+    value = parsed_env.get(p.var_name)
+    if value is None:
+        return None
+    return bytearray(value.encode("utf-8"))
+
+
 async def _build_oc_restores(
     planned: list[_PlannedRestore],
     repo: ShardRepository,
@@ -396,13 +413,19 @@ async def _build_oc_restores(
         record = p.oc_original_api_key_json
         if record is None:
             # No captured record (pre-G3 row or relock_no_prior). Stage A
-            # will fail-safe-skip; nothing to parse, nothing to warn.
+            # will fail-safe-skip openclaw.json's OWN restore; nothing to
+            # parse there. WOR-796's agent-auth-store restore is
+            # independent of whether openclaw.json ever had a prior entry
+            # (auth-profiles.json/models.json can cache a real key even
+            # when openclaw.json's provider section was never populated),
+            # so still try to re-read the plaintext key for it.
             restores.append(
                 _openclaw_integration.OcRestore(
                     provider=p.provider,
                     alias=p.alias,
                     oc_original_api_key_json=None,
-                    plaintext_key=None,
+                    plaintext_key=_reread_plaintext_from_env(p),
+                    var_name=p.var_name,
                 )
             )
             continue
@@ -434,12 +457,16 @@ async def _build_oc_restores(
                 f"OpenClaw {p.provider!r} rollback record is malformed "
                 f"({exc}); leaving entry on the proxy."
             )
+            # WOR-796: openclaw.json's own rollback record being malformed
+            # doesn't affect whether we can restore agent-auth-stores —
+            # that only needs the plaintext key, independently re-read.
             restores.append(
                 _openclaw_integration.OcRestore(
                     provider=p.provider,
                     alias=p.alias,
                     oc_original_api_key_json=None,
-                    plaintext_key=None,
+                    plaintext_key=_reread_plaintext_from_env(p),
+                    var_name=p.var_name,
                 )
             )
             continue
@@ -451,11 +478,7 @@ async def _build_oc_restores(
             # the reconstructed plaintext moments ago. If the .env is gone
             # (recovery mode / user deleted it) we can't restore the OC
             # plaintext branch — fall through fail-safe.
-            if p.env_path is not None and p.env_path.exists() and p.var_name:
-                parsed_env = dotenv_values(p.env_path)
-                value = parsed_env.get(p.var_name)
-                if value is not None:
-                    plaintext_key = bytearray(value.encode("utf-8"))
+            plaintext_key = _reread_plaintext_from_env(p)
             if plaintext_key is None:
                 console.print_warning(
                     f"OpenClaw {p.provider!r}: cannot re-read plaintext key "
@@ -467,6 +490,7 @@ async def _build_oc_restores(
                         alias=p.alias,
                         oc_original_api_key_json=None,
                         plaintext_key=None,
+                        var_name=p.var_name,
                     )
                 )
                 continue
@@ -479,6 +503,9 @@ async def _build_oc_restores(
                 plaintext_key=plaintext_key,
                 expected_mac=expected_mac,
                 recomputed_mac=recomputed_mac,
+                # WOR-796: needed to restore the EXACT ${var_name} ref
+                # scrub_agent_auth_stores() wrote, not "any env ref".
+                var_name=p.var_name,
             )
         )
     return restores

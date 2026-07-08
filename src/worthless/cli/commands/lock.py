@@ -1140,6 +1140,18 @@ def _finalise_openclaw_success(
         for event in result.events:
             if event.code in _ADOPTION_EVENT_CODES:
                 console.print_hint(f"   • {event.detail}")
+        # WOR-796: a scrub rewrote OpenClaw's OWN credential cache on disk;
+        # the running daemon (if any) won't see it until it reloads.
+        # WOR-756 (auto-reload) isn't wired yet, so say so loudly rather
+        # than let the user believe the cached real key is already gone
+        # from the live process.
+        if any(
+            event.code == OpenclawErrorCode.AGENT_AUTH_STORE_SCRUBBED for event in result.events
+        ):
+            console.print_warning(
+                "   [WARN] Scrubbed a cached real key from OpenClaw's agent auth "
+                "store on disk — restart OpenClaw now to apply it."
+            )
 
     # WOR-658: fire a self-test probe at the proxy for each written alias. A
     # "fail" here means the proxy didn't acknowledge the probe — the entry
@@ -1315,11 +1327,15 @@ def _apply_openclaw(
     # write the Docker-internal service name (e.g. "proxy") instead of
     # 127.0.0.1, which is unreachable inside the openclaw container.
     _proxy_host, proxy_base_url = _openclaw_proxy_base_url()
+    # WOR-796: the *_API_KEY var name holding shard-A for each alias, so
+    # scrub_agent_auth_stores() can point the agent-cache SecretRef at it.
+    env_var_by_alias = {p.alias: p.var_name for p in planned}
     try:
         result = _openclaw_integration.apply_lock(
             planned_updates=triples,
             proxy_base_url=proxy_base_url,
             adoption_policy=adoption_policy,
+            env_var_by_alias=env_var_by_alias,
         )
     except OpenclawIntegrationError as exc:
         # apply_lock's contract is "never raise". If it does, treat as
