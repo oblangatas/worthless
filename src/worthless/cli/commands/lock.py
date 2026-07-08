@@ -1627,6 +1627,7 @@ def _print_lock_result(
         if not openclaw_failed:
             console.print_hint("Check anytime with `worthless status`.")
         _maybe_prompt_code_scan(Path.cwd())
+        _print_unshardable_credentials_warning(console)
     else:
         console.print_warning("No unprotected API keys found.")
 
@@ -1769,6 +1770,26 @@ def _sync_fernet_after_lock(home: WorthlessHome) -> None:
         sync_fernet_for_launchd(home.base_dir, key=key)
     finally:
         zero_buf(key)
+
+
+def _print_unshardable_credentials_warning(console: WorthlessConsole) -> None:
+    """WOR-797: ``lock`` only shards a static API key. Warn (once, post-lock)
+    when any of the 8 unshardable OAuth/token credential surfaces are
+    present, so the user doesn't assume lock's protection extends to them —
+    see :mod:`worthless.openclaw.unshardable_credentials` for the full,
+    source-verified surface list.
+    """
+    from worthless.openclaw.unshardable_credentials import detect_unshardable_credentials
+
+    findings = detect_unshardable_credentials()
+    if not findings:
+        return
+    n = len(findings)
+    console.print_warning(
+        f"[WARN] {n} OAuth/token credential{'s' if n != 1 else ''} found that lock "
+        "CANNOT protect (the proxy is not load-bearing for these) — run "
+        "`worthless doctor --fix` to clear the ones you don't need."
+    )
 
 
 def _lock_keys(

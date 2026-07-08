@@ -56,4 +56,11 @@ PLAYBOOKS: dict[str, str] = {
         "`worthless lock`. Still unsure? Check the proxy is up (`worthless up`) and "
         "`WORTHLESS_PORT` is set."
     ),
+    "unshardable_credentials": (
+        "These aren't API keys — they're OAuth logins (Claude Code, Codex, Gemini, MiniMax, "
+        "or Google Vertex), and the proxy can't shard or protect them at all. Run `worthless "
+        "doctor --fix` to clear the ones you don't need; each provider re-prompts you to log "
+        "in again on next use. Vertex needs one extra step after clearing: "
+        "`gcloud auth application-default login`."
+    ),
 }

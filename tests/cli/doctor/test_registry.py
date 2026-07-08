@@ -32,6 +32,7 @@ EXPECTED_CHECK_IDS = {
     "fernet_drift",
     "broken_status",
     "bind_confirmation",  # WOR-658
+    "unshardable_credentials",  # WOR-797
 }
 
 

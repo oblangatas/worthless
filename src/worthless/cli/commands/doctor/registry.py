@@ -107,6 +107,7 @@ def _build_all_checks() -> list:
         orphan_keychain,
         recovery_import,
         stranded_shards,
+        unshardable_credentials,
     )
 
     return [
@@ -119,6 +120,7 @@ def _build_all_checks() -> list:
         fernet_drift,
         broken_status,
         bind_confirmation,
+        unshardable_credentials,
     ]
 
 
