@@ -4,7 +4,13 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [0.3.9] — 2026-07-08
+
 ### Security
+- **Rotating an API key now rotates the key OpenClaw actually uses** (WOR-777, [#387](https://github.com/shacharm2/worthless/pull/387)).
+- **Look-alike filenames that impersonate a real path are flagged in scan output** (WOR-800, [#419](https://github.com/shacharm2/worthless/pull/419)).
+- **`worthless doctor --json` zeroes the Fernet master key from memory after the run** (WOR-799, [#421](https://github.com/shacharm2/worthless/pull/421)).
+- **OpenClaw config provably carries the per-alias shard-A** (WOR-652, [#423](https://github.com/shacharm2/worthless/pull/423)) — regression test pinning the invariant.
 - **Spend cap stops the no-`max_tokens` money leak** (WOR-696, [#285](https://github.com/shacharm2/worthless/pull/285)). A request without `max_tokens` that disconnected mid-stream wrote a near-zero `spend_log` row — cap counter never moved, runaway loop could burn unbounded provider spend. `settle_at_estimate` now floors at a global 128K-token ceiling (`GLOBAL_CEILING_TOKENS`), so every fallback event bills honestly. Direction of error is conservative: gpt-4o-mini disconnect over-bills ~$0.017 vs the old ~$0.002 leak, but Opus 4.5 / gpt-5 disconnects bill exactly.
 - **Streams can't outlast the cap** (WOR-696). Two new operator-tunable kill paths close slow-drip variants where no client disconnect ever fires:
   - `WORTHLESS_MAX_STREAM_DURATION_SECONDS` (default `900` = 15min) — hard wall-clock cap per stream.
@@ -207,6 +213,7 @@ First release published to PyPI. `pip install worthless` now works.
 - Gate evaluation strictly precedes shard reconstruction (SR-03).
 - Published artifacts built via PyPI trusted publishing (OIDC, no long-lived tokens).
 
+[0.3.9]: https://github.com/shacharm2/worthless/releases/tag/v0.3.9
 [0.3.8]: https://github.com/shacharm2/worthless/releases/tag/v0.3.8.0
 [0.3.7]: https://github.com/shacharm2/worthless/releases/tag/v0.3.7
 [0.3.6]: https://github.com/shacharm2/worthless/releases/tag/v0.3.6
