@@ -25,7 +25,7 @@ from worthless.cli.commands.scan import (
     _format_code_findings_human,
     _format_lock_block_human,
 )
-from worthless.cli.process import check_proxy_health, resolve_port
+from worthless.cli.process import check_proxy_health, resolve_openclaw_proxy_base_url, resolve_port
 from worthless.cli.console import WorthlessConsole, get_console
 from worthless.cli.scanner import SkippedFile, scan_source_for_hardcoded_provider_urls
 from worthless.cli.dotenv_rewriter import (
@@ -1100,15 +1100,15 @@ def _finalise_openclaw_success(
 def _openclaw_proxy_base_url() -> tuple[str, str]:
     """``(proxy_host, proxy_base_url)`` for OpenClaw config writes.
 
-    Single-sourced so the WOR-650 consent preview and the actual write agree
-    on the URL. Honours ``WORTHLESS_PROXY_HOST`` (all-container Docker writes
-    the service name, not 127.0.0.1) and the resolved ``--port``.
+    Delegates URL construction to the single-sourced
+    :func:`worthless.cli.process.resolve_openclaw_proxy_base_url` so lock's
+    write, the WOR-650 consent preview, the WOR-777 audit gate, and
+    ``worthless doctor`` all agree on the same URL. ``proxy_host`` is
+    returned separately for callers (e.g. ``_confirm_bind``) that need the
+    bare host.
     """
     proxy_host = os.environ.get("WORTHLESS_PROXY_HOST", "127.0.0.1")
-    # NOSONAR python:S5332 — loopback proxy: the host is constrained to local
-    # endpoints by _validate_proxy_base_url, and only shard-A (inert without
-    # shard-B) ever transits. Matches the suppression on the health-probe URL.
-    return proxy_host, f"http://{proxy_host}:{resolve_port(None)}"  # NOSONAR python:S5332
+    return proxy_host, resolve_openclaw_proxy_base_url()
 
 
 _ADOPTION_EVENT_CODES = frozenset(
@@ -1761,9 +1761,13 @@ def _lock_keys(
 
             # WOR-777 / brutus: the audit gate host-pins recognition to the proxy
             # (an attacker baseUrl on a foreign host must NOT be recognized as
-            # ours), so it needs the resolved proxy base — the same value
-            # apply_lock writes into the provider entries.
-            oc_proxy_base_url = _openclaw_integration._resolve_proxy_base_url()
+            # ours), so it needs the EXACT value apply_lock will write into the
+            # provider entries — not integration._resolve_proxy_base_url()
+            # (Docker-auto-detected host, hardcoded port). BugBot (PR #387): a
+            # mismatched port/host here means recognition can never match a
+            # real entry, reintroducing exit-73 on re-lock. Reuse the single
+            # source of truth apply_lock's caller actually uses below.
+            _, oc_proxy_base_url = _openclaw_proxy_base_url()
 
             env_str = str(env_path.resolve())
             all_enrollments = await repo.list_enrollments()

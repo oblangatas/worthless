@@ -505,21 +505,24 @@ class TestAC10DoctorSurface:
     with subprocess-layer mocks so no real openclaw binary is required.
     """
 
-    def test_doctor_uses_resolved_proxy_base_url_not_hardcoded_loopback(
-        self, tmp_path: Path
+    def test_doctor_uses_the_single_sourced_proxy_base_url(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """CodeRabbit (PR #387): doctor must use the SAME resolved proxy base URL
-        as ``worthless lock`` (``_resolve_proxy_base_url()``), not a hardcoded
-        ``http://127.0.0.1:<port>``. In a Docker install the proxy resolves to a
-        docker-bridge address; hardcoding loopback means doctor can never
-        recognize a legitimately worthless-managed entry there — reintroducing
-        the exact false "key exposed" alarm this PR fixes, but only for doctor,
-        and only in Docker."""
+        """CodeRabbit + BugBot (PR #387): doctor must use the SAME resolved
+        proxy base URL — host AND port — that a real ``worthless lock`` would
+        write. Three review passes each found a variant of doctor/lock/the
+        audit gate disagreeing on this URL; this pins doctor against the
+        single-sourced :func:`resolve_openclaw_proxy_base_url`, covering both
+        ``WORTHLESS_PROXY_HOST`` (host) and ``WORTHLESS_PORT`` (port) in one
+        assertion so the two can't silently re-drift independently."""
         from worthless.cli.bootstrap import ensure_home
         from worthless.cli.commands.doctor.checks import openclaw as _oc_check_mod
         from worthless.cli.commands.doctor.registry import CheckContext
         from worthless.openclaw.integration import IntegrationState
         from worthless.storage.repository import ShardRepository
+
+        monkeypatch.setenv("WORTHLESS_PROXY_HOST", "proxy")  # all-container Docker service name
+        monkeypatch.setenv("WORTHLESS_PORT", "9123")
 
         fake_home = ensure_home(tmp_path / ".worthless")
         repo = ShardRepository(str(fake_home.db_path), bytes(fake_home.fernet_key))
@@ -534,7 +537,6 @@ class TestAC10DoctorSurface:
             home_dir=tmp_path,
             notes=(),
         )
-        docker_bridge_url = "http://172.17.0.1:8787"
         captured: dict = {}
 
         def _capture_audit_findings(managed_aliases, proxy_base_url):
@@ -548,17 +550,13 @@ class TestAC10DoctorSurface:
                 "_audit_gate_findings",
                 side_effect=_capture_audit_findings,
             ),
-            patch.object(
-                _oc_check_mod._oc_integration,
-                "_resolve_proxy_base_url",
-                return_value=docker_bridge_url,
-            ),
         ):
             _oc_check_mod.run(ctx)
 
-        assert captured.get("proxy_base_url") == docker_bridge_url, (
-            f"doctor passed {captured.get('proxy_base_url')!r} to the audit gate — "
-            f"expected the resolved proxy base {docker_bridge_url!r}, not a hardcoded loopback"
+        assert captured.get("proxy_base_url") == "http://proxy:9123", (
+            f"doctor passed {captured.get('proxy_base_url')!r} — expected "
+            "'http://proxy:9123' (the WORTHLESS_PROXY_HOST + WORTHLESS_PORT-aware, "
+            "single-sourced value a real worthless lock would write)"
         )
 
     def test_doctor_reports_exit_87_when_binary_unavailable(self) -> None:

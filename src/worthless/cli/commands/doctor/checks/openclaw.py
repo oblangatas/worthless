@@ -16,7 +16,7 @@ import asyncio
 from typing import Literal
 
 from worthless.cli.commands.doctor.registry import CheckContext, CheckResult
-from worthless.cli.process import resolve_port
+from worthless.cli.process import resolve_openclaw_proxy_base_url, resolve_port
 from worthless.openclaw import audit as _oc_audit
 from worthless.openclaw import integration as _oc_integration
 
@@ -138,11 +138,10 @@ def run(ctx: CheckContext) -> CheckResult:
         managed_aliases: set[str] | None = set(asyncio.run(ctx.repo.list_keys()))
     except Exception:  # noqa: BLE001 — recognition is best-effort, never blocks the check
         managed_aliases = None
-    # CodeRabbit (PR #387): must match the SAME resolved proxy base lock uses
-    # (Docker-bridge aware) — a hardcoded loopback would make doctor unable to
-    # recognize a worthless-managed entry in a Docker install, reintroducing
-    # the false "key exposed" alarm this PR fixes.
-    proxy_base_url = _oc_integration._resolve_proxy_base_url()
+    # CodeRabbit + BugBot (PR #387): must match the SAME resolved proxy base
+    # lock uses — host AND port. Reuses the already-resolved `port` above so
+    # a non-default WORTHLESS_PORT doesn't desync doctor from what lock wrote.
+    proxy_base_url = resolve_openclaw_proxy_base_url(port=port)
     audit_findings = _audit_gate_findings(managed_aliases, proxy_base_url)
 
     all_issues = skill_issues + provider_issues

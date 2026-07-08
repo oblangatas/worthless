@@ -2379,3 +2379,34 @@ class TestOpenClawGateWiredIntoLock:
         )
         postflight.assert_called_once()
         assert postflight.call_args.args[0] is sentinel
+
+    def test_audit_gate_honours_non_default_port(
+        self, home_dir: WorthlessHome, env_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """BugBot (PR #387): the audit gate's proxy_base_url must be the SAME
+        single-sourced, port-aware value ``apply_lock`` actually writes into
+        openclaw.json (``_openclaw_proxy_base_url()``) — not a bare resolver
+        hardcoded to port 8787. On a non-default ``WORTHLESS_PORT``, a mismatch
+        means recognition can never match a real entry, reintroducing exit-73
+        on re-lock for every non-default-port user."""
+        captured: dict = {}
+
+        def _capture_preflight(managed_aliases: object, proxy_base_url: str) -> None:
+            captured["proxy_base_url"] = proxy_base_url
+            return None  # gate skipped (OpenClaw absent) — lock proceeds normally
+
+        monkeypatch.setattr(
+            "worthless.cli.commands.lock._openclaw_audit_preflight", _capture_preflight
+        )
+
+        result = runner.invoke(
+            app,
+            ["lock", "--env", str(env_file)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir), "WORTHLESS_PORT": "9123"},
+        )
+
+        assert result.exit_code == 0, f"{result.stdout}\n{result.exception!r}"
+        assert captured.get("proxy_base_url", "").endswith(":9123"), (
+            f"audit gate used {captured.get('proxy_base_url')!r} — expected the "
+            "port-aware :9123, not a hardcoded :8787"
+        )
