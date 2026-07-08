@@ -84,9 +84,12 @@ def install_redaction_filter() -> None:
     targets: list[logging.Filterer] = [
         logging.getLogger("uvicorn.access"),
         logging.getLogger("uvicorn.error"),
-        logging.lastResort,
         *logging.getLogger().handlers,
     ]
+    # logging.lastResort is Optional — a user/framework can set it to None
+    # to disable the stdlib's stderr fallback entirely.
+    if logging.lastResort is not None:
+        targets.append(logging.lastResort)
     for target in targets:
         if not any(isinstance(f, RedactingFilter) for f in target.filters):
             target.addFilter(RedactingFilter())
