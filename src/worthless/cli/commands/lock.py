@@ -1087,6 +1087,40 @@ def _confirm_bind(
     }
 
 
+def _print_openclaw_success_result(console, result, *, adoption_skipped: bool) -> None:  # noqa: ANN001
+    """The user-visible ``[OK]``/``[WARN]`` block for a successful OpenClaw
+    apply. Extracted out of :func:`_finalise_openclaw_success` to keep it
+    under the project's xenon complexity ceiling.
+    """
+    if adoption_skipped:
+        console.print_warning(
+            "[WARN] OpenClaw integration incomplete — an entry was left in place:"
+        )
+    else:
+        console.print_success("[OK] OpenClaw integration:")
+    for provider_name in result.providers_set:
+        console.print_hint(f"   • ~/.openclaw/openclaw.json — added provider '{provider_name}'")
+    if result.skill_installed:
+        console.print_hint("   • ~/.openclaw/workspace/skills/worthless/ — installed skill")
+    console.print_hint("   • Undo: worthless unlock")
+    # WOR-650: tell the user when an unrecognized entry was adopted or
+    # skipped. The detail strings already name the benign cause and the
+    # --adopt remedy; on the normal recognized/real-key path there are no
+    # adoption events so this is silent.
+    for event in result.events:
+        if event.code in _ADOPTION_EVENT_CODES:
+            console.print_hint(f"   • {event.detail}")
+    # WOR-796: a scrub rewrote OpenClaw's OWN credential cache on disk; the
+    # running daemon (if any) won't see it until it reloads. WOR-756
+    # (auto-reload) isn't wired yet, so say so loudly rather than let the
+    # user believe the cached real key is already gone from the live process.
+    if any(event.code == OpenclawErrorCode.AGENT_AUTH_STORE_SCRUBBED for event in result.events):
+        console.print_warning(
+            "   [WARN] Scrubbed a cached real key from OpenClaw's agent auth "
+            "store on disk — restart OpenClaw now to apply it."
+        )
+
+
 def _finalise_openclaw_success(
     planned: list[_PlannedUpdate],
     result,  # noqa: ANN001 — OpenclawApplyResult is opaque from this layer
@@ -1122,36 +1156,7 @@ def _finalise_openclaw_success(
     )
 
     if not quiet:
-        if adoption_skipped:
-            console.print_warning(
-                "[WARN] OpenClaw integration incomplete — an entry was left in place:"
-            )
-        else:
-            console.print_success("[OK] OpenClaw integration:")
-        for provider_name in result.providers_set:
-            console.print_hint(f"   • ~/.openclaw/openclaw.json — added provider '{provider_name}'")
-        if result.skill_installed:
-            console.print_hint("   • ~/.openclaw/workspace/skills/worthless/ — installed skill")
-        console.print_hint("   • Undo: worthless unlock")
-        # WOR-650: tell the user when an unrecognized entry was adopted or
-        # skipped. The detail strings already name the benign cause and the
-        # --adopt remedy; on the normal recognized/real-key path there are no
-        # adoption events so this is silent.
-        for event in result.events:
-            if event.code in _ADOPTION_EVENT_CODES:
-                console.print_hint(f"   • {event.detail}")
-        # WOR-796: a scrub rewrote OpenClaw's OWN credential cache on disk;
-        # the running daemon (if any) won't see it until it reloads.
-        # WOR-756 (auto-reload) isn't wired yet, so say so loudly rather
-        # than let the user believe the cached real key is already gone
-        # from the live process.
-        if any(
-            event.code == OpenclawErrorCode.AGENT_AUTH_STORE_SCRUBBED for event in result.events
-        ):
-            console.print_warning(
-                "   [WARN] Scrubbed a cached real key from OpenClaw's agent auth "
-                "store on disk — restart OpenClaw now to apply it."
-            )
+        _print_openclaw_success_result(console, result, adoption_skipped=adoption_skipped)
 
     # WOR-658: fire a self-test probe at the proxy for each written alias. A
     # "fail" here means the proxy didn't acknowledge the probe — the entry

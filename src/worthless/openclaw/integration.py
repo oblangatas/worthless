@@ -1643,6 +1643,30 @@ def preview_unrecognized(
     return unrecognized
 
 
+def _apply_lock_scrub_agent_stores(
+    state: IntegrationState,
+    planned_updates: list[tuple[str, str, str]],
+    providers_set: list[str],
+    env_var_by_alias: dict[str, str] | None,
+) -> list[OpenclawIntegrationEvent]:
+    """Stage A2 of apply_lock: scrub agent auth stores for cleanly-written
+    providers. WOR-796. Only providers whose openclaw.json write actually
+    succeeded (survived any Stage A rollback) — a provider we didn't
+    cleanly write there shouldn't have its separate agent-cache entry
+    touched either. Extracted to keep apply_lock within xenon's budget.
+    """
+    if not env_var_by_alias or state.home_dir is None:
+        return []
+    written_updates = [
+        (provider, alias, shard_a)
+        for provider, alias, shard_a in planned_updates
+        if provider in providers_set
+    ]
+    if not written_updates:
+        return []
+    return scrub_agent_auth_stores(state.home_dir, written_updates, env_var_by_alias)
+
+
 def apply_lock(
     planned_updates: list[tuple[str, str, str]],
     *,
@@ -1875,19 +1899,10 @@ def apply_lock(
     _apply_lock_neutralize_models_json(config_path, resolved_proxy_base_url, providers_set, events)
 
     # ---- Stage A2: scrub the real key cached in agent auth stores --------
-    # WOR-796. Only providers whose openclaw.json write actually succeeded
-    # (survived any rollback above) — a provider we didn't cleanly write
-    # there shouldn't have its separate agent-cache entry touched either.
-    if env_var_by_alias and state.home_dir is not None:
-        written_updates = [
-            (provider, alias, shard_a)
-            for provider, alias, shard_a in planned_updates
-            if provider in providers_set
-        ]
-        if written_updates:
-            events.extend(
-                scrub_agent_auth_stores(state.home_dir, written_updates, env_var_by_alias)
-            )
+    # WOR-796. Extracted to keep apply_lock within xenon's complexity budget.
+    events.extend(
+        _apply_lock_scrub_agent_stores(state, planned_updates, providers_set, env_var_by_alias)
+    )
 
     # ---- Stage B: install skill ------------------------------------------
     skill_installed = False
