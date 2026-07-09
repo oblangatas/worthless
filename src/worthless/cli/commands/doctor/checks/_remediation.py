@@ -56,4 +56,10 @@ PLAYBOOKS: dict[str, str] = {
         "so re-run `worthless lock` to re-confirm. Still unsure? Check the proxy is up "
         "(`worthless up`) and `WORTHLESS_PORT` is set."
     ),
+    "service_health": (
+        "The proxy service is degraded — it may be running the wrong binary, on the wrong "
+        "port, for a home that no longer exists, or (on Linux) set to stop at logout. Each "
+        "finding names its own fix; the usual repair is `worthless service install` to "
+        "re-sync it, or `worthless service uninstall` if you're resetting."
+    ),
 }

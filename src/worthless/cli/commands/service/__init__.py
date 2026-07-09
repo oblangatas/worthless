@@ -29,6 +29,20 @@ def _backend():
     return systemd
 
 
+def _print_service_banner(console, *, platform: str, port: int) -> None:
+    """Confirm the persistence guarantee a first-run service user needs.
+
+    ``worthless up`` dies on Ctrl+C; a service-managed proxy does not. Say so
+    explicitly — otherwise the user can't tell the two apart. Suppressed in
+    ``--json`` mode (machine output is emitted separately by the caller).
+    """
+    if console.json_mode:
+        return
+    console.print_success(f"Worthless proxy running as a {platform} service on 127.0.0.1:{port}.")
+    console.print_hint("Auto-restarts on crash and survives reboot — no `worthless up` needed.")
+    console.print_hint("Status: `worthless service status` · Stop: `worthless service stop`")
+
+
 def uninstall_service(home: WorthlessHome) -> None:
     """Remove the installed launchd/systemd unit for *home*.
 
@@ -93,9 +107,10 @@ def register_service_commands(app: typer.Typer) -> None:
                 + "\n"
             )
         else:
-            console.print_success(
-                f"Service installed ({current_platform_backend_name()}). "
-                f"Proxy healthy on 127.0.0.1:{actual_port}."
+            _print_service_banner(
+                console,
+                platform=current_platform_backend_name(),
+                port=actual_port,
             )
 
     @service_group.command("uninstall")
@@ -171,7 +186,11 @@ def register_service_commands(app: typer.Typer) -> None:
         """Start an installed service."""
         fail_if_windows()
         _backend().start(get_home())
-        get_console().print_success("Service started.")
+        _print_service_banner(
+            get_console(),
+            platform=current_platform_backend_name(),
+            port=resolve_port(None),
+        )
 
     @service_group.command("stop")
     @error_boundary

@@ -170,6 +170,24 @@ class TestServiceInstall:
         assert result.exit_code == 0, result.output
         mock_backend.start.assert_called_once()
 
+    def test_start_banner_states_persistence_guarantee(self, home_dir: Path) -> None:
+        """WOR-726: the banner must tell the user the proxy now survives crashes
+        and reboot — the thing that distinguishes it from `worthless up`."""
+        mock_backend = MagicMock()
+        with (
+            patch("worthless.cli.commands.service._backend", return_value=mock_backend),
+            patch("worthless.cli.commands.service.get_home") as mock_home,
+        ):
+            mock_home.return_value.base_dir = home_dir
+            result = runner.invoke(
+                app,
+                ["service", "start"],
+                env={"WORTHLESS_HOME": str(home_dir)},
+            )
+        assert result.exit_code == 0, result.output
+        assert "Auto-restarts" in result.output
+        assert "survives reboot" in result.output
+
     def test_restart_invokes_backend(self, home_dir: Path) -> None:
         mock_backend = MagicMock()
         with (
