@@ -94,10 +94,14 @@ class TestRedactingFilterLazyArgs:
 
         # _SECRET is a runtime-generated fake key, not a real credential —
         # logged deliberately to exercise the redaction path under test.
-        request_line = (
-            f"GET /x?api_key={_SECRET} HTTP/1.1"  # lgtm[py/clear-text-logging-sensitive-data]
-        )
-        logger.info('%s - "%s" %d', "127.0.0.1", request_line, 200)
+        # CodeQL anchors the alert to the sink (this call using
+        # request_line as an argument), not the assignment above — the
+        # suppression comment must be here, confirmed via two live
+        # CodeQL runs that didn't suppress it in the wrong spot.
+        request_line = f"GET /x?api_key={_SECRET} HTTP/1.1"
+        logger.info(
+            '%s - "%s" %d', "127.0.0.1", request_line, 200
+        )  # lgtm[py/clear-text-logging-sensitive-data]
 
         assert len(capture.lines) == 1
         assert _SECRET not in capture.lines[0]
