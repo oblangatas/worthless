@@ -6,6 +6,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pwd
+import subprocess
+
 import pytest
 
 from worthless.cli.bootstrap import WorthlessHome
@@ -193,6 +195,40 @@ class TestSystemdBackend:
             systemd.install(home)
 
         assert ["loginctl", "enable-linger", "testuser"] in calls
+
+    def test_install_raises_clean_error_when_linger_enable_fails(
+        self, home: WorthlessHome, tmp_path: Path
+    ) -> None:
+        binary = tmp_path / "worthless"
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+        unit = tmp_path / "worthless-proxy.service"
+
+        def fake_run(args: list[str], **kwargs):
+            if args[:2] == ["loginctl", "show-user"]:
+                result = MagicMock()
+                result.returncode = 0
+                result.stdout = "Linger=no"
+                return result
+            if args[:2] == ["loginctl", "enable-linger"]:
+                raise subprocess.CalledProcessError(1, args, stderr="Failed to enable linger.")
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = "active"
+            return result
+
+        with (
+            patch.object(systemd, "unit_path", return_value=unit),
+            patch.object(systemd, "resolve_worthless_binary", return_value=binary),
+            patch.object(systemd, "run_cmd", side_effect=fake_run),
+            patch.object(systemd, "verify_proxy_health"),
+            patch.dict("os.environ", {"USER": "testuser"}, clear=False),
+        ):
+            with pytest.raises(WorthlessError) as exc_info:
+                systemd.install(home)
+
+        assert exc_info.value.code == ErrorCode.SERVICE_INSTALL_FAILED
+        assert "linger" in str(exc_info.value).lower()
 
     def test_detect_not_installed(self, home: WorthlessHome, tmp_path: Path) -> None:
         with patch.object(systemd, "unit_path", return_value=tmp_path / "missing.service"):
