@@ -268,9 +268,12 @@ class TestWrapProxiesRequest:
                     "WORTHLESS_KEYRING_BACKEND": "null",
                     # Isolate $HOME too, matching the runner.invoke call above —
                     # _resolve_home() (openclaw/integration.py) reads Path.home(),
-                    # not WORTHLESS_HOME. cli_env["HOME"] is _make_e2e_env's
-                    # sandbox dir, already isolated from the real machine.
+                    # not WORTHLESS_HOME. cli_env["HOME"]/["USERPROFILE"] are
+                    # _make_e2e_env's sandbox dir, already isolated from the real
+                    # machine. USERPROFILE matters on native Windows, where
+                    # Path.home() checks it before $HOME.
                     "HOME": cli_env["HOME"],
+                    "USERPROFILE": cli_env["USERPROFILE"],
                 },
                 timeout=45,
                 capture_output=True,
