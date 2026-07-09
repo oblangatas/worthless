@@ -20,18 +20,24 @@ from worthless.cli.key_patterns import KEY_PATTERN
 
 _REDACTED = "[REDACTED]"
 
+# Header names must stay in sync with adapters/types.py's
+# _SENSITIVE_HEADER_KEYS. Not imported directly: that set treats both
+# headers identically (whole value -> "REDACTED"), while these need
+# different match shapes (Authorization has a "Bearer " prefix to
+# preserve; x-api-key doesn't), so unifying them would force one shape
+# on both rather than removing real duplication.
 _AUTH_HEADER_RE = re.compile(r"(?i)(authorization[\"']?\s*[:=]\s*[\"']?Bearer\s+)[^\s\"']+")
 _API_KEY_HEADER_RE = re.compile(r"(?i)(x-api-key[\"']?\s*[:=]\s*[\"']?)[^\s\"']+")
 _QUERY_PARAM_RE = re.compile(r"(?i)([?&](?:api[-_]?key|key)=)[^&\s\"']+")
+_CAPTURE_GROUP_PATTERNS = (_AUTH_HEADER_RE, _API_KEY_HEADER_RE, _QUERY_PARAM_RE)
 
 _EXC_FORMATTER = logging.Formatter()
 
 
 def _redact(text: str) -> str:
     text = KEY_PATTERN.sub(_REDACTED, text)
-    text = _AUTH_HEADER_RE.sub(rf"\1{_REDACTED}", text)
-    text = _API_KEY_HEADER_RE.sub(rf"\1{_REDACTED}", text)
-    text = _QUERY_PARAM_RE.sub(rf"\1{_REDACTED}", text)
+    for pattern in _CAPTURE_GROUP_PATTERNS:
+        text = pattern.sub(rf"\1{_REDACTED}", text)
     return text
 
 

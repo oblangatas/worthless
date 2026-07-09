@@ -31,13 +31,22 @@ from tests.helpers import fake_openai_key
 _SECRET = fake_openai_key()
 
 
-class _CapturingHandler(logging.Handler):
+class _RecordCapturingHandler(logging.Handler):
+    """Keeps the actual LogRecord objects, not just rendered text, so a
+    test can inspect record.exc_text/exc_info/stack_info directly (and
+    ``.lines`` derives rendered text on demand for tests that only need
+    that)."""
+
     def __init__(self) -> None:
         super().__init__()
-        self.lines: list[str] = []
+        self.records: list[logging.LogRecord] = []
 
     def emit(self, record: logging.LogRecord) -> None:
-        self.lines.append(record.getMessage())
+        self.records.append(record)
+
+    @property
+    def lines(self) -> list[str]:
+        return [r.getMessage() for r in self.records]
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +97,7 @@ class TestRedactingFilterLazyArgs:
         logger = logging.getLogger("test.wor277.lazyargs")
         logger.propagate = False
         logger.setLevel(logging.DEBUG)
-        capture = _CapturingHandler()
+        capture = _RecordCapturingHandler()
         logger.addHandler(capture)
         logger.addFilter(RedactingFilter())
 
@@ -111,25 +120,13 @@ class TestRedactingFilterLazyArgs:
         logger = logging.getLogger("test.wor277.clean")
         logger.propagate = False
         logger.setLevel(logging.DEBUG)
-        capture = _CapturingHandler()
+        capture = _RecordCapturingHandler()
         logger.addHandler(capture)
         logger.addFilter(RedactingFilter())
 
         logger.info('%s - "%s" %d', "127.0.0.1", "GET /health HTTP/1.1", 200)
 
         assert capture.lines == ['127.0.0.1 - "GET /health HTTP/1.1" 200']
-
-
-class _RecordCapturingHandler(logging.Handler):
-    """Keeps the actual LogRecord objects, not just rendered text, so a
-    test can inspect record.exc_text/exc_info/stack_info directly."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.records: list[logging.LogRecord] = []
-
-    def emit(self, record: logging.LogRecord) -> None:
-        self.records.append(record)
 
 
 class TestRedactingFilterExcInfoAndStackInfo:
@@ -263,7 +260,7 @@ async def test_real_uvicorn_access_log_never_contains_query_string_key(
         rules=[SpendCapRule(db=db), RateLimitRule(default_rps=100.0)]
     )
 
-    capture = _CapturingHandler()
+    capture = _RecordCapturingHandler()
     access_logger = logging.getLogger("uvicorn.access")
 
     # uvicorn.Config.__init__ calls configure_logging() (dictConfig), which

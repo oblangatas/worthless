@@ -538,25 +538,24 @@ class TestCoreDumpSuppressionWiredIntoCommands:
     called before any of them can fail on missing keys/env files.
     """
 
-    def test_lock_disables_core_dumps(self, tmp_path: Path) -> None:
-        env_file = tmp_path / ".env"
-        env_file.write_text("UNRELATED_VAR=hello\n")
-        soft, hard = _rlimit_core_after_subprocess_command(tmp_path, "lock", "--env", str(env_file))
-        assert (soft, hard) == (0, 0), f"lock left RLIMIT_CORE at ({soft}, {hard})"
-
-    def test_enroll_disables_core_dumps(self, tmp_path: Path) -> None:
-        soft, hard = _rlimit_core_after_subprocess_command(
-            tmp_path, "enroll", "--alias", "x", "--key-stdin", "--provider", "openai"
-        )
-        assert (soft, hard) == (0, 0), f"enroll left RLIMIT_CORE at ({soft}, {hard})"
-
-    def test_unlock_disables_core_dumps(self, tmp_path: Path) -> None:
-        soft, hard = _rlimit_core_after_subprocess_command(tmp_path, "unlock")
-        assert (soft, hard) == (0, 0), f"unlock left RLIMIT_CORE at ({soft}, {hard})"
-
-    def test_scan_disables_core_dumps(self, tmp_path: Path) -> None:
-        soft, hard = _rlimit_core_after_subprocess_command(tmp_path, "scan")
-        assert (soft, hard) == (0, 0), f"scan left RLIMIT_CORE at ({soft}, {hard})"
+    @pytest.mark.parametrize(
+        "command,extra_args",
+        [
+            ("lock", []),  # --env is filled in from tmp_path below, once a file exists
+            ("enroll", ["--alias", "x", "--key-stdin", "--provider", "openai"]),
+            ("unlock", []),
+            ("scan", []),
+        ],
+    )
+    def test_command_disables_core_dumps(
+        self, tmp_path: Path, command: str, extra_args: list[str]
+    ) -> None:
+        if command == "lock":
+            env_file = tmp_path / ".env"
+            env_file.write_text("UNRELATED_VAR=hello\n")
+            extra_args = ["--env", str(env_file)]
+        soft, hard = _rlimit_core_after_subprocess_command(tmp_path, command, *extra_args)
+        assert (soft, hard) == (0, 0), f"{command} left RLIMIT_CORE at ({soft}, {hard})"
 
 
 # =====================================================================

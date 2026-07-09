@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import stat
@@ -108,14 +109,10 @@ def _collect_deep_paths(explicit_paths: list[Path]) -> tuple[list[Path], Path | 
             # partial env dump written) — close the fd AND remove the file,
             # or a plaintext secrets dump orphans on disk with no caller ever
             # learning its path to clean it up.
-            try:
+            with contextlib.suppress(Exception):
                 os.close(fd)
-            except Exception:  # noqa: S110 — fd cleanup on error path; can't recover usefully  # nosec B110
-                pass
-            try:
+            with contextlib.suppress(OSError):
                 Path(tmp).unlink()
-            except OSError:
-                pass
 
     return paths, tmp_path
 
