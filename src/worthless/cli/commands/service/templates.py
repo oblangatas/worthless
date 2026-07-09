@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
-LAUNCHD_LABEL = "dev.worthless.proxy"
+LAUNCHD_LABEL = "sh.worthless.proxy"
+LEGACY_LAUNCHD_LABEL = "dev.worthless.proxy"
 SYSTEMD_UNIT_NAME = "worthless-proxy.service"
 
 
 def launchd_plist_path(home: str) -> str:
     return f"{home}/Library/LaunchAgents/{LAUNCHD_LABEL}.plist"
+
+
+def legacy_launchd_plist_path(home: str) -> str:
+    return f"{home}/Library/LaunchAgents/{LEGACY_LAUNCHD_LABEL}.plist"
 
 
 def systemd_unit_path(home: str) -> str:

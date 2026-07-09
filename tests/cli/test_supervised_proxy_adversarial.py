@@ -40,7 +40,7 @@ class TestUnitFileMatchesHomeAdversarial:
     """``unit_file_matches_home`` must not trust substring accidents or foreign homes."""
 
     def test_rejects_foreign_home_plist(self, home: WorthlessHome, tmp_path: Path) -> None:
-        plist = tmp_path / "dev.worthless.proxy.plist"
+        plist = tmp_path / "sh.worthless.proxy.plist"
         plist.write_text(
             templates.render_launchd_plist(
                 binary="/usr/local/bin/worthless",
@@ -54,7 +54,7 @@ class TestUnitFileMatchesHomeAdversarial:
         self, home: WorthlessHome, tmp_path: Path
     ) -> None:
         """A comment-like string must not satisfy ownership without WORTHLESS_HOME key."""
-        plist = tmp_path / "dev.worthless.proxy.plist"
+        plist = tmp_path / "sh.worthless.proxy.plist"
         plist.write_text(
             "<!-- WORTHLESS_HOME="
             + str(home.base_dir)
@@ -103,7 +103,7 @@ class TestUnitFileMatchesHomeAdversarial:
         assert unit_file_matches_home(blob, home) is False
 
     def test_concurrent_reads_do_not_crash(self, home: WorthlessHome, tmp_path: Path) -> None:
-        plist = tmp_path / "dev.worthless.proxy.plist"
+        plist = tmp_path / "sh.worthless.proxy.plist"
         plist.write_text(
             templates.render_launchd_plist(
                 binary="/usr/local/bin/worthless",

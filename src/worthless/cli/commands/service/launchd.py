@@ -26,6 +26,20 @@ def plist_path() -> Path:
     return Path(templates.launchd_plist_path(str(Path.home())))
 
 
+def _legacy_plist_path() -> Path:
+    """Pre-rename (WOR-174) plist location — same dir, old label."""
+    return plist_path().parent / f"{templates.LEGACY_LAUNCHD_LABEL}.plist"
+
+
+def _migrate_legacy_install() -> None:
+    """Tear down a pre-rename dev.worthless.proxy LaunchAgent, if present."""
+    legacy_path = _legacy_plist_path()
+    if not legacy_path.is_file():
+        return
+    run_cmd(["launchctl", "bootout", _launchctl_domain(), str(legacy_path)], check=False)
+    legacy_path.unlink(missing_ok=True)
+
+
 def _launchctl_domain() -> str:
     return f"gui/{os.getuid()}"
 
@@ -97,6 +111,7 @@ def detect_status(home: WorthlessHome, port: int) -> ServiceStatus:
 def install(home: WorthlessHome, *, port: int | None = None) -> None:
     path = plist_path()
     refuse_foreign_unit(path, home)
+    _migrate_legacy_install()
     binary = resolve_worthless_binary()
     log_path, worthless_home = service_paths(home)
     actual_port = resolve_port(port)

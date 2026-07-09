@@ -31,7 +31,7 @@ class TestServiceInstall:
     def test_install_success_json(self, home_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(sys, "platform", "darwin")
         mock_backend = MagicMock()
-        mock_backend.plist_path.return_value = home_dir / "dev.worthless.proxy.plist"
+        mock_backend.plist_path.return_value = home_dir / "sh.worthless.proxy.plist"
         mock_backend.unit_path = MagicMock()  # unused on darwin
 
         with (

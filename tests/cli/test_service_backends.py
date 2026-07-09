@@ -29,7 +29,7 @@ class TestLaunchdBackend:
         binary = tmp_path / "worthless"
         binary.write_text("#!/bin/sh\n")
         binary.chmod(0o755)
-        plist = tmp_path / "dev.worthless.proxy.plist"
+        plist = tmp_path / "sh.worthless.proxy.plist"
         calls: list[list[str]] = []
 
         def fake_run(args: list[str], **kwargs):
@@ -51,11 +51,71 @@ class TestLaunchdBackend:
 
         assert plist.is_file()
         content = plist.read_text()
-        assert "dev.worthless.proxy" in content
+        assert "sh.worthless.proxy" in content
         assert str(binary) in content
         assert "WORTHLESS_SERVICE_MANAGED" in content
         assert ["launchctl", "bootstrap", "gui/501", str(plist)] in calls
-        assert ["launchctl", "kickstart", "-k", "gui/501/dev.worthless.proxy"] in calls
+        assert ["launchctl", "kickstart", "-k", "gui/501/sh.worthless.proxy"] in calls
+
+    def test_install_tears_down_legacy_labeled_plist(
+        self, home: WorthlessHome, tmp_path: Path
+    ) -> None:
+        binary = tmp_path / "worthless"
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+        plist = tmp_path / "sh.worthless.proxy.plist"
+        legacy_plist = tmp_path / "dev.worthless.proxy.plist"
+        legacy_plist.write_text("legacy plist content")
+        calls: list[list[str]] = []
+
+        def fake_run(args: list[str], **kwargs):
+            calls.append(args)
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = ""
+            return result
+
+        with (
+            patch.object(launchd, "plist_path", return_value=plist),
+            patch.object(launchd, "resolve_worthless_binary", return_value=binary),
+            patch.object(launchd, "run_cmd", side_effect=fake_run),
+            patch.object(launchd, "_is_loaded", return_value=False),
+            patch.object(launchd, "verify_proxy_health"),
+            patch.object(launchd.os, "getuid", return_value=501),
+        ):
+            launchd.install(home)
+
+        assert not legacy_plist.exists()
+        assert ["launchctl", "bootout", "gui/501", str(legacy_plist)] in calls
+        assert plist.is_file()
+
+    def test_install_no_op_when_no_legacy_plist(self, home: WorthlessHome, tmp_path: Path) -> None:
+        binary = tmp_path / "worthless"
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+        plist = tmp_path / "sh.worthless.proxy.plist"
+        calls: list[list[str]] = []
+
+        def fake_run(args: list[str], **kwargs):
+            calls.append(args)
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = ""
+            return result
+
+        with (
+            patch.object(launchd, "plist_path", return_value=plist),
+            patch.object(launchd, "resolve_worthless_binary", return_value=binary),
+            patch.object(launchd, "run_cmd", side_effect=fake_run),
+            patch.object(launchd, "_is_loaded", return_value=False),
+            patch.object(launchd, "verify_proxy_health"),
+            patch.object(launchd.os, "getuid", return_value=501),
+        ):
+            launchd.install(home)
+
+        assert not any(
+            c[:2] == ["launchctl", "bootout"] and "dev.worthless.proxy" in c[2] for c in calls
+        )
 
     def test_detect_not_installed(self, home: WorthlessHome, tmp_path: Path) -> None:
         with patch.object(launchd, "plist_path", return_value=tmp_path / "missing.plist"):
@@ -105,7 +165,7 @@ class TestLaunchdBackend:
         binary = tmp_path / "worthless"
         binary.write_text("#!/bin/sh\n")
         binary.chmod(0o755)
-        plist = tmp_path / "dev.worthless.proxy.plist"
+        plist = tmp_path / "sh.worthless.proxy.plist"
         calls: list[list[str]] = []
 
         def fake_run(args: list[str], **kwargs):
@@ -127,7 +187,7 @@ class TestLaunchdBackend:
         assert any("bootout" in str(c) for c in calls)
 
     def test_detect_ignores_plist_for_other_home(self, home: WorthlessHome, tmp_path: Path) -> None:
-        plist = tmp_path / "dev.worthless.proxy.plist"
+        plist = tmp_path / "sh.worthless.proxy.plist"
         plist.write_text(
             templates.render_launchd_plist(
                 binary="/usr/local/bin/worthless",
@@ -279,7 +339,7 @@ class TestSystemdBackend:
 
 
 def _foreign_launchd_plist(tmp_path: Path) -> Path:
-    plist = tmp_path / "dev.worthless.proxy.plist"
+    plist = tmp_path / "sh.worthless.proxy.plist"
     plist.write_text(
         templates.render_launchd_plist(
             binary="/usr/local/bin/worthless",
@@ -302,7 +362,7 @@ def _foreign_systemd_unit(tmp_path: Path) -> Path:
 
 
 def _owned_launchd_plist(home: WorthlessHome, tmp_path: Path) -> Path:
-    plist = tmp_path / "dev.worthless.proxy.plist"
+    plist = tmp_path / "sh.worthless.proxy.plist"
     plist.write_text(
         templates.render_launchd_plist(
             binary="/usr/local/bin/worthless",
@@ -538,7 +598,7 @@ class TestOwnedUnitMutators:
 
         assert ["launchctl", "bootout", "gui/501", str(plist)] in calls
         assert ["launchctl", "bootstrap", "gui/501", str(plist)] in calls
-        assert ["launchctl", "kickstart", "-k", "gui/501/dev.worthless.proxy"] in calls
+        assert ["launchctl", "kickstart", "-k", "gui/501/sh.worthless.proxy"] in calls
 
     def test_launchd_stop_owned_plist(self, home: WorthlessHome, tmp_path: Path) -> None:
         plist = _owned_launchd_plist(home, tmp_path)
@@ -720,7 +780,7 @@ class TestVerifyProxyHealthIntegration:
         binary = tmp_path / "worthless"
         binary.write_text("#!/bin/sh\n")
         binary.chmod(0o755)
-        plist = tmp_path / "dev.worthless.proxy.plist"
+        plist = tmp_path / "sh.worthless.proxy.plist"
 
         def fake_run(args: list[str], **kwargs):
             result = MagicMock()
