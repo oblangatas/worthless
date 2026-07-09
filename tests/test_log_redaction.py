@@ -92,10 +92,12 @@ class TestRedactingFilterLazyArgs:
         logger.addHandler(capture)
         logger.addFilter(RedactingFilter())
 
-        # _SECRET is a hardcoded-looking but non-functional placeholder used
-        # deliberately to exercise the redaction path under test — not a
-        # real credential. lgtm[py/clear-text-logging-sensitive-data]
-        logger.info('%s - "%s" %d', "127.0.0.1", f"GET /x?api_key={_SECRET} HTTP/1.1", 200)
+        # _SECRET is a runtime-generated fake key, not a real credential —
+        # logged deliberately to exercise the redaction path under test.
+        request_line = (
+            f"GET /x?api_key={_SECRET} HTTP/1.1"  # lgtm[py/clear-text-logging-sensitive-data]
+        )
+        logger.info('%s - "%s" %d', "127.0.0.1", request_line, 200)
 
         assert len(capture.lines) == 1
         assert _SECRET not in capture.lines[0]
