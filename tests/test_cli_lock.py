@@ -1667,6 +1667,10 @@ class TestLockBaseUrlSlotPriority:
             **os.environ,
             "WORTHLESS_HOME": str(worthless_home),
             "WORTHLESS_KEYRING_BACKEND": "null",
+            # Isolate $HOME too — _resolve_home() (openclaw/integration.py)
+            # reads Path.home(), not WORTHLESS_HOME. Without this, a real
+            # ~/.openclaw on the dev machine leaks into this subprocess.
+            "HOME": str(tmp_path),
         }
 
         result = runner.invoke(

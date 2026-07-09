@@ -672,6 +672,12 @@ class TestConcurrencyAndCorruption:
         env_vars = {
             **os.environ,
             "WORTHLESS_HOME": str(home_dir.base_dir),
+            # Isolate $HOME too — _resolve_home() (openclaw/integration.py)
+            # reads Path.home(), not WORTHLESS_HOME. Without this, a real
+            # ~/.openclaw on the dev machine makes detect().present True
+            # inside the subprocess, contradicting this class's own claim
+            # above that "Real $HOME is never touched."
+            "HOME": str(tmp_path),
         }
         cli = _worthless_cli_args()
         cmd = [*cli, "lock", "--env", str(env)]

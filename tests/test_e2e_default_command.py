@@ -45,6 +45,13 @@ def _run_worthless(
         # write fernet-key-* to the host's real keychain. Defense-in-depth
         # against future drift if conftest is refactored.
         "WORTHLESS_KEYRING_BACKEND": "null",
+        # Isolate $HOME too: _resolve_home() (openclaw/integration.py) reads
+        # Path.home(), not WORTHLESS_HOME. Without this, a dev machine with a
+        # real ~/.openclaw makes detect().present True inside the subprocess,
+        # tripping the F7 proxy-health gate before this test's own proxy has
+        # started. home.parent is the pytest tmp_path — always fresh, never
+        # contains a real .openclaw.
+        "HOME": str(home.parent),
     }
     return subprocess.run(
         [_WORTHLESS, *args],

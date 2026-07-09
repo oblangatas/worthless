@@ -357,6 +357,10 @@ class TestDownIntegration:
         env = {
             **os.environ,
             "WORTHLESS_HOME": str(home.base_dir),
+            # Isolate $HOME too — _resolve_home() (openclaw/integration.py)
+            # reads Path.home(), not WORTHLESS_HOME. Without this, a real
+            # ~/.openclaw on the dev machine leaks into this subprocess.
+            "HOME": str(tmp_path),
         }
 
         # Use a high ephemeral port to avoid conflicts
