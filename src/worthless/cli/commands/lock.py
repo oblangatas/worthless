@@ -25,7 +25,12 @@ from worthless.cli.commands.scan import (
     _format_code_findings_human,
     _format_lock_block_human,
 )
-from worthless.cli.process import check_proxy_health, disable_core_dumps, resolve_port
+from worthless.cli.process import (
+    check_proxy_health,
+    disable_core_dumps,
+    resolve_openclaw_proxy_base_url,
+    resolve_port,
+)
 from worthless.cli.console import WorthlessConsole, get_console
 from worthless.cli.scanner import SkippedFile, scan_source_for_hardcoded_provider_urls
 from worthless.cli.dotenv_rewriter import (
@@ -640,7 +645,7 @@ async def _pass1_db_writes(
                     env_path=env_str,
                     prefix=db_shard.prefix,
                     charset=db_shard.charset,
-                    base_url=db_shard.base_url or upstream_base_url,
+                    base_url=upstream_base_url,
                     original_mode=original_mode,
                     write_config=False,
                     oc_original_api_key_json=oc_capture_record,
@@ -1214,15 +1219,15 @@ def _finalise_openclaw_success(
 def _openclaw_proxy_base_url() -> tuple[str, str]:
     """``(proxy_host, proxy_base_url)`` for OpenClaw config writes.
 
-    Single-sourced so the WOR-650 consent preview and the actual write agree
-    on the URL. Honours ``WORTHLESS_PROXY_HOST`` (all-container Docker writes
-    the service name, not 127.0.0.1) and the resolved ``--port``.
+    Delegates URL construction to the single-sourced
+    :func:`worthless.cli.process.resolve_openclaw_proxy_base_url` so lock's
+    write, the WOR-650 consent preview, the WOR-777 audit gate, and
+    ``worthless doctor`` all agree on the same URL. ``proxy_host`` is
+    returned separately for callers (e.g. ``_confirm_bind``) that need the
+    bare host.
     """
     proxy_host = os.environ.get("WORTHLESS_PROXY_HOST", "127.0.0.1")
-    # NOSONAR python:S5332 — loopback proxy: the host is constrained to local
-    # endpoints by _validate_proxy_base_url, and only shard-A (inert without
-    # shard-B) ever transits. Matches the suppression on the health-probe URL.
-    return proxy_host, f"http://{proxy_host}:{resolve_port(None)}"  # NOSONAR python:S5332
+    return proxy_host, resolve_openclaw_proxy_base_url()
 
 
 _ADOPTION_EVENT_CODES = frozenset(
@@ -1610,8 +1615,18 @@ def _print_lock_result(
         console.print_warning("No unprotected API keys found.")
 
 
-def _openclaw_audit_preflight() -> _oc_audit.AuditGateHandle | None:
+def _openclaw_audit_preflight(
+    managed_aliases: set[str] | None,
+    proxy_base_url: str,
+) -> _oc_audit.AuditGateHandle | None:
     """Run OpenClaw secrets audit pre-flight before worthless lock writes.
+
+    ``managed_aliases`` is this machine's ``shards`` keys (the WOR-650 snapshot).
+    It lets the gate recognize worthless's own inert shard-A — written into the
+    user's real provider entry (F1/WOR-647) and carrying a proxy ``baseUrl``
+    alias — so a re-lock (rotation) is not aborted by worthless's own prior
+    shard (WOR-777 / bead worthless-b8me). ``None`` (snapshot failed) recognizes
+    nothing — fail-safe.
 
     Returns None if OpenClaw is not detected on this host or binary is not
     available (gate skipped, _apply_openclaw handles the partial-failure path).
@@ -1634,7 +1649,9 @@ def _openclaw_audit_preflight() -> _oc_audit.AuditGateHandle | None:
         return None
 
     try:
-        result, classification = _oc_audit.run_and_classify(openclaw_bin)
+        result, classification = _oc_audit.run_and_classify(
+            openclaw_bin, managed_aliases=managed_aliases, proxy_base_url=proxy_base_url
+        )
     except _oc_audit.AuditGateError as exc:
         typer.echo(f"worthless lock: openclaw audit gate failed: {exc}", err=True)
         raise typer.Exit(code=87) from exc
@@ -1657,7 +1674,11 @@ def _openclaw_audit_preflight() -> _oc_audit.AuditGateHandle | None:
     )
 
 
-def _openclaw_audit_postflight(gate: _oc_audit.AuditGateHandle) -> None:
+def _openclaw_audit_postflight(
+    gate: _oc_audit.AuditGateHandle,
+    managed_aliases: set[str] | None,
+    proxy_base_url: str,
+) -> None:
     """Post-flight TOCTOU re-audit after lock-core write commits.
 
     Skips the second subprocess entirely if file hashes are unchanged since
@@ -1681,7 +1702,9 @@ def _openclaw_audit_postflight(gate: _oc_audit.AuditGateHandle) -> None:
         return
 
     try:
-        _, post_class = _oc_audit.run_and_classify(gate.openclaw_bin)
+        _, post_class = _oc_audit.run_and_classify(
+            gate.openclaw_bin, managed_aliases=managed_aliases, proxy_base_url=proxy_base_url
+        )
     except _oc_audit.AuditGateError as exc:
         typer.echo(f"worthless lock: post-flight audit failed: {exc}", err=True)
         raise typer.Exit(code=87) from exc
@@ -1860,6 +1883,16 @@ def _lock_keys(
             except Exception:  # noqa: BLE001 — recognition is best-effort, never blocks lock
                 managed_aliases = None
 
+            # WOR-777 / brutus: the audit gate host-pins recognition to the proxy
+            # (an attacker baseUrl on a foreign host must NOT be recognized as
+            # ours), so it needs the EXACT value apply_lock will write into the
+            # provider entries — not integration._resolve_proxy_base_url()
+            # (Docker-auto-detected host, hardcoded port). BugBot (PR #387): a
+            # mismatched port/host here means recognition can never match a
+            # real entry, reintroducing exit-73 on re-lock. Reuse the single
+            # source of truth apply_lock's caller actually uses below.
+            _, oc_proxy_base_url = _openclaw_proxy_base_url()
+
             env_str = str(env_path.resolve())
             all_enrollments = await repo.list_enrollments()
 
@@ -1911,7 +1944,7 @@ def _lock_keys(
             # DB/.env write so blocking plaintext findings abort the lock with
             # zero side effects (gate-before-write). Orthogonal to the
             # sidecar-IPC repo above — placement here is load-bearing.
-            _oc_gate = _openclaw_audit_preflight()
+            _oc_gate = _openclaw_audit_preflight(managed_aliases, oc_proxy_base_url)
 
             # F7 (WOR-648 / WOR-621 AC5): proxy health gate, alongside the
             # audit gate above — BEFORE any DB or .env write. Gated on
@@ -2027,7 +2060,7 @@ def _lock_keys(
                     return _LockResult(total=0, fresh_count=0, openclaw_exit=0)
                 _batch_rewrite(env_path, planned, keys_only, existing_env_keys)
                 if _oc_gate is not None:
-                    _openclaw_audit_postflight(_oc_gate)
+                    _openclaw_audit_postflight(_oc_gate, managed_aliases, oc_proxy_base_url)
                 # Phase 2.b: OpenClaw magic. Per L1 in
                 # engineering/research/openclaw/WOR-431-phase-2-spec.md, this
                 # NEVER rolls back lock-core success. Per L2 (revised 2026-05-08

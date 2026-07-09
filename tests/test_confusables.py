@@ -1,0 +1,170 @@
+"""WOR-800: detect look-alike (confusable) filename tokens for a display warning.
+
+Signal = a single token whose *letters* mix ≥2 confusable-with-Latin scripts
+(Latin+Cyrillic, Latin+Greek, Cyrillic+Greek). Legitimate single-script names
+(Hebrew, CJK, accented Latin) must stay silent — no alarm fatigue.
+
+Confusable code points are built with chr() so the intent is explicit; the
+legitimate non-Latin names are literal (they are printable letters, not the
+invisible chars the #376 scrubber removes).
+"""
+
+from __future__ import annotations
+
+from worthless.cli.code_scanner import CodeFinding
+from worthless.cli.commands.scan import (
+    _code_findings_to_json,
+    _format_ai_prompt_block,
+    _format_code_findings_human,
+)
+from worthless.cli.confusables import MARKER, confusable_hits, footnote
+
+CYRILLIC_O = chr(0x043E)  # 'о' — look-alike of Latin 'o'
+GREEK_OMICRON = chr(0x03BF)  # 'ο' — look-alike of Latin 'o'
+
+
+def test_latin_cyrillic_token_flagged() -> None:
+    hits = confusable_hits(f"c{CYRILLIC_O}nfig.py")
+    assert hits, "Latin+Cyrillic token must be flagged"
+    h = hits[0]
+    assert h.char == CYRILLIC_O
+    assert h.codepoint == "U+043E"
+    assert h.script == "Cyrillic"
+
+
+def test_latin_greek_token_flagged() -> None:
+    hits = confusable_hits(f"p{GREEK_OMICRON}six.txt")
+    assert hits and hits[0].script == "Greek"
+
+
+def test_pure_latin_not_flagged() -> None:
+    assert confusable_hits("config.py") == []
+
+
+def test_hebrew_name_not_flagged() -> None:
+    # single-script Hebrew token — legitimate, must stay silent
+    assert confusable_hits("סוד.env") == []
+
+
+def test_cjk_name_not_flagged() -> None:
+    assert confusable_hits("日本語.py") == []
+
+
+def test_accented_latin_not_flagged() -> None:
+    # é is LATIN SMALL LETTER E WITH ACUTE — still Latin script, not confusable
+    assert confusable_hits("café.js") == []
+
+
+def test_all_cyrillic_token_not_flagged_documented_gap() -> None:
+    # honest residual (WOR-800): an all-Cyrillic token is single-script, so the
+    # mixed-script heuristic does not catch it. Only TR39 would. Documented.
+    all_cyrillic = chr(0x0441) + chr(0x043E) + chr(0x0440)  # 'сор' — every letter Cyrillic
+    assert confusable_hits(f"{all_cyrillic}.py") == []
+
+
+def test_separators_scope_the_token() -> None:
+    # a lone Cyrillic letter as its own token, Latin in another token — neither
+    # token is itself mixed, so it must not fire.
+    assert confusable_hits(f"{CYRILLIC_O}/config.py") == []
+
+
+# --- integration: the marker + footnote in real scan output --------------- #
+
+
+def _cf(file: str) -> CodeFinding:
+    return CodeFinding(
+        file=file,
+        line=1,
+        column=1,
+        matched_url="https://api.openai.com",
+        provider_name="openai",
+        suggested_env_var="OPENAI_BASE_URL",
+        line_text='url = "https://api.openai.com"',
+    )
+
+
+def test_confusable_filename_marked_in_human_output() -> None:
+    out = _format_code_findings_human([_cf(f"c{CYRILLIC_O}nfig.py")])
+    assert "[!]" in out
+    assert "WARN_CONFUSABLE_NAME" in out
+    assert "U+043E" in out and "Cyrillic" in out  # footnote names the culprit
+
+
+def test_clean_and_legit_names_get_no_marker() -> None:
+    for name in ("config.py", "סוד.env", "日本語.py", "café.js"):
+        out = _format_code_findings_human([_cf(name)])
+        assert "[!]" not in out, f"{name} falsely flagged"
+        assert "WARN_CONFUSABLE_NAME" not in out
+
+
+def test_footnote_prints_once_per_codepoint() -> None:
+    out = _format_code_findings_human([_cf(f"c{CYRILLIC_O}nfig.py"), _cf(f"pr{CYRILLIC_O}d.env")])
+    assert out.count("[!] WARN_CONFUSABLE_NAME") == 1  # legend deduped by codepoint
+
+
+def test_json_warning_structured_and_path_raw() -> None:
+    name = f"c{CYRILLIC_O}nfig.py"
+    js = _code_findings_to_json([_cf(name)])
+    assert js[0]["file"] == name  # raw path preserved (display-only invariant)
+    warn = js[0]["warnings"][0]
+    assert warn["code"] == "WARN_CONFUSABLE_NAME"
+    assert warn["confusable_chars"][0] == {"codepoint": "U+043E", "script": "Cyrillic"}
+
+
+def test_json_clean_name_no_warning() -> None:
+    assert _code_findings_to_json([_cf("config.py")])[0]["warnings"] == []
+
+
+def test_majority_flip_names_the_cyrillic_impostor_not_latin() -> None:
+    """CodeRabbit #419: when homoglyphs OUTNUMBER genuine Latin, the reported
+    culprit must still be the non-Latin impostor, not the genuine Latin letters.
+    4 Cyrillic + 2 Latin in one token."""
+    cyr = chr(0x0441) + chr(0x043E) + chr(0x0440) + chr(0x0435)  # с о р е
+    hits = confusable_hits(cyr + "fg.py")
+    assert hits, "must still fire"
+    assert all(h.script == "Cyrillic" for h in hits), (
+        f"must name the Cyrillic impostor, got {[(h.char, h.script) for h in hits]}"
+    )
+
+
+def test_tie_token_names_the_non_latin_letter() -> None:
+    """A 1-Cyrillic + 1-Latin tie must name the Cyrillic look-alike."""
+    hits = confusable_hits(chr(0x043E) + "b.txt")  # о + b
+    assert [h.script for h in hits] == ["Cyrillic"], (
+        f"tie must name the Cyrillic look-alike, got {[(h.char, h.script) for h in hits]}"
+    )
+
+
+def test_no_latin_token_reports_all_confusable_letters() -> None:
+    """Cursor #419: Greek + Cyrillic with NO Latin has no baseline, so every
+    confusable letter is reported (not an arbitrary majority pick)."""
+    token = chr(0x03BF) + chr(0x0440)  # Greek omicron + Cyrillic er
+    scripts = {h.script for h in confusable_hits(token + ".py")}
+    assert scripts == {"Greek", "Cyrillic"}, f"expected both, got {scripts}"
+
+
+def test_footnote_does_not_hardcode_with_latin() -> None:
+    """Cursor #419: footnote must not claim 'with Latin' when there is no Latin."""
+    hit = confusable_hits(chr(0x03BF) + chr(0x0440) + ".py")[0]
+    text = footnote(hit)
+    assert "with Latin" not in text
+    assert "mixed-script" in text
+
+
+def test_ai_prompt_block_marks_confusable_file() -> None:
+    """Cursor #419: the copy-to-AI-agent prompt carries the marker too."""
+    assert MARKER in _format_ai_prompt_block([_cf(f"src/c{CYRILLIC_O}nfig.py")])
+    assert MARKER not in _format_ai_prompt_block([_cf("src/config.py")])
+
+
+def test_repeated_confusable_char_deduped_by_codepoint() -> None:
+    """CodeRabbit #419: a repeated confusable char yields ONE hit and no
+    duplicate JSON entries; distinct confusables are still both reported."""
+    name = "c" + chr(0x043E) + chr(0x043E) + "nfig.py"  # two Cyrillic о
+    hits = confusable_hits(name)
+    assert len(hits) == 1 and hits[0].codepoint == "U+043E"
+    name2 = "c" + chr(0x043E) + chr(0x0430) + "nfig.py"  # о + а (distinct)
+    assert len({h.codepoint for h in confusable_hits(name2)}) == 2
+    j = _code_findings_to_json([_cf(name)])[0]
+    cps = [c["codepoint"] for c in j["warnings"][0]["confusable_chars"]]
+    assert cps == ["U+043E"], f"expected one entry, got {cps}"

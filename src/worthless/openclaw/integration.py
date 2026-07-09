@@ -33,6 +33,7 @@ import shutil
 import stat
 import subprocess
 import sys
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -817,8 +818,9 @@ def _is_proxy_url(url: str, proxy_base_url: str) -> bool:
     1. Primary: the URL starts with the *current* resolved proxy base URL.
        This is the exact match and the common fast path.
 
-    2. Secondary: the URL is on the same port as ``proxy_base_url`` (regardless
-       of host).  This handles the scenario where a previous ``lock`` wrote
+    2. Secondary: the URL is on the same port as ``proxy_base_url`` AND on an
+       allowed proxy host (loopback / Docker bridge — NOT any host; see the
+       security note below).  This handles the scenario where a previous ``lock`` wrote
        the entry with a different host alias — e.g. ``http://127.0.0.1:<port>/…``
        when Docker was absent, and the current run resolves to
        ``http://172.17.0.1:<port>`` via the Docker bridge.  The port is derived
@@ -840,11 +842,37 @@ def _is_proxy_url(url: str, proxy_base_url: str) -> bool:
     if url.startswith(proxy_base_url.rstrip("/") + "/"):
         return True
     # Derive the fallback port from proxy_base_url so non-default deployments
-    # (--port / WORTHLESS_PORT) work too.
+    # (--port / WORTHLESS_PORT) work too. SECURITY (WOR-777 / brutus): the host
+    # is NOT arbitrary — it must be a loopback / Docker-bridge proxy host, or an
+    # attacker baseUrl like ``https://evil.com:<port>/<alias>/v1`` would read as
+    # proxy-shaped and (a) get its plaintext finding demoted past the audit gate,
+    # (b) get neutralized. Same allowlist as :func:`_validate_proxy_base_url`.
     port = urlsplit(proxy_base_url).port
     if port is None:
         return False
-    return re.match(rf"^https?://[^/]*:{port}/", url) is not None
+    # SECURITY (WOR-777 / brutus): ``url`` is attacker-influenced. On Python
+    # 3.12+ ``urlsplit`` / ``.hostname`` / ``.port`` eagerly reject malformed
+    # hosts — a bracketed non-IPv6 host ``http://[evil.com]:<port>/…`` (raises in
+    # urlsplit itself) or a non-numeric port ``127.0.0.1:8787.evil.com`` (raises
+    # on ``.port``) — with ValueError. A crafted config must read as
+    # "not our proxy" (return False), never crash the gate.
+    try:
+        parts = urlsplit(url)
+        if parts.port != port:
+            return False
+        # CodeRabbit (WOR-777): scheme must match too — worthless's proxy is
+        # http-only (_DEFAULT_PROXY_BASE_URL), so an https:// entry on the same
+        # host:port cannot be a real worthless-written entry.
+        if parts.scheme != urlsplit(proxy_base_url).scheme:
+            return False
+        host = parts.hostname or ""
+    except ValueError:
+        return False
+    try:
+        in_docker_bridge = ipaddress.ip_address(host) in _DOCKER_BRIDGE_CIDR
+    except ValueError:
+        in_docker_bridge = False
+    return host in _ALLOWED_PROXY_HOSTS or in_docker_bridge
 
 
 # WOR-650 recognition helpers. The alias is parsed from an attacker/
@@ -1196,6 +1224,124 @@ def _apply_lock_rollback(
     providers_set.clear()
 
 
+def _agent_models_json_paths(openclaw_dir: Path, env: Mapping[str, str]) -> list[Path]:
+    """Enumerate per-agent ``models.json`` projections under ``<.openclaw>``.
+
+    Mirrors OpenClaw's ``listAgentModelsJsonPaths`` (storage-scan.ts): the
+    ``main`` agent, every ``agents/*/agent`` subdirectory, and an
+    ``OPENCLAW_AGENT_DIR`` / ``PI_CODING_AGENT_DIR`` override if set.
+
+    ponytail: custom per-agent dirs declared inside openclaw.json are not
+    followed — add config-driven resolution if a non-standard layout needs it.
+    """
+    paths: set[Path] = set()
+    override = (env.get("OPENCLAW_AGENT_DIR") or env.get("PI_CODING_AGENT_DIR") or "").strip()
+    if override:
+        paths.add(Path(override).expanduser() / "models.json")
+    agents_root = openclaw_dir / "agents"
+    paths.add(agents_root / "main" / "agent" / "models.json")
+    try:
+        for entry in agents_root.iterdir():
+            if entry.is_dir():
+                paths.add(entry / "agent" / "models.json")
+    except OSError:
+        pass  # agents/ absent or unreadable -> just the main + override paths
+    return sorted(paths)
+
+
+def _apply_lock_neutralize_models_json(
+    config_path: Path,
+    resolved_proxy_base_url: str,
+    providers_set: Sequence[str],
+    events: list[OpenclawIntegrationEvent],
+    env: Mapping[str, str] | None = None,
+) -> None:
+    """Delete worthless's stale provider entries from each agent ``models.json``.
+
+    WOR-777 Layer 2. OpenClaw runs from ``<.openclaw>/agents/*/agent/models.json``
+    — a projection it regenerates each turn by MERGING openclaw.json over the
+    EXISTING file, and the merge PRESERVES the existing apiKey/baseUrl
+    (models-config.merge.ts). So after a re-lock rotates openclaw.json, the
+    runtime keeps the OLD shard-A until the stale projection is removed. Deleting
+    our entry makes the next regen take the new value wholesale (no-existing ->
+    new-wins, merge.ts:227).
+
+    Only entries whose ``baseUrl`` is worthless-proxy-shaped are removed — a
+    foreign/custom entry the user put there is left untouched. A genuinely absent
+    ``agents/`` dir or file is a silent no-op. An EXISTING file we cannot clean
+    (symlink, foreign-owned, write failure) is a false-secure state — that agent
+    still serves the OLD key — so it emits an ``error``-level event (lock reports
+    partial failure), never a silent pass.
+
+    Relies on the OpenClaw restart contract, not cross-process locking: nothing
+    else writes these files during ``worthless lock``.
+    """
+    if not providers_set:
+        return
+    env = os.environ if env is None else env
+    openclaw_dir = config_path.parent
+    for mj_path in _agent_models_json_paths(openclaw_dir, env):
+        try:
+            # Never block on a FIFO/device/socket planted at an agent path — it
+            # can't be a real projection, and read_config would hang forever.
+            # Mirrors audit.recognize_managed_providers / snapshot_hashes.
+            if mj_path.exists() and not stat.S_ISREG(mj_path.stat().st_mode):
+                continue
+            data = _config_mod.read_config(mj_path)
+        except OSError:
+            continue  # stat probe vanished/unreadable -> nothing to rotate
+        except OpenclawConfigError as exc:
+            events.append(
+                OpenclawIntegrationEvent(
+                    code=OpenclawErrorCode.MODELS_JSON_STALE_NOT_REMOVED,
+                    level="error",
+                    detail=(
+                        f"could not read agent models.json at {mj_path} — that agent "
+                        f"still serves the OLD key after re-lock: {exc}"
+                    ),
+                    extra={"path": str(mj_path)},
+                )
+            )
+            continue
+        providers = data.get("providers") if isinstance(data, dict) else None
+        if not isinstance(providers, dict):
+            continue  # absent / non-projection file -> nothing to rotate (silent)
+        for provider in providers_set:
+            entry = providers.get(provider)
+            if not isinstance(entry, dict):
+                continue  # provider not projected in this agent -> nothing to do
+            if not _is_proxy_url(str(entry.get("baseUrl", "")), resolved_proxy_base_url):
+                continue  # foreign / user-customized entry -> not ours, leave it
+            try:
+                removed = _config_mod.unset_models_json_provider(mj_path, provider)
+            except (OpenclawConfigError, OSError) as exc:
+                events.append(
+                    OpenclawIntegrationEvent(
+                        code=OpenclawErrorCode.MODELS_JSON_STALE_NOT_REMOVED,
+                        level="error",
+                        detail=(
+                            f"could not remove stale {provider} entry from {mj_path} — "
+                            f"that agent still serves the OLD key until fixed: {exc}"
+                        ),
+                        extra={"provider": provider, "path": str(mj_path)},
+                    )
+                )
+                continue
+            if removed:
+                events.append(
+                    OpenclawIntegrationEvent(
+                        code=OpenclawErrorCode.MODELS_JSON_STALE_REMOVED,
+                        level="info",
+                        detail=(
+                            f"removed stale {provider} projection from {mj_path}; OpenClaw "
+                            "regenerates it with the new key on next turn — restart the "
+                            "running gateway to drop the old key from memory"
+                        ),
+                        extra={"provider": provider, "path": str(mj_path)},
+                    )
+                )
+
+
 _ALLOWED_PROXY_HOSTS: frozenset[str] = frozenset(
     # "proxy" is the worthless proxy's Docker Compose service name — OpenClaw
     # reaches it over the internal network as http://proxy:8787 (see
@@ -1281,12 +1427,14 @@ def apply_lock(
     structured events in the returned :class:`OpenclawApplyResult`.
 
     Args:
-        planned_updates: list of ``(provider, alias, auth_token)`` triples
-            for keys that were just locked.  ``auth_token`` is the stable
-            proxy auth token (worthless-16x2) — an opaque URL-safe base64
-            string — NOT shard-A.  The same token is written to every
-            provider entry so all aliases share one secret, rotated on
-            ``worthless relock``.
+        planned_updates: list of ``(provider, alias, shard_a)`` triples for
+            keys that were just locked.  ``shard_a`` is that alias's shard-A
+            — the same format-preserving half written to ``.env`` — written
+            PER-ALIAS (each alias gets its own; they do NOT share one token).
+            Safe to sit in the config only insofar as it cannot be logged to
+            a leak (SR-04) and cannot reconstruct the key without shard-B; it
+            remains a LIVE replay credential until the key is retired (see the
+            retired-key tripwire in ``proxy/app.py``).
         proxy_base_url: override for the proxy host. Defaults to
             ``http://127.0.0.1:8787`` (the canonical worthless port).
 
@@ -1471,6 +1619,14 @@ def apply_lock(
     # ---- Transactional rollback on write failure -------------------------
     if rollback_needed:
         _apply_lock_rollback(config_path, original_config, events, providers_set, providers_skipped)
+
+    # ---- Stage A.5: neutralize stale agent models.json projections -------
+    # WOR-777 Layer 2: the provider write above rotated openclaw.json, but
+    # OpenClaw's per-agent models.json cache would merge-preserve the OLD
+    # shard-A. Remove our stale entry so the next agent turn regenerates it
+    # with the new key. Operates only on what Stage A actually wrote
+    # (providers_set is empty after a rollback, so this no-ops).
+    _apply_lock_neutralize_models_json(config_path, resolved_proxy_base_url, providers_set, events)
 
     # ---- Stage B: install skill ------------------------------------------
     skill_installed = False

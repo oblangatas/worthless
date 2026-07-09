@@ -40,6 +40,9 @@ class OpenclawErrorCode(str, Enum):
     SKILL_FOREIGN_OWNER = "openclaw.skill_foreign_owner"
     SKILL_INSTALL_FAILED = "openclaw.skill_install_failed"
     HOME_MISMATCH = "openclaw.home_mismatch"
+    # WOR-777 Layer 2: agent models.json projection rotation (re-lock).
+    MODELS_JSON_STALE_REMOVED = "openclaw.models_json_stale_removed"
+    MODELS_JSON_STALE_NOT_REMOVED = "openclaw.models_json_stale_not_removed"
 
 
 @dataclass(frozen=True)

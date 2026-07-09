@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Literal
 
 from worthless.cli.key_patterns import KEY_PATTERN
+from worthless.openclaw.integration import _alias_from_base_url, _is_proxy_url
 
 # --- Constants ----------------------------------------------------------------
 
@@ -368,9 +369,72 @@ def check_auth_profiles_direct(
     return findings
 
 
+def recognize_managed_providers(
+    files_scanned: Sequence[str],
+    managed_aliases: set[str] | None,
+    proxy_base_url: str,
+) -> set[tuple[str, str]]:
+    """Return ``{(file, provider)}`` that are worthless's own managed entries.
+
+    worthless writes both an inert shard-A ``apiKey`` and a proxy ``baseUrl``
+    (``http://<proxy-host>:<port>/<alias>/v1``) into the user's real provider
+    entry (F1/WOR-647).  The audit flags that shard-A as plaintext; this
+    recognizes the entry as one worthless created and lets
+    :func:`classify_findings` demote it to advisory, so a re-lock (rotation) is
+    not blocked by worthless's own shard-A (bead worthless-b8me).
+
+    Recognition requires BOTH (SECURITY — WOR-777 / brutus):
+    1. the ``baseUrl`` is worthless-proxy-shaped — host:port match the proxy
+       (:func:`~worthless.openclaw.integration._is_proxy_url`), NOT just any host
+       carrying the alias token.  Without the host pin, an attacker-controlled
+       ``https://evil.com/<alias>/v1`` (the alias is ``provider-sha256(key)[:8]``,
+       computable by anyone holding the key) would smuggle a real plaintext key
+       past the gate.
+    2. the parsed alias is in this machine's ``shards`` keys (``managed_aliases``).
+
+    ``managed_aliases`` falsy (``None`` = DB snapshot failed, or empty) -> empty
+    set: never trust an entry we cannot confirm we created (fail-safe, mirrors
+    :class:`~worthless.openclaw.integration.AdoptionPolicy`).  Handles both the
+    models.json shape (``providers.<X>``) and the openclaw.json shape
+    (``models.providers.<X>``).
+    """
+    if not managed_aliases:
+        return set()
+    recognized: set[tuple[str, str]] = set()
+    for path_str in files_scanned:
+        try:
+            # Never block on a FIFO/device/socket planted at a scanned path — it
+            # can't be a real projection, and read_text would hang forever.
+            # Mirrors the guard in snapshot_hashes.
+            if not stat.S_ISREG(Path(path_str).stat().st_mode):
+                continue
+            data = json.loads(Path(path_str).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        providers = data.get("providers")
+        if not isinstance(providers, dict):
+            models = data.get("models")
+            providers = models.get("providers") if isinstance(models, dict) else None
+        if not isinstance(providers, dict):
+            continue
+        for name, entry in providers.items():
+            if not isinstance(entry, dict):
+                continue
+            base_url = entry.get("baseUrl")
+            if not isinstance(base_url, str) or not _is_proxy_url(base_url, proxy_base_url):
+                continue  # host:port not our proxy -> not ours, never recognize
+            alias = _alias_from_base_url(base_url)
+            if alias is not None and alias in managed_aliases:
+                recognized.add((path_str, name))
+    return recognized
+
+
 def classify_findings(
     result: AuditResult,
     auth_profiles_blocking: list[BlockingFinding] | None = None,
+    recognized_managed: set[tuple[str, str]] | None = None,
 ) -> AuditClassification:
     """Classify audit findings into blocking vs advisory vs unknown.
 
@@ -382,6 +446,9 @@ def classify_findings(
     - ADVISORY_CODES: REF_UNRESOLVED, REF_SHADOWED, LEGACY_RESIDUE
     - gateway.auth.token jsonPath
     - worthless-own-provider jsonPaths (WORTHLESS_OWN_PROVIDERS)
+    - recognized worthless-managed entries (``recognized_managed`` — the
+      ``(file, provider)`` pairs whose proxy ``baseUrl`` alias is in the
+      ``shards`` DB; see :func:`recognize_managed_providers`)
 
     Default-deny: unknown codes are returned in ``AuditClassification.unknown_codes``
     rather than raising here — callers (lock pre-flight, doctor check) map them
@@ -398,6 +465,7 @@ def classify_findings(
     blocking: list[BlockingFinding] = list(auth_profiles_blocking or [])
     advisory_count = 0
     unknown_codes: list[str] = []
+    recognized = recognized_managed or set()
 
     for finding in result.findings:
         if finding.code in ADVISORY_CODES:
@@ -422,7 +490,7 @@ def classify_findings(
             m = _PROVIDER_APIKEY_RE.match(finding.json_path)
             if m:
                 provider = m.group("provider")
-                if provider in WORTHLESS_OWN_PROVIDERS:
+                if provider in WORTHLESS_OWN_PROVIDERS or (finding.file, provider) in recognized:
                     advisory_count += 1
                     continue
                 blocking.append(
@@ -449,23 +517,36 @@ def classify_findings(
 def run_and_classify(
     openclaw_bin: Path,
     timeout: float = _DEFAULT_TIMEOUT,
+    managed_aliases: set[str] | None = None,
+    *,
+    proxy_base_url: str,
 ) -> tuple[AuditResult, AuditClassification]:
     """Run the audit and classify findings in one call.
 
     Convenience wrapper used by both pre-flight and post-flight so callers
     don't duplicate the ``run_audit → check_auth_profiles_direct →
-    classify_findings`` sequence.
+    recognize_managed_providers → classify_findings`` sequence.
 
     Args:
         openclaw_bin: absolute path to the openclaw binary.
         timeout: subprocess timeout passed to :func:`run_audit`.
+        managed_aliases: this machine's ``shards`` keys, used to recognize
+            worthless's own provider entries (alias parsed from ``baseUrl``) so
+            its inert shard-A is not mistaken for a leak on re-lock. ``None``
+            (DB unavailable) recognizes nothing — fail-safe.
+        proxy_base_url: the worthless proxy base (``http://127.0.0.1:<port>``).
+            Required: recognition only trusts an entry whose ``baseUrl`` host:port
+            match the proxy, so an attacker host carrying a managed alias cannot
+            smuggle a real key past the gate (WOR-777 / brutus). Keyword-only so
+            no caller silently omits the host pin.
 
     Raises:
         AuditGateError: on subprocess failure (propagated from :func:`run_audit`).
     """
     result = run_audit(openclaw_bin, timeout=timeout)
     direct_blocking: list[BlockingFinding] = check_auth_profiles_direct(result.files_scanned)
-    classification = classify_findings(result, direct_blocking)
+    recognized = recognize_managed_providers(result.files_scanned, managed_aliases, proxy_base_url)
+    classification = classify_findings(result, direct_blocking, recognized_managed=recognized)
     return result, classification
 
 
