@@ -51,6 +51,12 @@ def _run(args: list[str], home: Path) -> subprocess.CompletedProcess[str]:
         **os.environ,
         "WORTHLESS_HOME": str(home),
         "WORTHLESS_KEYRING_BACKEND": "null",
+        # Isolate $HOME too: _resolve_home() (openclaw/integration.py) reads
+        # Path.home(), not WORTHLESS_HOME. Without this, a dev machine with a
+        # real ~/.openclaw makes detect().present True inside the subprocess,
+        # tripping the F7 proxy-health gate. home.parent is the pytest
+        # tmp_path — always fresh, never contains a real .openclaw.
+        "HOME": str(home.parent),
     }
     return subprocess.run(
         ["uv", "run", "worthless", *args],
