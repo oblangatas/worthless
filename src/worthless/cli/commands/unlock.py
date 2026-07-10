@@ -32,6 +32,7 @@ from worthless.cli.commands.lock import _PROVIDER_ENV_MAP
 from worthless.cli.dotenv_rewriter import rewrite_env_keys, scan_env_keys
 from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary
 from worthless.cli.orphans import format_orphan_error
+from worthless.cli.process import disable_core_dumps
 from worthless.crypto.reconstruction import reconstruct_key, reconstruct_key_fp
 from worthless.crypto.types import zero_buf
 from worthless.exceptions import ShardTamperedError
@@ -658,6 +659,7 @@ def register_unlock_commands(app: typer.Typer) -> None:
         console = get_console()
         db_was_missing, missing_db_path = _db_missing_after_completed_bootstrap()
         home = get_home()
+        disable_core_dumps()
 
         # Detect whether the user passed --env explicitly. The HF4
         # discriminator (raise on shard-shape values without DB rows)

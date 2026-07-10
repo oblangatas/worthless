@@ -204,6 +204,31 @@ class TestScanFormats:
         assert "is_protected" in data["findings"][0]
         assert "orphans" in data and isinstance(data["orphans"], list)
 
+    def test_format_json_never_contains_raw_key_value(self, file_with_key: Path) -> None:
+        """WOR-277 success criterion: scan --json findings carry only a
+        {prefix}...{suffix} preview — the raw matched key must never
+        appear anywhere in the JSON output."""
+        secret = _fake_openai_key()
+        result = runner.invoke(app, ["scan", "--json", str(file_with_key)])
+        assert result.exit_code == 1
+        assert secret not in result.stdout
+        data = json.loads(result.stdout)
+        assert secret not in json.dumps(data)
+        preview = data["findings"][0]["value_preview"]
+        assert preview != secret
+        assert "*" in preview, f"expected a masked preview, got {preview!r}"
+        assert len(preview) < len(secret)
+
+    def test_format_sarif_never_contains_raw_key_value(self, file_with_key: Path) -> None:
+        """WOR-277 success criterion: scan --format sarif must never emit
+        the raw matched key value anywhere in the SARIF document."""
+        secret = _fake_openai_key()
+        result = runner.invoke(app, ["scan", "--format", "sarif", str(file_with_key)])
+        assert result.exit_code == 1
+        assert secret not in result.stdout
+        sarif = json.loads(result.stdout)
+        assert secret not in json.dumps(sarif)
+
     def test_quiet_suppresses_output(self, file_with_key: Path) -> None:
         """--quiet should produce no stderr output (exit code only)."""
         result = runner.invoke(app, ["-q", "scan", str(file_with_key)])
@@ -605,6 +630,73 @@ class TestCollectDeepPaths:
             result = runner.invoke(app, ["scan", "--deep"])
         # Should not crash — exception is caught
         assert result.exit_code in (0, 1)
+
+    def test_deep_scan_tempfile_write_failure_unlinks_orphan(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """WOR-277: a write failure must not orphan the env-dump tempfile.
+
+        Before the fix, ``mkstemp`` had already created the file on disk
+        when ``os.write`` raised; the except-branch closed the fd but never
+        unlinked it, leaking a (possibly partially written) plaintext env
+        dump forever. Spy on ``tempfile.mkstemp`` to learn the exact path
+        it created, then assert it's gone once ``_collect_deep_paths``
+        returns.
+        """
+        monkeypatch.chdir(tmp_path)
+        _strip_env_secrets(monkeypatch)
+        monkeypatch.setenv("WORTHLESS_TEST_ENV_LEAK_PROBE", "sentinel-value")
+
+        created_paths: list[str] = []
+        real_mkstemp = tempfile.mkstemp
+
+        def _spy_mkstemp(*args, **kwargs):
+            fd, path = real_mkstemp(*args, **kwargs)
+            created_paths.append(path)
+            return fd, path
+
+        with (
+            patch("worthless.cli.commands.scan.tempfile.mkstemp", _spy_mkstemp),
+            patch("worthless.cli.commands.scan.os.write", side_effect=OSError("disk full")),
+        ):
+            result = runner.invoke(app, ["scan", "--deep"])
+        assert result.exit_code in (0, 1)
+        assert created_paths, "mkstemp should have been called for the env dump"
+        assert not Path(created_paths[0]).exists(), (
+            f"orphaned env-dump tempfile leaked at {created_paths[0]!r}"
+        )
+
+    def test_mkstemp_never_opens_through_a_preexisting_symlink(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """WOR-277 ('refuse if a symlink pre-exists'): ``mkstemp``'s
+        O_CREAT|O_EXCL contract means a pre-planted symlink at a candidate
+        path is a collision, not a target — it retries the next candidate
+        name rather than opening through the link. This is why
+        ``_collect_deep_paths`` needs no hand-rolled symlink check of its
+        own; it inherits the guarantee from ``tempfile.mkstemp`` directly.
+        """
+        attacker_target = tmp_path / "attacker-owned-file"
+        attacker_target.write_text("not the env dump\n")
+
+        poisoned_name = "poisoned0000000000000000000000"
+        fresh_name = "freshname0000000000000000000000"
+        (tmp_path / f"worthless-env-{poisoned_name}.env").symlink_to(attacker_target)
+
+        names = iter([poisoned_name, fresh_name])
+        monkeypatch.setattr(tempfile, "_get_candidate_names", lambda: names)
+
+        fd, path = tempfile.mkstemp(prefix="worthless-env-", suffix=".env", dir=str(tmp_path))
+        try:
+            os.close(fd)
+            created = Path(path)
+            assert created.name == f"worthless-env-{fresh_name}.env"
+            assert not created.is_symlink()
+            assert attacker_target.read_text() == "not the env dump\n", (
+                "mkstemp wrote through the pre-planted symlink instead of skipping it"
+            )
+        finally:
+            Path(path).unlink(missing_ok=True)
 
     def test_deep_scan_explicit_path_deduped(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

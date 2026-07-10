@@ -25,7 +25,12 @@ from worthless.cli.commands.scan import (
     _format_code_findings_human,
     _format_lock_block_human,
 )
-from worthless.cli.process import check_proxy_health, resolve_openclaw_proxy_base_url, resolve_port
+from worthless.cli.process import (
+    check_proxy_health,
+    disable_core_dumps,
+    resolve_openclaw_proxy_base_url,
+    resolve_port,
+)
 from worthless.cli.console import WorthlessConsole, get_console
 from worthless.cli.scanner import SkippedFile, scan_source_for_hardcoded_provider_urls
 from worthless.cli.dotenv_rewriter import (
@@ -1774,6 +1779,11 @@ def _lock_keys(
     if env_path.is_symlink():
         raise WorthlessError(ErrorCode.ENV_NOT_FOUND, f"Refusing to follow symlink: {env_path}")
 
+    # WOR-277: disable core dumps before any raw key material is read —
+    # matches the up.py/wrap.py placement (after validation, before key
+    # material touches memory).
+    disable_core_dumps()
+
     # c5kc-61tw: same fail-closed contract the CLI scan uses — bounded per-file
     # read + wall-clock deadline so a hostile / oversized source file can't hang
     # ``worthless lock`` the way it could hang ``worthless scan`` pre-c5kc.
@@ -2277,22 +2287,33 @@ def register_lock_commands(app: typer.Typer) -> None:
             None,
             "--key",
             "-k",
-            help="API key (use --key-stdin instead to avoid shell history)",
+            help="REMOVED — leaks into shell history. Use --key-stdin.",
         ),
         key_stdin: bool = typer.Option(False, "--key-stdin", help="Read API key from stdin"),
         provider: str = typer.Option(..., "--provider", "-p", help="Provider name"),
     ) -> None:
         """Enroll a single API key (scripting/CI primitive)."""
         home = get_home()
+        disable_core_dumps()
+
+        # WOR-277: a raw key value on the command line survives in shell
+        # history (and process listings) forever — no CLI flag may accept
+        # one. Checked before key_stdin so passing both still refuses.
+        if key is not None:
+            raise WorthlessError(
+                ErrorCode.INVALID_INPUT,
+                "--key is not accepted — a raw key value on the command line "
+                "leaks into shell history. Use --key-stdin instead, e.g.: "
+                '`echo "$API_KEY" | worthless enroll --key-stdin --alias '
+                "<alias> --provider <provider>`",
+            )
 
         if key_stdin:
             actual_key = sys.stdin.readline().strip()
             if not actual_key:
                 raise WorthlessError(ErrorCode.KEY_NOT_FOUND, "No key provided on stdin")
-        elif key:
-            actual_key = key
         else:
-            raise WorthlessError(ErrorCode.KEY_NOT_FOUND, "Provide --key or --key-stdin")
+            raise WorthlessError(ErrorCode.KEY_NOT_FOUND, "Provide --key-stdin")
 
         with acquire_lock(home):
             _enroll_single(alias, actual_key, provider, home)

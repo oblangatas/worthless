@@ -186,6 +186,48 @@ class TestNonInterruptExitCodePreserved:
         assert result.exit_code == 87, result.output
 
 
+class TestDbWriteBeforeEnvRewriteOrdering:
+    """WOR-277 item 5: shard DB writes (Pass-1) must land BEFORE the .env
+    rewrite — so a failure between the two steps leaves the real key still
+    readable in the original .env, never destroyed with no working shard
+    to recover it from. Proven here by making the rewrite step itself fail
+    outright (not a signal — a genuine write failure) and asserting the
+    original file survives untouched and the DB unwinds to zero rows."""
+
+    def test_batch_rewrite_failure_leaves_original_env_recoverable(
+        self,
+        home_dir: WorthlessHome,
+        two_key_env: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import worthless.cli.commands.lock as lock_mod
+
+        original_env_bytes = two_key_env.read_bytes()
+
+        def _rewrite_boom(*args: object, **kwargs: object) -> None:
+            raise OSError("simulated disk failure during .env rewrite")
+
+        monkeypatch.setattr(lock_mod, "_batch_rewrite", _rewrite_boom)
+
+        result = runner.invoke(
+            app,
+            ["lock", "--env", str(two_key_env)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+        )
+
+        assert result.exit_code != 0
+        # The real key must still be sitting in the original .env, in
+        # plaintext and fully recoverable — "still on disk" beats "lost
+        # forever" when the rewrite step can't be trusted to have run.
+        assert two_key_env.read_bytes() == original_env_bytes
+
+        # Pass-1's DB writes must have been unwound — no orphan shard rows
+        # for keys whose .env was never actually rewritten to point at them.
+        repo = _repo(home_dir)
+        aliases = asyncio.run(repo.list_keys())
+        assert aliases == [], f"expected DB rollback to leave zero rows, found {aliases}"
+
+
 # ---------------------------------------------------------------------------
 # 3. Attack journey: mashed Ctrl-C must not abort the rollback
 # ---------------------------------------------------------------------------

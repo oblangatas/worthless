@@ -1438,6 +1438,59 @@ class TestPrintHint:
 class TestEnrollCommand:
     """Tests for `worthless enroll`."""
 
+    def test_enroll_key_flag_rejected(self, home_dir: WorthlessHome) -> None:
+        """WOR-277: no CLI flag may accept a raw key value.
+
+        ``--key`` would land the real key in shell history forever —
+        ``enroll`` must refuse it outright and point at ``--key-stdin``,
+        never silently accept the value.
+        """
+        key = fake_openai_key()
+        result = runner.invoke(
+            app,
+            ["enroll", "--alias", "shell-history-test", "--key", key, "--provider", "openai"],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+        )
+        assert result.exit_code != 0
+        assert "--key-stdin" in result.output
+        assert key not in result.output
+
+        # Nothing should have been enrolled — the rejection must happen
+        # before any DB write.
+        repo = _repo(home_dir)
+        aliases = asyncio.run(repo.list_keys())
+        assert "shell-history-test" not in aliases
+
+    def test_enroll_key_and_key_stdin_both_given_rejected(self, home_dir: WorthlessHome) -> None:
+        """Passing --key alongside --key-stdin must still be rejected —
+        the mere presence of a raw key value on the command line is the
+        violation, regardless of what else is passed."""
+        key = fake_openai_key()
+        result = runner.invoke(
+            app,
+            [
+                "enroll",
+                "--alias",
+                "both-flags-test",
+                "--key",
+                key,
+                "--key-stdin",
+                "--provider",
+                "openai",
+            ],
+            input=f"{key}\n",
+            env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+        )
+        assert result.exit_code != 0
+        assert "--key-stdin" in result.output
+        assert key not in result.output
+
+        # Nothing should have been enrolled — the rejection must happen
+        # before any DB write, same as the --key-only rejection path.
+        repo = _repo(home_dir)
+        aliases = asyncio.run(repo.list_keys())
+        assert "both-flags-test" not in aliases
+
     def test_enroll_explicit_args(self, home_dir: WorthlessHome) -> None:
         """Enroll with explicit alias, key, and provider."""
         result = runner.invoke(
@@ -1446,11 +1499,11 @@ class TestEnrollCommand:
                 "enroll",
                 "--alias",
                 "my-test-key",
-                "--key",
-                fake_openai_key(),
+                "--key-stdin",
                 "--provider",
                 "openai",
             ],
+            input=f"{fake_openai_key()}\n",
             env={"WORTHLESS_HOME": str(home_dir.base_dir)},
         )
         assert result.exit_code == 0, result.output
@@ -1473,11 +1526,11 @@ class TestEnrollCommand:
                 "enroll",
                 "--alias",
                 "dup-test",
-                "--key",
-                fake_openai_key(),
+                "--key-stdin",
                 "--provider",
                 "openai",
             ],
+            input=f"{fake_openai_key()}\n",
             env={"WORTHLESS_HOME": str(home_dir.base_dir)},
         )
         assert result1.exit_code == 0, result1.output
@@ -1494,11 +1547,11 @@ class TestEnrollCommand:
                 "enroll",
                 "--alias",
                 "dup-test",
-                "--key",
-                fake_openai_key(),
+                "--key-stdin",
                 "--provider",
                 "openai",
             ],
+            input=f"{fake_openai_key()}\n",
             env={"WORTHLESS_HOME": str(home_dir.base_dir)},
         )
         assert result2.exit_code != 0, (
@@ -1530,11 +1583,11 @@ class TestEnrollCommand:
                 "enroll",
                 "--alias",
                 "orphan-test",
-                "--key",
-                fake_openai_key(),
+                "--key-stdin",
                 "--provider",
                 "openai",
             ],
+            input=f"{fake_openai_key()}\n",
             env={"WORTHLESS_HOME": str(home_dir.base_dir)},
         )
         # Command should fail

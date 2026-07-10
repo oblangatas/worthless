@@ -52,6 +52,7 @@ from worthless.proxy.rules import (
     extract_model,
 )
 from worthless.storage.schema import SCHEMA, migrate_db
+from worthless.cli.log_redaction import install_redaction_filter
 from worthless.storage.shard_reader import ShardReader
 from worthless.storage.spend_ledger import SpendLedger
 
@@ -326,6 +327,12 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
     Args:
         settings: Proxy settings. If None, loads from environment.
     """
+    # WOR-277: uvicorn's own Config.configure_logging() has already run by
+    # the time this factory is invoked (uvicorn is launched with
+    # `--factory worthless.proxy.app:create_app`), so attaching here is not
+    # racing uvicorn's dictConfig — it runs strictly after it.
+    install_redaction_filter()
+
     if settings is None:
         settings = ProxySettings()
 
@@ -583,7 +590,25 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
         _spend_reservation = _estimate_tokens(body)
 
         # GATE: rules engine evaluates BEFORE any Fernet decrypt
-        gate = await rules_engine.evaluate(alias, request, provider=encrypted.provider, body=body)
+        # WOR-277: SpendCapRule/TokenBudgetRule/TimeWindowRule each fail
+        # closed internally (return a Denial rather than raising), but
+        # RateLimitRule.evaluate() has no try/except of its own — a
+        # transient error there (e.g. its _load_limit DB read) propagates
+        # here uncaught (code-reviewer, PR #426; confirmed by reading
+        # rules.py directly rather than assuming). If TokenBudgetRule ran
+        # first and placed an in-memory reservation, it must be released
+        # here too, or it leaks forever (no sweeper exists for it, unlike
+        # the durable spend-cap hold). This was also the one step in this
+        # handler with no try/except at all, skipping shard_a zeroing
+        # (SR-01/SR-02) and propagating a raw, unhandled exception.
+        try:
+            gate = await rules_engine.evaluate(
+                alias, request, provider=encrypted.provider, body=body
+            )
+        except Exception:
+            shard_a[:] = b"\x00" * len(shard_a)
+            await rules_engine.release_spend_reservation(alias, amount=_spend_reservation)
+            return _uniform_401()
         spend_handle = gate.spend_handle
 
         async def _release_reservations() -> None:
