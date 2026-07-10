@@ -334,6 +334,59 @@ def test_real_openclaw_logs_match_the_reload_matcher(loaded_stack):
         _oc(oc, "config", "set", "models.providers.openai.baseUrl", good)
 
 
+def test_real_openclaw_logs_match_the_reject_marker(loaded_stack):
+    """WOR-756 reject-path mirror of the matcher test (closes the gap TCV
+    flagged): the exit-92 path fires only when the REAL image emits
+    ``config reload skipped (invalid config)``. Prove that marker against the
+    live image the same way the applied marker is proven — otherwise a drift in
+    the reject string silently turns exit-92 into ``skipped`` → ``[OK]``, exactly
+    the fail-loud guarantee this PR exists to make real.
+
+    Induce a genuinely schema-invalid config by writing ``baseUrl`` as an integer
+    STRAIGHT into openclaw.json — ``openclaw config set`` validates and would
+    reject it before the write, so we bypass it to reach the gateway's reload.
+    The gateway skips the invalid reload (keeping the last-valid config in
+    memory) and logs the reject event; the file is restored from a backup.
+    """
+    oc = loaded_stack["oc"]
+    cfg = "/home/node/.openclaw/openclaw.json"
+    backup = "/tmp/oc-good.json"  # noqa: S108 — path inside the container, not the host
+    try:
+        assert _dexec(oc, ["cp", cfg, backup]).returncode == 0
+        c_now = _run(["docker", "exec", oc, "date", "-u", "+%Y-%m-%dT%H:%M:%S+00:00"], check=True)
+        since = datetime.fromisoformat(c_now.stdout.strip()) - timedelta(seconds=2)
+        # node is guaranteed present (it's a node app); corrupt baseUrl to an int.
+        corrupt = (
+            f"const fs=require('fs');const d=JSON.parse(fs.readFileSync('{cfg}'));"
+            "d.models.providers.openai.baseUrl=12345;"
+            f"fs.writeFileSync('{cfg}',JSON.stringify(d))"
+        )
+        assert _dexec(oc, ["node", "-e", corrupt]).returncode == 0
+        time.sleep(6)  # F6: the gateway logs the reject event.
+
+        # `openclaw logs` loads config to reach the gateway, so it can't run while
+        # the config is schema-invalid — restore the valid file first. That also
+        # emits a fresh APPLIED event, so we assert only that the REJECT marker was
+        # seen (its co-occurrence with applied is expected and harmless).
+        assert _dexec(oc, ["cp", backup, cfg]).returncode == 0
+        time.sleep(6)
+        logs = _oc(oc, "logs", "--json", "--limit", "500", "--plain")
+        assert logs.returncode == 0, f"`openclaw logs` failed: {logs.stderr[-400:]}"
+        _applied, rejected = _classify_reload_lines(logs.stdout.splitlines(), since)
+        tail = logs.stdout[-1100:]
+        assert rejected, (
+            "The pinned OpenClaw image did not emit the reject marker the production "
+            "classifier matches (lock.py _RELOAD_REJECTED_MARKER). "
+            "_confirm_openclaw_reload would return 'skipped' instead of 'fail' on a "
+            "rejected config, so lock would print [OK]+advisory (exit 0) instead of "
+            f"exit 92. Re-verify against the image and update the marker.\nlogs tail:\n{tail}"
+        )
+    finally:
+        # Belt-and-suspenders: ensure the valid config is in place for siblings.
+        _dexec(oc, ["cp", backup, cfg])
+        time.sleep(2)
+
+
 def test_proxy_is_load_bearing_after_lock(loaded_stack):
     """Kill the proxy → OpenClaw cannot reach upstream; restart → it can."""
     oc = loaded_stack["oc"]

@@ -10,7 +10,7 @@ import os
 import re
 import signal
 import stat
-import subprocess
+import subprocess  # nosec B404
 import sys
 import time
 from dataclasses import dataclass
@@ -937,17 +937,35 @@ _RELOAD_REJECTED_MARKER = "config reload skipped (invalid config)"
 
 
 def _parse_log_event_time(raw: object) -> datetime | None:
-    """Parse an ``openclaw logs --json`` event ``time`` to an aware datetime.
+    """Parse an ``openclaw logs --json`` event ``time`` to an **aware** datetime.
 
-    Tolerates the ``Z`` suffix (fromisoformat pre-3.11 rejects it); returns
-    ``None`` for anything unparsable so a garbage line is skipped, not fatal.
+    Robust to three real-world shapes so the comparison in
+    :func:`_classify_reload_lines` never raises (a naive-vs-aware ``<`` throws
+    ``TypeError``, which would crash ``worthless lock`` *after* its writes
+    committed — violating this function's never-raise contract):
+
+    * ``Z`` suffix — ``fromisoformat`` pre-3.11 rejects it.
+    * missing offset — a naive result is coerced to UTC, never returned bare.
+    * fractional seconds of any width — pre-3.11 ``fromisoformat`` accepts only
+      0/3/6 digits, so normalise to exactly 6 (Go loggers emit trimmed nanos).
+
+    Returns ``None`` for anything still unparsable so a garbage line is skipped.
     """
     if not isinstance(raw, str):
         return None
+    text = raw.strip().replace("Z", "+00:00")
+    # Normalise the fractional-seconds field to exactly 6 digits (pad or trim)
+    # so Python 3.10's stricter fromisoformat accepts widths like .12 or .123456789.
+    frac = re.search(r"\.(\d+)", text)
+    if frac:
+        text = f"{text[: frac.start()]}.{(frac.group(1) + '000000')[:6]}{text[frac.end() :]}"
     try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(text)
     except ValueError:
         return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def _classify_reload_lines(lines: list[str], since_ts: datetime) -> tuple[bool, bool]:
@@ -975,19 +993,27 @@ def _classify_reload_lines(lines: list[str], since_ts: datetime) -> tuple[bool, 
         if when is None or when < since_ts:
             continue  # stale event from a prior lock — must not count
         message = str(event.get("message", ""))
-        # Coarse match on the message prefix + the "models" subtree. apply_lock
-        # writes the whole config once, so OpenClaw may coalesce into a single
-        # "…(models)" event rather than per-provider; we only need proof that A
-        # models reload landed after our write. Per-alias routing is the job of
-        # the bind-confirmation that runs next.
-        if "models" not in message:
-            continue
-        # Substring, not startswith: the live message is
-        # ``{"subsystem":"gateway/reload"} config hot reload applied (models…)``.
-        if _RELOAD_APPLIED_MARKER in message:
-            saw_applied = True
-        elif _RELOAD_REJECTED_MARKER in message:
+        # Reject is classified on the marker ALONE — independent of the "models"
+        # token — and checked FIRST. A rejection can report a structural error
+        # ("… invalid config: JSON parse error …") that never names "models", and
+        # MISSING a real rejection (→ skipped → [OK]) is the unsafe direction;
+        # treating any invalid-config reload as fail (exit 92, loud) is fail-safe.
+        # Checking it first also resolves a coalesced "applied (…); skipped
+        # (invalid config)" message to fail, not pass.
+        if _RELOAD_REJECTED_MARKER in message:
             saw_rejected = True
+            continue
+        # Applied additionally requires the "models" subtree: apply_lock writes
+        # the whole config once, so OpenClaw may coalesce to a single "…(models)"
+        # event. This proves a fresh models reload LANDED after our write — not
+        # that this specific baseUrl value took (per-alias routing is the
+        # bind-confirmation's job; the live e2e proves actual routing). The
+        # markers are substrings because the live message is prefixed with a
+        # ``{"subsystem":"gateway/reload"} `` tag — but they are matched only
+        # INSIDE an already subsystem-authenticated event (the ``!=`` check
+        # above), never as a raw text grep over the log.
+        if "models" in message and _RELOAD_APPLIED_MARKER in message:
+            saw_applied = True
     return (saw_applied, saw_rejected)
 
 
@@ -998,7 +1024,7 @@ def _scan_reload_events(bin_path: object, since_ts: datetime) -> tuple[bool, boo
     never raises — the caller keeps polling until its deadline.
     """
     try:
-        probe = subprocess.run(  # noqa: S603
+        probe = subprocess.run(  # noqa: S603  # nosec B603 — cmd[0] validated absolute by resolve_openclaw_bin
             [str(bin_path), "logs", "--json", "--limit", "500", "--plain"],
             capture_output=True,
             text=True,
@@ -1018,15 +1044,24 @@ def _confirm_openclaw_reload(
     timeout: float = 15.0,
     poll_interval: float = 0.75,
 ) -> str:
-    """WOR-756: prove the RUNNING OpenClaw gateway applied lock's baseUrl write.
+    """WOR-756: observe that the RUNNING OpenClaw gateway performed a fresh
+    models reload after lock's baseUrl write.
+
+    Honest scope: this is a benign-integrity check ("did the live gateway pick
+    up my write?"), NOT an anti-adversarial control and NOT per-write
+    correlation. It confirms *a* fresh ``gateway/reload`` applied-models event,
+    not that this specific ``baseUrl`` value routes — per-alias routing is the
+    bind-confirmation's job and the live e2e proves actual traffic. Under the
+    same-UID threat model a local attacker owns the log anyway (see the security
+    review); the value here is catching a stale/stuck gateway, not an attacker.
 
     Polls ``openclaw logs --json`` for a ``gateway/reload`` event newer than
     ``since_ts`` (captured by the caller *before* ``apply_lock``'s write, so a
-    stale historical reload can never be mistaken for ours). Tri-state, mirroring
+    stale historical reload is normally excluded). Tri-state, mirroring
     :func:`_confirm_bind`:
 
     * ``"pass"``    — a fresh "config hot reload applied (models…)" event: the
-      live gateway took the new config.
+      live gateway performed a models reload after our write.
     * ``"fail"``    — a fresh "config reload skipped (invalid config)…" event:
       the gateway actively REJECTED it (silent-bypass class, exit 92).
     * ``"skipped"`` — inconclusive: nothing seen before the deadline, OR the
@@ -1044,11 +1079,15 @@ def _confirm_openclaw_reload(
     path that's broken is an error); unset → ``"skipped"`` (openclaw may not be
     co-located, and lock must not be blocked for that).
 
-    Clock assumption: ``since_ts`` and the event timestamps must come from the
-    same clock. They do under the co-location assumption (lock and the gateway
-    share a host). If a future cross-clock deployment ever skewed them, the
-    freshness gate fails SAFE — a legitimate reload judged "stale" yields
-    ``"skipped"`` (advisory, exit 0), never a false ``"pass"`` or ``"fail"``.
+    Clock assumption: ``since_ts`` (host clock) and the event timestamps
+    (gateway clock) must come from the same clock, which they do under the
+    co-location assumption (lock and the gateway share a host). A cross-clock
+    deployment is NOT purely fail-safe: if the gateway clock runs *ahead* of the
+    host, a prior lock's reload can carry ``time > since_ts`` and be judged
+    fresh → a false ``"pass"``. That only downgrades an advisory to a green on a
+    benign-integrity check (never a real ``"fail"`` → ``"pass"``), and
+    co-location prevents it — but it is a false-pass window, not a safe one, so
+    do not rely on this check across clocks.
     """
     try:
         bin_path = _oc_audit.resolve_openclaw_bin()

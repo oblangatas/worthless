@@ -209,6 +209,61 @@ def test_applied_event_matches_any_models_granularity(monkeypatch: pytest.Monkey
 
 
 # --------------------------------------------------------------------------- #
+# _classify_reload_lines / _parse_log_event_time — robustness (merge-ready panel)
+# --------------------------------------------------------------------------- #
+def _raw_line(time_str: str, message: str, subsystem: str = "gateway/reload") -> str:
+    return json.dumps({"time": time_str, "subsystem": subsystem, "message": message})
+
+
+def test_naive_event_time_is_coerced_not_crash() -> None:
+    """python-pro: an offset-less (naive) event time must not raise TypeError
+    against the aware since_ts — that uncaught crash would kill `worthless lock`
+    AFTER its writes committed, violating the never-raise contract."""
+    since = datetime(2026, 7, 10, 12, 0, 0, tzinfo=UTC)
+    applied, rejected = lock_mod._classify_reload_lines(
+        [_raw_line("2026-07-10T12:00:01", APPLIED)], since
+    )
+    assert applied and not rejected
+
+
+@pytest.mark.parametrize("frac", ["", ".1", ".123", ".123456", ".123456789"])
+def test_fractional_second_widths_all_parse(frac: str) -> None:
+    """python-pro: pre-3.11 fromisoformat accepts only 0/3/6-digit fractions;
+    every width must normalise + parse, else a real reload silently skips."""
+    since = datetime(2026, 7, 10, 12, 0, 0, tzinfo=UTC)
+    applied, _ = lock_mod._classify_reload_lines(
+        [_raw_line(f"2026-07-10T12:00:05{frac}+00:00", APPLIED)], since
+    )
+    assert applied
+
+
+def test_reject_without_models_token_still_fails() -> None:
+    """brutus #2: a rejection that reports a structural error and never names
+    'models' must still classify as reject — missing it (→ skipped → [OK]) is
+    the unsafe direction the exit-92 path exists to prevent."""
+    since = datetime(2026, 7, 10, 12, 0, 0, tzinfo=UTC)
+    msg = _RELOAD_TAG + "config reload skipped (invalid config): JSON parse error at line 5"
+    applied, rejected = lock_mod._classify_reload_lines(
+        [_raw_line("2026-07-10T12:00:05+00:00", msg)], since
+    )
+    assert rejected and not applied
+
+
+def test_reject_wins_within_a_coalesced_message() -> None:
+    """brutus #1/#2: applied + reject markers in ONE coalesced message must
+    resolve to fail, not pass (reject is checked first)."""
+    since = datetime(2026, 7, 10, 12, 0, 0, tzinfo=UTC)
+    msg = (
+        _RELOAD_TAG
+        + "config hot reload applied (models); config reload skipped (invalid config): models.x"
+    )
+    applied, rejected = lock_mod._classify_reload_lines(
+        [_raw_line("2026-07-10T12:00:05+00:00", msg)], since
+    )
+    assert rejected and not applied
+
+
+# --------------------------------------------------------------------------- #
 # Wiring into _finalise_openclaw_success — exit 92 on fail; pass/skipped proceed.
 # --------------------------------------------------------------------------- #
 class _Console:
