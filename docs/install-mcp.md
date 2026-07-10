@@ -11,10 +11,10 @@ Python and `uv` are bootstrapped automatically on first run.
 
 ## Recommended — npm wrapper via `.mcp.json`
 
-Add this to your editor's MCP config. **Verified on Claude Code** (`.mcp.json`)
-**and Cursor** (`~/.cursor/mcp.json` — appears as `worthless` with all 4 tools
-enabled under Settings → MCP). Windsurf reads its own config path and is
-unverified:
+Add this to your editor's MCP config. **Manually verified on Claude Code**
+(`.mcp.json`) **and Cursor** (`~/.cursor/mcp.json` — appears as `worthless`
+with all 4 tools enabled under Settings → MCP; macOS, 2026-07-09). Windsurf
+reads its own config path and is unverified:
 
 ```json
 {
