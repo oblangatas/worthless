@@ -325,7 +325,7 @@ def test_real_openclaw_logs_match_the_reload_matcher(loaded_stack):
         applied, rejected = _classify_reload_lines(logs.stdout.splitlines(), since)
         assert applied and not rejected, (
             "The pinned OpenClaw image's gateway/reload log strings no longer match "
-            "the production matcher (lock.py _RELOAD_SUBSYSTEM / _RELOAD_APPLIED_PREFIX). "
+            "the production matcher (lock.py _RELOAD_SUBSYSTEM / _RELOAD_APPLIED_MARKER). "
             "_confirm_openclaw_reload would silently return 'skipped' in production, "
             "making lock's [OK] a lie. Re-verify against the image and update the "
             f"constants.\nlogs tail:\n{logs.stdout[-900:]}"
