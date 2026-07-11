@@ -968,6 +968,33 @@ def _parse_log_event_time(raw: object) -> datetime | None:
     return parsed
 
 
+def _reload_event_kind(message: str) -> str | None:
+    """Classify one subsystem-authenticated ``gateway/reload`` event message.
+
+    ``"rejected"`` — an invalid-config reload. Checked FIRST and on the marker
+    ALONE (independent of the "models" token): a structural rejection may report
+    "… invalid config: JSON parse error …" that never names "models", MISSING a
+    real rejection (→ skipped → ``[OK]``) is the unsafe direction, and checking
+    it first resolves a coalesced "applied (…); skipped (invalid config)" to
+    reject, not pass.
+
+    ``"applied"`` — a models reload landed. Requires the "models" subtree:
+    apply_lock writes the whole config once, so OpenClaw may coalesce to a single
+    "…(models)" event. This proves a fresh models reload landed after our write,
+    not that this specific baseUrl value took (per-alias routing is the
+    bind-confirmation's job; the live e2e proves actual routing).
+
+    ``None`` — neither. Markers are substrings because the live message is
+    prefixed with a ``{"subsystem":"gateway/reload"} `` tag, but they are matched
+    only INSIDE an already subsystem-authenticated event, never as a raw grep.
+    """
+    if _RELOAD_REJECTED_MARKER in message:
+        return "rejected"
+    if "models" in message and _RELOAD_APPLIED_MARKER in message:
+        return "applied"
+    return None
+
+
 def _classify_reload_lines(lines: list[str], since_ts: datetime) -> tuple[bool, bool]:
     """Pure classifier over ``openclaw logs --json`` lines: did the gateway APPLY
     or REJECT a models reload *after* ``since_ts``? Returns
@@ -992,27 +1019,10 @@ def _classify_reload_lines(lines: list[str], since_ts: datetime) -> tuple[bool, 
         when = _parse_log_event_time(event.get("time"))
         if when is None or when < since_ts:
             continue  # stale event from a prior lock — must not count
-        message = str(event.get("message", ""))
-        # Reject is classified on the marker ALONE — independent of the "models"
-        # token — and checked FIRST. A rejection can report a structural error
-        # ("… invalid config: JSON parse error …") that never names "models", and
-        # MISSING a real rejection (→ skipped → [OK]) is the unsafe direction;
-        # treating any invalid-config reload as fail (exit 92, loud) is fail-safe.
-        # Checking it first also resolves a coalesced "applied (…); skipped
-        # (invalid config)" message to fail, not pass.
-        if _RELOAD_REJECTED_MARKER in message:
+        kind = _reload_event_kind(str(event.get("message", "")))
+        if kind == "rejected":
             saw_rejected = True
-            continue
-        # Applied additionally requires the "models" subtree: apply_lock writes
-        # the whole config once, so OpenClaw may coalesce to a single "…(models)"
-        # event. This proves a fresh models reload LANDED after our write — not
-        # that this specific baseUrl value took (per-alias routing is the
-        # bind-confirmation's job; the live e2e proves actual routing). The
-        # markers are substrings because the live message is prefixed with a
-        # ``{"subsystem":"gateway/reload"} `` tag — but they are matched only
-        # INSIDE an already subsystem-authenticated event (the ``!=`` check
-        # above), never as a raw text grep over the log.
-        if "models" in message and _RELOAD_APPLIED_MARKER in message:
+        elif kind == "applied":
             saw_applied = True
     return (saw_applied, saw_rejected)
 

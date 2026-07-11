@@ -41,6 +41,17 @@ def _classify(sentinel: dict | None) -> tuple[_CheckStatus | None, str]:
         return None, "Proof-of-routing: PASS."
 
     if status == "fail":
+        if bc.get("reason") == "reload_rejected":
+            # WOR-756: the gateway REJECTED the new config (invalid-config
+            # reload) before any probe ran — so there is no "test request
+            # reached the proxy" to speak of. Remediation is about the config,
+            # not the proxy hop.
+            return "error", (
+                "OpenClaw REJECTED the new configuration on reload, so it is "
+                "NOT routing through the proxy. Re-run `worthless lock` to "
+                "re-confirm; if it keeps failing, check `worthless doctor` and "
+                "your OpenClaw config for what the gateway rejected."
+            )
         return "error", (
             "Proof-of-routing FAILED — the test request reached the proxy "
             "but the rewritten OpenClaw entry is NOT routing. Re-run "
