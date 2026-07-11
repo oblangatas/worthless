@@ -456,3 +456,55 @@ def test_uninstall_zeros_keys_when_a_restore_fails(
     assert result.exit_code != 0, "a failed restore must abort the wipe"
     assert home_dir.base_dir.exists(), "shredder guard: home not wiped"
     assert spied, "uninstall must zero built restore keys on the failure path"
+
+
+# --- f2ge: symlink .env classification (real symlinks, no mocking) ---------
+
+
+def test_uninstall_dangling_symlink_env_is_skipped_not_blocked(
+    home_dir: WorthlessHome, tmp_path
+) -> None:
+    """worthless-f2ge: a locked .env replaced by a DANGLING symlink (target
+    deleted) classifies as `missing` — the shard-A file is already gone, so
+    the wipe proceeds. Real symlink; safe_rewrite's real refusal drives it.
+    """
+    from tests.helpers import fake_key
+
+    env = tmp_path / ".env"
+    env.write_text(f"OPENAI_API_KEY={fake_key('sk-')}\n")
+    runner.invoke(app, ["lock", "--env", str(env)], env={"WORTHLESS_HOME": str(home_dir.base_dir)})
+
+    env.unlink()
+    env.symlink_to(tmp_path / "deleted-target")  # dangling: target does not exist
+
+    result = runner.invoke(
+        app, ["uninstall", "--yes"], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
+    )
+    assert result.exit_code == 0, result.output
+    assert "nothing to restore" in result.output.lower(), result.output
+    assert not home_dir.base_dir.exists(), "a dangling symlink must NOT block the wipe"
+
+
+def test_uninstall_live_symlink_env_blocks_wipe(home_dir: WorthlessHome, tmp_path) -> None:
+    """worthless-f2ge: a locked .env replaced by a LIVE symlink (points at a
+    real file) classifies as `failed` — the real key was never written back
+    (safe_rewrite refuses symlinks) and shard-A is still live, so the
+    key-shredder guard must block the wipe. Real symlink.
+    """
+    from tests.helpers import fake_key
+
+    env = tmp_path / ".env"
+    env.write_text(f"OPENAI_API_KEY={fake_key('sk-')}\n")
+    runner.invoke(app, ["lock", "--env", str(env)], env={"WORTHLESS_HOME": str(home_dir.base_dir)})
+
+    real_target = tmp_path / "elsewhere.env"
+    real_target.write_text("OPENAI_API_KEY=whatever\n")
+    env.unlink()
+    env.symlink_to(real_target)  # live: target exists
+
+    result = runner.invoke(
+        app, ["uninstall", "--yes"], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
+    )
+    assert result.exit_code != 0, "a live symlink must trip the shredder guard"
+    assert home_dir.base_dir.exists(), "a live symlink must NOT be wiped"
+    assert "could not restore" in result.output.lower(), result.output

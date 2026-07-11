@@ -178,10 +178,18 @@ async def _restore_all(
             restored.append((env_path, target))
         except Exception as exc:  # noqa: BLE001 — collect every failure, never abort mid-loop
             # Route by the ACTUAL state, only AFTER attempting the restore — never
-            # pre-classify via exists() (CodeRabbit): a .env confirmed GONE
-            # (deleted project) is a skip+warn, nothing to brick (BUG-2); a file
-            # that's present but unrestorable (transient EACCES, tamper) falls to
-            # `failed` and still trips the key-shredder guard.
+            # pre-classify via exists() (CodeRabbit). ``Path.exists()`` follows
+            # symlinks, which is exactly right here (worthless-f2ge):
+            #   - deleted project (.env gone)     → exists()=False → `missing`:
+            #     skip+warn, nothing to brick (BUG-2).
+            #   - dangling symlink (target gone)  → exists()=False → `missing`:
+            #     same — the file that held shard-A is already gone.
+            #   - live symlink (target present)   → exists()=True  → `failed`:
+            #     the real key was NOT written (safe_rewrite refuses symlinks,
+            #     UnsafeReason.SYMLINK), shard-A is still live → the shredder
+            #     guard must fire.
+            #   - present regular file, unrestorable (transient EACCES, tamper)
+            #     → `failed`, trips the guard.
             if not Path(env_path).exists():
                 missing.append(env_path)
             else:
