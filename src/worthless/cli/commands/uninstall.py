@@ -14,6 +14,7 @@ Assembles existing primitives rather than duplicating crypto:
 from __future__ import annotations
 
 import asyncio
+import errno
 import logging
 import os
 import shutil
@@ -291,6 +292,36 @@ def _confirm_uninstall(console, *, assume_yes: bool) -> bool:  # noqa: ANN001
     return True
 
 
+# SQLITE_BUSY(5) / SQLITE_LOCKED(6): the DB is momentarily in use (the running
+# proxy holds it), NOT broken. sqlite_errorname/errorcode are Python 3.11+, so
+# the "is locked" message substring is the load-bearing discriminator on 3.10.
+_RECOVERABLE_SQLITE_CODES = frozenset({5, 6})
+
+
+def _is_recoverable_repo_error(exc: BaseException) -> bool:
+    """True for a RECOVERABLE repo-open failure — the install is HEALTHY, its DB
+    is just in use right now (typically the running proxy). NEVER true for a
+    ``WorthlessError`` (missing/orphaned key, corrupt DB): those are genuinely
+    broken and stay wipeable via ``--force``. Deliberately narrow — anything
+    unrecognized is treated as broken, so a real breakage is never stranded as
+    "just retry".
+    """
+    if isinstance(exc, WorthlessError):
+        return False
+    if isinstance(exc, sqlite3.OperationalError):
+        # The str() check is load-bearing on 3.10 (no sqlite_errorcode there) and
+        # a backstop if a future aiosqlite bump drops the attr.
+        code = getattr(exc, "sqlite_errorcode", None)
+        return code in _RECOVERABLE_SQLITE_CODES or "is locked" in str(exc).lower()
+    if isinstance(exc, OSError):
+        # IPC/sidecar mode only (bare-metal DB contention surfaces as an
+        # OperationalError, above): a refused socket means the sidecar is down —
+        # recoverable (restart it), never a reason to force-wipe. Full IPC
+        # error-type verification is a tracked follow-up.
+        return exc.errno == errno.ECONNREFUSED
+    return False
+
+
 def _handle_broken_repo(console, exc, *, force: bool):  # noqa: ANN001, ANN201
     """BUG-1: the install can't be read (no fernet key / corrupt DB). Without
     --force refuse cleanly; with --force warn and return empty buckets to wipe.
@@ -404,6 +435,19 @@ def _run_uninstall(*, assume_yes: bool, force: bool = False) -> None:
         try:
             restored, failed, missing, unlocked, enroll_only, oc_build_failed = asyncio.run(_run())
         except (WorthlessError, sqlite3.Error, OSError) as exc:
+            if _is_recoverable_repo_error(exc):
+                # A busy/locked DB (usually the running proxy) is RECOVERABLE —
+                # the keys are intact. Refuse, never wipe, even with --force:
+                # --force is for UNRECOVERABLE installs. `rm -rf ~/.worthless` is
+                # the escape for a permanently-wedged lock (worthless-u4hl).
+                raise WorthlessError(
+                    ErrorCode.LOCK_IN_PROGRESS,
+                    "Worthless couldn't read its database because another process "
+                    "is using it (most likely the running proxy). Nothing was "
+                    "changed — your keys are safe. Stop it with `worthless down` "
+                    "and re-run. If it's permanently stuck, remove ~/.worthless "
+                    "manually and rotate those keys at your provider.",
+                ) from exc
             restored, failed, missing, unlocked, enroll_only, oc_build_failed = _handle_broken_repo(
                 console, exc, force=force
             )

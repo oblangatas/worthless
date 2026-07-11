@@ -7,13 +7,26 @@ holds the reconstructed real key — no group/other access to a secret.
 
 from __future__ import annotations
 
+import errno
+import sqlite3
+
 import pytest
 from typer.testing import CliRunner
 
 from worthless.cli.app import app
 from worthless.cli.bootstrap import WorthlessHome
+from worthless.cli.errors import ErrorCode, WorthlessError
 
 runner = CliRunner()
+
+
+def _op_error(msg: str, *, code: int | None) -> sqlite3.OperationalError:
+    """A sqlite3.OperationalError with an optional sqlite_errorcode — 3.11+ sets
+    it from the C layer; ``None`` simulates the 3.10 no-attribute case."""
+    exc = sqlite3.OperationalError(msg)
+    if code is not None:
+        exc.sqlite_errorcode = code
+    return exc
 
 
 @pytest.mark.parametrize(
@@ -579,3 +592,84 @@ def test_openclaw_build_failure_exits_73_and_still_wipes(
     assert key in env.read_text(), "the real key must still be restored"
     assert not home_dir.base_dir.exists(), "the wipe must still complete"
     assert "doctor" in result.output.lower(), "must point the user at `worthless doctor`"
+
+
+# --- u4hl: never force-wipe a recoverable (busy/locked) install ---------------
+
+
+@pytest.mark.parametrize(
+    ("make_exc", "recoverable"),
+    [
+        (lambda: _op_error("database is locked", code=5), True),  # SQLITE_BUSY
+        (lambda: _op_error("database table is locked", code=6), True),  # SQLITE_LOCKED
+        (lambda: _op_error("database is locked", code=None), True),  # 3.10 string-only path
+        (lambda: _op_error("no such table: enrollments", code=1), False),  # SQLITE_ERROR → broken
+        (lambda: sqlite3.DatabaseError("file is not a database"), False),  # corrupt → broken
+        (lambda: WorthlessError(ErrorCode.KEY_NOT_FOUND, "no key at /secret/x"), False),
+        (lambda: WorthlessError(ErrorCode.ORPHANED_SHARD_DATA, "gone"), False),
+        (lambda: OSError(errno.EACCES, "Permission denied"), False),  # perms → broken
+        (lambda: OSError(errno.ECONNREFUSED, "Connection refused"), True),  # IPC sidecar down
+    ],
+)
+def test_is_recoverable_repo_error_classification(make_exc, recoverable) -> None:  # noqa: ANN001
+    """worthless-u4hl: the busy-vs-broken discriminator. Recoverable (busy/locked,
+    incl. the 3.10 string-only path, and an IPC sidecar-down socket) is never
+    force-wiped; everything unrecognized (corrupt, no-such-table, WorthlessError,
+    EACCES) stays broken → wipeable via --force.
+    """
+    from worthless.cli.commands.uninstall import _is_recoverable_repo_error
+
+    assert _is_recoverable_repo_error(make_exc()) is recoverable
+
+
+@pytest.mark.parametrize("force_flag", [[], ["--force"]])
+def test_uninstall_refuses_a_locked_install_never_wipes(
+    home_dir: WorthlessHome, tmp_path, monkeypatch, force_flag
+) -> None:
+    """worthless-u4hl (the P2 data-loss fix): a busy/locked DB is RECOVERABLE —
+    uninstall refuses and changes NOTHING, with OR without --force. Injects the
+    exact ``database is locked`` OperationalError a held write lock produces,
+    driven through the real classifier + refuse path.
+    """
+    import worthless.cli.commands.uninstall as uninstall_mod
+    from tests.helpers import fake_key
+
+    env = tmp_path / ".env"
+    env.write_text(f"OPENAI_API_KEY={fake_key('sk-')}\n")
+    runner.invoke(app, ["lock", "--env", str(env)], env={"WORTHLESS_HOME": str(home_dir.base_dir)})
+
+    async def _locked(*_a, **_k):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(uninstall_mod, "_restore_all", _locked)
+
+    result = runner.invoke(
+        app, ["uninstall", "--yes", *force_flag], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
+    )
+    assert result.exit_code != 0, "a locked DB must never be wiped"
+    assert home_dir.base_dir.exists(), "nothing must be wiped on a recoverable/busy DB"
+    n_shards = (
+        sqlite3.connect(str(home_dir.db_path)).execute("SELECT COUNT(*) FROM shards").fetchone()[0]
+    )
+    assert n_shards >= 1, "shard-B must survive — the keys are recoverable"
+    out = result.output.lower()
+    assert "another process" in out or "worthless down" in out, out
+
+
+def test_force_wipes_a_really_corrupt_db(home_dir: WorthlessHome, tmp_path) -> None:
+    """worthless-u4hl: a genuinely corrupt DB is UNRECOVERABLE — --force still
+    wipes it (the escape hatch survives). Real garbage bytes on disk, no mock.
+    """
+    from tests.helpers import fake_key
+
+    env = tmp_path / ".env"
+    env.write_text(f"OPENAI_API_KEY={fake_key('sk-')}\n")
+    runner.invoke(app, ["lock", "--env", str(env)], env={"WORTHLESS_HOME": str(home_dir.base_dir)})
+
+    home_dir.db_path.write_bytes(b"this is definitely not a sqlite database")  # real corruption
+
+    result = runner.invoke(
+        app, ["uninstall", "--yes", "--force"], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
+    )
+    assert result.exit_code == 0, f"--force must wipe a genuinely-broken install: {result.output}"
+    assert not home_dir.base_dir.exists(), "the broken install must be wiped"
