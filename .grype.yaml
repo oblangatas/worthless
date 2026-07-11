@@ -9,17 +9,21 @@
 # Review every Monday via the scheduled docker-security workflow run.
 
 ignore:
-  - vulnerability: CVE-2026-7210
+  - vulnerability: CVE-2026-15308
     package:
       name: python
       type: binary
-    # Python 3.13.13 carries CVE-2026-7210 (Critical). Upstream fix lives in
-    # Python 3.15.0b2 — a beta with no stable backport on 3.13.x yet. Bumping
-    # the Docker base to a beta is the wrong trade against shipping a CVE
-    # whose attack surface in our proxy is bounded (proxy runs as non-root,
-    # network-isolated, no untrusted input parsing on the Python boundary).
+    # Python 3.13.14 (the latest 3.13.x — no 3.13.15 base image exists yet)
+    # carries CVE-2026-15308 (High). Grype's only fixed version is Python
+    # 3.15.0, a PRE-RELEASE; there is no stable 3.13.x backport released yet.
+    # Moving the Docker base to a Python pre-release is the wrong trade against
+    # shipping a CVE whose attack surface in our proxy is bounded (non-root,
+    # network-isolated, no untrusted input parsed at the Python boundary).
     #
-    # Linear: WOR-691 (filled in after creation) — review base image bump
-    # when a stable 3.13.x patch ships, OR re-justify this ignore.
-    reason: "Upstream fix only in Python 3.15.0b2 (beta). Tracking WOR-691 for stable backport."
-    expiry: "2026-07-06"  # 30 days from PR #280 land date (2026-06-06).
+    # Supersedes the prior CVE-2026-7210 ignore: that one affected 3.13.13 and
+    # is fixed in the current 3.13.14 base (grype no longer reports it).
+    #
+    # Linear: WOR-691 — bump the Docker base image when a stable 3.13.x patch
+    # ships the backport, then remove this ignore.
+    reason: "Upstream fix only in Python 3.15.0 (pre-release); no stable 3.13.x backport yet. Tracking WOR-691."
+    expiry: "2026-08-10"  # ~30 days; recheck when python:3.13.15-slim-bookworm ships.
