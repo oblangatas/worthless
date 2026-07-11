@@ -14,6 +14,7 @@ Assembles existing primitives rather than duplicating crypto:
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import shutil
 import sqlite3
@@ -37,6 +38,23 @@ from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary
 from worthless.cli.keystore import delete_fernet_key
 from worthless.cli.platform import IS_WINDOWS
 from worthless.crypto.types import zero_buf
+
+logger = logging.getLogger(__name__)
+
+
+def _scrub_exc(exc: BaseException) -> str:
+    """SR-04: a path-free token for user-facing messages.
+
+    ``WorthlessError`` → its numeric code (the message may embed the fernet.key
+    path — see keystore.py); anything else → the exception class name. The full
+    exception is logged at DEBUG (dropped unless the operator opted into
+    logging), so nothing sensitive reaches the terminal.
+    """
+    logger.debug("uninstall: handling exception", exc_info=exc)
+    if isinstance(exc, WorthlessError):
+        return f"WRTLS-{exc.code.value} ({exc.code.name})"
+    return type(exc).__name__
+
 
 # A restored .env holds the real reconstructed key, so clamp its mode to a hard
 # 0o600 floor: ANDing with ``0o600`` keeps at most owner read+write and strips
@@ -128,10 +146,11 @@ async def _restore_all(
     list[str],
     list,
     list[str],
+    bool,
 ]:
     """Reconstruct + restore every locked .env, applying the mode policy.
 
-    Returns ``(restored, failed, missing, unlocked, enroll_only)``:
+    Returns ``(restored, failed, missing, unlocked, enroll_only, oc_build_failed)``:
     - ``restored`` — ``(env_path, applied_mode)`` per file put back.
     - ``failed`` — ``(env_path, reason)`` per file that EXISTS but could NOT be
       restored (triggers the no-wipe key-shredder guard in the caller).
@@ -168,14 +187,17 @@ async def _restore_all(
     # _build_oc_restores so uninstall feeds _apply_openclaw_unlock exactly what
     # it expects (WOR-621 changed the contract from (provider, alias) tuples).
     unlocked: list = []
+    # OpenClaw-undo build failed for at least one file → surface via exit 73
+    # (never blocks the wipe; the key is already back). worthless-ftit.
+    oc_build_failed = False
     for env_path, slot in by_path.items():
+        # _unlock_batch is the ONLY shred-guarded step: it writes the real key
+        # back and deletes shard-B, transactionally. A failure HERE means the key
+        # is genuinely NOT restored, so it routes to missing/failed and may block
+        # the wipe. Everything after it is best-effort post-restore work that must
+        # never route to `failed` (worthless-ftit).
         try:
             planned = await _unlock_batch(slot["aliases"], home, repo, Path(env_path))
-            unlocked.extend(await _build_oc_restores(planned, repo, console))
-            target = _decide_mode(env_path, slot["mode"], assume_yes=assume_yes, console=console)
-            if target is not None:
-                os.chmod(env_path, target)  # noqa: PTH101
-            restored.append((env_path, target))
         except Exception as exc:  # noqa: BLE001 — collect every failure, never abort mid-loop
             # Route by the ACTUAL state, only AFTER attempting the restore — never
             # pre-classify via exists() (CodeRabbit). ``Path.exists()`` follows
@@ -193,9 +215,38 @@ async def _restore_all(
             if not Path(env_path).exists():
                 missing.append(env_path)
             else:
-                failed.append((env_path, str(exc)))
+                failed.append((env_path, _scrub_exc(exc)))
+            continue
 
-    return restored, failed, missing, unlocked, enroll_only
+        # OpenClaw symmetric undo is FUNCTIONAL, not cosmetic: skipping it leaves
+        # openclaw.json pointing at the proxy we're about to delete. A build
+        # failure must NOT block the wipe (the key is back), but it MUST surface —
+        # oc_build_failed rides the existing exit-73 "run doctor" channel.
+        try:
+            unlocked.extend(await _build_oc_restores(planned, repo, console))
+        except Exception as exc:  # noqa: BLE001 — best-effort; surfaced via exit 73
+            oc_build_failed = True
+            console.print_warning(
+                f"{env_path}: key restored, but openclaw.json may still point at the "
+                f"proxy ({_scrub_exc(exc)}); run `worthless doctor` after uninstall."
+            )
+
+        # Mode tightening is COSMETIC: a chmod-hostile filesystem (WSL /mnt/c,
+        # FAT, some network mounts) must not abort an uninstall whose key is back.
+        target = slot["mode"]
+        try:
+            target = _decide_mode(env_path, slot["mode"], assume_yes=assume_yes, console=console)
+            if target is not None:
+                os.chmod(env_path, target)  # noqa: PTH101
+        except OSError as exc:
+            console.print_warning(
+                f"{env_path}: key restored, but the file mode wasn't tightened "
+                f"({_scrub_exc(exc)}); run 'chmod 600 {env_path}' yourself."
+            )
+            target = slot["mode"]
+        restored.append((env_path, target))
+
+    return restored, failed, missing, unlocked, enroll_only, oc_build_failed
 
 
 def _resolve_home_no_bootstrap() -> WorthlessHome:
@@ -256,7 +307,7 @@ def _handle_broken_repo(console, exc, *, force: bool):  # noqa: ANN001, ANN201
         f"--force: could not restore keys (broken install: {exc}); wiping the "
         "remains anyway. Rotate your keys at the provider."
     )
-    return [], [], [], [], []
+    return [], [], [], [], [], False  # 6th: oc_build_failed (nothing was built)
 
 
 def _report_outcomes(console, restored, missing, enroll_only) -> None:  # noqa: ANN001
@@ -351,9 +402,9 @@ def _run_uninstall(*, assume_yes: bool, force: bool = False) -> None:
                 return await _restore_all(home, repo, assume_yes=assume_yes, console=console)
 
         try:
-            restored, failed, missing, unlocked, enroll_only = asyncio.run(_run())
+            restored, failed, missing, unlocked, enroll_only, oc_build_failed = asyncio.run(_run())
         except (WorthlessError, sqlite3.Error, OSError) as exc:
-            restored, failed, missing, unlocked, enroll_only = _handle_broken_repo(
+            restored, failed, missing, unlocked, enroll_only, oc_build_failed = _handle_broken_repo(
                 console, exc, force=force
             )
 
@@ -380,8 +431,9 @@ def _run_uninstall(*, assume_yes: bool, force: bool = False) -> None:
             console.print_warning(f"could not stop the proxy daemon ({exc}); continuing.")
 
         # OpenClaw symmetric undo — best-effort; a partial failure → exit 73 AFTER
-        # the wipe (jl13), mirroring unlock.
-        oc_partial = _apply_openclaw_unlock(unlocked, console, home)
+        # the wipe (jl13), mirroring unlock. An earlier _build_oc_restores failure
+        # (oc_build_failed) rides the same exit-73 channel (worthless-ftit).
+        oc_partial = _apply_openclaw_unlock(unlocked, console, home) or oc_build_failed
 
         # Cleanup is best-effort so a broken install (key already gone) still wipes.
         try:

@@ -439,23 +439,22 @@ def test_uninstall_zeros_keys_when_a_restore_fails(
     env.write_text(f"OPENAI_API_KEY={fake_key('sk-')}\n")
     runner.invoke(app, ["lock", "--env", str(env)], env={"WORTHLESS_HOME": str(home_dir.base_dir)})
 
-    # Force a restore failure AFTER the OcRestores are built (so `unlocked` holds
-    # the keys to zero) but before the wipe. Fail _decide_mode, which runs right
-    # after _build_oc_restores — deterministic across platforms and Python
-    # versions. (Earlier this booped os.chmod, but chmod is only called when a
-    # mode clamp is needed, which depends on the captured original_mode — that
-    # platform-variance was the py3.13-only CI failure.)
-    def _boom(*_a, **_k):
+    # Fail _unlock_batch — the SOLE shred-guarded step (worthless-ftit). A
+    # transactional restore failure there routes the file to `failed` →
+    # _guard_failed_restores zeroes any keys already built for other files (SR-02)
+    # and aborts the wipe. (Post-ftit, _decide_mode/os.chmod are cosmetic and no
+    # longer abort, so the injection point moved here from _decide_mode.)
+    async def _boom(*_a, **_k):
         raise OSError("simulated restore failure")
 
-    monkeypatch.setattr(uninstall_mod, "_decide_mode", _boom)
+    monkeypatch.setattr(uninstall_mod, "_unlock_batch", _boom)
 
     result = runner.invoke(
         app, ["uninstall", "--yes"], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
     )
     assert result.exit_code != 0, "a failed restore must abort the wipe"
     assert home_dir.base_dir.exists(), "shredder guard: home not wiped"
-    assert spied, "uninstall must zero built restore keys on the failure path"
+    assert spied, "the abort path must run the key-zeroing guard"
 
 
 # --- f2ge: symlink .env classification (real symlinks, no mocking) ---------
@@ -508,3 +507,75 @@ def test_uninstall_live_symlink_env_blocks_wipe(home_dir: WorthlessHome, tmp_pat
     assert result.exit_code != 0, "a live symlink must trip the shredder guard"
     assert home_dir.base_dir.exists(), "a live symlink must NOT be wiped"
     assert "could not restore" in result.output.lower(), result.output
+
+
+# --- ftit: post-restore failures don't false-block / don't silently break OC --
+
+
+def test_chmod_failure_after_restore_does_not_block_wipe(
+    home_dir: WorthlessHome, tmp_path, monkeypatch
+) -> None:
+    """worthless-ftit: on a chmod-hostile filesystem (WSL /mnt/c, FAT, some
+    network mounts), a failed mode-tighten AFTER the key is restored must NOT
+    abort the uninstall — the key is already back. Simulated by a chmod that
+    rejects the .env (the real EPERM/EROFS such mounts raise).
+    """
+    import errno
+
+    import worthless.cli.commands.uninstall as uninstall_mod
+    from tests.helpers import fake_key
+
+    key = fake_key("sk-")
+    env = tmp_path / ".env"
+    env.write_text(f"OPENAI_API_KEY={key}\n")
+    env.chmod(0o644)  # loose → uninstall will try to clamp it to 0o600
+    runner.invoke(app, ["lock", "--env", str(env)], env={"WORTHLESS_HOME": str(home_dir.base_dir)})
+
+    real_chmod = uninstall_mod.os.chmod
+
+    def _chmod_hostile(path, mode, *a, **k):  # noqa: ANN001, ANN202 — mimic a chmod-hostile mount
+        if str(path).endswith(".env"):
+            raise OSError(errno.EPERM, "Operation not permitted")
+        return real_chmod(path, mode, *a, **k)
+
+    monkeypatch.setattr(uninstall_mod.os, "chmod", _chmod_hostile)
+
+    result = runner.invoke(
+        app, ["uninstall", "--yes"], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
+    )
+    assert result.exit_code == 0, f"a cosmetic chmod failure must not abort: {result.output}"
+    assert key in env.read_text(), "the real key must be restored despite the chmod failure"
+    assert not home_dir.base_dir.exists(), "the wipe must complete"
+    assert "tightened" in result.output.lower() or "chmod" in result.output.lower()
+
+
+def test_openclaw_build_failure_exits_73_and_still_wipes(
+    home_dir: WorthlessHome, tmp_path, monkeypatch
+) -> None:
+    """worthless-ftit: if the OpenClaw undo BUILD raises, uninstall must NOT
+    false-block (the key IS restored) and must NOT silently exit 0 (openclaw.json
+    would still point at the deleted proxy). It surfaces via exit 73 + a
+    'run doctor' hint, and the wipe still completes.
+    """
+    import worthless.cli.commands.uninstall as uninstall_mod
+    from tests.helpers import fake_key
+
+    key = fake_key("sk-")
+    env = tmp_path / ".env"
+    env.write_text(f"OPENAI_API_KEY={key}\n")
+    runner.invoke(app, ["lock", "--env", str(env)], env={"WORTHLESS_HOME": str(home_dir.base_dir)})
+
+    async def _build_boom(*_a, **_k):
+        raise RuntimeError("openclaw rollback build blew up")
+
+    monkeypatch.setattr(uninstall_mod, "_build_oc_restores", _build_boom)
+
+    result = runner.invoke(
+        app, ["uninstall", "--yes"], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
+    )
+    assert result.exit_code == 73, (
+        f"OpenClaw build failure must surface as exit 73: {result.output}"
+    )
+    assert key in env.read_text(), "the real key must still be restored"
+    assert not home_dir.base_dir.exists(), "the wipe must still complete"
+    assert "doctor" in result.output.lower(), "must point the user at `worthless doctor`"
