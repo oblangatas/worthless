@@ -651,15 +651,21 @@ class TestServiceManagedCacheSeed:
         (base / ".bootstrapped").write_text("")
         monkeypatch.setenv("WORTHLESS_SERVICE_MANAGED", "1")
 
-        # WOR-716: a real row must exist so _guard_and_provision_keystore's
-        # rows-present branch returns immediately without ever touching
-        # fernet_key. Without this, empty rows + read_fernet_key mocked to
-        # always fail is exactly the state WOR-716 correctly self-heals
-        # (mints a fresh key) — which is not what this test isolates (the
-        # WOR-749 service-managed advisory-seed defer-on-failure path).
+        # WOR-716: a real ENROLLMENT must exist so _guard_and_provision_keystore's
+        # rows-present branch returns immediately without ever touching fernet_key.
+        # _shard_rows_present gates on enrollments (real locked-.env refs), not bare
+        # shards — without an enrollment this is the empty+keyless state WOR-716
+        # correctly self-heals (mints a fresh key), which is not what this test
+        # isolates (the WOR-749 service-managed advisory-seed defer-on-failure path).
         conn = sqlite3.connect(str(base / "worthless.db"))
-        conn.execute("CREATE TABLE shards (key_alias TEXT PRIMARY KEY)")
-        conn.execute("INSERT INTO shards VALUES ('t')")
+        conn.execute(
+            "CREATE TABLE enrollments (id INTEGER PRIMARY KEY, key_alias TEXT, "
+            "var_name TEXT, env_path TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO enrollments (key_alias, var_name, env_path) "
+            "VALUES ('t', 'OPENAI_API_KEY', '/proj/.env')"
+        )
         conn.commit()
         conn.close()
 

@@ -35,10 +35,12 @@ def _force_file_fallback():
 
 
 def _insert_shard_row(base: Path) -> None:
-    """Insert one real ``shards`` row (creates a minimal table if none exists).
+    """Seed one real locked-.env: a ``shards`` row AND its ``enrollments`` row.
 
-    ``CREATE TABLE IF NOT EXISTS`` is a no-op against the real schema, so this
-    works both on a bare directory (no DB yet) and on a fully-bootstrapped home.
+    ``_shard_rows_present`` gates on ENROLLMENTS (real .env references), so a bare
+    shard alone is orphan junk that does not count — a realistic "recoverable data
+    present" fixture needs the enrollment too. ``CREATE TABLE IF NOT EXISTS`` is a
+    no-op against the real schema (bare dir or bootstrapped home alike).
     """
     conn = sqlite3.connect(str(base / "worthless.db"))
     conn.execute(
@@ -46,8 +48,16 @@ def _insert_shard_row(base: Path) -> None:
         "(key_alias TEXT PRIMARY KEY, shard_b_enc BLOB, commitment BLOB, nonce BLOB, provider TEXT)"
     )
     conn.execute(
+        "CREATE TABLE IF NOT EXISTS enrollments "
+        "(id INTEGER PRIMARY KEY, key_alias TEXT, var_name TEXT, env_path TEXT)"
+    )
+    conn.execute(
         "INSERT INTO shards (key_alias, shard_b_enc, commitment, nonce, provider) "
         "VALUES ('t', X'00', X'00', X'00', 'openai')"
+    )
+    conn.execute(
+        "INSERT INTO enrollments (key_alias, var_name, env_path) "
+        "VALUES ('t', 'OPENAI_API_KEY', '/proj/.env')"
     )
     conn.commit()
     conn.close()

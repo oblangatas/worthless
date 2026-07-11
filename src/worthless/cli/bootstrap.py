@@ -279,7 +279,11 @@ _MSG_STALE_BOOTSTRAP_ADOPTED = (
 
 
 def _shard_rows_present(home: WorthlessHome) -> bool:
-    """True if ``shards`` or ``enrollments`` holds at least one real row.
+    """True if ``enrollments`` holds at least one real locked-.env reference.
+
+    Deliberately counts ``enrollments`` only, NOT ``shards``: a bare orphan shard
+    (a ``shards`` row with no enrollment) is unrecoverable junk, not data at risk,
+    so it must never block a mint or trip ORPHANED. (Name kept for continuity.)
 
     ``False`` immediately if the DB file doesn't exist — no schema, no rows.
     Fail-closed ``True`` on ``sqlite3.DatabaseError`` UNLESS the file has
@@ -299,14 +303,17 @@ def _shard_rows_present(home: WorthlessHome) -> bool:
                     "SELECT name FROM sqlite_master WHERE type='table'"
                 ).fetchall()
             }
-            # Static SQL per table (fixed literals, no interpolation) so the
-            # security linters don't false-positive an injection on a table name.
-            for table, count_sql in (
-                ("shards", "SELECT COUNT(*) FROM shards"),
-                ("enrollments", "SELECT COUNT(*) FROM enrollments"),
+            # Count ENROLLMENTS (real locked-.env references), NOT bare `shards`
+            # rows. An orphan shard with no enrollment has no shard-A and no .env
+            # to restore — it is junk that `doctor` clears, never recoverable data.
+            # Counting it would wrongly trip ORPHANED / block a first-run mint on a
+            # home carrying a stray orphan shard (e.g. the MCP orphan-shard path).
+            # Static SQL literal so the security linters don't flag interpolation.
+            if (
+                "enrollments" in tables
+                and conn.execute("SELECT COUNT(*) FROM enrollments").fetchone()[0]
             ):
-                if table in tables and conn.execute(count_sql).fetchone()[0]:
-                    return True
+                return True
             return False
         finally:
             conn.close()
