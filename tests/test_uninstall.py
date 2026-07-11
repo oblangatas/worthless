@@ -673,3 +673,45 @@ def test_force_wipes_a_really_corrupt_db(home_dir: WorthlessHome, tmp_path) -> N
     )
     assert result.exit_code == 0, f"--force must wipe a genuinely-broken install: {result.output}"
     assert not home_dir.base_dir.exists(), "the broken install must be wiped"
+
+
+def test_uninstall_zeros_keys_when_the_mode_confirm_aborts(
+    home_dir: WorthlessHome, tmp_path, monkeypatch
+) -> None:
+    """ftit / SR-02: a Ctrl-C `Abort` from the mode-clamp confirm (a RuntimeError,
+    NOT an OSError) escapes the cosmetic catch — the restore loop's finally must
+    still zero the keys already built into `unlocked` before the abort
+    propagates, and nothing may be wiped.
+    """
+    import typer
+
+    import worthless.cli.commands.uninstall as uninstall_mod
+    from tests.helpers import fake_key
+
+    env = tmp_path / ".env"
+    env.write_text(f"OPENAI_API_KEY={fake_key('sk-')}\n")
+    runner.invoke(app, ["lock", "--env", str(env)], env={"WORTHLESS_HOME": str(home_dir.base_dir)})
+
+    spied: list[list] = []
+    real = uninstall_mod._zero_restore_keys
+
+    def _spy(restores):  # noqa: ANN001, ANN202
+        spied.append(list(restores))
+        real(restores)
+
+    monkeypatch.setattr(uninstall_mod, "_zero_restore_keys", _spy)
+    monkeypatch.setattr(
+        uninstall_mod,
+        "_confirm_uninstall",
+        lambda console, *, assume_yes: True,  # noqa: ANN001
+    )
+
+    def _abort(*_a, **_k):
+        raise typer.Abort()
+
+    monkeypatch.setattr(uninstall_mod, "_decide_mode", _abort)
+
+    result = runner.invoke(app, ["uninstall"], env={"WORTHLESS_HOME": str(home_dir.base_dir)})
+    assert result.exit_code != 0, "an aborted uninstall must not silently wipe"
+    assert home_dir.base_dir.exists(), "abort before the wipe → home intact"
+    assert spied, "SR-02: built restore keys must be zeroed even when the confirm aborts"

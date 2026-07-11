@@ -100,9 +100,11 @@ def _decide_mode(
         return original_mode  # nothing to clamp
 
     if not assume_yes:
-        # Human at the keyboard — let them decide, plainly. typer.confirm
-        # returns the default on EOF (piped/closed stdin), so the safe path
-        # is the no-input fallback too.
+        # Human at the keyboard — let them decide, plainly. NOTE: on Ctrl-C or
+        # EOF (piped/closed stdin) typer.confirm raises ``click.Abort`` (a
+        # RuntimeError), NOT the default — that Abort aborts the uninstall
+        # (nothing wiped), and ``_restore_all``'s finally zeros any keys already
+        # built into ``unlocked`` before it propagates (SR-02).
         keep_safe = typer.confirm(
             f"{env_path} was 0o{original_mode:o} — other users on this machine could read "
             f"this file, which now holds your real key. Set minimal-safe 0o{safe:o}?",
@@ -191,61 +193,73 @@ async def _restore_all(
     # OpenClaw-undo build failed for at least one file → surface via exit 73
     # (never blocks the wipe; the key is already back). worthless-ftit.
     oc_build_failed = False
-    for env_path, slot in by_path.items():
-        # _unlock_batch is the ONLY shred-guarded step: it writes the real key
-        # back and deletes shard-B, transactionally. A failure HERE means the key
-        # is genuinely NOT restored, so it routes to missing/failed and may block
-        # the wipe. Everything after it is best-effort post-restore work that must
-        # never route to `failed` (worthless-ftit).
-        try:
-            planned = await _unlock_batch(slot["aliases"], home, repo, Path(env_path))
-        except Exception as exc:  # noqa: BLE001 — collect every failure, never abort mid-loop
-            # Route by the ACTUAL state, only AFTER attempting the restore — never
-            # pre-classify via exists() (CodeRabbit). ``Path.exists()`` follows
-            # symlinks, which is exactly right here (worthless-f2ge):
-            #   - deleted project (.env gone)     → exists()=False → `missing`:
-            #     skip+warn, nothing to brick (BUG-2).
-            #   - dangling symlink (target gone)  → exists()=False → `missing`:
-            #     same — the file that held shard-A is already gone.
-            #   - live symlink (target present)   → exists()=True  → `failed`:
-            #     the real key was NOT written (safe_rewrite refuses symlinks,
-            #     UnsafeReason.SYMLINK), shard-A is still live → the shredder
-            #     guard must fire.
-            #   - present regular file, unrestorable (transient EACCES, tamper)
-            #     → `failed`, trips the guard.
-            if not Path(env_path).exists():
-                missing.append(env_path)
-            else:
-                failed.append((env_path, _scrub_exc(exc)))
-            continue
+    completed = False
+    try:
+        for env_path, slot in by_path.items():
+            # _unlock_batch is the ONLY shred-guarded step: it writes the real key
+            # back and deletes shard-B, transactionally. A failure HERE means the
+            # key is genuinely NOT restored, so it routes to missing/failed and may
+            # block the wipe. Everything after it is best-effort post-restore work
+            # that must never route to `failed` (worthless-ftit).
+            try:
+                planned = await _unlock_batch(slot["aliases"], home, repo, Path(env_path))
+            except Exception as exc:  # noqa: BLE001 — collect every failure, never abort mid-loop
+                # Route by the ACTUAL state, only AFTER attempting the restore —
+                # never pre-classify via exists() (CodeRabbit). ``Path.exists()``
+                # follows symlinks, which is exactly right here (worthless-f2ge):
+                #   - deleted project (.env gone)    → exists()=False → `missing`:
+                #     skip+warn, nothing to brick (BUG-2).
+                #   - dangling symlink (target gone) → exists()=False → `missing`:
+                #     same — the file that held shard-A is already gone.
+                #   - live symlink (target present)  → exists()=True  → `failed`:
+                #     the real key was NOT written (safe_rewrite refuses symlinks,
+                #     UnsafeReason.SYMLINK), shard-A is still live → guard fires.
+                #   - present regular file, unrestorable (transient EACCES, tamper)
+                #     → `failed`, trips the guard.
+                if not Path(env_path).exists():
+                    missing.append(env_path)
+                else:
+                    failed.append((env_path, _scrub_exc(exc)))
+                continue
 
-        # OpenClaw symmetric undo is FUNCTIONAL, not cosmetic: skipping it leaves
-        # openclaw.json pointing at the proxy we're about to delete. A build
-        # failure must NOT block the wipe (the key is back), but it MUST surface —
-        # oc_build_failed rides the existing exit-73 "run doctor" channel.
-        try:
-            unlocked.extend(await _build_oc_restores(planned, repo, console))
-        except Exception as exc:  # noqa: BLE001 — best-effort; surfaced via exit 73
-            oc_build_failed = True
-            console.print_warning(
-                f"{env_path}: key restored, but openclaw.json may still point at the "
-                f"proxy ({_scrub_exc(exc)}); run `worthless doctor` after uninstall."
-            )
+            # OpenClaw symmetric undo is FUNCTIONAL, not cosmetic: skipping it
+            # leaves openclaw.json pointing at the proxy we're about to delete. A
+            # build failure must NOT block the wipe (the key is back), but it MUST
+            # surface — oc_build_failed rides the existing exit-73 "run doctor" path.
+            try:
+                unlocked.extend(await _build_oc_restores(planned, repo, console))
+            except Exception as exc:  # noqa: BLE001 — best-effort; surfaced via exit 73
+                oc_build_failed = True
+                console.print_warning(
+                    f"{env_path}: key restored, but openclaw.json may still point at the "
+                    f"proxy ({_scrub_exc(exc)}); run `worthless doctor` after uninstall."
+                )
 
-        # Mode tightening is COSMETIC: a chmod-hostile filesystem (WSL /mnt/c,
-        # FAT, some network mounts) must not abort an uninstall whose key is back.
-        target = slot["mode"]
-        try:
-            target = _decide_mode(env_path, slot["mode"], assume_yes=assume_yes, console=console)
-            if target is not None:
-                os.chmod(env_path, target)  # noqa: PTH101
-        except OSError as exc:
-            console.print_warning(
-                f"{env_path}: key restored, but the file mode wasn't tightened "
-                f"({_scrub_exc(exc)}); run 'chmod 600 {env_path}' yourself."
-            )
+            # Mode tightening is COSMETIC: a chmod-hostile filesystem (WSL /mnt/c,
+            # FAT, some network mounts) must not abort an uninstall whose key is back.
             target = slot["mode"]
-        restored.append((env_path, target))
+            try:
+                target = _decide_mode(
+                    env_path, slot["mode"], assume_yes=assume_yes, console=console
+                )
+                if target is not None:
+                    os.chmod(env_path, target)  # noqa: PTH101
+            except OSError as exc:
+                console.print_warning(
+                    f"{env_path}: key restored, but the file mode wasn't tightened "
+                    f"({_scrub_exc(exc)}); run 'chmod 600 {env_path}' yourself."
+                )
+                target = slot["mode"]
+            restored.append((env_path, target))
+        completed = True
+    finally:
+        # SR-02: if the loop exits early — e.g. a Ctrl-C ``click.Abort`` (a
+        # RuntimeError, NOT an OSError) from _decide_mode's confirm escapes the
+        # cosmetic catch — zero any reconstructed keys already built into
+        # ``unlocked`` before the exception propagates. On the normal-return path
+        # the caller owns that zeroing (via _apply_openclaw_unlock / the guard).
+        if not completed:
+            _zero_restore_keys(unlocked)
 
     return restored, failed, missing, unlocked, enroll_only, oc_build_failed
 
@@ -328,14 +342,14 @@ def _handle_broken_repo(console, exc, *, force: bool):  # noqa: ANN001, ANN201
     """
     if not force:
         console.print_failure(
-            f"Can't read this Worthless install ({exc}). It looks broken, so "
+            f"Can't read this Worthless install ({_scrub_exc(exc)}). It looks broken, so "
             "keys can't be restored. Re-run with --force to wipe the remains "
             "anyway — your real keys are unrecoverable from here; rotate them "
             "at your provider."
         )
         raise typer.Exit(code=1) from exc
     console.print_warning(
-        f"--force: could not restore keys (broken install: {exc}); wiping the "
+        f"--force: could not restore keys (broken install: {_scrub_exc(exc)}); wiping the "
         "remains anyway. Rotate your keys at the provider."
     )
     return [], [], [], [], [], False  # 6th: oc_build_failed (nothing was built)
@@ -465,14 +479,18 @@ def _run_uninstall(*, assume_yes: bool, force: bool = False) -> None:
             try:
                 uninstall_service(home)
             except Exception as exc:  # noqa: BLE001 — best-effort; never block the wipe
-                console.print_warning(f"could not remove the service unit ({exc}); continuing.")
+                console.print_warning(
+                    f"could not remove the service unit ({_scrub_exc(exc)}); continuing."
+                )
 
         # fzbi: stop a running proxy daemon before wiping its home. Best-effort —
         # a daemon we can't stop must never block the teardown.
         try:
             _stop_daemon(home, console)
         except Exception as exc:  # noqa: BLE001 — best-effort; never block the wipe
-            console.print_warning(f"could not stop the proxy daemon ({exc}); continuing.")
+            console.print_warning(
+                f"could not stop the proxy daemon ({_scrub_exc(exc)}); continuing."
+            )
 
         # OpenClaw symmetric undo — best-effort; a partial failure → exit 73 AFTER
         # the wipe (jl13), mirroring unlock. An earlier _build_oc_restores failure
@@ -483,7 +501,9 @@ def _run_uninstall(*, assume_yes: bool, force: bool = False) -> None:
         try:
             delete_fernet_key(home.base_dir)
         except Exception as exc:  # noqa: BLE001 — best-effort cleanup
-            console.print_warning(f"could not remove the keychain entry ({exc}); continuing.")
+            console.print_warning(
+                f"could not remove the keychain entry ({_scrub_exc(exc)}); continuing."
+            )
         home.bootstrapped_marker.unlink(missing_ok=True)
 
     _finalize_wipe(console, home, len(restored))
