@@ -715,3 +715,35 @@ def test_uninstall_zeros_keys_when_the_mode_confirm_aborts(
     assert result.exit_code != 0, "an aborted uninstall must not silently wipe"
     assert home_dir.base_dir.exists(), "abort before the wipe → home intact"
     assert spied, "SR-02: built restore keys must be zeroed even when the confirm aborts"
+
+
+def test_uninstall_force_refuses_on_a_locked_db_mid_restore(
+    home_dir: WorthlessHome, tmp_path, monkeypatch
+) -> None:
+    """CodeRabbit / u4hl: a busy/locked DB raised from _unlock_batch mid-restore is
+    RECOVERABLE — it must re-raise to the refuse path (LOCK_IN_PROGRESS), never
+    route to `failed` where --force would wipe recoverable keys.
+    """
+    import sqlite3
+
+    import worthless.cli.commands.uninstall as uninstall_mod
+    from tests.helpers import fake_key
+
+    env = tmp_path / ".env"
+    env.write_text(f"OPENAI_API_KEY={fake_key('sk-')}\n")
+    runner.invoke(app, ["lock", "--env", str(env)], env={"WORTHLESS_HOME": str(home_dir.base_dir)})
+
+    async def _busy(*_a, **_k):
+        raise _op_error("database is locked", code=5)  # SQLITE_BUSY
+
+    monkeypatch.setattr(uninstall_mod, "_unlock_batch", _busy)
+
+    result = runner.invoke(
+        app, ["uninstall", "--yes", "--force"], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
+    )
+    assert result.exit_code != 0, "a locked DB mid-restore must refuse, even with --force"
+    assert home_dir.base_dir.exists(), "a recoverable lock must NOT be force-wiped"
+    n_shards = (
+        sqlite3.connect(str(home_dir.db_path)).execute("SELECT COUNT(*) FROM shards").fetchone()[0]
+    )
+    assert n_shards >= 1, "shard-B deleted despite the recoverable refuse"

@@ -204,6 +204,12 @@ async def _restore_all(
             try:
                 planned = await _unlock_batch(slot["aliases"], home, repo, Path(env_path))
             except Exception as exc:  # noqa: BLE001 — collect every failure, never abort mid-loop
+                # A busy/locked DB (or IPC blip) mid-restore is RECOVERABLE, not an
+                # unrestorable file: re-raise so the outer handler refuses (never
+                # force-wipes a recoverable install) — routing it to `failed` would
+                # let --force wipe recoverable keys. worthless-u4hl / CodeRabbit.
+                if _is_recoverable_repo_error(exc):
+                    raise
                 # Route by the ACTUAL state, only AFTER attempting the restore —
                 # never pre-classify via exists() (CodeRabbit). ``Path.exists()``
                 # follows symlinks, which is exactly right here (worthless-f2ge):
