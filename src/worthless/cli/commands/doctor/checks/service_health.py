@@ -10,6 +10,21 @@ weeks after install with nobody watching.
 Read-only: no ``--fix``. Every finding names its own remediation because the
 correct repair (re-install, stop a foreign process, enable linger) depends on
 the user's intent.
+
+Scope — what this does NOT do (be honest, do not oversell). This is a
+hygiene + naive-tamper *detector*, not a defense against a hostile service:
+
+* It only inspects worthless's own unit (``sh.worthless.proxy`` + the legacy
+  label). An attacker who can write to the LaunchAgents / systemd-user dir can
+  install a service under *any other* label and this check is blind to it.
+* The binary check compares the launch-binary *path*, not its hash — a trojaned
+  binary swapped in at the expected path is not detected here.
+* It is passive: it only helps if the user runs ``worthless doctor``. It does
+  not prevent tampering, only surfaces the shapes it recognizes.
+
+Closing the remaining execution vectors (launchd ``Program`` key, systemd
+``ExecStartPre``/``LD_PRELOAD``/``DYLD_INSERT_LIBRARIES``) is tracked as a
+follow-up; even then the label-scope limit above stands.
 """
 
 from __future__ import annotations
@@ -26,7 +41,6 @@ from worthless.cli.commands.service._common import (
 from worthless.cli.commands.service.templates import LEGACY_LAUNCHD_LABEL
 from worthless.cli.commands.doctor.registry import CheckContext, CheckResult
 from worthless.cli.errors import WorthlessError
-from worthless.cli.process import resolve_port
 
 check_id = "service_health"
 
@@ -49,7 +63,16 @@ def _binary_in_unit(content: str, backend_name: str) -> str | None:
 def _binary_mismatch(content: str, backend_name: str, expected: Path) -> dict | None:
     raw = _binary_in_unit(content, backend_name)
     if raw is None:
-        return None  # can't parse → no false positive
+        # Our own units ALWAYS carry ExecStart / ProgramArguments. If we can't
+        # find the launch-binary field, the unit is tampered or an unrecognized
+        # shape — fail CLOSED with a finding, never a silent OK. (Security
+        # review: a regex-evading unit must not read as healthy.)
+        return {
+            "kind": "unverifiable_unit",
+            "remediation": "The service unit is in a shape worthless can't verify "
+            "(the launch-binary field is missing or malformed). Re-run "
+            "`worthless service install`, or inspect the unit by hand.",
+        }
     try:
         installed = Path(raw).resolve()
         want = expected.resolve()
@@ -63,18 +86,6 @@ def _binary_mismatch(content: str, backend_name: str, expected: Path) -> dict | 
         "expected_binary": str(want),
         "remediation": "Re-run `worthless service install` to point the service at "
         "the current binary. If you didn't install this unit, treat it as hostile.",
-    }
-
-
-def _port_mismatch(installed_port: int | None, expected_port: int) -> dict | None:
-    if installed_port is None or installed_port == expected_port:
-        return None
-    return {
-        "kind": "port_mismatch",
-        "installed_port": installed_port,
-        "expected_port": expected_port,
-        "remediation": "The service is bound to a different port than expected. "
-        "Re-run `worthless service install` so it matches WORTHLESS_PORT.",
     }
 
 
@@ -124,12 +135,6 @@ def _installed_unit_path(backend_name: str) -> Path:
     if backend_name == "launchd":
         return launchd.plist_path()
     return systemd.unit_path()
-
-
-def _installed_port(backend_name: str) -> int | None:
-    if backend_name == "launchd":
-        return launchd.installed_port()
-    return systemd.installed_port()
 
 
 def _linger_ok_if_systemd(backend_name: str) -> bool:
@@ -182,10 +187,6 @@ def run(ctx: CheckContext) -> CheckResult:
             findings.append(binary_finding)
     except WorthlessError:
         pass  # can't resolve our own binary — a different check owns that
-
-    port_finding = _port_mismatch(_installed_port(backend_name), resolve_port(None))
-    if port_finding:
-        findings.append(port_finding)
 
     findings.extend(_orphan_home_findings(content))
 

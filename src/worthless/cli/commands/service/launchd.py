@@ -31,10 +31,19 @@ def _legacy_plist_path() -> Path:
     return plist_path().parent / f"{templates.LEGACY_LAUNCHD_LABEL}.plist"
 
 
-def _migrate_legacy_install() -> None:
-    """Tear down a pre-rename dev.worthless.proxy LaunchAgent, if present."""
+def _migrate_legacy_install(home: WorthlessHome) -> None:
+    """Tear down a pre-rename dev.worthless.proxy LaunchAgent for THIS home.
+
+    Guarded by ``unit_file_matches_home``: a legacy plist belonging to a
+    different WORTHLESS_HOME (or one we can't attribute) is left in place — the
+    ``service_health`` doctor check surfaces it for the user to decide, instead
+    of an unrelated install silently tearing down someone else's service. Same
+    invariant as ``refuse_foreign_unit`` on the current-label path.
+    """
     legacy_path = _legacy_plist_path()
     if not legacy_path.is_file():
+        return
+    if not unit_file_matches_home(legacy_path, home):
         return
     run_cmd(["launchctl", "bootout", _launchctl_domain(), str(legacy_path)], check=False)
     legacy_path.unlink(missing_ok=True)
@@ -111,7 +120,7 @@ def detect_status(home: WorthlessHome, port: int) -> ServiceStatus:
 def install(home: WorthlessHome, *, port: int | None = None) -> None:
     path = plist_path()
     refuse_foreign_unit(path, home)
-    _migrate_legacy_install()
+    _migrate_legacy_install(home)
     binary = resolve_worthless_binary()
     log_path, worthless_home = service_paths(home)
     actual_port = resolve_port(port)

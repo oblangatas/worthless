@@ -65,7 +65,8 @@ class TestLaunchdBackend:
         binary.chmod(0o755)
         plist = tmp_path / "sh.worthless.proxy.plist"
         legacy_plist = tmp_path / "dev.worthless.proxy.plist"
-        legacy_plist.write_text("legacy plist content")
+        # Legacy plist belongs to THIS home → migration tears it down.
+        legacy_plist.write_text(f"<key>WORTHLESS_HOME</key><string>{home.base_dir}</string>")
         calls: list[list[str]] = []
 
         def fake_run(args: list[str], **kwargs):
@@ -88,6 +89,39 @@ class TestLaunchdBackend:
         assert not legacy_plist.exists()
         assert ["launchctl", "bootout", "gui/501", str(legacy_plist)] in calls
         assert plist.is_file()
+
+    def test_install_leaves_legacy_plist_of_a_different_home(
+        self, home: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """A legacy plist belonging to ANOTHER WORTHLESS_HOME must not be torn
+        down by this home's install (security: no cross-home teardown)."""
+        binary = tmp_path / "worthless"
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+        plist = tmp_path / "sh.worthless.proxy.plist"
+        legacy_plist = tmp_path / "dev.worthless.proxy.plist"
+        legacy_plist.write_text("<key>WORTHLESS_HOME</key><string>/some/other/home</string>")
+        calls: list[list[str]] = []
+
+        def fake_run(args: list[str], **kwargs):
+            calls.append(args)
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = ""
+            return result
+
+        with (
+            patch.object(launchd, "plist_path", return_value=plist),
+            patch.object(launchd, "resolve_worthless_binary", return_value=binary),
+            patch.object(launchd, "run_cmd", side_effect=fake_run),
+            patch.object(launchd, "_is_loaded", return_value=False),
+            patch.object(launchd, "verify_proxy_health"),
+            patch.object(launchd.os, "getuid", return_value=501),
+        ):
+            launchd.install(home)
+
+        assert legacy_plist.exists(), "another home's legacy plist was torn down"
+        assert ["launchctl", "bootout", "gui/501", str(legacy_plist)] not in calls
 
     def test_install_no_op_when_no_legacy_plist(self, home: WorthlessHome, tmp_path: Path) -> None:
         binary = tmp_path / "worthless"

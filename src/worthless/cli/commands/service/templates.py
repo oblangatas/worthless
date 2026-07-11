@@ -11,10 +11,6 @@ def launchd_plist_path(home: str) -> str:
     return f"{home}/Library/LaunchAgents/{LAUNCHD_LABEL}.plist"
 
 
-def legacy_launchd_plist_path(home: str) -> str:
-    return f"{home}/Library/LaunchAgents/{LEGACY_LAUNCHD_LABEL}.plist"
-
-
 def systemd_unit_path(home: str) -> str:
     return f"{home}/.config/systemd/user/{SYSTEMD_UNIT_NAME}"
 

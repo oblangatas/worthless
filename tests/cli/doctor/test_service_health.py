@@ -3,11 +3,11 @@
 Catches service-specific breakage the plain status/doctor checks miss,
 synthesized from a reliability + security premortem panel:
 
-  A. binary mismatch  — installed unit runs a binary != the resolved one
-  B. port mismatch    — installed unit's port != the expected port
-  C. legacy label     — pre-rename dev.worthless.proxy plist still present
-  D. orphan home      — unit references a WORTHLESS_HOME that no longer exists
-  E. linger off        — systemd unit installed but Linger=no (dies at logout)
+  A. binary mismatch    — installed unit runs a binary != the resolved one
+  B. unverifiable unit  — launch-binary field missing/malformed → fail closed
+  C. legacy label       — pre-rename dev.worthless.proxy plist still present
+  D. orphan home        — unit references a WORTHLESS_HOME that no longer exists
+  E. linger off         — systemd unit installed but Linger=no (dies at logout)
 """
 
 from __future__ import annotations
@@ -67,24 +67,13 @@ class TestBinaryMismatch:
         assert finding is not None
         assert finding["kind"] == "binary_mismatch"
 
-    def test_none_when_binary_unparseable(self) -> None:
-        # No binary in content → can't compare → no false positive.
-        assert service_health._binary_mismatch("garbage", "launchd", Path("/x")) is None
-
-
-class TestPortMismatch:
-    def test_none_when_match(self) -> None:
-        assert service_health._port_mismatch(8787, 8787) is None
-
-    def test_finding_when_mismatch(self) -> None:
-        finding = service_health._port_mismatch(9000, 8787)
+    def test_unparsable_fails_closed_to_a_finding(self) -> None:
+        # Our own units ALWAYS carry ExecStart / ProgramArguments. If we can't
+        # find the binary field, the unit is tampered or an unknown shape —
+        # fail closed with a finding, never a silent OK (security review).
+        finding = service_health._binary_mismatch("garbage", "launchd", Path("/x"))
         assert finding is not None
-        assert finding["kind"] == "port_mismatch"
-        assert finding["installed_port"] == 9000
-        assert finding["expected_port"] == 8787
-
-    def test_none_when_installed_unknown(self) -> None:
-        assert service_health._port_mismatch(None, 8787) is None
+        assert finding["kind"] == "unverifiable_unit"
 
 
 class TestOrphanHome:
@@ -142,16 +131,10 @@ class TestRun:
         binary = tmp_path / "worthless"
         binary.write_text("#!/bin/sh\n")
         unit = tmp_path / "worthless-proxy.service"
-        unit.write_text(
-            f"ExecStart={binary} up\n"
-            f"Environment=WORTHLESS_HOME={home_dir}\n"
-            "Environment=WORTHLESS_PORT=8787\n"
-        )
+        unit.write_text(f"ExecStart={binary} up\nEnvironment=WORTHLESS_HOME={home_dir}\n")
         monkeypatch.setattr(service_health, "current_platform_backend_name", lambda: "systemd")
         monkeypatch.setattr(service_health, "_installed_unit_path", lambda name: unit)
         monkeypatch.setattr(service_health, "resolve_worthless_binary", lambda: binary)
-        monkeypatch.setattr(service_health, "resolve_port", lambda _: 8787)
-        monkeypatch.setattr(service_health, "_installed_port", lambda name: 8787)
         monkeypatch.setattr(service_health, "_linger_ok_if_systemd", lambda name: True)
 
         result = service_health.run(ctx)
@@ -164,18 +147,14 @@ class TestRun:
         missing_home = tmp_path / "gone"
         unit = tmp_path / "worthless-proxy.service"
         unit.write_text(
-            f"ExecStart=/opt/evil/worthless up\n"
-            f"Environment=WORTHLESS_HOME={missing_home}\n"
-            "Environment=WORTHLESS_PORT=9000\n"
+            f"ExecStart=/opt/evil/worthless up\nEnvironment=WORTHLESS_HOME={missing_home}\n"
         )
         monkeypatch.setattr(service_health, "current_platform_backend_name", lambda: "systemd")
         monkeypatch.setattr(service_health, "_installed_unit_path", lambda name: unit)
         monkeypatch.setattr(service_health, "resolve_worthless_binary", lambda: binary)
-        monkeypatch.setattr(service_health, "resolve_port", lambda _: 8787)
-        monkeypatch.setattr(service_health, "_installed_port", lambda name: 9000)
         monkeypatch.setattr(service_health, "_linger_ok_if_systemd", lambda name: False)
 
         result = service_health.run(ctx)
         assert result["status"] == "warn"
         kinds = {f["kind"] for f in result["findings"]}
-        assert kinds == {"binary_mismatch", "orphan_home", "port_mismatch", "linger_off"}
+        assert kinds == {"binary_mismatch", "orphan_home", "linger_off"}
