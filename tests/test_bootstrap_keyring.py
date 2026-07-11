@@ -6,6 +6,7 @@ retrieval to the keystore module instead of doing direct file I/O.
 
 from __future__ import annotations
 
+import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -13,7 +14,7 @@ from unittest.mock import patch
 
 import pytest
 
-from worthless.cli.bootstrap import WorthlessHome, ensure_home
+from worthless.cli.bootstrap import WorthlessHome, _init_db, ensure_home
 from worthless.cli.errors import ErrorCode, WorthlessError
 
 
@@ -559,6 +560,67 @@ class TestStaleFernetFileCacheSeed:
             assert bytes(home.fernet_key) == canonical
 
 
+class TestHalfUninstalledKeyring:
+    """WOR-716: keyring-specific facets of half-uninstalled detection.
+
+    Live here (not test_bootstrap.py) because test_bootstrap.py's autouse
+    fixture forces ``keyring_available`` False, and these need it True to
+    represent a real keyring-only install.
+    """
+
+    @staticmethod
+    def _bootstrapped_empty(base: Path) -> None:
+        base.mkdir(mode=0o700)
+        (base / ".bootstrapped").write_text("")
+        _init_db(WorthlessHome(base_dir=base))  # real, valid, empty schema
+
+    def test_available_keyring_no_rows_no_eager_probe_no_adopt(self, tmp_path: Path):
+        """Marker present + no rows + no env/file key, but the keyring backend
+        IS available → NOT provably keyless. ensure_home must NOT eagerly probe
+        the keyring (HF3) and must NOT adopt — it defers to the lazy fetch."""
+        base = tmp_path / ".worthless"
+        self._bootstrapped_empty(base)
+        with (
+            patch("worthless.cli.bootstrap.keyring_available", return_value=True),
+            patch(
+                "worthless.cli.bootstrap.read_fernet_key",
+                side_effect=AssertionError("eager keystore probe on available-keyring no-rows run"),
+            ),
+        ):
+            home = ensure_home(base_dir=base)
+        assert home._adoption_note is None  # deferred, not adopted
+        assert home.bootstrapped_marker.exists()  # untouched
+
+    def test_rows_present_fast_path_never_touches_keyring(self, tmp_path: Path):
+        """The everyday case (marker present + real rows) short-circuits before
+        any keyring call — the HF2/HF3 prompt-count invariant holds."""
+        base = tmp_path / ".worthless"
+        base.mkdir(mode=0o700)
+        (base / ".bootstrapped").write_text("")
+        # Real row, and NO fernet.key file (keyring-only install shape).
+        conn = sqlite3.connect(str(base / "worthless.db"))
+        conn.execute(
+            "CREATE TABLE shards "
+            "(key_alias TEXT PRIMARY KEY, shard_b_enc BLOB, commitment BLOB, "
+            "nonce BLOB, provider TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO shards (key_alias, shard_b_enc, commitment, nonce, provider) "
+            "VALUES ('t', X'00', X'00', X'00', 'openai')"
+        )
+        conn.commit()
+        conn.close()
+        from worthless.cli import keystore
+
+        with (
+            patch.object(keystore, "keyring_available", return_value=True),
+            patch("worthless.cli.bootstrap.keyring_available", return_value=True),
+            patch.object(keystore.keyring, "get_password") as mock_get,
+        ):
+            ensure_home(base_dir=base)
+        assert mock_get.call_count == 0, "rows-present fast path eagerly touched the keyring"
+
+
 class TestServiceManagedCacheSeed:
     """WOR-749: service-managed ensure_home seeds cache via read_fernet_key (file-first)."""
 
@@ -582,10 +644,24 @@ class TestServiceManagedCacheSeed:
     def test_service_managed_seed_deferred_when_read_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        import sqlite3
+
         base = tmp_path / ".worthless"
         base.mkdir()
         (base / ".bootstrapped").write_text("")
         monkeypatch.setenv("WORTHLESS_SERVICE_MANAGED", "1")
+
+        # WOR-716: a real row must exist so _guard_and_provision_keystore's
+        # rows-present branch returns immediately without ever touching
+        # fernet_key. Without this, empty rows + read_fernet_key mocked to
+        # always fail is exactly the state WOR-716 correctly self-heals
+        # (mints a fresh key) — which is not what this test isolates (the
+        # WOR-749 service-managed advisory-seed defer-on-failure path).
+        conn = sqlite3.connect(str(base / "worthless.db"))
+        conn.execute("CREATE TABLE shards (key_alias TEXT PRIMARY KEY)")
+        conn.execute("INSERT INTO shards VALUES ('t')")
+        conn.commit()
+        conn.close()
 
         with patch(
             "worthless.cli.bootstrap.read_fernet_key",
