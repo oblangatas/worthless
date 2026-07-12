@@ -172,8 +172,11 @@ class TestServiceInstall:
 
     def test_start_banner_states_persistence_guarantee(self, home_dir: Path) -> None:
         """WOR-726: the banner must tell the user the proxy now survives crashes
-        and reboot — the thing that distinguishes it from `worthless up`."""
+        and reboot — the thing that distinguishes it from `worthless up`. It must
+        also show the port the INSTALLED unit binds, not the ambient WORTHLESS_PORT
+        of this shell (CodeRabbit)."""
         mock_backend = MagicMock()
+        mock_backend.installed_port.return_value = 9191
         with (
             patch("worthless.cli.commands.service._backend", return_value=mock_backend),
             patch("worthless.cli.commands.service.get_home") as mock_home,
@@ -182,11 +185,14 @@ class TestServiceInstall:
             result = runner.invoke(
                 app,
                 ["service", "start"],
-                env={"WORTHLESS_HOME": str(home_dir)},
+                env={"WORTHLESS_HOME": str(home_dir), "WORTHLESS_PORT": "8787"},
             )
         assert result.exit_code == 0, result.output
         assert "Auto-restarts" in result.output
         assert "survives reboot" in result.output
+        # Installed port (9191) wins over the shell's WORTHLESS_PORT (8787).
+        assert "9191" in result.output
+        assert "8787" not in result.output
 
     def test_restart_invokes_backend(self, home_dir: Path) -> None:
         mock_backend = MagicMock()

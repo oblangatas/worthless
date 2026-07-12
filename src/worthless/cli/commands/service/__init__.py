@@ -185,11 +185,15 @@ def register_service_commands(app: typer.Typer) -> None:
     def service_start() -> None:
         """Start an installed service."""
         fail_if_windows()
-        _backend().start(get_home())
+        backend = _backend()
+        backend.start(get_home())
+        # Show the port the installed unit actually binds, not the ambient
+        # WORTHLESS_PORT of this shell (which may differ from install time).
+        port = backend.installed_port() or resolve_port(None)
         _print_service_banner(
             get_console(),
             platform=current_platform_backend_name(),
-            port=resolve_port(None),
+            port=port,
         )
 
     @service_group.command("stop")
