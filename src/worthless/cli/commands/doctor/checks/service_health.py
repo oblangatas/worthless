@@ -2,10 +2,10 @@
 
 Synthesized from a reliability + security premortem on the launchd/systemd
 proxy service. Plain ``status`` proves the proxy answers ``/healthz``; it does
-NOT prove the *right* binary is running, on the *right* port, for a home that
-still exists, without a stale legacy label, and (on Linux) with linger enabled
-so it survives logout. Each of those is a way the service silently degrades
-weeks after install with nobody watching.
+NOT prove the *right* binary is running (or that the unit is even verifiable),
+for a home that still exists, without a stale legacy label, and (on Linux) with
+linger enabled so it survives logout. Each of those is a way the service
+silently degrades weeks after install with nobody watching.
 
 Read-only: no ``--fix``. Every finding names its own remediation because the
 correct repair (re-install, stop a foreign process, enable linger) depends on
