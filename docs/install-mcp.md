@@ -31,12 +31,12 @@ Restart your editor. On first launch, `worthless-mcp`:
 
 1. Finds or installs `uv` (one-time).
 2. Runs `uvx worthless[mcp]==<pinned-version> mcp` — `uvx` caches the Python
-   environment, so subsequent starts are instant.
+   environment, so subsequent starts reuse it instead of re-downloading.
 3. Streams MCP protocol over stdio to the editor.
 
 The first run takes longer while `uv` and the Python environment download;
-every start after that is instant from cache. No Python toolchain awareness
-required.
+later starts reuse the cached environment and skip that download. No Python
+toolchain awareness required.
 
 ### Available tools
 
