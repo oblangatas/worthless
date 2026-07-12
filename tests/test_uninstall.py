@@ -717,12 +717,28 @@ def test_uninstall_zeros_keys_when_the_mode_confirm_aborts(
     assert spied, "SR-02: built restore keys must be zeroed even when the confirm aborts"
 
 
-def test_uninstall_force_refuses_on_a_locked_db_mid_restore(
-    home_dir: WorthlessHome, tmp_path, monkeypatch
+@pytest.mark.parametrize("extra", [[], ["--force"]], ids=["no-force", "force"])
+@pytest.mark.parametrize(
+    "make_busy",
+    [
+        lambda: _op_error("database is locked", code=5),  # SQLITE_BUSY
+        lambda: _op_error("database table is locked", code=6),  # SQLITE_LOCKED
+        lambda: _op_error("database is locked", code=None),  # 3.10: no errorcode → string fallback
+    ],
+    ids=["busy", "locked", "py310-string"],
+)
+def test_uninstall_refuses_on_a_locked_db_mid_restore(
+    home_dir: WorthlessHome,
+    tmp_path,
+    monkeypatch,
+    extra: list[str],
+    make_busy,  # noqa: ANN001
 ) -> None:
     """CodeRabbit / u4hl: a busy/locked DB raised from _unlock_batch mid-restore is
-    RECOVERABLE — it must re-raise to the refuse path (LOCK_IN_PROGRESS), never
-    route to `failed` where --force would wipe recoverable keys.
+    RECOVERABLE — it re-raises to the refuse path (LOCK_IN_PROGRESS), never routes
+    to `failed`. Proven across BUSY(5), LOCKED(6), and the 3.10 string-only path,
+    with AND without --force (with --force is the data-loss case: `failed` +
+    --force would otherwise wipe recoverable keys).
     """
     import sqlite3
 
@@ -734,15 +750,18 @@ def test_uninstall_force_refuses_on_a_locked_db_mid_restore(
     runner.invoke(app, ["lock", "--env", str(env)], env={"WORTHLESS_HOME": str(home_dir.base_dir)})
 
     async def _busy(*_a, **_k):
-        raise _op_error("database is locked", code=5)  # SQLITE_BUSY
+        raise make_busy()
 
     monkeypatch.setattr(uninstall_mod, "_unlock_batch", _busy)
 
     result = runner.invoke(
-        app, ["uninstall", "--yes", "--force"], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
+        app, ["uninstall", "--yes", *extra], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
     )
-    assert result.exit_code != 0, "a locked DB mid-restore must refuse, even with --force"
-    assert home_dir.base_dir.exists(), "a recoverable lock must NOT be force-wiped"
+    assert result.exit_code != 0, f"a locked DB mid-restore must refuse ({extra})"
+    # the LOCK_IN_PROGRESS refuse path — NOT a generic crash, NOT a wipe:
+    assert "another process" in result.output.lower(), result.output
+    assert "keys are safe" in result.output.lower(), result.output
+    assert home_dir.base_dir.exists(), "a recoverable lock must NOT be wiped"
     n_shards = (
         sqlite3.connect(str(home_dir.db_path)).execute("SELECT COUNT(*) FROM shards").fetchone()[0]
     )
