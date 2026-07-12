@@ -125,6 +125,11 @@ class WorthlessHome:
     _cache_lock: threading.Lock = field(
         default_factory=threading.Lock, init=False, repr=False, compare=False
     )
+    # WOR-716: set when _guard_and_provision_keystore() silently self-heals a
+    # stale bootstrap marker (no locked rows anywhere, so nothing was at
+    # risk). get_home() discloses this to the user after ensure_home()
+    # returns. Same exclusion rationale as _cached_fernet_key above.
+    _adoption_note: str | None = field(default=None, init=False, repr=False, compare=False)
 
     @property
     def db_path(self) -> Path:
@@ -188,12 +193,26 @@ class WorthlessHome:
 
         Returns a fresh bytearray copy on each access so callers can
         ``zero_buf()`` per SR-01 without poisoning the cache.
+
+        WOR-716: a ``KEY_NOT_FOUND`` here while real ``shards``/``enrollments``
+        rows exist means those rows are permanently orphaned — the key that
+        encrypted them is gone from every source. Re-raised as
+        ``ORPHANED_SHARD_DATA`` so callers get an honest, actionable message
+        instead of the generic "run enroll" advice, which would mint a new
+        key/enrollment and leave the old rows to rot forever.
         """
         if self._cached_fernet_key is None:
             with self._cache_lock:
                 if self._cached_fernet_key is None:
                     logger.debug("WorthlessHome.fernet_key cache MISS — reading from keystore")
-                    self._cached_fernet_key = read_fernet_key(self.base_dir)
+                    try:
+                        self._cached_fernet_key = read_fernet_key(self.base_dir)
+                    except WorthlessError as exc:
+                        if exc.code == ErrorCode.KEY_NOT_FOUND and _shard_rows_present(self):
+                            raise WorthlessError(
+                                ErrorCode.ORPHANED_SHARD_DATA, _MSG_ORPHANED_SHARD_DATA
+                            ) from exc
+                        raise
         else:
             logger.debug("WorthlessHome.fernet_key cache HIT")
         return bytearray(self._cached_fernet_key)
@@ -237,16 +256,150 @@ def _fernet_key_present(home: WorthlessHome) -> bool:
     return False
 
 
+# WOR-716: frozen, static messages — never interpolate a path or a caught
+# exception's text (SR-04/05 — see the panel review's security-reviewer
+# finding F3). Both call sites share these exact strings; never suggest key
+# recovery, only rotation (a plaintext-key recovery manifest was already
+# proposed and blocked — SR-04/05 — in wor-435-uninstall-synthesis.md §7).
+_MSG_ORPHANED_SHARD_DATA = (
+    "Worthless has locked entries in its database, but the encryption key to "
+    "unlock them can't be found anywhere (environment, file, or OS keychain). "
+    "This usually happens after an interrupted `worthless uninstall`, or "
+    "copying ~/.worthless to a new machine without its keychain entry. Those "
+    "locked .env files cannot be reconstructed — rotate the affected keys at "
+    "your provider. Run `worthless uninstall --force` to clear the leftover "
+    "database state."
+)
+_MSG_STALE_BOOTSTRAP_ADOPTED = (
+    "Found a stale setup marker from an interrupted uninstall (or an "
+    "incomplete sync) with no locked keys and no reachable encryption key "
+    "behind it. Nothing was at risk, so Worthless is treating this as a "
+    "fresh install."
+)
+
+
+def _shard_rows_present(home: WorthlessHome) -> bool:
+    """True if ``enrollments`` holds at least one real locked-.env reference.
+
+    Deliberately counts ``enrollments`` only, NOT ``shards``: a bare orphan shard
+    (a ``shards`` row with no enrollment) is unrecoverable junk, not data at risk,
+    so it must never block a mint or trip ORPHANED. (Name kept for continuity.)
+
+    ``False`` immediately if the DB file doesn't exist — no schema, no rows.
+    Fail-closed ``True`` on ``sqlite3.DatabaseError`` UNLESS the file has
+    since vanished — a concurrent ``worthless uninstall``'s ``rmtree`` racing
+    this read, not corruption. Without that re-check, an ordinary in-progress
+    uninstall would trip a scary false "orphaned data" diagnosis for a
+    bystander process (WOR-716 panel review, brutus's weakest-link finding).
+    """
+    if not home.db_path.exists():
+        return False
+    try:
+        conn = sqlite3.connect(str(home.db_path))
+        try:
+            tables = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            # Count ENROLLMENTS (real locked-.env references), NOT bare `shards`
+            # rows. An orphan shard with no enrollment has no shard-A and no .env
+            # to restore — it is junk that `doctor` clears, never recoverable data.
+            # Counting it would wrongly trip ORPHANED / block a first-run mint on a
+            # home carrying a stray orphan shard (e.g. the MCP orphan-shard path).
+            # Static SQL literal so the security linters don't flag interpolation.
+            if (
+                "enrollments" in tables
+                and conn.execute("SELECT COUNT(*) FROM enrollments").fetchone()[0]
+            ):
+                return True
+            return False
+        finally:
+            conn.close()
+    except sqlite3.DatabaseError:
+        if not home.db_path.exists():
+            return False  # deleted mid-read — a concurrent uninstall, not corruption
+        return True  # still present but unreadable — conservative, never silently adopt
+
+
+def _provably_keyless(home: WorthlessHome) -> bool:
+    """True iff no Fernet key can possibly be reached — decided with CHEAP,
+    keyring-free signals only.
+
+    ``_fernet_key_present`` (env var or on-disk file) and ``keyring_available``
+    (a backend *type* check, NOT a ``get_password`` call) never touch the OS
+    keychain, so this preserves the HF3 invariant: ``ensure_home`` must not
+    probe the keystore on a keyring-only subsequent run. When a keyring
+    backend EXISTS we deliberately return ``False`` even though the key could
+    have been deleted from it — confirming that would need an eager
+    ``get_password`` probe (the exact macOS-prompt cost HF3 closed). That
+    dangerous variant (real rows + key gone from an available keyring) is
+    still caught, lazily, by ``fernet_key`` re-raising ``ORPHANED_SHARD_DATA``.
+    """
+    return not _fernet_key_present(home) and not keyring_available()
+
+
+def _guard_and_provision_keystore(home: WorthlessHome) -> bool:
+    """WOR-716: detect a half-uninstalled machine before the keystore cascade
+    runs. Returns ``True`` when the caller should treat this exactly like a
+    genuine first run — mints via ``_first_run_keystore`` and signals
+    ``ensure_home()`` to write ``.bootstrapped`` after ``_init_db()``
+    succeeds. Covers a real first run's mint-guard and a silent self-heal of
+    a stale, provably-keyless marker.
+
+    Decisions gate on row-emptiness (``_shard_rows_present``), never
+    key-reachability alone. The check-then-mutate sequences run inside
+    ``acquire_lock`` and re-check immediately after acquiring it, closing a
+    TOCTOU where a concurrent ``enroll``/``lock`` could insert a real row
+    between an unlocked check and the mint (WOR-716 panel review — brutus and
+    the security reviewer independently flagged this).
+    """
+    if not home.bootstrapped_marker.exists():
+        with acquire_lock(home):
+            if _shard_rows_present(home):
+                raise WorthlessError(ErrorCode.ORPHANED_SHARD_DATA, _MSG_ORPHANED_SHARD_DATA)
+            _first_run_keystore(home)  # mint INSIDE the lock — no gap after the check above
+        return True
+
+    # Marker present. The everyday case (real enrollments) and every
+    # HF3-gated state — cheap env/file key, or a healthy keyring-only install
+    # — fall through unchanged. We NEVER eagerly probe the keystore here.
+    #
+    # The one leftover we self-heal is a PROVABLY-keyless marker: no env/file
+    # key, no keyring backend at all (a prior uninstall, or a copy without its
+    # keychain, that left a bootstrap marker with nothing behind it). Cheap
+    # checks decide "keyless"; the DB read only runs in that rare branch, so
+    # the everyday case pays zero new DB or keyring cost.
+    if not _provably_keyless(home):
+        return False
+    if _shard_rows_present(home):
+        return (
+            False  # real rows + provably no key → don't mint over them; fernet_key raises ORPHANED
+        )
+    with acquire_lock(home):
+        # Re-check BOTH signals under the lock: a concurrent enroll/lock may
+        # have inserted a row or seeded a key in the check→lock window.
+        if _shard_rows_present(home) or not _provably_keyless(home):
+            return False
+        home.bootstrapped_marker.unlink(missing_ok=True)
+        _first_run_keystore(home)  # mint INSIDE the lock
+        home._adoption_note = _MSG_STALE_BOOTSTRAP_ADOPTED
+        return True
+
+
 def _provision_keystore_path(home: WorthlessHome) -> bool:
     """Run the bare-metal keystore cascade for ``ensure_home``.
 
     Split out so ``ensure_home`` itself stays under xenon's rank-C
-    cyclomatic ceiling. Handles three states discriminated by the
-    ``.bootstrapped`` marker: first-run probe-and-generate, post-
-    bootstrap env-or-file pre-populate, and keyring-only fallthrough.
+    cyclomatic ceiling. Delegates the marker/rows/key state machine to
+    ``_guard_and_provision_keystore`` (WOR-716), which also detects a
+    half-uninstalled machine (stale marker, orphaned rows) before falling
+    through to the pre-WOR-716 states below: post-bootstrap env-or-file
+    pre-populate, and keyring-only fallthrough.
 
-    Returns ``True`` on first run (marker not yet written) so the
-    caller can write the marker after ``_init_db()`` succeeds.
+    Returns ``True`` when the caller should write ``.bootstrapped`` after
+    ``_init_db()`` succeeds — a true first run, or a WOR-716 silent self-heal.
     """
     # Validate custom fernet key path if set via env var
     fernet_path = home.fernet_key_path
@@ -258,8 +411,7 @@ def _provision_keystore_path(home: WorthlessHome) -> bool:
             "Create it or mount a volume at that path.",
         )
 
-    if not home.bootstrapped_marker.exists():
-        _first_run_keystore(home)
+    if _guard_and_provision_keystore(home):
         # Do NOT write .bootstrapped here — _init_db() runs in the caller
         # (ensure_home) after we return.  Writing the marker before _init_db
         # succeeds means a failed DB init leaves the marker in place, causing
@@ -540,15 +692,30 @@ def acquire_lock(home: WorthlessHome) -> Generator[None, None, None]:
 
 
 def get_home() -> WorthlessHome:
-    """Resolve WorthlessHome from WORTHLESS_HOME env var or default."""
+    """Resolve WorthlessHome from WORTHLESS_HOME env var or default.
+
+    WOR-716: discloses a silent self-heal (stale bootstrap marker adopted —
+    see ``_guard_and_provision_keystore``) via a one-line stderr warning.
+    Deferred import keeps ``bootstrap.py`` itself UI-agnostic — MCP/IPC
+    callers hitting ``ensure_home()`` directly stay silent, unchanged.
+    """
     env_home = os.environ.get("WORTHLESS_HOME")
-    if env_home:
-        return ensure_home(Path(env_home))
-    return ensure_home()
+    home = ensure_home(Path(env_home)) if env_home else ensure_home()
+    if home._adoption_note:
+        from worthless.cli.console import get_console
+
+        get_console().print_warning(home._adoption_note)
+    return home
 
 
 def resolve_home() -> WorthlessHome | None:
-    """Try to load WorthlessHome; return None if not initialized."""
+    """Try to load WorthlessHome; return None if not initialized.
+
+    WOR-716: does NOT swallow ``ORPHANED_SHARD_DATA`` — a caller doing
+    ``if resolve_home():`` must not silently treat a half-uninstalled
+    machine (real locked data, key genuinely gone) as "nothing installed
+    here." Every other error still returns ``None``, unchanged.
+    """
     try:
         env_home = os.environ.get("WORTHLESS_HOME")
         if env_home:
@@ -559,6 +726,10 @@ def resolve_home() -> WorthlessHome | None:
         default = Path.home() / ".worthless"
         if default.exists():
             return ensure_home(default)
+        return None
+    except WorthlessError as exc:
+        if exc.code == ErrorCode.ORPHANED_SHARD_DATA:
+            raise
         return None
     except Exception:
         return None

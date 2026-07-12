@@ -20,11 +20,15 @@ the planned action without writing.
 
 Design seams (foreseen extensions, NOT in this PR):
 
-* ``worthless-7db2`` (P3): a SECOND repair shape — partial-state recovery
-  when the home dir is intact but the fernet key is missing from every
-  source (manual keyring deletion). ``ensure_home`` will surface that
-  state and point users here; doctor will need a key-regeneration flow
-  guarded against silently destroying access to existing locked secrets.
+* ``worthless-7db2`` (P3, mostly resolved by WOR-716): partial-state
+  recovery when the home dir is intact but the fernet key is missing from
+  every source. ``ensure_home`` now surfaces this directly —
+  ``ORPHANED_SHARD_DATA`` when real rows exist and the key is genuinely
+  gone (see ``bootstrap.py::_guard_and_provision_keystore``), caught here
+  by the broad ``except WorthlessError`` a few lines below. No new
+  key-regeneration flow needed: the old shard-B is unrecoverable once the
+  key is truly gone, so the honest path is ``uninstall --force`` + rotate
+  at the provider, never regenerate a key that can't decrypt the old rows.
 * ``worthless-57ad`` (P3, post-v0.4): a BYO-key LLM agent diagnoses
   UNKNOWN stuck states using a user-locked enrollment.
 """
