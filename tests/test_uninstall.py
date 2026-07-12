@@ -747,7 +747,12 @@ def test_uninstall_refuses_on_a_locked_db_mid_restore(
 
     env = tmp_path / ".env"
     env.write_text(f"OPENAI_API_KEY={fake_key('sk-')}\n")
-    runner.invoke(app, ["lock", "--env", str(env)], env={"WORTHLESS_HOME": str(home_dir.base_dir)})
+    locked = runner.invoke(
+        app, ["lock", "--env", str(env)], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
+    )
+    # Prove the refusal comes from the locked-DB path, not a "nothing installed"
+    # fallback: the setup lock MUST have succeeded (CodeRabbit).
+    assert locked.exit_code == 0, f"setup lock failed, test would prove nothing: {locked.output}"
 
     async def _busy(*_a, **_k):
         raise make_busy()
