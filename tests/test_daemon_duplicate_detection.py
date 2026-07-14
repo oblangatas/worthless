@@ -107,10 +107,6 @@ def cli_env(tmp_path: Path) -> dict[str, str]:
     return {
         **os.environ,
         "WORTHLESS_HOME": str(home.base_dir),
-        # Isolate $HOME too — _resolve_home() (openclaw/integration.py)
-        # reads Path.home(), not WORTHLESS_HOME. Without this, a real
-        # ~/.openclaw on the dev machine leaks into this subprocess.
-        "HOME": str(tmp_path),
     }
 
 
