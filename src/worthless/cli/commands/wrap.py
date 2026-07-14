@@ -17,6 +17,7 @@ combinable. Run one or the other.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -132,7 +133,27 @@ def _list_enrolled_aliases(home: WorthlessHome) -> list[tuple[str, str]]:
         return []
 
     async def _query() -> list[tuple[str, str]]:
-        async with aiosqlite.connect(str(home.db_path)) as db:
+        db = aiosqlite.connect(str(home.db_path))
+        try:
+            await db
+        except BaseException:
+            # aiosqlite's Connection._connect() calls self.stop() on a failed
+            # connect but never awaits the future it returns, so the worker
+            # thread it just started can still be shutting down when this
+            # exception reaches us. Propagating immediately lets asyncio.run()
+            # close our loop before the thread's completion callback can reach
+            # it (RuntimeError: Event loop is closed — the thread crashes
+            # instead of exiting cleanly), which under a busy CI host can
+            # leave it observably alive past a test's thread-leak check. Give
+            # it a bounded window to finish while our loop is still open.
+            thread = getattr(db, "_thread", None)
+            if thread is not None:
+                loop = asyncio.get_event_loop()
+                deadline = loop.time() + 2.0
+                while thread.is_alive() and loop.time() < deadline:
+                    await asyncio.sleep(0.01)
+            raise
+        async with db:
             cursor = await db.execute(
                 "SELECT s.key_alias, s.provider "
                 "FROM shards s "
