@@ -332,6 +332,19 @@ def test_lock_scrubs_agent_with_custom_agentdir_override(
         {"providers": {"openai": {"apiKey": real_key, "baseUrl": "https://api.openai.com/v1"}}},
     )
     _write_json(
+        custom_dir / "auth-profiles.json",
+        {
+            "version": 1,
+            "profiles": {
+                "custom-openai": {
+                    "type": "api_key",
+                    "provider": "openai",
+                    "key": real_key,
+                }
+            },
+        },
+    )
+    _write_json(
         openclaw_dir / "openclaw.json",
         {
             "models": {"providers": {}},
@@ -348,6 +361,12 @@ def test_lock_scrubs_agent_with_custom_agentdir_override(
         f"custom agentDir's models.json was never scanned — real key survived: {entry!r}"
     )
     assert entry["baseUrl"] == "https://api.openai.com/v1"
+
+    custom_profiles = json.loads((custom_dir / "auth-profiles.json").read_text())
+    cred = custom_profiles["profiles"]["custom-openai"]
+    assert cred["key"] == "${OPENAI_API_KEY}", (
+        f"custom agentDir's auth-profiles.json was never scanned — real key survived: {cred!r}"
+    )
 
 
 def test_scrub_refuses_symlinked_auth_store_file(
