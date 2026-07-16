@@ -146,7 +146,7 @@ def run(ctx: CheckContext) -> CheckResult:
     audit_findings = _audit_gate_findings(managed_aliases, proxy_base_url)
 
     # WOR-656 F6: surface a legacy decoy layout (advisory; `worthless lock` heals it).
-    legacy_issues = _check_legacy_decoy_layout(state)
+    legacy_issues = _check_legacy_decoy_layout(state, proxy_base_url)
     all_issues = skill_issues + provider_issues + legacy_issues
     # Promote plain-string integration issues to the same structured shape as
     # audit_findings so all entries in findings[] have consistent keys.
