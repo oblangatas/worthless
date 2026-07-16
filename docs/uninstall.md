@@ -75,6 +75,10 @@ For scripts and agents:
 | `1` | Refused — confirmation declined, a non-interactive shell without `--yes`, or a broken install without `--force`. |
 | `73` | Uninstall completed, but reverting the OpenClaw config partially failed — check `openclaw.json`. |
 
+## The MCP server is separate
+
+If you added the Worthless MCP server to Claude Code, Cursor, or Windsurf, that's a `worthless` entry *you* hand-added to your editor's MCP config (`.mcp.json`, `~/.claude.json`, or `~/.cursor/mcp.json`). Uninstall **names that file if it finds one**, but never edits it — the file holds your other MCP servers too. Remove the `worthless` entry yourself to fully unwire it. The [uninstall contract](/uninstall-contract/) has the full accounting.
+
 ## See also
 
 - [Recovery](/recovery/) — what to do if your `.env` was corrupted or deleted (Worthless does not back it up).

@@ -425,6 +425,48 @@ def _finalize_wipe(console, home, n_restored: int) -> None:  # noqa: ANN001
         )
 
 
+def _mentions_worthless_mcp(path: Path) -> bool:
+    """Best-effort: does this editor config reference the Worthless MCP wrapper?
+
+    ``worthless-mcp`` is the npm package name that appears in the config's
+    ``args`` (see docs/install-mcp.md), so a substring check on the raw text is a
+    cheap, reliable signal. A missing/unreadable file → not our concern → False.
+    """
+    try:
+        return "worthless-mcp" in path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False
+
+
+def _remind_mcp_leftovers(console) -> None:  # noqa: ANN001
+    """Read-only: if a Worthless MCP server entry is present in a known editor
+    config, name the file so the user can remove it themselves.
+
+    NEVER edits these files — the user hand-wrote them (Worthless didn't), they
+    hold the user's OTHER MCP servers, and their exact path is editor-specific
+    (the openclaw.json blast-radius lesson: don't mutate a shared config we don't
+    own). Silent when nothing matches, so it never nags the majority who don't
+    run the MCP server. Advisory-only: any error is swallowed so a checked-out
+    cwd or unresolvable HOME can never turn a completed wipe into a failure.
+    """
+    try:
+        # Small pure-config files with a reliable `worthless-mcp` token. ~/.claude.json is
+        # skipped — it mixes MCP config with chat history (false positives); docs still list it.
+        candidates = [
+            Path.cwd() / ".mcp.json",  # Claude Code, project scope
+            Path.home() / ".cursor" / "mcp.json",  # Cursor
+        ]
+        found = [str(p) for p in candidates if _mentions_worthless_mcp(p)]
+    except Exception:  # noqa: BLE001 — advisory only; never fail a completed uninstall
+        logger.debug("uninstall: MCP-leftover check skipped", exc_info=True)
+        return
+    if found:
+        console.print_hint(
+            "You also set up the Worthless MCP server. Remove its 'worthless' entry "
+            f"from {', '.join(found)} to fully unwire it — uninstall never edits editor configs."
+        )
+
+
 def _run_uninstall(*, assume_yes: bool, force: bool = False) -> None:
     """Restore every locked .env, then (only when it's safe) wipe Worthless.
 
@@ -513,6 +555,7 @@ def _run_uninstall(*, assume_yes: bool, force: bool = False) -> None:
         home.bootstrapped_marker.unlink(missing_ok=True)
 
     _finalize_wipe(console, home, len(restored))
+    _remind_mcp_leftovers(console)  # read-only; silent unless a worthless MCP entry exists
 
     if oc_partial:
         raise typer.Exit(code=73)
