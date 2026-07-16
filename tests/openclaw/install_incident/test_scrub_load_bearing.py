@@ -126,6 +126,19 @@ def _models_json_api_key(c: str) -> str:
     return _sh(c, script).stdout.strip()
 
 
+def _agents_files_with_real_key(c: str, real_key: str) -> list[str]:
+    """Recursively list EVERY file under the real ``agents/`` tree that still
+    holds the raw key — the file/provider-agnostic proof, not just one field of
+    one models.json. Catches auth-profiles.json, any provider, any agent dir.
+
+    ``grep -rlF`` prints matching filenames (fixed-string); rc 1 = no matches,
+    swallowed to ``true`` so a clean tree returns an empty list, not an error.
+    ``real_key`` is a fixed alphanumeric fixture — no shell metacharacters.
+    """
+    r = _sh(c, f"grep -rlF -- '{real_key}' /home/node/.openclaw/agents/ 2>/dev/null || true")
+    return [line for line in r.stdout.splitlines() if line.strip()]
+
+
 def _hide_openclaw_binary(c: str) -> None:
     """Move the real openclaw binary off PATH — no WORTHLESS_OPENCLAW_BIN override,
     so resolve_openclaw_bin() fails via shutil.which, and the #210 audit
@@ -243,6 +256,11 @@ def scrub_stack():
         # this file; OpenClaw's own code did.
         pre_turn = _route(oc)
         pre_lock_key = _models_json_api_key(oc)
+        # WOR-796 (scrub proof #3): capture EVERY file under agents/ holding the
+        # raw key before lock, so the post-lock "zero survivors" claim isn't
+        # vacuous and covers auth-profiles.json + all agent dirs, not just one
+        # field of main/models.json.
+        pre_lock_leak_files = _agents_files_with_real_key(oc, real_key)
 
         # --- Step 2.5: hide the openclaw binary so the #210 audit-preflight
         # gate (lock.py:1635) takes its SKIP branch instead of blocking. That
@@ -273,6 +291,8 @@ def scrub_stack():
             "lock_stdout": lock.stdout,
             "lock_stderr": lock.stderr,
             "post_lock_key": _models_json_api_key(oc),
+            "pre_lock_leak_files": pre_lock_leak_files,
+            "post_lock_leak_files": _agents_files_with_real_key(oc, real_key),
         }
     finally:
         _run(["docker", "rm", "-f", oc, mock], timeout=60)
@@ -326,3 +346,26 @@ def test_lock_scrubs_the_real_key_from_the_real_models_json(scrub_stack):
         "WOR-796's scrub is NOT real defense-in-depth for the gate-unavailable case"
     )
     assert scrub_stack["real_key"] not in post_key, "the raw key leaked as a substring"
+
+
+def test_no_real_key_survives_anywhere_under_agents(scrub_stack):
+    """THE STRONGER PROOF (scrub proof #3): not just one field of
+    main/models.json, but a recursive grep over the ENTIRE real ``agents/**``
+    tree — every agent dir, both auth-profiles.json and models.json, any
+    provider. After a real `worthless lock`, the raw key must survive in ZERO
+    files. This is the file/provider-agnostic form of WOR-796's security claim.
+    """
+    assert scrub_stack["lock_rc"] == 0, (
+        f"worthless lock failed:\n{scrub_stack['lock_stdout']}\n{scrub_stack['lock_stderr']}"
+    )
+    # Precondition: the key really WAS somewhere under agents/ before lock, else
+    # "zero after" would pass for the wrong reason (nothing to scrub).
+    assert scrub_stack["pre_lock_leak_files"], (
+        "no file under agents/ held the raw key before lock — the recursive proof "
+        "would be vacuous; test setup did not reproduce the on-disk leak"
+    )
+    assert scrub_stack["post_lock_leak_files"] == [], (
+        "the raw key STILL survives on disk under agents/ after lock, in: "
+        f"{scrub_stack['post_lock_leak_files']} — the scrub did not neutralize every "
+        "cached copy (auth-profiles.json / a non-main agent dir / another provider)"
+    )
