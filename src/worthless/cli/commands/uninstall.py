@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import json
 import logging
 import os
 import shutil
@@ -426,16 +427,26 @@ def _finalize_wipe(console, home, n_restored: int) -> None:  # noqa: ANN001
 
 
 def _mentions_worthless_mcp(path: Path) -> bool:
-    """Best-effort: does this editor config reference the Worthless MCP wrapper?
+    """Read-only: does this editor config DECLARE a Worthless MCP server?
 
-    ``worthless-mcp`` is the npm package name that appears in the config's
-    ``args`` (see docs/install-mcp.md), so a substring check on the raw text is a
-    cheap, reliable signal. A missing/unreadable file → not our concern → False.
+    Parses JSON and inspects only the ``mcpServers`` block(s) — the top-level one
+    plus any per-project blocks under ``projects`` (the shape of ~/.claude.json) —
+    never the whole file. So a stray ``worthless-mcp`` mention elsewhere (e.g. the
+    chat history ~/.claude.json also stores) can't false-trigger the reminder.
+    ``worthless-mcp`` is the npm package name that appears in the server's ``args``
+    (see docs/install-mcp.md). Missing / unreadable / non-JSON → not ours → False.
     """
     try:
-        return "worthless-mcp" in path.read_text(encoding="utf-8", errors="ignore")
-    except OSError:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
         return False
+    if not isinstance(data, dict):
+        return False
+    blocks = [data.get("mcpServers")]
+    projects = data.get("projects")
+    if isinstance(projects, dict):
+        blocks += [p.get("mcpServers") for p in projects.values() if isinstance(p, dict)]
+    return any(isinstance(b, dict) and "worthless-mcp" in json.dumps(b) for b in blocks)
 
 
 def _remind_mcp_leftovers(console) -> None:  # noqa: ANN001
@@ -450,10 +461,13 @@ def _remind_mcp_leftovers(console) -> None:  # noqa: ANN001
     cwd or unresolvable HOME can never turn a completed wipe into a failure.
     """
     try:
-        # Small pure-config files with a reliable `worthless-mcp` token. ~/.claude.json is
-        # skipped — it mixes MCP config with chat history (false positives); docs still list it.
+        # Known editor MCP configs. We JSON-parse and inspect only each file's
+        # mcpServers block(s) (see _mentions_worthless_mcp), so ~/.claude.json —
+        # which also stores chat history — is safe to scan without false positives.
+        # ponytail: fixed known paths only — no filesystem hunt; Windsurf path unverified → skip.
         candidates = [
             Path.cwd() / ".mcp.json",  # Claude Code, project scope
+            Path.home() / ".claude.json",  # Claude Code, user + per-project scope
             Path.home() / ".cursor" / "mcp.json",  # Cursor
         ]
         found = [str(p) for p in candidates if _mentions_worthless_mcp(p)]

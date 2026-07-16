@@ -77,7 +77,7 @@ For scripts and agents:
 
 ## The MCP server is separate
 
-If you added the Worthless MCP server to Claude Code, Cursor, or Windsurf, that's a `worthless` entry *you* hand-added to your editor's MCP config (`.mcp.json`, `~/.claude.json`, or `~/.cursor/mcp.json`). Uninstall **names that file if it finds one**, but never edits it — the file holds your other MCP servers too. Remove the `worthless` entry yourself to fully unwire it. The [uninstall contract](/uninstall-contract/) has the full accounting.
+If you added the Worthless MCP server to your editor, that's a `worthless` entry *you* hand-added to its MCP config. Uninstall **auto-detects and names** your Claude Code (`.mcp.json` or `~/.claude.json`) or Cursor (`~/.cursor/mcp.json`) config when it holds one — but never edits it, since the file holds your other MCP servers too. Remove the `worthless` entry yourself to fully unwire it. (Windsurf and other editors aren't auto-scanned — remove the entry there by hand.) The [uninstall contract](/uninstall-contract/) has the full accounting.
 
 ## See also
 

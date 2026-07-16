@@ -940,3 +940,70 @@ class TestMcpLeftoverReminder:
         assert result.exit_code == 0, result.output
         assert "MCP server" in result.output, "cwd .mcp.json must be detected"
         assert str(mcp_cfg) in result.output, "reminder must name the cwd .mcp.json"
+
+    def test_uninstall_names_a_claude_code_config_with_a_per_project_mcp_block(
+        self, home_dir: WorthlessHome, tmp_path, monkeypatch
+    ) -> None:
+        """Proof of fix (flagship gap): a Claude Code ~/.claude.json — including a
+        per-project mcpServers block — is detected and named, even when uninstall
+        runs from an unrelated directory (the entry lives only in ~/.claude.json).
+        """
+        from tests.helpers import fake_key
+
+        work = tmp_path / "work"
+        work.mkdir()
+        monkeypatch.chdir(work)  # no ./.mcp.json here — entry lives only in ~/.claude.json
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        claude_cfg = fake_home / ".claude.json"
+        claude_cfg.write_text(
+            '{"projects":{"/some/project":{"mcpServers":'
+            '{"worthless":{"command":"npx","args":["-y","worthless-mcp"]}}}}}'
+        )
+
+        env = work / ".env"
+        env.write_text(f"OPENAI_API_KEY={fake_key('sk-')}\n")
+        runner.invoke(
+            app,
+            ["lock", "--env", str(env)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir), "HOME": str(fake_home)},
+        )
+        result = runner.invoke(
+            app, ["uninstall", "--yes"], env=self._uninstall_env(home_dir, fake_home)
+        )
+        assert result.exit_code == 0, result.output
+        assert "MCP server" in result.output, "Claude Code ~/.claude.json must be detected"
+        assert str(claude_cfg) in result.output, "reminder must name ~/.claude.json"
+
+    def test_uninstall_ignores_worthless_mcp_mentioned_outside_mcpservers(
+        self, home_dir: WorthlessHome, tmp_path, monkeypatch
+    ) -> None:
+        """No false positives: ~/.claude.json also stores chat history. A
+        'worthless-mcp' string anywhere but a real mcpServers entry must NOT
+        trigger the reminder — only a declared server does.
+        """
+        from tests.helpers import fake_key
+
+        work = tmp_path / "work"
+        work.mkdir()
+        monkeypatch.chdir(work)
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        # 'worthless-mcp' appears only in history text, never in an mcpServers block.
+        (fake_home / ".claude.json").write_text(
+            '{"mcpServers":{},"history":[{"display":"how do I install worthless-mcp?"}],'
+            '"projects":{"/p":{"mcpServers":{},"history":["worthless-mcp notes"]}}}'
+        )
+
+        env = work / ".env"
+        env.write_text(f"OPENAI_API_KEY={fake_key('sk-')}\n")
+        runner.invoke(
+            app,
+            ["lock", "--env", str(env)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir), "HOME": str(fake_home)},
+        )
+        result = runner.invoke(
+            app, ["uninstall", "--yes"], env=self._uninstall_env(home_dir, fake_home)
+        )
+        assert result.exit_code == 0, result.output
+        assert "MCP server" not in result.output, "chat-history mention must not false-trigger"
