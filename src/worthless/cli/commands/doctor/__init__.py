@@ -338,6 +338,34 @@ def _read_worthless_providers_from_config(config_path: Path) -> dict[str, dict]:
     return {}
 
 
+def _check_legacy_decoy_layout(state: IntegrationState) -> list[str]:
+    """Detect the pre-WOR-647 legacy decoy layout (WOR-656 F6), read-only.
+
+    Old installs left a proxy-shaped ``worthless-<provider>`` decoy entry
+    beside the real ``<provider>``. The current design rewrites the original in
+    place and keeps no decoy, so a lingering proxy-shaped ``worthless-*`` entry
+    means the install predates that change. Flag it (advisory) so the user
+    knows a plain ``worthless lock`` will auto-heal it — this NEVER mutates the
+    config.
+    """
+    config_path = state.config_path
+    if config_path is None:
+        return []
+    findings: list[str] = []
+    for name, entry in _read_worthless_providers_from_config(config_path).items():
+        base_url = entry.get("baseUrl")
+        # Proxy-shaped (``…/<alias>/v1``) → a decoy we recognize, not a user's
+        # own ``worthless-``-named provider pointing elsewhere.
+        if not isinstance(base_url, str) or _alias_from_base_url(base_url) is None:
+            continue
+        provider = name[len("worthless-") :]
+        findings.append(
+            f"legacy OpenClaw decoy layout detected for '{provider}' — "
+            f"run `worthless lock` to auto-migrate (read-only; nothing changed)"
+        )
+    return findings
+
+
 def _check_openclaw_apikey_consistency(
     state: IntegrationState,
     repo: ShardRepository,
