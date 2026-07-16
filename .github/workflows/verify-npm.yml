@@ -59,6 +59,13 @@ jobs:
     # Bonus: because the wheel is built from pyproject's version but the
     # wrapper requests package.json's version, a drift between the two (the
     # WOR-811 root cause) makes the offline resolve fail and this job go red.
+    #
+    # Coverage split (not a gap): tool-surface *drift* — a tool added/renamed
+    # in src/worthless/mcp — is caught on every PR by
+    # tests/test_mcp_stdio_contract.py in the default pytest pass. THIS job
+    # guards the wrapper + bootstrap + version-drift path (npx -> uv -> uvx,
+    # npm-vs-PyPI), which regresses on packages/worthless-mcp + release changes
+    # — hence the narrower `paths:` trigger above.
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -87,7 +94,11 @@ jobs:
           UV_TOOL_DIR: ${{ runner.temp }}/uvtools
           UV_TOOL_BIN_DIR: ${{ runner.temp }}/uvtools/bin
         run: |
-          wheel="$(find "${PWD}/dist" -maxdepth 1 -name 'worthless-*.whl' | head -1)"
+          set -euo pipefail
+          # `-print -quit` stops after the first match in-process — no `| head`
+          # that could SIGPIPE `find` (141) under bash pipefail and flake red.
+          wheel="$(find "${PWD}/dist" -maxdepth 1 -name 'worthless-*.whl' -print -quit)"
+          test -n "${wheel}" || { echo "no worthless wheel built in dist/"; exit 1; }
           echo "pre-seeding ${wheel}"
           uv tool install "worthless[mcp] @ file://${wheel}"
 
