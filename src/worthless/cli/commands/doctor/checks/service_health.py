@@ -162,7 +162,28 @@ def run(ctx: CheckContext) -> CheckResult:
         return _skip("`worthless service` is not supported on this platform.")
 
     unit_path = _installed_unit_path(backend_name)
+
+    # Compute the legacy-label finding first (launchd only): a pre-rename
+    # dev.worthless.proxy plist can still be on disk even when the current
+    # sh.worthless.proxy unit is absent — the upgraded-but-not-reinstalled state.
+    # If we skipped on "new unit absent" before checking, doctor would stay
+    # silent about that orphan, which is exactly the case the finding exists for.
+    legacy_finding: dict | None = None
+    if backend_name == "launchd":
+        legacy_plist = unit_path.parent / f"{LEGACY_LAUNCHD_LABEL}.plist"
+        legacy_finding = _legacy_label_finding(legacy_plist)
+
     if not unit_path.is_file():
+        if legacy_finding:
+            return CheckResult(
+                check_id=check_id,
+                status="warn",
+                findings=[legacy_finding],
+                summary="1 service issue(s) found.",
+                fixable=False,
+                fixed=[],
+                skipped_reason=None,
+            )
         return _skip("No worthless service is installed.")
 
     try:
@@ -190,11 +211,8 @@ def run(ctx: CheckContext) -> CheckResult:
 
     findings.extend(_orphan_home_findings(content))
 
-    if backend_name == "launchd":
-        legacy_plist = unit_path.parent / f"{LEGACY_LAUNCHD_LABEL}.plist"
-        legacy_finding = _legacy_label_finding(legacy_plist)
-        if legacy_finding:
-            findings.append(legacy_finding)
+    if legacy_finding:  # computed above; fires when both new + legacy plists exist
+        findings.append(legacy_finding)
 
     linger_finding = _linger_finding(_linger_ok_if_systemd(backend_name))
     if linger_finding:

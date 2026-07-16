@@ -126,6 +126,22 @@ class TestRun:
         assert result["status"] == "ok"
         assert result["skipped_reason"] is not None
 
+    def test_legacy_plist_surfaced_when_new_unit_absent(self, ctx, tmp_path, monkeypatch) -> None:
+        """Upgraded-but-not-reinstalled: the pre-rename dev.worthless.proxy plist is
+        still on disk while the new sh.worthless.proxy plist is absent. doctor must
+        WARN about the orphan, not silently report 'nothing installed' (the early-skip
+        used to make the legacy-label check unreachable)."""
+        new_plist = tmp_path / "sh.worthless.proxy.plist"  # absent
+        legacy = tmp_path / f"{service_health.LEGACY_LAUNCHD_LABEL}.plist"
+        legacy.write_text("<plist>legacy</plist>")
+        monkeypatch.setattr(service_health, "current_platform_backend_name", lambda: "launchd")
+        monkeypatch.setattr(service_health, "_installed_unit_path", lambda name: new_plist)
+
+        result = service_health.run(ctx)
+        assert result["status"] == "warn"
+        assert result["skipped_reason"] is None
+        assert {f["kind"] for f in result["findings"]} == {"legacy_label"}
+
     def test_ok_when_unit_healthy(self, ctx, tmp_path, monkeypatch) -> None:
         home_dir = ctx.home.base_dir
         binary = tmp_path / "worthless"
