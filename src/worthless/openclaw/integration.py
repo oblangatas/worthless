@@ -1465,8 +1465,13 @@ def _apply_lock_migrate_legacy_decoy(
         decoy_name = f"worthless-{provider}"
         try:
             decoy = _config_mod.get_provider(config_path, decoy_name)
-        except OpenclawConfigError:
-            return True  # unreadable/symlinked — abort; Stage A would fail too
+        except (OSError, OpenclawConfigError):
+            # Can't read the config to look for a decoy. Skip migration and let
+            # Stage A handle it: Stage A surfaces CONFIG_UNREADABLE and aborts
+            # the write byte-identically (WOR-516). Returning rollback here would
+            # SKIP Stage A and swallow that event — re-opening the WOR-516 bug
+            # where an unreadable config could be deleted by a {}-snapshot rollback.
+            return False
         if not isinstance(decoy, dict):
             continue  # no decoy for this provider — new-design layout, nothing to heal
         decoy_base = decoy.get("baseUrl")
