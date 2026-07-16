@@ -908,3 +908,35 @@ class TestMcpLeftoverReminder:
         )
         assert result.exit_code == 0, result.output  # an advisory crash must not fail the uninstall
         assert not home_dir.base_dir.exists(), "the wipe must still have completed"
+
+    def test_uninstall_names_a_project_scoped_mcp_json_in_the_cwd(
+        self, home_dir: WorthlessHome, tmp_path, monkeypatch
+    ) -> None:
+        """Proof of fix (cwd branch): a project-scoped ./.mcp.json referencing
+        worthless-mcp is detected and named too — not only the ~/.cursor path.
+        """
+        from tests.helpers import fake_key
+
+        work = tmp_path / "work"
+        work.mkdir()
+        monkeypatch.chdir(work)
+        mcp_cfg = work / ".mcp.json"
+        mcp_cfg.write_text(
+            '{"mcpServers":{"worthless":{"command":"npx","args":["-y","worthless-mcp"]}}}'
+        )
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()  # empty: isolate the cwd branch (no ~/.cursor / ~/.claude.json)
+
+        env = work / ".env"
+        env.write_text(f"OPENAI_API_KEY={fake_key('sk-')}\n")
+        runner.invoke(
+            app,
+            ["lock", "--env", str(env)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir), "HOME": str(fake_home)},
+        )
+        result = runner.invoke(
+            app, ["uninstall", "--yes"], env=self._uninstall_env(home_dir, fake_home)
+        )
+        assert result.exit_code == 0, result.output
+        assert "MCP server" in result.output, "cwd .mcp.json must be detected"
+        assert str(mcp_cfg) in result.output, "reminder must name the cwd .mcp.json"
