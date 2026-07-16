@@ -84,12 +84,17 @@ def test_home_isolation_regresses_without_the_fixture(
     env_file.write_text(f"OPENAI_API_KEY={fake_openai_key()}\n")
     smoke_home = tmp_path / ".worthless"
 
-    # Simulate the regression: override the autouse fixture's HOME with a
-    # hostile value, as if the fixture were deleted or broken. monkeypatch
-    # stacks LIFO, so this wins over the autouse fixture for the duration of
-    # the `with` block only.
+    # Simulate the regression: override the autouse fixture's HOME AND
+    # USERPROFILE with a hostile value, as if the fixture were deleted or
+    # broken. Both matter: native Windows Path.home() checks USERPROFILE
+    # before HOME, so leaving USERPROFILE at the fixture's safe value would
+    # let the subprocess resolve the safe path anyway on Windows CI runners,
+    # silently defeating this simulation there. monkeypatch stacks LIFO, so
+    # this wins over the autouse fixture for the duration of the `with`
+    # block only.
     with monkeypatch.context() as m:
         m.setenv("HOME", str(hostile_home))
+        m.setenv("USERPROFILE", str(hostile_home))
         broken = _run(["lock", "--env", str(env_file)], smoke_home)
         assert broken.returncode != 0, (
             "expected the simulated regression (hostile HOME) to fail, but "
