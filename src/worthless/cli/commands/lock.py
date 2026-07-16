@@ -1309,6 +1309,13 @@ def _print_openclaw_success_block(
     if result.skill_installed:
         console.print_hint("   • ~/.openclaw/workspace/skills/worthless/ — installed skill")
     console.print_hint("   • Undo: worthless unlock")
+    # WOR-796 (scrub gap #1): a provider whose key var isn't a valid uppercase
+    # SecretRef id was NOT scrubbed — its cached real key is still live in
+    # OpenClaw's agent store even though openclaw.json reads "locked". Surface it
+    # unconditionally (reload state is irrelevant — nothing was scrubbed for it).
+    for event in result.events:
+        if event.code == OpenclawErrorCode.AGENT_AUTH_STORE_SCRUB_SKIPPED:
+            console.print_warning(f"   [WARN] {event.detail}")
     # WOR-756: reload couldn't be positively confirmed (openclaw binary not
     # co-located, or no reload event before the deadline). Not a failure —
     # OpenClaw reloads automatically — but say so honestly so the user can

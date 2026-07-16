@@ -1528,6 +1528,31 @@ def scrub_agent_auth_stores(
     for provider, alias, shard_a_str in planned_updates:
         var_name = env_var_by_alias.get(alias)
         if not var_name or not _ENV_SECRET_REF_ID_RE.match(var_name):
+            # WOR-796: a present-but-non-uppercase var name is the leak-risk case
+            # — a lowercase ``${var}`` is not a valid SecretRef, so we (correctly)
+            # refuse to write it, but that means this provider's cached real key
+            # is NOT scrubbed while openclaw.json still reads "locked". Emit a loud
+            # event so protection can't silently degrade (scrub-correctness gap #1).
+            # A wholly-missing var name (nothing to point a ref at) stays silent.
+            if var_name:
+                events.append(
+                    OpenclawIntegrationEvent(
+                        # warn-level, NOT error: worthless already only warns on a
+                        # non-uppercase key var for .env locking (CANONICAL_KEY_VAR_RE),
+                        # so failing the whole lock here (has_failure → exit 73) would be
+                        # inconsistent. The loud [WARN] in lock's output is what closes the
+                        # silent-degradation gap.
+                        code=OpenclawErrorCode.AGENT_AUTH_STORE_SCRUB_SKIPPED,
+                        level="warn",
+                        detail=(
+                            f"did NOT scrub {provider!r}'s cached real key — its key "
+                            f"variable {var_name!r} is not an uppercase SecretRef id "
+                            "([A-Z][A-Z0-9_]*). Rename it uppercase in your .env and "
+                            "re-lock; the real key is still live in OpenClaw's agent cache."
+                        ),
+                        extra={"provider": provider, "var_name": var_name},
+                    )
+                )
             continue
         secret_ref = f"${{{var_name}}}"
         scrubbed_any = False
