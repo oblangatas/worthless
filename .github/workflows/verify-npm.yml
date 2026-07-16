@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - "packages/worthless-mcp/**"
+      - "tests/test_mcp_npx_wrapper_mount.py"
       - ".github/workflows/verify-npm.yml"
       - ".github/workflows/publish-npm.yml"
   push:
@@ -48,3 +49,61 @@ jobs:
 
       - name: npm publish --dry-run
         run: npm publish --dry-run --access public
+
+  wrapper-mount:
+    # Proves the path a real editor/agent walks — `npx worthless-mcp` → uv →
+    # uvx → the MCP server — actually boots and mounts exactly the 4 tools.
+    # This is the gap that let the 0.3.9 split release ship broken: npm had
+    # worthless-mcp@0.3.9 while PyPI had no worthless==0.3.9, so every
+    # `npx worthless-mcp` died unsatisfiable and no test caught it (WOR-809).
+    # Bonus: because the wheel is built from pyproject's version but the
+    # wrapper requests package.json's version, a drift between the two (the
+    # WOR-811 root cause) makes the offline resolve fail and this job go red.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+          cache: ""  # no shared npm cache (cache-poisoning); the wrapper is run, not published
+
+      - name: Set up uv + Python
+        uses: ./.github/actions/setup-uv-python
+
+      - name: Build the PR wheel (the bytes under test)
+        run: uv build --wheel
+
+      - name: Pre-seed an isolated uv cache with the PR wheel
+        # Option A: install the PR wheel into a clean, isolated uv cache. The
+        # mount step then runs offline, so the ONLY worthless[mcp] that can
+        # resolve is this wheel — never a stray PyPI copy of the same version.
+        env:
+          UV_CACHE_DIR: ${{ runner.temp }}/uvcache
+          UV_TOOL_DIR: ${{ runner.temp }}/uvtools
+          UV_TOOL_BIN_DIR: ${{ runner.temp }}/uvtools/bin
+        run: |
+          wheel="$(find "${PWD}/dist" -maxdepth 1 -name 'worthless-*.whl' | head -1)"
+          echo "pre-seeding ${wheel}"
+          uv tool install "worthless[mcp] @ file://${wheel}"
+
+      - name: Build the test harness (MCP client + pytest)
+        run: |
+          uv venv "${RUNNER_TEMP}/mountvenv"
+          uv pip install --python "${RUNNER_TEMP}/mountvenv" \
+            mcp pytest pytest-asyncio pytest-xdist pytest-rerunfailures pytest-timeout
+
+      - name: Mount test — real npx wrapper, offline (PR bytes only)
+        env:
+          WORTHLESS_NPX_MOUNT_TEST: "1"
+          UV_OFFLINE: "1"
+          UV_CACHE_DIR: ${{ runner.temp }}/uvcache
+          UV_TOOL_DIR: ${{ runner.temp }}/uvtools
+          UV_TOOL_BIN_DIR: ${{ runner.temp }}/uvtools/bin
+        run: |
+          "${RUNNER_TEMP}/mountvenv/bin/pytest" tests/test_mcp_npx_wrapper_mount.py \
+            --noconftest -o asyncio_mode=auto -o addopts="" -q
