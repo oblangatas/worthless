@@ -24,9 +24,11 @@ upstream — that failure is the feature. The flow:
    again.
 
 Honest scope: this proves "load-bearing after OpenClaw picks up the
-rewrite", which today means after an OpenClaw restart (we restart in step
-3). The no-restart live-reload is PR-2. OpenClaw is pinned so a release
-that changes routing turns this red on purpose.
+rewrite", which the ``_after_lock`` test does via an OpenClaw restart (step 3).
+The no-restart live-reload (WOR-756, formerly "PR-2") now also lives here:
+``test_gateway_hot_reloads_baseurl_without_restart`` and
+``test_real_openclaw_logs_match_the_reload_matcher``. OpenClaw is pinned so a
+release that changes routing OR its reload-log strings turns these red on purpose.
 
 Marks: ``openclaw`` + ``docker``; skipped when Docker is unavailable. Heavy
 (builds the proxy image, boots three containers, restarts OpenClaw, stops
@@ -39,6 +41,7 @@ import json
 import subprocess
 import time
 import uuid
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -46,7 +49,7 @@ import pytest
 
 from tests._docker_helpers import docker_available, docker_exec, wait_healthy
 from tests.helpers import fake_openai_key
-from worthless.cli.commands.lock import _make_alias
+from worthless.cli.commands.lock import _classify_reload_lines, _make_alias
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 COMPOSE_FILE = REPO_ROOT / "tests" / "openclaw" / "docker-compose.yml"
@@ -223,6 +226,165 @@ def loaded_stack():
             ],
             timeout=90,
         )
+
+
+def test_gateway_hot_reloads_baseurl_without_restart(loaded_stack):
+    """WOR-756 (PR-2, the no-restart proof): the RUNNING gateway picks up a
+    ``baseUrl`` change with NO restart.
+
+    The sibling load-bearing test restarts OpenClaw to apply config (docstring
+    step 3). This one proves the restart is unnecessary: flip the provider
+    ``baseUrl`` to an unrecognized proxy alias (routing must BREAK) and then back
+    (routing must be RESTORED) — both without restarting OpenClaw. Each flip is
+    only observable if the live gateway hot-reloaded ``openclaw.json``.
+
+    Runs before the load-bearing test (which stops/starts the proxy); restores
+    ``baseUrl`` in ``finally`` so it leaves the shared stack as it found it.
+    """
+    oc = loaded_stack["oc"]
+    mock_port = loaded_stack["mock_port"]
+    fake_key = loaded_stack["fake_key"]
+    alias = _make_alias("openai", fake_key)
+    good = f"http://worthless-proxy:8787/{alias}/v1"
+    bogus = f"http://worthless-proxy:8787/bogus-{alias}/v1"
+
+    try:
+        # 0. Precondition: baseline (post-restart, valid alias) reaches the mock.
+        _clear(mock_port)
+        assert _route(oc).returncode == 0, "baseline turn failed — stack precondition broken"
+        assert _captured(mock_port), "baseline routing broken — stack precondition failed"
+
+        # 1. Point baseUrl at an UNKNOWN alias, NO restart. A hot-reloading
+        #    gateway now dials the unknown alias, which the proxy rejects, so the
+        #    mock is NOT reached. (A gateway that did NOT reload would keep hitting
+        #    the valid alias and the mock WOULD be reached — the discriminating
+        #    assertion.)
+        assert _oc(oc, "config", "set", "models.providers.openai.baseUrl", bogus).returncode == 0
+        time.sleep(3)  # let the in-process hot-reload settle (~100ms; margin for slow CI)
+        _clear(mock_port)
+        _route(oc)
+        assert _captured(mock_port) == [], (
+            "mock was reached after pointing baseUrl at an unknown alias with NO "
+            "restart — the running gateway did NOT hot-reload the change (WOR-756 "
+            "regression: lock's [OK] would be a lie without a manual restart)."
+        )
+
+        # 2. Point baseUrl BACK to the valid alias, NO restart. Routing restored
+        #    with the real key reconstructed by the proxy → the live gateway
+        #    hot-reloaded a second time.
+        assert _oc(oc, "config", "set", "models.providers.openai.baseUrl", good).returncode == 0
+        time.sleep(3)
+        _clear(mock_port)
+        assert _route(oc).returncode == 0, "turn failed after restoring baseUrl"
+        auths = " ".join(e.get("authorization", "") for e in _captured(mock_port))
+        assert fake_key in auths, (
+            "routing not restored after pointing baseUrl back with no restart — "
+            "the gateway did not hot-reload the recovery."
+        )
+    finally:
+        # Leave the shared stack pointing at the valid alias for the next test.
+        _oc(oc, "config", "set", "models.providers.openai.baseUrl", good)
+
+
+def test_real_openclaw_logs_match_the_reload_matcher(loaded_stack):
+    """WOR-756 anti-self-reference guard (closes the gap Jenny flagged): the 12
+    unit tests fabricate ``openclaw logs --json`` from the SAME strings the code
+    matches — a closed loop that stays green even if the real image's event
+    strings drift. This drives a REAL config change on the pinned container and
+    feeds its ACTUAL log output through the exact production classifier
+    (:func:`_classify_reload_lines`).
+
+    If OpenClaw's ``gateway/reload`` subsystem or message prefix ever changes,
+    this turns RED — instead of ``_confirm_openclaw_reload`` silently degrading
+    to ``"skipped"`` forever in production (which would make the AC3 exit-92 path
+    unreachable and the AC2 gate a no-op while lock still prints ``[OK]``).
+    """
+    oc = loaded_stack["oc"]
+    fake_key = loaded_stack["fake_key"]
+    alias = _make_alias("openai", fake_key)
+    good = f"http://worthless-proxy:8787/{alias}/v1"
+
+    try:
+        # Floor for "fresh" events derived from the CONTAINER's clock, not the
+        # host's: Docker Desktop's Linux VM clock drifts from the macOS host, and
+        # the events are timestamped by the container. (Production is immune —
+        # lock and the openclaw gateway are co-located on one clock.)
+        c_now = _run(["docker", "exec", oc, "date", "-u", "+%Y-%m-%dT%H:%M:%S+00:00"], check=True)
+        since = datetime.fromisoformat(c_now.stdout.strip()) - timedelta(seconds=2)
+        # A real config write → a real gateway hot-reload event on the pinned image.
+        assert (
+            _oc(
+                oc, "config", "set", "models.providers.openai.baseUrl", f"{good}?probe=matcher"
+            ).returncode
+            == 0
+        )
+        time.sleep(6)  # F6: the logs RPC lags the in-process apply by ~3-5s.
+
+        logs = _oc(oc, "logs", "--json", "--limit", "500", "--plain")
+        assert logs.returncode == 0, f"`openclaw logs` failed: {logs.stderr[-400:]}"
+        applied, rejected = _classify_reload_lines(logs.stdout.splitlines(), since)
+        assert applied and not rejected, (
+            "The pinned OpenClaw image's gateway/reload log strings no longer match "
+            "the production matcher (lock.py _RELOAD_SUBSYSTEM / _RELOAD_APPLIED_MARKER). "
+            "_confirm_openclaw_reload would silently return 'skipped' in production, "
+            "making lock's [OK] a lie. Re-verify against the image and update the "
+            f"constants.\nlogs tail:\n{logs.stdout[-900:]}"
+        )
+    finally:
+        _oc(oc, "config", "set", "models.providers.openai.baseUrl", good)
+
+
+def test_real_openclaw_logs_match_the_reject_marker(loaded_stack):
+    """WOR-756 reject-path mirror of the matcher test (closes the gap TCV
+    flagged): the exit-92 path fires only when the REAL image emits
+    ``config reload skipped (invalid config)``. Prove that marker against the
+    live image the same way the applied marker is proven — otherwise a drift in
+    the reject string silently turns exit-92 into ``skipped`` → ``[OK]``, exactly
+    the fail-loud guarantee this PR exists to make real.
+
+    Induce a genuinely schema-invalid config by writing ``baseUrl`` as an integer
+    STRAIGHT into openclaw.json — ``openclaw config set`` validates and would
+    reject it before the write, so we bypass it to reach the gateway's reload.
+    The gateway skips the invalid reload (keeping the last-valid config in
+    memory) and logs the reject event; the file is restored from a backup.
+    """
+    oc = loaded_stack["oc"]
+    cfg = "/home/node/.openclaw/openclaw.json"
+    backup = "/tmp/oc-good.json"  # noqa: S108 — path inside the container, not the host
+    try:
+        assert _dexec(oc, ["cp", cfg, backup]).returncode == 0
+        c_now = _run(["docker", "exec", oc, "date", "-u", "+%Y-%m-%dT%H:%M:%S+00:00"], check=True)
+        since = datetime.fromisoformat(c_now.stdout.strip()) - timedelta(seconds=2)
+        # node is guaranteed present (it's a node app); corrupt baseUrl to an int.
+        corrupt = (
+            f"const fs=require('fs');const d=JSON.parse(fs.readFileSync('{cfg}'));"
+            "d.models.providers.openai.baseUrl=12345;"
+            f"fs.writeFileSync('{cfg}',JSON.stringify(d))"
+        )
+        assert _dexec(oc, ["node", "-e", corrupt]).returncode == 0
+        time.sleep(6)  # F6: the gateway logs the reject event.
+
+        # `openclaw logs` loads config to reach the gateway, so it can't run while
+        # the config is schema-invalid — restore the valid file first. That also
+        # emits a fresh APPLIED event, so we assert only that the REJECT marker was
+        # seen (its co-occurrence with applied is expected and harmless).
+        assert _dexec(oc, ["cp", backup, cfg]).returncode == 0
+        time.sleep(6)
+        logs = _oc(oc, "logs", "--json", "--limit", "500", "--plain")
+        assert logs.returncode == 0, f"`openclaw logs` failed: {logs.stderr[-400:]}"
+        _applied, rejected = _classify_reload_lines(logs.stdout.splitlines(), since)
+        tail = logs.stdout[-1100:]
+        assert rejected, (
+            "The pinned OpenClaw image did not emit the reject marker the production "
+            "classifier matches (lock.py _RELOAD_REJECTED_MARKER). "
+            "_confirm_openclaw_reload would return 'skipped' instead of 'fail' on a "
+            "rejected config, so lock would print [OK]+advisory (exit 0) instead of "
+            f"exit 92. Re-verify against the image and update the marker.\nlogs tail:\n{tail}"
+        )
+    finally:
+        # Belt-and-suspenders: ensure the valid config is in place for siblings.
+        _dexec(oc, ["cp", backup, cfg])
+        time.sleep(2)
 
 
 def test_proxy_is_load_bearing_after_lock(loaded_stack):

@@ -26,6 +26,47 @@ def test_classify_fail_returns_error_with_routing_message() -> None:
     assert "openclaw" in summary.lower() or "lock" in summary.lower()
 
 
+def test_classify_reload_rejected_describes_the_reject_not_a_proxy_probe() -> None:
+    """WOR-756: a ``fail`` with reason ``reload_rejected`` means the gateway
+    rejected the config BEFORE any probe ran — the message must say that, not
+    the generic 'the test request reached the proxy' (which never happened)."""
+    sentinel = {
+        "bind_confirmation": {
+            "status": "fail",
+            "reason": "reload_rejected",
+            "delta": 0,
+            "reached": 0,
+        },
+    }
+    status, summary = bind_confirmation._classify(sentinel)
+    assert status == "error"
+    low = summary.lower()
+    assert "reject" in low, summary
+    # Must NOT reuse the probe-reached-the-proxy framing for a pre-probe reject.
+    assert "reached the proxy" not in low, summary
+
+
+def test_remediation_no_longer_tells_user_to_restart_openclaw_daemon() -> None:
+    """WOR-756 regression guard: OpenClaw auto-hot-reloads, so the old
+    'restart OpenClaw('s)? daemon' advice is now WRONG. Guard both the doctor
+    fail summary and the shared remediation string so they can't silently
+    revert to instructing a manual restart."""
+    from worthless.cli.commands.doctor.checks import _remediation
+
+    fail_sentinel = {"bind_confirmation": {"status": "fail", "delta": 0, "reached": 1}}
+    _, summary = bind_confirmation._classify(fail_sentinel)
+    remediation = _remediation.PLAYBOOKS["bind_confirmation"]
+
+    for text in (summary, remediation):
+        low = text.lower()
+        assert "restart openclaw" not in low, f"stale manual-restart advice resurfaced: {text!r}"
+        assert "restart" not in low or "re-run" in low, (
+            f"remediation still leans on a manual restart: {text!r}"
+        )
+    # The corrected guidance points at re-running lock / worthless doctor.
+    assert "worthless lock" in remediation
+
+
 def test_classify_skipped_unrecognised_returns_warn_with_squatter_hint() -> None:
     """proxy_unrecognised → warn (not error) + a message pointing at the
     foreign service on the port."""

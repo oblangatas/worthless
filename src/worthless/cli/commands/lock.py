@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import re
 import signal
 import stat
+import subprocess  # nosec B404
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import NamedTuple
 from pathlib import Path
 
@@ -920,6 +923,199 @@ def _classify_bind_per_alias(
     }
 
 
+# WOR-756: OpenClaw's gateway subsystem that emits config-reload events, and the
+# two message markers that classify a reload. Empirically characterized against
+# ghcr.io/openclaw/openclaw:2026.5.3-1 (2026-07-10) — see the WOR-756 engineering
+# report. Matched as SUBSTRINGS, not prefixes: the live logger prepends a
+# ``{"subsystem":"gateway/reload"} `` tag to the message, so the marker sits mid-
+# string (a real-image e2e proves the match; a startswith() here silently made the
+# whole check a no-op). These strings are OpenClaw-internal and version-coupled:
+# the image is pinned, and a bump must re-verify them (the e2e test turns red).
+_RELOAD_SUBSYSTEM = "gateway/reload"
+_RELOAD_APPLIED_MARKER = "config hot reload applied"
+_RELOAD_REJECTED_MARKER = "config reload skipped (invalid config)"
+
+
+def _parse_log_event_time(raw: object) -> datetime | None:
+    """Parse an ``openclaw logs --json`` event ``time`` to an **aware** datetime.
+
+    Robust to three real-world shapes so the comparison in
+    :func:`_classify_reload_lines` never raises (a naive-vs-aware ``<`` throws
+    ``TypeError``, which would crash ``worthless lock`` *after* its writes
+    committed — violating this function's never-raise contract):
+
+    * ``Z`` suffix — ``fromisoformat`` pre-3.11 rejects it.
+    * missing offset — a naive result is coerced to UTC, never returned bare.
+    * fractional seconds of any width — pre-3.11 ``fromisoformat`` accepts only
+      0/3/6 digits, so normalise to exactly 6 (Go loggers emit trimmed nanos).
+
+    Returns ``None`` for anything still unparsable so a garbage line is skipped.
+    """
+    if not isinstance(raw, str):
+        return None
+    text = raw.strip().replace("Z", "+00:00")
+    # Normalise the fractional-seconds field to exactly 6 digits (pad or trim)
+    # so Python 3.10's stricter fromisoformat accepts widths like .12 or .123456789.
+    frac = re.search(r"\.(\d+)", text)
+    if frac:
+        text = f"{text[: frac.start()]}.{(frac.group(1) + '000000')[:6]}{text[frac.end() :]}"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _reload_event_kind(message: str) -> str | None:
+    """Classify one subsystem-authenticated ``gateway/reload`` event message.
+
+    ``"rejected"`` — an invalid-config reload. Checked FIRST and on the marker
+    ALONE (independent of the "models" token): a structural rejection may report
+    "… invalid config: JSON parse error …" that never names "models", MISSING a
+    real rejection (→ skipped → ``[OK]``) is the unsafe direction, and checking
+    it first resolves a coalesced "applied (…); skipped (invalid config)" to
+    reject, not pass.
+
+    ``"applied"`` — a models reload landed. Requires the "models" subtree:
+    apply_lock writes the whole config once, so OpenClaw may coalesce to a single
+    "…(models)" event. This proves a fresh models reload landed after our write,
+    not that this specific baseUrl value took (per-alias routing is the
+    bind-confirmation's job; the live e2e proves actual routing).
+
+    ``None`` — neither. Markers are substrings because the live message is
+    prefixed with a ``{"subsystem":"gateway/reload"} `` tag, but they are matched
+    only INSIDE an already subsystem-authenticated event, never as a raw grep.
+    """
+    if _RELOAD_REJECTED_MARKER in message:
+        return "rejected"
+    if "models" in message and _RELOAD_APPLIED_MARKER in message:
+        return "applied"
+    return None
+
+
+def _classify_reload_lines(lines: list[str], since_ts: datetime) -> tuple[bool, bool]:
+    """Pure classifier over ``openclaw logs --json`` lines: did the gateway APPLY
+    or REJECT a models reload *after* ``since_ts``? Returns
+    ``(saw_applied, saw_rejected)``; malformed lines are skipped, never raise.
+
+    Split out from the subprocess call (:func:`_scan_reload_events`) on purpose:
+    a real-image e2e feeds the pinned container's ACTUAL captured log output
+    through this exact matcher, so a silent drift in OpenClaw's event strings
+    turns a test red instead of degrading the live check to a no-op (WOR-756).
+    """
+    saw_applied = saw_rejected = False
+    for raw in lines:
+        line = raw.strip()
+        if not line.startswith("{"):
+            continue  # the "Log file: …" header and any non-JSON noise
+        try:
+            event = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(event, dict) or event.get("subsystem") != _RELOAD_SUBSYSTEM:
+            continue
+        when = _parse_log_event_time(event.get("time"))
+        if when is None or when < since_ts:
+            continue  # stale event from a prior lock — must not count
+        kind = _reload_event_kind(str(event.get("message", "")))
+        if kind == "rejected":
+            saw_rejected = True
+        elif kind == "applied":
+            saw_applied = True
+    return (saw_applied, saw_rejected)
+
+
+def _scan_reload_events(bin_path: object, since_ts: datetime) -> tuple[bool, bool]:
+    """One poll of ``openclaw logs --json`` → :func:`_classify_reload_lines`.
+
+    Best-effort: a subprocess error yields ``(False, False)`` for that poll,
+    never raises — the caller keeps polling until its deadline.
+    """
+    try:
+        probe = subprocess.run(  # noqa: S603  # nosec B603 — cmd[0] validated absolute by resolve_openclaw_bin
+            [str(bin_path), "logs", "--json", "--limit", "500", "--plain"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return (False, False)
+    if probe.returncode != 0:
+        return (False, False)
+    return _classify_reload_lines(probe.stdout.splitlines(), since_ts)
+
+
+def _confirm_openclaw_reload(
+    *,
+    since_ts: datetime,
+    timeout: float = 15.0,
+    poll_interval: float = 0.75,
+) -> str:
+    """WOR-756: observe that the RUNNING OpenClaw gateway performed a fresh
+    models reload after lock's baseUrl write.
+
+    Honest scope: this is a benign-integrity check ("did the live gateway pick
+    up my write?"), NOT an anti-adversarial control and NOT per-write
+    correlation. It confirms *a* fresh ``gateway/reload`` applied-models event,
+    not that this specific ``baseUrl`` value routes — per-alias routing is the
+    bind-confirmation's job and the live e2e proves actual traffic. Under the
+    same-UID threat model a local attacker owns the log anyway (see the security
+    review); the value here is catching a stale/stuck gateway, not an attacker.
+
+    Polls ``openclaw logs --json`` for a ``gateway/reload`` event newer than
+    ``since_ts`` (captured by the caller *before* ``apply_lock``'s write, so a
+    stale historical reload is normally excluded). Tri-state, mirroring
+    :func:`_confirm_bind`:
+
+    * ``"pass"``    — a fresh "config hot reload applied (models…)" event: the
+      live gateway performed a models reload after our write.
+    * ``"fail"``    — a fresh "config reload skipped (invalid config)…" event:
+      the gateway actively REJECTED it (silent-bypass class, exit 92).
+    * ``"skipped"`` — inconclusive: nothing seen before the deadline, OR the
+      ``openclaw`` binary is absent. Not a failure.
+
+    Why a log poll and not ``config get``: ``config get`` reads the *file* lock
+    just wrote — a guaranteed false pass (WOR-756 report §F3). The live-state RPC
+    queries (``models.status`` etc.) are gated behind device pairing worthless
+    has no way to obtain (§F4). The reload log event is the only observable,
+    unpaired, in-band signal. The RPC log-tail lags the in-process apply by a few
+    seconds, hence the ≥10s default timeout (§F6).
+
+    Binary-absent policy mirrors the audit gate's set-vs-unset split:
+    ``WORTHLESS_OPENCLAW_BIN`` set-but-unresolvable → ``"fail"`` (a configured
+    path that's broken is an error); unset → ``"skipped"`` (openclaw may not be
+    co-located, and lock must not be blocked for that).
+
+    Clock assumption: ``since_ts`` (host clock) and the event timestamps
+    (gateway clock) must come from the same clock, which they do under the
+    co-location assumption (lock and the gateway share a host). A cross-clock
+    deployment is NOT purely fail-safe: if the gateway clock runs *ahead* of the
+    host, a prior lock's reload can carry ``time > since_ts`` and be judged
+    fresh → a false ``"pass"``. That only downgrades an advisory to a green on a
+    benign-integrity check (never a real ``"fail"`` → ``"pass"``), and
+    co-location prevents it — but it is a false-pass window, not a safe one, so
+    do not rely on this check across clocks.
+    """
+    try:
+        bin_path = _oc_audit.resolve_openclaw_bin()
+    except _oc_audit.AuditGateError:
+        return "fail" if os.environ.get("WORTHLESS_OPENCLAW_BIN") else "skipped"
+
+    deadline = time.monotonic() + timeout
+    while True:
+        saw_applied, saw_rejected = _scan_reload_events(bin_path, since_ts)
+        if saw_rejected:
+            return "fail"
+        if saw_applied:
+            return "pass"
+        if time.monotonic() >= deadline:
+            return "skipped"
+        time.sleep(poll_interval)
+
+
 def _confirm_bind(
     planned: list[_PlannedUpdate],
     *,
@@ -1092,6 +1288,84 @@ def _confirm_bind(
     }
 
 
+def _print_openclaw_success_block(
+    console,  # noqa: ANN001 — Console type is opaque from this layer
+    result,  # noqa: ANN001 — OpenclawApplyResult is opaque from this layer
+    *,
+    adoption_skipped: bool,
+    reload_status: str,
+) -> None:
+    """WOR-650/756: the user-visible ``[OK]``/``[WARN]`` block for a lock whose
+    reload did NOT fail. Split out to keep :func:`_finalise_openclaw_success`
+    under the xenon complexity ceiling."""
+    if adoption_skipped:
+        console.print_warning(
+            "[WARN] OpenClaw integration incomplete — an entry was left in place:"
+        )
+    else:
+        console.print_success("[OK] OpenClaw integration:")
+    for provider_name in result.providers_set:
+        console.print_hint(f"   • ~/.openclaw/openclaw.json — added provider '{provider_name}'")
+    if result.skill_installed:
+        console.print_hint("   • ~/.openclaw/workspace/skills/worthless/ — installed skill")
+    console.print_hint("   • Undo: worthless unlock")
+    # WOR-756: reload couldn't be positively confirmed (openclaw binary not
+    # co-located, or no reload event before the deadline). Not a failure —
+    # OpenClaw reloads automatically — but say so honestly so the user can
+    # self-check rather than assume a proven route.
+    if reload_status == "skipped":
+        console.print_hint(
+            "   • Couldn't confirm OpenClaw picked up the change; if the next "
+            "chat still bypasses the proxy, run `worthless doctor`."
+        )
+    # WOR-650: tell the user when an unrecognized entry was adopted or skipped.
+    # The detail strings already name the benign cause and the --adopt remedy;
+    # on the normal recognized/real-key path there are no adoption events so
+    # this is silent.
+    for event in result.events:
+        if event.code in _ADOPTION_EVENT_CODES:
+            console.print_hint(f"   • {event.detail}")
+
+
+def _emit_reload_rejected(
+    console,  # noqa: ANN001 — Console type is opaque from this layer
+    quiet: bool,
+    home: WorthlessHome,
+    result,  # noqa: ANN001 — OpenclawApplyResult is opaque from this layer
+    confirmed_planned: list[_PlannedUpdate],
+) -> None:
+    """WOR-756: user-visible + sentinel side of a REJECTED reload (exit-92 path).
+
+    Split from :func:`_finalise_openclaw_success` to keep it under the xenon
+    complexity ceiling. The gateway rejected apply_lock's config (a fresh
+    "config reload skipped (invalid config)" event), so lock must not claim
+    ``[OK]`` — it writes a DEGRADED sentinel and prints the recovery path.
+    """
+    if not quiet:
+        console.print_failure(
+            "[FAIL] OpenClaw reload: the running gateway rejected the new "
+            "configuration, so it is NOT routing through the proxy."
+        )
+        console.print_warning(
+            "   Re-run `worthless lock` to re-confirm, or `worthless unlock` "
+            "to roll back. `worthless doctor` will tell you which."
+        )
+    _write_lock_sentinel(
+        home,
+        status="partial",
+        openclaw="failed",
+        alias_count=len(result.providers_set),
+        events=tuple(e.to_dict() for e in result.events),
+        bind_confirmation={
+            "status": "fail",
+            "reason": "reload_rejected",
+            "delta": 0,
+            "aliases": [p.alias for p in confirmed_planned],
+            "reached": 0,
+        },
+    )
+
+
 def _finalise_openclaw_success(
     planned: list[_PlannedUpdate],
     result,  # noqa: ANN001 — OpenclawApplyResult is opaque from this layer
@@ -1100,12 +1374,18 @@ def _finalise_openclaw_success(
     home: WorthlessHome,
     *,
     proxy_host: str,
+    reload_since_ts: datetime,
 ) -> int:
     """WOR-658: finalise the success branch of ``_apply_openclaw``.
 
-    Runs bind-confirmation, writes the sentinel with the correct paired
-    ``status``/``openclaw`` state, prints the user-visible result block,
-    and returns the exit code (0 on success, 91 on bind-fail).
+    Runs reload-confirmation, bind-confirmation, writes the sentinel with the
+    correct paired ``status``/``openclaw`` state, prints the user-visible
+    result block, and returns the exit code (0 on success, 92 on reload-fail,
+    91 on bind-fail).
+
+    ``reload_since_ts`` is captured by the caller *before* ``apply_lock``'s
+    write so :func:`_confirm_openclaw_reload` only counts a reload event that
+    post-dates our config change (WOR-756).
 
     WOR-650 follow-up: if an unrecognized entry was left in place (adoption
     declined / DB snapshot unavailable without --adopt), the header is
@@ -1126,25 +1406,35 @@ def _finalise_openclaw_success(
         reason == "unrecognized_not_adopted" for _, reason in result.providers_skipped
     )
 
+    # WOR-650 follow-up: confirm ONLY the providers we actually wrote. A
+    # skipped (unadopted) provider's entry still points elsewhere, so probing
+    # its alias would tick the counter and read as a (misleading) "pass".
+    set_providers = set(result.providers_set)
+    confirmed_planned = [p for p in planned if p.provider in set_providers]
+
+    # WOR-756: prove the RUNNING OpenClaw gateway APPLIED apply_lock's baseUrl
+    # write before we claim success. OpenClaw hot-reloads models config on write
+    # (no restart) and logs a gateway/reload event; we poll for one newer than
+    # our write. Tri-state (empirically grounded — see the WOR-756 report):
+    #   fail    → the gateway REJECTED the config (invalid-config reload event);
+    #             block [OK], DEGRADED sentinel, exit 92.
+    #   skipped → inconclusive (binary not co-located, or no event before the
+    #             deadline). NOT a failure — proceed, but add a doctor advisory.
+    #   pass    → a fresh reload-applied event; proceed clean.
+    reload_status = (
+        _confirm_openclaw_reload(since_ts=reload_since_ts) if confirmed_planned else "pass"
+    )
+    if reload_status == "fail":
+        # 92 = RELOAD_FAILED. Distinct from 91 (bind-confirmation refusal —
+        # config was live but not routing) so scripts/agents can tell "OpenClaw
+        # rejected the write" from "took it but isn't routing".
+        _emit_reload_rejected(console, quiet, home, result, confirmed_planned)
+        return 92
+
     if not quiet:
-        if adoption_skipped:
-            console.print_warning(
-                "[WARN] OpenClaw integration incomplete — an entry was left in place:"
-            )
-        else:
-            console.print_success("[OK] OpenClaw integration:")
-        for provider_name in result.providers_set:
-            console.print_hint(f"   • ~/.openclaw/openclaw.json — added provider '{provider_name}'")
-        if result.skill_installed:
-            console.print_hint("   • ~/.openclaw/workspace/skills/worthless/ — installed skill")
-        console.print_hint("   • Undo: worthless unlock")
-        # WOR-650: tell the user when an unrecognized entry was adopted or
-        # skipped. The detail strings already name the benign cause and the
-        # --adopt remedy; on the normal recognized/real-key path there are no
-        # adoption events so this is silent.
-        for event in result.events:
-            if event.code in _ADOPTION_EVENT_CODES:
-                console.print_hint(f"   • {event.detail}")
+        _print_openclaw_success_block(
+            console, result, adoption_skipped=adoption_skipped, reload_status=reload_status
+        )
 
     # WOR-658: fire a self-test probe at the proxy for each written alias. A
     # "fail" here means the proxy didn't acknowledge the probe — the entry
@@ -1152,12 +1442,6 @@ def _finalise_openclaw_success(
     # this checks proxy reachability + per-alias acknowledgment, NOT that
     # OpenClaw's rewrite is a working route (see _classify_bind_per_alias); the
     # live e2e tests prove actual routing.
-    #
-    # WOR-650 follow-up: confirm ONLY the providers we actually wrote. A
-    # skipped (unadopted) provider's entry still points elsewhere, so probing
-    # its alias would tick the counter and read as a (misleading) "pass".
-    set_providers = set(result.providers_set)
-    confirmed_planned = [p for p in planned if p.provider in set_providers]
     bind_confirmation = _confirm_bind(confirmed_planned, host=proxy_host, port=resolve_port(None))
     # Bind-fail is a partial-success state at the trust layer:
     # lock-core wrote the .env + DB, but the OpenClaw config isn't
@@ -1192,7 +1476,7 @@ def _finalise_openclaw_success(
                 "routing — do NOT trust this lock."
             )
             console.print_warning(
-                "   Recover: restart OpenClaw + re-run `worthless lock`, "
+                "   Recover: re-run `worthless lock` to re-confirm, "
                 "or `worthless unlock` to roll back. "
                 "`worthless doctor` will tell you which."
             )
@@ -1320,6 +1604,10 @@ def _apply_openclaw(
     # write the Docker-internal service name (e.g. "proxy") instead of
     # 127.0.0.1, which is unreachable inside the openclaw container.
     _proxy_host, proxy_base_url = _openclaw_proxy_base_url()
+    # WOR-756: stamp the instant BEFORE the write so the reload-confirmation poll
+    # only counts a gateway reload event that post-dates our config change (the
+    # log tail also contains reloads from prior locks).
+    reload_since_ts = datetime.now(timezone.utc)
     try:
         result = _openclaw_integration.apply_lock(
             planned_updates=triples,
@@ -1349,7 +1637,13 @@ def _apply_openclaw(
     # call this property.
     if not result.has_failure:
         return _finalise_openclaw_success(
-            planned, result, console, quiet, home, proxy_host=_proxy_host
+            planned,
+            result,
+            console,
+            quiet,
+            home,
+            proxy_host=_proxy_host,
+            reload_since_ts=reload_since_ts,
         )
 
     # Detected + failed: the trust-failure path. Print [FAIL] block, write

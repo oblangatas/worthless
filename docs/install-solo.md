@@ -1,6 +1,6 @@
 ---
 title: "Install — Solo Developer"
-description: "Install Worthless on your laptop in under 90 seconds."
+description: "Install Worthless on your laptop in one command."
 ---
 
 # Install — Solo Developer
@@ -25,7 +25,13 @@ Your existing code works identically. The proxy reconstructs the key only when t
 
 ## One-line install (curl)
 
-No Python or pipx set up? Install with a single command. The script is version-pinned and verifies a SHA-256 of the download before it runs anything:
+No Python or pipx set up? Install with a single command. The script is
+version-pinned, and verifies the SHA-256 of every sub-installer it fetches
+(e.g. the Astral/`uv` installer) before running it. To check the top-level
+script's own bytes weren't tampered with in transit, compare the
+`X-Worthless-Script-Sha256` response header against what you downloaded —
+see the [install security model](/install-security/) for exactly what that
+does and doesn't prove:
 
 ```bash
 curl -sSL https://worthless.sh | sh
