@@ -672,6 +672,13 @@ class TestConcurrencyAndCorruption:
         env_vars = {
             **os.environ,
             "WORTHLESS_HOME": str(home_dir.base_dir),
+            # Isolate $HOME too — _resolve_home() (openclaw/integration.py)
+            # reads Path.home(), not WORTHLESS_HOME. This duplicates the
+            # autouse _isolate_cli_process_context fixture in this package's
+            # conftest.py (verified: this test passes without this line too)
+            # — kept explicit so this test's isolation doesn't silently
+            # depend on a fixture defined in a different file.
+            "HOME": str(tmp_path),
         }
         cli = _worthless_cli_args()
         cmd = [*cli, "lock", "--env", str(env)]

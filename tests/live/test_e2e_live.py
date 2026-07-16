@@ -175,6 +175,12 @@ class TestOpenAILive:
                 # propagates via **os.environ. Self-documents the
                 # no-keychain-leak contract; defense-in-depth.
                 "WORTHLESS_KEYRING_BACKEND": "null",
+                # Isolate $HOME too — _resolve_home() (openclaw/integration.py)
+                # reads Path.home(), not WORTHLESS_HOME. Without this, a real
+                # ~/.openclaw on the dev machine leaks into this subprocess.
+                # worthless_home is tmp_path / ".worthless", so its parent is
+                # the fresh pytest tmp_path.
+                "HOME": str(worthless_home.parent),
             },
             timeout=90,
             capture_output=True,
@@ -257,6 +263,12 @@ class TestAnthropicLive:
                 # propagates via **os.environ. Self-documents the
                 # no-keychain-leak contract; defense-in-depth.
                 "WORTHLESS_KEYRING_BACKEND": "null",
+                # Isolate $HOME too — _resolve_home() (openclaw/integration.py)
+                # reads Path.home(), not WORTHLESS_HOME. Without this, a real
+                # ~/.openclaw on the dev machine leaks into this subprocess.
+                # worthless_home is tmp_path / ".worthless", so its parent is
+                # the fresh pytest tmp_path.
+                "HOME": str(worthless_home.parent),
             },
             timeout=90,
             capture_output=True,
@@ -375,6 +387,12 @@ class TestWrapBaseUrlInjection:
                 # propagates via **os.environ. Self-documents the
                 # no-keychain-leak contract; defense-in-depth.
                 "WORTHLESS_KEYRING_BACKEND": "null",
+                # Isolate $HOME too — _resolve_home() (openclaw/integration.py)
+                # reads Path.home(), not WORTHLESS_HOME. Without this, a real
+                # ~/.openclaw on the dev machine leaks into this subprocess.
+                # worthless_home is tmp_path / ".worthless", so its parent is
+                # the fresh pytest tmp_path.
+                "HOME": str(worthless_home.parent),
             },
             timeout=45,
             capture_output=True,

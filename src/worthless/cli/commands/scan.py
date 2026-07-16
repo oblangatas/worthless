@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import stat
@@ -23,6 +24,7 @@ from worthless.cli.key_patterns import KEY_PATTERN
 from worthless.cli.dotenv_rewriter import build_enrolled_locations
 from worthless.cli.keystore import PLACEHOLDER_FERNET_KEY
 from worthless.cli.orphans import FIX_PHRASE, PROBLEM_PHRASE, find_orphans
+from worthless.cli.process import disable_core_dumps
 from worthless.cli.scanner import (
     HardcodedUrlFinding,
     ScanFinding,
@@ -110,10 +112,14 @@ def _collect_deep_paths(explicit_paths: list[Path]) -> tuple[list[Path], Path | 
             tmp_path = Path(tmp)
             paths.append(tmp_path)
         except Exception:
-            try:
+            # WOR-277: mkstemp already created `tmp` on disk (possibly with a
+            # partial env dump written) — close the fd AND remove the file,
+            # or a plaintext secrets dump orphans on disk with no caller ever
+            # learning its path to clean it up.
+            with contextlib.suppress(Exception):
                 os.close(fd)
-            except Exception:  # noqa: S110 — fd cleanup on error path; can't recover usefully  # nosec B110
-                pass
+            with contextlib.suppress(OSError):
+                Path(tmp).unlink()
 
     return paths, tmp_path
 
@@ -666,6 +672,10 @@ def register_scan_commands(app: typer.Typer) -> None:
                 f"Unknown format: {fmt!r} (use text, sarif, or json)",
                 exit_code=2,
             )
+
+        # WOR-277: scan reads raw key material from files/env into memory —
+        # disable core dumps before that starts, matching lock/unlock/up/wrap.
+        disable_core_dumps()
 
         tmp_file: Path | None = None
         try:
