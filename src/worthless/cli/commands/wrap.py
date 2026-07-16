@@ -133,19 +133,34 @@ def _list_enrolled_aliases(home: WorthlessHome) -> list[tuple[str, str]]:
         return []
 
     async def _query() -> list[tuple[str, str]]:
+        # Keep a reference to the Connection so the failure path below can join
+        # its worker thread; open it exactly once via `async with`. Awaiting the
+        # connection a second time (e.g. `await db` then `async with db`) would
+        # call Connection._thread.start() twice -> "threads can only be started
+        # once" and leak the still-running thread from the first open.
         db = aiosqlite.connect(str(home.db_path))
         try:
-            await db
+            async with db:
+                cursor = await db.execute(
+                    "SELECT s.key_alias, s.provider "
+                    "FROM shards s "
+                    "JOIN enrollments e ON s.key_alias = e.key_alias "
+                    "ORDER BY s.key_alias"
+                )
+                rows = await cursor.fetchall()
+                return [(str(r[0]), str(r[1])) for r in rows if r[0] and r[1]]
         except BaseException:
-            # aiosqlite's Connection._connect() calls self.stop() on a failed
-            # connect but never awaits the future it returns, so the worker
-            # thread it just started can still be shutting down when this
-            # exception reaches us. Propagating immediately lets asyncio.run()
-            # close our loop before the thread's completion callback can reach
-            # it (RuntimeError: Event loop is closed — the thread crashes
-            # instead of exiting cleanly), which under a busy CI host can
-            # leave it observably alive past a test's thread-leak check. Give
-            # it a bounded window to finish while our loop is still open.
+            # Connection.__await__ starts a worker thread before the sqlite
+            # connect runs. On a FAILED connect, Connection._connect() only
+            # *queues* self.stop() without awaiting the future it returns, so
+            # that thread can still be shutting down when the exception reaches
+            # us. Propagating immediately lets asyncio.run() close our loop
+            # before the thread's completion callback lands (RuntimeError: Event
+            # loop is closed — the thread crashes instead of exiting cleanly),
+            # which under a busy CI host can leave it observably alive past a
+            # test's thread-leak check. Give it a bounded window to finish while
+            # our loop is still open. (The success path needs none of this:
+            # async with -> __aexit__ -> close() awaits the stop future itself.)
             thread = getattr(db, "_thread", None)
             if thread is not None:
                 loop = asyncio.get_event_loop()
@@ -153,15 +168,6 @@ def _list_enrolled_aliases(home: WorthlessHome) -> list[tuple[str, str]]:
                 while thread.is_alive() and loop.time() < deadline:
                     await asyncio.sleep(0.01)
             raise
-        async with db:
-            cursor = await db.execute(
-                "SELECT s.key_alias, s.provider "
-                "FROM shards s "
-                "JOIN enrollments e ON s.key_alias = e.key_alias "
-                "ORDER BY s.key_alias"
-            )
-            rows = await cursor.fetchall()
-            return [(str(r[0]), str(r[1])) for r in rows if r[0] and r[1]]
 
     try:
         return run_sync(_query())
