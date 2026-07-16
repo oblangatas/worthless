@@ -1475,8 +1475,12 @@ def _apply_lock_migrate_legacy_decoy(
         ):
             continue  # a user's own ``worthless-``-named provider, not our decoy — leave it
         try:
-            _config_mod.unset_provider(config_path, decoy_name)
+            # Repoint BEFORE deleting the decoy: a hard crash between the two
+            # writes then leaves an idempotently-recoverable state (decoy still
+            # present → next lock re-heals) rather than a dangling model.primary
+            # pointing at a removed provider that no tooling self-heals.
             _repoint_primary_off_decoy(config_path, provider, decoy_name)
+            _config_mod.unset_provider(config_path, decoy_name)
         except (OSError, OpenclawConfigError) as exc:
             events.append(
                 OpenclawIntegrationEvent(
