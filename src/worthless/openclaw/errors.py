@@ -43,6 +43,8 @@ class OpenclawErrorCode(str, Enum):
     # WOR-777 Layer 2: agent models.json projection rotation (re-lock).
     MODELS_JSON_STALE_REMOVED = "openclaw.models_json_stale_removed"
     MODELS_JSON_STALE_NOT_REMOVED = "openclaw.models_json_stale_not_removed"
+    # WOR-656 F6: a legacy decoy-layout install was auto-healed on lock.
+    LEGACY_DECOY_MIGRATED = "openclaw.legacy_decoy_migrated"
 
 
 @dataclass(frozen=True)
