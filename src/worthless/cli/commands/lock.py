@@ -1316,6 +1316,19 @@ def _print_openclaw_success_block(
     for event in result.events:
         if event.code == OpenclawErrorCode.AGENT_AUTH_STORE_SCRUB_SKIPPED:
             console.print_warning(f"   [WARN] {event.detail}")
+    # WOR-796: a scrub rewrote OpenClaw's OWN credential cache (auth-profiles.json
+    # / models.json) to a SecretRef on disk. A CONFIRMED models-config reload
+    # (reload_status == "pass") proves the new baseUrl ROUTES, but it does NOT
+    # prove OpenClaw evicted the OLD real key from its in-memory credential
+    # snapshot (runtime-snapshot.ts) — models-config reload ≠ credential
+    # eviction. So a restart is still required to drop the cached key, regardless
+    # of reload state. Show it whenever a scrub happened — NEVER suppressed on a
+    # confirmed reload, which would be a false all-clear (CodeRabbit, WOR-796).
+    if any(event.code == OpenclawErrorCode.AGENT_AUTH_STORE_SCRUBBED for event in result.events):
+        console.print_warning(
+            "   [WARN] Scrubbed a cached real key from OpenClaw's agent auth store "
+            "on disk — restart OpenClaw to drop the old key from the running daemon."
+        )
     # WOR-756: reload couldn't be positively confirmed (openclaw binary not
     # co-located, or no reload event before the deadline). Not a failure —
     # OpenClaw reloads automatically — but say so honestly so the user can
@@ -1325,17 +1338,6 @@ def _print_openclaw_success_block(
             "   • Couldn't confirm OpenClaw picked up the change; if the next "
             "chat still bypasses the proxy, run `worthless doctor`."
         )
-        # WOR-796: a scrub rewrote OpenClaw's OWN credential cache on disk. On a
-        # CONFIRMED reload (``pass``) the running daemon has already dropped the
-        # old key, so we stay silent; but here the reload is UNCONFIRMED, so the
-        # cached real key may still be live in the daemon — say so loudly.
-        if any(
-            event.code == OpenclawErrorCode.AGENT_AUTH_STORE_SCRUBBED for event in result.events
-        ):
-            console.print_warning(
-                "   [WARN] Scrubbed a cached real key from OpenClaw's agent auth "
-                "store on disk — restart OpenClaw now to apply it."
-            )
     # WOR-650: tell the user when an unrecognized entry was adopted or skipped.
     # The detail strings already name the benign cause and the --adopt remedy;
     # on the normal recognized/real-key path there are no adoption events so

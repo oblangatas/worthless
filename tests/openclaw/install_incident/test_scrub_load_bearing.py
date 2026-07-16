@@ -341,11 +341,16 @@ def test_lock_scrubs_the_real_key_from_the_real_models_json(scrub_stack):
         f"worthless lock failed:\n{scrub_stack['lock_stdout']}\n{scrub_stack['lock_stderr']}"
     )
     post_key = scrub_stack["post_lock_key"]
-    assert post_key != scrub_stack["real_key"], (
-        "the real key is STILL sitting in the real models.json after lock — "
-        "WOR-796's scrub is NOT real defense-in-depth for the gate-unavailable case"
-    )
     assert scrub_stack["real_key"] not in post_key, "the raw key leaked as a substring"
+    # CodeRabbit: assert the EXACT valid SecretRef, not merely "not the real key".
+    # A deleted apiKey, an empty string, or an invalid (lowercase/malformed) ref
+    # would all satisfy "!= real_key" while leaving the provider broken or — worse
+    # — sending the ref text upstream as a literal. The .env seeds OPENAI_API_KEY
+    # (the shard-A holder), so the scrub must write exactly ``${OPENAI_API_KEY}``.
+    assert post_key == "${OPENAI_API_KEY}", (
+        "scrub must write the exact uppercase SecretRef ${OPENAI_API_KEY}, "
+        f"not {post_key!r} — a broken/empty/invalid ref is not a real fix"
+    )
 
 
 def test_no_real_key_survives_anywhere_under_agents(scrub_stack):

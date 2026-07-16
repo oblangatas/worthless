@@ -28,6 +28,8 @@ import pytest
 
 from worthless.cli.commands import lock as lock_mod
 from worthless.openclaw.audit import AuditGateError
+from worthless.openclaw.errors import OpenclawErrorCode
+from worthless.openclaw.integration import OpenclawIntegrationEvent
 
 UTC = timezone.utc
 
@@ -385,3 +387,30 @@ def test_reload_skipped_proceeds_with_advisory(monkeypatch: pytest.MonkeyPatch, 
     assert bind_ran["v"], "bind-confirmation should still run on inconclusive reload"
     assert any("[OK] OpenClaw integration:" in m for m in console.success)
     assert any("doctor" in m.lower() for m in console.hint + console.warning)
+
+
+@pytest.mark.parametrize("reload_status", ["pass", "skipped"])
+def test_scrub_restart_warning_shows_even_on_confirmed_reload(reload_status: str) -> None:
+    """WOR-796 / CodeRabbit: a confirmed models-config reload proves the new
+    baseUrl ROUTES, but NOT that OpenClaw evicted the cached real key from its
+    in-memory credential snapshot. So the 'restart OpenClaw' warning after a
+    scrub must fire even when reload_status == 'pass' — suppressing it on a
+    confirmed reload would be a false all-clear (the exact bug CodeRabbit caught).
+    """
+    scrub_evt = OpenclawIntegrationEvent(
+        code=OpenclawErrorCode.AGENT_AUTH_STORE_SCRUBBED,
+        level="info",
+        detail="scrubbed cached real key for 'openai'",
+        extra={"provider": "openai"},
+    )
+    console = _Console()
+    lock_mod._print_openclaw_success_block(
+        console,
+        _apply_result(events=(scrub_evt,)),
+        adoption_skipped=False,
+        reload_status=reload_status,
+    )
+    assert any("restart openclaw" in m.lower() for m in console.warning), (
+        f"scrub restart warning must appear on reload_status={reload_status!r} — "
+        "a models-config reload does not prove the cached real key was evicted"
+    )
