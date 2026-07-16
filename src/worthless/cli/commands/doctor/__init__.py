@@ -64,7 +64,12 @@ from worthless.cli.orphans import FIX_PHRASE, PROBLEM_PHRASE, find_orphans, is_o
 from worthless.openclaw import integration as _oc_integration
 from worthless.openclaw import skill as _oc_skill
 from worthless.openclaw.errors import OpenclawIntegrationError
-from worthless.openclaw.integration import IntegrationState, _alias_from_base_url
+from worthless.openclaw.integration import (
+    IntegrationState,
+    _alias_from_base_url,
+    _is_proxy_url,
+    _sanitize_alias_for_log,
+)
 from worthless.storage.repository import EnrollmentRecord, ShardRepository
 from worthless.crypto.splitter import reconstruct_key_fp
 
@@ -336,6 +341,37 @@ def _read_worthless_providers_from_config(config_path: Path) -> dict[str, dict]:
         }
 
     return {}
+
+
+def _check_legacy_decoy_layout(state: IntegrationState, proxy_base_url: str) -> list[str]:
+    """Detect the pre-WOR-647 legacy decoy layout (WOR-656 F6), read-only.
+
+    Old installs left a proxy-shaped ``worthless-<provider>`` decoy entry
+    beside the real ``<provider>``. The current design rewrites the original in
+    place and keeps no decoy, so a lingering ``worthless-*`` entry whose
+    ``baseUrl`` is OUR proxy — host+port-pinned via ``_is_proxy_url``, the SAME
+    gate ``worthless lock`` uses to heal — means the install predates that
+    change. Flag it (advisory) so the user knows a plain ``worthless lock`` will
+    auto-heal it. NEVER mutates the config; the provider name (an
+    attacker-influenceable openclaw.json key) is sanitized before it reaches
+    doctor's output (SR-04 / terminal-injection defense).
+    """
+    config_path = state.config_path
+    if config_path is None:
+        return []
+    findings: list[str] = []
+    for name, entry in _read_worthless_providers_from_config(config_path).items():
+        base_url = entry.get("baseUrl")
+        # Host+port-pinned to OUR proxy — the same gate lock uses to heal, so
+        # this is never a dead-end warning for a user's own worthless-* provider.
+        if not isinstance(base_url, str) or not _is_proxy_url(base_url, proxy_base_url):
+            continue
+        provider = _sanitize_alias_for_log(name[len("worthless-") :])
+        findings.append(
+            f"legacy OpenClaw decoy layout detected for '{provider}' — "
+            f"run `worthless lock` to auto-migrate (read-only; nothing changed)"
+        )
+    return findings
 
 
 def _check_openclaw_apikey_consistency(

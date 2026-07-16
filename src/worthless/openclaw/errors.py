@@ -48,6 +48,8 @@ class OpenclawErrorCode(str, Enum):
     # name isn't a valid uppercase SecretRef id — protection silently degrades
     # unless we say so (openclaw.json still reads "locked").
     AGENT_AUTH_STORE_SCRUB_SKIPPED = "openclaw.agent_auth_store_scrub_skipped"
+    # WOR-656 F6: a legacy decoy-layout install was auto-healed on lock.
+    LEGACY_DECOY_MIGRATED = "openclaw.legacy_decoy_migrated"
 
 
 @dataclass(frozen=True)

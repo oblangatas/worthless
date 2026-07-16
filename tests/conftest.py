@@ -472,6 +472,36 @@ def _isolate_default_command_proxy(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_process_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Suite-wide $HOME/USERPROFILE sandbox for every test process.
+
+    worthless-q1k5 found 8 files hand-copying a "HOME": <tmp_path-derived dir>
+    line into a subprocess/CliRunner env dict because _resolve_home()
+    (openclaw/integration.py) reads Path.home(), not WORTHLESS_HOME. Without
+    isolation, a dev machine with a real ~/.openclaw makes detect().present
+    True inside the test process and trips the F7 proxy-health gate with a
+    failure unrelated to what the test checks. USERPROFILE travels with HOME
+    because native Windows Path.home() checks USERPROFILE first. Promotes
+    tests/cli/conftest.py's _isolate_cli_process_context pattern suite-wide;
+    that fixture still owns chdir, a CLI-package-specific concern this one
+    deliberately doesn't replicate. Unconditional (no ``integration`` opt-out
+    like its neighbors below) — this isn't mocking away real daemon/proxy
+    behavior, it's just keeping Path.home() off the real machine, which
+    matters for integration tests too.
+
+    Directory name is deliberately unusual (not "home") — ``tmp_path / "home"``
+    is already independently used as a local sandbox dir name by ~25 other
+    test files (mostly tests/openclaw/), and this fixture runs before every
+    one of them, so a collision would fail their own ``.mkdir()`` calls.
+    """
+    home = tmp_path / "_isolate_process_home_sandbox"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    return home
+
+
+@pytest.fixture(autouse=True)
 def _default_lock_proxy_probe_healthy(request, monkeypatch):
     """Default the ``lock`` command's proxy pre-flight to "healthy" suite-wide.
 
