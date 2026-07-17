@@ -1770,6 +1770,108 @@ def _apply_lock_scrub_agent_stores(
     )
 
 
+def _repoint_primary_off_decoy(config_path: Path, provider: str, decoy_name: str) -> None:
+    """Repoint the default model off a just-removed decoy.
+
+    ``agents.defaults.model.primary`` of ``worthless-openai/gpt-4o`` becomes
+    ``openai/gpt-4o``. Only fires on an exact ``worthless-<provider>/`` prefix;
+    a primary already pointing at the real provider (or anything else) is left
+    untouched.
+    """
+    data = _config_mod.read_config(config_path)
+    if not isinstance(data, dict):
+        return
+    agents = data.get("agents")
+    defaults = agents.get("defaults") if isinstance(agents, dict) else None
+    model = defaults.get("model") if isinstance(defaults, dict) else None
+    primary = model.get("primary") if isinstance(model, dict) else None
+    prefix = f"{decoy_name}/"
+    if isinstance(primary, str) and primary.startswith(prefix):
+        _config_mod.repoint_model_primary(
+            config_path, old_ref=primary, new_ref=f"{provider}/{primary[len(prefix) :]}"
+        )
+
+
+def _apply_lock_migrate_legacy_decoy(
+    config_path: Path,
+    resolved_proxy_base_url: str,
+    planned_updates: list[tuple[str, str, str]],
+    events: list[OpenclawIntegrationEvent],
+) -> bool:
+    """Heal a legacy decoy-layout install in place (WOR-656 F6).
+
+    Old worthless installs wrote a separate proxy-shaped
+    ``models.providers.worthless-<p>`` decoy beside the UNTOUCHED original
+    ``<p>``. The current design rewrites the original in place (Stage A), so on
+    the next lock we first delete the stale decoy and, when the default model
+    still points at it, repoint ``agents.defaults.model.primary`` back to the
+    real provider.
+
+    Only providers actually being locked this run (``planned_updates``) are
+    considered, and only when the sibling ``worthless-<p>`` entry is one we
+    recognize as OUR proxy decoy (``_is_proxy_url``) — never a user's own
+    ``worthless-``-named provider pointing elsewhere.
+
+    Returns ``True`` when a write failed and the whole transaction must roll
+    back (the caller restores the pre-lock config byte-identically and skips
+    Stage A); ``False`` on success or a clean no-op. NEVER logs the decoy's
+    apiKey (its shard-A half) — SR-04.
+    """
+    for provider, alias, _shard_a in planned_updates:
+        decoy_name = f"worthless-{provider}"
+        try:
+            decoy = _config_mod.get_provider(config_path, decoy_name)
+        except (OSError, OpenclawConfigError):
+            # Can't read the config to look for a decoy. Skip migration and let
+            # Stage A handle it: Stage A surfaces CONFIG_UNREADABLE and aborts
+            # the write byte-identically (WOR-516). Returning rollback here would
+            # SKIP Stage A and swallow that event — re-opening the WOR-516 bug
+            # where an unreadable config could be deleted by a {}-snapshot rollback.
+            return False
+        if not isinstance(decoy, dict):
+            continue  # no decoy for this provider — new-design layout, nothing to heal
+        decoy_base = decoy.get("baseUrl")
+        if not isinstance(decoy_base, str) or not _is_proxy_url(
+            decoy_base, resolved_proxy_base_url
+        ):
+            continue  # a user's own ``worthless-``-named provider, not our decoy — leave it
+        try:
+            # Repoint BEFORE deleting the decoy: a hard crash between the two
+            # writes then leaves an idempotently-recoverable state (decoy still
+            # present → next lock re-heals) rather than a dangling model.primary
+            # pointing at a removed provider that no tooling self-heals.
+            _repoint_primary_off_decoy(config_path, provider, decoy_name)
+            _config_mod.unset_provider(config_path, decoy_name)
+        except (OSError, OpenclawConfigError) as exc:
+            events.append(
+                OpenclawIntegrationEvent(
+                    code=OpenclawErrorCode.WRITE_FAILED,
+                    level="error",
+                    detail=(
+                        f"failed to migrate the legacy '{decoy_name}' decoy — rolling back; "
+                        f"fix the cause and re-run worthless lock ({type(exc).__name__})"
+                    ),
+                    extra={"provider": provider},
+                )
+            )
+            return True
+        events.append(
+            OpenclawIntegrationEvent(
+                code=OpenclawErrorCode.LEGACY_DECOY_MIGRATED,
+                level="info",
+                detail=(
+                    f"healed legacy decoy layout: removed '{decoy_name}'; '{provider}' now "
+                    f"routes through the proxy (alias {_sanitize_alias_for_log(alias)})"
+                ),
+                extra={
+                    "provider": provider,
+                    "alias": _sanitize_alias_for_log(_alias_from_base_url(decoy_base) or ""),
+                },
+            )
+        )
+    return False
+
+
 def apply_lock(
     planned_updates: list[tuple[str, str, str]],
     *,
@@ -1965,18 +2067,33 @@ def apply_lock(
             events=tuple(events),
         )
 
-    # ---- Stage A: write providers ----------------------------------------
-    # F-CFG-13 / DV-01/DV-02 handling is inside _apply_lock_write_providers.
-    # Extracted to keep apply_lock within xenon's complexity budget (rank C).
-    rollback_needed = _apply_lock_write_providers(
+    # ---- Stage A(pre): heal legacy decoy layout (WOR-656 F6) -------------
+    # Old installs wrote a separate ``worthless-<p>`` decoy beside the
+    # untouched original ``<p>``. Delete our stale decoy (and repoint a
+    # decoy-pointing default model) BEFORE Stage A rewrites the original in
+    # place. Runs under apply_lock's existing ``original_config`` rollback
+    # umbrella, so a mid-migration write failure restores byte-identically and
+    # Stage A is skipped.
+    rollback_needed = _apply_lock_migrate_legacy_decoy(
         config_path,
         resolved_proxy_base_url,
         planned_updates,
         events,
-        providers_set,
-        providers_skipped,
-        adoption_policy,
     )
+
+    # ---- Stage A: write providers ----------------------------------------
+    # F-CFG-13 / DV-01/DV-02 handling is inside _apply_lock_write_providers.
+    # Extracted to keep apply_lock within xenon's complexity budget (rank C).
+    if not rollback_needed:
+        rollback_needed = _apply_lock_write_providers(
+            config_path,
+            resolved_proxy_base_url,
+            planned_updates,
+            events,
+            providers_set,
+            providers_skipped,
+            adoption_policy,
+        )
 
     # ---- Transactional rollback on write failure -------------------------
     if rollback_needed:
