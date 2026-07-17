@@ -106,7 +106,7 @@ Install a per-user LaunchAgent that runs foreground `worthless up`
 (sidecar + proxy) at login and restarts on crash:
 
 ```bash
-worthless service install    # writes ~/Library/LaunchAgents/dev.worthless.proxy.plist
+worthless service install    # writes ~/Library/LaunchAgents/sh.worthless.proxy.plist
 worthless service status     # running + /healthz ok
 ```
 

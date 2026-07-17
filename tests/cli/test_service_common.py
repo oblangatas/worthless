@@ -189,7 +189,7 @@ class TestUnitFileMatchesHome:
             unit.chmod(0o600)
 
     def test_matches_launchd_plist_home_key(self, home: WorthlessHome, tmp_path: Path) -> None:
-        plist = tmp_path / "dev.worthless.proxy.plist"
+        plist = tmp_path / "sh.worthless.proxy.plist"
         log_path = home.base_dir / "proxy.log"
         plist.write_text(
             templates.render_launchd_plist(
