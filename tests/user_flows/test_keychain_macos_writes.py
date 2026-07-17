@@ -20,12 +20,19 @@ from pathlib import Path
 
 import pytest
 
-# Real macOS Keychain access needs a GUI to answer the access prompt; the headless
-# CI runner has none, so these writes/probes block until the job times out
-# (worthless-3ynb). Skip on CI — runs locally on macOS dev. Follow-up: ephemeral CI keychain.
+# Real macOS Keychain access needs a GUI to answer the access prompt. On a headless
+# CI runner with a LOCKED login keychain these writes/probes block until the job
+# times out (worthless-3ynb). The user-flows workflow now provisions an ephemeral
+# UNLOCKED keychain on macOS CI (WORTHLESS_TEST_KEYCHAIN_READY=1), so the non-synced
+# tests run there too (worthless-fc14). The @REQUIRES_SYNC_ENTITLEMENT subset still
+# needs a code-signed interpreter and stays skipped. Locally (no CI) they run.
 _ON_CI = os.environ.get("CI") is not None
+_KEYCHAIN_READY = os.environ.get("WORTHLESS_TEST_KEYCHAIN_READY") == "1"
 pytestmark = pytest.mark.skipif(
-    _ON_CI, reason="real macOS Keychain tests hang on headless CI (worthless-3ynb); run locally"
+    _ON_CI and not _KEYCHAIN_READY,
+    reason="real macOS Keychain tests hang on headless CI without an ephemeral "
+    "unlocked keychain (worthless-3ynb / worthless-fc14); run locally or on CI "
+    "with the keychain step",
 )
 
 REQUIRES_DARWIN = pytest.mark.skipif(

@@ -90,6 +90,30 @@ jobs:
         if: steps.detect.outputs.relevant == 'true'
         uses: ./.github/actions/setup-uv-python
 
+      - name: Provision an ephemeral unlocked keychain (macOS)
+        # worthless-fc14: the real-keychain user-flow tests were skipped on CI
+        # (worthless-3ynb) because the headless runner's default login keychain is
+        # locked -> `worthless lock`'s Keychain access blocks on a GUI prompt that
+        # never comes -> the job hangs to timeout. Create a throwaway keychain,
+        # unlock it, and make it the default + search list so python/keyring can
+        # read and write its OWN items without a prompt. The macOS runner is
+        # ephemeral, so this keychain vanishes with it. Only the non-synced tests
+        # are unblocked; the @REQUIRES_SYNC_ENTITLEMENT subset still needs a
+        # code-signed interpreter and stays skipped.
+        if: runner.os == 'macOS' && steps.detect.outputs.relevant == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          KC="$RUNNER_TEMP/wless-ci.keychain-db"
+          security create-keychain -p "" "$KC"
+          security set-keychain-settings "$KC"          # no auto-lock timeout
+          security unlock-keychain -p "" "$KC"
+          # Make our keychain the sole entry in the user search list for this job
+          # (the ephemeral runner needs nothing from the login keychain here).
+          security list-keychains -d user -s "$KC"
+          security default-keychain -s "$KC"
+          echo "WORTHLESS_TEST_KEYCHAIN_READY=1" >> "$GITHUB_ENV"
+
       - name: Run user-flow tests
         if: steps.detect.outputs.relevant == 'true'
         env:
