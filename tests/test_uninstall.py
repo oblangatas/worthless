@@ -771,3 +771,239 @@ def test_uninstall_refuses_on_a_locked_db_mid_restore(
         sqlite3.connect(str(home_dir.db_path)).execute("SELECT COUNT(*) FROM shards").fetchone()[0]
     )
     assert n_shards >= 1, "shard-B deleted despite the recoverable refuse"
+
+
+class TestMcpLeftoverReminder:
+    """worthless-ify0: after a successful uninstall, name a leftover Worthless MCP
+    server entry in the user's editor config so they can remove it — read-only, and
+    ONLY when one actually exists (the ~90% who never set it up aren't nagged).
+    """
+
+    @staticmethod
+    def _uninstall_env(home_dir: WorthlessHome, fake_home) -> dict[str, str]:
+        # Isolate HOME (detection reads ~/.cursor/mcp.json + ~/.claude.json) and
+        # widen the console so a long tmp path in the reminder isn't wrapped.
+        return {
+            "WORTHLESS_HOME": str(home_dir.base_dir),
+            "HOME": str(fake_home),
+            "WORTHLESS_KEYRING_BACKEND": "null",
+            "COLUMNS": "1000",
+        }
+
+    def test_uninstall_names_the_editor_config_holding_a_worthless_mcp_entry(
+        self, home_dir: WorthlessHome, tmp_path, monkeypatch
+    ) -> None:
+        """Proof of fix: with ~/.cursor/mcp.json referencing `worthless-mcp`, a
+        successful uninstall points the user at that exact file to remove.
+        """
+        from tests.helpers import fake_key
+
+        work = tmp_path / "work"
+        work.mkdir()
+        monkeypatch.chdir(work)  # Path.cwd()/.mcp.json must NOT exist / false-match here
+        fake_home = tmp_path / "home"
+        cursor_cfg = fake_home / ".cursor" / "mcp.json"
+        cursor_cfg.parent.mkdir(parents=True)
+        cursor_cfg.write_text(
+            '{"mcpServers":{"worthless":{"command":"npx","args":["-y","worthless-mcp"]}}}'
+        )
+
+        env = work / ".env"
+        env.write_text(f"OPENAI_API_KEY={fake_key('sk-')}\n")
+        locked = runner.invoke(
+            app,
+            ["lock", "--env", str(env)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir), "HOME": str(fake_home)},
+        )
+        assert locked.exit_code == 0, locked.output
+
+        result = runner.invoke(
+            app, ["uninstall", "--yes"], env=self._uninstall_env(home_dir, fake_home)
+        )
+        assert result.exit_code == 0, result.output
+        assert "MCP server" in result.output, "no MCP-leftover reminder printed"
+        assert str(cursor_cfg) in result.output, "reminder must name the exact config file"
+
+    def test_uninstall_is_silent_about_mcp_when_no_config_references_worthless(
+        self, home_dir: WorthlessHome, tmp_path, monkeypatch
+    ) -> None:
+        """No-noise invariant: with no editor MCP config referencing worthless,
+        uninstall says nothing about MCP — no nagging users who never set it up.
+        """
+        from tests.helpers import fake_key
+
+        work = tmp_path / "work"
+        work.mkdir()
+        monkeypatch.chdir(work)
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()  # empty: no .cursor / .claude.json / .mcp.json
+
+        env = work / ".env"
+        env.write_text(f"OPENAI_API_KEY={fake_key('sk-')}\n")
+        runner.invoke(
+            app,
+            ["lock", "--env", str(env)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir), "HOME": str(fake_home)},
+        )
+        result = runner.invoke(
+            app, ["uninstall", "--yes"], env=self._uninstall_env(home_dir, fake_home)
+        )
+        assert result.exit_code == 0, result.output
+        assert "MCP server" not in result.output, "no-noise: MCP reminder must stay silent"
+
+    def test_uninstall_does_not_remind_about_mcp_when_it_refuses(
+        self, home_dir: WorthlessHome, tmp_path, monkeypatch
+    ) -> None:
+        """Placement: the reminder rides the post-wipe path only. A refused
+        uninstall (non-interactive, no --yes) exits 1 and wipes nothing, so even
+        with a worthless MCP entry present, no reminder prints.
+        """
+        from tests.helpers import fake_key
+
+        work = tmp_path / "work"
+        work.mkdir()
+        monkeypatch.chdir(work)
+        fake_home = tmp_path / "home"
+        cursor_cfg = fake_home / ".cursor" / "mcp.json"
+        cursor_cfg.parent.mkdir(parents=True)
+        cursor_cfg.write_text(
+            '{"mcpServers":{"worthless":{"command":"npx","args":["-y","worthless-mcp"]}}}'
+        )
+
+        env = work / ".env"
+        env.write_text(f"OPENAI_API_KEY={fake_key('sk-')}\n")
+        runner.invoke(
+            app,
+            ["lock", "--env", str(env)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir), "HOME": str(fake_home)},
+        )
+        # No --yes + non-interactive stdin (CliRunner) → uninstall REFUSES; nothing wiped.
+        refused = runner.invoke(app, ["uninstall"], env=self._uninstall_env(home_dir, fake_home))
+        assert refused.exit_code == 1, refused.output
+        assert home_dir.base_dir.exists(), "a refused uninstall must not wipe"
+        assert "MCP server" not in refused.output, "reminder must not fire on a refused uninstall"
+
+    def test_uninstall_survives_a_crashing_mcp_check(
+        self, home_dir: WorthlessHome, tmp_path, monkeypatch
+    ) -> None:
+        """The MCP reminder is advisory: if the scan itself raises (deleted cwd,
+        unresolvable HOME), it must NOT flip a completed wipe to a failure.
+        """
+        import worthless.cli.commands.uninstall as uninstall_mod
+        from tests.helpers import fake_key
+
+        env = tmp_path / ".env"
+        env.write_text(f"OPENAI_API_KEY={fake_key('sk-')}\n")
+        runner.invoke(
+            app, ["lock", "--env", str(env)], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
+        )
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("HOME unresolvable / cwd gone")
+
+        monkeypatch.setattr(uninstall_mod, "_mentions_worthless_mcp", _boom)
+
+        result = runner.invoke(
+            app, ["uninstall", "--yes"], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
+        )
+        assert result.exit_code == 0, result.output  # an advisory crash must not fail the uninstall
+        assert not home_dir.base_dir.exists(), "the wipe must still have completed"
+
+    def test_uninstall_names_a_project_scoped_mcp_json_in_the_cwd(
+        self, home_dir: WorthlessHome, tmp_path, monkeypatch
+    ) -> None:
+        """Proof of fix (cwd branch): a project-scoped ./.mcp.json referencing
+        worthless-mcp is detected and named too — not only the ~/.cursor path.
+        """
+        from tests.helpers import fake_key
+
+        work = tmp_path / "work"
+        work.mkdir()
+        monkeypatch.chdir(work)
+        mcp_cfg = work / ".mcp.json"
+        mcp_cfg.write_text(
+            '{"mcpServers":{"worthless":{"command":"npx","args":["-y","worthless-mcp"]}}}'
+        )
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()  # empty: isolate the cwd branch (no ~/.cursor / ~/.claude.json)
+
+        env = work / ".env"
+        env.write_text(f"OPENAI_API_KEY={fake_key('sk-')}\n")
+        runner.invoke(
+            app,
+            ["lock", "--env", str(env)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir), "HOME": str(fake_home)},
+        )
+        result = runner.invoke(
+            app, ["uninstall", "--yes"], env=self._uninstall_env(home_dir, fake_home)
+        )
+        assert result.exit_code == 0, result.output
+        assert "MCP server" in result.output, "cwd .mcp.json must be detected"
+        assert str(mcp_cfg) in result.output, "reminder must name the cwd .mcp.json"
+
+    def test_uninstall_names_a_claude_code_config_with_a_per_project_mcp_block(
+        self, home_dir: WorthlessHome, tmp_path, monkeypatch
+    ) -> None:
+        """Proof of fix (flagship gap): a Claude Code ~/.claude.json — including a
+        per-project mcpServers block — is detected and named, even when uninstall
+        runs from an unrelated directory (the entry lives only in ~/.claude.json).
+        """
+        from tests.helpers import fake_key
+
+        work = tmp_path / "work"
+        work.mkdir()
+        monkeypatch.chdir(work)  # no ./.mcp.json here — entry lives only in ~/.claude.json
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        claude_cfg = fake_home / ".claude.json"
+        claude_cfg.write_text(
+            '{"projects":{"/some/project":{"mcpServers":'
+            '{"worthless":{"command":"npx","args":["-y","worthless-mcp"]}}}}}'
+        )
+
+        env = work / ".env"
+        env.write_text(f"OPENAI_API_KEY={fake_key('sk-')}\n")
+        runner.invoke(
+            app,
+            ["lock", "--env", str(env)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir), "HOME": str(fake_home)},
+        )
+        result = runner.invoke(
+            app, ["uninstall", "--yes"], env=self._uninstall_env(home_dir, fake_home)
+        )
+        assert result.exit_code == 0, result.output
+        assert "MCP server" in result.output, "Claude Code ~/.claude.json must be detected"
+        assert str(claude_cfg) in result.output, "reminder must name ~/.claude.json"
+
+    def test_uninstall_ignores_worthless_mcp_mentioned_outside_mcpservers(
+        self, home_dir: WorthlessHome, tmp_path, monkeypatch
+    ) -> None:
+        """No false positives: ~/.claude.json also stores chat history. A
+        'worthless-mcp' string anywhere but a real mcpServers entry must NOT
+        trigger the reminder — only a declared server does.
+        """
+        from tests.helpers import fake_key
+
+        work = tmp_path / "work"
+        work.mkdir()
+        monkeypatch.chdir(work)
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        # 'worthless-mcp' appears only in history text, never in an mcpServers block.
+        (fake_home / ".claude.json").write_text(
+            '{"mcpServers":{},"history":[{"display":"how do I install worthless-mcp?"}],'
+            '"projects":{"/p":{"mcpServers":{},"history":["worthless-mcp notes"]}}}'
+        )
+
+        env = work / ".env"
+        env.write_text(f"OPENAI_API_KEY={fake_key('sk-')}\n")
+        runner.invoke(
+            app,
+            ["lock", "--env", str(env)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir), "HOME": str(fake_home)},
+        )
+        result = runner.invoke(
+            app, ["uninstall", "--yes"], env=self._uninstall_env(home_dir, fake_home)
+        )
+        assert result.exit_code == 0, result.output
+        assert "MCP server" not in result.output, "chat-history mention must not false-trigger"

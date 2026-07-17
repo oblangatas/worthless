@@ -241,6 +241,7 @@ tier2_wipe() {
         printf "\n  These .env files still hold an inert key half (rotate the keys they used):\n" >&2
         printf '%s\n' "$envs" | sed 's/^/    /' >&2
     fi
+    warn "If you added the Worthless MCP server to your editor, remove its 'worthless' entry from your MCP config (.mcp.json / ~/.cursor/mcp.json)."
     printf "\n  Docs: %s\n" "$UNINSTALL_DOCS_URL"
 }
 
