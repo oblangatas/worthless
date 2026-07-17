@@ -1309,6 +1309,26 @@ def _print_openclaw_success_block(
     if result.skill_installed:
         console.print_hint("   • ~/.openclaw/workspace/skills/worthless/ — installed skill")
     console.print_hint("   • Undo: worthless unlock")
+    # WOR-796 (scrub gap #1): a provider whose key var isn't a valid uppercase
+    # SecretRef id was NOT scrubbed — its cached real key is still live in
+    # OpenClaw's agent store even though openclaw.json reads "locked". Surface it
+    # unconditionally (reload state is irrelevant — nothing was scrubbed for it).
+    for event in result.events:
+        if event.code == OpenclawErrorCode.AGENT_AUTH_STORE_SCRUB_SKIPPED:
+            console.print_warning(f"   [WARN] {event.detail}")
+    # WOR-796: a scrub rewrote OpenClaw's OWN credential cache (auth-profiles.json
+    # / models.json) to a SecretRef on disk. A CONFIRMED models-config reload
+    # (reload_status == "pass") proves the new baseUrl ROUTES, but it does NOT
+    # prove OpenClaw evicted the OLD real key from its in-memory credential
+    # snapshot (runtime-snapshot.ts) — models-config reload ≠ credential
+    # eviction. So a restart is still required to drop the cached key, regardless
+    # of reload state. Show it whenever a scrub happened — NEVER suppressed on a
+    # confirmed reload, which would be a false all-clear (CodeRabbit, WOR-796).
+    if any(event.code == OpenclawErrorCode.AGENT_AUTH_STORE_SCRUBBED for event in result.events):
+        console.print_warning(
+            "   [WARN] Scrubbed a cached real key from OpenClaw's agent auth store "
+            "on disk — restart OpenClaw to drop the old key from the running daemon."
+        )
     # WOR-756: reload couldn't be positively confirmed (openclaw binary not
     # co-located, or no reload event before the deadline). Not a failure —
     # OpenClaw reloads automatically — but say so honestly so the user can
@@ -1604,6 +1624,9 @@ def _apply_openclaw(
     # write the Docker-internal service name (e.g. "proxy") instead of
     # 127.0.0.1, which is unreachable inside the openclaw container.
     _proxy_host, proxy_base_url = _openclaw_proxy_base_url()
+    # WOR-796: the *_API_KEY var name holding shard-A for each alias, so
+    # scrub_agent_auth_stores() can point the agent-cache SecretRef at it.
+    env_var_by_alias = {p.alias: p.var_name for p in planned}
     # WOR-756: stamp the instant BEFORE the write so the reload-confirmation poll
     # only counts a gateway reload event that post-dates our config change (the
     # log tail also contains reloads from prior locks).
@@ -1613,6 +1636,7 @@ def _apply_openclaw(
             planned_updates=triples,
             proxy_base_url=proxy_base_url,
             adoption_policy=adoption_policy,
+            env_var_by_alias=env_var_by_alias,
         )
     except OpenclawIntegrationError as exc:
         # apply_lock's contract is "never raise". If it does, treat as

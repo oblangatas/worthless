@@ -323,6 +323,47 @@ class TestListEnrolledAliasesWithDB:
             assert type(provider) is str, f"provider is {type(provider).__name__}, not str"
 
 
+class TestListEnrolledAliasesConnectionLifecycle:
+    """Regression guards for the aiosqlite connection lifecycle inside
+    _list_enrolled_aliases.
+
+    A prior fix opened the connection twice (``await db`` then ``async with
+    db``). aiosqlite's ``Connection.__await__`` calls ``self._thread.start()``
+    on every await, so the second open raised
+    ``RuntimeError: threads can only be started once`` on every SUCCESSFUL read
+    and leaked the worker thread from the first open — reddening CI (Tests
+    thread-leak) and crashing ``worthless wrap`` (WRTLS-199 -> proxy never
+    starts). These pin the connection-opened-once contract.
+    """
+
+    def test_repeated_calls_never_raise_thread_error(self, home_with_key) -> None:
+        """Calling the helper many times in one process must succeed every
+        time — the double-open bug raised on the first successful read."""
+        for i in range(5):
+            aliases = _list_enrolled_aliases(home_with_key)
+            assert len(aliases) >= 1, f"call {i} returned no aliases"
+
+    def test_no_aiosqlite_worker_thread_leaks(self, home_with_key) -> None:
+        """After a successful read, aiosqlite's ``_connection_worker_thread``
+        must be joined — not left running. Asserts the leak directly instead of
+        relying only on the suite-wide teardown check."""
+
+        def _worker_threads() -> list[threading.Thread]:
+            return [t for t in threading.enumerate() if "_connection_worker_thread" in t.name]
+
+        before = {t.ident for t in _worker_threads()}
+        assert _list_enrolled_aliases(home_with_key), "expected a non-empty read"
+
+        # The clean close awaits aiosqlite's stop future, so the thread should be
+        # gone at once; poll briefly to stay robust on a loaded host.
+        deadline = time.monotonic() + 2.0
+        leaked = [t for t in _worker_threads() if t.ident not in before and t.is_alive()]
+        while leaked and time.monotonic() < deadline:
+            time.sleep(0.01)
+            leaked = [t for t in _worker_threads() if t.ident not in before and t.is_alive()]
+        assert not leaked, f"aiosqlite worker thread leaked: {[t.name for t in leaked]}"
+
+
 class TestListEnrolledAliasesAdversarial:
     """Hostile-input and race-condition probes for _list_enrolled_aliases.
 
