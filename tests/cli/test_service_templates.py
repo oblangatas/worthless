@@ -12,7 +12,7 @@ def test_launchd_plist_contains_managed_env_and_up() -> None:
         log_path="/home/u/.worthless/proxy.log",
         port=8787,
     )
-    assert "dev.worthless.proxy" in content
+    assert "sh.worthless.proxy" in content
     assert "<string>up</string>" in content
     assert "WORTHLESS_SERVICE_MANAGED" in content
     assert "WORTHLESS_HOME" in content

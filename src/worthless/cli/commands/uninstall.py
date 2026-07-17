@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import json
 import logging
 import os
 import shutil
@@ -425,6 +426,61 @@ def _finalize_wipe(console, home, n_restored: int) -> None:  # noqa: ANN001
         )
 
 
+def _mentions_worthless_mcp(path: Path) -> bool:
+    """Read-only: does this editor config DECLARE a Worthless MCP server?
+
+    Parses JSON and inspects only the ``mcpServers`` block(s) — the top-level one
+    plus any per-project blocks under ``projects`` (the shape of ~/.claude.json) —
+    never the whole file. So a stray ``worthless-mcp`` mention elsewhere (e.g. the
+    chat history ~/.claude.json also stores) can't false-trigger the reminder.
+    ``worthless-mcp`` is the npm package name that appears in the server's ``args``
+    (see docs/install-mcp.md). Missing / unreadable / non-JSON → not ours → False.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    blocks = [data.get("mcpServers")]
+    projects = data.get("projects")
+    if isinstance(projects, dict):
+        blocks += [p.get("mcpServers") for p in projects.values() if isinstance(p, dict)]
+    return any(isinstance(b, dict) and "worthless-mcp" in json.dumps(b) for b in blocks)
+
+
+def _remind_mcp_leftovers(console) -> None:  # noqa: ANN001
+    """Read-only: if a Worthless MCP server entry is present in a known editor
+    config, name the file so the user can remove it themselves.
+
+    NEVER edits these files — the user hand-wrote them (Worthless didn't), they
+    hold the user's OTHER MCP servers, and their exact path is editor-specific
+    (the openclaw.json blast-radius lesson: don't mutate a shared config we don't
+    own). Silent when nothing matches, so it never nags the majority who don't
+    run the MCP server. Advisory-only: any error is swallowed so a checked-out
+    cwd or unresolvable HOME can never turn a completed wipe into a failure.
+    """
+    try:
+        # Known editor MCP configs. We JSON-parse and inspect only each file's
+        # mcpServers block(s) (see _mentions_worthless_mcp), so ~/.claude.json —
+        # which also stores chat history — is safe to scan without false positives.
+        # ponytail: fixed known paths only — no filesystem hunt; Windsurf path unverified → skip.
+        candidates = [
+            Path.cwd() / ".mcp.json",  # Claude Code, project scope
+            Path.home() / ".claude.json",  # Claude Code, user + per-project scope
+            Path.home() / ".cursor" / "mcp.json",  # Cursor
+        ]
+        found = [str(p) for p in candidates if _mentions_worthless_mcp(p)]
+    except Exception:  # noqa: BLE001 — advisory only; never fail a completed uninstall
+        logger.debug("uninstall: MCP-leftover check skipped", exc_info=True)
+        return
+    if found:
+        console.print_hint(
+            "You also set up the Worthless MCP server. Remove its 'worthless' entry "
+            f"from {', '.join(found)} to fully unwire it — uninstall never edits editor configs."
+        )
+
+
 def _run_uninstall(*, assume_yes: bool, force: bool = False) -> None:
     """Restore every locked .env, then (only when it's safe) wipe Worthless.
 
@@ -513,6 +569,7 @@ def _run_uninstall(*, assume_yes: bool, force: bool = False) -> None:
         home.bootstrapped_marker.unlink(missing_ok=True)
 
     _finalize_wipe(console, home, len(restored))
+    _remind_mcp_leftovers(console)  # read-only; silent unless a worthless MCP entry exists
 
     if oc_partial:
         raise typer.Exit(code=73)

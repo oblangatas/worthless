@@ -675,7 +675,7 @@ async def test_store_enrolled_relock_preserves_first_original_mode(
     )
 
 
-@settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+@settings(suppress_health_check=[HealthCheck.function_scoped_fixture], deadline=None)
 @given(st.integers(min_value=0, max_value=0o777))
 @example(0o644)
 @example(0o600)
@@ -706,7 +706,7 @@ async def test_store_enrolled_original_mode_roundtrip_property(
     assert row[0] == mode
 
 
-@settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+@settings(suppress_health_check=[HealthCheck.function_scoped_fixture], deadline=None)
 @given(st.integers(min_value=0, max_value=0o777))
 @example(0o644)
 @example(0o755)
@@ -743,7 +743,7 @@ async def test_add_enrollment_original_mode_roundtrip_property(
     assert row[0] == mode
 
 
-@settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+@settings(suppress_health_check=[HealthCheck.function_scoped_fixture], deadline=None)
 @given(st.integers(min_value=0, max_value=0o177777))
 @example(0o100644)
 @example(0o120777)

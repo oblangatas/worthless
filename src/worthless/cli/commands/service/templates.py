@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-LAUNCHD_LABEL = "dev.worthless.proxy"
+LAUNCHD_LABEL = "sh.worthless.proxy"
+LEGACY_LAUNCHD_LABEL = "dev.worthless.proxy"
 SYSTEMD_UNIT_NAME = "worthless-proxy.service"
 
 
