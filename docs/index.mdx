@@ -6,10 +6,13 @@ hero:
   title: Make API keys worthless to steal.
   tagline: Split-key proxy with hard spend caps. Leaked .env? Useless.
   actions:
-    - text: Install in one command
-      link: /install-solo/
+    - text: Add to Cursor
+      link: cursor://anysphere.cursor-deeplink/mcp/install?name=worthless&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsIndvcnRobGVzcy1tY3AiXX0=
       icon: right-arrow
       variant: primary
+    - text: Other tools & CLI
+      link: "#install"
+      variant: minimal
     - text: GitHub
       link: https://github.com/shacharm2/worthless
       icon: external
@@ -18,30 +21,42 @@ hero:
 
 import { Card, CardGrid } from '@astrojs/starlight/components';
 
-## Pick how you install
+## Install
+
+Pick your tool. The AI-tool paths need only Node — **no Python**.
 
 <CardGrid>
-  <Card title="Solo dev" icon="laptop">
-    `pipx install worthless`. One command, no config.
-
-    [Get started →](/install-solo/)
+  <Card title="Cursor" icon="seti:code-search">
+    **One click:** [Add to Cursor](cursor://anysphere.cursor-deeplink/mcp/install?name=worthless&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsIndvcnRobGVzcy1tY3AiXX0=) — mounts 4 tools. [What's this? →](/install-mcp/)
   </Card>
-  <Card title="Docker" icon="seti:docker">
-    Signed multi-arch image from GHCR. No build.
-
-    [Pull image →](/install-docker/)
+  <Card title="VS Code" icon="seti:code-search">
+    **One click:** [Install in VS Code](vscode:mcp/install?%7B%22name%22%3A%22worthless%22%2C%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22worthless-mcp%22%5D%7D).
   </Card>
-  <Card title="Claude Code, Cursor, Windsurf" icon="seti:code-search">
-    MCP server for AI editors. Manually verified on Claude Code & Cursor (macOS, 2026-07-09, not yet CI-covered); Windsurf **unverified**.
+  <Card title="Claude Code" icon="rocket">
+    **One command:**
 
-    [Wire it up →](/install-mcp/)
+    ```bash
+    claude mcp add worthless -- npx -y worthless-mcp
+    ```
   </Card>
-  <Card title="GitHub Actions" icon="github">
-    Protect keys during CI runs. Scan for leaks.
+  <Card title="Claude Desktop" icon="laptop">
+    Add the `npx worthless-mcp` block to your MCP config — one-click bundle coming. [Steps →](/install-mcp/)
+  </Card>
+  <Card title="No AI tool — just the CLI" icon="laptop">
+    No Python needed:
 
-    [Add to CI →](/install-github-actions/)
+    ```bash
+    curl -sSL https://worthless.sh | sh
+    ```
+  </Card>
+  <Card title="Already have Python?" icon="seti:python">
+    `pipx install worthless`. [Solo-dev guide →](/install-solo/)
   </Card>
 </CardGrid>
+
+Also: [Docker](/install-docker/) · [GitHub Actions](/install-github-actions/).
+
+The one-click editor paths run `npx worthless-mcp`, whose 4-tool mount is proven in CI (WOR-809). Cursor & Claude Code additionally verified by hand on macOS; Windsurf **unverified**.
 
 ## How it works
 
