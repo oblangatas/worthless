@@ -14,10 +14,19 @@ Run: ``uv run pytest -m user_flow tests/user_flows/test_keychain_macos_writes.py
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 import pytest
+
+# Real macOS Keychain access needs a GUI to answer the access prompt; the headless
+# CI runner has none, so these writes/probes block until the job times out
+# (worthless-3ynb). Skip on CI — runs locally on macOS dev. Follow-up: ephemeral CI keychain.
+_ON_CI = os.environ.get("CI") is not None
+pytestmark = pytest.mark.skipif(
+    _ON_CI, reason="real macOS Keychain tests hang on headless CI (worthless-3ynb); run locally"
+)
 
 REQUIRES_DARWIN = pytest.mark.skipif(
     sys.platform != "darwin",
@@ -38,6 +47,10 @@ def _can_seed_synced_entries() -> bool:
     invariant — the actual production behavior change — is fully
     verifiable on unsigned binaries (tests 3, 11, 12).
     """
+    if _ON_CI:
+        # Never probe the real keychain on headless CI — SecItemAdd blocks on the
+        # GUI access prompt at COLLECTION time, hanging the whole job (worthless-3ynb).
+        return False
     if sys.platform != "darwin":
         return False
     from worthless.cli import keystore_macos as km
