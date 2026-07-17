@@ -31,6 +31,7 @@ from worthless.cli.commands.lock import _PROVIDER_ENV_MAP
 # "no DB row here" hard-error path further down in this module).
 from worthless.cli.dotenv_rewriter import rewrite_env_keys, scan_env_keys
 from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary
+from worthless.cli.log_redaction import _redact
 from worthless.cli.orphans import format_orphan_error
 from worthless.cli.process import disable_core_dumps
 from worthless.crypto.reconstruction import reconstruct_key, reconstruct_key_fp
@@ -307,11 +308,29 @@ async def _pass3_db_cleanup(
             await repo.delete_enrolled(p.alias)
 
 
-def _print_recovery_keys(planned: list[_PlannedRestore], console) -> None:
-    """Print keys for aliases with no env_path (recovery mode)."""
-    for p in planned:
-        if p.env_path is not None and p.var_name is not None:
-            continue
+def _print_recovery_keys(
+    planned: list[_PlannedRestore], console, *, print_recovery: bool = False
+) -> None:
+    """Print reconstructed keys for aliases with no env_path (recovery mode).
+
+    SR-04 (WOR-655) — the one intended exception to "secrets never appear
+    in output". Recovery is the documented escape hatch when there is no
+    ``.env`` to restore the plaintext into, so it MUST be opt-in: printing a
+    full reconstructed key is gated behind an explicit ``--print-recovery``.
+    Without the flag we abort with guidance rather than surprise-printing a
+    key to a terminal that may be logged.
+    """
+    recovery = [p for p in planned if not (p.env_path is not None and p.var_name is not None)]
+    if not recovery:
+        return
+    if not print_recovery:
+        raise WorthlessError(
+            ErrorCode.INVALID_INPUT,
+            "Recovered key(s) not printed. There is no .env to restore them into. "
+            "Re-run with --print-recovery to print the recovered key to stdout, "
+            "or pass --env <file> to write it back into a .env.",
+        )
+    for p in recovery:
         if p.var_name:
             console.print_warning(f"No .env file at {p.env_path}. Printing key for recovery:")
             sys.stdout.write(f"{p.var_name}={p.key_buf.decode('utf-8')}\n")
@@ -326,6 +345,8 @@ async def _unlock_batch(
     home: WorthlessHome,
     repo: ShardRepository,
     env_path: Path | None,
+    *,
+    print_recovery: bool = False,
 ) -> list[_PlannedRestore]:
     """Transactional multi-alias unlock.
 
@@ -355,7 +376,7 @@ async def _unlock_batch(
                 )
             _batch_restore_env(env_path, env_writers)
 
-        _print_recovery_keys(planned, console)
+        _print_recovery_keys(planned, console, print_recovery=print_recovery)
 
         await _pass3_db_cleanup(repo, home, planned)
         return planned
@@ -593,6 +614,10 @@ def _emit_openclaw_unlock_failure(
     detail: str,
 ) -> None:
     """Print [FAIL] block + write partial sentinel for the unexpected-raise path."""
+    # SR-04 (WOR-655): inline-dict path bypasses the OpenclawIntegrationEvent
+    # choke point — redact ``detail`` here for both the console warning and
+    # the sentinel event dict below.
+    detail = _redact(detail)
     console.print_failure("[FAIL] OpenClaw cleanup did NOT complete.")
     console.print_warning("   Your .env is restored, but the original OpenClaw provider entries")
     console.print_warning(
@@ -649,6 +674,15 @@ def register_unlock_commands(app: typer.Typer) -> None:
             "--env",
             "-e",
             help="Path to .env file (default: ./.env if present)",
+        ),
+        print_recovery: bool = typer.Option(
+            False,
+            "--print-recovery",
+            help=(
+                "Print a reconstructed key to stdout when there is no .env to "
+                "restore it into (recovery mode). Off by default — a key is "
+                "never printed unless you ask for it (SR-04)."
+            ),
         ),
     ) -> None:
         """Restore original API keys from shards.
@@ -718,7 +752,9 @@ def register_unlock_commands(app: typer.Typer) -> None:
                 planned: list[_PlannedRestore] = []
 
                 if alias:
-                    planned = await _unlock_batch([alias], home, repo, env)
+                    planned = await _unlock_batch(
+                        [alias], home, repo, env, print_recovery=print_recovery
+                    )
                     if not planned:
                         # If a typo'd --alias points at a .env full of shard-shape
                         # values, silent success is the worst possible feedback.
@@ -737,7 +773,9 @@ def register_unlock_commands(app: typer.Typer) -> None:
                         console.print_warning("No enrolled keys found.")
                         return False
 
-                    planned = await _unlock_batch(aliases, home, repo, env)
+                    planned = await _unlock_batch(
+                        aliases, home, repo, env, print_recovery=print_recovery
+                    )
                     for p in planned:
                         console.print_success(_format_restored_line(p))
                     n = len(planned)
