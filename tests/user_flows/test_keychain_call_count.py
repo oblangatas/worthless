@@ -26,6 +26,7 @@ Why this lives here, not in ``tests/test_bootstrap_keyring.py``:
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import keyring
@@ -35,6 +36,15 @@ from typer.testing import CliRunner
 from tests.helpers import fake_openai_key
 from worthless.cli.app import app
 from worthless.cli.keystore import delete_fernet_key, keyring_available
+
+# Real macOS Keychain access needs a GUI to answer the access prompt; the headless
+# CI runner has none, so `worthless lock` blocks until the job times out
+# (worthless-3ynb). Skip on CI — this runs locally on macOS dev where the login
+# keychain is unlocked. Follow-up: an ephemeral CI keychain to restore coverage.
+_ON_CI = os.environ.get("CI") is not None
+pytestmark = pytest.mark.skipif(
+    _ON_CI, reason="real macOS Keychain test hangs on headless CI (worthless-3ynb); run locally"
+)
 
 
 @pytest.mark.user_flow
