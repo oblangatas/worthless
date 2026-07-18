@@ -379,6 +379,47 @@ def test_doctor_fix_clears_unshardable_credential_via_cli(
     assert not creds_path.exists()
 
 
+def test_doctor_fix_vertex_adc_prints_gcloud_reauth_remediation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Gap 2 (WOR-797): Vertex ADC is the one surface whose cleared entry must
+    carry a `gcloud auth application-default login` remediation (real OpenClaw
+    throws on a missing ADC file, with no in-app re-login flow). Production
+    emits it, but nothing asserted it — deleting that branch would leave the
+    suite green while breaking the acceptance criterion. Pin it end-to-end
+    through `doctor --fix --json`.
+    """
+    monkeypatch.setattr(uc, "_keychain_service_present", lambda service: False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    # _vertex_adc_path() prefers $GOOGLE_APPLICATION_CREDENTIALS over the default
+    # home path — clear it so this exercises the default ADC location, not
+    # whatever a developer running the suite happens to have exported.
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+    fake_home = ensure_home(tmp_path / ".worthless")
+    fake_home.warranty_notice_marker.touch()  # keep stderr off the JSON payload
+    adc_path = tmp_path / ".config" / "gcloud" / "application_default_credentials.json"
+    _write_json(
+        adc_path,
+        {"type": "authorized_user", "client_id": "fake", "refresh_token": "fake"},
+    )
+
+    from worthless.cli.commands.doctor import runner as runner_module
+
+    monkeypatch.setattr(runner_module, "get_home", lambda: fake_home)
+    result = runner.invoke(
+        app,
+        ["doctor", "--fix", "--yes", "--json"],
+        env={"WORTHLESS_HOME": str(fake_home.base_dir)},
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    check = next(c for c in payload["checks"] if c["check_id"] == "unshardable_credentials")
+    entry = next(f for f in check["fixed"] if f["surface_id"] == "vertex_adc")
+    assert "gcloud auth application-default login" in entry.get("remediation", ""), entry
+    assert not adc_path.exists()
+
+
 # ---------------------------------------------------------------------------
 # Security-review follow-ups: a 0-finding scan must never read as "verified
 # clean" when part of the scan genuinely couldn't run, and clearing a
