@@ -455,11 +455,11 @@ class TestEnrollUx:
                 "enroll",
                 "--alias",
                 "bad alias!@#",
-                "--key",
-                _OPENAI_KEY,
+                "--key-stdin",
                 "--provider",
                 "openai",
             ],
+            input=f"{_OPENAI_KEY}\n",
             env={"WORTHLESS_HOME": str(home_dir.base_dir)},
         )
         assert result.exit_code == 1

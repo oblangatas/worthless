@@ -26,6 +26,7 @@ from typer.testing import CliRunner
 from worthless.cli.app import app
 from worthless.cli.bootstrap import WorthlessHome
 from worthless.cli.key_patterns import KEY_PATTERN
+from worthless.openclaw.errors import OpenclawErrorCode
 
 from tests.helpers import fake_openai_key
 
@@ -286,7 +287,7 @@ def test_scrub_refuses_lowercase_var_name_and_ignores_unplanned_providers(
     _write_json(models_path, models)
     before_anthropic = models_path.read_bytes()
 
-    integration.scrub_agent_auth_stores(
+    events = integration.scrub_agent_auth_stores(
         openclaw_with_agent_caches["home"],
         [("openai", "openai-abc12345", "sk-shard-a-fake")],
         {"openai-abc12345": "openai_api_key"},  # lowercase — invalid, must be refused
@@ -298,6 +299,16 @@ def test_scrub_refuses_lowercase_var_name_and_ignores_unplanned_providers(
     )
     assert models_path.read_bytes() == before_anthropic, (
         "scrub touched an unrelated provider that was never in planned_updates"
+    )
+    # WOR-796 scrub gap #1: refusing must NOT be silent — the real key persists
+    # while openclaw.json reads "locked", so a warn-level event must fire naming
+    # the provider + the fix, so lock can surface it loudly.
+    skipped = [e for e in events if e.code == OpenclawErrorCode.AGENT_AUTH_STORE_SCRUB_SKIPPED]
+    assert len(skipped) == 1, "a refused (non-uppercase) scrub must emit a SCRUB_SKIPPED event"
+    assert skipped[0].level == "warn"
+    assert "openai" in skipped[0].extra.get("provider", "")
+    assert not any(e.code == OpenclawErrorCode.AGENT_AUTH_STORE_SCRUBBED for e in events), (
+        "nothing was scrubbed, so no SCRUBBED event should be emitted"
     )
 
 
@@ -332,6 +343,19 @@ def test_lock_scrubs_agent_with_custom_agentdir_override(
         {"providers": {"openai": {"apiKey": real_key, "baseUrl": "https://api.openai.com/v1"}}},
     )
     _write_json(
+        custom_dir / "auth-profiles.json",
+        {
+            "version": 1,
+            "profiles": {
+                "custom-openai": {
+                    "type": "api_key",
+                    "provider": "openai",
+                    "key": real_key,
+                }
+            },
+        },
+    )
+    _write_json(
         openclaw_dir / "openclaw.json",
         {
             "models": {"providers": {}},
@@ -348,6 +372,12 @@ def test_lock_scrubs_agent_with_custom_agentdir_override(
         f"custom agentDir's models.json was never scanned — real key survived: {entry!r}"
     )
     assert entry["baseUrl"] == "https://api.openai.com/v1"
+
+    custom_profiles = json.loads((custom_dir / "auth-profiles.json").read_text())
+    cred = custom_profiles["profiles"]["custom-openai"]
+    assert cred["key"] == "${OPENAI_API_KEY}", (
+        f"custom agentDir's auth-profiles.json was never scanned — real key survived: {cred!r}"
+    )
 
 
 def test_scrub_refuses_symlinked_auth_store_file(

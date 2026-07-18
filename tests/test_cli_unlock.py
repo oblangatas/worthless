@@ -247,7 +247,8 @@ class TestEnrollUnlockNullEnvPath:
         # Enroll via CLI
         result = runner.invoke(
             app,
-            ["enroll", "--alias", alias, "--key", _TEST_KEY, "--provider", "openai"],
+            ["enroll", "--alias", alias, "--key-stdin", "--provider", "openai"],
+            input=f"{_TEST_KEY}\n",
             env={"WORTHLESS_HOME": str(home_dir.base_dir)},
         )
         assert result.exit_code == 0

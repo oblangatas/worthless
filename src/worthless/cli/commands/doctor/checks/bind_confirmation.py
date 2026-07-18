@@ -6,8 +6,10 @@ DEGRADED on fail — this doctor check turns the same signal into a
 diagnostic with a remediation hint, so the user who follows lock's
 ``Run `worthless doctor``` prompt actually gets a useful answer.
 
-No ``--fix`` is offered: the remediation is to restart OpenClaw's daemon
-(daemon-reload trigger is WOR-756 follow-up) or re-run ``worthless lock``.
+No ``--fix`` is offered: OpenClaw reloads the rewritten config automatically
+(WOR-756 verified this against the pinned image), so the remediation is to
+re-run ``worthless lock`` — which re-confirms both the reload and routing — or
+check the proxy is up.
 """
 
 from __future__ import annotations
@@ -39,11 +41,22 @@ def _classify(sentinel: dict | None) -> tuple[_CheckStatus | None, str]:
         return None, "Proof-of-routing: PASS."
 
     if status == "fail":
+        if bc.get("reason") == "reload_rejected":
+            # WOR-756: the gateway REJECTED the new config (invalid-config
+            # reload) before any probe ran — so there is no "test request
+            # reached the proxy" to speak of. Remediation is about the config,
+            # not the proxy hop.
+            return "error", (
+                "OpenClaw REJECTED the new configuration on reload, so it is "
+                "NOT routing through the proxy. Re-run `worthless lock` to "
+                "re-confirm; if it keeps failing, check `worthless doctor` and "
+                "your OpenClaw config for what the gateway rejected."
+            )
         return "error", (
             "Proof-of-routing FAILED — the test request reached the proxy "
-            "but the rewritten OpenClaw entry is NOT routing. Restart "
-            "OpenClaw's daemon (its cached config still points at the old "
-            "URL) or re-run `worthless lock`."
+            "but the rewritten OpenClaw entry is NOT routing. Re-run "
+            "`worthless lock` to re-confirm, or check the proxy is up "
+            "(`worthless up`)."
         )
 
     if status == "skipped":
@@ -104,7 +117,7 @@ def run(ctx: CheckContext) -> CheckResult:
             {
                 "bind_confirmation_status": bc.get("status"),
                 "reason": bc.get("reason"),
-                "remediation": ("restart OpenClaw daemon or re-run `worthless lock`"),
+                "remediation": ("re-run `worthless lock`, or check the proxy is up"),
             }
         ],
         summary=summary,

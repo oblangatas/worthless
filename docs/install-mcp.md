@@ -11,10 +11,10 @@ Python and `uv` are bootstrapped automatically on first run.
 
 ## Recommended — npm wrapper via `.mcp.json`
 
-Add this to your editor's MCP config. **Verified on Claude Code** (`.mcp.json`)
-**and Cursor** (`~/.cursor/mcp.json` — appears as `worthless` with all 4 tools
-enabled under Settings → MCP). Windsurf reads its own config path and is
-unverified:
+Add this to your editor's MCP config. **Manually verified on Claude Code**
+(`.mcp.json`) **and Cursor** (`~/.cursor/mcp.json` — appears as `worthless`
+with all 4 tools enabled under Settings → MCP; macOS, 2026-07-09). Windsurf
+reads its own config path and is unverified:
 
 ```json
 {
@@ -29,13 +29,14 @@ unverified:
 
 Restart your editor. On first launch, `worthless-mcp`:
 
-1. Finds or installs `uv` (one-time, ~5 s).
+1. Finds or installs `uv` (one-time).
 2. Runs `uvx worthless[mcp]==<pinned-version> mcp` — `uvx` caches the Python
-   environment, so subsequent starts are instant.
+   environment, so subsequent starts reuse it instead of re-downloading.
 3. Streams MCP protocol over stdio to the editor.
 
-Total cold-start install time: **< 30 s** on a fresh machine with Node only.
-No Python toolchain awareness required.
+The first run takes longer while `uv` and the Python environment download;
+later starts reuse the cached environment and skip that download. No Python
+toolchain awareness required.
 
 ### Available tools
 
@@ -73,11 +74,12 @@ export ANTHROPIC_BASE_URL=http://localhost:8787
 
 ## Cursor
 
-:::tip[MCP tools — verified]
+:::tip[MCP tools — manually verified]
 The `worthless-mcp` block above works in Cursor. Drop it into
 `~/.cursor/mcp.json`; Cursor connects the server and Settings → MCP shows
 **`worthless`, 4 tools enabled** (`worthless_status`, `worthless_scan`,
-`worthless_lock`, `worthless_spend`). Verified on macOS.
+`worthless_lock`, `worthless_spend`). Manually verified on macOS, 2026-07-09
+— not yet covered by an automated CI check (tracked separately).
 :::
 
 The section below is a **different** integration — pointing Cursor's *built-in*

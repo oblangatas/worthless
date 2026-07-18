@@ -11,8 +11,9 @@ test matrix rows U-DOC-01..07.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 
 from worthless.cli.commands.doctor import _check_openclaw_section, _skill_installed_version
@@ -523,3 +524,126 @@ class TestRecoveryNoteSchema:
             f"recovery_note 'issue' must be a non-empty string so consumers can display it; "
             f"got: {last.get('issue')!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# WOR-656 F6: doctor detects the legacy OpenClaw decoy layout (read-only)
+# ---------------------------------------------------------------------------
+
+
+_LEGACY_DECOY_CONFIG = {
+    "gateway": {"authToken": "oc-gw-SECRET-must-survive", "port": 18789},
+    "agents": {"defaults": {"model": {"primary": "openai/gpt-4o"}}},
+    "models": {
+        "providers": {
+            "openai": {
+                "api": "openai-completions",
+                "apiKey": "sk-REAL-original-key-still-unprotected",
+                "baseUrl": "https://api.openai.com/v1",
+                "models": [{"id": "gpt-4o"}],
+            },
+            "worthless-openai": {
+                "api": "openai-completions",
+                "apiKey": "sk-DECOY-shard-a-value",
+                "baseUrl": "http://127.0.0.1:8787/openai-558dd0d8/v1",
+                "models": [],
+            },
+        },
+    },
+}
+
+
+class TestDoctorDetectsLegacyDecoyLayout:
+    """WOR-656 F6: doctor NAMES the legacy decoy layout without mutating it."""
+
+    def test_legacy_layout_reported_readonly(self, tmp_path: Path) -> None:
+        """A proxy-shaped ``worthless-openai`` beside an unprotected ``openai`` →
+        a warn finding naming the provider + ``worthless lock``; config untouched.
+        """
+        from worthless.cli.commands.doctor.checks.openclaw import run
+
+        oc = tmp_path / ".openclaw"
+        oc.mkdir()
+        cfg = oc / "openclaw.json"
+        cfg.write_text(
+            json.dumps(_LEGACY_DECOY_CONFIG, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        original_bytes = cfg.read_bytes()
+
+        state = _make_state(present=True, config_path=cfg, workspace_path=oc / "workspace")
+
+        ctx = MagicMock()
+        ctx.dry_run = False
+        ctx.fix = False
+        ctx.repo.list_enrollments = AsyncMock(return_value=[])
+        ctx.repo.list_keys = AsyncMock(return_value=[])
+
+        with (
+            patch(
+                "worthless.cli.commands.doctor.checks.openclaw._oc_integration.detect",
+                return_value=state,
+            ),
+            patch(
+                "worthless.cli.commands.doctor.checks.openclaw._audit_gate_findings",
+                return_value=[],
+            ),
+            patch("worthless.cli.commands.doctor._check_skill", return_value=([], [])),
+            patch("worthless.cli.commands.doctor._check_providers", return_value=[]),
+            patch("worthless.cli.commands.doctor.is_orphan", return_value=False),
+        ):
+            result = run(ctx)
+
+        findings_text = " ".join(f["issue"] for f in result["findings"])
+        assert "legacy" in findings_text.lower(), findings_text
+        assert "openai" in findings_text
+        assert "worthless lock" in findings_text
+        assert result["status"] == "warn"
+        # Read-only: doctor must never touch openclaw.json.
+        assert cfg.read_bytes() == original_bytes
+
+    def test_new_design_layout_not_flagged(self, tmp_path: Path) -> None:
+        """No decoy (new design) → no legacy-layout finding."""
+        from worthless.cli.commands.doctor.checks.openclaw import run
+
+        oc = tmp_path / ".openclaw"
+        oc.mkdir()
+        cfg = oc / "openclaw.json"
+        new_design = {
+            "models": {
+                "providers": {
+                    "openai": {
+                        "api": "openai-completions",
+                        "apiKey": "sk-shard-a",
+                        "baseUrl": "http://127.0.0.1:8787/openai-existing1/v1",
+                        "models": [],
+                    },
+                },
+            },
+        }
+        cfg.write_text(json.dumps(new_design, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+        state = _make_state(present=True, config_path=cfg, workspace_path=oc / "workspace")
+
+        ctx = MagicMock()
+        ctx.dry_run = False
+        ctx.fix = False
+        ctx.repo.list_enrollments = AsyncMock(return_value=[])
+        ctx.repo.list_keys = AsyncMock(return_value=[])
+
+        with (
+            patch(
+                "worthless.cli.commands.doctor.checks.openclaw._oc_integration.detect",
+                return_value=state,
+            ),
+            patch(
+                "worthless.cli.commands.doctor.checks.openclaw._audit_gate_findings",
+                return_value=[],
+            ),
+            patch("worthless.cli.commands.doctor._check_skill", return_value=([], [])),
+            patch("worthless.cli.commands.doctor._check_providers", return_value=[]),
+            patch("worthless.cli.commands.doctor.is_orphan", return_value=False),
+        ):
+            result = run(ctx)
+
+        findings_text = " ".join(f["issue"] for f in result["findings"])
+        assert "legacy" not in findings_text.lower(), findings_text

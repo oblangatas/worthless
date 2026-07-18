@@ -20,6 +20,7 @@ Spec: WOR-621 plan §F8 / PR-2, AC10 (first half).
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -772,6 +773,9 @@ def test_finalise_warns_and_degrades_when_entry_left_in_place(
         }
 
     monkeypatch.setattr(lock_mod, "_confirm_bind", fake_confirm_bind)
+    # WOR-756: keep this bind-confirmation test hermetic — don't let the reload
+    # gate shell out to a real openclaw binary. "pass" = proceed as before.
+    monkeypatch.setattr(lock_mod, "_confirm_openclaw_reload", lambda **k: "pass")
 
     sentinel_calls: dict[str, object] = {}
 
@@ -788,6 +792,7 @@ def test_finalise_warns_and_degrades_when_entry_left_in_place(
         False,
         SimpleNamespace(base_dir=tmp_path),
         proxy_host="127.0.0.1",
+        reload_since_ts=_dt.datetime.now(_dt.timezone.utc),
     )
 
     # 1. No bare [OK] header — a [WARN] incomplete header instead.

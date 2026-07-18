@@ -383,6 +383,34 @@ def unset_provider(path: Path, provider: str) -> dict[str, Any]:
         return removed if isinstance(removed, dict) else {}
 
 
+def repoint_model_primary(path: Path, *, old_ref: str, new_ref: str) -> bool:
+    """Repoint ``agents.defaults.model.primary`` from ``old_ref`` to ``new_ref``.
+
+    Rewrites the primary model reference ONLY when it exactly equals
+    ``old_ref`` (the ``worthless-<provider>/<model>`` decoy ref a legacy
+    install left behind, WOR-656 F6). Any other value — including absent, or a
+    malformed ``agents`` subtree — is left untouched and the file is not
+    rewritten. Returns whether a change was actually written.
+
+    flock + symlink refusal (F-CFG-15) and an atomic rewrite, same as
+    :func:`unset_provider`, so a concurrent OpenClaw read never observes a
+    half-written ``primary``.
+    """
+    with _file_lock(path):
+        _refuse_if_symlink(path)
+        data = read_config(path)
+        if not isinstance(data, dict):
+            return False
+        agents = data.get("agents")
+        defaults = agents.get("defaults") if isinstance(agents, dict) else None
+        model = defaults.get("model") if isinstance(defaults, dict) else None
+        if not isinstance(model, dict) or model.get("primary") != old_ref:
+            return False
+        model["primary"] = new_ref
+        _atomic_write_json(path, data)
+        return True
+
+
 def unset_models_json_provider(path: Path, provider: str) -> dict[str, Any]:
     """Remove a ROOT-level ``providers.<provider>`` entry from an agent models.json.
 

@@ -52,9 +52,16 @@ PLAYBOOKS: dict[str, str] = {
     ),
     "bind_confirmation": (
         "Your keys are locked (safe at rest), but worthless couldn't confirm the rewritten "
-        "OpenClaw entry routes through the proxy. Restart OpenClaw's daemon, then re-run "
-        "`worthless lock`. Still unsure? Check the proxy is up (`worthless up`) and "
-        "`WORTHLESS_PORT` is set."
+        "OpenClaw entry routes through the proxy. OpenClaw reloads the change automatically, "
+        "so re-run `worthless lock` to re-confirm. Still unsure? Check the proxy is up "
+        "(`worthless up`) and `WORTHLESS_PORT` is set."
+    ),
+    "service_health": (
+        "The proxy service is degraded — it may be running a different binary than "
+        "installed, pointing at a home that no longer exists, in a shape worthless can't "
+        "verify, or (on Linux) set to stop at logout. Each finding names its own fix; the "
+        "usual repair is `worthless service install` to re-sync it, or `worthless service "
+        "uninstall` if you're resetting."
     ),
     "unshardable_credentials": (
         "These aren't API keys — they're OAuth logins (Claude Code, Codex, Gemini, MiniMax, "

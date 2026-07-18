@@ -19,6 +19,8 @@ import asyncio
 import resource
 import sqlite3
 import stat
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -484,6 +486,76 @@ class TestCoreDumpSuppression:
         disable_core_dumps()
         soft, hard = resource.getrlimit(resource.RLIMIT_CORE)
         assert soft == 0
+
+
+# WOR-277: the two tests above prove disable_core_dumps() itself sets
+# RLIMIT_CORE=0 — they do NOT prove lock/enroll/unlock/scan actually CALL
+# it. A real subprocess per command is required rather than an in-process
+# check: RLIMIT_CORE can only be lowered within a process, never raised
+# back, so an in-process assertion after these tests already ran would
+# pass even if a command's call site were silently deleted.
+_SUBPROCESS_SNIPPET = """
+import sys
+import resource
+from pathlib import Path
+from typer.testing import CliRunner
+from worthless.cli.app import app
+from worthless.cli.bootstrap import ensure_home
+
+home = Path(sys.argv[1])
+ensure_home(home)
+CliRunner(mix_stderr=False).invoke(app, sys.argv[2:], env={"WORTHLESS_HOME": str(home)})
+soft, hard = resource.getrlimit(resource.RLIMIT_CORE)
+print(f"RLIMIT_CORE={soft},{hard}")
+"""
+
+
+def _rlimit_core_after_subprocess_command(tmp_path: Path, *cli_args: str) -> tuple[int, int]:
+    """Run one worthless command in a fresh subprocess, return its own
+    (soft, hard) RLIMIT_CORE immediately after the command returns."""
+    result = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", _SUBPROCESS_SNIPPET, str(tmp_path / ".worthless"), *cli_args],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    for line in result.stdout.splitlines():
+        if line.startswith("RLIMIT_CORE="):
+            soft_s, hard_s = line[len("RLIMIT_CORE=") :].split(",")
+            return int(soft_s), int(hard_s)
+    raise AssertionError(
+        f"subprocess never printed RLIMIT_CORE — stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+
+
+class TestCoreDumpSuppressionWiredIntoCommands:
+    """WOR-277: lock/enroll/unlock/scan must disable core dumps before
+    touching key material — previously only up/wrap did this. Each test
+    runs the real command in a real subprocess and reads that process's
+    actual RLIMIT_CORE afterward; none of these commands need to succeed
+    at their nominal task to prove the wiring — disable_core_dumps() is
+    called before any of them can fail on missing keys/env files.
+    """
+
+    @pytest.mark.parametrize(
+        "command,extra_args",
+        [
+            ("lock", []),  # --env is filled in from tmp_path below, once a file exists
+            ("enroll", ["--alias", "x", "--key-stdin", "--provider", "openai"]),
+            ("unlock", []),
+            ("scan", []),
+        ],
+    )
+    def test_command_disables_core_dumps(
+        self, tmp_path: Path, command: str, extra_args: list[str]
+    ) -> None:
+        if command == "lock":
+            env_file = tmp_path / ".env"
+            env_file.write_text("UNRELATED_VAR=hello\n")
+            extra_args = ["--env", str(env_file)]
+        soft, hard = _rlimit_core_after_subprocess_command(tmp_path, command, *extra_args)
+        assert (soft, hard) == (0, 0), f"{command} left RLIMIT_CORE at ({soft}, {hard})"
 
 
 # =====================================================================

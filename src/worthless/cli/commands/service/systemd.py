@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 
 from worthless.cli.bootstrap import WorthlessHome
@@ -63,7 +64,14 @@ def _linger_enabled() -> bool:
 def _ensure_linger() -> None:
     if _linger_enabled():
         return
-    run_cmd(["loginctl", "enable-linger", _session_user()])
+    try:
+        run_cmd(["loginctl", "enable-linger", _session_user()])
+    except subprocess.CalledProcessError as exc:
+        raise WorthlessError(
+            ErrorCode.SERVICE_INSTALL_FAILED,
+            "Failed to enable systemd linger — the service won't survive logout. "
+            f"Run `loginctl enable-linger {_session_user()}` manually, then retry.",
+        ) from exc
 
 
 def installed_port() -> int | None:

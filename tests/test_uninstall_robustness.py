@@ -375,9 +375,9 @@ def test_uninstall_force_still_zeros_keys_on_failed_restore(
     zeroed — ``--force`` must not regress the SR-02 zeroing the abort path got
     (bead worthless-gcmp).
 
-    Breaks ``os.chmod`` only during uninstall so a restore is built then fails
-    AFTER reconstruction (mirrors ``test_uninstall_zeros_keys_when_a_restore_fails``),
-    then asserts ``_zero_restore_keys`` still ran under ``--force``.
+    Breaks ``_unlock_batch`` — the sole shred-guarded step (post-ftit ``os.chmod``
+    is cosmetic and no longer aborts) — so a restore genuinely fails, then asserts
+    ``_zero_restore_keys`` still runs under ``--force``.
     """
     import worthless.cli.commands.uninstall as uninstall_mod
 
@@ -392,10 +392,10 @@ def test_uninstall_force_still_zeros_keys_on_failed_restore(
 
     monkeypatch.setattr(uninstall_mod, "_zero_restore_keys", _spy)
 
-    def _boom(*_a, **_k):
-        raise OSError("simulated chmod failure")
+    async def _boom(*_a, **_k):
+        raise OSError("simulated restore failure")
 
-    monkeypatch.setattr(uninstall_mod.os, "chmod", _boom)
+    monkeypatch.setattr(uninstall_mod, "_unlock_batch", _boom)
 
     result = runner.invoke(
         app,

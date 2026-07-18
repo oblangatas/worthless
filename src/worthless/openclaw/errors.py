@@ -44,6 +44,12 @@ class OpenclawErrorCode(str, Enum):
     MODELS_JSON_STALE_REMOVED = "openclaw.models_json_stale_removed"
     MODELS_JSON_STALE_NOT_REMOVED = "openclaw.models_json_stale_not_removed"
     AGENT_AUTH_STORE_SCRUBBED = "openclaw.agent_auth_store_scrubbed"
+    # WOR-796: a provider's cached real key was NOT scrubbed because its key var
+    # name isn't a valid uppercase SecretRef id — protection silently degrades
+    # unless we say so (openclaw.json still reads "locked").
+    AGENT_AUTH_STORE_SCRUB_SKIPPED = "openclaw.agent_auth_store_scrub_skipped"
+    # WOR-656 F6: a legacy decoy-layout install was auto-healed on lock.
+    LEGACY_DECOY_MIGRATED = "openclaw.legacy_decoy_migrated"
 
 
 @dataclass(frozen=True)
