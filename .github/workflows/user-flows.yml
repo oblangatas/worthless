@@ -114,8 +114,11 @@ jobs:
           security unlock-keychain -p "" "$KC"
           security list-keychains -d user -s "$KC"
           security default-keychain -s "$KC"
-          # Best-effort: allow tools + unsigned callers to use items without a prompt.
-          security set-key-partition-list -S apple-tool:,apple:,unsigned: -s -k "" "$KC" >/dev/null 2>&1 || true
+          # NB: `security set-key-partition-list -S apple-tool:,apple:,unsigned:` was
+          # tried here and PROVEN not to help (run 88045781340): it grants signed-tool
+          # access to KEYS, not the per-item ACL that python keyring's generic-password
+          # items need — the probe below still blocked to the timeout. Deliberately left
+          # out rather than kept as a misleading no-op. Don't re-add it without evidence.
           # Sync deps FIRST so the timed probe measures keychain access, not a cold sync.
           uv sync --extra dev --extra test >/dev/null 2>&1 || true
           TIMEOUT="$(command -v timeout || command -v gtimeout || true)"
