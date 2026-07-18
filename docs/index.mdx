@@ -4,14 +4,14 @@ description: "Split-key proxy with hard spend caps. Your leaked .env becomes wor
 template: splash
 hero:
   title: Make API keys worthless to steal.
-  tagline: Split-key proxy with hard spend caps. Leaked .env? Useless.
+  tagline: Your key is split on disk and rebuilt only inside a local proxy, under a spend cap you set. It's an HTTP proxy, so it works with any language — no Python toolchain required.
   actions:
-    - text: Add to Cursor
-      link: cursor://anysphere.cursor-deeplink/mcp/install?name=worthless&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsIndvcnRobGVzcy1tY3AiXX0=
+    - text: Install and start the proxy
+      link: "#install"
       icon: right-arrow
       variant: primary
-    - text: Other tools & CLI
-      link: "#install"
+    - text: What each path gives you
+      link: /install-what-you-get/
       variant: minimal
     - text: GitHub
       link: https://github.com/oblangatas/worthless
@@ -23,40 +23,50 @@ import { Card, CardGrid } from '@astrojs/starlight/components';
 
 ## Install
 
-Pick your tool. The AI-tool paths need only Node — **no Python**.
+This is the path that protects your keys — it installs the CLI and starts the proxy:
+
+```bash
+curl -sSL https://worthless.sh | sh && worthless
+```
+
+Worthless is an HTTP proxy, so it works with any language. No Python toolchain required.
+
+**What just happened:** your key was split in two, the proxy came up on `127.0.0.1:8787`, and the matching `*_BASE_URL` in your `.env` now points at it — so your existing code routes through the spend cap with no code change.
+
+**Check it:**
+
+```bash
+worthless status
+```
+
+It reports whether the proxy is running and which keys are protected.
+
+Already use Python tooling? `pipx install worthless` installs the same CLI — see the [solo-dev guide](/install-solo/). Also: [Docker](/install-docker/) · [GitHub Actions](/install-github-actions/).
+
+## Already running? Add editor controls
+
+These add four management tools — `status`, `scan`, `lock`, `spend` — to your AI editor. **They do not route your keys.** The CLI proxy above has to be running for keys to route. [What each path gives you →](/install-what-you-get/)
 
 <CardGrid>
   <Card title="Cursor" icon="seti:code-search">
-    **One click:** [Add to Cursor](cursor://anysphere.cursor-deeplink/mcp/install?name=worthless&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsIndvcnRobGVzcy1tY3AiXX0=) — mounts 4 tools. [What's this? →](/install-mcp/)
+    **One click:** [Add to Cursor](cursor://anysphere.cursor-deeplink/mcp/install?name=worthless&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsIndvcnRobGVzcy1tY3AiXX0=) — adds the 4 tools to Cursor's MCP panel. Does not route keys; the CLI proxy must be running. [What's this? →](/install-mcp/)
   </Card>
   <Card title="VS Code" icon="seti:code-search">
-    **One click:** [Install in VS Code](vscode:mcp/install?%7B%22name%22%3A%22worthless%22%2C%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22worthless-mcp%22%5D%7D).
+    **One click:** [Install in VS Code](vscode:mcp/install?%7B%22name%22%3A%22worthless%22%2C%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22worthless-mcp%22%5D%7D) — adds the same 4 tools. Key routing still comes from the CLI proxy.
   </Card>
   <Card title="Claude Code" icon="rocket">
-    **One command:**
+    Registers the 4 tools as an MCP server. Your calls route only while `worthless` is running.
 
     ```bash
     claude mcp add worthless -- npx -y worthless-mcp
     ```
   </Card>
   <Card title="Claude Desktop" icon="laptop">
-    Add the `npx worthless-mcp` block to your MCP config — one-click bundle coming. [Steps →](/install-mcp/)
-  </Card>
-  <Card title="No AI tool — just the CLI" icon="laptop">
-    No Python needed:
-
-    ```bash
-    curl -sSL https://worthless.sh | sh
-    ```
-  </Card>
-  <Card title="Already have Python?" icon="seti:python">
-    `pipx install worthless`. [Solo-dev guide →](/install-solo/)
+    Add the `npx worthless-mcp` block to your MCP config — one-click bundle coming. Read and control only; the CLI proxy does the protecting. [Steps →](/install-mcp/)
   </Card>
 </CardGrid>
 
-Also: [Docker](/install-docker/) · [GitHub Actions](/install-github-actions/).
-
-The one-click editor paths run `npx worthless-mcp`, whose 4-tool mount is proven in CI (WOR-809). Cursor & Claude Code additionally verified by hand on macOS; Windsurf **unverified**.
+The editor paths run `npx worthless-mcp`, whose 4-tool mount is proven in CI (WOR-809). Cursor and Claude Code were additionally verified by hand on macOS; Windsurf is **unverified**.
 
 ## How it works
 
