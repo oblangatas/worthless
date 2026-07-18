@@ -410,6 +410,16 @@ async def _build_oc_restores(
       pointer verbatim — NEVER downgraded to plaintext.
     """
     restores: list[_openclaw_integration.OcRestore] = []
+    # SR-02: a just-re-read key lives here until it is safely inside ``restores``,
+    # so a BaseException between the re-read and the append still zeros it — the
+    # accumulated-list guard below would otherwise miss an in-flight key (CodeRabbit).
+    in_flight: bytearray | None = None
+
+    def _read(pr: _PlannedRestore) -> bytearray | None:
+        nonlocal in_flight
+        in_flight = _reread_plaintext_from_env(pr)
+        return in_flight
+
     try:
         for p in planned:
             record = p.oc_original_api_key_json
@@ -426,7 +436,7 @@ async def _build_oc_restores(
                         provider=p.provider,
                         alias=p.alias,
                         oc_original_api_key_json=None,
-                        plaintext_key=_reread_plaintext_from_env(p),
+                        plaintext_key=_read(p),
                         var_name=p.var_name,
                     )
                 )
@@ -467,7 +477,7 @@ async def _build_oc_restores(
                         provider=p.provider,
                         alias=p.alias,
                         oc_original_api_key_json=None,
-                        plaintext_key=_reread_plaintext_from_env(p),
+                        plaintext_key=_read(p),
                         var_name=p.var_name,
                     )
                 )
@@ -482,7 +492,7 @@ async def _build_oc_restores(
             # only re-read for `kind == "plaintext"`, silently leaving a
             # `secretref`-kind provider's agent cache scrubbed forever even
             # after a successful unlock.
-            plaintext_key = _reread_plaintext_from_env(p)
+            plaintext_key = _read(p)
             if kind == "plaintext":
                 # pass-2 wrote the reconstructed plaintext moments ago. If the
                 # .env is gone (recovery mode / user deleted it) we can't
@@ -526,6 +536,8 @@ async def _build_oc_restores(
         for r in restores:
             if r.plaintext_key is not None:
                 zero_buf(r.plaintext_key)
+        if in_flight is not None:
+            zero_buf(in_flight)  # a key re-read but not yet appended (CodeRabbit)
         raise
     return restores
 

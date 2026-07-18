@@ -56,3 +56,31 @@ def test_build_oc_restores_zeros_partial_keys_when_it_raises_mid_build(monkeypat
     assert handed_out[0] == bytearray(len(handed_out[0])), (
         "SR-02: the plaintext key reconstructed before the raise was NOT zeroed"
     )
+
+
+def test_build_oc_restores_zeros_an_in_flight_key_if_the_append_raises(monkeypatch) -> None:
+    """CodeRabbit edge: a key re-read but NOT yet appended to `restores` (e.g. the
+    OcRestore construction raises, or a KeyboardInterrupt fires between the re-read
+    and the append) must still be zeroed — the accumulated-list guard alone misses it.
+    """
+    handed_out: list[bytearray] = []
+
+    def spy_reread(p: _PlannedRestore) -> bytearray:
+        key = bytearray(b"sk-in-flight-not-yet-appended-key")
+        handed_out.append(key)
+        return key
+
+    monkeypatch.setattr(unlock_mod, "_reread_plaintext_from_env", spy_reread)
+
+    def boom_ocrestore(*a, **k):
+        raise RuntimeError("append boom")  # blow up AFTER the key was re-read, before it lands
+
+    monkeypatch.setattr(unlock_mod._openclaw_integration, "OcRestore", boom_ocrestore)
+
+    with pytest.raises(RuntimeError, match="append boom"):
+        asyncio.run(_build_oc_restores([_planned("openai-a")], MagicMock(), MagicMock()))
+
+    assert handed_out, "spy never handed out a key — test wiring broke"
+    assert handed_out[0] == bytearray(len(handed_out[0])), (
+        "SR-02: the in-flight key (re-read but not yet appended) was NOT zeroed"
+    )
