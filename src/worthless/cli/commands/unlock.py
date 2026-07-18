@@ -410,111 +410,135 @@ async def _build_oc_restores(
       pointer verbatim — NEVER downgraded to plaintext.
     """
     restores: list[_openclaw_integration.OcRestore] = []
-    for p in planned:
-        record = p.oc_original_api_key_json
-        if record is None:
-            # No captured record (pre-G3 row or relock_no_prior). Stage A
-            # will fail-safe-skip openclaw.json's OWN restore; nothing to
-            # parse there. WOR-796's agent-auth-store restore is
-            # independent of whether openclaw.json ever had a prior entry
-            # (auth-profiles.json/models.json can cache a real key even
-            # when openclaw.json's provider section was never populated),
-            # so still try to re-read the plaintext key for it.
-            restores.append(
-                _openclaw_integration.OcRestore(
-                    provider=p.provider,
-                    alias=p.alias,
-                    oc_original_api_key_json=None,
-                    plaintext_key=_reread_plaintext_from_env(p),
-                    var_name=p.var_name,
-                )
-            )
-            continue
+    # SR-02: a just-re-read key lives here until it is safely inside ``restores``,
+    # so a BaseException between the re-read and the append still zeros it — the
+    # accumulated-list guard below would otherwise miss an in-flight key (CodeRabbit).
+    in_flight: bytearray | None = None
 
-        # G5-A: the MAC tamper-bind gate now lives in Stage A. The CLI
-        # only computes the recompute (async — Stage A is sync) and threads
-        # both values through the OcRestore. Legacy rows pass both as None
-        # and fall back to shape-only validation per the G1 docstring.
-        # ``is not None`` (not truthy) matches the parser's contract verbatim
-        # at integration.py:159 — an empty-string MAC would otherwise
-        # silently downgrade the gate to shape-only.
-        expected_mac = p.oc_rollback_mac
-        recomputed_mac = (
-            await repo._compute_decoy_hash(record) if expected_mac is not None else None
-        )
+    def _read(pr: _PlannedRestore) -> bytearray | None:
+        nonlocal in_flight
+        in_flight = _reread_plaintext_from_env(pr)
+        return in_flight
 
-        # Shape-only parse here so we can route plaintext-vs-secretref.
-        # Stage A re-runs the full parse with MAC args; that's the
-        # load-bearing check. INVARIANT: the same ``record`` object is
-        # passed to BOTH this parse and the OcRestore.oc_original_api_key_json
-        # field below — Stage A re-parses the identical string, so the two
-        # parses cannot disagree. If the record is structurally invalid we
-        # surface it now (saves the .env re-read on the plaintext branch)
-        # and let Stage A's identical refusal fire as the canonical event.
-        try:
-            parsed = _openclaw_integration._parse_oc_rollback_entry_record(record)
-        except ValueError as exc:
-            console.print_warning(
-                f"OpenClaw {p.provider!r} rollback record is malformed "
-                f"({exc}); leaving entry on the proxy."
-            )
-            # WOR-796: openclaw.json's own rollback record being malformed
-            # doesn't affect whether we can restore agent-auth-stores —
-            # that only needs the plaintext key, independently re-read.
-            restores.append(
-                _openclaw_integration.OcRestore(
-                    provider=p.provider,
-                    alias=p.alias,
-                    oc_original_api_key_json=None,
-                    plaintext_key=_reread_plaintext_from_env(p),
-                    var_name=p.var_name,
-                )
-            )
-            continue
-
-        kind = parsed["apiKey"]["kind"]
-        # Read the key back from the just-restored .env regardless of
-        # `kind` — WOR-796's agent-cache restore needs the real key value
-        # independent of whatever shape openclaw.json's OWN entry happens
-        # to be (a `secretref`-kind entry can still have had a literal real
-        # key scrubbed out of its agent cache). Bugbot catch: this used to
-        # only re-read for `kind == "plaintext"`, silently leaving a
-        # `secretref`-kind provider's agent cache scrubbed forever even
-        # after a successful unlock.
-        plaintext_key = _reread_plaintext_from_env(p)
-        if kind == "plaintext":
-            # pass-2 wrote the reconstructed plaintext moments ago. If the
-            # .env is gone (recovery mode / user deleted it) we can't
-            # restore the OC plaintext branch — fall through fail-safe.
-            if plaintext_key is None:
-                console.print_warning(
-                    f"OpenClaw {p.provider!r}: cannot re-read plaintext key "
-                    "from restored .env; leaving entry on the proxy."
-                )
+    try:
+        for p in planned:
+            record = p.oc_original_api_key_json
+            if record is None:
+                # No captured record (pre-G3 row or relock_no_prior). Stage A
+                # will fail-safe-skip openclaw.json's OWN restore; nothing to
+                # parse there. WOR-796's agent-auth-store restore is
+                # independent of whether openclaw.json ever had a prior entry
+                # (auth-profiles.json/models.json can cache a real key even
+                # when openclaw.json's provider section was never populated),
+                # so still try to re-read the plaintext key for it.
                 restores.append(
                     _openclaw_integration.OcRestore(
                         provider=p.provider,
                         alias=p.alias,
                         oc_original_api_key_json=None,
-                        plaintext_key=None,
+                        plaintext_key=_read(p),
                         var_name=p.var_name,
                     )
                 )
                 continue
 
-        restores.append(
-            _openclaw_integration.OcRestore(
-                provider=p.provider,
-                alias=p.alias,
-                oc_original_api_key_json=record,
-                plaintext_key=plaintext_key,
-                expected_mac=expected_mac,
-                recomputed_mac=recomputed_mac,
-                # WOR-796: needed to restore the EXACT ${var_name} ref
-                # scrub_agent_auth_stores() wrote, not "any env ref".
-                var_name=p.var_name,
+            # G5-A: the MAC tamper-bind gate now lives in Stage A. The CLI
+            # only computes the recompute (async — Stage A is sync) and threads
+            # both values through the OcRestore. Legacy rows pass both as None
+            # and fall back to shape-only validation per the G1 docstring.
+            # ``is not None`` (not truthy) matches the parser's contract verbatim
+            # at integration.py:159 — an empty-string MAC would otherwise
+            # silently downgrade the gate to shape-only.
+            expected_mac = p.oc_rollback_mac
+            recomputed_mac = (
+                await repo._compute_decoy_hash(record) if expected_mac is not None else None
             )
-        )
+
+            # Shape-only parse here so we can route plaintext-vs-secretref.
+            # Stage A re-runs the full parse with MAC args; that's the
+            # load-bearing check. INVARIANT: the same ``record`` object is
+            # passed to BOTH this parse and the OcRestore.oc_original_api_key_json
+            # field below — Stage A re-parses the identical string, so the two
+            # parses cannot disagree. If the record is structurally invalid we
+            # surface it now (saves the .env re-read on the plaintext branch)
+            # and let Stage A's identical refusal fire as the canonical event.
+            try:
+                parsed = _openclaw_integration._parse_oc_rollback_entry_record(record)
+            except ValueError as exc:
+                console.print_warning(
+                    f"OpenClaw {p.provider!r} rollback record is malformed "
+                    f"({exc}); leaving entry on the proxy."
+                )
+                # WOR-796: openclaw.json's own rollback record being malformed
+                # doesn't affect whether we can restore agent-auth-stores —
+                # that only needs the plaintext key, independently re-read.
+                restores.append(
+                    _openclaw_integration.OcRestore(
+                        provider=p.provider,
+                        alias=p.alias,
+                        oc_original_api_key_json=None,
+                        plaintext_key=_read(p),
+                        var_name=p.var_name,
+                    )
+                )
+                continue
+
+            kind = parsed["apiKey"]["kind"]
+            # Read the key back from the just-restored .env regardless of
+            # `kind` — WOR-796's agent-cache restore needs the real key value
+            # independent of whatever shape openclaw.json's OWN entry happens
+            # to be (a `secretref`-kind entry can still have had a literal real
+            # key scrubbed out of its agent cache). Bugbot catch: this used to
+            # only re-read for `kind == "plaintext"`, silently leaving a
+            # `secretref`-kind provider's agent cache scrubbed forever even
+            # after a successful unlock.
+            plaintext_key = _read(p)
+            if kind == "plaintext":
+                # pass-2 wrote the reconstructed plaintext moments ago. If the
+                # .env is gone (recovery mode / user deleted it) we can't
+                # restore the OC plaintext branch — fall through fail-safe.
+                if plaintext_key is None:
+                    console.print_warning(
+                        f"OpenClaw {p.provider!r}: cannot re-read plaintext key "
+                        "from restored .env; leaving entry on the proxy."
+                    )
+                    restores.append(
+                        _openclaw_integration.OcRestore(
+                            provider=p.provider,
+                            alias=p.alias,
+                            oc_original_api_key_json=None,
+                            plaintext_key=None,
+                            var_name=p.var_name,
+                        )
+                    )
+                    continue
+
+            restores.append(
+                _openclaw_integration.OcRestore(
+                    provider=p.provider,
+                    alias=p.alias,
+                    oc_original_api_key_json=record,
+                    plaintext_key=plaintext_key,
+                    expected_mac=expected_mac,
+                    recomputed_mac=recomputed_mac,
+                    # WOR-796: needed to restore the EXACT ${var_name} ref
+                    # scrub_agent_auth_stores() wrote, not "any env ref".
+                    var_name=p.var_name,
+                )
+            )
+    except BaseException:
+        # SR-02 (worthless-1m8i): a mid-build raise means the caller never
+        # receives ``restores``, so _apply_openclaw_unlock's zeroing finally
+        # never runs on the keys reconstructed so far. Zero them here before
+        # propagating -- incl. CancelledError / KeyboardInterrupt -- so no
+        # plaintext key lingers in the heap on the failure path. On success we
+        # return them intact; the caller owns zeroing then.
+        for r in restores:
+            if r.plaintext_key is not None:
+                zero_buf(r.plaintext_key)
+        if in_flight is not None:
+            zero_buf(in_flight)  # a key re-read but not yet appended (CodeRabbit)
+        raise
     return restores
 
 
