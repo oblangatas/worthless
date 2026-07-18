@@ -154,6 +154,16 @@ jobs:
       - name: Run WOR-777 rotation load-bearing test
         run: uv run pytest tests/openclaw/install_incident/test_rotation_load_bearing.py -v -m "openclaw and docker" --tb=short --timeout=900
 
+      # WOR-797: the unshardable-credential detect/clear claim, proven against a
+      # REAL OpenClaw install (the unit suite is 100% mocked). Surfaces 5
+      # (MiniMax) + 8 (Vertex ADC) are planted at their real Path.home() paths;
+      # asserts the real `worthless doctor` DETECTS both there (the path-drift
+      # guard a mock can't make) and `--fix` removes them from the real
+      # filesystem with the gcloud re-auth remediation. Reuses the co-located
+      # worthless-oc-test:local image built for the rotation test above.
+      - name: Run WOR-797 unshardable-credential load-bearing test
+        run: uv run pytest tests/openclaw/install_incident/test_unshardable_credentials_load_bearing.py -v -m "openclaw and docker" --tb=short --timeout=900
+
   # WOR-749 Linux: lock → systemd service → proxied POST → mock upstream gets
   # real key (privileged systemd container). macOS launchd roundtrip stays
   # manual L7 — Keychain + LaunchAgent on shared GHA macOS runners is flaky.
