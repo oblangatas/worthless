@@ -65,6 +65,73 @@ class TestWorthlessStatus:
         assert result["keys"] == []
         assert result["proxy"]["healthy"] is False
 
+    @pytest.mark.asyncio
+    async def test_status_enrolled_but_proxy_down_is_unprotected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Keys enrolled but proxy down → protected=false + a fix hint (WOR-819).
+
+        This is the silent-danger state left by the one-click editor path: a
+        lock split the keys and pointed ``.env`` at the proxy, but nothing is
+        listening, so the user's calls fail. ``status`` must say so, not leave
+        it to be inferred from two separate fields.
+        """
+        home = _make_home(tmp_path)
+        import worthless.cli.commands.status as status_mod
+
+        monkeypatch.setattr(
+            status_mod,
+            "_list_enrolled_keys",
+            lambda _home: [{"alias": "openai", "provider": "openai"}],
+        )
+        monkeypatch.setattr(status_mod, "_discover_proxy_port", lambda _home: 8787)
+        monkeypatch.setattr(
+            status_mod,
+            "_check_proxy_health",
+            lambda _port: {"healthy": False, "port": 8787, "mode": None},
+        )
+        with patch.dict(os.environ, {"WORTHLESS_HOME": str(home)}):
+            result = json.loads(await worthless_status())
+
+        assert result["keys"], "scenario requires enrolled keys"
+        assert result["protected"] is False
+        assert "proxy is not running" in result["reason"]
+        assert "worthless" in result["reason"]  # names the CLI fix
+
+    @pytest.mark.asyncio
+    async def test_status_enrolled_and_proxy_up_is_protected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Keys enrolled AND proxy healthy → protected=true, no warning."""
+        home = _make_home(tmp_path)
+        import worthless.cli.commands.status as status_mod
+
+        monkeypatch.setattr(
+            status_mod,
+            "_list_enrolled_keys",
+            lambda _home: [{"alias": "openai", "provider": "openai"}],
+        )
+        monkeypatch.setattr(status_mod, "_discover_proxy_port", lambda _home: 8787)
+        monkeypatch.setattr(
+            status_mod,
+            "_check_proxy_health",
+            lambda _port: {"healthy": True, "port": 8787, "mode": "http"},
+        )
+        with patch.dict(os.environ, {"WORTHLESS_HOME": str(home)}):
+            result = json.loads(await worthless_status())
+
+        assert result["protected"] is True
+        assert "reason" not in result
+
+    @pytest.mark.asyncio
+    async def test_status_no_keys_is_unprotected_with_lock_hint(self, tmp_path: Path) -> None:
+        """No keys enrolled → protected=false, pointing at ``worthless lock``."""
+        home = _make_home(tmp_path)
+        with patch.dict(os.environ, {"WORTHLESS_HOME": str(home)}):
+            result = json.loads(await worthless_status())
+        assert result["protected"] is False
+        assert "worthless lock" in result["reason"]
+
 
 # ---------------------------------------------------------------------------
 # worthless_scan

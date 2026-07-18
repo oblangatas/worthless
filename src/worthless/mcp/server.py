@@ -94,10 +94,15 @@ async def _list_orphan_shards(db_path: Path) -> list[str]:
 
 @mcp.tool()
 async def worthless_status() -> str:
-    """Show enrolled keys and proxy health.
+    """Show enrolled keys, proxy health, and whether you are actually protected.
 
-    Returns the list of protected key aliases with their providers,
-    and whether the local proxy is currently running.
+    Returns the list of protected key aliases with their providers, whether the
+    local proxy is running, and a top-level ``protected`` verdict. This tool
+    (the MCP server) cannot start the proxy — only the CLI (`worthless`) does.
+    So an editor-only user can enrol keys yet leave the proxy down; because a
+    lock always rewrites ``*_BASE_URL`` to point at the proxy, that state makes
+    the user's calls fail. ``protected``/``reason`` name that state explicitly
+    instead of leaving it to be inferred from two separate fields.
     """
     # Deferred: avoid pulling typer/rich CLI stack at MCP server startup.
     # TODO(WOR-126): move _check_proxy_health, _list_enrolled_keys into
@@ -122,7 +127,32 @@ async def worthless_status() -> str:
         if port is not None:
             proxy_info = _check_proxy_health(port)
 
-    return json.dumps({"keys": keys, "proxy": proxy_info}, default=str)
+    enrolled = len(keys) > 0
+    proxy_healthy = bool(proxy_info.get("healthy"))
+    # "Protected" means both halves of the loop are in place: keys are split
+    # AND the proxy is up to reconstruct them under the cap. Either half alone
+    # is not protection.
+    protected = enrolled and proxy_healthy
+
+    result: dict[str, Any] = {
+        "keys": keys,
+        "proxy": proxy_info,
+        "protected": protected,
+    }
+    if not enrolled:
+        result["reason"] = "No keys are enrolled yet — run `worthless lock` to protect your .env."
+    elif not proxy_healthy:
+        # The dangerous state: keys are split and .env points at the proxy, but
+        # nothing is listening, so the user's requests fail. The MCP path can't
+        # fix this — tell them the CLI command that can.
+        result["reason"] = (
+            "Keys are split but the proxy is not running — your .env points at "
+            "the local proxy and nothing is listening, so calls will fail with a "
+            "connection error. Run `worthless` in your project directory to start "
+            "the proxy (the editor tools cannot start it)."
+        )
+
+    return json.dumps(result, default=str)
 
 
 @mcp.tool()
