@@ -281,6 +281,13 @@ class TestLockVerdictFirst:
 
         # _maybe_prompt_code_scan would scan cwd / prompt — stub it out.
         monkeypatch.setattr(lock_mod, "_maybe_prompt_code_scan", lambda *_a, **_k: None)
+        # WOR-797: same reason — the unshardable warning runs real detection
+        # against the developer's REAL home (and shells out to /usr/bin/security
+        # on macOS). This test is about verdict wording, not credential
+        # discovery, so keep it off the machine's actual home directory.
+        monkeypatch.setattr(
+            lock_mod, "_print_unshardable_credentials_warning", lambda *_a, **_k: None
+        )
         console = WorthlessConsole(quiet=False, json_mode=False)
         lock_mod._print_lock_result(
             console,

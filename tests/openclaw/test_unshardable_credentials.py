@@ -312,6 +312,43 @@ def test_lock_prints_warning_when_unshardable_credential_present(
     assert "worthless doctor --fix" in result.output or "worthless doctor --fix" in result.stderr
 
 
+def test_lock_warns_about_oauth_credentials_when_no_shardable_keys_exist(
+    home_dir: WorthlessHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Gap 1 (WOR-797): a pure-OAuth user with ZERO shardable API keys must
+    STILL be warned about the unshardable credentials on disk. The warning used
+    to be gated inside lock's has-keys branch, so this exact user — the one the
+    feature exists for — heard only "No unprotected API keys found." and nothing
+    about their live OAuth logins. Fails on the pre-fix code (RED).
+    """
+    from worthless.openclaw import unshardable_credentials as uc_mod
+
+    monkeypatch.setattr(uc_mod, "_keychain_service_present", lambda service: False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _write_json(
+        tmp_path / ".gemini" / "oauth_creds.json",
+        {"access_token": "fake", "refresh_token": "fake"},
+    )
+    # A .env with NO API key: nothing to shard, so lock takes its
+    # "No unprotected API keys found." branch — the branch that stayed silent.
+    env_file = tmp_path / ".env"
+    env_file.write_text("PORT=8000\n")
+
+    result = runner.invoke(
+        app,
+        ["lock", "--env", str(env_file)],
+        env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+    )
+
+    assert result.exit_code == 0, result.output
+    out = result.output.lower()  # CliRunner mixes stderr into output
+    # The no-keys message must still appear — the fix must not break that path.
+    assert "no unprotected api keys found" in out
+    # THE FIX: the OAuth warning now fires on the zero-shardable-keys path too.
+    assert "cannot protect" in out
+    assert "worthless doctor --fix" in result.output
+
+
 def test_doctor_fix_clears_unshardable_credential_via_cli(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

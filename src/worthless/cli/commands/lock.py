@@ -1929,9 +1929,16 @@ def _print_lock_result(
         if not openclaw_failed:
             console.print_hint("Check anytime with `worthless status`.")
         _maybe_prompt_code_scan(Path.cwd())
-        _print_unshardable_credentials_warning(console)
     else:
         console.print_warning("No unprotected API keys found.")
+    # WOR-797 (Gap 1): fires on BOTH paths, deliberately outside the branch
+    # above. A user with ZERO shardable keys is exactly the population this
+    # warning exists for — a CLI-login-only OpenClaw user whose OAuth refresh
+    # tokens lock cannot protect. Gating it inside the has-keys branch left
+    # them with "No unprotected API keys found." and a false all-clear.
+    # Self-returns when there are no findings, so a genuinely clean install
+    # stays quiet.
+    _print_unshardable_credentials_warning(console)
 
 
 def _openclaw_audit_preflight(
