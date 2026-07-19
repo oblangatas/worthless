@@ -62,6 +62,15 @@ class CheckResult(TypedDict, total=False):
             this run. Empty when ``fix=False`` or no repairs were needed.
         skipped_reason: present when the check could not run at all
             (e.g. platform mismatch); status is ``ok`` in that case.
+        caveats: coverage gaps WITHIN a check that did run — surfaces it
+            couldn't fully inspect (e.g. macOS-only keychain surfaces on a
+            Linux host). Advisory only; status stays ``ok``. A 0-finding scan
+            carrying caveats means "clean, but not everything could be
+            checked" — never "verified clean". Optional; omitted when empty.
+        unfixed: list of dicts for surfaces ``--fix`` attempted but could NOT
+            clear (e.g. a symlinked credential, permission denied), each with
+            a ``reason``. Status is ``warn`` when present — a partial fix must
+            never read as done. Optional; omitted when empty.
     """
 
     check_id: str
@@ -71,6 +80,8 @@ class CheckResult(TypedDict, total=False):
     fixable: bool
     fixed: list[dict]
     skipped_reason: str | None
+    caveats: list[str]
+    unfixed: list[dict]
 
 
 class Check(Protocol):
@@ -108,6 +119,7 @@ def _build_all_checks() -> list:
         recovery_import,
         service_health,
         stranded_shards,
+        unshardable_credentials,
     )
 
     return [
@@ -121,6 +133,7 @@ def _build_all_checks() -> list:
         broken_status,
         bind_confirmation,
         service_health,
+        unshardable_credentials,
     ]
 
 

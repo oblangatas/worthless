@@ -70,6 +70,10 @@ from worthless.openclaw import audit as _oc_audit
 from worthless.openclaw import config as _openclaw_config_mod
 from worthless.openclaw import integration as _openclaw_integration
 from worthless.openclaw.errors import OpenclawErrorCode, OpenclawIntegrationError
+from worthless.openclaw.unshardable_credentials import (
+    detect_unshardable_credentials,
+    detection_caveats,
+)
 from worthless.storage.repository import ShardRepository, StoredShard
 
 logger = logging.getLogger(__name__)
@@ -1931,6 +1935,14 @@ def _print_lock_result(
         _maybe_prompt_code_scan(Path.cwd())
     else:
         console.print_warning("No unprotected API keys found.")
+    # WOR-797 (Gap 1): fires on BOTH paths, deliberately outside the branch
+    # above. A user with ZERO shardable keys is exactly the population this
+    # warning exists for — a CLI-login-only OpenClaw user whose OAuth refresh
+    # tokens lock cannot protect. Gating it inside the has-keys branch left
+    # them with "No unprotected API keys found." and a false all-clear.
+    # Self-returns when there are no findings, so a genuinely clean install
+    # stays quiet.
+    _print_unshardable_credentials_warning(console)
 
 
 def _openclaw_audit_preflight(
@@ -2071,6 +2083,32 @@ def _sync_fernet_after_lock(home: WorthlessHome) -> None:
         sync_fernet_for_launchd(home.base_dir, key=key)
     finally:
         zero_buf(key)
+
+
+def _print_unshardable_credentials_warning(console: WorthlessConsole) -> None:
+    """WOR-797: ``lock`` only shards a static API key. Warn (once, post-lock)
+    when any of the 8 unshardable OAuth/token credential surfaces are
+    present, so the user doesn't assume lock's protection extends to them —
+    see :mod:`worthless.openclaw.unshardable_credentials` for the full,
+    source-verified surface list.
+    """
+    findings = detect_unshardable_credentials()
+    if findings:
+        n = len(findings)
+        console.print_warning(
+            f"[WARN] {n} OAuth/token credential{'s' if n != 1 else ''} found that lock "
+            "CANNOT protect (the proxy is not load-bearing for these) — run "
+            "`worthless doctor --fix` to clear the ones you don't need."
+        )
+    # WOR-797 (Gap 1, second surface): a Linux/WSL scan cannot inspect the two
+    # macOS-keychain surfaces. Surface that caveat here — exactly as `doctor`
+    # does — so a partial scan on the target platform never reads as a clean
+    # bill of health. Runs on both the has-keys and zero-keys paths.
+    caveats = detection_caveats()
+    if caveats:
+        console.print_hint(
+            "[NOTE] " + "; ".join(caveats) + " — run `worthless doctor` for a full check."
+        )
 
 
 def _lock_keys(

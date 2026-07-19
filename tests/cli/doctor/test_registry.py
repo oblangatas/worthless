@@ -33,6 +33,7 @@ EXPECTED_CHECK_IDS = {
     "broken_status",
     "bind_confirmation",  # WOR-658
     "service_health",  # WOR-726
+    "unshardable_credentials",  # WOR-797
 }
 
 

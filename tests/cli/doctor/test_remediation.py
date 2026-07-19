@@ -96,6 +96,7 @@ def test_each_playbook_leads_with_its_correct_verdict() -> None:
         "stranded_shards": ("nothing at risk",),
         "bind_confirmation": ("locked",),
         "service_health": ("degraded",),
+        "unshardable_credentials": ("aren't api keys",),
     }
     assert set(expected) == set(PLAYBOOKS), "verdict map and PLAYBOOKS drifted — add the new check"
     for cid, oks in expected.items():
