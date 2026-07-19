@@ -87,6 +87,25 @@ async def _list_orphan_shards(db_path: Path) -> list[str]:
         return [r[0] for r in rows]
 
 
+def _safe_sentinel(sentinel: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Project the lock sentinel down to the fields a verdict consumer needs.
+
+    Unlike the CLI, this surface hands its output to a model that may be
+    remote. The raw sentinel carries operational detail — config paths,
+    usernames in those paths, and a full provider inventory in its event
+    list — none of which is needed to explain a verdict. Whitelist rather
+    than blacklist so a future field added upstream is withheld by default.
+    """
+    if not sentinel:
+        return None
+    safe: dict[str, Any] = {k: sentinel[k] for k in ("status", "openclaw", "ts") if k in sentinel}
+    # Only the bind-confirmation *outcome*, never the per-alias detail.
+    bind = sentinel.get("bind_confirmation")
+    if isinstance(bind, dict) and "status" in bind:
+        safe["bind_confirmation"] = {"status": bind["status"]}
+    return safe
+
+
 # ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
@@ -112,6 +131,13 @@ async def worthless_status() -> str:
     ``keys``, ``proxy``, ``sentinel``, ``degraded``) so both surfaces answer
     "am I protected?" identically, plus ``header`` — the human-readable line
     an agent can relay verbatim.
+
+    Scope of the verdict — state this when relaying it: it covers **enrolled
+    keys and the proxy only**. Status is cwd-independent, so it never reads
+    this project's ``.env`` and cannot see un-enrolled plaintext keys sitting
+    beside the locked ones. A green verdict means "what is enrolled is
+    protected", not "no exposed keys exist here" — call ``worthless_scan``
+    for that question.
     """
     # Deferred: avoid pulling typer/rich CLI stack at MCP server startup.
     # TODO(WOR-126): move _check_proxy_health, _list_enrolled_keys and
@@ -121,11 +147,19 @@ async def worthless_status() -> str:
         _check_proxy_health,
         _discover_proxy_port,
         _list_enrolled_keys,
+        _resolve_home_for_status,
         _status_verdict,
     )
     from worthless.cli.sentinel import is_partial, read_sentinel
 
-    home = resolve_home()
+    # Resolve the home exactly as the CLI's status does. The general
+    # ``resolve_home()`` swallows bootstrap failures and returns None, which
+    # here would render as verdict "empty" — telling a user with real locked
+    # keys that nothing is enrolled, and forcing degraded=False (re-closing
+    # the at_risk path). The CLI deliberately lets storage corruption
+    # propagate instead of hiding it; this surface must do the same or the
+    # two disagree on the only question that matters.
+    home = _resolve_home_for_status()
 
     keys: list[dict[str, str]] = []
     proxy_info: dict[str, Any] = {"healthy": False, "port": None, "mode": None}
@@ -154,7 +188,7 @@ async def worthless_status() -> str:
             "header": header,
             "keys": keys,
             "proxy": proxy_info,
-            "sentinel": sentinel,
+            "sentinel": _safe_sentinel(sentinel),
             "degraded": degraded,
         },
         default=str,

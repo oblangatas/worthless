@@ -174,6 +174,88 @@ class TestWorthlessStatus:
         assert result["verdict"] == expected_verdict
         assert result["header"] == expected_header
 
+    @pytest.mark.asyncio
+    async def test_storage_failure_is_not_reported_as_empty(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A broken store must not read as "nothing enrolled" (WOR-820).
+
+        The general ``resolve_home()`` swallows bootstrap errors and returns
+        None, which would render as verdict ``empty`` — telling a user whose
+        keys ARE locked that nothing is enrolled, and forcing degraded=False.
+        The CLI deliberately lets storage corruption propagate; this surface
+        must too, or the two disagree on the only question that matters.
+        """
+        import worthless.cli.commands.status as status_mod
+        from worthless.cli.errors import ErrorCode, WorthlessError
+
+        def _boom() -> None:
+            raise WorthlessError(ErrorCode.BOOTSTRAP_FAILED, "keystore unavailable")
+
+        monkeypatch.setattr(status_mod, "_resolve_home_for_status", _boom)
+
+        with pytest.raises(WorthlessError):
+            await worthless_status()
+
+    @pytest.mark.asyncio
+    async def test_sentinel_is_whitelisted_not_passed_through_raw(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Operational detail must not ride along to a possibly-remote model.
+
+        The raw sentinel carries config paths, usernames inside those paths,
+        and a provider inventory in ``events`` — none of it needed to explain
+        a verdict. Whitelist, so a field added upstream is withheld by default.
+        """
+        home = _make_home(tmp_path)
+        self._stub_status(
+            monkeypatch,
+            keys=[{"alias": "openai", "provider": "openai", "status": "PROTECTED"}],
+            healthy=True,
+            sentinel={
+                "status": "ok",
+                "openclaw": "applied",
+                "ts": "2026-07-19T00:00:00Z",
+                "events": [{"path": "/Users/someone/.config/secret.json"}],
+                "alias_count": 3,
+                "bind_confirmation": {"status": "confirmed", "aliases": ["openai"]},
+            },
+        )
+        with patch.dict(os.environ, {"WORTHLESS_HOME": str(home)}):
+            result = json.loads(await worthless_status())
+
+        sentinel = result["sentinel"]
+        assert "events" not in sentinel, "operational event detail leaked"
+        assert "alias_count" not in sentinel
+        assert sentinel["bind_confirmation"] == {"status": "confirmed"}, (
+            "per-alias bind detail leaked"
+        )
+        assert sentinel["status"] == "ok"
+
+    @pytest.mark.asyncio
+    async def test_shape_is_a_superset_of_the_cli_json(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pin the cross-surface contract so shape drift is caught.
+
+        The CLI's ``status --json`` emits verdict/keys/proxy/sentinel/degraded.
+        This surface must carry all of them (plus ``header``) or an agent and
+        a human reading the same install stop seeing the same facts.
+        """
+        home = _make_home(tmp_path)
+        self._stub_status(
+            monkeypatch,
+            keys=[{"alias": "openai", "provider": "openai", "status": "PROTECTED"}],
+            healthy=True,
+        )
+        with patch.dict(os.environ, {"WORTHLESS_HOME": str(home)}):
+            result = json.loads(await worthless_status())
+
+        cli_json_fields = {"verdict", "keys", "proxy", "sentinel", "degraded"}
+        assert cli_json_fields <= set(result), (
+            f"missing CLI fields: {sorted(cli_json_fields - set(result))}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # worthless_scan
