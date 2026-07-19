@@ -174,7 +174,12 @@ def _format_human(
                 # "**** (3f9a2b1c)".
                 lines_text = text.splitlines()
                 if 1 <= f.line <= len(lines_text):
-                    match = KEY_PATTERN.search(lines_text[f.line - 1])
+                    line_text = lines_text[f.line - 1]
+                    # Fingerprint THIS finding's key: start at its recorded
+                    # column so a second key on the same line gets its own
+                    # fingerprint, not the line's first match. Fall back to the
+                    # first match if column is unknown (e.g. legacy findings).
+                    match = KEY_PATTERN.search(line_text, f.column if f.column is not None else 0)
                     if match:
                         preview = f"{f.value_preview} ({key_fingerprint(match.group(0))})"
             except Exception:  # noqa: S110 — best-effort preview; display failure is non-critical  # nosec B110

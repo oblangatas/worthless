@@ -214,6 +214,10 @@ class ScanFinding:
     provider: str
     is_protected: bool
     value_preview: str  # fully masked by default
+    # 0-indexed offset of the match within its line. Lets --show-suffix
+    # fingerprint THIS finding's key rather than the line's first match, which
+    # would show one shared fingerprint for every key on a minified JSON line.
+    column: int | None = None
 
 
 def scan_files(
@@ -293,6 +297,7 @@ def scan_files(
                         provider=provider,
                         is_protected=is_protected,
                         value_preview=_mask(value),
+                        column=match.start(),
                     )
                 )
     return findings

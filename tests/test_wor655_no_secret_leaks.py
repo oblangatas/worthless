@@ -187,6 +187,24 @@ class TestPrintRecoveryGate:
         captured = capsys.readouterr()
         assert key in captured.out, "with --print-recovery the key IS printed by design"
 
+    # --- Why these call _print_recovery_keys directly ----------------------
+    # Driving recovery through `runner.invoke(app, ["unlock", ...])` would be
+    # the stronger boundary, but the branch is NOT CLI-reachable for keys
+    # locked by the current version:
+    #
+    #   _load_shard_a() takes the format-preserving path whenever the row has
+    #   prefix+charset (every current-version lock), and that path REQUIRES
+    #   env_path + var_name — it raises WRTLS-102 ("shard-A is in .env but no
+    #   valid env_path") otherwise. Recovery is selected only when var_name is
+    #   None, so for a current-version row the two conditions are mutually
+    #   exclusive: you get WRTLS-102 long before _print_recovery_keys runs.
+    #
+    # Recovery therefore fires only for LEGACY rows (shard-A on disk, no
+    # prefix/charset), which a CLI test cannot create — it would have to
+    # fabricate a storage row and couple this test to the DB schema.
+    # Flag propagation (unlock --print-recovery -> _unlock_batch) is verified
+    # by inspection; a legacy-row fixture test is tracked separately.
+
 
 # ===========================================================================
 # Item 4 — scan render: flat **** default, fingerprint (not real bytes) on
@@ -226,6 +244,31 @@ class TestScanRenderRedaction:
         # that fingerprint, so the 8-hex tail must appear.
         fingerprint = _make_alias("openai", key).split("-")[-1]
         assert fingerprint in combined
+
+    def test_two_keys_on_one_line_get_their_own_fingerprints(self, tmp_path: Path) -> None:
+        """Each finding fingerprints ITS OWN key, not the line's first match.
+
+        Minified JSON puts several keys on a single line. Fingerprinting the
+        line's first match would stamp every finding on that line with the
+        same hash, defeating the whole "tell two keys apart" purpose.
+        """
+        k1 = fake_openai_key()
+        k2 = fake_anthropic_key()
+        f = tmp_path / "config.json"
+        f.write_text(f'{{"a":"{k1}","b":"{k2}"}}\n')
+
+        result = runner.invoke(app, ["scan", "--show-suffix", str(f)])
+        assert result.exit_code == 1, result.output
+        combined = result.stdout + result.stderr
+
+        fp1 = _make_alias("openai", k1).split("-")[-1]
+        fp2 = _make_alias("anthropic", k2).split("-")[-1]
+        assert fp1 != fp2, "distinct keys must have distinct fingerprints"
+        assert fp1 in combined, "first key's own fingerprint missing"
+        assert fp2 in combined, "second key got the first key's fingerprint"
+        # And still no real bytes from either key.
+        assert k1[-4:] not in combined
+        assert k2[-4:] not in combined
 
 
 # ===========================================================================
@@ -324,15 +367,19 @@ def test_no_secret_leaks_across_lock_status_doctor_unlock(
         channels.append(("lock.stderr", r_lock.stderr.encode()))
         assert r_lock.exit_code == 0, f"lock failed: {r_lock.output}\n{r_lock.stderr}"
 
-        # 2. status (human + --json)
+        # 2. status (human + --json). Assert each run completed BEFORE trusting
+        # its channels — an early crash would satisfy the absence checks below
+        # vacuously (nothing printed ⇒ no key printed).
         for extra in ([], ["--json"]):
             r = runner.invoke(app, ["status", *extra], env=env_vars)
+            assert r.exit_code == 0, f"status{extra} failed: {r.output}\n{r.stderr}"
             channels.append((f"status{extra}.stdout", r.stdout.encode()))
             channels.append((f"status{extra}.stderr", r.stderr.encode()))
 
         # 3. doctor (human + --json)
         for extra in (["--yes"], ["--json"]):
             r = runner.invoke(app, ["doctor", *extra], env=env_vars)
+            assert r.exit_code == 0, f"doctor{extra} failed: {r.output}\n{r.stderr}"
             channels.append((f"doctor{extra}.stdout", r.stdout.encode()))
             channels.append((f"doctor{extra}.stderr", r.stderr.encode()))
 
@@ -345,6 +392,7 @@ def test_no_secret_leaks_across_lock_status_doctor_unlock(
 
         # 5. doctor --fix --dry-run — the audit/repair surface.
         r_fix = runner.invoke(app, ["doctor", "--fix", "--dry-run", "--yes"], env=env_vars)
+        assert r_fix.exit_code == 0, f"doctor dry-run failed: {r_fix.output}\n{r_fix.stderr}"
         channels.append(("doctor-fix-dry.stdout", r_fix.stdout.encode()))
         channels.append(("doctor-fix-dry.stderr", r_fix.stderr.encode()))
 
