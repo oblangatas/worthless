@@ -351,7 +351,10 @@ def _clear_auth_profile_entries(location: str) -> bool:
     matches the exact-match precision WOR-796's scrub/restore already use,
     so an unrelated profile in the same file is never touched.
     """
-    path_str, _, profile_id = location.partition("#")
+    # rpartition, not partition: an auth-profiles.json path may itself contain
+    # a '#' (valid in POSIX paths). The profile-id separator is the LAST '#',
+    # so splitting on the first would corrupt both the path and the id.
+    path_str, _, profile_id = location.rpartition("#")
     path = Path(path_str)
     try:
         with _config_mod._file_lock(path):

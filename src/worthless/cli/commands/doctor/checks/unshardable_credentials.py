@@ -18,6 +18,8 @@ application-default login`` remediation string.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from worthless.cli.commands.doctor.registry import CheckContext, CheckResult
 from worthless.openclaw.unshardable_credentials import (
     VERTEX_REAUTH_COMMAND,
@@ -29,16 +31,45 @@ from worthless.openclaw.unshardable_credentials import (
 check_id = "unshardable_credentials"
 
 
-def _clear_finding(finding) -> dict | None:  # noqa: ANN001 - UnshardableCredentialFinding
-    """Clear one finding; return its ``fixed`` entry, or ``None`` if it's
-    still present. Extracted to keep :func:`run` under xenon's budget.
+def _unfixed_reason(finding) -> str:  # noqa: ANN001 - UnshardableCredentialFinding
+    """Human-readable reason a clear was attempted but did not remove the
+    credential — so ``--fix`` never leaves a live token silently listed.
+    """
+    if finding.clear_kind in ("file", "auth_profile_entries"):
+        # auth_profile locations are "<path>#<profile_id>" — the path is
+        # everything before the LAST '#' (see _clear_auth_profile_entries).
+        path_str = (
+            finding.location.rpartition("#")[0]
+            if finding.clear_kind == "auth_profile_entries"
+            else finding.location
+        )
+        try:
+            if Path(path_str).is_symlink():
+                return (
+                    "refused — the credential is a symlink; clearing it would "
+                    "unlink only the pointer and leave the real token live"
+                )
+        except OSError:
+            pass
+    return "could not remove — permission denied or I/O error (see logs)"
+
+
+def _clear_finding(finding) -> tuple[str, dict]:  # noqa: ANN001 - UnshardableCredentialFinding
+    """Clear one finding. Returns ``("fixed", entry)`` on success or
+    ``("unfixed", entry)`` with a reason when the clear was refused/failed —
+    so a partial ``--fix`` tells the user exactly what it couldn't touch.
+    Extracted to keep :func:`run` under xenon's budget.
     """
     if not clear_unshardable_credential(finding):
-        return None
+        return "unfixed", {
+            "surface_id": finding.surface_id,
+            "description": finding.description,
+            "reason": _unfixed_reason(finding),
+        }
     entry = {"surface_id": finding.surface_id, "description": finding.description}
     if finding.needs_vertex_reauth_notice:
         entry["remediation"] = f"cleared — re-authenticate with: {VERTEX_REAUTH_COMMAND}"
-    return entry
+    return "fixed", entry
 
 
 def _summarize(n: int, caveats: list[str]) -> str:
@@ -67,19 +98,31 @@ def run(ctx: CheckContext) -> CheckResult:
     caveats = detection_caveats()
 
     fixed: list[dict] = []
+    unfixed: list[dict] = []
     if ctx.fix and findings_data and not ctx.dry_run:
-        fixed = [e for f in findings_data if (e := _clear_finding(f)) is not None]
+        for f in findings_data:
+            kind, entry = _clear_finding(f)
+            (fixed if kind == "fixed" else unfixed).append(entry)
     status = "ok" if len(fixed) == len(findings_data) else "warn"
+
+    summary = _summarize(len(findings_data), caveats)
+    if unfixed:
+        # An honesty feature must not report a partial --fix as done: name how
+        # many surfaces it could NOT clear right in the summary a terminal user
+        # reads, with the per-surface reason available in the structured field.
+        summary += f" ({len(unfixed)} could not be cleared — see 'unfixed' for why)"
 
     result = CheckResult(
         check_id=check_id,
         status=status,
         findings=findings,
-        summary=_summarize(len(findings_data), caveats),
+        summary=summary,
         fixable=True,
         fixed=fixed,
         skipped_reason=None,
     )
+    if unfixed:
+        result["unfixed"] = unfixed
     # WOR-797 (Gap 3): expose coverage gaps as structured data, not just prose
     # buried in the summary string — a JSON consumer on Linux/WSL (the target
     # platform, where the 2 macOS-keychain surfaces can't be checked) can now

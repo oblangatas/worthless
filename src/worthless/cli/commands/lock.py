@@ -70,6 +70,10 @@ from worthless.openclaw import audit as _oc_audit
 from worthless.openclaw import config as _openclaw_config_mod
 from worthless.openclaw import integration as _openclaw_integration
 from worthless.openclaw.errors import OpenclawErrorCode, OpenclawIntegrationError
+from worthless.openclaw.unshardable_credentials import (
+    detect_unshardable_credentials,
+    detection_caveats,
+)
 from worthless.storage.repository import ShardRepository, StoredShard
 
 logger = logging.getLogger(__name__)
@@ -2088,17 +2092,23 @@ def _print_unshardable_credentials_warning(console: WorthlessConsole) -> None:
     see :mod:`worthless.openclaw.unshardable_credentials` for the full,
     source-verified surface list.
     """
-    from worthless.openclaw.unshardable_credentials import detect_unshardable_credentials
-
     findings = detect_unshardable_credentials()
-    if not findings:
-        return
-    n = len(findings)
-    console.print_warning(
-        f"[WARN] {n} OAuth/token credential{'s' if n != 1 else ''} found that lock "
-        "CANNOT protect (the proxy is not load-bearing for these) — run "
-        "`worthless doctor --fix` to clear the ones you don't need."
-    )
+    if findings:
+        n = len(findings)
+        console.print_warning(
+            f"[WARN] {n} OAuth/token credential{'s' if n != 1 else ''} found that lock "
+            "CANNOT protect (the proxy is not load-bearing for these) — run "
+            "`worthless doctor --fix` to clear the ones you don't need."
+        )
+    # WOR-797 (Gap 1, second surface): a Linux/WSL scan cannot inspect the two
+    # macOS-keychain surfaces. Surface that caveat here — exactly as `doctor`
+    # does — so a partial scan on the target platform never reads as a clean
+    # bill of health. Runs on both the has-keys and zero-keys paths.
+    caveats = detection_caveats()
+    if caveats:
+        console.print_hint(
+            "[NOTE] " + "; ".join(caveats) + " — run `worthless doctor` for a full check."
+        )
 
 
 def _lock_keys(

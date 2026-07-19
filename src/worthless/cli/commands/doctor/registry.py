@@ -67,6 +67,10 @@ class CheckResult(TypedDict, total=False):
             Linux host). Advisory only; status stays ``ok``. A 0-finding scan
             carrying caveats means "clean, but not everything could be
             checked" — never "verified clean". Optional; omitted when empty.
+        unfixed: list of dicts for surfaces ``--fix`` attempted but could NOT
+            clear (e.g. a symlinked credential, permission denied), each with
+            a ``reason``. Status is ``warn`` when present — a partial fix must
+            never read as done. Optional; omitted when empty.
     """
 
     check_id: str
@@ -77,6 +81,7 @@ class CheckResult(TypedDict, total=False):
     fixed: list[dict]
     skipped_reason: str | None
     caveats: list[str]
+    unfixed: list[dict]
 
 
 class Check(Protocol):

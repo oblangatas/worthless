@@ -527,3 +527,156 @@ def test_caveats_field_absent_when_scan_had_full_coverage(
     result = check_mod.run(ctx)
     assert "caveats" not in result
     assert result["status"] == "ok"
+
+
+def test_clear_auth_profile_entry_when_path_contains_hash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CodeRabbit (WOR-797): '#' is legal in a POSIX path, but it is also the
+    separator between the auth-profiles.json path and the profile id inside a
+    finding's ``location``. Splitting on the FIRST '#' (``partition``) corrupts
+    both the path and the id when a home dir contains '#', so the clear misses
+    and silently leaves the token live. ``rpartition`` (split on the LAST '#')
+    is the fix. RED on the pre-fix code: the clear returns False and the leaked
+    profile survives.
+    """
+    home = tmp_path / "ho#me"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setattr(uc, "_keychain_service_present", lambda service: False)
+    auth_profiles = home / ".openclaw" / "agents" / "main" / "agent" / "auth-profiles.json"
+    _write_json(
+        auth_profiles,
+        {
+            "profiles": {
+                "leaky": {"type": "oauth", "refresh_token": "fake"},
+                "keeper": {"type": "api_key", "key": fake_openai_key()},
+            }
+        },
+    )
+
+    finding = _find_surface(uc.detect_unshardable_credentials(), "auth_profile_oauth")
+    assert "#" in finding.location, "sanity: the path under test genuinely carries a '#'"
+
+    assert uc.clear_unshardable_credential(finding) is True, (
+        "with '#' in the path, the clear must still find and rewrite the file"
+    )
+    remaining = json.loads(auth_profiles.read_text())["profiles"]
+    assert "leaky" not in remaining, "the oauth profile must actually be removed"
+    assert "keeper" in remaining, "the unrelated (api_key) profile must be left untouched"
+
+
+def test_lock_surfaces_detection_caveats_on_non_macos(
+    home_dir: WorthlessHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Gap 1, second surface (WOR-797): the caveat about un-checkable macOS
+    keychain surfaces must reach the ``lock`` user too — not only ``doctor``.
+    Before the fix, lock ignored ``detection_caveats()`` entirely, so a
+    Linux/WSL user (the target platform) got an unqualified result for a scan
+    that silently skipped two surfaces. Zero findings here isolates the NOTE.
+    """
+    from worthless.cli.commands import lock as lock_mod
+
+    monkeypatch.setattr(lock_mod, "detect_unshardable_credentials", lambda: [])
+    monkeypatch.setattr(
+        lock_mod,
+        "detection_caveats",
+        lambda: ["keychain-based surfaces (Claude Code, Codex) could not be checked — macOS-only"],
+    )
+    monkeypatch.setenv("HOME", str(tmp_path))
+    env_file = tmp_path / ".env"
+    env_file.write_text("PORT=8000\n")
+
+    result = runner.invoke(
+        app,
+        ["lock", "--env", str(env_file)],
+        env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+    )
+
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "[NOTE]" in out, "the coverage caveat must be surfaced on the lock path"
+    assert "could not be checked" in out
+    assert "worthless doctor" in out, "the NOTE must point the user at the full check"
+
+
+def test_doctor_summary_names_the_credentials_when_found(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Surface audit (WOR-797): the headline sentence a user reads when
+    credentials ARE found had zero assertions — deleting or corrupting it left
+    the suite fully green. Pin the exact honest phrasing.
+    """
+    from worthless.cli.commands.doctor.checks import unshardable_credentials as check_mod
+    from worthless.storage.repository import ShardRepository
+
+    monkeypatch.setattr(check_mod, "detection_caveats", lambda: [])
+    monkeypatch.setattr(uc, "_keychain_service_present", lambda service: False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+    _write_json(
+        tmp_path / ".gemini" / "oauth_creds.json",
+        {"access_token": "fake", "refresh_token": "fake"},
+    )
+    fake_home = ensure_home(tmp_path / ".worthless")
+    ctx = check_mod.CheckContext(
+        home=fake_home,
+        repo=ShardRepository(str(fake_home.db_path), bytes(fake_home.fernet_key)),
+        fix=False,
+        dry_run=False,
+    )
+
+    result = check_mod.run(ctx)
+    assert result["status"] == "warn"
+    assert "unshardable credential" in result["summary"]
+    assert "not load-bearing" in result["summary"]
+
+
+def test_doctor_fix_reports_symlinked_credential_as_unfixed_with_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Surface audit (WOR-797): a symlinked credential must be REFUSED by
+    ``--fix`` (unlinking the pointer leaves the real token live) AND that
+    refusal must reach the user — never silently leave the surface listed with
+    no reason. A second, real credential clears normally, proving a partial fix
+    reports both outcomes truthfully. Before the fix there was no ``unfixed``
+    channel: the refusal existed only as a log line.
+    """
+    from worthless.cli.commands.doctor.checks import unshardable_credentials as check_mod
+    from worthless.storage.repository import ShardRepository
+
+    monkeypatch.setattr(uc, "_keychain_service_present", lambda service: False)
+    monkeypatch.setattr(check_mod, "detection_caveats", lambda: [])
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+
+    # Surface A — a real MiniMax creds file: clears normally.
+    minimax = tmp_path / ".minimax" / "oauth_creds.json"
+    _write_json(minimax, {"access_token": "fake", "refresh_token": "fake"})
+    # Surface B — a SYMLINKED Gemini creds file: --fix must refuse it.
+    real_target = tmp_path / "real_gemini_token.json"
+    _write_json(real_target, {"access_token": "fake", "refresh_token": "fake"})
+    gemini = tmp_path / ".gemini" / "oauth_creds.json"
+    gemini.parent.mkdir(parents=True, exist_ok=True)
+    gemini.symlink_to(real_target)
+
+    fake_home = ensure_home(tmp_path / ".worthless")
+    ctx = check_mod.CheckContext(
+        home=fake_home,
+        repo=ShardRepository(str(fake_home.db_path), bytes(fake_home.fernet_key)),
+        fix=True,
+        dry_run=False,
+    )
+
+    result = check_mod.run(ctx)
+    assert result["status"] == "warn"
+    fixed_ids = {e["surface_id"] for e in result["fixed"]}
+    unfixed = {e["surface_id"]: e for e in result.get("unfixed", [])}
+    assert "minimax_cli_file" in fixed_ids, "the real file should clear"
+    assert "gemini_cli_file" in unfixed, "the symlinked file must be reported as unfixed"
+    assert "symlink" in unfixed["gemini_cli_file"]["reason"].lower()
+    assert "could not be cleared" in result["summary"]
+    # The refusal must have left the real token untouched — the whole point.
+    assert real_target.exists(), "the real credential behind the symlink must survive"
+    assert gemini.is_symlink(), "the symlink itself must be left alone, not removed"
