@@ -442,7 +442,26 @@ def _mentions_worthless_mcp(path: Path) -> bool:
         return False
     if not isinstance(data, dict):
         return False
-    return any("worthless-mcp" in json.dumps(b) for b in _mcp_server_blocks(data))
+    return any(
+        _declares_worthless_mcp(entry)
+        for block in _mcp_server_blocks(data)
+        for entry in block.values()
+    )
+
+
+def _declares_worthless_mcp(entry: object) -> bool:
+    """Does this ONE server entry launch our npm wrapper?
+
+    Anchored to the fields where the package name actually appears — the launch
+    ``command`` and its ``args`` — rather than the whole serialized entry, so a
+    third-party server that merely mentions ``worthless-mcp`` in an env value, a
+    description, or a URL is never mistaken for ours (CodeRabbit). Removal is the
+    one operation here that DELETES, and a false positive there costs the user a
+    real server, so detection and removal share this single narrow predicate.
+    """
+    if not isinstance(entry, dict):
+        return False
+    return "worthless-mcp" in json.dumps([entry.get("command"), entry.get("args")])
 
 
 def _mcp_server_blocks(data: dict) -> list[dict]:
@@ -495,9 +514,16 @@ def _remove_worthless_mcp_entries(path: Path) -> list[str]:
     the atomic replace, so the pre-edit bytes are always recoverable.
     """
     try:
-        # O_NOFOLLOW mirrors safe_rewrite's SYMLINK gate: never write through a
-        # symlink into a file we never meant to touch.
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)  # noqa: PTH123
+        # Never write through a symlink into a file we never meant to touch. The
+        # explicit check works everywhere; O_NOFOLLOW additionally closes the
+        # check-then-open race where the platform has it. Both are needed:
+        # O_NOFOLLOW/O_CLOEXEC do NOT exist on Windows (CodeRabbit), and blindly
+        # referencing them there raises AttributeError — which this function's
+        # advisory caller would swallow into a silent no-op.
+        if path.is_symlink():
+            return []
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        fd = os.open(path, flags)  # noqa: PTH123
         with os.fdopen(fd, encoding="utf-8") as fh:
             raw = fh.read()
         data = json.loads(raw)
@@ -508,7 +534,7 @@ def _remove_worthless_mcp_entries(path: Path) -> list[str]:
 
     removed: list[str] = []
     for block in _mcp_server_blocks(data):
-        for name in [k for k, v in block.items() if "worthless-mcp" in json.dumps(v)]:
+        for name in [k for k, v in block.items() if _declares_worthless_mcp(v)]:
             del block[name]
             removed.append(name)
     if not removed:

@@ -9,6 +9,7 @@ stays read-only (name the file, never edit it).
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from worthless.cli.commands.uninstall import _remove_worthless_mcp_entries
@@ -123,6 +124,52 @@ def test_refuses_to_follow_a_symlink(tmp_path: Path) -> None:
 
     assert removed == []
     assert real.read_bytes() == before, "wrote through a symlink"
+
+
+def test_does_not_delete_a_third_party_server_that_merely_mentions_us(tmp_path: Path) -> None:
+    """The match is anchored to ``command``/``args``. A neighbour that mentions
+    ``worthless-mcp`` in an env value, description or URL is NOT ours.
+
+    This is the mutating path, so a false positive costs the user a real server.
+    """
+    impostor = {
+        "command": "node",
+        "args": ["proxy.js"],
+        "env": {"NOTE": "drop-in replacement for worthless-mcp"},
+    }
+    p = _cfg(tmp_path, {"mcpServers": {"worthless": _WORTHLESS, "other": impostor}})
+
+    removed = _remove_worthless_mcp_entries(p)
+
+    assert removed == ["worthless"]
+    after = json.loads(p.read_text(encoding="utf-8"))
+    assert after["mcpServers"]["other"] == impostor, "deleted a third-party server that isn't ours"
+
+
+def test_symlink_still_refused_when_o_nofollow_is_unavailable(tmp_path: Path, monkeypatch) -> None:
+    """Windows has no ``os.O_NOFOLLOW``/``O_CLOEXEC``.
+
+    Referencing them blindly raises AttributeError there — which the advisory
+    caller swallows into a silent no-op — and dropping them must not drop the
+    symlink guard. Simulate the missing constants and assert both still hold.
+    """
+    monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+    monkeypatch.delattr(os, "O_CLOEXEC", raising=False)
+
+    real = _cfg(tmp_path, {"mcpServers": {"worthless": _WORTHLESS}}, name="real.json")
+    link = tmp_path / "mcp.json"
+    link.symlink_to(real)
+    before = real.read_bytes()
+
+    assert _remove_worthless_mcp_entries(link) == []
+    assert real.read_bytes() == before, "wrote through a symlink without O_NOFOLLOW"
+
+    # ...and a normal file still works with those constants absent.
+    plain = _cfg(
+        tmp_path, {"mcpServers": {"worthless": _WORTHLESS, "github": _GITHUB}}, name="plain.json"
+    )
+    assert _remove_worthless_mcp_entries(plain) == ["worthless"]
+    assert json.loads(plain.read_text(encoding="utf-8"))["mcpServers"]["github"] == _GITHUB
 
 
 def test_preserves_the_files_existing_indent_width(tmp_path: Path) -> None:
