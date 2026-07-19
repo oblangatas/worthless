@@ -62,6 +62,11 @@ class CheckResult(TypedDict, total=False):
             this run. Empty when ``fix=False`` or no repairs were needed.
         skipped_reason: present when the check could not run at all
             (e.g. platform mismatch); status is ``ok`` in that case.
+        caveats: coverage gaps WITHIN a check that did run — surfaces it
+            couldn't fully inspect (e.g. macOS-only keychain surfaces on a
+            Linux host). Advisory only; status stays ``ok``. A 0-finding scan
+            carrying caveats means "clean, but not everything could be
+            checked" — never "verified clean". Optional; omitted when empty.
     """
 
     check_id: str
@@ -71,6 +76,7 @@ class CheckResult(TypedDict, total=False):
     fixable: bool
     fixed: list[dict]
     skipped_reason: str | None
+    caveats: list[str]
 
 
 class Check(Protocol):

@@ -64,18 +64,27 @@ def run(ctx: CheckContext) -> CheckResult:
         {"surface_id": f.surface_id, "description": f.description, "location": f.location}
         for f in findings_data
     ]
+    caveats = detection_caveats()
 
     fixed: list[dict] = []
     if ctx.fix and findings_data and not ctx.dry_run:
         fixed = [e for f in findings_data if (e := _clear_finding(f)) is not None]
     status = "ok" if len(fixed) == len(findings_data) else "warn"
 
-    return CheckResult(
+    result = CheckResult(
         check_id=check_id,
         status=status,
         findings=findings,
-        summary=_summarize(len(findings_data), detection_caveats()),
+        summary=_summarize(len(findings_data), caveats),
         fixable=True,
         fixed=fixed,
         skipped_reason=None,
     )
+    # WOR-797 (Gap 3): expose coverage gaps as structured data, not just prose
+    # buried in the summary string — a JSON consumer on Linux/WSL (the target
+    # platform, where the 2 macOS-keychain surfaces can't be checked) can now
+    # SEE what wasn't inspected. Advisory only: status is unchanged, so a clean
+    # scan doesn't falsely fail. Omitted when empty (e.g. on macOS).
+    if caveats:
+        result["caveats"] = caveats
+    return result

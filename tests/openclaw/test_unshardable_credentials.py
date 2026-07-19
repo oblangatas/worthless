@@ -495,3 +495,35 @@ def test_doctor_summary_includes_caveat_note_when_present(
     )
     result = check_mod.run(ctx)
     assert "keychain surfaces unchecked" in result["summary"]
+    # WOR-797 (Gap 3): the caveat is also STRUCTURED, not only prose inside the
+    # summary string — a JSON consumer (CI gate, dashboard) can read what the
+    # scan couldn't inspect without regex-ing English out of a sentence.
+    assert result["caveats"] == ["keychain surfaces unchecked"]
+    # Advisory only: a coverage gap must NOT flip the check to warn, which
+    # would fail every Linux/WSL run of `worthless doctor` for a clean install.
+    assert result["status"] == "ok"
+
+
+def test_caveats_field_absent_when_scan_had_full_coverage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The inverse of the above: when nothing was skipped there is no coverage
+    gap to report, so the optional ``caveats`` key is omitted entirely rather
+    than shipping an empty list for consumers to special-case.
+    """
+    from worthless.cli.commands.doctor.checks import unshardable_credentials as check_mod
+    from worthless.storage.repository import ShardRepository
+
+    monkeypatch.setattr(check_mod, "detect_unshardable_credentials", lambda: [])
+    monkeypatch.setattr(check_mod, "detection_caveats", lambda: [])
+
+    fake_home = ensure_home(tmp_path / ".worthless")
+    ctx = check_mod.CheckContext(
+        home=fake_home,
+        repo=ShardRepository(str(fake_home.db_path), bytes(fake_home.fernet_key)),
+        fix=False,
+        dry_run=False,
+    )
+    result = check_mod.run(ctx)
+    assert "caveats" not in result
+    assert result["status"] == "ok"
