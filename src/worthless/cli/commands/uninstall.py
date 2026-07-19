@@ -442,23 +442,118 @@ def _mentions_worthless_mcp(path: Path) -> bool:
         return False
     if not isinstance(data, dict):
         return False
-    blocks = [data.get("mcpServers")]
+    return any("worthless-mcp" in json.dumps(b) for b in _mcp_server_blocks(data))
+
+
+def _mcp_server_blocks(data: dict) -> list[dict]:
+    """Every ``mcpServers`` block in an editor config, and nothing else.
+
+    The top-level block plus any per-project blocks under ``projects`` (the
+    ~/.claude.json shape). Restricting traversal to these is what keeps a stray
+    ``worthless-mcp`` string elsewhere in the file — chat history, notes — from
+    being mistaken for a declared server. Shared by detection and removal so the
+    two can never disagree about what counts as "ours".
+    """
+    blocks: list[dict] = []
+    top = data.get("mcpServers")
+    if isinstance(top, dict):
+        blocks.append(top)
     projects = data.get("projects")
     if isinstance(projects, dict):
-        blocks += [p.get("mcpServers") for p in projects.values() if isinstance(p, dict)]
-    return any(isinstance(b, dict) and "worthless-mcp" in json.dumps(b) for b in blocks)
+        blocks += [
+            p["mcpServers"]
+            for p in projects.values()
+            if isinstance(p, dict) and isinstance(p.get("mcpServers"), dict)
+        ]
+    return blocks
 
 
-def _remind_mcp_leftovers(console) -> None:  # noqa: ANN001
-    """Read-only: if a Worthless MCP server entry is present in a known editor
-    config, name the file so the user can remove it themselves.
+def _detect_json_indent(raw: str) -> int:
+    """The indent width the user's config already uses (default 2).
 
-    NEVER edits these files — the user hand-wrote them (Worthless didn't), they
+    ponytail: a 6-line heuristic beats reformatting someone's hand-written config
+    out from under them just because we deleted one key.
+    """
+    for line in raw.splitlines():
+        stripped = line.lstrip(" ")
+        if stripped.startswith('"') and stripped != line:
+            return len(line) - len(stripped)
+    return 2
+
+
+def _remove_worthless_mcp_entries(path: Path) -> list[str]:
+    """Delete ONLY Worthless's own server entries from an editor MCP config.
+
+    Opt-in (``uninstall --remove-mcp``); the default uninstall path stays
+    read-only and merely names the file. Returns the removed server names, or an
+    empty list when there is nothing of ours, the file is missing/unreadable/
+    malformed, or it is a symlink — in every one of those cases the file is left
+    **byte-identical**, including no reformat. The user's other servers and every
+    key outside ``mcpServers`` survive verbatim, and the original is backed up
+    before the atomic replace.
+    """
+    try:
+        # O_NOFOLLOW mirrors safe_rewrite's SYMLINK gate: never write through a
+        # symlink into a file we never meant to touch.
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)  # noqa: PTH123
+        with os.fdopen(fd, encoding="utf-8") as fh:
+            raw = fh.read()
+        data = json.loads(raw)
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, dict):
+        return []
+
+    removed: list[str] = []
+    for block in _mcp_server_blocks(data):
+        for name in [k for k, v in block.items() if "worthless-mcp" in json.dumps(v)]:
+            del block[name]
+            removed.append(name)
+    if not removed:
+        return []  # nothing of ours: leave the file completely alone
+
+    mode = path.stat().st_mode & 0o777
+    backup = path.with_suffix(path.suffix + ".worthless.bak")
+    backup.write_text(raw, encoding="utf-8")
+    backup.chmod(mode)
+    tmp = path.with_suffix(path.suffix + ".worthless.tmp")
+    tmp.write_text(json.dumps(data, indent=_detect_json_indent(raw)) + "\n", encoding="utf-8")
+    tmp.chmod(mode)
+    os.replace(tmp, path)  # noqa: PTH105 — atomic swap, same directory
+    return removed
+
+
+def _apply_mcp_removal(console, found: list[Path]) -> None:  # noqa: ANN001
+    """``--remove-mcp``: delete our own entry from each config that declares one.
+
+    Never fails the uninstall — a config we can't safely edit is reported so the
+    user can finish it by hand, exactly as the default read-only path would.
+    """
+    for path in found:
+        removed = _remove_worthless_mcp_entries(path)
+        if removed:
+            console.print_success(
+                f"removed the Worthless MCP entry from {path} "
+                f"(original saved as {path.name}.worthless.bak)"
+            )
+        else:
+            console.print_warning(
+                f"could not edit {path} (unreadable, malformed, or a symlink); "
+                "remove its 'worthless' entry by hand."
+            )
+
+
+def _remind_mcp_leftovers(console, *, remove: bool = False) -> None:  # noqa: ANN001
+    """If a Worthless MCP server entry is present in a known editor config, name
+    the file — or, with ``remove=True`` (``--remove-mcp``), delete just our entry.
+
+    Read-only BY DEFAULT: the user hand-wrote these files (Worthless didn't), they
     hold the user's OTHER MCP servers, and their exact path is editor-specific
     (the openclaw.json blast-radius lesson: don't mutate a shared config we don't
-    own). Silent when nothing matches, so it never nags the majority who don't
-    run the MCP server. Advisory-only: any error is swallowed so a checked-out
-    cwd or unresolvable HOME can never turn a completed wipe into a failure.
+    own). Editing is therefore opt-in, surgical, and backed up. Silent when
+    nothing matches, so it never nags the majority who don't run the MCP server.
+    Advisory-only: any error is swallowed so a checked-out cwd or unresolvable
+    HOME can never turn a completed wipe into a failure.
     """
     try:
         # Known editor MCP configs. We JSON-parse and inspect only each file's
@@ -470,18 +565,22 @@ def _remind_mcp_leftovers(console) -> None:  # noqa: ANN001
             Path.home() / ".claude.json",  # Claude Code, user + per-project scope
             Path.home() / ".cursor" / "mcp.json",  # Cursor
         ]
-        found = [str(p) for p in candidates if _mentions_worthless_mcp(p)]
+        found = [p for p in candidates if _mentions_worthless_mcp(p)]
+        if found and remove:
+            _apply_mcp_removal(console, found)
+            return
     except Exception:  # noqa: BLE001 — advisory only; never fail a completed uninstall
         logger.debug("uninstall: MCP-leftover check skipped", exc_info=True)
         return
     if found:
         console.print_hint(
             "You also set up the Worthless MCP server. Remove its 'worthless' entry "
-            f"from {', '.join(found)} to fully unwire it — uninstall never edits editor configs."
+            f"from {', '.join(str(p) for p in found)} to fully unwire it — uninstall "
+            "never edits editor configs unless you pass --remove-mcp."
         )
 
 
-def _run_uninstall(*, assume_yes: bool, force: bool = False) -> None:
+def _run_uninstall(*, assume_yes: bool, force: bool = False, remove_mcp: bool = False) -> None:
     """Restore every locked .env, then (only when it's safe) wipe Worthless.
 
     ``force`` is the escape hatch for broken states: it wipes even when keys
@@ -569,7 +668,8 @@ def _run_uninstall(*, assume_yes: bool, force: bool = False) -> None:
         home.bootstrapped_marker.unlink(missing_ok=True)
 
     _finalize_wipe(console, home, len(restored))
-    _remind_mcp_leftovers(console)  # read-only; silent unless a worthless MCP entry exists
+    # Read-only by default (names the file); --remove-mcp deletes just our entry.
+    _remind_mcp_leftovers(console, remove=remove_mcp)
 
     if oc_partial:
         raise typer.Exit(code=73)
@@ -594,11 +694,20 @@ def register_uninstall_commands(app: typer.Typer) -> None:
             "(missing fernet key / corrupt DB) or an unrestorable .env. Those "
             "keys become unrecoverable; rotate them at your provider.",
         ),
+        remove_mcp: bool = typer.Option(
+            False,
+            "--remove-mcp",
+            help="Also delete Worthless's own entry from your editor's MCP config "
+            "(.mcp.json / ~/.claude.json / ~/.cursor/mcp.json). Your other MCP "
+            "servers are left untouched and the original is backed up. Without "
+            "this, uninstall only names the file and never edits it.",
+        ),
     ) -> None:
         """Restore every locked .env to its real key, then remove Worthless.
 
         Permissions are restored owner-only by default (never re-exposing a key
         to other local users). A deleted project's .env is skipped; an
-        unrestorable real key blocks the wipe unless you pass --force.
+        unrestorable real key blocks the wipe unless you pass --force. Editor MCP
+        configs are only ever named, not edited, unless you pass --remove-mcp.
         """
-        _run_uninstall(assume_yes=yes, force=force)
+        _run_uninstall(assume_yes=yes, force=force, remove_mcp=remove_mcp)
