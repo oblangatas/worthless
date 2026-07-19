@@ -90,6 +90,45 @@ jobs:
         if: steps.detect.outputs.relevant == 'true'
         uses: ./.github/actions/setup-uv-python
 
+      - name: Provision ephemeral keychain + fail-fast access probe (macOS)
+        # worthless-fc14: the real-keychain user-flow tests were skipped on CI
+        # (worthless-3ynb) because the headless runner's login keychain is locked and
+        # `worthless lock`'s Keychain access blocks on a GUI prompt that never comes,
+        # hanging the job to its 15-min timeout. Create + unlock a throwaway keychain,
+        # try to grant non-interactive item access, then PROBE with python `keyring`
+        # (what worthless's keystore uses) under a HARD 5s timeout. Only set the
+        # run-flag when the probe passes — so if access still prompts, the tests SKIP
+        # cleanly in seconds instead of hanging. pytest-timeout can't rescue us here:
+        # the block is a C-level Security.framework call that ignores the signal, so
+        # the guard has to live at the workflow level. (The @REQUIRES_SYNC_ENTITLEMENT
+        # subset needs a code-signed interpreter and stays skipped regardless.)
+        if: runner.os == 'macOS' && steps.detect.outputs.relevant == 'true'
+        env:
+          UV_CACHE_DIR: /tmp/uv-cache
+        shell: bash
+        run: |
+          set -uo pipefail   # NOT -e: a failed/timed-out probe is handled, not fatal
+          KC="$RUNNER_TEMP/wless-ci.keychain-db"
+          security create-keychain -p "" "$KC"
+          security set-keychain-settings "$KC"          # no auto-lock timeout
+          security unlock-keychain -p "" "$KC"
+          security list-keychains -d user -s "$KC"
+          security default-keychain -s "$KC"
+          # NB: `security set-key-partition-list -S apple-tool:,apple:,unsigned:` was
+          # tried here and PROVEN not to help (run 88045781340): it grants signed-tool
+          # access to KEYS, not the per-item ACL that python keyring's generic-password
+          # items need — the probe below still blocked to the timeout. Deliberately left
+          # out rather than kept as a misleading no-op. Don't re-add it without evidence.
+          # Sync deps FIRST so the timed probe measures keychain access, not a cold sync.
+          uv sync --extra dev --extra test >/dev/null 2>&1 || true
+          TIMEOUT="$(command -v timeout || command -v gtimeout || true)"
+          if [ -n "$TIMEOUT" ] && "$TIMEOUT" 5 uv run --no-sync python -c 'import keyring; keyring.set_password("wless-ci-probe","u","v"); assert keyring.get_password("wless-ci-probe","u")=="v"; keyring.delete_password("wless-ci-probe","u")'; then
+            echo "WORTHLESS_TEST_KEYCHAIN_READY=1" >> "$GITHUB_ENV"
+            echo "::notice::keychain probe passed — real-keychain user-flow tests will RUN"
+          else
+            echo "::warning::keychain not non-interactively accessible (probe timed out/failed); real-keychain user-flow tests SKIP (worthless-fc14)"
+          fi
+
       - name: Run user-flow tests
         if: steps.detect.outputs.relevant == 'true'
         env:
