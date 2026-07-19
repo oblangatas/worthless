@@ -125,6 +125,23 @@ def test_refuses_to_follow_a_symlink(tmp_path: Path) -> None:
     assert real.read_bytes() == before, "wrote through a symlink"
 
 
+def test_preserves_the_files_existing_indent_width(tmp_path: Path) -> None:
+    """Editing re-serializes the file, so at least keep the user's indent style.
+
+    Backs the docs claim "your indent width is preserved" — an unpinned claim is
+    how overclaims creep back in.
+    """
+    p = tmp_path / "mcp.json"
+    p.write_text(
+        json.dumps({"mcpServers": {"worthless": _WORTHLESS, "github": _GITHUB}}, indent=4) + "\n",
+        encoding="utf-8",
+    )
+
+    _remove_worthless_mcp_entries(p)
+
+    assert '\n    "mcpServers"' in p.read_text(encoding="utf-8"), "4-space indent not preserved"
+
+
 def test_preserves_the_file_mode(tmp_path: Path) -> None:
     """A config the user tightened to 0600 must not come back world-readable."""
     p = _cfg(tmp_path, {"mcpServers": {"worthless": _WORTHLESS, "github": _GITHUB}})

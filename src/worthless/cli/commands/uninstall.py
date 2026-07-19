@@ -488,9 +488,11 @@ def _remove_worthless_mcp_entries(path: Path) -> list[str]:
     read-only and merely names the file. Returns the removed server names, or an
     empty list when there is nothing of ours, the file is missing/unreadable/
     malformed, or it is a symlink — in every one of those cases the file is left
-    **byte-identical**, including no reformat. The user's other servers and every
-    key outside ``mcpServers`` survive verbatim, and the original is backed up
-    before the atomic replace.
+    **byte-identical**, including no reformat. When we DO remove, the file is
+    re-serialized: every other server and every key outside ``mcpServers`` keeps
+    its exact VALUE, but JSON formatting normalizes (the file's indent width is
+    preserved; compact nested objects expand). The original is backed up before
+    the atomic replace, so the pre-edit bytes are always recoverable.
     """
     try:
         # O_NOFOLLOW mirrors safe_rewrite's SYMLINK gate: never write through a

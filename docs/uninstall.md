@@ -85,7 +85,7 @@ To have uninstall clean it up for you, opt in:
 worthless uninstall --remove-mcp
 ```
 
-That deletes **only** the Worthless entry. Your other MCP servers and every other key in the file survive verbatim, the original is saved next to it as `<config>.worthless.bak`, and the rewrite is atomic — a symlinked or unparsable config is refused untouched. Without the flag, remove the `worthless` entry yourself. (Windsurf and other editors aren't auto-scanned — remove the entry there by hand.) The [uninstall contract](/uninstall-contract/) has the full accounting.
+That deletes **only** the Worthless entry. Your other MCP servers and every other key keep their exact values, the original is saved next to it as `<config>.worthless.bak`, and the rewrite is atomic — a symlinked or unparsable config is refused untouched. Note the file is re-serialized when we edit it: your indent width is preserved, but compact nested objects get expanded onto separate lines. (Nothing is touched at all when there's no Worthless entry to remove.) Without the flag, remove the `worthless` entry yourself. (Windsurf and other editors aren't auto-scanned — remove the entry there by hand.) The [uninstall contract](/uninstall-contract/) has the full accounting.
 
 ## See also
 
