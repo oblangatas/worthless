@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
-import subprocess
+import subprocess  # nosec B404
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -82,7 +82,7 @@ def _keychain_service_present(service: str) -> bool:
     if sys.platform != "darwin":
         return False
     try:
-        result = subprocess.run(  # noqa: S603 - fixed argv, no shell, no user input
+        result = subprocess.run(  # noqa: S603 - fixed argv, no shell, no user input  # nosec B603
             [_SECURITY_BIN, "find-generic-password", "-s", service],
             capture_output=True,
             timeout=_KEYCHAIN_TIMEOUT_S,
@@ -100,7 +100,7 @@ def _clear_keychain_service(service: str) -> bool:
     if sys.platform != "darwin":
         return True
     try:
-        result = subprocess.run(  # noqa: S603 - fixed argv, no shell, no user input
+        result = subprocess.run(  # noqa: S603 - fixed argv, no shell, no user input  # nosec B603
             [_SECURITY_BIN, "delete-generic-password", "-s", service],
             capture_output=True,
             timeout=_KEYCHAIN_TIMEOUT_S,
