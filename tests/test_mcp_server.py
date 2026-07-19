@@ -65,6 +65,115 @@ class TestWorthlessStatus:
         assert result["keys"] == []
         assert result["proxy"]["healthy"] is False
 
+    @staticmethod
+    def _stub_status(
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        keys: list[dict[str, str]],
+        healthy: bool,
+        sentinel: dict[str, str] | None = None,
+    ) -> None:
+        """Pin the three inputs the verdict is derived from."""
+        import worthless.cli.commands.status as status_mod
+        import worthless.cli.sentinel as sentinel_mod
+
+        monkeypatch.setattr(status_mod, "_list_enrolled_keys", lambda _home: keys)
+        monkeypatch.setattr(status_mod, "_discover_proxy_port", lambda _home: 8787)
+        monkeypatch.setattr(
+            status_mod,
+            "_check_proxy_health",
+            lambda _port: {"healthy": healthy, "port": 8787, "mode": "http"},
+        )
+        monkeypatch.setattr(sentinel_mod, "read_sentinel", lambda _dir: sentinel)
+
+    @pytest.mark.asyncio
+    async def test_locked_keys_with_proxy_down_is_protected_at_rest(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """WOR-819: locked keys + proxy down is SAFE, not a security failure.
+
+        A stolen ``.env`` is genuinely worthless in this state — only routing
+        is unavailable. Reporting it as "not protected" would read as "your
+        secret is exposed", the opposite of the truth, and per WOR-779 trains
+        the user to ignore red. This is the anti-inversion guard.
+        """
+        home = _make_home(tmp_path)
+        self._stub_status(
+            monkeypatch,
+            keys=[{"alias": "openai", "provider": "openai", "status": "PROTECTED"}],
+            healthy=False,
+        )
+        with patch.dict(os.environ, {"WORTHLESS_HOME": str(home)}):
+            result = json.loads(await worthless_status())
+
+        assert result["verdict"] == "protected_at_rest"
+        # The affirmative security claim must survive to the editor surface.
+        assert "stolen" in result["header"]
+
+    @pytest.mark.asyncio
+    async def test_at_risk_tier_is_reachable_from_the_editor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """WOR-821: the one 🔴 verdict must not be structurally unreachable here.
+
+        ``degraded`` comes from the lock-status sentinel. If a refactor stubs
+        it False, ``at_risk`` can never be emitted from this surface and a
+        genuinely broken user is told they are protected — a silent false
+        green. This test fails if that wire is ever cut.
+        """
+        home = _make_home(tmp_path)
+        self._stub_status(
+            monkeypatch,
+            keys=[{"alias": "openai", "provider": "openai", "status": "PROTECTED"}],
+            healthy=True,
+            # is_partial(): status == "partial" AND openclaw == "failed".
+            sentinel={"status": "partial", "openclaw": "failed"},
+        )
+        with patch.dict(os.environ, {"WORTHLESS_HOME": str(home)}):
+            result = json.loads(await worthless_status())
+
+        assert result["degraded"] is True
+        assert result["verdict"] == "at_risk"
+
+    @pytest.mark.asyncio
+    async def test_locked_keys_with_proxy_up_is_protected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Both halves in place → the plain green verdict."""
+        home = _make_home(tmp_path)
+        self._stub_status(
+            monkeypatch,
+            keys=[{"alias": "openai", "provider": "openai", "status": "PROTECTED"}],
+            healthy=True,
+        )
+        with patch.dict(os.environ, {"WORTHLESS_HOME": str(home)}):
+            result = json.loads(await worthless_status())
+
+        assert result["verdict"] == "protected"
+        assert result["degraded"] is False
+
+    @pytest.mark.asyncio
+    async def test_editor_verdict_matches_the_cli_for_identical_inputs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """WOR-820's whole point: one true answer on every surface.
+
+        Asserts this surface reports exactly what the CLI's rulebook returns
+        for the same inputs — so a future change can't quietly reintroduce a
+        second, divergent notion of "protected" here.
+        """
+        from worthless.cli.commands.status import _status_verdict
+
+        home = _make_home(tmp_path)
+        keys = [{"alias": "openai", "provider": "openai", "status": "PROTECTED"}]
+        self._stub_status(monkeypatch, keys=keys, healthy=False)
+        with patch.dict(os.environ, {"WORTHLESS_HOME": str(home)}):
+            result = json.loads(await worthless_status())
+
+        expected_verdict, expected_header = _status_verdict(keys, False, False)
+        assert result["verdict"] == expected_verdict
+        assert result["header"] == expected_header
+
 
 # ---------------------------------------------------------------------------
 # worthless_scan

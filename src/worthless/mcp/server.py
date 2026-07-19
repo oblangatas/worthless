@@ -94,24 +94,42 @@ async def _list_orphan_shards(db_path: Path) -> list[str]:
 
 @mcp.tool()
 async def worthless_status() -> str:
-    """Show enrolled keys and proxy health.
+    """Show the same protection verdict the CLI shows, plus keys and proxy health.
 
-    Returns the list of protected key aliases with their providers,
-    and whether the local proxy is currently running.
+    WOR-820: this surface must not invent its own notion of "protected". It
+    derives the verdict with the CLI's ``_status_verdict`` (WOR-779), which
+    deliberately separates two independent questions:
+
+      * confidentiality — is a stolen ``.env`` worthless? (keys locked)
+      * availability    — can apps reach the keys right now? (proxy up)
+
+    Locked keys with the proxy down is ``protected_at_rest`` — SAFE, not a
+    security failure. Reporting that state as "not protected" would read as
+    "your secret is exposed", which is the opposite of the truth and, per
+    WOR-779, trains the user to ignore red.
+
+    The returned shape mirrors ``worthless status --json`` (``verdict``,
+    ``keys``, ``proxy``, ``sentinel``, ``degraded``) so both surfaces answer
+    "am I protected?" identically, plus ``header`` — the human-readable line
+    an agent can relay verbatim.
     """
     # Deferred: avoid pulling typer/rich CLI stack at MCP server startup.
-    # TODO(WOR-126): move _check_proxy_health, _list_enrolled_keys into
-    # worthless.services.status so both CLI and MCP import a shared public API.
+    # TODO(WOR-126): move _check_proxy_health, _list_enrolled_keys and
+    # _status_verdict into worthless.services.status so both CLI and MCP
+    # import a shared public API instead of reaching into cli.commands.
     from worthless.cli.commands.status import (
         _check_proxy_health,
         _discover_proxy_port,
         _list_enrolled_keys,
+        _status_verdict,
     )
+    from worthless.cli.sentinel import is_partial, read_sentinel
 
     home = resolve_home()
 
     keys: list[dict[str, str]] = []
     proxy_info: dict[str, Any] = {"healthy": False, "port": None, "mode": None}
+    sentinel: dict[str, Any] | None = None
     if home is not None:
         # _list_enrolled_keys calls asyncio.run() internally, raising
         # RuntimeError inside FastMCP's running event loop. Run in a thread
@@ -121,8 +139,26 @@ async def worthless_status() -> str:
         port = _discover_proxy_port(home)
         if port is not None:
             proxy_info = _check_proxy_health(port)
+        # WOR-821: read the lock-status sentinel for real. Stubbing this to
+        # False would make the 🔴 ``at_risk`` tier — the only verdict meaning
+        # "routing is genuinely broken" — unreachable from this surface, so a
+        # broken user would be told they are protected. Same read the CLI does.
+        sentinel = read_sentinel(home.base_dir)
 
-    return json.dumps({"keys": keys, "proxy": proxy_info}, default=str)
+    degraded = is_partial(sentinel)
+    verdict, header = _status_verdict(keys, bool(proxy_info["healthy"]), degraded)
+
+    return json.dumps(
+        {
+            "verdict": verdict,
+            "header": header,
+            "keys": keys,
+            "proxy": proxy_info,
+            "sentinel": sentinel,
+            "degraded": degraded,
+        },
+        default=str,
+    )
 
 
 @mcp.tool()
