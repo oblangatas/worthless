@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 
 from worthless.cli.dotenv_rewriter import shannon_entropy
 from worthless.cli.key_patterns import ENTROPY_THRESHOLD, KEY_PATTERN, detect_provider
+from worthless.cli.redaction import mask_secret
 
 _VAR_NAME_RE = re.compile(r"(\w+)\s*$")
 
@@ -213,6 +214,10 @@ class ScanFinding:
     provider: str
     is_protected: bool
     value_preview: str  # fully masked by default
+    # 0-indexed offset of the match within its line. Lets --show-suffix
+    # fingerprint THIS finding's key rather than the line's first match, which
+    # would show one shared fingerprint for every key on a minified JSON line.
+    column: int | None = None
 
 
 def scan_files(
@@ -292,6 +297,7 @@ def scan_files(
                         provider=provider,
                         is_protected=is_protected,
                         value_preview=_mask(value),
+                        column=match.start(),
                     )
                 )
     return findings
@@ -308,10 +314,13 @@ def _extract_var_name(line: str, value_start: int) -> str | None:
 
 
 def _mask(value: str) -> str:
-    """Mask all but provider prefix of a key value."""
-    if len(value) <= 8:
-        return "****"
-    return value[:4] + "****"
+    """Return an output-safe placeholder for a matched key value.
+
+    SR-04 (WOR-655): a flat ``****`` — no prefix, no suffix, no length hint.
+    Previously emitted ``value[:4] + "****"``, leaking the first four real
+    bytes into every scan preview (human + JSON).
+    """
+    return mask_secret(value)
 
 
 def format_sarif(findings: list[ScanFinding], tool_version: str) -> dict:

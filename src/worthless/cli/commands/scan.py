@@ -21,6 +21,7 @@ from worthless.cli.code_scanner import CodeFinding, scan_for_hardcoded_provider_
 from worthless.cli.console import get_console
 from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary
 from worthless.cli.key_patterns import KEY_PATTERN
+from worthless.cli.redaction import key_fingerprint
 from worthless.cli.dotenv_rewriter import build_enrolled_locations
 from worthless.cli.keystore import PLACEHOLDER_FERNET_KEY
 from worthless.cli.orphans import FIX_PHRASE, PROBLEM_PHRASE, find_orphans
@@ -166,12 +167,21 @@ def _format_human(
                 if f.file not in file_cache:
                     file_cache[f.file] = Path(f.file).read_text(errors="replace")
                 text = file_cache[f.file]
-                for line in text.splitlines():
-                    for match in KEY_PATTERN.finditer(line):
-                        value = match.group(0)
-                        if preview.startswith(value[:4]):
-                            preview = f.value_preview + "..." + value[-4:]
-                            break
+                # SR-04 (WOR-655): --show-suffix used to append the real last
+                # 4 chars of the key. Instead, locate the key on the finding's
+                # own 1-indexed line and append a NON-secret sha256[:8]
+                # fingerprint, so a human can still tell two keys apart:
+                # "**** (3f9a2b1c)".
+                lines_text = text.splitlines()
+                if 1 <= f.line <= len(lines_text):
+                    line_text = lines_text[f.line - 1]
+                    # Fingerprint THIS finding's key: start at its recorded
+                    # column so a second key on the same line gets its own
+                    # fingerprint, not the line's first match. Fall back to the
+                    # first match if column is unknown (e.g. legacy findings).
+                    match = KEY_PATTERN.search(line_text, f.column if f.column is not None else 0)
+                    if match:
+                        preview = f"{f.value_preview} ({key_fingerprint(match.group(0))})"
             except Exception:  # noqa: S110 — best-effort preview; display failure is non-critical  # nosec B110
                 pass
 
@@ -624,7 +634,7 @@ def register_scan_commands(app: typer.Typer) -> None:
         show_suffix: bool = typer.Option(
             False,
             "--show-suffix",
-            help="Show last 4 chars of keys",
+            help="Show a non-secret fingerprint (sha256[:8]) to tell keys apart.",
         ),
         install_hook: bool = typer.Option(
             False,

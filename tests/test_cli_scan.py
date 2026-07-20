@@ -235,12 +235,18 @@ class TestScanFormats:
         assert result.exit_code == 1
         assert result.stderr.strip() == ""
 
-    def test_show_suffix_reveals_chars(self, file_with_key: Path) -> None:
-        """--show-suffix should reveal last 4 chars of key in output."""
+    def test_show_suffix_shows_fingerprint_not_real_bytes(self, file_with_key: Path) -> None:
+        """SR-04 (WOR-655): --show-suffix shows a non-secret sha256[:8]
+        fingerprint so a human can tell keys apart — NEVER the real last 4
+        chars of the key (the previous, leaky behaviour)."""
+        import hashlib
+
+        key = _fake_openai_key()
         result = runner.invoke(app, ["scan", "--show-suffix", str(file_with_key)])
         assert result.exit_code == 1
-        expected_suffix = _fake_openai_key()[-4:]
-        assert expected_suffix in result.stderr
+        assert key[-4:] not in result.stderr
+        fingerprint = hashlib.sha256(key.encode()).hexdigest()[:8]
+        assert fingerprint in result.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -486,11 +492,17 @@ class TestScanPrecommitEdgeCases:
 class TestScanShowSuffixFormat:
     """Detailed tests for --show-suffix output formatting."""
 
-    def test_show_suffix_contains_dots_separator(self, file_with_key: Path) -> None:
-        """--show-suffix output should use '...' before the suffix."""
+    def test_show_suffix_uses_fingerprint_parens_format(self, file_with_key: Path) -> None:
+        """SR-04 (WOR-655): --show-suffix renders '**** (<8-hex>)', replacing
+        the old 'sk-a...wXyZ' prefix+suffix leak. No '...' separator, no real
+        bytes."""
+        import hashlib
+
+        key = _fake_openai_key()
         result = runner.invoke(app, ["scan", "--show-suffix", str(file_with_key)])
         assert result.exit_code == 1
-        assert "..." in result.stderr
+        fingerprint = hashlib.sha256(key.encode()).hexdigest()[:8]
+        assert f"**** ({fingerprint})" in result.stderr
 
     def test_show_suffix_with_clean_file_no_suffix(self, env_clean: Path) -> None:
         """--show-suffix with no keys found -> no suffix in output."""

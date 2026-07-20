@@ -18,6 +18,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 
+from worthless.cli.log_redaction import _redact
+
 
 class OpenclawErrorCode(str, Enum):
     """Wire-stable identifiers for OpenClaw integration events.
@@ -65,6 +67,29 @@ class OpenclawIntegrationEvent:
     detail: str
     extra: dict[str, str] | None = field(default=None)
 
+    def __post_init__(self) -> None:
+        """SR-04 (WOR-655): every event is BORN redacted.
+
+        ``detail`` and each ``extra`` value are free-form strings populated
+        by call sites in ``integration.py``. The by-convention contract
+        ("don't put key bytes in here") is not enough for an audit-ready
+        guarantee, so we scrub at construction — the single choke point
+        every sink inherits: the human console (``console.py`` does NOT
+        self-redact), the inline sentinel dict, and ``to_dict()``/``--json``.
+
+        Frozen dataclass ⇒ ``object.__setattr__`` to rewrite in place. The
+        redactor is a no-op on already-clean strings, so non-secret
+        ``extra`` values (``path``, ``provider``, ``baseUrl``, ``nlink``)
+        pass through untouched.
+        """
+        object.__setattr__(self, "detail", _redact(self.detail))
+        if self.extra is not None:
+            object.__setattr__(
+                self,
+                "extra",
+                {k: (_redact(v) if isinstance(v, str) else v) for k, v in self.extra.items()},
+            )
+
     def to_dict(self) -> dict[str, str]:
         """Wire-stable serialization for sentinel + ``--json`` output.
 
@@ -95,7 +120,10 @@ class OpenclawIntegrationError(Exception):
 
     def __init__(self, code: OpenclawErrorCode, detail: str) -> None:
         self.code = code
-        super().__init__(detail)
+        # SR-04 (WOR-655): the detail becomes ``str(exc)`` and flows into
+        # event details / warnings — scrub any key-shaped bytes here so it
+        # is redacted at every downstream sink.
+        super().__init__(_redact(detail))
 
 
 class OpenclawConfigUnreadableError(Exception):

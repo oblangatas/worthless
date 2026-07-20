@@ -49,6 +49,7 @@ from worthless.cli.errors import (
     sanitize_exception,
 )
 from worthless.cli.key_patterns import CANONICAL_KEY_VAR_RE, detect_prefix
+from worthless.cli.log_redaction import _redact
 from worthless._flags import fernet_ipc_only_enabled
 from worthless.cli.keystore import (
     _fernet_file_bytes,
@@ -1833,6 +1834,10 @@ def _emit_openclaw_failure(
     in-line FAIL block above — we don't know exactly what failed, but the
     user is in a genuinely broken state and must be told loudly.
     """
+    # SR-04 (WOR-655): this inline-dict path bypasses the
+    # OpenclawIntegrationEvent choke point, so redact ``detail`` here — it
+    # feeds BOTH the console warning below AND the sentinel event dict.
+    detail = _redact(detail)
     if not quiet:
         console.print_failure("[FAIL] OpenClaw integration did NOT complete.")
         console.print_warning("   Your .env is locked, but OpenClaw is still calling the")

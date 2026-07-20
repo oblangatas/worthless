@@ -8,7 +8,22 @@ import sys
 import traceback
 from enum import Enum, IntEnum
 
+from worthless.cli.log_redaction import _redact
+
 logger = logging.getLogger(__name__)
+
+
+def _print_redacted_traceback() -> None:
+    """Write the current exception's traceback to stderr, key-redacted.
+
+    SR-04 (WOR-655): ``--debug`` mode used ``traceback.print_exc()``, which
+    streams the raw traceback — including an exception's own message, where
+    a future subclass could embed a key — straight past the log redactor.
+    Format to a string, scrub, then write. CPython does not print frame
+    locals by default, so the reconstructed key in a local variable does
+    not appear; this closes the message-text channel.
+    """
+    sys.stderr.write(_redact(traceback.format_exc()))
 
 
 class ErrorCode(IntEnum):
@@ -192,7 +207,7 @@ def error_boundary(fn=None, *, exit_code: int = 1):  # noqa: ANN001, ANN201
                 raise
             except WorthlessError as exc:
                 if _debug:
-                    traceback.print_exc(file=sys.stderr)
+                    _print_redacted_traceback()
                 else:
                     # Deferred: console imports errors, so we can't import at top.
                     from worthless.cli.console import get_console
@@ -204,7 +219,7 @@ def error_boundary(fn=None, *, exit_code: int = 1):  # noqa: ANN001, ANN201
                 raise typer.Exit(code=exc.exit_code) from exc
             except Exception as exc:
                 if _debug:
-                    traceback.print_exc(file=sys.stderr)
+                    _print_redacted_traceback()
                 else:
                     from worthless.cli.console import get_console
 
