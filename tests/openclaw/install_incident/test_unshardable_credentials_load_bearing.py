@@ -213,3 +213,96 @@ def test_vertex_fix_carries_the_gcloud_reauth_remediation(unshardable_stack):
     assert "gcloud auth application-default login" in entry.get("remediation", ""), (
         f"vertex remediation missing the gcloud re-auth command: {entry!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# WOR-823 — a scan that couldn't LOOK must not report it found nothing.
+#
+# On the pre-fix binary, an unreadable credential directory raised
+# PermissionError straight out of detection; the doctor runner caught it at the
+# check boundary and marked the whole check ``status="error"`` with no caveats
+# (verified live in this exact image before the fix). A half-written
+# auth-profiles.json was worse: swallowed silently, so every OAuth profile
+# inside went unreported while the scan still read clean.
+#
+# The unit suite proves this on tmp_path, but its permission test SKIPS as root
+# — and CI's user is not guaranteed. This container runs as the non-root
+# ``node`` user, so ``chmod 000`` genuinely blocks and the permission path
+# actually executes. This is the load-bearing guard for that path.
+# ---------------------------------------------------------------------------
+
+_BLIND_GEMINI_DIR = f"{_HOME}/.gemini"
+_BLIND_AUTH_PROFILES = f"{_HOME}/.openclaw/agents/main/agent/auth-profiles.json"
+
+
+@pytest.fixture(scope="module")
+def blind_spot_stack():
+    """A real install where two surfaces cannot be inspected: an unreadable
+    credential directory (``chmod 000`` as the non-root node user) and a
+    truncated ``auth-profiles.json``. Captures what the real ``worthless
+    doctor`` reports — the whole point is that it neither crashes nor implies
+    clean."""
+    oc = f"wor823-blind-{uuid.uuid4().hex[:8]}"
+    try:
+        _run(
+            [
+                "docker",
+                "run",
+                "-d",
+                "--name",
+                oc,
+                "-e",
+                "OPENCLAW_ACCEPT_TERMS=yes",
+                "--user",
+                "node",
+                OC_WORTHLESS_IMAGE,
+            ],  # fmt: skip
+            check=True,
+        )
+        _wait_worthless(oc)
+        # Plant an unreadable Gemini creds dir and a half-written profile store.
+        _sh(
+            oc,
+            "mkdir -p /home/node/.openclaw/agents/main/agent && "
+            f'printf \'{{"profiles": {{"leaky": {{"type": "oau\' > {_BLIND_AUTH_PROFILES} && '
+            f"mkdir -p {_BLIND_GEMINI_DIR} && "
+            f'printf "{{}}" > {_BLIND_GEMINI_DIR}/oauth_creds.json && '
+            f"chmod 000 {_BLIND_GEMINI_DIR}",
+        )
+        doc = _doctor_json(oc)
+        yield {
+            "doc": doc,
+            "check": _unshardable_check(doc),
+            "num_checks": len(doc["checks"]),
+        }
+    finally:
+        # Restore perms before removal so docker's cleanup can traverse the dir.
+        _sh(oc, f"chmod 700 {_BLIND_GEMINI_DIR} 2>/dev/null || true")
+        _run(["docker", "rm", "-f", oc], timeout=60)
+
+
+def test_doctor_survives_uninspectable_surfaces_without_crashing(blind_spot_stack):
+    """THE CRASH GUARD: an unreadable credential dir used to make this check
+    ``status="error"`` (a caught crash) in this exact image. The real doctor
+    must now complete the whole scan and keep this check out of the error
+    state."""
+    check = blind_spot_stack["check"]
+    assert blind_spot_stack["num_checks"] >= 2, "doctor returned a truncated run — it crashed"
+    assert check["status"] != "error", (
+        f"unshardable check is still in the crashed error state: {check!r}"
+    )
+
+
+def test_unreadable_dir_and_malformed_profiles_are_caveated_live(blind_spot_stack):
+    """THE HONESTY PROOF: both blind spots are named in the real doctor's
+    structured output, so a scan that couldn't look is never presented as a
+    clean bill of health."""
+    caveats = blind_spot_stack["check"].get("caveats") or []
+    joined = " || ".join(caveats)
+    assert any("could not be checked" in c for c in caveats), (
+        f"the unreadable Gemini dir was not surfaced as a caveat: {caveats!r}"
+    )
+    assert "Gemini" in joined, "the permission caveat must name which surface"
+    assert any("could not be read" in c for c in caveats), (
+        f"the half-written auth-profiles.json was silently skipped, not caveated: {caveats!r}"
+    )
