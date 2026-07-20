@@ -2092,7 +2092,8 @@ def _print_unshardable_credentials_warning(console: WorthlessConsole) -> None:
     see :mod:`worthless.openclaw.unshardable_credentials` for the full,
     source-verified surface list.
     """
-    findings = detect_unshardable_credentials()
+    probe_caveats: list[str] = []
+    findings = detect_unshardable_credentials(probe_caveats)
     if findings:
         n = len(findings)
         console.print_warning(
@@ -2104,7 +2105,7 @@ def _print_unshardable_credentials_warning(console: WorthlessConsole) -> None:
     # macOS-keychain surfaces. Surface that caveat here — exactly as `doctor`
     # does — so a partial scan on the target platform never reads as a clean
     # bill of health. Runs on both the has-keys and zero-keys paths.
-    caveats = detection_caveats()
+    caveats = detection_caveats() + probe_caveats
     if caveats:
         console.print_hint(
             "[NOTE] " + "; ".join(caveats) + " — run `worthless doctor` for a full check."
