@@ -14,6 +14,7 @@ honest warning, and ``doctor --fix`` clears a detected surface end to end.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -483,7 +484,7 @@ def test_doctor_summary_includes_caveat_note_when_present(
     from worthless.cli.commands.doctor.checks import unshardable_credentials as check_mod
     from worthless.storage.repository import ShardRepository
 
-    monkeypatch.setattr(check_mod, "detect_unshardable_credentials", lambda: [])
+    monkeypatch.setattr(check_mod, "detect_unshardable_credentials", lambda *_a, **_k: [])
     monkeypatch.setattr(check_mod, "detection_caveats", lambda: ["keychain surfaces unchecked"])
 
     fake_home = ensure_home(tmp_path / ".worthless")
@@ -514,7 +515,7 @@ def test_caveats_field_absent_when_scan_had_full_coverage(
     from worthless.cli.commands.doctor.checks import unshardable_credentials as check_mod
     from worthless.storage.repository import ShardRepository
 
-    monkeypatch.setattr(check_mod, "detect_unshardable_credentials", lambda: [])
+    monkeypatch.setattr(check_mod, "detect_unshardable_credentials", lambda *_a, **_k: [])
     monkeypatch.setattr(check_mod, "detection_caveats", lambda: [])
 
     fake_home = ensure_home(tmp_path / ".worthless")
@@ -578,7 +579,7 @@ def test_lock_surfaces_detection_caveats_on_non_macos(
     """
     from worthless.cli.commands import lock as lock_mod
 
-    monkeypatch.setattr(lock_mod, "detect_unshardable_credentials", lambda: [])
+    monkeypatch.setattr(lock_mod, "detect_unshardable_credentials", lambda *_a, **_k: [])
     monkeypatch.setattr(
         lock_mod,
         "detection_caveats",
@@ -680,3 +681,115 @@ def test_doctor_fix_reports_symlinked_credential_as_unfixed_with_reason(
     # The refusal must have left the real token untouched — the whole point.
     assert real_target.exists(), "the real credential behind the symlink must survive"
     assert gemini.is_symlink(), "the symlink itself must be left alone, not removed"
+
+
+# ---------------------------------------------------------------------------
+# WOR-823 — "couldn't inspect" must never be reported as "isn't there".
+# A surface that fails to probe comes back absent, so without a caveat the
+# caller cannot tell a clean scan from a blind one — and would print a clean
+# bill of health for a scan that never looked.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root ignores chmod, so the unreadable directory would still be readable "
+    "and this test would pass without exercising anything",
+)
+def test_unreadable_credential_dir_is_caveated_not_crashed(
+    sandboxed_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WOR-823: ``Path.is_file()`` does not swallow EACCES, so a credential
+    directory this process can't traverse used to raise ``PermissionError``
+    straight out of detection and take down the whole scan (confirmed
+    empirically). It must now fail soft AND say what it couldn't check.
+    """
+    monkeypatch.setattr(uc, "_keychain_service_present", lambda service: False)
+    gemini_dir = sandboxed_home / ".gemini"
+    gemini_dir.mkdir(parents=True)
+    (gemini_dir / "oauth_creds.json").write_text('{"refresh_token": "fake"}')
+    gemini_dir.chmod(0o000)
+    try:
+        caveats: list[str] = []
+        findings = uc.detect_unshardable_credentials(caveats)  # must not raise
+    finally:
+        gemini_dir.chmod(0o700)  # always restore so tmp cleanup works
+
+    assert findings == [], "an un-probeable surface is reported absent, not invented"
+    assert any("could not be checked" in c for c in caveats), (
+        f"the blind spot must be surfaced, got {caveats!r}"
+    )
+    assert any("Gemini" in c for c in caveats), "the caveat must name which surface"
+
+
+def test_clean_machine_emits_no_probe_caveats(
+    sandboxed_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The inverse guard, and the one that keeps this feature usable: a
+    machine with simply nothing installed must produce ZERO caveats. An
+    absent file is a real answer ("not there"), not a coverage gap — treating
+    ENOENT as "couldn't inspect" would print a false caveat on every single
+    run for every user.
+    """
+    monkeypatch.setattr(uc, "_keychain_service_present", lambda service: False)
+    caveats: list[str] = []
+    findings = uc.detect_unshardable_credentials(caveats)
+    assert findings == []
+    assert caveats == [], f"a clean machine must not be told the scan was partial: {caveats!r}"
+
+
+def test_malformed_auth_profiles_json_is_reported_not_silently_skipped(
+    sandboxed_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WOR-823: a half-written ``auth-profiles.json`` used to be skipped by a
+    bare ``continue`` — dropping EVERY oauth/token profile inside it while the
+    scan still reported "no unshardable credentials found". A false all-clear
+    caused by a file we couldn't parse is the worst failure mode this feature
+    has, so the unreadable file must be named.
+    """
+    monkeypatch.setattr(uc, "_keychain_service_present", lambda service: False)
+    auth_profiles = sandboxed_home / ".openclaw" / "agents" / "main" / "agent"
+    auth_profiles.mkdir(parents=True)
+    (auth_profiles / "auth-profiles.json").write_text('{"profiles": {"leaky": {"type": "oau')
+
+    caveats: list[str] = []
+    findings = uc.detect_unshardable_credentials(caveats)
+
+    assert findings == [], "nothing parseable, so nothing to report as found"
+    assert any("auth-profiles.json could not be read" in c for c in caveats), (
+        f"the unparsable profile store must be surfaced, got {caveats!r}"
+    )
+
+
+def test_doctor_reports_probe_caveats_so_a_blind_scan_is_not_verified_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end through the doctor check: a scan that couldn't inspect a
+    surface reports 0 findings, so the ONLY thing distinguishing it from a
+    genuinely clean machine is the caveat. Pin that it reaches the structured
+    output and the summary prose.
+    """
+    from worthless.cli.commands.doctor.checks import unshardable_credentials as check_mod
+    from worthless.storage.repository import ShardRepository
+
+    monkeypatch.setattr(uc, "_keychain_service_present", lambda service: False)
+    monkeypatch.setattr(check_mod, "detection_caveats", lambda: [])
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+    auth_profiles = tmp_path / ".openclaw" / "agents" / "main" / "agent"
+    auth_profiles.mkdir(parents=True)
+    (auth_profiles / "auth-profiles.json").write_text("{ truncated")
+
+    fake_home = ensure_home(tmp_path / ".worthless")
+    ctx = check_mod.CheckContext(
+        home=fake_home,
+        repo=ShardRepository(str(fake_home.db_path), bytes(fake_home.fernet_key)),
+        fix=False,
+        dry_run=False,
+    )
+
+    result = check_mod.run(ctx)
+    assert result["findings"] == []
+    assert result["caveats"], "the blind spot must reach the structured output"
+    assert any("could not be read" in c for c in result["caveats"])
+    assert "NOTE:" in result["summary"], "and the prose a terminal user reads"

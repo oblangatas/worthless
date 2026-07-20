@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess  # nosec B404
 import sys
 from dataclasses import dataclass
@@ -121,7 +122,32 @@ def _home_relative_path(*parts: str) -> Path:
     return Path.home().joinpath(*parts)
 
 
-def _detect_claude_cli(findings: list[UnshardableCredentialFinding]) -> None:
+def _probe_is_file(path: Path, surface_label: str, caveats: list[str] | None) -> bool:
+    """Presence probe that can never raise.
+
+    ``Path.is_file()`` does NOT swallow ``EACCES`` — pathlib ignores only
+    ENOENT/ENOTDIR/EBADF/ELOOP — so a credential directory this process
+    can't traverse propagates ``PermissionError`` and takes down the whole
+    scan. Treat an un-probeable surface as absent, but record a caveat:
+    "we couldn't look" must never be reported as "it isn't there", which is
+    exactly the false all-clear this module exists to prevent.
+
+    The caveat names the surface, never the path — caveats surface in CLI
+    output and CI logs, and a home-relative path is needless detail there
+    (the full path goes to the debug log instead).
+    """
+    try:
+        return path.is_file()
+    except OSError as exc:
+        logger.warning("could not probe %s at %s: %s", surface_label, path, exc)
+        if caveats is not None:
+            caveats.append(f"{surface_label} could not be checked ({exc.strerror or 'unreadable'})")
+        return False
+
+
+def _detect_claude_cli(
+    findings: list[UnshardableCredentialFinding], caveats: list[str] | None = None
+) -> None:
     # Surface 1 — OS keychain "Claude Code-credentials" (cli-credentials.ts:18).
     if _keychain_service_present(CLAUDE_CLI_KEYCHAIN_SERVICE):
         findings.append(
@@ -138,7 +164,7 @@ def _detect_claude_cli(findings: list[UnshardableCredentialFinding]) -> None:
 
     # Surface 2 — ~/.claude/.credentials.json (cli-credentials.ts:13).
     path = _home_relative_path(".claude", ".credentials.json")
-    if path.is_file():
+    if _probe_is_file(path, "Claude Code CLI credentials file", caveats):
         findings.append(
             UnshardableCredentialFinding(
                 surface_id="claude_cli_file",
@@ -149,7 +175,9 @@ def _detect_claude_cli(findings: list[UnshardableCredentialFinding]) -> None:
         )
 
 
-def _detect_codex_cli(findings: list[UnshardableCredentialFinding]) -> None:
+def _detect_codex_cli(
+    findings: list[UnshardableCredentialFinding], caveats: list[str] | None = None
+) -> None:
     # Surface 3 — ~/.codex/auth.json + its own keychain entry.
     if _keychain_service_present(CODEX_CLI_KEYCHAIN_SERVICE):
         findings.append(
@@ -165,7 +193,7 @@ def _detect_codex_cli(findings: list[UnshardableCredentialFinding]) -> None:
         )
 
     path = _home_relative_path(".codex", "auth.json")
-    if path.is_file():
+    if _probe_is_file(path, "Codex CLI credentials file", caveats):
         findings.append(
             UnshardableCredentialFinding(
                 surface_id="codex_cli_file",
@@ -176,10 +204,12 @@ def _detect_codex_cli(findings: list[UnshardableCredentialFinding]) -> None:
         )
 
 
-def _detect_gemini_cli(findings: list[UnshardableCredentialFinding]) -> None:
+def _detect_gemini_cli(
+    findings: list[UnshardableCredentialFinding], caveats: list[str] | None = None
+) -> None:
     # Surface 4 — ~/.gemini/oauth_creds.json (cli-credentials.ts:16).
     path = _home_relative_path(".gemini", "oauth_creds.json")
-    if path.is_file():
+    if _probe_is_file(path, "Gemini CLI credentials file", caveats):
         findings.append(
             UnshardableCredentialFinding(
                 surface_id="gemini_cli_file",
@@ -190,10 +220,12 @@ def _detect_gemini_cli(findings: list[UnshardableCredentialFinding]) -> None:
         )
 
 
-def _detect_minimax_cli(findings: list[UnshardableCredentialFinding]) -> None:
+def _detect_minimax_cli(
+    findings: list[UnshardableCredentialFinding], caveats: list[str] | None = None
+) -> None:
     # Surface 5 — ~/.minimax/oauth_creds.json (cli-credentials.ts:15).
     path = _home_relative_path(".minimax", "oauth_creds.json")
-    if path.is_file():
+    if _probe_is_file(path, "MiniMax CLI credentials file", caveats):
         findings.append(
             UnshardableCredentialFinding(
                 surface_id="minimax_cli_file",
@@ -206,6 +238,7 @@ def _detect_minimax_cli(findings: list[UnshardableCredentialFinding]) -> None:
 
 def _detect_auth_profiles_oauth_token(
     findings: list[UnshardableCredentialFinding],
+    caveats: list[str] | None = None,
 ) -> None:
     """Surfaces 6/7 — OpenClaw's OWN auth-profiles.json entries with
     ``type: "oauth"`` or ``type: "token"``. Only ``type: "api_key"`` entries
@@ -228,7 +261,22 @@ def _detect_auth_profiles_oauth_token(
         auth_profiles_path = agent_dir / "auth-profiles.json"
         try:
             data = json.loads(auth_profiles_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except (FileNotFoundError, NotADirectoryError):
+            # Genuinely absent — the common case (most installs have no auth
+            # profiles at all). "Not there" is a real answer, not a coverage
+            # gap, so it must NOT raise a caveat or every user would see one.
+            continue
+        except (OSError, ValueError) as exc:
+            # Present but unreadable or half-written: skipping silently would
+            # drop EVERY oauth/token profile inside it and still report "no
+            # unshardable credentials found" — a false all-clear caused by a
+            # file we couldn't parse. Skip it, but say so.
+            logger.warning("could not read %s: %s", auth_profiles_path, exc)
+            if caveats is not None:
+                caveats.append(
+                    "an OpenClaw auth-profiles.json could not be read — any "
+                    "OAuth/token profiles inside it were not checked"
+                )
             continue
         profiles = data.get("profiles")
         if not isinstance(profiles, dict):
@@ -256,15 +304,15 @@ def _vertex_adc_path() -> Path | None:
     (vertex-adc.ts:39-62): explicit ``$GOOGLE_APPLICATION_CREDENTIALS`` env
     var first, else the default ADC location under the home dir.
     """
-    import os
-
     explicit = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
     if explicit:
         return Path(explicit)
     return _home_relative_path(".config", "gcloud", "application_default_credentials.json")
 
 
-def _detect_vertex_adc(findings: list[UnshardableCredentialFinding]) -> None:
+def _detect_vertex_adc(
+    findings: list[UnshardableCredentialFinding], caveats: list[str] | None = None
+) -> None:
     # Surface 8 — Vertex ADC (vertex-adc.ts:20,39-86). No static key; the
     # safety-critical throw for a MISSING file lives at
     # resolveGoogleVertexAuthorizedUserHeaders (:169-187) — caught one level
@@ -272,7 +320,7 @@ def _detect_vertex_adc(findings: list[UnshardableCredentialFinding]) -> None:
     # in-app re-login flow. That's why this is the one surface whose clear
     # path needs an explicit remediation message.
     path = _vertex_adc_path()
-    if path is not None and path.is_file():
+    if path is not None and _probe_is_file(path, "Vertex AI ADC file", caveats):
         findings.append(
             UnshardableCredentialFinding(
                 surface_id="vertex_adc",
@@ -284,7 +332,9 @@ def _detect_vertex_adc(findings: list[UnshardableCredentialFinding]) -> None:
         )
 
 
-def detect_unshardable_credentials() -> list[UnshardableCredentialFinding]:
+def detect_unshardable_credentials(
+    caveats: list[str] | None = None,
+) -> list[UnshardableCredentialFinding]:
     """Enumerate every unshardable credential surface currently present.
 
     All 8 surfaces resolve relative to the real OS home directory
@@ -295,14 +345,19 @@ def detect_unshardable_credentials() -> list[UnshardableCredentialFinding]:
     corrupt file, keychain backend unavailable) is treated as "not found"
     here, never raised — matches the read side of every surface's own
     fail-soft contract in real OpenClaw.
+
+    Pass a list as *caveats* to collect what could NOT be inspected. A
+    surface that failed to probe is reported as absent, so without this the
+    caller cannot distinguish "checked, nothing there" from "couldn't look" —
+    and would present the second as a clean bill of health (WOR-823).
     """
     findings: list[UnshardableCredentialFinding] = []
-    _detect_claude_cli(findings)
-    _detect_codex_cli(findings)
-    _detect_gemini_cli(findings)
-    _detect_minimax_cli(findings)
-    _detect_auth_profiles_oauth_token(findings)
-    _detect_vertex_adc(findings)
+    _detect_claude_cli(findings, caveats)
+    _detect_codex_cli(findings, caveats)
+    _detect_gemini_cli(findings, caveats)
+    _detect_minimax_cli(findings, caveats)
+    _detect_auth_profiles_oauth_token(findings, caveats)
+    _detect_vertex_adc(findings, caveats)
     return findings
 
 

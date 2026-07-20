@@ -90,12 +90,17 @@ def _summarize(n: int, caveats: list[str]) -> str:
 
 
 def run(ctx: CheckContext) -> CheckResult:
-    findings_data = detect_unshardable_credentials()
+    # WOR-823: collect surfaces that could not be inspected at all (unreadable
+    # dir, unparsable auth-profiles.json). They come back as "absent", so
+    # without this a scan that couldn't look would read as a clean bill of
+    # health — the exact false all-clear this check exists to prevent.
+    probe_caveats: list[str] = []
+    findings_data = detect_unshardable_credentials(probe_caveats)
     findings = [
         {"surface_id": f.surface_id, "description": f.description, "location": f.location}
         for f in findings_data
     ]
-    caveats = detection_caveats()
+    caveats = detection_caveats() + probe_caveats
 
     fixed: list[dict] = []
     unfixed: list[dict] = []
