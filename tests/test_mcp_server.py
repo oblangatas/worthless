@@ -72,18 +72,23 @@ class TestWorthlessStatus:
         keys: list[dict[str, str]],
         healthy: bool,
         sentinel: dict[str, str] | None = None,
+        identified: bool = True,
     ) -> None:
-        """Pin the three inputs the verdict is derived from."""
+        """Pin the four inputs the verdict is derived from.
+
+        ``identified`` (WOR-822) mirrors what ``check_proxy_health`` surfaces:
+        ``bind_probe_count`` is present iff the responder is really our proxy.
+        """
         import worthless.cli.commands.status as status_mod
         import worthless.cli.sentinel as sentinel_mod
 
+        health: dict[str, object] = {"healthy": healthy, "port": 8787, "mode": "http"}
+        if identified:
+            health["bind_probe_count"] = 0
+
         monkeypatch.setattr(status_mod, "_list_enrolled_keys", lambda _home: keys)
         monkeypatch.setattr(status_mod, "_discover_proxy_port", lambda _home: 8787)
-        monkeypatch.setattr(
-            status_mod,
-            "_check_proxy_health",
-            lambda _port: {"healthy": healthy, "port": 8787, "mode": "http"},
-        )
+        monkeypatch.setattr(status_mod, "_check_proxy_health", lambda _port: health)
         monkeypatch.setattr(sentinel_mod, "read_sentinel", lambda _dir: sentinel)
 
     @pytest.mark.asyncio
@@ -153,6 +158,31 @@ class TestWorthlessStatus:
         assert result["degraded"] is False
 
     @pytest.mark.asyncio
+    async def test_stranger_on_the_proxy_port_is_not_green_from_the_editor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """WOR-822: the identity gate must reach this surface too.
+
+        The gate lives in the shared ``_status_verdict``, so an agent asking
+        "am I protected?" from the editor gets the same refusal to call an
+        unidentified responder "the proxy". If this ever passes ``True``
+        unconditionally, a squatter forges a green verdict here only — the
+        exact CLI/editor divergence WOR-820 was opened to end.
+        """
+        home = _make_home(tmp_path)
+        self._stub_status(
+            monkeypatch,
+            keys=[{"alias": "openai", "provider": "openai", "status": "PROTECTED"}],
+            healthy=True,
+            identified=False,
+        )
+        with patch.dict(os.environ, {"WORTHLESS_HOME": str(home)}):
+            result = json.loads(await worthless_status())
+
+        assert result["verdict"] == "proxy_unrecognised"
+        assert "isn't worthless" in result["header"]
+
+    @pytest.mark.asyncio
     async def test_editor_verdict_matches_the_cli_for_identical_inputs(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -170,7 +200,7 @@ class TestWorthlessStatus:
         with patch.dict(os.environ, {"WORTHLESS_HOME": str(home)}):
             result = json.loads(await worthless_status())
 
-        expected_verdict, expected_header = _status_verdict(keys, False, False)
+        expected_verdict, expected_header = _status_verdict(keys, False, False, True)
         assert result["verdict"] == expected_verdict
         assert result["header"] == expected_header
 
