@@ -158,7 +158,7 @@ class TestWorthlessStatus:
         assert result["degraded"] is False
 
     @pytest.mark.asyncio
-    async def test_stranger_on_the_proxy_port_is_not_green_from_the_editor(
+    async def test_unidentified_responder_is_not_green_from_the_editor(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """WOR-822: the identity gate must reach this surface too.
@@ -166,7 +166,7 @@ class TestWorthlessStatus:
         The gate lives in the shared ``_status_verdict``, so an agent asking
         "am I protected?" from the editor gets the same refusal to call an
         unidentified responder "the proxy". If this ever passes ``True``
-        unconditionally, a squatter forges a green verdict here only — the
+        unconditionally, an unidentified responder reads green here only — the
         exact CLI/editor divergence WOR-820 was opened to end.
         """
         home = _make_home(tmp_path)

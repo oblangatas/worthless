@@ -4,6 +4,12 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Security
+- **"Am I protected?" no longer reads green just because *something* answers on the proxy port** (WOR-822, [#451](https://github.com/oblangatas/worthless/pull/451)). `worthless status` and the editor's `worthless_status` tool used to report 🟢 "you're protected" whenever any service returned 200 on the proxy port — a leftover dev server, or anything else that happened to bind it, earned the same green light as the real proxy while the app's traffic went elsewhere. The verdict now gates green on the `bind_probe_count` identity marker (WOR-658) that a real worthless proxy stamps on `/healthz`; a healthy-but-unidentified responder returns a new 🟡 `proxy_unrecognised` verdict ("something's answering, but it isn't worthless") instead. The gate lives in the one shared verdict function, so the CLI and the editor answer identically (the WOR-820 invariant).
+
+### What this does NOT defend against
+- **A motivated same-host process that forges the marker** (WOR-822). `bind_probe_count` is a public field name, not a secret, and the check is presence-only. It reliably tells a *benign* non-worthless responder (the common, accidental collision) apart from our proxy, but a process that reads the open-source `/healthz` handler can echo the field and still read green. That's out of scope under worthless's honest-payload loopback trust model — the same limit `lock`'s bind-confirmation already has — and the marker proves responder *identity*, not that traffic is actually *routed* (that's `bind_confirmation`'s job). The `proxy_unrecognised` verdict keeps exit code 0 (matching `protected_at_rest`); machines gating on protection must read the `verdict` enum, not `$?`.
+
 ## [0.3.9] — 2026-07-08
 
 ### Security

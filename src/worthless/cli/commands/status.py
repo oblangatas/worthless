@@ -173,13 +173,27 @@ def _status_verdict(
     component is bad.
 
     WOR-822: *healthy* only means something answered ``/healthz`` with a 200.
-    ``proxy_identified`` is the separate question of whether that responder is
-    OUR proxy — it echoes ``bind_probe_count`` (WOR-658), the same identity
-    marker ``worthless lock`` already gates its bind-confirmation on. Without
-    this input a stray dev server squatting on the port earns a green verdict
-    while the user's traffic goes somewhere else entirely. It is NOT folded
-    into ``proxy_healthy``: "nothing is listening" and "a stranger is
-    listening" need different advice, and the second is the quieter failure.
+    ``proxy_identified`` is the separate question of whether that responder
+    even looks like OUR proxy — it echoes ``bind_probe_count`` (WOR-658), the
+    same marker ``worthless lock`` already gates its bind-confirmation on.
+    Without this input a stray, unrelated service on the port (a leftover dev
+    server) earns a green verdict while the user's traffic goes elsewhere. It
+    is NOT folded into ``proxy_healthy``: "nothing is listening" and "an
+    unidentified service is listening" need different advice, and the second
+    is the quieter failure.
+
+    Scope — do NOT overstate this. ``bind_probe_count`` is a public field
+    name, not a secret, and the check is presence-only. So it distinguishes a
+    *benign* non-worthless responder (the common, accidental case) from our
+    proxy; it does NOT authenticate. A motivated same-host process that reads
+    the open-source field name can echo it and still read green. That's out of
+    scope under worthless's honest-payload loopback trust model — the same
+    limit ``lock``'s bind-confirmation has — not a defense this adds. Nor does
+    the marker prove *routing*; that is ``bind_confirmation``'s job.
+
+    Exit code stays 0 for ``proxy_unrecognised`` (see the command below),
+    matching ``protected_at_rest`` — the availability tiers don't flip the
+    exit code; machines must read the ``verdict`` enum, not ``$?``.
     """
     if not keys:
         return "empty", None
@@ -307,8 +321,9 @@ def register_status_commands(app: typer.Typer) -> None:
                     )
 
             if proxy_info["healthy"] and not identified:
-                # WOR-822: don't call a stranger "the proxy" — that reading is
-                # what made the green verdict forgeable in the first place.
+                # WOR-822: don't call an unidentified responder "the proxy" —
+                # that reading is what made the green verdict forgeable by an
+                # accidental collision in the first place.
                 sys.stderr.write(
                     f"Proxy: something is answering on 127.0.0.1:{proxy_info['port']},"
                     f" but it isn't worthless\n"

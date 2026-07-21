@@ -128,7 +128,7 @@ class TestStatusProxy:
             status_code = 200
 
             def json(self):
-                return {"status": "ok", "mode": "up"}
+                return {"status": "ok", "mode": "up", "bind_probe_count": 0}
 
         with patch("worthless.cli.process.httpx") as mock_httpx:
             mock_httpx.get.return_value = MockResponse()
@@ -151,7 +151,7 @@ class TestStatusProxy:
             status_code = 200
 
             def json(self):
-                return {"status": "ok", "mode": "up"}
+                return {"status": "ok", "mode": "up", "bind_probe_count": 0}
 
         with patch("worthless.cli.process.httpx") as mock_httpx:
             mock_httpx.get.return_value = MockResponse()
@@ -185,7 +185,7 @@ class TestStatusRequestsProxied:
             status_code = 200
 
             def json(self):
-                return {"status": "ok", "mode": "up", "requests_proxied": 42}
+                return {"status": "ok", "mode": "up", "requests_proxied": 42, "bind_probe_count": 0}
 
         with patch("worthless.cli.process.httpx") as mock_httpx:
             mock_httpx.get.return_value = MockResponse()
@@ -209,7 +209,7 @@ class TestStatusRequestsProxied:
             status_code = 200
 
             def json(self):
-                return {"status": "ok", "mode": "up", "requests_proxied": 7}
+                return {"status": "ok", "mode": "up", "requests_proxied": 7, "bind_probe_count": 0}
 
         with patch("worthless.cli.process.httpx") as mock_httpx:
             mock_httpx.get.return_value = MockResponse()
@@ -232,7 +232,7 @@ class TestStatusRequestsProxied:
             status_code = 200
 
             def json(self):
-                return {"status": "ok", "mode": "up", "requests_proxied": 0}
+                return {"status": "ok", "mode": "up", "requests_proxied": 0, "bind_probe_count": 0}
 
         with patch("worthless.cli.process.httpx") as mock_httpx:
             mock_httpx.get.return_value = MockResponse()

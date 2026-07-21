@@ -102,17 +102,18 @@ class TestStatusVerdictHeader:
             f"proxy-down is NOT a security risk — crying 'at risk' trains red-blindness:\n{out}"
         )
 
-    def test_a_stranger_on_the_proxy_port_does_not_earn_a_green_verdict(
+    def test_an_unidentified_responder_does_not_earn_a_green_verdict(
         self, home_with_key: WorthlessHome
     ) -> None:
         """WOR-822: 200 on /healthz is not proof the proxy is ours.
 
-        Anything can bind the port — a stray dev server, or a squatter that
-        now receives every request the user's app makes. A real worthless
-        proxy answers with ``bind_probe_count`` (WOR-658), the same identity
-        marker lock's bind-confirmation already gates on. Without that marker
-        the user must NOT be told they're protected, and must not be told
-        "proxy: running" either.
+        Anything can bind the port — commonly a stray dev server, not an
+        attacker. A real worthless proxy answers with ``bind_probe_count``
+        (WOR-658), the same marker lock's bind-confirmation gates on. Without
+        it the user must NOT be told they're protected, nor "proxy: running".
+        (Presence-only, public field: this catches the benign/accidental
+        responder, not a same-host process that forges the field — that's out
+        of scope under the honest-payload loopback model.)
         """
         mock = _healthy_proxy(home_with_key, identified=False)
         try:
