@@ -33,18 +33,25 @@ pytestmark = pytest.mark.real_ipc
 _RUN = "from worthless.sidecar.__main__ import _configure_logging"
 
 
-def _spawn_sidecar(share_a: bytes, share_b: bytes) -> subprocess.CompletedProcess[str]:
+def _spawn_sidecar(
+    share_a: bytes, share_b: bytes, *, socket_occupied: bool = False
+) -> subprocess.CompletedProcess[str]:
     """Spawn a real sidecar against the given share bytes; return the finished proc.
 
-    All exercised paths (share/backend errors) return rc=1 before the socket
-    binds, so the process exits promptly — no server lifecycle to manage.
+    Share/backend error paths return rc=1 before the socket binds. With
+    ``socket_occupied=True`` a regular file sits at the socket path, so
+    ``_check_socket_path_available`` refuses to bind (rc=2) — forcing an exit
+    *after* the backend (and reconstructed key) exist. Either way the process
+    exits promptly; no server lifecycle to manage.
     """
     base = Path(tempfile.mkdtemp(prefix="w-leak-", dir="/tmp"))
-    a_path, b_path = base / "share_a", base / "share_b"
+    a_path, b_path, sock = base / "share_a", base / "share_b", base / "s.sock"
     a_path.write_bytes(share_a)
     b_path.write_bytes(share_b)
+    if socket_occupied:
+        sock.write_text("not a socket")
     env = null_keyring_env(
-        WORTHLESS_SIDECAR_SOCKET=str(base / "s.sock"),
+        WORTHLESS_SIDECAR_SOCKET=str(sock),
         WORTHLESS_SIDECAR_SHARE_A=str(a_path),
         WORTHLESS_SIDECAR_SHARE_B=str(b_path),
         WORTHLESS_SIDECAR_ALLOWED_UID="1000",
@@ -58,7 +65,7 @@ def _spawn_sidecar(share_a: bytes, share_b: bytes) -> subprocess.CompletedProces
             timeout=30,
         )
     finally:
-        for p in (a_path, b_path):
+        for p in (a_path, b_path, sock):
             p.unlink(missing_ok=True)
         base.rmdir()
 
@@ -86,6 +93,19 @@ def test_invalid_fernet_key_path_leaks_nothing() -> None:
     # SHARE_MARKER is the real needle here: the derived key is a XOR b, never the
     # fixed KEY_SENTINEL_B64, so only the planted share marker can actually appear.
     assert not grep_all(SHARE_MARKER).leaked_in(proc.stdout, proc.stderr)
+
+
+def test_successful_key_reconstruction_then_bind_failure_leaks_nothing() -> None:
+    """Exercise the key-RESIDENT path: shares XOR to a valid Fernet key so the
+    backend builds and the reconstructed key lives in memory, then a non-socket
+    path forces a bind refusal. Assert the key never reaches stdout/stderr."""
+    key = KEY_SENTINEL_B64.encode()  # 44-char urlsafe-b64 → a valid Fernet key
+    a = secrets.token_bytes(len(key))
+    b = bytes(x ^ y for x, y in zip(a, key, strict=True))
+    proc = _spawn_sidecar(a, b, socket_occupied=True)
+    assert proc.returncode == 2  # bind refused AFTER the backend was built
+    assert "not a socket" in proc.stderr  # the post-backend path was reached
+    assert not grep_all(KEY_SENTINEL_B64).leaked_in(proc.stdout, proc.stderr)
 
 
 # ------------------------------------------------ T2: redaction acts (real proc)

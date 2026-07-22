@@ -53,4 +53,7 @@ class Grep:
             else:
                 hay.append(s)
         blob = "\n".join(hay)
-        return [n for n in self.needles if n in blob]
+        # Match a needle both as literal text and as its hex encoding — a
+        # `.hex()` leak of share bytes renders the marker as e.g. 534841..., not
+        # as the ASCII "SHARESENTINEL".
+        return [n for n in self.needles if n in blob or bytes(n, "latin-1").hex() in blob]

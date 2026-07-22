@@ -213,10 +213,14 @@ def warn_if_core_pattern_piped() -> None:
     except OSError:
         return
     if pattern.startswith("|"):
+        # Deliberately do NOT log the raw pattern value: it is external input
+        # (a root-controlled proc file) and interpolating it into a log line is
+        # a log-injection surface (SonarCloud S5145). The boolean fact is what a
+        # responder needs; they can read the file for the exact handler.
         _LOG.warning(
-            "core_pattern pipes cores to a handler (%s); RLIMIT_CORE=0 is bypassed "
-            "for it — relying on PR_SET_DUMPABLE=0 to block the dump",
-            pattern,
+            "core_pattern pipes cores to a handler; RLIMIT_CORE=0 is bypassed for it — "
+            "relying on PR_SET_DUMPABLE=0 to block the dump "
+            "(inspect /proc/sys/kernel/core_pattern for the handler)"
         )
 
 

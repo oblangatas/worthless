@@ -307,8 +307,11 @@ def _redacting_excepthook(
         text = redact("".join(traceback.format_exception(exc_type, exc, tb)))
     except Exception:  # noqa: BLE001 — leak-safe fallback; must never fall through to the default hook
         text = "sidecar: fatal error (traceback suppressed to avoid leak)\n"
-    sys.stderr.write(text)
-    sys.stderr.flush()
+    try:
+        sys.stderr.write(text)
+        sys.stderr.flush()
+    except Exception:  # noqa: BLE001,S110 — a broken stderr must not resurrect the raw traceback
+        pass
 
 
 def _configure_logging(level: int) -> None:
