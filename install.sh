@@ -452,18 +452,6 @@ path_is_persistent() {
     esac
 }
 
-command_in_original_path() {
-    name="$1"
-    current_path="${PATH:-}"
-    PATH="$ORIGINAL_PATH"
-    if command -v "$name" >/dev/null 2>&1; then
-        PATH="$current_path"
-        return 0
-    fi
-    PATH="$current_path"
-    return 1
-}
-
 # mode: "full" (default) prints both current-shell + make-permanent hints;
 # "activate" prints only the current-shell activation command.
 print_activation_hint() {
@@ -517,8 +505,31 @@ main() {
     smoke_test
 
     printf "\n"
-    if command_in_original_path worthless; then
+    worthless_on_original_path=0
+    worthless_matches_installed=0
+    current_path="${PATH:-}"
+    PATH="$ORIGINAL_PATH"
+    worthless_path="$(command -v worthless 2>/dev/null || true)"
+    if [ -n "$worthless_path" ]; then
+        worthless_on_original_path=1
+        path_version_output="$(worthless --version 2>/dev/null || true)"
+        if [ -n "${version_output:-}" ] && [ "$path_version_output" = "$version_output" ]; then
+            worthless_matches_installed=1
+        fi
+    fi
+    PATH="$current_path"
+
+    if [ "$worthless_matches_installed" -eq 1 ]; then
         ok "Done! 'worthless' is on your PATH."
+    elif [ "$worthless_on_original_path" -eq 1 ]; then
+        ok "Done! 'worthless' is installed."
+        printf "\n"
+        warn "Heads up: this terminal finds a different 'worthless' first on PATH."
+        printf "\n"
+        printf "  PATH resolves:      %s\n" "$worthless_path"
+        printf "  PATH version:       %s\n" "${path_version_output:-unreadable}"
+        printf "  Installed version:  %s\n" "${version_output:-unknown}"
+        print_activation_hint activate
     else
         ok "Done! 'worthless' is installed."
         printf "\n"
@@ -532,7 +543,7 @@ main() {
         fi
     fi
     printf "\n"
-    if command_in_original_path worthless; then
+    if [ "$worthless_matches_installed" -eq 1 ]; then
         printf "  ${BOLD}Try it:${RESET}        cd your-project && worthless lock\n"
     else
         printf "  ${BOLD}Try after PATH:${RESET} cd your-project && worthless lock\n"
