@@ -305,7 +305,7 @@ def _redacting_excepthook(
     """
     try:
         text = redact("".join(traceback.format_exception(exc_type, exc, tb)))
-    except BaseException:  # noqa: BLE001 — a leak-safe fallback must catch everything
+    except Exception:  # noqa: BLE001 — leak-safe fallback; must never fall through to the default hook
         text = "sidecar: fatal error (traceback suppressed to avoid leak)\n"
     sys.stderr.write(text)
     sys.stderr.flush()

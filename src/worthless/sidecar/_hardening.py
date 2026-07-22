@@ -29,7 +29,7 @@ from pathlib import Path
 
 try:
     import resource
-except ImportError:  # Windows lacks the POSIX ``resource`` module
+except ImportError:  # pragma: no cover — Windows lacks the POSIX ``resource`` module
     resource = None  # type: ignore[assignment]
 
 from worthless.cli.errors import ErrorCode, WorthlessError
