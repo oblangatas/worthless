@@ -41,15 +41,24 @@ def _status(home: WorthlessHome, *args: str):
     return runner.invoke(app, ["status", *args], env={"WORTHLESS_HOME": str(home.base_dir)})
 
 
-def _healthy_proxy(home: WorthlessHome, port: int = 18787):
-    """Context manager: make `status` see a healthy worthless proxy."""
+def _healthy_proxy(home: WorthlessHome, port: int = 18787, *, identified: bool = True):
+    """Context manager: make `status` see a healthy worthless proxy.
+
+    ``identified=False`` models WOR-822: a 200 on /healthz from something that
+    is NOT our proxy (a stray dev server, a squatter), which a real worthless
+    proxy would answer with ``bind_probe_count`` (WOR-658).
+    """
     (home.base_dir / "proxy.pid").write_text(f"99999\n{port}\n")
+
+    body = {"status": "ok", "mode": "up", "requests_proxied": 0}
+    if identified:
+        body["bind_probe_count"] = 0
 
     class _Resp:
         status_code = 200
 
         def json(self):
-            return {"status": "ok", "mode": "up", "requests_proxied": 0}
+            return body
 
     mock = patch("worthless.cli.process.httpx")
     handle = mock.start()
@@ -92,6 +101,36 @@ class TestStatusVerdictHeader:
         assert "at risk" not in out.lower(), (
             f"proxy-down is NOT a security risk — crying 'at risk' trains red-blindness:\n{out}"
         )
+
+    def test_an_unidentified_responder_does_not_earn_a_green_verdict(
+        self, home_with_key: WorthlessHome
+    ) -> None:
+        """WOR-822: 200 on /healthz is not proof the proxy is ours.
+
+        Anything can bind the port — commonly a stray dev server, not an
+        attacker. A real worthless proxy answers with ``bind_probe_count``
+        (WOR-658), the same marker lock's bind-confirmation gates on. Without
+        it the user must NOT be told they're protected, nor "proxy: running".
+        (Presence-only, public field: this catches the benign/accidental
+        responder, not a same-host process that forges the field — that's out
+        of scope under the honest-payload loopback model.)
+        """
+        mock = _healthy_proxy(home_with_key, identified=False)
+        try:
+            result = _status(home_with_key)
+            json_result = _status(home_with_key, "--json")
+        finally:
+            mock.stop()
+
+        out = result.stderr + result.stdout
+        assert "you're protected" not in out.lower(), (
+            f"green verdict forged by an unidentified responder:\n{out}"
+        )
+        assert "isn't worthless" in out.lower(), f"must name the real problem:\n{out}"
+        # The state stays machine-distinguishable — collapsing it into
+        # `protected_at_rest` would lose "a stranger is listening", which
+        # needs different advice from "nothing is listening".
+        assert json.loads(json_result.stdout)["verdict"] == "proxy_unrecognised"
 
     def test_broken_key_reads_as_attention_with_doctor_hint(
         self, home_dir: WorthlessHome, env_file: Path
