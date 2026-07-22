@@ -77,7 +77,10 @@ class TestWorthlessStatus:
         """Pin the four inputs the verdict is derived from.
 
         ``identified`` (WOR-822) mirrors what ``check_proxy_health`` surfaces:
-        ``bind_probe_count`` is present iff the responder is really our proxy.
+        ``bind_probe_count`` is the marker a real proxy advertises on
+        ``/healthz``. The check is presence-only — a same-host process could
+        forge it — so it flags a benign/unidentified responder, it does not
+        authenticate the proxy.
         """
         import worthless.cli.commands.status as status_mod
         import worthless.cli.sentinel as sentinel_mod
