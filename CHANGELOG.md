@@ -4,6 +4,35 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [0.3.10] — 2026-07-21
+
+Credential-leak hardening across the OpenClaw path, plus honest reporting when Worthless can't protect or can't look.
+
+### Security
+- **A stolen OpenClaw install no longer hands over your real API key** (WOR-796, [#424](https://github.com/shacharm2/worthless/pull/424)). `lock` scrubs the cached real key from OpenClaw's per-agent `auth-profiles.json` / `models.json` to an uppercase `${VAR}` SecretRef → shard-A, and warns when a non-uppercase key var blocks the scrub.
+- **`lock` tells you the truth about logins it can't shard** (WOR-797, [#425](https://github.com/shacharm2/worthless/pull/425)). OAuth tokens, keychain creds, and Vertex ADC are enumerated and honestly flagged as unprotectable — never implied as sharded — with `gcloud auth application-default login` guidance for Vertex.
+- **`lock` confirms OpenClaw applied the new proxy URL before printing `[OK]`** (WOR-756, [#431](https://github.com/shacharm2/worthless/pull/431)). No more false green while the live gateway still routes the real key; a rejected reload exits 92.
+- **Old OpenClaw installs auto-heal their leftover decoy on the next lock** (WOR-656, [#437](https://github.com/shacharm2/worthless/pull/437)).
+- **A scan that couldn't look no longer reports "clean"** (WOR-823, [#449](https://github.com/shacharm2/worthless/pull/449)). The credential scan stops crashing on unreadable files and stops falsely reporting nothing found when it couldn't read them.
+- **The editor stops telling you your keys are exposed when they're actually safe** (WOR-820, [#447](https://github.com/shacharm2/worthless/pull/447)).
+- **A shipped Worthless log can never carry a live key** (WOR-655, [#442](https://github.com/shacharm2/worthless/pull/442)).
+- **A leaked key can't be read back out of Worthless anywhere** (WOR-277, [#426](https://github.com/shacharm2/worthless/pull/426)).
+- **A crash mid-unlock no longer leaves a reconstructed key lingering in memory** (SR-02, [#443](https://github.com/shacharm2/worthless/pull/443)).
+- **Uninstall never force-wipes a recoverable key; install never mints over an orphaned one** (WOR-716, [#432](https://github.com/shacharm2/worthless/pull/432)).
+
+### Added
+- **Service management: a background proxy that tells you when it's silently broken** (WOR-193, [#430](https://github.com/shacharm2/worthless/pull/430)).
+- **Install page leads with a one-click, per-tool picker** (WOR-790, [#441](https://github.com/shacharm2/worthless/pull/441)).
+- **CI proves the real `npx worthless-mcp` mounts its 4 tools** (WOR-809, [#438](https://github.com/shacharm2/worthless/pull/438)).
+
+### Fixed
+- **Uninstall points you at the leftover MCP config instead of staying silent** ([#439](https://github.com/shacharm2/worthless/pull/439)).
+- **Every push stops dying on a click CVE we never trigger** ([#435](https://github.com/shacharm2/worthless/pull/435)).
+
+### Docs
+- **Install docs claim only what we can back** (WOR-810, [#433](https://github.com/shacharm2/worthless/pull/433)) — dropped "90 seconds", qualified MCP verification.
+- **`curl` leads the install hero; editor paths state they don't route keys** (WOR-819, [#445](https://github.com/shacharm2/worthless/pull/445)).
+
 ## [0.3.9] — 2026-07-08
 
 ### Security
@@ -213,6 +242,7 @@ First release published to PyPI. `pip install worthless` now works.
 - Gate evaluation strictly precedes shard reconstruction (SR-03).
 - Published artifacts built via PyPI trusted publishing (OIDC, no long-lived tokens).
 
+[0.3.10]: https://github.com/shacharm2/worthless/releases/tag/v0.3.10
 [0.3.9]: https://github.com/shacharm2/worthless/releases/tag/v0.3.9
 [0.3.8]: https://github.com/shacharm2/worthless/releases/tag/v0.3.8.0
 [0.3.7]: https://github.com/shacharm2/worthless/releases/tag/v0.3.7
