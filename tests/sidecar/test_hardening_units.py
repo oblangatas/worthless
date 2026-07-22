@@ -63,11 +63,43 @@ def test_redacting_excepthook_fallback_when_redact_raises(
     assert "supersecret" not in err
 
 
-def test_disable_core_dumps_sets_zero() -> None:
-    import resource
+def test_redacting_excepthook_survives_broken_stderr(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _BadStderr:
+        def write(self, _data: str) -> int:
+            raise OSError("broken pipe")
 
+        def flush(self) -> None:
+            raise OSError("broken pipe")
+
+    monkeypatch.setattr(sys, "stderr", _BadStderr())
+    try:
+        raise ValueError("supersecret")
+    except ValueError as exc:
+        # Must NOT raise: a broken stderr can't be allowed to resurface the
+        # original traceback via CPython's default excepthook fallback.
+        sidecar_main._redacting_excepthook(type(exc), exc, exc.__traceback__)
+
+
+def test_disable_core_dumps_success_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Use a fake resource module so the pytest worker's real RLIMIT_CORE is NOT
+    # permanently lowered (that would leak into sibling tests). The real (0, 0)
+    # is proven end-to-end by tests/sidecar/test_core_dumps.py.
+    calls: list[tuple[int, tuple[int, int]]] = []
+
+    class _Res:
+        RLIMIT_CORE = 4
+
+        @staticmethod
+        def setrlimit(res: int, lim: tuple[int, int]) -> None:
+            calls.append((res, lim))
+
+        @staticmethod
+        def getrlimit(_res: int) -> tuple[int, int]:
+            return (0, 0)
+
+    monkeypatch.setattr(_hardening, "resource", _Res)
     _hardening.disable_core_dumps()
-    assert resource.getrlimit(resource.RLIMIT_CORE) == (0, 0)
+    assert calls == [(4, (0, 0))]
 
 
 def test_disable_core_dumps_no_resource_module(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -119,11 +151,14 @@ def test_warn_if_core_pattern_piped(
     monkeypatch: pytest.MonkeyPatch, tmp_path, caplog: pytest.LogCaptureFixture
 ) -> None:
     f = tmp_path / "core_pattern"
-    f.write_text("|/usr/lib/systemd/systemd-coredump\n")
+    handler = "/usr/lib/systemd/systemd-coredump"
+    f.write_text(f"|{handler}\n")
     monkeypatch.setattr(_hardening, "_CORE_PATTERN_FILE", f)
     with caplog.at_level(logging.WARNING):
         _hardening.warn_if_core_pattern_piped()
     assert "core_pattern pipes cores" in caplog.text
+    # The raw (external) pattern value must NOT be interpolated into the log (S5145).
+    assert handler not in caplog.text
 
 
 def test_warn_if_core_pattern_not_piped_is_silent(

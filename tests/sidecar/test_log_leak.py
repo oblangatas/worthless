@@ -35,7 +35,7 @@ _RUN = "from worthless.sidecar.__main__ import _configure_logging"
 
 def _spawn_sidecar(
     share_a: bytes, share_b: bytes, *, socket_occupied: bool = False
-) -> subprocess.CompletedProcess[str]:
+) -> subprocess.CompletedProcess[bytes]:
     """Spawn a real sidecar against the given share bytes; return the finished proc.
 
     Share/backend error paths return rc=1 before the socket binds. With
@@ -60,8 +60,7 @@ def _spawn_sidecar(
         return subprocess.run(
             [sys.executable, "-m", "worthless.sidecar"],
             env=env,
-            capture_output=True,
-            text=True,
+            capture_output=True,  # bytes, not text: the leak sweep must see raw bytes
             timeout=30,
         )
     finally:
@@ -78,7 +77,7 @@ def test_share_length_mismatch_path_leaks_nothing() -> None:
     marker = SHARE_MARKER.encode()
     proc = _spawn_sidecar(marker + secrets.token_bytes(40), marker + secrets.token_bytes(8))
     assert proc.returncode == 1
-    assert "share load failed" in proc.stderr  # path was actually exercised
+    assert b"share load failed" in proc.stderr  # path was actually exercised
     assert not grep_all(SHARE_MARKER).leaked_in(proc.stdout, proc.stderr)
 
 
@@ -89,7 +88,7 @@ def test_invalid_fernet_key_path_leaks_nothing() -> None:
     b = marker + bytes(40)  # XOR leaves marker region intact, key is invalid b64 shape
     proc = _spawn_sidecar(a, b)
     assert proc.returncode == 1
-    assert "backend init failed" in proc.stderr
+    assert b"backend init failed" in proc.stderr
     # SHARE_MARKER is the real needle here: the derived key is a XOR b, never the
     # fixed KEY_SENTINEL_B64, so only the planted share marker can actually appear.
     assert not grep_all(SHARE_MARKER).leaked_in(proc.stdout, proc.stderr)
@@ -104,7 +103,7 @@ def test_successful_key_reconstruction_then_bind_failure_leaks_nothing() -> None
     b = bytes(x ^ y for x, y in zip(a, key, strict=True))
     proc = _spawn_sidecar(a, b, socket_occupied=True)
     assert proc.returncode == 2  # bind refused AFTER the backend was built
-    assert "not a socket" in proc.stderr  # the post-backend path was reached
+    assert b"not a socket" in proc.stderr  # the post-backend path was reached
     assert not grep_all(KEY_SENTINEL_B64).leaked_in(proc.stdout, proc.stderr)
 
 
