@@ -111,9 +111,14 @@ def _print_human(v: dict) -> None:
         )
         write("Run `worthless doctor` to diagnose.\n")
     elif reason in ("proxy_unrecognised", "proxy_unrecognised_after"):
+        # WOR-822 honest framing: bind_probe_count is a public, presence-only
+        # marker — its absence means the responder doesn't ADVERTISE the
+        # Worthless marker (a benign/accidental service is the common case), so
+        # routing can't be confirmed. It does NOT prove an adversary; a
+        # motivated same-host process could echo the field. Don't say "squatter".
         write(
-            "RED — the service on the proxy port isn't a Worthless proxy (a "
-            "squatter). Routing is NOT proven.\n"
+            "RED — the service answering on the proxy port doesn't advertise the "
+            "Worthless marker, so routing can't be confirmed.\n"
         )
         write("Run `worthless doctor` to diagnose.\n")
     else:

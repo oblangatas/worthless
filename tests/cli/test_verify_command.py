@@ -110,7 +110,9 @@ def test_healthy_but_zero_delta_is_red():
     assert "red" in (result.stdout + result.stderr).lower()
 
 
-def test_squatter_is_red():
+def test_unidentified_responder_is_red():
+    # WOR-822 honest framing: an unidentified responder (no bind_probe_count),
+    # not necessarily an adversary — verify can't confirm routing → RED.
     confirm = {
         "status": "skipped",
         "reason": "proxy_unrecognised",
