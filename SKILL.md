@@ -230,6 +230,21 @@ Locked keys:
 Proxy: http://127.0.0.1:8787 (running)
 ```
 
+#### `worthless verify [OPTIONS]`
+**Confirm the gateway is alive and routing a request right now.**
+
+Fires a live loopback probe through the proxy and reports a GREEN/RED verdict earned by a fresh delta this instant (not the cumulative `requests_proxied` counter, which can't say "now"). GREEN means the proxy is live and routing now — it does NOT prove OpenClaw isn't also bypassing on a cached token. RED (gateway down, or routing unproven) exits non-zero so scripts can gate on it.
+
+**Options:**
+- `--json`: emit a machine-readable verdict (`{"verdict", "healthy", "aliases", "reason"}`).
+
+**Output:**
+```
+GREEN — proxy is live and a request routed through it just now (alias: openai).
+        Note: proves the proxy is live and routing now; does NOT prove OpenClaw
+        isn't also bypassing on a cached token — see `worthless status`.
+```
+
 ### worthless doctor
 
 **Diagnose and repair stuck states across all known failure modes. WOR-464 adds a check registry + `--json` machine-readable output.**
