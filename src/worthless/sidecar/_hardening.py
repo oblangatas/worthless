@@ -27,6 +27,11 @@ import os
 import sys
 from pathlib import Path
 
+try:
+    import resource
+except ImportError:  # pragma: no cover — Windows lacks the POSIX ``resource`` module
+    resource = None  # type: ignore[assignment]
+
 from worthless.cli.errors import ErrorCode, WorthlessError
 
 _LOG = logging.getLogger("worthless.sidecar.hardening")
@@ -166,6 +171,57 @@ def set_dumpable_zero() -> None:
             "refusing to start without core-dump protection.",
         )
     _LOG.debug("PR_SET_DUMPABLE=0 — core dumps and non-parent ptrace blocked")
+
+
+_CORE_PATTERN_FILE = Path("/proc/sys/kernel/core_pattern")
+
+
+def disable_core_dumps() -> None:
+    """Set ``RLIMIT_CORE=(0, 0)`` with a readback (WOR-831).
+
+    Cross-platform companion to :func:`set_dumpable_zero`: it suppresses the
+    core *file* on macOS (where ``PR_SET_DUMPABLE`` is a silent no-op) and on
+    Linux hosts whose ``core_pattern`` is not piped. WARNs rather than raises —
+    the sidecar's protection against a *piped* ``core_pattern``
+    (systemd-coredump/apport) is ``PR_SET_DUMPABLE=0`` (applied and asserted
+    separately), and macOS is a dev-only target, so this is defense in depth.
+    The ``getrlimit`` readback surfaces a clamped sandbox that silently refuses
+    the ``setrlimit`` instead of assuming success.
+    """
+    if resource is None:
+        return
+    try:
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    except (OSError, ValueError) as exc:
+        _LOG.warning("could not disable core dumps: %s", exc)
+        return
+    if resource.getrlimit(resource.RLIMIT_CORE) != (0, 0):
+        _LOG.warning("RLIMIT_CORE not (0, 0) after setrlimit; a core file may still be written")
+
+
+def warn_if_core_pattern_piped() -> None:
+    """Breadcrumb (WOR-831): warn when ``core_pattern`` pipes cores to a handler.
+
+    A piped ``core_pattern`` (e.g. ``|/usr/lib/systemd/systemd-coredump``) makes
+    ``RLIMIT_CORE=(0, 0)`` ineffective — the kernel treats the size limit as
+    unlimited for the pipe. ``PR_SET_DUMPABLE=0`` is what actually aborts the
+    dump there. Logging the value keeps an incident responder from wrongly
+    trusting the rlimit. Linux-only, best-effort.
+    """
+    try:
+        pattern = _CORE_PATTERN_FILE.read_text().strip()
+    except OSError:
+        return
+    if pattern.startswith("|"):
+        # Deliberately do NOT log the raw pattern value: it is external input
+        # (a root-controlled proc file) and interpolating it into a log line is
+        # a log-injection surface (SonarCloud S5145). The boolean fact is what a
+        # responder needs; they can read the file for the exact handler.
+        _LOG.warning(
+            "core_pattern pipes cores to a handler; RLIMIT_CORE=0 is bypassed for it — "
+            "relying on PR_SET_DUMPABLE=0 to block the dump "
+            "(inspect /proc/sys/kernel/core_pattern for the handler)"
+        )
 
 
 def set_dumpable_zero_or_log() -> None:
