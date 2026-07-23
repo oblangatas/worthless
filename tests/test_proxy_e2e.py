@@ -73,6 +73,7 @@ async def _enroll(
     prefix: str,
     provider: str,
     proxy_app=None,
+    base_url: str = "https://api.openai.com/v1",
 ):
     """Enroll a key and return (alias, shard_a_utf8, raw_api_key).
 
@@ -80,6 +81,9 @@ async def _enroll(
     onto the autouse FakeIPCSupervisor at ``proxy_app.state.ipc_supervisor``.
     Without this pin the fake returns its default plaintext, reconstruction
     yields the wrong API key, and reconstruct-dependent tests return 401.
+
+    ``base_url`` is the stored upstream the proxy forwards to — override it to
+    exercise a custom/enterprise gateway (WOR-834).
     """
     sr = split_key_fp(api_key, prefix=prefix, provider=provider)
     shard = StoredShard(
@@ -88,9 +92,7 @@ async def _enroll(
         nonce=bytearray(sr.nonce),
         provider=provider,
     )
-    await repo.store(
-        alias, shard, prefix=sr.prefix, charset=sr.charset, base_url="https://api.openai.com/v1"
-    )
+    await repo.store(alias, shard, prefix=sr.prefix, charset=sr.charset, base_url=base_url)
     if proxy_app is not None:
         pin_shard_b(proxy_app, alias, sr.shard_b)
     shard_a_utf8 = sr.shard_a.decode("utf-8")
@@ -152,6 +154,49 @@ class TestFullRequestLifecycle:
         )
         # Shard-A must NOT be what the upstream sees
         assert shard_a_utf8 not in upstream_auth
+
+    @respx.mock
+    async def test_custom_gateway_base_url_routes_key_to_gateway_not_openai(
+        self, proxy_client: httpx.AsyncClient, repo, proxy_app
+    ):
+        """WOR-834 proof-of-work: when the enrolled row carries a custom
+        enterprise gateway ``base_url`` (as ``worthless lock`` now stores from
+        openclaw.json), the proxy forwards the RECONSTRUCTED key to THAT
+        gateway — never to the api.openai.com default."""
+        gateway = "https://my-corp.openai.azure.com/openai/v1"
+        alias, shard_a_utf8, original_key = await _enroll(
+            repo,
+            "azure-key",
+            "sk-azure-key-1234567890abcdef",
+            "sk-",
+            "openai",
+            proxy_app=proxy_app,
+            base_url=gateway,
+        )
+
+        captured: dict[str, str] = {}
+
+        def capture(request: httpx.Request) -> httpx.Response:
+            captured.update(dict(request.headers))
+            return httpx.Response(200, json={"choices": [], "usage": {"total_tokens": 5}})
+
+        gw_route = respx.post(f"{gateway}/chat/completions").mock(side_effect=capture)
+        openai_route = respx.post("https://api.openai.com/v1/chat/completions").mock(
+            return_value=httpx.Response(200, json={})
+        )
+
+        resp = await proxy_client.post(
+            f"/{alias}/v1/chat/completions",
+            headers={"authorization": f"Bearer {shard_a_utf8}", "content-type": "application/json"},
+            content=b'{"model": "gpt-4", "messages": []}',
+        )
+
+        assert resp.status_code == 200
+        assert gw_route.called, "request must reach the custom gateway"
+        assert not openai_route.called, "request must NOT fall through to api.openai.com"
+        assert captured.get("authorization") == f"Bearer {original_key}", (
+            "the gateway must receive the reconstructed original key"
+        )
 
     @respx.mock
     async def test_upstream_receives_correct_body(
