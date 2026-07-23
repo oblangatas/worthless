@@ -39,6 +39,36 @@ def detect_provider(api_key: str) -> str | None:
     return None
 
 
+# Claude Code's OAuth login issues an access token prefixed ``sk-ant-oat01-``
+# and a refresh token prefixed ``sk-ant-ort01-``. Both collide with the static
+# ``sk-ant-`` API-key prefix above, so ``detect_provider`` reports them as
+# "anthropic" and lock would try to shard them — but they are short-lived and
+# auto-rotating, so a frozen shard is a dead credential within hours. lock must
+# skip them. We match on the ``oat``/``ort`` marker (not the ``01`` version
+# digits) so a future token version still classifies correctly — mirroring
+# OpenClaw's own ``isAnthropicOAuthToken`` (``sk-ant-oat`` infix check), which
+# disambiguates the identical collision at its transport layer.
+#
+# Anthropic-only by construction: other providers' OAuth tokens don't collide
+# with any prefix here (OpenAI/Google issue JWTs, xAI has no dev OAuth,
+# OpenRouter OAuth returns a genuine static ``sk-or-v1-`` key that is safe to
+# shard). This is a classifier for the shard decision only — it deliberately
+# does NOT touch ``KEY_PATTERN``, so an OAuth token stays caught for log
+# redaction (it is still a secret).
+_OAUTH_TOKEN_PREFIXES: tuple[str, ...] = ("sk-ant-oat", "sk-ant-ort")
+
+
+def is_oauth_token(value: str) -> bool:
+    """True if *value* is a Claude Code OAuth access/refresh token.
+
+    Such tokens rotate every few hours, so ``lock`` skips them instead of
+    freezing a shard of a credential that will soon be dead. Static API keys
+    (including ``sk-ant-api03-`` console keys) return ``False`` and lock
+    normally.
+    """
+    return value.startswith(_OAUTH_TOKEN_PREFIXES)
+
+
 ENTROPY_THRESHOLD: float = 3.9
 # Lowered 4.5 → 3.9 so legitimate OpenRouter keys (entropy ~4.118) clear the
 # scan, while common placeholders ("sk-your-key-here" 3.03, "sk-aaaa" 0.88,

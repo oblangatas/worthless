@@ -48,7 +48,7 @@ from worthless.cli.errors import (
     error_boundary,
     sanitize_exception,
 )
-from worthless.cli.key_patterns import CANONICAL_KEY_VAR_RE, detect_prefix
+from worthless.cli.key_patterns import CANONICAL_KEY_VAR_RE, detect_prefix, is_oauth_token
 from worthless.cli.log_redaction import _redact
 from worthless._flags import fernet_ipc_only_enabled
 from worthless.cli.keystore import (
@@ -2259,6 +2259,30 @@ def _lock_keys(
             all_enrollments = await repo.list_enrollments()
 
             raw_scanned = scan_env_keys(env_path)
+
+            # WOR-837: a Claude Code OAuth token (sk-ant-oat/ort) collides with
+            # the static sk-ant- prefix, so scan_env_keys classifies it as
+            # "anthropic" — but it rotates every few hours, so a frozen shard is
+            # a dead credential within hours. Skip it (still lock the user's real
+            # keys) and say so loudly, before it can become a lock candidate.
+            # Anthropic-only by construction; see key_patterns.is_oauth_token.
+            oauth_skipped = [entry for entry in raw_scanned if is_oauth_token(entry[1])]
+            if oauth_skipped:
+                raw_scanned = [entry for entry in raw_scanned if not is_oauth_token(entry[1])]
+                # Sanitise the user-controlled .env var names before printing —
+                # a crafted name (dotenv keys are permissive) could otherwise
+                # smuggle terminal-injection / bidi-override sequences into the
+                # warning. Same guard lock/doctor use everywhere else.
+                oauth_vars = ", ".join(
+                    _oc_audit.sanitise_for_message(var_name) for var_name, _, _ in oauth_skipped
+                )
+                console.print_warning(
+                    f"[WARN] Skipped {oauth_vars}: looks like a Claude Code OAuth token "
+                    "(sk-ant-oat/ort), not a static API key. Locking it would freeze a "
+                    "credential that rotates every few hours — your other keys were locked "
+                    "normally."
+                )
+
             scanned = await _select_unlocked_keys(
                 repo,
                 raw_scanned,
