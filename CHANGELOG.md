@@ -4,11 +4,45 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [0.3.10] — 2026-07-21
+
+Credential-leak hardening across the OpenClaw path and the "am I protected?" verdict, plus honest reporting when Worthless can't protect or can't look. Also lands background service management and a rebuilt install experience.
+
 ### Security
-- **"Am I protected?" no longer reads green just because *something* answers on the proxy port** (WOR-822, [#451](https://github.com/oblangatas/worthless/pull/451)). `worthless status` and the editor's `worthless_status` tool used to report 🟢 "you're protected" whenever any service returned 200 on the proxy port — a leftover dev server, or anything else that happened to bind it, earned the same green light as the real proxy while the app's traffic went elsewhere. The verdict now gates green on the `bind_probe_count` identity marker (WOR-658) that a real worthless proxy stamps on `/healthz`; a healthy-but-unidentified responder returns a new 🟡 `proxy_unrecognised` verdict ("something's answering, but it isn't worthless") instead. The gate lives in the one shared verdict function, so the CLI and the editor answer identically (the WOR-820 invariant).
+- **`lock` scrubs the real API key OpenClaw caches in its config** (WOR-796, [#424](https://github.com/shacharm2/worthless/pull/424)). `lock` scrubs the cached real key from OpenClaw's per-agent `auth-profiles.json` / `models.json` to an uppercase `${VAR}` SecretRef → shard-A, and warns when a non-uppercase key var blocks the scrub. Static `api_key` credentials only — see *What this does NOT defend against*.
+- **`lock` tells you the truth about logins it can't shard** (WOR-797, [#425](https://github.com/shacharm2/worthless/pull/425)). OAuth tokens, keychain creds, and Vertex ADC are enumerated and honestly flagged as unprotectable — never implied as sharded — with `gcloud auth application-default login` guidance for Vertex.
+- **`lock` confirms OpenClaw applied the new proxy URL before printing `[OK]` — when it can observe the reload** (WOR-756, [#431](https://github.com/shacharm2/worthless/pull/431)). No more false green while the live gateway still routes the real key; an observed rejected reload exits 92.
+- **"Am I protected?" no longer reads green just because *something* answers on the proxy port** (WOR-822, [#451](https://github.com/shacharm2/worthless/pull/451)). `worthless status` and the editor's `worthless_status` tool used to report 🟢 "you're protected" whenever any service returned 200 on the proxy port — a leftover dev server that happened to bind it earned the same green light while the app's traffic went elsewhere. The verdict now gates green on the `bind_probe_count` identity marker (WOR-658) a real worthless proxy stamps on `/healthz`; a healthy-but-unidentified responder gets a new 🟡 `proxy_unrecognised` verdict instead. The gate lives in the one shared verdict function, so the CLI and editor answer identically.
+- **Old OpenClaw installs auto-heal their leftover decoy on the next lock** (WOR-656, [#437](https://github.com/shacharm2/worthless/pull/437)).
+- **A scan that couldn't look no longer reports "clean"** (WOR-823, [#449](https://github.com/shacharm2/worthless/pull/449)). The credential scan stops crashing on unreadable files and names the surface it couldn't check instead of falsely reporting nothing found.
+- **The editor stops telling you your keys are exposed when they're actually safe** (WOR-820, [#447](https://github.com/shacharm2/worthless/pull/447)). Same five-state verdict as the CLI, including an honest `protected_at_rest` when the proxy is down.
+- **Worthless's own commands can't print a live key** (WOR-655, [#442](https://github.com/shacharm2/worthless/pull/442)). A build tripwire fails if any command leaks a provider-shaped key or post-lock shard-A, and `scan --show-suffix` prints a stable non-secret identifier, not real bytes.
+- **The sidecar can't leak a key through its own logs or a crash dump** (WOR-826/WOR-831, [#455](https://github.com/shacharm2/worthless/pull/455)). The process that holds raw shares redacts its own log lines and uncaught tracebacks before they reach stderr (a self-protecting `sys.excepthook`), and `RLIMIT_CORE=0` blocks a core-dump *file* of share bytes — with residual crash-dump paths noted below.
+- **Worthless closes the named plaintext-recovery points for a leaked key** (WOR-277, [#426](https://github.com/shacharm2/worthless/pull/426)) — `enroll` shell history, proxy access-log query strings, the bare-`worthless` traceback, `scan --deep` temp files, and core-dump suppression across lock/enroll/unlock/scan.
+- **A crash mid-unlock no longer leaves a reconstructed key lingering in memory** (SR-02, [#443](https://github.com/shacharm2/worthless/pull/443)).
+- **Uninstall never force-wipes a recoverable key; install never mints over an orphaned one** (WOR-716, [#432](https://github.com/shacharm2/worthless/pull/432)).
+
+### Added
+- **Service management: a background proxy that tells you when it's silently broken** (WOR-193, [#430](https://github.com/shacharm2/worthless/pull/430)).
+- **Install page leads with a one-click, per-tool picker** (WOR-790, [#441](https://github.com/shacharm2/worthless/pull/441)).
+- **CI proves the real `npx worthless-mcp` mounts its 4 tools** (WOR-809, [#438](https://github.com/shacharm2/worthless/pull/438)).
+- **`worthless uninstall --remove-mcp` cleans up only Worthless's own MCP entry** ([#448](https://github.com/shacharm2/worthless/pull/448)) — surgical removal that leaves other MCP servers in your config untouched.
+
+### Fixed
+- **Uninstall points you at the leftover MCP config instead of staying silent** ([#439](https://github.com/shacharm2/worthless/pull/439)).
+- **Every push stops dying on a click CVE we never trigger** ([#435](https://github.com/shacharm2/worthless/pull/435)).
+
+### Docs
+- **Install docs claim only what we can back** (WOR-810, [#433](https://github.com/shacharm2/worthless/pull/433)) — dropped "90 seconds", qualified MCP verification.
+- **`curl` leads the install hero; editor paths state they don't route keys** (WOR-819, [#445](https://github.com/shacharm2/worthless/pull/445)).
 
 ### What this does NOT defend against
-- **A motivated same-host process that forges the marker** (WOR-822). `bind_probe_count` is a public field name, not a secret, and the check is presence-only. It reliably tells a *benign* non-worthless responder (the common, accidental collision) apart from our proxy, but a process that reads the open-source `/healthz` handler can echo the field and still read green. That's out of scope under worthless's honest-payload loopback trust model — the same limit `lock`'s bind-confirmation already has — and the marker proves responder *identity*, not that traffic is actually *routed* (that's `bind_confirmation`'s job). The `proxy_unrecognised` verdict keeps exit code 0 (matching `protected_at_rest`); machines gating on protection must read the `verdict` enum, not `$?`.
+- **OAuth / keychain / Vertex logins stay unprotectable** (WOR-797). `lock` shards a static `api_key`; it cannot shard a refresh token. It *discloses* and can *clear* these — you re-authenticate — but never *protects* them. WOR-796's scrub covers the api_key path only.
+- **A cached key in an agent file the scrub can't safely rewrite** (WOR-796). The scrub is best-effort: a symlinked, foreign-owned, or otherwise unwritable `auth-profiles.json` / `models.json` is skipped and its cached real key survives. A non-uppercase key var is warned about loudly, but a silent write failure is not.
+- **A motivated same-host process that forges the proxy marker** (WOR-822). `bind_probe_count` is a public, presence-only field; a process that reads the open-source `/healthz` handler can echo it and still read green. Scope is honest-payload loopback trust, and the marker proves responder *identity*, not that traffic is actually *routed* (that's `bind_confirmation`'s job). `proxy_unrecognised` keeps exit code 0 — machines gating on protection must read the `verdict` enum, not `$?`.
+- **An unconfirmed OpenClaw reload** (WOR-756). When the reload can't be observed (openclaw binary not co-located, no event in the window), `lock` prints `[OK]` + an advisory at exit 0 — indistinguishable from a proven pass. Only an *observed* rejection blocks with exit 92.
+- **The macOS keychain scan blind spot** (WOR-823, deferred to WOR-824). A keychain probe that times out or can't find the `security` binary can still fail without naming the surface.
+- **Full plaintext-recovery closure** (WOR-277). WOR-826/831 now redact the sidecar's own logs and uncaught tracebacks and block its core-dump *file*, but the redaction matches provider-key *text* — not raw share bytes or the Fernet key (an AST guard, not redaction, keeps sinks from interpolating shares). Residual crash paths: on a **piped-`core_pattern` Linux host** `RLIMIT_CORE=0` is bypassed, and the `lock`/`unlock`/`up`/`wrap`/`scan` CLIs don't yet set `PR_SET_DUMPABLE=0` — so a CLI crash there can still write the Fernet key to host core storage (**WOR-839**); macOS `DiagnosticReports` capture register state (dev-only); unprefixed admin tokens aren't redaction-matched.
 
 ## [0.3.9] — 2026-07-08
 
@@ -219,6 +253,7 @@ First release published to PyPI. `pip install worthless` now works.
 - Gate evaluation strictly precedes shard reconstruction (SR-03).
 - Published artifacts built via PyPI trusted publishing (OIDC, no long-lived tokens).
 
+[0.3.10]: https://github.com/shacharm2/worthless/releases/tag/v0.3.10
 [0.3.9]: https://github.com/shacharm2/worthless/releases/tag/v0.3.9
 [0.3.8]: https://github.com/shacharm2/worthless/releases/tag/v0.3.8.0
 [0.3.7]: https://github.com/shacharm2/worthless/releases/tag/v0.3.7
