@@ -82,6 +82,9 @@ All commands take `--json` for machine-readable output.
   proxy (e.g. `worthless wrap python main.py`); cleans up on exit.
 - `worthless up` — start the persistent local proxy daemon.
 - `worthless status [--json]` — what's enrolled, proxy health, spend so far.
+- `worthless verify [--json]` — confirm the gateway is alive and routing a
+  request right now (a live probe → GREEN/RED). RED means your traffic may be
+  unprotected; exits non-zero so scripts can gate on it.
 - `worthless scan [PATHS…] [--json] [--code]` — find LLM keys in `.env`
   files; `--code` instead finds hardcoded provider base URLs (routing
   bypasses) in source. `scan --json` → `{"schema_version": 2, "findings":

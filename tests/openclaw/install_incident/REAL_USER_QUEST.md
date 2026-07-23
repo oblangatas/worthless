@@ -179,3 +179,18 @@ Once that's in, I confirm the bypass matches `live_demo.sh`, we move to
 **Phase 1** (credential-cache registry / `lock` fail-loud). Your OpenClaw
 key-management review feeds straight into Phase 1's registry design —
 share it whenever.
+
+---
+
+## Phase 4 addendum (WOR-517) — the "is it actually protecting me?" check
+
+After a real hosted install (`curl -sSL https://worthless.sh | sh`) and a
+`worthless lock`, prove the gateway is truthfully reporting its own state:
+
+- `worthless verify` → **GREEN** ("a request routed through it just now"); 📸.
+- Kill the gateway (`worthless down`), re-run `worthless verify` → **RED**
+  ("gateway is DOWN … in the clear right now") and exit code 73; 📸.
+
+This is the exact signal that was missing when the gateway was silently
+bypassed. Full release-gate wording lives in
+`tests/install_fixtures/MANUAL_SMOKE.md`.

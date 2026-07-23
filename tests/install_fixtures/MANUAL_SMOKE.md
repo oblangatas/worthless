@@ -32,6 +32,12 @@ This checklist is the public-domain release proof. Per-PR CI runs checkout-local
 - [ ] Verify activation one-liner matches `$SHELL`
 - [ ] After activation, `worthless --version` works
 - [ ] Smoke-test `worthless doctor` (if shipped) reports clean
+- [ ] Gateway-lifecycle smoke (WOR-517): `worthless up` then `worthless verify` →
+      GREEN ("routed through it just now"); 📸. Kill the gateway
+      (`worthless down`), re-run `worthless verify` → RED ("gateway is DOWN …
+      in the clear right now") and exit code 73; 📸. This is the hosted-install
+      "like a human" proof the automated lane can't give (install.sh only
+      installs the published pin).
 
 ## Fresh DigitalOcean / Hetzner Ubuntu 24.04 droplet
 
