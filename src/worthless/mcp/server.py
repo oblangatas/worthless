@@ -180,7 +180,12 @@ async def worthless_status() -> str:
         sentinel = read_sentinel(home.base_dir)
 
     degraded = is_partial(sentinel)
-    verdict, header = _status_verdict(keys, bool(proxy_info["healthy"]), degraded)
+    # WOR-822: `healthy` only says something answered; `bind_probe_count`
+    # (WOR-658) is what says it's ours. Derived here exactly as the CLI does
+    # so a squatter on the port can't forge a green verdict on this surface
+    # either — the whole point of routing both through `_status_verdict`.
+    identified = "bind_probe_count" in proxy_info
+    verdict, header = _status_verdict(keys, bool(proxy_info["healthy"]), degraded, identified)
 
     return json.dumps(
         {

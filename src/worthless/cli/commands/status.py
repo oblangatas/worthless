@@ -151,7 +151,10 @@ def _discover_proxy_port(home: WorthlessHome) -> int | None:
 
 
 def _status_verdict(
-    keys: list[dict[str, str]], proxy_healthy: bool, degraded: bool
+    keys: list[dict[str, str]],
+    proxy_healthy: bool,
+    degraded: bool,
+    proxy_identified: bool,
 ) -> tuple[str, str | None]:
     """WOR-779: derive the worst-component verdict. Returns ``(enum, header)``.
 
@@ -168,6 +171,29 @@ def _status_verdict(
     to ignore red. A BROKEN enrollment is data-loss (🟡 ``attention``), not a
     leak. The verdict is derived, so a green banner is unreachable when any
     component is bad.
+
+    WOR-822: *healthy* only means something answered ``/healthz`` with a 200.
+    ``proxy_identified`` is the separate question of whether that responder
+    even looks like OUR proxy — it echoes ``bind_probe_count`` (WOR-658), the
+    same marker ``worthless lock`` already gates its bind-confirmation on.
+    Without this input a stray, unrelated service on the port (a leftover dev
+    server) earns a green verdict while the user's traffic goes elsewhere. It
+    is NOT folded into ``proxy_healthy``: "nothing is listening" and "an
+    unidentified service is listening" need different advice, and the second
+    is the quieter failure.
+
+    Scope — do NOT overstate this. ``bind_probe_count`` is a public field
+    name, not a secret, and the check is presence-only. So it distinguishes a
+    *benign* non-worthless responder (the common, accidental case) from our
+    proxy; it does NOT authenticate. A motivated same-host process that reads
+    the open-source field name can echo it and still read green. That's out of
+    scope under worthless's honest-payload loopback trust model — the same
+    limit ``lock``'s bind-confirmation has — not a defense this adds. Nor does
+    the marker prove *routing*; that is ``bind_confirmation``'s job.
+
+    Exit code stays 0 for ``proxy_unrecognised`` (see the command below),
+    matching ``protected_at_rest`` — the availability tiers don't flip the
+    exit code; machines must read the ``verdict`` enum, not ``$?``.
     """
     if not keys:
         return "empty", None
@@ -184,6 +210,13 @@ def _status_verdict(
         return "attention", (
             f"🟡 Attention — {broken} {b_noun} can't be restored "
             f"(the .env line is gone) — see below."
+        )
+
+    if proxy_healthy and not proxy_identified:
+        return "proxy_unrecognised", (
+            f"🟡 Protected at rest — {n} {noun} locked (a stolen .env is worthless), "
+            f"but the service answering on the proxy port isn't worthless, so your "
+            f"apps aren't being routed through it. Stop it, then run `worthless up`."
         )
 
     if proxy_healthy:
@@ -244,7 +277,11 @@ def register_status_commands(app: typer.Typer) -> None:
         # honestly see (enrolled keys + proxy + sentinel). The exit code below
         # stays 0/73 — the verdict header carries the 🟢/🟡 nuance a binary
         # exit can't, while machines read the `verdict` enum from --json.
-        verdict, header = _status_verdict(keys, bool(proxy_info["healthy"]), degraded)
+        # WOR-822: a 200 on /healthz proves only that *something* is listening.
+        # `bind_probe_count` is what proves it's ours (WOR-658) — the same
+        # marker lock's bind-confirmation gates on.
+        identified = "bind_probe_count" in proxy_info
+        verdict, header = _status_verdict(keys, bool(proxy_info["healthy"]), degraded, identified)
 
         # Output. Sub-command --json mirrors scan/wrap; honors top-level --json too.
         if console.json_mode or json_output:
@@ -283,7 +320,15 @@ def register_status_commands(app: typer.Typer) -> None:
                         f"line was deleted. Run `{FIX_PHRASE}` to clean up.\n\n"
                     )
 
-            if proxy_info["healthy"]:
+            if proxy_info["healthy"] and not identified:
+                # WOR-822: don't call an unidentified responder "the proxy" —
+                # that reading is what made the green verdict forgeable by an
+                # accidental collision in the first place.
+                sys.stderr.write(
+                    f"Proxy: something is answering on 127.0.0.1:{proxy_info['port']},"
+                    f" but it isn't worthless\n"
+                )
+            elif proxy_info["healthy"]:
                 sys.stderr.write(
                     f"Proxy: running on 127.0.0.1:{proxy_info['port']}"
                     f" (mode: {proxy_info['mode']})\n"
