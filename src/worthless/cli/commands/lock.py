@@ -17,7 +17,7 @@ import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import NamedTuple
+from typing import NamedTuple, NoReturn
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -233,7 +233,7 @@ def _validate_upstream_base_url(url: str) -> None:
     re-validation) and worthless-8fbg (broader hardening).
     """
 
-    def _reject(reason: str) -> None:
+    def _reject(reason: str) -> NoReturn:
         raise WorthlessError(
             ErrorCode.INVALID_INPUT,
             f"refusing openclaw gateway URL {url!r}: {reason}. Register a "
