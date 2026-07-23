@@ -413,6 +413,10 @@ class TestWorthlessLock:
         with patch.dict(os.environ, {"WORTHLESS_HOME": str(home)}):
             result = json.loads(await worthless_lock(env_path=str(env_file)))
         assert result["protected_count"] == 0
+        # WOR-829: a 0-key lock has nothing to route, so the probe is skipped
+        # and the routing fields are intentionally absent. Pin that.
+        assert "proxy_running" not in result
+        assert "next_step" not in result
 
     @pytest.mark.asyncio
     async def test_lock_protects_key(self, tmp_path: Path) -> None:
