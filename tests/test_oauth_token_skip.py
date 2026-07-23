@@ -86,3 +86,25 @@ class TestLockSkipsOAuthToken:
         assert "oauth" in result.output.lower(), (
             f"lock must warn that it skipped an OAuth token; output:\n{result.output}"
         )
+
+    def test_lock_sanitizes_oauth_var_name_in_warning(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        # A crafted .env var name (dotenv keys are permissive) must not smuggle
+        # a bidi-override / control char into the terminal warning — it goes
+        # through the same sanitizer lock uses everywhere else.
+        bidi = chr(0x202E)  # RIGHT-TO-LEFT OVERRIDE — a terminal-injection primitive
+        oauth_token = fake_key("sk-ant-oat01-", "wor837-inject")
+        env = tmp_path / ".env"
+        env.write_text(f"ANTHROPIC{bidi}_API_KEY={oauth_token}\n")
+
+        result = runner.invoke(
+            app,
+            ["lock", "--env", str(env)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+        )
+        assert result.exit_code == 0, result.output
+        # The warning fired (so this isn't a vacuous pass)...
+        assert "oauth" in result.output.lower(), result.output
+        # ...and the bidi-override was neutralized, never emitted raw.
+        assert bidi not in result.output, "unsanitized bidi-override reached the terminal"
