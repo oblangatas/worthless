@@ -2269,7 +2269,13 @@ def _lock_keys(
             oauth_skipped = [entry for entry in raw_scanned if is_oauth_token(entry[1])]
             if oauth_skipped:
                 raw_scanned = [entry for entry in raw_scanned if not is_oauth_token(entry[1])]
-                oauth_vars = ", ".join(var_name for var_name, _, _ in oauth_skipped)
+                # Sanitise the user-controlled .env var names before printing —
+                # a crafted name (dotenv keys are permissive) could otherwise
+                # smuggle terminal-injection / bidi-override sequences into the
+                # warning. Same guard lock/doctor use everywhere else.
+                oauth_vars = ", ".join(
+                    _oc_audit.sanitise_for_message(var_name) for var_name, _, _ in oauth_skipped
+                )
                 console.print_warning(
                     f"[WARN] Skipped {oauth_vars}: looks like a Claude Code OAuth token "
                     "(sk-ant-oat/ort), not a static API key. Locking it would freeze a "
