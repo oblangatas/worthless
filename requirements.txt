@@ -94,7 +94,7 @@ pywin32-ctypes==0.2.3 ; sys_platform == 'win32'
     # via keyring
 pyyaml==6.0.3
     # via uvicorn
-rich==14.3.3
+rich==15.0.0
     # via typer
 secretstorage==3.5.0 ; sys_platform == 'linux'
     # via keyring
