@@ -525,14 +525,18 @@ class TestWorthlessLock:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A 200 on /healthz without ``bind_probe_count`` is a stranger, not our
-        proxy (WOR-822). Lock must not report it as routing."""
+        proxy (WOR-822). Lock must not report it as routing — AND must give the
+        distinct "stop the stranger first" guidance, not the plain proxy-down
+        "run `worthless up`" message (which would just fail to bind the port)."""
         home = _make_home(tmp_path)
         env_file = _make_env_file(tmp_path, f"OPENAI_API_KEY={self.KEY}\n")
         self._set_proxy(monkeypatch, healthy=True, identified=False)
         with patch.dict(os.environ, {"WORTHLESS_HOME": str(home)}):
             result = json.loads(await worthless_lock(env_path=str(env_file)))
         assert result["proxy_running"] is False
-        assert "worthless up" in result["next_step"]
+        # The unrecognized-responder branch, distinct from proxy-down.
+        assert "isn't worthless" in result["next_step"]
+        assert "Stop it" in result["next_step"]
 
     @pytest.mark.asyncio
     async def test_probe_failure_never_undoes_the_lock(

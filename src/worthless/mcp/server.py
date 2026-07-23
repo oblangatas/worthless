@@ -370,11 +370,25 @@ async def worthless_lock(env_path: str = ".env") -> str:
         # must not let lock report "running" — and lock must never mint a green
         # "protected" claim off this presence-only, forgeable marker.
         routing_ready = bool(health.get("healthy")) and ("bind_probe_count" in health)
+        # proxy_running is the honest "is the worthless proxy routing my keys"
+        # bool — false for BOTH a dead port and a stranger squatting on it,
+        # because in neither case is our traffic routed. next_step carries the
+        # distinction, because the fix differs.
         result["proxy_running"] = routing_ready
         if routing_ready:
             result["next_step"] = (
                 "Your keys are split and the proxy is up. "
                 "Verify end-to-end with `worthless status`."
+            )
+        elif health.get("healthy"):
+            # WOR-822: something answered /healthz but it isn't our proxy (no
+            # bind_probe_count). "Run `worthless up`" alone is wrong — it would
+            # fail to bind the occupied port. Tell them to stop the stranger
+            # first, mirroring the status surface's `proxy_unrecognised` verdict.
+            result["next_step"] = (
+                "Your keys are split and inert at rest, but the service answering on "
+                "the proxy port isn't worthless, so your apps aren't routing through "
+                "it. Stop it, then run `worthless up`."
             )
         else:
             result["next_step"] = (
