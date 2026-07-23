@@ -25,6 +25,7 @@ Credential-leak hardening across the OpenClaw path and the "am I protected?" ver
 - **Service management: a background proxy that tells you when it's silently broken** (WOR-193, [#430](https://github.com/shacharm2/worthless/pull/430)).
 - **Install page leads with a one-click, per-tool picker** (WOR-790, [#441](https://github.com/shacharm2/worthless/pull/441)).
 - **CI proves the real `npx worthless-mcp` mounts its 4 tools** (WOR-809, [#438](https://github.com/shacharm2/worthless/pull/438)).
+- **`worthless uninstall --remove-mcp` cleans up only Worthless's own MCP entry** ([#448](https://github.com/shacharm2/worthless/pull/448)) — surgical removal that leaves other MCP servers in your config untouched.
 
 ### Fixed
 - **Uninstall points you at the leftover MCP config instead of staying silent** ([#439](https://github.com/shacharm2/worthless/pull/439)).

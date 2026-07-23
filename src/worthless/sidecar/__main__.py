@@ -33,15 +33,19 @@ See ``engineering/ipc-contract.md`` for the wire contract this server honours.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import signal
 import socket
 import stat
 import sys
+import traceback
 from pathlib import Path
+from types import TracebackType
 
 from worthless.cli.errors import WorthlessError
+from worthless.cli.log_redaction import install_redaction_filter, redact
 
 # Module-level import is load-bearing: tests patch
 # ``_hardening.set_dumpable_zero``/``_hardening.check_yama_ptrace_scope``
@@ -238,6 +242,11 @@ async def _run() -> int:
     except ValueError as exc:
         _LOG.error("backend init failed: %s", exc)
         return 1
+    # Drop the local reference to the raw shares now the backend holds the
+    # derived key. Python won't zero the freed bytes and the reconstructed key
+    # lives on inside FernetBackend, so this only marginally shrinks residency
+    # (WOR-831); true zeroization is a follow-up.
+    del shares
 
     if not _check_socket_path_available(socket_path):
         return 2
@@ -282,6 +291,47 @@ async def _run() -> int:
     return 0
 
 
+def _redacting_excepthook(
+    exc_type: type[BaseException], exc: BaseException, tb: TracebackType | None
+) -> None:
+    """Scrub an uncaught exception's traceback before it hits stderr.
+
+    An uncaught traceback bypasses the logging pipeline and ``RedactingFilter``
+    entirely, printing straight to stderr via the default hook. Format it, run
+    the same redaction over it, then write it out (WOR-826).
+
+    Self-protecting: if formatting or redaction itself raises, we must NOT let
+    CPython's default hook run — it would print the original, unredacted
+    traceback. Emit a fixed generic line instead.
+    """
+    try:
+        text = redact("".join(traceback.format_exception(exc_type, exc, tb)))
+    except Exception:  # noqa: BLE001 — leak-safe fallback; must never fall through to the default hook
+        text = "sidecar: fatal error (traceback suppressed to avoid leak)\n"
+    # A broken stderr must not raise out of the hook — CPython would then fall
+    # back to printing the original, unredacted traceback. suppress() keeps it
+    # leak-safe without a broad try/except-pass.
+    with contextlib.suppress(Exception):
+        sys.stderr.write(text)
+        sys.stderr.flush()
+
+
+def _configure_logging(level: int) -> None:
+    """Configure logging so no sidecar output channel leaks a provider key.
+
+    Order is load-bearing: ``basicConfig`` creates the root ``StreamHandler``,
+    then ``install_redaction_filter`` attaches ``RedactingFilter`` to it (it
+    snapshots the root handlers at call time). The excepthook covers uncaught
+    tracebacks, which never pass through a logging handler at all.
+    """
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    install_redaction_filter()
+    sys.excepthook = _redacting_excepthook
+
+
 def main() -> int:
     raw_level = os.environ.get("WORTHLESS_LOG_LEVEL")
     level = _resolve_log_level(raw_level)
@@ -295,10 +345,7 @@ def main() -> int:
             flush=True,
         )
         return 1
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    _configure_logging(level)
     # Hardening must run before share bytes enter the address space
     # (PR_SET_DUMPABLE=0 covers crashes mid-decrypt) and before the
     # IPC socket binds.
@@ -320,6 +367,8 @@ def main() -> int:
     # uid wall is in place and YAMA is defense-in-depth (warn-only);
     # otherwise YAMA refusal stays mandatory.
     try:
+        _hardening.disable_core_dumps()
+        _hardening.warn_if_core_pattern_piped()
         _hardening.set_dumpable_zero()
         if os.environ.get("WORTHLESS_DOCKER_PRIVDROP_REQUIRED") == "1":
             try:
@@ -335,7 +384,7 @@ def main() -> int:
             _hardening.check_yama_ptrace_scope()
         _hardening.assert_hardening_applied()
     except WorthlessError as exc:
-        print(f"sidecar: {exc}", file=sys.stderr, flush=True)
+        print(f"sidecar: {redact(str(exc))}", file=sys.stderr, flush=True)
         return 1
     return asyncio.run(_run())
 
