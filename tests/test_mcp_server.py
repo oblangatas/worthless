@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
+import httpx
 import pytest
 
 pytest.importorskip("mcp", reason="mcp extra not installed")
@@ -412,6 +413,10 @@ class TestWorthlessLock:
         with patch.dict(os.environ, {"WORTHLESS_HOME": str(home)}):
             result = json.loads(await worthless_lock(env_path=str(env_file)))
         assert result["protected_count"] == 0
+        # WOR-829: a 0-key lock has nothing to route, so the probe is skipped
+        # and the routing fields are intentionally absent. Pin that.
+        assert "proxy_running" not in result
+        assert "next_step" not in result
 
     @pytest.mark.asyncio
     async def test_lock_protects_key(self, tmp_path: Path) -> None:
@@ -460,6 +465,97 @@ class TestWorthlessLock:
         assert result["state_consistent"] is False
         assert result["orphan_shards"] == ["orphan-alias"]
         assert "doctor" in result["hint"]
+
+    # -- WOR-829: the lock response tells the editor user whether traffic routes --
+    #
+    # The victim is the MCP editor user with no OpenClaw: lock succeeds with the
+    # proxy down (the WRTLS-109 gate is OpenClaw-only, and the suite-wide HOME
+    # sandbox makes ``detect().present`` False — see conftest), so nothing warns
+    # them their apps can't reach the keys. These pin that the lock response now
+    # carries ``proxy_running`` + a ``next_step``.
+
+    KEY = "sk-proj-" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0" * 2
+
+    @staticmethod
+    def _set_proxy(monkeypatch: pytest.MonkeyPatch, *, healthy: bool, identified: bool) -> None:
+        """Pin what the post-lock probe sees. ``identified`` mirrors WOR-822:
+        ``bind_probe_count`` is present iff the responder is really our proxy."""
+        health: dict[str, object] = {
+            "healthy": healthy,
+            "port": 8787,
+            "mode": "http",
+            "requests_proxied": 0,
+        }
+        if identified:
+            health["bind_probe_count"] = 0
+        monkeypatch.setattr("worthless.mcp.server.check_proxy_health", lambda _p: health)
+
+    @pytest.mark.asyncio
+    async def test_lock_with_proxy_down_tells_the_editor_to_start_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Proxy down at lock → the response names the fix. Proof of fix:
+        fails on today's count-only response."""
+        home = _make_home(tmp_path)
+        env_file = _make_env_file(tmp_path, f"OPENAI_API_KEY={self.KEY}\n")
+        self._set_proxy(monkeypatch, healthy=False, identified=False)
+        with patch.dict(os.environ, {"WORTHLESS_HOME": str(home)}):
+            result = json.loads(await worthless_lock(env_path=str(env_file)))
+        assert result["protected_count"] == 1
+        assert result["proxy_running"] is False
+        assert "worthless up" in result["next_step"]
+
+    @pytest.mark.asyncio
+    async def test_lock_with_proxy_up_confirms_without_a_green_claim(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Proxy up + identified → calm confirm pointing at ``status`` — but NOT
+        a green "protected" claim, because the marker is forgeable (WOR-822)."""
+        home = _make_home(tmp_path)
+        env_file = _make_env_file(tmp_path, f"OPENAI_API_KEY={self.KEY}\n")
+        self._set_proxy(monkeypatch, healthy=True, identified=True)
+        with patch.dict(os.environ, {"WORTHLESS_HOME": str(home)}):
+            result = json.loads(await worthless_lock(env_path=str(env_file)))
+        assert result["proxy_running"] is True
+        assert "worthless status" in result["next_step"]
+        assert "protected" not in result["next_step"].lower()
+
+    @pytest.mark.asyncio
+    async def test_lock_with_a_squatter_on_the_port_is_not_running(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A 200 on /healthz without ``bind_probe_count`` is a stranger, not our
+        proxy (WOR-822). Lock must not report it as routing — AND must give the
+        distinct "stop the stranger first" guidance, not the plain proxy-down
+        "run `worthless up`" message (which would just fail to bind the port)."""
+        home = _make_home(tmp_path)
+        env_file = _make_env_file(tmp_path, f"OPENAI_API_KEY={self.KEY}\n")
+        self._set_proxy(monkeypatch, healthy=True, identified=False)
+        with patch.dict(os.environ, {"WORTHLESS_HOME": str(home)}):
+            result = json.loads(await worthless_lock(env_path=str(env_file)))
+        assert result["proxy_running"] is False
+        # The unrecognized-responder branch, distinct from proxy-down.
+        assert "isn't worthless" in result["next_step"]
+        assert "Stop it" in result["next_step"]
+
+    @pytest.mark.asyncio
+    async def test_probe_failure_never_undoes_the_lock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Lock success is a confidentiality fact, independent of the
+        availability probe. A probe that raises must not change
+        ``protected_count`` — it just reads as "not running"."""
+        home = _make_home(tmp_path)
+        env_file = _make_env_file(tmp_path, f"OPENAI_API_KEY={self.KEY}\n")
+
+        def _boom(_p: int) -> dict[str, object]:
+            raise httpx.ConnectError("down")
+
+        monkeypatch.setattr("worthless.mcp.server.check_proxy_health", _boom)
+        with patch.dict(os.environ, {"WORTHLESS_HOME": str(home)}):
+            result = json.loads(await worthless_lock(env_path=str(env_file)))
+        assert result["protected_count"] == 1
+        assert result["proxy_running"] is False
 
 
 # ---------------------------------------------------------------------------
