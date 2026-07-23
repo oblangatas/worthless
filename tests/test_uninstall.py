@@ -8,6 +8,7 @@ holds the reconstructed real key — no group/other access to a secret.
 from __future__ import annotations
 
 import errno
+import json
 import sqlite3
 
 import pytest
@@ -1007,3 +1008,71 @@ class TestMcpLeftoverReminder:
         )
         assert result.exit_code == 0, result.output
         assert "MCP server" not in result.output, "chat-history mention must not false-trigger"
+
+    def _seed_cursor_cfg(self, fake_home, servers: dict):  # noqa: ANN001, ANN202
+        cfg = fake_home / ".cursor" / "mcp.json"
+        cfg.parent.mkdir(parents=True)
+        cfg.write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
+        return cfg
+
+    def _lock_one(self, home_dir: WorthlessHome, work, fake_home):  # noqa: ANN001, ANN202
+        from tests.helpers import fake_key
+
+        env = work / ".env"
+        env.write_text(f"OPENAI_API_KEY={fake_key('sk-')}\n")
+        runner.invoke(
+            app,
+            ["lock", "--env", str(env)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir), "HOME": str(fake_home)},
+        )
+
+    def test_remove_mcp_flag_deletes_only_our_entry_and_leaves_others(
+        self, home_dir: WorthlessHome, tmp_path, monkeypatch
+    ) -> None:
+        """Proof of fix: --remove-mcp edits the config — our entry goes, others stay."""
+        work = tmp_path / "work"
+        work.mkdir()
+        monkeypatch.chdir(work)
+        fake_home = tmp_path / "home"
+        cfg = self._seed_cursor_cfg(
+            fake_home,
+            {
+                "worthless": {"command": "npx", "args": ["-y", "worthless-mcp"]},
+                "github": {"command": "docker"},
+            },
+        )
+        self._lock_one(home_dir, work, fake_home)
+
+        result = runner.invoke(
+            app,
+            ["uninstall", "--yes", "--remove-mcp"],
+            env=self._uninstall_env(home_dir, fake_home),
+        )
+
+        assert result.exit_code == 0, result.output
+        after = json.loads(cfg.read_text(encoding="utf-8"))
+        assert "worthless" not in after["mcpServers"], "--remove-mcp did not remove our entry"
+        assert after["mcpServers"]["github"] == {"command": "docker"}, "another server was altered"
+        assert "removed the Worthless MCP entry" in result.output
+
+    def test_default_uninstall_never_edits_the_editor_config(
+        self, home_dir: WorthlessHome, tmp_path, monkeypatch
+    ) -> None:
+        """No-noise invariant holds the other way too: without the flag the config
+        is byte-identical — uninstall only names it.
+        """
+        work = tmp_path / "work"
+        work.mkdir()
+        monkeypatch.chdir(work)
+        fake_home = tmp_path / "home"
+        cfg = self._seed_cursor_cfg(fake_home, {"worthless": {"args": ["worthless-mcp"]}})
+        before = cfg.read_bytes()
+        self._lock_one(home_dir, work, fake_home)
+
+        result = runner.invoke(
+            app, ["uninstall", "--yes"], env=self._uninstall_env(home_dir, fake_home)
+        )
+
+        assert result.exit_code == 0, result.output
+        assert cfg.read_bytes() == before, "default uninstall edited an editor config"
+        assert "MCP server" in result.output, "default run should still name the file"
