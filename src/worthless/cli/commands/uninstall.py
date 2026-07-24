@@ -303,11 +303,20 @@ def _confirm_uninstall(console, *, assume_yes: bool) -> bool:  # noqa: ANN001
             "to every locked .env, then removes Worthless)."
         )
         raise typer.Exit(code=1)
-    if not typer.confirm(
-        "This restores your real API keys into every locked .env and removes "
-        "Worthless from this machine. Continue?",
-        default=True,
-    ):
+    try:
+        proceed = typer.confirm(
+            "This restores your real API keys into every locked .env and removes "
+            "Worthless from this machine. Continue?",
+            default=True,
+        )
+    except (typer.Abort, KeyboardInterrupt):
+        # Ctrl+C here is a decline, not a failure — nothing has been touched yet.
+        # Unhandled, typer.confirm's Abort escapes to the error boundary and prints
+        # "WRTLS-199: an internal error occurred" (worthless-6xuv). On the command
+        # that restores real API keys that reads as "it died halfway", leaving the
+        # user unable to tell whether their .env files are intact.
+        proceed = False
+    if not proceed:
         console.print_hint("Uninstall cancelled — nothing was changed.")
         return False
     return True
