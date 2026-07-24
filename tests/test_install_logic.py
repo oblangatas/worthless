@@ -52,6 +52,50 @@ def test_default_install_pins_baked_version(tmp_path: Path) -> None:
     )
 
 
+def test_banner_reports_the_installed_binary_not_a_stale_uv_run(tmp_path: Path) -> None:
+    """The version banner must come from the artifact we actually installed.
+
+    install.sh installs with ``uv tool install worthless==<pin>`` (entry point at
+    ~/.local/bin/worthless) but reported the version with ``uv run --no-project
+    worthless --version`` — a different resolution that builds an *ephemeral*
+    environment and can answer from a stale cache. Observed live on a real Mac:
+    the banner printed ``worthless 0.3.9`` while ``0.3.10`` had just been
+    installed and ``which``/``--version``/the pin all agreed on 0.3.10
+    (worthless-dc26).
+
+    The stock fixture cannot catch this: ``write_happy_path_stubs`` makes both
+    oracles answer ``0.3.0``, so asking the wrong one is invisible. Here they
+    deliberately disagree — the number in the banner tells you which oracle
+    install.sh trusted.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_happy_path_stubs(bin_dir)
+
+    # `uv run …` answers from a stale ephemeral env …
+    uv_stub = bin_dir / "uv"
+    uv_stub.write_text(
+        uv_stub.read_text(encoding="utf-8").replace(
+            'run) echo "worthless 0.3.0"', 'run) echo "worthless 0.3.9"'
+        ),
+        encoding="utf-8",
+    )
+    # … while the installed entry point — what the user actually runs — is 0.3.10.
+    write_stub(bin_dir, "worthless", 'echo "worthless 0.3.10"')
+
+    result = run_install(bin_dir)
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+
+    combined = result.stdout + result.stderr
+    assert "0.3.9" not in combined, (
+        "the banner reported a stale `uv run` resolution instead of the installed "
+        f"binary — the user is told the wrong version.\n{combined}"
+    )
+    assert "0.3.10" in combined, (
+        f"the banner must report the installed binary's version.\n{combined}"
+    )
+
+
 def test_user_override_beats_pin(tmp_path: Path) -> None:
     """WORTHLESS_VERSION overrides the baked pin."""
     bin_dir = tmp_path / "bin"
