@@ -190,6 +190,29 @@ def _derive_base_url_var(var_name: str, provider: str) -> str:
 # services live here (e.g. Alibaba's ``100.100.100.200``). Deny it explicitly so
 # the guard is version-independent — see security review of WOR-834.
 _CGNAT_NET = ipaddress.ip_network("100.64.0.0/10")
+_NAT64_NET = ipaddress.ip_network("64:ff9b::/96")
+
+
+def _fold_embedded_ipv4(
+    ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    """Fold an IPv6-wrapped IPv4 address down to the IPv4 it really denotes.
+
+    ``::ffff:100.64.0.1`` and NAT64 ``64:ff9b::a9fe:a9fe`` route to the
+    embedded IPv4, so they must be classified as that IPv4 and not as the v6
+    wrapper. Python's own flags can't carry this: pre-3.10.15 treated all of
+    ``::ffff:0:0/96`` as private, while 3.10.15+/3.11.10+ delegate to the
+    embedded address — so CGNAT (which is NOT ``is_private``) reached through
+    the wrapper on py3.13 while py3.10 rejected it. Folding first makes the
+    guard identical on every interpreter and lets the v4-only CGNAT check fire.
+    """
+    if isinstance(ip, ipaddress.IPv6Address):
+        mapped = ip.ipv4_mapped
+        if mapped is None and ip in _NAT64_NET:
+            mapped = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+        if mapped is not None:
+            return mapped
+    return ip
 
 
 def _upstream_host_ip(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
@@ -206,7 +229,7 @@ def _upstream_host_ip(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Addres
     if not host:
         return None
     try:
-        return ipaddress.ip_address(host)
+        return _fold_embedded_ipv4(ipaddress.ip_address(host))
     except ValueError:
         pass
     try:  # decimal / octal / hex / short IPv4 → canonical dotted form
@@ -697,20 +720,6 @@ async def _pass1_db_writes(
                 f"follow <PROVIDER>_API_KEY to silence this warning."
             )
 
-        # Resolve the upstream URL by the REGISTRY NAME (detected_provider, e.g.
-        # "openrouter"), not the wire PROTOCOL (provider, e.g. "openai"). They
-        # diverge for OpenAI-dialect-compatible services: OpenRouter's protocol
-        # is "openai" but its upstream is openrouter.ai. Using the protocol here
-        # mailed OpenRouter keys to api.openai.com → 401 (PR #276 review).
-        # WOR-834: an unregistered enterprise gateway (Azure/custom) is neither
-        # in .env nor the registry — its openclaw baseUrl is the source of truth.
-        # On re-lock the live entry is proxy-shaped, so this yields None and we
-        # re-resolve from .env/registry exactly as before (no stale-URL pinning).
-        oc_base_url = _genuine_oc_base_url(oc_config, provider, oc_proxy_base_url)
-        upstream_base_url = _resolve_upstream_base_url(
-            base_url_var, env_values, detected_provider, oc_base_url=oc_base_url
-        )
-
         alias = _make_alias(provider, value)
 
         # Cross-path collision check: if this alias is already enrolled from a
@@ -728,6 +737,38 @@ async def _pass1_db_writes(
                 break  # one warning per alias is sufficient
 
         db_shard = await repo.fetch_encrypted(alias)
+
+        # Resolve the upstream URL by the REGISTRY NAME (detected_provider, e.g.
+        # "openrouter"), not the wire PROTOCOL (provider, e.g. "openai"). They
+        # diverge for OpenAI-dialect-compatible services: OpenRouter's protocol
+        # is "openai" but its upstream is openrouter.ai. Using the protocol here
+        # mailed OpenRouter keys to api.openai.com -> 401 (PR #276 review).
+        #
+        # WOR-834: an unregistered enterprise gateway (Azure/custom) is in
+        # neither .env nor the registry -- its openclaw baseUrl is the only
+        # source of truth. Resolved AFTER the db_shard fetch on purpose: on
+        # re-lock the live openclaw entry is proxy-shaped, so the genuine
+        # gateway URL is no longer readable from it, and re-resolving from
+        # .env/registry would silently revert the alias to the registry
+        # default (api.openai.com) on the SECOND lock. Reuse what this alias
+        # was locked with instead. An explicit registered *_BASE_URL still
+        # wins -- it is the first tier inside _resolve_upstream_base_url.
+        oc_base_url = _genuine_oc_base_url(oc_config, provider, oc_proxy_base_url)
+        if oc_base_url is None and db_shard is not None:
+            persisted = db_shard.base_url
+            # Carry forward ONLY an UNREGISTERED gateway. Such a URL can only
+            # have come from openclaw.json (WOR-834) and is unrecoverable once
+            # the live entry is proxy-shaped, so re-resolving would silently
+            # revert an Azure/enterprise alias to the registry default on the
+            # second lock. A REGISTERED url stays re-derivable from
+            # .env/registry, so re-lock keeps its documented semantics there:
+            # deleting *_BASE_URL resets the row to the registry default
+            # (test_relock_without_base_url_var_falls_back_to_registry_default).
+            if persisted and lookup_by_url(persisted) is None:
+                oc_base_url = persisted
+        upstream_base_url = _resolve_upstream_base_url(
+            base_url_var, env_values, detected_provider, oc_base_url=oc_base_url
+        )
 
         if db_shard is not None:
             if not db_shard.prefix or not db_shard.charset:

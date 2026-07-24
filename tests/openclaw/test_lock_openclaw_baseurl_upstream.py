@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import json
 from pathlib import Path
 
@@ -32,7 +33,7 @@ from typer.testing import CliRunner
 
 from worthless.cli.app import app
 from worthless.cli.bootstrap import WorthlessHome
-from worthless.cli.commands.lock import _validate_upstream_base_url
+from worthless.cli.commands.lock import _upstream_host_ip, _validate_upstream_base_url
 from worthless.cli.errors import WorthlessError
 from worthless.storage.repository import ShardRepository
 
@@ -135,6 +136,11 @@ def test_validate_upstream_accepts_safe_urls(url: str) -> None:
         "https://[::]/v1",  # IPv6 unspecified
         "https://100.64.0.1/v1",  # RFC6598 CGNAT / shared address space
         "https://100.100.100.200/v1",  # Alibaba Cloud metadata (lives in CGNAT)
+        # IPv4-mapped CGNAT: py>=3.10.15/3.11.10 delegate is_private to the
+        # embedded IPv4, and CGNAT is NOT is_private — so the v6 wrapper slipped
+        # the version==4 CGNAT check on py3.13. Regression guard for that split.
+        "https://[::ffff:100.64.0.1]/v1",
+        "https://[::ffff:100.100.100.200]/v1",
     ],
 )
 def test_validate_upstream_rejects_dangerous_urls(url: str) -> None:
@@ -188,4 +194,68 @@ def test_lock_refuses_dangerous_openclaw_baseurl(
     alias = _alias_for_key("openai", fixed_key)
     assert _base_url(home_dir, alias) is None, (
         "nothing must be enrolled when the gateway is refused"
+    )
+
+
+@pytest.mark.parametrize(
+    ("host", "expected"),
+    [
+        ("::ffff:100.64.0.1", "100.64.0.1"),  # the py3.13 bypass
+        ("::ffff:169.254.169.254", "169.254.169.254"),
+        ("::ffff:127.0.0.1", "127.0.0.1"),
+        ("0:0:0:0:0:ffff:a9fe:a9fe", "169.254.169.254"),  # expanded form
+        ("64:ff9b::a9fe:a9fe", "169.254.169.254"),  # NAT64 well-known prefix
+        ("::ffff:100.64.0.1.", "100.64.0.1"),  # trailing dot + mapped
+    ],
+)
+def test_upstream_host_ip_folds_mapped_and_nat64_to_embedded_ipv4(host: str, expected: str) -> None:
+    """An IPv4 address wrapped in IPv6 must classify as its embedded IPv4.
+
+    Version-independent invariant. Relying on ``IPv6Address.is_private`` is a
+    trap: pre-3.10.15 it blanket-treated ``::ffff:0:0/96`` as private, while
+    3.10.15+/3.11.10+ delegate to the embedded IPv4 — so CGNAT (not
+    ``is_private``) reached through the wrapper on py3.13 only. Folding to the
+    embedded IPv4 before classifying makes the guard behave the same on every
+    interpreter, and lets the version==4 CGNAT check actually fire.
+    """
+    assert _upstream_host_ip(host) == ipaddress.ip_address(expected)
+
+
+def test_relock_preserves_gateway_upstream(
+    home_dir: WorthlessHome,
+    env_file: Path,
+    sandboxed_home: Path,
+    fixed_key: str,
+    tmp_path: Path,
+) -> None:
+    """Re-locking the same key must NOT reset the gateway to the registry default.
+
+    After the first lock, openclaw.json is proxy-shaped, so the genuine gateway
+    URL is no longer readable from it. If the upstream is re-resolved from
+    .env/registry at that point, an unregistered Azure gateway silently reverts
+    to ``api.openai.com`` — WOR-834 all over again, on the second lock.
+    """
+    _seed_openclaw(sandboxed_home, {"baseUrl": AZURE_URL, "apiKey": fixed_key})
+    cli_env = {"WORTHLESS_HOME": str(home_dir.base_dir), "WORTHLESS_KEYRING_BACKEND": "null"}
+
+    first = runner.invoke(app, ["lock", "--env", str(env_file)], env=cli_env)
+    assert first.exit_code == 0, first.output
+
+    alias = _alias_for_key("openai", fixed_key)
+    assert _base_url(home_dir, alias) == AZURE_URL, "first lock must store the gateway"
+
+    # The user pastes the original key again into a second project's .env.
+    # (A re-lock of the SAME .env is refused earlier by the already-locked
+    # preflight, so this is the path that actually reaches the re-lock branch.)
+    proj2 = tmp_path / "proj2"
+    proj2.mkdir()
+    env2 = proj2 / ".env"
+    env2.write_text(f"OPENAI_API_KEY={fixed_key}\n")
+
+    second = runner.invoke(app, ["lock", "--env", str(env2)], env=cli_env)
+    assert second.exit_code == 0, second.output
+
+    assert _base_url(home_dir, alias) == AZURE_URL, (
+        "re-lock reset the upstream to the registry default — the enterprise "
+        "gateway key would 401 against api.openai.com after a second lock."
     )
