@@ -407,15 +407,9 @@ install_or_upgrade_worthless() {
 }
 
 smoke_test() {
-    # Ask the artifact we actually installed. `uv tool install` placed an entry
-    # point in ~/.local/bin (already prepended to PATH above), whereas
-    # `uv run --no-project worthless` is a DIFFERENT resolution: it builds an
-    # ephemeral environment and can answer from a stale cache. It reported
-    # "worthless 0.3.9" on a box that had just installed 0.3.10, while `which`,
-    # `worthless --version` and the pin all agreed on 0.3.10 (worthless-dc26).
-    # Reporting a version the user does not have is exactly the dishonesty this
-    # release is about. Capture output so we verify the install AND display the
-    # version in one invocation.
+    # Ask the binary we installed, not `uv run --no-project worthless` — that
+    # resolves an ephemeral env and can answer from a stale cache (it said
+    # 0.3.9 right after installing 0.3.10; worthless-dc26).
     worthless_bin="$(command -v worthless 2>/dev/null || true)"
     [ -n "$worthless_bin" ] || worthless_bin="${HOME:-}/.local/bin/worthless"
     if ! version_output="$("$worthless_bin" --version 2>/dev/null)"; then
