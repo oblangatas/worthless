@@ -35,6 +35,11 @@ RAILWAY_TOML = DEPLOY_DIR / "railway.toml"
 RENDER_YAML = DEPLOY_DIR / "render.yaml"
 RELEASE_SYNC_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release-sync-check.yml"
 PUBLISH_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "publish.yml"
+RELEASE_NOTES_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release-notes.yml"
+RELEASE_FANIN_SCRIPT = REPO_ROOT / ".github" / "scripts" / "release-fanin.sh"
+EXTRACT_CHANGELOG_SCRIPT = REPO_ROOT / ".github" / "scripts" / "extract_changelog.py"
+# The four independent publishers the auto-Release job fans in over.
+PUBLISHER_WORKFLOWS = ["publish.yml", "publish-npm.yml", "publish-docker.yml", "deploy-worker.yml"]
 
 
 # ------------------------------------------------------------------
@@ -88,6 +93,12 @@ def publish_text() -> str:
 def publish_data() -> dict:
     """Parsed publish.yml workflow."""
     return yaml.safe_load(PUBLISH_WORKFLOW.read_text())
+
+
+@pytest.fixture(scope="module")
+def release_notes_data() -> dict:
+    """Parsed release-notes.yml workflow (the auto-Release job)."""
+    return yaml.safe_load(RELEASE_NOTES_WORKFLOW.read_text())
 
 
 @pytest.fixture(scope="module")
@@ -1335,6 +1346,148 @@ class TestPublishTagVerification:
             f"publish.yml triggers must be push-only (got {sorted(triggers)}); "
             "workflow_dispatch/workflow_call would bypass the signed-tag verify."
         )
+
+
+# ------------------------------------------------------------------
+# Auto-created GitHub Release guardrails (WOR-846)
+# ------------------------------------------------------------------
+
+
+class TestReleaseNotesGuardrails:
+    """release-notes.yml creates the GitHub Release once all four publishers pass.
+
+    It is the only workflow holding a ``contents: write`` token, so it must be
+    structurally unable to (a) mint a tag — ``gh release create`` creates an
+    unsigned tag if one is absent, which fails the GPG gate AND tombstones the
+    version name permanently — or (b) execute attacker-pushable tag content while
+    that token is live. These are the security-signed-off guardrails F1-F8.
+    """
+
+    @staticmethod
+    def _job(data: dict) -> dict:
+        return data["jobs"]["create-release"]
+
+    @staticmethod
+    def _runs(data: dict) -> str:
+        steps = TestReleaseNotesGuardrails._job(data)["steps"]
+        return "\n".join(str(s.get("run", "")) for s in steps)
+
+    def test_top_level_permissions_are_read_only(self, release_notes_data: dict):
+        # F3: the write scope must be opted into per-job, never granted workflow-wide.
+        assert release_notes_data.get("permissions") == {"contents": "read"}
+
+    def test_write_scope_is_job_local_and_minimal(self, release_notes_data: dict):
+        # F3: contents:write only, plus actions:read for the fan-in API reads.
+        perms = self._job(release_notes_data)["permissions"]
+        assert perms.get("contents") == "write"
+        assert set(perms) <= {"contents", "actions"}, (
+            f"release job must not hold scopes beyond contents/actions (got {sorted(perms)}); "
+            "id-token or packages would let it publish artifacts, not just notes."
+        )
+
+    def test_release_job_sits_behind_protected_environment(self, release_notes_data: dict):
+        # F3: `release` environment carries the required-reviewer rule, so a
+        # malicious workflow edit still can't cut a Release unattended.
+        assert self._job(release_notes_data).get("environment") == "release"
+
+    def test_fires_only_on_a_pushed_v_tag(self, release_notes_data: dict):
+        # F2: workflow_run inherits the triggering event; anything but a real tag
+        # push must be refused before the signed-tag verify is reachable.
+        cond = self._job(release_notes_data)["if"]
+        assert "workflow_run.event == 'push'" in cond
+        assert "head_branch, 'v'" in cond
+
+    def test_reverifies_the_signed_tag_independently(self, release_notes_data: dict):
+        # F5: highest-privilege job fails closed on its own rather than trusting
+        # that the publishers already verified (same precedent as deploy-worker.yml).
+        assert "verify-tag.sh" in self._runs(release_notes_data)
+
+    def test_cannot_mint_a_tag(self, release_notes_data: dict):
+        # F1: --verify-tag aborts unless the git tag already exists; --target would
+        # let the Release point at an arbitrary commit.
+        runs = self._runs(release_notes_data)
+        assert "--verify-tag" in runs, (
+            "gh release create must pass --verify-tag — without it, a missing tag is "
+            "silently created UNSIGNED and the version name is tombstoned forever."
+        )
+        assert "--target" not in runs, "no --target: the Release must follow the signed tag only"
+
+    def test_runs_no_untrusted_tag_content(self, release_notes_data: dict):
+        # F4: the job checks out the default branch and runs only trusted scripts.
+        # A build/install step would execute tag-authored hooks with the write token live.
+        runs = self._runs(release_notes_data)
+        for forbidden in ("python -m build", "npm ci", "npm install", "pip install", "uv sync"):
+            assert forbidden not in runs, (
+                f"{forbidden!r} executes tag-content code while contents:write is live"
+            )
+        checkout = next(
+            s
+            for s in self._job(release_notes_data)["steps"]
+            if "checkout" in str(s.get("uses", "")).lower()
+        )
+        assert checkout.get("with", {}).get("persist-credentials") is False
+        assert "ref:" not in str(checkout.get("with", {})), (
+            "must check out the default branch, not the tag — scripts executed here must be trusted"
+        )
+
+    def test_is_idempotent_across_repeat_firings(self, release_notes_data: dict):
+        # F8: up to four publisher completions fire this workflow for one tag.
+        assert "concurrency" in release_notes_data
+        assert "gh release view" in self._runs(release_notes_data), (
+            "must skip when the Release already exists — repeat firings are expected"
+        )
+
+    def test_trigger_matches_the_publishers_actual_names(self, release_notes_data: dict):
+        # Drift guard: workflow_run matches on DISPLAY name. Renaming a publisher
+        # would silently orphan the fan-in and no Release would ever be created.
+        on_block = release_notes_data.get("on", release_notes_data.get(True))
+        listed = set(on_block["workflow_run"]["workflows"])
+        actual = {
+            yaml.safe_load((REPO_ROOT / ".github" / "workflows" / wf).read_text())["name"]
+            for wf in PUBLISHER_WORKFLOWS
+        }
+        assert listed == actual, (
+            "release-notes.yml workflow_run.workflows must equal the publishers' name: "
+            f"fields exactly.\n  listed: {sorted(listed)}\n  actual: {sorted(actual)}"
+        )
+
+    def test_fanin_polls_every_publisher(self):
+        # A publisher missing from the fan-in list would let the Release ship while
+        # that leg had failed.
+        text = RELEASE_FANIN_SCRIPT.read_text()
+        for wf in PUBLISHER_WORKFLOWS:
+            assert wf in text, f"release-fanin.sh must require {wf} to be green"
+
+    def test_changelog_extraction_picks_one_section(self):
+        sample = (
+            "# Changelog\n\n"
+            "## [Unreleased]\n\n"
+            "## [0.3.10] — 2026-07-21\n\n### Security\n- the released thing\n\n"
+            "## [0.3.9] — 2026-07-01\n\n- the older thing\n"
+        )
+        hit = subprocess.run(
+            [sys.executable, str(EXTRACT_CHANGELOG_SCRIPT), "0.3.10"],
+            input=sample,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert hit.returncode == 0
+        assert "the released thing" in hit.stdout
+        assert "the older thing" not in hit.stdout, "must stop at the next ## [ heading"
+        assert "Unreleased" not in hit.stdout
+
+        # Unknown version → exit 3 so the workflow falls back to --generate-notes
+        # rather than publishing a Release with empty notes.
+        miss = subprocess.run(
+            [sys.executable, str(EXTRACT_CHANGELOG_SCRIPT), "9.9.9"],
+            input=sample,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert miss.returncode == 3
+        assert miss.stdout.strip() == ""
 
 
 # ------------------------------------------------------------------

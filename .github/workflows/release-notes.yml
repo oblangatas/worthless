@@ -1,0 +1,138 @@
+name: Create GitHub Release
+
+# Auto-creates the GitHub Release once ALL four publishers succeed for a signed
+# v* tag — replacing the manual `gh release create` step (and its unsigned-tag
+# tombstone footgun) at the end of scripts/tag-release.sh. WOR-846.
+#
+# A GitHub Release is only a notes page: it is DOWNSTREAM of the signed-tag gate,
+# not a trust anchor. The signing key never enters CI; this job cannot mint a tag
+# (`--verify-tag`, tag taken only from the triggering event, never `--target`).
+#
+# workflow_run (not needs:) because the publishers are four independent workflows
+# and publish.yml forbids workflow_call/workflow_dispatch. This fires on each
+# publisher completion; release-fanin.sh makes it act once, only when all four are
+# green for this exact head_sha.
+
+# zizmor flags every workflow_run as dangerous, because the usual pattern —
+# checking out and executing the triggering run's (attacker-controlled) code with
+# a privileged token — is a token-theft escalation. This workflow is the opposite
+# of that pattern, and workflow_run is unavoidable here:
+#   * unavoidable: the four publishers are separate workflows, `needs:` cannot span
+#     workflows, and publish.yml forbids workflow_call/workflow_dispatch (that ban
+#     is itself a security guard, enforced by TestPublishTagVerification).
+#   * no untrusted code runs: checkout takes the DEFAULT BRANCH (no `ref:`), so
+#     every script executed is trusted repo code. Tag content is never checked out
+#     or executed — the tag supplies only a GPG-verified tag object and CHANGELOG
+#     text piped in as data. No build/install steps run (guarded by test).
+#   * not reachable from a PR: gated on workflow_run.event == 'push' and a v* tag.
+#   * re-verifies the maintainer GPG signature itself before the privileged step.
+#   * the token can only create a Release for an already-signed tag: --verify-tag
+#     means it cannot mint a tag, and there is no --target.
+# Guardrails are pinned by TestReleaseNotesGuardrails in tests/test_deploy_static.py.
+on: # zizmor: ignore[dangerous-triggers]
+  workflow_run:
+    workflows:
+      - "Publish to PyPI"
+      - "Publish worthless-mcp to npm"
+      - "Publish Docker image to GHCR"
+      - "Deploy Worker (worthless-sh)"
+    types: [completed]
+
+# F3: least privilege at the top level. Only the create-release job widens it.
+permissions:
+  contents: read
+
+# F8: serialize the (up to four) firings for one tag so the exists-check and
+# create can't race each other.
+concurrency:
+  group: release-notes-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+jobs:
+  create-release:
+    # F2: only real tag pushes. workflow_run inherits the triggering event, so a
+    # non-push (e.g. a manual dispatch on some publisher) or a non-tag branch is
+    # refused here — the signed-tag verify below is not reachable off this path.
+    if: >-
+      github.event.workflow_run.event == 'push' &&
+      startsWith(github.event.workflow_run.head_branch, 'v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # F3: the Release-creating job holds the ONLY contents:write in this workflow,
+    # behind a protected environment. Configure `release` with a REQUIRED REVIEWER
+    # in repo Settings → Environments so a malicious workflow edit still can't cut
+    # a Release unattended (mirrors the pypi / npm-publish environment gates).
+    environment: release
+    permissions:
+      contents: write # create the Release
+      actions: read # read sibling publishers' run status (fan-in)
+    env:
+      TAG: ${{ github.event.workflow_run.head_branch }}
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      # F4: check out the DEFAULT BRANCH, not the tag. Every script executed below
+      # (fan-in, verify-tag, extract_changelog) is therefore trusted repo code, not
+      # attacker-pushable tag content. The tag supplies only the signed tag object
+      # (verified) and its CHANGELOG text (piped as data). fetch-depth: 0 so the
+      # tag's commit is reachable; persist-credentials: false — no token on disk.
+      - name: Checkout default branch (trusted scripts only)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Fan-in: ready=true only when all four publishers succeeded for this tag.
+      - name: Require all four publishers green for this tag
+        id: fanin
+        run: bash .github/scripts/release-fanin.sh
+
+      # Bring the signed tag object local so verify-tag.sh and `git show` can read
+      # it (public repo → unauthenticated fetch; no credentials needed).
+      - name: Fetch the signed tag object
+        if: steps.fanin.outputs.ready == 'true'
+        run: git fetch --no-tags origin "refs/tags/${TAG}:refs/tags/${TAG}"
+
+      # F5: re-verify the maintainer GPG signature independently. This is the
+      # highest-privilege job, so it fails closed on its own rather than trusting
+      # that the publishers already verified. verify-tag.sh reads GITHUB_REF_NAME —
+      # set it to the tag (on workflow_run, github.ref_name is the default branch).
+      - name: Re-verify the tag GPG signature
+        if: steps.fanin.outputs.ready == 'true'
+        env:
+          MAINTAINER_PUBKEY: ${{ vars.MAINTAINER_GPG_PUBKEY }}
+          MAINTAINER_FINGERPRINT: ${{ vars.MAINTAINER_GPG_FINGERPRINT }}
+          GITHUB_REF_NAME: ${{ github.event.workflow_run.head_branch }}
+        run: bash .github/scripts/verify-tag.sh
+
+      # F8: idempotent — if a prior firing already created the Release, do nothing.
+      - name: Does the Release already exist?
+        if: steps.fanin.outputs.ready == 'true'
+        id: exists
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >>"$GITHUB_OUTPUT"
+          fi
+
+      # F1: --verify-tag makes `gh` abort unless the git tag already exists, so this
+      # can never mint (and tombstone) a tag. The tag comes only from $TAG (the
+      # event's head_branch); no --target, so the Release can't point at an
+      # arbitrary commit.
+      - name: Create the GitHub Release
+        if: steps.fanin.outputs.ready == 'true' && steps.exists.outputs.exists == 'false'
+        run: |
+          VERSION="${TAG#v}"
+          case "$TAG" in
+            *rc*|*alpha*|*beta*|*dev* | *a[0-9]* | *b[0-9]*) PRE="--prerelease --latest=false" ;;
+            *) PRE="" ;;
+          esac
+          if git show "${TAG}:CHANGELOG.md" 2>/dev/null | python3 .github/scripts/extract_changelog.py "$VERSION" >notes.md && [ -s notes.md ]; then
+            NOTES="--notes-file notes.md"
+          else
+            NOTES="--generate-notes"
+          fi
+          # shellcheck disable=SC2086  # $PRE / $NOTES are intentional flag lists
+          gh release create "$TAG" --title "$TAG" --verify-tag $NOTES $PRE
