@@ -69,9 +69,12 @@ jobs:
         # Re-run safe (mirrors PyPI's skip-existing): npm publish errors if the
         # version already exists, so re-driving a half-failed release would fail on
         # this leg. Skip when the exact version is already on the registry. WOR-846.
-        run: |
+        # NOTE: the zizmor suppression must live on the `run:` line, as a real YAML
+        # comment. Inside a `run: |` block a `#` is literal shell text, so zizmor
+        # never sees it and the finding fails the job.
+        run: | # zizmor: ignore[use-trusted-publishing]
           if npm view "worthless-mcp@${SEMVER}" version >/dev/null 2>&1; then
             echo "worthless-mcp@${SEMVER} already published — skipping (re-run safe)."
           else
-            npm publish --access public --tag "${DIST_TAG}" # zizmor: ignore[use-trusted-publishing]
+            npm publish --access public --tag "${DIST_TAG}"
           fi

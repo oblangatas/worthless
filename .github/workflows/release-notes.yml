@@ -78,7 +78,7 @@ jobs:
       # (verified) and its CHANGELOG text (piped as data). fetch-depth: 0 so the
       # tag's commit is reachable; persist-credentials: false — no token on disk.
       - name: Checkout default branch (trusted scripts only)
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
           persist-credentials: false
