@@ -1139,7 +1139,23 @@ def _confirm_bind(
     * ``status == "skipped"`` — proxy unhealthy at the before- or after-read,
       OR there was nothing to confirm (no aliases). Inconclusive, not a fail.
     """
-    aliases = [p.alias for p in planned]
+    return _confirm_bind_aliases([p.alias for p in planned], host=host, port=port)
+
+
+def _confirm_bind_aliases(
+    aliases: list[str],
+    *,
+    host: str,
+    port: int,
+) -> dict[str, object]:
+    """Bind-confirmation core, keyed by alias strings.
+
+    Shared by :func:`_confirm_bind` (lock, which passes ``[p.alias for p in
+    planned]``) and ``worthless verify`` (WOR-517, which passes the currently
+    locked aliases). Fires one loopback ``/_bind_probe/{alias}`` per alias and
+    classifies the ``bind_probe_count`` delta. See :func:`_confirm_bind` for
+    the ``pass``/``fail``/``skipped`` verdict semantics.
+    """
     if not aliases:
         return {
             "status": "skipped",

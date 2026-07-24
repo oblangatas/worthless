@@ -431,6 +431,47 @@ def test_proxy_is_load_bearing_after_lock(loaded_stack):
     assert len(_captured(mock_port)) >= 1, "proxy did not resume routing after restart"
 
 
+def test_verify_reports_live_routing(loaded_stack):
+    """WOR-517 CI anchor — ``worthless verify`` against a REAL proxy + locked DB.
+
+    This is the proof a unit mock cannot give: that verify's live loopback
+    bind-probe actually ticks through the running Worthless proxy. verify is
+    co-resident with the proxy by design (the ``/_bind_probe`` endpoint is
+    loopback-only), so it runs INSIDE the proxy container — the container
+    analogue of a user running ``worthless verify`` on the host where the
+    proxy also listens on localhost.
+
+    * GREEN: verify against the live proxy → verdict ``green`` and the alias
+      reports ``routed`` — earned by a fresh delta THIS call, not a counter.
+    * RED: same real install pointed at a dead port (fresh empty home so no
+      pidfile shadows the probe) → verdict ``red`` / ``proxy_down``, exit 73.
+      Proves the down-signal in the real container without stopping the shared
+      module-scoped proxy (the load-bearing test above owns the stop/start).
+    """
+    proxy = loaded_stack["proxy"]
+
+    green = _dexec(proxy, ["worthless", "verify", "--json"], timeout=60)
+    assert green.returncode == 0, f"verify was not GREEN against the live proxy:\n{green.stderr}"
+    payload = json.loads(green.stdout)
+    assert payload["verdict"] == "green", payload
+    assert payload["healthy"] is True, payload
+    assert payload["aliases"], "verify GREEN but named no locked alias"
+    assert all(a["routed"] for a in payload["aliases"]), payload
+
+    red = _dexec(
+        proxy,
+        ["sh", "-c", "WORTHLESS_HOME=/tmp/wv-empty WORTHLESS_PORT=9 worthless verify --json"],
+        timeout=60,
+    )
+    assert red.returncode == 73, (
+        f"verify exit was {red.returncode}, expected 73 (RED):\n{red.stderr}"
+    )
+    down = json.loads(red.stdout)
+    assert down["verdict"] == "red", down
+    assert down["healthy"] is False, down
+    assert down["reason"] == "proxy_down", down
+
+
 # --------------------------------------------------------------------------- #
 # WOR-791 — a stolen .env replayed AFTER rotation is refused at the proxy door
 # by the decoy tripwire, end-to-end through a real OpenClaw agent. Automated
