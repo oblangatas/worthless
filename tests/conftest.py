@@ -652,19 +652,26 @@ def _restore_process_dumpable():
     Only the dumpable bit is restorable; ``RLIMIT_CORE`` cannot be raised once
     lowered, which is pre-existing behavior and unrelated to this fixture.
     """
-    from worthless.sidecar._hardening import get_dumpable
+    from worthless.sidecar import _hardening
 
-    before = get_dumpable()
+    before = _hardening.get_dumpable()
     try:
         yield
     finally:
-        if before is not None and get_dumpable() != before:
-            import ctypes
-            import ctypes.util
-
-            libc_path = ctypes.util.find_library("c")
-            if libc_path:
-                ctypes.CDLL(libc_path).prctl(4, before, 0, 0, 0)  # PR_SET_DUMPABLE
+        # Tests that mock libc (e.g. test_load_libc_falls_back_to_musl_when_glibc_fails)
+        # make get_dumpable() itself raise — its `if rc < 0` compares a MagicMock to
+        # an int. The read must be caught HERE, not guarded after the fact: the throw
+        # is inside the call. A mocked libc during teardown means there is nothing
+        # real to restore, so treat it as None. isinstance() then also skips the
+        # non-Linux (None) case; restore only when a test actually changed the bit.
+        try:
+            after = _hardening.get_dumpable()
+        except Exception:
+            after = None
+        if isinstance(before, int) and isinstance(after, int) and after != before:
+            libc = _hardening._load_libc()
+            if libc is not None:
+                libc.prctl(_hardening.PR_SET_DUMPABLE, before, 0, 0, 0)
 
 
 def pytest_runtest_logreport(report):

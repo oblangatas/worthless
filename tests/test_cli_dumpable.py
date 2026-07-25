@@ -181,6 +181,35 @@ def test_core_dump_protection_precedes_key_load(module: str) -> None:
         )
 
 
+@pytest.mark.parametrize("module", ["lock.py", "unlock.py", "up.py", "wrap.py"])
+def test_key_holding_command_calls_disable_core_dumps(module: str) -> None:
+    """Presence guard: the ordering test skips a file with no call at all, so a
+    deleted disable_core_dumps() would pass silently. This fails on deletion."""
+    src = (_CMD_DIR / module).read_text(encoding="utf-8")
+    assert "disable_core_dumps(" in src, (
+        f"{module} no longer calls disable_core_dumps() — a key-holding command "
+        f"must harden before it loads the Fernet key"
+    )
+
+
+def test_rlimit_failure_does_not_stop_dumpable_hardening(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If setrlimit raises (some CI/sandbox), the PR_SET_DUMPABLE path must still run."""
+    from worthless.cli import process as proc_mod
+
+    def _boom(*_a: object, **_k: object) -> None:
+        raise OSError("setrlimit denied")
+
+    monkeypatch.setattr(proc_mod.resource, "setrlimit", _boom)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        proc_mod._hardening, "set_dumpable_zero_or_log", lambda: calls.append("set")
+    )
+    monkeypatch.setattr(proc_mod._hardening, "get_dumpable", lambda: 0)
+
+    disable_core_dumps()  # must not propagate the OSError
+    assert calls == ["set"], "dumpable hardening skipped when setrlimit failed"
+
+
 def test_scan_hardens_without_failing_the_command() -> None:
     """scan never reconstructs a key, so it must warn rather than abort."""
     src = (_CMD_DIR / "scan.py").read_text(encoding="utf-8")
