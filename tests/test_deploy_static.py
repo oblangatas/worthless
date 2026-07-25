@@ -1443,7 +1443,10 @@ class TestReleaseNotesGuardrails:
             if "checkout" in str(s.get("uses", "")).lower()
         )
         assert checkout.get("with", {}).get("persist-credentials") is False
-        assert "ref:" not in str(checkout.get("with", {})), (
+        # Dict-key membership, NOT a substring of str(dict): str({'ref': ...}) renders
+        # as "{'ref': ...}", so a "ref:" substring test never matches and the guard
+        # would pass even when the job checks out the tag (CodeRabbit, PR #462).
+        assert "ref" not in checkout.get("with", {}), (
             "must check out the default branch, not the tag — scripts executed here must be trusted"
         )
 
