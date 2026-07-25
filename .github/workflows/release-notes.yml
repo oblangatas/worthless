@@ -135,4 +135,8 @@ jobs:
             NOTES="--generate-notes"
           fi
           # shellcheck disable=SC2086  # $PRE / $NOTES are intentional flag lists
-          gh release create "$TAG" --title "$TAG" --verify-tag $NOTES $PRE
+          # `|| gh release view` tolerates a Release created by a racing firing
+          # (F8): create fails with already_exists → view succeeds → step passes.
+          # A real error (e.g. --verify-tag aborting on a missing tag) fails both.
+          gh release create "$TAG" --title "$TAG" --verify-tag $NOTES $PRE \
+            || gh release view "$TAG"

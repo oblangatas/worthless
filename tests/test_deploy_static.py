@@ -41,6 +41,23 @@ EXTRACT_CHANGELOG_SCRIPT = REPO_ROOT / ".github" / "scripts" / "extract_changelo
 # The four independent publishers the auto-Release job fans in over.
 PUBLISHER_WORKFLOWS = ["publish.yml", "publish-npm.yml", "publish-docker.yml", "deploy-worker.yml"]
 
+# Fake `gh` for the fan-in behavioural tests: emits {"workflow_runs":[...]} per
+# workflow file, driven by RUNS="file=status:conclusion,...". A missing file =>
+# no runs (leg hasn't started). conclusion "null" => JSON null (in-progress).
+_FANIN_GH_SHIM = r"""#!/usr/bin/env bash
+path=""
+for a in "$@"; do case "$a" in */actions/workflows/*/runs) path="$a";; esac; done
+wf=$(printf '%s' "$path" | sed -E 's#.*/workflows/([^/]+)/runs#\1#')
+spec=""
+IFS=',' read -ra pairs <<<"${RUNS:-}"
+for p in "${pairs[@]}"; do [ "${p%%=*}" = "$wf" ] && spec="${p#*=}"; done
+if [ -z "$spec" ]; then echo '{"workflow_runs":[]}'; exit 0; fi
+st="${spec%%:*}"; cc="${spec#*:}"
+if [ "$cc" = "null" ]; then ccj=null; else ccj="\"$cc\""; fi
+run="{\"head_sha\":\"${HEAD_SHA}\",\"status\":\"${st}\",\"conclusion\":${ccj}}"
+printf '{"workflow_runs":[%s]}\n' "$run"
+"""
+
 
 # ------------------------------------------------------------------
 # Fixtures
@@ -1458,6 +1475,14 @@ class TestReleaseNotesGuardrails:
         for wf in PUBLISHER_WORKFLOWS:
             assert wf in text, f"release-fanin.sh must require {wf} to be green"
 
+    def test_fanin_forces_get_on_the_api_call(self):
+        # `gh api` silently POSTs when any -f field is present; the runs endpoint
+        # only exists for GET, so without -X GET it 404s and (under set -e) the
+        # whole fan-in aborts — no Release, ever. Verified live on v0.3.10. Pin it
+        # so a future "cleanup" can't drop the flag and silently break every release.
+        text = RELEASE_FANIN_SCRIPT.read_text()
+        assert "-X GET" in text, "fan-in gh api call must force GET (see comment in the script)"
+
     def test_changelog_extraction_picks_one_section(self):
         sample = (
             "# Changelog\n\n"
@@ -1488,6 +1513,98 @@ class TestReleaseNotesGuardrails:
         )
         assert miss.returncode == 3
         assert miss.stdout.strip() == ""
+
+
+class TestReleaseFaninBehaviour:
+    """Behavioural coverage for release-fanin.sh — run the REAL script against a
+    fake `gh` on PATH and assert the ready verdict AND the exit code. Static
+    string-greps cannot catch the silent-permanent-hold class of bug (a terminal
+    non-success conclusion outside a hand-listed set being mistaken for "still
+    waiting"), so these run the classifier for real. WOR-846."""
+
+    ALL_GREEN = (
+        "publish.yml=completed:success,publish-npm.yml=completed:success,"
+        "publish-docker.yml=completed:success,deploy-worker.yml=completed:success"
+    )
+
+    @staticmethod
+    def _run(tmp_path, runs_spec: str):
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        gh = bindir / "gh"
+        gh.write_text(_FANIN_GH_SHIM)
+        gh.chmod(0o755)
+        out = tmp_path / "gh_output"
+        out.touch()
+        env = {
+            **os.environ,
+            "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}",
+            "GITHUB_OUTPUT": str(out),
+            "GH_REPO": "o/w",
+            "TAG": "v9.9.9",
+            "HEAD_SHA": "deadbeef",
+            "RUNS": runs_spec,
+        }
+        proc = subprocess.run(
+            ["bash", str(REPO_ROOT / ".github" / "scripts" / "release-fanin.sh")],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        ready = None
+        for line in out.read_text().splitlines():
+            if line.startswith("ready="):
+                ready = line.split("=", 1)[1]
+        return ready, proc.returncode, proc.stdout
+
+    def test_all_four_green_is_ready_and_exits_zero(self, tmp_path):
+        ready, rc, _ = self._run(tmp_path, self.ALL_GREEN)
+        assert ready == "true"
+        assert rc == 0
+
+    def test_a_failed_leg_holds_the_release_and_fails_loud(self, tmp_path):
+        spec = self.ALL_GREEN.replace(
+            "publish-npm.yml=completed:success", "publish-npm.yml=completed:failure"
+        )
+        ready, rc, out = self._run(tmp_path, spec)
+        assert ready == "false"
+        assert rc != 0, "a terminally-failed leg must fail the run so GitHub notifies"
+        assert "::error" in out
+
+    def test_startup_failure_is_not_mistaken_for_waiting(self, tmp_path):
+        # The exact bug the old {failure,cancelled,timed_out} list missed: a
+        # terminal non-success conclusion outside that set. Must block LOUD, not
+        # sit silently "waiting" forever.
+        spec = self.ALL_GREEN.replace(
+            "publish-docker.yml=completed:success",
+            "publish-docker.yml=completed:startup_failure",
+        )
+        ready, rc, _ = self._run(tmp_path, spec)
+        assert ready == "false"
+        assert rc != 0, "startup_failure/skipped/stale must block loudly, not wait forever"
+
+    def test_an_in_progress_leg_waits_quietly(self, tmp_path):
+        # Not-yet-finished is NOT a failure — exit 0 so a later firing can complete
+        # the fan-in. Failing here would turn every early firing red.
+        spec = self.ALL_GREEN.replace(
+            "deploy-worker.yml=completed:success", "deploy-worker.yml=in_progress:null"
+        )
+        ready, rc, out = self._run(tmp_path, spec)
+        assert ready == "false"
+        assert rc == 0, "an in-progress leg must not fail the run"
+        assert "::error" not in out
+
+    def test_a_never_started_leg_waits_not_blocks(self, tmp_path):
+        # A leg with no runs yet (omitted) is indistinguishable from "hasn't
+        # started", so it waits (exit 0), unlike a terminal failure.
+        spec = (
+            "publish.yml=completed:success,publish-npm.yml=completed:success,"
+            "publish-docker.yml=completed:success"  # deploy-worker absent
+        )
+        ready, rc, _ = self._run(tmp_path, spec)
+        assert ready == "false"
+        assert rc == 0
 
 
 # ------------------------------------------------------------------
