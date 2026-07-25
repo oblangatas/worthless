@@ -227,13 +227,19 @@ def disable_core_dumps(*, strict: bool = True) -> None:
 
     _hardening.set_dumpable_zero_or_log()
     observed = _hardening.get_dumpable()
-    if observed is None or observed == 0:
-        # None == indeterminate (non-Linux, or libc unreachable). Nothing to
-        # assert; the rlimit above is still applied.
+    if observed == 0:
         return
-
+    if observed is None and sys.platform != "linux":
+        # macOS/Windows have no dumpable bit — RLIMIT_CORE above is the only
+        # lever and has been applied. Genuinely indeterminate, nothing to assert.
+        return
+    # On Linux, observed is 1 (kernel refused) or None (libc unreachable, so the
+    # setter provably never ran). Either way dumpable is NOT confirmed 0 on a
+    # platform that HAS the bit — fail closed, matching the sidecar's own strict
+    # set_dumpable_zero(). None must not be waved through as "indeterminate": the
+    # setter didn't run, so this is a known failure, not an unknown.
     msg = (
-        f"core dump protection not applied: kernel reports PR_GET_DUMPABLE={observed} "
+        f"core dump protection not applied: PR_GET_DUMPABLE={observed} "
         "(expected 0). A crash could pipe this process's memory — including "
         "reconstructed key material — to a host core handler."
     )

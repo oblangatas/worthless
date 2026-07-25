@@ -69,12 +69,26 @@ class TestDumpableApplied:
         disable_core_dumps()
         assert get_dumpable() == 0
 
-    def test_non_linux_is_a_silent_no_op(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """get_dumpable() returns None off-Linux — indeterminate must not hard-fail."""
+    def test_non_linux_none_is_a_silent_no_op(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Off-Linux there is no dumpable bit — None is genuinely indeterminate."""
         from worthless.cli import process as proc_mod
 
+        monkeypatch.setattr(proc_mod.sys, "platform", "darwin")
         monkeypatch.setattr(proc_mod._hardening, "get_dumpable", lambda: None)
         disable_core_dumps()  # must not raise
+
+    def test_linux_none_fails_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """F1: on Linux, None means the setter never ran (libc unreachable) — a
+        known failure on a platform that HAS the bit, not 'indeterminate'. Must
+        fail closed under strict, never silently proceed with dumpable=1."""
+        from worthless.cli import process as proc_mod
+
+        monkeypatch.setattr(proc_mod.sys, "platform", "linux")
+        monkeypatch.setattr(proc_mod._hardening, "set_dumpable_zero_or_log", lambda: None)
+        monkeypatch.setattr(proc_mod._hardening, "get_dumpable", lambda: None)
+        with pytest.raises(WorthlessError) as exc:
+            disable_core_dumps(strict=True)
+        assert exc.value.code is ErrorCode.CORE_DUMP_PROTECTION_FAILED
 
 
 class TestFailureModes:
