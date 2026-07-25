@@ -29,6 +29,15 @@ from worthless.cli.errors import ErrorCode, WorthlessError
 from worthless.cli.keystore import keyring_available
 from worthless.cli.platform import IS_WINDOWS, check_pid_alive, popen_platform_kwargs
 
+# Imported as a module (not `from ... import set_dumpable_zero_or_log`) so tests
+# can monkeypatch the primitives — same pattern the sidecar entrypoint relies on.
+from worthless.sidecar import _hardening
+
+try:
+    import resource
+except ImportError:  # pragma: no cover - Windows has no resource module
+    resource = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
 
 # Set by launchd/systemd units installed via ``worthless service install``.
@@ -185,17 +194,52 @@ def build_proxy_env(home: WorthlessHome) -> dict[str, str]:
     return env
 
 
-def disable_core_dumps() -> None:
-    """Set RLIMIT_CORE to (0, 0) to prevent core dumps leaking key material.
+def disable_core_dumps(*, strict: bool = True) -> None:
+    """Stop this process's memory reaching disk on a crash.
 
-    Silently ignored on platforms that don't support it (e.g. some CI runners).
+    Two independent kernel controls — neither is sufficient alone:
+
+    * ``RLIMIT_CORE=(0, 0)`` suppresses the core *file*. Cross-platform, and
+      the only lever on macOS. On Linux it is **bypassed** when
+      ``core_pattern`` pipes to a handler (systemd-coredump / apport, the
+      default on most Docker hosts and not namespaced): the kernel treats a
+      piped handler as unlimited size, so the ``RLIMIT_CORE == 0``
+      early-abort governs only the core *file* path.
+    * ``PR_SET_DUMPABLE=0`` is evaluated *before* ``core_pattern``, so it
+      aborts the dump before the pipe helper is ever spawned. Linux-only.
+      Also refuses ptrace, closing ``/proc/<pid>/mem`` to other processes.
+
+    The dumpable bit lives on the ``mm`` and is **reset by execve**, so every
+    key-holding process must call this itself — a parent cannot harden a
+    child through it. (Corollary: ``wrap`` does not leak dumpable=0 into the
+    user's own program, so wrapped apps stay debuggable.)
+
+    ``strict=True`` (default) raises when the kernel did not honor
+    dumpable=0 — correct for any command that reconstructs a key. Pass
+    ``strict=False`` for commands that never hold key material, so a
+    hardening gap degrades to a warning rather than aborting the command.
     """
-    try:
-        import resource
+    if resource is not None:
+        try:
+            resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+        except (OSError, ValueError, AttributeError):
+            pass
 
-        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-    except (OSError, ValueError, AttributeError, ImportError):
-        pass
+    _hardening.set_dumpable_zero_or_log()
+    observed = _hardening.get_dumpable()
+    if observed is None or observed == 0:
+        # None == indeterminate (non-Linux, or libc unreachable). Nothing to
+        # assert; the rlimit above is still applied.
+        return
+
+    msg = (
+        f"core dump protection not applied: kernel reports PR_GET_DUMPABLE={observed} "
+        "(expected 0). A crash could pipe this process's memory — including "
+        "reconstructed key material — to a host core handler."
+    )
+    if strict:
+        raise WorthlessError(ErrorCode.CORE_DUMP_PROTECTION_FAILED, msg)
+    logger.warning(msg)
 
 
 # ---------------------------------------------------------------------------

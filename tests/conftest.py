@@ -638,6 +638,35 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(quarantine_marker)
 
 
+@pytest.fixture(autouse=True)
+def _restore_process_dumpable():
+    """Stop in-process CLI tests leaving the pytest worker undumpable (dupf.10).
+
+    ``disable_core_dumps()`` sets ``PR_SET_DUMPABLE=0`` on the *calling*
+    process. Command bodies run in-process via ``CliRunner``, so without this
+    the first such test flips the pytest worker itself for the rest of the
+    session — every later subprocess inherits it (order-dependent under
+    xdist), and ptrace-based tooling (debuggers, py-spy, some coverage
+    plugins) stops working against the worker.
+
+    Only the dumpable bit is restorable; ``RLIMIT_CORE`` cannot be raised once
+    lowered, which is pre-existing behavior and unrelated to this fixture.
+    """
+    from worthless.sidecar._hardening import get_dumpable
+
+    before = get_dumpable()
+    try:
+        yield
+    finally:
+        if before is not None and get_dumpable() != before:
+            import ctypes
+            import ctypes.util
+
+            libc_path = ctypes.util.find_library("c")
+            if libc_path:
+                ctypes.CDLL(libc_path).prctl(4, before, 0, 0, 0)  # PR_SET_DUMPABLE
+
+
 def pytest_runtest_logreport(report):
     """Auto-detect flaky tests (failed once, then passed on rerun) and warn/annotate."""
     if report.when != "call":

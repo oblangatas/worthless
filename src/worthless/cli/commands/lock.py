@@ -2671,8 +2671,10 @@ def register_lock_commands(app: typer.Typer) -> None:
         provider: str = typer.Option(..., "--provider", "-p", help="Provider name"),
     ) -> None:
         """Enroll a single API key (scripting/CI primitive)."""
-        home = get_home()
+        # Before get_home(): it loads home.fernet_key into memory, and cores
+        # must already be off by then (dupf.10).
         disable_core_dumps()
+        home = get_home()
 
         # WOR-277: a raw key value on the command line survives in shell
         # history (and process listings) forever — no CLI flag may accept

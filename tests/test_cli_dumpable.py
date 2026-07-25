@@ -1,0 +1,191 @@
+"""CLI core-dump protection — PR_SET_DUMPABLE=0, not just RLIMIT_CORE (dupf.10).
+
+Why this file exists
+--------------------
+``disable_core_dumps()`` used to set only ``RLIMIT_CORE=(0, 0)``. On Linux the
+kernel treats a **piped** ``core_pattern`` (systemd-coredump / apport — the
+default on most Docker hosts, and not namespaced) as *unlimited size*: the
+``RLIMIT_CORE == 0`` early-abort governs only the core *file* path. So a
+key-holding CLI process could still have its full crash image piped to host
+storage with the reconstructed Fernet key in it.
+
+``PR_SET_DUMPABLE=0`` is evaluated *before* ``core_pattern`` is consulted, so
+it aborts the dump before the pipe helper is ever spawned. That is the control
+that actually closes the path; the rlimit is belt-and-suspenders for the file
+case (and the only lever on macOS).
+
+Per-process, verified empirically
+---------------------------------
+The dumpable bit lives on the ``mm``, so ``execve`` resets it to 1 — a parent
+cannot harden a child this way. Measured in a Linux container:
+
+    fork   -> dumpable inherited (0)
+    execve -> dumpable RESET to 1     (RLIMIT_CORE is inherited across both)
+
+Two consequences encoded by these tests:
+
+1. Every key-holding process must call this itself. The sidecar's own startup
+   call is what protects the sidecar; the CLI needs its own.
+2. ``worthless wrap -- <user cmd>`` does **not** leak dumpable=0 into the
+   user's program, so there is no debugger/core-dump regression for wrapped
+   apps and no ``preexec_fn`` restore is needed.
+"""
+
+from __future__ import annotations
+
+import ast
+import logging
+import resource
+import sys
+from pathlib import Path
+
+import pytest
+
+from worthless.cli.errors import ErrorCode, WorthlessError
+from worthless.cli.process import disable_core_dumps
+
+LINUX_ONLY = pytest.mark.skipif(sys.platform != "linux", reason="PR_SET_DUMPABLE is Linux-only")
+
+
+class TestRlimitStillApplied:
+    """The pre-existing RLIMIT_CORE behavior must not regress."""
+
+    def test_sets_rlimit_core_to_zero(self) -> None:
+        disable_core_dumps()
+        assert resource.getrlimit(resource.RLIMIT_CORE) == (0, 0)
+
+    def test_idempotent(self) -> None:
+        disable_core_dumps()
+        disable_core_dumps()
+
+
+class TestDumpableApplied:
+    """The new control: the kernel must actually report dumpable == 0."""
+
+    @LINUX_ONLY
+    def test_kernel_reports_dumpable_zero(self) -> None:
+        from worthless.sidecar._hardening import get_dumpable
+
+        disable_core_dumps()
+        assert get_dumpable() == 0
+
+    def test_non_linux_is_a_silent_no_op(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """get_dumpable() returns None off-Linux — indeterminate must not hard-fail."""
+        from worthless.cli import process as proc_mod
+
+        monkeypatch.setattr(proc_mod._hardening, "get_dumpable", lambda: None)
+        disable_core_dumps()  # must not raise
+
+
+class TestFailureModes:
+    """Fail closed for key-holding commands, warn-only for the rest."""
+
+    def test_strict_raises_when_kernel_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from worthless.cli import process as proc_mod
+
+        monkeypatch.setattr(proc_mod._hardening, "set_dumpable_zero_or_log", lambda: None)
+        monkeypatch.setattr(proc_mod._hardening, "get_dumpable", lambda: 1)
+
+        with pytest.raises(WorthlessError) as exc:
+            disable_core_dumps(strict=True)
+        assert exc.value.code is ErrorCode.CORE_DUMP_PROTECTION_FAILED
+
+    def test_non_strict_warns_but_returns(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from worthless.cli import process as proc_mod
+
+        monkeypatch.setattr(proc_mod._hardening, "set_dumpable_zero_or_log", lambda: None)
+        monkeypatch.setattr(proc_mod._hardening, "get_dumpable", lambda: 1)
+
+        with caplog.at_level(logging.WARNING):
+            disable_core_dumps(strict=False)  # must not raise
+        assert "core dump" in caplog.text.lower()
+
+    def test_strict_is_the_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A caller that forgets the flag gets the safe behavior."""
+        from worthless.cli import process as proc_mod
+
+        monkeypatch.setattr(proc_mod._hardening, "set_dumpable_zero_or_log", lambda: None)
+        monkeypatch.setattr(proc_mod._hardening, "get_dumpable", lambda: 1)
+
+        with pytest.raises(WorthlessError):
+            disable_core_dumps()
+
+
+# ---------------------------------------------------------------------------
+# Ordering guard (R4): protection must be applied BEFORE key material is read.
+# ---------------------------------------------------------------------------
+
+_CMD_DIR = Path(__file__).resolve().parents[1] / "src" / "worthless" / "cli" / "commands"
+
+
+def _call_names(fn: ast.AST) -> list[tuple[str, int]]:
+    """Calls in this function's own scope, NOT in nested defs.
+
+    The command modules wrap every subcommand in a ``register_*_commands``
+    registrar, so descending into nested scopes would compare one
+    subcommand's ``get_home()`` against a *different* subcommand's
+    ``disable_core_dumps()``. Nested functions are visited separately by the
+    caller's ``ast.walk``.
+    """
+    out: list[tuple[str, int]] = []
+    stack = list(ast.iter_child_nodes(fn))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
+            continue
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+            if name:
+                out.append((name, node.lineno))
+        stack.extend(ast.iter_child_nodes(node))
+    return out
+
+
+@pytest.mark.parametrize("module", sorted(p.name for p in _CMD_DIR.glob("*.py")))
+def test_core_dump_protection_precedes_key_load(module: str) -> None:
+    """In any function doing both, disable_core_dumps() must precede get_home().
+
+    get_home() reads home.fernet_key into memory. Hardening after that leaves a
+    window where the key is resident and cores are still enabled.
+    """
+    tree = ast.parse((_CMD_DIR / module).read_text(encoding="utf-8"))
+    for fn in ast.walk(tree):
+        if not isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        calls = _call_names(fn)
+        harden = [ln for name, ln in calls if name == "disable_core_dumps"]
+        loads = [ln for name, ln in calls if name == "get_home"]
+        if not harden or not loads:
+            continue
+        assert min(harden) < min(loads), (
+            f"{module}::{fn.name} loads the key at line {min(loads)} before "
+            f"disabling core dumps at line {min(harden)} — the key is resident "
+            f"while cores are still enabled"
+        )
+
+
+def test_scan_hardens_without_failing_the_command() -> None:
+    """scan never reconstructs a key, so it must warn rather than abort."""
+    src = (_CMD_DIR / "scan.py").read_text(encoding="utf-8")
+    assert "disable_core_dumps(strict=False)" in src
+
+
+def test_doctor_home_check_does_not_false_warn_when_proc_unreadable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Regression: PR_SET_DUMPABLE=0 on the daemon makes /proc/<pid> root-owned,
+    so doctor's read_process_env returns {}. It must treat that as indeterminate
+    (return False), not default to _DEFAULT_BASE and cry mismatch for custom homes.
+    """
+    from worthless.cli.commands import doctor as doctor_mod
+
+    monkeypatch.setattr(doctor_mod, "read_pid", lambda _p: (4242, 8787))
+    monkeypatch.setattr(doctor_mod, "read_process_env", lambda _pid: {})
+
+    class _Home:
+        base_dir = tmp_path / "custom-home"  # deliberately NOT the default base
+
+    assert doctor_mod._check_home_mismatch(_Home()) is False

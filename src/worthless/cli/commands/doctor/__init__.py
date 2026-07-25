@@ -557,6 +557,13 @@ def _check_home_mismatch(home: WorthlessHome) -> bool:
         return False
     pid, _port = pid_result
     env = read_process_env(pid)
+    if not env:
+        # /proc/<pid>/environ is unreadable — the proxy runs with
+        # PR_SET_DUMPABLE=0 (dupf.10), which makes /proc/<pid> root-owned, so a
+        # same-user `doctor` gets AccessDenied and read_process_env returns {}.
+        # A live proxy always has a non-empty environment, so {} means
+        # "indeterminate", not "no WORTHLESS_HOME set" — don't false-warn.
+        return False
     proxy_home_str = env.get("WORTHLESS_HOME")
     proxy_home = Path(proxy_home_str) if proxy_home_str else _DEFAULT_BASE
     if proxy_home.resolve() == home.base_dir.resolve():
