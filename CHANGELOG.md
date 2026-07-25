@@ -4,6 +4,20 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [0.3.11] — 2026-07-24
+
+Closes the last gap from the OpenClaw install incident: you can now ask Worthless, on demand, whether your gateway is actually protecting you *right now* — and get an answer that can't be faked by a stale counter.
+
+### Added
+- **`worthless verify` — confirm the gateway is protecting you right now** (WOR-517, [#457](https://github.com/shacharm2/worthless/pull/457)). The incident that started this ended with a user killing the Worthless gateway and watching his agent keep working — with no way to tell his key was now exposed. `worthless verify` answers that question directly: it fires a live loopback bind-probe and reports **GREEN only when that probe routes through the proxy this instant**, never from the cumulative `requests_proxied` count (which stays frozen at its last value when the gateway dies, and would have printed green over the exact bypass it exists to catch). A down gateway reports **RED with exit code 73**, worded as an active exposure — "any agent still holding a cached token may be sending your key in the clear right now" — not as a tool that merely isn't configured. A healthy-but-unidentified responder on the port reports RED rather than claiming an attacker, since the identity marker is public. `--json` for scripting.
+
+### Security
+- **The rollback record can't carry an unprefixed secret** (WOR-827, [#452](https://github.com/shacharm2/worthless/pull/452)). Secrets without a recognized provider prefix are redacted from the OpenClaw rollback record instead of being written through.
+
+### What this does NOT defend against
+- **`worthless verify` proves the proxy is live and routing a request now — not that your agent's last request went through it.** The probe is a separate synthetic request; a proxy that is up and an agent that bypasses it on a cached token can coexist. The command says so in its own GREEN output rather than implying full coverage. Confirming that a *specific* application's traffic is routed remains the job of `worthless status` and the load-bearing proxy work (WOR-621).
+- The hosted `curl worthless.sh | sh` install path is proven by a manual release smoke, not automation — the installer only ever fetches the published pin, so unreleased code cannot be exercised through it.
+
 ## [0.3.10] — 2026-07-21
 
 Credential-leak hardening across the OpenClaw path and the "am I protected?" verdict, plus honest reporting when Worthless can't protect or can't look. Also lands background service management and a rebuilt install experience.
@@ -253,6 +267,7 @@ First release published to PyPI. `pip install worthless` now works.
 - Gate evaluation strictly precedes shard reconstruction (SR-03).
 - Published artifacts built via PyPI trusted publishing (OIDC, no long-lived tokens).
 
+[0.3.11]: https://github.com/shacharm2/worthless/releases/tag/v0.3.11
 [0.3.10]: https://github.com/shacharm2/worthless/releases/tag/v0.3.10
 [0.3.9]: https://github.com/shacharm2/worthless/releases/tag/v0.3.9
 [0.3.8]: https://github.com/shacharm2/worthless/releases/tag/v0.3.8.0
