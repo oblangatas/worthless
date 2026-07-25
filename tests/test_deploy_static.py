@@ -1551,6 +1551,7 @@ class TestReleaseFaninBehaviour:
             capture_output=True,
             text=True,
             check=False,
+            timeout=60,  # a hung fan-in must fail this test fast, never stall the whole suite
         )
         ready = None
         for line in out.read_text().splitlines():
