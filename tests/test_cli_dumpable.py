@@ -77,6 +77,48 @@ class TestDumpableApplied:
         monkeypatch.setattr(proc_mod._hardening, "get_dumpable", lambda: None)
         disable_core_dumps()  # must not raise
 
+    def test_non_linux_fails_closed_when_rlimit_did_not_apply(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Off-Linux the rlimit is the ONLY lever, so a failed setrlimit must not
+        be reported as success — that would leave the caller believing it is
+        protected when nothing was applied at all."""
+        from worthless.cli import process as proc_mod
+
+        monkeypatch.setattr(proc_mod.sys, "platform", "darwin")
+        monkeypatch.setattr(proc_mod, "_set_rlimit_core_zero", lambda: False)
+        monkeypatch.setattr(proc_mod._hardening, "set_dumpable_zero_or_log", lambda: None)
+        monkeypatch.setattr(proc_mod._hardening, "get_dumpable", lambda: None)
+
+        with pytest.raises(WorthlessError) as exc:
+            disable_core_dumps(strict=True)
+        assert exc.value.code is ErrorCode.CORE_DUMP_PROTECTION_FAILED
+
+    def test_windows_no_lever_does_not_abort_the_command(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Windows has no `resource` module and no dumpable bit — no lever exists,
+        so there is nothing to confirm. Raising here would hard-fail lock/unlock
+        on every native-Windows run (they have no fail_if_windows() guard)."""
+        from worthless.cli import process as proc_mod
+
+        monkeypatch.setattr(proc_mod, "resource", None)
+        monkeypatch.setattr(proc_mod.sys, "platform", "win32")
+        monkeypatch.setattr(proc_mod._hardening, "set_dumpable_zero_or_log", lambda: None)
+        monkeypatch.setattr(proc_mod._hardening, "get_dumpable", lambda: None)
+
+        disable_core_dumps(strict=True)  # must NOT raise
+
+    def test_rlimit_readback_confirms_not_just_the_call(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """setrlimit succeeding is not proof: the helper must read the limit back."""
+        from worthless.cli import process as proc_mod
+
+        monkeypatch.setattr(proc_mod.resource, "setrlimit", lambda *_a: None)
+        monkeypatch.setattr(proc_mod.resource, "getrlimit", lambda *_a: (1024, 1024))
+        assert proc_mod._set_rlimit_core_zero() is False
+
     def test_linux_none_fails_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """F1: on Linux, None means the setter never ran (libc unreachable) — a
         known failure on a platform that HAS the bit, not 'indeterminate'. Must
