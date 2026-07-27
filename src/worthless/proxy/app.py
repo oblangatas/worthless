@@ -363,6 +363,14 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
     # never inflate the real-traffic meter and a real-traffic burst can
     # never fake a probe pass.
     app.state.bind_probe_count = 0
+    # worthless-ax9d: real-traffic meter. Counted in the forward path, NOT read
+    # off ``spend_log`` — that is the BILLING ledger, and a request the provider
+    # rejects is deliberately never billed (see the refund branch in
+    # ``_do_record_spend``). Deriving "requests proxied" from it made ``worthless
+    # status`` report 0 while every request was in fact being proxied correctly
+    # and the provider was refusing them. Same in-memory lifecycle as
+    # ``bind_probe_count`` above: per-process, resets on restart.
+    app.state.requests_proxied = 0
     # WOR-650 follow-up: per-alias probe counts. The global counter above moves
     # on *any* probe — a probe for alias X ticks it just as well as one for
     # alias Y. Recording per-alias lets ``worthless lock`` tell which alias a
@@ -394,15 +402,19 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
         not sensitive (already visible via ``ps``/``lsof`` to anyone on the
         host) and must never be forwarded into audit streams.
         """
-        count = 0
+        billed = 0
         try:
             db: aiosqlite.Connection = request.app.state.db
             async with db.execute("SELECT COUNT(*) FROM spend_log") as cursor:
                 row = await cursor.fetchone()
                 if row:
-                    count = row[0]
+                    billed = row[0]
         except Exception:  # noqa: S110 — spend_log may not exist yet  # nosec B110
             pass
+        # worthless-ax9d: ``requests_proxied`` is the forward-path meter, not the
+        # billing ledger. ``spend_log`` is still surfaced — as ``requests_billed``,
+        # which is what it has always actually counted.
+        requests_proxied = getattr(request.app.state, "requests_proxied", 0)
         # Expose the listening process PID so the CLI can write the
         # authoritative PID — the process actually bound to the port —
         # rather than whatever Popen returned on this platform.
@@ -414,7 +426,8 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
         bind_probe_count = getattr(request.app.state, "bind_probe_count", 0)
         body: dict[str, object] = {
             "status": "ok",
-            "requests_proxied": count,
+            "requests_proxied": requests_proxied,
+            "requests_billed": billed,
             "pid": os.getpid(),
             "bind_probe_count": bind_probe_count,
         }
@@ -694,6 +707,12 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
 
                 try:
                     upstream_resp = await httpx_client.send(upstream_req, stream=True)
+                    # worthless-ax9d: gated, reconstructed, forwarded, answered —
+                    # that is a proxied request. Whether the provider replied 200
+                    # or 401 is the billing ledger's business, not this meter's.
+                    request.app.state.requests_proxied = (
+                        getattr(request.app.state, "requests_proxied", 0) + 1
+                    )
                 except httpx.TimeoutException:
                     await _release_reservations()
                     return _make_gateway_response(504, "gateway timeout")
