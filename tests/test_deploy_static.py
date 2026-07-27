@@ -1378,7 +1378,10 @@ class TestReleaseNotesGuardrails:
     structurally unable to (a) mint a tag — ``gh release create`` creates an
     unsigned tag if one is absent, which fails the GPG gate AND tombstones the
     version name permanently — or (b) execute attacker-pushable tag content while
-    that token is live. These are the security-signed-off guardrails F1-F8.
+    that token is live. Each test below pins one security-signed-off guardrail;
+    they are described inline rather than by number, because `.github/` already
+    uses an unrelated F-numbering (docker-security.yml) and the collision misled
+    more than the shorthand saved.
     """
 
     @staticmethod
@@ -1410,15 +1413,59 @@ class TestReleaseNotesGuardrails:
 
     def test_fires_only_on_a_pushed_v_tag(self, release_notes_data: dict):
         # F2: workflow_run inherits the triggering event; anything but a real tag
-        # push must be refused before the signed-tag verify is reachable.
-        cond = self._job(release_notes_data)["if"]
+        # push must be refused before the signed-tag verify is reachable. The gate
+        # job is the entry point, and the privileged job hangs off it.
+        cond = release_notes_data["jobs"]["gate"]["if"]
         assert "workflow_run.event == 'push'" in cond
         assert "head_branch, 'v'" in cond
+        assert self._job(release_notes_data).get("needs") == "gate"
+
+    def test_approval_is_requested_once_not_per_publisher(self, release_notes_data: dict):
+        """The environment gate must NOT sit on a job that runs every firing.
+
+        This workflow fires on each of four publisher completions. `environment:`
+        prompts a required reviewer before a job's first step, so an environment on
+        the every-firing job would ask for approval up to four times per release —
+        the opposite of "push a signed tag and walk away". Only the job guarded by
+        the fan-in verdict may carry it.
+        """
+        gate = release_notes_data["jobs"]["gate"]
+        assert "environment" not in gate, (
+            "the every-firing gate job must not carry `environment:` — it would "
+            "prompt for approval on every publisher completion."
+        )
+        assert gate["permissions"].get("contents") == "read"
+        assert self._job(release_notes_data)["if"] == "needs.gate.outputs.ready == 'true'"
 
     def test_reverifies_the_signed_tag_independently(self, release_notes_data: dict):
-        # F5: highest-privilege job fails closed on its own rather than trusting
-        # that the publishers already verified (same precedent as deploy-worker.yml).
-        assert "verify-tag.sh" in self._runs(release_notes_data)
+        """F5: the privileged job re-verifies the GPG signature itself.
+
+        Non-vacuous on purpose. The first version of this test only asserted that
+        the string "verify-tag.sh" appeared somewhere, which passed while the tag
+        was handed over via GITHUB_REF_NAME — an assignment GitHub silently
+        DISCARDS for GITHUB_*-prefixed names, so the script verified "main",
+        failed closed, and no Release could ever be created. Assert the override
+        actually reaches the script under a usable name.
+        """
+        step = next(
+            s
+            for s in self._job(release_notes_data)["steps"]
+            if "verify-tag.sh" in str(s.get("run", ""))
+        )
+        env = step.get("env", {})
+        assert "GITHUB_REF_NAME" not in env, (
+            "GitHub ignores assignments to GITHUB_*-prefixed variables, so this "
+            "override never arrives and verify-tag.sh checks the default branch."
+        )
+        ref = env.get("VERIFY_TAG_REF", "")
+        assert "workflow_run.head_branch" in ref, (
+            f"the tag under verification must come from the triggering event; got {ref!r}"
+        )
+        # ...and the script must actually honour that variable.
+        verify_sh = (REPO_ROOT / ".github" / "scripts" / "verify-tag.sh").read_text()
+        assert "VERIFY_TAG_REF" in verify_sh, (
+            "verify-tag.sh does not read VERIFY_TAG_REF — the override is inert."
+        )
 
     def test_cannot_mint_a_tag(self, release_notes_data: dict):
         # F1: --verify-tag aborts unless the git tag already exists; --target would
@@ -1569,14 +1616,20 @@ class TestReleaseFaninBehaviour:
         assert rc == 0
 
     def test_query_shape_holds_against_the_real_github_api(self, tmp_path):
-        """Run the fan-in against the LIVE API for v0.3.10 — a shipped release
-        where all four publishers really did succeed.
+        """Run the fan-in against the LIVE API and assert it reaches a verdict.
 
         The fake-`gh` tests above pin the decision logic but drive a stub, so they
         were blind to the bug that actually mattered: `gh api -f` silently switches
         to POST, there is no POST route for .../runs, it 404s, and under `set -e`
-        the whole script aborts — no Release, on any tag, ever. Only a real call
-        catches that class. Read-only; creates nothing.
+        the whole script aborts — no Release, on any tag, ever.
+
+        Asserts REACHING a verdict, not which verdict. A bad query shape aborts
+        mid-loop and never writes `ready=`, so absence of a verdict is the signal.
+        Deliberately NOT asserting ready=="true" against a pinned release: GitHub
+        expires workflow-run records (90 days by default), which would turn this
+        into a test that goes red on a calendar date for reasons unrelated to the
+        code. An expired tag simply yields ready=false — still a verdict, still a
+        pass. Read-only; creates nothing.
         """
         if shutil.which("gh") is None:
             pytest.skip("gh CLI not installed")
@@ -1585,25 +1638,34 @@ class TestReleaseFaninBehaviour:
         )
         if probe.returncode != 0:
             pytest.skip("no authenticated/reachable GitHub API from this environment")
-        sha = subprocess.run(
-            ["git", "rev-list", "-n", "1", "v0.3.10"],
+        slug = subprocess.run(
+            ["gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
             cwd=REPO_ROOT,
             capture_output=True,
             text=True,
             timeout=60,
             check=False,
         )
-        if sha.returncode != 0 or not sha.stdout.strip():
-            pytest.skip("tag v0.3.10 not present locally (shallow clone?)")
+        if slug.returncode != 0 or not slug.stdout.strip():
+            pytest.skip("cannot resolve the repository slug from gh")
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
 
         out = tmp_path / "gh_output"
         out.touch()
         env = {
             **os.environ,
             "GITHUB_OUTPUT": str(out),
-            "GH_REPO": "oblangatas/worthless",
+            "GH_REPO": slug.stdout.strip(),
+            # Any plausible tag works: we are exercising the QUERY, not a release.
             "TAG": "v0.3.10",
-            "HEAD_SHA": sha.stdout.strip(),
+            "HEAD_SHA": head.stdout.strip(),
         }
         proc = subprocess.run(
             ["bash", str(REPO_ROOT / ".github" / "scripts" / "release-fanin.sh")],
@@ -1617,13 +1679,14 @@ class TestReleaseFaninBehaviour:
         for line in out.read_text().splitlines():
             if line.startswith("ready="):
                 ready = line.split("=", 1)[1]
-        assert proc.returncode == 0, (
-            "fan-in errored against the real API — the query shape regressed "
-            f"(this is how the POST/404 bug presented):\n{proc.stdout}\n{proc.stderr}"
+        combined = f"{proc.stdout}\n{proc.stderr}"
+        assert ready in ("true", "false"), (
+            "fan-in never reached a verdict against the real API — it aborted "
+            "mid-query, which is exactly how the POST/404 bug presented. "
+            f"ready={ready!r}\n{combined}"
         )
-        assert ready == "true", (
-            "v0.3.10 shipped with all four publishers green, so the real API must "
-            f"yield ready=true; got {ready!r}.\n{proc.stdout}"
+        assert "404" not in combined and "Not Found" not in combined, (
+            f"real API rejected the fan-in's request shape:\n{combined}"
         )
 
     def test_a_failed_leg_holds_the_release_and_fails_loud(self, tmp_path):

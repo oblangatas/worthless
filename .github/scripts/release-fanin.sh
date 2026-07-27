@@ -10,11 +10,12 @@
 # stale/older run can't satisfy the gate.
 #
 # Three states per publisher, not two:
-#   * a SUCCESS run exists                     → this leg is done.
-#   * a run FINISHED without success           → this leg failed. `status=="completed"
-#     (failure/cancelled/timed_out/startup_failure/skipped/stale/neutral/…)   && conclusion!="success"` catches EVERY terminal
-#                                                  non-success, not a hand-listed few.
-#   * only in-progress/queued runs, or none    → still waiting; a later firing decides.
+#   * a SUCCESS run exists                  → this leg is done.
+#   * a run finished WITHOUT success        → this leg failed. Matching on
+#     `status=="completed" && conclusion!="success"` catches every terminal
+#     non-success (failure, cancelled, timed_out, startup_failure, skipped,
+#     stale, neutral, …) rather than a hand-listed few that silently misses one.
+#   * only in-progress/queued runs, or none → still waiting; a later firing decides.
 #
 # A finished-without-success leg makes this script exit 1 so the release-notes run
 # goes RED and GitHub actually notifies the maintainer — a held release must never

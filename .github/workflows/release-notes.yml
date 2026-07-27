@@ -49,13 +49,51 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  create-release:
+  # Split in two on purpose. This workflow fires on EVERY publisher completion
+  # (up to four times per tag), but `environment:` requests reviewer approval
+  # before a job's first step runs — so putting the environment on a job that
+  # runs every firing would prompt the maintainer up to four times per release,
+  # which is the opposite of "push a signed tag and walk away". The unprivileged
+  # gate runs every firing; the protected job runs only on the firing where all
+  # four publishers are green, so approval is requested exactly once.
+  gate:
     # F2: only real tag pushes. workflow_run inherits the triggering event, so a
     # non-push (e.g. a manual dispatch on some publisher) or a non-tag branch is
     # refused here — the signed-tag verify below is not reachable off this path.
     if: >-
       github.event.workflow_run.event == 'push' &&
       startsWith(github.event.workflow_run.head_branch, 'v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # No contents:write and no environment — this job only READS run status.
+    permissions:
+      contents: read
+      actions: read # read sibling publishers' run status (fan-in)
+    outputs:
+      ready: ${{ steps.fanin.outputs.ready }}
+    env:
+      TAG: ${{ github.event.workflow_run.head_branch }}
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      # F4: check out the DEFAULT BRANCH, not the tag — every script run here is
+      # trusted repo code, never attacker-pushable tag content.
+      - name: Checkout default branch (trusted scripts only)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      # ready=true only when all four publishers succeeded for this exact sha.
+      # A leg that finished without success exits non-zero here, so the run goes
+      # red and the maintainer is actually notified.
+      - name: Require all four publishers green for this tag
+        id: fanin
+        run: bash .github/scripts/release-fanin.sh
+
+  create-release:
+    needs: gate
+    if: needs.gate.outputs.ready == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # F3: the Release-creating job holds the ONLY contents:write in this workflow,
@@ -65,50 +103,43 @@ jobs:
     environment: release
     permissions:
       contents: write # create the Release
-      actions: read # read sibling publishers' run status (fan-in)
     env:
       TAG: ${{ github.event.workflow_run.head_branch }}
-      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
-      # F4: check out the DEFAULT BRANCH, not the tag. Every script executed below
-      # (fan-in, verify-tag, extract_changelog) is therefore trusted repo code, not
-      # attacker-pushable tag content. The tag supplies only the signed tag object
-      # (verified) and its CHANGELOG text (piped as data). fetch-depth: 0 so the
-      # tag's commit is reachable; persist-credentials: false — no token on disk.
+      # F4: default branch again — the scripts below (verify-tag, extract_changelog)
+      # must be trusted code while contents:write is live. The tag supplies only the
+      # signed tag object (verified) and its CHANGELOG text (piped as data).
+      # fetch-depth: 0 so the tag's commit is reachable.
       - name: Checkout default branch (trusted scripts only)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      # Fan-in: ready=true only when all four publishers succeeded for this tag.
-      - name: Require all four publishers green for this tag
-        id: fanin
-        run: bash .github/scripts/release-fanin.sh
-
       # Bring the signed tag object local so verify-tag.sh and `git show` can read
       # it (public repo → unauthenticated fetch; no credentials needed).
       - name: Fetch the signed tag object
-        if: steps.fanin.outputs.ready == 'true'
         run: git fetch --no-tags origin "refs/tags/${TAG}:refs/tags/${TAG}"
 
       # F5: re-verify the maintainer GPG signature independently. This is the
       # highest-privilege job, so it fails closed on its own rather than trusting
-      # that the publishers already verified. verify-tag.sh reads GITHUB_REF_NAME —
-      # set it to the tag (on workflow_run, github.ref_name is the default branch).
+      # that the publishers already verified.
+      #
+      # VERIFY_TAG_REF, not GITHUB_REF_NAME: this job runs on the default branch
+      # (workflow_run), so the natural GITHUB_REF_NAME is "main" — and GitHub
+      # SILENTLY IGNORES assignments to GITHUB_*-prefixed variables, so overriding
+      # it would leave verify-tag.sh checking the wrong ref and failing closed.
       - name: Re-verify the tag GPG signature
-        if: steps.fanin.outputs.ready == 'true'
         env:
           MAINTAINER_PUBKEY: ${{ vars.MAINTAINER_GPG_PUBKEY }}
           MAINTAINER_FINGERPRINT: ${{ vars.MAINTAINER_GPG_FINGERPRINT }}
-          GITHUB_REF_NAME: ${{ github.event.workflow_run.head_branch }}
+          VERIFY_TAG_REF: ${{ github.event.workflow_run.head_branch }}
         run: bash .github/scripts/verify-tag.sh
 
       # F8: idempotent — if a prior firing already created the Release, do nothing.
       - name: Does the Release already exist?
-        if: steps.fanin.outputs.ready == 'true'
         id: exists
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
@@ -122,7 +153,7 @@ jobs:
       # event's head_branch); no --target, so the Release can't point at an
       # arbitrary commit.
       - name: Create the GitHub Release
-        if: steps.fanin.outputs.ready == 'true' && steps.exists.outputs.exists == 'false'
+        if: steps.exists.outputs.exists == 'false'
         run: |
           VERSION="${TAG#v}"
           case "$TAG" in

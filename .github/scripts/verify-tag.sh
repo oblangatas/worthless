@@ -5,7 +5,15 @@
 # Reads from environment:
 #   MAINTAINER_PUBKEY      — ASCII-armored public key (repo Variable)
 #   MAINTAINER_FINGERPRINT — 40-char hex fingerprint (repo Variable)
-#   GITHUB_REF_NAME        — tag to verify (set automatically by GHA)
+#   GITHUB_REF_NAME        — tag to verify (set automatically by GHA on a tag push)
+#   VERIFY_TAG_REF         — explicit override, wins over GITHUB_REF_NAME
+#
+# Why the override exists: a `workflow_run` job runs on the DEFAULT BRANCH, so
+# GITHUB_REF_NAME is "main", not the tag — such a caller must state the tag
+# itself. It cannot do that by setting GITHUB_REF_NAME, because GitHub ignores
+# assignments to GITHUB_*-prefixed variables ("Default environment variables";
+# the assignment is silently discarded), which would leave this script verifying
+# the wrong ref and failing closed. Hence a non-reserved name. WOR-846.
 #
 # Defense layers (each fails closed):
 #   1. Both Variables must be set.
@@ -30,6 +38,12 @@
 # .github/workflows/verify-tag-test.yml).
 
 set -euo pipefail
+
+TAG_REF="${VERIFY_TAG_REF:-${GITHUB_REF_NAME:-}}"
+if [ -z "${TAG_REF}" ]; then
+  echo "::error title=No tag to verify::Neither VERIFY_TAG_REF nor GITHUB_REF_NAME is set; nothing to verify."
+  exit 1
+fi
 
 if [ -z "${MAINTAINER_PUBKEY:-}" ] || [ -z "${MAINTAINER_FINGERPRINT:-}" ]; then
   echo "::error title=Missing maintainer trust anchors::Both MAINTAINER_GPG_PUBKEY and MAINTAINER_GPG_FINGERPRINT repo Variables must be set. See workers/worthless-sh/DEPLOY.md §'Set up signed tags'."
@@ -76,9 +90,9 @@ fi
 # Pin gpg.program defensively: a future runner image change could ship
 # a wrapper or alternative gpg path; we want git to invoke the same
 # gpg (and inherit our GNUPGHOME) as we used for import.
-if ! git -c gpg.program=gpg verify-tag "${GITHUB_REF_NAME}"; then
-  echo "::error title=Unsigned or untrusted tag::Tag ${GITHUB_REF_NAME} did not verify against MAINTAINER_GPG_PUBKEY (fingerprint ${NORMALIZED_FINGERPRINT})."
+if ! git -c gpg.program=gpg verify-tag "${TAG_REF}"; then
+  echo "::error title=Unsigned or untrusted tag::Tag ${TAG_REF} did not verify against MAINTAINER_GPG_PUBKEY (fingerprint ${NORMALIZED_FINGERPRINT})."
   exit 1
 fi
 
-echo "Tag ${GITHUB_REF_NAME} verified against pinned fingerprint ${NORMALIZED_FINGERPRINT}."
+echo "Tag ${TAG_REF} verified against pinned fingerprint ${NORMALIZED_FINGERPRINT}."
