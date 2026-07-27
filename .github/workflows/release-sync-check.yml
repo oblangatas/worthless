@@ -33,7 +33,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Check out repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v6
         with:
           # Need full tag history for `git show <tag>:install.sh`.
           fetch-depth: 0
@@ -41,7 +41,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Python (for tomllib + JSON parsing)
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.13"
 
