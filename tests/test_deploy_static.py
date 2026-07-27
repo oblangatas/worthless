@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 
@@ -1566,6 +1567,64 @@ class TestReleaseFaninBehaviour:
         ready, rc, _ = self._run(tmp_path, self.ALL_GREEN)
         assert ready == "true"
         assert rc == 0
+
+    def test_query_shape_holds_against_the_real_github_api(self, tmp_path):
+        """Run the fan-in against the LIVE API for v0.3.10 — a shipped release
+        where all four publishers really did succeed.
+
+        The fake-`gh` tests above pin the decision logic but drive a stub, so they
+        were blind to the bug that actually mattered: `gh api -f` silently switches
+        to POST, there is no POST route for .../runs, it 404s, and under `set -e`
+        the whole script aborts — no Release, on any tag, ever. Only a real call
+        catches that class. Read-only; creates nothing.
+        """
+        if shutil.which("gh") is None:
+            pytest.skip("gh CLI not installed")
+        probe = subprocess.run(
+            ["gh", "api", "/rate_limit"], capture_output=True, text=True, timeout=60, check=False
+        )
+        if probe.returncode != 0:
+            pytest.skip("no authenticated/reachable GitHub API from this environment")
+        sha = subprocess.run(
+            ["git", "rev-list", "-n", "1", "v0.3.10"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        if sha.returncode != 0 or not sha.stdout.strip():
+            pytest.skip("tag v0.3.10 not present locally (shallow clone?)")
+
+        out = tmp_path / "gh_output"
+        out.touch()
+        env = {
+            **os.environ,
+            "GITHUB_OUTPUT": str(out),
+            "GH_REPO": "oblangatas/worthless",
+            "TAG": "v0.3.10",
+            "HEAD_SHA": sha.stdout.strip(),
+        }
+        proc = subprocess.run(
+            ["bash", str(REPO_ROOT / ".github" / "scripts" / "release-fanin.sh")],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=120,
+        )
+        ready = None
+        for line in out.read_text().splitlines():
+            if line.startswith("ready="):
+                ready = line.split("=", 1)[1]
+        assert proc.returncode == 0, (
+            "fan-in errored against the real API — the query shape regressed "
+            f"(this is how the POST/404 bug presented):\n{proc.stdout}\n{proc.stderr}"
+        )
+        assert ready == "true", (
+            "v0.3.10 shipped with all four publishers green, so the real API must "
+            f"yield ready=true; got {ready!r}.\n{proc.stdout}"
+        )
 
     def test_a_failed_leg_holds_the_release_and_fails_loud(self, tmp_path):
         spec = self.ALL_GREEN.replace(
