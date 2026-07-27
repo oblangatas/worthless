@@ -129,3 +129,12 @@ echo "Monitor at: https://github.com/shacharm2/worthless/actions"
 echo
 echo "If a publisher fails, re-run just that workflow; the Release is held until"
 echo "all four are green, then created exactly once. (WOR-846)"
+echo
+echo "FALLBACK — if all four publishers are green but no Release appears after"
+echo "~10 minutes, the automation did not fire. Create it by hand (safe: the"
+echo "signed tag already exists, so this attaches to it and cannot tombstone):"
+if [ -n "$headline" ]; then
+    echo "  gh release create $tag --title \"$tag: $headline\" --verify-tag --generate-notes"
+else
+    echo "  gh release create $tag --title \"$tag: <headline>\" --verify-tag --generate-notes"
+fi
