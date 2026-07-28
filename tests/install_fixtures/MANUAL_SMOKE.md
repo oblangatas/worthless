@@ -127,3 +127,32 @@ content is the attack this pin is supposed to prevent.
 - [ ] All boxes ticked
 - [ ] Release tag pushed
 - [ ] Linear WOR-235 closed with PR + commit references
+
+---
+
+## Evidence record — v0.3.11 (2026-07-29)
+
+Gateway-lifecycle smoke (WOR-517) executed against the **deployed** `worthless.sh`
+Worker serving the published `0.3.11` pin. Run in a clean `python:3.12-slim`
+container (no pre-existing uv, worthless, or state), so it exercises the real
+hosted install path end-to-end rather than a checkout-local `install.sh`.
+
+Install: `curl -sSL https://worthless.sh | sh` → `worthless 0.3.11`; `verify` present.
+
+| Step | Expected | Observed |
+| --- | --- | --- |
+| `worthless verify` (gateway up, after lock) | GREEN, exit 0 | `GREEN — proxy is live and a request routed through it just now (alias: openai-…)`, exit 0 |
+| `worthless verify --json` | `verdict: green`, alias routed | `{"healthy": true, "verdict": "green", "aliases": [{"alias": "openai-…", "routed": true}], "reason": "routed"}` |
+| `worthless down` then `worthless verify` | RED, exit 73 | `RED — gateway is DOWN. Any agent still holding a cached token may be sending your key in the clear right now.`, exit 73 |
+
+**Adversarial case (the counter-that-lies trap).** With the real proxy stopped, an
+imposter HTTP server was bound to `127.0.0.1:8787` returning a healthy body with
+inflated cumulative counters (`requests_proxied: 99999`, `bind_probe_count: 4242`).
+A passive counter read would have reported GREEN here — this is the WOR-514 failure
+mode. Observed instead:
+
+    RED — the proxy answered but did NOT route the test request.
+          Your traffic may be bypassing Worthless right now.
+    exit 73   {"verdict": "red", "aliases": [{"routed": false}], "reason": "fail"}
+
+GREEN is therefore gated on a live probe delta, not on any self-reported count.
