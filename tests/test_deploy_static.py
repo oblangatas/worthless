@@ -1393,6 +1393,23 @@ class TestReleaseNotesGuardrails:
         steps = TestReleaseNotesGuardrails._job(data)["steps"]
         return "\n".join(str(s.get("run", "")) for s in steps)
 
+    @staticmethod
+    def _code(data: dict) -> str:
+        """The run: blocks with shell comments stripped.
+
+        Asserting a required flag against raw text is vacuous: the comments
+        explaining WHY a flag matters also contain the flag, so deleting it from
+        the command leaves the assertion green. TestGuardsCanActuallyFail caught
+        exactly that here. Anything checking "this flag must be present" has to
+        look at executable text only.
+        """
+        out = []
+        for line in TestReleaseNotesGuardrails._runs(data).splitlines():
+            if line.lstrip().startswith("#"):
+                continue
+            out.append(line.split(" #", 1)[0])
+        return "\n".join(out)
+
     def test_top_level_permissions_are_read_only(self, release_notes_data: dict):
         # F3: the write scope must be opted into per-job, never granted workflow-wide.
         assert release_notes_data.get("permissions") == {"contents": "read"}
@@ -1470,12 +1487,12 @@ class TestReleaseNotesGuardrails:
     def test_cannot_mint_a_tag(self, release_notes_data: dict):
         # F1: --verify-tag aborts unless the git tag already exists; --target would
         # let the Release point at an arbitrary commit.
-        runs = self._runs(release_notes_data)
-        assert "--verify-tag" in runs, (
+        code = self._code(release_notes_data)
+        assert "--verify-tag" in code, (
             "gh release create must pass --verify-tag — without it, a missing tag is "
             "silently created UNSIGNED and the version name is tombstoned forever."
         )
-        assert "--target" not in runs, "no --target: the Release must follow the signed tag only"
+        assert "--target" not in code, "no --target: the Release must follow the signed tag only"
 
     def test_runs_no_untrusted_tag_content(self, release_notes_data: dict):
         # F4: the job checks out the default branch and runs only trusted scripts.
@@ -1531,8 +1548,22 @@ class TestReleaseNotesGuardrails:
         # only exists for GET, so without -X GET it 404s and (under set -e) the
         # whole fan-in aborts — no Release, ever. Verified live on v0.3.10. Pin it
         # so a future "cleanup" can't drop the flag and silently break every release.
-        text = RELEASE_FANIN_SCRIPT.read_text()
-        assert "-X GET" in text, "fan-in gh api call must force GET (see comment in the script)"
+        # Check the COMMAND, not the file text: the script's own comment says
+        # "Do not remove -X GET", so a whole-file grep passes even after the flag
+        # is deleted from the call — the guard was vacuous until TestGuardsCanActuallyFail
+        # caught it. Assert on the executable line only.
+        code = [
+            line.split("#", 1)[0]
+            for line in RELEASE_FANIN_SCRIPT.read_text().splitlines()
+            if not line.lstrip().startswith("#")
+        ]
+        api_calls = [line for line in code if "gh api" in line]
+        assert api_calls, "fan-in must call `gh api` to poll publisher status"
+        for call in api_calls:
+            assert "-X GET" in call, (
+                "the gh api call must force GET — without it `-f` fields make gh "
+                f"POST, the runs endpoint 404s, and the fan-in aborts:\n  {call.strip()}"
+            )
 
     def test_changelog_extraction_picks_one_section(self):
         sample = (
@@ -1759,4 +1790,204 @@ class TestInstallPinMatchesPyproject:
             f"install.sh pin {pin!r} != pyproject version {version!r}. "
             "The default `curl | sh` must install the version this repo ships — "
             "bump them together (scripts/bump-version.sh)."
+        )
+
+
+# ------------------------------------------------------------------
+# Meta-guards: catch the class of defect CI kept missing (WOR-846)
+#
+# Three times on this workstream a fully green suite hid a defect that made the
+# feature non-functional: `gh api -f` silently switching to POST, an assertion
+# that could not fail, and an env override GitHub discards. None were catchable
+# by the tests themselves — they need tests ABOUT the tests and about the
+# platform's rules.
+# ------------------------------------------------------------------
+
+
+# Variables GitHub sets automatically for every job. Assigning any of these in an
+# `env:` block is silently IGNORED, so the value you think you passed never
+# arrives. GITHUB_TOKEN is deliberately absent: it is NOT auto-provided, so
+# passing it explicitly is both legal and the documented convention.
+GITHUB_AUTOSET_ENV_VARS = frozenset(
+    {
+        "GITHUB_ACTION",
+        "GITHUB_ACTIONS",
+        "GITHUB_ACTOR",
+        "GITHUB_API_URL",
+        "GITHUB_BASE_REF",
+        "GITHUB_ENV",
+        "GITHUB_EVENT_NAME",
+        "GITHUB_EVENT_PATH",
+        "GITHUB_HEAD_REF",
+        "GITHUB_JOB",
+        "GITHUB_OUTPUT",
+        "GITHUB_PATH",
+        "GITHUB_REF",
+        "GITHUB_REF_NAME",
+        "GITHUB_REF_TYPE",
+        "GITHUB_REPOSITORY",
+        "GITHUB_REPOSITORY_OWNER",
+        "GITHUB_RUN_ATTEMPT",
+        "GITHUB_RUN_ID",
+        "GITHUB_RUN_NUMBER",
+        "GITHUB_SERVER_URL",
+        "GITHUB_SHA",
+        "GITHUB_STEP_SUMMARY",
+        "GITHUB_WORKFLOW",
+        "GITHUB_WORKSPACE",
+    }
+)
+
+
+class TestNoWorkflowOverridesAutosetVars:
+    """No workflow may assign a variable GitHub sets automatically.
+
+    Regression guard for the WOR-846 blocker: release-notes.yml passed the tag to
+    verify-tag.sh as ``GITHUB_REF_NAME``. GitHub discards assignments to its own
+    default variables, so the script kept reading the default branch, failed
+    closed, and no Release could ever be created — while actionlint, zizmor and
+    37 CI checks all stayed green. A one-second check catches the whole class.
+    """
+
+    def test_no_workflow_assigns_an_autoset_variable(self):
+        offenders: list[str] = []
+
+        def walk(node, path: str, wf: str) -> None:
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    if key == "env" and isinstance(value, dict):
+                        for name in value:
+                            if str(name) in GITHUB_AUTOSET_ENV_VARS:
+                                offenders.append(f"{wf}{path}.env.{name}")
+                    walk(value, f"{path}.{key}", wf)
+            elif isinstance(node, list):
+                for i, value in enumerate(node):
+                    walk(value, f"{path}[{i}]", wf)
+
+        workflow_dir = REPO_ROOT / ".github" / "workflows"
+        for wf in sorted(workflow_dir.glob("*.yml")):
+            walk(yaml.safe_load(wf.read_text()), "", wf.name)
+
+        assert not offenders, (
+            "these assignments are silently ignored by GitHub, so the value never "
+            "reaches the step — use a non-reserved name (e.g. VERIFY_TAG_REF):\n  "
+            + "\n  ".join(offenders)
+        )
+
+
+# Each entry: (label, file, find, replace, the guard test that MUST then fail).
+# Adding a security guard to TestReleaseNotesGuardrails without adding a mutation
+# here is how a vacuous assertion slips in — twice already on this workstream.
+GUARD_MUTATIONS = [
+    (
+        "drop --verify-tag (job could mint an unsigned tag)",
+        ".github/workflows/release-notes.yml",
+        # Anchor on the command, not the comment above it that also names the flag.
+        "--verify-tag $NOTES",
+        "$NOTES",
+        "test_cannot_mint_a_tag",
+    ),
+    (
+        "pass the tag via a variable GitHub ignores",
+        ".github/workflows/release-notes.yml",
+        "VERIFY_TAG_REF:",
+        "GITHUB_REF_NAME:",
+        "test_reverifies_the_signed_tag_independently",
+    ),
+    (
+        "let the API call fall back to POST",
+        ".github/scripts/release-fanin.sh",
+        # Anchor on the call itself; the header comment also contains "-X GET".
+        '/runs" -X GET',
+        '/runs"',
+        "test_fanin_forces_get_on_the_api_call",
+    ),
+    (
+        "grant write at the workflow level",
+        ".github/workflows/release-notes.yml",
+        "permissions:\n  contents: read",
+        "permissions:\n  contents: write",
+        "test_top_level_permissions_are_read_only",
+    ),
+    (
+        "drop the protected environment",
+        ".github/workflows/release-notes.yml",
+        "    environment: release\n",
+        "",
+        "test_release_job_sits_behind_protected_environment",
+    ),
+    (
+        "check out the tag instead of the default branch",
+        ".github/workflows/release-notes.yml",
+        # Anchor on fetch-depth so this lands on the create-release checkout, not
+        # the gate job's — the guard inspects create-release.
+        "          fetch-depth: 0\n          persist-credentials: false",
+        "          fetch-depth: 0\n          ref: refs/tags/v9.9.9\n"
+        "          persist-credentials: false",
+        "test_runs_no_untrusted_tag_content",
+    ),
+]
+
+
+class TestGuardsCanActuallyFail:
+    """Every security guard must be provably capable of failing.
+
+    Twice on this workstream a guard was structurally incapable of failing and
+    passed on broken code: ``"ref:" not in str(dict)`` (a substring that can never
+    occur once a dict is stringified) and a bare grep for ``"verify-tag.sh"`` that
+    stayed green while the tag was handed over via a variable GitHub discards.
+    Both looked like coverage. Neither was.
+
+    So: mutate the thing each guard protects, and require the guard to go RED.
+    A guard that survives its own mutation is not protecting anything.
+    """
+
+    @pytest.mark.parametrize(
+        ("label", "rel_path", "find", "replace", "guard_test"),
+        [pytest.param(*m, id=m[4]) for m in GUARD_MUTATIONS],
+    )
+    def test_guard_fails_when_its_subject_is_broken(
+        self, tmp_path, label, rel_path, find, replace, guard_test
+    ):
+        # Work on a full copy so nothing mutates the real tree — safe under xdist.
+        shutil.copytree(REPO_ROOT / ".github", tmp_path / ".github")
+        (tmp_path / "tests").mkdir()
+        shutil.copy(Path(__file__), tmp_path / "tests" / Path(__file__).name)
+
+        target = tmp_path / rel_path
+        original = target.read_text()
+        assert find in original, (
+            f"mutation {label!r} no longer applies — {rel_path} does not contain "
+            f"{find!r}. Update GUARD_MUTATIONS to match the current code."
+        )
+        target.write_text(original.replace(find, replace, 1))
+
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                str(tmp_path / "tests" / Path(__file__).name),
+                # Exclude this harness: `-k <name>` also matches the parametrize
+                # id below, which would make the subprocess re-run the harness
+                # recursively (and mask the guard's own verdict).
+                "-k",
+                f"{guard_test} and not guard_fails_when",
+                "-p",
+                "no:randomly",
+                "-p",
+                "no:cacheprovider",
+                "-q",
+                "--no-header",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+        assert proc.returncode != 0, (
+            f"{guard_test} PASSED against a deliberately broken workflow "
+            f"({label}). The guard is vacuous — it asserts something that cannot "
+            f"fail, so it is not protecting the invariant it claims to.\n"
+            f"{proc.stdout[-2000:]}"
         )
