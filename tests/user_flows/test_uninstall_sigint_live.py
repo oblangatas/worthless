@@ -126,13 +126,21 @@ def test_real_ctrl_c_at_the_uninstall_prompt_cancels_cleanly(tmp_path: Path) -> 
             proc.wait(timeout=10)
 
     output = seen.decode(errors="replace").lower()
+    # The terminal wraps at the PTY width, so collapse whitespace before matching
+    # a phrase that could straddle a line break.
+    normalized = " ".join(output.split())
 
     assert "internal error" not in output, (
         "a real Ctrl+C still surfaces an internal error — the user cannot tell "
         f"whether their keys are safe. Full terminal output:\n{seen.decode(errors='replace')}"
     )
-    assert "cancel" in output, (
-        f"an aborted uninstall must say it was cancelled; got:\n{seen.decode(errors='replace')}"
+    # Pin the whole promise, not just the word "cancelled". A bare "cancel" match
+    # would also accept something like "cancelled after partial changes" — the very
+    # ambiguity this fix exists to remove, on the command that restores real API
+    # keys. The "nothing was changed" half is the safety guarantee.
+    assert "cancelled" in normalized and "nothing was changed" in normalized, (
+        "an aborted uninstall must confirm it cancelled AND that nothing changed; "
+        f"got:\n{seen.decode(errors='replace')}"
     )
     assert returncode == 0, f"cancelling is not a failure, but exited {returncode}"
     assert sentinel.exists(), "cancelling must not remove anything — the home was touched"
