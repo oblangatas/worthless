@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import ast
 import logging
-import resource
 import sys
 from pathlib import Path
 
@@ -44,12 +43,22 @@ import pytest
 from worthless.cli.errors import ErrorCode, WorthlessError
 from worthless.cli.process import disable_core_dumps
 
+try:
+    import resource
+except ImportError:  # native Windows has no rlimit at all
+    resource = None  # type: ignore[assignment]
+
 LINUX_ONLY = pytest.mark.skipif(sys.platform != "linux", reason="PR_SET_DUMPABLE is Linux-only")
+# Guards only the rlimit-specific tests. Deliberately NOT a module-level skip:
+# that would also skip test_windows_no_lever_does_not_abort_the_command, which is
+# the one test that most needs to run on Windows.
+NEEDS_RLIMIT = pytest.mark.skipif(resource is None, reason="no resource module (Windows)")
 
 
 class TestRlimitStillApplied:
     """The pre-existing RLIMIT_CORE behavior must not regress."""
 
+    @NEEDS_RLIMIT
     def test_sets_rlimit_core_to_zero(self) -> None:
         disable_core_dumps()
         assert resource.getrlimit(resource.RLIMIT_CORE) == (0, 0)
@@ -109,6 +118,7 @@ class TestDumpableApplied:
 
         disable_core_dumps(strict=True)  # must NOT raise
 
+    @NEEDS_RLIMIT
     def test_rlimit_readback_confirms_not_just_the_call(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -234,6 +244,7 @@ def test_key_holding_command_calls_disable_core_dumps(module: str) -> None:
     )
 
 
+@NEEDS_RLIMIT
 def test_rlimit_failure_does_not_stop_dumpable_hardening(monkeypatch: pytest.MonkeyPatch) -> None:
     """If setrlimit raises (some CI/sandbox), the PR_SET_DUMPABLE path must still run."""
     from worthless.cli import process as proc_mod
