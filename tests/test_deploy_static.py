@@ -1687,6 +1687,8 @@ class TestReleaseFaninBehaviour:
             timeout=60,
             check=False,
         )
+        if head.returncode != 0 or not head.stdout.strip():
+            pytest.skip("cannot resolve HEAD (not a git checkout?)")
 
         out = tmp_path / "gh_output"
         out.touch()
@@ -1954,6 +1956,47 @@ class TestGuardsCanActuallyFail:
         (tmp_path / "tests").mkdir()
         shutil.copy(Path(__file__), tmp_path / "tests" / Path(__file__).name)
 
+        def run_guard() -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pytest",
+                    str(tmp_path / "tests" / Path(__file__).name),
+                    # Exclude this harness: `-k <name>` also matches the parametrize
+                    # id below, which would make the subprocess re-run the harness
+                    # recursively (and mask the guard's own verdict).
+                    "-k",
+                    f"{guard_test} and not guard_fails_when",
+                    # -n0: the project's addopts carry `-n auto`, which a subprocess
+                    # inherits — spinning up xdist workers per mutation for a handful
+                    # of assertions. Serial is far faster here.
+                    "-n0",
+                    "-p",
+                    "no:randomly",
+                    "-p",
+                    "no:cacheprovider",
+                    "-q",
+                    "--no-header",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                check=False,
+            )
+
+        # CONTROL FIRST. Without this the harness is itself vacuous: a bare
+        # `returncode != 0` also accepts collection errors (2/3), "no tests
+        # collected" (5) and usage errors (4) — so a renamed guard, or a copied
+        # tree that cannot import, would make this green while proving nothing.
+        # Requiring green-then-red pins BOTH directions (CodeRabbit, PR #462).
+        control = run_guard()
+        assert control.returncode == 0 and "1 passed" in control.stdout, (
+            f"harness broken: {guard_test} did not run green against the UNMUTATED "
+            f"copy, so a red result below would prove nothing. Check the test name "
+            f"still exists and the copied tree imports.\n{control.stdout[-2000:]}"
+        )
+
         target = tmp_path / rel_path
         original = target.read_text()
         assert find in original, (
@@ -1962,35 +2005,9 @@ class TestGuardsCanActuallyFail:
         )
         target.write_text(original.replace(find, replace, 1))
 
-        proc = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "pytest",
-                str(tmp_path / "tests" / Path(__file__).name),
-                # Exclude this harness: `-k <name>` also matches the parametrize
-                # id below, which would make the subprocess re-run the harness
-                # recursively (and mask the guard's own verdict).
-                "-k",
-                f"{guard_test} and not guard_fails_when",
-                # -n0: the project's addopts carry `-n auto`, which a subprocess
-                # inherits — spinning up xdist workers per mutation for a handful
-                # of assertions. Serial is far faster here.
-                "-n0",
-                "-p",
-                "no:randomly",
-                "-p",
-                "no:cacheprovider",
-                "-q",
-                "--no-header",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=300,
-            check=False,
-        )
-        assert proc.returncode != 0, (
-            f"{guard_test} PASSED against a deliberately broken workflow "
+        proc = run_guard()
+        assert "1 failed" in proc.stdout, (
+            f"{guard_test} did not FAIL against a deliberately broken workflow "
             f"({label}). The guard is vacuous — it asserts something that cannot "
             f"fail, so it is not protecting the invariant it claims to.\n"
             f"{proc.stdout[-2000:]}"
