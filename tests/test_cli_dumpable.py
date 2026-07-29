@@ -95,6 +95,11 @@ class TestDumpableApplied:
         from worthless.cli import process as proc_mod
 
         monkeypatch.setattr(proc_mod.sys, "platform", "darwin")
+        # A lever must EXIST for this scenario to mean anything. On real Windows
+        # proc_mod.resource is None, which is the separate "no lever at all" case
+        # that correctly returns instead of raising — without this stand-in the
+        # test silently changes premise and fails there (caught on Windows CI).
+        monkeypatch.setattr(proc_mod, "resource", object())
         monkeypatch.setattr(proc_mod, "_set_rlimit_core_zero", lambda: False)
         monkeypatch.setattr(proc_mod._hardening, "set_dumpable_zero_or_log", lambda: None)
         monkeypatch.setattr(proc_mod._hardening, "get_dumpable", lambda: None)
