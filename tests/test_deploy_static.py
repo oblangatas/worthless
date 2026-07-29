@@ -1973,6 +1973,10 @@ class TestGuardsCanActuallyFail:
                 # recursively (and mask the guard's own verdict).
                 "-k",
                 f"{guard_test} and not guard_fails_when",
+                # -n0: the project's addopts carry `-n auto`, which a subprocess
+                # inherits — spinning up xdist workers per mutation for a handful
+                # of assertions. Serial is far faster here.
+                "-n0",
                 "-p",
                 "no:randomly",
                 "-p",
