@@ -105,6 +105,9 @@ jobs:
       contents: write # create the Release
     env:
       TAG: ${{ github.event.workflow_run.head_branch }}
+      # Carried through so the tag can be re-bound to the exact commit the gate
+      # validated — see the re-bind step below.
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
@@ -121,7 +124,25 @@ jobs:
       # Bring the signed tag object local so verify-tag.sh and `git show` can read
       # it (public repo → unauthenticated fetch; no credentials needed).
       - name: Fetch the signed tag object
-        run: git fetch --no-tags origin "refs/tags/${TAG}:refs/tags/${TAG}"
+        run: git fetch --no-tags --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
+
+      # The gate proved all four publishers succeeded FOR A SPECIFIC COMMIT, but
+      # everything after that works from the tag NAME. Those can diverge: the
+      # approval gate can hold this job for hours, and a re-tag (delete + re-sign
+      # + push, a routine hotfix move) repoints the name at a new commit whose
+      # publishers never ran. Approving the stale run would then cut a Release for
+      # unpublished code. Re-bind the name to the sha before trusting it.
+      - name: Re-bind the tag to the commit the gate validated
+        run: |
+          ACTUAL=$(git rev-list -n 1 "refs/tags/${TAG}")
+          if [ "$ACTUAL" != "$HEAD_SHA" ]; then
+            echo "::error title=Tag moved::${TAG} now points at ${ACTUAL}, but the"\
+                 "publishers were verified green for ${HEAD_SHA}. Refusing to create"\
+                 "a Release for a commit that was never published. Re-run the"\
+                 "publishers for the current tag."
+            exit 1
+          fi
+          echo "${TAG} still resolves to ${HEAD_SHA} — safe to release."
 
       # F5: re-verify the maintainer GPG signature independently. This is the
       # highest-privilege job, so it fails closed on its own rather than trusting

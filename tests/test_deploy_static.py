@@ -1515,6 +1515,25 @@ class TestReleaseNotesGuardrails:
             "must check out the default branch, not the tag — scripts executed here must be trusted"
         )
 
+    def test_rebinds_the_tag_to_the_validated_commit(self, release_notes_data: dict):
+        """The Release must be cut for the commit the gate actually validated.
+
+        The gate proves four publishers succeeded for a specific sha, but the rest
+        of the job works from the tag NAME. A re-tag during the approval wait
+        repoints that name at a commit whose publishers never ran, and approving
+        the stale run would publish notes for unpublished code.
+        """
+        job = self._job(release_notes_data)
+        assert "HEAD_SHA" in job.get("env", {}), (
+            "create-release must carry HEAD_SHA to re-bind the tag to the commit "
+            "the gate validated."
+        )
+        code = self._code(release_notes_data)
+        assert "rev-list" in code and "$HEAD_SHA" in code, (
+            "must compare the tag's current commit against the gate's HEAD_SHA "
+            "before creating the Release."
+        )
+
     def test_is_idempotent_across_repeat_firings(self, release_notes_data: dict):
         # F8: up to four publisher completions fire this workflow for one tag.
         assert "concurrency" in release_notes_data
@@ -1903,6 +1922,13 @@ GUARD_MUTATIONS = [
         '/runs" -X GET',
         '/runs"',
         "test_fanin_forces_get_on_the_api_call",
+    ),
+    (
+        "release a commit the publishers never ran",
+        ".github/workflows/release-notes.yml",
+        'ACTUAL=$(git rev-list -n 1 "refs/tags/${TAG}")',
+        'ACTUAL="$HEAD_SHA"',
+        "test_rebinds_the_tag_to_the_validated_commit",
     ),
     (
         "grant write at the workflow level",

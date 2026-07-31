@@ -127,12 +127,20 @@ echo "now running. Once all four pass, release-notes.yml creates the GitHub"
 echo "Release automatically from the CHANGELOG — no manual 'gh release create'."
 echo "Monitor at: https://github.com/shacharm2/worthless/actions"
 echo
-echo "If a publisher fails, re-run just that workflow; the Release is held until"
-echo "all four are green, then created exactly once. (WOR-846)"
+echo "YOU MUST APPROVE ONE STEP. Once all four publishers are green, the"
+echo "'Create GitHub Release' run pauses for review (the 'release' environment)."
+echo "Open Actions, find the waiting run, and click Review deployments → Approve."
+echo "The Release page appears right after. Until you approve, it will NOT appear"
+echo "— that is the gate working, not a failure."
 echo
-echo "FALLBACK — if all four publishers are green but no Release appears after"
-echo "~10 minutes, the automation did not fire. Create it by hand (safe: the"
-echo "signed tag already exists, so this attaches to it and cannot tombstone):"
+echo "If a publisher fails, re-run THAT RUN (Actions → the failed run → 'Re-run"
+echo "failed jobs'). Do not use 'Run workflow' — a manual dispatch is a different"
+echo "event and will not clear the gate. The Release is held until all four are"
+echo "green, then created exactly once. (WOR-846)"
+echo
+echo "FALLBACK — only if there is NO waiting run and no Release after ~15 min,"
+echo "the automation did not fire. Create it by hand (safe: the signed tag exists,"
+echo "so this attaches to it and cannot tombstone):"
 if [ -n "$headline" ]; then
     echo "  gh release create $tag --title \"$tag: $headline\" --verify-tag --generate-notes"
 else

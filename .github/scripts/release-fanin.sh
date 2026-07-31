@@ -43,7 +43,10 @@ for wf in $PUBLISHERS; do
     ready=false
     if [ "$bad" -ge 1 ]; then
       blocked=true
-      echo "::warning title=Release held::${wf} finished without success for ${TAG} — Release NOT created. Re-run that workflow to release."
+      # "Re-run failed jobs" on the ORIGINAL push run — not "Run workflow". A
+      # manual dispatch is a different event and is filtered out by `-f event=push`
+      # above, so it can never clear this gate.
+      echo "::warning title=Release held::${wf} finished without success for ${TAG} — Release NOT created. Open that run in Actions and use 'Re-run failed jobs' (a manual 'Run workflow' dispatch will NOT clear this gate)."
     else
       echo "::notice::${wf} has no successful run yet for ${TAG} — waiting for it to finish."
     fi
