@@ -241,7 +241,11 @@ def _upstream_host_ip(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Addres
         pass
     try:  # decimal / octal / hex / short IPv4 → canonical dotted form
         return ipaddress.ip_address(socket.inet_ntoa(socket.inet_aton(host)))
-    except OSError:
+    except (OSError, ValueError):
+        # ValueError as well as OSError: inet_aton raises ValueError (not
+        # OSError) on an embedded NUL, and _genuine_oc_base_url calls this
+        # BEFORE the guard runs — so an unhandled ValueError there would abort
+        # the lock with a traceback instead of a clean WRTLS-112 refusal.
         return None
 
 
