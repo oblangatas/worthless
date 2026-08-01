@@ -300,9 +300,8 @@ def _validate_upstream_base_url(url: str) -> None:
     if ip is None:
         # A DNS name, not an IP literal. Only reject the obvious local names;
         # we deliberately do NOT resolve DNS (rebinding makes it useless).
-        if host.rstrip(".").lower() == "localhost" or host.rstrip(".").lower().endswith(
-            ".localhost"
-        ):
+        name = host.rstrip(".").lower()
+        if name == "localhost" or name.endswith(".localhost"):
             _reject("resolves to localhost")
         return
     if (

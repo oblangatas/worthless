@@ -331,4 +331,10 @@ def test_relock_revalidates_carried_forward_upstream(
         "a tampered stored upstream was carried forward without re-validation; "
         f"the proxy would forward a live key to cloud metadata. output: {second.output}"
     )
-    assert _base_url(home_dir, alias) != "https://169.254.169.254/v1" or second.exit_code != 0
+    # NOT "the row is clean": the guard raises before any upsert, so the
+    # tampered row survives the refusal by design (re-lock refuses to
+    # PROPAGATE it; it does not remediate the DB — worthless-rzi1 owns that).
+    # What must hold is that the refusal is attributable to the tampered value.
+    assert "169.254.169.254" in second.output, (
+        f"the refusal must name the tampered upstream it rejected; output: {second.output}"
+    )
