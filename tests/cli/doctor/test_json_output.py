@@ -24,7 +24,7 @@ from worthless.cli.bootstrap import ensure_home
 from worthless.cli.commands import doctor as doctor_module
 
 
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner()
 
 
 @pytest.fixture

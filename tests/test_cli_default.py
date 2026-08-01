@@ -24,7 +24,7 @@ from worthless.cli.errors import ErrorCode, WorthlessError
 
 from tests.helpers import fake_anthropic_key, fake_openai_key
 
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner()
 
 
 # ---------------------------------------------------------------------------

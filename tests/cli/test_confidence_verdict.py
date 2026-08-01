@@ -34,7 +34,7 @@ from worthless.cli.scanner import ScanFinding
 from tests.cli.conftest import cli_invoke, lock_env
 
 # Stream-separating runner so we can assert "--json on stdout, prose on stderr".
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner()
 
 
 def _status(home: WorthlessHome, *args: str):

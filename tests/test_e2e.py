@@ -22,7 +22,7 @@ from worthless.storage.repository import ShardRepository
 from tests._fakes import WOR309_SUBPROCESS_FOLLOWUP
 from tests.helpers import fake_openai_key
 
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner()
 _WRAP_BIND_ATTEMPTS = 5
 _WRAP_BIND_COLLISION_MARKERS = (
     "couldn't bind port",

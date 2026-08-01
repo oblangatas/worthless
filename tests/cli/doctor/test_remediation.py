@@ -15,7 +15,7 @@ from worthless.cli.commands.doctor.checks._remediation import PLAYBOOKS
 from worthless.cli.commands.doctor.registry import ensure_registered
 from worthless.storage.repository import ShardRepository, StoredShard
 
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner()
 
 
 @pytest.fixture

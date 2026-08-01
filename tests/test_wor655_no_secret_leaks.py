@@ -55,7 +55,7 @@ from worthless.openclaw.errors import (
 
 from tests.helpers import fake_anthropic_key, fake_openai_key
 
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner()
 
 
 # ---------------------------------------------------------------------------

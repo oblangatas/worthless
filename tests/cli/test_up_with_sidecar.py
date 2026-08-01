@@ -471,7 +471,8 @@ class TestDaemonModeRejected:
             result = runner.invoke(app, ["up", "-d"])
 
         assert result.exit_code != 0
-        out = (result.stdout or "") + (str(result.exception) if result.exception else "")
+        # Console renders to stderr; `output` is the mixed stream (typer >=0.26).
+        out = (result.output or "") + (str(result.exception) if result.exception else "")
         # Must mention daemon and foreground in some form.
         assert "daemon" in out.lower()
         assert "foreground" in out.lower()

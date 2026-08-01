@@ -36,7 +36,7 @@ from worthless.storage.repository import ShardRepository, StoredShard
 
 from tests.helpers import fake_openai_key
 
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner()
 
 # Shared sentinel — all _collect_alias_issues unit tests use this so a future
 # signature change only needs updating here.

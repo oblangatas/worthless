@@ -40,10 +40,10 @@ from typer.testing import CliRunner
 from worthless.cli.app import app
 from worthless.cli.bootstrap import WorthlessHome
 
-# mix_stderr=False so result.stdout is PURE JSON: the one-time AS-IS warranty
+# click >=8.2 keeps stderr separate, so result.stdout is PURE JSON: the one-time AS-IS warranty
 # banner is written to stderr (notice.py), and a real agent reads --json off
 # stdout only. Mixing the streams would fold the banner into the JSON parse.
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner()
 
 
 def _lock_one(home_dir: WorthlessHome, tmp_path) -> None:
@@ -207,7 +207,7 @@ def test_doctor_text_mode_survives_missing_fernet_key(home_dir: WorthlessHome, t
     result = runner.invoke(app, ["doctor"], env={"WORTHLESS_HOME": str(home_dir.base_dir)})
 
     assert result.exit_code == 0, f"text doctor must exit 0 on a broken install: {result.output}"
-    # print_warning goes to stderr; the module runner is mix_stderr=False, so
+    # print_warning goes to stderr; click >=8.2 keeps it separate, so
     # combine both streams to assert on what the human actually sees.
     out = (result.stdout + (result.stderr or "")).lower()
     assert "wrtls-102" not in out, f"text doctor crashed on a missing key: {out}"

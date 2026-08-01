@@ -400,7 +400,7 @@ def test_lock_writes_shard_a_not_stable_token_to_openclaw(tmp_path: Path) -> Non
     api_key = "sk-locktest-openclaw-apikey-abcdef01"
     env_file.write_text(f"OPENAI_API_KEY={api_key}\n")
 
-    runner = CliRunner(mix_stderr=False)
+    runner = CliRunner()
     worthless_home_env = {"WORTHLESS_HOME": str(home_dir.base_dir)}
 
     # Run lock — writes openclaw.json via apply_lock

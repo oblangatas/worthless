@@ -24,7 +24,7 @@ from worthless.cli.app import app
 from worthless.cli.code_scanner import scan_for_hardcoded_provider_urls
 from worthless.openclaw.integration import OpenclawApplyResult, apply_lock
 
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner()
 
 
 def _strip_ansi(s: str) -> str:

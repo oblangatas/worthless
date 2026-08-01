@@ -35,9 +35,9 @@ from tests.helpers import fake_openai_key
 _SCAN_FN = "worthless.cli.commands.lock.scan_for_hardcoded_provider_urls"
 _IS_TTY = "worthless.cli.commands.lock._scan_prompt_is_tty"
 
-# mix_stderr=False: lock's console (print_success/print_warning) → result.stderr
+# click >=8.2 keeps stderr separate: lock's console (print_success/print_warning) → result.stderr
 # typer.confirm prompt text → result.output (stdout)
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner()
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +135,9 @@ class TestLockScanPromptHappyFlow:
             )
 
         assert result.exit_code == 0
-        assert "OPENAI_BASE_URL" not in result.output
+        # typer >=0.26: `output` is stdout+stderr mixed; `stdout` is the
+        # stdout-only stream this assertion has always meant.
+        assert "OPENAI_BASE_URL" not in result.stdout
 
     def test_clean_project_no_prompt(self, home_dir: WorthlessHome, tmp_path: Path) -> None:
         """Zero findings → no prompt, no scan noise whatsoever."""
@@ -507,7 +509,7 @@ class TestPostLockCollapseTests:
 
         assert result.exit_code == 0
         assert "OPENAI_BASE_URL" in result.stderr
-        assert "[OK]" in result.stderr  # console writes to stderr with mix_stderr=False
+        assert "[OK]" in result.stderr  # console writes to stderr, kept separate by click >=8.2
 
 
 # ---------------------------------------------------------------------------

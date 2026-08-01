@@ -11,10 +11,11 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
-import click.testing
 import pytest
 import typer.testing
+from typer.core import TyperGroup
 
 from worthless.cli.app import app
 
@@ -30,11 +31,11 @@ def skill_content() -> str:
 
 
 @pytest.fixture(scope="module")
-def registered_commands() -> dict[str, click.Command]:
+def registered_commands() -> dict[str, Any]:
     """Get all commands registered on the Typer app."""
-    # Typer wraps Click internally; get the Click group
+    # Typer vendors its own Click since 0.26 — assert on Typer's group type.
     cli = typer.main.get_command(app)
-    assert isinstance(cli, click.Group)
+    assert isinstance(cli, TyperGroup)
     return {name: cmd for name, cmd in cli.commands.items()}
 
 
@@ -130,7 +131,7 @@ class TestCliCommandsDrift:
     """Every CLI command mentioned in SKILL.md must actually exist."""
 
     def test_all_skill_commands_exist(
-        self, skill_commands: list[str], registered_commands: dict[str, click.Command]
+        self, skill_commands: list[str], registered_commands: dict[str, Any]
     ) -> None:
         missing = [cmd for cmd in skill_commands if cmd not in registered_commands]
         assert not missing, (
@@ -139,7 +140,7 @@ class TestCliCommandsDrift:
         )
 
     def test_all_registered_commands_documented(
-        self, skill_commands: list[str], registered_commands: dict[str, click.Command]
+        self, skill_commands: list[str], registered_commands: dict[str, Any]
     ) -> None:
         """Every registered command should appear in SKILL.md."""
         undocumented = [cmd for cmd in registered_commands if cmd not in skill_commands]
@@ -152,7 +153,7 @@ class TestCliFlagsDrift:
     def test_documented_flags_exist(
         self,
         skill_flags: dict[str, list[str]],
-        registered_commands: dict[str, click.Command],
+        registered_commands: dict[str, Any],
     ) -> None:
         """Every flag documented in SKILL.md must exist on the real command."""
         errors: list[str] = []
@@ -163,7 +164,7 @@ class TestCliFlagsDrift:
             # Get all option names from the Click command
             real_opts: set[str] = set()
             for param in cmd.params:
-                if isinstance(param, click.Option):
+                if param.param_type_name == "option":
                     real_opts.update(param.opts)
                     real_opts.update(param.secondary_opts)
             for flag in flags:

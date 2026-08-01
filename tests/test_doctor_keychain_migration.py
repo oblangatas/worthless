@@ -30,7 +30,7 @@ from worthless.cli.app import app
 from worthless.cli.bootstrap import WorthlessHome
 from worthless.cli.commands import doctor as doctor_module
 
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner()
 
 
 # ---------------------------------------------------------------------------

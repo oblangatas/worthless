@@ -32,8 +32,8 @@ import pytest
 
 pytestmark = pytest.mark.skip(reason="WOR-549: worthless-16x2 ↔ sidecar IPC integration pending")
 
-# mix_stderr=False so CLI output to stderr doesn't bleed into result.output
-runner = CliRunner(mix_stderr=False)
+# click >=8.2 keeps stderr out of result.output, so CLI stderr does not bleed in
+runner = CliRunner()
 
 _PROVIDER = "openai"
 _BASE_URL = "https://api.openai.com/v1"
