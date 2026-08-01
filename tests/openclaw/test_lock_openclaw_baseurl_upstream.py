@@ -142,6 +142,18 @@ def test_validate_upstream_accepts_safe_urls(url: str) -> None:
         # the version==4 CGNAT check on py3.13. Regression guard for that split.
         "https://[::ffff:100.64.0.1]/v1",
         "https://[::ffff:100.100.100.200]/v1",
+        # Unicode label separators. urlsplit leaves U+FF0E / U+3002 / U+FF61
+        # intact, so these read as opaque DNS names and skipped every IP check
+        # -- while httpx IDNA/UTS-46-normalizes them straight back to the
+        # literal and connects there. Validating a different string than the
+        # one we dial; found by adversarial review of PR #460.
+        "https://169．254．169．254/v1",  # fullwidth full stop -> metadata
+        "https://127。0。0。1/v1",  # ideographic full stop -> loopback
+        "https://10．0．0．5/v1",  # fullwidth -> RFC1918
+        "https://127｡0｡0｡1/v1",  # halfwidth ideographic -> loopback
+        # 6to4 (RFC 3056) wrapping of 127.0.0.1. On py3.10 this is neither
+        # is_private nor is_reserved, so it passed there while failing on 3.13.
+        "https://[2002:7f00:1::]/v1",
     ],
 )
 def test_validate_upstream_rejects_dangerous_urls(url: str) -> None:
@@ -207,6 +219,8 @@ def test_lock_refuses_dangerous_openclaw_baseurl(
         ("0:0:0:0:0:ffff:a9fe:a9fe", "169.254.169.254"),  # expanded form
         ("64:ff9b::a9fe:a9fe", "169.254.169.254"),  # NAT64 well-known prefix
         ("::ffff:100.64.0.1.", "100.64.0.1"),  # trailing dot + mapped
+        ("2002:7f00:1::", "127.0.0.1"),  # 6to4-wrapped loopback
+        ("2002:a9fe:a9fe::", "169.254.169.254"),  # 6to4-wrapped metadata
     ],
 )
 def test_upstream_host_ip_folds_mapped_and_nat64_to_embedded_ipv4(host: str, expected: str) -> None:

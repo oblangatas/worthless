@@ -21,6 +21,7 @@ from typing import NamedTuple, NoReturn
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import httpx
 import typer
 
 from worthless.cli._repo_factory import open_repo
@@ -191,6 +192,7 @@ def _derive_base_url_var(var_name: str, provider: str) -> str:
 # the guard is version-independent — see security review of WOR-834.
 _CGNAT_NET = ipaddress.ip_network("100.64.0.0/10")
 _NAT64_NET = ipaddress.ip_network("64:ff9b::/96")
+_6TO4_NET = ipaddress.ip_network("2002::/16")
 
 
 def _fold_embedded_ipv4(
@@ -210,6 +212,11 @@ def _fold_embedded_ipv4(
         mapped = ip.ipv4_mapped
         if mapped is None and ip in _NAT64_NET:
             mapped = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+        if mapped is None and ip in _6TO4_NET:
+            # 6to4 (RFC 3056) embeds the IPv4 in the 2nd-5th bytes. Python's
+            # flags don't look through the wrapper, and on py3.10 a 6to4 of
+            # 127.0.0.1 is neither is_private nor is_reserved -> would pass.
+            mapped = ipaddress.IPv4Address((int(ip) >> 80) & 0xFFFFFFFF)
         if mapped is not None:
             return mapped
     return ip
@@ -276,6 +283,19 @@ def _validate_upstream_base_url(url: str) -> None:
     host = parts.hostname
     if not host:
         _reject("has no host")
+    # Close the parser differential. urlsplit and httpx disagree on Unicode
+    # label separators: urlsplit leaves U+FF0E / U+3002 / U+FF61 intact, so
+    # "169．254．169．254" reads as an opaque DNS name and sails past the IP
+    # checks -- while httpx IDNA/UTS-46-normalizes it back to 169.254.169.254
+    # and connects to the metadata service. Validating a different string than
+    # the one we dial is the whole bug class, so classify the host the client
+    # will ACTUALLY use. Fail closed if httpx can't parse what urlsplit did.
+    try:
+        client_host = httpx.URL(url).raw_host.decode("ascii")
+    except Exception:  # noqa: BLE001 -- any parse/encode failure is a refusal
+        _reject("host is not encodable to a normalized (IDNA) form")
+    if client_host:
+        host = client_host
     ip = _upstream_host_ip(host)
     if ip is None:
         # A DNS name, not an IP literal. Only reject the obvious local names;
