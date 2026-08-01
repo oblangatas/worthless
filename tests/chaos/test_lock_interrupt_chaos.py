@@ -459,6 +459,48 @@ def test_mashed_sigint(tmp_path: Path, seam: float) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Guard self-test — prove the hang detector actually fires
+# ---------------------------------------------------------------------------
+
+
+def test_hang_guard_fires_with_diagnostic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A wedged CLI must trip ``WAIT_TIMEOUT`` and say which signal/jitter did it.
+
+    ``WAIT_TIMEOUT`` only earns its place if it FIRES. It previously equalled the
+    repo-wide ``timeout = 30``, so the generic pytest timeout always won the race
+    and this diagnostic was unreachable — a guard nobody had ever seen work. That
+    is exactly the failure mode worth a test rather than an assumption.
+
+    Inject a shim that ignores SIGINT and never exits, then assert the harness
+    fails fast, with the actionable message, well inside the module timeout.
+    """
+    shim = tmp_path / "wedged_cli.py"
+    shim.write_text(
+        "import signal, time\n"
+        "signal.signal(signal.SIGINT, signal.SIG_IGN)\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "while True:\n"
+        "    time.sleep(0.05)\n"
+    )
+    monkeypatch.setattr(
+        f"{__name__}._cli",
+        lambda: [sys.executable, str(shim)],
+    )
+
+    te = _make_trial_env(tmp_path, 0, 1)
+    started = time.monotonic()
+    with pytest.raises(pytest.fail.Exception, match=r"hung after sig="):
+        _run_trial(te, signal.SIGINT, 0.05)
+    elapsed = time.monotonic() - started
+
+    assert WAIT_TIMEOUT <= elapsed < WAIT_TIMEOUT + 10.0, (
+        f"hang guard fired at {elapsed:.1f}s; expected ~{WAIT_TIMEOUT}s. "
+        "Too early means a hair trigger on slow machines; too late means the "
+        "per-test timeout will swallow the diagnostic again."
+    )
+
+
+# ---------------------------------------------------------------------------
 # SIGKILL — the brutal-honesty atomicity probe
 # ---------------------------------------------------------------------------
 
