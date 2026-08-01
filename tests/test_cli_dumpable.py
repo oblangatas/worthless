@@ -108,6 +108,26 @@ class TestDumpableApplied:
             disable_core_dumps(strict=True)
         assert exc.value.code is ErrorCode.CORE_DUMP_PROTECTION_FAILED
 
+    @pytest.mark.parametrize("boom", [AttributeError("no prctl symbol"), OSError("libc gone")])
+    def test_non_worthless_errors_are_handled_not_propagated(
+        self, monkeypatch: pytest.MonkeyPatch, boom: Exception
+    ) -> None:
+        """A libc that loads but has no prctl symbol raises AttributeError from
+        ctypes. An unhandled one crashes the command instead of failing closed —
+        strict must convert it, non-strict must warn and continue."""
+        from worthless.cli import process as proc_mod
+
+        def _raise() -> None:
+            raise boom
+
+        monkeypatch.setattr(proc_mod._hardening, "set_dumpable_zero", _raise)
+
+        with pytest.raises(WorthlessError) as exc:
+            disable_core_dumps(strict=True)
+        assert exc.value.code is ErrorCode.CORE_DUMP_PROTECTION_FAILED
+
+        disable_core_dumps(strict=False)  # must NOT propagate
+
     def test_windows_no_lever_does_not_abort_the_command(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -224,12 +244,23 @@ def _is_typer_command(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     return False
 
 
-@pytest.mark.parametrize("module", sorted(p.name for p in _CMD_DIR.glob("*.py")))
+@pytest.mark.parametrize(
+    "module", sorted(str(p.relative_to(_CMD_DIR)) for p in _CMD_DIR.rglob("*.py"))
+)
 def test_core_dump_protection_precedes_key_load(module: str) -> None:
     """In any function doing both, disable_core_dumps() must precede get_home().
 
     get_home() reads home.fernet_key into memory. Hardening after that leaves a
     window where the key is resident and cores are still enabled.
+
+    KNOWN BLIND SPOT — do not mistake a green run here for full coverage. This
+    only sees ``get_home()`` called *directly inside* an ``@app.command()``
+    function. A command whose key load happens in a helper it calls is invisible
+    to this guard: the entry point has no ``get_home()`` of its own, so there is
+    nothing to order against. ``revoke`` is exactly that shape (its key load is
+    in ``_revoke_key``) and this test cannot see it — tracked as dupf.17.
+    Widening the guard means resolving calls across functions, which is why it
+    is a separate ticket rather than a bigger regex here.
     """
     tree = ast.parse((_CMD_DIR / module).read_text(encoding="utf-8"))
     for fn in ast.walk(tree):

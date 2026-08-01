@@ -246,15 +246,21 @@ def disable_core_dumps(*, strict: bool = True) -> None:
     # where the hardcoded sonames miss but find_library("c") resolves, the set
     # silently no-ops, the readback returns 1, and strict then hard-fails every
     # key-holding command that would otherwise have been fine.
+    # Catch OSError/AttributeError too, not just WorthlessError: a libc that
+    # loads but has no prctl symbol raises AttributeError from ctypes, and an
+    # unhandled one would crash the command instead of failing closed. Any
+    # failure to apply the protection is the same outcome — protection absent.
     try:
         _hardening.set_dumpable_zero()
-    except WorthlessError as exc:
+        observed = _hardening.get_dumpable()
+    except (WorthlessError, OSError, AttributeError) as exc:
         if strict:
-            raise WorthlessError(ErrorCode.CORE_DUMP_PROTECTION_FAILED, str(exc)) from exc
+            raise WorthlessError(
+                ErrorCode.CORE_DUMP_PROTECTION_FAILED,
+                f"core dump protection could not be applied: {exc}",
+            ) from exc
         logger.warning("could not disable core dumps: %s", exc)
         return
-
-    observed = _hardening.get_dumpable()
     if observed == 0:
         return
 
