@@ -68,8 +68,7 @@ jobs:
         env:
           UV_CACHE_DIR: /tmp/uv-cache
         run: |
-          uv sync --extra qa
-          uv run semgrep scan --config auto --config p/secrets --config p/security-audit --config .semgrep/ src/ --sarif --output semgrep.sarif
+          uvx semgrep@1.172.0 scan --config auto --config p/secrets --config p/security-audit --config .semgrep/ src/ --sarif --output semgrep.sarif
 
       - name: Upload Semgrep SARIF
         if: always()
