@@ -58,6 +58,16 @@ from tests.helpers import fake_anthropic_key, fake_key
 pytestmark = [
     pytest.mark.slow,
     pytest.mark.skipif(sys.platform == "win32", reason="chaos suite is POSIX-only"),
+    # Each storm test SLEEPS ``TRIALS_PER_CELL`` times before signalling, and each
+    # sleep is drawn from a band centred on the session-calibrated ``seam``. So the
+    # test's floor is ~= TRIALS_PER_CELL * seam, and ``seam`` is measured once from
+    # a single warm-up lock whose duration swings with machine load (observed
+    # 1.37s idle vs 2.75s cold on the same 10-core box). Against the repo-wide
+    # ``timeout = 30`` that meant the suite only passed while seam stayed under
+    # ~1.1s — a load-sensitive coin flip, not a product signal. Budget the real
+    # worst case instead: TRIALS_PER_CELL * (MAX_SEAM + 0.12) ~= 154s of sleeping
+    # plus spawn/classify overhead for 30 subprocesses.
+    pytest.mark.timeout(300),
 ]
 
 
@@ -66,7 +76,15 @@ pytestmark = [
 # ---------------------------------------------------------------------------
 
 TRIALS_PER_CELL = 30
-WAIT_TIMEOUT = 30.0
+# Guard for "the CLI never exited" — it must stay WELL BELOW the per-test timeout
+# above, or the generic pytest timeout fires first and swallows the diagnostic
+# (which signal, which jitter) that makes a hang actionable.
+#
+# Sized from measurement, not guesswork. With 10 CPU hogs saturating a 10-core
+# box, signal -> exit was: mashed-SIGINT max 27ms, single-SIGINT max 1.40s, and a
+# full *unsignalled* lock (what the ``seam`` warm-up waits on) max 1.64s. 15s is
+# ~10x the worst of those, so a trip here means a real hang, not contention.
+WAIT_TIMEOUT = 15.0
 # Hard ceiling on the calibrated seam in case the warm-up probe misbehaves; a
 # real lock completes well under this.
 MAX_SEAM = 5.0
