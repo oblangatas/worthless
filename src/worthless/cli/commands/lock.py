@@ -2634,6 +2634,12 @@ def register_lock_commands(app: typer.Typer) -> None:
         ),
     ) -> None:
         """Protect API keys in a .env file."""
+        # FIRST statement: get_home() below loads home.fernet_key, and the
+        # keyring probe above it can surface key material too. _lock_keys()
+        # also hardens, but that is a callee — by the time it runs the key is
+        # already resident here (dupf.10).
+        disable_core_dumps()
+
         # Pre-announce the macOS Keychain dialog so users aren't surprised by a
         # system prompt mid-command. The dialog labels itself "python3.10" not
         # "worthless"; without this hint, first-time users panic and click Deny.

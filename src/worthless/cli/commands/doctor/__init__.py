@@ -558,11 +558,16 @@ def _check_home_mismatch(home: WorthlessHome) -> bool:
     pid, _port = pid_result
     env = read_process_env(pid)
     if not env:
-        # /proc/<pid>/environ is unreadable — the proxy runs with
-        # PR_SET_DUMPABLE=0 (dupf.10), which makes /proc/<pid> root-owned, so a
-        # same-user `doctor` gets AccessDenied and read_process_env returns {}.
-        # A live proxy always has a non-empty environment, so {} means
-        # "indeterminate", not "no WORTHLESS_HOME set" — don't false-warn.
+        # read_process_env() returns {} for AccessDenied, NoSuchProcess AND
+        # ZombieProcess alike — in every case the proxy's home is unknowable,
+        # not "unset". A live process always has a non-empty environment, so {}
+        # means indeterminate; warning "home mismatch" here would be a guess.
+        #
+        # AccessDenied became reachable with dupf.10: a FOREGROUND `up` hardens
+        # itself with PR_SET_DUMPABLE=0, which makes its /proc/<pid> root-owned.
+        # (A --daemon proxy is exec'd, and execve resets the bit, so that one
+        # stays readable.) Known cost: a stale pidfile or a foreign-user proxy
+        # now reports no-mismatch instead of warning.
         return False
     proxy_home_str = env.get("WORTHLESS_HOME")
     proxy_home = Path(proxy_home_str) if proxy_home_str else _DEFAULT_BASE

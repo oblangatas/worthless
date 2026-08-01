@@ -239,7 +239,21 @@ def disable_core_dumps(*, strict: bool = True) -> None:
     """
     rlimit_zero = _set_rlimit_core_zero()
 
-    _hardening.set_dumpable_zero_or_log()
+    # set_dumpable_zero(), NOT the _or_log variant: the _or_log one loads libc
+    # with allow_find_library=False because it runs between fork and exec, where
+    # find_library() may shell out. The CLI is not in that window. Using it here
+    # paired with get_dumpable()'s full loader created an asymmetry — on a host
+    # where the hardcoded sonames miss but find_library("c") resolves, the set
+    # silently no-ops, the readback returns 1, and strict then hard-fails every
+    # key-holding command that would otherwise have been fine.
+    try:
+        _hardening.set_dumpable_zero()
+    except WorthlessError as exc:
+        if strict:
+            raise WorthlessError(ErrorCode.CORE_DUMP_PROTECTION_FAILED, str(exc)) from exc
+        logger.warning("could not disable core dumps: %s", exc)
+        return
+
     observed = _hardening.get_dumpable()
     if observed == 0:
         return

@@ -275,9 +275,10 @@ def register_wrap_commands(app: typer.Typer) -> None:
         fail_if_windows()
 
         # Before get_home(): it loads home.fernet_key into memory, and cores
-        # must already be off by then (dupf.10). Note the dumpable bit is
-        # reset by execve, so this does NOT propagate to COMMAND — the
-        # wrapped program stays debuggable and core-dumpable.
+        # must already be off by then (dupf.10). The dumpable bit is reset by
+        # execve, so COMMAND stays ptrace-able (gdb/lldb/py-spy still attach).
+        # RLIMIT_CORE, however, IS inherited across execve — the wrapped
+        # program does not get core files. That predates this change.
         disable_core_dumps()
 
         # Load home, verify keys enrolled

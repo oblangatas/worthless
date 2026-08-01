@@ -101,7 +101,7 @@ class TestDumpableApplied:
         # test silently changes premise and fails there (caught on Windows CI).
         monkeypatch.setattr(proc_mod, "resource", object())
         monkeypatch.setattr(proc_mod, "_set_rlimit_core_zero", lambda: False)
-        monkeypatch.setattr(proc_mod._hardening, "set_dumpable_zero_or_log", lambda: None)
+        monkeypatch.setattr(proc_mod._hardening, "set_dumpable_zero", lambda: None)
         monkeypatch.setattr(proc_mod._hardening, "get_dumpable", lambda: None)
 
         with pytest.raises(WorthlessError) as exc:
@@ -118,7 +118,7 @@ class TestDumpableApplied:
 
         monkeypatch.setattr(proc_mod, "resource", None)
         monkeypatch.setattr(proc_mod.sys, "platform", "win32")
-        monkeypatch.setattr(proc_mod._hardening, "set_dumpable_zero_or_log", lambda: None)
+        monkeypatch.setattr(proc_mod._hardening, "set_dumpable_zero", lambda: None)
         monkeypatch.setattr(proc_mod._hardening, "get_dumpable", lambda: None)
 
         disable_core_dumps(strict=True)  # must NOT raise
@@ -141,7 +141,7 @@ class TestDumpableApplied:
         from worthless.cli import process as proc_mod
 
         monkeypatch.setattr(proc_mod.sys, "platform", "linux")
-        monkeypatch.setattr(proc_mod._hardening, "set_dumpable_zero_or_log", lambda: None)
+        monkeypatch.setattr(proc_mod._hardening, "set_dumpable_zero", lambda: None)
         monkeypatch.setattr(proc_mod._hardening, "get_dumpable", lambda: None)
         with pytest.raises(WorthlessError) as exc:
             disable_core_dumps(strict=True)
@@ -154,7 +154,7 @@ class TestFailureModes:
     def test_strict_raises_when_kernel_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from worthless.cli import process as proc_mod
 
-        monkeypatch.setattr(proc_mod._hardening, "set_dumpable_zero_or_log", lambda: None)
+        monkeypatch.setattr(proc_mod._hardening, "set_dumpable_zero", lambda: None)
         monkeypatch.setattr(proc_mod._hardening, "get_dumpable", lambda: 1)
 
         with pytest.raises(WorthlessError) as exc:
@@ -166,7 +166,7 @@ class TestFailureModes:
     ) -> None:
         from worthless.cli import process as proc_mod
 
-        monkeypatch.setattr(proc_mod._hardening, "set_dumpable_zero_or_log", lambda: None)
+        monkeypatch.setattr(proc_mod._hardening, "set_dumpable_zero", lambda: None)
         monkeypatch.setattr(proc_mod._hardening, "get_dumpable", lambda: 1)
 
         with caplog.at_level(logging.WARNING):
@@ -177,7 +177,7 @@ class TestFailureModes:
         """A caller that forgets the flag gets the safe behavior."""
         from worthless.cli import process as proc_mod
 
-        monkeypatch.setattr(proc_mod._hardening, "set_dumpable_zero_or_log", lambda: None)
+        monkeypatch.setattr(proc_mod._hardening, "set_dumpable_zero", lambda: None)
         monkeypatch.setattr(proc_mod._hardening, "get_dumpable", lambda: 1)
 
         with pytest.raises(WorthlessError):
@@ -215,6 +215,15 @@ def _call_names(fn: ast.AST) -> list[tuple[str, int]]:
     return out
 
 
+def _is_typer_command(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """True for a @app.command()-decorated CLI entry point."""
+    for dec in fn.decorator_list:
+        node = dec.func if isinstance(dec, ast.Call) else dec
+        if getattr(node, "attr", None) == "command":
+            return True
+    return False
+
+
 @pytest.mark.parametrize("module", sorted(p.name for p in _CMD_DIR.glob("*.py")))
 def test_core_dump_protection_precedes_key_load(module: str) -> None:
     """In any function doing both, disable_core_dumps() must precede get_home().
@@ -229,7 +238,19 @@ def test_core_dump_protection_precedes_key_load(module: str) -> None:
         calls = _call_names(fn)
         harden = [ln for name, ln in calls if name == "disable_core_dumps"]
         loads = [ln for name, ln in calls if name == "get_home"]
-        if not harden or not loads:
+        if not loads:
+            continue
+        if not harden:
+            # A key load with NO hardening in this scope is only acceptable in a
+            # helper — a @app.command() entry point must harden itself. Relying
+            # on a callee to do it (as `lock` once did) means the key is already
+            # resident by the time the callee runs. This branch is what the
+            # merge-ready gauntlet caught; do not weaken it back to `continue`.
+            assert not _is_typer_command(fn), (
+                f"{module}::{fn.name} is a CLI entry point that loads the key at "
+                f"line {min(loads)} but never calls disable_core_dumps() in its "
+                f"own scope — hardening in a callee runs too late"
+            )
             continue
         assert min(harden) < min(loads), (
             f"{module}::{fn.name} loads the key at line {min(loads)} before "
@@ -259,9 +280,7 @@ def test_rlimit_failure_does_not_stop_dumpable_hardening(monkeypatch: pytest.Mon
 
     monkeypatch.setattr(proc_mod.resource, "setrlimit", _boom)
     calls: list[str] = []
-    monkeypatch.setattr(
-        proc_mod._hardening, "set_dumpable_zero_or_log", lambda: calls.append("set")
-    )
+    monkeypatch.setattr(proc_mod._hardening, "set_dumpable_zero", lambda: calls.append("set"))
     monkeypatch.setattr(proc_mod._hardening, "get_dumpable", lambda: 0)
 
     disable_core_dumps()  # must not propagate the OSError
