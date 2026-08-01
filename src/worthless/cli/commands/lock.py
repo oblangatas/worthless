@@ -4,20 +4,24 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import json
 import logging
 import os
 import re
 import signal
+import socket
 import stat
 import subprocess  # nosec B404
 import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import NamedTuple
+from typing import NamedTuple, NoReturn
 from pathlib import Path
+from urllib.parse import urlsplit
 
+import httpx
 import typer
 
 from worthless.cli._repo_factory import open_repo
@@ -182,14 +186,194 @@ def _derive_base_url_var(var_name: str, provider: str) -> str:
     return _PROVIDER_ENV_MAP.get(provider, "OPENAI_BASE_URL")
 
 
+# RFC 6598 shared address space (carrier-grade NAT). Python's ``is_private`` did
+# NOT include this range before 3.13 (gh-113171), and some cloud metadata
+# services live here (e.g. Alibaba's ``100.100.100.200``). Deny it explicitly so
+# the guard is version-independent — see security review of WOR-834.
+_CGNAT_NET = ipaddress.ip_network("100.64.0.0/10")
+_NAT64_NET = ipaddress.ip_network("64:ff9b::/96")
+_6TO4_NET = ipaddress.ip_network("2002::/16")
+
+
+def _fold_embedded_ipv4(
+    ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    """Fold an IPv6-wrapped IPv4 address down to the IPv4 it really denotes.
+
+    ``::ffff:100.64.0.1`` and NAT64 ``64:ff9b::a9fe:a9fe`` route to the
+    embedded IPv4, so they must be classified as that IPv4 and not as the v6
+    wrapper. Python's own flags can't carry this: pre-3.10.15 treated all of
+    ``::ffff:0:0/96`` as private, while 3.10.15+/3.11.10+ delegate to the
+    embedded address — so CGNAT (which is NOT ``is_private``) reached through
+    the wrapper on py3.13 while py3.10 rejected it. Folding first makes the
+    guard identical on every interpreter and lets the v4-only CGNAT check fire.
+    """
+    if isinstance(ip, ipaddress.IPv6Address):
+        mapped = ip.ipv4_mapped
+        if mapped is None and ip in _NAT64_NET:
+            mapped = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+        if mapped is None and ip in _6TO4_NET:
+            # 6to4 (RFC 3056) embeds the IPv4 in the 2nd-5th bytes. Python's
+            # flags don't look through the wrapper, and on py3.10 a 6to4 of
+            # 127.0.0.1 is neither is_private nor is_reserved -> would pass.
+            mapped = ipaddress.IPv4Address((int(ip) >> 80) & 0xFFFFFFFF)
+        if mapped is not None:
+            return mapped
+    return ip
+
+
+def _upstream_host_ip(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """The IP a URL host denotes, or ``None`` for a real DNS name.
+
+    Normalizes the SSRF-bypass IP encodings a canonical parse misses: a
+    trailing FQDN dot (``127.0.0.1.``) and decimal / octal / hex / short
+    IPv4 forms (``2852039166``, ``0xA9.0xFE.0xA9.0xFE``, ``127.1``) — all of
+    which ``getaddrinfo`` would still resolve to the literal address. We do
+    NOT resolve real DNS names (rebinding makes a lock-time lookup useless);
+    those return ``None`` and are handled as hostnames by the caller.
+    """
+    host = host.rstrip(".")
+    if not host:
+        return None
+    try:
+        return _fold_embedded_ipv4(ipaddress.ip_address(host))
+    except ValueError:
+        pass
+    try:  # decimal / octal / hex / short IPv4 → canonical dotted form
+        return ipaddress.ip_address(socket.inet_ntoa(socket.inet_aton(host)))
+    except (OSError, ValueError):
+        # ValueError as well as OSError: inet_aton raises ValueError (not
+        # OSError) on an embedded NUL, and _genuine_oc_base_url calls this
+        # BEFORE the guard runs — so an unhandled ValueError there would abort
+        # the lock with a traceback instead of a clean WRTLS-112 refusal.
+        return None
+
+
+def _validate_upstream_base_url(url: str) -> None:
+    """Fail-closed guard for a NON-registry upstream URL (WOR-834).
+
+    The openclaw ``baseUrl`` is a locally-writable source of truth for
+    unregistered enterprise gateways, so — unlike a ``.env`` URL — we can't
+    require registry membership. Instead we reject the dumb-dangerous
+    targets that a tampered file could point a live key at. Matches OWASP
+    SSRF guidance (block loopback / RFC1918 / link-local + metadata /
+    unspecified; require https), incl. the encoded-IP forms normalized by
+    :func:`_upstream_host_ip`.
+
+    Raises ``WorthlessError(INVALID_INPUT)`` on any violation. Does NOT
+    defend against a plausible *public* attacker URL (a lock-time static
+    check can't tell ``azure.com`` from ``evil.com``), DNS rebinding, or
+    post-lock DB tamper — those are worthless-rzi1 (per-request
+    re-validation) and worthless-8fbg (broader hardening).
+    """
+
+    def _reject(reason: str) -> NoReturn:
+        raise WorthlessError(
+            ErrorCode.INVALID_INPUT,
+            f"refusing openclaw gateway URL {url!r}: {reason}. Register a "
+            "trusted upstream instead: 'worthless providers register --name "
+            "<n> --url <url> --protocol openai|anthropic' and set the "
+            "matching *_BASE_URL.",
+        )
+
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        _reject("not a parseable URL")
+    if parts.scheme != "https":
+        _reject("must be https (cleartext would expose the key on the wire)")
+    if parts.username or parts.password:
+        _reject("must not embed credentials (userinfo)")
+    host = parts.hostname
+    if not host:
+        _reject("has no host")
+    # Close the parser differential. urlsplit and httpx disagree on Unicode
+    # label separators: urlsplit leaves U+FF0E / U+3002 / U+FF61 intact, so
+    # "169．254．169．254" reads as an opaque DNS name and sails past the IP
+    # checks -- while httpx IDNA/UTS-46-normalizes it back to 169.254.169.254
+    # and connects to the metadata service. Validating a different string than
+    # the one we dial is the whole bug class, so classify the host the client
+    # will ACTUALLY use. Fail closed if httpx can't parse what urlsplit did.
+    try:
+        client_host = httpx.URL(url).raw_host.decode("ascii")
+    except Exception:  # noqa: BLE001 -- any parse/encode failure is a refusal
+        _reject("host is not encodable to a normalized (IDNA) form")
+    if client_host:
+        host = client_host
+    ip = _upstream_host_ip(host)
+    if ip is None:
+        # A DNS name, not an IP literal. Only reject the obvious local names;
+        # we deliberately do NOT resolve DNS (rebinding makes it useless).
+        name = host.rstrip(".").lower()
+        if name == "localhost" or name.endswith(".localhost"):
+            _reject("resolves to localhost")
+        return
+    if (
+        ip.is_loopback
+        or ip.is_link_local
+        or ip.is_private
+        or ip.is_unspecified
+        or ip.is_reserved
+        or ip.is_multicast
+        or (ip.version == 4 and ip in _CGNAT_NET)
+    ):
+        _reject("points at a loopback / private / link-local / reserved / CGNAT address")
+
+
+def _genuine_oc_base_url(oc_config: dict | None, provider: str, proxy_base_url: str) -> str | None:
+    """The genuine (non-proxy-shaped) openclaw ``baseUrl`` for ``provider``.
+
+    Returns ``None`` when there's no usable gateway URL to honor (no
+    openclaw, no entry, empty/absent ``baseUrl``, or a stale proxy-shaped
+    entry from a previous lock — that's not a real upstream, so we fall
+    through to the registry). A genuine URL is guard-validated
+    (:func:`_validate_upstream_base_url`, raises on unsafe) before return.
+
+    ``provider`` is the wire protocol (matching the key used by the G3
+    capture path in :func:`_decide_oc_capture`), so behavior stays
+    consistent with the shipped rollback-capture lookup.
+    """
+    if not oc_config:
+        return None
+    providers = oc_config.get("models", {}).get("providers", {}) or {}
+    entry = providers.get(provider)
+    if not isinstance(entry, dict):
+        return None
+    url = entry.get("baseUrl")
+    if not isinstance(url, str) or not url:
+        return None
+    # Our proxy always lives on loopback, and a user would never point their
+    # upstream gateway at loopback — so any loopback baseUrl is our own
+    # (possibly stale, port-shifted) proxy rewrite, not a gateway to honor.
+    # Ignore it and fall through to the registry (always a safe public
+    # default); do NOT fail the lock on our own plumbing.
+    try:
+        host = urlsplit(url).hostname or ""
+    except ValueError:
+        # Malformed baseUrl (e.g. bad bracketed IPv6) — not a usable gateway.
+        # Ignore and fall through to the registry (safe); never crash the lock.
+        return None
+    if _openclaw_integration._is_proxy_url(url, proxy_base_url):
+        return None
+    ip = _upstream_host_ip(host)
+    if ip is not None and ip.is_loopback:
+        return None
+    _validate_upstream_base_url(url)
+    return url
+
+
 def _resolve_upstream_base_url(
-    base_url_var: str, env_values: dict[str, str | None], registry_name: str
+    base_url_var: str,
+    env_values: dict[str, str | None],
+    registry_name: str,
+    *,
+    oc_base_url: str | None = None,
 ) -> str:
     """Pick the upstream URL for the DB row.
 
-    Prefers the user's explicit ``*_BASE_URL`` value from ``.env`` when set
-    AND when that URL is in the provider registry. Otherwise falls back to
-    the bundled registry default for the provider.
+    Precedence: the user's explicit registered ``*_BASE_URL`` from ``.env``
+    > the provider's genuine openclaw ``baseUrl`` (``oc_base_url``, WOR-834)
+    > the bundled registry default > the hard fallback.
 
     ``registry_name`` MUST be the registry name (e.g. ``openrouter``), NOT
     the wire protocol (e.g. ``openai``). OpenRouter speaks the OpenAI
@@ -200,9 +384,12 @@ def _resolve_upstream_base_url(
 
     Refuses unregistered user URLs (M3 / Blocker #1): an attacker who can
     write to .env should not be able to redirect the proxy at an arbitrary
-    upstream. worthless-rzi1 (P1 follow-up) adds per-request re-validation
-    to close the post-lock-tamper variant; worthless-8fbg adds RFC1918 /
-    loopback hardening. See seam 2 in worthless-8rqs design notes.
+    upstream. ``oc_base_url`` is NOT registry-validated (unregistered
+    gateways are the whole point of WOR-834) but is guard-validated by the
+    caller via :func:`_validate_upstream_base_url`. worthless-rzi1 (P1
+    follow-up) adds per-request re-validation to close the post-lock-tamper
+    variant; worthless-8fbg adds RFC1918 / loopback hardening. See seam 2 in
+    worthless-8rqs design notes.
     """
     user_value = env_values.get(base_url_var)
     if user_value:
@@ -214,6 +401,8 @@ def _resolve_upstream_base_url(
                 "--url <url> --protocol openai|anthropic'.",
             )
         return user_value
+    if oc_base_url:  # genuine openclaw gateway URL, already guard-validated
+        return oc_base_url
     entry = lookup_by_name(registry_name)
     if entry is None:  # pragma: no cover — provider is validated above
         return "https://api.openai.com/v1"
@@ -554,13 +743,6 @@ async def _pass1_db_writes(
                 f"follow <PROVIDER>_API_KEY to silence this warning."
             )
 
-        # Resolve the upstream URL by the REGISTRY NAME (detected_provider, e.g.
-        # "openrouter"), not the wire PROTOCOL (provider, e.g. "openai"). They
-        # diverge for OpenAI-dialect-compatible services: OpenRouter's protocol
-        # is "openai" but its upstream is openrouter.ai. Using the protocol here
-        # mailed OpenRouter keys to api.openai.com → 401 (PR #276 review).
-        upstream_base_url = _resolve_upstream_base_url(base_url_var, env_values, detected_provider)
-
         alias = _make_alias(provider, value)
 
         # Cross-path collision check: if this alias is already enrolled from a
@@ -578,6 +760,48 @@ async def _pass1_db_writes(
                 break  # one warning per alias is sufficient
 
         db_shard = await repo.fetch_encrypted(alias)
+
+        # Resolve the upstream URL by the REGISTRY NAME (detected_provider, e.g.
+        # "openrouter"), not the wire PROTOCOL (provider, e.g. "openai"). They
+        # diverge for OpenAI-dialect-compatible services: OpenRouter's protocol
+        # is "openai" but its upstream is openrouter.ai. Using the protocol here
+        # mailed OpenRouter keys to api.openai.com -> 401 (PR #276 review).
+        #
+        # WOR-834: an unregistered enterprise gateway (Azure/custom) is in
+        # neither .env nor the registry -- its openclaw baseUrl is the only
+        # source of truth. Resolved AFTER the db_shard fetch on purpose: on
+        # re-lock the live openclaw entry is proxy-shaped, so the genuine
+        # gateway URL is no longer readable from it, and re-resolving from
+        # .env/registry would silently revert the alias to the registry
+        # default (api.openai.com) on the SECOND lock. Reuse what this alias
+        # was locked with instead. An explicit registered *_BASE_URL still
+        # wins -- it is the first tier inside _resolve_upstream_base_url.
+        oc_base_url = _genuine_oc_base_url(oc_config, provider, oc_proxy_base_url)
+        if oc_base_url is None and db_shard is not None:
+            persisted = db_shard.base_url
+            # Carry forward ONLY an UNREGISTERED gateway. Such a URL can only
+            # have come from openclaw.json (WOR-834) and is unrecoverable once
+            # the live entry is proxy-shaped, so re-resolving would silently
+            # revert an Azure/enterprise alias to the registry default on the
+            # second lock. A REGISTERED url stays re-derivable from
+            # .env/registry, so re-lock keeps its documented semantics there:
+            # deleting *_BASE_URL resets the row to the registry default
+            # (test_relock_without_base_url_var_falls_back_to_registry_default).
+            if persisted and lookup_by_url(persisted) is None:
+                # Re-validate before trusting it. The row is locally writable,
+                # and a URL that was registered when it was first stored can be
+                # de-registered later (delete the providers.toml entry) — which
+                # would reclassify it as an "unregistered gateway" and carry it
+                # forward unchecked on every future lock. Running the same guard
+                # here keeps the DB from becoming an unvalidated persistence
+                # slot; a genuine gateway passes it exactly as it did at first
+                # lock. Fail-closed: a refusal raises rather than silently
+                # falling back, so a tampered row can never quietly reroute a key.
+                _validate_upstream_base_url(persisted)
+                oc_base_url = persisted
+        upstream_base_url = _resolve_upstream_base_url(
+            base_url_var, env_values, detected_provider, oc_base_url=oc_base_url
+        )
 
         if db_shard is not None:
             if not db_shard.prefix or not db_shard.charset:
