@@ -27,3 +27,40 @@ ignore:
     # ships the backport, then remove this ignore.
     reason: "Upstream fix only in Python 3.15.0 (pre-release); no stable 3.13.x backport yet. Tracking WOR-691."
     expiry: "2026-08-10"  # ~30 days; recheck when python:3.13.15-slim-bookworm ships.
+
+  # CVE-2026-11940 / CVE-2026-11972 — both in CPython's ``tarfile``, both
+  # entered the Grype DB on 2026-07-31 (v6.1.9) and immediately failed every
+  # PR. Same upstream situation as CVE-2026-15308 above: measured against
+  # python:3.13-slim-bookworm (current pin), :3.13-slim-trixie, and
+  # :3.14-slim-trixie — all three still carry them (3.13.14 and 3.14.6 alike).
+  # Only python:3.15-rc-slim-trixie scans clean, and shipping a release
+  # CANDIDATE interpreter in the production image is the worse trade. So a
+  # digest bump or a Debian 13 move does NOT clear these; only time does.
+  #
+  # REACHABILITY (why the residual risk is bounded, not merely inconvenient):
+  # both CVEs require the process to PARSE A TAR ARCHIVE — CVE-2026-11940
+  # needs a ``tarfile.extractall()`` call with the data/tar filter on a crafted
+  # archive, CVE-2026-11972 needs a streaming-mode (``mode="r|"``) tarfile
+  # read. The proxy image ships one workload: forward JSON LLM requests
+  # upstream. It never opens an archive from any source, trusted or not.
+  # Verified: ``tarfile``, ``extractall``, ``html.parser`` and ``HTMLParser``
+  # have ZERO occurrences across src/worthless. The vulnerable code path does
+  # not exist in the shipped runtime; Grype matches on interpreter VERSION,
+  # not on reachability. Container is additionally non-root and
+  # network-isolated (see the CVE-2026-15308 entry above).
+  #
+  # Linear: WOR-852 — remove both when a stable 3.13.x (or 3.14.x) base ships
+  # the backport; WOR-691 carries the same base-image bump obligation.
+  - vulnerability: CVE-2026-11940
+    package:
+      name: python
+      type: binary
+    reason: "tarfile.extractall() filter bypass; proxy never parses tar archives (zero tarfile imports in src/worthless). Fix only in pre-release 3.15.0b4. Tracking WOR-852."
+    expiry: "2026-08-31"  # ~30 days; recheck when a stable 3.13.x/3.14.x backport ships.
+
+  - vulnerability: CVE-2026-11972
+    package:
+      name: python
+      type: binary
+    reason: "tarfile streaming-mode EOF mishandling; proxy never parses tar archives (zero tarfile imports in src/worthless). Fix only in pre-release 3.15.0b4. Tracking WOR-852."
+    expiry: "2026-08-31"  # ~30 days; recheck when a stable 3.13.x/3.14.x backport ships.
