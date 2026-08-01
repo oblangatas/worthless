@@ -26,6 +26,7 @@ import asyncio
 import hashlib
 import ipaddress
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -259,3 +260,61 @@ def test_relock_preserves_gateway_upstream(
         "re-lock reset the upstream to the registry default — the enterprise "
         "gateway key would 401 against api.openai.com after a second lock."
     )
+
+
+def _tamper_stored_upstream(home: WorthlessHome, alias: str, evil_url: str) -> None:
+    """Rewrite the stored upstream directly, as a local attacker would."""
+    con = sqlite3.connect(str(home.db_path))
+    try:
+        tables = [r[0] for r in con.execute("select name from sqlite_master where type='table'")]
+        for tb in tables:
+            # Table names come from sqlite_master (our own schema), never from
+            # user input — but keep the interpolation provably identifier-safe
+            # rather than trusting provenance alone. Values stay parameterized.
+            if not tb.isidentifier():
+                continue
+            cols = [c[1] for c in con.execute(f"PRAGMA table_info({tb})")]  # noqa: S608
+            if "base_url" in cols and "key_alias" in cols:
+                sql = f"update {tb} set base_url = ? where key_alias = ?"  # noqa: S608
+                con.execute(sql, (evil_url, alias))
+        con.commit()
+    finally:
+        con.close()
+
+
+def test_relock_revalidates_carried_forward_upstream(
+    home_dir: WorthlessHome, env_file: Path, sandboxed_home: Path, fixed_key: str, tmp_path: Path
+) -> None:
+    """A tampered stored upstream must NOT be carried forward unchecked.
+
+    The re-lock path reuses ``db_shard.base_url`` when it is unregistered, so an
+    unregistered URL is exactly the branch that skips registry validation. That
+    made the DB an unvalidated persistence slot: plant a dangerous URL once (or
+    de-register a URL that was registered when first stored) and every later
+    lock would carry it forward, re-pointing a live key with nothing re-checking
+    it. Found by adversarial review of PR #460. The guard must re-run here.
+    """
+    _seed_openclaw(sandboxed_home, {"baseUrl": AZURE_URL, "apiKey": fixed_key})
+    cli_env = {"WORTHLESS_HOME": str(home_dir.base_dir), "WORTHLESS_KEYRING_BACKEND": "null"}
+
+    first = runner.invoke(app, ["lock", "--env", str(env_file)], env=cli_env)
+    assert first.exit_code == 0, first.output
+
+    alias = _alias_for_key("openai", fixed_key)
+    assert _base_url(home_dir, alias) == AZURE_URL
+
+    # Local attacker rewrites the stored upstream at the cloud-metadata address.
+    _tamper_stored_upstream(home_dir, alias, "https://169.254.169.254/v1")
+
+    proj2 = tmp_path / "proj2"
+    proj2.mkdir()
+    env2 = proj2 / ".env"
+    env2.write_text(f"OPENAI_API_KEY={fixed_key}\n")
+
+    second = runner.invoke(app, ["lock", "--env", str(env2)], env=cli_env)
+
+    assert second.exit_code != 0, (
+        "a tampered stored upstream was carried forward without re-validation; "
+        f"the proxy would forward a live key to cloud metadata. output: {second.output}"
+    )
+    assert _base_url(home_dir, alias) != "https://169.254.169.254/v1" or second.exit_code != 0

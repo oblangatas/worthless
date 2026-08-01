@@ -765,6 +765,16 @@ async def _pass1_db_writes(
             # deleting *_BASE_URL resets the row to the registry default
             # (test_relock_without_base_url_var_falls_back_to_registry_default).
             if persisted and lookup_by_url(persisted) is None:
+                # Re-validate before trusting it. The row is locally writable,
+                # and a URL that was registered when it was first stored can be
+                # de-registered later (delete the providers.toml entry) — which
+                # would reclassify it as an "unregistered gateway" and carry it
+                # forward unchecked on every future lock. Running the same guard
+                # here keeps the DB from becoming an unvalidated persistence
+                # slot; a genuine gateway passes it exactly as it did at first
+                # lock. Fail-closed: a refusal raises rather than silently
+                # falling back, so a tampered row can never quietly reroute a key.
+                _validate_upstream_base_url(persisted)
                 oc_base_url = persisted
         upstream_base_url = _resolve_upstream_base_url(
             base_url_var, env_values, detected_provider, oc_base_url=oc_base_url
