@@ -3,6 +3,12 @@ name: Docker Security Scan & E2E
 on:
   push:
     paths:
+      # The scan gate must re-run when the scan gate changes. Without these
+      # two, editing the cutoff or adding a suppression ships without ever
+      # running the job it modifies. WOR-852.
+      - '.github/workflows/docker-security.yml'
+      - '.grype.yaml'
+      - 'scripts/hooks/check_grype_ignore_expiry.py'
       - 'Dockerfile'
       - 'deploy/**'
       - 'pyproject.toml'
@@ -21,6 +27,10 @@ on:
       - 'tests/install_fixtures/Dockerfile.service-lifecycle-live-linux'
   pull_request:
     paths:
+      # See the push filter above — a change to the gate must exercise it.
+      - '.github/workflows/docker-security.yml'
+      - '.grype.yaml'
+      - 'scripts/hooks/check_grype_ignore_expiry.py'
       - 'Dockerfile'
       - 'deploy/**'
       - 'pyproject.toml'
