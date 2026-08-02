@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any
 
 import aiosqlite
-from mcp.server.fastmcp import FastMCP  # type: ignore[import-not-found]  # optional dep
 
 from worthless.cli.bootstrap import (
     WorthlessHome,
@@ -17,6 +16,21 @@ from worthless.cli.bootstrap import (
     resolve_home,
 )
 from worthless.cli.errors import ErrorCode, WorthlessError
+
+try:
+    from mcp.server.fastmcp import FastMCP  # type: ignore[import-not-found]  # optional dep
+except ModuleNotFoundError as exc:  # pragma: no cover - depends on the installed SDK
+    # Every worthless <= 0.3.11 published `mcp>=1.0` with no ceiling, so a fresh
+    # install resolves mcp 2.0+, where `mcp.server.fastmcp` was renamed to
+    # `mcp.server.mcpserver`. Those releases are immutable, so users keep landing
+    # here — a bare traceback through the stdio transport tells an agent nothing.
+    raise WorthlessError(
+        ErrorCode.MCP_SDK_INCOMPATIBLE,
+        "the installed MCP SDK is not compatible with this version of worthless "
+        "(missing mcp.server.fastmcp — mcp 2.0 renamed it). Reinstall with a "
+        "supported SDK: pip install --upgrade 'worthless[mcp]>=0.3.12', or pin "
+        "the SDK directly with 'pip install \"mcp<2\"'.",
+    ) from exc
 
 mcp = FastMCP("worthless")
 

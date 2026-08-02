@@ -1,17 +1,26 @@
 name: Verify worthless-mcp package
 
 on:
+  # pyproject.toml / uv.lock are load-bearing here: the mount job resolves the
+  # `mcp` extra from the live index, so it is the only check that sees what a
+  # real user resolves. Without these paths a dependency-only change never
+  # triggers it — which is how the mcp 2.0 break reached users unnoticed
+  # (WOR-864). Keep both lists in sync.
   pull_request:
     paths:
       - "packages/worthless-mcp/**"
       - "tests/test_mcp_npx_wrapper_mount.py"
       - ".github/workflows/verify-npm.yml"
       - ".github/workflows/publish-npm.yml"
+      - "pyproject.toml"
+      - "uv.lock"
   push:
     branches:
       - main
     paths:
       - "packages/worthless-mcp/**"
+      - "pyproject.toml"
+      - "uv.lock"
 
 permissions:
   contents: read
