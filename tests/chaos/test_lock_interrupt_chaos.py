@@ -64,10 +64,20 @@ pytestmark = [
     # a single warm-up lock whose duration swings with machine load (observed
     # 1.37s idle vs 2.75s cold on the same 10-core box). Against the repo-wide
     # ``timeout = 30`` that meant the suite only passed while seam stayed under
-    # ~1.1s — a load-sensitive coin flip, not a product signal. Budget the real
-    # worst case instead: TRIALS_PER_CELL * (MAX_SEAM + 0.12) ~= 154s of sleeping
-    # plus spawn/classify overhead for 30 subprocesses.
-    pytest.mark.timeout(300),
+    # ~1.1s — a load-sensitive coin flip, not a product signal.
+    #
+    # Budget the worst LEGITIMATE runtime, generously. At the MAX_SEAM ceiling
+    # the sleep floor alone is TRIALS_PER_CELL * (MAX_SEAM + 0.12) ~= 154s, and
+    # full-suite contention was measured inflating this module ~1.8x over an
+    # isolated run (mashed_sigint: 33.10s isolated -> 60.67s under `-n auto`),
+    # which puts the ceiling near 280s. Observed seams keep climbing as machines
+    # get busier -- 1.366s, 2.748s, ~3.0s -- so a snug budget just reintroduces
+    # the flake at a higher number.
+    #
+    # This value is NOT the hang detector; WAIT_TIMEOUT below is, and it fires
+    # ~40x sooner with the signal and jitter that wedged the CLI. So erring
+    # generous here costs nothing and cannot mask a hang.
+    pytest.mark.timeout(600),
 ]
 
 
