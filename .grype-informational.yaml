@@ -1,0 +1,14 @@
+# Grype config for the INFORMATIONAL scan only — deliberately empty of ignores.
+#
+# The gated scan reads .grype.yaml and must honour every suppression there;
+# that is what keeps the build green on findings we have argued and dated.
+#
+# The informational scan has the opposite job: show everything, including the
+# things we chose to accept. Pointed at .grype.yaml it inherited those same
+# ignores, so a suppressed CVE appeared in NO output anywhere — the gate
+# skipped it and the report omitted it. That is precisely the blind spot
+# WOR-852 exists to close, so the informational step sets GRYPE_CONFIG to this
+# file instead.
+#
+# Keep `ignore` empty. An entry here would re-create the blind spot.
+ignore: []
