@@ -94,7 +94,93 @@ def test_yaml_date_and_string_forms_both_parse(tmp_path: Path, stamp: str) -> No
     assert _load().check(cfg, TODAY) == []
 
 
-def test_the_real_repo_config_is_current() -> None:
-    """The shipped .grype.yaml must itself satisfy the contract."""
-    problems = _load().check(REPO / ".grype.yaml", dt.date.today())
+def test_the_real_repo_config_is_structurally_sound() -> None:
+    """Every shipped ignore is named and dated — deliberately NOT a freshness check.
+
+    Asserting the live config against `today` would red the whole unit suite
+    the morning an expiry lapses, for every developer, on unrelated work.
+    Freshness is the hook's job: it runs at commit time and again in
+    docker-security.yml right before the scan. This test guards the shape.
+    """
+    mod = _load()
+    # A date far in the past would make every entry "expired"; a far-future
+    # date makes none expire, so anything reported here is structural.
+    problems = mod.check(REPO / ".grype.yaml", dt.date(1970, 1, 1))
     assert problems == [], "\n".join(problems)
+
+
+# --- the .grype/config.yaml blind spot -------------------------------------
+# grype reads BOTH .grype.yaml and .grype/config.yaml from the repo root
+# (`grype config locations`, grype 0.114.0), and anchore/scan-action passes no
+# explicit --config. Checking only the first left the second as a silent place
+# to park undated suppressions.
+
+
+def test_secondary_config_location_is_checked(tmp_path: Path) -> None:
+    """An undated ignore in .grype/config.yaml must NOT slip through."""
+    mod = _load()
+    primary = _write(tmp_path, 'ignore:\n  - vulnerability: CVE-1\n    expiry: "2026-08-31"\n')
+    nested = tmp_path / ".grype"
+    nested.mkdir()
+    secondary = nested / "config.yaml"
+    secondary.write_text("ignore:\n  - vulnerability: CVE-2026-11940\n")
+
+    problems = mod.check_all((primary, secondary), TODAY)
+    assert len(problems) == 1
+    assert "no `expiry`" in problems[0]
+    assert "CVE-2026-11940" in problems[0]
+
+
+def test_check_all_errors_when_no_config_exists(tmp_path: Path) -> None:
+    mod = _load()
+    problems = mod.check_all((tmp_path / ".grype.yaml", tmp_path / "config.yaml"), TODAY)
+    assert len(problems) == 1
+    assert "no ignore policy" in problems[0]
+
+
+def test_rule_without_cve_id_is_rejected(tmp_path: Path) -> None:
+    """A dated rule matching on package alone silences a whole class."""
+    cfg = _write(
+        tmp_path,
+        'ignore:\n  - package:\n      type: binary\n    expiry: "2099-01-01"\n',
+    )
+    problems = _load().check(cfg, TODAY)
+    assert len(problems) == 1
+    assert "no `vulnerability` id" in problems[0]
+
+
+def test_malformed_entry_does_not_crash(tmp_path: Path) -> None:
+    """A non-mapping list item is reported, not an AttributeError traceback."""
+    cfg = _write(tmp_path, "ignore:\n  - just-a-string\n")
+    problems = _load().check(cfg, TODAY)
+    assert len(problems) == 1
+    assert "not a mapping" in problems[0]
+
+
+def test_every_real_grype_config_location_is_structurally_sound() -> None:
+    """Same for the secondary location, if it exists. Shape, not freshness."""
+    mod = _load()
+    problems = mod.check_all(mod.CONFIGS, dt.date(1970, 1, 1))
+    assert problems == [], "\n".join(problems)
+
+
+def test_hook_would_fail_the_repo_config_once_an_expiry_lapses() -> None:
+    """The forcing function still exists — it just fires in the hook, not here.
+
+    Proves the shipped config WOULD be rejected the day after its earliest
+    expiry, without tying this suite to the calendar.
+    """
+    import yaml
+
+    mod = _load()
+    raw = yaml.safe_load((REPO / ".grype.yaml").read_text())
+    stamps = []
+    for rule in raw["ignore"]:
+        e = rule["expiry"]
+        stamps.append(e if isinstance(e, dt.date) else dt.date.fromisoformat(str(e)))
+    earliest = min(stamps)
+
+    assert mod.check(REPO / ".grype.yaml", earliest) == []
+    lapsed = mod.check(REPO / ".grype.yaml", earliest + dt.timedelta(days=1))
+    assert lapsed, "an expiry lapsing must be caught by the hook"
+    assert "expired" in lapsed[0]

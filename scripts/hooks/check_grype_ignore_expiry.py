@@ -26,7 +26,14 @@ from pathlib import Path
 
 import yaml
 
-CONFIG = Path(__file__).resolve().parents[2] / ".grype.yaml"
+REPO = Path(__file__).resolve().parents[2]
+
+# Every repo-root config grype auto-discovers. Verified with `grype config
+# locations` (grype 0.114.0): it reads BOTH of these, in this order, and
+# anchore/scan-action passes no explicit --config, so both are live in CI.
+# Checking only .grype.yaml left .grype/config.yaml as a silent hiding place
+# for undated suppressions.
+CONFIGS = (REPO / ".grype.yaml", REPO / ".grype" / "config.yaml")
 
 
 def check(config: Path, today: dt.date) -> list[str]:
@@ -39,9 +46,23 @@ def check(config: Path, today: dt.date) -> list[str]:
     if not rules:
         return []
 
+    where = config.name if config.parent == REPO else f"{config.parent.name}/{config.name}"
     problems: list[str] = []
     for i, rule in enumerate(rules):
-        vuln = rule.get("vulnerability", f"<entry {i}>")
+        if not isinstance(rule, dict):
+            problems.append(f"{where}: ignore entry {i} is {type(rule).__name__}, not a mapping.")
+            continue
+
+        vuln = rule.get("vulnerability")
+        if not vuln:
+            # No CVE id means the rule matches on package/type alone, silencing
+            # a whole class of findings. An expiry date cannot make that safe.
+            problems.append(
+                f"{where}: ignore entry {i} has no `vulnerability` id — it would "
+                f"suppress by package match alone ({rule!r}). Name the CVE."
+            )
+            continue
+        vuln = f"{where}: {vuln}"
         raw = rule.get("expiry")
 
         if raw is None:
@@ -74,8 +95,20 @@ def check(config: Path, today: dt.date) -> list[str]:
     return problems
 
 
+def check_all(configs: tuple[Path, ...], today: dt.date) -> list[str]:
+    """Check every grype config that exists. At least one must.
+
+    A missing secondary config is fine — a missing primary one is not, and is
+    reported by check() itself.
+    """
+    present = [c for c in configs if c.exists()]
+    if not present:
+        return [f"none of {[c.name for c in configs]} exist — no ignore policy to enforce."]
+    return [p for c in present for p in check(c, today)]
+
+
 def main() -> int:
-    problems = check(CONFIG, dt.date.today())
+    problems = check_all(CONFIGS, dt.date.today())
     if not problems:
         return 0
 
