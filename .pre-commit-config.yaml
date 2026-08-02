@@ -102,6 +102,17 @@ repos:
         always_run: true
         stages: [pre-push]
 
+      # Grype has no `expiry` field — it silently drops unknown keys, so a
+      # suppression dated 2020 still suppresses today (measured on grype
+      # 0.114.0). This hook is the only thing making .grype.yaml's time-boxing
+      # real. WOR-852.
+      - id: grype-ignore-expiry
+        name: "supply chain: grype ignores are dated and current"
+        language: system
+        entry: uv run python scripts/hooks/check_grype_ignore_expiry.py
+        pass_filenames: false
+        always_run: true
+
   # Actionlint: GitHub Actions YAML syntax and logic errors
   - repo: https://github.com/rhysd/actionlint
     rev: v1.7.7

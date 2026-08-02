@@ -4,9 +4,17 @@
 #   - vulnerability ID
 #   - reason citing the upstream status
 #   - linear ticket for the bump/recheck obligation
-#   - expiry date — past this point, Grype auto-re-fires the finding
+#   - expiry date (ISO YYYY-MM-DD)
 #
-# Review every Monday via the scheduled docker-security workflow run.
+# IMPORTANT — Grype does NOT honour `expiry`. Its IgnoreRule schema drops
+# unknown keys silently, so an entry dated 2020 still suppresses its finding
+# today (measured against grype 0.114.0 on 2026-08-01: a five-year-old expiry
+# changed nothing, exit stayed 0). An earlier version of this header claimed
+# Grype auto-re-fires past the date. It does not.
+#
+# The expiry is enforced by scripts/hooks/check_grype_ignore_expiry.py, wired
+# into pre-commit as "supply chain: grype ignores are dated and current".
+# That hook is the ONLY thing stopping a suppression from living forever.
 
 ignore:
   - vulnerability: CVE-2026-15308
