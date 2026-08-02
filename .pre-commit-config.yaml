@@ -211,16 +211,21 @@ repos:
       - id: uv-audit
         name: "supply chain: vulnerability scan"
         language: system
-        # Ignore list — each entry MUST cite its tracking ticket.
-        # Re-check quarterly; drop an ID once the upstream fix lands.
-        #   GHSA-58qw-9mgm-455v : pip 26.0.1 tarball handling (dev-only; no fix
-        #                        available as of 2026-04-24). Tracked in beads
-        #                        worthless-lwvs. Drop when pip patches.
-        # PYSEC-2026-2132 (click.edit() command injection, CVE-2026-7246) was
-        # dropped 2026-08-01: semgrep left the lock (now `uvx`-isolated in
-        # sast.yml), so click resolves to 8.4.2 >= the 8.3.3 fix. beads
-        # worthless-fnvz.
-        entry: sh -c 'uv export --frozen --no-emit-project | uv run pip-audit --disable-pip -r /dev/stdin --ignore-vuln GHSA-58qw-9mgm-455v'
+        # NOTHING is ignored here any more. Both former entries were dropped
+        # 2026-08-02 after verifying pip-audit reports clean without them:
+        #   PYSEC-2026-2132 : click.edit() injection (CVE-2026-7246). semgrep
+        #                     left the lock (now `uvx`-isolated in sast.yml),
+        #                     so click resolves to 8.4.2 >= the 8.3.3 fix.
+        #                     beads worthless-fnvz.
+        #   GHSA-58qw-9mgm-455v : pip tarball handling. pip is still in the
+        #                     exported set, but pip-audit no longer reports it,
+        #                     so the suppression was hiding nothing. A dead
+        #                     ignore is worse than none — it silently absorbs
+        #                     the NEXT finding for that package. beads
+        #                     worthless-lwvs; reopen if it re-fires.
+        # If an ignore is ever needed again it MUST cite its tracking ticket
+        # and be re-checked quarterly.
+        entry: sh -c 'uv export --frozen --no-emit-project | uv run pip-audit --disable-pip -r /dev/stdin'
         pass_filenames: false
         stages: [pre-push]
 
