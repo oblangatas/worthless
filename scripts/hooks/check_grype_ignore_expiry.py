@@ -37,10 +37,10 @@ CONFIGS = (REPO / ".grype.yaml", REPO / ".grype" / "config.yaml")
 
 
 def check(config: Path, today: dt.date) -> list[str]:
-    """Return one problem string per bad ignore rule. Empty list = all good."""
-    if not config.exists():
-        return [f"{config.name} is missing — the scan has no ignore policy to enforce."]
+    """Return one problem string per bad ignore rule. Empty list = all good.
 
+    Caller guarantees the file exists — check_all() filters first.
+    """
     data = yaml.safe_load(config.read_text()) or {}
     rules = data.get("ignore") or []
     if not rules:
@@ -98,8 +98,10 @@ def check(config: Path, today: dt.date) -> list[str]:
 def check_all(configs: tuple[Path, ...], today: dt.date) -> list[str]:
     """Check every grype config that exists. At least one must.
 
-    A missing secondary config is fine — a missing primary one is not, and is
-    reported by check() itself.
+    Either location alone is legitimate — grype reads both, so a repo that
+    keeps all its ignores in .grype/config.yaml is fine. What is NOT fine is
+    neither existing, which would mean the scan has no ignore policy at all
+    and this gate has nothing to enforce.
     """
     present = [c for c in configs if c.exists()]
     if not present:

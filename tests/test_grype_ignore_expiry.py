@@ -94,19 +94,12 @@ def test_yaml_date_and_string_forms_both_parse(tmp_path: Path, stamp: str) -> No
     assert _load().check(cfg, TODAY) == []
 
 
-def test_the_real_repo_config_is_structurally_sound() -> None:
-    """Every shipped ignore is named and dated — deliberately NOT a freshness check.
-
-    Asserting the live config against `today` would red the whole unit suite
-    the morning an expiry lapses, for every developer, on unrelated work.
-    Freshness is the hook's job: it runs at commit time and again in
-    docker-security.yml right before the scan. This test guards the shape.
-    """
+def test_missing_file_is_not_check_s_job(tmp_path: Path) -> None:
+    """check() assumes the file exists; check_all() owns that invariant."""
     mod = _load()
-    # A date far in the past would make every entry "expired"; a far-future
-    # date makes none expire, so anything reported here is structural.
-    problems = mod.check(REPO / ".grype.yaml", dt.date(1970, 1, 1))
-    assert problems == [], "\n".join(problems)
+    problems = mod.check_all((tmp_path / ".grype.yaml", tmp_path / "config.yaml"), TODAY)
+    assert len(problems) == 1
+    assert "no ignore policy" in problems[0]
 
 
 # --- the .grype/config.yaml blind spot -------------------------------------
@@ -157,30 +150,15 @@ def test_malformed_entry_does_not_crash(tmp_path: Path) -> None:
     assert "not a mapping" in problems[0]
 
 
-def test_every_real_grype_config_location_is_structurally_sound() -> None:
-    """Same for the secondary location, if it exists. Shape, not freshness."""
+def test_the_shipped_config_is_structurally_sound() -> None:
+    """Every shipped ignore is named and dated — deliberately NOT a freshness check.
+
+    Asserting the live config against `today` would red the whole unit suite
+    the morning an expiry lapses, for every developer, on unrelated work.
+    Freshness is the hook's job: it runs at commit time and again in
+    docker-security.yml right before the scan. This guards the shape only, so
+    the epoch date is used — nothing can be "expired" relative to 1970.
+    """
     mod = _load()
     problems = mod.check_all(mod.CONFIGS, dt.date(1970, 1, 1))
     assert problems == [], "\n".join(problems)
-
-
-def test_hook_would_fail_the_repo_config_once_an_expiry_lapses() -> None:
-    """The forcing function still exists — it just fires in the hook, not here.
-
-    Proves the shipped config WOULD be rejected the day after its earliest
-    expiry, without tying this suite to the calendar.
-    """
-    import yaml
-
-    mod = _load()
-    raw = yaml.safe_load((REPO / ".grype.yaml").read_text())
-    stamps = []
-    for rule in raw["ignore"]:
-        e = rule["expiry"]
-        stamps.append(e if isinstance(e, dt.date) else dt.date.fromisoformat(str(e)))
-    earliest = min(stamps)
-
-    assert mod.check(REPO / ".grype.yaml", earliest) == []
-    lapsed = mod.check(REPO / ".grype.yaml", earliest + dt.timedelta(days=1))
-    assert lapsed, "an expiry lapsing must be caught by the hook"
-    assert "expired" in lapsed[0]
