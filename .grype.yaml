@@ -43,10 +43,21 @@ ignore:
   # 3.14-slim-trixie: all still carry both. Only 3.15-rc scans clean, and
   # shipping a release-candidate interpreter is the worse trade.
   #
-  # Not reachable in Worthless: the proxy forwards JSON and never opens an
-  # archive. Verified 2026-08-01 against src/worthless — zero imports of
-  # tarfile, zero uses of shutil.unpack_archive, zero uses of zipfile.
-  # Both CVEs require calling into tarfile with an attacker-supplied archive.
+  # Not reachable in Worthless. Verified 2026-08-01, first-party AND deps:
+  #   - src/worthless: zero imports of tarfile, zero shutil.unpack_archive,
+  #     zero zipfile. The proxy forwards JSON and never opens an archive.
+  #   - site-packages: the only runtime dependency touching tarfile is
+  #     pygments, in lexers/_php_builtins.py — a maintenance script for
+  #     regenerating lexer data. Confirmed NOT loaded after importing
+  #     worthless.proxy + worthless.cli.
+  #   - `backports.tarfile` IS resident at runtime (keyring -> jaraco-context).
+  #     It is a separate PyPI package, not the CPython stdlib module these two
+  #     CVEs are filed against, and this ignore is scoped to
+  #     `package: {name: python, type: binary}` so it does not mask anything
+  #     filed against backports-tarfile itself. Worthless never calls the
+  #     jaraco.context tarball helper that would exercise it.
+  # Both CVEs require calling into tarfile with an attacker-supplied archive,
+  # and no code path carries attacker bytes to any of the above.
   #
   # Linear: WOR-852 — move off EOL Debian 12, or re-check whether a stable
   # 3.13.x / 3.14.x backport has shipped. Re-MEASURE before extending; do not

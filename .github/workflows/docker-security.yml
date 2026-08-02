@@ -61,6 +61,15 @@ jobs:
       - name: Build image
         run: docker build -t worthless-proxy:${{ github.sha }} .
 
+      # Grype silently drops the unknown `expiry` key in .grype.yaml, so a
+      # suppression dated 2020 still suppresses. The pre-commit hook that
+      # enforces expiry is bypassed by Dependabot, web edits, --no-verify and
+      # any clone that never ran `pre-commit install` — so it has to run here
+      # too, right before the scan it is protecting. WOR-852.
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+      - name: Grype ignores are dated and current
+        run: uv run --with pyyaml python scripts/hooks/check_grype_ignore_expiry.py
+
       # Grype (Anchore) replaces Trivy (Aqua) after the TeamPCP supply-chain
       # compromise of aquasecurity/trivy-action in Feb-Mar 2026. Same
       # archetype (OSS, OS-pkg + language-dep coverage), different vendor
