@@ -94,7 +94,7 @@ def test_iclolud_finding_uses_canonical_phrases(
 
     result = runner.invoke(app, ["doctor"])
 
-    output = result.output + (result.stderr or "")
+    output = result.stdout + (result.stderr or "")
     assert doctor_module.ICLOUD_LEAK_PHRASE in output, (
         f"missing canonical phrase '{doctor_module.ICLOUD_LEAK_PHRASE}':\n{output}"
     )
@@ -166,7 +166,7 @@ def test_doctor_exit_codes(
     assert result.exit_code == expected_exit, (
         f"unexpected exit {result.exit_code} for "
         f"orphans={n_orphans} synced={n_synced} recovery={n_recovery}:\n"
-        f"stdout: {result.output}\nstderr: {result.stderr}"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
 
 

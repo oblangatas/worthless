@@ -32,7 +32,7 @@ import pytest
 
 pytestmark = pytest.mark.skip(reason="WOR-549: worthless-16x2 ↔ sidecar IPC integration pending")
 
-# click >=8.2 keeps stderr out of result.output, so CLI stderr does not bleed in
+# click >=8.2 keeps stderr out of result.stdout, so CLI stderr does not bleed in
 runner = CliRunner()
 
 _PROVIDER = "openai"
@@ -280,7 +280,7 @@ class TestDoctorOpenclawConsistency:
 
         # Step 1: Lock → DB has shard-B₁; derive shard-A₁ to put in openclaw.json
         result = _lock_env(home, env_a)
-        assert result.exit_code == 0, f"Lock failed: {result.output}\n{result.stderr}"  # type: ignore[union-attr]
+        assert result.exit_code == 0, f"Lock failed: {result.stdout}\n{result.stderr}"  # type: ignore[union-attr]
 
         alias = _get_first_alias(home)
         repo = _make_repo(home)
@@ -375,7 +375,7 @@ class TestDoctorOpenclawConsistency:
         # conflict from parallel test runs).  Both mean the DB has shard-B and .env
         # has shard-A — which is all this test cares about.
         assert result.exit_code in (0, 73), (  # type: ignore[union-attr]
-            f"Lock failed: {result.output}\n{result.stderr}"  # type: ignore[union-attr]
+            f"Lock failed: {result.stdout}\n{result.stderr}"  # type: ignore[union-attr]
         )
 
         alias = _get_first_alias(home)
@@ -429,7 +429,7 @@ class TestDoctorOpenclawConsistency:
         env_a = _make_env_file(tmp_path, key)
 
         result = _lock_env(home, env_a)
-        assert result.exit_code == 0, f"Lock failed: {result.output}\n{result.stderr}"  # type: ignore[union-attr]
+        assert result.exit_code == 0, f"Lock failed: {result.stdout}\n{result.stderr}"  # type: ignore[union-attr]
 
         alias = _get_first_alias(home)
         repo = _make_repo(home)

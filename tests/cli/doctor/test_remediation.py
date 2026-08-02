@@ -51,7 +51,7 @@ def test_failing_check_finding_carries_remediation(fake_home, monkeypatch) -> No
     monkeypatch.setattr(runner_module, "get_home", lambda: fake_home)
 
     result = runner.invoke(app, ["doctor", "--json"])
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
 
     failing = [c for c in payload["checks"] if c["status"] in ("warn", "error")]

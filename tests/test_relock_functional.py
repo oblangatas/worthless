@@ -361,7 +361,7 @@ async def test_relock_doctor_detects_stale_openclaw(
             env={"WORTHLESS_HOME": str(home_dir.base_dir)},
         )
 
-    output = (result.output or "").lower()
+    output = (result.stdout or "").lower()
     assert any(
         keyword in output
         for keyword in ("openclaw", "stale", "out of sync", "mismatch", "inconsistent")

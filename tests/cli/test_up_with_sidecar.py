@@ -472,10 +472,13 @@ class TestDaemonModeRejected:
 
         assert result.exit_code != 0
         # Console renders to stderr; `output` is the mixed stream (typer >=0.26).
-        out = (result.output or "") + (str(result.exception) if result.exception else "")
+        # Assert against what the USER actually saw — folding
+        # str(result.exception) in here would let this pass on text that only
+        # ever existed inside a traceback and never reached the terminal.
+        out = result.output or ""
         # Must mention daemon and foreground in some form.
-        assert "daemon" in out.lower()
-        assert "foreground" in out.lower()
+        assert "daemon" in out.lower(), f"user never saw 'daemon':\n{out!r}"
+        assert "foreground" in out.lower(), f"user never saw 'foreground':\n{out!r}"
         # WOR-384 fix-11/11: pin the numeric error code so a future change
         # to the rejection's ErrorCode surfaces explicitly. Was substring-
         # only before — would silently couple to the wrong code (Jenny CONCERN #4).

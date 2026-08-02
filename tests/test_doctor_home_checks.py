@@ -65,8 +65,8 @@ class TestLockHomeMismatchWarning:
             ["lock", "--env", str(env_file)],
             env={"WORTHLESS_HOME": str(home.base_dir)},
         )
-        assert result.exit_code == 0, result.output
-        # Warning is routed to stderr (typer.echo(..., err=True)); result.output is stdout.
+        assert result.exit_code == 0, result.stdout
+        # Warning is routed to stderr (typer.echo(..., err=True)); result.stdout is stdout.
         assert "Warning: using non-default home" in result.stderr
         assert "WORTHLESS_HOME is set" in result.stderr
 
@@ -78,8 +78,8 @@ class TestLockHomeMismatchWarning:
         env_file = tmp_path / ".env"
         env_file.write_text(f"OPENAI_API_KEY={fake_openai_key()}\n")
         result = runner.invoke(app, ["lock", "--env", str(env_file)])
-        assert result.exit_code == 0, result.output
-        assert "WORTHLESS_HOME is set" not in (result.output + (result.stderr or ""))
+        assert result.exit_code == 0, result.stdout
+        assert "WORTHLESS_HOME is set" not in (result.stdout + (result.stderr or ""))
 
     def test_lock_no_warning_on_failed_lock(self, tmp_path: Path) -> None:
         """When lock fails (missing .env), the non-default-home warning is never printed.
@@ -96,7 +96,7 @@ class TestLockHomeMismatchWarning:
             env={"WORTHLESS_HOME": str(tmp_path / ".worthless")},
         )
         assert result.exit_code != 0
-        assert "WORTHLESS_HOME is set" not in (result.output + (result.stderr or ""))
+        assert "WORTHLESS_HOME is set" not in (result.stdout + (result.stderr or ""))
 
 
 # ---------------------------------------------------------------------------
@@ -120,8 +120,8 @@ class TestDoctorHomeMismatch:
             ["doctor"],
             env={"WORTHLESS_HOME": str(fake_home.base_dir)},
         )
-        assert "home mismatch" in result.output
-        assert "Fix: unset WORTHLESS_HOME" in result.output
+        assert "home mismatch" in result.stdout
+        assert "Fix: unset WORTHLESS_HOME" in result.stdout
 
     def test_doctor_skips_mismatch_check_when_proxy_not_running(
         self, fake_home: WorthlessHome
@@ -132,7 +132,7 @@ class TestDoctorHomeMismatch:
             ["doctor"],
             env={"WORTHLESS_HOME": str(fake_home.base_dir)},
         )
-        assert "home mismatch" not in result.output
+        assert "home mismatch" not in result.stdout
         assert result.exit_code == 0
 
     def test_doctor_handles_corrupt_pid_file(self, fake_home: WorthlessHome) -> None:
@@ -148,7 +148,7 @@ class TestDoctorHomeMismatch:
             ["doctor"],
             env={"WORTHLESS_HOME": str(fake_home.base_dir)},
         )
-        assert "home mismatch" not in result.output
+        assert "home mismatch" not in result.stdout
         assert result.exit_code == 0
 
     def test_doctor_handles_dead_process_returns_empty_env(
@@ -169,7 +169,7 @@ class TestDoctorHomeMismatch:
             ["doctor"],
             env={"WORTHLESS_HOME": str(fake_home.base_dir)},
         )
-        assert "Traceback" not in (result.output + (result.stderr or ""))
+        assert "Traceback" not in (result.stdout + (result.stderr or ""))
 
 
 # ---------------------------------------------------------------------------
@@ -192,8 +192,8 @@ class TestDoctorAliasNotInDb:
             ["doctor"],
             env={"WORTHLESS_HOME": str(fake_home.base_dir)},
         )
-        assert "openai-abc12345" in result.output
-        assert "no shard" in result.output
+        assert "openai-abc12345" in result.stdout
+        assert "no shard" in result.stdout
 
     def test_doctor_alias_check_separate_from_orphan_check(
         self, tmp_path: Path, monkeypatch
@@ -243,8 +243,8 @@ class TestDoctorAliasNotInDb:
             env={"WORTHLESS_HOME": str(home.base_dir)},
         )
 
-        assert PROBLEM_PHRASE in result.output
-        assert "phantom999" in result.output
+        assert PROBLEM_PHRASE in result.stdout
+        assert "phantom999" in result.stdout
 
 
 # ---------------------------------------------------------------------------

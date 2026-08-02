@@ -114,8 +114,8 @@ def test_doctor_json_does_not_crash_when_fernet_key_missing(
 
     # A parseable JSON document must be on stdout regardless of the key state.
     doc = json.loads(result.stdout)
-    assert "checks" in doc, f"doctor --json did not emit a checks envelope: {result.stdout!r}"
-    out = result.output.lower()
+    assert "checks" in doc, f"doctor --json did not emit a checks envelope: {result.output!r}"
+    out = result.stdout.lower()
     assert "internal error" not in out, "doctor --json must not crash with WRTLS-199"
 
 
@@ -258,9 +258,9 @@ def test_doctor_json_survives_corrupt_db(home_dir: WorthlessHome, tmp_path) -> N
 
     # A parseable JSON document must be on stdout despite the corrupt DB.
     doc = json.loads(result.stdout)
-    assert "checks" in doc, f"doctor --json did not emit a checks envelope: {result.stdout!r}"
+    assert "checks" in doc, f"doctor --json did not emit a checks envelope: {result.output!r}"
     assert doc.get("ok") is False, f"a corrupt DB must be ok=False: {doc}"
-    out = result.output.lower()
+    out = result.stdout.lower()
     assert "wrtls-103" not in out, f"doctor --json crashed on a corrupt DB: {out}"
     assert "internal error" not in out, "doctor --json must not crash with WRTLS-199"
 

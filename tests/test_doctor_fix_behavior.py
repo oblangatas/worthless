@@ -893,7 +893,7 @@ class TestDoctorRunIntegration:
         result = runner.invoke(app, ["doctor", "--fix", "--dry-run"])
 
         assert result.exit_code == 0, f"dry-run must exit 0: {result.output}"
-        combined = result.output + (result.stderr or "")
+        combined = result.stdout + (result.stderr or "")
         assert "dry-run" in combined.lower(), f"output must mention 'dry-run': {combined}"
         assert len(apply_called) == 0, "_doctor_apply must NOT be called in dry-run mode"
 
@@ -918,7 +918,7 @@ class TestDoctorRunIntegration:
 
         result = runner.invoke(app, ["doctor"])
 
-        combined = result.output + (result.stderr or "")
+        combined = result.stdout + (result.stderr or "")
         assert "no issues found" not in combined.lower(), (
             f"Recovery-only state must not say 'no issues found': {combined}"
         )
@@ -942,7 +942,7 @@ class TestDoctorRunIntegration:
 
         result = runner.invoke(app, ["doctor"])
 
-        combined = result.output + (result.stderr or "")
+        combined = result.stdout + (result.stderr or "")
         assert doctor_module.RECOVERY_IMPORT_PHRASE in combined, (
             f"Output must include RECOVERY_IMPORT_PHRASE "
             f"'{doctor_module.RECOVERY_IMPORT_PHRASE}': {combined}"
@@ -963,7 +963,7 @@ class TestDoctorRunIntegration:
 
         result = runner.invoke(app, ["doctor"])
 
-        combined = result.output + (result.stderr or "")
+        combined = result.stdout + (result.stderr or "")
         assert "no issues found" in combined.lower(), (
             f"Clean state must report 'No issues found.': {combined}"
         )

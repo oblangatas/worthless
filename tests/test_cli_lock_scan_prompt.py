@@ -36,7 +36,7 @@ _SCAN_FN = "worthless.cli.commands.lock.scan_for_hardcoded_provider_urls"
 _IS_TTY = "worthless.cli.commands.lock._scan_prompt_is_tty"
 
 # click >=8.2 keeps stderr separate: lock's console (print_success/print_warning) → result.stderr
-# typer.confirm prompt text → result.output (stdout)
+# typer.confirm prompt text → result.stdout (stdout)
 runner = CliRunner()
 
 
@@ -93,7 +93,7 @@ class TestLockScanPromptHappyFlow:
 
         assert result.exit_code == 0, result.stderr
         # typer.confirm prompt goes to stdout; bypass summary is in the prompt text
-        assert "bypass" in result.output.lower() or "hardcoded" in result.output.lower()
+        assert "bypass" in result.stdout.lower() or "hardcoded" in result.stdout.lower()
 
     def test_user_answers_yes_shows_scan_output(
         self, home_dir: WorthlessHome, tmp_path: Path
@@ -155,9 +155,9 @@ class TestLockScanPromptHappyFlow:
 
         assert result.exit_code == 0
         # Both stdout and stderr must be completely clear of scan-related noise.
-        assert "hardcoded" not in result.output.lower()
-        assert "bypass" not in result.output.lower()
-        assert "Scan now" not in result.output
+        assert "hardcoded" not in result.stdout.lower()
+        assert "bypass" not in result.stdout.lower()
+        assert "Scan now" not in result.stdout
         assert "hardcoded" not in result.stderr.lower()
         assert "bypass" not in result.stderr.lower()
         assert "Scan now" not in result.stderr
@@ -204,7 +204,7 @@ class TestLockScanPromptNonTTY:
             )
 
         assert result.exit_code == 0
-        assert "Scan now" not in result.output
+        assert "Scan now" not in result.stdout
         assert "Scan now" not in result.stderr
         # _maybe_prompt_code_scan writes the warning to sys.stderr
         assert "hardcoded" in result.stderr.lower() or "bypass" in result.stderr.lower()
@@ -227,7 +227,7 @@ class TestLockScanPromptNonTTY:
             )
 
         assert result.exit_code == 0
-        assert "Scan now" not in result.output
+        assert "Scan now" not in result.stdout
         assert "bypass" in result.stderr.lower()
 
     def test_scan_not_called_when_no_findings_non_tty(
@@ -249,7 +249,7 @@ class TestLockScanPromptNonTTY:
         assert result.exit_code == 0
         assert "hardcoded" not in result.stderr.lower()
         assert "bypass" not in result.stderr.lower()
-        assert "Scan now" not in result.output
+        assert "Scan now" not in result.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -271,7 +271,7 @@ class TestLockScanPromptInsulation:
                 env=_env(home_dir),
             )
 
-        assert result.exit_code == 0, result.output
+        assert result.exit_code == 0, result.stdout
 
     def test_lock_exit_code_unchanged_with_findings(
         self, home_dir: WorthlessHome, tmp_path: Path

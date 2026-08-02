@@ -42,7 +42,7 @@ jobs:
       - name: Upload Bandit SARIF
         if: always()
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@3b1a19a80ab047f35cbb237b5bd9bdc1e14f166c # v3
+        uses: github/codeql-action/upload-sarif@a2983b8bed1923f44751c5c43237f479442827b3 # v3
         with:
           sarif_file: bandit.sarif
           category: bandit
@@ -68,12 +68,15 @@ jobs:
         env:
           UV_CACHE_DIR: /tmp/uv-cache
         run: |
-          uvx semgrep@1.172.0 scan --config auto --config p/secrets --config p/security-audit --config .semgrep/ src/ --sarif --output semgrep.sarif
+          # --error: `semgrep scan` exits 0 even when it finds things. Without
+          # it the SARIF upload is the only signal and the job stays green.
+          # Measured 2026-08-01 on this exact config: 1567 rules, 0 findings.
+          uvx semgrep@1.172.0 scan --error --config auto --config p/secrets --config p/security-audit --config .semgrep/ src/ --sarif --output semgrep.sarif
 
       - name: Upload Semgrep SARIF
         if: always()
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@3b1a19a80ab047f35cbb237b5bd9bdc1e14f166c # v3
+        uses: github/codeql-action/upload-sarif@a2983b8bed1923f44751c5c43237f479442827b3 # v3
         with:
           sarif_file: semgrep.sarif
           category: semgrep
