@@ -25,7 +25,7 @@ from typer.testing import CliRunner
 from worthless.cli.app import app
 from worthless.cli.scanner import SkippedFile
 
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner()
 
 
 @pytest.fixture

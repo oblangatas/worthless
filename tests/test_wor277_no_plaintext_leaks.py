@@ -26,7 +26,7 @@ from worthless.cli.bootstrap import WorthlessHome
 
 from tests.helpers import fake_openai_key
 
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner()
 
 
 class _RootLogCapture:

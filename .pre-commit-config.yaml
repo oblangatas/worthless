@@ -102,6 +102,17 @@ repos:
         always_run: true
         stages: [pre-push]
 
+      # Grype has no `expiry` field — it silently drops unknown keys, so a
+      # suppression dated 2020 still suppresses today (measured on grype
+      # 0.114.0). This hook is the only thing making .grype.yaml's time-boxing
+      # real. WOR-852.
+      - id: grype-ignore-expiry
+        name: "supply chain: grype ignores are dated and current"
+        language: system
+        entry: uv run python scripts/hooks/check_grype_ignore_expiry.py
+        pass_filenames: false
+        always_run: true
+
   # Actionlint: GitHub Actions YAML syntax and logic errors
   - repo: https://github.com/rhysd/actionlint
     rev: v1.7.7
@@ -200,21 +211,21 @@ repos:
       - id: uv-audit
         name: "supply chain: vulnerability scan"
         language: system
-        # Ignore list — each entry MUST cite its tracking ticket.
-        # Re-check quarterly; drop an ID once the upstream fix lands.
-        #   GHSA-58qw-9mgm-455v : pip 26.0.1 tarball handling (dev-only; no fix
-        #                        available as of 2026-04-24). Tracked in beads
-        #                        worthless-lwvs. Drop when pip patches.
-        #   PYSEC-2026-2132    : click.edit() command injection (CVE-2026-7246),
-        #                        fixed in click 8.3.3. click is pinned to 8.1.8
-        #                        by semgrep (qa group, dev/CI-only SAST) which
-        #                        requires click~=8.1.8 through >=1.169.0. Not
-        #                        exploitable here: the CLI uses typer decorators
-        #                        and never calls click.edit()/launch(). CVSS
-        #                        AV:L/AC:H/PR:H/UI:R. Tracked in beads
-        #                        worthless-fnvz. Drop when semgrep relaxes the
-        #                        click<8.2 pin (then bump click>=8.3.3).
-        entry: sh -c 'uv export --frozen --no-emit-project | uv run pip-audit --disable-pip -r /dev/stdin --ignore-vuln GHSA-58qw-9mgm-455v --ignore-vuln PYSEC-2026-2132'
+        # NOTHING is ignored here any more. Both former entries were dropped
+        # 2026-08-02 after verifying pip-audit reports clean without them:
+        #   PYSEC-2026-2132 : click.edit() injection (CVE-2026-7246). semgrep
+        #                     left the lock (now `uvx`-isolated in sast.yml),
+        #                     so click resolves to 8.4.2 >= the 8.3.3 fix.
+        #                     beads worthless-fnvz.
+        #   GHSA-58qw-9mgm-455v : pip tarball handling. pip is still in the
+        #                     exported set, but pip-audit no longer reports it,
+        #                     so the suppression was hiding nothing. A dead
+        #                     ignore is worse than none — it silently absorbs
+        #                     the NEXT finding for that package. beads
+        #                     worthless-lwvs; reopen if it re-fires.
+        # If an ignore is ever needed again it MUST cite its tracking ticket
+        # and be re-checked quarterly.
+        entry: sh -c 'uv export --frozen --no-emit-project | uv run pip-audit --disable-pip -r /dev/stdin'
         pass_filenames: false
         stages: [pre-push]
 

@@ -4,9 +4,17 @@
 #   - vulnerability ID
 #   - reason citing the upstream status
 #   - linear ticket for the bump/recheck obligation
-#   - expiry date — past this point, Grype auto-re-fires the finding
+#   - expiry date (ISO YYYY-MM-DD)
 #
-# Review every Monday via the scheduled docker-security workflow run.
+# IMPORTANT — Grype does NOT honour `expiry`. Its IgnoreRule schema drops
+# unknown keys silently, so an entry dated 2020 still suppresses its finding
+# today (measured against grype 0.114.0 on 2026-08-01: a five-year-old expiry
+# changed nothing, exit stayed 0). An earlier version of this header claimed
+# Grype auto-re-fires past the date. It does not.
+#
+# The expiry is enforced by scripts/hooks/check_grype_ignore_expiry.py, wired
+# into pre-commit as "supply chain: grype ignores are dated and current".
+# That hook is the ONLY thing stopping a suppression from living forever.
 
 ignore:
   - vulnerability: CVE-2026-15308
@@ -27,3 +35,47 @@ ignore:
     # ships the backport, then remove this ignore.
     reason: "Upstream fix only in Python 3.15.0 (pre-release); no stable 3.13.x backport yet. Tracking WOR-691."
     expiry: "2026-08-10"  # ~30 days; recheck when python:3.13.15-slim-bookworm ships.
+
+  # ── CPython tarfile, base-image only (WOR-852 Track B) ──────────────
+  # Both are tarfile bugs in the digest-pinned python:3.13-slim-bookworm base.
+  # Grype's only fixed version is 3.15.0b4 — a PRE-RELEASE. Measured across
+  # 3.13-slim-bookworm (current + latest digest), 3.13-slim-trixie and
+  # 3.14-slim-trixie: all still carry both. Only 3.15-rc scans clean, and
+  # shipping a release-candidate interpreter is the worse trade.
+  #
+  # Not reachable in Worthless. Verified 2026-08-01, first-party AND deps:
+  #   - src/worthless: zero imports of tarfile, zero shutil.unpack_archive,
+  #     zero zipfile. The proxy forwards JSON and never opens an archive.
+  #   - site-packages: the only runtime dependency touching tarfile is
+  #     pygments, in lexers/_php_builtins.py — a maintenance script for
+  #     regenerating lexer data. Confirmed NOT loaded after importing
+  #     worthless.proxy + worthless.cli.
+  #   - `backports.tarfile` IS resident at runtime (keyring -> jaraco-context).
+  #     It is a separate PyPI package, not the CPython stdlib module these two
+  #     CVEs are filed against, and this ignore is scoped to
+  #     `package: {name: python, type: binary}` so it does not mask anything
+  #     filed against backports-tarfile itself. Worthless never calls the
+  #     jaraco.context tarball helper that would exercise it.
+  # Both CVEs require calling into tarfile with an attacker-supplied archive,
+  # and no code path carries attacker bytes to any of the above.
+  #
+  # Linear: WOR-852 — move off EOL Debian 12, or re-check whether a stable
+  # 3.13.x / 3.14.x backport has shipped. Re-MEASURE before extending; do not
+  # extend blind.
+  - vulnerability: CVE-2026-11940
+    package:
+      name: python
+      type: binary
+    # tarfile.extractall() 'data'/'tar' filter bypass via a crafted archive
+    # where a hardlink references a symlink stored at a deeper name.
+    reason: "CPython tarfile; fix only in 3.15.0b4 (pre-release). Unreachable — no tarfile/archive use in src/worthless. Tracking WOR-852."
+    expiry: "2026-08-31"
+
+  - vulnerability: CVE-2026-11972
+    package:
+      name: python
+      type: binary
+    # tarfile streaming mode (mode="r|") mishandles EOF, making archive
+    # parsing take exponentially longer — a DoS against archive parsing.
+    reason: "CPython tarfile; fix only in 3.15.0b4 (pre-release). Unreachable — no tarfile/archive use in src/worthless. Tracking WOR-852."
+    expiry: "2026-08-31"
