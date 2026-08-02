@@ -94,6 +94,21 @@ def test_yaml_date_and_string_forms_both_parse(tmp_path: Path, stamp: str) -> No
     assert _load().check(cfg, TODAY) == []
 
 
+def test_configs_covers_every_location_grype_reads() -> None:
+    """Pin the WIRING, not just the logic.
+
+    `grype config locations` (0.114.0) reports .grype.yaml and
+    .grype/config.yaml as the two repo-root configs it auto-discovers, and
+    anchore/scan-action passes no explicit --config. The blind-spot test below
+    hands check_all() its own tuple, so without this assertion someone could
+    delete the second entry from CONFIGS and no test would notice — which is
+    exactly the hole this suite was written to close.
+    """
+    mod = _load()
+    names = {str(c.relative_to(REPO)) for c in mod.CONFIGS}
+    assert names == {".grype.yaml", ".grype/config.yaml"}, names
+
+
 def test_missing_file_is_not_check_s_job(tmp_path: Path) -> None:
     """check() assumes the file exists; check_all() owns that invariant."""
     mod = _load()
