@@ -13,9 +13,12 @@ import importlib.util
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO = Path(__file__).resolve().parents[1]
 HOOK = REPO / "scripts" / "hooks" / "check_grype_ignore_expiry.py"
+WORKFLOW = REPO / ".github" / "workflows" / "docker-security.yml"
+INFORMATIONAL_CONFIG = REPO / ".grype-informational.yaml"
 
 
 def _load():
@@ -177,3 +180,66 @@ def test_the_shipped_config_is_structurally_sound() -> None:
     mod = _load()
     problems = mod.check_all(mod.CONFIGS, dt.date(1970, 1, 1))
     assert problems == [], "\n".join(problems)
+
+
+# --- the scan policy itself (WOR-852) --------------------------------------
+# A suppression is only half the contract. The other half lives in the
+# workflow: which severities gate, and which config each scan reads. Both were
+# wrong before WOR-852 and both failed silently, so they are pinned here.
+
+
+def _scan_steps() -> list[dict]:
+    """The two anchore/scan-action steps, in file order: gated, then informational."""
+    # PyYAML resolves the bare `on:` key to True (YAML 1.1 booleans), so the
+    # trigger block is looked up separately where it is needed.
+    wf = yaml.safe_load(WORKFLOW.read_text())
+    steps = wf["jobs"]["scan"]["steps"]
+    return [s for s in steps if "anchore/scan-action" in str(s.get("uses", ""))]
+
+
+def test_the_gate_fails_on_medium_not_just_high() -> None:
+    """The gated scan must stop a fixable Medium, not wave it through.
+
+    `severity-cutoff` becomes grype's `--fail-on`, an exit-code threshold that
+    does NOT filter the report — so at `high` a fixable Medium was neither
+    gated nor surfaced, and a new one arrived in silence. Reverting this to
+    `high` re-opens that hole with a one-word edit and no other symptom.
+    """
+    gated = [s for s in _scan_steps() if s["with"].get("fail-build") is True]
+    assert len(gated) == 1, "expected exactly one build-failing scan step"
+    assert gated[0]["with"]["severity-cutoff"] == "medium"
+    assert gated[0]["with"]["only-fixed"] is True
+
+
+def test_the_informational_scan_does_not_inherit_the_gate_s_ignores() -> None:
+    """Pointed at .grype.yaml, this scan hides what the gate already skips.
+
+    A suppressed CVE would then appear in NO output anywhere: skipped by the
+    gate AND omitted from the report. That regression shipped once during
+    WOR-852 and was caught only by reading the CI log by hand.
+    """
+    informational = [s for s in _scan_steps() if s["with"].get("fail-build") is False]
+    assert len(informational) == 1, "expected exactly one informational scan step"
+    step = informational[0]
+    assert step.get("env", {}).get("GRYPE_CONFIG") == INFORMATIONAL_CONFIG.name
+    # table is what puts findings in the job log; sarif (the action default)
+    # is written to a file nothing uploads, so the report reaches no human.
+    assert step["with"]["output-format"] == "table"
+
+
+def test_the_informational_config_suppresses_nothing() -> None:
+    """An ignore here would re-create the very blind spot the file exists to close."""
+    assert INFORMATIONAL_CONFIG.exists(), f"{INFORMATIONAL_CONFIG.name} is missing"
+    assert not yaml.safe_load(INFORMATIONAL_CONFIG.read_text()).get("ignore")
+
+
+def test_the_scan_reruns_when_its_own_config_changes() -> None:
+    """A gate that cannot observe edits to itself will eventually ship one that disables it."""
+    wf = yaml.safe_load(WORKFLOW.read_text())
+    triggers = wf[True]  # bare `on:` — see _scan_steps
+    for event in ("push", "pull_request"):
+        paths = set(triggers[event]["paths"])
+        assert ".grype*.yaml" in paths, f"{event}: grype configs not in paths filter"
+        assert ".github/workflows/docker-security.yml" in paths, (
+            f"{event}: workflow not self-covering"
+        )
