@@ -3,7 +3,7 @@
 -e .
 aiosqlite==0.22.1
     # via worthless
-annotated-doc==0.0.4
+annotated-doc==0.0.5
     # via
     #   fastapi
     #   typer
