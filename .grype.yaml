@@ -105,6 +105,21 @@ ignore:
   # WOR-852 already rejected for the two Highs above: shipping a pre-release
   # interpreter is worse than carrying a bounded, argued finding.
   #
+  # MEASURED 2026-08-03 (grype 0.114.0) across every candidate base, with a
+  # 3.15 pre-release as the positive control — these four were NOT given the
+  # Highs' expiry on the strength of the Highs' measurement:
+  #
+  #   python:3.13-slim-bookworm  3.13.14  all four present   <- ours
+  #   python:3.13-slim-trixie    3.13.14  all four present
+  #   python:3.13-slim           3.13.14  all four present
+  #   python:3.14-slim-trixie    3.14.6   all four present
+  #   python:3.14-slim           3.14.6   all four present
+  #   python:3.15-rc-slim        3.15.0   ALL FOUR CLEAR     <- control
+  #
+  # A full major version ahead still carries all four. The control confirms
+  # the fix is real and pre-release-only, so there is no stable base to move
+  # to — the same trap as the Highs, now demonstrated rather than assumed.
+  #
   # Reachability MEASURED 2026-08-02 against the built image, not assumed —
   # first-party imports AND runtime-resident modules after importing
   # worthless.proxy + worthless.cli. Re-MEASURE before extending.
@@ -117,7 +132,7 @@ ignore:
     # is NOT resident after importing worthless.proxy + worthless.cli.
     # Worthless speaks HTTP to LLM providers; it has no mail client.
     reason: "CPython imaplib injection; fix only in 3.15.0a6 (pre-release). Unreachable — imaplib not imported first-party and not resident at runtime. Tracking WOR-852."
-    expiry: "2026-08-31"
+    expiry: "2027-01-31"  # set 2026-08-03 on the six-base measurement above, not blind.
 
   - vulnerability: CVE-2025-15367
     package:
@@ -126,7 +141,7 @@ ignore:
     # poplib: same newline-injection shape as CVE-2025-15366, POP3 instead of
     # IMAP. Measured identically: not imported first-party, not resident.
     reason: "CPython poplib injection; fix only in 3.15.0a6 (pre-release). Unreachable — poplib not imported first-party and not resident at runtime. Tracking WOR-852."
-    expiry: "2026-08-31"
+    expiry: "2027-01-31"  # set 2026-08-03 on the six-base measurement above, not blind.
 
   - vulnerability: CVE-2026-12003
     package:
@@ -140,7 +155,7 @@ ignore:
     # Planting that landmark needs write access beside the interpreter, which
     # the non-root runtime user does not have.
     reason: "CPython VPATH sys.path; fix only in 3.15.0b3 (pre-release). Unreachable — installed layout, no Modules/setup.local, non-root runtime. Tracking WOR-852."
-    expiry: "2026-08-31"
+    expiry: "2027-01-31"  # set 2026-08-03 on the six-base measurement above, not blind.
 
   - vulnerability: CVE-2026-0864
     package:
@@ -148,10 +163,22 @@ ignore:
       type: binary
     # configparser: WRITING a config whose multi-line value carries \r can
     # inject extra keys. This is the only one of the four that is resident at
-    # runtime — keyring.core imports it (site-packages/keyring/core.py:7).
-    # But keyring only READS: core.py:171 builds a RawConfigParser to parse
-    # keyringrc.cfg, and there is no configparser `.write()` anywhere in the
-    # package. src/worthless has zero configparser imports and writes no ini.
-    # No write path means the injection has nowhere to land.
-    reason: "CPython configparser write-injection; fix only in 3.15.0b4 (pre-release). Unreachable — resident via keyring.core but read-only; no configparser write path. Tracking WOR-852."
-    expiry: "2026-08-31"
+    # runtime, so "we don't use it" was not available as an answer and the
+    # whole image had to be swept (2026-08-03). Five packages import
+    # configparser; exactly one WRITES with it:
+    #
+    #   pip (+ vendored distlib)  reads AND WRITES  not resident at runtime
+    #   keyring                   reads keyringrc   resident  (core.py:7/171)
+    #   rich                      reads a theme     resident
+    #   uvicorn                   reads log config  resident
+    #   pydantic                  mypy plugin only  not resident
+    #
+    # typer and starlette look like writers to a naive grep and are not:
+    # typer's hits are docstring examples, starlette's `parser.write()` is a
+    # multipart form parser unrelated to configparser.
+    #
+    # So the only writer in the image is pip, which is not loaded by the proxy
+    # or the CLI. src/worthless imports configparser nowhere. The CVE needs a
+    # write path to inject into; there isn't one.
+    reason: "CPython configparser write-injection; fix only in 3.15.0b4 (pre-release). Unreachable — swept whole image 2026-08-03: only pip writes via configparser and it is not resident. Tracking WOR-852."
+    expiry: "2027-01-31"  # set 2026-08-03 on the six-base measurement above, not blind.
