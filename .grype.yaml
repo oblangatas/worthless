@@ -128,17 +128,3 @@ ignore:
     # the non-root runtime user does not have.
     reason: "CPython VPATH sys.path; fix only in 3.15.0b3 (pre-release). Unreachable — installed layout, no Modules/setup.local, non-root runtime. Tracking WOR-852."
     expiry: "2026-08-31"
-
-  - vulnerability: CVE-2026-0864
-    package:
-      name: python
-      type: binary
-    # configparser: WRITING a config whose multi-line value carries \r can
-    # inject extra keys. This is the only one of the four that is resident at
-    # runtime — keyring.core imports it (site-packages/keyring/core.py:7).
-    # But keyring only READS: core.py:171 builds a RawConfigParser to parse
-    # keyringrc.cfg, and there is no configparser `.write()` anywhere in the
-    # package. src/worthless has zero configparser imports and writes no ini.
-    # No write path means the injection has nowhere to land.
-    reason: "CPython configparser write-injection; fix only in 3.15.0b4 (pre-release). Unreachable — resident via keyring.core but read-only; no configparser write path. Tracking WOR-852."
-    expiry: "2026-08-31"
