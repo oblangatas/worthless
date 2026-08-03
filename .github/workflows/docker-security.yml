@@ -1,6 +1,11 @@
 name: Docker Security Scan & E2E
 
 on:
+  # Manual trigger. The weekly `schedule:` below already exists, but without
+  # workflow_dispatch there is no way to answer "is main red RIGHT NOW?"
+  # between Mondays. During WOR-852 main was red and unscanned for 5 days and
+  # the only way to find out was to build the image and run grype locally.
+  workflow_dispatch:
   push:
     paths:
       - 'Dockerfile'
