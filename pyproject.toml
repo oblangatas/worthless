@@ -21,7 +21,10 @@ classifiers = [
 ]
 
 dependencies = [
-    "cryptography>=48.0.1",
+    # Floor is 50.0.0, not 48.0.1: PYSEC-2026-3552 affects everything below it.
+    # A floor of 48 let a fresh `uv lock` land on 49.0.0 and fail uv-audit at
+    # push time, which is how this surfaced. Raise the floor, not just the lock.
+    "cryptography>=50.0.0",
     "aiosqlite>=0.22.1",
     "httpx>=0.28",
     "fastapi>=0.115.12",
