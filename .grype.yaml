@@ -44,8 +44,9 @@ ignore:
     expiry: "2027-01-31"  # extended on a fresh measurement, not blind. Re-measure before extending again.
 
   # ── CPython tarfile, base-image only (WOR-852 Track B) ──────────────
-  # Both are tarfile bugs in the digest-pinned python:3.13-slim-bookworm base.
-  # Grype's only fixed version is 3.15.0b4 — a PRE-RELEASE.
+  # All three are tarfile bugs in the digest-pinned python:3.13-slim-bookworm
+  # base. For CVE-2026-11940 and CVE-2026-11972, grype's only fixed version is
+  # 3.15.0b4 — a PRE-RELEASE.
   #
   # RE-MEASURED 2026-08-02 (grype 0.114.0), five candidate bases pulled fresh:
   #   python:3.13-slim-bookworm  3.13.14  both present
@@ -56,6 +57,36 @@ ignore:
   # Even a full major version ahead still carries both. Only 3.15-rc scans
   # clean, and shipping a release-candidate interpreter is the worse trade.
   #
+  # CVE-2026-4360 is the OPPOSITE case, and the shortest-lived of the three.
+  # Grype reports `fix: []` with an empty state for it — but that is a fact
+  # about grype's record, not about CPython. Its record here is NVD-sourced
+  # (`provider: nvd`), and NVD carries no fixed-version mapping, so grype has
+  # nothing to report. Read as "no fix exists" it is simply wrong.
+  #
+  # MEASURED 2026-08-05 against the CPython repo, not inferred:
+  #   GH-151988 (gh-151987) is merged and backported to 3.10, 3.11, 3.13,
+  #   3.14 and 3.15. `git`-level containment via the GitHub compare API:
+  #     v3.13.14 -> does NOT contain it   (our base image: still affected)
+  #     v3.13.15 -> CONTAINS it           (tagged upstream)
+  #     v3.14.6  -> does NOT contain it
+  #     v3.14.7  -> CONTAINS it           (tagged upstream)
+  # So a fixed CPython is released. What is missing is a published image:
+  #   python:3.13.15-slim-bookworm  not on Docker Hub as of 2026-08-05
+  #   python:3.13-slim-bookworm     still resolves to 3.13.14
+  #   python:3.14.7-slim-bookworm   published, and it carries the fix
+  #
+  # This entry is therefore a SHORT bridge, not a standing waiver: suppressed
+  # only until python:3.13.15-slim-bookworm publishes, at which point bump the
+  # base and DELETE this entry rather than extending it. Moving to 3.14.7 today
+  # would also clear it, but that is a product-wide minor-version bump and a
+  # separate decision — it is not smuggled in under a CVE suppression.
+  #
+  # That difference is why CVE-2026-4360 carries a SHORTER expiry than the two
+  # above it. Theirs was extended to 2027-01-31 on the measurement above,
+  # because nothing they can be fixed by has shipped. This one has a fix in a
+  # tagged release and is waiting on a Docker publish, so a long date would
+  # mean carrying a suppression months past the bump that retires it.
+  #
   # Not reachable in Worthless. Verified 2026-08-01, first-party AND deps:
   #   - src/worthless: zero imports of tarfile, zero shutil.unpack_archive,
   #     zero zipfile. The proxy forwards JSON and never opens an archive.
@@ -64,13 +95,13 @@ ignore:
   #     regenerating lexer data. Confirmed NOT loaded after importing
   #     worthless.proxy + worthless.cli.
   #   - `backports.tarfile` IS resident at runtime (keyring -> jaraco-context).
-  #     It is a separate PyPI package, not the CPython stdlib module these two
+  #     It is a separate PyPI package, not the CPython stdlib module these
   #     CVEs are filed against, and this ignore is scoped to
   #     `package: {name: python, type: binary}` so it does not mask anything
   #     filed against backports-tarfile itself. Worthless never calls the
   #     jaraco.context tarball helper that would exercise it.
-  # Both CVEs require calling into tarfile with an attacker-supplied archive,
-  # and no code path carries attacker bytes to any of the above.
+  # All three CVEs require calling into tarfile with an attacker-supplied
+  # archive, and no code path carries attacker bytes to any of the above.
   #
   # Linear: WOR-852 — move off EOL Debian 12, or re-check whether a stable
   # 3.13.x / 3.14.x backport has shipped. Re-MEASURE before extending; do not
@@ -92,6 +123,41 @@ ignore:
     # parsing take exponentially longer — a DoS against archive parsing.
     reason: "CPython tarfile; fix only in 3.15.0b4 (pre-release). Unreachable — no tarfile/archive use in src/worthless. Tracking WOR-852."
     expiry: "2027-01-31"  # extended 2026-08-02 on the re-measurement above, not blind.
+
+  - vulnerability: CVE-2026-4360
+    package:
+      name: python
+      type: binary
+    # tarfile.extract() does not pass `filter` through when extracting
+    # hardlinks, so a crafted archive can land files with an unexpected
+    # uid/gid even when the caller passed filter='data'. Same class as
+    # CVE-2026-11940's extractall() filter bypass, same precondition: the
+    # caller must hand tarfile an attacker-supplied archive.
+    #
+    # WHY THIS ENTRY EXISTS AT ALL, given the cutoff moved to `medium`:
+    # it would NOT have failed the build without it. The gating scan runs
+    # `only-fixed: true`, which drops findings grype has no fixed version for —
+    # and grype has none for this one (NVD record, version-blind; see above).
+    # Measured 2026-08-02 against the built image: `grype --only-fixed
+    # --fail-on medium` exits 0 and reports zero findings with or without this
+    # entry. CI is green either way; this is not a green-CI change.
+    #
+    # That is the honest limit of the medium cutoff, and it is worth writing
+    # down: it catches a new Medium that grype can map to a fixed version, and
+    # misses one it cannot. Whether the fix exists upstream is irrelevant to
+    # the gate — only whether grype's provider records it.
+    #
+    # Nor does this entry hide the finding. The informational scan reads
+    # .grype-informational.yaml, which carries no ignores, so CVE-2026-4360
+    # keeps printing in that report exactly as before. What this entry adds is
+    # the argument and the expiry clock, not silence.
+    #
+    # Reachability is no longer just asserted here. tests/test_archive_reachability.py
+    # fails the build if anything under src/worthless imports tarfile/zipfile or
+    # calls shutil.unpack_archive — which an expiry date cannot detect, because
+    # a date fires on the calendar, not on the commit that breaks the claim.
+    reason: "CPython tarfile; fixed upstream in v3.13.15 / v3.14.7 (GH-151988) but no python:3.13.15-slim-bookworm image published yet — grype shows no fix only because its record is NVD-sourced and version-blind. Unreachable — no tarfile/archive use in src/worthless, enforced by tests/test_archive_reachability.py. Tracking WOR-852."
+    expiry: "2026-08-31"  # short on purpose: DELETE this when the 3.13.15 image publishes.
 
   # ── CPython Mediums, base-image only (WOR-852 Track C) ──────────────
   # These four became gating when the scan cutoff moved from `high` to
