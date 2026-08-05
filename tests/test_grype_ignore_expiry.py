@@ -243,3 +243,7 @@ def test_the_scan_reruns_when_its_own_config_changes() -> None:
         assert ".github/workflows/docker-security.yml" in paths, (
             f"{event}: workflow not self-covering"
         )
+        # Actions path globs do not cross `/`, so `.grype*.yaml` does NOT match
+        # the nested location — the same blind spot CONFIGS covers above. An
+        # ignore parked there would otherwise never re-trigger the scan.
+        assert ".grype/config.yaml" in paths, f"{event}: nested grype config not in paths filter"

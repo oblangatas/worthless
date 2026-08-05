@@ -95,10 +95,13 @@ ignore:
 
   # ── CPython Mediums, base-image only (WOR-852 Track C) ──────────────
   # These four became gating when the scan cutoff moved from `high` to
-  # `medium` (see .github/workflows/docker-security.yml). Before that they
-  # were invisible: below the cutoff, and the scan's SARIF output is written
-  # to a temp file the runner deletes, so nothing ever surfaced them. The
-  # cutoff moved so that a FIFTH Medium fails the build instead of vanishing;
+  # `medium` (see .github/workflows/docker-security.yml). Two separate faults
+  # kept them quiet before that, and it matters that they were separate:
+  #   - UNGATED: they sat below the cutoff, so the build never failed on them.
+  #   - UNSEEN: the cutoff never filtered the report — it only sets grype's
+  #     exit code — so they WERE in the scan output all along. That output was
+  #     sarif written to a temp file nothing uploads, deleted with the runner.
+  # The cutoff moved so a FIFTH Medium fails the build instead of vanishing;
   # these four are the measured, named exceptions.
   #
   # All four are fixed only in Python 3.15 PRE-RELEASES (a6/b3/b4). Same trade

@@ -13,6 +13,10 @@ on:
       # running the job it modifies. WOR-852.
       - '.github/workflows/docker-security.yml'
       - '.grype*.yaml'
+      # NOT covered by the glob above: Actions path globs do not cross `/`.
+      # grype reads this second location too, and it is the exact blind spot
+      # check_grype_ignore_expiry.py exists to watch — so it needs its own line.
+      - '.grype/config.yaml'
       - 'scripts/hooks/check_grype_ignore_expiry.py'
       - 'Dockerfile'
       - 'deploy/**'
@@ -35,6 +39,10 @@ on:
       # See the push filter above — a change to the gate must exercise it.
       - '.github/workflows/docker-security.yml'
       - '.grype*.yaml'
+      # NOT covered by the glob above: Actions path globs do not cross `/`.
+      # grype reads this second location too, and it is the exact blind spot
+      # check_grype_ignore_expiry.py exists to watch — so it needs its own line.
+      - '.grype/config.yaml'
       - 'scripts/hooks/check_grype_ignore_expiry.py'
       - 'Dockerfile'
       - 'deploy/**'
@@ -122,7 +130,9 @@ jobs:
           GRYPE_CONFIG: .grype-informational.yaml
         with:
           image: worthless-proxy:${{ github.sha }}
-          severity-cutoff: medium
+          # No `severity-cutoff` here on purpose. It only sets grype's
+          # `--fail-on` exit code, which `fail-build: false` discards — so any
+          # value would be dead config implying a filter that does not exist.
           only-fixed: false
           fail-build: false
           output-format: table
