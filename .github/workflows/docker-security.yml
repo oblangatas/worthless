@@ -8,6 +8,16 @@ on:
   workflow_dispatch:
   push:
     paths:
+      # The scan gate must re-run when the scan gate changes. Without these
+      # two, editing the cutoff or adding a suppression ships without ever
+      # running the job it modifies. WOR-852.
+      - '.github/workflows/docker-security.yml'
+      - '.grype*.yaml'
+      # NOT covered by the glob above: Actions path globs do not cross `/`.
+      # grype reads this second location too, and it is the exact blind spot
+      # check_grype_ignore_expiry.py exists to watch — so it needs its own line.
+      - '.grype/config.yaml'
+      - 'scripts/hooks/check_grype_ignore_expiry.py'
       - 'Dockerfile'
       - 'deploy/**'
       - 'pyproject.toml'
@@ -26,6 +36,14 @@ on:
       - 'tests/install_fixtures/Dockerfile.service-lifecycle-live-linux'
   pull_request:
     paths:
+      # See the push filter above — a change to the gate must exercise it.
+      - '.github/workflows/docker-security.yml'
+      - '.grype*.yaml'
+      # NOT covered by the glob above: Actions path globs do not cross `/`.
+      # grype reads this second location too, and it is the exact blind spot
+      # check_grype_ignore_expiry.py exists to watch — so it needs its own line.
+      - '.grype/config.yaml'
+      - 'scripts/hooks/check_grype_ignore_expiry.py'
       - 'Dockerfile'
       - 'deploy/**'
       - 'pyproject.toml'
@@ -81,21 +99,43 @@ jobs:
       # compromise of aquasecurity/trivy-action in Feb-Mar 2026. Same
       # archetype (OSS, OS-pkg + language-dep coverage), different vendor
       # and codebase, currently clean.
-      - name: Grype vulnerability scan (fixable only, fail on HIGH+)
+      # Cutoff is MEDIUM, not high. `severity-cutoff` becomes grype's
+      # `--fail-on`, which is an exit-code threshold only — it does not filter
+      # the report. So while this said `high`, fixable Mediums were neither
+      # gated nor surfaced anywhere, and a NEW one would have appeared in
+      # total silence. Measured blast radius when moving to medium: exactly 4
+      # findings, all four named with reachability arguments in .grype.yaml.
+      # A fifth now fails the build, which is the entire point. WOR-852.
+      - name: Grype vulnerability scan (fixable only, fail on MEDIUM+)
         uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
         with:
           image: worthless-proxy:${{ github.sha }}
-          severity-cutoff: high
+          severity-cutoff: medium
           only-fixed: true
           fail-build: true
 
+      # `output-format: table` is load-bearing, not cosmetic. The action
+      # defaults to sarif (action.yml), always writes the report to a file,
+      # and only echoes it to the log when the format is `table`. Nothing here
+      # uploads that sarif — this workflow has `permissions: contents: read`
+      # and no upload-sarif step — so before this line the informational scan
+      # produced output that no human could ever read. Now it prints.
       - name: Grype full scan (including unfixed — informational)
         uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        env:
+          # Read the ignore-free config, NOT .grype.yaml. Otherwise this scan
+          # inherits the gate's suppressions and a CVE we have accepted shows
+          # up in no output at all — skipped by the gate, omitted from the
+          # report. This step exists to show what we chose to carry.
+          GRYPE_CONFIG: .grype-informational.yaml
         with:
           image: worthless-proxy:${{ github.sha }}
-          severity-cutoff: high
+          # No `severity-cutoff` here on purpose. It only sets grype's
+          # `--fail-on` exit code, which `fail-build: false` discards — so any
+          # value would be dead config implying a filter that does not exist.
           only-fixed: false
           fail-build: false
+          output-format: table
 
       - name: Dockle best-practice lint
         # ``.dockleignore`` in the repo root skips CIS-DI-0001 (image
