@@ -320,9 +320,25 @@ def test_the_release_gate_is_never_looser_than_the_pr_gate() -> None:
     # The two scans must point at DIFFERENT images.
     images = _scan_step_images(PUBLISH_WORKFLOW)
     assert len(set(images)) == 2, f"both release scans point at the same image: {images}"
-    assert any("docker-archive:" in i for i in images), (
-        "no release scan reads the arm64 tarball — arm64 is unscanned"
-    )
+    archives = [i for i in images if i.startswith("docker-archive:")]
+    assert archives, "no release scan reads a tarball — arm64 is unscanned"
+    # A `docker-archive:` input proves a tarball, NOT an architecture. Two
+    # amd64 builds with one exported to a tarball would satisfy everything
+    # above while the arm64 image users pull has no gate at all. Trace the
+    # tarball back to the step that produced it and check what it built.
+    wf = yaml.safe_load(PUBLISH_WORKFLOW.read_text())
+    steps = [s for j in wf["jobs"].values() for s in j.get("steps", [])]
+    producers = [
+        s
+        for s in steps
+        if "build-push-action" in str(s.get("uses", ""))
+        and "ARM64_TAR" in str(s.get("with", {}).get("outputs", ""))
+    ]
+    assert producers, "nothing produces the scanned tarball"
+    for step in producers:
+        assert step["with"]["platforms"] == "linux/arm64", (
+            f"the scanned tarball is built for {step['with']['platforms']}, not arm64"
+        )
     weakest_pr = min(_STRICTNESS.index(c) for c in pr)
     for cutoff in release:
         assert _STRICTNESS.index(cutoff) <= weakest_pr, (
