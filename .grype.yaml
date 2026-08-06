@@ -81,17 +81,27 @@ ignore:
   #   python:3.13-slim-bookworm     still resolves to 3.13.14
   #   python:3.14.7-slim-bookworm   published, and it carries the fix
   #
-  # This entry is therefore a SHORT bridge, not a standing waiver: suppressed
-  # only until python:3.13.15-slim-bookworm publishes, at which point bump the
-  # base and DELETE this entry rather than extending it. Moving to 3.14.7 today
-  # would also clear it, but that is a product-wide minor-version bump and a
-  # separate decision — it is not smuggled in under a CVE suppression.
+  # DO NOT expect a base-image bump to retire this entry. It will not, and an
+  # earlier version of this comment said it would. MEASURED 2026-08-06:
   #
-  # That difference is why CVE-2026-4360 carries a SHORTER expiry than the two
-  # above it. Theirs was extended to 2027-01-31 on the measurement above,
-  # because nothing they can be fixed by has shipped. This one has a fix in a
-  # tagged release and is waiting on a Docker publish, so a long date would
-  # mean carrying a suppression months past the bump that retires it.
+  #   grype's match for CVE-2026-4360 is
+  #     versionConstraint: "none (unknown)"
+  #     cpes: ["cpe:2.3:a:python:python:*"]        <- matches ANY version
+  #   Scanning python:3.14.7-slim-bookworm — an interpreter that DOES contain
+  #   the fix per the containment check above — still reports CVE-2026-4360.
+  #
+  # So the two things come apart, and both are true at once:
+  #   - Bumping the base REMOVES THE VULNERABILITY. Worth doing on its own
+  #     merits; tracked separately, not under this suppression.
+  #   - Bumping the base DOES NOT SILENCE THIS FINDING. Only NVD publishing
+  #     version data for the CVE (or grype changing provider for it) does.
+  # Anyone who bumps, deletes this entry, and expects green will get red.
+  #
+  # That also kills the reason this entry once carried a shorter expiry. The
+  # premise was "a fixed image is imminent, so do not date past the bump that
+  # retires it" — but no bump retires it, and an NVD data refresh has no ETA.
+  # Dated 2027-01-31 with its block-mates instead: same block, same re-measure
+  # pass, and no date engineered to expire against an event that will not come.
   #
   # Not reachable in Worthless. Verified 2026-08-01, first-party AND deps:
   #   - src/worthless: zero imports of tarfile, zero shutil.unpack_archive,
@@ -175,11 +185,12 @@ ignore:
     # extending any entry in this block.
     #
     # One inversion worth knowing: this entry is currently invisible to the gate
-    # because grype has no fixed version for the CVE. If NVD later backfills one,
-    # the finding becomes gate-visible and this entry starts actually suppressing
-    # it. The short expiry below bounds how long that can go unnoticed.
-    reason: "CPython tarfile; fixed upstream in v3.13.15 / v3.14.7 (GH-151988) but no python:3.13.15-slim-bookworm image published yet — grype shows no fix only because its record is NVD-sourced and version-blind. Unreachable — no tarfile/archive use in src/worthless, enforced by tests/test_archive_reachability.py. Tracking WOR-852."
-    expiry: "2026-08-31"  # short on purpose: DELETE this when the 3.13.15 image publishes.
+    # because grype has no fixed version for the CVE. If NVD backfills one, two
+    # things happen together — the finding becomes gate-visible, AND it becomes
+    # retirable by a base bump. That NVD refresh is the single event to watch;
+    # it is also what the expiry re-measure is for.
+    reason: "CPython tarfile; fixed upstream in v3.13.15 / v3.14.7 (GH-151988), but grype's record is NVD-sourced and version-blind (versionConstraint 'none (unknown)', wildcard CPE) so it reports on every version — measured 2026-08-06: a fixed 3.14.7 image still matches. A base bump removes the vulnerability but does NOT retire this entry; only an NVD version-data update does. Unreachable — no tarfile/archive use in src/worthless, enforced by tests/test_archive_reachability.py. Tracking WOR-852."
+    expiry: "2027-01-31"  # aligned with its block-mates; re-measure the NVD record, not the image.
 
   # ── CPython Mediums, base-image only (WOR-852 Track C) ──────────────
   # These four became gating when the scan cutoff moved from `high` to
