@@ -203,6 +203,22 @@ jobs:
           fail-build: true
           output-format: table  # see the amd64 step above
 
+      # Informational, never blocking. The two gates above honour .grype.yaml,
+      # so a suppressed CVE is skipped by the gate AND filtered out of the
+      # gate's report — it would appear in NO release output at all, and a
+      # green release log would read "nothing found" while seven documented
+      # CVEs shipped. This scan reads the ignore-free config so the release
+      # record states what we chose to carry. Mirrors docker-security.yml.
+      - name: Grype full scan (including unfixed — informational)
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        env:
+          GRYPE_CONFIG: .grype-informational.yaml
+        with:
+          image: worthless-proxy:scan-${{ github.sha }}
+          only-fixed: false
+          fail-build: false
+          output-format: table
+
       # Sign-before-tag invariant: we push by DIGEST ONLY (no human-readable
       # tags) so the image exists at sha256:... but is not yet pullable via
       # :X.Y.Z / :X.Y / :latest. We sign the digest next; only if signing
