@@ -248,6 +248,13 @@ def test_the_scan_reruns_when_its_own_config_changes() -> None:
         # the nested location — the same blind spot CONFIGS covers above. An
         # ignore parked there would otherwise never re-trigger the scan.
         assert ".grype/config.yaml" in paths, f"{event}: nested grype config not in paths filter"
+        # The release workflow triggers only on `v*` tags, so it is exercised
+        # by nothing on a PR unless the scan job watches it. WOR-871 shipped
+        # its entire release-gate change with 36 green checks and no scan
+        # among them; this makes that impossible to repeat.
+        assert ".github/workflows/publish-docker.yml" in paths, (
+            f"{event}: release workflow changes run no scan"
+        )
 
 
 # --- the RELEASE gate (WOR-871) --------------------------------------------

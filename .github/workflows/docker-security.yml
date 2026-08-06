@@ -12,6 +12,11 @@ on:
       # two, editing the cutoff or adding a suppression ships without ever
       # running the job it modifies. WOR-852.
       - '.github/workflows/docker-security.yml'
+      # The RELEASE gate too. publish-docker.yml only triggers on `v*` tags,
+      # so without this a change to it is exercised by nothing until a real
+      # release — WOR-871 landed its whole release-gate change on a PR with
+      # 36 green checks and zero scans among them.
+      - '.github/workflows/publish-docker.yml'
       - '.grype*.yaml'
       # NOT covered by the glob above: Actions path globs do not cross `/`.
       # grype reads this second location too, and it is the exact blind spot
@@ -38,6 +43,11 @@ on:
     paths:
       # See the push filter above — a change to the gate must exercise it.
       - '.github/workflows/docker-security.yml'
+      # The RELEASE gate too. publish-docker.yml only triggers on `v*` tags,
+      # so without this a change to it is exercised by nothing until a real
+      # release — WOR-871 landed its whole release-gate change on a PR with
+      # 36 green checks and zero scans among them.
+      - '.github/workflows/publish-docker.yml'
       - '.grype*.yaml'
       # NOT covered by the glob above: Actions path globs do not cross `/`.
       # grype reads this second location too, and it is the exact blind spot
