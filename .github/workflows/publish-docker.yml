@@ -17,6 +17,13 @@ on:
   push:
     tags:
       - "v*"
+  # Break-glass. The release gate below can fail mid-release, and this
+  # workflow's only other trigger is the tag push itself — so a blocked scan
+  # leaves the tag existing with no image and no signature, and the pull
+  # command in the README 404s. Without a manual re-run the recovery is
+  # deleting a tag or editing .grype.yaml under release pressure, which is
+  # exactly how a suppression gets rubber-stamped. WOR-871.
+  workflow_dispatch:
 
 # Workflow-scoped minimum. Per-job permissions widen as needed.
 permissions:
@@ -104,16 +111,38 @@ jobs:
           tags: worthless-proxy:scan-${{ github.sha }}
           labels: ${{ steps.meta.outputs.labels }}
 
+      # Both release-gate scans below read .grype.yaml and honour every
+      # suppression in it. Grype silently drops the unknown `expiry` key, so
+      # without this step a lapsed suppression keeps suppressing forever on
+      # the one path that reaches users. docker-security.yml has run this
+      # since WOR-852; the release path did not. WOR-871.
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          # Caching is on by default and this workflow PUBLISHES a signed
+          # artifact — a poisoned cache would reach the image we cosign.
+          # zizmor flags it High here and is right to. This step parses ~50
+          # lines of YAML, so there is nothing worth caching anyway.
+          enable-cache: false
+      - name: Grype ignores are dated and current
+        # --no-project: parsing one small YAML file does not justify syncing
+        # the whole project venv.
+        run: uv run --no-project --with pyyaml python scripts/hooks/check_grype_ignore_expiry.py
+
       # Grype (Anchore) replaces Trivy (Aqua) after the TeamPCP supply-chain
       # compromise of aquasecurity/trivy-action in Feb-Mar 2026. Different
       # vendor, different codebase, different CI pipeline — limits blast
       # radius of any one scanner repo being compromised. Same archetype:
-      # OSS, OS-pkg + language-dep coverage, fails on fixable CRITICAL.
-      - name: Grype release-gate amd64 (fail on critical)
+      # OSS, OS-pkg + language-dep coverage.
+      #
+      # Cutoff MATCHES docker-security.yml. It sat at `critical` while the PR
+      # gate moved to `medium`, so a fixable High could be published to users
+      # while a Medium blocked a branch — the strict gate guarding the
+      # proposal, the loose one guarding the artifact. WOR-871.
+      - name: Grype release-gate amd64 (fail on MEDIUM+)
         uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
         with:
           image: worthless-proxy:scan-${{ github.sha }}
-          severity-cutoff: critical
+          severity-cutoff: medium
           only-fixed: true
           fail-build: true
 
@@ -133,13 +162,13 @@ jobs:
           tags: worthless-proxy:scan-arm64-${{ github.sha }}
           labels: ${{ steps.meta.outputs.labels }}
 
-      - name: Grype release-gate arm64 (fail on critical)
+      - name: Grype release-gate arm64 (fail on MEDIUM+)
         uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
         with:
           # docker-archive: scheme tells Grype to read the tarball directly
           # (via its internal libs). No daemon load needed for foreign arch.
           image: docker-archive:${{ env.ARM64_TAR }}
-          severity-cutoff: critical
+          severity-cutoff: medium
           only-fixed: true
           fail-build: true
 

@@ -18,6 +18,7 @@ import yaml
 REPO = Path(__file__).resolve().parents[1]
 HOOK = REPO / "scripts" / "hooks" / "check_grype_ignore_expiry.py"
 WORKFLOW = REPO / ".github" / "workflows" / "docker-security.yml"
+PUBLISH_WORKFLOW = REPO / ".github" / "workflows" / "publish-docker.yml"
 INFORMATIONAL_CONFIG = REPO / ".grype-informational.yaml"
 
 
@@ -247,3 +248,67 @@ def test_the_scan_reruns_when_its_own_config_changes() -> None:
         # the nested location — the same blind spot CONFIGS covers above. An
         # ignore parked there would otherwise never re-trigger the scan.
         assert ".grype/config.yaml" in paths, f"{event}: nested grype config not in paths filter"
+
+
+# --- the RELEASE gate (WOR-871) --------------------------------------------
+# Everything above guards the PR path. The artifact users actually `docker
+# pull` is gated by a different workflow, and nothing kept the two in step.
+
+
+# Grype severities, loosest gate first. A cutoff further right blocks more.
+_STRICTNESS = ("negligible", "low", "medium", "high", "critical")
+
+
+def _gate_cutoffs(workflow: Path) -> list[str]:
+    """Every build-failing anchore/scan-action cutoff in a workflow."""
+    wf = yaml.safe_load(workflow.read_text())
+    return [
+        step["with"]["severity-cutoff"]
+        for job in wf["jobs"].values()
+        for step in job.get("steps", [])
+        if "anchore/scan-action" in str(step.get("uses", ""))
+        and step.get("with", {}).get("fail-build") is True
+    ]
+
+
+def test_the_release_gate_is_never_looser_than_the_pr_gate() -> None:
+    """The published image must not be held to a weaker standard than a branch.
+
+    A PR is a proposal; the GHCR image is what users run against real keys.
+    Gating the proposal harder than the artifact is backwards, and it drifted
+    that way silently — WOR-852 tightened the PR gate and nothing flagged that
+    the release gate had been left two tiers behind.
+    """
+    pr = _gate_cutoffs(WORKFLOW)
+    release = _gate_cutoffs(PUBLISH_WORKFLOW)
+    assert pr and release, "expected build-failing scan steps in both workflows"
+    weakest_pr = min(_STRICTNESS.index(c) for c in pr)
+    for cutoff in release:
+        assert _STRICTNESS.index(cutoff) <= weakest_pr, (
+            f"release gate `{cutoff}` is looser than the PR gate `{_STRICTNESS[weakest_pr]}`"
+        )
+
+
+def test_the_release_gate_enforces_ignore_expiry() -> None:
+    """Suppressions are time-boxed only where something checks the date.
+
+    Grype drops the unknown `expiry` key silently, so the hook is the sole
+    enforcement. The PR gate runs it; without this the release path honours
+    every suppression in .grype.yaml with nothing policing whether they have
+    lapsed — on the one path that reaches users.
+    """
+    assert "check_grype_ignore_expiry.py" in PUBLISH_WORKFLOW.read_text(), (
+        "release workflow never validates .grype.yaml expiry dates"
+    )
+
+
+def test_the_release_gate_can_be_rerun_by_hand() -> None:
+    """A hardened gate must not be able to strand a release.
+
+    Publish fires on `v*` tag push only. If the scan blocks mid-release the tag
+    already exists while the image does not, and the documented pull command
+    404s. A manual trigger is the difference between re-running a release and
+    deleting a tag under pressure.
+    """
+    triggers = yaml.safe_load(PUBLISH_WORKFLOW.read_text())[True]
+    assert "workflow_dispatch" in triggers, "release workflow has no break-glass trigger"
