@@ -259,6 +259,18 @@ def test_the_scan_reruns_when_its_own_config_changes() -> None:
 _STRICTNESS = ("negligible", "low", "medium", "high", "critical")
 
 
+def _scan_step_images(workflow: Path) -> list[str]:
+    """The `image:` each build-failing scan points at, in file order."""
+    wf = yaml.safe_load(workflow.read_text())
+    return [
+        str(s.get("with", {}).get("image", ""))
+        for j in wf["jobs"].values()
+        for s in j.get("steps", [])
+        if "anchore/scan-action" in str(s.get("uses", ""))
+        and s.get("with", {}).get("fail-build") is True
+    ]
+
+
 def _gate_cutoffs(workflow: Path) -> list[str]:
     """Every build-failing anchore/scan-action cutoff in a workflow, lowercased.
 
@@ -296,6 +308,14 @@ def test_the_release_gate_is_never_looser_than_the_pr_gate() -> None:
     # an entire architecture ships unscanned — the exact class of silent drift
     # this suite exists to catch.
     assert len(release) == 2, f"expected 2 release-gate scans (amd64, arm64), found {len(release)}"
+    # Arity alone is gameable: duplicate the amd64 step, delete arm64, and a
+    # count-only assertion stays green while an architecture ships unscanned.
+    # The two scans must point at DIFFERENT images.
+    images = _scan_step_images(PUBLISH_WORKFLOW)
+    assert len(set(images)) == 2, f"both release scans point at the same image: {images}"
+    assert any("docker-archive:" in i for i in images), (
+        "no release scan reads the arm64 tarball — arm64 is unscanned"
+    )
     weakest_pr = min(_STRICTNESS.index(c) for c in pr)
     for cutoff in release:
         assert _STRICTNESS.index(cutoff) <= weakest_pr, (
@@ -314,15 +334,20 @@ def test_the_release_gate_enforces_ignore_expiry() -> None:
     # Structural, not a substring grep on the file text: `if: false`,
     # `continue-on-error: true`, or commenting the step out must all fail this.
     wf = yaml.safe_load(PUBLISH_WORKFLOW.read_text())
-    live = [
-        step
-        for job in wf["jobs"].values()
-        for step in job.get("steps", [])
-        if "check_grype_ignore_expiry.py" in str(step.get("run", ""))
-        and step.get("if") is None
-        and step.get("continue-on-error") is not True
+    steps = [s for j in wf["jobs"].values() for s in j.get("steps", [])]
+    hook = [
+        i
+        for i, s in enumerate(steps)
+        if "check_grype_ignore_expiry.py" in str(s.get("run", ""))
+        and s.get("if") is None
+        and s.get("continue-on-error") is not True
     ]
-    assert live, "release workflow never enforces .grype.yaml expiry dates"
+    assert hook, "release workflow never enforces .grype.yaml expiry dates"
+    # Existing is not enough — it has to run BEFORE the scans it protects.
+    # Placed after them, a lapsed suppression is still honoured by every scan
+    # and the hook only reports it once the gate has already passed.
+    scans = [i for i, s in enumerate(steps) if "anchore/scan-action" in str(s.get("uses", ""))]
+    assert hook[0] < min(scans), "expiry check runs after the scans it is supposed to guard"
 
 
 def test_the_release_workflow_cannot_be_triggered_by_hand() -> None:
@@ -336,11 +361,17 @@ def test_the_release_workflow_cannot_be_triggered_by_hand() -> None:
     signed orphan digest whose Fulcio SAN is `@refs/heads/...` rather than the
     `@refs/tags/v.*` our documented verify command pins.
 
-    It is also unnecessary: "Re-run failed jobs" on the original tag-push run
-    already re-runs a blocked release and preserves the tag ref. Added and
-    removed inside WOR-871; this keeps it from coming back.
+    Added and removed inside WOR-871; this keeps it from coming back.
+
+    An ALLOWLIST, not a `workflow_dispatch not in ...` denylist. `workflow_call`
+    (a callee inherits the caller's ref), `repository_dispatch`, `schedule`, or
+    `push: branches:` each reopen the same hole while leaving that one string
+    absent. Tag-push is the only way this workflow may ever start.
     """
     triggers = yaml.safe_load(PUBLISH_WORKFLOW.read_text())[True]
-    assert "workflow_dispatch" not in triggers, (
-        "workflow_dispatch lets a branch publish and sign under this repo's identity"
+    assert set(triggers) == {"push"}, (
+        f"release workflow must trigger ONLY on push; found {sorted(triggers)}"
+    )
+    assert set(triggers["push"]) == {"tags"}, (
+        f"release workflow must trigger only on TAG push; found {sorted(triggers['push'])}"
     )

@@ -28,9 +28,19 @@ on:
 #     digest and `cosign sign` all SUCCEED and only promotion fails, leaving a
 #     signed orphan digest whose Fulcio SAN is `@refs/heads/...` — not the
 #     `@refs/tags/v.*` the verify command we document pins against.
-#   - It bought nothing: "Re-run failed jobs" on the original tag-push run
-#     already re-runs a blocked release AND preserves `refs/tags/v*`, so the
-#     signing identity stays valid.
+#
+# IF THE GATE BLOCKS A RELEASE, the recovery is NOT "re-run the job" — a re-run
+# replays the identical tree at the tag's SHA, so a lapsed expiry or a newly
+# published CVE fails again, deterministically. Re-run only helps a transient
+# failure (e.g. the cosign retry path below). The real path forward:
+#
+#   1. Fix the finding: bump the pinned base image, or add a dated, argued
+#      entry to .grype.yaml (see the reachability arguments already there).
+#   2. Delete the tag, re-push it at the new commit. That keeps the trigger,
+#      and therefore the Fulcio SAN, on `refs/tags/v*` where verify expects it.
+#
+# Doing this under release pressure is exactly how a suppression gets
+# rubber-stamped, so prefer fixing the base image over widening the waiver.
 
 # Workflow-scoped minimum. Per-job permissions widen as needed.
 permissions:
@@ -143,11 +153,6 @@ jobs:
           tags: worthless-proxy:scan-${{ github.sha }}
           labels: ${{ steps.meta.outputs.labels }}
 
-      # Both release-gate scans below read .grype.yaml and honour every
-      # suppression in it. Grype silently drops the unknown `expiry` key, so
-      # without this step a lapsed suppression keeps suppressing forever on
-      # the one path that reaches users. docker-security.yml has run this
-      # since WOR-852; the release path did not. WOR-871.
       # Grype (Anchore) replaces Trivy (Aqua) after the TeamPCP supply-chain
       # compromise of aquasecurity/trivy-action in Feb-Mar 2026. Different
       # vendor, different codebase, different CI pipeline — limits blast
