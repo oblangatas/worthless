@@ -17,13 +17,20 @@ on:
   push:
     tags:
       - "v*"
-  # Break-glass. The release gate below can fail mid-release, and this
-  # workflow's only other trigger is the tag push itself — so a blocked scan
-  # leaves the tag existing with no image and no signature, and the pull
-  # command in the README 404s. Without a manual re-run the recovery is
-  # deleting a tag or editing .grype.yaml under release pressure, which is
-  # exactly how a suppression gets rubber-stamped. WOR-871.
-  workflow_dispatch:
+
+# NO `workflow_dispatch`. It was added in WOR-871 as break-glass for a blocked
+# release, then removed in the same PR once reviewed:
+#
+#   - GitHub runs the workflow FROM the dispatched ref, so a branch dispatch
+#     supplies both the Dockerfile and this file — a branch could delete the
+#     release gate and still publish under this repo's OIDC identity.
+#   - `type=semver` yields no tags on a non-tag ref, so the build, the push by
+#     digest and `cosign sign` all SUCCEED and only promotion fails, leaving a
+#     signed orphan digest whose Fulcio SAN is `@refs/heads/...` — not the
+#     `@refs/tags/v.*` the verify command we document pins against.
+#   - It bought nothing: "Re-run failed jobs" on the original tag-push run
+#     already re-runs a blocked release AND preserves `refs/tags/v*`, so the
+#     signing identity stays valid.
 
 # Workflow-scoped minimum. Per-job permissions widen as needed.
 permissions:
@@ -98,6 +105,31 @@ jobs:
           flavor: |
             latest=auto
 
+      # Both release-gate scans below read .grype.yaml and honour every
+      # suppression in it. Grype silently drops the unknown `expiry` key, so
+      # without this step a lapsed suppression keeps suppressing forever on
+      # the one path that reaches users. docker-security.yml has run this
+      # since WOR-852; the release path did not. WOR-871.
+      #
+      # Placed BEFORE the builds, on the same principle the cosign preflight
+      # states above: this parses ~50 lines of YAML, so a lapsed date should
+      # fail in seconds rather than after 25 minutes of QEMU arm64 build.
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          # Caching is on by default and this workflow PUBLISHES a signed
+          # artifact — a poisoned cache would reach the image we cosign.
+          # zizmor flags it High here and is right to. This step parses ~50
+          # lines of YAML, so there is nothing worth caching anyway.
+          enable-cache: false
+      - name: Grype ignores are dated and current
+        # Version-pinned deliberately. This job holds `id-token: write` and
+        # `packages: write`, so an unpinned resolve would let a malicious
+        # release of this dependency run with the signing token. Every action
+        # here is SHA-pinned; this dependency gets the same treatment.
+        # --no-project: parsing one small YAML file does not justify syncing
+        # the whole project venv.
+        run: uv run --no-project --with 'pyyaml==6.0.3' python scripts/hooks/check_grype_ignore_expiry.py
+
       # Scan-before-push gate: amd64 loads to daemon, arm64 writes tarball
       # (foreign-arch daemon load is unreliable across runner images).
       - name: Build amd64 image locally for vulnerability scan
@@ -116,18 +148,6 @@ jobs:
       # without this step a lapsed suppression keeps suppressing forever on
       # the one path that reaches users. docker-security.yml has run this
       # since WOR-852; the release path did not. WOR-871.
-      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
-        with:
-          # Caching is on by default and this workflow PUBLISHES a signed
-          # artifact — a poisoned cache would reach the image we cosign.
-          # zizmor flags it High here and is right to. This step parses ~50
-          # lines of YAML, so there is nothing worth caching anyway.
-          enable-cache: false
-      - name: Grype ignores are dated and current
-        # --no-project: parsing one small YAML file does not justify syncing
-        # the whole project venv.
-        run: uv run --no-project --with pyyaml python scripts/hooks/check_grype_ignore_expiry.py
-
       # Grype (Anchore) replaces Trivy (Aqua) after the TeamPCP supply-chain
       # compromise of aquasecurity/trivy-action in Feb-Mar 2026. Different
       # vendor, different codebase, different CI pipeline — limits blast
@@ -145,6 +165,11 @@ jobs:
           severity-cutoff: medium
           only-fixed: true
           fail-build: true
+          # The action defaults to sarif, writes it to a file, and echoes the
+          # report to the log ONLY for `table`. Nothing here uploads that
+          # file, so without this a green release reports what it checked:
+          # nothing at all. Same fix as docker-security.yml. WOR-871.
+          output-format: table
 
       # arm64-specific CVEs (different Debian slim package variants) would
       # otherwise ship unscanned. Build arm64 to a local OCI tarball (more
@@ -171,6 +196,7 @@ jobs:
           severity-cutoff: medium
           only-fixed: true
           fail-build: true
+          output-format: table  # see the amd64 step above
 
       # Sign-before-tag invariant: we push by DIGEST ONLY (no human-readable
       # tags) so the image exists at sha256:... but is not yet pullable via

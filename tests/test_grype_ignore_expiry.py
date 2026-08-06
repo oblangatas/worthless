@@ -260,15 +260,24 @@ _STRICTNESS = ("negligible", "low", "medium", "high", "critical")
 
 
 def _gate_cutoffs(workflow: Path) -> list[str]:
-    """Every build-failing anchore/scan-action cutoff in a workflow."""
+    """Every build-failing anchore/scan-action cutoff in a workflow, lowercased.
+
+    grype's --fail-on is case-insensitive, so `Medium` is valid config; compare
+    normalised or a legal value blows up with a ValueError instead of a verdict.
+    """
     wf = yaml.safe_load(workflow.read_text())
-    return [
-        step["with"]["severity-cutoff"]
-        for job in wf["jobs"].values()
-        for step in job.get("steps", [])
-        if "anchore/scan-action" in str(step.get("uses", ""))
-        and step.get("with", {}).get("fail-build") is True
-    ]
+    cutoffs = []
+    for job in wf["jobs"].values():
+        for step in job.get("steps", []):
+            with_ = step.get("with", {})
+            if "anchore/scan-action" not in str(step.get("uses", "")):
+                continue
+            if with_.get("fail-build") is not True:
+                continue
+            cutoff = with_.get("severity-cutoff")
+            assert cutoff, f"{workflow.name}: build-failing scan step has no severity-cutoff"
+            cutoffs.append(str(cutoff).lower())
+    return cutoffs
 
 
 def test_the_release_gate_is_never_looser_than_the_pr_gate() -> None:
@@ -281,7 +290,12 @@ def test_the_release_gate_is_never_looser_than_the_pr_gate() -> None:
     """
     pr = _gate_cutoffs(WORKFLOW)
     release = _gate_cutoffs(PUBLISH_WORKFLOW)
-    assert pr and release, "expected build-failing scan steps in both workflows"
+    assert pr, "no build-failing scan step in the PR workflow"
+    # Arity, not just presence: the release path scans amd64 AND arm64, and
+    # deleting one of those steps would otherwise leave this test green while
+    # an entire architecture ships unscanned — the exact class of silent drift
+    # this suite exists to catch.
+    assert len(release) == 2, f"expected 2 release-gate scans (amd64, arm64), found {len(release)}"
     weakest_pr = min(_STRICTNESS.index(c) for c in pr)
     for cutoff in release:
         assert _STRICTNESS.index(cutoff) <= weakest_pr, (
@@ -297,18 +311,36 @@ def test_the_release_gate_enforces_ignore_expiry() -> None:
     every suppression in .grype.yaml with nothing policing whether they have
     lapsed — on the one path that reaches users.
     """
-    assert "check_grype_ignore_expiry.py" in PUBLISH_WORKFLOW.read_text(), (
-        "release workflow never validates .grype.yaml expiry dates"
-    )
+    # Structural, not a substring grep on the file text: `if: false`,
+    # `continue-on-error: true`, or commenting the step out must all fail this.
+    wf = yaml.safe_load(PUBLISH_WORKFLOW.read_text())
+    live = [
+        step
+        for job in wf["jobs"].values()
+        for step in job.get("steps", [])
+        if "check_grype_ignore_expiry.py" in str(step.get("run", ""))
+        and step.get("if") is None
+        and step.get("continue-on-error") is not True
+    ]
+    assert live, "release workflow never enforces .grype.yaml expiry dates"
 
 
-def test_the_release_gate_can_be_rerun_by_hand() -> None:
-    """A hardened gate must not be able to strand a release.
+def test_the_release_workflow_cannot_be_triggered_by_hand() -> None:
+    """`workflow_dispatch` here is a publishing hole, not a break-glass.
 
-    Publish fires on `v*` tag push only. If the scan blocks mid-release the tag
-    already exists while the image does not, and the documented pull command
-    404s. A manual trigger is the difference between re-running a release and
-    deleting a tag under pressure.
+    GitHub runs the workflow FROM the dispatched ref, so a branch dispatch
+    supplies both the Dockerfile and this workflow — a branch could delete the
+    release gate and still publish under the repo's OIDC identity. And because
+    `type=semver` yields no tags on a non-tag ref, the build, the push by
+    digest and `cosign sign` all SUCCEED; only promotion fails, leaving a
+    signed orphan digest whose Fulcio SAN is `@refs/heads/...` rather than the
+    `@refs/tags/v.*` our documented verify command pins.
+
+    It is also unnecessary: "Re-run failed jobs" on the original tag-push run
+    already re-runs a blocked release and preserves the tag ref. Added and
+    removed inside WOR-871; this keeps it from coming back.
     """
     triggers = yaml.safe_load(PUBLISH_WORKFLOW.read_text())[True]
-    assert "workflow_dispatch" in triggers, "release workflow has no break-glass trigger"
+    assert "workflow_dispatch" not in triggers, (
+        "workflow_dispatch lets a branch publish and sign under this repo's identity"
+    )
