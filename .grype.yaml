@@ -70,8 +70,9 @@ ignore:
   # instead, which is the only method that can answer the question:
   #
   # MEASURED 2026-08-05 against the CPython repo, not inferred:
-  #   GH-151988 (gh-151987) is merged and backported to 3.10, 3.11, 3.13,
-  #   3.14 and 3.15. `git`-level containment via the GitHub compare API:
+  #   GH-151988 (gh-151987) is merged and backported to every live branch:
+  #   3.10, 3.11, 3.12 (GH-152611, merged 2026-08-04), 3.13, 3.14 and 3.15.
+  #   `git`-level containment via the GitHub compare API:
   #     v3.13.14 -> does NOT contain it   (our base image: still affected)
   #     v3.13.15 -> CONTAINS it           (tagged upstream)
   #     v3.14.6  -> does NOT contain it
