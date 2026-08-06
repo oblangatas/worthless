@@ -72,7 +72,19 @@ def test_src_worthless_never_touches_archives() -> None:
 
     Three .grype.yaml suppressions cite this file's result as their evidence.
     """
-    offenders = [v for f in sorted(_SRC_ROOT.rglob("*.py")) for v in _violations(f)]
+    scanned = sorted(_SRC_ROOT.rglob("*.py"))
+
+    # "Found no archive imports" and "found no files" produce the identical
+    # green here, so the empty scan has to be ruled out explicitly. A package
+    # move, an src-layout change, or running against an installed wheel would
+    # otherwise turn this guard into one that always passes.
+    assert scanned, (
+        f"scanned 0 files under {_SRC_ROOT} — this guard is not pointed at the "
+        f"package any more and would pass no matter what the code does. Fix the "
+        f"path before trusting a green result from it."
+    )
+
+    offenders = [v for f in scanned for v in _violations(f)]
 
     assert not offenders, (
         "src/worthless now handles archives:\n  "

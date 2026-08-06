@@ -63,6 +63,12 @@ ignore:
   # (`provider: nvd`), and NVD carries no fixed-version mapping, so grype has
   # nothing to report. Read as "no fix exists" it is simply wrong.
   #
+  # NOTE ON METHOD: the five-base grype sweep above deliberately does NOT cover
+  # CVE-2026-4360. It cannot — grype's record for this one is version-blind, so
+  # scanning more images would return the same empty answer regardless of what
+  # each image contains. Upstream containment was checked at the git level
+  # instead, which is the only method that can answer the question:
+  #
   # MEASURED 2026-08-05 against the CPython repo, not inferred:
   #   GH-151988 (gh-151987) is merged and backported to 3.10, 3.11, 3.13,
   #   3.14 and 3.15. `git`-level containment via the GitHub compare API:
@@ -152,10 +158,26 @@ ignore:
     # keeps printing in that report exactly as before. What this entry adds is
     # the argument and the expiry clock, not silence.
     #
-    # Reachability is no longer just asserted here. tests/test_archive_reachability.py
-    # fails the build if anything under src/worthless imports tarfile/zipfile or
-    # calls shutil.unpack_archive — which an expiry date cannot detect, because
-    # a date fires on the calendar, not on the commit that breaks the claim.
+    # Reachability is PARTLY enforced now, and it matters which part.
+    # tests/test_archive_reachability.py fails the build if anything under
+    # src/worthless imports tarfile/zipfile or calls shutil.unpack_archive —
+    # which an expiry date cannot detect, because a date fires on the calendar,
+    # not on the commit that breaks the claim.
+    #
+    # What it does NOT enforce: the argument above has three legs, and the test
+    # covers only the first.
+    #   1. first-party src/worthless  -> ENFORCED by the test, every CI run.
+    #   2. pygments not loaded        -> measured 2026-08-01, NOT enforced.
+    #   3. backports.tarfile unused   -> measured 2026-08-01, NOT enforced.
+    # Legs 2 and 3 are the ones a dependency bump can silently invalidate, and
+    # nothing re-reads this file when Dependabot lands. Treat them as a dated
+    # observation, not a guarantee. Re-measure them, not just leg 1, before
+    # extending any entry in this block.
+    #
+    # One inversion worth knowing: this entry is currently invisible to the gate
+    # because grype has no fixed version for the CVE. If NVD later backfills one,
+    # the finding becomes gate-visible and this entry starts actually suppressing
+    # it. The short expiry below bounds how long that can go unnoticed.
     reason: "CPython tarfile; fixed upstream in v3.13.15 / v3.14.7 (GH-151988) but no python:3.13.15-slim-bookworm image published yet — grype shows no fix only because its record is NVD-sourced and version-blind. Unreachable — no tarfile/archive use in src/worthless, enforced by tests/test_archive_reachability.py. Tracking WOR-852."
     expiry: "2026-08-31"  # short on purpose: DELETE this when the 3.13.15 image publishes.
 
