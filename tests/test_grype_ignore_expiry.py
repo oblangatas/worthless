@@ -18,6 +18,7 @@ import yaml
 REPO = Path(__file__).resolve().parents[1]
 HOOK = REPO / "scripts" / "hooks" / "check_grype_ignore_expiry.py"
 WORKFLOW = REPO / ".github" / "workflows" / "docker-security.yml"
+PUBLISH_WORKFLOW = REPO / ".github" / "workflows" / "publish-docker.yml"
 INFORMATIONAL_CONFIG = REPO / ".grype-informational.yaml"
 
 
@@ -247,3 +248,153 @@ def test_the_scan_reruns_when_its_own_config_changes() -> None:
         # the nested location — the same blind spot CONFIGS covers above. An
         # ignore parked there would otherwise never re-trigger the scan.
         assert ".grype/config.yaml" in paths, f"{event}: nested grype config not in paths filter"
+        # The release workflow triggers only on `v*` tags, so it is exercised
+        # by nothing on a PR unless the scan job watches it. WOR-871 shipped
+        # its entire release-gate change with 36 green checks and no scan
+        # among them; this makes that impossible to repeat.
+        assert ".github/workflows/publish-docker.yml" in paths, (
+            f"{event}: release workflow changes run no scan"
+        )
+
+
+# --- the RELEASE gate (WOR-871) --------------------------------------------
+# Everything above guards the PR path. The artifact users actually `docker
+# pull` is gated by a different workflow, and nothing kept the two in step.
+
+
+# Grype severities, loosest gate first. A cutoff further right blocks more.
+_STRICTNESS = ("negligible", "low", "medium", "high", "critical")
+
+
+def _scan_step_images(workflow: Path) -> list[str]:
+    """The `image:` each build-failing scan points at, in file order."""
+    wf = yaml.safe_load(workflow.read_text())
+    return [
+        str(s.get("with", {}).get("image", ""))
+        for j in wf["jobs"].values()
+        for s in j.get("steps", [])
+        if "anchore/scan-action" in str(s.get("uses", ""))
+        and s.get("with", {}).get("fail-build") is True
+    ]
+
+
+def _gate_cutoffs(workflow: Path) -> list[str]:
+    """Every build-failing anchore/scan-action cutoff in a workflow, lowercased.
+
+    grype's --fail-on is case-insensitive, so `Medium` is valid config; compare
+    normalised or a legal value blows up with a ValueError instead of a verdict.
+    """
+    wf = yaml.safe_load(workflow.read_text())
+    cutoffs = []
+    for job in wf["jobs"].values():
+        for step in job.get("steps", []):
+            with_ = step.get("with", {})
+            if "anchore/scan-action" not in str(step.get("uses", "")):
+                continue
+            if with_.get("fail-build") is not True:
+                continue
+            cutoff = with_.get("severity-cutoff")
+            assert cutoff, f"{workflow.name}: build-failing scan step has no severity-cutoff"
+            cutoffs.append(str(cutoff).lower())
+    return cutoffs
+
+
+def test_the_release_gate_is_never_looser_than_the_pr_gate() -> None:
+    """The published image must not be held to a weaker standard than a branch.
+
+    A PR is a proposal; the GHCR image is what users run against real keys.
+    Gating the proposal harder than the artifact is backwards, and it drifted
+    that way silently — WOR-852 tightened the PR gate and nothing flagged that
+    the release gate had been left two tiers behind.
+    """
+    pr = _gate_cutoffs(WORKFLOW)
+    release = _gate_cutoffs(PUBLISH_WORKFLOW)
+    assert pr, "no build-failing scan step in the PR workflow"
+    # Arity, not just presence: the release path scans amd64 AND arm64, and
+    # deleting one of those steps would otherwise leave this test green while
+    # an entire architecture ships unscanned — the exact class of silent drift
+    # this suite exists to catch.
+    assert len(release) == 2, f"expected 2 release-gate scans (amd64, arm64), found {len(release)}"
+    # Arity alone is gameable: duplicate the amd64 step, delete arm64, and a
+    # count-only assertion stays green while an architecture ships unscanned.
+    # The two scans must point at DIFFERENT images.
+    images = _scan_step_images(PUBLISH_WORKFLOW)
+    assert len(set(images)) == 2, f"both release scans point at the same image: {images}"
+    archives = [i for i in images if i.startswith("docker-archive:")]
+    assert archives, "no release scan reads a tarball — arm64 is unscanned"
+    # A `docker-archive:` input proves a tarball, NOT an architecture. Two
+    # amd64 builds with one exported to a tarball would satisfy everything
+    # above while the arm64 image users pull has no gate at all. Trace the
+    # tarball back to the step that produced it and check what it built.
+    wf = yaml.safe_load(PUBLISH_WORKFLOW.read_text())
+    steps = [s for j in wf["jobs"].values() for s in j.get("steps", [])]
+    producers = [
+        s
+        for s in steps
+        if "build-push-action" in str(s.get("uses", ""))
+        and "ARM64_TAR" in str(s.get("with", {}).get("outputs", ""))
+    ]
+    assert producers, "nothing produces the scanned tarball"
+    for step in producers:
+        assert step["with"]["platforms"] == "linux/arm64", (
+            f"the scanned tarball is built for {step['with']['platforms']}, not arm64"
+        )
+    weakest_pr = min(_STRICTNESS.index(c) for c in pr)
+    for cutoff in release:
+        assert _STRICTNESS.index(cutoff) <= weakest_pr, (
+            f"release gate `{cutoff}` is looser than the PR gate `{_STRICTNESS[weakest_pr]}`"
+        )
+
+
+def test_the_release_gate_enforces_ignore_expiry() -> None:
+    """Suppressions are time-boxed only where something checks the date.
+
+    Grype drops the unknown `expiry` key silently, so the hook is the sole
+    enforcement. The PR gate runs it; without this the release path honours
+    every suppression in .grype.yaml with nothing policing whether they have
+    lapsed — on the one path that reaches users.
+    """
+    # Structural, not a substring grep on the file text: `if: false`,
+    # `continue-on-error: true`, or commenting the step out must all fail this.
+    wf = yaml.safe_load(PUBLISH_WORKFLOW.read_text())
+    steps = [s for j in wf["jobs"].values() for s in j.get("steps", [])]
+    hook = [
+        i
+        for i, s in enumerate(steps)
+        if "check_grype_ignore_expiry.py" in str(s.get("run", ""))
+        and s.get("if") is None
+        and s.get("continue-on-error") is not True
+    ]
+    assert hook, "release workflow never enforces .grype.yaml expiry dates"
+    # Existing is not enough — it has to run BEFORE the scans it protects.
+    # Placed after them, a lapsed suppression is still honoured by every scan
+    # and the hook only reports it once the gate has already passed.
+    scans = [i for i, s in enumerate(steps) if "anchore/scan-action" in str(s.get("uses", ""))]
+    assert hook[0] < min(scans), "expiry check runs after the scans it is supposed to guard"
+
+
+def test_the_release_workflow_cannot_be_triggered_by_hand() -> None:
+    """`workflow_dispatch` here is a publishing hole, not a break-glass.
+
+    GitHub runs the workflow FROM the dispatched ref, so a branch dispatch
+    supplies both the Dockerfile and this workflow — a branch could delete the
+    release gate and still publish under the repo's OIDC identity. And because
+    `type=semver` yields no tags on a non-tag ref, the build, the push by
+    digest and `cosign sign` all SUCCEED; only promotion fails, leaving a
+    signed orphan digest whose Fulcio SAN is `@refs/heads/...` rather than the
+    `@refs/tags/v.*` our documented verify command pins.
+
+    Added and removed inside WOR-871; this keeps it from coming back.
+
+    An ALLOWLIST, not a `workflow_dispatch not in ...` denylist. `workflow_call`
+    (a callee inherits the caller's ref), `repository_dispatch`, `schedule`, or
+    `push: branches:` each reopen the same hole while leaving that one string
+    absent. Tag-push is the only way this workflow may ever start.
+    """
+    triggers = yaml.safe_load(PUBLISH_WORKFLOW.read_text())[True]
+    assert set(triggers) == {"push"}, (
+        f"release workflow must trigger ONLY on push; found {sorted(triggers)}"
+    )
+    assert set(triggers["push"]) == {"tags"}, (
+        f"release workflow must trigger only on TAG push; found {sorted(triggers['push'])}"
+    )

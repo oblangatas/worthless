@@ -5,7 +5,9 @@ description: "Pull a pre-built, signed multi-arch image from GHCR."
 
 # Install -- Docker (from GHCR)
 
-Pull a pre-built, multi-arch image from the GitHub Container Registry. No clone, no build. Every image is vulnerability-scanned with [Grype](https://github.com/anchore/grype) on both architectures and signed with cosign before publish.
+Pull a pre-built, multi-arch image from the GitHub Container Registry. No clone, no build. Every image is scanned with [Grype](https://github.com/anchore/grype) on both architectures, and cosign-signed before any release tag is promoted. The release fails on any **fixable Medium-or-higher** vulnerability — the same bar a pull request has to clear.
+
+"Scanned" is not "zero known CVEs". The image carries a small number of CPython vulnerabilities inherited from the base image that have no stable upstream fix, and each one is listed in [`.grype.yaml`](https://github.com/shacharm2/worthless/blob/main/.grype.yaml) with a written argument for why it is not reachable from the proxy and a date by which it must be re-examined. Read that file if you want to check our reasoning rather than take our word for it.
 
 ```bash
 docker run -d --name worthless -p 127.0.0.1:8787:8787 \
