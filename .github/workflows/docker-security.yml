@@ -86,6 +86,8 @@ concurrency:
 jobs:
   scan:
     runs-on: ubuntu-latest
+    env:
+      ARM64_TAR: /tmp/worthless-proxy-arm64.tar
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -143,6 +145,67 @@ jobs:
           # No `severity-cutoff` here on purpose. It only sets grype's
           # `--fail-on` exit code, which `fail-build: false` discards — so any
           # value would be dead config implying a filter that does not exist.
+          only-fixed: false
+          fail-build: false
+          output-format: table
+
+      # ── arm64, on the weekly schedule only (WOR-873) ────────────────────
+      # Everything above builds whatever the runner is — amd64. So until this,
+      # arm64 was scanned in exactly one place: the release job, which fires
+      # only on a `v*` tag. Debian slim ships different package variants per
+      # architecture, so one fixable Medium present in arm64 and absent in
+      # amd64 was enough to turn every PR green and then fail the release with
+      # the tag already pushed and no image behind it.
+      #
+      # WHY SCHEDULE-ONLY, not every PR: arm64 needs QEMU emulation, ~8-12min
+      # per run. Paying that on every PR that touches the image taxes every
+      # contributor to catch drift that originates upstream, not in our diff.
+      # The Monday run is already the mechanism that catches base-image drift.
+      #
+      # WHAT THIS DOES NOT CATCH: an arm64-only finding introduced AND released
+      # inside the same week. That window is the accepted cost of not taxing
+      # PRs; the release gate remains the backstop for it.
+      - name: Set up QEMU (arm64 emulation on amd64 runner)
+        if: github.event_name == 'schedule'
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+
+      - name: Set up Docker Buildx
+        if: github.event_name == 'schedule'
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          cache-binary: false
+
+      # Tarball, not `load: true` — foreign-arch daemon load is unreliable
+      # across runner images. Grype reads it via `docker-archive:`. Same shape
+      # the release job uses, deliberately, so both paths scan alike.
+      - name: Build arm64 image to tarball for vulnerability scan
+        if: github.event_name == 'schedule'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/arm64
+          push: false
+          outputs: type=docker,dest=${{ env.ARM64_TAR }}
+          tags: worthless-proxy:scan-arm64-${{ github.sha }}
+
+      - name: Grype arm64 (fixable only, fail on MEDIUM+)
+        if: github.event_name == 'schedule'
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        with:
+          image: docker-archive:${{ env.ARM64_TAR }}
+          severity-cutoff: medium
+          only-fixed: true
+          fail-build: true
+          output-format: table
+
+      - name: Grype arm64 full scan (including unfixed — informational)
+        if: github.event_name == 'schedule'
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        env:
+          GRYPE_CONFIG: .grype-informational.yaml
+        with:
+          image: docker-archive:${{ env.ARM64_TAR }}
           only-fixed: false
           fail-build: false
           output-format: table

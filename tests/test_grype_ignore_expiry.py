@@ -207,8 +207,14 @@ def test_the_gate_fails_on_medium_not_just_high() -> None:
     `high` re-opens that hole with a one-word edit and no other symptom.
     """
     gated = [s for s in _scan_steps() if s["with"].get("fail-build") is True]
-    assert len(gated) == 1, "expected exactly one build-failing scan step"
-    assert gated[0]["with"]["severity-cutoff"] == "medium"
+    assert gated, "no build-failing scan step at all"
+    # EVERY gated step, not just the first. WOR-873 added an arm64 gate beside
+    # the amd64 one; a second gate at a looser cutoff would be a hole no
+    # single-step assertion could see.
+    for step in gated:
+        assert step["with"]["severity-cutoff"] == "medium", (
+            f"{step.get('name')} gates at {step['with'].get('severity-cutoff')}, not medium"
+        )
     assert gated[0]["with"]["only-fixed"] is True
 
 
@@ -220,9 +226,11 @@ def test_the_informational_scan_does_not_inherit_the_gate_s_ignores() -> None:
     WOR-852 and was caught only by reading the CI log by hand.
     """
     informational = [s for s in _scan_steps() if s["with"].get("fail-build") is False]
-    assert len(informational) == 1, "expected exactly one informational scan step"
-    step = informational[0]
-    assert step.get("env", {}).get("GRYPE_CONFIG") == INFORMATIONAL_CONFIG.name
+    assert informational, "no informational scan step at all"
+    for step in informational:
+        assert step.get("env", {}).get("GRYPE_CONFIG") == INFORMATIONAL_CONFIG.name, (
+            f"{step.get('name')} inherits the gate's suppressions"
+        )
     # table is what puts findings in the job log; sarif (the action default)
     # is written to a file nothing uploads, so the report reaches no human.
     assert step["with"]["output-format"] == "table"
@@ -371,6 +379,45 @@ def test_the_release_gate_enforces_ignore_expiry() -> None:
     # and the hook only reports it once the gate has already passed.
     scans = [i for i, s in enumerate(steps) if "anchore/scan-action" in str(s.get("uses", ""))]
     assert hook[0] < min(scans), "expiry check runs after the scans it is supposed to guard"
+
+
+def test_arm64_is_scanned_before_a_release_not_only_during_one() -> None:
+    """arm64 must meet the Medium bar somewhere other than the release tag.
+
+    The PR scan builds whatever the runner is — amd64. Before WOR-873 the only
+    place arm64 met a gate was the release job, which fires on a `v*` tag: one
+    arm64-only fixable Medium turned every PR green and then failed a release
+    with the tag already pushed and no image behind it.
+
+    Scheduled-only by design, so PRs are not taxed ~8-12min of QEMU. This pins
+    BOTH halves — that arm64 is gated at all, and that it stays off the PR path.
+    """
+    wf = yaml.safe_load(WORKFLOW.read_text())
+    steps = [s for j in wf["jobs"].values() for s in j.get("steps", [])]
+    arm64_gates = [
+        s
+        for s in steps
+        if "anchore/scan-action" in str(s.get("uses", ""))
+        and "ARM64_TAR" in str(s.get("with", {}).get("image", ""))
+        and s.get("with", {}).get("fail-build") is True
+    ]
+    assert arm64_gates, "arm64 is gated only at the release tag"
+    for gate in arm64_gates:
+        assert gate.get("if") == "github.event_name == 'schedule'", (
+            "arm64 gate is not schedule-scoped — this taxes every PR with QEMU"
+        )
+    # And the tarball it reads must actually have been built for arm64.
+    producers = [
+        s
+        for s in steps
+        if "build-push-action" in str(s.get("uses", ""))
+        and "ARM64_TAR" in str(s.get("with", {}).get("outputs", ""))
+    ]
+    assert producers, "nothing produces the arm64 tarball"
+    for p in producers:
+        assert p["with"]["platforms"] == "linux/arm64", (
+            f"the scanned tarball is built for {p['with']['platforms']}"
+        )
 
 
 def test_the_release_workflow_cannot_be_triggered_by_hand() -> None:
