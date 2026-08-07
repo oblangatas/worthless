@@ -215,7 +215,9 @@ def test_the_gate_fails_on_medium_not_just_high() -> None:
         assert step["with"]["severity-cutoff"] == "medium", (
             f"{step.get('name')} gates at {step['with'].get('severity-cutoff')}, not medium"
         )
-    assert gated[0]["with"]["only-fixed"] is True
+        assert step["with"]["only-fixed"] is True, (
+            f"{step.get('name')} gates on unfixable findings too"
+        )
 
 
 def test_the_informational_scan_does_not_inherit_the_gate_s_ignores() -> None:
@@ -231,9 +233,12 @@ def test_the_informational_scan_does_not_inherit_the_gate_s_ignores() -> None:
         assert step.get("env", {}).get("GRYPE_CONFIG") == INFORMATIONAL_CONFIG.name, (
             f"{step.get('name')} inherits the gate's suppressions"
         )
-    # table is what puts findings in the job log; sarif (the action default)
-    # is written to a file nothing uploads, so the report reaches no human.
-    assert step["with"]["output-format"] == "table"
+        # table is what puts findings in the job log; sarif (the action
+        # default) is written to a file nothing uploads, so the report
+        # reaches no human.
+        assert step["with"]["output-format"] == "table", (
+            f"{step.get('name')} writes a report nobody can read"
+        )
 
 
 def test_the_informational_config_suppresses_nothing() -> None:
@@ -417,6 +422,20 @@ def test_arm64_is_scanned_before_a_release_not_only_during_one() -> None:
     for p in producers:
         assert p["with"]["platforms"] == "linux/arm64", (
             f"the scanned tarball is built for {p['with']['platforms']}"
+        )
+    # The EXPENSIVE steps must be schedule-scoped too, not just the scan.
+    # Scoping only the scan would still run QEMU and an emulated arm64 build
+    # on every PR — the ~8-12min tax this design exists to avoid — while
+    # leaving the assertion above perfectly green.
+    emulation = [
+        s
+        for s in steps
+        if "setup-qemu-action" in str(s.get("uses", ""))
+        or "setup-buildx-action" in str(s.get("uses", ""))
+    ]
+    for s in emulation + producers:
+        assert s.get("if") == "github.event_name == 'schedule'", (
+            f"{s.get('name') or s.get('uses')} runs on every PR — arm64 emulation is not free"
         )
 
 
