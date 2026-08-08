@@ -3,13 +3,37 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>How It Works — Worthless</title>
-  <meta name="description" content="A step-by-step walkthrough of how Worthless splits API keys and enforces spending budgets." />
+  <title>How It Works - Worthless</title>
+  <meta name="description" content="How Worthless replaces a local AI API key with a .env shard and routes legitimate calls through a local proxy." />
+  <link rel="canonical" href="https://wless.io/how-it-works.html" />
+  <meta name="theme-color" content="#4a6fa5" />
+
+  <!-- Open Graph -->
+  <meta property="og:title" content="How It Works - Worthless" />
+  <meta property="og:description" content="See how a copied .env shard alone cannot call the AI provider while your local app keeps working." />
+  <meta property="og:image" content="https://wless.io/og-image.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:url" content="https://wless.io/how-it-works.html" />
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="Worthless" />
+
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="How It Works - Worthless" />
+  <meta name="twitter:description" content="See how a copied .env shard alone cannot call the AI provider while your local app keeps working." />
+  <meta name="twitter:image" content="https://wless.io/og-image.png" />
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/x-icon" href="favicon.ico" />
+  <link rel="apple-touch-icon" href="apple-touch-icon.png" />
+  <link rel="manifest" href="site.webmanifest" />
+
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
   <style>
     :root {
-      /* Soothing palette — soft blue-grays, no harsh tones */
+      /* Soothing palette, soft blue-grays, no harsh tones */
       --bg: #eef6ff;
       --bg2: #eef3fb;
       --white: #ffffff;
@@ -25,7 +49,7 @@
 
       --text: #2c3a4a;
       /* soft dark, not black */
-      --text2: #6c7e95;
+      --text2: #586b82;
       /* muted mid */
       --text3: #a8bccf;
       /* very soft */
@@ -50,12 +74,32 @@
       border-bottom: 1px solid var(--border-soft);
     }
     .nav-logo { font-size: 0.95rem; font-weight: 700; color: #005f73; text-decoration: none; display: flex; align-items: center; gap: 0.55rem; }
-    .nav-icon { width: 26px; height: 26px; background: #0a9396; border-radius: 7px; display: grid; place-items: center; color: white; font-size: 12px; font-weight: 700; }
+    .nav-icon {
+      width: 26px;
+      height: 26px;
+      border-radius: 7px;
+      flex-shrink: 0;
+      overflow: hidden;
+    }
+
+    .nav-icon img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
     .nav-links { display: flex; gap: 0.1rem; margin-left: 1.5rem; }
     .nav-links a { font-size: 0.855rem; font-weight: 500; color: #0a9396; text-decoration: none; padding: 0.4rem 0.8rem; border-radius: 7px; transition: color 0.2s, background 0.2s; }
     .nav-links a:hover, .nav-links a.active { color: var(--text); background: var(--bg2); }
     .nav-gh { margin-left: auto; font-size: 0.82rem; font-weight: 500; color: var(--text2); text-decoration: none; padding: 0.4rem 0.85rem; border: 1px solid var(--border); border-radius: 7px; background: var(--white); transition: color 0.2s; }
     .nav-gh:hover { color: var(--text); }
+    @media (max-width: 720px) {
+      nav { height: auto; min-height: 60px; flex-wrap: wrap; gap: 0.45rem 0.75rem; padding: 0.65rem 1rem; }
+      .nav-logo { flex: 1 0 auto; }
+      .nav-links { order: 3; width: 100%; margin-left: 0; overflow-x: auto; padding-bottom: 0.1rem; scrollbar-width: none; }
+      .nav-links::-webkit-scrollbar { display: none; }
+      .nav-links a { padding: 0.35rem 0.55rem; white-space: nowrap; }
+      .nav-gh { margin-left: 0; padding: 0.34rem 0.65rem; }
+    }
 
     .page { max-width: 760px; margin: 0 auto; padding: 4rem 2rem 6rem; }
     .eyebrow { font-size: 14px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text2); margin-bottom: 0.6rem; }
@@ -77,6 +121,10 @@
     .step-body { padding-bottom: 2.75rem; }
     .step h2 { font-size: 1.05rem; font-weight: 700; color: var(--text); margin-bottom: 0.5rem; padding-top: 0.3rem; letter-spacing: -0.01em; }
     .step p { font-size: 0.875rem; color: var(--text2); line-height: 1.8; }
+    details { margin-top: 0.75rem; }
+    details summary { font-size: 0.82rem; color: var(--slate); cursor: pointer; font-weight: 500; }
+    details summary:hover { color: var(--slate-dim); }
+    details p { font-size: 0.82rem; color: var(--text2); line-height: 1.8; margin-top: 0.5rem; padding-left: 0.5rem; border-left: 2px solid var(--slate-pale); }
     code { font-family: var(--mono); font-size: 0.82em; color: var(--slate); background: var(--slate-fog); border-radius: 4px; padding: 0.1em 0.4em; }
 
     /* Code block */
@@ -148,131 +196,91 @@
 </head>
 <body>
 <nav>
-  <a href="index.html" class="nav-logo">
-    <div class="nav-icon">W</div>
-    worthless
+  <a href="index.html" class="nav-logo" aria-label="Back to Worthless home">
+    <span aria-hidden="true">&larr;</span> Worthless
   </a>
   <div class="nav-links">
     <a href="how-it-works.html" class="active">How it works</a>
     <a href="features.html">Features</a>
     <a href="blog/index.html">Blog</a>
+    <a href="red/index.html">Red Blog</a>
   </div>
-  <a href="https://github.com/shacharm2/worthless" class="nav-gh" target="_blank" rel="noopener">GitHub</a>
+  <a href="https://github.com/oblangatas/worthless" class="nav-gh" target="_blank" rel="noopener">GitHub</a>
 </nav>
 
 <div class="page">
   <div class="eyebrow">How it works</div>
-  <h1>Three commands.<br />Zero code changes.</h1>
-  <p class="intro">Worthless wraps your existing app with a transparent proxy. Your code never sees the full key — and neither does an attacker who gets hold of your <code>.env</code> or git history.</p>
+  <h1>A copied protected AI key cannot call the provider on its own.</h1>
 
   <div class="step">
     <div class="step-rail"><div class="step-num">01</div><div class="step-line"></div></div>
     <div class="step-body">
-      <h2>Lock your keys</h2>
-      <p>Run <code>worthless lock</code>. It scans your <code>.env</code>, detects API keys, and splits each one using XOR secret sharing. Share A is written to local encrypted storage. Share B lives in the proxy process memory only — never on disk. Your <code>.env</code> is updated to point at the proxy.</p>
-      <div class="code-card">
-        <div class="code-bar"><div class="cd r"></div><div class="cd y"></div><div class="cd g"></div><span class="code-fname">terminal</span></div>
-        <div class="code-body">
-          <span class="cp">$ </span><span class="ck">worthless</span> lock<br/>
-          <span class="co">&nbsp;&nbsp;Scanning .env... found 1 API key<br/>
-          &nbsp;&nbsp;Splitting OPENAI_API_KEY...<br/>
-          &nbsp;&nbsp;Share A → ~/.worthless/shares/<br/>
-          &nbsp;&nbsp;Share B → proxy memory<br/>
-          1 key(s) protected.</span>
-        </div>
-      </div>
-      <div class="callout">
-        <span class="callout-icon">🔑</span>
-        <div><strong>Information-theoretic security.</strong> Share A alone is a random-looking string. Given only A, an attacker cannot learn anything about the original key — not even a single bit. This cannot be brute-forced.</div>
-      </div>
+      <h2>You have an API key in your .env</h2>
+      <p>Right now it's sitting there in plaintext. If anyone gets that file, they have your key. They can use it. You pay.</p>
+      <details><summary>but why is that bad?</summary><p>Your .env gets committed to git, printed in CI logs, read by compromised packages, or pushed by an AI agent running <code>git add -A</code>. It happens constantly. Once the key is out there, anyone can use it and you get the bill.</p></details>
     </div>
   </div>
 
   <div class="step">
     <div class="step-rail"><div class="step-num">02</div><div class="step-line"></div></div>
     <div class="step-body">
-      <h2>Run your app — unchanged</h2>
-      <p>Prefix any command with <code>worthless wrap</code>. The proxy intercepts outbound API requests, reconstructs the full key in memory for the duration of the call, forwards the request, then zeroes memory immediately. Your code doesn't change.</p>
-      <div class="code-card">
-        <div class="code-bar"><div class="cd r"></div><div class="cd y"></div><div class="cd g"></div><span class="code-fname">terminal</span></div>
-        <div class="code-body">
-          <span class="cc"># Before</span><br/>
-          <span class="cp">$ </span>python app.py<br/><br/>
-          <span class="cc"># After — everything else stays the same</span><br/>
-          <span class="cp">$ </span><span class="ck">worthless</span> wrap python app.py<br/>
-          <span class="cp">$ </span><span class="ck">worthless</span> wrap node server.js<br/>
-          <span class="cp">$ </span><span class="ck">worthless</span> wrap pytest
-        </div>
-      </div>
-      <div class="arch-card">
-        <div class="arch-row">
-          <div class="an">your app</div>
-          <span class="aa">──→</span>
-          <div class="an blue">worthless proxy</div>
-          <span class="aa">──→</span>
-          <div class="an">OpenAI API</div>
-        </div>
-        <div class="arch-note">proxy reconstructs key in memory · checks budget · zeroes after use</div>
-        <div style="margin-top:1rem; border-top:1px solid var(--border-soft); padding-top:0.85rem;">
-          <div class="arch-row">
-            <div class="an blue">Share A</div><span style="color:var(--text3)">⊕</span><div class="an blue">Share B</div><span class="aa">──→</span><div class="an green">full key (ephemeral)</div>
-          </div>
-          <div class="arch-note" style="margin-top:0.75rem;">A leaked Share A alone → cryptographically worthless</div>
-        </div>
-      </div>
+      <h2>Worthless splits it in half</h2>
+      <p>Run <code>worthless lock</code>. Your key gets split into two random-looking pieces. One stays in your .env. The other goes to a local proxy on your machine. Neither piece works on its own.</p>
+      <p>If someone copies your .env, the protected value alone cannot call the provider. The stored share reveals nothing about the original key while the other share remains out of reach.</p>
+      <details><summary>how does that work?</summary><p>It's called XOR secret sharing. Think of it like tearing a photo in half, each piece looks like random noise. You need both halves to see the picture. One half reveals zero bits about the original. The catch: only true while the other half stays out of reach.</p></details>
     </div>
   </div>
 
   <div class="step">
     <div class="step-rail"><div class="step-num">03</div><div class="step-line"></div></div>
     <div class="step-body">
-      <h2>Budget enforcement — a hard stop</h2>
-      <p>Before reconstructing the key, the proxy checks your spending counter. If the budget is reached, the proxy refuses — even if both shares are available. This is a hard stop at the infrastructure layer. No alerts to miss, no override from the app side.</p>
-      <div class="callout">
-        <span class="callout-icon">💸</span>
-        <div><strong>Two independent guards:</strong> a cryptographic split and a spending cap. An attacker who somehow gets both shares still can't spend more than your limit allows.</div>
-      </div>
+      <h2>Standard local SDK flows keep the same application code</h2>
+      <p>Run <code>worthless wrap python app.py</code> instead of <code>python app.py</code>. Your code reads environment variables like before. Docker, CI, or unusual SDK flows may also need documented environment or base-URL configuration. The proxy combines both halves for the upstream call, then drops the reconstructed key.</p>
+      <details><summary>what happens under the hood?</summary><p>The proxy sits between your app and the API provider. When your app makes a request, the proxy combines both halves, makes the real API call, and passes the response back. The key reconstructs, calls the provider, then drops. Your app never sees it. (Python PoC: memory-zeroing has known limits, see <a href="https://docs.wless.io/security/">security model</a>.)</p></details>
     </div>
   </div>
 
   <div class="step">
     <div class="step-rail"><div class="step-num">04</div><div class="step-line"></div></div>
     <div class="step-body">
-      <h2>Pre-commit scanning</h2>
-      <p>Add the Worthless hook to prevent raw keys from ever reaching git history. First line of defense — the split-key proxy handles everything that slips through.</p>
-      <div class="yaml-block">
-        <div class="code-bar"><div class="cd r"></div><div class="cd y"></div><div class="cd g"></div><span class="code-fname">.pre-commit-config.yaml</span></div>
-        <div class="yaml-body">
-          <span class="yk">repos</span>:<br/>
-          &nbsp;&nbsp;- <span class="yk">repo</span>: <span class="ys">https://github.com/shacharm2/worthless</span><br/>
-          &nbsp;&nbsp;&nbsp;&nbsp;<span class="yk">rev</span>: <span class="ys">main</span><br/>
-          &nbsp;&nbsp;&nbsp;&nbsp;<span class="yk">hooks</span>:<br/>
-          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;- <span class="yk">id</span>: <span class="ys">worthless-scan</span><br/>
-          <br/>
-          <span class="yc"># Every commit is scanned automatically.</span>
-        </div>
-      </div>
+      <h2>A local check before reconstruction</h2>
+      <p>Hit your local limit and the proxy stops reconstructing the key for that call. Not a provider bill cap.</p>
+      <details><summary>is this the same as a provider billing cap?</summary><p>No. Provider billing rules vary, and Worthless should not be described as a provider-side dollar cap. It is a local gate that can deny requests before reconstruction.</p></details>
     </div>
   </div>
 
   <div class="step">
     <div class="step-rail"><div class="step-num">05</div><div class="step-line"></div></div>
     <div class="step-body">
-      <h2>Undo everything — fully reversible</h2>
-      <p>Run <code>worthless unlock</code> at any time. Original keys are restored, the proxy stops, no traces remain. No lock-in. No dependency on Worthless to keep your app running.</p>
-      <div class="code-card">
-        <div class="code-bar"><div class="cd r"></div><div class="cd y"></div><div class="cd g"></div><span class="code-fname">terminal</span></div>
-        <div class="code-body">
-          <span class="cp">$ </span><span class="ck">worthless</span> unlock<br/>
-          <span class="co">1 key(s) restored. .env as before.</span>
-        </div>
-      </div>
+      <h2>Don't like it? One command to undo</h2>
+      <p>Run <code>worthless unlock</code>. Original .env restored. Proxy gone. Shares deleted. Like it was never there.</p>
+      <details><summary>is there really zero lock-in?</summary><p>Zero. Your original key is stored encrypted locally. <code>worthless unlock</code> decrypts it, writes it back to .env, stops the proxy, and deletes the shares. Your app goes back to reading the real key directly. No artifacts, no config files, no dependencies left behind.</p></details>
     </div>
+  </div>
+
+  <style>
+    .limits-block{margin-top:1rem;padding-top:2rem;border-top:1px solid var(--border-soft)}
+    .limits-block h2{font-size:1.05rem;font-weight:700;color:var(--text);letter-spacing:-.01em;margin-bottom:.5rem}
+    .limits-block > p{font-size:.875rem;color:var(--text2);line-height:1.8;margin-bottom:.75rem}
+    .limits-block ul{margin:.4rem 0 .9rem 1.1rem;display:grid;gap:.4rem}
+    .limits-block li{font-size:.875rem;color:var(--text2);line-height:1.65}
+    .limits-block strong{color:var(--text);font-weight:600}
+    .limits-block a{color:var(--slate);font-weight:500;text-decoration:none}
+  </style>
+  <div class="limits-block">
+    <h2>What Worthless does not protect against</h2>
+    <p>Worthless aims to make a copied <code>.env</code> share useless on its own. It is not a sandbox for a machine that is already compromised, and it is not the only layer you need.</p>
+    <ul>
+      <li><strong>A compromised machine.</strong> If an attacker controls the computer Worthless runs on, they can reach your key. Same trust boundary as a password manager.</li>
+      <li><strong>The provider's side.</strong> A breach or outage at OpenAI, Anthropic, or another upstream is outside what Worthless can affect.</li>
+      <li><strong>This early build's limits.</strong> The proof of concept is Python, with documented limits on how briefly key material lives in memory.</li>
+    </ul>
+    <p>Worthless is one layer, built to sit alongside a vault, secret scanning, and key rotation. Full threat model: <a href="https://docs.wless.io/security/">security model</a>.</p>
   </div>
 
   <div class="page-nav">
     <a href="features.html" class="btn-calm">View all features →</a>
-    <a href="https://github.com/shacharm2/worthless" class="btn-ghost" target="_blank" rel="noopener">GitHub ↗</a>
+    <a href="https://github.com/oblangatas/worthless" class="btn-ghost" target="_blank" rel="noopener">GitHub ↗</a>
     <a href="blog/index.html" class="btn-ghost">Read the blog →</a>
   </div>
 </div>
@@ -280,6 +288,32 @@
   <footer style="justify-content: flex-start; gap: 1.5rem;">
     <span class="footer-copy">Open source · AGPL-3.0</span>
     <a href="https://ko-fi.com/shacharme" target="_blank" rel="noopener" class="footer-copy" style="text-decoration: none; border-left: 1px solid var(--border-soft); padding-left: 1.5rem;">Buy me a Ko-fi ☕</a>
+    <nav class="footer-links" aria-label="Legal" style="margin-left: auto; flex-wrap: wrap;">
+      <a href="privacy.html">Privacy Policy</a>
+      <a href="terms.html">Terms of Service</a>
+      <a href="security.html">Security</a>
+      <a href="license.html">License</a>
+    </nav>
   </footer>
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "WebPage",
+  "name": "How It Works - Worthless",
+  "url": "https://wless.io/how-it-works.html",
+  "description": "How Worthless replaces a local AI API key with a .env shard and routes legitimate calls through a local proxy.",
+  "isPartOf": {
+    "@type": "WebSite",
+    "name": "Worthless",
+    "url": "https://wless.io/"
+  },
+  "about": [
+    { "@type": "Thing", "name": "post-leak API key protection" },
+    { "@type": "Thing", "name": "AI API key security" },
+    { "@type": "Thing", "name": "local proxy" }
+  ]
+}
+</script>
 </body>
 </html>
