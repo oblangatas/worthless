@@ -20,6 +20,10 @@ HOOK = REPO / "scripts" / "hooks" / "check_grype_ignore_expiry.py"
 WORKFLOW = REPO / ".github" / "workflows" / "docker-security.yml"
 PUBLISH_WORKFLOW = REPO / ".github" / "workflows" / "publish-docker.yml"
 INFORMATIONAL_CONFIG = REPO / ".grype-informational.yaml"
+# arm64 runs on the weekly cron AND on manual dispatch. Dispatch matters: it is
+# the only way to answer "is arm64 red right now?" between Mondays, and without
+# it the workflow's break-glass trigger silently covered amd64 only.
+ARM64_WHEN = 'contains(fromJSON(\'["schedule", "workflow_dispatch"]\'), github.event_name)'
 
 
 def _load():
@@ -207,9 +211,17 @@ def test_the_gate_fails_on_medium_not_just_high() -> None:
     `high` re-opens that hole with a one-word edit and no other symptom.
     """
     gated = [s for s in _scan_steps() if s["with"].get("fail-build") is True]
-    assert len(gated) == 1, "expected exactly one build-failing scan step"
-    assert gated[0]["with"]["severity-cutoff"] == "medium"
-    assert gated[0]["with"]["only-fixed"] is True
+    assert gated, "no build-failing scan step at all"
+    # EVERY gated step, not just the first. WOR-873 added an arm64 gate beside
+    # the amd64 one; a second gate at a looser cutoff would be a hole no
+    # single-step assertion could see.
+    for step in gated:
+        assert step["with"]["severity-cutoff"] == "medium", (
+            f"{step.get('name')} gates at {step['with'].get('severity-cutoff')}, not medium"
+        )
+        assert step["with"]["only-fixed"] is True, (
+            f"{step.get('name')} gates on unfixable findings too"
+        )
 
 
 def test_the_informational_scan_does_not_inherit_the_gate_s_ignores() -> None:
@@ -220,12 +232,17 @@ def test_the_informational_scan_does_not_inherit_the_gate_s_ignores() -> None:
     WOR-852 and was caught only by reading the CI log by hand.
     """
     informational = [s for s in _scan_steps() if s["with"].get("fail-build") is False]
-    assert len(informational) == 1, "expected exactly one informational scan step"
-    step = informational[0]
-    assert step.get("env", {}).get("GRYPE_CONFIG") == INFORMATIONAL_CONFIG.name
-    # table is what puts findings in the job log; sarif (the action default)
-    # is written to a file nothing uploads, so the report reaches no human.
-    assert step["with"]["output-format"] == "table"
+    assert informational, "no informational scan step at all"
+    for step in informational:
+        assert step.get("env", {}).get("GRYPE_CONFIG") == INFORMATIONAL_CONFIG.name, (
+            f"{step.get('name')} inherits the gate's suppressions"
+        )
+        # table is what puts findings in the job log; sarif (the action
+        # default) is written to a file nothing uploads, so the report
+        # reaches no human.
+        assert step["with"]["output-format"] == "table", (
+            f"{step.get('name')} writes a report nobody can read"
+        )
 
 
 def test_the_informational_config_suppresses_nothing() -> None:
@@ -371,6 +388,126 @@ def test_the_release_gate_enforces_ignore_expiry() -> None:
     # and the hook only reports it once the gate has already passed.
     scans = [i for i, s in enumerate(steps) if "anchore/scan-action" in str(s.get("uses", ""))]
     assert hook[0] < min(scans), "expiry check runs after the scans it is supposed to guard"
+
+
+def test_arm64_is_scanned_before_a_release_not_only_during_one() -> None:
+    """arm64 must meet the Medium bar somewhere other than the release tag.
+
+    The PR scan builds whatever the runner is — amd64. Before WOR-873 the only
+    place arm64 met a gate was the release job, which fires on a `v*` tag: one
+    arm64-only fixable Medium turned every PR green and then failed a release
+    with the tag already pushed and no image behind it.
+
+    Scheduled-only by design, so PRs are not taxed ~8-12min of QEMU. This pins
+    BOTH halves — that arm64 is gated at all, and that it stays off the PR path.
+    """
+    wf = yaml.safe_load(WORKFLOW.read_text())
+    steps = [s for j in wf["jobs"].values() for s in j.get("steps", [])]
+    arm64_gates = [
+        s
+        for s in steps
+        if "anchore/scan-action" in str(s.get("uses", ""))
+        and "ARM64_TAR" in str(s.get("with", {}).get("image", ""))
+        and s.get("with", {}).get("fail-build") is True
+    ]
+    assert arm64_gates, "arm64 is gated only at the release tag"
+    for gate in arm64_gates:
+        assert gate.get("if") == ARM64_WHEN, (
+            "arm64 gate is not schedule-scoped — this taxes every PR with QEMU"
+        )
+    # And the tarball it reads must actually have been built for arm64.
+    producers = [
+        s
+        for s in steps
+        if "build-push-action" in str(s.get("uses", ""))
+        and "ARM64_TAR" in str(s.get("with", {}).get("outputs", ""))
+    ]
+    assert producers, "nothing produces the arm64 tarball"
+    for p in producers:
+        assert p["with"]["platforms"] == "linux/arm64", (
+            f"the scanned tarball is built for {p['with']['platforms']}"
+        )
+    # The EXPENSIVE steps must be schedule-scoped too, not just the scan.
+    # Scoping only the scan would still run QEMU and an emulated arm64 build
+    # on every PR — the ~8-12min tax this design exists to avoid — while
+    # leaving the assertion above perfectly green.
+    emulation = [
+        s
+        for s in steps
+        if "setup-qemu-action" in str(s.get("uses", ""))
+        or "setup-buildx-action" in str(s.get("uses", ""))
+    ]
+    for s in emulation + producers:
+        assert s.get("if") == ARM64_WHEN, (
+            f"{s.get('name') or s.get('uses')} runs on every PR — arm64 emulation is not free"
+        )
+
+
+def test_the_weekly_cron_still_exists() -> None:
+    """Delete the cron and arm64 is scanned nowhere but a release tag.
+
+    The arm64 steps are scoped to `schedule` / `workflow_dispatch`, so the cron
+    IS the coverage. Every other test here passed with `schedule:` removed —
+    the guards were green, and the thing they guarded never ran.
+    """
+    triggers = yaml.safe_load(WORKFLOW.read_text())[True]
+    assert "schedule" in triggers, "the weekly cron is gone — arm64 is scanned only at a tag"
+    assert triggers["schedule"], "schedule block is empty"
+    # Both halves of ARM64_WHEN must survive, not just the cron. Drop
+    # `workflow_dispatch` and every ARM64_WHEN assertion still passes while the
+    # only way to check arm64 between Mondays quietly disappears — which is the
+    # hole WOR-873 found in the first place, one trigger over.
+    assert "workflow_dispatch" in triggers, (
+        "no manual trigger — arm64 can only be checked by waiting for the cron"
+    )
+
+
+def test_a_routine_push_cannot_cancel_the_weekly_scan() -> None:
+    """`github.event_name` must be in the concurrency key.
+
+    Without it a scheduled run and a push to main both key on `refs/heads/main`,
+    and `cancel-in-progress: true` lets any Monday-morning push kill the cron
+    partway through the emulated arm64 build. Cancelled runs render grey, not
+    red, so coverage could sit at zero for weeks with nothing looking wrong.
+    """
+    wf = yaml.safe_load(WORKFLOW.read_text())
+    group = str(wf["concurrency"]["group"])
+    if wf["concurrency"].get("cancel-in-progress"):
+        assert "github.event_name" in group, f"cron shares a cancellation lane with pushes: {group}"
+
+
+def test_the_scan_job_cannot_run_away() -> None:
+    """A hung emulated build must not burn the 6h default before anyone hears."""
+    wf = yaml.safe_load(WORKFLOW.read_text())
+    timeout = wf["jobs"]["scan"].get("timeout-minutes")
+    assert timeout, "scan job has no timeout-minutes — it now builds twice"
+    assert timeout <= 60, f"timeout-minutes={timeout} is not a meaningful bound"
+
+
+def test_a_cve_does_not_swallow_the_dockle_signal() -> None:
+    """One arm64 CVE must not silently skip an unrelated best-practice check."""
+    wf = yaml.safe_load(WORKFLOW.read_text())
+    dockle = [
+        s
+        for j in wf["jobs"].values()
+        for s in j.get("steps", [])
+        if "dockle-action" in str(s.get("uses", ""))
+    ]
+    assert dockle, "no Dockle step"
+    for step in dockle:
+        assert step.get("if") == "always()", (
+            "a failing scan above skips Dockle — two independent problems, one report"
+        )
+
+
+def test_the_ignore_file_says_which_architecture_it_measured() -> None:
+    """Reachability arguments are evidence, and evidence has a platform.
+
+    All 7 were measured on amd64 and applied to both architectures. That is
+    defensible, but only while it is stated — WOR-873 AC 3.
+    """
+    header = (REPO / ".grype.yaml").read_text()
+    assert "amd64" in header, ".grype.yaml does not say which arch its arguments cover"
 
 
 def test_the_release_workflow_cannot_be_triggered_by_hand() -> None:

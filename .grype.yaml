@@ -15,6 +15,13 @@
 # The expiry is enforced by scripts/hooks/check_grype_ignore_expiry.py, wired
 # into pre-commit as "supply chain: grype ignores are dated and current".
 # That hook is the ONLY thing stopping a suppression from living forever.
+#
+# ARCHITECTURE: every reachability argument below was measured on **amd64**.
+# These rules match on `package.name` + `type` with no version pin, so they
+# apply to the arm64 image too — but the evidence behind them does not. arm64
+# was scanned once (2026-08-06) and carried the identical findings; nothing
+# keeps that true. WOR-873 added a weekly arm64 scan so divergence surfaces on
+# a Monday rather than at a release tag. Re-MEASURE per-arch before extending.
 
 ignore:
   - vulnerability: CVE-2026-15308

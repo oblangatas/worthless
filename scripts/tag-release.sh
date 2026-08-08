@@ -124,6 +124,27 @@ echo
 echo "Tag pushed. publish.yml is now running."
 echo "Monitor at: https://github.com/shacharm2/worthless/actions"
 echo
+# WOR-873: the release scans BOTH architectures at severity-cutoff medium, but
+# pull requests only ever scan amd64 — arm64 is checked weekly (Monday cron).
+# So a release can fail on an arm64 CVE that no PR could have shown you, at the
+# worst moment: the tag exists, the image does not, and the documented `docker
+# pull` 404s until it is resolved.
+echo "IF THE RELEASE FAILS ON A CVE:"
+echo "  A fixable Medium+ blocks publish on either architecture. arm64 findings"
+echo "  never appear on a PR — that scan runs weekly — so an arm64-only CVE can"
+echo "  surface here for the first time."
+echo
+echo "  A re-run DOES help a transient failure (cosign 5xx, runner error)."
+echo "  It does NOT help a CVE finding — that replays the same tree and fails"
+echo "  identically. For a CVE:"
+echo "    1. Check both architectures at the TAGGED commit — not main, which"
+echo "       may already have moved past it:"
+echo "       gh workflow run docker-security.yml --ref $tag"
+echo "    2. Fix it — bump the pinned base image, or add a dated, argued entry"
+echo "       to .grype.yaml. Prefer bumping the base over widening the waiver."
+echo "    3. Delete the tag and re-push it at the new commit. That keeps the"
+echo "       trigger on refs/tags/v*, which the cosign identity depends on."
+echo
 echo "WAIT for publish.yml to succeed, THEN create the GitHub Release:"
 if [ -n "$headline" ]; then
     echo "  gh release create $tag --title \"$tag: $headline\" --generate-notes"
