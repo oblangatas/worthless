@@ -1,0 +1,63 @@
+name: Docker Security Scan & E2E (skip)
+
+# WOR-874 — the counterpart to docker-security.yml.
+#
+# `scan` and `docker-e2e` are REQUIRED status checks on main, but they live
+# behind a `paths:` filter. A pull request that touches none of those paths
+# never runs them, so the required check never reports and the PR sits at
+# "Expected — waiting for status to be reported" forever. Nine PRs deadlocked
+# this way the moment the checks were made required, with zero failures
+# between them.
+#
+# This workflow carries the EXACT INVERSE filter and jobs of the SAME NAMES,
+# so every PR gets a result for both checks from exactly one of the two files.
+# GitHub accepts a same-named job from either workflow as satisfying the
+# requirement.
+#
+# !!! THE TWO PATH LISTS MUST STAY EXACT INVERSES !!!
+# Drift one way and PRs deadlock again; drift the other and both workflows fire
+# with contradictory results. test_skip_shim_paths_are_exact_inverses pins it.
+# Add a path here whenever you add one there.
+
+on:
+  pull_request:
+    paths-ignore:
+      - '.github/workflows/docker-security.yml'
+      - '.github/workflows/publish-docker.yml'
+      - '.grype*.yaml'
+      - '.grype/config.yaml'
+      - 'scripts/hooks/check_grype_ignore_expiry.py'
+      - 'Dockerfile'
+      - 'deploy/**'
+      - 'pyproject.toml'
+      - 'src/**'
+      - 'tests/test_docker_e2e.py'
+      - 'tests/test_openclaw_e2e.py'
+      - 'tests/openclaw/**'
+      - 'tests/docker/test_container_smoke.py'
+      - 'tests/openclaw/install_incident/test_proxy_load_bearing.py'
+      - 'src/worthless/cli/commands/lock.py'
+      - 'src/worthless/cli/commands/service/**'
+      - 'src/worthless/cli/keystore.py'
+      - 'src/worthless/openclaw/**'
+      - 'tests/cli/test_fernet_sync.py'
+      - 'engineering/testing/scripts/run-service-lock-roundtrip-linux-docker.sh'
+      - 'engineering/testing/scripts/service-lock-roundtrip-live-linux.sh'
+      - 'tests/install_fixtures/Dockerfile.service-lifecycle-live-linux'
+
+permissions:
+  contents: read
+
+jobs:
+  # Names MUST match docker-security.yml exactly — that is the whole mechanism.
+  scan:
+    name: scan
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "No image-affecting paths changed — the real scan in docker-security.yml did not need to run."
+
+  docker-e2e:
+    name: docker-e2e
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "No image-affecting paths changed — the real e2e suite in docker-security.yml did not need to run."

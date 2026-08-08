@@ -19,6 +19,7 @@ REPO = Path(__file__).resolve().parents[1]
 HOOK = REPO / "scripts" / "hooks" / "check_grype_ignore_expiry.py"
 WORKFLOW = REPO / ".github" / "workflows" / "docker-security.yml"
 PUBLISH_WORKFLOW = REPO / ".github" / "workflows" / "publish-docker.yml"
+SKIP_WORKFLOW = REPO / ".github" / "workflows" / "docker-security-skip.yml"
 INFORMATIONAL_CONFIG = REPO / ".grype-informational.yaml"
 # arm64 runs on the weekly cron AND on manual dispatch. Dispatch matters: it is
 # the only way to answer "is arm64 red right now?" between Mondays, and without
@@ -535,3 +536,46 @@ def test_the_release_workflow_cannot_be_triggered_by_hand() -> None:
     assert set(triggers["push"]) == {"tags"}, (
         f"release workflow must trigger only on TAG push; found {sorted(triggers['push'])}"
     )
+
+
+# --- the required-check reporting gap (WOR-874) ----------------------------
+# `scan` and `docker-e2e` are required on main but sit behind a `paths:`
+# filter, so a PR touching none of those paths never reports them and blocks
+# forever. docker-security-skip.yml carries the inverse filter and same-named
+# jobs. The two only work as a pair.
+
+
+def _jobs(workflow: Path) -> set[str]:
+    return set(yaml.safe_load(workflow.read_text())["jobs"])
+
+
+def test_skip_shim_paths_are_exact_inverses() -> None:
+    """Drift here re-deadlocks pull requests, or double-fires both workflows.
+
+    Nine PRs sat BLOCKED with zero failing checks the moment these checks were
+    made required — the required status simply never reported. The shim closes
+    that only while its `paths-ignore` is the exact complement of the real
+    workflow's `paths`.
+    """
+    real = set(yaml.safe_load(WORKFLOW.read_text())[True]["pull_request"]["paths"])
+    skip = set(yaml.safe_load(SKIP_WORKFLOW.read_text())[True]["pull_request"]["paths-ignore"])
+    assert real == skip, (
+        f"path lists drifted — only in real: {sorted(real - skip)}; "
+        f"only in skip: {sorted(skip - real)}"
+    )
+
+
+def test_skip_shim_covers_every_required_job() -> None:
+    """A required job missing from the shim deadlocks on exactly the PRs the shim exists for."""
+    required = {"scan", "docker-e2e"}
+    assert required <= _jobs(WORKFLOW), "a required job vanished from the real workflow"
+    assert required <= _jobs(SKIP_WORKFLOW), (
+        f"shim is missing {sorted(required - _jobs(SKIP_WORKFLOW))} — those PRs will block forever"
+    )
+
+
+def test_the_shim_does_no_real_work() -> None:
+    """It must never scan, build, or gate — it exists to report, nothing else."""
+    body = SKIP_WORKFLOW.read_text()
+    for forbidden in ("anchore/scan-action", "docker build", "build-push-action"):
+        assert forbidden not in body, f"the skip shim runs {forbidden} — it must only report"
