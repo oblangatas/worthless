@@ -32,38 +32,41 @@ _SRC_ROOT = Path(__file__).resolve().parent.parent / "src" / "worthless"
 _ARCHIVE_MODULES = {"tarfile", "zipfile"}
 
 # shutil is imported all over for ordinary file work, so the module name alone
-# proves nothing. These are the two shutil calls that unpack or build archives.
-_ARCHIVE_CALLS = {"unpack_archive", "make_archive"}
+# proves nothing. Only the call that UNPACKS one matters: all three waived CVEs
+# are extraction bugs needing an attacker-supplied archive, so `make_archive` is
+# deliberately absent — writing a tarball cannot reach any of them, and flagging
+# it would fail a build while citing three CVEs it has nothing to do with.
+_ARCHIVE_CALLS = {"unpack_archive"}
 
 
-def _violations(py_file: Path) -> list[str]:
-    """Return one message per archive-handling construct found in the file."""
+def _violations(source: str, label: str) -> list[str]:
+    """Return one message per archive-handling construct in `source`.
+
+    Takes source text rather than a path so the caller owns file reading and
+    naming — that keeps this function trivially exercisable from a literal.
+    """
     try:
-        tree = ast.parse(py_file.read_text())
+        tree = ast.parse(source)
     except SyntaxError:  # pragma: no cover — a syntax error is another test's problem
         return []
 
-    try:
-        rel: Path | str = py_file.relative_to(_SRC_ROOT.parent.parent)
-    except ValueError:
-        rel = py_file  # a file outside the repo — only happens in this module's own test
     found: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.name.split(".")[0] in _ARCHIVE_MODULES:
-                    found.append(f"{rel}:{node.lineno}: import {alias.name}")
+                    found.append(f"{label}:{node.lineno}: import {alias.name}")
         elif isinstance(node, ast.ImportFrom):
             if node.module and node.module.split(".")[0] in _ARCHIVE_MODULES:
-                found.append(f"{rel}:{node.lineno}: from {node.module} import ...")
+                found.append(f"{label}:{node.lineno}: from {node.module} import ...")
             # `from shutil import unpack_archive` — the module is innocent, the name isn't.
             for alias in node.names:
                 if alias.name in _ARCHIVE_CALLS:
-                    found.append(f"{rel}:{node.lineno}: from {node.module} import {alias.name}")
+                    found.append(f"{label}:{node.lineno}: from {node.module} import {alias.name}")
         elif isinstance(node, ast.Attribute) and node.attr in _ARCHIVE_CALLS:
             # `shutil.unpack_archive(...)` — caught as an attribute so the import
             # of shutil itself stays allowed.
-            found.append(f"{rel}:{node.lineno}: .{node.attr}(...)")
+            found.append(f"{label}:{node.lineno}: .{node.attr}(...)")
     return found
 
 
@@ -84,7 +87,8 @@ def test_src_worthless_never_touches_archives() -> None:
         f"path before trusting a green result from it."
     )
 
-    offenders = [v for f in scanned for v in _violations(f)]
+    repo = _SRC_ROOT.parent.parent
+    offenders = [v for f in scanned for v in _violations(f.read_text(), str(f.relative_to(repo)))]
 
     assert not offenders, (
         "src/worthless now handles archives:\n  "
@@ -95,24 +99,34 @@ def test_src_worthless_never_touches_archives() -> None:
     )
 
 
-def test_guard_actually_detects_archive_use(tmp_path: Path) -> None:
+def test_guard_actually_detects_archive_use() -> None:
     """The guard above is only worth having if it can fail. Prove it can.
 
-    A green all-clear from a scanner that cannot detect anything is worse than
-    no scanner, so exercise every construct the real test relies on.
+    The empty-scan assertion is what stops a mis-pointed guard passing; this is
+    the other half — proof the detector still matches every construct that
+    assertion assumes it matches.
     """
-    sample = tmp_path / "offender.py"
-    sample.write_text(
+    found = _violations(
         "import tarfile\n"
         "import zipfile\n"
+        "from tarfile import open as topen\n"
         "import shutil\n"
         "from shutil import unpack_archive\n"
-        "shutil.make_archive('x', 'gztar')\n"
+        "shutil.unpack_archive('x')\n",
+        "sample.py",
     )
-
-    found = _violations(sample)
 
     assert any("import tarfile" in v for v in found)
     assert any("import zipfile" in v for v in found)
-    assert any("unpack_archive" in v for v in found)
-    assert any("make_archive" in v for v in found)
+    assert any("from tarfile import" in v for v in found)
+    assert sum("unpack_archive" in v for v in found) == 2  # from-import AND attribute call
+
+
+def test_creating_an_archive_is_not_flagged() -> None:
+    """`make_archive` must NOT trip the guard.
+
+    All three waived CVEs are extraction bugs requiring an attacker-supplied
+    archive. Writing one cannot reach them, so flagging it would fail a build
+    while naming three CVEs the commit has nothing to do with.
+    """
+    assert _violations("import shutil\nshutil.make_archive('x', 'gztar')\n", "s.py") == []
