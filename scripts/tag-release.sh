@@ -1,5 +1,6 @@
 #!/bin/sh
-# tag-release.sh — GPG-sign and push a release tag, then print the gh release command.
+# tag-release.sh — GPG-sign and push a release tag; release-notes.yml then
+# auto-creates the GitHub Release once all publishers pass.
 #
 # NEVER create a GitHub Release before pushing the signed tag.  gh release create
 # also creates the git tag (unsigned), which (a) fails the GPG gate in publish.yml
@@ -9,8 +10,8 @@
 #
 #   1. GPG-sign the tag (openpgp, explicit fingerprint)
 #   2. Verify the signature locally
-#   3. Push the tag  →  publish.yml fires automatically
-#   4. Print the gh release create command to run AFTER CI passes
+#   3. Push the tag  →  the four publishers fire automatically
+#   4. release-notes.yml auto-creates the GitHub Release once all publishers pass
 #
 # Usage:
 #   ./scripts/tag-release.sh 0.3.9 "agents and exits"
@@ -115,21 +116,33 @@ fi
 echo "Signature OK"
 echo
 
-# --- 5. Push tag — triggers publish.yml --------------------------------------
+# --- 5. Push tag — triggers the publishers + auto-Release --------------------
 
 echo "Pushing $tag to origin ..."
 git push origin "$tag"
 
 echo
-echo "Tag pushed. publish.yml is now running."
+echo "Tag pushed. The four publishers (PyPI, npm, GHCR, Cloudflare worker) are"
+echo "now running. Once all four pass, release-notes.yml creates the GitHub"
+echo "Release automatically from the CHANGELOG — no manual 'gh release create'."
 echo "Monitor at: https://github.com/shacharm2/worthless/actions"
 echo
-echo "WAIT for publish.yml to succeed, THEN create the GitHub Release:"
-if [ -n "$headline" ]; then
-    echo "  gh release create $tag --title \"$tag: $headline\" --generate-notes"
-else
-    echo "  gh release create $tag --title \"$tag: <headline>\" --generate-notes"
-fi
+echo "YOU MUST APPROVE ONE STEP. Once all four publishers are green, the"
+echo "'Create GitHub Release' run pauses for review (the 'release' environment)."
+echo "Open Actions, find the waiting run, and click Review deployments → Approve."
+echo "The Release page appears right after. Until you approve, it will NOT appear"
+echo "— that is the gate working, not a failure."
 echo
-echo "DO NOT run gh release create before publish.yml passes — it creates an"
-echo "unsigned tag and tombstones the name permanently."
+echo "If a publisher fails, re-run THAT RUN (Actions → the failed run → 'Re-run"
+echo "failed jobs'). Do not use 'Run workflow' — a manual dispatch is a different"
+echo "event and will not clear the gate. The Release is held until all four are"
+echo "green, then created exactly once. (WOR-846)"
+echo
+echo "FALLBACK — only if there is NO waiting run and no Release after ~15 min,"
+echo "the automation did not fire. Create it by hand (safe: the signed tag exists,"
+echo "so this attaches to it and cannot tombstone):"
+if [ -n "$headline" ]; then
+    echo "  gh release create $tag --title \"$tag: $headline\" --verify-tag --generate-notes"
+else
+    echo "  gh release create $tag --title \"$tag: <headline>\" --verify-tag --generate-notes"
+fi
