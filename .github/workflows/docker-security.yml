@@ -187,8 +187,15 @@ jobs:
           cache-binary: false
 
       # Tarball, not `load: true` — foreign-arch daemon load is unreliable
-      # across runner images. Grype reads it via `docker-archive:`. Same shape
-      # the release job uses, deliberately, so both paths scan alike.
+      # across runner images. Grype reads it via `docker-archive:`.
+      #
+      # Deliberately the same shape publish-docker.yml uses, so both paths
+      # scan alike — but note that is a shared DESIGN, not a proven one: that
+      # job's arm64 scan landed in WOR-871 on 2026-08-07 and its last run was
+      # v0.3.11 on 2026-07-28, so it had never executed either. Both were
+      # first exercised by a manual dispatch of THIS workflow (WOR-873); if
+      # you are debugging an arm64 scan failure, neither path has the mileage
+      # its comments might imply.
       - name: Build arm64 image to tarball for vulnerability scan
         if: contains(fromJSON('["schedule", "workflow_dispatch"]'), github.event_name)
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
