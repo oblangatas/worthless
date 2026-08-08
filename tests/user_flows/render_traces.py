@@ -142,7 +142,15 @@ class TraceRunner:
         bin_dir.mkdir(parents=True)
         state_file = case_root / "install-state.txt"
         state_file.write_text(f"case={name}\nphase=before\n")
-        before = snapshot_env_files("before", [state_file])
+        snapshot_files = [state_file]
+        if name == "manual uninstall current limitation":
+            leftover_state = self.journey.home / "worthless.db"
+            leftover_state.parent.mkdir(parents=True, exist_ok=True)
+            leftover_state.write_text(
+                "simulated local Worthless state; uv tool uninstall does not purge this\n"
+            )
+            snapshot_files.append(leftover_state)
+        before = snapshot_env_files("before", snapshot_files)
 
         if name == "fresh install with persistent PATH":
             write_happy_path_stubs(bin_dir, with_worthless=False)
@@ -151,6 +159,11 @@ class TraceRunner:
             command = ["sh", "./install.sh"]
         elif name == "fresh install without persistent PATH":
             write_happy_path_stubs(bin_dir, with_worthless=False)
+            result = run_install(bin_dir)
+            command = ["sh", "./install.sh"]
+        elif name == "stale worthless on PATH":
+            write_happy_path_stubs(bin_dir)
+            write_stub(bin_dir, "worthless", 'echo "worthless 0.1.0"')
             result = run_install(bin_dir)
             command = ["sh", "./install.sh"]
         elif name == "reinstall pinned version already installed":
@@ -163,6 +176,25 @@ class TraceRunner:
   tool) shift; case "$1" in
     list) echo "worthless v0.3.0" ;;
     install|upgrade) echo "unexpected reinstall" >&2; exit 1 ;;
+    *) echo "uv tool: unhandled: $*" >&2; exit 1 ;;
+  esac ;;
+  run) echo "worthless 0.3.0" ;;
+  *) echo "uv: unhandled: $*" >&2; exit 1 ;;
+esac""",
+            )
+            result = run_install(bin_dir, env_extra={"WORTHLESS_VERSION": "0.3.0"})
+            command = ["WORTHLESS_VERSION=0.3.0", "sh", "./install.sh"]
+        elif name == "upgrade older uv tool install":
+            write_happy_path_stubs(bin_dir)
+            write_stub(
+                bin_dir,
+                "uv",
+                """case "$1" in
+  --version) echo "uv 0.11.7" ;;
+  tool) shift; case "$1" in
+    list) echo "worthless v0.2.0" ;;
+    install) echo "installed $3" ;;
+    upgrade) echo "unexpected upgrade" >&2; exit 1 ;;
     *) echo "uv tool: unhandled: $*" >&2; exit 1 ;;
   esac ;;
   run) echo "worthless 0.3.0" ;;
@@ -243,7 +275,7 @@ esac""",
                 f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
             )
         state_file.write_text(f"case={name}\nphase=after\nexit={result.returncode}\n")
-        after = snapshot_env_files("after", [state_file])
+        after = snapshot_env_files("after", snapshot_files)
         self.journey.traces.append(
             CommandTrace(
                 command=command,
@@ -331,14 +363,18 @@ def build_install_lifecycle() -> Journey:
         title="Install, Reinstall, Manual Uninstall Guidance",
         summary=(
             "The installer succeeds with and without persistent PATH setup, re-running a "
-            "pinned install is a no-op, failure paths keep actionable diagnostics visible, "
-            "and uninstall is currently documented as the manual `uv tool uninstall worthless` "
-            "command plus platform cleanup notes until WOR-435 ships a first-class command."
+            "pinned install is a no-op, older uv tool installs upgrade through the pinned "
+            "path, stale PATH binaries are called out, failure paths keep actionable "
+            "diagnostics visible, and uninstall is currently documented as the manual "
+            "`uv tool uninstall worthless` command plus platform cleanup notes until "
+            "WOR-435 ships a first-class command."
         ),
     )
     runner.run_install_case("fresh install with persistent PATH")
     runner.run_install_case("fresh install without persistent PATH")
+    runner.run_install_case("stale worthless on PATH")
     runner.run_install_case("reinstall pinned version already installed")
+    runner.run_install_case("upgrade older uv tool install")
     runner.run_install_case(
         "pipx conflict shows uninstall guidance",
         expect_exit=lambda code: code == 30,
