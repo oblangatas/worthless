@@ -453,6 +453,13 @@ def test_the_weekly_cron_still_exists() -> None:
     triggers = yaml.safe_load(WORKFLOW.read_text())[True]
     assert "schedule" in triggers, "the weekly cron is gone — arm64 is scanned only at a tag"
     assert triggers["schedule"], "schedule block is empty"
+    # Both halves of ARM64_WHEN must survive, not just the cron. Drop
+    # `workflow_dispatch` and every ARM64_WHEN assertion still passes while the
+    # only way to check arm64 between Mondays quietly disappears — which is the
+    # hole WOR-873 found in the first place, one trigger over.
+    assert "workflow_dispatch" in triggers, (
+        "no manual trigger — arm64 can only be checked by waiting for the cron"
+    )
 
 
 def test_a_routine_push_cannot_cancel_the_weekly_scan() -> None:
