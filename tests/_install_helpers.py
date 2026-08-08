@@ -93,6 +93,18 @@ esac""",
     )
     if with_worthless:
         write_stub(bin_dir, "worthless", 'echo "worthless 0.3.0"')
+    else:
+        # `uv tool install` really does place the entry point in ~/.local/bin even
+        # when that directory is not on the caller's PATH — install.sh only
+        # prepends it while bootstrapping uv, so a box with uv already pinned
+        # short-circuits and never sees it. Model that faithfully: without this
+        # the fixture describes an impossible state (install reported success,
+        # yet the binary exists nowhere at all), and anything that legitimately
+        # consults the installed artifact looks broken. `command -v worthless`
+        # still fails here, so the "not yet on your PATH" branch is unaffected.
+        local_bin = bin_dir.parent / ".local" / "bin"
+        local_bin.mkdir(parents=True, exist_ok=True)
+        write_stub(local_bin, "worthless", 'echo "worthless 0.3.0"')
 
 
 def run_install(
