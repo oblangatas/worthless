@@ -112,15 +112,29 @@ ignore:
   #       * it claimed pygments was the only dep touching tarfile and was not
   #         loaded. pygments IS loaded, via httpx._main.
   #       * it claimed `backports.tarfile` was the resident one, so the CPython
-  #         module was untouched. `backports` is NOT INSTALLED in this image
-  #         (ModuleNotFoundError), so jaraco/context.py takes its fallback
-  #         branch — a plain `import tarfile`. The vulnerable stdlib module is
-  #         resident.
+  #         module was untouched. It is not. jaraco/context/__init__.py:26-29
+  #         is a VERSION GATE, not an ImportError fallback:
+  #             if TYPE_CHECKING or sys.version_info >= (3, 12):
+  #                 import tarfile
+  #             else:
+  #                 from backports import tarfile
+  #         This image runs 3.13.14, so the stdlib branch is the PRIMARY one and
+  #         is taken whether or not backports is installed. (It is not installed
+  #         here, but that is incidental — installing it would NOT end stdlib
+  #         residency.) The vulnerable stdlib module is resident.
   #
   #   - tarfile is NEVER CALLED. With tarfile.open, TarFile.extract and
-  #     TarFile.extractall wrapped, container startup plus live requests to
-  #     /healthz, / and /v1/messages produced ZERO calls. Control: the same
-  #     instrumentation fires immediately on a deliberate tarfile.open.
+  #     TarFile.extractall wrapped, container startup plus live HTTP requests
+  #     produced ZERO calls. Control: the same instrumentation fires
+  #     immediately on a deliberate tarfile.open, so the null result is a real
+  #     measurement and not a dead probe.
+  #     COVERAGE, stated precisely: only /healthz and / reached a handler.
+  #     /v1/messages and every other route tried (/v1/models, /docs, /metrics,
+  #     /openapi.json) returned 401 at the auth boundary, so NO forwarding or
+  #     response-decoding code ran. The authenticated proxy path has NOT been
+  #     exercised under this instrumentation. What carries that gap is the
+  #     first-party static guard, which proves no src/worthless module imports
+  #     tarfile on ANY path, authenticated or not.
   #
   # That is the honest shape of this argument. The module being loaded is not
   # the risk; all three CVEs require CALLING into tarfile with an
@@ -186,15 +200,21 @@ ignore:
     # which an expiry date cannot detect, because a date fires on the calendar,
     # not on the commit that breaks the claim.
     #
-    # What it does NOT enforce: the argument above has three legs, and the test
-    # covers only the first.
-    #   1. first-party src/worthless  -> ENFORCED by the test, every CI run.
-    #   2. pygments not loaded        -> measured 2026-08-01, NOT enforced.
-    #   3. backports.tarfile unused   -> measured 2026-08-01, NOT enforced.
-    # Legs 2 and 3 are the ones a dependency bump can silently invalidate, and
-    # nothing re-reads this file when Dependabot lands. Treat them as a dated
-    # observation, not a guarantee. Re-measure them, not just leg 1, before
-    # extending any entry in this block.
+    # What it does NOT enforce. The argument has two legs now, not three —
+    # the old legs "pygments is not loaded" and "backports.tarfile is the
+    # resident one" were RETRACTED above: both were false in the shipped image.
+    # Do not re-measure those; they are dead.
+    #   1. src/worthless never imports tarfile
+    #        -> ENFORCED by tests/test_archive_reachability.py, every CI run.
+    #   2. the resident stdlib tarfile is never CALLED
+    #        -> measured live in-container 2026-08-07, NOT enforced.
+    #
+    # Leg 2 is the live one and the only one a dependency bump can silently
+    # invalidate: keyring -> jaraco.context already puts tarfile in the
+    # process, so a dep that starts CALLING it would end this argument with
+    # nothing going red. Nothing re-reads this file when Dependabot lands.
+    # Re-measure leg 2 — re-run the in-container call trace — before extending
+    # any entry in this block. Leg 1 re-measures itself on every CI run.
     #
     # One inversion worth knowing: an NVD backfill flips two things at once —
     # the finding becomes gate-visible AND becomes retirable by a base bump.
