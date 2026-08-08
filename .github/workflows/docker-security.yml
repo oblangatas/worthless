@@ -80,12 +80,23 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # `github.event_name` is in the key so the weekly cron gets its OWN lane.
+  # Without it, a scheduled run and a push to main both key on
+  # `refs/heads/main`, and `cancel-in-progress` lets any Monday-morning push
+  # kill the cron partway through its slowest step — the emulated arm64
+  # build. A cancelled run renders grey, not red, so arm64 coverage could sit
+  # at zero for weeks with nothing looking wrong. WOR-873.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   scan:
     runs-on: ubuntu-latest
+    # amd64 build (~3m) + scans, plus an emulated arm64 build (~8-12m) on
+    # scheduled runs. Matches publish-docker.yml's budget for the same work.
+    # Without this the job inherits the 6h default, so a hung QEMU build burns
+    # six hours of runner time before anyone hears about it. WOR-873.
+    timeout-minutes: 35
     env:
       ARM64_TAR: /tmp/worthless-proxy-arm64.tar
     steps:
@@ -166,11 +177,11 @@ jobs:
       # inside the same week. That window is the accepted cost of not taxing
       # PRs; the release gate remains the backstop for it.
       - name: Set up QEMU (arm64 emulation on amd64 runner)
-        if: github.event_name == 'schedule'
+        if: contains(fromJSON('["schedule", "workflow_dispatch"]'), github.event_name)
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
 
       - name: Set up Docker Buildx
-        if: github.event_name == 'schedule'
+        if: contains(fromJSON('["schedule", "workflow_dispatch"]'), github.event_name)
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         with:
           cache-binary: false
@@ -179,7 +190,7 @@ jobs:
       # across runner images. Grype reads it via `docker-archive:`. Same shape
       # the release job uses, deliberately, so both paths scan alike.
       - name: Build arm64 image to tarball for vulnerability scan
-        if: github.event_name == 'schedule'
+        if: contains(fromJSON('["schedule", "workflow_dispatch"]'), github.event_name)
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
@@ -190,7 +201,7 @@ jobs:
           tags: worthless-proxy:scan-arm64-${{ github.sha }}
 
       - name: Grype arm64 (fixable only, fail on MEDIUM+)
-        if: github.event_name == 'schedule'
+        if: contains(fromJSON('["schedule", "workflow_dispatch"]'), github.event_name)
         uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
         with:
           image: docker-archive:${{ env.ARM64_TAR }}
@@ -200,7 +211,7 @@ jobs:
           output-format: table
 
       - name: Grype arm64 full scan (including unfixed — informational)
-        if: github.event_name == 'schedule'
+        if: contains(fromJSON('["schedule", "workflow_dispatch"]'), github.event_name)
         uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
         env:
           GRYPE_CONFIG: .grype-informational.yaml
@@ -216,6 +227,12 @@ jobs:
         # entrypoint).  See the .dockleignore comments for full
         # rationale.  Dockle reads .dockleignore from CWD, which is
         # the checkout root inside the action runner.
+        #
+        # `always()` because the scans above it can fail the job: one arm64 CVE
+        # would otherwise skip this step entirely and silently cost an
+        # unrelated best-practice signal. A CVE and a Dockle regression are
+        # independent problems and should be reported independently. WOR-873.
+        if: always()
         uses: erzz/dockle-action@e8a7c41f36f1236ca3282b298d425ffbfdb2e922 # v1
         with:
           image: worthless-proxy:${{ github.sha }}

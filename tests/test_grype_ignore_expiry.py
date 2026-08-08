@@ -20,6 +20,10 @@ HOOK = REPO / "scripts" / "hooks" / "check_grype_ignore_expiry.py"
 WORKFLOW = REPO / ".github" / "workflows" / "docker-security.yml"
 PUBLISH_WORKFLOW = REPO / ".github" / "workflows" / "publish-docker.yml"
 INFORMATIONAL_CONFIG = REPO / ".grype-informational.yaml"
+# arm64 runs on the weekly cron AND on manual dispatch. Dispatch matters: it is
+# the only way to answer "is arm64 red right now?" between Mondays, and without
+# it the workflow's break-glass trigger silently covered amd64 only.
+ARM64_WHEN = 'contains(fromJSON(\'["schedule", "workflow_dispatch"]\'), github.event_name)'
 
 
 def _load():
@@ -408,7 +412,7 @@ def test_arm64_is_scanned_before_a_release_not_only_during_one() -> None:
     ]
     assert arm64_gates, "arm64 is gated only at the release tag"
     for gate in arm64_gates:
-        assert gate.get("if") == "github.event_name == 'schedule'", (
+        assert gate.get("if") == ARM64_WHEN, (
             "arm64 gate is not schedule-scoped — this taxes every PR with QEMU"
         )
     # And the tarball it reads must actually have been built for arm64.
@@ -434,9 +438,69 @@ def test_arm64_is_scanned_before_a_release_not_only_during_one() -> None:
         or "setup-buildx-action" in str(s.get("uses", ""))
     ]
     for s in emulation + producers:
-        assert s.get("if") == "github.event_name == 'schedule'", (
+        assert s.get("if") == ARM64_WHEN, (
             f"{s.get('name') or s.get('uses')} runs on every PR — arm64 emulation is not free"
         )
+
+
+def test_the_weekly_cron_still_exists() -> None:
+    """Delete the cron and arm64 is scanned nowhere but a release tag.
+
+    The arm64 steps are scoped to `schedule` / `workflow_dispatch`, so the cron
+    IS the coverage. Every other test here passed with `schedule:` removed —
+    the guards were green, and the thing they guarded never ran.
+    """
+    triggers = yaml.safe_load(WORKFLOW.read_text())[True]
+    assert "schedule" in triggers, "the weekly cron is gone — arm64 is scanned only at a tag"
+    assert triggers["schedule"], "schedule block is empty"
+
+
+def test_a_routine_push_cannot_cancel_the_weekly_scan() -> None:
+    """`github.event_name` must be in the concurrency key.
+
+    Without it a scheduled run and a push to main both key on `refs/heads/main`,
+    and `cancel-in-progress: true` lets any Monday-morning push kill the cron
+    partway through the emulated arm64 build. Cancelled runs render grey, not
+    red, so coverage could sit at zero for weeks with nothing looking wrong.
+    """
+    wf = yaml.safe_load(WORKFLOW.read_text())
+    group = str(wf["concurrency"]["group"])
+    if wf["concurrency"].get("cancel-in-progress"):
+        assert "github.event_name" in group, f"cron shares a cancellation lane with pushes: {group}"
+
+
+def test_the_scan_job_cannot_run_away() -> None:
+    """A hung emulated build must not burn the 6h default before anyone hears."""
+    wf = yaml.safe_load(WORKFLOW.read_text())
+    timeout = wf["jobs"]["scan"].get("timeout-minutes")
+    assert timeout, "scan job has no timeout-minutes — it now builds twice"
+    assert timeout <= 60, f"timeout-minutes={timeout} is not a meaningful bound"
+
+
+def test_a_cve_does_not_swallow_the_dockle_signal() -> None:
+    """One arm64 CVE must not silently skip an unrelated best-practice check."""
+    wf = yaml.safe_load(WORKFLOW.read_text())
+    dockle = [
+        s
+        for j in wf["jobs"].values()
+        for s in j.get("steps", [])
+        if "dockle-action" in str(s.get("uses", ""))
+    ]
+    assert dockle, "no Dockle step"
+    for step in dockle:
+        assert step.get("if") == "always()", (
+            "a failing scan above skips Dockle — two independent problems, one report"
+        )
+
+
+def test_the_ignore_file_says_which_architecture_it_measured() -> None:
+    """Reachability arguments are evidence, and evidence has a platform.
+
+    All 7 were measured on amd64 and applied to both architectures. That is
+    defensible, but only while it is stated — WOR-873 AC 3.
+    """
+    header = (REPO / ".grype.yaml").read_text()
+    assert "amd64" in header, ".grype.yaml does not say which arch its arguments cover"
 
 
 def test_the_release_workflow_cannot_be_triggered_by_hand() -> None:
