@@ -98,21 +98,38 @@ ignore:
   # finding. Only NVD publishing version data (or grype changing provider for
   # this CVE) retires the entry. Bump, delete this, expect green, get red.
   #
-  # Not reachable in Worthless. Verified 2026-08-01, first-party AND deps:
-  #   - src/worthless: zero imports of tarfile, zero shutil.unpack_archive,
-  #     zero zipfile. The proxy forwards JSON and never opens an archive.
-  #   - site-packages: the only runtime dependency touching tarfile is
-  #     pygments, in lexers/_php_builtins.py — a maintenance script for
-  #     regenerating lexer data. Confirmed NOT loaded after importing
-  #     worthless.proxy + worthless.cli.
-  #   - `backports.tarfile` IS resident at runtime (keyring -> jaraco-context).
-  #     It is a separate PyPI package, not the CPython stdlib module these
-  #     CVEs are filed against, and this ignore is scoped to
-  #     `package: {name: python, type: binary}` so it does not mask anything
-  #     filed against backports-tarfile itself. Worthless never calls the
-  #     jaraco.context tarball helper that would exercise it.
-  # All three CVEs require calling into tarfile with an attacker-supplied
-  # archive, and no code path carries attacker bytes to any of the above.
+  # Not reachable in Worthless. MEASURED 2026-08-07 INSIDE THE SHIPPED IMAGE,
+  # by running the real container (`python /deploy/start.py`), serving real
+  # HTTP traffic, and instrumenting both imports and calls:
+  #
+  #   - src/worthless: zero imports of tarfile / zipfile, zero
+  #     shutil.unpack_archive. Enforced every CI run by
+  #     tests/test_archive_reachability.py — not a one-off observation.
+  #
+  #   - stdlib tarfile IS IMPORTED at runtime, by jaraco.context (via keyring).
+  #     An earlier version of this comment said otherwise, on two counts, both
+  #     wrong because they were measured on a dev laptop instead of the image:
+  #       * it claimed pygments was the only dep touching tarfile and was not
+  #         loaded. pygments IS loaded, via httpx._main.
+  #       * it claimed `backports.tarfile` was the resident one, so the CPython
+  #         module was untouched. `backports` is NOT INSTALLED in this image
+  #         (ModuleNotFoundError), so jaraco/context.py takes its fallback
+  #         branch — a plain `import tarfile`. The vulnerable stdlib module is
+  #         resident.
+  #
+  #   - tarfile is NEVER CALLED. With tarfile.open, TarFile.extract and
+  #     TarFile.extractall wrapped, container startup plus live requests to
+  #     /healthz, / and /v1/messages produced ZERO calls. Control: the same
+  #     instrumentation fires immediately on a deliberate tarfile.open.
+  #
+  # That is the honest shape of this argument. The module being loaded is not
+  # the risk; all three CVEs require CALLING into tarfile with an
+  # attacker-supplied archive. Nothing here does, and no code path carries
+  # attacker bytes toward one. "Imported but never called" is what holds — not
+  # "never loaded", which was the previous claim and was simply false.
+  #
+  # The ignore stays scoped to `package: {name: python, type: binary}`, so it
+  # cannot mask a finding filed against backports-tarfile or any other package.
   #
   # Linear: WOR-852 — move off EOL Debian 12, or re-check whether a stable
   # 3.13.x / 3.14.x backport has shipped. Re-MEASURE before extending; do not
