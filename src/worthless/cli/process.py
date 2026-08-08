@@ -29,6 +29,15 @@ from worthless.cli.errors import ErrorCode, WorthlessError
 from worthless.cli.keystore import keyring_available
 from worthless.cli.platform import IS_WINDOWS, check_pid_alive, popen_platform_kwargs
 
+# Imported as a module (not `from ... import set_dumpable_zero_or_log`) so tests
+# can monkeypatch the primitives — same pattern the sidecar entrypoint relies on.
+from worthless.sidecar import _hardening
+
+try:
+    import resource
+except ImportError:  # pragma: no cover - Windows has no resource module
+    resource = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
 
 # Set by launchd/systemd units installed via ``worthless service install``.
@@ -185,17 +194,110 @@ def build_proxy_env(home: WorthlessHome) -> dict[str, str]:
     return env
 
 
-def disable_core_dumps() -> None:
-    """Set RLIMIT_CORE to (0, 0) to prevent core dumps leaking key material.
+def _set_rlimit_core_zero() -> bool:
+    """Set ``RLIMIT_CORE=(0, 0)`` and report whether it actually took effect.
 
-    Silently ignored on platforms that don't support it (e.g. some CI runners).
+    Returns ``True`` only when a read-back confirms the soft limit is 0 —
+    "we called setrlimit" is not proof it applied. Never raises: the caller
+    decides whether an unapplied limit is fatal, which depends on whether
+    this platform also has ``PR_SET_DUMPABLE``.
     """
+    if resource is None:  # pragma: no cover - Windows only
+        return False
     try:
-        import resource
-
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-    except (OSError, ValueError, AttributeError, ImportError):
-        pass
+        return resource.getrlimit(resource.RLIMIT_CORE)[0] == 0
+    except (OSError, ValueError, AttributeError) as exc:
+        logger.warning("could not set RLIMIT_CORE=(0, 0): %s", exc)
+        return False
+
+
+def disable_core_dumps(*, strict: bool = True) -> None:
+    """Stop this process's memory reaching disk on a crash.
+
+    Two independent kernel controls — neither is sufficient alone:
+
+    * ``RLIMIT_CORE=(0, 0)`` suppresses the core *file*. Cross-platform, and
+      the only lever on macOS. On Linux it is **bypassed** when
+      ``core_pattern`` pipes to a handler (systemd-coredump / apport, the
+      default on most Docker hosts and not namespaced): the kernel treats a
+      piped handler as unlimited size, so the ``RLIMIT_CORE == 0``
+      early-abort governs only the core *file* path.
+    * ``PR_SET_DUMPABLE=0`` is evaluated *before* ``core_pattern``, so it
+      aborts the dump before the pipe helper is ever spawned. Linux-only.
+      Also refuses ptrace, closing ``/proc/<pid>/mem`` to other processes.
+
+    The dumpable bit lives on the ``mm`` and is **reset by execve**, so every
+    key-holding process must call this itself — a parent cannot harden a
+    child through it. (Corollary: ``wrap`` does not leak dumpable=0 into the
+    user's own program, so wrapped apps stay debuggable.)
+
+    ``strict=True`` (default) raises when the kernel did not honor
+    dumpable=0 — correct for any command that reconstructs a key. Pass
+    ``strict=False`` for commands that never hold key material, so a
+    hardening gap degrades to a warning rather than aborting the command.
+    """
+    rlimit_zero = _set_rlimit_core_zero()
+
+    # set_dumpable_zero(), NOT the _or_log variant: the _or_log one loads libc
+    # with allow_find_library=False because it runs between fork and exec, where
+    # find_library() may shell out. The CLI is not in that window. Using it here
+    # paired with get_dumpable()'s full loader created an asymmetry — on a host
+    # where the hardcoded sonames miss but find_library("c") resolves, the set
+    # silently no-ops, the readback returns 1, and strict then hard-fails every
+    # key-holding command that would otherwise have been fine.
+    # Catch OSError/AttributeError too, not just WorthlessError: a libc that
+    # loads but has no prctl symbol raises AttributeError from ctypes, and an
+    # unhandled one would crash the command instead of failing closed. Any
+    # failure to apply the protection is the same outcome — protection absent.
+    try:
+        _hardening.set_dumpable_zero()
+        observed = _hardening.get_dumpable()
+    except (WorthlessError, OSError, AttributeError) as exc:
+        if strict:
+            raise WorthlessError(
+                ErrorCode.CORE_DUMP_PROTECTION_FAILED,
+                f"core dump protection could not be applied: {exc}",
+            ) from exc
+        logger.warning("could not disable core dumps: %s", exc)
+        return
+    if observed == 0:
+        return
+
+    if observed is None and sys.platform != "linux":
+        # macOS/Windows have no dumpable bit, so RLIMIT_CORE is the ONLY lever
+        # here — it has to be confirmed applied before this counts as success.
+        # Swallowing a setrlimit failure and returning would leave the caller
+        # believing it is protected when nothing was applied at all.
+        #
+        # But "no lever exists" is NOT "the lever failed". Windows has no
+        # `resource` module at all, so there is nothing to apply and nothing to
+        # confirm — raising there would hard-fail lock/unlock on every run
+        # (up/wrap are already gated by fail_if_windows(), lock/unlock are not).
+        # The sidecar's own hardening is a no-op on that platform for the same
+        # reason; the CLI must not diverge.
+        if rlimit_zero or resource is None:
+            return
+        msg = (
+            "core dump protection not applied: RLIMIT_CORE is not 0 and this "
+            "platform has no dumpable bit. A crash could write this process's "
+            "memory — including reconstructed key material — to a core file."
+        )
+    else:
+        # On Linux, observed is 1 (kernel refused) or None (libc unreachable, so
+        # the setter provably never ran). Either way dumpable is NOT confirmed 0
+        # on a platform that HAS the bit — fail closed, matching the sidecar's
+        # own strict set_dumpable_zero(). None must not be waved through as
+        # "indeterminate": the setter didn't run, so it is a known failure.
+        msg = (
+            f"core dump protection not applied: PR_GET_DUMPABLE={observed} "
+            "(expected 0). A crash could pipe this process's memory — including "
+            "reconstructed key material — to a host core handler."
+        )
+
+    if strict:
+        raise WorthlessError(ErrorCode.CORE_DUMP_PROTECTION_FAILED, msg)
+    logger.warning(msg)
 
 
 # ---------------------------------------------------------------------------

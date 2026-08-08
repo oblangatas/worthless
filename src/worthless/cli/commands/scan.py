@@ -685,7 +685,14 @@ def register_scan_commands(app: typer.Typer) -> None:
 
         # WOR-277: scan reads raw key material from files/env into memory —
         # disable core dumps before that starts, matching lock/unlock/up/wrap.
-        disable_core_dumps()
+        #
+        # strict=False (dupf.10): scan is a read-only diagnostic and never
+        # reconstructs a key from shards. The protection is applied either
+        # way; strict only decides what happens when the *kernel refuses*
+        # (libc unreachable). Aborting a diagnostic command in that case is
+        # worse than running it with a logged warning — the key-holding
+        # commands (lock/unlock/up/wrap) still fail closed.
+        disable_core_dumps(strict=False)
 
         tmp_file: Path | None = None
         try:
