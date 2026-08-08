@@ -17,6 +17,7 @@ from worthless.cli.bootstrap import (
     resolve_home,
 )
 from worthless.cli.errors import ErrorCode, WorthlessError
+from worthless.cli.process import check_proxy_health, resolve_port
 
 mcp = FastMCP("worthless")
 
@@ -345,6 +346,57 @@ async def worthless_lock(env_path: str = ".env") -> str:
     if orphans:
         result["orphan_shards"] = orphans
         result["hint"] = "Mixed state detected — run `worthless doctor` to reconcile."
+
+    # WOR-829: the editor user's silent-broken state. A one-click lock rewrites
+    # `.env` to point at the proxy, then this MCP path returns — but on the
+    # no-OpenClaw editor path the proxy is (by definition) not running, and
+    # nothing tells the agent that calls will fail. So carry the truth forward
+    # in the lock's own response: probe once, and name the fix. Only when keys
+    # were actually locked — a 0-key lock has nothing to route.
+    if count > 0:
+
+        def _probe() -> dict[str, Any]:
+            # Bounded (httpx 2s) and non-fatal: lock success is a
+            # confidentiality fact, wholly independent of this availability
+            # probe. A probe failure reads as "not running", never undoes lock.
+            try:
+                return check_proxy_health(resolve_port(None))
+            except Exception:  # noqa: BLE001 — any probe failure ⇒ treat as down
+                return {"healthy": False}
+
+        health = await loop.run_in_executor(None, _probe)
+        # WOR-822: a 200 on /healthz only proves *something* answered;
+        # `bind_probe_count` is what proves it's ours. A stranger on the port
+        # must not let lock report "running" — and lock must never mint a green
+        # "protected" claim off this presence-only, forgeable marker.
+        routing_ready = bool(health.get("healthy")) and ("bind_probe_count" in health)
+        # proxy_running is the honest "is the worthless proxy routing my keys"
+        # bool — false for BOTH a dead port and a stranger squatting on it,
+        # because in neither case is our traffic routed. next_step carries the
+        # distinction, because the fix differs.
+        result["proxy_running"] = routing_ready
+        if routing_ready:
+            result["next_step"] = (
+                "Your keys are split and the proxy is up. "
+                "Verify end-to-end with `worthless status`."
+            )
+        elif health.get("healthy"):
+            # WOR-822: something answered /healthz but it isn't our proxy (no
+            # bind_probe_count). "Run `worthless up`" alone is wrong — it would
+            # fail to bind the occupied port. Tell them to stop the stranger
+            # first, mirroring the status surface's `proxy_unrecognised` verdict.
+            result["next_step"] = (
+                "Your keys are split and inert at rest, but the service answering on "
+                "the proxy port isn't worthless, so your apps aren't routing through "
+                "it. Stop it, then run `worthless up`."
+            )
+        else:
+            result["next_step"] = (
+                "Your keys are split and inert at rest, but the worthless proxy "
+                "isn't running — apps using this .env will fail to reach your keys "
+                "until it's up. Run `worthless up`."
+            )
+
     return json.dumps(result)
 
 
