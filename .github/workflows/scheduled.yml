@@ -87,7 +87,7 @@ jobs:
           fetch-depth: 0  # full history required for git scan
 
       - name: TruffleHog secret scan
-        uses: trufflesecurity/trufflehog@9b6b5326bfe25dbd856eccc8a8275eb5dea7bd52 # main
+        uses: trufflesecurity/trufflehog@82df476e759c1448517fac6bfb3677685cdcd78a # main
         with:
           path: ./
           base: ""
