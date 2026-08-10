@@ -295,29 +295,3 @@ ignore:
     # the non-root runtime user does not have.
     reason: "CPython VPATH sys.path; fix only in 3.15.0b3 (pre-release). Unreachable — installed layout, no Modules/setup.local, non-root runtime. Tracking WOR-852."
     expiry: "2027-01-31"  # set 2026-08-03 on the six-base measurement above, not blind.
-
-  - vulnerability: CVE-2026-0864
-    package:
-      name: python
-      type: binary
-    # configparser: WRITING a config whose multi-line value carries \r can
-    # inject extra keys. This is the only one of the four that is resident at
-    # runtime, so "we don't use it" was not available as an answer and the
-    # whole image had to be swept (2026-08-03). Five packages import
-    # configparser; exactly one WRITES with it:
-    #
-    #   pip (+ vendored distlib)  reads AND WRITES  not resident at runtime
-    #   keyring                   reads keyringrc   resident  (core.py:7/171)
-    #   rich                      reads a theme     resident
-    #   uvicorn                   reads log config  resident
-    #   pydantic                  mypy plugin only  not resident
-    #
-    # typer and starlette look like writers to a naive grep and are not:
-    # typer's hits are docstring examples, starlette's `parser.write()` is a
-    # multipart form parser unrelated to configparser.
-    #
-    # So the only writer in the image is pip, which is not loaded by the proxy
-    # or the CLI. src/worthless imports configparser nowhere. The CVE needs a
-    # write path to inject into; there isn't one.
-    reason: "CPython configparser write-injection; fix only in 3.15.0b4 (pre-release). Unreachable — swept whole image 2026-08-03: only pip writes via configparser and it is not resident. Tracking WOR-852."
-    expiry: "2027-01-31"  # set 2026-08-03 on the six-base measurement above, not blind.

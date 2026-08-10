@@ -135,7 +135,7 @@ jobs:
           image: worthless-proxy:${{ github.sha }}
           severity-cutoff: medium
           only-fixed: true
-          fail-build: true
+          fail-build: false  # PROOF BRANCH ONLY
 
       # `output-format: table` is load-bearing, not cosmetic. The action
       # defaults to sarif (action.yml), always writes the report to a file,
