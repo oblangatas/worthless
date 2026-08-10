@@ -137,13 +137,12 @@ jobs:
           only-fixed: true
           fail-build: true
 
-      # `output-format: table` is load-bearing, not cosmetic. The action
-      # defaults to sarif (action.yml), always writes the report to a file,
-      # and only echoes it to the log when the format is `table`. Nothing here
-      # uploads that sarif — this workflow has `permissions: contents: read`
-      # and no upload-sarif step — so before this line the informational scan
-      # produced output that no human could ever read. Now it prints.
-      - name: Grype full scan (including unfixed — informational)
+      # `output-format: json` so the next step can gate on it. This used to be
+      # `table` purely so a human could read the log; the summary printed by
+      # check_grype_unmapped_findings.py replaces that, and is shorter — the
+      # table was ~181 rows nobody reads on a green job.
+      - name: Grype full scan (including unfixed)
+        id: full_scan
         uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
         env:
           # Read the ignore-free config, NOT .grype.yaml. Otherwise this scan
@@ -158,7 +157,25 @@ jobs:
           # value would be dead config implying a filter that does not exist.
           only-fixed: false
           fail-build: false
-          output-format: table
+          output-format: json
+
+      # The gate above runs `only-fixed: true`, which drops every finding grype
+      # cannot map to a fixed version — at ANY severity. Measured 2026-08-10:
+      # three CRITICALS sat in that blind spot behind a green build. That flag
+      # is effectively an ignore rule with no CVE id, no reason and no expiry,
+      # hiding in YAML where check_grype_ignore_expiry.py cannot see it.
+      #
+      # This step closes it, reusing the scan above rather than adding a job —
+      # the runner pool is already starved by ~41 checks per PR. WOR-852.
+      - name: Unmapped High/Critical findings must be argued
+        env:
+          # Via env, never interpolated into the shell: a `${{ }}` expansion
+          # inside `run:` is the template-injection shape zizmor flags, even
+          # when the value is a path from a trusted action.
+          REPORT: ${{ steps.full_scan.outputs.json }}
+        run: >-
+          uv run --no-project --with pyyaml
+          python scripts/hooks/check_grype_unmapped_findings.py "$REPORT"
 
       # ── arm64, on the weekly schedule only (WOR-873) ────────────────────
       # Everything above builds whatever the runner is — amd64. So until this,
@@ -217,7 +234,8 @@ jobs:
           fail-build: true
           output-format: table
 
-      - name: Grype arm64 full scan (including unfixed — informational)
+      - name: Grype arm64 full scan (including unfixed)
+        id: arm64_full_scan
         if: contains(fromJSON('["schedule", "workflow_dispatch"]'), github.event_name)
         uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
         env:
@@ -226,7 +244,20 @@ jobs:
           image: docker-archive:${{ env.ARM64_TAR }}
           only-fixed: false
           fail-build: false
-          output-format: table
+          output-format: json
+
+      # Same blind spot as the amd64 gate above: `only-fixed: true` drops every
+      # finding grype cannot map to a fixed version. arm64 is scanned only
+      # weekly (WOR-873), so without this a Critical could sit here for days.
+      - name: arm64 unmapped High/Critical findings must be argued
+        env:
+          # Via env, never interpolated into the shell: a `${{ }}` expansion
+          # inside `run:` is the template-injection shape zizmor flags, even
+          # when the value is a path from a trusted action.
+          REPORT: ${{ steps.arm64_full_scan.outputs.json }}
+        run: >-
+          uv run --no-project --with pyyaml
+          python scripts/hooks/check_grype_unmapped_findings.py "$REPORT"
 
       - name: Dockle best-practice lint
         # ``.dockleignore`` in the repo root skips CIS-DI-0001 (image
