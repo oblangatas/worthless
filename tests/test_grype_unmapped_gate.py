@@ -115,3 +115,26 @@ def test_duplicate_matches_reported_once(tmp_path: Path) -> None:
     result = _run(tmp_path, dupes)
     assert result.returncode == 1
     assert result.stderr.count("CVE-2099-00007") == 1
+
+
+def test_empty_path_is_a_clear_error_not_a_traceback() -> None:
+    """A skipped scan step yields "", and Path("") is "." — a directory.
+
+    This shipped: the arm64 gate ran on PRs where its scan was skipped and
+    died with IsADirectoryError. CI caught it; review did not.
+    """
+    result = subprocess.run(
+        [sys.executable, str(HOOK), ""], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 2
+    assert "no grype report path" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_directory_argument_is_rejected() -> None:
+    """Belt and braces: an actual directory must not be parsed as a report."""
+    result = subprocess.run(
+        [sys.executable, str(HOOK), "."], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 2
+    assert "not a file" in result.stderr

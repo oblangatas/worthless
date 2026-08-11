@@ -250,6 +250,10 @@ jobs:
       # finding grype cannot map to a fixed version. arm64 is scanned only
       # weekly (WOR-873), so without this a Critical could sit here for days.
       - name: arm64 unmapped High/Critical findings must be argued
+        # Same guard as every other arm64 step. Without it this runs on PRs,
+        # where the arm64 scan above is skipped, so its `json` output is empty
+        # and the hook is handed "" — which resolves to the repo root.
+        if: contains(fromJSON('["schedule", "workflow_dispatch"]'), github.event_name)
         env:
           # Via env, never interpolated into the shell: a `${{ }}` expansion
           # inside `run:` is the template-injection shape zizmor flags, even

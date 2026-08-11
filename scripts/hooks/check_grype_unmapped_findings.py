@@ -132,9 +132,21 @@ def main() -> int:
         print("usage: check_grype_unmapped_findings.py <grype-report.json>", file=sys.stderr)
         return 2
 
-    report_path = Path(sys.argv[1])
-    if not report_path.exists():
-        print(f"grype report not found: {report_path}", file=sys.stderr)
+    raw = sys.argv[1].strip()
+    if not raw:
+        # A skipped scan step yields an empty output, and Path("") is ".", which
+        # exists and is a directory — so this crashed with IsADirectoryError
+        # instead of saying what was wrong. Caught in CI, not by review.
+        print(
+            "no grype report path given — the scan step it comes from was "
+            "probably skipped. Guard this step with the same `if:` condition.",
+            file=sys.stderr,
+        )
+        return 2
+
+    report_path = Path(raw)
+    if not report_path.is_file():
+        print(f"grype report is not a file: {report_path}", file=sys.stderr)
         return 2
 
     report = json.loads(report_path.read_text())
