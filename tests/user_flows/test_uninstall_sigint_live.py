@@ -1,20 +1,23 @@
-"""Real Ctrl+C at the real uninstall prompt (worthless-6xuv).
+"""Real Ctrl+C at a real confirmation prompt (worthless-6xuv).
 
-The unit test for this bug mocks ``typer.confirm`` to raise and mocks
-``_stdin_is_tty`` to return True, then drives the app in-process with
-``CliRunner``. That tests a *model* of Ctrl+C. It cannot fail if the real signal
-lands somewhere else, which is exactly the class of blind spot tracked in
-``worthless-d4h2``.
+A unit test cannot prove this. It has no terminal and sends no signal — it tests a
+*model* of Ctrl+C. So these drive the real ``worthless`` console script as its own
+process, attached to a real pseudo-terminal, and deliver a real ``SIGINT`` to its
+process group.
 
-This test removes every one of those stand-ins:
+Two things are pinned:
 
-* the real ``worthless`` console script, spawned as its own process
-* a real PTY, so ``sys.stdin.isatty()`` is genuinely true — nothing patched
-* a real ``SIGINT`` delivered to the process group, like a real Ctrl+C
-* assertions on the real exit code and the bytes really written to the terminal
+1. **No "internal error".** ``typer.confirm`` raises ``click.Abort`` on Ctrl+C, which
+   inherits from ``Exception`` and so was swallowed by the CLI's error boundary into
+   ``WRTLS-199: an internal error occurred``. On commands that touch real API keys that
+   reads as "it died halfway".
+2. **Exit code 130.** The conventional code for "terminated by SIGINT". Exiting 0 tells
+   a script or agent the command *succeeded* — a user abort is not a success. Declining
+   with "n" is a deliberate choice and still exits 0; that distinction is the point.
 
-Remaining honest gap: this runs the console script built from the working tree,
-not a ``uv tool install``-ed published wheel. Closing that is ``worthless-d4h2``.
+The fix belongs in the error boundary, not at individual call sites: there are nine
+``typer.confirm`` prompts across uninstall, lock, doctor, service, and the default
+command. Patching them one at a time is how this bug survived its first fix.
 """
 
 from __future__ import annotations
@@ -32,7 +35,6 @@ import pytest
 
 pytestmark = pytest.mark.user_flow
 
-#: The command must reach its confirmation prompt, then die, well inside this.
 _TIMEOUT_S = 60.0
 
 
@@ -74,8 +76,44 @@ def _drain(fd: int, deadline: float, until: bytes | None = None) -> bytes:
     return buf
 
 
+def _ctrl_c_at_prompt(
+    binary: Path, args: list[str], env: dict[str, str], prompt: bytes
+) -> tuple[str, int]:
+    """Run ``binary args`` on a real PTY, wait for *prompt*, send a real Ctrl+C.
+
+    Returns the full terminal output and the process exit code.
+    """
+    master, slave = pty.openpty()
+    proc = subprocess.Popen(  # noqa: S603
+        [str(binary), *args],
+        stdin=slave,
+        stdout=slave,
+        stderr=slave,
+        env=env,
+        start_new_session=True,  # own process group, so we can signal it like a terminal does
+        close_fds=True,
+    )
+    os.close(slave)
+    try:
+        seen = _drain(master, time.monotonic() + _TIMEOUT_S, until=prompt)
+        assert prompt in seen, (
+            f"never reached the prompt {prompt!r}; saw: {seen.decode(errors='replace')!r}"
+        )
+
+        os.killpg(os.getpgid(proc.pid), signal.SIGINT)  # the real thing
+
+        seen += _drain(master, time.monotonic() + _TIMEOUT_S)
+        returncode = proc.wait(timeout=_TIMEOUT_S)
+    finally:
+        os.close(master)
+        if proc.poll() is None:  # pragma: no cover — only on an unexpected hang
+            proc.kill()
+            proc.wait(timeout=10)
+    return seen.decode(errors="replace"), returncode
+
+
 def test_real_ctrl_c_at_the_uninstall_prompt_cancels_cleanly(tmp_path: Path) -> None:
-    """A real SIGINT at the real prompt must say "cancelled", never "internal error".
+    """Ctrl+C at the uninstall prompt: says nothing changed, exits 130, changes nothing.
 
     Against the pre-fix code this fails with the operator's exact terminal output:
     ``WRTLS-199: an internal error occurred``.
@@ -95,52 +133,58 @@ def test_real_ctrl_c_at_the_uninstall_prompt_cancels_cleanly(tmp_path: Path) -> 
     sentinel = home / "worthless.db"
     sentinel.write_bytes(b"not-a-real-db")
 
-    master, slave = pty.openpty()
-    proc = subprocess.Popen(
-        [str(binary), "uninstall"],
-        stdin=slave,
-        stdout=slave,
-        stderr=slave,
-        env=env,
-        start_new_session=True,  # own process group, so we can signal it like a terminal does
-        close_fds=True,
-    )
-    os.close(slave)
+    output, returncode = _ctrl_c_at_prompt(binary, ["uninstall"], env, b"Continue?")
 
-    try:
-        deadline = time.monotonic() + _TIMEOUT_S
-        seen = _drain(master, deadline, until=b"Continue?")
-        assert b"Continue?" in seen, (
-            f"never reached the confirmation prompt; saw: {seen.decode(errors='replace')!r}"
-        )
-
-        # The real thing: Ctrl+C to the whole process group.
-        os.killpg(os.getpgid(proc.pid), signal.SIGINT)
-
-        seen += _drain(master, time.monotonic() + _TIMEOUT_S)
-        returncode = proc.wait(timeout=_TIMEOUT_S)
-    finally:
-        os.close(master)
-        if proc.poll() is None:  # pragma: no cover — only on an unexpected hang
-            proc.kill()
-            proc.wait(timeout=10)
-
-    output = seen.decode(errors="replace").lower()
     # The terminal wraps at the PTY width, so collapse whitespace before matching
     # a phrase that could straddle a line break.
-    normalized = " ".join(output.split())
+    normalized = " ".join(output.lower().split())
 
-    assert "internal error" not in output, (
+    assert "internal error" not in normalized, (
         "a real Ctrl+C still surfaces an internal error — the user cannot tell "
-        f"whether their keys are safe. Full terminal output:\n{seen.decode(errors='replace')}"
+        f"whether their keys are safe. Full terminal output:\n{output}"
     )
     # Pin the whole promise, not just the word "cancelled". A bare "cancel" match
     # would also accept something like "cancelled after partial changes" — the very
     # ambiguity this fix exists to remove, on the command that restores real API
     # keys. The "nothing was changed" half is the safety guarantee.
     assert "cancelled" in normalized and "nothing was changed" in normalized, (
-        "an aborted uninstall must confirm it cancelled AND that nothing changed; "
-        f"got:\n{seen.decode(errors='replace')}"
+        f"an aborted uninstall must confirm it cancelled AND that nothing changed;\n{output}"
     )
-    assert returncode == 0, f"cancelling is not a failure, but exited {returncode}"
+    assert returncode == 130, (
+        "Ctrl+C must exit 130 (terminated by SIGINT), not "
+        f"{returncode} — exiting 0 tells a script the uninstall succeeded"
+    )
     assert sentinel.exists(), "cancelling must not remove anything — the home was touched"
+
+
+@pytest.mark.parametrize(
+    ("args", "prompt"),
+    [
+        (["service", "uninstall"], b"Remove the worthless user service?"),
+    ],
+    ids=["service-uninstall"],
+)
+def test_ctrl_c_is_handled_at_prompts_beyond_uninstall(
+    tmp_path: Path, args: list[str], prompt: bytes
+) -> None:
+    """The fix must live at the error boundary, not at one call site.
+
+    ``uninstall`` was patched locally first; every other confirmation prompt kept
+    printing ``WRTLS-199``. This proves a *different* command's prompt is covered, so
+    a future prompt inherits the behaviour instead of repeating the bug.
+    """
+    binary = _worthless_bin()
+    if not binary.exists():  # pragma: no cover
+        pytest.skip(f"no worthless console script at {binary}")
+
+    env = _clean_env(tmp_path)
+    (tmp_path / ".worthless").mkdir(parents=True, exist_ok=True)
+
+    output, returncode = _ctrl_c_at_prompt(binary, args, env, prompt)
+    normalized = " ".join(output.lower().split())
+
+    assert "internal error" not in normalized, (
+        f"Ctrl+C at `worthless {' '.join(args)}` still reports an internal error:\n{output}"
+    )
+    assert "cancel" in normalized, f"an interrupted command must say it cancelled:\n{output}"
+    assert returncode == 130, f"Ctrl+C must exit 130, got {returncode}\n{output}"
