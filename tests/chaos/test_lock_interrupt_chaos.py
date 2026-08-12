@@ -78,6 +78,17 @@ pytestmark = [
     # ~40x sooner with the signal and jitter that wedged the CLI. So erring
     # generous here costs nothing and cannot mask a hang.
     pytest.mark.timeout(600),
+    # NEVER auto-retry this module. ``--reruns 1`` is repo-wide (pyproject addopts
+    # and .github/workflows/tests.yml), and a rerun that passes is reported green.
+    # That is precisely how the budget defect above survived: a systematic failure
+    # was retried into a pass run after run, surfacing only as an "occasional
+    # flake". The same masking applies to what this suite actually guards -- a
+    # PARTIAL/ORPHAN on-disk state is a rare, timing-dependent security bug, so
+    # retrying it is how a half-locked `.env` ships.
+    #
+    # A failure here must be loud and attributable. If that means an intermittent
+    # red, the red is the finding.
+    pytest.mark.flaky(reruns=0),
 ]
 
 
