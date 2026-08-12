@@ -1,6 +1,6 @@
 [project]
 name = "worthless"
-version = "0.3.11"
+version = "0.3.12"
 description = "Split-key reverse proxy that makes leaked API keys worthless"
 readme = "README.md"
 license = { text = "AGPL-3.0-only" }
@@ -191,7 +191,10 @@ timeout_method = "thread"
 addopts = "--strict-config --strict-markers -n auto --dist loadscope --reruns 1 --max-worker-restart=0 -m 'not live and not docker and not user_flow and not real_ipc'"
 markers = [
     "benchmark: performance and latency regression checks",
-    "contract: schema-driven API and protocol checks",
+    # `contract` removed in WOR-877 — declared here, documented in the CI
+    # marker map, applied to zero tests. The scheduled job selecting it
+    # collected nothing and exited 5 on every run. Re-add the marker and the
+    # job together if contract tests are ever written.
     "snapshot: request/response and stream shape snapshot checks",
     "integration: tests requiring live infrastructure or subprocesses",
     "slow: long-running statistical validation tests",
@@ -289,9 +292,32 @@ targets = ["src"]
 # these files are now the net's declared scope (renamed from the deprecated
 # paths_to_mutate). NOTE: mutmut 3.x's stats phase collides with this repo's
 # pytest addopts (-n auto + strict markers), so a full `mutmut run` needs
-# reconciliation before it can gate in CI. Until then the enforced net is the
+# reconciliation before it can gate in CI.
+#
+# WOR-877 — CORRECTION. This block previously claimed the net was "the
 # hypothesis properties in tests/openclaw/test_lock_bind_confirmation.py plus
-# scripts/mutation_spine_sweep.py (8/8 canonical spine mutations verified killed).
+# scripts/mutation_spine_sweep.py (8/8 canonical spine mutations verified
+# killed)". Three parts of that were false or misleading:
+#
+#   1. The 8/8 is UNEARNED. mutation_spine_sweep.py runs a FAST test list
+#      containing `tests/cli/test_cli_status.py`, which does not exist (the
+#      real path is tests/test_cli_status.py). pytest aborts collection, and
+#      the script scores any non-zero exit as KILLED — so every mutation
+#      reports killed whether or not a single test noticed. The number would
+#      read 8/8 against a suite that asserts nothing.
+#   2. The sweep is wired into NOTHING. It is referenced only here; no
+#      workflow, no pre-commit hook invokes it.
+#   3. Its scope is lock.py / sentinel.py / app.py — it covers ZERO crypto,
+#      so it never substituted for the crypto mutmut job it was excusing.
+#
+#   The hypothesis properties in test_lock_bind_confirmation.py ARE real and
+#   green (16 tests) — only the sweep's verification of them was fake.
+#
+#   The mutmut jobs in scheduled.yml and pre-release.yml were removed in
+#   WOR-877: both had failed every run since April on flags mutmut 3.x
+#   deleted, so no mutation testing has actually run in this repo for months.
+#   Fixing the sweep is tracked separately; do not cite it as a net until it
+#   can fail.
 source_paths = [
     "src/worthless/adapters",
     "src/worthless/crypto",

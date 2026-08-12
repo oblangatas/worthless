@@ -7,7 +7,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-import aiosqlite
 from mcp.server.fastmcp import FastMCP  # type: ignore[import-not-found]  # optional dep
 
 from worthless.cli.bootstrap import (
@@ -17,6 +16,7 @@ from worthless.cli.bootstrap import (
     resolve_home,
 )
 from worthless.cli.errors import ErrorCode, WorthlessError
+from worthless.storage.sqlite import connect as sqlite_connect
 
 mcp = FastMCP("worthless")
 
@@ -51,7 +51,7 @@ async def _query_spend(db_path: Path, alias: str | None) -> list[dict[str, Any]]
         params = (alias,)
     query += " GROUP BY key_alias, provider"
 
-    async with aiosqlite.connect(str(db_path)) as db:
+    async with sqlite_connect(str(db_path)) as db:
         rows = await db.execute_fetchall(query, params)
         return [
             {
@@ -82,7 +82,7 @@ async def _list_orphan_shards(db_path: Path) -> list[str]:
         "LEFT JOIN enrollments e ON s.key_alias = e.key_alias "
         "WHERE e.key_alias IS NULL ORDER BY s.key_alias"
     )
-    async with aiosqlite.connect(str(db_path)) as db:
+    async with sqlite_connect(str(db_path)) as db:
         rows = await db.execute_fetchall(query)
         return [r[0] for r in rows]
 
