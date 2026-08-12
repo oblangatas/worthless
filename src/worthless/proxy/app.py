@@ -54,6 +54,7 @@ from worthless.proxy.rules import (
 from worthless.storage.schema import SCHEMA, migrate_db
 from worthless.cli.log_redaction import install_redaction_filter
 from worthless.storage.shard_reader import ShardReader
+from worthless.storage.sqlite import open_connection
 from worthless.storage.spend_ledger import SpendLedger
 
 logger = logging.getLogger(__name__)
@@ -223,7 +224,12 @@ async def _lifespan(app: FastAPI):
     """
     settings: ProxySettings = app.state.settings
 
-    db = await aiosqlite.connect(settings.db_path)
+    # open_connection(), not aiosqlite.connect(): an interrupt landing inside
+    # Connection.__await__'s Thread.start() otherwise strands a non-daemon
+    # worker that wedges interpreter shutdown. The connection is long-lived
+    # (closed in the shutdown half below), so the async-with helper `connect()`
+    # does not fit — only the open needs the guard.
+    db = await open_connection(settings.db_path)
     await db.executescript(SCHEMA)
     await db.execute("PRAGMA journal_mode=WAL")
     await db.execute("PRAGMA busy_timeout=5000")
