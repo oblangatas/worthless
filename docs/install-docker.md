@@ -11,7 +11,7 @@ Pull a pre-built, multi-arch image from the GitHub Container Registry. No clone,
 
 ```bash
 docker run -d --name worthless -p 127.0.0.1:8787:8787 \
-  ghcr.io/shacharm2/worthless-proxy:0.3.11
+  ghcr.io/shacharm2/worthless-proxy:0.3.12
 ```
 
 The proxy starts on `localhost:8787`. Enroll your keys exactly like the Compose flow:
@@ -26,7 +26,7 @@ For a production setup with volumes, secrets, and resource limits, use [`deploy/
 ## Pin the version
 
 ```bash
-docker pull ghcr.io/shacharm2/worthless-proxy:0.3.11   # recommended
+docker pull ghcr.io/shacharm2/worthless-proxy:0.3.12   # recommended
 docker pull ghcr.io/shacharm2/worthless-proxy:latest  # moves on every stable release
 ```
 
@@ -41,7 +41,7 @@ Both `linux/amd64` and `linux/arm64` (Apple Silicon, Graviton) are published. Do
 Every image is signed with [Sigstore cosign](https://www.sigstore.dev/) using keyless OIDC — no long-lived keys; the signature is cryptographically bound to a tag-triggered run of **this** workflow file (`.github/workflows/publish-docker.yml`) in this repo. Verifying proves the image digest was produced by that specific workflow identity and the tag you pulled resolves to that digest. It defends against tampered registries and images built outside this CI. It does **not** by itself defend against a compromised maintainer with tag-push rights running the legitimate workflow.
 
 ```bash
-cosign verify ghcr.io/shacharm2/worthless-proxy:0.3.11 \
+cosign verify ghcr.io/shacharm2/worthless-proxy:0.3.12 \
   --certificate-identity-regexp 'https://github.com/shacharm2/worthless/\.github/workflows/publish-docker\.yml@refs/tags/v.*' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --certificate-github-workflow-repository shacharm2/worthless
