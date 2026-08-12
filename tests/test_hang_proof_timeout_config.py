@@ -25,6 +25,7 @@ crash simply comes back, at roughly one run in five. Hence this guard.
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -33,7 +34,10 @@ import pytest
 from tests.conftest import pytest_collection_modifyitems
 
 PYPROJECT = Path(__file__).resolve().parent.parent / "pyproject.toml"
-WORKFLOWS = Path(__file__).resolve().parent.parent / ".github" / "workflows"
+# The whole .github tree, not just workflows/: composite actions under
+# .github/actions/ can invoke pytest too, and an unguarded serial lane planted
+# there was invisible to an earlier version of this file.
+GITHUB = Path(__file__).resolve().parent.parent / ".github"
 
 # A zero-worker (serial) pytest lane in ANY invocation form: `uv run pytest`,
 # `python -m pytest`, `uv run --frozen pytest`, an env-var prefix, or flags
@@ -52,7 +56,33 @@ _ADDOPTS = re.compile(r'^\s*addopts\s*=\s*"([^"]*)"', re.MULTILINE)
 _FUNC_ONLY = re.compile(r"^\s*timeout_func_only\s*=\s*(\w+)", re.MULTILINE)
 
 
-_MODULE_TIMEOUT = re.compile(r"pytest\.mark\.timeout\((\d+)\)")
+def _module_level_budgets(path: Path) -> list[int]:
+    """Timeout budgets declared in a MODULE-LEVEL ``pytestmark``.
+
+    Read via AST, not regex: a text search for ``pytest.mark.timeout(N)``
+    anywhere in the file is satisfied by a single decorated test, which covers
+    one test rather than the module. Only a module-level mark protects them all.
+    Handles both shapes in use here — a bare ``pytestmark = pytest.mark.timeout(N)``
+    and a list containing it alongside other marks.
+    """
+    budgets: list[int] = []
+    for node in ast.parse(path.read_text(encoding="utf-8")).body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(t, ast.Name) and t.id == "pytestmark" for t in node.targets):
+            continue
+        for call in ast.walk(node.value):
+            if (
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute)
+                and call.func.attr == "timeout"
+                and call.args
+                and isinstance(call.args[0], ast.Constant)
+                and isinstance(call.args[0].value, int)
+            ):
+                budgets.append(call.args[0].value)
+    return budgets
+
 
 # Modules whose real runtime under a loaded `-n auto` run approaches or exceeds
 # the repo-global 30s budget, measured: the chaos suite runs 27-33s (it straddles
@@ -133,7 +163,7 @@ def test_serial_lanes_override_to_signal() -> None:
     """
     offenders: list[str] = []
     lanes_per_file: dict[str, int] = {}
-    workflows = sorted(p for pat in ("*.yml", "*.yaml") for p in WORKFLOWS.glob(pat))
+    workflows = sorted(p for pat in ("**/*.yml", "**/*.yaml") for p in GITHUB.glob(pat))
     for workflow in workflows:
         text = _CONTINUATION.sub(" ", workflow.read_text(encoding="utf-8"))
         lanes = [line for line in text.splitlines() if _SERIAL_FLAG.search(line)]
@@ -209,9 +239,12 @@ def test_slow_modules_carry_their_own_budget() -> None:
         if not path.exists():
             missing.append(f"{rel}: file not found (moved? update _NEEDS_OWN_BUDGET)")
             continue
-        found = [int(n) for n in _MODULE_TIMEOUT.findall(path.read_text(encoding="utf-8"))]
+        found = _module_level_budgets(path)
         if not any(n >= minimum for n in found):
-            missing.append(f"{rel}: needs pytest.mark.timeout(>={minimum}), found {found}")
+            missing.append(
+                f"{rel}: needs a MODULE-LEVEL pytestmark timeout(>={minimum}); "
+                f"module-level budgets found: {found or 'none'}"
+            )
 
     assert not missing, (
         "these modules run at or past the global 30s budget under load and must "
