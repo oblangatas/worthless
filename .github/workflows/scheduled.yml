@@ -82,6 +82,11 @@ jobs:
       # So every pytest function named `test_` plus exactly 35 more characters
       # — 40 total — matches it. This repo has a lot of those.
       #
+      # This detector worked fine for months — the scan was green in 43 of 46
+      # runs and regressed on 2026-08-07 with no repo change, so the trigger is
+      # an upstream detector change. If upstream tightens it again, REMOVE this
+      # exclusion rather than carrying it forever.
+      #
       # Measured: 149 "verified" findings, every one a test function name.
       # Confirmed with --json, which gives file and line:
       #     tests/test_confusables.py:93
