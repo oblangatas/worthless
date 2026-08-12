@@ -262,10 +262,19 @@ def test_the_informational_scan_does_not_inherit_the_gate_s_ignores() -> None:
             # The reference may sit in `run:` or in `env:`. Passing it through
             # env is what keeps zizmor's template-injection rule happy, so a
             # check that only searched `run:` would forbid the safer form.
+            #
+            # Search only steps AFTER the producing one. Actions cannot read an
+            # output before the step that writes it, so a reference sitting
+            # earlier is stale — and would satisfy this test while the findings
+            # still reached nobody.
+            all_steps = _all_steps()
+            producer = next(
+                i for i, candidate in enumerate(all_steps) if candidate.get("id") == step_id
+            )
             consumed = any(
                 f"steps.{step_id}.outputs.json"
                 in (str(s.get("run") or "") + str(s.get("env") or ""))
-                for s in _all_steps()
+                for s in all_steps[producer + 1 :]
             )
             assert consumed, (
                 f"{step.get('name')} emits json that no later step reads — "

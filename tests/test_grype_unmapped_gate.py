@@ -93,6 +93,22 @@ def test_argued_cve_is_silenced(tmp_path: Path) -> None:
     assert result.returncode == 0
 
 
+def test_an_argument_does_not_travel_to_another_package(tmp_path: Path) -> None:
+    """The same argued CVE on a DIFFERENT package must still gate.
+
+    The perl entries argue that perl is unreachable — a claim about perl, not
+    about the CVE. If that same id later surfaces against python, nobody has
+    examined it and the build must go red. An earlier version of this gate
+    matched on CVE id alone and would have waved this through.
+    """
+    result = _run(tmp_path, [_match("CVE-2026-12087", "Critical", "not-fixed", "python")])
+    assert result.returncode == 1, (
+        "an argument written about perl-base silenced the same CVE on python; "
+        "package scope is being dropped"
+    )
+    assert "CVE-2026-12087" in (result.stdout + result.stderr)
+
+
 def test_the_gate_can_actually_fail(tmp_path: Path) -> None:
     """A gate that cannot fail is worse than no gate.
 

@@ -53,25 +53,60 @@ GATING_SEVERITIES = {"Critical", "High"}
 UNMAPPED_STATES = {"unknown", "not-fixed", ""}
 
 
-def argued_cves(configs: tuple[Path, ...]) -> set[str]:
-    """CVE ids that already carry a dated argument in a grype config.
+def argued_cves(configs: tuple[Path, ...]) -> dict[str, list[dict[str, str]]]:
+    """CVE ids that carry a dated argument, mapped to the scopes they cover.
 
-    Only the id is read here. Whether the date is still valid is
-    check_grype_ignore_expiry.py's job — duplicating it would mean two places
-    to fix when the contract changes.
+    The PACKAGE SCOPE is carried, not just the id. An entry arguing
+    CVE-2026-12087 is unreachable *in perl-base* says nothing about the same
+    CVE surfacing in python — dropping the scope here would let one written
+    argument silently excuse every future package it never examined.
+
+    An empty scope list means the rule named no package, so it covers any.
+    Whether the date is still valid is check_grype_ignore_expiry.py's job;
+    duplicating it would mean two places to fix when the contract changes.
     """
-    argued: set[str] = set()
+    argued: dict[str, list[dict[str, str]]] = {}
     for config in configs:
         if not config.exists():
             continue
         data = yaml.safe_load(config.read_text()) or {}
         for rule in data.get("ignore") or []:
-            if isinstance(rule, dict) and rule.get("vulnerability"):
-                argued.add(str(rule["vulnerability"]))
+            if not (isinstance(rule, dict) and rule.get("vulnerability")):
+                continue
+            pkg = rule.get("package") or {}
+            scope = {
+                k: str(pkg[k]) for k in ("name", "type") if isinstance(pkg, dict) and pkg.get(k)
+            }
+            argued.setdefault(str(rule["vulnerability"]), []).append(scope)
     return argued
 
 
-def unmapped_findings(report: dict, argued: set[str]) -> list[tuple[str, str, str, str]]:
+def _is_argued(cve: str, artifact: dict, argued: dict[str, list[dict[str, str]]]) -> bool:
+    """True only if an argument covers this CVE *on this package*.
+
+    ponytail: plain equality, not grype's regex matching. This gate only ever
+    narrows what is excused, so being stricter than grype here is the safe
+    direction — a scope we fail to match stays gating rather than slipping past.
+    """
+    scopes = argued.get(cve)
+    if scopes is None:
+        return False
+    name = str(artifact.get("name") or "")
+    ptype = str(artifact.get("type") or "")
+    for scope in scopes:
+        if not scope:
+            return True  # rule named no package: covers everything
+        if "name" in scope and scope["name"] != name:
+            continue
+        if "type" in scope and scope["type"] != ptype:
+            continue
+        return True
+    return False
+
+
+def unmapped_findings(
+    report: dict, argued: dict[str, list[dict[str, str]]]
+) -> list[tuple[str, str, str, str]]:
     """Return (severity, cve, package, state) for each gating finding.
 
     Deduplicated by (cve, package): grype reports one match per matching
@@ -91,10 +126,13 @@ def unmapped_findings(report: dict, argued: set[str]) -> list[tuple[str, str, st
             continue
 
         cve = vuln.get("id") or "?"
-        if cve in argued:
+        artifact = match.get("artifact") or {}
+        # Scope-aware: an argument written about one package does not excuse
+        # the same CVE on another.
+        if _is_argued(cve, artifact, argued):
             continue
 
-        package = (match.get("artifact") or {}).get("name") or "?"
+        package = artifact.get("name") or "?"
         if (cve, package) in seen:
             continue
         seen.add((cve, package))
