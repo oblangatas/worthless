@@ -156,6 +156,42 @@ verify_logic "$MULTI_2FIRST" "$KEY1_FPR" >/dev/null 2>&1; assert_exit "multi-key
 # Case 7: single key2, pinned key1 → fail (fingerprint mismatch)
 verify_logic "$SINGLE2" "$KEY1_FPR" >/dev/null 2>&1; assert_exit "single key2, pinned key1" 1 $?
 
+# Case 8: the tag OBJECT must be fetched when only the commit is present.
+#
+# `actions/checkout` with `fetch-depth: 0` stopped leaving the annotated tag
+# object on disk after the action bump in #469. Without the object there is no
+# signature to check and git reports "cannot verify a non-tag object of type
+# commit" — which failed every publisher on the real v0.3.12 tag (WOR-864).
+#
+# Uses real git (no stub): build an origin carrying an annotated tag, clone it
+# without tags, point a LIGHTWEIGHT ref at the commit to reproduce exactly what
+# the new checkout leaves, then run the guard and assert the object became a
+# tag. Unsigned annotated tag is enough — this pins the FETCH, not the GPG check
+# (cases 1-7 cover that).
+tagfetch_case() {
+  local root; root=$(mktemp -d)
+  git init -q --bare "$root/origin.git"
+  git init -q "$root/src" && cd "$root/src"
+  git -c user.email=t@e -c user.name=t commit -q --allow-empty -m init
+  git tag -a v9.9.9 -m v9.9.9                     # annotated, lives only as an object
+  git remote add origin "$root/origin.git" && git push -q origin HEAD:refs/heads/main v9.9.9
+  local sha; sha=$(git rev-parse HEAD)
+
+  git clone -q --no-tags "$root/origin.git" "$root/work" && cd "$root/work"
+  git update-ref refs/tags/v9.9.9 "$sha"           # lightweight → reproduces the bug
+  [ "$(git cat-file -t v9.9.9)" = "commit" ] || { cd /; rm -rf "$root"; return 2; }
+
+  # the guard, verbatim from verify-tag.sh
+  if [ "$(git cat-file -t v9.9.9 2>/dev/null || true)" != "tag" ]; then
+    git fetch --force origin "refs/tags/v9.9.9:refs/tags/v9.9.9" 2>/dev/null || true
+  fi
+
+  local after; after=$(git cat-file -t v9.9.9)
+  cd /; rm -rf "$root"
+  [ "$after" = "tag" ]
+}
+tagfetch_case >/dev/null 2>&1; assert_exit "lightweight tag ref → object fetched" 0 $?
+
 echo ""
 echo "Pass: $PASS  Fail: $FAIL"
 [ "$FAIL" -eq 0 ]

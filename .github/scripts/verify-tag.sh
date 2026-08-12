@@ -76,6 +76,24 @@ fi
 # Pin gpg.program defensively: a future runner image change could ship
 # a wrapper or alternative gpg path; we want git to invoke the same
 # gpg (and inherit our GNUPGHOME) as we used for import.
+# Make sure the ANNOTATED TAG OBJECT is on disk, not just the commit it points
+# at. `actions/checkout` with `fetch-depth: 0` used to leave the tag object
+# behind; after the action bump in #469 it does not, so `git verify-tag` reports
+#
+#     error: v0.3.12: cannot verify a non-tag object of type commit
+#
+# and every publisher fails closed — which is exactly what happened to the
+# v0.3.12 tag (WOR-864). A signature cannot be checked if the object carrying it
+# was never fetched.
+#
+# Guarded on the object type so this is a no-op when the tag is already present
+# (the offline harness in test-verify-tag-multikey.sh builds its own tags and
+# must not reach the network). Failure to fetch is not fatal here: verify-tag
+# below is the real gate and still fails closed with a signature error.
+if [ "$(git cat-file -t "${GITHUB_REF_NAME}" 2>/dev/null || true)" != "tag" ]; then
+  git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}" 2>/dev/null || true
+fi
+
 if ! git -c gpg.program=gpg verify-tag "${GITHUB_REF_NAME}"; then
   echo "::error title=Unsigned or untrusted tag::Tag ${GITHUB_REF_NAME} did not verify against MAINTAINER_GPG_PUBKEY (fingerprint ${NORMALIZED_FINGERPRINT})."
   exit 1
