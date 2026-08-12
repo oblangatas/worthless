@@ -612,24 +612,33 @@ def detect_thread_leak(request):
 
 
 def pytest_collection_modifyitems(config, items):
-    """Give ``real_ipc`` tests timeout headroom, then mark quarantined tests."""
-    # real_ipc tests Popen a real interpreter and wait for an AF_UNIX socket to
-    # bind. CI sets WORTHLESS_SIDECAR_READY_TIMEOUT_SECS=20 because cold start on
-    # a loaded runner is slow — which leaves only 10s of the repo-global 30s
-    # budget for the test body. That straddles the wall, and a test cut at the
-    # wall is not a clean failure: the serial `-n0` lane has no xdist worker to
-    # sacrifice, so `timeout_method = "thread"` (os._exit) takes the whole pytest
-    # process down with exit 1 and no report at all. Observed on CI run
-    # 31610847051, where tests/ipc/test_roundtrip.py was cut at 30s and killed
-    # the serial pass. Headroom keeps the alarm from arming; the lane also passes
-    # --timeout-method=signal so a genuine overrun is still a reported failure.
-    ipc_timeout = pytest.mark.timeout(120)
+    """Give real-process test families timeout headroom, then mark quarantined."""
+    # Both families drive REAL processes, so their runtime is dominated by
+    # process startup on a loaded runner rather than by the code under test —
+    # and the repo-global 30s budget is sized for ordinary unit tests.
+    #
+    #   real_ipc   — Popen a real interpreter and wait for an AF_UNIX socket.
+    #                CI sets WORTHLESS_SIDECAR_READY_TIMEOUT_SECS=20 because cold
+    #                start is slow there, leaving only 10s of the 30s for the
+    #                test body. tests/ipc/test_roundtrip.py was cut at the wall
+    #                on CI run 31610847051.
+    #   user_flow  — full journeys against a live proxy. Measured 15.2s locally
+    #                for the slowest, ~32s on a macOS runner (~2.1x): straight
+    #                through the wall. It failed on CI run 31639231328, and the
+    #                next-slowest sits at 12.5s local (~26s there), i.e. next in
+    #                line to start flipping.
+    #
+    # Straddling the wall is the whole disease this PR treats: a test that
+    # sometimes finishes at 28s and sometimes at 33s is a coin flip every run,
+    # and the loss was silent because --reruns 1 retried it into a green
+    # summary. Headroom stops the alarm arming for tests that are merely slow,
+    # so a timeout once again means something is genuinely stuck.
+    slow_family_timeout = pytest.mark.timeout(120)
     for item in items:
-        if (
-            item.get_closest_marker("real_ipc") is not None
-            and item.get_closest_marker("timeout") is None
-        ):
-            item.add_marker(ipc_timeout)
+        if item.get_closest_marker("timeout") is not None:
+            continue  # an explicit per-test budget always wins
+        if any(item.get_closest_marker(m) is not None for m in ("real_ipc", "user_flow")):
+            item.add_marker(slow_family_timeout)
 
     quarantine_file = Path(config.rootdir) / "tests" / "quarantined_tests.txt"
     if not quarantine_file.exists():

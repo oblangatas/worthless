@@ -193,31 +193,36 @@ def test_serial_lanes_override_to_signal() -> None:
     )
 
 
-def test_real_ipc_tests_get_timeout_headroom(tmp_path) -> None:
+@pytest.mark.parametrize("family", ["real_ipc", "user_flow"])
+def test_real_process_families_get_timeout_headroom(tmp_path, family: str) -> None:
     """The collection hook must actually attach the budget it promises.
 
-    real_ipc tests Popen a real interpreter and wait for an AF_UNIX socket; CI
-    allows 20s for that alone, leaving 10s of the global 30s for the test body.
-    Without this, deleting the injection loop in conftest leaves every test in
-    the suite green — the behaviour it adds is otherwise unobserved.
+    Both families drive real processes, so startup dominates their runtime and
+    the 30s global is the wrong size. real_ipc waits on an AF_UNIX socket (CI
+    allows 20s for that alone, leaving 10s for the body); user_flow drives a
+    live proxy — the slowest measured 15.2s locally and ~32s on a macOS runner,
+    straight through the wall, and failed there on CI run 31639231328.
+
+    Without this test, deleting the injection loop leaves the whole suite green:
+    the behaviour it adds is otherwise unobserved.
     """
-    ipc = _MockItem([pytest.mark.real_ipc])
+    slow = _MockItem([getattr(pytest.mark, family)])
     plain = _MockItem()
 
-    pytest_collection_modifyitems(_MockConfig(tmp_path), [ipc, plain])
+    pytest_collection_modifyitems(_MockConfig(tmp_path), [slow, plain])
 
-    injected = ipc.get_closest_marker("timeout")
+    injected = slow.get_closest_marker("timeout")
     assert injected is not None, (
-        "real_ipc items must get a timeout marker injected at collection; "
-        "without it they inherit the 30s global and are cut mid-socket-wait"
+        f"{family} items must get a timeout marker injected at collection; "
+        "without it they inherit the 30s global and get cut mid-process-startup"
     )
     assert injected.args[0] >= 60, (
         f"injected budget {injected.args[0]}s is too tight — CI alone allows 20s "
-        "for sidecar readiness before the test body starts"
+        "for sidecar readiness, and the slowest user flow needs ~32s there"
     )
     assert plain.get_closest_marker("timeout") is None, (
-        "only real_ipc items should get headroom; blanket injection would hide "
-        "genuinely slow tests everywhere else"
+        "only real-process families should get headroom; blanket injection would "
+        "hide genuinely slow tests everywhere else"
     )
 
 
