@@ -23,7 +23,6 @@ command. Patching them one at a time is how this bug survived its first fix.
 from __future__ import annotations
 
 import os
-import pty
 import select
 import signal
 import subprocess
@@ -32,6 +31,15 @@ import time
 from pathlib import Path
 
 import pytest
+
+# `pty` is POSIX-only and import-time — on Windows this module would fail to
+# COLLECT, not skip, taking the whole session down with it. Signals work
+# differently there too (no SIGINT to a process group), so the scenario cannot
+# be expressed; skip before the import rather than guard each test.
+if sys.platform == "win32":  # pragma: no cover — POSIX-only by construction
+    pytest.skip("needs a POSIX pty and SIGINT process groups", allow_module_level=True)
+
+import pty  # noqa: E402 — must follow the platform guard above
 
 pytestmark = pytest.mark.user_flow
 
