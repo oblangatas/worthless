@@ -9,6 +9,7 @@ making the file's "time-boxed" promise real — these tests keep it honest.
 from __future__ import annotations
 
 import datetime as dt
+import re
 import importlib.util
 from pathlib import Path
 
@@ -535,3 +536,128 @@ def test_the_release_workflow_cannot_be_triggered_by_hand() -> None:
     assert set(triggers["push"]) == {"tags"}, (
         f"release workflow must trigger only on TAG push; found {sorted(triggers['push'])}"
     )
+
+
+# --- scheduled checks must be honest (WOR-877) -----------------------------
+# scheduled.yml failed every run it has ever had — 45 of 46, the 46th being
+# the dispatch that proved this fix. But the three jobs failed for DIFFERENT
+# reasons, and conflating them was an error worth not repeating:
+#
+#   Mutation testing (crypto)   45/45 failure — never worked, dead mutmut flags
+#   Contract tests              45/45 failure — never worked, marker on 0 tests
+#   Secret scan (full history)  43/46 SUCCESS — worked fine, regressed 2026-08-07
+#
+# The scanner is a RECENT regression, not a control that was always broken.
+# Repo content did not change (matching identifier count stable across the
+# window), so the cause is upstream in TruffleHog's Lob detector and is
+# undiagnosed. That matters for the exclusion below: it may be pinning around
+# an upstream bug that gets fixed, in which case the exclusion should be
+# removed rather than inherited forever.
+#
+# What the two dead jobs cost was attention: the workflow was red every run
+# regardless, so the scanner's genuine regression on 08-07 arrived in a channel
+# nobody was reading. These guards pin each failure mode closed.
+
+SCHEDULED_WORKFLOW = REPO / ".github" / "workflows" / "scheduled.yml"
+PRERELEASE_WORKFLOW = REPO / ".github" / "workflows" / "pre-release.yml"
+
+
+def _all_run_steps(workflow: Path) -> list[str]:
+    wf = yaml.safe_load(workflow.read_text())
+    return [
+        str(s.get("run", ""))
+        for j in wf["jobs"].values()
+        for s in j.get("steps", [])
+        if s.get("run")
+    ]
+
+
+def test_no_workflow_invokes_mutmut_with_flags_it_removed() -> None:
+    """mutmut 3.x deleted `--paths-to-mutate` and `--runner`.
+
+    The lockfile pins mutmut==3.6.0, whose `run` accepts only `--max-children`.
+    Both workflows carried the 2.x invocation and crashed on startup — 45/45
+    scheduled runs and 4/4 pre-release runs, every one a failure, for four
+    months. Nobody noticed, because nobody reads a job that is always red.
+    """
+    dead = ("--paths-to-mutate", "--runner")
+    # EVERY workflow, not two by name — a new mutation.yml must be covered too.
+    for wf in sorted((REPO / ".github" / "workflows").glob("*.yml")):
+        for cmd in _all_run_steps(wf):
+            if "mutmut" not in cmd:
+                continue
+            for flag in dead:
+                assert flag not in cmd, (
+                    f"{wf.name} calls mutmut with {flag}, removed in mutmut 3.x — "
+                    "the job cannot start"
+                )
+
+
+def test_no_job_selects_a_pytest_marker_no_test_carries() -> None:
+    """`pytest -m <marker>` with zero matching tests exits 5 and looks like failure.
+
+    The `contract` marker was declared in pyproject.toml and documented in the
+    CI marker map, and applied to zero tests. The job never tested anything.
+    """
+    import re
+
+    for wf in sorted((REPO / ".github" / "workflows").glob("*.yml")):
+        for cmd in _all_run_steps(wf):
+            if "pytest" not in cmd:
+                continue
+            # Handles `-m contract`, `-m "contract"`, `-m 'not slow'`. A bare
+            # \\w+ pattern silently skipped every QUOTED form, so the guard was
+            # satisfiable while a dead marker sat in a quoted selector.
+            for raw in re.findall(r"-m\s+('[^']*'|\"[^\"]*\"|\S+)", cmd):
+                expr = raw.strip("'\"")
+                if any(op in expr.split() for op in ("not", "and", "or")):
+                    continue  # compound selectors exclude, they don't demand a marker
+                marker = expr
+                hits = list(REPO.glob("tests/**/*.py"))
+                carried = any(f"pytest.mark.{marker}" in f.read_text(errors="ignore") for f in hits)
+                assert carried, (
+                    f"{wf.name} runs `pytest -m {marker}` but no test carries that "
+                    "marker — the job exits 5 and reports red forever"
+                )
+
+
+def test_the_secret_scan_excludes_the_detector_that_matches_test_names() -> None:
+    """TruffleHog's Lob detector fires on pytest function names.
+
+    Its regex is `\b(live|test)_[a-zA-Z0-9_]{35}\b` — no keyword proximity, and
+    `_` is a body character. Every pytest function named `test_` plus exactly 35
+    more characters matches. Measured 149 "verified" findings, each one a test
+    function name with a file and line (e.g. tests/test_confusables.py:93 ->
+    test_clean_and_legit_names_get_no_marker). "Verified" carries no weight
+    here: Lob's verify() treats HTTP 403/422 as success.
+
+    Excluding ONE detector, not the scan — proven narrow: with this flag a
+    planted non-Lob token is still caught.
+    """
+    wf = yaml.safe_load(SCHEDULED_WORKFLOW.read_text())
+    steps = [
+        s
+        for j in wf["jobs"].values()
+        for s in j.get("steps", [])
+        if "trufflehog" in str(s.get("uses", "")).lower()
+    ]
+    assert steps, "no TruffleHog step at all"
+    for step in steps:
+        args = str(step.get("with", {}).get("extra_args", ""))
+        # Parse the VALUE and assert the exact set. A substring check passes
+        # for `--exclude-detectors=lob,aws,github`, which would silence real
+        # detectors — failing open in exactly the direction this comment
+        # forbids. Also tolerates `--exclude-detectors lob` (space form).
+        found = re.findall(r"--exclude-detectors[= ]([^\\s]+)", args)
+        assert found, (
+            "TruffleHog step does not exclude the Lob detector — 149 pytest "
+            "function names will be reported as verified secrets"
+        )
+        excluded = {d.strip().lower() for f in found for d in f.split(",") if d.strip()}
+        assert excluded == {"lob"}, (
+            f"TruffleHog excludes {sorted(excluded)} — only `lob` is argued for. "
+            "Every other detector must stay live; see the step's comment."
+        )
+        assert "--only-verified" in args, (
+            "dropping --only-verified would flood the scan with unverified noise"
+        )
