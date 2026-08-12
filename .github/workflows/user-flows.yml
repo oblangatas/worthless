@@ -16,6 +16,10 @@ on:
       - "src/worthless/cli/**"
       - "src/worthless/storage/**"
       - "src/worthless/crypto/**"
+      # worthless-ax9d: user-flow tests drive the real proxy daemon, so a
+      # proxy-only change must trigger them. Without this a regression in the
+      # request path runs no live guard on push.
+      - "src/worthless/proxy/**"
       - "pyproject.toml"
       - "uv.lock"
       - ".github/actions/setup-uv-python/**"
