@@ -58,6 +58,19 @@ from tests.helpers import fake_anthropic_key, fake_key
 pytestmark = [
     pytest.mark.slow,
     pytest.mark.skipif(sys.platform == "win32", reason="chaos suite is POSIX-only"),
+    # 30 trials/cell against real signal storms: 15-18s per test on an idle box,
+    # ~72s under a loaded `-n auto` run — straight through the repo-global 30s
+    # budget. Being cut at that wall is not a harmless failure: pytest-timeout
+    # raises WHEREVER the process happens to be, and `timeout_func_only`
+    # defaults to False, so the timer is armed across the whole
+    # `pytest_runtest_protocol` — including xdist's report serialize-and-send,
+    # which sits OUTSIDE every `CallInfo.from_call()` catch. A `Failed` landing
+    # there means `runtest_protocol_complete` is never sent and the master trips
+    # `assert not crashitem` (xdist `dsession.py:217`), aborting the WHOLE
+    # session and silently dropping every test that had not run yet. Measured:
+    # 8 attempts pinned within 0.03s of the 30s wall in one full-suite run,
+    # masked as 10 `--reruns 1` retries behind a green summary.
+    pytest.mark.timeout(300),
 ]
 
 
