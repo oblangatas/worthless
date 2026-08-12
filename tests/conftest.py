@@ -612,7 +612,25 @@ def detect_thread_leak(request):
 
 
 def pytest_collection_modifyitems(config, items):
-    """Mark tests in tests/quarantined_tests.txt with @pytest.mark.quarantine."""
+    """Give ``real_ipc`` tests timeout headroom, then mark quarantined tests."""
+    # real_ipc tests Popen a real interpreter and wait for an AF_UNIX socket to
+    # bind. CI sets WORTHLESS_SIDECAR_READY_TIMEOUT_SECS=20 because cold start on
+    # a loaded runner is slow — which leaves only 10s of the repo-global 30s
+    # budget for the test body. That straddles the wall, and a test cut at the
+    # wall is not a clean failure: the serial `-n0` lane has no xdist worker to
+    # sacrifice, so `timeout_method = "thread"` (os._exit) takes the whole pytest
+    # process down with exit 1 and no report at all. Observed on CI run
+    # 31610847051, where tests/ipc/test_roundtrip.py was cut at 30s and killed
+    # the serial pass. Headroom keeps the alarm from arming; the lane also passes
+    # --timeout-method=signal so a genuine overrun is still a reported failure.
+    ipc_timeout = pytest.mark.timeout(120)
+    for item in items:
+        if (
+            item.get_closest_marker("real_ipc") is not None
+            and item.get_closest_marker("timeout") is None
+        ):
+            item.add_marker(ipc_timeout)
+
     quarantine_file = Path(config.rootdir) / "tests" / "quarantined_tests.txt"
     if not quarantine_file.exists():
         return

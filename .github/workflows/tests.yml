@@ -58,7 +58,15 @@ jobs:
           # kept serial because subprocess.run(waitpid) + PEP 475 EINTR-retry
           # makes pytest-timeout ineffective for these tests under xdist.
           # `--cov-append` rolls coverage into total; `--cov-fail-under` gates.
-          uv run pytest --reruns 1 --cov=worthless --cov-append --cov-report=xml --cov-report=term-missing --cov-fail-under=80 -n0 -m "real_ipc and not live and not docker and not quarantine"
+          # --timeout-method=signal: the repo default is `thread`, which kills the
+          # process outright. That is correct under `-n auto`, where the victim is
+          # an expendable xdist worker and the master reports it as one honest
+          # failure. Here there is no worker — os._exit() would take this pytest
+          # process down with exit 1 and NO test report, turning one slow test
+          # into a blind red lane (observed on run 31610847051). Serial has none
+          # of the problems `thread` exists to solve: no report-send window, no
+          # `assert not crashitem`. A hang here is bounded by timeout-minutes.
+          uv run pytest --reruns 1 --timeout-method=signal --cov=worthless --cov-append --cov-report=xml --cov-report=term-missing --cov-fail-under=80 -n0 -m "real_ipc and not live and not docker and not quarantine"
 
       - name: Lint
         env:

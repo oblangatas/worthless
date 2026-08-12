@@ -29,6 +29,10 @@ import re
 from pathlib import Path
 
 PYPROJECT = Path(__file__).resolve().parent.parent / "pyproject.toml"
+WORKFLOWS = Path(__file__).resolve().parent.parent / ".github" / "workflows"
+
+# Any `pytest ... -n0 ...` invocation in CI, however the flags are ordered.
+_SERIAL_PYTEST = re.compile(r"^\s*(?:uv run )?pytest\s+(?P<flags>.*-n\s*0\b.*)$", re.MULTILINE)
 
 # ponytail: regex over the raw text, mirroring tests/test_mcp_dependency_cap.py —
 # tomllib is 3.11+ and this repo still supports 3.10.
@@ -70,6 +74,31 @@ def test_worker_restart_disabled() -> None:
     assert "--max-worker-restart=0" in match.group(1), (
         "addopts must pass --max-worker-restart=0; without it a hanging test is "
         "re-run once per restart, each attempt paying the full timeout."
+    )
+
+
+def test_serial_lanes_override_to_signal() -> None:
+    """A ``-n0`` lane must NOT inherit ``thread``. There is no worker to kill.
+
+    ``thread`` is right under ``-n auto``: the victim is an expendable xdist
+    worker and the master reports it as one honest failure. With ``-n0`` the
+    victim is pytest itself — ``os._exit()`` ends the run with exit 1 and NO
+    test report, so one slow test becomes a blind red lane with nothing to read.
+    That regression shipped once (CI run 31610847051, serial real_ipc pass) and
+    this test exists so it cannot ship twice.
+    """
+    offenders: list[str] = []
+    for workflow in sorted(WORKFLOWS.glob("*.yml")):
+        for match in _SERIAL_PYTEST.finditer(workflow.read_text(encoding="utf-8")):
+            flags = match.group("flags")
+            if "--timeout-method=signal" not in flags:
+                offenders.append(f"{workflow.name}: pytest {flags.strip()[:90]}")
+
+    assert not offenders, (
+        "serial (-n0) pytest invocations must pass --timeout-method=signal, "
+        "because the repo default `thread` calls os._exit() and with no xdist "
+        "worker that kills the run itself — exit 1, no report. Offenders:\n  "
+        + "\n  ".join(offenders)
     )
 
 
