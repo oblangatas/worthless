@@ -172,7 +172,12 @@ tagfetch_case() {
   local root; root=$(mktemp -d)
   git init -q --bare "$root/origin.git"
   git init -q "$root/src" && cd "$root/src"
-  git -c user.email=t@e -c user.name=t commit -q --allow-empty -m init
+  # Identity must be set on the REPO, not just the commit: `git tag -a` needs a
+  # tagger and a bare CI runner has no global git config, so passing -c only to
+  # `commit` builds no tag and the fixture silently collapses.
+  git config user.email fixture@example.com
+  git config user.name "verify-tag fixture"
+  git commit -q --allow-empty -m init
   git tag -a v9.9.9 -m v9.9.9                     # annotated, lives only as an object
   git remote add origin "$root/origin.git" && git push -q origin HEAD:refs/heads/main v9.9.9
   local sha; sha=$(git rev-parse HEAD)
