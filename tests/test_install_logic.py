@@ -52,6 +52,100 @@ def test_default_install_pins_baked_version(tmp_path: Path) -> None:
     )
 
 
+def test_install_succeeds_when_uv_installs_outside_home_local_bin(tmp_path: Path) -> None:
+    """A customised uv bin dir must not turn a successful install into a failure.
+
+    uv resolves its entry-point directory as ``UV_TOOL_BIN_DIR`` → ``XDG_BIN_HOME``
+    → ``~/.local/bin``, and install.sh scrubs neither variable. Guessing
+    ``~/.local/bin`` means that on such a box ``command -v`` comes back empty, the
+    guess points at a path that does not exist, and the installer dies
+    ``EXIT_INTERNAL`` — on an install that actually worked.
+
+    Asking uv where it put the binary is the only answer that survives this.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_happy_path_stubs(bin_dir, with_worthless=False)
+
+    # The scenario is "uv installed somewhere else entirely", so ~/.local/bin must
+    # hold nothing — otherwise the guessed path happens to work and the bug hides.
+    home_local = tmp_path / ".local" / "bin" / "worthless"
+    if home_local.exists():
+        home_local.unlink()
+
+    # uv installs here, and this directory is deliberately NOT on PATH.
+    custom_bin = tmp_path / "uv-tools" / "bin"
+    custom_bin.mkdir(parents=True)
+    write_stub(custom_bin, "worthless", 'echo "worthless 9.9.9"')
+
+    result = run_install(bin_dir, env_extra={"UV_TOOL_BIN_DIR": str(custom_bin)})
+
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, (
+        "a successful install must not fail just because uv's bin dir is customised.\n"
+        f"exit={result.returncode}\n{combined}"
+    )
+    assert "9.9.9" in combined, f"must report the version of the binary uv installed.\n{combined}"
+
+
+def test_banner_reports_the_installed_binary_not_a_stale_uv_run(tmp_path: Path) -> None:
+    """The version banner must come from the artifact we actually installed.
+
+    install.sh installs with ``uv tool install worthless==<pin>`` (entry point at
+    ~/.local/bin/worthless) but reported the version with ``uv run --no-project
+    worthless --version`` — a different resolution that builds an *ephemeral*
+    environment and can answer from a stale cache. Observed live on a real Mac:
+    the banner printed ``worthless 0.3.9`` while ``0.3.10`` had just been
+    installed and ``which``/``--version``/the pin all agreed on 0.3.10
+    (worthless-dc26).
+
+    The stock fixture cannot catch this: ``write_happy_path_stubs`` makes both
+    oracles answer ``0.3.0``, so asking the wrong one is invisible. Here they
+    deliberately disagree — the number in the banner tells you which oracle
+    install.sh trusted.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_happy_path_stubs(bin_dir)
+
+    # Three oracles, three different answers, so the banner names which one won.
+    # Only asserting "not the uv-run version" would pass even if the installer
+    # ignored `uv tool dir --bin` and fell back to PATH.
+
+    # 1. `uv run …` — stale ephemeral env. Must NOT win.
+    uv_stub = bin_dir / "uv"
+    uv_stub.write_text(
+        uv_stub.read_text(encoding="utf-8").replace(
+            'run) echo "worthless 0.3.0"', 'run) echo "worthless 0.3.9"'
+        ),
+        encoding="utf-8",
+    )
+    # 2. A shadowing binary earlier on PATH. Must NOT win — install.sh's own PATH
+    #    lockdown puts /usr/local/bin ahead of the uv bin dir, so this is real.
+    write_stub(bin_dir, "worthless", 'echo "worthless 0.3.7"')
+    # 3. The entry point uv actually installed, in the dir `uv tool dir --bin`
+    #    reports. This is what the user runs, so this is what must be reported.
+    tool_bin = tmp_path / ".local" / "bin"
+    tool_bin.mkdir(parents=True, exist_ok=True)
+    write_stub(tool_bin, "worthless", 'echo "worthless 0.3.10"')
+
+    result = run_install(bin_dir)
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+
+    combined = result.stdout + result.stderr
+    assert "0.3.9" not in combined, (
+        "the banner reported a stale `uv run` resolution instead of the installed "
+        f"binary — the user is told the wrong version.\n{combined}"
+    )
+    assert "0.3.7" not in combined, (
+        "the banner reported a `worthless` shadowing us on PATH instead of the one "
+        f"uv installed — the same wrong-version bug by another route.\n{combined}"
+    )
+    assert "0.3.10" in combined, (
+        f"the banner must report the version uv actually installed.\n{combined}"
+    )
+
+
 def test_user_override_beats_pin(tmp_path: Path) -> None:
     """WORTHLESS_VERSION overrides the baked pin."""
     bin_dir = tmp_path / "bin"
@@ -303,6 +397,11 @@ def test_env_scrub_strips_poisoned_uv_pip_vars(tmp_path: Path) -> None:
         '  tool) shift; case "$1" in\n'
         '    install|upgrade) echo "ok" ;;\n'
         "    list) ;;\n"
+        # smoke_test asks uv where it installed the entry point rather than
+        # guessing ~/.local/bin (worthless-dc26). Echo a path that does not
+        # exist so the fallback to `command -v` runs — this test is about env
+        # scrubbing, not about which binary answers.
+        '    dir) echo "$HOME/nonexistent-uv-bin" ;;\n'
         '    *) echo "UNHANDLED_UV_CALL (test stub gap): uv tool $*" >&2; exit 99 ;;\n'
         "  esac ;;\n"
         '  run) echo "worthless 0.3.7" ;;\n'

@@ -407,12 +407,15 @@ install_or_upgrade_worthless() {
 }
 
 smoke_test() {
-    # `uv run` works even before the user activates PATH — uv knows where
-    # it put the binary. Capture output so we can both verify the install
-    # AND display the resolved version without a second invocation.
-    if ! version_output="$(uv run --no-project worthless --version 2>/dev/null)"; then
+    # Ask uv where it put the entry point: `uv run` answers from a stale cache,
+    # and guessing ~/.local/bin misses when UV_TOOL_BIN_DIR/XDG_BIN_HOME move it
+    # (unscrubbed), killing a good install. Also beats a shadowing worthless on
+    # PATH. worthless-dc26.
+    worthless_bin="$(uv tool dir --bin 2>/dev/null)/worthless"
+    [ -x "$worthless_bin" ] || worthless_bin="$(command -v worthless 2>/dev/null || true)"
+    if ! version_output="$("$worthless_bin" --version 2>/dev/null)"; then
         die "$EXIT_INTERNAL" "worthless installed but failed to run." \
-            "Try: uv run --no-project worthless --version" \
+            "Try: worthless --version" \
             "Or:  worthless doctor"
     fi
     actual_ver="$(printf '%s' "$version_output" | awk '{print $2}' | head -1)"
