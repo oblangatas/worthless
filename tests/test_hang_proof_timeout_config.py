@@ -88,11 +88,27 @@ def test_serial_lanes_override_to_signal() -> None:
     this test exists so it cannot ship twice.
     """
     offenders: list[str] = []
-    for workflow in sorted(WORKFLOWS.glob("*.yml")):
+    serial_lanes = 0
+    workflows = sorted(p for pat in ("*.yml", "*.yaml") for p in WORKFLOWS.glob(pat))
+    for workflow in workflows:
         for match in _SERIAL_PYTEST.finditer(workflow.read_text(encoding="utf-8")):
+            serial_lanes += 1
             flags = match.group("flags")
             if "--timeout-method=signal" not in flags:
                 offenders.append(f"{workflow.name}: pytest {flags.strip()[:90]}")
+
+    # Fail CLOSED. Zero matches means this scan lost sight of its subject — the
+    # workflow was renamed, the command was reflowed across lines, pytest is
+    # invoked some other way — not that the repo is clean. `assert not offenders`
+    # is vacuously true on an empty scan, so without this the lane could quietly
+    # go back to inheriting `thread` with the guard still green. A check that
+    # passes when it can no longer see what it guards is decoration.
+    assert serial_lanes, (
+        "found no `pytest ... -n0 ...` invocation under .github/workflows — this "
+        "guard can no longer see the serial lane it exists to protect. Either the "
+        "lane was genuinely removed (delete this test) or its form changed (update "
+        "_SERIAL_PYTEST). Do not leave it silently passing."
+    )
 
     assert not offenders, (
         "serial (-n0) pytest invocations must pass --timeout-method=signal, "
