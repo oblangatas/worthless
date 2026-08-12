@@ -161,6 +161,14 @@ def _list_enrolled_aliases(home: WorthlessHome) -> list[tuple[str, str]]:
             # test's thread-leak check. Give it a bounded window to finish while
             # our loop is still open. (The success path needs none of this:
             # async with -> __aexit__ -> close() awaits the stop future itself.)
+            # ...and if the interrupt landed IN Connection.__await__'s
+            # `self._thread.start()`, _connect() never ran, so stop() was never
+            # queued at all — the worker blocks on tx.get() forever and, being
+            # non-daemon, wedges threading._shutdown. Queue the sentinel here so
+            # the wait below has something to wait FOR. See
+            # worthless.storage.sqlite.connect, which is the shared version of
+            # this guard; prefer it for new call sites.
+            db.stop()
             thread = getattr(db, "_thread", None)
             if thread is not None:
                 loop = asyncio.get_event_loop()

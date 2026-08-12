@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 
 import aiosqlite
+from worthless.storage.sqlite import connect as sqlite_connect
 
 # Characters that would break out of a single-quoted SQL literal or are
 # otherwise illegal in a SQLite path argument. ``VACUUM INTO`` does not
@@ -276,7 +277,7 @@ async def _migrate_shard_a_enc_column(db: aiosqlite.Connection, shard_columns: s
 
 async def init_db(db_path: str) -> None:
     """Create tables and enable WAL journal mode."""
-    async with aiosqlite.connect(db_path) as db:
+    async with sqlite_connect(db_path) as db:
         await db.execute("PRAGMA foreign_keys = ON")
         await db.executescript(SCHEMA)
         await db.execute("PRAGMA journal_mode=WAL")
@@ -368,7 +369,7 @@ async def _migrate_original_mode_column(db: aiosqlite.Connection) -> None:
 
 async def migrate_db(db_path: str) -> None:
     """Apply forward-only migrations for existing databases."""
-    async with aiosqlite.connect(db_path) as db:
+    async with sqlite_connect(db_path) as db:
         await _migrate_pending_charges(db)
 
         await _prune_old_spend_log(db)
