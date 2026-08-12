@@ -108,7 +108,11 @@ def test_banner_reports_the_installed_binary_not_a_stale_uv_run(tmp_path: Path) 
     bin_dir.mkdir()
     write_happy_path_stubs(bin_dir)
 
-    # `uv run …` answers from a stale ephemeral env …
+    # Three oracles, three different answers, so the banner names which one won.
+    # Only asserting "not the uv-run version" would pass even if the installer
+    # ignored `uv tool dir --bin` and fell back to PATH.
+
+    # 1. `uv run …` — stale ephemeral env. Must NOT win.
     uv_stub = bin_dir / "uv"
     uv_stub.write_text(
         uv_stub.read_text(encoding="utf-8").replace(
@@ -116,8 +120,14 @@ def test_banner_reports_the_installed_binary_not_a_stale_uv_run(tmp_path: Path) 
         ),
         encoding="utf-8",
     )
-    # … while the installed entry point — what the user actually runs — is 0.3.10.
-    write_stub(bin_dir, "worthless", 'echo "worthless 0.3.10"')
+    # 2. A shadowing binary earlier on PATH. Must NOT win — install.sh's own PATH
+    #    lockdown puts /usr/local/bin ahead of the uv bin dir, so this is real.
+    write_stub(bin_dir, "worthless", 'echo "worthless 0.3.7"')
+    # 3. The entry point uv actually installed, in the dir `uv tool dir --bin`
+    #    reports. This is what the user runs, so this is what must be reported.
+    tool_bin = tmp_path / ".local" / "bin"
+    tool_bin.mkdir(parents=True, exist_ok=True)
+    write_stub(tool_bin, "worthless", 'echo "worthless 0.3.10"')
 
     result = run_install(bin_dir)
     assert result.returncode == 0, f"stderr: {result.stderr}"
@@ -127,8 +137,12 @@ def test_banner_reports_the_installed_binary_not_a_stale_uv_run(tmp_path: Path) 
         "the banner reported a stale `uv run` resolution instead of the installed "
         f"binary — the user is told the wrong version.\n{combined}"
     )
+    assert "0.3.7" not in combined, (
+        "the banner reported a `worthless` shadowing us on PATH instead of the one "
+        f"uv installed — the same wrong-version bug by another route.\n{combined}"
+    )
     assert "0.3.10" in combined, (
-        f"the banner must report the installed binary's version.\n{combined}"
+        f"the banner must report the version uv actually installed.\n{combined}"
     )
 
 
