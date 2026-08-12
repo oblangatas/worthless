@@ -407,11 +407,12 @@ install_or_upgrade_worthless() {
 }
 
 smoke_test() {
-    # Ask the binary we installed, not `uv run --no-project worthless` — that
-    # resolves an ephemeral env and can answer from a stale cache (it said
-    # 0.3.9 right after installing 0.3.10; worthless-dc26).
-    worthless_bin="$(command -v worthless 2>/dev/null || true)"
-    [ -n "$worthless_bin" ] || worthless_bin="${HOME:-}/.local/bin/worthless"
+    # Ask uv where it put the entry point: `uv run` answers from a stale cache,
+    # and guessing ~/.local/bin misses when UV_TOOL_BIN_DIR/XDG_BIN_HOME move it
+    # (unscrubbed), killing a good install. Also beats a shadowing worthless on
+    # PATH. worthless-dc26.
+    worthless_bin="$(uv tool dir --bin 2>/dev/null)/worthless"
+    [ -x "$worthless_bin" ] || worthless_bin="$(command -v worthless 2>/dev/null || true)"
     if ! version_output="$("$worthless_bin" --version 2>/dev/null)"; then
         die "$EXIT_INTERNAL" "worthless installed but failed to run." \
             "Try: worthless --version" \

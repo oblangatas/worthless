@@ -52,6 +52,42 @@ def test_default_install_pins_baked_version(tmp_path: Path) -> None:
     )
 
 
+def test_install_succeeds_when_uv_installs_outside_home_local_bin(tmp_path: Path) -> None:
+    """A customised uv bin dir must not turn a successful install into a failure.
+
+    uv resolves its entry-point directory as ``UV_TOOL_BIN_DIR`` → ``XDG_BIN_HOME``
+    → ``~/.local/bin``, and install.sh scrubs neither variable. Guessing
+    ``~/.local/bin`` means that on such a box ``command -v`` comes back empty, the
+    guess points at a path that does not exist, and the installer dies
+    ``EXIT_INTERNAL`` — on an install that actually worked.
+
+    Asking uv where it put the binary is the only answer that survives this.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_happy_path_stubs(bin_dir, with_worthless=False)
+
+    # The scenario is "uv installed somewhere else entirely", so ~/.local/bin must
+    # hold nothing — otherwise the guessed path happens to work and the bug hides.
+    home_local = tmp_path / ".local" / "bin" / "worthless"
+    if home_local.exists():
+        home_local.unlink()
+
+    # uv installs here, and this directory is deliberately NOT on PATH.
+    custom_bin = tmp_path / "uv-tools" / "bin"
+    custom_bin.mkdir(parents=True)
+    write_stub(custom_bin, "worthless", 'echo "worthless 9.9.9"')
+
+    result = run_install(bin_dir, env_extra={"UV_TOOL_BIN_DIR": str(custom_bin)})
+
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, (
+        "a successful install must not fail just because uv's bin dir is customised.\n"
+        f"exit={result.returncode}\n{combined}"
+    )
+    assert "9.9.9" in combined, f"must report the version of the binary uv installed.\n{combined}"
+
+
 def test_banner_reports_the_installed_binary_not_a_stale_uv_run(tmp_path: Path) -> None:
     """The version banner must come from the artifact we actually installed.
 
@@ -347,6 +383,11 @@ def test_env_scrub_strips_poisoned_uv_pip_vars(tmp_path: Path) -> None:
         '  tool) shift; case "$1" in\n'
         '    install|upgrade) echo "ok" ;;\n'
         "    list) ;;\n"
+        # smoke_test asks uv where it installed the entry point rather than
+        # guessing ~/.local/bin (worthless-dc26). Echo a path that does not
+        # exist so the fallback to `command -v` runs — this test is about env
+        # scrubbing, not about which binary answers.
+        '    dir) echo "$HOME/nonexistent-uv-bin" ;;\n'
         '    *) echo "UNHANDLED_UV_CALL (test stub gap): uv tool $*" >&2; exit 99 ;;\n'
         "  esac ;;\n"
         '  run) echo "worthless 0.3.7" ;;\n'

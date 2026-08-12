@@ -85,6 +85,11 @@ case "$1" in
   tool) shift; case "$1" in
     install|upgrade) echo "ok" ;;
     list) ;;  # empty: no worthless line → fast-path miss → real install runs
+    # `uv tool dir --bin` is uv's own answer for where it puts entry points.
+    # It honours UV_TOOL_BIN_DIR / XDG_BIN_HOME, which install.sh does NOT
+    # scrub — so on a box that sets either, this is the ONLY reliable way to
+    # find the binary just installed (worthless-dc26).
+    dir) echo "${{UV_TOOL_BIN_DIR:-${{XDG_BIN_HOME:-$HOME/.local/bin}}}}" ;;
     *) echo "uv tool: unhandled: $*" >&2; exit 1 ;;
   esac ;;
   run) echo "worthless 0.3.0" ;;
