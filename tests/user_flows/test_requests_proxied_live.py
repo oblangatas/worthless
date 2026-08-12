@@ -1,20 +1,23 @@
-"""``requests_proxied`` counts a provider-rejected request (worthless-ax9d).
+"""``requests_proxied`` counts traffic; ``requests_billed`` counts spend (worthless-ax9d).
 
-A unit test CANNOT prove this fix, and that is the whole story of this bug. In
+A unit test cannot prove this fix, and that is the whole story of the bug. In
 ``tests/test_proxy.py`` the fixture builds its own ``RulesEngine`` and
 ``ASGITransport`` skips the lifespan; there, a rejected request DOES write a
-``spend_log`` row, so the old billing-derived counter incremented too and a unit
-test passes identically against broken and fixed code. Measured 2026-07-27.
+``spend_log`` row, so the OLD billing-derived counter incremented too and a unit test
+passes identically against broken and fixed code. (A unit test that did exactly that
+was written, watched pass against the reverted fix, and deleted.)
 
-The real daemon behaves differently: it writes no ``spend_log`` row for a request
-the provider rejected (correctly — the user must not pay for it), so the old
-counter sat at 0 while requests were being proxied fine.
+The real daemon behaves differently: it writes no ``spend_log`` row for a request the
+provider rejected — correctly, the user must not pay for it — so the old counter sat
+at 0 while requests were being proxied fine.
 
-So this test runs the real thing: the real ``worthless`` console script as its own
-process, its real lifespan and rules engine, a real ``lock``, and a real HTTP
-round-trip. The only stand-in is the upstream provider, which is a local server
-that answers 401 — that keeps the test hermetic (no network, no API key) while
-leaving every part of Worthless genuinely exercised.
+Proving the two numbers are genuinely different needs **two** requests against one
+daemon: one the provider rejects, one it accepts. One request can only show a counter
+moving; it cannot show the counters diverging.
+
+Everything here is real except the provider: the real ``worthless`` console script as
+its own process, its real lifespan and rules engine, a real ``lock``, real HTTP. The
+upstream is a local server so the test stays hermetic — no network, no API key.
 """
 
 from __future__ import annotations
@@ -44,15 +47,38 @@ def _free_port() -> int:
         return int(s.getsockname()[1])
 
 
-class _RejectingHandler(http.server.BaseHTTPRequestHandler):
-    """Stands in for the provider: answers every call 401, like a bad key would."""
+class _ScriptedProvider(http.server.BaseHTTPRequestHandler):
+    """Provider stand-in. ``reject`` flips between a 401 and a 200-with-usage."""
+
+    reject = True
 
     def do_POST(self) -> None:  # noqa: N802 — BaseHTTPRequestHandler API
         length = int(self.headers.get("content-length") or 0)
         if length:
             self.rfile.read(length)
-        payload = json.dumps({"error": {"message": "invalid key"}}).encode()
-        self.send_response(401)
+        if type(self).reject:
+            status = 401
+            payload = json.dumps({"error": {"message": "invalid key"}}).encode()
+        else:
+            status = 200
+            # `usage` is what makes this billable — without it the proxy has
+            # nothing to meter and the billing path is a no-op.
+            payload = json.dumps(
+                {
+                    "id": "chatcmpl-test",
+                    "object": "chat.completion",
+                    "model": "gpt-4o-mini",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "ok"},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
+                }
+            ).encode()
+        self.send_response(status)
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(payload)))
         self.end_headers()
@@ -66,7 +92,7 @@ def _worthless_bin() -> Path:
     return Path(sys.executable).parent / "worthless"
 
 
-def _wait_healthy(port: int, deadline: float) -> dict | None:
+def _health(port: int, deadline: float) -> dict | None:
     while time.monotonic() < deadline:
         try:
             with urllib.request.urlopen(  # noqa: S310 — fixed loopback URL
@@ -78,20 +104,62 @@ def _wait_healthy(port: int, deadline: float) -> dict | None:
     return None
 
 
-def test_a_provider_rejected_request_still_counts_as_proxied(tmp_path: Path) -> None:
-    """Real daemon: one forwarded request the provider 401s must move the counter.
+def _counters(port: int) -> tuple[int, int]:
+    """(requests_proxied, requests_billed) straight from /healthz."""
+    data = _health(port, time.monotonic() + 5) or {}
+    return int(data.get("requests_proxied", 0)), int(data.get("requests_billed", 0))
 
-    Against the pre-fix code this fails with ``requests_proxied`` stuck at 0 —
-    the operator-observed symptom, reproduced without a real provider key.
+
+def _await_proxied(port: int, expected: int) -> tuple[int, int]:
+    """Poll until requests_proxied reaches *expected*, or give up after 10s.
+
+    Billing is settled in a background task, so read it only after the traffic
+    counter has landed — a bare sleep would be flaky and teach the wrong lesson.
+    """
+    deadline = time.monotonic() + 10
+    proxied, billed = _counters(port)
+    while proxied < expected and time.monotonic() < deadline:
+        time.sleep(0.5)
+        proxied, billed = _counters(port)
+    time.sleep(1.0)  # let any settle/refund background task finish
+    return _counters(port)
+
+
+def _chat(base_url: str, shard_a: str) -> int:
+    req = urllib.request.Request(  # noqa: S310 — fixed loopback URL
+        base_url.rstrip("/") + "/chat/completions",
+        data=json.dumps(
+            {"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}]}
+        ).encode(),
+        headers={"Authorization": f"Bearer {shard_a}", "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310
+            return int(resp.status)
+    except urllib.error.HTTPError as exc:
+        return int(exc.code)
+
+
+def test_proxied_counts_traffic_while_billed_counts_only_what_was_charged(
+    tmp_path: Path,
+) -> None:
+    """Two requests, one daemon: the counters must diverge.
+
+    * A request the provider **rejects** is proxied but not billed.
+    * A request the provider **accepts** is both.
+
+    Against the pre-fix code the first assertion fails with ``requests_proxied``
+    stuck at 0 — the operator-observed symptom, reproduced without a real key.
     """
     binary = _worthless_bin()
     if not binary.exists():  # pragma: no cover — depends on how the venv was built
         pytest.skip(f"no worthless console script at {binary}")
 
+    _ScriptedProvider.reject = True
     upstream_port = _free_port()
     proxy_port = _free_port()
 
-    upstream = http.server.HTTPServer(("127.0.0.1", upstream_port), _RejectingHandler)
+    upstream = http.server.HTTPServer(("127.0.0.1", upstream_port), _ScriptedProvider)
     threading.Thread(target=upstream.serve_forever, daemon=True).start()
 
     home = tmp_path / "home"
@@ -130,7 +198,7 @@ def test_a_provider_rejected_request_still_counts_as_proxied(tmp_path: Path) -> 
         text=True,
     )
     try:
-        assert _wait_healthy(proxy_port, time.monotonic() + _TIMEOUT_S), "proxy never came up"
+        assert _health(proxy_port, time.monotonic() + _TIMEOUT_S), "proxy never came up"
 
         locked = subprocess.run(  # noqa: S603
             [str(binary), "lock", "--env", str(env_file), "--adopt"],
@@ -162,35 +230,26 @@ def test_a_provider_rejected_request_still_counts_as_proxied(tmp_path: Path) -> 
             f"stderr: {locked.stderr}\n.env now:\n{body}"
         )
 
-        before = _wait_healthy(proxy_port, time.monotonic() + 5) or {}
-        assert before.get("requests_proxied") == 0, "counter should start at zero"
+        assert _counters(proxy_port) == (0, 0), "counters should start at zero"
 
-        req = urllib.request.Request(  # noqa: S310 — fixed loopback URL
-            base_url.rstrip("/") + "/chat/completions",
-            data=json.dumps(
-                {"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}]}
-            ).encode(),
-            headers={"Authorization": f"Bearer {shard_a}", "Content-Type": "application/json"},
+        # --- 1. the provider rejects it -------------------------------------
+        assert _chat(base_url, shard_a) == 401, "the provider's rejection should reach us"
+        proxied, billed = _await_proxied(proxy_port, 1)
+        assert proxied == 1, (
+            "a request that was gated, reconstructed and forwarded must count as "
+            f"proxied even when the provider rejects it — got {proxied}. This is the "
+            "operator-observed symptom: status reads 0 while Worthless is working."
         )
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310
-                status = resp.status
-        except urllib.error.HTTPError as exc:
-            status = exc.code
-        assert status == 401, f"expected the upstream's rejection to reach us, got {status}"
+        assert billed == 0, (
+            f"a rejected request must NOT be billed — the user does not pay for it (got {billed})"
+        )
 
-        # The counter moves in the request path, but give any background work a
-        # moment before reading — a flaky read here would teach the wrong lesson.
-        deadline = time.monotonic() + 10
-        after = 0
-        while time.monotonic() < deadline:
-            after = (_wait_healthy(proxy_port, time.monotonic() + 2) or {}).get(
-                "requests_proxied", 0
-            )
-            if after:
-                break
-            time.sleep(0.5)
+        # --- 2. the provider accepts it -------------------------------------
+        _ScriptedProvider.reject = False
+        assert _chat(base_url, shard_a) == 200, "the accepted call should come back 200"
+        proxied, billed = _await_proxied(proxy_port, 2)
     finally:
+        _ScriptedProvider.reject = True
         upstream.shutdown()
         proxy.terminate()
         try:
@@ -198,8 +257,11 @@ def test_a_provider_rejected_request_still_counts_as_proxied(tmp_path: Path) -> 
         except subprocess.TimeoutExpired:  # pragma: no cover
             proxy.kill()
 
-    assert after == 1, (
-        "a request the provider rejected was gated, reconstructed and forwarded — "
-        f"it must count as proxied, but requests_proxied is {after}. This is the "
-        "operator-observed symptom: status reports 0 while Worthless is working."
+    assert proxied == 2, (
+        f"both requests were proxied, so the traffic meter must read 2, got {proxied}"
+    )
+    assert billed == 1, (
+        f"only the accepted request is billable, so the spend meter must read 1, got {billed}. "
+        "If this equals requests_proxied the two numbers have been conflated again — "
+        "which is the bug."
     )

@@ -681,54 +681,6 @@ class TestUpstreamErrors:
         assert "error" in resp.json()
         assert leaked_text not in resp.text
 
-    @respx.mock
-    async def test_a_request_the_provider_rejected_still_counts_as_proxied(
-        self, proxy_client: httpx.AsyncClient, enrolled_alias
-    ):
-        """Gated, reconstructed, forwarded, answered 401 — that is a proxied request.
-
-        ``requests_proxied`` was ``SELECT COUNT(*) FROM spend_log``, i.e. the
-        BILLING ledger, and the proxy deliberately does not bill a request the
-        provider rejected. Reproduced against a real daemon: one request to a real
-        provider came back 401 and ``worthless status`` reported
-        ``requests_proxied: 0`` for ten seconds while ``spend_log`` stayed empty
-        (worthless-ax9d).
-
-        That is the moment the number matters most. A user whose key is bad, out of
-        credits, or pointed at a model they cannot access sees "0" and concludes
-        Worthless is doing nothing — while it is in fact doing its job on every
-        single request.
-        """
-        alias, shard_a_utf8, _ = enrolled_alias
-
-        before = (await proxy_client.get("/healthz")).json()["requests_proxied"]
-
-        respx.post("https://api.openai.com/v1/chat/completions").mock(
-            return_value=httpx.Response(401, json={"error": {"message": "invalid key"}})
-        )
-
-        resp = await proxy_client.post(
-            f"/{alias}/v1/chat/completions",
-            headers={
-                "authorization": f"Bearer {shard_a_utf8}",
-                "content-type": "application/json",
-            },
-            content=b'{"model": "gpt-4", "messages": []}',
-        )
-        assert resp.status_code == 401, "the provider's rejection should reach the client"
-
-        health = (await proxy_client.get("/healthz")).json()
-        assert health["requests_proxied"] == before + 1, (
-            "a request forwarded to the provider must count as proxied even when "
-            f"the provider rejects it (before={before}, after={health['requests_proxied']})"
-        )
-        # Deliberately NOT asserting ``requests_billed`` here. This fixture builds
-        # its own RulesEngine and ASGITransport skips the lifespan, so its billing
-        # behaviour on a rejected request diverges from the real daemon: measured
-        # 2026-07-27, the harness writes a spend_log row where the daemon writes
-        # none. Pinning it would encode harness-only fiction — the exact trap that
-        # hid this bug. Billing on the error path belongs in a live test.
-
 
 class TestTransparentProxy:
     """Proxy extracts alias from URL path (SR-09)."""
