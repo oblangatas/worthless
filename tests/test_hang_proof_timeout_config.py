@@ -28,11 +28,22 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
+from tests.conftest import pytest_collection_modifyitems
+
 PYPROJECT = Path(__file__).resolve().parent.parent / "pyproject.toml"
 WORKFLOWS = Path(__file__).resolve().parent.parent / ".github" / "workflows"
 
-# Any `pytest ... -n0 ...` invocation in CI, however the flags are ordered.
-_SERIAL_PYTEST = re.compile(r"^\s*(?:uv run )?pytest\s+(?P<flags>.*-n\s*0\b.*)$", re.MULTILINE)
+# A zero-worker (serial) pytest lane in ANY invocation form: `uv run pytest`,
+# `python -m pytest`, `uv run --frozen pytest`, an env-var prefix, or flags
+# folded across a line continuation. Matching the WORKER FLAG rather than the
+# word `pytest` is what buys that — `-n0` / `--numprocesses=0` appears nowhere
+# else in a workflow, whereas an earlier version of this file keyed on
+# `^\s*(?:uv run )?pytest` and was blind to every form above.
+_SERIAL_FLAG = re.compile(r"(?:-n\s*0(?!\d)|--numprocesses[= ]\s*0(?!\d))")
+# Shell line continuations, so flags split across lines are seen as one command.
+_CONTINUATION = re.compile(r"\\\n\s*")
 
 # ponytail: regex over the raw text, mirroring tests/test_mcp_dependency_cap.py —
 # tomllib is 3.11+ and this repo still supports 3.10.
@@ -41,8 +52,41 @@ _ADDOPTS = re.compile(r'^\s*addopts\s*=\s*"([^"]*)"', re.MULTILINE)
 _FUNC_ONLY = re.compile(r"^\s*timeout_func_only\s*=\s*(\w+)", re.MULTILINE)
 
 
+_MODULE_TIMEOUT = re.compile(r"pytest\.mark\.timeout\((\d+)\)")
+
+# Modules whose real runtime under a loaded `-n auto` run approaches or exceeds
+# the repo-global 30s budget, measured: the chaos suite runs 27-33s (it straddles
+# the wall, which is what made this bug fire ~1 run in 5) and the openclaw
+# concurrency suite launches ~90 child interpreters. Each must carry its own
+# budget or it goes back to being cut at 30s.
+_NEEDS_OWN_BUDGET = {
+    "tests/chaos/test_lock_interrupt_chaos.py": 120,
+    "tests/openclaw/test_integration_concurrency.py": 60,
+}
+
+
 def _pyproject_text() -> str:
     return PYPROJECT.read_text(encoding="utf-8")
+
+
+class _MockItem:
+    """Minimal stand-in for a collected item — the interface the hook uses."""
+
+    def __init__(self, markers=()) -> None:
+        self.nodeid = "tests/fake.py::test_fake"
+        self.name = "test_fake"
+        self.markers = list(markers)
+
+    def add_marker(self, marker) -> None:
+        self.markers.append(marker)
+
+    def get_closest_marker(self, name):
+        return next((m for m in self.markers if m.name == name), None)
+
+
+class _MockConfig:
+    def __init__(self, rootdir) -> None:
+        self.rootdir = rootdir
 
 
 def test_timeout_method_is_thread_not_signal() -> None:
@@ -88,33 +132,90 @@ def test_serial_lanes_override_to_signal() -> None:
     this test exists so it cannot ship twice.
     """
     offenders: list[str] = []
-    serial_lanes = 0
+    lanes_per_file: dict[str, int] = {}
     workflows = sorted(p for pat in ("*.yml", "*.yaml") for p in WORKFLOWS.glob(pat))
     for workflow in workflows:
-        for match in _SERIAL_PYTEST.finditer(workflow.read_text(encoding="utf-8")):
-            serial_lanes += 1
-            flags = match.group("flags")
-            if "--timeout-method=signal" not in flags:
-                offenders.append(f"{workflow.name}: pytest {flags.strip()[:90]}")
+        text = _CONTINUATION.sub(" ", workflow.read_text(encoding="utf-8"))
+        lanes = [line for line in text.splitlines() if _SERIAL_FLAG.search(line)]
+        lanes_per_file[workflow.name] = len(lanes)
+        for line in lanes:
+            if "--timeout-method=signal" not in line:
+                offenders.append(f"{workflow.name}: {line.strip()[:110]}")
 
-    # Fail CLOSED. Zero matches means this scan lost sight of its subject — the
-    # workflow was renamed, the command was reflowed across lines, pytest is
-    # invoked some other way — not that the repo is clean. `assert not offenders`
-    # is vacuously true on an empty scan, so without this the lane could quietly
-    # go back to inheriting `thread` with the guard still green. A check that
-    # passes when it can no longer see what it guards is decoration.
-    assert serial_lanes, (
-        "found no `pytest ... -n0 ...` invocation under .github/workflows — this "
-        "guard can no longer see the serial lane it exists to protect. Either the "
-        "lane was genuinely removed (delete this test) or its form changed (update "
-        "_SERIAL_PYTEST). Do not leave it silently passing."
+    # Fail CLOSED, twice over. `assert not offenders` alone is vacuously true on
+    # an empty scan, so a rename, a reflow, or a different invocation form would
+    # leave this green while checking nothing — and the lane could quietly go
+    # back to inheriting `thread`. Naming the file we KNOW holds a serial lane
+    # makes that failure loud instead of silent: if the lane moves, this breaks
+    # and someone has to look, which is the entire point.
+    assert lanes_per_file.get("tests.yml"), (
+        "no serial (zero-worker) pytest lane found in .github/workflows/tests.yml, "
+        "where the real_ipc lane lives. Either it was genuinely removed (delete "
+        "this test) or its form changed (update _SERIAL_FLAG). Do not leave this "
+        f"guard silently passing. Lanes seen per file: {lanes_per_file}"
     )
 
     assert not offenders, (
-        "serial (-n0) pytest invocations must pass --timeout-method=signal, "
+        "serial (zero-worker) pytest invocations must pass --timeout-method=signal, "
         "because the repo default `thread` calls os._exit() and with no xdist "
         "worker that kills the run itself — exit 1, no report. Offenders:\n  "
         + "\n  ".join(offenders)
+    )
+
+
+def test_real_ipc_tests_get_timeout_headroom(tmp_path) -> None:
+    """The collection hook must actually attach the budget it promises.
+
+    real_ipc tests Popen a real interpreter and wait for an AF_UNIX socket; CI
+    allows 20s for that alone, leaving 10s of the global 30s for the test body.
+    Without this, deleting the injection loop in conftest leaves every test in
+    the suite green — the behaviour it adds is otherwise unobserved.
+    """
+    ipc = _MockItem([pytest.mark.real_ipc])
+    plain = _MockItem()
+
+    pytest_collection_modifyitems(_MockConfig(tmp_path), [ipc, plain])
+
+    injected = ipc.get_closest_marker("timeout")
+    assert injected is not None, (
+        "real_ipc items must get a timeout marker injected at collection; "
+        "without it they inherit the 30s global and are cut mid-socket-wait"
+    )
+    assert injected.args[0] >= 60, (
+        f"injected budget {injected.args[0]}s is too tight — CI alone allows 20s "
+        "for sidecar readiness before the test body starts"
+    )
+    assert plain.get_closest_marker("timeout") is None, (
+        "only real_ipc items should get headroom; blanket injection would hide "
+        "genuinely slow tests everywhere else"
+    )
+
+
+def test_real_ipc_injection_respects_an_explicit_marker(tmp_path) -> None:
+    """An explicit per-test budget must win over the injected default."""
+    explicit = _MockItem([pytest.mark.real_ipc, pytest.mark.timeout(999)])
+
+    pytest_collection_modifyitems(_MockConfig(tmp_path), [explicit])
+
+    budgets = [m.args[0] for m in explicit.markers if m.name == "timeout"]
+    assert budgets == [999], f"explicit marker was clobbered or duplicated: {budgets}"
+
+
+def test_slow_modules_carry_their_own_budget() -> None:
+    """Modules that legitimately run near the 30s wall must not inherit it."""
+    missing: list[str] = []
+    for rel, minimum in _NEEDS_OWN_BUDGET.items():
+        path = PYPROJECT.parent / rel
+        if not path.exists():
+            missing.append(f"{rel}: file not found (moved? update _NEEDS_OWN_BUDGET)")
+            continue
+        found = [int(n) for n in _MODULE_TIMEOUT.findall(path.read_text(encoding="utf-8"))]
+        if not any(n >= minimum for n in found):
+            missing.append(f"{rel}: needs pytest.mark.timeout(>={minimum}), found {found}")
+
+    assert not missing, (
+        "these modules run at or past the global 30s budget under load and must "
+        "carry their own, or they get cut at the wall again:\n  " + "\n  ".join(missing)
     )
 
 
