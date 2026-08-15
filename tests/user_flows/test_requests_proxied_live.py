@@ -36,7 +36,13 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.user_flow
+# The global default is 30s (pyproject). This test starts a real daemon, runs a
+# real lock, and makes two real HTTP round-trips — several separate invocations
+# of the binary. Against a freshly `uv tool install`-ed wheel the FIRST call
+# costs ~5s while uv warms its tool env (measured: 5.3s cold vs 0.5s warm), so
+# the honest budget is larger. Raising it here rather than globally keeps the
+# 30s guard on every other test (worthless-d4h2).
+pytestmark = [pytest.mark.user_flow, pytest.mark.timeout(180)]
 
 _TIMEOUT_S = 60.0
 
@@ -89,7 +95,15 @@ class _ScriptedProvider(http.server.BaseHTTPRequestHandler):
 
 
 def _worthless_bin() -> Path:
-    return Path(sys.executable).parent / "worthless"
+    """The console script under test.
+
+    Defaults to the one beside the interpreter running the tests — the branch
+    build. ``WORTHLESS_TEST_BIN`` aims this at a different binary, so CI can run
+    the same test against an installed wheel: the artifact a user actually gets
+    (worthless-d4h2). Without that, a packaging-only defect passes every test.
+    """
+    override = os.environ.get("WORTHLESS_TEST_BIN")
+    return Path(override) if override else Path(sys.executable).parent / "worthless"
 
 
 def _health(port: int, deadline: float) -> dict | None:

@@ -144,6 +144,40 @@ jobs:
           uv sync --extra dev --extra test
           uv run pytest tests/user_flows -m user_flow 2>&1 | tee user-flow-traces/pytest-${{ runner.os }}.log
 
+      # worthless-d4h2: the step above proves the BRANCH build works. It cannot
+      # catch a defect that only exists once the package is built and installed
+      # — the artifact users actually get. Three bugs reached a release past a
+      # green suite for exactly this reason (worthless-6xuv/dc26/ax9d), all
+      # found by hand on a real install.
+      #
+      # So: build the wheel, install it the way `curl worthless.sh | sh` does,
+      # and re-run the SAME live tests against that binary via
+      # WORTHLESS_TEST_BIN. Linux only — these tests need no launchd, and macOS
+      # runners cost ~10x for no extra coverage of this specific gap.
+      - name: Re-run live tests against an INSTALLED wheel
+        if: ${{ steps.detect.outputs.relevant == 'true' && runner.os == 'Linux' }}
+        env:
+          UV_CACHE_DIR: /tmp/uv-cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p user-flow-traces
+          uv build --wheel
+          # find, not `ls` — shellcheck SC2012, and a glob is safer besides.
+          WHEEL="$(find dist -maxdepth 1 -name '*.whl' -type f | head -1)"
+          test -n "$WHEEL" || { echo "no wheel produced by uv build"; exit 1; }
+          echo "installing $WHEEL"
+          uv tool install --force "$WHEEL"
+          BIN="$(uv tool dir --bin)/worthless"
+          test -x "$BIN" || { echo "installed entry point missing at $BIN"; exit 1; }
+          # Anti-vacuity: name the artifact under test, so a green run can never
+          # be silently about the branch copy again.
+          echo "wheel binary: $BIN"
+          echo "wheel version: $($BIN --version)"
+          WORTHLESS_TEST_BIN="$BIN" uv run pytest tests/user_flows -m user_flow \
+            2>&1 | tee user-flow-traces/pytest-installed-wheel.log
+          uv tool uninstall worthless || true
+
       - name: Render terminal traces
         if: ${{ always() && steps.detect.outputs.relevant == 'true' }}
         env:

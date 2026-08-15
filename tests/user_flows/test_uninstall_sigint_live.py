@@ -41,14 +41,24 @@ if sys.platform == "win32":  # pragma: no cover — POSIX-only by construction
 
 import pty  # noqa: E402 — must follow the platform guard above
 
-pytestmark = pytest.mark.user_flow
+# See the note in test_requests_proxied_live.py: a freshly installed wheel costs
+# ~5s on its first invocation while uv warms the tool env, which the 30s global
+# default does not allow for (worthless-d4h2).
+pytestmark = [pytest.mark.user_flow, pytest.mark.timeout(180)]
 
 _TIMEOUT_S = 60.0
 
 
 def _worthless_bin() -> Path:
-    """The real console script next to the interpreter running the tests."""
-    return Path(sys.executable).parent / "worthless"
+    """The console script under test.
+
+    Defaults to the one beside the interpreter running the tests — the branch
+    build. ``WORTHLESS_TEST_BIN`` aims this at a different binary, so CI can run
+    the same test against an installed wheel: the artifact a user actually gets
+    (worthless-d4h2). Without that, a packaging-only defect passes every test.
+    """
+    override = os.environ.get("WORTHLESS_TEST_BIN")
+    return Path(override) if override else Path(sys.executable).parent / "worthless"
 
 
 def _clean_env(home: Path) -> dict[str, str]:
