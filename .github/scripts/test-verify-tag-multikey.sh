@@ -40,7 +40,15 @@ declare -a REQUIRED=(
   "set -euo pipefail"
   "PUB_COUNT"
   "MAINTAINER_GPG_FINGERPRINT"
-  "git -c gpg.program=gpg verify-tag"
+  "git -c gpg.program=gpg -c gpg.format=openpgp verify-tag"
+  # Both post-verify bindings must stay present: a good signature proves the
+  # maintainer signed SOME tag, not this release at this revision.
+  #
+  # Match the COMPARISONS, not the variable names. A marker that also appears in
+  # a comment or an error string still matches after the logic is deleted —
+  # verified by renaming the variable and watching this check stay green.
+  '"${TAG_TARGET}" != "${HEAD_COMMIT}"'
+  '"${EMBEDDED_TAG_NAME}" != "${GITHUB_REF_NAME}"'
 )
 for marker in "${REQUIRED[@]}"; do
   if ! grep -q "$marker" "$SCRIPT"; then
@@ -62,9 +70,12 @@ trap 'rm -rf "$WORK"' EXIT
   cat <<PROLOGUE
 #!/usr/bin/env bash
 git() {
-  if [ "\$1" = "-c" ] && [ "\$2" = "gpg.program=gpg" ] && [ "\$3" = "verify-tag" ]; then
-    return 0
-  fi
+  # Match on the subcommand anywhere in the args, not by position: the real
+  # invocation carries several -c pins and gained one more when gpg.format was
+  # pinned, which silently stopped a position-based stub from matching.
+  case " \$* " in
+    *" verify-tag "*) return 0 ;;
+  esac
   # Cases 1-7 drive a synthetic tag name that does not exist in this repo, so
   # the post-verify bindings (tag peels to HEAD, embedded name matches the ref)
   # would refuse for a reason unrelated to the key handling they test. Make

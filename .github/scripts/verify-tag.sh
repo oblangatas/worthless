@@ -73,9 +73,6 @@ if [ "${IMPORTED_FINGERPRINT}" != "${NORMALIZED_FINGERPRINT}" ]; then
   exit 1
 fi
 
-# Pin gpg.program defensively: a future runner image change could ship
-# a wrapper or alternative gpg path; we want git to invoke the same
-# gpg (and inherit our GNUPGHOME) as we used for import.
 # Make sure the ANNOTATED TAG OBJECT is on disk, not just the commit it points
 # at. `actions/checkout` with `fetch-depth: 0` used to leave the tag object
 # behind; after the action bump in #469 it does not, so `git verify-tag` reports
@@ -90,11 +87,23 @@ fi
 # (the offline harness in test-verify-tag-multikey.sh builds its own tags and
 # must not reach the network). Failure to fetch is not fatal here: verify-tag
 # below is the real gate and still fails closed with a signature error.
+# The checkout runs with persist-credentials: false, so this fetch is
+# unauthenticated — fine while the repo is public, and the first thing to look
+# at if it ever goes private. A failure is surfaced rather than swallowed: the
+# silent version of this is exactly how WOR-864 presented, as an opaque
+# "cannot verify a non-tag object" with no hint of the real cause.
 if [ "$(git cat-file -t "${GITHUB_REF_NAME}" 2>/dev/null || true)" != "tag" ]; then
-  git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}" 2>/dev/null || true
+  if ! git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}" 2>&1; then
+    echo "::notice title=Tag object fetch failed::Could not fetch refs/tags/${GITHUB_REF_NAME}. If verification fails below, this is why."
+  fi
 fi
 
-if ! git -c gpg.program=gpg verify-tag "${GITHUB_REF_NAME}"; then
+# Pin gpg.program defensively: a future runner image change could ship a wrapper
+# or alternative gpg path, and we want git to invoke the same gpg (inheriting our
+# GNUPGHOME) that we imported into. Pin gpg.format too: with `gpg.format=ssh` set
+# in any inherited config, git would verify against an allowed-signers file and
+# never consult the keyring we just built.
+if ! git -c gpg.program=gpg -c gpg.format=openpgp verify-tag "${GITHUB_REF_NAME}"; then
   echo "::error title=Unsigned or untrusted tag::Tag ${GITHUB_REF_NAME} did not verify against MAINTAINER_GPG_PUBKEY (fingerprint ${NORMALIZED_FINGERPRINT})."
   exit 1
 fi
@@ -113,16 +122,20 @@ fi
 #    header, independent of the ref it is served under — so a genuine signature
 #    for v0.1.0 could be replayed under the ref v9.9.9 and still verify. Refuse
 #    when the embedded name is not the one we were triggered for.
+# Both bindings fail CLOSED on an empty value. Empty is unreachable today —
+# verify-tag above already proved the object exists, is a tag, and is signed —
+# but "every layer fails closed" is this script's contract, and a later refactor
+# that moves either check above the verify must not silently become a no-op.
 TAG_TARGET=$(git rev-parse --verify --quiet "${GITHUB_REF_NAME}^{commit}" || true)
 HEAD_COMMIT=$(git rev-parse --verify --quiet "HEAD^{commit}" || true)
-if [ -n "${HEAD_COMMIT}" ] && [ "${TAG_TARGET}" != "${HEAD_COMMIT}" ]; then
-  echo "::error title=Tag does not match the checked-out revision::${GITHUB_REF_NAME} points at ${TAG_TARGET:-<none>} but this job is running ${HEAD_COMMIT}. The tag moved after checkout; refusing to publish code that was never verified."
+if [ -z "${TAG_TARGET}" ] || [ -z "${HEAD_COMMIT}" ] || [ "${TAG_TARGET}" != "${HEAD_COMMIT}" ]; then
+  echo "::error title=Tag does not match the checked-out revision::${GITHUB_REF_NAME} points at ${TAG_TARGET:-<none>} but this job is running ${HEAD_COMMIT:-<none>}. The tag moved after checkout, or one side could not be resolved; refusing to publish code that was never verified."
   exit 1
 fi
 
 EMBEDDED_TAG_NAME=$(git cat-file tag "${GITHUB_REF_NAME}" 2>/dev/null | sed -n 's/^tag //p' | head -1)
-if [ -n "${EMBEDDED_TAG_NAME}" ] && [ "${EMBEDDED_TAG_NAME}" != "${GITHUB_REF_NAME}" ]; then
-  echo "::error title=Tag name mismatch::The signed tag object names '${EMBEDDED_TAG_NAME}' but is served under '${GITHUB_REF_NAME}'. A signature for one release cannot authorise another."
+if [ -z "${EMBEDDED_TAG_NAME}" ] || [ "${EMBEDDED_TAG_NAME}" != "${GITHUB_REF_NAME}" ]; then
+  echo "::error title=Tag name mismatch::The signed tag object names '${EMBEDDED_TAG_NAME:-<unreadable>}' but is served under '${GITHUB_REF_NAME}'. A signature for one release cannot authorise another."
   exit 1
 fi
 
