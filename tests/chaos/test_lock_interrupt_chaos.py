@@ -58,19 +58,49 @@ from tests.helpers import fake_anthropic_key, fake_key
 pytestmark = [
     pytest.mark.slow,
     pytest.mark.skipif(sys.platform == "win32", reason="chaos suite is POSIX-only"),
-    # 30 trials/cell against real signal storms: 15-18s per test on an idle box,
-    # ~72s under a loaded `-n auto` run — straight through the repo-global 30s
-    # budget. Being cut at that wall is not a harmless failure: pytest-timeout
-    # raises WHEREVER the process happens to be, and `timeout_func_only`
-    # defaults to False, so the timer is armed across the whole
-    # `pytest_runtest_protocol` — including xdist's report serialize-and-send,
-    # which sits OUTSIDE every `CallInfo.from_call()` catch. A `Failed` landing
-    # there means `runtest_protocol_complete` is never sent and the master trips
-    # `assert not crashitem` (xdist `dsession.py:217`), aborting the WHOLE
-    # session and silently dropping every test that had not run yet. Measured:
-    # 8 attempts pinned within 0.03s of the 30s wall in one full-suite run,
-    # masked as 10 `--reruns 1` retries behind a green summary.
-    pytest.mark.timeout(300),
+    # Each storm test SLEEPS ``TRIALS_PER_CELL`` times before signalling, and each
+    # sleep is drawn from a band centred on the session-calibrated ``seam``. So the
+    # test's floor is ~= TRIALS_PER_CELL * seam, and ``seam`` is measured once from
+    # a single warm-up lock whose duration swings with machine load (observed
+    # 1.37s idle vs 2.75s cold on the same 10-core box). Against the repo-wide
+    # ``timeout = 30`` that meant the suite only passed while seam stayed under
+    # ~1.1s — a load-sensitive coin flip, not a product signal.
+    #
+    # Budget the worst LEGITIMATE runtime, generously. At the MAX_SEAM ceiling
+    # the sleep floor alone is TRIALS_PER_CELL * (MAX_SEAM + 0.12) ~= 154s, and
+    # full-suite contention was measured inflating this module ~1.8x over an
+    # isolated run (mashed_sigint: 33.10s isolated -> 60.67s under `-n auto`),
+    # which puts the ceiling near 280s. Observed seams keep climbing as machines
+    # get busier -- 1.366s, 2.748s, ~3.0s -- so a snug budget just reintroduces
+    # the flake at a higher number.
+    #
+    # This value is NOT the hang detector; WAIT_TIMEOUT below is, and it fires
+    # ~40x sooner with the signal and jitter that wedged the CLI. So erring
+    # generous here costs nothing and cannot mask a hang.
+    #
+    # One more reason to err generous: being cut at the wall is worse than a
+    # failed test. pytest-timeout raises WHEREVER the process happens to be, and
+    # `timeout_func_only` defaults to False, so the timer is armed across the
+    # whole `pytest_runtest_protocol` — including xdist's report
+    # serialize-and-send, which sits OUTSIDE every `CallInfo.from_call()` catch.
+    # A `Failed` landing there means `runtest_protocol_complete` is never sent
+    # and the master trips `assert not crashitem` (xdist `dsession.py:217`),
+    # aborting the WHOLE session and silently dropping every test that had not
+    # run yet — 4004 collected, 3992 reported, nothing red. `timeout_method =
+    # "thread"` (pyproject) now kills the worker instead, which xdist reports as
+    # one honest failure, but a budget that never arms is still the first line.
+    pytest.mark.timeout(600),
+    # NEVER auto-retry this module. ``--reruns 1`` is repo-wide (pyproject addopts
+    # and .github/workflows/tests.yml), and a rerun that passes is reported green.
+    # That is precisely how the budget defect above survived: a systematic failure
+    # was retried into a pass run after run, surfacing only as an "occasional
+    # flake". The same masking applies to what this suite actually guards -- a
+    # PARTIAL/ORPHAN on-disk state is a rare, timing-dependent security bug, so
+    # retrying it is how a half-locked `.env` ships.
+    #
+    # A failure here must be loud and attributable. If that means an intermittent
+    # red, the red is the finding.
+    pytest.mark.flaky(reruns=0),
 ]
 
 
@@ -79,7 +109,15 @@ pytestmark = [
 # ---------------------------------------------------------------------------
 
 TRIALS_PER_CELL = 30
-WAIT_TIMEOUT = 30.0
+# Guard for "the CLI never exited" — it must stay WELL BELOW the per-test timeout
+# above, or the generic pytest timeout fires first and swallows the diagnostic
+# (which signal, which jitter) that makes a hang actionable.
+#
+# Sized from measurement, not guesswork. With 10 CPU hogs saturating a 10-core
+# box, signal -> exit was: mashed-SIGINT max 27ms, single-SIGINT max 1.40s, and a
+# full *unsignalled* lock (what the ``seam`` warm-up waits on) max 1.64s. 15s is
+# ~10x the worst of those, so a trip here means a real hang, not contention.
+WAIT_TIMEOUT = 15.0
 # Hard ceiling on the calibrated seam in case the warm-up probe misbehaves; a
 # real lock completes well under this.
 MAX_SEAM = 5.0
@@ -451,6 +489,48 @@ def test_mashed_sigint(tmp_path: Path, seam: float) -> None:
             _drain(proc)
         state = classify(te)
         _assert_no_partial(state, n_keys=n_keys, sig=signal.SIGINT, delay=delay)
+
+
+# ---------------------------------------------------------------------------
+# Guard self-test — prove the hang detector actually fires
+# ---------------------------------------------------------------------------
+
+
+def test_hang_guard_fires_with_diagnostic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A wedged CLI must trip ``WAIT_TIMEOUT`` and say which signal/jitter did it.
+
+    ``WAIT_TIMEOUT`` only earns its place if it FIRES. It previously equalled the
+    repo-wide ``timeout = 30``, so the generic pytest timeout always won the race
+    and this diagnostic was unreachable — a guard nobody had ever seen work. That
+    is exactly the failure mode worth a test rather than an assumption.
+
+    Inject a shim that ignores SIGINT and never exits, then assert the harness
+    fails fast, with the actionable message, well inside the module timeout.
+    """
+    shim = tmp_path / "wedged_cli.py"
+    shim.write_text(
+        "import signal, time\n"
+        "signal.signal(signal.SIGINT, signal.SIG_IGN)\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "while True:\n"
+        "    time.sleep(0.05)\n"
+    )
+    monkeypatch.setattr(
+        f"{__name__}._cli",
+        lambda: [sys.executable, str(shim)],
+    )
+
+    te = _make_trial_env(tmp_path, 0, 1)
+    started = time.monotonic()
+    with pytest.raises(pytest.fail.Exception, match=r"hung after sig="):
+        _run_trial(te, signal.SIGINT, 0.05)
+    elapsed = time.monotonic() - started
+
+    assert WAIT_TIMEOUT <= elapsed < WAIT_TIMEOUT + 10.0, (
+        f"hang guard fired at {elapsed:.1f}s; expected ~{WAIT_TIMEOUT}s. "
+        "Too early means a hair trigger on slow machines; too late means the "
+        "per-test timeout will swallow the diagnostic again."
+    )
 
 
 # ---------------------------------------------------------------------------
