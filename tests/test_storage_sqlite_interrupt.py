@@ -38,6 +38,7 @@ import pytest
 
 from worthless.proxy.app import create_app
 from worthless.proxy.config import ProxySettings
+from worthless.proxy.ipc_supervisor import IPCUnavailable
 from worthless.storage.sqlite import connect as sqlite_connect
 
 WORKER_NAME = "_connection_worker_thread"
@@ -208,5 +209,42 @@ async def test_proxy_startup_interrupt_after_open_does_not_leak_worker(
     # Proves the interrupt landed past the open, in the window __del__ cannot
     # rescue — and keeps `app` referenced while the leak check runs.
     assert app.state.db is not None
+
+    worker_watch()
+
+
+@pytest.mark.real_ipc
+async def test_failed_startup_does_not_leak_worker(
+    tmp_path, worker_watch: Callable[[], None]
+) -> None:
+    """A startup that fails for the ordinary reason must not leak either.
+
+    The other tests in this module raise a synthetic ``KeyboardInterrupt``.
+    This one uses the real failure: the sidecar socket is missing, so the real
+    supervisor raises ``IPCUnavailable`` and startup aborts fail-loud. That is
+    the reachable production trigger — under uvicorn a plain Ctrl-C is captured
+    by the server's own signal handler and never reaches this code, but a proxy
+    started against an unreachable sidecar takes this path every time.
+
+    Measured on the real launcher without the guard: startup failed and the
+    process was still alive 20s later instead of exiting. With it: exits rc=3
+    in under a second.
+
+    ``real_ipc`` opts out of the autouse fake supervisor so the lifespan builds
+    and connects a real one.
+    """
+    settings = ProxySettings(
+        db_path=str(tmp_path / "failed-startup.db"),
+        fernet_key=bytearray(b"x" * 32),
+        allow_insecure=True,
+        sidecar_socket_path=str(tmp_path / "definitely-not-here.sock"),
+    )
+    app = create_app(settings)
+
+    with pytest.raises(IPCUnavailable):
+        async with app.router.lifespan_context(app):
+            pytest.fail("lifespan startup must not yield when the sidecar is unreachable")
+
+    assert app.state.db is not None  # keeps the reference that defeats __del__
 
     worker_watch()
