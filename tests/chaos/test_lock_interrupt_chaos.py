@@ -195,6 +195,36 @@ def _child_env(te: TrialEnv) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_seam(first_shard: float | None) -> float:
+    """Turn the probe result into a usable seam, or refuse to run.
+
+    A seam the probe could not measure is a BROKEN HARNESS, not a 0.5.
+
+    This used to silently substitute that constant. The failure mode is nastier
+    than it looks: every storm test re-centres its jitter band on the fabricated
+    number, so the signals land nowhere near the window where DB rows exist but
+    ``.env`` has not been rewritten. Nothing partial is ever observed and all
+    nine tests pass — green, fast, and meaningless. A suite that cannot fail is
+    worse than no suite, because it reports safety it never checked.
+
+    So refuse. A red here means "the harness could not calibrate", which is
+    actionable; a vacuous green is not.
+    """
+    if first_shard is not None:
+        return first_shard
+    pytest.fail(
+        "chaos seam calibration FAILED — no shard row appeared within "
+        f"MAX_SEAM={MAX_SEAM}s during the warm-up lock, so the orphan-vulnerable "
+        "window could not be located.\n"
+        "  This is NOT a product failure. It means the harness cannot aim.\n"
+        "  Refusing to substitute a fabricated seam: every storm test would "
+        "centre its jitter on it, miss the window, and pass vacuously.\n"
+        "  Likely causes: the runner is slow enough that the lock needs more "
+        f"than {MAX_SEAM}s to write its first shard (raise MAX_SEAM), or the "
+        "warm-up lock is failing outright (run `worthless lock` by hand)."
+    )
+
+
 @pytest.fixture(scope="session")
 def seam(tmp_path_factory: pytest.TempPathFactory) -> float:
     """Measure (once) when the first shard row appears in a warm-up lock.
@@ -234,9 +264,7 @@ def seam(tmp_path_factory: pytest.TempPathFactory) -> float:
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=5)
-    # Fallback: if the probe never saw a shard (very fast machine / race), use a
-    # conservative late seam so the jitter still lands near completion.
-    return first_shard if first_shard is not None else 0.5
+    return _resolve_seam(first_shard)
 
 
 def _delays_for(seam_s: float) -> tuple[float, ...]:
@@ -519,6 +547,22 @@ def test_hang_guard_fires_with_diagnostic(tmp_path: Path, monkeypatch: pytest.Mo
         "Too early means a hair trigger on slow machines; too late means the "
         "per-test timeout will swallow the diagnostic again."
     )
+
+
+def test_seam_calibration_refuses_to_fabricate() -> None:
+    """A seam the probe could not measure must fail, not silently become 0.5.
+
+    The regression this guards is invisible by construction: a fabricated seam
+    still produces a green run, so nothing about the output would tell you the
+    suite stopped aiming at the orphan window. Assert the refusal directly.
+    """
+    # A real measurement passes through untouched.
+    assert _resolve_seam(1.234) == 1.234
+    assert _resolve_seam(0.0) == 0.0
+
+    # A missing measurement refuses, and says why.
+    with pytest.raises(pytest.fail.Exception, match=r"seam calibration FAILED"):
+        _resolve_seam(None)
 
 
 # ---------------------------------------------------------------------------
