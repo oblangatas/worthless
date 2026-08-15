@@ -3,10 +3,43 @@
 #
 # Env:
 #   LIVE_PACK_NO_COLOR=1  — plain ASCII headers (CI logs)
+#   WORTHLESS_BIN=<path>  — test THIS binary instead of whatever PATH resolves
+#                           (worthless-d4h2). Point it at an installed wheel to
+#                           exercise the artifact users actually get.
 
 _live_pack_lib_loaded=1
 
 LP_PHASE_NUM=0
+
+# worthless-d4h2: these packs call bare `worthless`, so PATH silently decides
+# which build is under test. Run from a worktree and PATH hands you .venv —
+# the branch copy, not the artifact a user installs. That is how three bugs
+# reached a release with a green suite: the lane existed but tested the wrong
+# thing, and never said which thing.
+#
+# Two jobs here: honour an explicit WORTHLESS_BIN, and ALWAYS print the
+# resolved path + version so a run can never be silently about the wrong
+# binary again. Prepending to PATH (rather than rewriting every call site)
+# keeps the packs readable and covers subprocesses the CLI spawns.
+lp_use_binary() {
+  if [[ -n "${WORTHLESS_BIN:-}" ]]; then
+    if [[ ! -x "$WORTHLESS_BIN" ]]; then
+      echo "WORTHLESS_BIN is set but not executable: $WORTHLESS_BIN" >&2
+      exit 1
+    fi
+    PATH="$(cd "$(dirname "$WORTHLESS_BIN")" && pwd):$PATH"
+    export PATH
+  fi
+
+  local resolved
+  resolved="$(command -v worthless 2>/dev/null || true)"
+  if [[ -z "$resolved" ]]; then
+    echo "no 'worthless' on PATH — set WORTHLESS_BIN or install it first" >&2
+    exit 1
+  fi
+  echo "  binary under test: ${resolved}"
+  echo "  version:           $(worthless --version 2>&1 | tail -1)"
+}
 
 lp_banner() {
   local title="${1:-worthless live pack}"
