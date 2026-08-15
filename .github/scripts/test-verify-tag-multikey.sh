@@ -65,6 +65,16 @@ git() {
   if [ "\$1" = "-c" ] && [ "\$2" = "gpg.program=gpg" ] && [ "\$3" = "verify-tag" ]; then
     return 0
   fi
+  # Cases 1-7 drive a synthetic tag name that does not exist in this repo, so
+  # the post-verify bindings (tag peels to HEAD, embedded name matches the ref)
+  # would refuse for a reason unrelated to the key handling they test. Make
+  # those two lookups agree. Cases 8-10 exercise the real git behaviour.
+  case "\$*" in
+    *"v0.0.0-test^{commit}"*)
+      command git rev-parse --verify --quiet "HEAD^{commit}"; return \$? ;;
+    "cat-file tag v0.0.0-test")
+      echo "tag v0.0.0-test"; return 0 ;;
+  esac
   command git "\$@"
 }
 export -f git
@@ -171,7 +181,7 @@ verify_logic "$SINGLE2" "$KEY1_FPR" >/dev/null 2>&1; assert_exit "single key2, p
 tagfetch_case() {
   local root; root=$(mktemp -d)
   git init -q --bare "$root/origin.git"
-  git init -q "$root/src" && cd "$root/src"
+  git init -q "$root/src" && cd "$root/src" || return 2
   # Identity must be set on the REPO, not just the commit: `git tag -a` needs a
   # tagger and a bare CI runner has no global git config, so passing -c only to
   # `commit` builds no tag and the fixture silently collapses.
@@ -182,7 +192,7 @@ tagfetch_case() {
   git remote add origin "$root/origin.git" && git push -q origin HEAD:refs/heads/main v9.9.9
   local sha; sha=$(git rev-parse HEAD)
 
-  git clone -q --no-tags "$root/origin.git" "$root/work" && cd "$root/work"
+  git clone -q --no-tags "$root/origin.git" "$root/work" && cd "$root/work" || return 2
   git update-ref refs/tags/v9.9.9 "$sha"           # lightweight → reproduces the bug
   [ "$(git cat-file -t v9.9.9)" = "commit" ] || { cd /; rm -rf "$root"; return 2; }
 
@@ -196,6 +206,48 @@ tagfetch_case() {
   [ "$after" = "tag" ]
 }
 tagfetch_case >/dev/null 2>&1; assert_exit "lightweight tag ref → object fetched" 0 $?
+
+# Cases 9 and 10: the post-verify bindings. A good signature proves the
+# maintainer signed SOME tag — not that they signed THIS release at THIS
+# revision. Both use real git; neither needs a key, because the binding logic
+# runs after the signature check has already passed.
+# NB: takes the dir as an argument and cds in the CALLER's shell. Returning the
+# path via $(...) would run the cd in a subshell, leaving the case operating on
+# the real repository instead of the fixture.
+_fixture_repo() {
+  git init -q "$1" && cd "$1" || return 1
+  git config user.email fixture@example.com
+  git config user.name "verify-tag fixture"
+  git commit -q --allow-empty -m one
+}
+
+# Case 9: the tag names a different release than the ref serving it. A genuine
+# signature for v0.1.0 must not authorise a publish of v9.9.9.
+tagname_case() {
+  local root; root=$(mktemp -d)
+  _fixture_repo "$root" || { cd / || return 2; rm -rf "$root"; return 2; }
+  git tag -a v0.1.0 -m v0.1.0
+  git update-ref refs/tags/v9.9.9 "$(git rev-parse v0.1.0)"   # same object, different ref
+  local embedded; embedded=$(git cat-file tag v9.9.9 2>/dev/null | sed -n 's/^tag //p' | head -1)
+  cd / || return 2; rm -rf "$root"
+  [ "$embedded" = "v0.1.0" ]     # guard compares this to the ref name and refuses
+}
+tagname_case >/dev/null 2>&1; assert_exit "tag object names a different release → detectable" 0 $?
+
+# Case 10: the tag no longer peels to the checked-out revision — what a re-tag
+# between checkout and fetch looks like.
+tagpeel_case() {
+  local root; root=$(mktemp -d)
+  _fixture_repo "$root" || { cd / || return 2; rm -rf "$root"; return 2; }
+  local first; first=$(git rev-parse HEAD)
+  git tag -a v9.9.9 -m v9.9.9
+  git commit -q --allow-empty -m two                      # HEAD moves on
+  local target; target=$(git rev-parse --verify --quiet "v9.9.9^{commit}")
+  local head; head=$(git rev-parse --verify --quiet "HEAD^{commit}")
+  cd / || return 2; rm -rf "$root"
+  [ "$target" = "$first" ] && [ "$target" != "$head" ]     # guard sees the mismatch and refuses
+}
+tagpeel_case >/dev/null 2>&1; assert_exit "tag doesn't peel to HEAD → detectable" 0 $?
 
 echo ""
 echo "Pass: $PASS  Fail: $FAIL"

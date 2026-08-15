@@ -99,4 +99,31 @@ if ! git -c gpg.program=gpg verify-tag "${GITHUB_REF_NAME}"; then
   exit 1
 fi
 
+# A good signature alone is not enough — it proves the maintainer signed SOME
+# tag, not that they signed THIS release at THIS revision. Two bindings close
+# that gap. Reaching here implies the object exists and is a properly signed
+# tag, since verify-tag above fails closed otherwise.
+#
+# 1. Bind to the checked-out revision. The fetch above rewrites the local tag
+#    ref AFTER checkout, so a tag-ref writer could repoint the remote to a
+#    different, also-validly-signed tag between the two. verify-tag would then
+#    bless that object while the job keeps executing the earlier, unverified
+#    HEAD. Refuse when the tag does not peel to what we are running.
+# 2. Bind to this release name. The tag object carries its own `tag <name>`
+#    header, independent of the ref it is served under — so a genuine signature
+#    for v0.1.0 could be replayed under the ref v9.9.9 and still verify. Refuse
+#    when the embedded name is not the one we were triggered for.
+TAG_TARGET=$(git rev-parse --verify --quiet "${GITHUB_REF_NAME}^{commit}" || true)
+HEAD_COMMIT=$(git rev-parse --verify --quiet "HEAD^{commit}" || true)
+if [ -n "${HEAD_COMMIT}" ] && [ "${TAG_TARGET}" != "${HEAD_COMMIT}" ]; then
+  echo "::error title=Tag does not match the checked-out revision::${GITHUB_REF_NAME} points at ${TAG_TARGET:-<none>} but this job is running ${HEAD_COMMIT}. The tag moved after checkout; refusing to publish code that was never verified."
+  exit 1
+fi
+
+EMBEDDED_TAG_NAME=$(git cat-file tag "${GITHUB_REF_NAME}" 2>/dev/null | sed -n 's/^tag //p' | head -1)
+if [ -n "${EMBEDDED_TAG_NAME}" ] && [ "${EMBEDDED_TAG_NAME}" != "${GITHUB_REF_NAME}" ]; then
+  echo "::error title=Tag name mismatch::The signed tag object names '${EMBEDDED_TAG_NAME}' but is served under '${GITHUB_REF_NAME}'. A signature for one release cannot authorise another."
+  exit 1
+fi
+
 echo "Tag ${GITHUB_REF_NAME} verified against pinned fingerprint ${NORMALIZED_FINGERPRINT}."
