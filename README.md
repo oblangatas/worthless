@@ -14,7 +14,7 @@
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/oblangatas/worthless/badge)](https://securityscorecards.dev/projects/github.com/oblangatas/worthless)
 [![Known Vulnerabilities](https://snyk.io/test/github/oblangatas/worthless/badge.svg?targetFile=requirements.txt)](https://snyk.io/test/github/oblangatas/worthless?targetFile=requirements.txt)
 <!-- SonarCloud quality-gate badge, held until the existing issues are triaged. Re-enable when ready:
-[![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=oblangatas_worthless&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=oblangatas_worthless)
+[![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=shacharm2_worthless&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=shacharm2_worthless)
 -->
 
 When your `.env` leaks, the keys inside are placeholders. The real key never sits in your repo, your shell history, or your laptop's memory.
