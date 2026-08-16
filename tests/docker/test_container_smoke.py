@@ -5,11 +5,15 @@ Builds ``docker/sidecar/Dockerfile`` and runs it, asserting that
 the smoke client connects as ``worthless-proxy``, and a full
 seal/open/attest roundtrip succeeds across the uid boundary.
 
-Marked ``@pytest.mark.docker`` so it is skipped by default (the
-project's pytest ``addopts`` excludes ``docker``-marked tests). Run
-explicitly with::
+The container roundtrip is marked ``@pytest.mark.docker`` and skipped by
+default (the project's pytest ``addopts`` excludes ``docker``-marked
+tests). Run it explicitly with::
 
     uv run pytest -m docker -v
+
+The mark is per-test, NOT module-wide: ``test_each_run_gets_its_own_container_name``
+is pure string logic and runs in the default suite, because a regression
+guard excluded from the default run guards nothing.
 
 The test auto-skips (not fails) when the ``docker`` CLI is missing
 or the daemon is unreachable, so CI boxes without Docker stay green.
