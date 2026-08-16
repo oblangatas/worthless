@@ -253,25 +253,37 @@ def test_the_informational_config_suppresses_nothing() -> None:
 
 
 def test_the_scan_reruns_when_its_own_config_changes() -> None:
-    """A gate that cannot observe edits to itself will eventually ship one that disables it."""
-    wf = yaml.safe_load(WORKFLOW.read_text())
-    triggers = wf[True]  # bare `on:` — see _scan_steps
+    """A gate that cannot observe edits to itself will eventually ship one that disables it.
+
+    This originally enumerated the globs the `paths:` filter had to contain.
+    WOR-874 deleted that filter, so the property now holds for every path —
+    but the property is what matters, not the mechanism, and re-adding a
+    filter that omits these would silently restore the hole. The assertion
+    therefore covers both worlds: no filter, or a filter that self-covers.
+
+    The four paths matter for specific, already-observed reasons:
+      - the workflow itself, or an edit disabling the gate ships unscanned
+      - both grype config locations, since Actions globs do not cross `/`
+      - publish-docker.yml, which triggers only on `v*` tags and is otherwise
+        exercised by nothing; WOR-871 shipped its entire release-gate change
+        with 36 green checks and no scan among them
+    """
+    must_cover = {
+        ".github/workflows/docker-security.yml",
+        ".github/workflows/publish-docker.yml",
+        ".grype*.yaml",
+        ".grype/config.yaml",
+    }
+    triggers = yaml.safe_load(WORKFLOW.read_text())[True]  # bare `on:` — see _scan_steps
     for event in ("push", "pull_request"):
-        paths = set(triggers[event]["paths"])
-        assert ".grype*.yaml" in paths, f"{event}: grype configs not in paths filter"
-        assert ".github/workflows/docker-security.yml" in paths, (
-            f"{event}: workflow not self-covering"
-        )
-        # Actions path globs do not cross `/`, so `.grype*.yaml` does NOT match
-        # the nested location — the same blind spot CONFIGS covers above. An
-        # ignore parked there would otherwise never re-trigger the scan.
-        assert ".grype/config.yaml" in paths, f"{event}: nested grype config not in paths filter"
-        # The release workflow triggers only on `v*` tags, so it is exercised
-        # by nothing on a PR unless the scan job watches it. WOR-871 shipped
-        # its entire release-gate change with 36 green checks and no scan
-        # among them; this makes that impossible to repeat.
-        assert ".github/workflows/publish-docker.yml" in paths, (
-            f"{event}: release workflow changes run no scan"
+        config = triggers.get(event)
+        if not isinstance(config, dict) or "paths" not in config:
+            continue  # unfiltered: every path re-triggers it, including these
+        missing = must_cover - set(config["paths"])
+        assert not missing, (
+            f"{event}: a paths filter was re-added without {sorted(missing)}. "
+            f"Edits to those files would then ship without ever running the gate "
+            f"they modify. Prefer no filter at all — see WOR-874."
         )
 
 
@@ -694,3 +706,54 @@ def test_trufflehog_pins_an_exact_scanner_version() -> None:
                     f"release. `latest` and floating majors are mutable — upstream "
                     f"can repoint them, which is what pinning exists to prevent."
                 )
+
+
+# Jobs that carry the container security gates. A `paths:` filter on their
+# workflow makes them unusable as required checks: GitHub only creates a check
+# run when the workflow triggers, so on a PR that matches no glob the required
+# context never reports and the PR waits forever. Nine PRs went BLOCKED with
+# zero failing checks the day `scan` was made required. WOR-874.
+GATE_WORKFLOW = REPO / ".github" / "workflows" / "docker-security.yml"
+
+
+def test_gate_workflow_has_no_paths_filter() -> None:
+    """A gate that reports on only some PRs cannot be a required check.
+
+    `severity-cutoff` and the ignore rules decide whether the gate is right.
+    This decides whether it is present at all — the failure mode is silence,
+    not a wrong answer, and silence is invisible in a PR's check list.
+    """
+    doc = yaml.safe_load(GATE_WORKFLOW.read_text())
+    triggers = doc.get(True) or doc.get("on") or {}
+    for event in ("push", "pull_request"):
+        config = triggers.get(event)
+        if not isinstance(config, dict):
+            continue
+        for key in ("paths", "paths-ignore"):
+            assert key not in config, (
+                f"docker-security.yml `{event}` has a `{key}` filter. These jobs "
+                f"gate container CVEs and the end-to-end credential tests; a "
+                f"filtered gate does not report on non-matching PRs, so making it "
+                f"required leaves those PRs permanently BLOCKED with no failing "
+                f"check. Runners are free on a public repo — let it always run."
+            )
+
+
+def test_gate_jobs_are_unconditional_and_time_limited() -> None:
+    """No job-level `if:`, and every job bounded.
+
+    A skipped job reports SUCCESS to branch protection, so gating these with
+    an `if:` converts the gate into a bypass — worse than the deadlock it
+    would be working around. And an untimed required job that hangs blocks
+    merges until GitHub's 6-hour default expires.
+    """
+    doc = yaml.safe_load(GATE_WORKFLOW.read_text())
+    for name, job in (doc.get("jobs") or {}).items():
+        assert "if" not in job, (
+            f"job {name!r} has a job-level `if:`. A skipped job counts as SUCCESS "
+            f"to branch protection, which turns this gate into a bypass."
+        )
+        assert isinstance(job.get("timeout-minutes"), int), (
+            f"job {name!r} has no `timeout-minutes`, so it inherits GitHub's "
+            f"6-hour default. A required job that hangs blocks every merge."
+        )
