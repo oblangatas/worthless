@@ -133,7 +133,12 @@ if [ -z "${TAG_TARGET}" ] || [ -z "${HEAD_COMMIT}" ] || [ "${TAG_TARGET}" != "${
   exit 1
 fi
 
-EMBEDDED_TAG_NAME=$(git cat-file tag "${GITHUB_REF_NAME}" 2>/dev/null | sed -n 's/^tag //p' | head -1)
+# `|| true` for the same reason as the two lines above, and it is load-bearing
+# here: under `set -euo pipefail` a failing `git cat-file` aborts the script at
+# this assignment with rc=128, so the explicit ::error below would never print.
+# Failing closed is right; failing closed with no message is how WOR-864
+# presented in the first place.
+EMBEDDED_TAG_NAME=$(git cat-file tag "${GITHUB_REF_NAME}" 2>/dev/null | sed -n 's/^tag //p' | head -1 || true)
 if [ -z "${EMBEDDED_TAG_NAME}" ] || [ "${EMBEDDED_TAG_NAME}" != "${GITHUB_REF_NAME}" ]; then
   echo "::error title=Tag name mismatch::The signed tag object names '${EMBEDDED_TAG_NAME:-<unreadable>}' but is served under '${GITHUB_REF_NAME}'. A signature for one release cannot authorise another."
   exit 1

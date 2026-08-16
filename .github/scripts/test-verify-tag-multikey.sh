@@ -26,7 +26,17 @@
 set -uo pipefail
 
 REPO_ROOT="${REPO_ROOT:-$(git rev-parse --show-toplevel)}"
-SCRIPT="${REPO_ROOT}/.github/scripts/verify-tag.sh"
+SCRIPT="${VERIFY_TAG_SCRIPT:-${REPO_ROOT}/.github/scripts/verify-tag.sh}"
+# Absolute, because the mutation gate re-invokes this file after the cases have
+# cd'd away from the repo. A relative path would fail to launch, and every
+# mutation would then report "suite went red" for the wrong reason — a vacuous
+# gate checking vacuous tests.
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+# The fixture cases cd out of the repo and land on `/`. The mutation gate runs
+# after them and re-invokes this file, so it must restore the starting directory
+# first: cases 1-7 resolve HEAD in the current repo, and from `/` they all fail
+# closed for a reason that has nothing to do with the mutation under test.
+START_CWD=$(pwd)
 
 if [ ! -f "$SCRIPT" ]; then
   echo "ERROR: $SCRIPT not found"
@@ -41,17 +51,28 @@ declare -a REQUIRED=(
   "PUB_COUNT"
   "MAINTAINER_GPG_FINGERPRINT"
   "git -c gpg.program=gpg -c gpg.format=openpgp verify-tag"
-  # Both post-verify bindings must stay present: a good signature proves the
-  # maintainer signed SOME tag, not this release at this revision.
-  #
-  # Match the COMPARISONS, not the variable names. A marker that also appears in
-  # a comment or an error string still matches after the logic is deleted —
-  # verified by renaming the variable and watching this check stay green.
-  '"${TAG_TARGET}" != "${HEAD_COMMIT}"'
-  '"${EMBEDDED_TAG_NAME}" != "${GITHUB_REF_NAME}"'
+  # The WOR-864 fix itself. Its absence is what this whole file exists to catch,
+  # and it had no marker at all until a review deleted the line and watched the
+  # suite report 10/10.
+  "git fetch --force origin"
+  # Both post-verify bindings: a good signature proves the maintainer signed SOME
+  # tag, not this release at this revision.
+  "TAG_TARGET"
+  "EMBEDDED_TAG_NAME"
 )
+# Strip comments before matching. A whole-file grep is satisfied by the marker
+# appearing ANYWHERE — including in a comment left behind by the change that
+# deleted the code. That was demonstrated twice: once by comments naming the
+# flags they guarded, and again by parking both binding comparisons in a
+# replacement comment while removing the blocks entirely.
+#
+# These markers are deliberately coarse (variable names, not comparisons) so that
+# an INVERTED defense still satisfies them. Text presence and correct behaviour
+# are different questions; the mutation gate at the end of this file owns the
+# second one, and coarse markers keep the two from collapsing into each other.
+SCRIPT_CODE=$(grep -v '^[[:space:]]*#' "$SCRIPT")
 for marker in "${REQUIRED[@]}"; do
-  if ! grep -q "$marker" "$SCRIPT"; then
+  if ! printf '%s' "$SCRIPT_CODE" | grep -qF "$marker"; then
     echo "ERROR: verify-tag.sh is missing required marker: $marker"
     echo "       A required defense was removed."
     exit 1
@@ -102,10 +123,12 @@ git() {
   # would refuse for a reason unrelated to the key handling they test. Make
   # those two lookups agree. Cases 8-10 exercise the real git behaviour.
   case "\$*" in
-    *"v0.0.0-test^{commit}"*)
+    *"v0.0.0-harness-never-pushed^{commit}"*)
       command git rev-parse --verify --quiet "HEAD^{commit}"; return \$? ;;
-    "cat-file tag v0.0.0-test")
-      echo "tag v0.0.0-test"; return 0 ;;
+    "cat-file -t v0.0.0-harness-never-pushed")
+      echo "tag"; return 0 ;;
+    "cat-file tag v0.0.0-harness-never-pushed")
+      echo "tag v0.0.0-harness-never-pushed"; return 0 ;;
   esac
   command git "\$@"
 }
@@ -114,7 +137,7 @@ export -f git
 verify_logic() {
   export MAINTAINER_PUBKEY="\$1"
   export MAINTAINER_FINGERPRINT="\$2"
-  export GITHUB_REF_NAME="\${3:-v0.0.0-test}"
+  export GITHUB_REF_NAME="\${3:-v0.0.0-harness-never-pushed}"
   ( bash "$SCRIPT" )
 }
 PROLOGUE
@@ -244,79 +267,172 @@ _fixture_identity() {
   git config tag.gpgsign false
 }
 
-# Each guard below returns a DISTINCT exit code. The case runs with output
-# suppressed, so a bare `return 2` everywhere reports "got exit 2" and says
-# nothing about which step broke — which cost a full CI cycle to chase once
-# already. The assert prints the code, so the code has to carry the information.
+# --------------------------------------------------------------------------
+# Cases 8-10: drive the REAL verify-tag.sh and assert ITS exit code.
+#
+# These used to re-implement the guard inline ("verbatim from verify-tag.sh")
+# and assert git's behaviour. That is a test of the copy, not of the code, and
+# it showed: deleting the entire WOR-864 fetch fix from verify-tag.sh left this
+# suite reporting 10/10. Same for both post-verify bindings — replacing their
+# `exit 1` with `:` stayed green. The only thing tying the script to this file
+# was a grep.
+#
+# Now each case builds a fixture, cds into it, and runs `bash "$SCRIPT"` through
+# verify_logic with the pinned fixture key, so the key handling passes and the
+# tag plumbing is what decides the exit code. Only `git verify-tag` remains
+# stubbed: these cases pin the fetch and the two bindings, not gpg — cases 1-7
+# own gpg, and signing fixtures would test gpg twice and the plumbing never.
+# --------------------------------------------------------------------------
+
+# Build an origin carrying an annotated tag, then clone it the way
+# actions/checkout v6 now leaves a tag push: the commit is present, the tag
+# OBJECT is not. Leaves the caller cd'd inside the clone.
+#   $1 = scratch dir   $2 = name the tag is created under   $3 = ref it is served as
+# Distinct exit codes: the cases run with output captured, and a single shared
+# code points at four lines at once.
+_tag_fixture() {
+  local root="$1" made="$2" served="$3"
+  # -b main on BOTH: the bare repo's HEAD defaults to the local git's
+  # init.defaultBranch, and pushing `main` into a repo whose HEAD says `master`
+  # produces a clone with nothing checked out ("remote HEAD refers to nonexistent
+  # ref"). Developer machines with init.defaultBranch=main never see it.
+  git init -q -b main --bare "$root/origin.git" || return 91
+  git init -q -b main "$root/src" || return 91
+  cd "$root/src" || return 91
+  _fixture_identity
+  git commit -q --allow-empty -m init || return 92
+  git tag -a "$made" -m "$made" || return 93
+  git remote add origin "$root/origin.git" || return 91
+  git push -q origin HEAD:refs/heads/main "refs/tags/${made}:refs/tags/${served}" || return 94
+  git clone -q --no-tags "$root/origin.git" "$root/work" || return 95
+  cd "$root/work" || return 95
+  # A broken fixture must never look like a passing test. Cases 9 and 10 expect
+  # exit 1, and a fixture that failed to check anything out ALSO yields exit 1 —
+  # so both reported OK against a repo with no commits. Fail with a code no case
+  # expects instead.
+  # (the tag ref is deliberately absent here — the clone is --no-tags, and each
+  # case creates the lightweight ref itself to reproduce the checkout state)
+  git rev-parse --verify --quiet HEAD >/dev/null || return 96
+}
+
+# Case 8: the tag ref is present but LIGHTWEIGHT — exactly what the new checkout
+# leaves, and exactly what failed the real v0.3.12. The script must fetch the
+# object and succeed. Delete the fetch and this case is the one that goes red.
 tagfetch_case() {
-  local root; root=$(mktemp -d)
-  git init -q --bare "$root/origin.git"
-  git init -q "$root/src" && cd "$root/src" || return 2
-  # Identity must be set on the REPO, not just the commit: `git tag -a` needs a
-  # tagger and a bare CI runner has no global git config, so passing -c only to
-  # `commit` builds no tag and the fixture silently collapses.
-  _fixture_identity
-  git commit -q --allow-empty -m init
-  git tag -a v9.9.9 -m v9.9.9                     # annotated, lives only as an object
-  git remote add origin "$root/origin.git" && git push -q origin HEAD:refs/heads/main v9.9.9
-  local sha; sha=$(git rev-parse HEAD)
-
-  git clone -q --no-tags "$root/origin.git" "$root/work" && cd "$root/work" || return 3
-  git update-ref refs/tags/v9.9.9 "$sha"           # lightweight → reproduces the bug
-  [ "$(git cat-file -t v9.9.9)" = "commit" ] || { cd /; rm -rf "$root"; return 4; }
-
-  # the guard, verbatim from verify-tag.sh
-  if [ "$(git cat-file -t v9.9.9 2>/dev/null || true)" != "tag" ]; then
-    git fetch --force origin "refs/tags/v9.9.9:refs/tags/v9.9.9" 2>/dev/null || true
-  fi
-
-  local after; after=$(git cat-file -t v9.9.9)
-  cd /; rm -rf "$root"
-  [ "$after" = "tag" ]
+  local root rc; root=$(mktemp -d) || return 90
+  _tag_fixture "$root" v9.9.9 v9.9.9 || { rc=$?; cd / || true; rm -rf "$root"; return $rc; }
+  git update-ref refs/tags/v9.9.9 "$(git rev-parse HEAD)"
+  [ "$(git cat-file -t v9.9.9)" = "commit" ] || { cd / || true; rm -rf "$root"; return 96; }
+  verify_logic "$SINGLE1" "$KEY1_FPR" v9.9.9; rc=$?
+  cd / || true; rm -rf "$root"
+  return $rc
 }
-run_case "lightweight tag ref → object fetched" 0 tagfetch_case
+run_case "lightweight tag ref → real script publishes" 0 tagfetch_case
 
-# Cases 9 and 10: the post-verify bindings. A good signature proves the
-# maintainer signed SOME tag — not that they signed THIS release at THIS
-# revision. Both use real git; neither needs a key, because the binding logic
-# runs after the signature check has already passed.
-# NB: takes the dir as an argument and cds in the CALLER's shell. Returning the
-# path via $(...) would run the cd in a subshell, leaving the case operating on
-# the real repository instead of the fixture.
-_fixture_repo() {
-  git init -q "$1" && cd "$1" || return 1
-  _fixture_identity
-  git commit -q --allow-empty -m one
-}
-
-# Case 9: the tag names a different release than the ref serving it. A genuine
-# signature for v0.1.0 must not authorise a publish of v9.9.9.
+# Case 9: the tag object names v0.1.0 but is served under refs/tags/v9.9.9. The
+# signature is genuine; it just authorises a different release. The script must
+# refuse. Neuter the embedded-name binding and this case goes green.
 tagname_case() {
-  local root; root=$(mktemp -d)
-  _fixture_repo "$root" || { cd / || return 6; rm -rf "$root"; return 5; }
-  git tag -a v0.1.0 -m v0.1.0
-  git update-ref refs/tags/v9.9.9 "$(git rev-parse v0.1.0)"   # same object, different ref
-  local embedded; embedded=$(git cat-file tag v9.9.9 2>/dev/null | sed -n 's/^tag //p' | head -1)
-  cd / || return 2; rm -rf "$root"
-  [ "$embedded" = "v0.1.0" ]     # guard compares this to the ref name and refuses
+  local root rc; root=$(mktemp -d) || return 90
+  _tag_fixture "$root" v0.1.0 v9.9.9 || { rc=$?; cd / || true; rm -rf "$root"; return $rc; }
+  git update-ref refs/tags/v9.9.9 "$(git rev-parse HEAD)"
+  verify_logic "$SINGLE1" "$KEY1_FPR" v9.9.9; rc=$?
+  cd / || true; rm -rf "$root"
+  return $rc
 }
-run_case "tag object names a different release → detectable" 0 tagname_case
+run_case "tag names a different release → real script refuses" 1 tagname_case
 
-# Case 10: the tag no longer peels to the checked-out revision — what a re-tag
-# between checkout and fetch looks like.
+# Case 10: HEAD moves after checkout, so the verified tag no longer describes the
+# code being run — the re-tag race. The script must refuse. Neuter the revision
+# binding and this case goes green.
 tagpeel_case() {
-  local root; root=$(mktemp -d)
-  _fixture_repo "$root" || { cd / || return 6; rm -rf "$root"; return 5; }
-  local first; first=$(git rev-parse HEAD)
-  git tag -a v9.9.9 -m v9.9.9
-  git commit -q --allow-empty -m two                      # HEAD moves on
-  local target; target=$(git rev-parse --verify --quiet "v9.9.9^{commit}")
-  local head; head=$(git rev-parse --verify --quiet "HEAD^{commit}")
-  cd / || return 2; rm -rf "$root"
-  [ "$target" = "$first" ] && [ "$target" != "$head" ]     # guard sees the mismatch and refuses
+  local root rc; root=$(mktemp -d) || return 90
+  _tag_fixture "$root" v9.9.9 v9.9.9 || { rc=$?; cd / || true; rm -rf "$root"; return $rc; }
+  _fixture_identity
+  git commit -q --allow-empty -m two || { cd / || true; rm -rf "$root"; return 97; }
+  git update-ref refs/tags/v9.9.9 "$(git rev-parse HEAD)"
+  verify_logic "$SINGLE1" "$KEY1_FPR" v9.9.9; rc=$?
+  cd / || true; rm -rf "$root"
+  return $rc
 }
-run_case "tag doesn't peel to HEAD → detectable" 0 tagpeel_case
+run_case "tag no longer peels to HEAD → real script refuses" 1 tagpeel_case
 
 echo ""
 echo "Pass: $PASS  Fail: $FAIL"
-[ "$FAIL" -eq 0 ]
+[ "$FAIL" -eq 0 ] || exit 1
+
+# --------------------------------------------------------------------------
+# Mutation gate: every defense above must be LOAD-BEARING.
+#
+# Four separate assertions in this file's own history passed against code that
+# no longer worked — a substring match that swallowed its own fixture setup,
+# guards sharing one exit code, output sent to /dev/null, and whole-file greps
+# satisfied by a comment. Each looked green. The only check that catches that
+# class is asserting the suite goes RED when a defense is removed.
+#
+# Each mutation below keeps the REQUIRED markers satisfied and kills only the
+# BEHAVIOUR, so a pass here means the executed cases have real detection power —
+# not that the grep found a string.
+# --------------------------------------------------------------------------
+if [ -z "${VERIFY_TAG_MUTATION_CHILD:-}" ]; then
+  echo ""
+  echo "Mutation gate — each defense must be load-bearing:"
+  MUT_FAIL=0
+  _mutate() {
+    local label="$1" expr="$2" dir
+    dir=$(mktemp -d)
+    sed "$expr" "$SCRIPT" > "$dir/verify-tag.sh"
+    if cmp -s "$SCRIPT" "$dir/verify-tag.sh"; then
+      echo "  STALE    $label — the mutation changed nothing; its pattern no longer matches"
+      MUT_FAIL=$((MUT_FAIL + 1)); rm -rf "$dir"; return
+    fi
+    if (cd "$START_CWD" && VERIFY_TAG_MUTATION_CHILD=1 \
+          VERIFY_TAG_SCRIPT="$dir/verify-tag.sh" bash "$SELF") >/dev/null 2>&1; then
+      echo "  VACUOUS  $label — suite still PASSED with this defense disabled"
+      MUT_FAIL=$((MUT_FAIL + 1))
+    else
+      echo "  OK       $label — suite went red"
+    fi
+    rm -rf "$dir"
+  }
+
+  # CONTROL FIRST. A cosmetic edit must leave the suite GREEN. If this reports
+  # red, the gate is broken (bad path, missing env, child dying on startup) and
+  # every "OK … went red" below would be meaningless — a vacuous gate policing
+  # vacuous tests. Run it before trusting a single result.
+  _control() {
+    local dir; dir=$(mktemp -d)
+    sed 's/^# Fatal GPG-tag verification/# Fatal GPG-tag verification (control mutation)/' \
+      "$SCRIPT" > "$dir/verify-tag.sh"
+    if cmp -s "$SCRIPT" "$dir/verify-tag.sh"; then
+      echo "  STALE    control — pattern no longer matches; gate cannot be trusted"
+      MUT_FAIL=$((MUT_FAIL + 1)); rm -rf "$dir"; return
+    fi
+    if (cd "$START_CWD" && VERIFY_TAG_MUTATION_CHILD=1 \
+          VERIFY_TAG_SCRIPT="$dir/verify-tag.sh" bash "$SELF") >/dev/null 2>&1; then
+      echo "  OK       control — cosmetic edit stays green, so the gate can run"
+    else
+      echo "  BROKEN   control — a comment-only edit turned the suite red."
+      echo "           The gate is not measuring the mutations. Fix before trusting it."
+      MUT_FAIL=$((MUT_FAIL + 1))
+    fi
+    rm -rf "$dir"
+  }
+  _control
+
+  # Invert the object-type guard so the fetch never fires for a lightweight ref.
+  # The `git fetch` line stays in the file, so the marker check still passes.
+  _mutate "fetch the tag object"        '/cat-file -t/s/!= "tag"/= "tag"/'
+  # Compare TAG_TARGET to itself: the binding can never fire. TAG_TARGET remains.
+  _mutate "bind tag to checked-out rev" '/TAG_TARGET.*!=.*HEAD_COMMIT/s/HEAD_COMMIT/TAG_TARGET/g'
+  # Same for the release-name binding. EMBEDDED_TAG_NAME remains.
+  _mutate "bind tag to release name"    '/EMBEDDED_TAG_NAME.*!=.*GITHUB_REF_NAME/s/GITHUB_REF_NAME/EMBEDDED_TAG_NAME/g'
+
+  echo ""
+  if [ "$MUT_FAIL" -ne 0 ]; then
+    echo "MUTATION GATE FAILED: $MUT_FAIL defense(s) are not actually tested."
+    echo "A green suite against a disabled defense is worse than no test."
+    exit 1
+  fi
+  echo "Mutation gate: all defenses load-bearing."
+fi
