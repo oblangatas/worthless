@@ -41,13 +41,14 @@ if sys.platform == "win32":  # pragma: no cover — POSIX-only by construction
 
 import pty  # noqa: E402 — must follow the platform guard above
 
-# See the note in test_requests_proxied_live.py: a freshly installed wheel costs
-# ~5s on its first invocation while uv warms the tool env, which the 30s global
-# default does not allow for (worthless-d4h2).
 # Scoped to the wheel path only — see the note in test_requests_proxied_live.py.
 # The branch run keeps the 30s global guard, where a hang is a real signal.
-_TIMEOUT_BUDGET = 180 if os.environ.get("WORTHLESS_TEST_BIN") else 30
-pytestmark = [pytest.mark.user_flow, pytest.mark.timeout(_TIMEOUT_BUDGET)]
+_TIMEOUT_BUDGET = 60 if os.environ.get("WORTHLESS_TEST_BIN") else 30
+pytestmark = [
+    pytest.mark.user_flow,
+    pytest.mark.wheel_artifact,
+    pytest.mark.timeout(_TIMEOUT_BUDGET),
+]
 
 _TIMEOUT_S = 60.0
 

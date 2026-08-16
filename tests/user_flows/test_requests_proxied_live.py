@@ -36,19 +36,17 @@ from pathlib import Path
 
 import pytest
 
-# The global default is 30s (pyproject). This test starts a real daemon, runs a
-# real lock, and makes two real HTTP round-trips — several separate invocations
-# of the binary. Against a freshly `uv tool install`-ed wheel the FIRST call
-# costs ~5s while uv warms its tool env (measured: 5.3s cold vs 0.5s warm), so
-# the honest budget is larger. Raising it here rather than globally keeps the
-# 30s guard on every other test (worthless-d4h2).
 # The global default is 30s (pyproject) and the branch build keeps it. Only the
 # installed-wheel run needs more: uv warms its tool env on the first call to a
 # freshly installed binary (measured 5.3s cold vs 0.5s warm), and this test
 # spawns the binary several times. Raising it unconditionally would drop the
 # 30s guard on the branch run too, where a hang is a real signal.
-_TIMEOUT_BUDGET = 180 if os.environ.get("WORTHLESS_TEST_BIN") else 30
-pytestmark = [pytest.mark.user_flow, pytest.mark.timeout(_TIMEOUT_BUDGET)]
+_TIMEOUT_BUDGET = 60 if os.environ.get("WORTHLESS_TEST_BIN") else 30
+pytestmark = [
+    pytest.mark.user_flow,
+    pytest.mark.wheel_artifact,
+    pytest.mark.timeout(_TIMEOUT_BUDGET),
+]
 
 _TIMEOUT_S = 60.0
 

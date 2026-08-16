@@ -40,6 +40,7 @@ def _free_port() -> int:
 
 
 @pytest.mark.user_flow
+@pytest.mark.wheel_artifact  # spawns the binary; honours WORTHLESS_TEST_BIN
 def test_wrap_child_reaches_proxy_via_env_url(tmp_path: Path) -> None:
     """The headline v0.3.4 contract: a child run under ``worthless wrap``
     that loads .env can reach ``/healthz`` on the proxy.

@@ -179,8 +179,20 @@ jobs:
           # be silently about the branch copy again.
           echo "wheel binary: $BIN"
           echo "wheel version: $($BIN --version)"
-          WORTHLESS_TEST_BIN="$BIN" uv run pytest tests/user_flows -m user_flow \
+          # Only tests marked `wheel_artifact` can actually see this binary —
+          # they spawn it as a subprocess. The rest of tests/user_flows uses
+          # typer's CliRunner IN-PROCESS, importing the `uv run` .venv, i.e. the
+          # branch source. Running those here would re-prove the branch build a
+          # second time under a banner that says "INSTALLED wheel" — the exact
+          # looks-covered-proves-nothing failure this whole lane exists to kill.
+          # 4 honest tests beat 30 vacuous ones.
+          WORTHLESS_TEST_BIN="$BIN" uv run pytest tests/user_flows \
+            -m "user_flow and wheel_artifact" \
             2>&1 | tee user-flow-traces/pytest-installed-wheel.log
+          # Anti-vacuity: a marker typo or a rename would silently collect zero
+          # tests and still exit 0 here. Assert we actually ran some.
+          grep -qE '[1-9][0-9]* passed' user-flow-traces/pytest-installed-wheel.log || {
+            echo "wheel step collected no passing tests — the guard proved nothing"; exit 1; }
           uv tool uninstall worthless || true
 
       - name: Render terminal traces
