@@ -42,6 +42,50 @@ import aiosqlite
 __all__ = ["connect", "open_connection"]
 
 
+def _daemonize_worker(conn: aiosqlite.Connection) -> aiosqlite.Connection:
+    """Mark the connection's worker thread as a daemon, before it starts.
+
+    WOR-882. The stop sentinel below is the CLEAN shutdown path and stays the
+    primary mechanism. This is the backstop for the paths it cannot reach.
+
+    ``aiosqlite.Connection`` builds its worker in ``__init__`` but only starts it
+    in ``__await__``, so there is a window here to flip the flag. It matters
+    because the worker loop leaves only on the sentinel::
+
+        while True:
+            future, function = tx.get()      # parks here forever otherwise
+            ...
+            if result is _STOP_RUNNING_SENTINEL:
+                break
+
+    A non-daemon worker still parked there is joined by ``threading._shutdown``
+    at interpreter exit, so a single missed sentinel means the process can never
+    terminate — it ignores SIGINT and SIGTERM and needs SIGKILL. That was
+    observed on a real ``worthless lock`` child: main thread in ``_shutdown``,
+    worker in ``_connection_worker_thread``, after cleanup had already printed
+    ``Cancelled.``.
+
+    Guaranteeing the sentinel on *every* window is not tractable — a late
+    interrupt during ``asyncio.run`` teardown can leave a suspended async
+    generator that is never resumed, so its ``except BaseException`` never runs.
+    Daemon status makes the hang structurally impossible instead of chasing each
+    window: the interpreter simply stops waiting.
+
+    Safety: this only changes behaviour when the process is ALREADY exiting. The
+    success path still ends in ``Connection.close()``, which queues the sentinel
+    and awaits it, so the worker has exited before shutdown and there is nothing
+    to abandon. A write interrupted by interpreter exit is an uncommitted SQLite
+    transaction, which rolls back — the same guarantee as any process kill.
+
+    Uses a private attribute because aiosqlite exposes no public accessor; the
+    ``getattr`` keeps a future rename from breaking the open path outright.
+    """
+    thread = getattr(conn, "_thread", None)
+    if thread is not None:
+        thread.daemon = True
+    return conn
+
+
 async def open_connection(db_path: str, **kwargs: Any) -> aiosqlite.Connection:
     """Open a connection the *caller* owns, without leaking the worker thread.
 
@@ -51,7 +95,7 @@ async def open_connection(db_path: str, **kwargs: Any) -> aiosqlite.Connection:
     fit. Only the *open* is guarded; closing stays the caller's job, and
     ``Connection.close()`` already stops the worker on its own.
     """
-    conn = aiosqlite.connect(db_path, **kwargs)
+    conn = _daemonize_worker(aiosqlite.connect(db_path, **kwargs))
     try:
         return await conn
     except BaseException:
@@ -68,7 +112,7 @@ async def connect(db_path: str, **kwargs: Any) -> AsyncIterator[aiosqlite.Connec
     Drop-in for ``async with aiosqlite.connect(path) as db``. See the module
     docstring for the window this closes.
     """
-    conn = aiosqlite.connect(db_path, **kwargs)
+    conn = _daemonize_worker(aiosqlite.connect(db_path, **kwargs))
     try:
         async with conn as db:
             yield db
