@@ -716,6 +716,33 @@ def test_trufflehog_pins_an_exact_scanner_version() -> None:
 GATE_WORKFLOW = REPO / ".github" / "workflows" / "docker-security.yml"
 
 
+def test_push_is_branch_scoped_so_runs_are_not_doubled() -> None:
+    """`push` must be scoped to main, or every job runs twice per commit.
+
+    With `push` unscoped, a push to a PR branch fires a full run alongside the
+    pull_request run for the same SHA. The concurrency group keys on
+    github.event_name, so they do not cancel each other: measured as two
+    `scan`, two `docker-e2e` and two `service lock roundtrip` check runs, ~26
+    runner-minutes instead of 13, and doubled anonymous base-image pulls.
+
+    A BRANCH restriction is safe where a PATHS filter is not. Branch scoping
+    cannot strand a PR, because `pull_request` still fires on every PR and the
+    required context still reports. WOR-874.
+    """
+    triggers = yaml.safe_load(GATE_WORKFLOW.read_text())[True]
+    push = triggers.get("push")
+    assert isinstance(push, dict) and push.get("branches"), (
+        "docker-security.yml `push` has no `branches:` restriction, so every "
+        "push to every branch runs the full gate on top of the pull_request "
+        "run for the same commit — double the runner time, and the concurrency "
+        "key cannot dedupe them because it includes github.event_name."
+    )
+    assert "paths" not in push and "paths-ignore" not in push, (
+        "scope `push` by BRANCH, never by path — a path filter is what made "
+        "these jobs unusable as required checks."
+    )
+
+
 def test_gate_workflow_has_no_paths_filter() -> None:
     """A gate that reports on only some PRs cannot be a required check.
 
@@ -740,12 +767,21 @@ def test_gate_workflow_has_no_paths_filter() -> None:
 
 
 def test_gate_jobs_are_unconditional_and_time_limited() -> None:
-    """No job-level `if:`, and every job bounded.
+    """No JOB-level `if:`, and every job bounded.
 
-    A skipped job reports SUCCESS to branch protection, so gating these with
-    an `if:` converts the gate into a bypass — worse than the deadlock it
-    would be working around. And an untimed required job that hangs blocks
-    merges until GitHub's 6-hour default expires.
+    Job level specifically. A skipped job reports SUCCESS to branch
+    protection, so gating a required job with `if:` converts the gate into a
+    bypass — worse than the deadlock it would work around.
+
+    Step-level `if:` is a different thing and is used here deliberately: the
+    arm64 build and scan steps are scoped to schedule/dispatch (WOR-873),
+    because a QEMU-emulated arm64 build is far too slow for every PR. A
+    skipped STEP does not fabricate a job result — the job still reports what
+    its remaining steps actually did. The consequence is real but chosen and
+    documented: PRs are gated on amd64, arm64 is gated weekly.
+
+    Also: an untimed required job that hangs blocks merges until GitHub's
+    6-hour default expires.
     """
     doc = yaml.safe_load(GATE_WORKFLOW.read_text())
     for name, job in (doc.get("jobs") or {}).items():

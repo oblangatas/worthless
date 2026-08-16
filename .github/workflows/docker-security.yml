@@ -7,6 +7,18 @@ on:
   # the only way to find out was to build the image and run grype locally.
   workflow_dispatch:
   push:
+    # Scoped to main. Without this, every push to every branch fires a full
+    # run ON TOP OF the pull_request run for the same commit — the concurrency
+    # key includes github.event_name, so the two cannot cancel each other.
+    # Measured on this branch before the fix: two `scan`, two `docker-e2e` and
+    # two `service lock roundtrip` check runs per push, ~26 runner-minutes
+    # instead of 13, and doubled anonymous pulls of the base image.
+    #
+    # This is a BRANCH restriction, not a paths filter, and the difference is
+    # the whole point: `pull_request` below stays unfiltered, so a required
+    # context still reports on every PR. Scoping by branch cannot deadlock a
+    # PR; scoping by path can, and did. WOR-874.
+    branches: [main]
     # No paths filter, deliberately. These jobs used to run only when a PR
     # touched one of ~22 globs. That made them USELESS AS GATES: a required
     # check that never reports leaves a PR waiting forever, which is exactly
