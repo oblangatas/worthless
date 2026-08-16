@@ -189,6 +189,20 @@ verify_logic "$SINGLE2" "$KEY1_FPR" >/dev/null 2>&1; assert_exit "single key2, p
 # the new checkout leaves, then run the guard and assert the object became a
 # tag. Unsigned annotated tag is enough — this pins the FETCH, not the GPG check
 # (cases 1-7 cover that).
+# Identity AND signing, set on the fixture repo. Identity because `git tag -a`
+# needs a tagger. Signing OFF because this repo signs its real commits and tags,
+# and a runner has no maintainer key — an inherited commit.gpgsign made every
+# fixture `git commit` fail, which is exactly what sank cases 8-10 on the runner
+# while they passed locally and in a root container. The fixtures exercise ref
+# plumbing, never signatures (cases 1-7 own that), so inheriting signing config
+# is pure hazard with no upside. Defined before its first caller.
+_fixture_identity() {
+  git config user.email fixture@example.com
+  git config user.name "verify-tag fixture"
+  git config commit.gpgsign false
+  git config tag.gpgsign false
+}
+
 # Each guard below returns a DISTINCT exit code. The case runs with output
 # suppressed, so a bare `return 2` everywhere reports "got exit 2" and says
 # nothing about which step broke — which cost a full CI cycle to chase once
@@ -200,8 +214,7 @@ tagfetch_case() {
   # Identity must be set on the REPO, not just the commit: `git tag -a` needs a
   # tagger and a bare CI runner has no global git config, so passing -c only to
   # `commit` builds no tag and the fixture silently collapses.
-  git config user.email fixture@example.com
-  git config user.name "verify-tag fixture"
+  _fixture_identity
   git commit -q --allow-empty -m init
   git tag -a v9.9.9 -m v9.9.9                     # annotated, lives only as an object
   git remote add origin "$root/origin.git" && git push -q origin HEAD:refs/heads/main v9.9.9
@@ -231,8 +244,7 @@ tagfetch_case >/dev/null 2>&1; assert_exit "lightweight tag ref → object fetch
 # the real repository instead of the fixture.
 _fixture_repo() {
   git init -q "$1" && cd "$1" || return 1
-  git config user.email fixture@example.com
-  git config user.name "verify-tag fixture"
+  _fixture_identity
   git commit -q --allow-empty -m one
 }
 
