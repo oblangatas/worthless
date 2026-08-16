@@ -70,12 +70,33 @@ trap 'rm -rf "$WORK"' EXIT
   cat <<PROLOGUE
 #!/usr/bin/env bash
 git() {
-  # Match on the subcommand anywhere in the args, not by position: the real
-  # invocation carries several -c pins and gained one more when gpg.format was
-  # pinned, which silently stopped a position-based stub from matching.
-  case " \$* " in
-    *" verify-tag "*) return 0 ;;
-  esac
+  # Match verify-tag as the SUBCOMMAND — skip -c pairs and options, then compare
+  # the first bare token.
+  #
+  # A fixed position was wrong (the real call carries several -c pins, and gained
+  # another when gpg.format was pinned). But the substring fix that replaced it
+  # was worse: it also swallowed
+  #
+  #     git config user.name "verify-tag fixture"
+  #
+  # returning 0 without setting anything, so every fixture repo had an empty
+  # ident and every fixture commit died with "empty ident name". That only shows
+  # up on CI, where there is no global identity to fall back on — which is why
+  # cases 8-10 passed on two machines and failed on the runner.
+  #
+  # The fixture user.name below still contains "verify-tag" ON PURPOSE: it is the
+  # canary. Re-broaden this match and the suite breaks loudly instead of silently.
+  local sub="" i=1
+  while [ \$i -le \$# ]; do
+    case "\${!i}" in
+      -c) i=\$((i + 2)); continue ;;
+      -*) i=\$((i + 1)); continue ;;
+      *)  sub="\${!i}"; break ;;
+    esac
+  done
+  if [ "\$sub" = "verify-tag" ]; then
+    return 0
+  fi
   # Cases 1-7 drive a synthetic tag name that does not exist in this repo, so
   # the post-verify bindings (tag peels to HEAD, embedded name matches the ref)
   # would refuse for a reason unrelated to the key handling they test. Make
