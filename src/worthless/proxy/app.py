@@ -335,11 +335,21 @@ async def _lifespan(app: FastAPI):
         for _bg in (sweep_task, decoy_reload_task):
             with contextlib.suppress(asyncio.CancelledError):
                 await _bg
+        # Each close owns its own unwind (worthless-oz8u). Sharing one try meant
+        # a raising client.aclose() skipped db.close() entirely, leaving
+        # app.state.db holding an open connection whose non-daemon worker then
+        # wedges interpreter shutdown — the startup bug guarded above, at the
+        # other end of the lifespan. db.stop() covers the remaining case, where
+        # close() itself is cancelled on a forced exit; it is a no-op once
+        # close() has succeeded, since that already cleared _connection.
         try:
             await client.aclose()
-            await db.close()
         finally:
-            await ipc.aclose()
+            try:
+                await db.close()
+            finally:
+                db.stop()
+                await ipc.aclose()
 
 
 def create_app(settings: ProxySettings | None = None) -> FastAPI:

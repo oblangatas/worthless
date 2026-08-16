@@ -34,6 +34,7 @@ import time
 from collections.abc import Callable, Iterator
 
 import aiosqlite
+import httpx
 import pytest
 
 from worthless.proxy.app import create_app
@@ -244,6 +245,40 @@ async def test_failed_startup_does_not_leak_worker(
     with pytest.raises(IPCUnavailable):
         async with app.router.lifespan_context(app):
             pytest.fail("lifespan startup must not yield when the sidecar is unreachable")
+
+    assert app.state.db is not None  # keeps the reference that defeats __del__
+
+    worker_watch()
+
+
+async def test_shutdown_client_close_failure_does_not_leak_worker(
+    tmp_path, worker_watch: Callable[[], None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failing close in the shutdown half must not skip the database close.
+
+    Same failure class as startup, at the other end of the lifespan
+    (worthless-oz8u): ``client.aclose()`` and ``db.close()` once shared a single
+    ``try``, so a raising client close skipped the database close entirely.
+    ``app.state.db`` keeps the connection referenced, so ``__del__`` never runs,
+    and the non-daemon worker survives to wedge interpreter shutdown.
+
+    Startup completes normally here — the failure is injected on the way out.
+    """
+    settings = ProxySettings(
+        db_path=str(tmp_path / "shutdown-close-failure.db"),
+        fernet_key=bytearray(b"x" * 32),
+        allow_insecure=True,
+    )
+    app = create_app(settings)
+
+    async def _raise_on_aclose(self: httpx.AsyncClient) -> None:
+        raise RuntimeError("httpx client failed to close")
+
+    monkeypatch.setattr(httpx.AsyncClient, "aclose", _raise_on_aclose)
+
+    with pytest.raises(RuntimeError, match="httpx client failed to close"):
+        async with app.router.lifespan_context(app):
+            pass  # startup succeeded; the failure belongs to shutdown
 
     assert app.state.db is not None  # keeps the reference that defeats __del__
 
