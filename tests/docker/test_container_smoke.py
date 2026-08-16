@@ -112,7 +112,12 @@ def test_each_run_gets_its_own_container_name() -> None:
     `handshake step missing` with an empty steps dict. That reads as a product
     failure, so the next person debugs the proxy instead of the harness.
     """
-    assert _smoke_container_name() != _smoke_container_name()
+    names = [_smoke_container_name() for _ in range(100)]
+
+    assert len(set(names)) == len(names), "container names repeated within one process"
+    # The prefix has to survive: humans grep for it, and `docker ps` filters on
+    # it. A unique name that nobody recognises trades one problem for another.
+    assert all(n.startswith("worthless-sidecar-smoke-") for n in names)
 
 
 @pytest.mark.docker
