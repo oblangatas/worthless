@@ -153,6 +153,26 @@ assert_exit() {
   fi
 }
 
+# Run a real-git fixture case, and on failure PRINT WHAT GIT SAID.
+#
+# The cases used to run with output sent to /dev/null. When cases 8-10 failed on
+# the runner but passed on two other machines, that left one number and no
+# stderr, and each guess cost a CI round-trip — one of them reproduced the same
+# exit codes from an unrelated cause and looked like a fix. A test that only
+# reports a number cannot be debugged remotely, so keep the output on failure.
+run_case() {
+  local label="$1" expected="$2" fn="$3" rc
+  "$fn" >"$WORK/$fn.log" 2>&1; rc=$?
+  assert_exit "$label" "$expected" "$rc"
+  if [ "$rc" -ne "$expected" ] && [ -s "$WORK/$fn.log" ]; then
+    echo "     --- $fn output ---"
+    sed 's/^/     | /' "$WORK/$fn.log"
+    echo "     --- git env ---"
+    echo "     | git $(git --version 2>&1 | cut -d' ' -f3)  uid=$(id -u)  HOME=${HOME:-<unset>}  TMPDIR=${TMPDIR:-<unset>}"
+    git config --list --show-origin 2>&1 | grep -Ei 'sign|template|hook|safe|default' | sed 's/^/     | /' | head -8
+  fi
+}
+
 # Case 1: empty pubkey + fingerprint → fail (var unset)
 verify_logic "" "" >/dev/null 2>&1; assert_exit "var unset" 1 $?
 
@@ -233,7 +253,7 @@ tagfetch_case() {
   cd /; rm -rf "$root"
   [ "$after" = "tag" ]
 }
-tagfetch_case >/dev/null 2>&1; assert_exit "lightweight tag ref → object fetched" 0 $?
+run_case "lightweight tag ref → object fetched" 0 tagfetch_case
 
 # Cases 9 and 10: the post-verify bindings. A good signature proves the
 # maintainer signed SOME tag — not that they signed THIS release at THIS
@@ -259,7 +279,7 @@ tagname_case() {
   cd / || return 2; rm -rf "$root"
   [ "$embedded" = "v0.1.0" ]     # guard compares this to the ref name and refuses
 }
-tagname_case >/dev/null 2>&1; assert_exit "tag object names a different release → detectable" 0 $?
+run_case "tag object names a different release → detectable" 0 tagname_case
 
 # Case 10: the tag no longer peels to the checked-out revision — what a re-tag
 # between checkout and fetch looks like.
@@ -274,7 +294,7 @@ tagpeel_case() {
   cd / || return 2; rm -rf "$root"
   [ "$target" = "$first" ] && [ "$target" != "$head" ]     # guard sees the mismatch and refuses
 }
-tagpeel_case >/dev/null 2>&1; assert_exit "tag doesn't peel to HEAD → detectable" 0 $?
+run_case "tag doesn't peel to HEAD → detectable" 0 tagpeel_case
 
 echo ""
 echo "Pass: $PASS  Fail: $FAIL"
