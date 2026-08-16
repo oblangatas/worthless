@@ -17,7 +17,6 @@ combinable. Run one or the other.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import re
@@ -33,6 +32,7 @@ from worthless._async import run_sync
 from worthless.cli.bootstrap import WorthlessHome, get_home
 from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary, sanitize_exception
 from worthless.cli.platform import fail_if_windows, popen_platform_kwargs
+from worthless.storage.sqlite import connect as sqlite_connect
 from worthless.cli.sentinel import is_partial, read_sentinel
 from worthless.cli.process import (
     build_proxy_env,
@@ -133,49 +133,15 @@ def _list_enrolled_aliases(home: WorthlessHome) -> list[tuple[str, str]]:
         return []
 
     async def _query() -> list[tuple[str, str]]:
-        # Keep a reference to the Connection so the failure path below can join
-        # its worker thread; open it exactly once via `async with`. Awaiting the
-        # connection a second time (e.g. `await db` then `async with db`) would
-        # call Connection._thread.start() twice -> "threads can only be started
-        # once" and leak the still-running thread from the first open.
-        db = aiosqlite.connect(str(home.db_path))
-        try:
-            async with db:
-                cursor = await db.execute(
-                    "SELECT s.key_alias, s.provider "
-                    "FROM shards s "
-                    "JOIN enrollments e ON s.key_alias = e.key_alias "
-                    "ORDER BY s.key_alias"
-                )
-                rows = await cursor.fetchall()
-                return [(str(r[0]), str(r[1])) for r in rows if r[0] and r[1]]
-        except BaseException:
-            # Connection.__await__ starts a worker thread before the sqlite
-            # connect runs. On a FAILED connect, Connection._connect() only
-            # *queues* self.stop() without awaiting the future it returns, so
-            # that thread can still be shutting down when the exception reaches
-            # us. Propagating immediately lets asyncio.run() close our loop
-            # before the thread's completion callback lands (RuntimeError: Event
-            # loop is closed — the thread crashes instead of exiting cleanly),
-            # which under a busy CI host can leave it observably alive past a
-            # test's thread-leak check. Give it a bounded window to finish while
-            # our loop is still open. (The success path needs none of this:
-            # async with -> __aexit__ -> close() awaits the stop future itself.)
-            # ...and if the interrupt landed IN Connection.__await__'s
-            # `self._thread.start()`, _connect() never ran, so stop() was never
-            # queued at all — the worker blocks on tx.get() forever and, being
-            # non-daemon, wedges threading._shutdown. Queue the sentinel here so
-            # the wait below has something to wait FOR. See
-            # worthless.storage.sqlite.connect, which is the shared version of
-            # this guard; prefer it for new call sites.
-            db.stop()
-            thread = getattr(db, "_thread", None)
-            if thread is not None:
-                loop = asyncio.get_event_loop()
-                deadline = loop.time() + 2.0
-                while thread.is_alive() and loop.time() < deadline:
-                    await asyncio.sleep(0.01)
-            raise
+        async with sqlite_connect(str(home.db_path)) as db:
+            cursor = await db.execute(
+                "SELECT s.key_alias, s.provider "
+                "FROM shards s "
+                "JOIN enrollments e ON s.key_alias = e.key_alias "
+                "ORDER BY s.key_alias"
+            )
+            rows = await cursor.fetchall()
+            return [(str(r[0]), str(r[1])) for r in rows if r[0] and r[1]]
 
     try:
         return run_sync(_query())

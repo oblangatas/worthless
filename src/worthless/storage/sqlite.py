@@ -25,8 +25,10 @@ the hang ``tests/chaos/test_lock_interrupt_chaos.py`` reports as a regression.
 every failure path. The success path is untouched — ``async with`` still ends
 in ``Connection.close()``, which stops the worker and awaits its future.
 
-``worthless wrap`` grew a bespoke variant of this guard first; prefer this
-helper for new call sites.
+This module is the only implementation of the guard. ``worthless wrap`` carried
+a hand-rolled variant until worthless-aydz folded it in here. Use :func:`connect`
+for scoped callers, and :func:`open_connection` when the connection must outlive
+the scope that opens it — as the proxy lifespan's does.
 """
 
 from __future__ import annotations
