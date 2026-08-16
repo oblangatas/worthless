@@ -661,3 +661,36 @@ def test_the_secret_scan_excludes_the_detector_that_matches_test_names() -> None
         assert "--only-verified" in args, (
             "dropping --only-verified would flood the scan with unverified noise"
         )
+
+
+def test_trufflehog_pins_an_exact_scanner_version() -> None:
+    """The action SHA pins the wrapper; `version` pins the scanner itself.
+
+    trufflesecurity/trufflehog is a thin wrapper that runs
+    `docker run ghcr.io/trufflesecurity/trufflehog:${VERSION}`, and its
+    `version` input defaults to `latest` — a mutable tag upstream can repoint
+    at will. Without an explicit pin the SHA is decorative: the code that
+    actually scans this repo is whatever `latest` resolved to that morning.
+
+    A version TAG rather than a digest is deliberate and forced: the action
+    interpolates "${IMAGE}:${VERSION}" with a colon, so a digest yields the
+    invalid ref `trufflehog:sha256:...`. A release tag is the strongest form
+    this action accepts. WOR-876.
+    """
+    for wf in sorted((REPO / ".github" / "workflows").glob("*.yml")):
+        doc = yaml.safe_load(wf.read_text())
+        for job in (doc.get("jobs") or {}).values():
+            for step in job.get("steps") or []:
+                if "trufflesecurity/trufflehog" not in str(step.get("uses", "")):
+                    continue
+                version = str((step.get("with") or {}).get("version", "")).strip()
+                assert version, (
+                    f"{wf.name}: the TruffleHog step pins no `version`, so it runs "
+                    f"whatever `latest` resolves to. The action SHA alone does not "
+                    f'pin the scanner. Set an exact release, e.g. version: "3.96.0".'
+                )
+                assert re.fullmatch(r"\d+\.\d+\.\d+", version), (
+                    f"{wf.name}: TruffleHog version {version!r} is not an exact "
+                    f"release. `latest` and floating majors are mutable — upstream "
+                    f"can repoint them, which is what pinning exists to prevent."
+                )
