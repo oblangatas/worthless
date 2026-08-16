@@ -31,7 +31,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import pytest_collection_modifyitems
+from tests.conftest import pytest_collection_modifyitems, pytest_configure
 
 PYPROJECT = Path(__file__).resolve().parent.parent / "pyproject.toml"
 # The whole .github tree, not just workflows/: composite actions under
@@ -117,6 +117,79 @@ class _MockItem:
 class _MockConfig:
     def __init__(self, rootdir) -> None:
         self.rootdir = rootdir
+
+
+class _ConfigureOption:
+    def __init__(self, numprocesses) -> None:
+        self.numprocesses = numprocesses
+        self.timeout_method = "thread"
+
+
+class _ConfigureConfig:
+    """Stand-in for the config `pytest_configure` inspects."""
+
+    def __init__(self, numprocesses=None, *, worker: bool = False) -> None:
+        self.option = _ConfigureOption(numprocesses)
+        self._env_timeout_method = "thread"
+        if worker:
+            self.workerinput = {}  # xdist sets this only inside a worker
+
+
+@pytest.mark.parametrize("numprocesses", [None, 0])
+def test_serial_runs_downgrade_to_signal(numprocesses) -> None:
+    """No xdist worker means os._exit would kill pytest itself.
+
+    `-o addopts=` wipes `-n auto` while leaving `timeout_method = "thread"` set,
+    which is how several CI steps and scripts/hooks/live_e2e_gate.py end up
+    serial-with-thread. Proven before this hook existed: exit 1, stack dump, no
+    summary line, no test report at all.
+    """
+    config = _ConfigureConfig(numprocesses)
+    pytest_configure(config)
+    assert config._env_timeout_method == "signal", (
+        "a serial run must fall back to `signal`; with `thread` a timeout "
+        "os._exit()s pytest itself and the run reports nothing"
+    )
+    assert config.option.timeout_method == "signal"
+
+
+@pytest.mark.parametrize(
+    "config",
+    [_ConfigureConfig(4), _ConfigureConfig(None, worker=True)],
+    ids=["parallel-controller", "inside-xdist-worker"],
+)
+def test_parallel_runs_keep_thread(config) -> None:
+    """The downgrade must NOT fire where the whole fix lives.
+
+    Inside a worker the victim is expendable and xdist reports the kill as one
+    honest failure — that is the entire point of the PR. `workerinput` is the
+    only reliable "am I a worker" signal, since a worker inherits the parent's
+    numprocesses.
+    """
+    pytest_configure(config)
+    assert config._env_timeout_method == "thread", (
+        "parallel runs must keep `thread`; downgrading here reintroduces the "
+        "swallowed-timeout hang and the session-abort this PR fixes"
+    )
+
+
+def test_noconftest_lanes_pass_the_flag_explicitly() -> None:
+    """`--noconftest` skips the auto-downgrade, so those lanes must be explicit."""
+    offenders: list[str] = []
+    for wf in sorted(p for pat in ("**/*.yml", "**/*.yaml") for p in GITHUB.glob(pat)):
+        text = _CONTINUATION.sub(" ", wf.read_text(encoding="utf-8"))
+        for line in text.splitlines():
+            if line.lstrip().startswith("#"):
+                continue  # a comment ABOUT the flag is not an invocation
+            if "--noconftest" in line and "pytest" in line:
+                if "--timeout-method=signal" not in line:
+                    offenders.append(f"{wf.name}: {line.strip()[:110]}")
+
+    assert not offenders, (
+        "--noconftest skips tests/conftest.py, so the pytest_configure hook that "
+        "downgrades thread->signal for serial runs never loads. These lanes must "
+        "pass --timeout-method=signal themselves:\n  " + "\n  ".join(offenders)
+    )
 
 
 def test_timeout_method_is_thread_not_signal() -> None:

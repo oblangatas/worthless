@@ -59,8 +59,14 @@ jobs:
             # we observe RAW flake rate, not retry-masked rate. Excludes
             # docker/live/user_flow (need real services) and quarantine
             # (already-known flakes — they're handled separately).
+            # --max-worker-restart=2: xdist's default is unlimited, so a worker
+            # that dies deterministically is restarted forever. This loop runs 30
+            # iterations inside a 60m budget, and real_ipc is NOT excluded below —
+            # that family is documented in pyproject as crashing workers under
+            # `-n auto`. Without a cap, one such crash burns the entire job with
+            # nothing to show (the same shape as run 31966179187).
             uv run pytest \
-              -n auto --dist loadscope \
+              -n auto --dist loadscope --max-worker-restart=2 \
               -m "not docker and not live and not user_flow and not quarantine" \
               -o "addopts=--strict-config --strict-markers" \
               --tb=line -q --no-header 2>&1 \

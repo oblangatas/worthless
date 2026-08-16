@@ -611,6 +611,39 @@ def detect_thread_leak(request):
         )
 
 
+@pytest.hookimpl(trylast=True)
+def pytest_configure(config):
+    """Downgrade ``timeout_method`` to ``signal`` when there is no worker to kill.
+
+    ``timeout_method = "thread"`` (pyproject) makes a timeout call ``os._exit()``.
+    That is exactly right inside an xdist worker: the worker is expendable, the
+    master reports "worker 'gwN' crashed while running <nodeid>" as one honest
+    failure, and the session survives. It is exactly WRONG with no xdist, where
+    the process being killed is pytest itself — exit 1, no summary, no test
+    report, no indication which test did it.
+
+    Both halves of that were shipped broken on this branch and caught by CI, so
+    this decides it from the actual run shape instead of relying on every caller
+    to remember a flag. It has to: ``-o addopts=`` (used by several CI steps and
+    by scripts/hooks/live_e2e_gate.py) wipes ``-n auto`` while leaving
+    ``timeout_method`` set, silently producing the serial+thread combination.
+
+    trylast so it runs after pytest-timeout's own ``pytest_configure``, which is
+    what populates ``_env_timeout_method`` (pytest_timeout.py:160) — the value
+    actually read per test at ``_get_item_settings``.
+
+    Note: ``--noconftest`` skips this file entirely, so any such invocation still
+    has to pass ``--timeout-method=signal`` explicitly.
+    """
+    if hasattr(config, "workerinput"):
+        return  # inside an xdist worker — `thread` is the whole point
+    if getattr(config.option, "numprocesses", None) not in (None, 0):
+        return  # parallel: a worker will do the dying
+    config.option.timeout_method = "signal"
+    if hasattr(config, "_env_timeout_method"):
+        config._env_timeout_method = "signal"
+
+
 def pytest_collection_modifyitems(config, items):
     """Give real-process test families timeout headroom, then mark quarantined."""
     # Both families drive REAL processes, so their runtime is dominated by
