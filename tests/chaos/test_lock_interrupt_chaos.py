@@ -195,7 +195,13 @@ def _child_env(te: TrialEnv) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
-def _resolve_seam(first_shard: float | None) -> float:
+def _resolve_seam(
+    first_shard: float | None,
+    *,
+    returncode: int | None = None,
+    elapsed: float | None = None,
+    stderr: str = "",
+) -> float:
     """Turn the probe result into a usable seam, or refuse to run.
 
     A seam the probe could not measure is a BROKEN HARNESS, not a 0.5.
@@ -209,19 +215,44 @@ def _resolve_seam(first_shard: float | None) -> float:
 
     So refuse. A red here means "the harness could not calibrate", which is
     actionable; a vacuous green is not.
+
+    Two very different faults produce the SAME symptom, because the probe loop
+    also exits when the child does: a lock too slow to write its first shard
+    inside ``MAX_SEAM``, and a lock that fails outright and exits early. They
+    need opposite fixes — raise the ceiling, versus go fix the product — so the
+    message carries the child's exit code, elapsed time and stderr to tell them
+    apart without a second CI round-trip.
     """
     if first_shard is not None:
         return first_shard
+
+    if returncode == 0:
+        verdict = (
+            "the warm-up lock EXITED CLEANLY without the probe ever seeing a "
+            "shard row. Either it finished between 4ms polls (very fast runner) "
+            "or it wrote no shards at all. Check the stderr tail below."
+        )
+    elif returncode is not None:
+        verdict = (
+            f"the warm-up lock FAILED (exit {returncode}). This is a PRODUCT or "
+            "environment fault, not a slow runner — raising MAX_SEAM would only "
+            "hide it. Read the stderr tail below."
+        )
+    else:
+        verdict = "the warm-up lock never exited (killed by the harness)."
+
+    detail = f"  child: exit={returncode} elapsed={elapsed:.2f}s\n" if elapsed is not None else ""
+    tail = f"  stderr tail:\n{stderr[-800:]}\n" if stderr.strip() else "  stderr: (empty)\n"
+
     pytest.fail(
         "chaos seam calibration FAILED — no shard row appeared within "
         f"MAX_SEAM={MAX_SEAM}s during the warm-up lock, so the orphan-vulnerable "
         "window could not be located.\n"
-        "  This is NOT a product failure. It means the harness cannot aim.\n"
+        f"  Diagnosis: {verdict}\n"
+        f"{detail}"
         "  Refusing to substitute a fabricated seam: every storm test would "
         "centre its jitter on it, miss the window, and pass vacuously.\n"
-        "  Likely causes: the runner is slow enough that the lock needs more "
-        f"than {MAX_SEAM}s to write its first shard (raise MAX_SEAM), or the "
-        "warm-up lock is failing outright (run `worthless lock` by hand)."
+        f"{tail}"
     )
 
 
@@ -240,7 +271,9 @@ def seam(tmp_path_factory: pytest.TempPathFactory) -> float:
         cwd=str(te.repo),
         start_new_session=True,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        # stderr is CAPTURED, not discarded: when calibration fails it is the
+        # only thing that distinguishes "runner too slow" from "lock is broken".
+        stderr=subprocess.PIPE,
     )
     t0 = time.time()
     first_shard: float | None = None
@@ -264,7 +297,19 @@ def seam(tmp_path_factory: pytest.TempPathFactory) -> float:
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=5)
-    return _resolve_seam(first_shard)
+    elapsed = time.time() - t0
+    err = ""
+    if proc.stderr is not None:
+        try:
+            err = proc.stderr.read().decode("utf-8", errors="replace")
+        finally:
+            proc.stderr.close()
+    return _resolve_seam(
+        first_shard,
+        returncode=proc.returncode,
+        elapsed=elapsed,
+        stderr=err,
+    )
 
 
 def _delays_for(seam_s: float) -> tuple[float, ...]:
