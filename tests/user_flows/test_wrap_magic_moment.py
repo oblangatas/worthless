@@ -50,7 +50,11 @@ def test_wrap_child_reaches_proxy_via_env_url(tmp_path: Path) -> None:
     Uses ``WORTHLESS_PORT`` to avoid colliding with any real daemon on
     8787 on the dev machine.
     """
-    worthless_bin = shutil.which("worthless")
+    # worthless-d4h2: honour the same override the other live tests use. Under
+    # `uv run pytest` the project .venv wins PATH, so shutil.which() resolved the
+    # BRANCH build even during the installed-wheel CI step — this test sat in the
+    # wheel run looking covered while proving nothing about the shipped artifact.
+    worthless_bin = os.environ.get("WORTHLESS_TEST_BIN") or shutil.which("worthless")
     if worthless_bin is None:
         pytest.skip("worthless CLI not on PATH (install with `uv sync` first)")
 

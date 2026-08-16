@@ -71,6 +71,11 @@ jobs:
               case "$f" in
                 tests/user_flows/*) relevant=true ;;
                 src/worthless/cli/*|src/worthless/storage/*|src/worthless/crypto/*) relevant=true ;;
+                # worthless-ax9d added src/worthless/proxy/** to the PUSH path
+                # filter above but not to this PR-side list, so a proxy-only PR
+                # skipped this whole job — wheel step included. These live tests
+                # drive the real proxy daemon; the two lists must agree.
+                src/worthless/proxy/*) relevant=true ;;
                 pyproject.toml|uv.lock) relevant=true ;;
                 .github/actions/setup-uv-python/*) relevant=true ;;
                 .github/workflows/user-flows.yml) relevant=true ;;
