@@ -36,7 +36,17 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.user_flow
+# The global default is 30s (pyproject) and the branch build keeps it. Only the
+# installed-wheel run needs more: uv warms its tool env on the first call to a
+# freshly installed binary (measured 5.3s cold vs 0.5s warm), and this test
+# spawns the binary several times. Raising it unconditionally would drop the
+# 30s guard on the branch run too, where a hang is a real signal.
+_TIMEOUT_BUDGET = 60 if os.environ.get("WORTHLESS_TEST_BIN") else 30
+pytestmark = [
+    pytest.mark.user_flow,
+    pytest.mark.wheel_artifact,
+    pytest.mark.timeout(_TIMEOUT_BUDGET),
+]
 
 _TIMEOUT_S = 60.0
 
@@ -89,7 +99,15 @@ class _ScriptedProvider(http.server.BaseHTTPRequestHandler):
 
 
 def _worthless_bin() -> Path:
-    return Path(sys.executable).parent / "worthless"
+    """The console script under test.
+
+    Defaults to the one beside the interpreter running the tests — the branch
+    build. ``WORTHLESS_TEST_BIN`` aims this at a different binary, so CI can run
+    the same test against an installed wheel: the artifact a user actually gets
+    (worthless-d4h2). Without that, a packaging-only defect passes every test.
+    """
+    override = os.environ.get("WORTHLESS_TEST_BIN")
+    return Path(override) if override else Path(sys.executable).parent / "worthless"
 
 
 def _health(port: int, deadline: float) -> dict | None:

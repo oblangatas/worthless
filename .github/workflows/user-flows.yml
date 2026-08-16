@@ -71,6 +71,11 @@ jobs:
               case "$f" in
                 tests/user_flows/*) relevant=true ;;
                 src/worthless/cli/*|src/worthless/storage/*|src/worthless/crypto/*) relevant=true ;;
+                # worthless-ax9d added src/worthless/proxy/** to the PUSH path
+                # filter above but not to this PR-side list, so a proxy-only PR
+                # skipped this whole job — wheel step included. These live tests
+                # drive the real proxy daemon; the two lists must agree.
+                src/worthless/proxy/*) relevant=true ;;
                 pyproject.toml|uv.lock) relevant=true ;;
                 .github/actions/setup-uv-python/*) relevant=true ;;
                 .github/workflows/user-flows.yml) relevant=true ;;
@@ -143,6 +148,52 @@ jobs:
           mkdir -p user-flow-traces
           uv sync --extra dev --extra test
           uv run pytest tests/user_flows -m user_flow 2>&1 | tee user-flow-traces/pytest-${{ runner.os }}.log
+
+      # worthless-d4h2: the step above proves the BRANCH build works. It cannot
+      # catch a defect that only exists once the package is built and installed
+      # — the artifact users actually get. Three bugs reached a release past a
+      # green suite for exactly this reason (worthless-6xuv/dc26/ax9d), all
+      # found by hand on a real install.
+      #
+      # So: build the wheel, install it the way `curl worthless.sh | sh` does,
+      # and re-run the SAME live tests against that binary via
+      # WORTHLESS_TEST_BIN. Linux only — these tests need no launchd, and macOS
+      # runners cost ~10x for no extra coverage of this specific gap.
+      - name: Re-run live tests against an INSTALLED wheel
+        if: ${{ steps.detect.outputs.relevant == 'true' && runner.os == 'Linux' }}
+        env:
+          UV_CACHE_DIR: /tmp/uv-cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p user-flow-traces
+          uv build --wheel
+          # find, not `ls` — shellcheck SC2012, and a glob is safer besides.
+          WHEEL="$(find dist -maxdepth 1 -name '*.whl' -type f | head -1)"
+          test -n "$WHEEL" || { echo "no wheel produced by uv build"; exit 1; }
+          echo "installing $WHEEL"
+          uv tool install --force "$WHEEL"
+          BIN="$(uv tool dir --bin)/worthless"
+          test -x "$BIN" || { echo "installed entry point missing at $BIN"; exit 1; }
+          # Anti-vacuity: name the artifact under test, so a green run can never
+          # be silently about the branch copy again.
+          echo "wheel binary: $BIN"
+          echo "wheel version: $($BIN --version)"
+          # Only tests marked `wheel_artifact` can actually see this binary —
+          # they spawn it as a subprocess. The rest of tests/user_flows uses
+          # typer's CliRunner IN-PROCESS, importing the `uv run` .venv, i.e. the
+          # branch source. Running those here would re-prove the branch build a
+          # second time under a banner that says "INSTALLED wheel" — the exact
+          # looks-covered-proves-nothing failure this whole lane exists to kill.
+          # 4 honest tests beat 30 vacuous ones.
+          WORTHLESS_TEST_BIN="$BIN" uv run pytest tests/user_flows \
+            -m "user_flow and wheel_artifact" \
+            2>&1 | tee user-flow-traces/pytest-installed-wheel.log
+          # Anti-vacuity: a marker typo or a rename would silently collect zero
+          # tests and still exit 0 here. Assert we actually ran some.
+          grep -qE '[1-9][0-9]* passed' user-flow-traces/pytest-installed-wheel.log || {
+            echo "wheel step collected no passing tests — the guard proved nothing"; exit 1; }
+          uv tool uninstall worthless || true
 
       - name: Render terminal traces
         if: ${{ always() && steps.detect.outputs.relevant == 'true' }}

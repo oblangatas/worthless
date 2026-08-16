@@ -2,6 +2,12 @@
 # Service lifecycle live pack — Linux systemd user unit. See ../wor-193-live-checklist.md
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=engineering/testing/scripts/_live-pack-lib.sh
+source "${SCRIPT_DIR}/_live-pack-lib.sh"
+# worthless-d4h2: name the binary before proving anything with it.
+lp_use_binary
+
 PORT="${WORTHLESS_PORT:-8787}"
 UNIT="${HOME}/.config/systemd/user/worthless-proxy.service"
 
