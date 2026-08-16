@@ -3,7 +3,7 @@
 #
 # The verify-tag script is the single source of truth for the fatal
 # GPG-tag verification used by deploy-worker.yml's `verify` and `deploy`
-# jobs (WOR-323). This test stubs out `git verify-tag` (which needs real
+# jobs (WOR-333). This test stubs out `git verify-tag` (which needs real
 # signed tags we don't sign here), runs the script against 7 input cases,
 # and asserts each behaves as expected. The load-bearing cases are the
 # multi-key armor decoy attack (cases 5 + 6) and fingerprint mismatches
@@ -189,6 +189,10 @@ verify_logic "$SINGLE2" "$KEY1_FPR" >/dev/null 2>&1; assert_exit "single key2, p
 # the new checkout leaves, then run the guard and assert the object became a
 # tag. Unsigned annotated tag is enough — this pins the FETCH, not the GPG check
 # (cases 1-7 cover that).
+# Each guard below returns a DISTINCT exit code. The case runs with output
+# suppressed, so a bare `return 2` everywhere reports "got exit 2" and says
+# nothing about which step broke — which cost a full CI cycle to chase once
+# already. The assert prints the code, so the code has to carry the information.
 tagfetch_case() {
   local root; root=$(mktemp -d)
   git init -q --bare "$root/origin.git"
@@ -203,9 +207,9 @@ tagfetch_case() {
   git remote add origin "$root/origin.git" && git push -q origin HEAD:refs/heads/main v9.9.9
   local sha; sha=$(git rev-parse HEAD)
 
-  git clone -q --no-tags "$root/origin.git" "$root/work" && cd "$root/work" || return 2
+  git clone -q --no-tags "$root/origin.git" "$root/work" && cd "$root/work" || return 3
   git update-ref refs/tags/v9.9.9 "$sha"           # lightweight → reproduces the bug
-  [ "$(git cat-file -t v9.9.9)" = "commit" ] || { cd /; rm -rf "$root"; return 2; }
+  [ "$(git cat-file -t v9.9.9)" = "commit" ] || { cd /; rm -rf "$root"; return 4; }
 
   # the guard, verbatim from verify-tag.sh
   if [ "$(git cat-file -t v9.9.9 2>/dev/null || true)" != "tag" ]; then
@@ -236,7 +240,7 @@ _fixture_repo() {
 # signature for v0.1.0 must not authorise a publish of v9.9.9.
 tagname_case() {
   local root; root=$(mktemp -d)
-  _fixture_repo "$root" || { cd / || return 2; rm -rf "$root"; return 2; }
+  _fixture_repo "$root" || { cd / || return 6; rm -rf "$root"; return 5; }
   git tag -a v0.1.0 -m v0.1.0
   git update-ref refs/tags/v9.9.9 "$(git rev-parse v0.1.0)"   # same object, different ref
   local embedded; embedded=$(git cat-file tag v9.9.9 2>/dev/null | sed -n 's/^tag //p' | head -1)
@@ -249,7 +253,7 @@ tagname_case >/dev/null 2>&1; assert_exit "tag object names a different release 
 # between checkout and fetch looks like.
 tagpeel_case() {
   local root; root=$(mktemp -d)
-  _fixture_repo "$root" || { cd / || return 2; rm -rf "$root"; return 2; }
+  _fixture_repo "$root" || { cd / || return 6; rm -rf "$root"; return 5; }
   local first; first=$(git rev-parse HEAD)
   git tag -a v9.9.9 -m v9.9.9
   git commit -q --allow-empty -m two                      # HEAD moves on
