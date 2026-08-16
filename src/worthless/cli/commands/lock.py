@@ -1947,7 +1947,8 @@ def _print_lock_result(
         # it off the partial-failure path so nothing above LOCK FAILED reads as OK.
         if fresh_count and not openclaw_failed:
             console.print_hint(
-                "Next: run `worthless wrap <command>` or `worthless up` for daemon mode"
+                "Next: run `worthless wrap <command>`, or `worthless up` to keep a "
+                "proxy running in this terminal."
             )
         # WOR-779: closure — the "pull anytime" reassurance home. Suppressed on
         # a partial failure — don't reassure when the lock didn't fully succeed.
