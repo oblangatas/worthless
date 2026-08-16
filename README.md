@@ -124,3 +124,5 @@ All non-trivial contributions require a signed [Contributor License Agreement (C
 ## License
 
 [AGPL-3.0](LICENSE)
+
+<!-- WOR-874 proof: this file matches none of the deleted globs -->
