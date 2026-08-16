@@ -37,7 +37,26 @@ from typing import Any
 
 import aiosqlite
 
-__all__ = ["connect"]
+__all__ = ["connect", "open_connection"]
+
+
+async def open_connection(db_path: str, **kwargs: Any) -> aiosqlite.Connection:
+    """Open a connection the *caller* owns, without leaking the worker thread.
+
+    Drop-in for ``db = await aiosqlite.connect(path)``. Use this when the
+    connection outlives the scope that opens it — the proxy lifespan holds one
+    for the whole process — so :func:`connect`'s ``async with`` shape does not
+    fit. Only the *open* is guarded; closing stays the caller's job, and
+    ``Connection.close()`` already stops the worker on its own.
+    """
+    conn = aiosqlite.connect(db_path, **kwargs)
+    try:
+        return await conn
+    except BaseException:
+        # Same sentinel-on-failure contract as connect(); see its comment for
+        # why the returned future is deliberately not awaited.
+        conn.stop()
+        raise
 
 
 @asynccontextmanager
