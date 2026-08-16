@@ -194,6 +194,11 @@ def test_the_shipped_config_is_structurally_sound() -> None:
 # wrong before WOR-852 and both failed silently, so they are pinned here.
 
 
+def _all_steps() -> list[dict]:
+    """Every step of the scan job — used to prove a json report is consumed."""
+    return yaml.safe_load(WORKFLOW.read_text())["jobs"]["scan"]["steps"]
+
+
 def _scan_steps() -> list[dict]:
     """The two anchore/scan-action steps, in file order: gated, then informational."""
     # PyYAML resolves the bare `on:` key to True (YAML 1.1 booleans), so the
@@ -238,12 +243,43 @@ def test_the_informational_scan_does_not_inherit_the_gate_s_ignores() -> None:
         assert step.get("env", {}).get("GRYPE_CONFIG") == INFORMATIONAL_CONFIG.name, (
             f"{step.get('name')} inherits the gate's suppressions"
         )
-        # table is what puts findings in the job log; sarif (the action
-        # default) is written to a file nothing uploads, so the report
-        # reaches no human.
-        assert step["with"]["output-format"] == "table", (
-            f"{step.get('name')} writes a report nobody can read"
-        )
+        # The invariant is that findings REACH A HUMAN, not that the format is
+        # `table`. sarif (the action default) is written to a file nothing
+        # uploads, so it reaches nobody — that is the regression to catch.
+        #
+        # Two mechanisms satisfy it now:
+        #   table -> the action echoes the report itself
+        #   json  -> a later step reads it and prints a summary
+        # Asserting `table` alone would forbid the second, which is how the
+        # unmapped-findings gate gets its input (WOR-852).
+        fmt = step["with"]["output-format"]
+        assert fmt in {"table", "json"}, f"{step.get('name')} writes {fmt}, which reaches no human"
+        if fmt == "json":
+            step_id = step.get("id")
+            assert step_id, (
+                f"{step.get('name')} emits json but has no `id`, so no step can consume it"
+            )
+            # The reference may sit in `run:` or in `env:`. Passing it through
+            # env is what keeps zizmor's template-injection rule happy, so a
+            # check that only searched `run:` would forbid the safer form.
+            #
+            # Search only steps AFTER the producing one. Actions cannot read an
+            # output before the step that writes it, so a reference sitting
+            # earlier is stale — and would satisfy this test while the findings
+            # still reached nobody.
+            all_steps = _all_steps()
+            producer = next(
+                i for i, candidate in enumerate(all_steps) if candidate.get("id") == step_id
+            )
+            consumed = any(
+                f"steps.{step_id}.outputs.json"
+                in (str(s.get("run") or "") + str(s.get("env") or ""))
+                for s in all_steps[producer + 1 :]
+            )
+            assert consumed, (
+                f"{step.get('name')} emits json that no later step reads — "
+                "the findings reach nobody, which is exactly what this test forbids"
+            )
 
 
 def test_the_informational_config_suppresses_nothing() -> None:

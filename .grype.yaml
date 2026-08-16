@@ -321,3 +321,61 @@ ignore:
     # write path to inject into; there isn't one.
     reason: "CPython configparser write-injection; fix only in 3.15.0b4 (pre-release). Unreachable — swept whole image 2026-08-03: only pip writes via configparser and it is not resident. Tracking WOR-852."
     expiry: "2027-01-31"  # set 2026-08-03 on the six-base measurement above, not blind.
+
+  # ── Debian perl-base, install-time tooling only (WOR-852 Track D) ────
+  # These seven became VISIBLE when the unmapped-findings gate landed
+  # (scripts/hooks/check_grype_unmapped_findings.py). They were always in the
+  # image; `only-fixed: true` dropped them because grype has no fixed version,
+  # so three CRITICALS sat behind a green build. That silence was the bug.
+  #
+  # WHY NOT JUST REMOVE PERL. Measured 2026-08-10 in the shipped image:
+  #   dpkg-query perl-base -> Essential=yes Priority=required
+  # Debian marks it undeletable; removing it breaks dpkg and apt. There is no
+  # bump either — every one reports fix=not-fixed, Debian has shipped nothing.
+  #
+  # REACHABILITY, measured not assumed. 18 files in the image invoke perl.
+  # Every single one is package or system administration tooling:
+  #   debconf-* (7)          package configuration
+  #   dpkg-reconfigure, dpkg-preconfigure, dpkg-fsys-usrunmess
+  #   deb-systemd-helper, deb-systemd-invoke, update-rc.d
+  #   adduser, deluser, pam-auth-update, pam_getenv, c_rehash
+  # None of that runs in the container's runtime path. The image starts
+  # `python /deploy/start.py` as a non-root user; no package management, no
+  # user administration, no PAM reconfiguration happens after build.
+  # src/worthless, deploy/ and the Dockerfile contain ZERO perl invocations
+  # (word-boundary grep, 2026-08-10).
+  #
+  # So exploiting any of these requires first getting arbitrary code to run in
+  # the container — at which point perl is not the interesting part. They are
+  # carried, not ignored, and this block is why.
+  #
+  # Linux: WOR-852 — re-check when Debian ships a perl-base security update,
+  # or when the base image moves off EOL Debian 12. DELETE then, do not extend.
+  - vulnerability: CVE-2026-12087
+    package: {name: perl-base, type: deb}
+    reason: "Debian perl-base, fix=not-fixed (no upstream fix to take). Essential=yes so it cannot be removed. Unreachable — every perl consumer in the image is install-time tooling (dpkg/adduser/PAM); the runtime path is python only. Tracking WOR-852."
+    expiry: "2027-01-31"
+  - vulnerability: CVE-2026-13221
+    package: {name: perl-base, type: deb}
+    reason: "Debian perl-base, fix=not-fixed. See the Track D block above: Essential, unremovable, and invoked only by install-time tooling. Tracking WOR-852."
+    expiry: "2027-01-31"
+  - vulnerability: CVE-2026-57433
+    package: {name: perl-base, type: deb}
+    reason: "Debian perl-base, fix=not-fixed. See the Track D block above: Essential, unremovable, and invoked only by install-time tooling. Tracking WOR-852."
+    expiry: "2027-01-31"
+  - vulnerability: CVE-2026-48959
+    package: {name: perl-base, type: deb}
+    reason: "Debian perl-base, fix=not-fixed. See the Track D block above: Essential, unremovable, and invoked only by install-time tooling. Tracking WOR-852."
+    expiry: "2027-01-31"
+  - vulnerability: CVE-2026-48962
+    package: {name: perl-base, type: deb}
+    reason: "Debian perl-base, fix=not-fixed. See the Track D block above: Essential, unremovable, and invoked only by install-time tooling. Tracking WOR-852."
+    expiry: "2027-01-31"
+  - vulnerability: CVE-2026-57432
+    package: {name: perl-base, type: deb}
+    reason: "Debian perl-base, fix=not-fixed. See the Track D block above: Essential, unremovable, and invoked only by install-time tooling. Tracking WOR-852."
+    expiry: "2027-01-31"
+  - vulnerability: CVE-2026-7017
+    package: {name: perl-base, type: deb}
+    reason: "Debian perl-base, fix=not-fixed. See the Track D block above: Essential, unremovable, and invoked only by install-time tooling. Tracking WOR-852."
+    expiry: "2027-01-31"
