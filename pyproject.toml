@@ -183,8 +183,11 @@ timeout_method = "thread"
 # WOR-582: real_ipc tests spawn real subprocess sidecars; run concurrently
 # under `-n auto` they crash xdist workers nondeterministically. Excluded from
 # the default parallel run here and run serially instead (CI: dedicated -n0
-# step; locally: `uv run pytest -m real_ipc -n0`). Root cause tracked in
-# WOR-582; this is the interim quarantine.
+# step; locally: `uv run pytest -m real_ipc -n0 --timeout-method=signal`).
+# That flag is NOT optional: `-n0` has no xdist worker to sacrifice, so the
+# `thread` default above would os._exit pytest ITSELF on a timeout — exit 1,
+# no report, no clue which test. CI's serial step passes it for the same
+# reason. Root cause tracked in WOR-582; this is the interim quarantine.
 # --max-worker-restart=0: restarting a crashed worker just re-runs the hanging
 # test and pays its timeout again. Measured: restart=0 -> 6s/1 failure;
 # restart=3 -> 40s/4 failures; and no variant recovered the dropped sibling.
