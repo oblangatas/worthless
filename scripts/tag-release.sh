@@ -122,7 +122,7 @@ git push origin "$tag"
 
 echo
 echo "Tag pushed. publish.yml is now running."
-echo "Monitor at: https://github.com/shacharm2/worthless/actions"
+echo "Monitor at: https://github.com/oblangatas/worthless/actions"
 echo
 # WOR-873: the release scans BOTH architectures at severity-cutoff medium, but
 # pull requests only ever scan amd64 — arm64 is checked weekly (Monday cron).

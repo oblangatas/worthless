@@ -29,7 +29,7 @@ import sys
 # "<account-id>+<username>@users.noreply.github.com". We pin the stable numeric
 # ACCOUNT ID — which a username rename cannot change and which cannot be spoofed
 # (it is the account's permanent identifier) — NOT the username, so a rename
-# (e.g. shacharm2 -> oblangatas) doesn't lock the operator out of their own
+# (e.g. oblangatas -> oblangatas) doesn't lock the operator out of their own
 # provenance check.
 CANONICAL_AUTHOR_ID = "4841128"
 _CANONICAL_AUTHOR_RE = re.compile(

@@ -12,7 +12,7 @@ standard Linux install.
 The Linux mechanics underneath are CI-tested, but the WSL-specific layer
 (localhost forwarding, file-backed keystore, `/mnt/c` detection) is verified
 by hand, not in CI. If something here is off, [open an
-issue](https://github.com/shacharm2/worthless/issues).
+issue](https://github.com/oblangatas/worthless/issues).
 :::
 
 ## TL;DR

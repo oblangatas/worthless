@@ -20,7 +20,7 @@ IS_WINDOWS: bool = sys.platform == "win32"
 # Single source of truth for the "Platforms" section of the README. Referenced
 # from the native-Windows error message so a rename or repo move only needs a
 # change in one place.
-PLATFORMS_URL = "https://github.com/shacharm2/worthless#platforms"
+PLATFORMS_URL = "https://github.com/oblangatas/worthless#platforms"
 
 # Windows creation flags (defined here to avoid conditional imports at use sites)
 _DETACHED_PROCESS = 0x00000008

@@ -132,8 +132,8 @@ if grep -q "^\[$new_version\]:" CHANGELOG.md; then
     echo "  ✓ CHANGELOG.md: [$new_version] link reference already present"
 else
     # Derive the repo URL from `git remote get-url origin` rather than
-    # hardcoding `shacharm2/worthless` — the org/owner can change (today
-    # `shacharm2` is a personal account, not a `worthless` org). Falls
+    # hardcoding `oblangatas/worthless` — the org/owner can change (today
+    # `oblangatas` is a personal account, not a `worthless` org). Falls
     # back to the historical hardcode if origin isn't a recognisable
     # GitHub URL.
     origin_url=$(git remote get-url origin 2>/dev/null || true)
@@ -147,7 +147,7 @@ else
             owner_repo=${owner_repo%.git}
             ;;
         *)
-            owner_repo="shacharm2/worthless"
+            owner_repo="oblangatas/worthless"
             ;;
     esac
     new_link="[$new_version]: https://github.com/$owner_repo/releases/tag/v$new_version"
