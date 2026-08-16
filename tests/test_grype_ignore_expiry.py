@@ -731,11 +731,13 @@ def test_push_is_branch_scoped_so_runs_are_not_doubled() -> None:
     """
     triggers = yaml.safe_load(GATE_WORKFLOW.read_text())[True]
     push = triggers.get("push")
-    assert isinstance(push, dict) and push.get("branches"), (
-        "docker-security.yml `push` has no `branches:` restriction, so every "
-        "push to every branch runs the full gate on top of the pull_request "
-        "run for the same commit — double the runner time, and the concurrency "
-        "key cannot dedupe them because it includes github.event_name."
+    assert isinstance(push, dict) and push.get("branches") == ["main"], (
+        f"docker-security.yml `push` must be scoped to exactly ['main'], got "
+        f"{(push or {}).get('branches')!r}. Anything broader — a wildcard, an "
+        f"extra branch — puts the doubling back: every push runs the full gate "
+        f"on top of the pull_request run for the same commit, and the "
+        f"concurrency key cannot dedupe them because it includes "
+        f"github.event_name."
     )
     assert "paths" not in push and "paths-ignore" not in push, (
         "scope `push` by BRANCH, never by path — a path filter is what made "
