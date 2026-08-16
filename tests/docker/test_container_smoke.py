@@ -28,7 +28,11 @@ import pytest
 
 from worthless.proxy.config import DEFAULT_SIDECAR_CAPS
 
-pytestmark = pytest.mark.docker
+# Marked per-test, NOT module-wide. `_smoke_container_name` is pure string
+# logic and needs no daemon, so a module-level `docker` mark would exclude it
+# from the default run — leaving the guard unexercised on ordinary PRs and its
+# lines uncovered, which is the opposite of what a regression guard is for.
+# Only the test that actually drives a container carries the mark.
 
 
 _IMAGE_TAG = "worthless-sidecar:smoke"
@@ -111,6 +115,7 @@ def test_each_run_gets_its_own_container_name() -> None:
     assert _smoke_container_name() != _smoke_container_name()
 
 
+@pytest.mark.docker
 def test_container_roundtrip_succeeds_across_uid_boundary(built_image: str) -> None:
     """Full lifecycle: build → run → sidecar bind → smoke client roundtrip.
 
