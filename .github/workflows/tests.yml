@@ -53,7 +53,14 @@ jobs:
           # Parallel pass — everything EXCEPT the real-subprocess sidecar/IPC
           # family. Coverage is accumulated, not gated here. Quarantined flaky
           # tests are excluded from the gating run (WOR-578).
-          uv run pytest --reruns 1 --cov=worthless --cov-report=xml --cov-report=term-missing -n auto --dist loadscope -x -m "not live and not docker and not user_flow and not real_ipc and not quarantine"
+          # --max-worker-restart=0: for a worker killed by the `thread` timeout
+          # method, restarting just re-runs the hanging test and pays its budget
+          # again. Measured: restart=0 -> 6s/1 failure; restart=3 -> 40s/4, and
+          # no variant recovered the dead worker's dropped scope-group sibling.
+          # Scoped to THIS lane on purpose — in global addopts it also applied to
+          # the user_flow lane, whose live-proxy crashes a restart legitimately
+          # recovers, and turned a self-healing crash into a red (run 31965508132).
+          uv run pytest --reruns 1 --max-worker-restart=0 --cov=worthless --cov-report=xml --cov-report=term-missing -n auto --dist loadscope -x -m "not live and not docker and not user_flow and not real_ipc and not quarantine"
           # Serial pass — real_ipc tests that spawn real processes/sidecars;
           # kept serial because subprocess.run(waitpid) + PEP 475 EINTR-retry
           # makes pytest-timeout ineffective for these tests under xdist.

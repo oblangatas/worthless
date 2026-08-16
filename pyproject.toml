@@ -188,10 +188,17 @@ timeout_method = "thread"
 # `thread` default above would os._exit pytest ITSELF on a timeout — exit 1,
 # no report, no clue which test. CI's serial step passes it for the same
 # reason. Root cause tracked in WOR-582; this is the interim quarantine.
-# --max-worker-restart=0: restarting a crashed worker just re-runs the hanging
-# test and pays its timeout again. Measured: restart=0 -> 6s/1 failure;
-# restart=3 -> 40s/4 failures; and no variant recovered the dropped sibling.
-addopts = "--strict-config --strict-markers -n auto --dist loadscope --reruns 1 --max-worker-restart=0 -m 'not live and not docker and not user_flow and not real_ipc'"
+# --max-worker-restart=0 is deliberately NOT here. It belongs to the parallel
+# suite lane in .github/workflows/tests.yml, where it was measured: for a
+# TIMEOUT-killed worker, restarting just re-runs the hanging test and pays its
+# budget again (restart=0 -> 6s/1 failure; restart=3 -> 40s/4 failures, and no
+# variant recovered the dropped sibling). That reasoning does not generalise.
+# A worker can also die for reasons a restart legitimately recovers — the
+# user_flow lane drives live proxies and subprocesses, and a crash there
+# re-runs clean. Setting it globally applied a hang-tuned optimisation to
+# lanes it was never measured against and turned a self-recovering crash into
+# a red (run 31965508132). Scope it to the lane that earned it.
+addopts = "--strict-config --strict-markers -n auto --dist loadscope --reruns 1 -m 'not live and not docker and not user_flow and not real_ipc'"
 markers = [
     "benchmark: performance and latency regression checks",
     # `contract` removed in WOR-877 — declared here, documented in the CI

@@ -136,18 +136,44 @@ def test_timeout_method_is_thread_not_signal() -> None:
     )
 
 
-def test_worker_restart_disabled() -> None:
-    """Restarting a crashed worker re-runs the hanging test and recovers nothing.
+def test_worker_restart_disabled_only_on_the_lane_that_measured_it() -> None:
+    """``--max-worker-restart=0`` belongs to the parallel suite lane, not addopts.
 
-    Measured: ``--max-worker-restart=0`` -> 6s and one honest failure;
-    ``=3`` -> 40s and four failures, with the dropped scope-group sibling still
-    unrecovered either way. Restarts are pure cost here.
+    For a worker killed by the ``thread`` timeout method, restarting only re-runs
+    the hanging test and pays its budget again: measured 6s/1 failure at
+    restart=0 versus 40s/4 at restart=3, with the dead worker's dropped
+    scope-group sibling unrecovered either way.
+
+    That reasoning is specific to TIMEOUT kills. A worker can also die for
+    reasons a restart legitimately recovers — the user_flow lane drives live
+    proxies and subprocesses. Putting the flag in global ``addopts`` applied a
+    hang-tuned optimisation to lanes it was never measured against and turned a
+    self-recovering crash into a red (CI run 31965508132). Hence: on the lane,
+    never global.
     """
     match = _ADDOPTS.search(_pyproject_text())
     assert match is not None, "addopts missing from [tool.pytest.ini_options]"
-    assert "--max-worker-restart=0" in match.group(1), (
-        "addopts must pass --max-worker-restart=0; without it a hanging test is "
-        "re-run once per restart, each attempt paying the full timeout."
+    assert "--max-worker-restart" not in match.group(1), (
+        "--max-worker-restart must NOT be in global addopts: it then applies to "
+        "every lane, including user_flow, where a crashed worker recovers "
+        "cleanly on restart and suppressing that turns a self-healing crash into "
+        "a red. Put it on the parallel lane in .github/workflows/tests.yml."
+    )
+
+    text = _CONTINUATION.sub(" ", (GITHUB / "workflows" / "tests.yml").read_text(encoding="utf-8"))
+    parallel_lanes = [ln for ln in text.splitlines() if "pytest" in ln and "-n auto" in ln]
+    assert parallel_lanes, (
+        "no `-n auto` pytest lane found in tests.yml — this guard lost sight of "
+        "the lane it protects. Update it rather than leaving it green."
+    )
+    # At least one, not every one. tests.yml also runs a deliberately narrow
+    # macOS subset lane that this flag was never measured against, and demanding
+    # it there would repeat the over-application this test exists to prevent.
+    assert any("--max-worker-restart=0" in ln for ln in parallel_lanes), (
+        "no `-n auto` lane in tests.yml passes --max-worker-restart=0. It was "
+        "moved out of global addopts on purpose, so if no lane carries it the "
+        "setting is simply gone and a hanging test is re-run once per restart, "
+        f"each attempt paying the full budget. Lanes: {parallel_lanes}"
     )
 
 
