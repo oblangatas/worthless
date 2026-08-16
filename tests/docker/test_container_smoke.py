@@ -21,6 +21,7 @@ import json
 import shutil
 import subprocess
 import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -85,6 +86,31 @@ def built_image() -> str:
     return _IMAGE_TAG
 
 
+def _smoke_container_name() -> str:
+    """A container name unique to this invocation.
+
+    ponytail: uuid4, not pid or a counter. A retry runs in the SAME process,
+    so a pid suffix would collide exactly when it matters most.
+    """
+    return f"worthless-sidecar-smoke-{uuid.uuid4().hex[:12]}"
+
+
+def test_each_run_gets_its_own_container_name() -> None:
+    """Two invocations must not ask docker for the same container name.
+
+    A fixed name means a retry collides with the previous attempt's container
+    while it is still shutting down. `--rm` does not save us: it only fires on
+    a clean exit, and this job runs under pytest-rerunfailures, so the retry
+    is exactly when the old container is least likely to be gone.
+
+    Observed on PR #495 run 31524783177 — `docker: Conflict. The container
+    name "/worthless-sidecar-smoke" is already in use`, surfacing as
+    `handshake step missing` with an empty steps dict. That reads as a product
+    failure, so the next person debugs the proxy instead of the harness.
+    """
+    assert _smoke_container_name() != _smoke_container_name()
+
+
 def test_container_roundtrip_succeeds_across_uid_boundary(built_image: str) -> None:
     """Full lifecycle: build → run → sidecar bind → smoke client roundtrip.
 
@@ -103,7 +129,7 @@ def test_container_roundtrip_succeeds_across_uid_boundary(built_image: str) -> N
             "run",
             "--rm",
             "--name",
-            "worthless-sidecar-smoke",
+            _smoke_container_name(),
             built_image,
         ],
         capture_output=True,
