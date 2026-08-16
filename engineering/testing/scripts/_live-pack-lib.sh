@@ -27,7 +27,20 @@ lp_use_binary() {
       echo "WORTHLESS_BIN is set but not executable: $WORTHLESS_BIN" >&2
       exit 1
     fi
-    PATH="$(cd "$(dirname "$WORTHLESS_BIN")" && pwd):$PATH"
+    # Select the named file EXACTLY. Prepending dirname($WORTHLESS_BIN) and then
+    # resolving bare `worthless` is not the same thing: if the override has a
+    # different basename (worthless-0.3.12), or a second `worthless` sits in that
+    # directory, PATH would pick the other one and the pack would report a green
+    # run for a binary nobody asked for. In a lane whose entire purpose is "prove
+    # the artifact you named", that is the bug it exists to prevent.
+    #
+    # A private shim dir holding one symlink named `worthless` makes the
+    # resolution exact while keeping the packs' bare `worthless` calls readable.
+    local shim_dir target
+    target="$(cd "$(dirname "$WORTHLESS_BIN")" && pwd)/$(basename "$WORTHLESS_BIN")"
+    shim_dir="$(mktemp -d "${TMPDIR:-/tmp}/worthless-bin-shim.XXXXXX")"
+    ln -s "$target" "$shim_dir/worthless"
+    PATH="$shim_dir:$PATH"
     export PATH
   fi
 
@@ -37,7 +50,13 @@ lp_use_binary() {
     echo "no 'worthless' on PATH — set WORTHLESS_BIN or install it first" >&2
     exit 1
   fi
-  echo "  binary under test: ${resolved}"
+  # Assert, don't assume: if an override was given, what actually resolved must
+  # BE that file (-ef compares inode, so the symlink hop is fine).
+  if [[ -n "${WORTHLESS_BIN:-}" && ! "$resolved" -ef "$WORTHLESS_BIN" ]]; then
+    echo "resolved '$resolved' is not WORTHLESS_BIN '$WORTHLESS_BIN'" >&2
+    exit 1
+  fi
+  echo "  binary under test: ${WORTHLESS_BIN:-$resolved}"
   echo "  version:           $(worthless --version 2>&1 | tail -1)"
 }
 
