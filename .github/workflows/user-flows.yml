@@ -142,7 +142,21 @@ jobs:
           set -euo pipefail
           mkdir -p user-flow-traces
           uv sync --extra dev --extra test
-          uv run pytest tests/user_flows -m user_flow 2>&1 | tee user-flow-traces/pytest-${{ runner.os }}.log
+          # --timeout-method=signal: keep this lane on the pre-existing behaviour.
+          # The repo default is `thread` (os._exit), which is right for the main
+          # parallel suite where a killed worker is expendable and xdist reports
+          # it as one honest failure. These journeys drive a live proxy and real
+          # subprocesses, and on macOS runners the traffic-metering flow kills its
+          # worker; under `thread` that became a crash the worker could not
+          # survive, and with restarts enabled a crash-restart loop burned the
+          # whole 15m job budget (run 31966179187). `signal` raises inside the
+          # test instead, so a slow flow is a reported failure that `--reruns 1`
+          # can retry -- exactly how this lane behaved before this PR.
+          # --max-worker-restart=2 bounds the blast radius regardless: xdist's
+          # default is unlimited, so a worker that dies deterministically is
+          # restarted forever and eats the job's whole 15m budget instead of
+          # failing. Two is enough to ride out a one-off, small enough to fail fast.
+          uv run pytest tests/user_flows -m user_flow --timeout-method=signal --max-worker-restart=2 2>&1 | tee user-flow-traces/pytest-${{ runner.os }}.log
 
       - name: Render terminal traces
         if: ${{ always() && steps.detect.outputs.relevant == 'true' }}
