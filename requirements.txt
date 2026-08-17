@@ -81,7 +81,7 @@ pycparser==3.0 ; implementation_name != 'PyPy' and platform_python_implementatio
     # via cffi
 pydantic==2.12.5
     # via fastapi
-pydantic-core==2.41.5
+pydantic-core==2.48.0
     # via pydantic
 pygments==2.20.0
     # via rich
