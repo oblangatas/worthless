@@ -49,6 +49,8 @@ cosign verify ghcr.io/oblangatas/worthless-proxy:0.3.12 \
 
 The regex pins the verifier to tag-triggered runs of the publish workflow. Install cosign via `brew install cosign` or see [sigstore.dev/install](https://www.sigstore.dev/install).
 
+**Verifying an image older than 0.3.9?** The signing identity is baked into each signature when it is made, and this project's GitHub account was renamed partway through its release history. Images **0.3.9 and later** (including `latest`) carry `oblangatas`, as above. Images **0.3.8 and earlier** carry `shacharm2` — substitute it in both the identity regexp and `--certificate-github-workflow-repository`, or verification will fail against a signature that is perfectly valid. Nothing else about the check changes.
+
 If you don't run this, you still get [SLSA build provenance](https://slsa.dev/) and an SBOM attached to the image manifest — they're just not cryptographically verified as coming from a specific workflow run.
 
 ## Troubleshooting
@@ -57,7 +59,7 @@ If you don't run this, you still get [SLSA build provenance](https://slsa.dev/) 
 GHCR packages are private by default on first publish. Our CI tries to flip visibility to public automatically; if that fails the release workflow shows a red "Flip GHCR package visibility" job with the exact `gh api` command to run once. Until that's done, the image exists but isn't pullable.
 
 **`cosign verify` returns "no matching signatures".**
-You're probably using an older image published before signing was added (pre v0.3.1), or the identity regex needs to match the owner of the repo you're pulling from (change both `oblangatas` occurrences if you forked).
+You're probably using an older image published before signing was added (pre v0.3.1), or the identity regex needs to match the owner of the repo you're pulling from (change all three `oblangatas` occurrences if you forked — the image path, the identity regexp, and `--certificate-github-workflow-repository`).
 
 ## Compared to
 
