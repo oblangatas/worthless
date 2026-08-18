@@ -42,11 +42,30 @@ class TestRecoveryNoteDisclosesResidue:
             "must say the copy predates the lock"
         )
 
-    def test_recovery_note_names_last_good(self) -> None:
-        """`.last-good` is the persistent one — the ring self-heals after five
-        writes, this does not. Disclosing only `.bak` would repeat the same
-        false-completeness in a smaller form."""
+    def test_recovery_note_names_both_backup_kinds(self) -> None:
+        """Both kinds must be named, because which one retains the pre-lock key
+        depends on daemon state.
+
+        Measured against ghcr.io/openclaw/openclaw:2026.5.3-1 — seed a plaintext
+        key, boot the gateway, then rewrite the config the way lock does:
+
+        * ``.bak`` and ``.bak.1`` STILL held the pre-lock key afterwards.
+        * ``.last-good`` had been re-promoted to the post-lock contents, because
+          the daemon was running and observed the change. With the daemon down at
+          lock time it keeps the old copy until it next starts.
+
+        An earlier draft of this note claimed ``.last-good`` "never rotates away"
+        and treated the ring as self-healing. The probe showed the opposite
+        emphasis, so the wording must not lean on either file alone.
+        """
         assert "last-good" in _RECOVERY_NOTE_TEXT
+        assert "openclaw.json.bak" in _RECOVERY_NOTE_TEXT
+
+    def test_recovery_note_does_not_claim_last_good_is_permanent(self) -> None:
+        """Guard against the specific false claim the probe disproved."""
+        text = _RECOVERY_NOTE_TEXT.lower()
+        assert "never rotates" not in text
+        assert "persists indefinitely" not in text
 
     def test_recovery_note_contains_no_key_material(self) -> None:
         """SR-04: the note names paths, never bytes."""

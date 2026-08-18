@@ -24,12 +24,19 @@ from worthless.openclaw import integration as _oc_integration
 # look if openclaw.json is damaged after a failed lock.
 #
 # WOR-599 adds the other half of the truth. OpenClaw writes these itself, as
-# verbatim copies of the config:
-#   * openclaw.json.bak(.1…4) — a 5-slot ring, rewritten pre-edit on every
-#     config write, so a pre-lock copy ages out after five writes.
-#   * openclaw.json.last-good — written at gateway startup and NOT rotated;
-#     a pre-lock copy can persist indefinitely.
-# If the config held a plaintext apiKey when they were written — the normal case
+# verbatim copies of the config. Measured against the pinned image
+# (ghcr.io/openclaw/openclaw:2026.5.3-1), seeding a plaintext key, booting the
+# gateway, then rewriting the config the way lock does:
+#   * openclaw.json.bak(.1…4) — a 5-slot ring written pre-edit on every config
+#     write. OBSERVED: both .bak and .bak.1 still held the pre-lock key after
+#     the rewrite. This is the file that actually retains it, until five further
+#     writes age it out.
+#   * openclaw.json.last-good — promoted when the gateway observes a valid
+#     config. OBSERVED: re-promoted to the post-lock contents within seconds
+#     when the daemon was RUNNING. But promotion only happens when the daemon
+#     next observes the config, so if it is down at lock time (common — the user
+#     locks, then restarts) the pre-lock copy persists until it starts again.
+# If the config held a plaintext apiKey when these were written — the normal case
 # for anyone who used OpenClaw before installing Worthless — that key is still in
 # them after `worthless lock`. Recommending a restore from .bak without saying so
 # would have doctor contradict lock's "your key is protected".
@@ -42,11 +49,13 @@ _RECOVERY_NOTE_TEXT = (
     "Recovery: if openclaw.json is damaged, restore from "
     "~/.openclaw/openclaw.json.bak "
     "(written by the openclaw daemon on each config change). "
-    "Note: that file — and ~/.openclaw/openclaw.json.last-good, which the daemon "
-    "never rotates away — are verbatim copies of your config. If either was "
-    "written before you locked, it still holds your original API key in "
-    "plaintext. Worthless does not touch them: they are OpenClaw's own recovery "
-    "files. Rotate that key, or delete these files once OpenClaw is healthy."
+    "Note: these are verbatim copies of your config, so one written before you "
+    "locked still holds your original API key in plaintext. "
+    "openclaw.json.bak (and .bak.1 …) keep it until five further config writes "
+    "age it out; openclaw.json.last-good keeps it until the daemon next starts "
+    "and re-promotes. Worthless does not touch them — they are OpenClaw's own "
+    "recovery files. Rotate that key, or delete these files once OpenClaw is "
+    "healthy."
 )
 
 check_id = "openclaw"
