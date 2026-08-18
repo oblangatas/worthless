@@ -379,3 +379,62 @@ ignore:
     package: {name: perl-base, type: deb}
     reason: "Debian perl-base, fix=not-fixed. See the Track D block above: Essential, unremovable, and invoked only by install-time tooling. Tracking WOR-852."
     expiry: "2027-01-31"
+
+  # --- CVE-2026-14456: openssl / libssl3 (QUIC server) -----------------------
+  #
+  # NOT "unreachable" — NOT PRESENT. This is a stronger claim than the blocks
+  # above and it is worth stating precisely, because the obvious remediation
+  # makes things WORSE.
+  #
+  # The bug is unbounded memory growth in OpenSSL's QUIC SERVER listener queue:
+  # a peer floods QUIC Initial packets carrying unknown connection IDs, and
+  # per-channel state queues without limit until the process dies. CWE-770.
+  # OpenSSL themselves rate it LOW; grype reports High from a mechanical CVSS
+  # DoS score, not the CNA's assessment.
+  #
+  # Affected: 3.5.0-3.5.7, 3.6.0-3.6.3, 4.0.0-4.0.1. Per the OpenSSL advisory
+  # the defect has existed since 3.5 — the release that ADDED the QUIC server.
+  #
+  # Measured against the exact pinned base digest in our Dockerfile
+  # (python:3.13-slim-bookworm@sha256:fcbd8dfc2605..., Debian 12):
+  #
+  #     $ openssl version
+  #     OpenSSL 3.0.20 7 Apr 2026
+  #     $ openssl help | grep -ci quic
+  #     0
+  #     $ dpkg-query -W openssl libssl3
+  #     openssl  3.0.20-1~deb12u2
+  #     libssl3  3.0.20-1~deb12u2
+  #
+  # 3.0.20 predates the QUIC server by five minor releases. The vulnerable
+  # code is not compiled into this image.
+  #
+  # `fix=not-fixed` is Debian TRIAGE LAG, not an upstream gap: the security
+  # tracker marks every suite vulnerable until someone triages, and Debian bug
+  # #1144615 is untriaged with no urgency assigned. Expect this to be marked
+  # not-affected upstream well before the expiry below.
+  #
+  # DO NOT "FIX" THIS BY BUMPING THE BASE IMAGE.
+  #   bookworm (current)  openssl 3.0.20  QUIC absent          -> safe
+  #   trixie   (newer)    openssl 3.5.6   INSIDE affected range -> exposed
+  # Moving bookworm -> trixie would convert this false positive into a genuine
+  # exposure. The older base is the safer one here.
+  #
+  # Reachability fails twice over even if the code were present: zero
+  # aioquic/quic/http3 entries in uv.lock, uvicorn serves HTTP/1.1 and H2 over
+  # TCP, and Python's `ssl` module exposes no QUIC API at all. The bug needs an
+  # OpenSSL QUIC Listener object under SSL_accept, which cannot be constructed
+  # from this stack.
+  #
+  # Expiry is deliberately SHORTER than the 2027-01-31 block above: this is a
+  # triage-lag artifact, not a long-lived accepted risk. Re-check the Debian
+  # tracker at expiry; if it is marked not-affected, DELETE these two entries
+  # rather than extending them. WOR-885.
+  - vulnerability: CVE-2026-14456
+    package: {name: openssl, type: deb}
+    reason: "OpenSSL 3.0.20 in the pinned bookworm base; QUIC server was added in 3.5, so the vulnerable code is not present (measured: `openssl help | grep -ci quic` = 0). fix=not-fixed is Debian triage lag (bug #1144615, untriaged). Do NOT bump to trixie — it ships 3.5.6, inside the affected range. WOR-885."
+    expiry: "2026-11-30"
+  - vulnerability: CVE-2026-14456
+    package: {name: libssl3, type: deb}
+    reason: "OpenSSL 3.0.20 in the pinned bookworm base; QUIC server was added in 3.5, so the vulnerable code is not present (measured: `openssl help | grep -ci quic` = 0). fix=not-fixed is Debian triage lag (bug #1144615, untriaged). Do NOT bump to trixie — it ships 3.5.6, inside the affected range. WOR-885."
+    expiry: "2026-11-30"
