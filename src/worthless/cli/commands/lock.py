@@ -1347,8 +1347,9 @@ def _print_openclaw_success_block(
     console.print_hint(
         "   • OpenClaw keeps its own config backups (~/.openclaw/openclaw.json.bak, "
         ".bak.1 …, and .last-good). Ones written before this lock still hold your "
-        "original key in plaintext — rotate it, or delete those files once "
-        "OpenClaw is healthy."
+        "original key in plaintext. Rotate that key at your provider — that is "
+        "the only action that invalidates a copy which may already have been "
+        "synced or backed up elsewhere."
     )
     # WOR-796 (scrub gap #1): a provider whose key var isn't a valid uppercase
     # SecretRef id was NOT scrubbed — its cached real key is still live in

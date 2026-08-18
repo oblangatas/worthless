@@ -29,8 +29,12 @@ from worthless.openclaw import integration as _oc_integration
 # gateway, then rewriting the config the way lock does:
 #   * openclaw.json.bak(.1…4) — a 5-slot ring written pre-edit on every config
 #     write. OBSERVED: both .bak and .bak.1 still held the pre-lock key after
-#     the rewrite. This is the file that actually retains it, until five further
-#     writes age it out.
+#     the rewrite. This is the file that actually retains it.
+#     Do NOT tell users it "ages out after five writes": rotation runs only in
+#     OpenClaw's own writer (mutate.ts -> maintainConfigBackups). Worthless
+#     rewrites openclaw.json with its own _atomic_write_json (temp + os.replace),
+#     so lock/unlock cycles never rotate the ring. A user counting their own
+#     `worthless lock` runs would wrongly conclude the copy had aged out.
 #   * openclaw.json.last-good — promoted when the gateway observes a valid
 #     config. OBSERVED: re-promoted to the post-lock contents within seconds
 #     when the daemon was RUNNING. But promotion only happens when the daemon
@@ -50,12 +54,13 @@ _RECOVERY_NOTE_TEXT = (
     "~/.openclaw/openclaw.json.bak "
     "(written by the openclaw daemon on each config change). "
     "Note: these are verbatim copies of your config, so one written before you "
-    "locked still holds your original API key in plaintext. "
-    "openclaw.json.bak (and .bak.1 …) keep it until five further config writes "
-    "age it out; openclaw.json.last-good keeps it until the daemon next starts "
-    "and re-promotes. Worthless does not touch them — they are OpenClaw's own "
-    "recovery files. Rotate that key, or delete these files once OpenClaw is "
-    "healthy."
+    "locked still holds your original API key in plaintext — "
+    "openclaw.json.bak, .bak.1 …, and openclaw.json.last-good. Worthless does "
+    "not touch them: they are OpenClaw's own recovery files, and Worthless's "
+    "own writes do not rotate them. "
+    "Rotate that key at your provider — that is the only action that "
+    "invalidates a copy which may already have been synced or backed up "
+    "elsewhere. Deleting these files afterwards is cleanup, not a fix."
 )
 
 check_id = "openclaw"

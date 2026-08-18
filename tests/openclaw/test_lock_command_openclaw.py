@@ -269,8 +269,9 @@ def test_lock_tells_user_openclaw_backups_may_hold_the_old_key(
     openclaw_present: dict[str, Path],
 ) -> None:
     """OpenClaw writes verbatim copies of its config — a ``.bak`` ring and a
-    ``.last-good`` that never rotates. A copy written before this lock still
-    holds the ORIGINAL key, so "you're protected" is only true of the live file.
+    ``.last-good`` promoted when the daemon observes the config. A copy written
+    before this lock still holds the ORIGINAL key, so "you're protected" is only
+    true of the live file.
 
     We refuse to delete those files (daemon-owned, and ``.bak`` is our own
     documented recovery path), which makes saying so the only control we have.

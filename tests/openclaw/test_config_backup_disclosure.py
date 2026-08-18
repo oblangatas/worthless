@@ -4,8 +4,9 @@ OpenClaw natively writes two kinds of backup beside ``openclaw.json``:
 
 * ``openclaw.json.bak`` (+ ``.bak.1`` … ``.bak.4``) — a 5-slot rotating ring,
   written pre-edit on every config write (``backup-rotation.ts``).
-* ``openclaw.json.last-good`` — written at gateway startup and, unlike the ring,
-  **never rotated out** (``io.observe-recovery.ts``).
+* ``openclaw.json.last-good`` — promoted when the gateway observes a valid config
+  (``io.observe-recovery.ts``). Measured: it is re-promoted to the post-lock
+  contents when the daemon is RUNNING, and keeps the pre-lock copy when it is not.
 
 Both are verbatim copies of the config. If the config held a plaintext
 ``models.providers.*.apiKey`` when they were written — the normal case for anyone
