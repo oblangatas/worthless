@@ -73,11 +73,74 @@ if [ "${IMPORTED_FINGERPRINT}" != "${NORMALIZED_FINGERPRINT}" ]; then
   exit 1
 fi
 
-# Pin gpg.program defensively: a future runner image change could ship
-# a wrapper or alternative gpg path; we want git to invoke the same
-# gpg (and inherit our GNUPGHOME) as we used for import.
-if ! git -c gpg.program=gpg verify-tag "${GITHUB_REF_NAME}"; then
+# Make sure the ANNOTATED TAG OBJECT is on disk, not just the commit it points
+# at. `actions/checkout` with `fetch-depth: 0` used to leave the tag object
+# behind; after the action bump in #469 it does not, so `git verify-tag` reports
+#
+#     error: v0.3.12: cannot verify a non-tag object of type commit
+#
+# and every publisher fails closed — which is exactly what happened to the
+# v0.3.12 tag (WOR-864). A signature cannot be checked if the object carrying it
+# was never fetched.
+#
+# Guarded on the object type so this is a no-op when the tag is already present
+# (the offline harness in test-verify-tag-multikey.sh builds its own tags and
+# must not reach the network). Failure to fetch is not fatal here: verify-tag
+# below is the real gate and still fails closed with a signature error.
+# The checkout runs with persist-credentials: false, so this fetch is
+# unauthenticated — fine while the repo is public, and the first thing to look
+# at if it ever goes private. A failure is surfaced rather than swallowed: the
+# silent version of this is exactly how WOR-864 presented, as an opaque
+# "cannot verify a non-tag object" with no hint of the real cause.
+if [ "$(git cat-file -t "${GITHUB_REF_NAME}" 2>/dev/null || true)" != "tag" ]; then
+  if ! git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}" 2>&1; then
+    echo "::notice title=Tag object fetch failed::Could not fetch refs/tags/${GITHUB_REF_NAME}. If verification fails below, this is why."
+  fi
+fi
+
+# Pin gpg.program defensively: a future runner image change could ship a wrapper
+# or alternative gpg path, and we want git to invoke the same gpg (inheriting our
+# GNUPGHOME) that we imported into. Pin gpg.format too: with `gpg.format=ssh` set
+# in any inherited config, git would verify against an allowed-signers file and
+# never consult the keyring we just built.
+if ! git -c gpg.program=gpg -c gpg.format=openpgp verify-tag "${GITHUB_REF_NAME}"; then
   echo "::error title=Unsigned or untrusted tag::Tag ${GITHUB_REF_NAME} did not verify against MAINTAINER_GPG_PUBKEY (fingerprint ${NORMALIZED_FINGERPRINT})."
+  exit 1
+fi
+
+# A good signature alone is not enough — it proves the maintainer signed SOME
+# tag, not that they signed THIS release at THIS revision. Two bindings close
+# that gap. Reaching here implies the object exists and is a properly signed
+# tag, since verify-tag above fails closed otherwise.
+#
+# 1. Bind to the checked-out revision. The fetch above rewrites the local tag
+#    ref AFTER checkout, so a tag-ref writer could repoint the remote to a
+#    different, also-validly-signed tag between the two. verify-tag would then
+#    bless that object while the job keeps executing the earlier, unverified
+#    HEAD. Refuse when the tag does not peel to what we are running.
+# 2. Bind to this release name. The tag object carries its own `tag <name>`
+#    header, independent of the ref it is served under — so a genuine signature
+#    for v0.1.0 could be replayed under the ref v9.9.9 and still verify. Refuse
+#    when the embedded name is not the one we were triggered for.
+# Both bindings fail CLOSED on an empty value. Empty is unreachable today —
+# verify-tag above already proved the object exists, is a tag, and is signed —
+# but "every layer fails closed" is this script's contract, and a later refactor
+# that moves either check above the verify must not silently become a no-op.
+TAG_TARGET=$(git rev-parse --verify --quiet "${GITHUB_REF_NAME}^{commit}" || true)
+HEAD_COMMIT=$(git rev-parse --verify --quiet "HEAD^{commit}" || true)
+if [ -z "${TAG_TARGET}" ] || [ -z "${HEAD_COMMIT}" ] || [ "${TAG_TARGET}" != "${HEAD_COMMIT}" ]; then
+  echo "::error title=Tag does not match the checked-out revision::${GITHUB_REF_NAME} points at ${TAG_TARGET:-<none>} but this job is running ${HEAD_COMMIT:-<none>}. The tag moved after checkout, or one side could not be resolved; refusing to publish code that was never verified."
+  exit 1
+fi
+
+# `|| true` for the same reason as the two lines above, and it is load-bearing
+# here: under `set -euo pipefail` a failing `git cat-file` aborts the script at
+# this assignment with rc=128, so the explicit ::error below would never print.
+# Failing closed is right; failing closed with no message is how WOR-864
+# presented in the first place.
+EMBEDDED_TAG_NAME=$(git cat-file tag "${GITHUB_REF_NAME}" 2>/dev/null | sed -n 's/^tag //p' | head -1 || true)
+if [ -z "${EMBEDDED_TAG_NAME}" ] || [ "${EMBEDDED_TAG_NAME}" != "${GITHUB_REF_NAME}" ]; then
+  echo "::error title=Tag name mismatch::The signed tag object names '${EMBEDDED_TAG_NAME:-<unreadable>}' but is served under '${GITHUB_REF_NAME}'. A signature for one release cannot authorise another."
   exit 1
 fi
 

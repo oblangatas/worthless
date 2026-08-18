@@ -12,7 +12,7 @@ from worthless.cli.bootstrap import WorthlessHome
 from worthless.cli.console import WorthlessConsole
 from worthless.cli.notice import AS_IS_NOTICE, maybe_show_as_is_notice
 
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner()
 
 
 def _app():

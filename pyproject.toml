@@ -1,6 +1,6 @@
 [project]
 name = "worthless"
-version = "0.3.11"
+version = "0.3.12"
 description = "Split-key reverse proxy that makes leaked API keys worthless"
 readme = "README.md"
 license = { text = "AGPL-3.0-only" }
@@ -21,7 +21,10 @@ classifiers = [
 ]
 
 dependencies = [
-    "cryptography>=48.0.1",
+    # Floor is 50.0.0, not 48.0.1: PYSEC-2026-3552 affects everything below it.
+    # A floor of 48 let a fresh `uv lock` land on 49.0.0 and fail uv-audit at
+    # push time, which is how this surfaced. Raise the floor, not just the lock.
+    "cryptography>=50.0.0",
     "aiosqlite>=0.22.1",
     "httpx>=0.28",
     "fastapi>=0.115.12",
@@ -53,7 +56,11 @@ Issues = "https://github.com/shacharm2/worthless/issues"
 
 [project.optional-dependencies]
 mcp = [
-    "mcp>=1.0",
+    # Ceiling, not a floor raise (WOR-864): mcp 2.0.0 renamed
+    # mcp.server.fastmcp -> mcp.server.mcpserver with no shim, which breaks
+    # src/worthless/mcp/server.py. Floor stays at 1.0 so users already
+    # resolved on an older 1.x are untouched; the lock takes the newest 1.x.
+    "mcp>=1.0,<2",
 ]
 dev = [
     "deptry>=0.22",
@@ -86,7 +93,11 @@ qa = [
     "mutmut>=3.0",
     "pip-audit>=2.8",
     "schemathesis>=4.0; python_version >= '3.11'",
-    "semgrep>=1.155.0",
+    # semgrep is deliberately NOT here — it is CI-only SAST invoked once in
+    # .github/workflows/sast.yml via `uvx semgrep@<pin>`. As a project dep its
+    # own pins (click~=8.1.8, mcp==1.23.3) anchored the whole lock, holding
+    # click below the PYSEC-2026-2132 fix and mcp below its advisories.
+    # Tracked in beads worthless-fnvz.
 ]
 fuzz = [
     "atheris>=2.3",
@@ -150,7 +161,10 @@ timeout = 30
 addopts = "--strict-config --strict-markers -n auto --dist loadscope --reruns 1 -m 'not live and not docker and not user_flow and not real_ipc'"
 markers = [
     "benchmark: performance and latency regression checks",
-    "contract: schema-driven API and protocol checks",
+    # `contract` removed in WOR-877 — declared here, documented in the CI
+    # marker map, applied to zero tests. The scheduled job selecting it
+    # collected nothing and exited 5 on every run. Re-add the marker and the
+    # job together if contract tests are ever written.
     "snapshot: request/response and stream shape snapshot checks",
     "integration: tests requiring live infrastructure or subprocesses",
     "slow: long-running statistical validation tests",
@@ -164,6 +178,7 @@ markers = [
     "playwright: browser-driven GUI tests (requires playwright + a Chromium build)",
     "real_ipc: opt out of the autouse FakeIPCSupervisor injection — these tests bring their own real or subprocess sidecar (WOR-309 Phase 5)",
     "user_flow: end-to-end user-flow tests — real keyring, real CLI, real fs. Run with `pytest -m user_flow`. See Linear WOR-439 for the full suite scope.",
+    "wheel_artifact: spawns the worthless binary as a SUBPROCESS and honours WORTHLESS_TEST_BIN, so it can be aimed at an installed wheel. Tests using typer CliRunner import branch source in-process and must NOT carry this marker — running them under a wheel banner proves nothing (worthless-d4h2).",
 ]
 
 [tool.coverage.run]
@@ -248,9 +263,32 @@ targets = ["src"]
 # these files are now the net's declared scope (renamed from the deprecated
 # paths_to_mutate). NOTE: mutmut 3.x's stats phase collides with this repo's
 # pytest addopts (-n auto + strict markers), so a full `mutmut run` needs
-# reconciliation before it can gate in CI. Until then the enforced net is the
+# reconciliation before it can gate in CI.
+#
+# WOR-877 — CORRECTION. This block previously claimed the net was "the
 # hypothesis properties in tests/openclaw/test_lock_bind_confirmation.py plus
-# scripts/mutation_spine_sweep.py (8/8 canonical spine mutations verified killed).
+# scripts/mutation_spine_sweep.py (8/8 canonical spine mutations verified
+# killed)". Three parts of that were false or misleading:
+#
+#   1. The 8/8 is UNEARNED. mutation_spine_sweep.py runs a FAST test list
+#      containing `tests/cli/test_cli_status.py`, which does not exist (the
+#      real path is tests/test_cli_status.py). pytest aborts collection, and
+#      the script scores any non-zero exit as KILLED — so every mutation
+#      reports killed whether or not a single test noticed. The number would
+#      read 8/8 against a suite that asserts nothing.
+#   2. The sweep is wired into NOTHING. It is referenced only here; no
+#      workflow, no pre-commit hook invokes it.
+#   3. Its scope is lock.py / sentinel.py / app.py — it covers ZERO crypto,
+#      so it never substituted for the crypto mutmut job it was excusing.
+#
+#   The hypothesis properties in test_lock_bind_confirmation.py ARE real and
+#   green (16 tests) — only the sweep's verification of them was fake.
+#
+#   The mutmut jobs in scheduled.yml and pre-release.yml were removed in
+#   WOR-877: both had failed every run since April on flags mutmut 3.x
+#   deleted, so no mutation testing has actually run in this repo for months.
+#   Fixing the sweep is tracked separately; do not cite it as a net until it
+#   can fail.
 source_paths = [
     "src/worthless/adapters",
     "src/worthless/crypto",

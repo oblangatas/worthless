@@ -12,6 +12,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 unset WORTHLESS_FERNET_IPC_ONLY WORTHLESS_KEYRING_BACKEND WORTHLESS_FERNET_KEY WORTHLESS_SERVICE_MANAGED
 # shellcheck source=engineering/testing/scripts/_live-pack-lib.sh
 source "${SCRIPT_DIR}/_live-pack-lib.sh"
+
+# worthless-d4h2: name the binary before proving anything with it. Set
+# WORTHLESS_BIN to aim this pack at an installed wheel instead of whatever
+# PATH happens to resolve (a worktree venv, typically).
+lp_use_binary
 LP_SERVICE_BACKEND="systemd"
 LP_PHASE_NUM=0
 lp_banner "service-lock-roundtrip-live-linux (L7)"

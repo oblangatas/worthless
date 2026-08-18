@@ -4,6 +4,20 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [0.3.12] — 2026-08-11
+
+`worthless mcp` starts again on a fresh install. An unbounded dependency let a new major of the MCP SDK reach every new installation and kill the server at startup.
+
+### Fixed
+- **`worthless mcp` works again on a fresh install** (WOR-864, [#473](https://github.com/shacharm2/worthless/pull/473)). The `mcp` extra was declared as `mcp>=1.0` with no upper bound. When the MCP SDK published 2.0.0 on 2026-07-28 it removed `mcp.server.fastmcp` — the module the server imports — so every fresh `pip install "worthless[mcp]"` or `npx worthless-mcp` resolved 2.x and died at import with an opaque `WRTLS-199`. The extra is now capped at `mcp>=1.0,<2`. The floor stays at 1.0 so anyone already resolved on an older 1.x is untouched.
+- **A dependency change now runs the check that resolves like a real user does** (WOR-864, [#496](https://github.com/shacharm2/worthless/pull/496)). CI installs from `uv.lock`; a user resolves fresh against the index. The one job that resolves live wasn't watching `pyproject.toml` or `uv.lock`, so a dependency-only edit triggered nothing — which is how the broken bound shipped past a fully green pipeline. Both files are now on its triggers.
+- **A future cleanup can't silently re-break it** (WOR-868, [#474](https://github.com/shacharm2/worthless/pull/474)). A guard asserts the declared bound actually excludes 2.x, reading it as a version rather than checking that some `<` is present — `mcp>=1.0,<99` has an upper bound and still resolves straight to the broken release.
+
+### What this does NOT fix
+- **Versions 0.3.0 through 0.3.11 stay broken for the MCP server, permanently.** Package metadata is immutable once published, so those releases will always declare the unbounded `mcp>=1.0`. Yanking does not help either: a yanked version still installs when pinned exactly, which is what the npm wrapper does. **The only fix is upgrading to 0.3.12.**
+- If you already have mcp 2.x installed, `pip install -U worthless` **without** the `[mcp]` extra will not re-evaluate it. Upgrade with the extra: `pip install -U "worthless[mcp]"`.
+- Only the `[mcp]` extra was affected. `enroll`, `wrap`, `scan`, `status` and the proxy were never impacted — the MCP server is imported lazily, so the rest of the CLI kept working throughout.
+
 ## [0.3.11] — 2026-07-24
 
 Closes the last gap from the OpenClaw install incident: you can now ask Worthless, on demand, whether your gateway is actually protecting you *right now* — and get an answer that can't be faked by a stale counter.
@@ -267,6 +281,7 @@ First release published to PyPI. `pip install worthless` now works.
 - Gate evaluation strictly precedes shard reconstruction (SR-03).
 - Published artifacts built via PyPI trusted publishing (OIDC, no long-lived tokens).
 
+[0.3.12]: https://github.com/shacharm2/worthless/releases/tag/v0.3.12
 [0.3.11]: https://github.com/shacharm2/worthless/releases/tag/v0.3.11
 [0.3.10]: https://github.com/shacharm2/worthless/releases/tag/v0.3.10
 [0.3.9]: https://github.com/shacharm2/worthless/releases/tag/v0.3.9

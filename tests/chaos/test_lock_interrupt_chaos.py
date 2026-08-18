@@ -58,6 +58,37 @@ from tests.helpers import fake_anthropic_key, fake_key
 pytestmark = [
     pytest.mark.slow,
     pytest.mark.skipif(sys.platform == "win32", reason="chaos suite is POSIX-only"),
+    # Each storm test SLEEPS ``TRIALS_PER_CELL`` times before signalling, and each
+    # sleep is drawn from a band centred on the session-calibrated ``seam``. So the
+    # test's floor is ~= TRIALS_PER_CELL * seam, and ``seam`` is measured once from
+    # a single warm-up lock whose duration swings with machine load (observed
+    # 1.37s idle vs 2.75s cold on the same 10-core box). Against the repo-wide
+    # ``timeout = 30`` that meant the suite only passed while seam stayed under
+    # ~1.1s — a load-sensitive coin flip, not a product signal.
+    #
+    # Budget the worst LEGITIMATE runtime, generously. At the MAX_SEAM ceiling
+    # the sleep floor alone is TRIALS_PER_CELL * (MAX_SEAM + 0.12) ~= 154s, and
+    # full-suite contention was measured inflating this module ~1.8x over an
+    # isolated run (mashed_sigint: 33.10s isolated -> 60.67s under `-n auto`),
+    # which puts the ceiling near 280s. Observed seams keep climbing as machines
+    # get busier -- 1.366s, 2.748s, ~3.0s -- so a snug budget just reintroduces
+    # the flake at a higher number.
+    #
+    # This value is NOT the hang detector; WAIT_TIMEOUT below is, and it fires
+    # ~40x sooner with the signal and jitter that wedged the CLI. So erring
+    # generous here costs nothing and cannot mask a hang.
+    pytest.mark.timeout(600),
+    # NEVER auto-retry this module. ``--reruns 1`` is repo-wide (pyproject addopts
+    # and .github/workflows/tests.yml), and a rerun that passes is reported green.
+    # That is precisely how the budget defect above survived: a systematic failure
+    # was retried into a pass run after run, surfacing only as an "occasional
+    # flake". The same masking applies to what this suite actually guards -- a
+    # PARTIAL/ORPHAN on-disk state is a rare, timing-dependent security bug, so
+    # retrying it is how a half-locked `.env` ships.
+    #
+    # A failure here must be loud and attributable. If that means an intermittent
+    # red, the red is the finding.
+    pytest.mark.flaky(reruns=0),
 ]
 
 
@@ -66,7 +97,15 @@ pytestmark = [
 # ---------------------------------------------------------------------------
 
 TRIALS_PER_CELL = 30
-WAIT_TIMEOUT = 30.0
+# Guard for "the CLI never exited" — it must stay WELL BELOW the per-test timeout
+# above, or the generic pytest timeout fires first and swallows the diagnostic
+# (which signal, which jitter) that makes a hang actionable.
+#
+# Sized from measurement, not guesswork. With 10 CPU hogs saturating a 10-core
+# box, signal -> exit was: mashed-SIGINT max 27ms, single-SIGINT max 1.40s, and a
+# full *unsignalled* lock (what the ``seam`` warm-up waits on) max 1.64s. 15s is
+# ~10x the worst of those, so a trip here means a real hang, not contention.
+WAIT_TIMEOUT = 15.0
 # Hard ceiling on the calibrated seam in case the warm-up probe misbehaves; a
 # real lock completes well under this.
 MAX_SEAM = 5.0
@@ -156,6 +195,91 @@ def _child_env(te: TrialEnv) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
+SEAM_FLOOR = 0.05
+
+
+def _resolve_seam(
+    first_shard: float | None,
+    *,
+    shards_after: int | None = None,
+    returncode: int | None = None,
+    elapsed: float | None = None,
+    stderr: str = "",
+) -> float:
+    """Turn the probe result into a usable seam, or refuse to run.
+
+    This used to silently substitute ``0.5`` when the probe saw nothing. The
+    honest objection to that is NOT "the band lands nowhere near the window" —
+    on the one CI runner where calibration actually failed, the true seam was
+    ~0.598s and ``_delays_for(0.5)`` spans 0.25–0.62, which straddles it. The
+    objection is that a seam nobody measured is UNFALSIFIABLE: it may happen to
+    aim correctly, or it may put every trial inside process startup, and a green
+    run looks identical either way. So refuse, and say why.
+
+    Two faults produce the same "no measurement" symptom, because the probe loop
+    exits when the child does as well as on ``MAX_SEAM``:
+
+    * the lock wrote shards but the 4ms polling missed the moment — a HARNESS
+      problem, fix by polling faster or raising the ceiling;
+    * the lock wrote nothing at all — a PRODUCT or environment fault, where
+      raising the ceiling would only hide it.
+
+    Earlier this guessed between them from the exit code and told the reader to
+    go read stderr. It does not need to guess: the rows are still on disk after
+    the child exits. ``shards_after`` is that count, and it settles the question
+    as fact.
+
+    A measured seam is also bounded. Trusting any non-``None`` float reopens the
+    same hole from the other side — a near-zero seam collapses every jitter
+    delay into process startup, so nothing reaches the orphan window and the
+    suite passes vacuously with a clean conscience.
+    """
+    if first_shard is not None:
+        if SEAM_FLOOR <= first_shard <= MAX_SEAM * 0.9:
+            return first_shard
+        pytest.fail(
+            f"chaos seam calibration returned an implausible seam: {first_shard:.4f}s "
+            f"(expected {SEAM_FLOOR}s .. {MAX_SEAM * 0.9:.2f}s).\n"
+            "  A seam this small puts every jitter delay inside process startup, so no "
+            "trial reaches the window where DB rows exist but .env is not yet rewritten "
+            "— the suite would pass without testing anything.\n"
+            "  Likely causes: a stale DB from a previous trial, a wrong WORTHLESS_HOME, "
+            "or a warm-up lock that wrote its first shard before the probe's first poll."
+        )
+
+    if shards_after is None:
+        verdict = (
+            "the warm-up lock wrote no shard row the probe could see, AND the DB "
+            "could not be read afterwards, so the cause cannot be determined here."
+        )
+    elif shards_after > 0:
+        verdict = (
+            f"the probe MISSED the write — the DB holds {shards_after} shard row(s) "
+            "after the child exited. The lock worked; calibration did not. This is a "
+            "HARNESS problem: the 4ms poll interval or the MAX_SEAM ceiling is wrong "
+            "for this machine, NOT a product fault."
+        )
+    else:
+        verdict = (
+            "the warm-up lock wrote NO shard rows at all — the DB is empty after it "
+            "exited. This is a PRODUCT or environment fault; raising MAX_SEAM would "
+            "only hide it. Read the stderr tail below."
+        )
+
+    detail = f"  child: exit={returncode} elapsed={elapsed:.2f}s shards_after={shards_after}\n"
+    tail = f"  stderr tail:\n{stderr[-800:]}\n" if stderr.strip() else "  stderr: (empty)\n"
+
+    pytest.fail(
+        "chaos seam calibration FAILED — the orphan-vulnerable window could not be "
+        f"located within MAX_SEAM={MAX_SEAM}s.\n"
+        f"  Diagnosis: {verdict}\n"
+        f"{detail}"
+        "  Refusing to substitute a fabricated seam: an unmeasured seam is "
+        "unfalsifiable, and a green run would not distinguish it from a real one.\n"
+        f"{tail}"
+    )
+
+
 @pytest.fixture(scope="session")
 def seam(tmp_path_factory: pytest.TempPathFactory) -> float:
     """Measure (once) when the first shard row appears in a warm-up lock.
@@ -171,7 +295,9 @@ def seam(tmp_path_factory: pytest.TempPathFactory) -> float:
         cwd=str(te.repo),
         start_new_session=True,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        # stderr is CAPTURED, not discarded: when calibration fails it is the
+        # only thing that distinguishes "runner too slow" from "lock is broken".
+        stderr=subprocess.PIPE,
     )
     t0 = time.time()
     first_shard: float | None = None
@@ -190,14 +316,42 @@ def seam(tmp_path_factory: pytest.TempPathFactory) -> float:
                     pass
             time.sleep(0.004)
     finally:
+        # communicate(), NOT wait(): stderr is a pipe, and a child that fills the
+        # ~64KB buffer blocks forever while we wait for an exit that cannot come.
+        # That would surface as returncode=-9 after the kill, which the diagnosis
+        # below would report as a PRODUCT fault — a harness deadlock blamed on
+        # the product. communicate() drains while it waits.
         try:
-            proc.wait(timeout=WAIT_TIMEOUT)
+            err_bytes = proc.communicate(timeout=WAIT_TIMEOUT)[1]
         except subprocess.TimeoutExpired:
             proc.kill()
-            proc.wait(timeout=5)
-    # Fallback: if the probe never saw a shard (very fast machine / race), use a
-    # conservative late seam so the jitter still lands near completion.
-    return first_shard if first_shard is not None else 0.5
+            err_bytes = proc.communicate(timeout=5)[1]
+    elapsed = time.time() - t0
+    err = (err_bytes or b"").decode("utf-8", errors="replace")
+
+    # The child is gone, so the rows it wrote are now stable on disk. Ask.
+    # "Probe missed the write" and "lock wrote nothing" are opposite faults with
+    # opposite fixes, and guessing between them from an exit code is unnecessary
+    # when the DB can simply be read.
+    shards_after: int | None = None
+    db_path = _db_path(te.home)
+    if db_path is not None:
+        try:
+            conn = sqlite3.connect(str(db_path))
+            try:
+                shards_after = conn.execute("SELECT count(*) FROM shards").fetchone()[0]
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            shards_after = None
+
+    return _resolve_seam(
+        first_shard,
+        shards_after=shards_after,
+        returncode=proc.returncode,
+        elapsed=elapsed,
+        stderr=err,
+    )
 
 
 def _delays_for(seam_s: float) -> tuple[float, ...]:
@@ -438,6 +592,84 @@ def test_mashed_sigint(tmp_path: Path, seam: float) -> None:
             _drain(proc)
         state = classify(te)
         _assert_no_partial(state, n_keys=n_keys, sig=signal.SIGINT, delay=delay)
+
+
+# ---------------------------------------------------------------------------
+# Guard self-test — prove the hang detector actually fires
+# ---------------------------------------------------------------------------
+
+
+def test_hang_guard_fires_with_diagnostic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A wedged CLI must trip ``WAIT_TIMEOUT`` and say which signal/jitter did it.
+
+    ``WAIT_TIMEOUT`` only earns its place if it FIRES. It previously equalled the
+    repo-wide ``timeout = 30``, so the generic pytest timeout always won the race
+    and this diagnostic was unreachable — a guard nobody had ever seen work. That
+    is exactly the failure mode worth a test rather than an assumption.
+
+    Inject a shim that ignores SIGINT and never exits, then assert the harness
+    fails fast, with the actionable message, well inside the module timeout.
+    """
+    shim = tmp_path / "wedged_cli.py"
+    shim.write_text(
+        "import signal, time\n"
+        "signal.signal(signal.SIGINT, signal.SIG_IGN)\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "while True:\n"
+        "    time.sleep(0.05)\n"
+    )
+    monkeypatch.setattr(
+        f"{__name__}._cli",
+        lambda: [sys.executable, str(shim)],
+    )
+
+    te = _make_trial_env(tmp_path, 0, 1)
+    started = time.monotonic()
+    with pytest.raises(pytest.fail.Exception, match=r"hung after sig="):
+        _run_trial(te, signal.SIGINT, 0.05)
+    elapsed = time.monotonic() - started
+
+    assert WAIT_TIMEOUT <= elapsed < WAIT_TIMEOUT + 10.0, (
+        f"hang guard fired at {elapsed:.1f}s; expected ~{WAIT_TIMEOUT}s. "
+        "Too early means a hair trigger on slow machines; too late means the "
+        "per-test timeout will swallow the diagnostic again."
+    )
+
+
+def test_seam_calibration_refuses_to_fabricate() -> None:
+    """A seam the probe could not measure must fail, not silently become 0.5.
+
+    The regression this guards is invisible by construction: a fabricated seam
+    still produces a green run, so nothing about the output would tell you the
+    suite stopped aiming at the orphan window. Assert the refusal directly.
+    """
+    # A plausible measurement passes through untouched.
+    assert _resolve_seam(1.234) == 1.234
+
+    # An IMPLAUSIBLE measurement is refused too. A near-zero seam is not a fast
+    # machine, it is a broken probe: _delays_for(0.02) puts every trial inside
+    # process startup, so nothing reaches the orphan window and all nine storm
+    # tests pass vacuously. That is the same failure the fabricated 0.5 caused,
+    # so it gets the same answer. (An earlier version of this test asserted
+    # _resolve_seam(0.0) == 0.0 — it blessed the bug.)
+    with pytest.raises(pytest.fail.Exception, match=r"implausible"):
+        _resolve_seam(0.0)
+    with pytest.raises(pytest.fail.Exception, match=r"implausible"):
+        _resolve_seam(MAX_SEAM)
+
+    # No measurement + the DB HAS shards -> the lock worked, the probe missed
+    # the timing. Actionable as a harness problem.
+    with pytest.raises(pytest.fail.Exception, match=r"probe MISSED"):
+        _resolve_seam(None, shards_after=2, returncode=0, elapsed=0.4)
+
+    # No measurement + the DB is EMPTY -> the lock never wrote. Product or
+    # environment fault; raising MAX_SEAM would only hide it.
+    with pytest.raises(pytest.fail.Exception, match=r"wrote NO shard"):
+        _resolve_seam(None, shards_after=0, returncode=1, elapsed=0.2, stderr="boom")
+
+    # Unreadable DB -> honest "cannot tell", not a fabricated verdict.
+    with pytest.raises(pytest.fail.Exception, match=r"could not be read"):
+        _resolve_seam(None, shards_after=None, returncode=0, elapsed=0.3)
 
 
 # ---------------------------------------------------------------------------

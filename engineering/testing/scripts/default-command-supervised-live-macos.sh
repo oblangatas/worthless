@@ -4,7 +4,14 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+# This pack pins the repo venv by default, which is the clearest example of the
+# problem worthless-d4h2 names: it forces the BRANCH build and never says so.
 export PATH="${REPO_ROOT}/.venv/bin:${PATH}"
+# shellcheck source=engineering/testing/scripts/_live-pack-lib.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_live-pack-lib.sh"
+# Sourced AFTER the venv line so an explicit WORTHLESS_BIN outranks it, and so
+# the run always prints which binary it actually got.
+lp_use_binary
 PORT="${WORTHLESS_PORT:-8787}"
 if [[ -n "${LIVE_PROJECT_DIR:-}" ]]; then
   WORK_DIR="$LIVE_PROJECT_DIR"

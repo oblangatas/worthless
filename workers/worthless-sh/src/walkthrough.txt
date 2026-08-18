@@ -48,9 +48,10 @@ Step 5 — Install or upgrade worthless
   script is idempotent. Network failures exit 10 with proxy/mirror hints.
 
 Step 6 — Smoke test
-  Runs `uv run --no-project worthless --version` to confirm the binary
-  starts. Failure exits 40 ("installed but won't run") — usually a
-  corrupt cache. Error message links to `worthless doctor`.
+  Asks uv where it installed the entry point (`uv tool dir --bin`) and
+  runs that binary's `--version` to confirm it starts, so the version
+  you see is the one you got. Failure exits 40 ("installed but won't
+  run"). Error message links to `worthless doctor`.
 
 Step 7 — PATH activation
   Detects shell (bash / zsh / fish) and prints the exact line to add to

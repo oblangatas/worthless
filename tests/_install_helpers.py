@@ -85,6 +85,11 @@ case "$1" in
   tool) shift; case "$1" in
     install|upgrade) echo "ok" ;;
     list) ;;  # empty: no worthless line → fast-path miss → real install runs
+    # `uv tool dir --bin` is uv's own answer for where it puts entry points.
+    # It honours UV_TOOL_BIN_DIR / XDG_BIN_HOME, which install.sh does NOT
+    # scrub — so on a box that sets either, this is the ONLY reliable way to
+    # find the binary just installed (worthless-dc26).
+    dir) echo "${{UV_TOOL_BIN_DIR:-${{XDG_BIN_HOME:-$HOME/.local/bin}}}}" ;;
     *) echo "uv tool: unhandled: $*" >&2; exit 1 ;;
   esac ;;
   run) echo "worthless 0.3.0" ;;
@@ -93,6 +98,18 @@ esac""",
     )
     if with_worthless:
         write_stub(bin_dir, "worthless", 'echo "worthless 0.3.0"')
+    else:
+        # `uv tool install` really does place the entry point in ~/.local/bin even
+        # when that directory is not on the caller's PATH — install.sh only
+        # prepends it while bootstrapping uv, so a box with uv already pinned
+        # short-circuits and never sees it. Model that faithfully: without this
+        # the fixture describes an impossible state (install reported success,
+        # yet the binary exists nowhere at all), and anything that legitimately
+        # consults the installed artifact looks broken. `command -v worthless`
+        # still fails here, so the "not yet on your PATH" branch is unaffected.
+        local_bin = bin_dir.parent / ".local" / "bin"
+        local_bin.mkdir(parents=True, exist_ok=True)
+        write_stub(local_bin, "worthless", 'echo "worthless 0.3.0"')
 
 
 def run_install(

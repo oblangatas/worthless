@@ -254,4 +254,5 @@ class TestServiceInstall:
                 env={"WORTHLESS_HOME": str(home_dir)},
             )
         assert result.exit_code == 0, result.output
-        assert "running" in result.stdout.lower()
+        # Console renders to stderr; `output` is the mixed stream (typer >=0.26).
+        assert "running" in result.output.lower()

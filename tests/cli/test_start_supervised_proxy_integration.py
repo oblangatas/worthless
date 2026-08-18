@@ -158,7 +158,7 @@ class TestServiceManagedLockIdempotency:
         env_file.write_text(f"OPENAI_API_KEY={fake_openai_key()}\n")
         monkeypatch.chdir(project)
 
-        runner = CliRunner(mix_stderr=False)
+        runner = CliRunner()
         env = scrubbed_cli_env(home_with_key.base_dir)
 
         supervised_calls: list[int] = []
