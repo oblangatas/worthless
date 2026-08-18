@@ -831,3 +831,100 @@ def test_gate_jobs_are_unconditional_and_time_limited() -> None:
             f"job {name!r} has no `timeout-minutes`, so it inherits GitHub's "
             f"6-hour default. A required job that hangs blocks every merge."
         )
+
+
+# --- warning window before expiry (worthless-kjld) -------------------------
+# The hook used to fail cold: on the expiry date every commit in the repo
+# blocked with no prior notice, and the cheapest escape was a blind date bump —
+# exactly what .grype.yaml's header forbids. A warning window makes the
+# re-measure happen before the wall instead of at it.
+
+
+def _dated(tmp_path: Path, expiry: dt.date) -> Path:
+    return _write(
+        tmp_path,
+        f'ignore:\n  - vulnerability: CVE-2026-11940\n    expiry: "{expiry.isoformat()}"\n',
+    )
+
+
+@pytest.mark.parametrize("days_out", [0, 1, 13, 14])
+def test_expiry_inside_the_window_warns_but_is_not_a_problem(tmp_path: Path, days_out: int) -> None:
+    """Inside the window: a warning, and still exit-code clean."""
+    mod = _load()
+    warnings: list[str] = []
+    problems = mod.check(_dated(tmp_path, TODAY + dt.timedelta(days=days_out)), TODAY, warnings)
+
+    assert problems == [], "a not-yet-expired ignore must never be a problem"
+    assert len(warnings) == 1
+    assert "CVE-2026-11940" in warnings[0]
+
+
+def test_expiry_beyond_the_window_is_silent(tmp_path: Path) -> None:
+    mod = _load()
+    warnings: list[str] = []
+    assert mod.check(_dated(tmp_path, TODAY + dt.timedelta(days=15)), TODAY, warnings) == []
+    assert warnings == []
+
+
+def test_an_expired_ignore_is_a_problem_not_a_warning(tmp_path: Path) -> None:
+    """Past the date the hard failure is unchanged — the window never softens it."""
+    mod = _load()
+    warnings: list[str] = []
+    problems = mod.check(_dated(tmp_path, TODAY - dt.timedelta(days=1)), TODAY, warnings)
+
+    assert len(problems) == 1
+    assert "expired" in problems[0]
+    assert warnings == [], "an expired ignore must not also warn — it must block"
+
+
+def test_warnings_are_optional_so_existing_callers_are_unaffected(tmp_path: Path) -> None:
+    """check() without the out-param behaves exactly as before."""
+    mod = _load()
+    assert mod.check(_dated(tmp_path, TODAY + dt.timedelta(days=1)), TODAY) == []
+
+
+def test_main_exits_zero_when_only_warnings(tmp_path: Path, monkeypatch, capsys) -> None:
+    """🚨 The load-bearing one.
+
+    A warning that returns non-zero would block every commit in the repo —
+    precisely the failure this window exists to prevent. Dated off the real
+    clock, so it is always inside the window and never expired.
+    """
+    mod = _load()
+    cfg = _dated(tmp_path, dt.date.today() + dt.timedelta(days=1))
+    monkeypatch.setattr(mod, "CONFIGS", (cfg,))
+
+    assert mod.main() == 0
+    assert "NOTICE" in capsys.readouterr().err
+
+
+# --- package names that are secretly regexes (worthless-yilt) --------------
+# grype matches package.name literally until it contains a metacharacter, at
+# which point the whole name becomes a full-match regex and its dots turn into
+# wildcards. Measured on grype 0.114.0: `urllib.` does not match `urllib3`,
+# but `urllib.|zzzz` does.
+
+
+@pytest.mark.parametrize("name", ["urllib.|zzzz", "ta.*", "libapt.*", "py[t]hon", "a+b"])
+def test_regex_armed_package_names_are_rejected(tmp_path: Path, name: str) -> None:
+    cfg = _write(
+        tmp_path,
+        f'ignore:\n  - vulnerability: CVE-1\n    package:\n      name: "{name}"\n'
+        f'    expiry: "2099-01-01"\n',
+    )
+    problems = _load().check(cfg, TODAY)
+    assert len(problems) == 1
+    assert "full-match regex" in problems[0]
+
+
+@pytest.mark.parametrize(
+    "name", ["python", "backports.tarfile", "gopkg.in/yaml.v2", "libapt-pkg6.0"]
+)
+def test_ordinary_names_including_dotted_ones_are_fine(tmp_path: Path, name: str) -> None:
+    """A bare `.` is inert in grype's matcher, so flagging dotted names is noise."""
+    cfg = _write(
+        tmp_path,
+        f'ignore:\n  - vulnerability: CVE-1\n    package:\n      name: "{name}"\n'
+        f'    expiry: "2099-01-01"\n',
+    )
+    assert _load().check(cfg, TODAY) == []
