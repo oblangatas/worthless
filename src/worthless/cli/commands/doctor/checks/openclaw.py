@@ -20,6 +20,35 @@ from worthless.cli.process import resolve_openclaw_proxy_base_url, resolve_port
 from worthless.openclaw import audit as _oc_audit
 from worthless.openclaw import integration as _oc_integration
 
+# WOR-516: surface the OpenClaw .bak recovery path so operators know where to
+# look if openclaw.json is damaged after a failed lock.
+#
+# WOR-599 adds the other half of the truth. OpenClaw writes these itself, as
+# verbatim copies of the config:
+#   * openclaw.json.bak(.1…4) — a 5-slot ring, rewritten pre-edit on every
+#     config write, so a pre-lock copy ages out after five writes.
+#   * openclaw.json.last-good — written at gateway startup and NOT rotated;
+#     a pre-lock copy can persist indefinitely.
+# If the config held a plaintext apiKey when they were written — the normal case
+# for anyone who used OpenClaw before installing Worthless — that key is still in
+# them after `worthless lock`. Recommending a restore from .bak without saying so
+# would have doctor contradict lock's "your key is protected".
+#
+# We do not delete them: they are daemon-owned, .bak is this very recovery path,
+# and removing one can leave OpenClaw unable to restart. Disclosure is the whole
+# control, which is why the wording is asserted by
+# tests/openclaw/test_config_backup_disclosure.py.
+_RECOVERY_NOTE_TEXT = (
+    "Recovery: if openclaw.json is damaged, restore from "
+    "~/.openclaw/openclaw.json.bak "
+    "(written by the openclaw daemon on each config change). "
+    "Note: that file — and ~/.openclaw/openclaw.json.last-good, which the daemon "
+    "never rotates away — are verbatim copies of your config. If either was "
+    "written before you locked, it still holds your original API key in "
+    "plaintext. Worthless does not touch them: they are OpenClaw's own recovery "
+    "files. Rotate that key, or delete these files once OpenClaw is healthy."
+)
+
 check_id = "openclaw"
 
 
@@ -161,16 +190,8 @@ def run(ctx: CheckContext) -> CheckResult:
     else:
         status = "ok"
 
-    # WOR-516: always surface the OpenClaw .bak recovery path so operators
-    # know where to look if openclaw.json is damaged after a failed lock.
-    # The note is low-signal when everything is healthy (status=ok) but
-    # critical when a write-failed event appears in the findings list.
     recovery_note = {
-        "issue": (
-            "Recovery: if openclaw.json is damaged, restore from "
-            "~/.openclaw/openclaw.json.bak "
-            "(written by the openclaw daemon on each config change)"
-        ),
+        "issue": _RECOVERY_NOTE_TEXT,
         "exit_code": None,
     }
 

@@ -1330,6 +1330,19 @@ def _print_openclaw_success_block(
     if result.skill_installed:
         console.print_hint("   • ~/.openclaw/workspace/skills/worthless/ — installed skill")
     console.print_hint("   • Undo: worthless unlock")
+    # WOR-599: OpenClaw keeps verbatim copies of its own config — a .bak ring
+    # (rewritten pre-edit on every config write) and a .last-good that the daemon
+    # never rotates away. Any copy written BEFORE this lock still holds the
+    # original key in plaintext, so "you're protected" is true of the live config
+    # and not of the directory. We do not delete them: they are daemon-owned, and
+    # .bak is the recovery path `worthless doctor` itself recommends. Saying so is
+    # therefore the only control we have — asserted by
+    # tests/openclaw/test_lock_command_openclaw.py.
+    console.print_hint(
+        "   • OpenClaw keeps its own config backups (~/.openclaw/openclaw.json.bak "
+        "and .last-good). Ones written before this lock still hold your original "
+        "key — rotate it, or delete those files once OpenClaw is healthy."
+    )
     # WOR-796 (scrub gap #1): a provider whose key var isn't a valid uppercase
     # SecretRef id was NOT scrubbed — its cached real key is still live in
     # OpenClaw's agent store even though openclaw.json reads "locked". Surface it
