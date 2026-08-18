@@ -75,7 +75,33 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v6
         with:
+          # Full history so `git verify-tag` below can read the signed tag.
+          # Without this the tag object is not on disk and the gate cannot
+          # check a signature it never fetched (WOR-864).
+          fetch-depth: 0
           persist-credentials: false
+
+      # WOR-881. This is the FIRST thing after checkout, before QEMU, buildx,
+      # any build, and before cosign — a gate that runs after the image is
+      # pushed proves nothing, and cosign will happily attest whatever it is
+      # handed, so an unverified image would carry a valid signature.
+      #
+      # Until this existed, this workflow was the only tag-triggered publisher
+      # with no signature check. On all three v0.3.12 tag pushes the other three
+      # publishers failed closed and this one shipped anyway — twice from a tag
+      # that could not be verified at all, once from a tag signed with the
+      # wrong key type. GHCR overwrites by tag, so those images silently
+      # replaced whatever was behind that version.
+      #
+      # Same script and same repo Variables as publish.yml, publish-npm.yml and
+      # deploy-worker.yml. Guarded on `push` so a non-tag trigger (none today)
+      # cannot reach it with a branch name in GITHUB_REF_NAME.
+      - name: Verify tag GPG signature (fatal — must precede every build and push)
+        if: github.event_name == 'push'
+        env:
+          MAINTAINER_PUBKEY: ${{ vars.MAINTAINER_GPG_PUBKEY }}
+          MAINTAINER_FINGERPRINT: ${{ vars.MAINTAINER_GPG_FINGERPRINT }}
+        run: bash .github/scripts/verify-tag.sh
 
       - name: Set up QEMU (arm64 emulation on amd64 runner)
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
