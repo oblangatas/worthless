@@ -21,6 +21,7 @@ on:
 
 permissions:
   contents: read
+  deployments: read
 
 concurrency:
   # Don't drop a scheduled run if a manual one fires — both are useful.
@@ -296,10 +297,19 @@ jobs:
           STALE_HOURS: "24"
         run: |
           set -euo pipefail
-          # GitHub Pages deploys from the `website` branch (per WOR-326).
-          # Compare last `website` commit time to last successful Pages build.
-          WEBSITE_PUSH=$(gh api "repos/${REPO}/branches/website" --jq '.commit.commit.committer.date' 2>/dev/null || echo "")
-          PAGES_BUILD=$(gh api "repos/${REPO}/pages/builds/latest" --jq '.updated_at' 2>/dev/null || echo "")
+          # Pages no longer deploys from the website branch (WOR-326 is stale).
+          # Settings > Pages now shows Source: GitHub Actions, deployed by the
+          # "Deploy website" workflow, so repos/{repo}/pages/builds/latest 404s.
+          # gh api also prints error bodies to stdout, so the old
+          # 2>/dev/null || echo "" guard captured that JSON instead of an empty
+          # string, the -z skip below never fired, and date -d died on it.
+          gh_ts() {                     # $1 = api path, $2 = jq expression
+            local out
+            out=$(gh api "$1" --jq "$2" 2>/dev/null) || return 0
+            case "$out" in ????-??-??T*) printf '%s' "$out" ;; esac
+          }
+          WEBSITE_PUSH=$(gh_ts "repos/${REPO}/branches/website" '.commit.commit.committer.date')
+          PAGES_BUILD=$(gh_ts "repos/${REPO}/deployments?environment=github-pages&per_page=1" '.[0].updated_at')
 
           if [ -z "$WEBSITE_PUSH" ] || [ -z "$PAGES_BUILD" ]; then
             echo "::warning title=Deploy-lag check incomplete::Could not query Pages timestamps (website_push='$WEBSITE_PUSH', pages_build='$PAGES_BUILD'). Skipping."
