@@ -73,6 +73,33 @@ def test_audit_job_has_no_continue_on_error() -> None:
     assert "continue-on-error" not in wf["jobs"]["audit"]
 
 
+def test_audit_step_runs_with_pipefail() -> None:
+    """The run is a PIPELINE, and GitHub's default shell has no pipefail.
+
+    `bash -e -c 'false | true'` exits 0. So without this, a `uv export` that
+    died partway would hand pip-audit a truncated stream, which audits the
+    packages that arrived and exits 0 — a green gate over a fragment. That is
+    the failure mode worthless-tidv was opened for. `shell: bash` is the
+    documented opt-in to `-eo pipefail`.
+    """
+    step = _audit_step()
+    assert "|" in step["run"], "if this stops being a pipeline, revisit this test"
+    assert step.get("shell") == "bash", (
+        "a pipeline step without `shell: bash` runs under `bash -e` with no pipefail, "
+        "so a failing `uv export` would be masked by pip-audit's exit code"
+    )
+
+
+def test_lock_freshness_is_checked() -> None:
+    """`--frozen` audits uv.lock as-is; a desynced lock exports a stale tree."""
+    wf = yaml.safe_load(WORKFLOW.read_text())
+    runs = " ".join(str(s.get("run", "")) for s in wf["jobs"]["audit"]["steps"])
+    assert "uv lock --check" in runs, (
+        "without a freshness check, `--frozen` happily audits a lock that no longer "
+        "matches pyproject.toml, while a different tree actually ships"
+    )
+
+
 @pytest.mark.parametrize("forbidden", ["paths", "paths-ignore"])
 def test_pull_request_trigger_is_unfiltered(forbidden: str) -> None:
     """A path filter turns a required check into a deadlock. WOR-874."""

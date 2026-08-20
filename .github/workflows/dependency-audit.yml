@@ -46,12 +46,22 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Check out repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v6
         with:
           persist-credentials: false
 
       - name: Set up uv + Python
         uses: ./.github/actions/setup-uv-python
+
+      # `--frozen` below audits uv.lock AS IT IS, without checking it still
+      # agrees with pyproject.toml. A desynced lock therefore exports the OLD
+      # dependency set and passes, while a different tree actually ships.
+      # Freshness is otherwise enforced only by the `uv-lock-check` pre-commit
+      # hook — client-side, so skipped by every path this workflow exists to
+      # cover. Kept as its own step so the audit command below stays
+      # byte-identical to the hook entry.
+      - name: Lock is in sync with pyproject.toml
+        run: uv lock --check
 
       # Byte-identical to the `uv-audit` hook entry in .pre-commit-config.yaml.
       # No `set +e`, no continue-on-error: a finding MUST fail this job. The
@@ -63,7 +73,18 @@ jobs:
       # worthless-pjxv. Unblock by bumping the dependency, never by adding an
       # ignore without a tracking ticket — see the hook's comment on why a dead
       # ignore is worse than none.
+      #
+      # `shell: bash` is NOT cosmetic. GitHub's default step shell is
+      # `bash -e {0}` — no pipefail — and this run is a PIPELINE, so only
+      # pip-audit's exit code would count. A `uv export` that died partway
+      # would hand pip-audit a truncated-but-valid stream, which audits the
+      # packages that made it through and exits 0: a green gate that scanned
+      # a fragment. That is the exact failure mode of the Snyk job deleted in
+      # worthless-tidv. `shell: bash` is the documented opt-in to
+      # `-eo pipefail` and leaves the `run:` string untouched, so it stays
+      # byte-identical to the hook entry.
       - name: pip-audit the frozen runtime dependency tree
+        shell: bash
         env:
           UV_CACHE_DIR: /tmp/uv-cache
         run: uv export --frozen --no-emit-project | uv run pip-audit --disable-pip -r /dev/stdin
