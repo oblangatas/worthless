@@ -36,10 +36,14 @@ jobs:
         run: uv export --no-dev --no-hashes --format requirements-txt -o requirements.txt
       # Snyk's pip plugin resolves the tree from INSTALLED package metadata, not
       # from the requirements file alone — without this it fails with
-      # "Missing required packages" and scans nothing. --system puts them where
-      # the plain `python` Snyk shells out to will find them.
+      # "Missing required packages" and scans nothing. The runner's system
+      # Python is externally managed (PEP 668), so install into a venv and put
+      # it on PATH for the scan step, which shells out to a plain `python`.
       - name: Install locked runtime deps so Snyk can resolve them
-        run: uv pip install --system -r requirements.txt
+        run: |
+          uv venv
+          uv pip install -r requirements.txt
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
       # Uploads the project snapshot to Snyk.io so the dashboard reflects our
       # actual locked tree. NOT continue-on-error: this step silently failed on
       # every run for months and reported the job green.
