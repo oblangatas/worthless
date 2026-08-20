@@ -117,14 +117,26 @@ jobs:
               });
             } catch (err) {
               if (err.status !== 404) throw err;
-              await github.rest.issues.createLabel({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                name: 'scheduled-failure',
-                color: 'b60205',
-                description: 'A workflow failed on its cron schedule (WOR-878)',
-              });
-              core.notice('Created the scheduled-failure label');
+              try {
+                await github.rest.issues.createLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: 'scheduled-failure',
+                  color: 'b60205',
+                  description: 'A workflow failed on its cron schedule (WOR-878)',
+                });
+                core.notice('Created the scheduled-failure label');
+              } catch (raceErr) {
+                // Two alarms can create the label at once. docker-security.yml
+                // (0 6 * * 1) and scheduled.yml (0 6 */3 * *) collide at 06:00
+                // roughly every third Monday. If both fail while the label is
+                // still missing, both 404 and both try to create it — the loser
+                // gets 422 already_exists. Untolerated, that throws and THAT
+                // ALARM IS LOST, which is the failure this workflow exists to
+                // prevent, reintroduced one layer down.
+                if (raceErr.status !== 422) throw raceErr;
+                core.notice('Label created concurrently by another alarm');
+              }
             }
 
             const open = await github.paginate(github.rest.issues.listForRepo, {

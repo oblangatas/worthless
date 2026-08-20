@@ -939,8 +939,11 @@ ALARM_WORKFLOW = REPO / ".github" / "workflows" / "scheduled-failure-alarm.yml"
 
 def _scheduled_workflows() -> list[Path]:
     """Every workflow carrying a `schedule:` trigger."""
+    root = REPO / ".github" / "workflows"
+    # BOTH extensions. GitHub honours .yaml, so globbing *.yml only would let a
+    # cron workflow named .yaml go unwatched while this guard stayed green.
     found = []
-    for wf in sorted((REPO / ".github" / "workflows").glob("*.yml")):
+    for wf in sorted([*root.glob("*.yml"), *root.glob("*.yaml")]):
         doc = yaml.safe_load(wf.read_text()) or {}
         triggers = doc.get(True) or doc.get("on") or {}
         if isinstance(triggers, dict) and "schedule" in triggers:
@@ -999,11 +1002,31 @@ def test_the_alarm_can_actually_file_an_issue() -> None:
         "job reports success — an alarm that cannot raise anything"
     )
     assert isinstance(job.get("timeout-minutes"), int), "the alarm job has no timeout"
-    step = job["steps"][0]
-    assert "getLabel" in str(step) or "createLabel" in str(step), (
-        "the alarm applies a `scheduled-failure` label but never ensures it "
-        "exists. It did not exist when this was written, so issues.create would "
-        "have failed on the very first alarm — discovered only when needed."
+    # Assert the CALLS the alarm depends on, not merely that the step mentions
+    # a label. An earlier version checked only for the string "getLabel", which
+    # would have stayed green with `issues.create` deleted outright — a guard
+    # satisfiable while the property is false, which is the defect this whole
+    # suite exists to prevent.
+    script = str(job["steps"][0].get("with", {}).get("script", ""))
+    # Match the call WITH its opening paren. `issues.create` is a substring of
+    # both `issues.createComment` and `issues.createLabel`, so a bare substring
+    # check stayed green with the real create deleted — this guard was itself
+    # satisfiable while false on its first draft.
+    for call, why in (
+        ("issues.create({", "nothing would ever be filed"),
+        ("issues.createComment({", "a repeat failure would file a duplicate"),
+        ("issues.getLabel({", "the label is applied but never checked for"),
+        ("issues.createLabel({", "a missing label would crash the first alarm"),
+    ):
+        assert call in script, f"the alarm never calls {call.rstrip('({')}: {why}"
+
+    # The tolerance expression, not the bare number — "422" also appears in the
+    # comment explaining it, so checking the digits alone proved nothing.
+    assert "status !== 422" in script, (
+        "createLabel is not tolerant of 422 already_exists. Two cron workflows "
+        "failing in the same minute both create the label; the loser throws and "
+        "ITS alarm is lost — the exact failure this workflow prevents, one "
+        "layer down."
     )
 
     condition = str(job.get("if", ""))
