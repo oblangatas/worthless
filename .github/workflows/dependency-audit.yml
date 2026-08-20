@@ -1,0 +1,104 @@
+# Dependency vulnerability gate — the CI half of the `uv-audit` pre-commit hook.
+#
+# Why this exists: `uv-audit` (.pre-commit-config.yaml) is `stages: [pre-push]`,
+# so it is a CLIENT-SIDE check. It never runs for a Dependabot PR, a GitHub web
+# edit, `git push --no-verify`, or a clone that never ran `pre-commit install`.
+# Until this workflow, a vulnerable locked dependency could reach main through
+# any of those paths and only surface at release time (pre-release.yml) or in
+# the following Monday's canary (pip-audit-canary.yml).
+#
+# This repo already made this argument once and acted on it: docker-security.yml
+# mirrors the grype-ignore-expiry hook into CI for exactly these reasons
+# (WOR-852). `uv-audit` was never mirrored. beads worthless-jymn.
+#
+# WHAT IT ACTUALLY AUDITS, precisely — the earlier version of this comment got
+# it wrong, so be careful before trusting a summary:
+#   - `uv export` includes the default `dev` group. pytest, ruff, deptry,
+#     pre-commit and hypothesis ARE in scope. A CVE in a dev tool will red-line
+#     every open PR, which is intended but worth knowing before you are the one
+#     blocked by it.
+#   - The `mcp` extra is NOT in the export, so nothing here covers it.
+#   - pip-audit evaluates environment markers and SKIPS requirements that do not
+#     apply to the running interpreter. 16 of 116 pins are marker-gated, so on
+#     this runner (linux, CPython 3.13) entries like `numpy==2.2.6 ;
+#     python_full_version < '3.11'` and `pywin32-ctypes ; sys_platform ==
+#     'win32'` are never audited. This job therefore covers the linux/3.13
+#     resolution of the lock, not the whole lock. Matrixing or stripping
+#     markers would close that; beads worthless-jymn carries the follow-up.
+#
+# Keep the command byte-identical to the hook's `entry:`. Note that this is a
+# weaker guarantee than it sounds — identical strings still audit different
+# package sets on different interpreters, and the hook's `sh -c` has neither
+# `-e` nor pipefail while this job runs under `shell: bash`.
+
+name: Dependency Audit
+
+on:
+  push:
+    # Branch restriction, NOT a paths filter. Scoped to main so a push to a PR
+    # branch does not duplicate the pull_request run for the same commit.
+    branches: [main]
+  pull_request:
+    # Deliberately unfiltered. A required check that never reports leaves a PR
+    # waiting forever — that outage already happened here when path filters
+    # were added to docker-security.yml (nine PRs went BLOCKED with zero
+    # failing checks, WOR-874). Likewise no job-level `if:`: a skipped job
+    # reports SUCCESS to branch protection, which turns a gate into a bypass.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: uv-audit (locked runtime tree)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up uv + Python
+        uses: ./.github/actions/setup-uv-python
+
+      # `--frozen` below audits uv.lock AS IT IS, without checking it still
+      # agrees with pyproject.toml. A desynced lock therefore exports the OLD
+      # dependency set and passes, while a different tree actually ships.
+      # Freshness is otherwise enforced only by the `uv-lock-check` pre-commit
+      # hook — client-side, so skipped by every path this workflow exists to
+      # cover. Kept as its own step so the audit command below stays
+      # byte-identical to the hook entry.
+      - name: Lock is in sync with pyproject.toml
+        run: uv lock --check
+
+      # Byte-identical to the `uv-audit` hook entry in .pre-commit-config.yaml.
+      # No `set +e`, no continue-on-error: a finding MUST fail this job. The
+      # canary is the non-blocking signal; this is the gate.
+      #
+      # Expect this to go red for reasons nobody in the PR caused: a newly
+      # published CVE against an existing pin fails every open PR at once. That
+      # is the gate working, and it is the same event that opened
+      # worthless-pjxv. Unblock by bumping the dependency, never by adding an
+      # ignore without a tracking ticket — see the hook's comment on why a dead
+      # ignore is worse than none.
+      #
+      # `shell: bash` is NOT cosmetic. GitHub's default step shell is
+      # `bash -e {0}` — no pipefail — and this run is a PIPELINE, so only
+      # pip-audit's exit code would count. A `uv export` that died partway
+      # would hand pip-audit a truncated-but-valid stream, which audits the
+      # packages that made it through and exits 0: a green gate that scanned
+      # a fragment. That is the exact failure mode of the Snyk job deleted in
+      # worthless-tidv. `shell: bash` is the documented opt-in to
+      # `-eo pipefail` and leaves the `run:` string untouched, so it stays
+      # byte-identical to the hook entry.
+      - name: pip-audit the frozen runtime dependency tree
+        shell: bash
+        env:
+          UV_CACHE_DIR: /tmp/uv-cache
+        run: uv export --frozen --no-emit-project | uv run pip-audit --disable-pip -r /dev/stdin
