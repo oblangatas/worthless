@@ -11,11 +11,25 @@
 # mirrors the grype-ignore-expiry hook into CI for exactly these reasons
 # (WOR-852). `uv-audit` was never mirrored. beads worthless-jymn.
 #
-# It audits the LOCKED RUNTIME TREE, which is a different input from the weekly
-# canary: the canary runs `uv sync --extra qa` and audits the installed
-# environment (dev + qa tools included), while this exports the frozen runtime
-# set — what a user actually installs. Keep the command byte-identical to the
-# hook's `entry:`, or the gate and the hook will disagree about what is clean.
+# WHAT IT ACTUALLY AUDITS, precisely — the earlier version of this comment got
+# it wrong, so be careful before trusting a summary:
+#   - `uv export` includes the default `dev` group. pytest, ruff, deptry,
+#     pre-commit and hypothesis ARE in scope. A CVE in a dev tool will red-line
+#     every open PR, which is intended but worth knowing before you are the one
+#     blocked by it.
+#   - The `mcp` extra is NOT in the export, so nothing here covers it.
+#   - pip-audit evaluates environment markers and SKIPS requirements that do not
+#     apply to the running interpreter. 16 of 116 pins are marker-gated, so on
+#     this runner (linux, CPython 3.13) entries like `numpy==2.2.6 ;
+#     python_full_version < '3.11'` and `pywin32-ctypes ; sys_platform ==
+#     'win32'` are never audited. This job therefore covers the linux/3.13
+#     resolution of the lock, not the whole lock. Matrixing or stripping
+#     markers would close that; beads worthless-jymn carries the follow-up.
+#
+# Keep the command byte-identical to the hook's `entry:`. Note that this is a
+# weaker guarantee than it sounds — identical strings still audit different
+# package sets on different interpreters, and the hook's `sh -c` has neither
+# `-e` nor pipefail while this job runs under `shell: bash`.
 
 name: Dependency Audit
 
