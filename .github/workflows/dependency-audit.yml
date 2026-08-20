@@ -107,21 +107,20 @@ jobs:
   # Worker with its own package-lock.json, and nothing audited it — `grep -rn
   # "npm audit" .github/workflows/` returned nothing before this job.
   #
-  # SCOPE IS DELIBERATE, and the reason matters. `--omit=dev` audits only what
-  # the Worker actually ships. Its package.json declares `"dependencies": {}`,
-  # so production is empty and this passes today. The full tree does NOT pass:
-  # 5 advisories (2 high, 3 moderate) reach in through wrangler and
-  # @cloudflare/vitest-pool-workers -> miniflare -> undici, all devDependencies
-  # that never enter the bundle.
+  # SCOPE — the FULL tree, dev tooling included, and the earlier version of this
+  # job got that wrong. It audited `--omit=dev` on the argument that the 5 open
+  # advisories were unavoidable devDependency noise and a full gate would be red
+  # on arrival. That was false: `npm audit fix --package-lock-only` cleared all
+  # 5 with package.json unchanged (semver-compatible bumps of wrangler,
+  # vitest-pool-workers, undici, nanoid). The lockfile refresh is in this PR, so
+  # the full tree is green and there is nothing left to look away from.
   #
-  # Gating on the full tree would ship a job that is red on arrival — a gate
-  # born broken teaches people to ignore it, which is the failure worthless-tidv
-  # was opened for. The dev-tooling advisories are instead handled by the npm
-  # entry added to .github/dependabot.yml, which raises update PRs for them.
-  # If a real runtime dependency is ever added to the Worker, this job starts
-  # doing visible work immediately. beads worthless-yhcc.
+  # Dev tooling belongs in scope for this repo specifically. wrangler and
+  # miniflare execute in CI and on developer machines with deploy credentials —
+  # for a product whose entire purpose is credential protection, "it does not
+  # ship" is not a reason to leave build tooling unaudited. beads worthless-yhcc.
   npm-audit:
-    name: npm audit (worker production deps)
+    name: npm audit (worker)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -134,9 +133,19 @@ jobs:
       - name: Set up Node.js
         uses: ./.github/actions/setup-node-worker
 
-      # No `npm ci` on purpose: `npm audit` resolves from package-lock.json
-      # alone, so installing node_modules would cost a minute and change
-      # nothing. Verified against this lockfile with no node_modules present.
-      - name: Audit the Worker's production dependency tree
+      # `npm audit` reads package-lock.json and never checks it still agrees
+      # with package.json — add a runtime dependency without relocking and the
+      # audit happily reports 0 vulnerabilities and exits 0. That is the Snyk
+      # failure this repo already deleted once: green over a tree that is not
+      # the tree. `npm ci --dry-run` fails loudly (EUSAGE, "lock file ... not in
+      # sync") without paying for a real install. Mirrors `uv lock --check` in
+      # the Python job above.
+      - name: Lock is in sync with package.json
         working-directory: workers/worthless-sh
-        run: npm audit --omit=dev
+        run: npm ci --dry-run
+
+      # No `npm ci` install on purpose: `npm audit` resolves from the lockfile
+      # alone, verified against this lockfile with no node_modules present.
+      - name: Audit the Worker's dependency tree
+        working-directory: workers/worthless-sh
+        run: npm audit

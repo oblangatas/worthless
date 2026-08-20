@@ -131,19 +131,37 @@ def _npm_step() -> dict:
     return matches[0]
 
 
-def test_npm_audit_is_scoped_to_production() -> None:
-    """Full-tree audit is red on arrival; production is empty and passes.
+def test_npm_audit_covers_the_full_tree() -> None:
+    """Dev tooling stays in scope — it runs in CI with deploy credentials.
 
-    The Worker's devDependencies pull in 5 advisories via wrangler and
-    vitest-pool-workers. Gating on those would ship a job that fails on day one,
-    which trains people to ignore it. Dependabot handles them instead.
+    An earlier version of this job used `--omit=dev`, justified by 5 devDependency
+    advisories that would have made a full gate red on arrival. That was false:
+    `npm audit fix --package-lock-only` cleared all 5 with package.json unchanged.
+    Narrowing a security gate to dodge findings that a one-command refresh fixes
+    is looking away, not scoping.
     """
     step = _npm_step()
-    assert "--omit=dev" in step["run"], (
-        "auditing the Worker's full tree would fail immediately on devDependency "
-        "advisories; scope it to what actually ships"
+    assert "--omit=dev" not in step["run"], (
+        "wrangler and miniflare execute in CI and on dev machines with deploy "
+        "credentials; excluding them from a credential-protection product's "
+        "supply-chain gate needs a real cost, and the measured cost is zero"
     )
     assert step.get("working-directory") == "workers/worthless-sh"
+
+
+def test_npm_lockfile_freshness_is_checked() -> None:
+    """`npm audit` reads the lockfile and never checks it matches package.json.
+
+    Add a runtime dependency without relocking and the audit reports 0
+    vulnerabilities and exits 0 — green over a tree that is not the tree, which
+    is exactly the failure worthless-tidv was opened for.
+    """
+    wf = yaml.safe_load(WORKFLOW.read_text())
+    runs = " ".join(str(s.get("run", "")) for s in wf["jobs"]["npm-audit"]["steps"])
+    assert "npm ci" in runs, (
+        "without a sync check, a stale package-lock.json passes the audit while a "
+        "different dependency tree actually installs"
+    )
 
 
 def test_npm_audit_can_fail() -> None:
