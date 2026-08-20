@@ -1,0 +1,69 @@
+# Dependency vulnerability gate — the CI half of the `uv-audit` pre-commit hook.
+#
+# Why this exists: `uv-audit` (.pre-commit-config.yaml) is `stages: [pre-push]`,
+# so it is a CLIENT-SIDE check. It never runs for a Dependabot PR, a GitHub web
+# edit, `git push --no-verify`, or a clone that never ran `pre-commit install`.
+# Until this workflow, a vulnerable locked dependency could reach main through
+# any of those paths and only surface at release time (pre-release.yml) or in
+# the following Monday's canary (pip-audit-canary.yml).
+#
+# This repo already made this argument once and acted on it: docker-security.yml
+# mirrors the grype-ignore-expiry hook into CI for exactly these reasons
+# (WOR-852). `uv-audit` was never mirrored. beads worthless-jymn.
+#
+# It audits the LOCKED RUNTIME TREE, which is a different input from the weekly
+# canary: the canary runs `uv sync --extra qa` and audits the installed
+# environment (dev + qa tools included), while this exports the frozen runtime
+# set — what a user actually installs. Keep the command byte-identical to the
+# hook's `entry:`, or the gate and the hook will disagree about what is clean.
+
+name: Dependency Audit
+
+on:
+  push:
+    # Branch restriction, NOT a paths filter. Scoped to main so a push to a PR
+    # branch does not duplicate the pull_request run for the same commit.
+    branches: [main]
+  pull_request:
+    # Deliberately unfiltered. A required check that never reports leaves a PR
+    # waiting forever — that outage already happened here when path filters
+    # were added to docker-security.yml (nine PRs went BLOCKED with zero
+    # failing checks, WOR-874). Likewise no job-level `if:`: a skipped job
+    # reports SUCCESS to branch protection, which turns a gate into a bypass.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: uv-audit (locked runtime tree)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up uv + Python
+        uses: ./.github/actions/setup-uv-python
+
+      # Byte-identical to the `uv-audit` hook entry in .pre-commit-config.yaml.
+      # No `set +e`, no continue-on-error: a finding MUST fail this job. The
+      # canary is the non-blocking signal; this is the gate.
+      #
+      # Expect this to go red for reasons nobody in the PR caused: a newly
+      # published CVE against an existing pin fails every open PR at once. That
+      # is the gate working, and it is the same event that opened
+      # worthless-pjxv. Unblock by bumping the dependency, never by adding an
+      # ignore without a tracking ticket — see the hook's comment on why a dead
+      # ignore is worse than none.
+      - name: pip-audit the frozen runtime dependency tree
+        env:
+          UV_CACHE_DIR: /tmp/uv-cache
+        run: uv export --frozen --no-emit-project | uv run pip-audit --disable-pip -r /dev/stdin
