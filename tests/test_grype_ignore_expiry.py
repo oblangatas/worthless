@@ -999,6 +999,13 @@ def test_the_alarm_can_actually_file_an_issue() -> None:
         "job reports success — an alarm that cannot raise anything"
     )
     assert isinstance(job.get("timeout-minutes"), int), "the alarm job has no timeout"
+    step = job["steps"][0]
+    assert "getLabel" in str(step) or "createLabel" in str(step), (
+        "the alarm applies a `scheduled-failure` label but never ensures it "
+        "exists. It did not exist when this was written, so issues.create would "
+        "have failed on the very first alarm — discovered only when needed."
+    )
+
     condition = str(job.get("if", ""))
     assert "conclusion == 'failure'" in condition, "the alarm must fire only on failure"
     assert "event == 'schedule'" in condition, (

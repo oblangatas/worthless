@@ -76,7 +76,12 @@ jobs:
       issues: write  # the entire point: file where a human will see it
     steps:
       - name: Open or update the alarm issue
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.0.1
+        # v7 tip as of 2025-06-06, NOT a release tag. The first version of this
+        # file labelled this SHA "v7.0.1", which is a different commit
+        # (60a0d830). A pin whose comment names the wrong version is the exact
+        # defect WOR-876 fixed for the secret scanner — the SHA is immutable
+        # and safe, but the label lied. Verified: `git ref tags/v7` -> f28e40c7.
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
             const run = context.payload.workflow_run;
@@ -97,6 +102,30 @@ jobs:
               `four months. Close it once the run is green again — it will reopen`,
               `itself if the workflow fails another time.`,
             ].join('\n');
+
+            // The label must exist before it can be applied. It did not exist
+            // when this workflow was written, and issues.create would have
+            // failed on the very first alarm — an alarm that cannot raise
+            // anything, discovered only when it was needed. Create it here so
+            // the workflow is self-sufficient rather than depending on a manual
+            // repo setup step nobody wrote down.
+            try {
+              await github.rest.issues.getLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: 'scheduled-failure',
+              });
+            } catch (err) {
+              if (err.status !== 404) throw err;
+              await github.rest.issues.createLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: 'scheduled-failure',
+                color: 'b60205',
+                description: 'A workflow failed on its cron schedule (WOR-878)',
+              });
+              core.notice('Created the scheduled-failure label');
+            }
 
             const open = await github.paginate(github.rest.issues.listForRepo, {
               owner: context.repo.owner,
