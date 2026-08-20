@@ -34,9 +34,14 @@ jobs:
       # Export the locked runtime deps to a format Snyk parses natively.
       - name: Export locked runtime deps for Snyk
         run: uv export --no-dev --no-hashes --format requirements-txt -o requirements.txt
+      # Snyk's pip plugin resolves the tree from INSTALLED package metadata, not
+      # from the requirements file alone — without this it fails with
+      # "Missing required packages" and scans nothing. --system puts them where
+      # the plain `python` Snyk shells out to will find them.
+      - name: Install locked runtime deps so Snyk can resolve them
+        run: uv pip install --system -r requirements.txt
       # Uploads the project snapshot to Snyk.io so the dashboard reflects our
-      # actual locked tree. Non-fatal — a transient upload failure must not
-      # fail the build.
+      # actual locked tree. NOT continue-on-error: this step silently failed on
+      # every run for months and reported the job green.
       - name: Snyk Open Source monitor
         run: snyk monitor --file=requirements.txt --package-manager=pip
-        continue-on-error: true
