@@ -71,6 +71,29 @@ jobs:
         with:
           persist-credentials: false
 
+      # WOR-892: publish.yml runs `python -m build`, which produces an sdist AND
+      # a wheel. Every pre-release path builds ONLY the wheel (`uv build --wheel`
+      # here at the co-located-image step, in user-flows.yml and verify-npm.yml),
+      # so release day is the first time the sdist is ever built. A packaging
+      # change that omits a file from the sdist — the classic MANIFEST/hatch
+      # include break — is invisible until it is already on PyPI.
+      #
+      # Same builder as publish.yml on purpose: `uv build --sdist` would prove a
+      # different tool's output. Installs it too, since a broken sdist usually
+      # builds fine and fails at install (missing module, missing metadata).
+      # Own outdir so nothing here touches `dist/`, which later steps use.
+      - name: Sdist builds and installs (publish.yml's builder, before release day)
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check --quiet build
+          python3 -m build --sdist --outdir /tmp/sdist-check
+          SDIST="$(find /tmp/sdist-check -maxdepth 1 -name '*.tar.gz' -type f | head -1)"
+          test -n "$SDIST" || { echo "python -m build --sdist produced no sdist"; exit 1; }
+          echo "sdist under test: $SDIST"
+          python3 -m venv /tmp/sdist-venv
+          /tmp/sdist-venv/bin/python -m pip install --disable-pip-version-check --quiet "$SDIST"
+          /tmp/sdist-venv/bin/worthless --version
+
       - name: Build image
         run: docker build -t worthless-proxy:${{ github.sha }} .
 

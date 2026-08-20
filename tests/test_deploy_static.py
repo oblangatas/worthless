@@ -1337,6 +1337,53 @@ class TestPublishTagVerification:
         )
 
 
+class TestPublishBuildJobFailsClosed:
+    """No step in publish.yml's `build` job may be skippable (WOR-892).
+
+    The verify step used to carry `if: github.event_name == 'push'`. Under the
+    push-tags-only `on:` that condition can never be false, so it defended
+    nothing — but it FAILS OPEN the moment `on:` is widened: the step skips,
+    and a skipped step is not a failed step, so `build` completes green and
+    `publish` uploads to PyPI unverified.
+
+    Asserting "the verify step has no `if:`" would pin one string. The same
+    fail-open is reproducible with `continue-on-error` on the verify step, or
+    with an `if:` on any LATER step in the job (build/upload skipping still
+    leaves `build` green). So the invariant is job-wide: every step runs, every
+    failure is fatal, and `publish` cannot start without `build`.
+    """
+
+    def test_no_build_step_is_skippable(self, publish_data: dict):
+        offenders = [
+            (i, s.get("name", s.get("uses", "<unnamed>")), key)
+            for i, s in enumerate(publish_data["jobs"]["build"]["steps"])
+            for key in ("if", "continue-on-error")
+            if key in s
+        ]
+        assert not offenders, (
+            "publish.yml build steps must be unconditional and fatal, but found "
+            f"{offenders}. A skipped or error-tolerated step leaves `build` green, "
+            "which satisfies the publish job's `needs: build` and ships to PyPI "
+            "without the signed-tag verify (WOR-892)."
+        )
+
+    def test_build_job_itself_is_unconditional(self, publish_data: dict):
+        build = publish_data["jobs"]["build"]
+        for key in ("if", "continue-on-error"):
+            assert key not in build, (
+                f"publish.yml `build` job must not declare `{key}` — a skipped "
+                "build job still satisfies `needs: build` on publish."
+            )
+
+    def test_publish_needs_build(self, publish_data: dict):
+        needs = publish_data["jobs"]["publish"].get("needs")
+        needs = [needs] if isinstance(needs, str) else (needs or [])
+        assert "build" in needs, (
+            "publish.yml `publish` job must declare `needs: build`; without it "
+            "PyPI upload no longer waits on the signed-tag verify."
+        )
+
+
 # ------------------------------------------------------------------
 # install.sh pin ↔ pyproject version invariant (WOR-598, option iii guard)
 # ------------------------------------------------------------------
