@@ -102,3 +102,41 @@ jobs:
         env:
           UV_CACHE_DIR: /tmp/uv-cache
         run: uv export --frozen --no-emit-project | uv run pip-audit --disable-pip -r /dev/stdin
+
+  # Python is not the only ecosystem here. workers/worthless-sh is a Cloudflare
+  # Worker with its own package-lock.json, and nothing audited it — `grep -rn
+  # "npm audit" .github/workflows/` returned nothing before this job.
+  #
+  # SCOPE IS DELIBERATE, and the reason matters. `--omit=dev` audits only what
+  # the Worker actually ships. Its package.json declares `"dependencies": {}`,
+  # so production is empty and this passes today. The full tree does NOT pass:
+  # 5 advisories (2 high, 3 moderate) reach in through wrangler and
+  # @cloudflare/vitest-pool-workers -> miniflare -> undici, all devDependencies
+  # that never enter the bundle.
+  #
+  # Gating on the full tree would ship a job that is red on arrival — a gate
+  # born broken teaches people to ignore it, which is the failure worthless-tidv
+  # was opened for. The dev-tooling advisories are instead handled by the npm
+  # entry added to .github/dependabot.yml, which raises update PRs for them.
+  # If a real runtime dependency is ever added to the Worker, this job starts
+  # doing visible work immediately. beads worthless-yhcc.
+  npm-audit:
+    name: npm audit (worker production deps)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: ./.github/actions/setup-node-worker
+
+      # No `npm ci` on purpose: `npm audit` resolves from package-lock.json
+      # alone, so installing node_modules would cost a minute and change
+      # nothing. Verified against this lockfile with no node_modules present.
+      - name: Audit the Worker's production dependency tree
+        working-directory: workers/worthless-sh
+        run: npm audit --omit=dev
