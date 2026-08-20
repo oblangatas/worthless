@@ -4,6 +4,15 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Removed
+- **The Snyk CI check stops reporting green on a scan that never ran** (`worthless-tidv`, [#529](https://github.com/oblangatas/worthless/pull/529)). `snyk-security.yml` exported `requirements.txt` but never installed it, and Snyk's pip plugin resolves from installed package metadata — so the step failed with `SNYK-CLI-0000 / Missing required packages` on every run in the retained history (100 runs, oldest 2026-08-15). `continue-on-error: true` rewrote each failure as a job success, so completely that even `gh run view --json jobs` reported the step as `success` alongside exit code 2. The workflow is deleted rather than repaired: it ran `snyk monitor`, which is upload-only and cannot fail a build, and its assumed consumers do not read it — the README badge uses Snyk's server-side on-demand endpoint, and app.snyk.io's GitHub integration monitors the repo independently. `requirements.txt` and its pre-commit exporter are kept; the badge parses that file and cannot parse `uv.lock`.
+
+### What this does NOT fix
+- **No PR-time gate on dependency CVEs was added, and none existed before.** `uv-audit` still runs pre-push only, so `--no-verify`, Dependabot PRs, and GitHub web edits skip it (`worthless-jymn`). Grype in `docker-security.yml` does block medium-and-above on pull requests, but only for CVEs with a fix available, and only for what lands in the built image — `Dockerfile` installs without extras, so the `mcp` extra is invisible to it.
+- **This corrects an earlier claim in this file.** The 0.3.7 entry below states "Snyk reports the dependency tree we actually ship". That was not true when written and never became true; the scan never completed successfully.
+- **Whether the Snyk dashboard reflects the right project is still unverified** (`worthless-7fey`). The repo was re-imported as `oblangatas/worthless` on 2026-08-19 while the org slug stayed `shacharm2`, and a stale duplicate project would now go uncontradicted.
+- **The `SNYK_TOKEN` repo secret is not revoked by this change** (`worthless-s78g`). It is unused after this release but still present.
+
 ## [0.3.12] — 2026-08-11
 
 `worthless mcp` starts again on a fresh install. An unbounded dependency let a new major of the MCP SDK reach every new installation and kill the server at startup.
