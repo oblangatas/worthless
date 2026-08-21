@@ -97,7 +97,46 @@ if [ "${1:-}" = "--check" ]; then
         echo "  Run: ./scripts/verify-pypi-publisher.sh"
         exit 1
     fi
+    # The attestation names four fields; PyPI matches on all four. Comparing
+    # only the owner leaves the likelier drifts invisible: renaming the workflow
+    # file, or changing `environment:` in it, breaks the binding while this
+    # check keeps passing (raised on #546, folded in here per worthless-jjap).
+    confirmed_workflow=$(awk -F= '/^workflow=/ { print $2; exit }' "$RECORD")
+    confirmed_env=$(awk -F= '/^environment=/ { print $2; exit }' "$RECORD")
+
+    if [ -z "$confirmed_workflow" ] || [ -z "$confirmed_env" ]; then
+        echo "ERROR: $RECORD predates field checking (no workflow=/environment= lines)."
+        echo "  Re-confirm so the record covers everything PyPI matches on:"
+        echo "  ./scripts/verify-pypi-publisher.sh"
+        exit 1
+    fi
+
+    workflow_path=".github/workflows/$confirmed_workflow"
+    if [ ! -f "$workflow_path" ]; then
+        echo "ERROR: the attestation names workflow '$confirmed_workflow', which does not exist."
+        echo "  PyPI matches the OIDC claim on the workflow FILENAME. If it was renamed,"
+        echo "  the publisher on PyPI must be updated to match or the upload fails."
+        exit 1
+    fi
+
+    # The environment the publish job actually requests, read from the workflow.
+    actual_env=$(awk '/^[[:space:]]+environment:[[:space:]]/ { print $2; exit }' "$workflow_path")
+    if [ -z "$actual_env" ]; then
+        echo "ERROR: $workflow_path declares no 'environment:' — cannot confirm the binding."
+        echo "  PyPI matches on it; a publisher configured with one will not match a job without."
+        exit 1
+    fi
+    if [ "$actual_env" != "$confirmed_env" ]; then
+        echo "ERROR: attestation says environment '$confirmed_env' but $workflow_path"
+        echo "  now requests '$actual_env'. PyPI matches on this exactly — the next"
+        echo "  v* tag fails at upload with invalid-publisher."
+        echo "  Update the publisher on PyPI, then re-confirm:"
+        echo "  ./scripts/verify-pypi-publisher.sh"
+        exit 1
+    fi
+
     echo "PyPI publisher: confirmed for '$owner' ($(awk -F= '/^date=/ { print $2; exit }' "$RECORD"))"
+    echo "  workflow=$confirmed_workflow environment=$confirmed_env — both still match $workflow_path"
     exit 0
 fi
 
