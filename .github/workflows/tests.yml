@@ -60,7 +60,10 @@ jobs:
           # Scoped to THIS lane on purpose — in global addopts it also applied to
           # the user_flow lane, whose live-proxy crashes a restart legitimately
           # recovers, and turned a self-healing crash into a red (run 31965508132).
-          uv run pytest --reruns 1 --max-worker-restart=0 --cov=worthless --cov-report=xml --cov-report=term-missing -n auto --dist loadscope -x -m "not live and not docker and not user_flow and not real_ipc and not quarantine"
+          # `--durations=25` is not decoration: without it CI has never printed a
+          # single timing, so nobody can see which module is pinning a loadscope
+          # group to one worker until they reproduce it by hand (worthless-9fth).
+          uv run pytest --reruns 1 --max-worker-restart=0 --cov=worthless --cov-report=xml --cov-report=term-missing -n auto --dist loadscope --durations=25 -x -m "not live and not docker and not user_flow and not real_ipc and not quarantine"
           # Serial pass — real_ipc tests that spawn real processes/sidecars;
           # kept serial because subprocess.run(waitpid) + PEP 475 EINTR-retry
           # makes pytest-timeout ineffective for these tests under xdist.
