@@ -106,7 +106,10 @@ def entrypoint_text() -> str:
 @pytest.fixture(scope="module")
 def release_sync_text() -> str:
     """Raw release-sync-check.yml workflow content."""
-    return RELEASE_SYNC_WORKFLOW.read_text()
+    # encoding pinned: the workflow carries non-ASCII (em dashes, arrows), so a
+    # bare read_text() would decode via the ambient locale and blow up wherever
+    # that is not UTF-8.
+    return RELEASE_SYNC_WORKFLOW.read_text(encoding="utf-8")
 
 
 # ------------------------------------------------------------------
@@ -990,12 +993,6 @@ class TestInstallPinDriftCheck:
     falls behind the latest published PyPI release. This deploy-decoupled
     drift guard replaces the deploy-time pin gate (Option B: pin = latest
     published, hand-bumped like UV_VERSION)."""
-
-    @pytest.fixture(scope="class")
-    def release_sync_text(self) -> str:
-        return (REPO_ROOT / ".github" / "workflows" / "release-sync-check.yml").read_text(
-            encoding="utf-8"
-        )
 
     def test_drift_check_compares_pin_to_pypi(self, release_sync_text: str):
         assert "WORTHLESS_VERSION_PIN" in release_sync_text, (
