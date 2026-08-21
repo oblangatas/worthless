@@ -67,6 +67,22 @@ def dockerfile_final_stage(dockerfile_text: str) -> str:
     return dockerfile_text[from_indices[-1] :]
 
 
+def _split_image_ref(image: str) -> tuple[str, str, str, str]:
+    """Split ``registry/owner/name:tag`` into its four parts (WOR-553).
+
+    Assert on parsed components rather than substrings: ``"ghcr.io" in image``
+    or ``image.startswith("ghcr.io/")`` would also accept a reference that merely
+    *contains* the registry somewhere, and cannot tell the registry apart from the
+    owner. CodeQL flags exactly that pattern
+    (``py/incomplete-url-substring-sanitization``), and it is right to — a test
+    that can't distinguish ``ghcr.io/us/x`` from ``evil.io/ghcr.io/x`` is not
+    guarding the thing it claims to guard.
+    """
+    registry, owner, remainder = image.split("/", 2)
+    name, _, tag = remainder.partition(":")
+    return registry, owner, name, tag
+
+
 @pytest.fixture(scope="module")
 def compose_data() -> dict:
     """Parsed docker-compose.yml."""
@@ -255,8 +271,10 @@ class TestDockerCompose:
             "no build context and `docker compose up` fails"
         )
         assert "image" in proxy, "proxy must pin the published image"
-        assert proxy["image"].startswith("ghcr.io/"), proxy["image"]
-        assert "worthless-proxy" in proxy["image"], proxy["image"]
+        registry, owner, name, _tag = _split_image_ref(proxy["image"])
+        assert registry == "ghcr.io", proxy["image"]
+        assert name == "worthless-proxy", proxy["image"]
+        assert owner, proxy["image"]
 
     def test_proxy_image_names_the_current_owner(self, compose_data: dict):
         """GHCR does not redirect renamed accounts — the old path hard-fails.
@@ -270,10 +288,12 @@ class TestDockerCompose:
         like this one can rot.
         """
         image = compose_data["services"]["proxy"]["image"]
-        assert "shacharm2" not in image, (
-            f"{image} names the pre-rename account; GHCR will not redirect it"
+        registry, owner, name, _tag = _split_image_ref(image)
+        assert owner == "oblangatas", (
+            f"{image} names owner {owner!r}; GHCR does not redirect renamed accounts, "
+            "so any other owner is a pull that cannot succeed"
         )
-        assert image.startswith("ghcr.io/oblangatas/worthless-proxy"), image
+        assert (registry, name) == ("ghcr.io", "worthless-proxy"), image
 
     def test_build_override_restores_local_build(self):
         """Removing `build:` must not take local builds away from contributors.
@@ -292,7 +312,11 @@ class TestDockerCompose:
         assert proxy["build"]["context"] == "..", proxy["build"]
         # A local tag, so an override build can never be confused with — or pushed
         # as — the published artifact.
-        assert "ghcr.io" not in proxy.get("image", ""), proxy.get("image")
+        override_image = proxy.get("image", "")
+        assert "/" not in override_image, (
+            f"{override_image!r} looks like a registry reference; the override must "
+            "use a bare local tag so it can never be pushed as the published image"
+        )
 
     def test_proxy_image_is_version_pinned(self, compose_data: dict):
         """Pin an exact version, never a floating tag.
@@ -302,8 +326,8 @@ class TestDockerCompose:
         ``check_docs_versions.py`` can enforce against the release.
         """
         image = compose_data["services"]["proxy"]["image"]
-        assert ":" in image.split("/")[-1], f"{image} has no tag"
-        tag = image.rsplit(":", 1)[1]
+        _registry, _owner, _name, tag = _split_image_ref(image)
+        assert tag, f"{image} has no tag"
         assert tag != "latest", "pin an exact version, not a floating tag"
         assert re.match(r"^\d+\.\d+\.\d+", tag), f"{tag} is not a version"
 
