@@ -8,6 +8,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import sys
 import threading
 import time
 
@@ -635,6 +636,18 @@ def pytest_configure(config):
     Note: ``--noconftest`` skips this file entirely, so any such invocation still
     has to pass ``--timeout-method=signal`` explicitly.
     """
+    if sys.platform == "win32":
+        # `signal` mode is pytest-timeout's SIGALRM path, and Windows has no
+        # SIGALRM — setting it here crashed the whole session at startup with
+        # `AttributeError: module 'signal' has no attribute 'SIGALRM'`, before a
+        # single test ran (Tests / Smoke (windows, py3.13)). The smoke job hits
+        # this branch because `-o addopts=` strips `-n auto`, making it serial.
+        #
+        # Windows therefore keeps pytest-timeout's configured default. It does
+        # not get this branch's improvement, which is the honest trade: the
+        # alternative is running zero tests. The real suite runs on Linux, where
+        # the fix applies; Windows runs a two-file smoke job.
+        return
     if hasattr(config, "workerinput"):
         return  # inside an xdist worker — `thread` is the whole point
     if getattr(config.option, "numprocesses", None) not in (None, 0):
