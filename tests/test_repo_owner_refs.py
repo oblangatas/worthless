@@ -58,8 +58,9 @@ _NEWS_FEED_GIST_ID = "7f6e2293b540004c4a733258a2461800"
 #     probably right. It is NOT verified-correct: the live badge API returns
 #     HTTP 200 for BOTH keys, and only the response BODY distinguishes them --
 #     `shacharm2_worthless` returns a real measure, `oblangatas_worthless`
-#     returns `<!-- ERROR -->`. README.md badges the latter, so the README
-#     quality badge is currently broken. Reconciling the two is tracked
+#     returns an error marker. README.md references the latter, but only inside
+#     a commented-out block ("held until the existing issues are triaged"), so
+#     nothing is visibly broken today -- it would break on re-enable. Tracked
 #     separately; do not "fix" this file by find-and-replace in the meantime.
 #     (A status-code-only check calls both healthy. That is the same false
 #     green as commit 338da36f -- check the body, not the code.)
