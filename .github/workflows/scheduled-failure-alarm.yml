@@ -1,0 +1,178 @@
+name: Scheduled failure alarm
+
+# Seven workflows in this repo run on a cron. Until now, none of them told
+# anyone when they failed. scheduled.yml failed 45 consecutive runs across four
+# months — a mutmut invocation using flags mutmut 3.x had deleted, a contract
+# job selecting a marker no test carried, and a secret scanner that regressed
+# on 2026-08-07 — and none of it reached a human. GitHub emails the repo owner
+# by default; four months of unbroken red is the evidence that path does not
+# work in practice. WOR-878.
+#
+# Deliberately NOT a step copied into each scheduled workflow. That would be
+# seven hand-maintained copies which must agree, and WOR-874 is the standing
+# proof in this repo that two such lists drift apart on their own (its push and
+# pull_request path filters had already diverged before anyone noticed).
+#
+# The first attempt omitted `workflows:` so this would watch everything with no
+# list to drift. Both actionlint and zizmor reject that — the key is required.
+# So the list is here, and a TEST enforces that it exactly equals the set of
+# workflows carrying a `schedule:` trigger. Adding a cron workflow without
+# adding it here turns the build red, which is strictly better than the
+# catch-all: drift becomes loud instead of silent.
+#
+# Do not edit this list by hand without running the suite.
+
+# zizmor flags `workflow_run` as fundamentally insecure, and in general it is
+# right: the trigger runs in the BASE repository's context with write
+# permissions, so a workflow that checks out and executes code from the
+# triggering run hands a fork PR those permissions. That is the pwn-request
+# shape, and it is a real one.
+#
+# It does not apply here, for reasons that are structural rather than hopeful:
+#
+#   1. Nothing is checked out. There is no `actions/checkout` step and no code
+#      from the triggering run is executed. The job reads event metadata and
+#      calls the issues API. That is the entire body.
+#   2. `event == 'schedule'` gates the only job. A fork PR cannot cause a cron
+#      event, so the attacker-reachable path is closed by the condition itself,
+#      not by trusting the payload.
+#   3. Permissions are `contents: read` plus `issues: write` — enough to file an
+#      issue, not enough to alter the repository.
+#
+# Payload fields do reach the issue body (name, branch, SHA, URL). They are
+# interpolated into a JavaScript template string and passed as an API
+# parameter, never into a shell, so there is no injection sink. Worst case on a
+# hypothetical bypass is a misleading issue body.
+#
+# If this workflow ever gains a checkout step, or the `event == 'schedule'`
+# condition is relaxed, DELETE this suppression and re-audit. WOR-878.
+on:  # zizmor: ignore[dangerous-triggers]
+  workflow_run:
+    types: [completed]
+    workflows:
+      - "Docker Security Scan & E2E"
+      - "Flake radar (nightly)"
+      - "Pip-audit canary (weekly)"
+      - "Release Sync Check"
+      - "Scheduled (Hypothesis + Secret Scan)"
+      - "Scorecard security analysis"
+      - "Wire-attack canary (scheduled)"
+
+permissions:
+  contents: read
+
+jobs:
+  alarm:
+    # Only scheduled runs. A failure on a PR or a push is already visible in the
+    # PR's own check list and needs no second channel — the problem being solved
+    # here is specifically that nobody is looking when a cron fires at 06:00.
+    if: >-
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.event == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write  # the entire point: file where a human will see it
+    steps:
+      - name: Open or update the alarm issue
+        # v7 tip as of 2025-06-06, NOT a release tag. The first version of this
+        # file labelled this SHA "v7.0.1", which is a different commit
+        # (60a0d830). A pin whose comment names the wrong version is the exact
+        # defect WOR-876 fixed for the secret scanner — the SHA is immutable
+        # and safe, but the label lied. Verified: `git ref tags/v7` -> f28e40c7.
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const run = context.payload.workflow_run;
+            // One issue per workflow, reused forever. Without this a workflow
+            // failing every Monday files an issue every Monday, and 45 issues
+            // is the same silence as none — it just costs more to scroll past.
+            const marker = `<!-- scheduled-failure-alarm:${run.workflow_id} -->`;
+            const title = `Scheduled run failed: ${run.name}`;
+            const body = [
+              marker,
+              `**${run.name}** failed on its scheduled run.`,
+              ``,
+              `- Run: ${run.html_url}`,
+              `- Commit: \`${run.head_sha.slice(0, 8)}\` on \`${run.head_branch}\``,
+              `- Started: ${run.run_started_at}`,
+              ``,
+              `This issue exists because a red scheduled check reached nobody for`,
+              `four months. Close it once the run is green again — it will reopen`,
+              `itself if the workflow fails another time.`,
+            ].join('\n');
+
+            // The label must exist before it can be applied. It did not exist
+            // when this workflow was written, and issues.create would have
+            // failed on the very first alarm — an alarm that cannot raise
+            // anything, discovered only when it was needed. Create it here so
+            // the workflow is self-sufficient rather than depending on a manual
+            // repo setup step nobody wrote down.
+            try {
+              await github.rest.issues.getLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: 'scheduled-failure',
+              });
+            } catch (err) {
+              if (err.status !== 404) throw err;
+              try {
+                await github.rest.issues.createLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: 'scheduled-failure',
+                  color: 'b60205',
+                  description: 'A workflow failed on its cron schedule (WOR-878)',
+                });
+                core.notice('Created the scheduled-failure label');
+              } catch (raceErr) {
+                // Two alarms can create the label at once. docker-security.yml
+                // (0 6 * * 1) and scheduled.yml (0 6 */3 * *) collide at 06:00
+                // roughly every third Monday. If both fail while the label is
+                // still missing, both 404 and both try to create it — the loser
+                // gets 422 already_exists. Untolerated, that throws and THAT
+                // ALARM IS LOST, which is the failure this workflow exists to
+                // prevent, reintroduced one layer down.
+                if (raceErr.status !== 422) throw raceErr;
+                core.notice('Label created concurrently by another alarm');
+              }
+            }
+
+            const open = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'all',
+              labels: 'scheduled-failure',
+              per_page: 100,
+            });
+            const existing = open.find((i) => (i.body || '').includes(marker));
+
+            if (!existing) {
+              const created = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['scheduled-failure'],
+              });
+              core.notice(`Opened #${created.data.number} for ${run.name}`);
+              return;
+            }
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: existing.number,
+              body,
+            });
+            // A closed issue means someone believed it was fixed. It is not.
+            if (existing.state === 'closed') {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                state: 'open',
+              });
+            }
+            core.notice(`Updated #${existing.number} for ${run.name}`);
