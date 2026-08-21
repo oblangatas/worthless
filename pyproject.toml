@@ -218,6 +218,7 @@ markers = [
     "playwright: browser-driven GUI tests (requires playwright + a Chromium build)",
     "real_ipc: opt out of the autouse FakeIPCSupervisor injection — these tests bring their own real or subprocess sidecar (WOR-309 Phase 5)",
     "user_flow: end-to-end user-flow tests — real keyring, real CLI, real fs. Run with `pytest -m user_flow`. See Linear WOR-439 for the full suite scope.",
+    "wheel_artifact: spawns the worthless binary as a SUBPROCESS and honours WORTHLESS_TEST_BIN, so it can be aimed at an installed wheel. Tests using typer CliRunner import branch source in-process and must NOT carry this marker — running them under a wheel banner proves nothing (worthless-d4h2).",
 ]
 
 [tool.coverage.run]

@@ -256,3 +256,39 @@ def test_lock_with_uid_mismatch_outputs_failure_and_exits_73(
     assert "[FAIL] OpenClaw" in result.output, (
         f"expected '[FAIL] OpenClaw' in output\n{result.output}"
     )
+
+
+# ---------------------------------------------------------------------------
+# WOR-599: lock names OpenClaw's own config backups and points at the remedy
+# ---------------------------------------------------------------------------
+
+
+def test_lock_tells_user_openclaw_backups_may_hold_the_old_key(
+    home_dir: WorthlessHome,
+    env_file: Path,
+    openclaw_present: dict[str, Path],
+) -> None:
+    """OpenClaw writes verbatim copies of its config — a ``.bak`` ring and a
+    ``.last-good`` promoted when the daemon observes the config. A copy written
+    before this lock still holds the ORIGINAL key, so "you're protected" is only
+    true of the live file.
+
+    We refuse to delete those files (daemon-owned, and ``.bak`` is our own
+    documented recovery path), which makes saying so the only control we have.
+    Rotation is named because it is the one action that invalidates a copy
+    that may already have been synced or snapshotted elsewhere.
+    """
+    result = runner.invoke(
+        app,
+        ["lock", "--env", str(env_file)],
+        env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+    )
+
+    assert result.exit_code == 0, result.output
+    out = result.output.lower()
+
+    assert "last-good" in out, "the non-rotating backup must be named"
+    assert "rotate" in out, "rotation is the only remedy that invalidates a leaked copy"
+    # SR-04: name paths, never key bytes.
+    for marker in ("sk-ant-", "sk-proj-", "sk-or-"):
+        assert marker not in result.output

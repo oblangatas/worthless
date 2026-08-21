@@ -194,6 +194,11 @@ def test_the_shipped_config_is_structurally_sound() -> None:
 # wrong before WOR-852 and both failed silently, so they are pinned here.
 
 
+def _all_steps() -> list[dict]:
+    """Every step of the scan job — used to prove a json report is consumed."""
+    return yaml.safe_load(WORKFLOW.read_text())["jobs"]["scan"]["steps"]
+
+
 def _scan_steps() -> list[dict]:
     """The two anchore/scan-action steps, in file order: gated, then informational."""
     # PyYAML resolves the bare `on:` key to True (YAML 1.1 booleans), so the
@@ -238,12 +243,43 @@ def test_the_informational_scan_does_not_inherit_the_gate_s_ignores() -> None:
         assert step.get("env", {}).get("GRYPE_CONFIG") == INFORMATIONAL_CONFIG.name, (
             f"{step.get('name')} inherits the gate's suppressions"
         )
-        # table is what puts findings in the job log; sarif (the action
-        # default) is written to a file nothing uploads, so the report
-        # reaches no human.
-        assert step["with"]["output-format"] == "table", (
-            f"{step.get('name')} writes a report nobody can read"
-        )
+        # The invariant is that findings REACH A HUMAN, not that the format is
+        # `table`. sarif (the action default) is written to a file nothing
+        # uploads, so it reaches nobody — that is the regression to catch.
+        #
+        # Two mechanisms satisfy it now:
+        #   table -> the action echoes the report itself
+        #   json  -> a later step reads it and prints a summary
+        # Asserting `table` alone would forbid the second, which is how the
+        # unmapped-findings gate gets its input (WOR-852).
+        fmt = step["with"]["output-format"]
+        assert fmt in {"table", "json"}, f"{step.get('name')} writes {fmt}, which reaches no human"
+        if fmt == "json":
+            step_id = step.get("id")
+            assert step_id, (
+                f"{step.get('name')} emits json but has no `id`, so no step can consume it"
+            )
+            # The reference may sit in `run:` or in `env:`. Passing it through
+            # env is what keeps zizmor's template-injection rule happy, so a
+            # check that only searched `run:` would forbid the safer form.
+            #
+            # Search only steps AFTER the producing one. Actions cannot read an
+            # output before the step that writes it, so a reference sitting
+            # earlier is stale — and would satisfy this test while the findings
+            # still reached nobody.
+            all_steps = _all_steps()
+            producer = next(
+                i for i, candidate in enumerate(all_steps) if candidate.get("id") == step_id
+            )
+            consumed = any(
+                f"steps.{step_id}.outputs.json"
+                in (str(s.get("run") or "") + str(s.get("env") or ""))
+                for s in all_steps[producer + 1 :]
+            )
+            assert consumed, (
+                f"{step.get('name')} emits json that no later step reads — "
+                "the findings reach nobody, which is exactly what this test forbids"
+            )
 
 
 def test_the_informational_config_suppresses_nothing() -> None:
@@ -253,25 +289,37 @@ def test_the_informational_config_suppresses_nothing() -> None:
 
 
 def test_the_scan_reruns_when_its_own_config_changes() -> None:
-    """A gate that cannot observe edits to itself will eventually ship one that disables it."""
-    wf = yaml.safe_load(WORKFLOW.read_text())
-    triggers = wf[True]  # bare `on:` — see _scan_steps
+    """A gate that cannot observe edits to itself will eventually ship one that disables it.
+
+    This originally enumerated the globs the `paths:` filter had to contain.
+    WOR-874 deleted that filter, so the property now holds for every path —
+    but the property is what matters, not the mechanism, and re-adding a
+    filter that omits these would silently restore the hole. The assertion
+    therefore covers both worlds: no filter, or a filter that self-covers.
+
+    The four paths matter for specific, already-observed reasons:
+      - the workflow itself, or an edit disabling the gate ships unscanned
+      - both grype config locations, since Actions globs do not cross `/`
+      - publish-docker.yml, which triggers only on `v*` tags and is otherwise
+        exercised by nothing; WOR-871 shipped its entire release-gate change
+        with 36 green checks and no scan among them
+    """
+    must_cover = {
+        ".github/workflows/docker-security.yml",
+        ".github/workflows/publish-docker.yml",
+        ".grype*.yaml",
+        ".grype/config.yaml",
+    }
+    triggers = yaml.safe_load(WORKFLOW.read_text())[True]  # bare `on:` — see _scan_steps
     for event in ("push", "pull_request"):
-        paths = set(triggers[event]["paths"])
-        assert ".grype*.yaml" in paths, f"{event}: grype configs not in paths filter"
-        assert ".github/workflows/docker-security.yml" in paths, (
-            f"{event}: workflow not self-covering"
-        )
-        # Actions path globs do not cross `/`, so `.grype*.yaml` does NOT match
-        # the nested location — the same blind spot CONFIGS covers above. An
-        # ignore parked there would otherwise never re-trigger the scan.
-        assert ".grype/config.yaml" in paths, f"{event}: nested grype config not in paths filter"
-        # The release workflow triggers only on `v*` tags, so it is exercised
-        # by nothing on a PR unless the scan job watches it. WOR-871 shipped
-        # its entire release-gate change with 36 green checks and no scan
-        # among them; this makes that impossible to repeat.
-        assert ".github/workflows/publish-docker.yml" in paths, (
-            f"{event}: release workflow changes run no scan"
+        config = triggers.get(event)
+        if not isinstance(config, dict) or "paths" not in config:
+            continue  # unfiltered: every path re-triggers it, including these
+        missing = must_cover - set(config["paths"])
+        assert not missing, (
+            f"{event}: a paths filter was re-added without {sorted(missing)}. "
+            f"Edits to those files would then ship without ever running the gate "
+            f"they modify. Prefer no filter at all — see WOR-874."
         )
 
 
@@ -661,3 +709,329 @@ def test_the_secret_scan_excludes_the_detector_that_matches_test_names() -> None
         assert "--only-verified" in args, (
             "dropping --only-verified would flood the scan with unverified noise"
         )
+
+
+def test_trufflehog_pins_an_exact_scanner_version() -> None:
+    """The action SHA pins the wrapper; `version` pins the scanner itself.
+
+    trufflesecurity/trufflehog is a thin wrapper that runs
+    `docker run ghcr.io/trufflesecurity/trufflehog:${VERSION}`, and its
+    `version` input defaults to `latest` — a mutable tag upstream can repoint
+    at will. Without an explicit pin the SHA is decorative: the code that
+    actually scans this repo is whatever `latest` resolved to that morning.
+
+    A version TAG rather than a digest is deliberate and forced: the action
+    interpolates "${IMAGE}:${VERSION}" with a colon, so a digest yields the
+    invalid ref `trufflehog:sha256:...`. A release tag is the strongest form
+    this action accepts. WOR-876.
+    """
+    for wf in sorted((REPO / ".github" / "workflows").glob("*.yml")):
+        doc = yaml.safe_load(wf.read_text())
+        for job in (doc.get("jobs") or {}).values():
+            for step in job.get("steps") or []:
+                if "trufflesecurity/trufflehog" not in str(step.get("uses", "")):
+                    continue
+                version = str((step.get("with") or {}).get("version", "")).strip()
+                assert version, (
+                    f"{wf.name}: the TruffleHog step pins no `version`, so it runs "
+                    f"whatever `latest` resolves to. The action SHA alone does not "
+                    f'pin the scanner. Set an exact release, e.g. version: "3.96.0".'
+                )
+                assert re.fullmatch(r"\d+\.\d+\.\d+", version), (
+                    f"{wf.name}: TruffleHog version {version!r} is not an exact "
+                    f"release. `latest` and floating majors are mutable — upstream "
+                    f"can repoint them, which is what pinning exists to prevent."
+                )
+
+
+# Jobs that carry the container security gates. A `paths:` filter on their
+# workflow makes them unusable as required checks: GitHub only creates a check
+# run when the workflow triggers, so on a PR that matches no glob the required
+# context never reports and the PR waits forever. Nine PRs went BLOCKED with
+# zero failing checks the day `scan` was made required. WOR-874.
+GATE_WORKFLOW = REPO / ".github" / "workflows" / "docker-security.yml"
+
+
+def test_push_is_branch_scoped_so_runs_are_not_doubled() -> None:
+    """`push` must be scoped to main, or every job runs twice per commit.
+
+    With `push` unscoped, a push to a PR branch fires a full run alongside the
+    pull_request run for the same SHA. The concurrency group keys on
+    github.event_name, so they do not cancel each other: measured as two
+    `scan`, two `docker-e2e` and two `service lock roundtrip` check runs, ~26
+    runner-minutes instead of 13, and doubled anonymous base-image pulls.
+
+    A BRANCH restriction is safe where a PATHS filter is not. Branch scoping
+    cannot strand a PR, because `pull_request` still fires on every PR and the
+    required context still reports. WOR-874.
+    """
+    triggers = yaml.safe_load(GATE_WORKFLOW.read_text())[True]
+    push = triggers.get("push")
+    assert isinstance(push, dict) and push.get("branches") == ["main"], (
+        f"docker-security.yml `push` must be scoped to exactly ['main'], got "
+        f"{(push or {}).get('branches')!r}. Anything broader — a wildcard, an "
+        f"extra branch — puts the doubling back: every push runs the full gate "
+        f"on top of the pull_request run for the same commit, and the "
+        f"concurrency key cannot dedupe them because it includes "
+        f"github.event_name."
+    )
+    assert "paths" not in push and "paths-ignore" not in push, (
+        "scope `push` by BRANCH, never by path — a path filter is what made "
+        "these jobs unusable as required checks."
+    )
+
+
+def test_gate_workflow_has_no_paths_filter() -> None:
+    """A gate that reports on only some PRs cannot be a required check.
+
+    `severity-cutoff` and the ignore rules decide whether the gate is right.
+    This decides whether it is present at all — the failure mode is silence,
+    not a wrong answer, and silence is invisible in a PR's check list.
+    """
+    doc = yaml.safe_load(GATE_WORKFLOW.read_text())
+    triggers = doc.get(True) or doc.get("on") or {}
+    for event in ("push", "pull_request"):
+        config = triggers.get(event)
+        if not isinstance(config, dict):
+            continue
+        for key in ("paths", "paths-ignore"):
+            assert key not in config, (
+                f"docker-security.yml `{event}` has a `{key}` filter. These jobs "
+                f"gate container CVEs and the end-to-end credential tests; a "
+                f"filtered gate does not report on non-matching PRs, so making it "
+                f"required leaves those PRs permanently BLOCKED with no failing "
+                f"check. Runners are free on a public repo — let it always run."
+            )
+
+
+def test_gate_jobs_are_unconditional_and_time_limited() -> None:
+    """No JOB-level `if:`, and every job bounded.
+
+    Job level specifically. A skipped job reports SUCCESS to branch
+    protection, so gating a required job with `if:` converts the gate into a
+    bypass — worse than the deadlock it would work around.
+
+    Step-level `if:` is a different thing and is used here deliberately: the
+    arm64 build and scan steps are scoped to schedule/dispatch (WOR-873),
+    because a QEMU-emulated arm64 build is far too slow for every PR. A
+    skipped STEP does not fabricate a job result — the job still reports what
+    its remaining steps actually did. The consequence is real but chosen and
+    documented: PRs are gated on amd64, arm64 is gated weekly.
+
+    Also: an untimed required job that hangs blocks merges until GitHub's
+    6-hour default expires.
+    """
+    doc = yaml.safe_load(GATE_WORKFLOW.read_text())
+    for name, job in (doc.get("jobs") or {}).items():
+        assert "if" not in job, (
+            f"job {name!r} has a job-level `if:`. A skipped job counts as SUCCESS "
+            f"to branch protection, which turns this gate into a bypass."
+        )
+        assert isinstance(job.get("timeout-minutes"), int), (
+            f"job {name!r} has no `timeout-minutes`, so it inherits GitHub's "
+            f"6-hour default. A required job that hangs blocks every merge."
+        )
+
+
+# --- warning window before expiry (worthless-kjld) -------------------------
+# The hook used to fail cold: on the expiry date every commit in the repo
+# blocked with no prior notice, and the cheapest escape was a blind date bump —
+# exactly what .grype.yaml's header forbids. A warning window makes the
+# re-measure happen before the wall instead of at it.
+
+
+def _dated(tmp_path: Path, expiry: dt.date) -> Path:
+    return _write(
+        tmp_path,
+        f'ignore:\n  - vulnerability: CVE-2026-11940\n    expiry: "{expiry.isoformat()}"\n',
+    )
+
+
+@pytest.mark.parametrize("days_out", [0, 1, 13, 14])
+def test_expiry_inside_the_window_warns_but_is_not_a_problem(tmp_path: Path, days_out: int) -> None:
+    """Inside the window: a warning, and still exit-code clean."""
+    mod = _load()
+    warnings: list[str] = []
+    problems = mod.check(_dated(tmp_path, TODAY + dt.timedelta(days=days_out)), TODAY, warnings)
+
+    assert problems == [], "a not-yet-expired ignore must never be a problem"
+    assert len(warnings) == 1
+    assert "CVE-2026-11940" in warnings[0]
+
+
+def test_expiry_beyond_the_window_is_silent(tmp_path: Path) -> None:
+    mod = _load()
+    warnings: list[str] = []
+    assert mod.check(_dated(tmp_path, TODAY + dt.timedelta(days=15)), TODAY, warnings) == []
+    assert warnings == []
+
+
+def test_an_expired_ignore_is_a_problem_not_a_warning(tmp_path: Path) -> None:
+    """Past the date the hard failure is unchanged — the window never softens it."""
+    mod = _load()
+    warnings: list[str] = []
+    problems = mod.check(_dated(tmp_path, TODAY - dt.timedelta(days=1)), TODAY, warnings)
+
+    assert len(problems) == 1
+    assert "expired" in problems[0]
+    assert warnings == [], "an expired ignore must not also warn — it must block"
+
+
+def test_warnings_are_optional_so_existing_callers_are_unaffected(tmp_path: Path) -> None:
+    """check() without the out-param behaves exactly as before."""
+    mod = _load()
+    assert mod.check(_dated(tmp_path, TODAY + dt.timedelta(days=1)), TODAY) == []
+
+
+def test_main_exits_zero_when_only_warnings(tmp_path: Path, monkeypatch, capsys) -> None:
+    """🚨 The load-bearing one.
+
+    A warning that returns non-zero would block every commit in the repo —
+    precisely the failure this window exists to prevent. Dated off the real
+    clock, so it is always inside the window and never expired.
+    """
+    mod = _load()
+    cfg = _dated(tmp_path, dt.date.today() + dt.timedelta(days=1))
+    monkeypatch.setattr(mod, "CONFIGS", (cfg,))
+
+    assert mod.main() == 0
+    assert "NOTICE" in capsys.readouterr().err
+
+
+# --- package names that are secretly regexes (worthless-yilt) --------------
+# grype matches package.name literally until it contains a metacharacter, at
+# which point the whole name becomes a full-match regex and its dots turn into
+# wildcards. Measured on grype 0.114.0: `urllib.` does not match `urllib3`,
+# but `urllib.|zzzz` does.
+
+
+@pytest.mark.parametrize("name", ["urllib.|zzzz", "ta.*", "libapt.*", "py[t]hon", "a+b"])
+def test_regex_armed_package_names_are_rejected(tmp_path: Path, name: str) -> None:
+    cfg = _write(
+        tmp_path,
+        f'ignore:\n  - vulnerability: CVE-1\n    package:\n      name: "{name}"\n'
+        f'    expiry: "2099-01-01"\n',
+    )
+    problems = _load().check(cfg, TODAY)
+    assert len(problems) == 1
+    assert "full-match regex" in problems[0]
+
+
+@pytest.mark.parametrize(
+    "name", ["python", "backports.tarfile", "gopkg.in/yaml.v2", "libapt-pkg6.0"]
+)
+def test_ordinary_names_including_dotted_ones_are_fine(tmp_path: Path, name: str) -> None:
+    """A bare `.` is inert in grype's matcher, so flagging dotted names is noise."""
+    cfg = _write(
+        tmp_path,
+        f'ignore:\n  - vulnerability: CVE-1\n    package:\n      name: "{name}"\n'
+        f'    expiry: "2099-01-01"\n',
+    )
+    assert _load().check(cfg, TODAY) == []
+
+
+# Every workflow that runs on a cron must be watched by the failure alarm.
+# scheduled.yml failed 45 consecutive runs across four months and reached
+# nobody; GitHub's default owner email is demonstrably not a channel anyone
+# reads. WOR-878.
+ALARM_WORKFLOW = REPO / ".github" / "workflows" / "scheduled-failure-alarm.yml"
+
+
+def _scheduled_workflows() -> list[Path]:
+    """Every workflow carrying a `schedule:` trigger."""
+    root = REPO / ".github" / "workflows"
+    # BOTH extensions. GitHub honours .yaml, so globbing *.yml only would let a
+    # cron workflow named .yaml go unwatched while this guard stayed green.
+    found = []
+    for wf in sorted([*root.glob("*.yml"), *root.glob("*.yaml")]):
+        doc = yaml.safe_load(wf.read_text()) or {}
+        triggers = doc.get(True) or doc.get("on") or {}
+        if isinstance(triggers, dict) and "schedule" in triggers:
+            found.append(wf)
+    return found
+
+
+def test_a_failing_scheduled_run_reaches_a_human() -> None:
+    """The alarm exists, and watches every workflow rather than a list of names.
+
+    `workflows:` is a hand-maintained list that must agree with the set of cron
+    workflows — the same shape as the push/pull_request path filters in
+    WOR-874, which had drifted apart before anyone looked. Omitting the key
+    would watch everything, but actionlint and zizmor both reject that form.
+
+    So this test IS the drift protection: it asserts the list equals the set of
+    workflows carrying a `schedule:` trigger, in both directions. Adding a cron
+    workflow without wiring the alarm fails here rather than going unwatched.
+    """
+    assert ALARM_WORKFLOW.exists(), (
+        "no scheduled-failure alarm: a cron workflow can fail indefinitely with "
+        "nobody told, which is how three checks stayed broken for four months"
+    )
+    doc = yaml.safe_load(ALARM_WORKFLOW.read_text())
+    triggers = doc.get(True) or doc.get("on") or {}
+    assert "workflow_run" in triggers, "the alarm must fire on other runs completing"
+
+    watched = set(triggers["workflow_run"].get("workflows") or [])
+    actual = set()
+    for wf in _scheduled_workflows():
+        actual.add((yaml.safe_load(wf.read_text()) or {})["name"])
+
+    unwatched = actual - watched
+    assert not unwatched, (
+        f"these workflows run on a cron but the alarm does not watch them: "
+        f"{sorted(unwatched)}. They can fail indefinitely with nobody told — "
+        f"add them to `workflows:` in scheduled-failure-alarm.yml."
+    )
+    stale = watched - actual
+    assert not stale, (
+        f"the alarm watches {sorted(stale)}, which no longer run on a cron. "
+        f"A list that has drifted once will drift again — remove them."
+    )
+
+
+def test_the_alarm_can_actually_file_an_issue() -> None:
+    """`issues: write` is the whole mechanism — without it the alarm silently 403s.
+
+    This is the failure mode the ticket exists to end: a control that looks
+    present, runs green, and does nothing. A missing permission produces
+    exactly that, because the job still succeeds.
+    """
+    job = yaml.safe_load(ALARM_WORKFLOW.read_text())["jobs"]["alarm"]
+    assert job.get("permissions", {}).get("issues") == "write", (
+        "the alarm job lacks `issues: write`, so its API call 403s while the "
+        "job reports success — an alarm that cannot raise anything"
+    )
+    assert isinstance(job.get("timeout-minutes"), int), "the alarm job has no timeout"
+    # Assert the CALLS the alarm depends on, not merely that the step mentions
+    # a label. An earlier version checked only for the string "getLabel", which
+    # would have stayed green with `issues.create` deleted outright — a guard
+    # satisfiable while the property is false, which is the defect this whole
+    # suite exists to prevent.
+    script = str(job["steps"][0].get("with", {}).get("script", ""))
+    # Match the call WITH its opening paren. `issues.create` is a substring of
+    # both `issues.createComment` and `issues.createLabel`, so a bare substring
+    # check stayed green with the real create deleted — this guard was itself
+    # satisfiable while false on its first draft.
+    for call, why in (
+        ("issues.create({", "nothing would ever be filed"),
+        ("issues.createComment({", "a repeat failure would file a duplicate"),
+        ("issues.getLabel({", "the label is applied but never checked for"),
+        ("issues.createLabel({", "a missing label would crash the first alarm"),
+    ):
+        assert call in script, f"the alarm never calls {call.rstrip('({')}: {why}"
+
+    # The tolerance expression, not the bare number — "422" also appears in the
+    # comment explaining it, so checking the digits alone proved nothing.
+    assert "status !== 422" in script, (
+        "createLabel is not tolerant of 422 already_exists. Two cron workflows "
+        "failing in the same minute both create the label; the loser throws and "
+        "ITS alarm is lost — the exact failure this workflow prevents, one "
+        "layer down."
+    )
+
+    condition = str(job.get("if", ""))
+    assert "conclusion == 'failure'" in condition, "the alarm must fire only on failure"
+    assert "event == 'schedule'" in condition, (
+        "the alarm must fire only on SCHEDULED runs — a PR failure is already "
+        "visible in that PR's check list and needs no second channel"
+    )

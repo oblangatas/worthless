@@ -21,6 +21,7 @@ on:
       - ".github/scripts/test-verify-tag-multikey.sh"
       - ".github/workflows/verify-tag-test.yml"
       - ".github/workflows/deploy-worker.yml"
+      - ".github/workflows/publish-docker.yml"
   push:
     branches: [main]
     paths:
@@ -28,6 +29,7 @@ on:
       - ".github/scripts/test-verify-tag-multikey.sh"
       - ".github/workflows/verify-tag-test.yml"
       - ".github/workflows/deploy-worker.yml"
+      - ".github/workflows/publish-docker.yml"
   workflow_dispatch:
 
 permissions:

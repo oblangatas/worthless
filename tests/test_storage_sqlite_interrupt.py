@@ -1,4 +1,4 @@
-"""Interrupt-safety of :func:`worthless.storage.sqlite.connect`.
+"""Interrupt-safety of the :mod:`worthless.storage.sqlite` open guards.
 
 Regression pin for the ``worthless lock`` hang surfaced by
 ``tests/chaos/test_lock_interrupt_chaos.py``: a SIGINT/SIGTERM arriving while
@@ -17,19 +17,29 @@ The captured production stack was::
     Current thread (most recent call first):
       File ".../threading.py", line 1567 in _shutdown
 
-so the test raises the interrupt from exactly there rather than approximating
+so the tests raise the interrupt from exactly there rather than approximating
 it with a failure in the ``async with`` body (which aiosqlite's ``__aexit__``
 already handles correctly).
+
+Both shapes are pinned, because the window belongs to ``Connection.__await__``
+and not to any one call style: :func:`~worthless.storage.sqlite.connect` for
+scoped callers, and :func:`~worthless.storage.sqlite.open_connection` for the
+proxy lifespan, which holds its connection for the whole process lifetime.
 """
 
 from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable, Iterator
 
 import aiosqlite
+import httpx
 import pytest
 
+from worthless.proxy.app import create_app
+from worthless.proxy.config import ProxySettings
+from worthless.proxy.ipc_supervisor import IPCUnavailable
 from worthless.storage.sqlite import connect as sqlite_connect
 
 WORKER_NAME = "_connection_worker_thread"
@@ -40,18 +50,20 @@ def _workers() -> list[threading.Thread]:
     return [t for t in threading.enumerate() if WORKER_NAME in t.name]
 
 
-async def test_interrupt_during_thread_start_does_not_leak_worker(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A KeyboardInterrupt inside ``Thread.start()`` must still stop the worker.
+@pytest.fixture
+def worker_watch(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[[], None]]:
+    """Watch for aiosqlite workers that outlive the code under test.
 
-    Without the guard the worker never receives ``_STOP_RUNNING_SENTINEL`` and
-    stays alive, which is what wedges interpreter shutdown.
+    Yields the assertion to run once the failure has propagated: it polls for a
+    worker started during the test that is still alive, and fails if it finds
+    one.
+
+    Teardown queues the stop sentinel on every Connection handed out, so a
+    regression fails the assertion instead of wedging this test process at
+    exit — the exact failure mode under test must never be the way it reports.
     """
-    db_path = str(tmp_path / "interrupt.db")
-
     # Keep every Connection we create so the cleanup below can always unblock
-    # its worker — a regression must fail this assertion, never hang the suite.
+    # its worker — a regression must fail an assertion, never hang the suite.
     created: list[aiosqlite.Connection] = []
     real_connect = aiosqlite.connect
 
@@ -60,23 +72,10 @@ async def test_interrupt_during_thread_start_does_not_leak_worker(
         created.append(conn)
         return conn
 
+    before = {t.ident for t in _workers()}
     monkeypatch.setattr(aiosqlite, "connect", _spy_connect)
 
-    real_start = threading.Thread.start
-
-    def _start_then_interrupt(self: threading.Thread) -> None:
-        real_start(self)
-        if WORKER_NAME in self.name:
-            raise KeyboardInterrupt  # exactly where the captured stack died
-
-    monkeypatch.setattr(threading.Thread, "start", _start_then_interrupt)
-
-    before = {t.ident for t in _workers()}
-    try:
-        with pytest.raises(KeyboardInterrupt):
-            async with sqlite_connect(db_path):
-                pytest.fail("connection body must not be reached")
-    finally:
+    def _assert_no_worker_leaked() -> None:
         monkeypatch.undo()
 
         def _leaked() -> list[threading.Thread]:
@@ -91,9 +90,196 @@ async def test_interrupt_during_thread_start_does_not_leak_worker(
             leaked = _leaked()
         names = [t.name for t in leaked]
 
-        # Belt-and-braces: never let a regression leave a non-daemon thread
-        # behind to wedge this test process at exit.
+        assert not names, f"aiosqlite worker thread leaked after interrupt: {names}"
+
+    try:
+        yield _assert_no_worker_leaked
+    finally:
+        monkeypatch.undo()
         for conn in created:
             conn.stop()
 
-    assert not names, f"aiosqlite worker thread leaked after interrupt: {names}"
+
+@pytest.fixture
+def armed_interrupt(
+    monkeypatch: pytest.MonkeyPatch, worker_watch: Callable[[], None]
+) -> Callable[[], None]:
+    """:func:`worker_watch` plus a ``KeyboardInterrupt`` inside ``Thread.start()``.
+
+    Interrupts the *open* — the window where ``_connection`` is still None, so
+    neither ``__del__`` nor ``close()`` will stop the worker for us.
+    """
+    real_start = threading.Thread.start
+
+    def _start_then_interrupt(self: threading.Thread) -> None:
+        real_start(self)
+        if WORKER_NAME in self.name:
+            raise KeyboardInterrupt  # exactly where the captured stack died
+
+    monkeypatch.setattr(threading.Thread, "start", _start_then_interrupt)
+    return worker_watch
+
+
+class _InterruptingSupervisor:
+    """Sidecar supervisor stand-in that interrupts startup at ``connect()``.
+
+    Stands in for the real interrupt: a user pressing Ctrl-C while the proxy
+    waits on the sidecar, which is the slowest step in startup and so the most
+    likely moment to be interrupted.
+    """
+
+    async def connect(self) -> None:
+        raise KeyboardInterrupt
+
+    async def aclose(self) -> None:  # pragma: no cover — startup never completes
+        return None
+
+
+async def test_interrupt_during_thread_start_does_not_leak_worker(
+    tmp_path, armed_interrupt: Callable[[], None]
+) -> None:
+    """A KeyboardInterrupt inside ``Thread.start()`` must still stop the worker.
+
+    Without the guard the worker never receives ``_STOP_RUNNING_SENTINEL`` and
+    stays alive, which is what wedges interpreter shutdown.
+    """
+    with pytest.raises(KeyboardInterrupt):
+        async with sqlite_connect(str(tmp_path / "interrupt.db")):
+            pytest.fail("connection body must not be reached")
+
+    armed_interrupt()
+
+
+async def test_proxy_lifespan_interrupt_does_not_leak_worker(
+    tmp_path, armed_interrupt: Callable[[], None]
+) -> None:
+    """The proxy's long-lived connection is guarded on open too.
+
+    ``_lifespan`` opens ``app.state.db`` first and keeps it for the whole
+    process, so the scoped ``connect()`` helper does not fit — it awaits the
+    connection directly and must guard that await itself. Neither
+    ``Connection.__del__`` nor ``Connection.close()`` rescues this: both return
+    early while ``_connection`` is still None, which it is when the interrupt
+    lands before the sqlite connect ever runs.
+    """
+    settings = ProxySettings(
+        db_path=str(tmp_path / "lifespan-interrupt.db"),
+        fernet_key=bytearray(b"x" * 32),
+        allow_insecure=True,
+    )
+    app = create_app(settings)
+
+    with pytest.raises(KeyboardInterrupt):
+        async with app.router.lifespan_context(app):
+            pytest.fail("lifespan startup must not yield after an interrupt")
+
+    armed_interrupt()
+
+
+async def test_proxy_startup_interrupt_after_open_does_not_leak_worker(
+    tmp_path, worker_watch: Callable[[], None]
+) -> None:
+    """An interrupt *after* the open, mid-startup, must also stop the worker.
+
+    Guarding the open alone is not enough, and the reason inverts. Once the
+    connection is open, ``__del__`` *would* stop the worker — but only if the
+    Connection becomes unreferenced, and ``app.state.db`` holds a reference for
+    as long as the app is alive. Startup raising before the yield also means the
+    shutdown half never runs, so nothing closes it either.
+
+    The interrupt is raised from ``ipc.connect()``, the slowest step in startup
+    and the one a waiting user is most likely to interrupt. ``app`` is
+    deliberately kept alive through the assertion below: that reference is the
+    whole point of the test.
+    """
+    settings = ProxySettings(
+        db_path=str(tmp_path / "startup-interrupt.db"),
+        fernet_key=bytearray(b"x" * 32),
+        allow_insecure=True,
+    )
+    app = create_app(settings)
+    # Displace the autouse FakeIPCSupervisor, which is injected pre-connected
+    # and would skip the connect() call entirely.
+    app.state.ipc_supervisor = _InterruptingSupervisor()
+    app.state.ipc_supervisor_preconnected = False
+
+    with pytest.raises(KeyboardInterrupt):
+        async with app.router.lifespan_context(app):
+            pytest.fail("lifespan startup must not yield after an interrupt")
+
+    # Proves the interrupt landed past the open, in the window __del__ cannot
+    # rescue — and keeps `app` referenced while the leak check runs.
+    assert app.state.db is not None
+
+    worker_watch()
+
+
+@pytest.mark.real_ipc
+async def test_failed_startup_does_not_leak_worker(
+    tmp_path, worker_watch: Callable[[], None]
+) -> None:
+    """A startup that fails for the ordinary reason must not leak either.
+
+    The other tests in this module raise a synthetic ``KeyboardInterrupt``.
+    This one uses the real failure: the sidecar socket is missing, so the real
+    supervisor raises ``IPCUnavailable`` and startup aborts fail-loud. That is
+    the reachable production trigger — under uvicorn a plain Ctrl-C is captured
+    by the server's own signal handler and never reaches this code, but a proxy
+    started against an unreachable sidecar takes this path every time.
+
+    Measured on the real launcher without the guard: startup failed and the
+    process was still alive 20s later instead of exiting. With it: exits rc=3
+    in under a second.
+
+    ``real_ipc`` opts out of the autouse fake supervisor so the lifespan builds
+    and connects a real one.
+    """
+    settings = ProxySettings(
+        db_path=str(tmp_path / "failed-startup.db"),
+        fernet_key=bytearray(b"x" * 32),
+        allow_insecure=True,
+        sidecar_socket_path=str(tmp_path / "definitely-not-here.sock"),
+    )
+    app = create_app(settings)
+
+    with pytest.raises(IPCUnavailable):
+        async with app.router.lifespan_context(app):
+            pytest.fail("lifespan startup must not yield when the sidecar is unreachable")
+
+    assert app.state.db is not None  # keeps the reference that defeats __del__
+
+    worker_watch()
+
+
+async def test_shutdown_client_close_failure_does_not_leak_worker(
+    tmp_path, worker_watch: Callable[[], None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failing close in the shutdown half must not skip the database close.
+
+    Same failure class as startup, at the other end of the lifespan
+    (worthless-oz8u): ``client.aclose()`` and ``db.close()` once shared a single
+    ``try``, so a raising client close skipped the database close entirely.
+    ``app.state.db`` keeps the connection referenced, so ``__del__`` never runs,
+    and the non-daemon worker survives to wedge interpreter shutdown.
+
+    Startup completes normally here — the failure is injected on the way out.
+    """
+    settings = ProxySettings(
+        db_path=str(tmp_path / "shutdown-close-failure.db"),
+        fernet_key=bytearray(b"x" * 32),
+        allow_insecure=True,
+    )
+    app = create_app(settings)
+
+    async def _raise_on_aclose(self: httpx.AsyncClient) -> None:
+        raise RuntimeError("httpx client failed to close")
+
+    monkeypatch.setattr(httpx.AsyncClient, "aclose", _raise_on_aclose)
+
+    with pytest.raises(RuntimeError, match="httpx client failed to close"):
+        async with app.router.lifespan_context(app):
+            pass  # startup succeeded; the failure belongs to shutdown
+
+    assert app.state.db is not None  # keeps the reference that defeats __del__
+
+    worker_watch()

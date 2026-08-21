@@ -104,6 +104,25 @@ jobs:
       # Do NOT widen this to silence a different detector without repeating
       # that probe. Renaming tests to dodge the regex was considered and
       # rejected — it lets a third-party pattern dictate our test names.
+      #
+      # The SHA above pins the ACTION, which is a thin wrapper that runs
+      # `docker run ghcr.io/trufflesecurity/trufflehog:${VERSION}`. Its
+      # `version` input defaults to `latest` — a mutable tag upstream can
+      # repoint at will — so without the pin below the scanner's actual code
+      # is unpinned and the SHA is decorative. Every other action in this repo
+      # is SHA-pinned on purpose; grype replaced Trivy here precisely because
+      # aquasecurity/trivy-action was supply-chain compromised. WOR-876.
+      #
+      # A version TAG, not a digest — the action interpolates "${IMAGE}:${VERSION}"
+      # with a colon (upstream action.yml:102), so a digest would produce the
+      # invalid ref `trufflehog:sha256:...`; digests require `@`. A release tag
+      # is therefore the strongest form this action accepts.
+      #
+      # 3.96.0 was published 2026-07-24 and currently resolves to
+      # sha256:aa821cf4ace8861c7d096d83818cdf7bb9719028a52d37a52eaad44086a52577
+      # — recorded so a silent repoint of the tag is detectable after the fact.
+      # Dependabot does not bump this value; re-pin it when you bump the action
+      # SHA above, taking the version from the matching release.
       - name: TruffleHog secret scan
         uses: trufflesecurity/trufflehog@82df476e759c1448517fac6bfb3677685cdcd78a # main
         with:
@@ -111,3 +130,4 @@ jobs:
           base: ""
           head: HEAD
           extra_args: --only-verified --exclude-detectors=lob
+          version: "3.96.0"

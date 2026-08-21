@@ -321,3 +321,145 @@ ignore:
     # write path to inject into; there isn't one.
     reason: "CPython configparser write-injection; fix only in 3.15.0b4 (pre-release). Unreachable — swept whole image 2026-08-03: only pip writes via configparser and it is not resident. Tracking WOR-852."
     expiry: "2027-01-31"  # set 2026-08-03 on the six-base measurement above, not blind.
+
+  # ── Debian perl-base, install-time tooling only (WOR-852 Track D) ────
+  # These seven became VISIBLE when the unmapped-findings gate landed
+  # (scripts/hooks/check_grype_unmapped_findings.py). They were always in the
+  # image; `only-fixed: true` dropped them because grype has no fixed version,
+  # so three CRITICALS sat behind a green build. That silence was the bug.
+  #
+  # WHY NOT JUST REMOVE PERL. Measured 2026-08-10 in the shipped image:
+  #   dpkg-query perl-base -> Essential=yes Priority=required
+  # Debian marks it undeletable; removing it breaks dpkg and apt. There is no
+  # bump either — every one reports fix=not-fixed, Debian has shipped nothing.
+  #
+  # REACHABILITY, measured not assumed. 18 files in the image invoke perl.
+  # Every single one is package or system administration tooling:
+  #   debconf-* (7)          package configuration
+  #   dpkg-reconfigure, dpkg-preconfigure, dpkg-fsys-usrunmess
+  #   deb-systemd-helper, deb-systemd-invoke, update-rc.d
+  #   adduser, deluser, pam-auth-update, pam_getenv, c_rehash
+  # None of that runs in the container's runtime path. The image starts
+  # `python /deploy/start.py` as a non-root user; no package management, no
+  # user administration, no PAM reconfiguration happens after build.
+  # src/worthless, deploy/ and the Dockerfile contain ZERO perl invocations
+  # (word-boundary grep, 2026-08-10).
+  #
+  # So exploiting any of these requires first getting arbitrary code to run in
+  # the container — at which point perl is not the interesting part. They are
+  # carried, not ignored, and this block is why.
+  #
+  # Linux: WOR-852 — re-check when Debian ships a perl-base security update,
+  # or when the base image moves off EOL Debian 12. DELETE then, do not extend.
+  - vulnerability: CVE-2026-12087
+    package: {name: perl-base, type: deb}
+    reason: "Debian perl-base, fix=not-fixed (no upstream fix to take). Essential=yes so it cannot be removed. Unreachable — every perl consumer in the image is install-time tooling (dpkg/adduser/PAM); the runtime path is python only. Tracking WOR-852."
+    expiry: "2027-01-31"
+  - vulnerability: CVE-2026-13221
+    package: {name: perl-base, type: deb}
+    reason: "Debian perl-base, fix=not-fixed. See the Track D block above: Essential, unremovable, and invoked only by install-time tooling. Tracking WOR-852."
+    expiry: "2027-01-31"
+  - vulnerability: CVE-2026-57433
+    package: {name: perl-base, type: deb}
+    reason: "Debian perl-base, fix=not-fixed. See the Track D block above: Essential, unremovable, and invoked only by install-time tooling. Tracking WOR-852."
+    expiry: "2027-01-31"
+  - vulnerability: CVE-2026-48959
+    package: {name: perl-base, type: deb}
+    reason: "Debian perl-base, fix=not-fixed. See the Track D block above: Essential, unremovable, and invoked only by install-time tooling. Tracking WOR-852."
+    expiry: "2027-01-31"
+  - vulnerability: CVE-2026-48962
+    package: {name: perl-base, type: deb}
+    reason: "Debian perl-base, fix=not-fixed. See the Track D block above: Essential, unremovable, and invoked only by install-time tooling. Tracking WOR-852."
+    expiry: "2027-01-31"
+  - vulnerability: CVE-2026-57432
+    package: {name: perl-base, type: deb}
+    reason: "Debian perl-base, fix=not-fixed. See the Track D block above: Essential, unremovable, and invoked only by install-time tooling. Tracking WOR-852."
+    expiry: "2027-01-31"
+  - vulnerability: CVE-2026-7017
+    package: {name: perl-base, type: deb}
+    reason: "Debian perl-base, fix=not-fixed. See the Track D block above: Essential, unremovable, and invoked only by install-time tooling. Tracking WOR-852."
+    expiry: "2027-01-31"
+
+  # --- CVE-2026-14456: openssl / libssl3 (QUIC server) -----------------------
+  #
+  # NOT "unreachable" — NOT PRESENT. This is a stronger claim than the blocks
+  # above and it is worth stating precisely, because the obvious remediation
+  # makes things WORSE.
+  #
+  # The bug is unbounded memory growth in OpenSSL's QUIC SERVER listener queue:
+  # a peer floods QUIC Initial packets carrying unknown connection IDs, and
+  # per-channel state queues without limit until the process dies. CWE-770.
+  # OpenSSL themselves rate it LOW; grype reports High from a mechanical CVSS
+  # DoS score, not the CNA's assessment.
+  #
+  # Affected: 3.5.0-3.5.7, 3.6.0-3.6.3, 4.0.0-4.0.1. Per the OpenSSL advisory
+  # the defect has existed since 3.5 — the release that ADDED the QUIC server.
+  #
+  # The advisory (20260813) states it directly:
+  #   "OpenSSL 3.4, 3.0, 1.1.1 and 1.0.2 are not affected by this issue."
+  # That is upstream declaring 3.0 not-affected. It is the primary evidence
+  # here; the measurement below independently confirms it on our exact image.
+  #
+  # Measured against the exact pinned base digest in our Dockerfile
+  # (python:3.13-slim-bookworm@sha256:fcbd8dfc2605..., Debian 12):
+  #
+  #     $ openssl version
+  #     OpenSSL 3.0.20 7 Apr 2026
+  #     $ openssl help | grep -ci quic
+  #     0
+  #     $ dpkg-query -W openssl libssl3
+  #     openssl  3.0.20-1~deb12u2
+  #     libssl3  3.0.20-1~deb12u2
+  #
+  # 3.0.20 predates the QUIC server by five minor releases. The vulnerable
+  # code is not compiled into this image.
+  #
+  # `fix=not-fixed` is Debian's own deferral, not an upstream gap. Debian bug
+  # #1144615 IS triaged — the tracker records
+  #     [trixie] - openssl <postponed> (Minor issue, fix along with future update)
+  # with no urgency assigned. Note the note is scoped to TRIXIE; bookworm ships
+  # 3.0.20, which upstream lists as not affected at all.
+  #
+  # DO NOT "FIX" THIS BY BUMPING THE BASE IMAGE.
+  #   bookworm (current)  openssl 3.0.20  QUIC absent          -> safe
+  #   trixie   (newer)    openssl 3.5.6   INSIDE affected range -> exposed
+  # Moving bookworm -> trixie would convert this false positive into a genuine
+  # exposure. The older base is the safer one here.
+  #
+  # Reachability fails twice over even if the code were present: zero
+  # aioquic/quic/http3 entries in uv.lock, uvicorn serves HTTP/1.1 and H2 over
+  # TCP, and Python's `ssl` module exposes no QUIC API at all. The bug needs an
+  # OpenSSL QUIC Listener object under SSL_accept, which cannot be constructed
+  # from this stack.
+  #
+  # Expiry is deliberately SHORTER than the 2027-01-31 block above: this is a
+  # false positive on a version upstream calls not-affected, not a long-lived
+  # accepted risk. Re-check the Debian tracker at expiry; if bookworm is marked
+  # not-affected, DELETE these two entries rather than extending them.
+  #
+  # What expiry actually does, so nobody is surprised: grype ignores the key,
+  # so on 2026-12-01 the CVE stays SUPPRESSED while check_grype_ignore_expiry.py
+  # turns the build red. It nags; it does not re-expose. And the trigger being
+  # waited on (Debian marking bookworm not-affected) is outside our control, so
+  # the likely December outcome is "nothing changed, re-measure and extend".
+  #
+  # Narrowing by version is NOT possible here yet. grype's IgnoreRule schema
+  # accepts package.version, but the check that actually fired on this finding,
+  # scripts/hooks/check_grype_unmapped_findings.py, builds its scope from name
+  # and type only and silently discards a version key — so a pin would buy
+  # nothing until that hook is taught to carry it. Tracked separately.
+  #
+  # Measured on BOTH architectures: the arm64 resolution of this digest also
+  # reports 3.0.20 with zero QUIC symbols, and grype emits the same package
+  # names and types, so the weekly arm64 scan is covered by these entries.
+  # (Note for a future trixie bump: trixie renames libssl3 -> libssl3t64, so
+  # the libssl3 entry stops matching on its own; the openssl entry does not.)
+  # WOR-885.
+  - vulnerability: CVE-2026-14456
+    package: {name: openssl, type: deb}
+    reason: "OpenSSL 3.0.20 in the pinned bookworm base; QUIC server was added in 3.5, so the vulnerable code is not present (measured: `openssl help | grep -ci quic` = 0). The advisory states 3.0 is not affected. fix=not-fixed is Debian's postponement (bug #1144615, marked postponed for trixie), not an upstream gap. Do NOT bump to trixie — it ships 3.5.6, inside the affected range. WOR-885."
+    expiry: "2026-11-30"
+  - vulnerability: CVE-2026-14456
+    package: {name: libssl3, type: deb}
+    reason: "OpenSSL 3.0.20 in the pinned bookworm base; QUIC server was added in 3.5, so the vulnerable code is not present (measured: `openssl help | grep -ci quic` = 0). The advisory states 3.0 is not affected. fix=not-fixed is Debian's postponement (bug #1144615, marked postponed for trixie), not an upstream gap. Do NOT bump to trixie — it ships 3.5.6, inside the affected range. WOR-885."
+    expiry: "2026-11-30"

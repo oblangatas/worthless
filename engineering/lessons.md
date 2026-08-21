@@ -8,7 +8,18 @@ recognize the situation. Newest at the top.
 
 ---
 
-## Beads is the inbox; Linear is the scoreboard
+## Never invent a ticket number for a branch name
+
+**Rule:** Before putting a ticket ID in a branch name, call `get_issue` on it. If the work has no ticket, use a descriptive slug with no ID — never guess a number that "looks free".
+
+Originated from a session correction on 2026-08-10 (WOR-852 CVE work). Closing dependabot alert #91 (nanoid) had no ticket, so I named the branch `fix/wor-874-nanoid-infinite-loop` — picking 874 because it sounded unused. It was not: WOR-874 is *"A dependency bump can merge without waiting for a check it never runs"*, Urgent, In Progress, with its own PR #491 and branch. Linear auto-links attachments from branch names, so my PR #494 landed on that ticket, putting two unrelated PRs on one Urgent item and misleading whoever picks it up.
+
+Two things make this worse than a cosmetic slip:
+
+1. **It is not cleanly reversible.** GitHub cannot repoint a PR's head branch, so fixing the name means closing the PR and opening a new one. The cheap fix is a comment explaining the mis-attachment — which leaves the wrong link in place forever.
+2. **Ticket IDs are load-bearing here.** The repo's branch convention is `<type>/<ticket>-<slug>`, and tooling reads the ID. A wrong ID is not noise; it is a false cross-reference in the tracker.
+
+The check costs one API call. `get_issue` on a free number returns not-found, which is the confirmation you want. A descriptive branch with no ticket (`fix/nanoid-infinite-loop-alert-91`) is always safe; a guessed number never is.
 
 **Rule:** Capture every emergent discovery in beads. Export to Linear ONLY when team-visibility, scheduling, or non-engineer eyes actually need it — and even then, draft the proposed Linear ticket(s) inline in chat for operator confirmation before calling `save_issue`. Never mirror a bd issue to Linear by default.
 
