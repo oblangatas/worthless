@@ -29,9 +29,8 @@
 # checking carelessly, and it proves nothing about what PyPI will actually do.
 #
 # The record is bound to the owner it was confirmed for, and --check compares it
-# against pyproject.toml. So it fires as soon as a rename lands in the repo. It
-# does NOT detect a rename that nobody has applied anywhere -- for that, the
-# owner would have to come from a live `gh api repos/{owner}/{repo}` call.
+# against pyproject.toml -- so it fires as soon as a rename lands in the repo.
+# check_repo_owner_live.sh covers the case where the rename never landed at all.
 #
 # Usage:
 #     ./scripts/verify-pypi-publisher.sh          # interactive
@@ -58,8 +57,11 @@ ENVIRONMENT="pypi"
 # the moment a rename lands in the repo, this attestation stops matching and
 # --check demands a re-confirmation.
 #
-# It still cannot detect a rename that nobody has applied anywhere. Nothing in
-# the repo can; that needs a live `gh api repos/{owner}/{repo}` call.
+# A rename that nobody applied anywhere used to be invisible here -- pyproject
+# would be stale, everything would agree with it, and --check would pass.
+# scripts/check_repo_owner_live.sh now runs first and asks GitHub who this repo
+# actually is (worthless-jjap). A definite disagreement blocks; an unreachable
+# API only warns, so a network blip cannot wedge a release.
 repo_url=$(sed -n 's/^Repository *= *"\(.*\)"/\1/p' pyproject.toml | head -n1)
 owner_repo=$(printf '%s' "$repo_url" | sed -E 's#^https://github\.com/##; s#/*$##')
 if ! printf '%s' "$owner_repo" | grep -qE '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'; then
@@ -72,6 +74,14 @@ repo=${owner_repo##*/}
 # --- --check mode: used by tag-release.sh's pre-flight ----------------------
 
 if [ "${1:-}" = "--check" ]; then
+    # Before comparing the attestation to pyproject, confirm pyproject itself is
+    # not stale. Everything below compares the repo against itself, so a rename
+    # that nobody applied would agree with itself and pass (worthless-jjap).
+    # A definite disagreement exits 1; an unreachable API only warns.
+    if ! ./scripts/check_repo_owner_live.sh --quiet; then
+        echo "  PyPI publisher cannot be trusted while the declared owner is stale."
+        exit 1
+    fi
     if [ ! -f "$RECORD" ]; then
         echo "ERROR: PyPI Trusted Publisher has never been confirmed for this repo."
         echo "  publish.yml uploads with OIDC and no token; if the publisher does not"

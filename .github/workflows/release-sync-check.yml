@@ -192,6 +192,19 @@ jobs:
           done
           exit "$failed"
 
+      - name: A1d — the declared repo owner is still the live one
+        # A1c proves the docs' image paths resolve. It cannot notice that the
+        # ACCOUNT moved, because a rename leaves the repo entirely self-
+        # consistent: pyproject keeps its old URL, every reference keeps
+        # matching it, and the old URL keeps 301-redirecting. Meanwhile GHCR
+        # serves the old path a hard 403 and PyPI's publisher binding breaks.
+        # Asking GitHub who this repo actually is now is the only way to see it
+        # from inside the repo (worthless-jjap, the hole worthless-c478 left).
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/check_repo_owner_live.sh
+
       # ===== Assertion 2a: worthless.sh content negotiation (curl) ==========
       - name: A2a — worthless.sh curl-UA serves install.sh @ latest tag
         env:
