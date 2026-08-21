@@ -28,9 +28,13 @@
 # saw. It defends against FORGETTING to check. It does not defend against
 # checking carelessly, and it proves nothing about what PyPI will actually do.
 #
-# The record it writes is bound to the owner it was confirmed for, so a future
-# rename automatically invalidates it rather than silently vouching for the
-# wrong account.
+# The record is bound to the owner it was confirmed for, and --check compares it
+# against `git remote get-url origin`. That is a WEAKER guarantee than it looks:
+# a git remote does NOT update itself when a GitHub account is renamed (the old
+# URL keeps working via 301). So if nobody edits the remote, --check compares a
+# stale remote to a stale record, they agree, and the tag goes through. It
+# catches a remote that HAS been repointed; it does not detect a rename on its
+# own. Anchoring to `gh api repos/{owner}/{repo}` would close that gap.
 #
 # Usage:
 #     ./scripts/verify-pypi-publisher.sh          # interactive
@@ -142,7 +146,8 @@ esac
 cat > "$RECORD" <<EOF
 # PyPI Trusted Publisher confirmation — see scripts/verify-pypi-publisher.sh
 # An attestation that a human read the PyPI settings page, NOT a proof that
-# the binding works. Automatically invalidated if the repo owner changes.
+# the binding works. Invalidated when origin's owner changes -- which requires
+# someone to repoint the remote; a rename alone does not trigger it.
 owner=$owner
 repo=$repo
 workflow=$WORKFLOW

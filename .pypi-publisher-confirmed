@@ -1,6 +1,7 @@
 # PyPI Trusted Publisher confirmation — see scripts/verify-pypi-publisher.sh
 # An attestation that a human read the PyPI settings page, NOT a proof that
-# the binding works. Automatically invalidated if the repo owner changes.
+# the binding works. Invalidated when origin's owner changes -- which requires
+# someone to repoint the remote; a rename alone does not trigger it.
 owner=oblangatas
 repo=worthless
 workflow=publish.yml

@@ -50,17 +50,24 @@ _REPO_URL_RE = re.compile(r'^Repository\s*=\s*"([^"]+)"', re.MULTILINE)
 _NEWS_FEED_GIST_ID = "7f6e2293b540004c4a733258a2461800"
 
 # NOT allowlisted, because the patterns below only match URL-shaped references
-# and these mention the old name as a bare word, so they are never flagged:
+# and these mention an owner as a bare word, so they are never flagged:
 #
-#   * sonar-project.properties — `sonar.organization=shacharm2` /
-#     `sonar.projectKey=shacharm2_worthless`. SonarCloud's org slug is
-#     INDEPENDENT of the GitHub owner and did not change with the rename
-#     (verified: that project badge still returns 200). If you are here doing a
-#     blind find-and-replace on a future rename: leave this file alone, or you
-#     detach the repo from its Sonar project.
-#   * .github/scripts/verify_commit_provenance.py and
-#     scripts/hooks/check_pushed_commit_provenance.py — comments *about* the
-#     rename, documenting why the author allowlist tolerates both identities.
+#   * sonar-project.properties -- `sonar.organization=shacharm2` /
+#     `sonar.projectKey=shacharm2_worthless`. SonarCloud project keys are NOT
+#     GitHub-owner-derived and did not move with the rename, so this file is
+#     probably right. It is NOT verified-correct: the live badge API returns
+#     HTTP 200 for BOTH keys, and only the response BODY distinguishes them --
+#     `shacharm2_worthless` returns a real measure, `oblangatas_worthless`
+#     returns `<!-- ERROR -->`. README.md badges the latter, so the README
+#     quality badge is currently broken. Reconciling the two is tracked
+#     separately; do not "fix" this file by find-and-replace in the meantime.
+#     (A status-code-only check calls both healthy. That is the same false
+#     green as commit 338da36f -- check the body, not the code.)
+#   * .github/workflows/tests.yml -- gates a job on
+#     `github.repository == '<owner>/worthless'`, a bare comparison rather than
+#     a URL. test_workflow_repository_guards_match_canonical below covers it,
+#     because on a rename that condition silently evaluates false and the job
+#     skips GREEN rather than failing.
 #
 # Paths that keep a non-canonical owner ON PURPOSE. Every entry needs a reason:
 # a bare exclusion here is how the next rename hides again.
@@ -258,3 +265,38 @@ def test_shell_owner_fallbacks_match_canonical() -> None:
         "not leave it passing vacuously."
     )
     assert not offenders, "Stale hardcoded owner in a release script:\n" + "\n".join(offenders)
+
+
+def test_workflow_repository_guards_match_canonical() -> None:
+    """`if: github.repository == '<owner>/worthless'` must name the current owner.
+
+    Not URL-shaped, so the patterns above never see it. This form is worse than
+    a stale link: on a rename the condition quietly evaluates false, the job is
+    SKIPPED, and GitHub reports the workflow green. A guard that disappears
+    without failing is the exact silent-success shape worthless-c478 is about.
+    """
+    canonical = _canonical_owner()
+    pattern = re.compile(r"""github\.repository\s*==\s*['"]([A-Za-z0-9-]+)/worthless['"]""")
+    offenders: list[str] = []
+    checked = 0
+
+    for rel in _tracked_text_files():
+        if not rel.startswith(".github/workflows/"):
+            continue
+        for lineno, line in enumerate((_ROOT / rel).read_text(encoding="utf-8").splitlines(), 1):
+            for owner in pattern.findall(line):
+                checked += 1
+                if owner != canonical:
+                    offenders.append(
+                        f"{rel}:{lineno}: job gated on owner {owner!r} != {canonical!r}"
+                    )
+
+    assert checked, (
+        "no `github.repository == '<owner>/worthless'` comparison found in any "
+        "workflow. If the pattern moved, update it -- do not leave this passing "
+        "vacuously."
+    )
+    assert not offenders, (
+        "Workflow job gated on a stale owner (it will SKIP GREEN, not fail):\n"
+        + "\n".join(offenders)
+    )
