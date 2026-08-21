@@ -29,12 +29,9 @@
 # checking carelessly, and it proves nothing about what PyPI will actually do.
 #
 # The record is bound to the owner it was confirmed for, and --check compares it
-# against `git remote get-url origin`. That is a WEAKER guarantee than it looks:
-# a git remote does NOT update itself when a GitHub account is renamed (the old
-# URL keeps working via 301). So if nobody edits the remote, --check compares a
-# stale remote to a stale record, they agree, and the tag goes through. It
-# catches a remote that HAS been repointed; it does not detect a rename on its
-# own. Anchoring to `gh api repos/{owner}/{repo}` would close that gap.
+# against pyproject.toml. So it fires as soon as a rename lands in the repo. It
+# does NOT detect a rename that nobody has applied anywhere -- for that, the
+# owner would have to come from a live `gh api repos/{owner}/{repo}` call.
 #
 # Usage:
 #     ./scripts/verify-pypi-publisher.sh          # interactive
@@ -50,17 +47,23 @@ SETTINGS_URL="https://pypi.org/manage/project/worthless/settings/publishing/"
 WORKFLOW="publish.yml"
 ENVIRONMENT="pypi"
 
-# Derive owner/repo from origin. One sed covers every real remote form:
-# scheme, userinfo, scp-style `host:owner/repo`, per-account SSH aliases, and
-# `host:PORT/owner/repo`. Kept identical to scripts/bump-version.sh — narrow
-# host globs used to miss the SSH-alias and port forms and silently yield the
-# wrong owner. Validated as exactly `owner/repo`; anything else is an error
-# rather than a guess, because this value gates a release.
-owner_repo=$(git remote get-url origin 2>/dev/null \
-    | sed -E 's#^[a-zA-Z+]+://##; s#^[^/@]*@##; s#^[^/:]+(:[0-9]+)?[:/]+##; s#/*$##; s#\.git$##' \
-    || true)
+# Owner/repo come from pyproject.toml's [project.urls] Repository — the same
+# single source of truth tests/test_repo_owner_refs.py enforces repo-wide.
+#
+# This deliberately does NOT read `git remote get-url origin`. A git remote does
+# not update itself when a GitHub account is renamed (the old URL keeps working
+# via 301), so a remote-anchored check compares stale to stale, agrees, and lets
+# the tag through. pyproject is the artifact a rename actually has to touch, and
+# the static guard fails the build until every other reference matches it — so
+# the moment a rename lands in the repo, this attestation stops matching and
+# --check demands a re-confirmation.
+#
+# It still cannot detect a rename that nobody has applied anywhere. Nothing in
+# the repo can; that needs a live `gh api repos/{owner}/{repo}` call.
+repo_url=$(sed -n 's/^Repository *= *"\(.*\)"/\1/p' pyproject.toml | head -n1)
+owner_repo=$(printf '%s' "$repo_url" | sed -E 's#^https://github\.com/##; s#/*$##')
 if ! printf '%s' "$owner_repo" | grep -qE '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'; then
-    echo "ERROR: cannot derive owner/repo from origin ('$(git remote get-url origin 2>/dev/null)')."
+    echo "ERROR: cannot read owner/repo from pyproject.toml [project.urls] Repository ('$repo_url')."
     exit 1
 fi
 owner=${owner_repo%%/*}
@@ -72,14 +75,14 @@ if [ "${1:-}" = "--check" ]; then
     if [ ! -f "$RECORD" ]; then
         echo "ERROR: PyPI Trusted Publisher has never been confirmed for this repo."
         echo "  publish.yml uploads with OIDC and no token; if the publisher does not"
-        echo "  match owner '$owner', the tag you are about to push fails at upload."
+        echo "  match owner '$owner' (from pyproject.toml), the tag fails at upload."
         echo "  Run: ./scripts/verify-pypi-publisher.sh"
         exit 1
     fi
     confirmed_owner=$(awk -F= '/^owner=/ { print $2; exit }' "$RECORD")
     if [ "$confirmed_owner" != "$owner" ]; then
         echo "ERROR: PyPI publisher was confirmed for owner '$confirmed_owner',"
-        echo "  but origin now says '$owner'. The account was renamed since that check."
+        echo "  but pyproject.toml now says '$owner'. The owner changed since that check."
         echo "  PyPI does NOT follow GitHub renames — re-confirm before tagging."
         echo "  Run: ./scripts/verify-pypi-publisher.sh"
         exit 1

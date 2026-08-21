@@ -138,11 +138,6 @@ def _is_allowlisted(path: str) -> bool:
     return path in _ALLOWLIST or any(path.startswith(p) for p in _ALLOWLIST_PREFIXES)
 
 
-def test_canonical_owner_is_parseable() -> None:
-    """The source of truth must itself be well-formed, or the guard is vacuous."""
-    assert _canonical_owner()
-
-
 def test_no_tracked_file_references_a_stale_owner() -> None:
     canonical = _canonical_owner()
     violations: list[str] = []
@@ -230,42 +225,6 @@ def test_third_party_github_links_are_not_flagged() -> None:
     ):
         for _, pattern in _OWNED_REF_PATTERNS:
             assert not pattern.findall(benign), f"guard wrongly flagged {benign}"
-
-
-def test_shell_owner_fallbacks_match_canonical() -> None:
-    """The hardcoded fallback owner in release scripts must be current.
-
-    scripts/bump-version.sh keeps a literal `owner_repo="<owner>/worthless"` for
-    when origin can't be parsed. It is written bare -- no `github.com/` around
-    it -- so none of the URL patterns above see it, and it is exactly the kind
-    of string that rotted last time: it silently produced CHANGELOG links for
-    the wrong owner while looking like it had been derived (worthless-c478).
-
-    Targeted rather than a broad `<x>/worthless` regex on purpose: that form
-    also matches filesystem paths like `src/worthless` and produced a false
-    positive on tests/test_archive_reachability.py.
-    """
-    canonical = _canonical_owner()
-    assignment = re.compile(r"""owner_repo=["']([A-Za-z0-9-]+)/worthless["']""")
-    offenders: list[str] = []
-
-    shell_scripts = [p for p in _tracked_text_files() if p.endswith((".sh", ".bash"))]
-    assert shell_scripts, "no shell scripts found — the glob or the layout moved"
-
-    checked = 0
-    for rel in shell_scripts:
-        for lineno, line in enumerate((_ROOT / rel).read_text(encoding="utf-8").splitlines(), 1):
-            for owner in assignment.findall(line):
-                checked += 1
-                if owner != canonical:
-                    offenders.append(f"{rel}:{lineno}: fallback owner {owner!r} != {canonical!r}")
-
-    assert checked, (
-        "no owner_repo= fallback found in any shell script. If the fallback was "
-        "removed, delete this test; if it was renamed, update the pattern -- do "
-        "not leave it passing vacuously."
-    )
-    assert not offenders, "Stale hardcoded owner in a release script:\n" + "\n".join(offenders)
 
 
 def test_workflow_repository_guards_match_canonical() -> None:

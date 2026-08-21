@@ -131,25 +131,19 @@ fi
 if grep -q "^\[$new_version\]:" CHANGELOG.md; then
     echo "  ✓ CHANGELOG.md: [$new_version] link reference already present"
 else
-    # Derive owner/repo from origin rather than hardcoding it — the owner has
-    # changed once already (the account was renamed in Aug 2026, worthless-c478)
-    # and is a personal account, not a `worthless` org, so it can change again.
-    #
-    # One sed handles every real remote form: scheme, userinfo, scp-style
-    # `host:owner/repo`, per-account SSH aliases (this repo's own origin is
-    # `git@github-personal:oblangatas/worthless.git`), and `host:PORT/owner/repo`.
-    # The narrow `git@github.com:` / `https://github.com/` globs this replaced
-    # matched NEITHER the SSH alias nor a port form, and fell through to the
-    # hardcoded fallback — writing links for the WRONG owner while looking
-    # derived. That is the same failure this ticket exists to fix, so the result
-    # is validated as exactly `owner/repo` and falls back otherwise.
-    owner_repo=$(git remote get-url origin 2>/dev/null \
-        | sed -E 's#^[a-zA-Z+]+://##; s#^[^/@]*@##; s#^[^/:]+(:[0-9]+)?[:/]+##; s#/*$##; s#\.git$##' \
-        || true)
-    if ! printf '%s' "$owner_repo" | grep -qE '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'; then
-        owner_repo="oblangatas/worthless"
+    # Read the repo URL from pyproject.toml's [project.urls] Repository — the
+    # declared single source of truth for this repo's identity, which
+    # tests/test_repo_owner_refs.py already enforces every other reference
+    # against. Earlier revisions parsed `git remote get-url origin` instead and
+    # got it wrong twice (worthless-c478): narrow host globs missed per-account
+    # SSH aliases and `host:PORT/` forms, silently producing CHANGELOG links for
+    # the WRONG owner while looking derived. There is no owner to parse here.
+    repo_url=$(sed -n 's/^Repository *= *"\(.*\)"/\1/p' pyproject.toml | head -n1)
+    if [ -z "$repo_url" ]; then
+        echo "ERROR: no [project.urls] Repository in pyproject.toml — cannot build the CHANGELOG link."
+        exit 1
     fi
-    new_link="[$new_version]: https://github.com/$owner_repo/releases/tag/v$new_version"
+    new_link="[$new_version]: $repo_url/releases/tag/v$new_version"
 
     # Find the first existing [X.Y.Z]: link and insert above it
     if grep -q "^\[$current_version\]:" CHANGELOG.md; then
