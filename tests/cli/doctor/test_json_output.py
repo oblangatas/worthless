@@ -24,7 +24,7 @@ from worthless.cli.bootstrap import ensure_home
 from worthless.cli.commands import doctor as doctor_module
 
 
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner()
 
 
 @pytest.fixture
@@ -47,7 +47,7 @@ def test_json_emits_single_parseable_document(fake_home, monkeypatch: pytest.Mon
     monkeypatch.setattr(runner_module, "get_home", lambda: fake_home)
 
     result = runner.invoke(app, ["doctor", "--json"])
-    assert result.exit_code == 0, f"non-zero exit: {result.output} stderr={result.stderr}"
+    assert result.exit_code == 0, f"non-zero exit: {result.stdout} stderr={result.stderr}"
 
     # stdout must parse as JSON in one shot.
     payload = json.loads(result.stdout)
@@ -120,7 +120,7 @@ def test_json_zeroes_fernet_key_after_run(fake_home, monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(runner_module, "bytearray", _spy, raising=False)
 
     result = runner.invoke(app, ["doctor", "--json"])
-    assert result.exit_code == 0, f"non-zero exit: {result.output} stderr={result.stderr}"
+    assert result.exit_code == 0, f"non-zero exit: {result.stdout} stderr={result.stderr}"
     assert len(captured) == 1, (
         f"expected exactly one bytearray(...) call in runner.py, got {len(captured)}"
     )

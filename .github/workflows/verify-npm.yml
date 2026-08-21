@@ -1,17 +1,30 @@
 name: Verify worthless-mcp package
 
 on:
+  # pyproject.toml / uv.lock are load-bearing triggers. The mount job's pre-seed
+  # step resolves `worthless[mcp]` from the live index with no UV_OFFLINE, so it
+  # is the ONLY check in this repo that sees what a real user resolves — CI
+  # everywhere else reads uv.lock, which pins a version users never get.
+  #
+  # Without these paths a dependency-only change never runs this job. That is
+  # exactly how mcp 2.0.0 reached PyPI: `mcp>=1.0` had no ceiling, the lock hid
+  # it, and every fresh install of 0.3.10/0.3.11 died at import (WOR-864).
+  # Keep both lists in sync.
   pull_request:
     paths:
       - "packages/worthless-mcp/**"
       - "tests/test_mcp_npx_wrapper_mount.py"
       - ".github/workflows/verify-npm.yml"
       - ".github/workflows/publish-npm.yml"
+      - "pyproject.toml"
+      - "uv.lock"
   push:
     branches:
       - main
     paths:
       - "packages/worthless-mcp/**"
+      - "pyproject.toml"
+      - "uv.lock"
 
 permissions:
   contents: read
@@ -24,7 +37,7 @@ jobs:
         working-directory: packages/worthless-mcp
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
@@ -69,7 +82,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
@@ -116,5 +129,12 @@ jobs:
           UV_TOOL_DIR: ${{ runner.temp }}/uvtools
           UV_TOOL_BIN_DIR: ${{ runner.temp }}/uvtools/bin
         run: |
+          # --timeout-method=signal is REQUIRED here and cannot be inferred:
+          # --noconftest skips tests/conftest.py, so the pytest_configure hook
+          # that downgrades `thread` -> `signal` for serial runs never loads.
+          # -o addopts="" also drops `-n auto`, so this is a serial run with the
+          # repo-global `thread` still live — a timeout would os._exit pytest
+          # itself and this step would go red with no test report at all, on a
+          # real npx/MCP subprocess handshake that is slow on a cold runner.
           "${RUNNER_TEMP}/mountvenv/bin/pytest" tests/test_mcp_npx_wrapper_mount.py \
-            --noconftest -o asyncio_mode=auto -o addopts="" -q
+            --noconftest -o asyncio_mode=auto -o addopts="" --timeout-method=signal -q

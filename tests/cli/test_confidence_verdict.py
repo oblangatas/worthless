@@ -34,7 +34,7 @@ from worthless.cli.scanner import ScanFinding
 from tests.cli.conftest import cli_invoke, lock_env
 
 # Stream-separating runner so we can assert "--json on stdout, prose on stderr".
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner()
 
 
 def _status(home: WorthlessHome, *args: str):
@@ -301,14 +301,19 @@ class TestLockVerdictFirst:
         """The seatbelt click: verdict + proof + next, not a bare [OK]."""
         result = cli_invoke(["lock", "--env", str(env_file)], home_dir)
         assert result.exit_code == 0, result.output
+        # The verdict renders through Rich Console -> stderr. Combine both
+        # streams explicitly, as every other test in this file does, rather
+        # than leaning on `result.output`: under click >=8.2 that is the mixed
+        # stream, so the intent is invisible at the call site.
+        out = result.stderr + result.stdout
         # Collapse whitespace: Rich wraps long lines at 80 cols, so phrase
         # matches must be wrap-proof (see CLI-output-assertion lesson).
-        low = " ".join(result.output.split()).lower()
-        assert "you're protected" in low, f"missing the verdict 'click':\n{result.output}"
-        assert "worthless status" in low, f"missing the 'check anytime' next:\n{result.output}"
+        low = " ".join(out.split()).lower()
+        assert "you're protected" in low, f"missing the verdict 'click':\n{out}"
+        assert "worthless status" in low, f"missing the 'check anytime' next:\n{out}"
         # Proof + accessibility carrier preserved.
-        assert "no longer contains a usable secret" in low, result.output
-        assert "[OK]" in result.output, result.output
+        assert "no longer contains a usable secret" in low, out
+        assert "[OK]" in out, out
 
     def test_partial_openclaw_failure_does_not_claim_protected(self, monkeypatch, capsys) -> None:
         """Honesty (worst-component verdict): on a partial OpenClaw failure the

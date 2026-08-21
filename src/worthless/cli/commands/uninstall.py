@@ -303,11 +303,21 @@ def _confirm_uninstall(console, *, assume_yes: bool) -> bool:  # noqa: ANN001
             "to every locked .env, then removes Worthless)."
         )
         raise typer.Exit(code=1)
-    if not typer.confirm(
-        "This restores your real API keys into every locked .env and removes "
-        "Worthless from this machine. Continue?",
-        default=True,
-    ):
+    try:
+        proceed = typer.confirm(
+            "This restores your real API keys into every locked .env and removes "
+            "Worthless from this machine. Continue?",
+            default=True,
+        )
+    except (typer.Abort, KeyboardInterrupt):
+        # This prompt runs BEFORE any work, so unlike the generic boundary message
+        # we can honestly promise nothing changed — and on the command that holds
+        # every real API key, that promise is the whole point. Then exit 130 like
+        # any other interrupt, so a script can tell an abort from a success.
+        console.print_hint("Uninstall cancelled — nothing was changed.")
+        raise typer.Exit(code=130) from None
+    if not proceed:
+        # A deliberate "n" is a choice, not an interruption: exit 0.
         console.print_hint("Uninstall cancelled — nothing was changed.")
         return False
     return True

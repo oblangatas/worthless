@@ -11,7 +11,7 @@ Walkthrough for worthless uninstall.sh
 What you would have piped into sh, in plain English. Read this first if
 you'd rather audit than execute.
 
-Source: https://github.com/shacharm2/worthless
+Source: https://github.com/oblangatas/worthless
 
 ----------------------------------------------------------------------
 
@@ -64,4 +64,4 @@ What it does NOT do
 Still uncertain? Read the raw script:
   curl -sSL worthless.sh/uninstall
 Docs: https://docs.wless.io/uninstall
-Issues: https://github.com/shacharm2/worthless/issues
+Issues: https://github.com/oblangatas/worthless/issues

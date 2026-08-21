@@ -4,6 +4,55 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+- **Every PR now gets a CVE verdict on its locked dependency tree** (`worthless-jymn`, [#531](https://github.com/oblangatas/worthless/pull/531)). `uv-audit` was `stages: [pre-push]`, so it never ran for a Dependabot PR, a GitHub web edit, `git push --no-verify`, or a clone that never ran `pre-commit install` — a vulnerable locked dependency could reach `main` through any of those and surface only at release time. `dependency-audit.yml` runs the hook's entry byte-identically on every pull request, pinned by a test so the two cannot drift apart, with `shell: bash` for pipefail (the run is a pipeline, and GitHub's default `bash -e` would let a partial `uv export` audit a fragment and exit 0) and a `uv lock --check` step, since `--frozen` otherwise audits a lock that may no longer match `pyproject.toml`.
+- **The Worker's dependencies are audited and updated like everything else** (`worthless-yhcc`, [#532](https://github.com/oblangatas/worthless/pull/532)). `workers/worthless-sh` has its own `package-lock.json` that nothing in CI audited, and `.github/dependabot.yml` declared only `uv` and `github-actions` — so GitHub raised advisories for the Worker that no automation could clear, and `main` accumulated 5. Dependabot now covers it, and the dependency gate gained an `npm audit` job alongside the Python one.
+
+### Removed
+- **The Snyk CI check stops reporting green on a scan that never ran** (`worthless-tidv`, [#529](https://github.com/oblangatas/worthless/pull/529)). `snyk-security.yml` exported `requirements.txt` but never installed it, and Snyk's pip plugin resolves from installed package metadata — so the step failed with `SNYK-CLI-0000 / Missing required packages` on every run in the retained history (100 runs, oldest 2026-08-15). `continue-on-error: true` rewrote each failure as a job success, so completely that even `gh run view --json jobs` reported the step as `success` alongside exit code 2. The workflow is deleted rather than repaired: it ran `snyk monitor`, which is upload-only and cannot fail a build, and its assumed consumers do not read it — the README badge uses Snyk's server-side on-demand endpoint, and app.snyk.io's GitHub integration monitors the repo independently. `requirements.txt` and its pre-commit exporter are kept; the badge parses that file and cannot parse `uv.lock`.
+
+### Fixed
+- **The pre-push audit stops passing over a broken scan** (`worthless-mh0r`, [#541](https://github.com/oblangatas/worthless/pull/541)). The `uv-audit` hook piped `uv export` into `pip-audit` under a shell without `pipefail`, so only `pip-audit`'s exit code counted — an export that died partway handed over a truncated-but-valid stream, which audited the packages that arrived and passed. It now runs under `bash -c 'set -o pipefail; …'`; bash explicitly, because `pipefail` is not POSIX and `/bin/sh` is dash on many systems. CI already had this via `shell: bash`.
+- **A live advisory against the pinned `pip` is cleared** ([#541](https://github.com/oblangatas/worthless/pull/541)). `PYSEC-2026-3721` (`CVE-2026-13346`) was published 2026-07-29, but its OSV record was amended on 2026-08-21 to cover the pinned `pip 26.1.2` — so it began failing the new dependency gate hours after that gate merged. The first thing the gate caught, and exactly the behaviour its own entry predicted. Bumped to 26.2.1, lockfile only.
+
+### What this does NOT fix
+- **The new dependency gate reports, but does not yet block.** `uv-audit (locked runtime tree)` is not among ruleset `15499127`'s required contexts, so a red result is visible on the PR without preventing a merge until that context is added.
+- **The `mcp` extra is audited by nothing.** `uv export` omits extras, so it is absent from what the gate and the pre-push hook scan; the container scan cannot see it either, because the image installs without extras.
+- **It covers the linux/CPython 3.13 resolution of the lock, not the whole lock.** pip-audit skips requirements whose environment markers do not match the runner, and 16 of 116 pins are marker-gated — `numpy==2.2.6`, `scipy==1.15.3`, `pywin32-ctypes` and the `backports-*` set among them (`worthless-mh0r`). Grype in `docker-security.yml` does block medium-and-above on pull requests, but only for CVEs with a fix available, and only for what lands in the built image — `Dockerfile` installs without extras, so the `mcp` extra is invisible to it.
+- **The Worker's dev tooling is deliberately not gated.** The npm job audits `--omit=dev` — what the Worker actually ships. Its `package.json` declares `"dependencies": {}`, so production is empty and the job passes. The 5 advisories on `main` all arrive through `wrangler` and `@cloudflare/vitest-pool-workers` -> `miniflare` -> `undici`, every one a devDependency that never enters the bundle. Gating the full tree would have shipped a job red on arrival; Dependabot upgrades those instead.
+- **Neither audit job blocks yet.** `npm audit (worker production deps)` is not a required context either, so like its Python sibling it reports without preventing a merge.
+- **This corrects an earlier claim in this file.** The 0.3.7 entry below states "Snyk reports the dependency tree we actually ship". That was not true when written and never became true; the scan never completed successfully.
+- **Whether the Snyk dashboard reflects the right project is still unverified** (`worthless-7fey`). The repo was re-imported as `oblangatas/worthless` on 2026-08-19 while the org slug stayed `shacharm2`, and a stale duplicate project would now go uncontradicted.
+- **The `SNYK_TOKEN` repo secret is not revoked by this change** (`worthless-s78g`). It is unused after this release but still present.
+
+## [0.3.12] — 2026-08-11
+
+`worthless mcp` starts again on a fresh install. An unbounded dependency let a new major of the MCP SDK reach every new installation and kill the server at startup.
+
+### Fixed
+- **`worthless mcp` works again on a fresh install** (WOR-864, [#473](https://github.com/shacharm2/worthless/pull/473)). The `mcp` extra was declared as `mcp>=1.0` with no upper bound. When the MCP SDK published 2.0.0 on 2026-07-28 it removed `mcp.server.fastmcp` — the module the server imports — so every fresh `pip install "worthless[mcp]"` or `npx worthless-mcp` resolved 2.x and died at import with an opaque `WRTLS-199`. The extra is now capped at `mcp>=1.0,<2`. The floor stays at 1.0 so anyone already resolved on an older 1.x is untouched.
+- **A dependency change now runs the check that resolves like a real user does** (WOR-864, [#496](https://github.com/shacharm2/worthless/pull/496)). CI installs from `uv.lock`; a user resolves fresh against the index. The one job that resolves live wasn't watching `pyproject.toml` or `uv.lock`, so a dependency-only edit triggered nothing — which is how the broken bound shipped past a fully green pipeline. Both files are now on its triggers.
+- **A future cleanup can't silently re-break it** (WOR-868, [#474](https://github.com/shacharm2/worthless/pull/474)). A guard asserts the declared bound actually excludes 2.x, reading it as a version rather than checking that some `<` is present — `mcp>=1.0,<99` has an upper bound and still resolves straight to the broken release.
+
+### What this does NOT fix
+- **Versions 0.3.0 through 0.3.11 stay broken for the MCP server, permanently.** Package metadata is immutable once published, so those releases will always declare the unbounded `mcp>=1.0`. Yanking does not help either: a yanked version still installs when pinned exactly, which is what the npm wrapper does. **The only fix is upgrading to 0.3.12.**
+- If you already have mcp 2.x installed, `pip install -U worthless` **without** the `[mcp]` extra will not re-evaluate it. Upgrade with the extra: `pip install -U "worthless[mcp]"`.
+- Only the `[mcp]` extra was affected. `enroll`, `wrap`, `scan`, `status` and the proxy were never impacted — the MCP server is imported lazily, so the rest of the CLI kept working throughout.
+
+## [0.3.11] — 2026-07-24
+
+Closes the last gap from the OpenClaw install incident: you can now ask Worthless, on demand, whether your gateway is actually protecting you *right now* — and get an answer that can't be faked by a stale counter.
+
+### Added
+- **`worthless verify` — confirm the gateway is protecting you right now** (WOR-517, [#457](https://github.com/shacharm2/worthless/pull/457)). The incident that started this ended with a user killing the Worthless gateway and watching his agent keep working — with no way to tell his key was now exposed. `worthless verify` answers that question directly: it fires a live loopback bind-probe and reports **GREEN only when that probe routes through the proxy this instant**, never from the cumulative `requests_proxied` count (which stays frozen at its last value when the gateway dies, and would have printed green over the exact bypass it exists to catch). A down gateway reports **RED with exit code 73**, worded as an active exposure — "any agent still holding a cached token may be sending your key in the clear right now" — not as a tool that merely isn't configured. A healthy-but-unidentified responder on the port reports RED rather than claiming an attacker, since the identity marker is public. `--json` for scripting.
+
+### Security
+- **The rollback record can't carry an unprefixed secret** (WOR-827, [#452](https://github.com/shacharm2/worthless/pull/452)). Secrets without a recognized provider prefix are redacted from the OpenClaw rollback record instead of being written through.
+
+### What this does NOT defend against
+- **`worthless verify` proves the proxy is live and routing a request now — not that your agent's last request went through it.** The probe is a separate synthetic request; a proxy that is up and an agent that bypasses it on a cached token can coexist. The command says so in its own GREEN output rather than implying full coverage. Confirming that a *specific* application's traffic is routed remains the job of `worthless status` and the load-bearing proxy work (WOR-621).
+- The hosted `curl worthless.sh | sh` install path is proven by a manual release smoke, not automation — the installer only ever fetches the published pin, so unreleased code cannot be exercised through it.
+
 ## [0.3.10] — 2026-07-21
 
 Credential-leak hardening across the OpenClaw path and the "am I protected?" verdict, plus honest reporting when Worthless can't protect or can't look. Also lands background service management and a rebuilt install experience.
@@ -253,6 +302,8 @@ First release published to PyPI. `pip install worthless` now works.
 - Gate evaluation strictly precedes shard reconstruction (SR-03).
 - Published artifacts built via PyPI trusted publishing (OIDC, no long-lived tokens).
 
+[0.3.12]: https://github.com/shacharm2/worthless/releases/tag/v0.3.12
+[0.3.11]: https://github.com/shacharm2/worthless/releases/tag/v0.3.11
 [0.3.10]: https://github.com/shacharm2/worthless/releases/tag/v0.3.10
 [0.3.9]: https://github.com/shacharm2/worthless/releases/tag/v0.3.9
 [0.3.8]: https://github.com/shacharm2/worthless/releases/tag/v0.3.8.0

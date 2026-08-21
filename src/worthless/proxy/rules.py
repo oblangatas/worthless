@@ -26,6 +26,7 @@ from worthless.proxy.errors import (
 )
 from worthless.proxy.estimation import estimate_request_tokens
 from worthless.storage.spend_ledger import SpendLedger
+from worthless.storage.sqlite import connect as sqlite_connect
 
 logger = logging.getLogger(__name__)
 
@@ -524,7 +525,7 @@ class RateLimitRule:
 
     async def _load_limit(self, alias: str) -> None:
         """Load per-enrollment rate limit from DB into cache."""
-        async with aiosqlite.connect(self.db_path) as db:  # type: ignore[arg-type]
+        async with sqlite_connect(self.db_path) as db:  # type: ignore[arg-type]
             async with db.execute(
                 "SELECT rate_limit_rps FROM enrollment_config WHERE key_alias = ?",
                 (alias,),

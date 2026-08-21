@@ -504,7 +504,7 @@ from worthless.cli.bootstrap import ensure_home
 
 home = Path(sys.argv[1])
 ensure_home(home)
-CliRunner(mix_stderr=False).invoke(app, sys.argv[2:], env={"WORTHLESS_HOME": str(home)})
+CliRunner().invoke(app, sys.argv[2:], env={"WORTHLESS_HOME": str(home)})
 soft, hard = resource.getrlimit(resource.RLIMIT_CORE)
 print(f"RLIMIT_CORE={soft},{hard}")
 """

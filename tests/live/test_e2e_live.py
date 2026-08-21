@@ -37,7 +37,7 @@ from worthless.cli.process import (
 from worthless.cli.sidecar_lifecycle import shutdown_sidecar, spawn_sidecar, split_to_tmpfs
 from worthless.storage.repository import ShardRepository
 
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner()
 
 
 # ---------------------------------------------------------------------------

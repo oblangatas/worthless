@@ -69,10 +69,18 @@ def _server(
 
 def test_check_proxy_health_happy_path() -> None:
     """A clean 200 + JSON dict yields ``healthy=True``."""
-    handler = _make_handler(200, b'{"mode": "up", "requests_proxied": 42}')
+    handler = _make_handler(200, b'{"mode": "up", "requests_proxied": 42, "requests_billed": 7}')
     with _server(lambda: handler) as port:
         result = check_proxy_health(port)
-    assert result == {"healthy": True, "port": port, "mode": "up", "requests_proxied": 42}
+    # worthless-ax9d: traffic and spend are separate numbers — a request the
+    # provider rejects is proxied but never billed — so both are surfaced.
+    assert result == {
+        "healthy": True,
+        "port": port,
+        "mode": "up",
+        "requests_proxied": 42,
+        "requests_billed": 7,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -144,16 +152,25 @@ def test_check_proxy_health_dict_missing_fields_still_healthy_with_defaults() ->
     documented defaults — and is treated as healthy.
 
     This pins the *documented* behaviour at ``cli/process.py``: ``mode``
-    defaults to ``"up"`` and ``requests_proxied`` to ``0`` when absent. The
+    defaults to ``"up"`` and both counters to ``0`` when absent. The
     contract is: a 200 + JSON dict from ``/healthz`` is enough for "healthy."
-    A future tightening could require both fields, but until then this is the
+    A future tightening could require the fields, but until then this is the
     behaviour every consumer relies on (status command, wrap, MCP server,
     F7 gate). Locked in to catch silent drift.
+
+    ``requests_billed`` defaults alongside ``requests_proxied`` so an older proxy
+    that predates the split still reports as healthy rather than raising.
     """
     handler = _make_handler(200, b"{}")
     with _server(lambda: handler) as port:
         result = check_proxy_health(port)
-    assert result == {"healthy": True, "port": port, "mode": "up", "requests_proxied": 0}
+    assert result == {
+        "healthy": True,
+        "port": port,
+        "mode": "up",
+        "requests_proxied": 0,
+        "requests_billed": 0,
+    }
 
 
 # ---------------------------------------------------------------------------

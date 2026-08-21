@@ -5,11 +5,15 @@ Builds ``docker/sidecar/Dockerfile`` and runs it, asserting that
 the smoke client connects as ``worthless-proxy``, and a full
 seal/open/attest roundtrip succeeds across the uid boundary.
 
-Marked ``@pytest.mark.docker`` so it is skipped by default (the
-project's pytest ``addopts`` excludes ``docker``-marked tests). Run
-explicitly with::
+The container roundtrip is marked ``@pytest.mark.docker`` and skipped by
+default (the project's pytest ``addopts`` excludes ``docker``-marked
+tests). Run it explicitly with::
 
     uv run pytest -m docker -v
+
+The mark is per-test, NOT module-wide: ``test_each_run_gets_its_own_container_name``
+is pure string logic and runs in the default suite, because a regression
+guard excluded from the default run guards nothing.
 
 The test auto-skips (not fails) when the ``docker`` CLI is missing
 or the daemon is unreachable, so CI boxes without Docker stay green.
@@ -21,13 +25,18 @@ import json
 import shutil
 import subprocess
 import time
+import uuid
 from pathlib import Path
 
 import pytest
 
 from worthless.proxy.config import DEFAULT_SIDECAR_CAPS
 
-pytestmark = pytest.mark.docker
+# Marked per-test, NOT module-wide. `_smoke_container_name` is pure string
+# logic and needs no daemon, so a module-level `docker` mark would exclude it
+# from the default run — leaving the guard unexercised on ordinary PRs and its
+# lines uncovered, which is the opposite of what a regression guard is for.
+# Only the test that actually drives a container carries the mark.
 
 
 _IMAGE_TAG = "worthless-sidecar:smoke"
@@ -85,6 +94,37 @@ def built_image() -> str:
     return _IMAGE_TAG
 
 
+def _smoke_container_name() -> str:
+    """A container name unique to this invocation.
+
+    ponytail: uuid4, not pid or a counter. A retry runs in the SAME process,
+    so a pid suffix would collide exactly when it matters most.
+    """
+    return f"worthless-sidecar-smoke-{uuid.uuid4().hex[:12]}"
+
+
+def test_each_run_gets_its_own_container_name() -> None:
+    """Two invocations must not ask docker for the same container name.
+
+    A fixed name means a retry collides with the previous attempt's container
+    while it is still shutting down. `--rm` does not save us: it only fires on
+    a clean exit, and this job runs under pytest-rerunfailures, so the retry
+    is exactly when the old container is least likely to be gone.
+
+    Observed on PR #495 run 31524783177 — `docker: Conflict. The container
+    name "/worthless-sidecar-smoke" is already in use`, surfacing as
+    `handshake step missing` with an empty steps dict. That reads as a product
+    failure, so the next person debugs the proxy instead of the harness.
+    """
+    names = [_smoke_container_name() for _ in range(100)]
+
+    assert len(set(names)) == len(names), "container names repeated within one process"
+    # The prefix has to survive: humans grep for it, and `docker ps` filters on
+    # it. A unique name that nobody recognises trades one problem for another.
+    assert all(n.startswith("worthless-sidecar-smoke-") for n in names)
+
+
+@pytest.mark.docker
 def test_container_roundtrip_succeeds_across_uid_boundary(built_image: str) -> None:
     """Full lifecycle: build → run → sidecar bind → smoke client roundtrip.
 
@@ -103,7 +143,7 @@ def test_container_roundtrip_succeeds_across_uid_boundary(built_image: str) -> N
             "run",
             "--rm",
             "--name",
-            "worthless-sidecar-smoke",
+            _smoke_container_name(),
             built_image,
         ],
         capture_output=True,

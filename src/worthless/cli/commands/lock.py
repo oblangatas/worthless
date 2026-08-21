@@ -1330,6 +1330,27 @@ def _print_openclaw_success_block(
     if result.skill_installed:
         console.print_hint("   • ~/.openclaw/workspace/skills/worthless/ — installed skill")
     console.print_hint("   • Undo: worthless unlock")
+    # WOR-599: OpenClaw keeps verbatim copies of its own config — a .bak ring
+    # written pre-edit on every config write, plus a .last-good promoted when the
+    # gateway observes a valid config. A copy written BEFORE this lock still holds
+    # the original key in plaintext, so "you're protected" is true of the live
+    # config and not of the directory.
+    #
+    # Measured against ghcr.io/openclaw/openclaw:2026.5.3-1: after a lock-style
+    # rewrite, .bak and .bak.1 STILL held the pre-lock key, while .last-good had
+    # been re-promoted to the post-lock contents (the daemon was running). With
+    # the daemon down at lock time, .last-good keeps the old copy until it starts.
+    #
+    # We do not delete them: they are daemon-owned, and .bak is the recovery path
+    # `worthless doctor` itself recommends. Saying so is the only control we have
+    # — asserted by tests/openclaw/test_lock_command_openclaw.py.
+    console.print_hint(
+        "   • OpenClaw keeps its own config backups (~/.openclaw/openclaw.json.bak, "
+        ".bak.1 …, and .last-good). Ones written before this lock still hold your "
+        "original key in plaintext. Rotate that key at your provider — that is "
+        "the only action that invalidates a copy which may already have been "
+        "synced or backed up elsewhere."
+    )
     # WOR-796 (scrub gap #1): a provider whose key var isn't a valid uppercase
     # SecretRef id was NOT scrubbed — its cached real key is still live in
     # OpenClaw's agent store even though openclaw.json reads "locked". Surface it
@@ -1947,7 +1968,8 @@ def _print_lock_result(
         # it off the partial-failure path so nothing above LOCK FAILED reads as OK.
         if fresh_count and not openclaw_failed:
             console.print_hint(
-                "Next: run `worthless wrap <command>` or `worthless up` for daemon mode"
+                "Next: run `worthless wrap <command>`, or `worthless up` to keep a "
+                "proxy running in this terminal."
             )
         # WOR-779: closure — the "pull anytime" reassurance home. Suppressed on
         # a partial failure — don't reassure when the lock didn't fully succeed.

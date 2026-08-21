@@ -19,7 +19,7 @@ from worthless.cli.bootstrap import WorthlessHome, ensure_home
 
 from tests.helpers import fake_anthropic_key, fake_openai_key
 
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner()
 
 # WOR-582: CliRunner.invoke(["lock", ...]) calls asyncio.run() via bootstrap;
 # under xdist threaded workers this triggers event-loop conflicts that hang the

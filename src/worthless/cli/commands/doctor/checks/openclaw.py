@@ -20,6 +20,49 @@ from worthless.cli.process import resolve_openclaw_proxy_base_url, resolve_port
 from worthless.openclaw import audit as _oc_audit
 from worthless.openclaw import integration as _oc_integration
 
+# WOR-516: surface the OpenClaw .bak recovery path so operators know where to
+# look if openclaw.json is damaged after a failed lock.
+#
+# WOR-599 adds the other half of the truth. OpenClaw writes these itself, as
+# verbatim copies of the config. Measured against the pinned image
+# (ghcr.io/openclaw/openclaw:2026.5.3-1), seeding a plaintext key, booting the
+# gateway, then rewriting the config the way lock does:
+#   * openclaw.json.bak(.1…4) — a 5-slot ring written pre-edit on every config
+#     write. OBSERVED: both .bak and .bak.1 still held the pre-lock key after
+#     the rewrite. This is the file that actually retains it.
+#     Do NOT tell users it "ages out after five writes": rotation runs only in
+#     OpenClaw's own writer (mutate.ts -> maintainConfigBackups). Worthless
+#     rewrites openclaw.json with its own _atomic_write_json (temp + os.replace),
+#     so lock/unlock cycles never rotate the ring. A user counting their own
+#     `worthless lock` runs would wrongly conclude the copy had aged out.
+#   * openclaw.json.last-good — promoted when the gateway observes a valid
+#     config. OBSERVED: re-promoted to the post-lock contents within seconds
+#     when the daemon was RUNNING. But promotion only happens when the daemon
+#     next observes the config, so if it is down at lock time (common — the user
+#     locks, then restarts) the pre-lock copy persists until it starts again.
+# If the config held a plaintext apiKey when these were written — the normal case
+# for anyone who used OpenClaw before installing Worthless — that key is still in
+# them after `worthless lock`. Recommending a restore from .bak without saying so
+# would have doctor contradict lock's "your key is protected".
+#
+# We do not delete them: they are daemon-owned, .bak is this very recovery path,
+# and removing one can leave OpenClaw unable to restart. Disclosure is the whole
+# control, which is why the wording is asserted by
+# tests/openclaw/test_config_backup_disclosure.py.
+_RECOVERY_NOTE_TEXT = (
+    "Recovery: if openclaw.json is damaged, restore from "
+    "~/.openclaw/openclaw.json.bak "
+    "(written by the openclaw daemon on each config change). "
+    "Note: these are verbatim copies of your config, so one written before you "
+    "locked still holds your original API key in plaintext — "
+    "openclaw.json.bak, .bak.1 …, and openclaw.json.last-good. Worthless does "
+    "not touch them: they are OpenClaw's own recovery files, and Worthless's "
+    "own writes do not rotate them. "
+    "Rotate that key at your provider — that is the only action that "
+    "invalidates a copy which may already have been synced or backed up "
+    "elsewhere. Deleting these files afterwards is cleanup, not a fix."
+)
+
 check_id = "openclaw"
 
 
@@ -161,16 +204,8 @@ def run(ctx: CheckContext) -> CheckResult:
     else:
         status = "ok"
 
-    # WOR-516: always surface the OpenClaw .bak recovery path so operators
-    # know where to look if openclaw.json is damaged after a failed lock.
-    # The note is low-signal when everything is healthy (status=ok) but
-    # critical when a write-failed event appears in the findings list.
     recovery_note = {
-        "issue": (
-            "Recovery: if openclaw.json is damaged, restore from "
-            "~/.openclaw/openclaw.json.bak "
-            "(written by the openclaw daemon on each config change)"
-        ),
+        "issue": _RECOVERY_NOTE_TEXT,
         "exit_code": None,
     }
 

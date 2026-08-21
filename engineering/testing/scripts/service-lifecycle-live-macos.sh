@@ -2,6 +2,16 @@
 # Service lifecycle live pack — macOS launchd. See ../wor-193-live-checklist.md
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=engineering/testing/scripts/_live-pack-lib.sh
+source "${SCRIPT_DIR}/_live-pack-lib.sh"
+
+# worthless-d4h2: this pack called bare `worthless` and let PATH decide, so it
+# silently tested a worktree venv rather than the artifact users install. Set
+# WORTHLESS_BIN to aim it at an installed wheel; either way it now prints which
+# binary it is about to prove things about.
+lp_use_binary
+
 PORT="${WORTHLESS_PORT:-8787}"
 PLIST="$HOME/Library/LaunchAgents/dev.worthless.proxy.plist"
 if [[ -n "${WORTHLESS_HOME:-}" ]]; then

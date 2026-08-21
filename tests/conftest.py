@@ -8,6 +8,8 @@ import json
 import logging
 import os
 from pathlib import Path
+import signal
+import sys
 import threading
 import time
 
@@ -339,7 +341,6 @@ def _session_fake_ipc_supervisor():
     ``from ... import create_app`` and rebinds the captured reference to
     the wrapped version. Restored on session teardown.
     """
-    import sys
 
     wrapper = _make_create_app_wrapper(_ORIGINAL_CREATE_APP)
 
@@ -372,8 +373,6 @@ def _autouse_fake_ipc_supervisor(request: pytest.FixtureRequest, monkeypatch: py
     """
     if request.node.get_closest_marker("real_ipc") is None:
         return
-
-    import sys
 
     monkeypatch.setattr(_proxy_app_module, "create_app", _ORIGINAL_CREATE_APP)
     for mod in list(sys.modules.values()):
@@ -611,8 +610,85 @@ def detect_thread_leak(request):
         )
 
 
+@pytest.hookimpl(trylast=True)
+def pytest_configure(config):
+    """Downgrade ``timeout_method`` to ``signal`` when there is no worker to kill.
+
+    ``timeout_method = "thread"`` (pyproject) makes a timeout call ``os._exit()``.
+    That is exactly right inside an xdist worker: the worker is expendable, the
+    master reports "worker 'gwN' crashed while running <nodeid>" as one honest
+    failure, and the session survives. It is exactly WRONG with no xdist, where
+    the process being killed is pytest itself — exit 1, no summary, no test
+    report, no indication which test did it.
+
+    Both halves of that were shipped broken on this branch and caught by CI, so
+    this decides it from the actual run shape instead of relying on every caller
+    to remember a flag. It has to: ``-o addopts=`` (used by several CI steps and
+    by scripts/hooks/live_e2e_gate.py) wipes ``-n auto`` while leaving
+    ``timeout_method`` set, silently producing the serial+thread combination.
+
+    trylast so it runs after pytest-timeout's own ``pytest_configure``, which is
+    what populates ``_env_timeout_method`` (pytest_timeout.py:160) — the value
+    actually read per test at ``_get_item_settings``.
+
+    Note: ``--noconftest`` skips this file entirely, so any such invocation still
+    has to pass ``--timeout-method=signal`` explicitly.
+    """
+    if not hasattr(signal, "SIGALRM"):
+        # `signal` mode IS pytest-timeout's SIGALRM path, and Windows has no
+        # SIGALRM — setting it here crashed the whole session at startup with
+        # `AttributeError: module 'signal' has no attribute 'SIGALRM'`, before a
+        # single test ran (Tests / Smoke (windows, py3.13)). The smoke job hits
+        # this branch because `-o addopts=` strips `-n auto`, making it serial.
+        #
+        # Keyed on the capability, not on `sys.platform == "win32"`, because that
+        # is exactly what pytest-timeout itself checks (pytest_timeout.py:26).
+        # Any interpreter lacking SIGALRM gets the same treatment without this
+        # needing to enumerate platforms.
+        #
+        # Such platforms keep pytest-timeout's configured default and do NOT get
+        # this branch's improvement. That is the honest trade: the alternative is
+        # running zero tests. The real suite runs on Linux, where the fix
+        # applies; Windows runs a two-file smoke job.
+        return
+    if hasattr(config, "workerinput"):
+        return  # inside an xdist worker — `thread` is the whole point
+    if getattr(config.option, "numprocesses", None) not in (None, 0):
+        return  # parallel: a worker will do the dying
+    config.option.timeout_method = "signal"
+    if hasattr(config, "_env_timeout_method"):
+        config._env_timeout_method = "signal"
+
+
 def pytest_collection_modifyitems(config, items):
-    """Mark tests in tests/quarantined_tests.txt with @pytest.mark.quarantine."""
+    """Give real-process test families timeout headroom, then mark quarantined."""
+    # Both families drive REAL processes, so their runtime is dominated by
+    # process startup on a loaded runner rather than by the code under test —
+    # and the repo-global 30s budget is sized for ordinary unit tests.
+    #
+    #   real_ipc   — Popen a real interpreter and wait for an AF_UNIX socket.
+    #                CI sets WORTHLESS_SIDECAR_READY_TIMEOUT_SECS=20 because cold
+    #                start is slow there, leaving only 10s of the 30s for the
+    #                test body. tests/ipc/test_roundtrip.py was cut at the wall
+    #                on CI run 31610847051.
+    #   user_flow  — full journeys against a live proxy. Measured 15.2s locally
+    #                for the slowest, ~32s on a macOS runner (~2.1x): straight
+    #                through the wall. It failed on CI run 31639231328, and the
+    #                next-slowest sits at 12.5s local (~26s there), i.e. next in
+    #                line to start flipping.
+    #
+    # Straddling the wall is the whole disease this PR treats: a test that
+    # sometimes finishes at 28s and sometimes at 33s is a coin flip every run,
+    # and the loss was silent because --reruns 1 retried it into a green
+    # summary. Headroom stops the alarm arming for tests that are merely slow,
+    # so a timeout once again means something is genuinely stuck.
+    slow_family_timeout = pytest.mark.timeout(120)
+    for item in items:
+        if item.get_closest_marker("timeout") is not None:
+            continue  # an explicit per-test budget always wins
+        if any(item.get_closest_marker(m) is not None for m in ("real_ipc", "user_flow")):
+            item.add_marker(slow_family_timeout)
+
     quarantine_file = Path(config.rootdir) / "tests" / "quarantined_tests.txt"
     if not quarantine_file.exists():
         return
