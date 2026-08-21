@@ -60,7 +60,7 @@ mcp = [
     # mcp.server.fastmcp -> mcp.server.mcpserver with no shim, which breaks
     # src/worthless/mcp/server.py. Floor stays at 1.0 so users already
     # resolved on an older 1.x are untouched; the lock takes the newest 1.x.
-    "mcp>=1.0,<2",
+    "mcp>=1.0,<3",
 ]
 dev = [
     "deptry>=0.22",
