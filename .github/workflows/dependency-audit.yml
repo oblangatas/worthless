@@ -102,3 +102,50 @@ jobs:
         env:
           UV_CACHE_DIR: /tmp/uv-cache
         run: uv export --frozen --no-emit-project | uv run pip-audit --disable-pip -r /dev/stdin
+
+  # Python is not the only ecosystem here. workers/worthless-sh is a Cloudflare
+  # Worker with its own package-lock.json, and nothing audited it — `grep -rn
+  # "npm audit" .github/workflows/` returned nothing before this job.
+  #
+  # SCOPE — the FULL tree, dev tooling included, and the earlier version of this
+  # job got that wrong. It audited `--omit=dev` on the argument that the 5 open
+  # advisories were unavoidable devDependency noise and a full gate would be red
+  # on arrival. That was false: `npm audit fix --package-lock-only` cleared all
+  # 5 with package.json unchanged (semver-compatible bumps of wrangler,
+  # vitest-pool-workers, undici, nanoid). The lockfile refresh is in this PR, so
+  # the full tree is green and there is nothing left to look away from.
+  #
+  # Dev tooling belongs in scope for this repo specifically. wrangler and
+  # miniflare execute in CI and on developer machines with deploy credentials —
+  # for a product whose entire purpose is credential protection, "it does not
+  # ship" is not a reason to leave build tooling unaudited. beads worthless-yhcc.
+  npm-audit:
+    name: npm audit (worker)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: ./.github/actions/setup-node-worker
+
+      # `npm audit` reads package-lock.json and never checks it still agrees
+      # with package.json — add a runtime dependency without relocking and the
+      # audit happily reports 0 vulnerabilities and exits 0. That is the Snyk
+      # failure this repo already deleted once: green over a tree that is not
+      # the tree. `npm ci --dry-run` fails loudly (EUSAGE, "lock file ... not in
+      # sync") without paying for a real install. Mirrors `uv lock --check` in
+      # the Python job above.
+      - name: Lock is in sync with package.json
+        working-directory: workers/worthless-sh
+        run: npm ci --dry-run
+
+      # No `npm ci` install on purpose: `npm audit` resolves from the lockfile
+      # alone, verified against this lockfile with no node_modules present.
+      - name: Audit the Worker's dependency tree
+        working-directory: workers/worthless-sh
+        run: npm audit

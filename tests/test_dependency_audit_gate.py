@@ -117,3 +117,68 @@ def test_audit_job_is_unconditional() -> None:
     """A skipped job reports SUCCESS to branch protection — a bypass, not a gate."""
     wf = yaml.safe_load(WORKFLOW.read_text())
     assert "if" not in wf["jobs"]["audit"]
+
+
+# ── npm side (worthless-yhcc) ──────────────────────────────────────────────
+# The Worker subproject has its own lockfile and was audited by nothing.
+
+
+def _npm_step() -> dict:
+    wf = yaml.safe_load(WORKFLOW.read_text())
+    steps = wf["jobs"]["npm-audit"]["steps"]
+    matches = [s for s in steps if "npm audit" in str(s.get("run", ""))]
+    assert len(matches) == 1, f"expected exactly one npm audit step, got {len(matches)}"
+    return matches[0]
+
+
+def test_npm_audit_covers_the_full_tree() -> None:
+    """Dev tooling stays in scope — it runs in CI with deploy credentials.
+
+    An earlier version of this job used `--omit=dev`, justified by 5 devDependency
+    advisories that would have made a full gate red on arrival. That was false:
+    `npm audit fix --package-lock-only` cleared all 5 with package.json unchanged.
+    Narrowing a security gate to dodge findings that a one-command refresh fixes
+    is looking away, not scoping.
+    """
+    step = _npm_step()
+    assert "--omit=dev" not in step["run"], (
+        "wrangler and miniflare execute in CI and on dev machines with deploy "
+        "credentials; excluding them from a credential-protection product's "
+        "supply-chain gate needs a real cost, and the measured cost is zero"
+    )
+    assert step.get("working-directory") == "workers/worthless-sh"
+
+
+def test_npm_lockfile_freshness_is_checked() -> None:
+    """`npm audit` reads the lockfile and never checks it matches package.json.
+
+    Add a runtime dependency without relocking and the audit reports 0
+    vulnerabilities and exits 0 — green over a tree that is not the tree, which
+    is exactly the failure worthless-tidv was opened for.
+    """
+    wf = yaml.safe_load(WORKFLOW.read_text())
+    runs = " ".join(str(s.get("run", "")) for s in wf["jobs"]["npm-audit"]["steps"])
+    assert "npm ci" in runs, (
+        "without a sync check, a stale package-lock.json passes the audit while a "
+        "different dependency tree actually installs"
+    )
+
+
+def test_npm_audit_can_fail() -> None:
+    """Same rule as the Python gate: it must be able to go red."""
+    step = _npm_step()
+    assert "continue-on-error" not in step
+    assert "|| true" not in step["run"], "swallowing the exit code makes this decorative"
+    wf = yaml.safe_load(WORKFLOW.read_text())
+    assert "continue-on-error" not in wf["jobs"]["npm-audit"]
+    assert "if" not in wf["jobs"]["npm-audit"], (
+        "a skipped job reports SUCCESS to branch protection — a bypass, not a gate"
+    )
+
+
+def test_dependabot_covers_the_worker() -> None:
+    """Advisories with no update PR never clear — main sat on 5 of them."""
+    cfg = yaml.safe_load((REPO / ".github" / "dependabot.yml").read_text())
+    npm = [u for u in cfg["updates"] if u["package-ecosystem"] == "npm"]
+    assert npm, "no npm ecosystem entry: Dependabot raises Worker advisories but never fixes them"
+    assert any(u["directory"].rstrip("/").endswith("workers/worthless-sh") for u in npm)
