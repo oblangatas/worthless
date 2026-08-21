@@ -8,6 +8,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import signal
 import sys
 import threading
 import time
@@ -340,7 +341,6 @@ def _session_fake_ipc_supervisor():
     ``from ... import create_app`` and rebinds the captured reference to
     the wrapped version. Restored on session teardown.
     """
-    import sys
 
     wrapper = _make_create_app_wrapper(_ORIGINAL_CREATE_APP)
 
@@ -373,8 +373,6 @@ def _autouse_fake_ipc_supervisor(request: pytest.FixtureRequest, monkeypatch: py
     """
     if request.node.get_closest_marker("real_ipc") is None:
         return
-
-    import sys
 
     monkeypatch.setattr(_proxy_app_module, "create_app", _ORIGINAL_CREATE_APP)
     for mod in list(sys.modules.values()):
@@ -636,17 +634,22 @@ def pytest_configure(config):
     Note: ``--noconftest`` skips this file entirely, so any such invocation still
     has to pass ``--timeout-method=signal`` explicitly.
     """
-    if sys.platform == "win32":
-        # `signal` mode is pytest-timeout's SIGALRM path, and Windows has no
+    if not hasattr(signal, "SIGALRM"):
+        # `signal` mode IS pytest-timeout's SIGALRM path, and Windows has no
         # SIGALRM — setting it here crashed the whole session at startup with
         # `AttributeError: module 'signal' has no attribute 'SIGALRM'`, before a
         # single test ran (Tests / Smoke (windows, py3.13)). The smoke job hits
         # this branch because `-o addopts=` strips `-n auto`, making it serial.
         #
-        # Windows therefore keeps pytest-timeout's configured default. It does
-        # not get this branch's improvement, which is the honest trade: the
-        # alternative is running zero tests. The real suite runs on Linux, where
-        # the fix applies; Windows runs a two-file smoke job.
+        # Keyed on the capability, not on `sys.platform == "win32"`, because that
+        # is exactly what pytest-timeout itself checks (pytest_timeout.py:26).
+        # Any interpreter lacking SIGALRM gets the same treatment without this
+        # needing to enumerate platforms.
+        #
+        # Such platforms keep pytest-timeout's configured default and do NOT get
+        # this branch's improvement. That is the honest trade: the alternative is
+        # running zero tests. The real suite runs on Linux, where the fix
+        # applies; Windows runs a two-file smoke job.
         return
     if hasattr(config, "workerinput"):
         return  # inside an xdist worker — `thread` is the whole point

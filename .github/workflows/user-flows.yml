@@ -158,9 +158,10 @@ jobs:
           # test instead, so a slow flow is a reported failure that `--reruns 1`
           # can retry -- exactly how this lane behaved before this PR.
           # --max-worker-restart=2 bounds the blast radius regardless: xdist's
-          # default is unlimited, so a worker that dies deterministically is
-          # restarted forever and eats the job's whole 15m budget instead of
-          # failing. Two is enough to ride out a one-off, small enough to fail fast.
+          # default is numprocesses * 4 (dsession.py:556-568), not unlimited as an
+          # earlier version of this comment claimed — but 4x is still enough for a
+          # deterministically-dying worker to eat the job's 15m budget re-running
+          # one test. Two rides out a one-off and fails fast otherwise.
           uv run pytest tests/user_flows -m user_flow --timeout-method=signal --max-worker-restart=2 2>&1 | tee user-flow-traces/pytest-${{ runner.os }}.log
 
       # worthless-d4h2: the step above proves the BRANCH build works. It cannot

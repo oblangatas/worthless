@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import ast
 import re
+import signal
 from pathlib import Path
 
 import pytest
@@ -135,6 +136,86 @@ class _ConfigureConfig:
             self.workerinput = {}  # xdist sets this only inside a worker
 
 
+def test_a_timeout_is_actually_armed() -> None:
+    """`timeout = 0` disarms everything, and nothing else notices.
+
+    pytest-timeout gates on `timeout > 0` (pytest_timeout.py:190). Setting the
+    ini key to 0 leaves every other assertion in this file true — the method is
+    still "thread", the addopts are still right — while no timer is ever armed.
+    A one-line revert that ships a green board with the protection gone.
+    """
+    m = re.search(r"^\s*timeout\s*=\s*(\d+)", _pyproject_text(), re.MULTILINE)
+    assert m, "pyproject no longer declares a `timeout` — nothing arms without it"
+    assert int(m.group(1)) > 0, (
+        "`timeout = 0` disarms pytest-timeout entirely (it gates on > 0), so a "
+        "hung test wedges its worker again with every other guard here still green"
+    )
+
+
+def test_addopts_does_not_disarm_the_timeout() -> None:
+    """CLI beats ini, so addopts can silently override the method or unload it.
+
+    pytest-timeout reads the method from the command line in preference to the
+    ini file (pytest_timeout.py:367). Adding `--timeout-method=signal` to
+    addopts therefore reverts this module's entire point, and `-p no:timeout`
+    removes the plugin outright — both while every ini-level assertion here
+    still passes.
+    """
+    addopts = _ADDOPTS.search(_pyproject_text())
+    assert addopts, "pyproject no longer declares addopts"
+    value = addopts.group(1)
+    assert "--timeout-method" not in value, (
+        "addopts overrides the ini method (CLI wins); setting it here silently "
+        "reverts timeout_method = 'thread'"
+    )
+    assert "no:timeout" not in value, "`-p no:timeout` unloads pytest-timeout entirely"
+
+
+def test_no_workflow_disarms_the_timeout_by_env() -> None:
+    """`PYTEST_TIMEOUT=0` in any job env is the third one-line revert.
+
+    pytest-timeout reads the env var (pytest_timeout.py:358), so a single line
+    in a workflow disarms that lane with nothing in this file noticing.
+    """
+    offenders = []
+    for path in GITHUB.rglob("*.yml"):
+        text = _CONTINUATION.sub(" ", path.read_text(encoding="utf-8"))
+        for match in re.finditer(r"PYTEST_TIMEOUT\s*[:=]\s*[\"']?(\d+)", text):
+            if int(match.group(1)) == 0:
+                offenders.append(path.relative_to(GITHUB.parent))
+    assert not offenders, (
+        f"PYTEST_TIMEOUT=0 disarms pytest-timeout for that lane: {sorted(set(map(str, offenders)))}"
+    )
+
+
+def test_platforms_without_sigalrm_keep_their_default(monkeypatch) -> None:
+    """`signal` mode IS SIGALRM, so forcing it where SIGALRM is absent crashes.
+
+    Windows has no SIGALRM. Setting `timeout_method = "signal"` there made
+    pytest-timeout raise `AttributeError: module 'signal' has no attribute
+    'SIGALRM'` during the run loop, killing the whole session before a single
+    test executed — the Windows smoke job ran ZERO tests and sat that way for
+    five days. The guard keys on the capability rather than on `sys.platform`,
+    matching what pytest-timeout itself checks.
+
+    Such platforms keep the configured default and do NOT get this module's
+    protection. That is deliberate: running with the weaker timeout beats
+    running nothing.
+    """
+    monkeypatch.delattr(signal, "SIGALRM", raising=False)
+    config = _ConfigureConfig(None)  # serial: would otherwise downgrade
+    pytest_configure(config)
+    assert config._env_timeout_method == "thread", (
+        "without SIGALRM the downgrade must be skipped entirely; forcing "
+        "`signal` here crashes the session at startup"
+    )
+    assert config.option.timeout_method == "thread"
+
+
+@pytest.mark.skipif(
+    not hasattr(signal, "SIGALRM"),
+    reason="no SIGALRM here, so pytest_configure deliberately skips the downgrade",
+)
 @pytest.mark.parametrize("numprocesses", [None, 0])
 def test_serial_runs_downgrade_to_signal(numprocesses) -> None:
     """No xdist worker means os._exit would kill pytest itself.
