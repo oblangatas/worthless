@@ -60,18 +60,32 @@ if ! printf '%s' "$declared" | grep -qE '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'; the
 fi
 
 if ! command -v gh >/dev/null 2>&1; then
-    say "WARNING: gh not installed — cannot confirm '$declared' is still the live owner."
-    say "  A rename that nobody applied to this repo would be invisible here."
+    # Not `say`: --quiet is how the tag gate calls this, and an unverified owner
+    # must never be silent there. --quiet suppresses the SUCCESS line only.
+    echo "WARNING: gh not installed — cannot confirm '$declared' is still the live owner."
+    echo "  A rename that nobody applied to this repo would be invisible here."
     exit 0
 fi
 
-# `|| true` so an API/network failure lands in the empty-answer branch below
-# rather than tripping `set -e` and reading as a disagreement.
+# `|| true` so an API/network failure lands in the unknown branch below rather
+# than tripping `set -e` and reading as a disagreement.
+#
+# CRITICAL: `gh api` writes HTTP-error BODIES to stdout, not stderr, and skips
+# --jq on an error response. A 404 (repo deleted, or a token without access to a
+# private repo), a 401, or a secondary rate-limit all yield a captured value like
+#   {"message":"Not Found","status":"404"}
+# So an empty-string check is NOT enough: without the shape test below, any of
+# those compares unequal to the declared owner and hard-BLOCKS a release while
+# telling the operator to set their repo URL to a JSON blob. Validate the shape
+# and treat anything else as unknown.
 actual=$(gh api "repos/$declared" --jq '.full_name' 2>/dev/null || true)
 
-if [ -z "$actual" ]; then
-    say "WARNING: could not reach the GitHub API — '$declared' is unconfirmed."
-    say "  Treating an unknown as OK on purpose; the daily release-sync-check will retry."
+if ! printf '%s' "$actual" | grep -qE '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'; then
+    # --quiet must NOT suppress this: the tag gate calls with --quiet, and a
+    # silent unknown there is the one place the check most needs to speak.
+    echo "WARNING: GitHub did not return a usable answer for '$declared' — unconfirmed."
+    echo "  (no network, gh unauthenticated, rate-limited, or the repo is inaccessible)"
+    echo "  Treating an unknown as OK on purpose; an outage must not wedge a release."
     exit 0
 fi
 

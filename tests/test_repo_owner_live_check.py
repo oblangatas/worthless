@@ -96,13 +96,40 @@ def test_unreachable_api_warns_but_does_not_block(tmp_path: Path) -> None:
     assert "WARNING" in (r.stdout + r.stderr), "silence would hide that nothing was verified"
 
 
-def test_gh_present_but_failing_does_not_block(tmp_path: Path) -> None:
-    """`gh` installed but erroring (rate limit, auth, offline) is still unknown."""
+# Real `gh api` HTTP-error bodies. These go to STDOUT, not stderr, and --jq is
+# skipped on an error response — so the captured value is non-empty JSON, not "".
+# An earlier version of this test stubbed gh writing to stderr, which modelled a
+# gh that does not exist: the test passed while the script hard-BLOCKED releases
+# on any 404/401/rate-limit, telling the operator to set their repo URL to a JSON
+# blob. Captured verbatim from a real `gh api` call.
+_GH_404 = (
+    '{"message":"Not Found",'
+    '"documentation_url":"https://docs.github.com/rest/repos/repos#get-a-repository",'
+    '"status":"404"}'
+)
+_GH_401 = '{"message":"Bad credentials","status":"401"}'
+_GH_RATE_LIMIT = '{"message":"API rate limit exceeded","status":"403"}'
+
+
+@pytest.mark.parametrize(
+    ("label", "body"),
+    [("404", _GH_404), ("401", _GH_401), ("rate-limit", _GH_RATE_LIMIT)],
+)
+def test_gh_http_error_body_is_unknown_not_disagreement(
+    tmp_path: Path, label: str, body: str
+) -> None:
+    """An HTTP error must read as unknown, never as a rename.
+
+    This is the failure that matters most: `gh` exits non-zero and prints the
+    error JSON to STDOUT. Treating that as "GitHub reports X" blocks every
+    release whenever the token is wrong, the repo is private, or we are rate
+    limited — and blames a rename that never happened.
+    """
     repo = _fake_repo(tmp_path, "oblangatas/worthless")
     bindir = repo / "fakebin"
     bindir.mkdir(exist_ok=True)
     gh = bindir / "gh"
-    gh.write_text('#!/bin/sh\necho "API rate limit exceeded" >&2\nexit 1\n', encoding="utf-8")
+    gh.write_text(f"#!/bin/sh\nprintf '%s' '{body}'\nexit 1\n", encoding="utf-8")
     gh.chmod(0o755)
 
     env = dict(os.environ)
@@ -114,8 +141,14 @@ def test_gh_present_but_failing_does_not_block(tmp_path: Path) -> None:
         capture_output=True,
         text=True,
     )
-    assert r.returncode == 0, "a failing gh call is unknown, not disagreement"
-    assert "WARNING" in (r.stdout + r.stderr)
+    out = r.stdout + r.stderr
+    assert r.returncode == 0, (
+        f"a {label} HTTP error must be UNKNOWN, not a blocked release:\n" + out
+    )
+    assert "WARNING" in out, "an unverified owner must be said out loud"
+    assert "message" not in out.lower() or "Not Found" not in out, (
+        "the raw API error body must never be presented as the owner GitHub reports"
+    )
 
 
 def test_unparseable_pyproject_is_an_error(tmp_path: Path) -> None:
@@ -145,3 +178,19 @@ def test_quiet_only_silences_the_success_path(tmp_path: Path, quiet: bool) -> No
 
     assert r.returncode == 0
     assert (r.stdout.strip() == "") is quiet, "quiet must suppress the success line, and only that"
+
+
+def test_quiet_does_not_silence_an_unknown(tmp_path: Path) -> None:
+    """--quiet is how the tag gate calls this. A silent unknown there is the worst case."""
+    repo = _fake_repo(tmp_path, "oblangatas/worthless")
+    r = subprocess.run(
+        ["sh", "scripts/check_repo_owner_live.sh", "--quiet"],  # noqa: S607 — sh is on PATH
+        cwd=repo,
+        env={**os.environ, "PATH": f"{repo / 'fakebin'}:/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+    )
+    assert r.returncode == 0
+    assert "WARNING" in (r.stdout + r.stderr), (
+        "--quiet may hide a SUCCESS line; it must never hide that nothing was verified"
+    )

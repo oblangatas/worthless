@@ -111,6 +111,19 @@ if [ "${1:-}" = "--check" ]; then
         exit 1
     fi
 
+    confirmed_repo=$(awk -F= '/^repo=/ { print $2; exit }' "$RECORD")
+    if [ -n "$confirmed_repo" ] && [ "$confirmed_repo" != "$repo" ]; then
+        echo "ERROR: attestation names repository '$confirmed_repo' but this repo is '$repo'."
+        echo "  PyPI matches on the repository name too — a repo rename breaks the binding."
+        exit 1
+    fi
+
+    # Reject a record that could escape .github/workflows/ via ../ before use.
+    if ! printf '%s' "$confirmed_workflow" | grep -qE '^[A-Za-z0-9._-]+\.ya?ml$'; then
+        echo "ERROR: attestation names workflow '$confirmed_workflow', which is not a plain"
+        echo "  .yml filename. Refusing to resolve it."
+        exit 1
+    fi
     workflow_path=".github/workflows/$confirmed_workflow"
     if [ ! -f "$workflow_path" ]; then
         echo "ERROR: the attestation names workflow '$confirmed_workflow', which does not exist."
@@ -120,7 +133,14 @@ if [ "${1:-}" = "--check" ]; then
     fi
 
     # The environment the publish job actually requests, read from the workflow.
-    actual_env=$(awk '/^[[:space:]]+environment:[[:space:]]/ { print $2; exit }' "$workflow_path")
+    # Scoped to the `publish:` job. A bare first-match would read whichever job
+    # happens to appear first -- publish.yml's `build:` job precedes `publish:`,
+    # so the day build gains an `environment:` the gate would compare the wrong
+    # one and pass while the real binding is broken.
+    actual_env=$(awk '
+        /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { job = $1; sub(/:$/, "", job) }
+        job == "publish" && /^[[:space:]]+environment:[[:space:]]/ { print $2; exit }
+    ' "$workflow_path")
     if [ -z "$actual_env" ]; then
         echo "ERROR: $workflow_path declares no 'environment:' — cannot confirm the binding."
         echo "  PyPI matches on it; a publisher configured with one will not match a job without."
