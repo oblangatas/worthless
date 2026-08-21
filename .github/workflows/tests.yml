@@ -259,7 +259,7 @@ jobs:
           uv sync --extra dev --extra test
           uv run worthless --version
           uv run worthless --help
-          uv run pytest tests/test_platform.py tests/test_cli_down.py -v -k "not Integration" -o "addopts="
+          uv run pytest tests/test_platform.py tests/test_cli_down.py tests/test_cli_dumpable.py -v -k "not Integration" -o "addopts="
 
   quarantine:
     name: Quarantine tests

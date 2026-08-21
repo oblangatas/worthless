@@ -714,6 +714,42 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(quarantine_marker)
 
 
+@pytest.fixture(autouse=True)
+def _restore_process_dumpable():
+    """Stop in-process CLI tests leaving the pytest worker undumpable (dupf.10).
+
+    ``disable_core_dumps()`` sets ``PR_SET_DUMPABLE=0`` on the *calling*
+    process. Command bodies run in-process via ``CliRunner``, so without this
+    the first such test flips the pytest worker itself for the rest of the
+    session — every later subprocess inherits it (order-dependent under
+    xdist), and ptrace-based tooling (debuggers, py-spy, some coverage
+    plugins) stops working against the worker.
+
+    Only the dumpable bit is restorable; ``RLIMIT_CORE`` cannot be raised once
+    lowered, which is pre-existing behavior and unrelated to this fixture.
+    """
+    from worthless.sidecar import _hardening
+
+    before = _hardening.get_dumpable()
+    try:
+        yield
+    finally:
+        # Tests that mock libc (e.g. test_load_libc_falls_back_to_musl_when_glibc_fails)
+        # make get_dumpable() itself raise — its `if rc < 0` compares a MagicMock to
+        # an int. The read must be caught HERE, not guarded after the fact: the throw
+        # is inside the call. A mocked libc during teardown means there is nothing
+        # real to restore, so treat it as None. isinstance() then also skips the
+        # non-Linux (None) case; restore only when a test actually changed the bit.
+        try:
+            after = _hardening.get_dumpable()
+        except Exception:
+            after = None
+        if isinstance(before, int) and isinstance(after, int) and after != before:
+            libc = _hardening._load_libc()
+            if libc is not None:
+                libc.prctl(_hardening.PR_SET_DUMPABLE, before, 0, 0, 0)
+
+
 def pytest_runtest_logreport(report):
     """Auto-detect flaky tests (failed once, then passed on rerun) and warn/annotate."""
     if report.when != "call":
