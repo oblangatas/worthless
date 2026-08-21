@@ -70,6 +70,11 @@ def test_quarantine_collection(tmp_path):
         def add_marker(self, marker):
             self.markers.append(marker)
 
+        def get_closest_marker(self, name):
+            # Real pytest items expose this; the hook uses it to give real_ipc
+            # tests timeout headroom. Returns None when absent, same as pytest.
+            return next((m for m in self.markers if m.name == name), None)
+
     config = MockConfig(tmp_path)
     # The collection logic matches by nodeid only, so we provide nodeid matching what we quarantined
     item1 = MockItem("tests/test_dummy.py::dummy_quarantined_test", "dummy_quarantined_test")

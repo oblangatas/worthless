@@ -77,6 +77,18 @@ pytestmark = [
     # This value is NOT the hang detector; WAIT_TIMEOUT below is, and it fires
     # ~40x sooner with the signal and jitter that wedged the CLI. So erring
     # generous here costs nothing and cannot mask a hang.
+    #
+    # One more reason to err generous: being cut at the wall is worse than a
+    # failed test. pytest-timeout raises WHEREVER the process happens to be, and
+    # `timeout_func_only` defaults to False, so the timer is armed across the
+    # whole `pytest_runtest_protocol` — including xdist's report
+    # serialize-and-send, which sits OUTSIDE every `CallInfo.from_call()` catch.
+    # A `Failed` landing there means `runtest_protocol_complete` is never sent
+    # and the master trips `assert not crashitem` (xdist `dsession.py:217`),
+    # aborting the WHOLE session and silently dropping every test that had not
+    # run yet — 4004 collected, 3992 reported, nothing red. `timeout_method =
+    # "thread"` (pyproject) now kills the worker instead, which xdist reports as
+    # one honest failure, but a budget that never arms is still the first line.
     pytest.mark.timeout(600),
     # NEVER auto-retry this module. ``--reruns 1`` is repo-wide (pyproject addopts
     # and .github/workflows/tests.yml), and a rerun that passes is reported green.

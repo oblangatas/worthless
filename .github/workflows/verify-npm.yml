@@ -129,5 +129,12 @@ jobs:
           UV_TOOL_DIR: ${{ runner.temp }}/uvtools
           UV_TOOL_BIN_DIR: ${{ runner.temp }}/uvtools/bin
         run: |
+          # --timeout-method=signal is REQUIRED here and cannot be inferred:
+          # --noconftest skips tests/conftest.py, so the pytest_configure hook
+          # that downgrades `thread` -> `signal` for serial runs never loads.
+          # -o addopts="" also drops `-n auto`, so this is a serial run with the
+          # repo-global `thread` still live — a timeout would os._exit pytest
+          # itself and this step would go red with no test report at all, on a
+          # real npx/MCP subprocess handshake that is slow on a cold runner.
           "${RUNNER_TEMP}/mountvenv/bin/pytest" tests/test_mcp_npx_wrapper_mount.py \
-            --noconftest -o asyncio_mode=auto -o addopts="" -q
+            --noconftest -o asyncio_mode=auto -o addopts="" --timeout-method=signal -q

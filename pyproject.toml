@@ -153,11 +153,51 @@ worthless = ["providers.toml"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 timeout = 30
+# A timeout must KILL, not raise. The default `signal` method raises `Failed`
+# wherever the process happens to be, which has two failure modes we measured:
+#   1. It can land in code that swallows it. A timeout firing inside a test
+#      whose `finally` then blocks (e.g. Pool.join() on a child that will never
+#      be released) wedges the worker FOREVER -- no second alarm is armed.
+#      Measured: >150s and still hung, under a 3s timeout.
+#   2. `timeout_func_only` defaults to False, so the timer is armed across the
+#      whole `pytest_runtest_protocol` -- including xdist's report
+#      serialize-and-send, which sits OUTSIDE every `CallInfo.from_call()`
+#      catch. A `Failed` landing there means `runtest_protocol_complete` is
+#      never sent and the master trips `assert not crashitem`
+#      (xdist `dsession.py:217`), aborting the WHOLE session and silently
+#      dropping every test that had not run yet (observed 4004 -> 3992).
+# The `thread` method calls os._exit(): uncatchable, unwedgeable, and it routes
+# to xdist's `worker_errordown` path, which reports a normal
+# "worker 'gwN' crashed while running <nodeid>" failure and keeps the session
+# alive. Measured on the same wedge: 6s, one honest failure, everything else
+# still reported. Unlike `timeout_func_only = true` (the other way to close the
+# escape window) this KEEPS setup/teardown coverage -- verified: func_only lets
+# a hanging fixture run forever, thread kills it.
+# Cost, accepted knowingly: os._exit skips cleanup, so a killed worker orphans
+# any child processes it spawned, and the dead worker's remaining scope-group
+# siblings are dropped (loudly -- xdist prints the crash line, it is not
+# silent). pytest-timeout's stack dump goes to worker stdout, which execnet
+# swallows; to get the traceback, re-run the named test alone:
+#   uv run pytest <nodeid> -n0 --timeout-method=signal
+timeout_method = "thread"
 # WOR-582: real_ipc tests spawn real subprocess sidecars; run concurrently
 # under `-n auto` they crash xdist workers nondeterministically. Excluded from
 # the default parallel run here and run serially instead (CI: dedicated -n0
-# step; locally: `uv run pytest -m real_ipc -n0`). Root cause tracked in
-# WOR-582; this is the interim quarantine.
+# step; locally: `uv run pytest -m real_ipc -n0 --timeout-method=signal`).
+# That flag is NOT optional: `-n0` has no xdist worker to sacrifice, so the
+# `thread` default above would os._exit pytest ITSELF on a timeout — exit 1,
+# no report, no clue which test. CI's serial step passes it for the same
+# reason. Root cause tracked in WOR-582; this is the interim quarantine.
+# --max-worker-restart=0 is deliberately NOT here. It belongs to the parallel
+# suite lane in .github/workflows/tests.yml, where it was measured: for a
+# TIMEOUT-killed worker, restarting just re-runs the hanging test and pays its
+# budget again (restart=0 -> 6s/1 failure; restart=3 -> 40s/4 failures, and no
+# variant recovered the dropped sibling). That reasoning does not generalise.
+# A worker can also die for reasons a restart legitimately recovers — the
+# user_flow lane drives live proxies and subprocesses, and a crash there
+# re-runs clean. Setting it globally applied a hang-tuned optimisation to
+# lanes it was never measured against and turned a self-recovering crash into
+# a red (run 31965508132). Scope it to the lane that earned it.
 addopts = "--strict-config --strict-markers -n auto --dist loadscope --reruns 1 -m 'not live and not docker and not user_flow and not real_ipc'"
 markers = [
     "benchmark: performance and latency regression checks",
