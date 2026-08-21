@@ -77,6 +77,18 @@ pytestmark = [
     # This value is NOT the hang detector; WAIT_TIMEOUT below is, and it fires
     # ~40x sooner with the signal and jitter that wedged the CLI. So erring
     # generous here costs nothing and cannot mask a hang.
+    #
+    # One more reason to err generous: being cut at the wall is worse than a
+    # failed test. pytest-timeout raises WHEREVER the process happens to be, and
+    # `timeout_func_only` defaults to False, so the timer is armed across the
+    # whole `pytest_runtest_protocol` — including xdist's report
+    # serialize-and-send, which sits OUTSIDE every `CallInfo.from_call()` catch.
+    # A `Failed` landing there means `runtest_protocol_complete` is never sent
+    # and the master trips `assert not crashitem` (xdist `dsession.py:217`),
+    # aborting the WHOLE session and silently dropping every test that had not
+    # run yet — 4004 collected, 3992 reported, nothing red. `timeout_method =
+    # "thread"` (pyproject) now kills the worker instead, which xdist reports as
+    # one honest failure, but a budget that never arms is still the first line.
     pytest.mark.timeout(600),
     # NEVER auto-retry this module. ``--reruns 1`` is repo-wide (pyproject addopts
     # and .github/workflows/tests.yml), and a rerun that passes is reported green.
@@ -496,8 +508,18 @@ def _drain(proc: subprocess.Popen) -> None:
         proc.stderr.close()
 
 
-def _run_trial(te: TrialEnv, sig: int, delay: float) -> DiskState:
-    """Spawn the real CLI, signal its process group after *delay*, classify."""
+def _run_trial(te: TrialEnv, sig: int, delay: float, *, ready: Path | None = None) -> DiskState:
+    """Spawn the real CLI, signal its process group after *delay*, classify.
+
+    *ready*, when given, is a marker file the child creates once it has armed
+    itself and is safe to signal; we poll for it instead of trusting *delay*.
+    A blind sleep races interpreter startup, and a signal landing before the
+    child is armed KILLS it rather than wedging it — which looks like "no hang
+    happened" and silently guts whatever the caller was trying to prove.
+
+    The real chaos trials deliberately pass no *ready*: for them the blind
+    delay IS the variable under test, sweeping the orphan-vulnerable window.
+    """
     proc = subprocess.Popen(
         [*_cli(), "lock", "--env", str(te.env_file)],
         env=_child_env(te),
@@ -507,7 +529,16 @@ def _run_trial(te: TrialEnv, sig: int, delay: float) -> DiskState:
         stderr=subprocess.PIPE,
     )
     try:
-        time.sleep(delay)
+        if ready is None:
+            time.sleep(delay)
+        else:
+            deadline = time.monotonic() + WAIT_TIMEOUT
+            while not ready.exists():
+                if proc.poll() is not None:
+                    pytest.fail(f"wedge child exited before arming (rc={proc.returncode})")
+                if time.monotonic() > deadline:
+                    pytest.fail(f"wedge child never signalled ready within {WAIT_TIMEOUT}s")
+                time.sleep(0.01)
         _kill_group(proc, sig)
         try:
             proc.wait(timeout=WAIT_TIMEOUT)
@@ -533,65 +564,78 @@ def _assert_no_partial(state: DiskState, *, n_keys: int, sig: int, delay: float)
 # Storms — SIGINT / SIGTERM exercise Part-1's handler + unwind
 # ---------------------------------------------------------------------------
 
-
-@pytest.mark.parametrize("n_keys", [1, 2, 3], ids=["N1", "N2", "N3"])
-def test_sigint_storm(tmp_path: Path, seam: float, n_keys: int) -> None:
-    """~30 SIGINT trials per N across the calibrated seam — never partial."""
-    delays = _delays_for(seam)
-    for trial in range(TRIALS_PER_CELL):
-        delay = delays[trial % len(delays)]
-        te = _make_trial_env(tmp_path, trial, n_keys)
-        state = _run_trial(te, signal.SIGINT, delay)
-        _assert_no_partial(state, n_keys=n_keys, sig=signal.SIGINT, delay=delay)
-
-
-@pytest.mark.parametrize("n_keys", [1, 2, 3], ids=["N1", "N2", "N3"])
-def test_sigterm_storm(tmp_path: Path, seam: float, n_keys: int) -> None:
-    """~30 SIGTERM trials per N across the calibrated seam — never partial."""
-    delays = _delays_for(seam)
-    for trial in range(TRIALS_PER_CELL):
-        delay = delays[trial % len(delays)]
-        te = _make_trial_env(tmp_path, trial, n_keys)
-        state = _run_trial(te, signal.SIGTERM, delay)
-        _assert_no_partial(state, n_keys=n_keys, sig=signal.SIGTERM, delay=delay)
+# Each slow test below sits alone in its own class ON PURPOSE. ``--dist loadscope``
+# hands a whole GROUP to one xdist worker and cannot split it; the group is the
+# MODULE for bare functions but the CLASS for methods. As bare functions these were
+# a single ~10.7-minute group pinned to one worker while the other three idled,
+# which is what pushed `Test (ubuntu, py3.10)` past its 20m ceiling on an unlucky
+# shuffle (worthless-7zl6). One class each = one group each = they spread out.
+# Ceiling: the slowest single class is now the floor (~3.7m). If that becomes the
+# binding constraint again, split by ``n_keys`` rather than merging these back.
+# Do NOT collapse them into plain functions or into one shared class.
 
 
-def test_mashed_sigint(tmp_path: Path, seam: float) -> None:
-    """A burst of 5 SIGINTs ~5ms apart must NOT defeat the one-shot handler.
+class TestSigintStorm:
+    @pytest.mark.parametrize("n_keys", [1, 2, 3], ids=["N1", "N2", "N3"])
+    def test_sigint_storm(self, tmp_path: Path, seam: float, n_keys: int) -> None:
+        """~30 SIGINT trials per N across the calibrated seam — never partial."""
+        delays = _delays_for(seam)
+        for trial in range(TRIALS_PER_CELL):
+            delay = delays[trial % len(delays)]
+            te = _make_trial_env(tmp_path, trial, n_keys)
+            state = _run_trial(te, signal.SIGINT, delay)
+            _assert_no_partial(state, n_keys=n_keys, sig=signal.SIGINT, delay=delay)
 
-    Part-1 arms a one-shot handler; a panicked operator mashing Ctrl-C must not
-    re-enter cleanup or leave a torn state. Invariant still holds.
-    """
-    n_keys = 2
-    delays = _delays_for(seam)
-    for trial in range(TRIALS_PER_CELL):
-        delay = delays[trial % len(delays)]
-        te = _make_trial_env(tmp_path, trial, n_keys)
-        proc = subprocess.Popen(
-            [*_cli(), "lock", "--env", str(te.env_file)],
-            env=_child_env(te),
-            cwd=str(te.repo),
-            start_new_session=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        try:
-            time.sleep(delay)
-            for _ in range(5):
-                if proc.poll() is not None:
-                    break
-                _kill_group(proc, signal.SIGINT)
-                time.sleep(0.005)
+
+class TestSigtermStorm:
+    @pytest.mark.parametrize("n_keys", [1, 2, 3], ids=["N1", "N2", "N3"])
+    def test_sigterm_storm(self, tmp_path: Path, seam: float, n_keys: int) -> None:
+        """~30 SIGTERM trials per N across the calibrated seam — never partial."""
+        delays = _delays_for(seam)
+        for trial in range(TRIALS_PER_CELL):
+            delay = delays[trial % len(delays)]
+            te = _make_trial_env(tmp_path, trial, n_keys)
+            state = _run_trial(te, signal.SIGTERM, delay)
+            _assert_no_partial(state, n_keys=n_keys, sig=signal.SIGTERM, delay=delay)
+
+
+class TestMashedSigint:
+    def test_mashed_sigint(self, tmp_path: Path, seam: float) -> None:
+        """A burst of 5 SIGINTs ~5ms apart must NOT defeat the one-shot handler.
+
+        Part-1 arms a one-shot handler; a panicked operator mashing Ctrl-C must not
+        re-enter cleanup or leave a torn state. Invariant still holds.
+        """
+        n_keys = 2
+        delays = _delays_for(seam)
+        for trial in range(TRIALS_PER_CELL):
+            delay = delays[trial % len(delays)]
+            te = _make_trial_env(tmp_path, trial, n_keys)
+            proc = subprocess.Popen(
+                [*_cli(), "lock", "--env", str(te.env_file)],
+                env=_child_env(te),
+                cwd=str(te.repo),
+                start_new_session=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
             try:
-                proc.wait(timeout=WAIT_TIMEOUT)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=5)
-                pytest.fail(f"mashed-SIGINT hung at delay={delay:.3f}s — regression")
-        finally:
-            _drain(proc)
-        state = classify(te)
-        _assert_no_partial(state, n_keys=n_keys, sig=signal.SIGINT, delay=delay)
+                time.sleep(delay)
+                for _ in range(5):
+                    if proc.poll() is not None:
+                        break
+                    _kill_group(proc, signal.SIGINT)
+                    time.sleep(0.005)
+                try:
+                    proc.wait(timeout=WAIT_TIMEOUT)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                    pytest.fail(f"mashed-SIGINT hung at delay={delay:.3f}s — regression")
+            finally:
+                _drain(proc)
+            state = classify(te)
+            _assert_no_partial(state, n_keys=n_keys, sig=signal.SIGINT, delay=delay)
 
 
 # ---------------------------------------------------------------------------
@@ -611,10 +655,15 @@ def test_hang_guard_fires_with_diagnostic(tmp_path: Path, monkeypatch: pytest.Mo
     fails fast, with the actionable message, well inside the module timeout.
     """
     shim = tmp_path / "wedged_cli.py"
+    ready = tmp_path / "wedged_ready"
+    # The marker is written AFTER the handlers are installed, never before: it
+    # is the child asserting "I can now survive a signal". Ordering is the whole
+    # point — see the ready= gate in _run_trial.
     shim.write_text(
         "import signal, time\n"
         "signal.signal(signal.SIGINT, signal.SIG_IGN)\n"
         "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        f"open({str(ready)!r}, 'w').close()\n"
         "while True:\n"
         "    time.sleep(0.05)\n"
     )
@@ -626,13 +675,18 @@ def test_hang_guard_fires_with_diagnostic(tmp_path: Path, monkeypatch: pytest.Mo
     te = _make_trial_env(tmp_path, 0, 1)
     started = time.monotonic()
     with pytest.raises(pytest.fail.Exception, match=r"hung after sig="):
-        _run_trial(te, signal.SIGINT, 0.05)
+        _run_trial(te, signal.SIGINT, 0.05, ready=ready)
     elapsed = time.monotonic() - started
 
-    assert WAIT_TIMEOUT <= elapsed < WAIT_TIMEOUT + 10.0, (
-        f"hang guard fired at {elapsed:.1f}s; expected ~{WAIT_TIMEOUT}s. "
-        "Too early means a hair trigger on slow machines; too late means the "
-        "per-test timeout will swallow the diagnostic again."
+    # Upper bound is anchored on the module timeout (600s), NOT on a hand-picked
+    # margin above WAIT_TIMEOUT: `elapsed` now also covers interpreter startup
+    # while we wait for the ready marker, which is load-dependent by nature. The
+    # property worth pinning is "fired, and far inside the module timeout" —
+    # anything tighter is measuring the machine, not the guard.
+    assert WAIT_TIMEOUT <= elapsed < 60.0, (
+        f"hang guard fired at {elapsed:.1f}s; expected >= {WAIT_TIMEOUT}s and far "
+        f"inside the 600s module timeout. Too early means a hair trigger; too "
+        f"late means the per-test timeout will swallow the diagnostic again."
     )
 
 
@@ -677,33 +731,34 @@ def test_seam_calibration_refuses_to_fabricate() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason="WOR-646 Part 2: atomic Pass-1 transaction + atomic-.env. "
-    "SIGKILL allows no cleanup; only write-ordering/atomic commit prevents "
-    "orphan shards. Current code may leak — documented, not hidden.",
-    strict=False,
-)
-@pytest.mark.parametrize("n_keys", [2, 3], ids=["N2", "N3"])
-def test_sigkill_atomicity(tmp_path: Path, seam: float, n_keys: int) -> None:
-    """SIGKILL mid-lock: no handler runs, so only true atomicity holds the line.
-
-    Reports the partial/orphan rate. Marked xfail(strict=False) per the WOR-646
-    honesty rule: a green-able suite that still surfaces the real gap. If a run
-    is fully atomic it PASSES (xpass); any partial state fails the assertion,
-    which xfail records rather than hides.
-    """
-    delays = _delays_for(seam)
-    partials: list[str] = []
-    for trial in range(TRIALS_PER_CELL):
-        delay = delays[trial % len(delays)]
-        te = _make_trial_env(tmp_path, trial, n_keys)
-        state = _run_trial(te, signal.SIGKILL, delay)
-        if state.classification == "partial":
-            partials.append(f"delay={delay:.3f}s {state.detail}")
-
-    rate = len(partials) / TRIALS_PER_CELL
-    assert not partials, (
-        f"SIGKILL produced {len(partials)}/{TRIALS_PER_CELL} partial states "
-        f"({rate:.0%} orphan/partial rate) for N={n_keys}.\n"
-        + "\n".join(f"  - {p}" for p in partials[:8])
+class TestSigkillAtomicity:
+    @pytest.mark.xfail(
+        reason="WOR-646 Part 2: atomic Pass-1 transaction + atomic-.env. "
+        "SIGKILL allows no cleanup; only write-ordering/atomic commit prevents "
+        "orphan shards. Current code may leak — documented, not hidden.",
+        strict=False,
     )
+    @pytest.mark.parametrize("n_keys", [2, 3], ids=["N2", "N3"])
+    def test_sigkill_atomicity(self, tmp_path: Path, seam: float, n_keys: int) -> None:
+        """SIGKILL mid-lock: no handler runs, so only true atomicity holds the line.
+
+        Reports the partial/orphan rate. Marked xfail(strict=False) per the WOR-646
+        honesty rule: a green-able suite that still surfaces the real gap. If a run
+        is fully atomic it PASSES (xpass); any partial state fails the assertion,
+        which xfail records rather than hides.
+        """
+        delays = _delays_for(seam)
+        partials: list[str] = []
+        for trial in range(TRIALS_PER_CELL):
+            delay = delays[trial % len(delays)]
+            te = _make_trial_env(tmp_path, trial, n_keys)
+            state = _run_trial(te, signal.SIGKILL, delay)
+            if state.classification == "partial":
+                partials.append(f"delay={delay:.3f}s {state.detail}")
+
+        rate = len(partials) / TRIALS_PER_CELL
+        assert not partials, (
+            f"SIGKILL produced {len(partials)}/{TRIALS_PER_CELL} partial states "
+            f"({rate:.0%} orphan/partial rate) for N={n_keys}.\n"
+            + "\n".join(f"  - {p}" for p in partials[:8])
+        )

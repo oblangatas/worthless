@@ -186,6 +186,14 @@ def test_the_gate_script_itself_exists() -> None:
 # workflow_dispatch was added in WOR-871 and removed only after review. publish.yml
 # is already guarded against it by test_deploy_static.py::test_no_skip_path_triggers;
 # these extend the same idea to every publisher.
+#
+# UPDATE (WOR-892). The fourth mutation no longer has that effect on publish.yml
+# or publish-docker.yml: their verify steps are now unconditional, so adding a
+# trigger makes verify-tag.sh run against a non-tag ref and fail CLOSED rather
+# than skip. test_the_gate_is_not_defanged now BANS the guard on a push-only
+# publisher for exactly that reason, and REQUIRES it on one with a non-push
+# trigger (deploy-worker.yml's preview dispatch), where the condition is live.
+# The trigger-classification tests above remain the first line either way.
 # --------------------------------------------------------------------------
 
 PUSH_GUARD = "github.event_name == 'push'"
@@ -225,11 +233,46 @@ def test_the_gate_is_not_defanged(name: str) -> None:
         )
 
     condition = step.get("if")
-    assert condition is None or PUSH_GUARD in str(condition), (
-        f"{name}: the verify step's `if:` is {condition!r}. Only the push guard "
-        f"({PUSH_GUARD}) is allowed — anything else can silently skip the gate "
-        "and a skipped gate does not fail a job."
-    )
+    triggers = yaml.safe_load((WORKFLOWS / name).read_text())
+    triggers = triggers.get("on", triggers.get(True)) or {}
+    # `on:` may parse as a mapping, a list, or a bare scalar. `set("push")` on
+    # the scalar form yields {'p','u','s','h'}, which would silently flip a
+    # push-only publisher into the require-a-guard branch below — so normalise
+    # rather than assuming the mapping form.
+    if isinstance(triggers, str):
+        trigger_names = {triggers}
+    elif isinstance(triggers, dict):
+        trigger_names = set(triggers)
+    else:
+        trigger_names = set(triggers or [])
+    assert trigger_names, f"{name}: could not read any trigger from `on:`"
+    push_only = trigger_names == {"push"}
+
+    if push_only:
+        # WOR-892. With `push` as the ONLY trigger, `event_name == 'push'` can
+        # never be false, so the guard defends nothing — and it fails OPEN the
+        # moment a trigger is added: the step skips, and a skipped step is not
+        # a failed step, so the job stays green and publishes unverified.
+        # Absent, the same widening makes verify-tag.sh run against a non-tag
+        # ref and fail CLOSED. So on a push-only publisher the guard is not
+        # merely allowed-or-not, it is BANNED.
+        assert condition is None, (
+            f"{name}: the verify step carries `if: {condition}` while `on:` is "
+            "push-only, so the condition can never be false. It defends nothing "
+            "today and fails OPEN if a trigger is ever added — remove it and let "
+            "verify-tag.sh fail closed on a non-tag ref instead."
+        )
+    else:
+        # A publisher with a non-push trigger (deploy-worker.yml's preview
+        # dispatch) NEEDS the guard: there the condition is live, and skipping
+        # verification is the intended behaviour for a preview that cannot
+        # reach production.
+        assert condition is not None and PUSH_GUARD in str(condition), (
+            f"{name}: the verify step's `if:` is {condition!r}, but this "
+            f"publisher has non-push triggers {sorted(trigger_names - {'push'})}. "
+            f"It must carry exactly the push guard ({PUSH_GUARD}) so a non-push "
+            "run cannot reach the publish path unverified."
+        )
 
 
 # A publisher may carry a non-push trigger ONLY when that trigger provably
@@ -246,10 +289,21 @@ EXTRA_TRIGGERS_ALLOWED = {
 def test_publisher_has_no_trigger_that_skips_the_gate(name: str) -> None:
     """A publisher fires only on a pushed tag, unless a declared exception holds.
 
-    The verify step is guarded on `event_name == 'push'`, so any additional
-    trigger converts the gate from fail-closed to SKIPPED while the build, the
-    push and cosign still run — a signed artifact nobody checked. WOR-871 added
-    exactly such a trigger to publish-docker.yml once already.
+    An additional trigger means the build, the push and cosign can run against
+    a ref that is not a signed tag. WOR-871 added exactly such a trigger to
+    publish-docker.yml once already.
+
+    Historically the danger was sharper still: the verify step carried
+    `if: event_name == 'push'`, so a non-push trigger SKIPPED the gate — and a
+    skipped step is not a failed step, so the job stayed green and shipped a
+    signed artifact nobody checked. WOR-892 removed that guard from publish.yml
+    and publish-docker.yml, where `on:` was push-tags-only and the condition
+    could never be false. Those two now fail CLOSED on a non-tag ref instead of
+    silently skipping. deploy-worker.yml keeps its guard: it has a real
+    workflow_dispatch preview path, so there the condition is live.
+
+    This test is still the right gate — it stops a trigger being added in the
+    first place, which is upstream of either behaviour.
 
     deploy-worker.yml is the one legitimate exception: its dispatch input is a
     `choice` offering only "preview". That is asserted here, not assumed — add
