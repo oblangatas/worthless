@@ -14,10 +14,14 @@ on:
   #
   # The real reason: publishing must require pushing a signed `v*` tag,
   # because that push is what the `v-tags-signed` ruleset gates. Any other
-  # trigger lets someone with repo-write reach the publish path without ever
-  # pushing a tag, bypassing the ruleset entirely. (`environment: pypi` and
-  # the trusted-publisher filename pin still bind — this is about the ruleset,
-  # not about arbitrary repos publishing.)
+  # trigger reaches the publish path without a tag push, so the ruleset never
+  # evaluates.
+  #
+  # Defense in depth, not the last line: with the verify now unconditional,
+  # such a run still dies at verify-tag.sh (a branch ref fails `git
+  # verify-tag`). `environment: pypi` and the trusted-publisher filename pin
+  # also still bind. Keep the pin anyway — the ruleset is the control that is
+  # auditable outside this file.
   push:
     tags:
       - "v*"

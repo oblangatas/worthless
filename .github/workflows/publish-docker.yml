@@ -94,10 +94,20 @@ jobs:
       # replaced whatever was behind that version.
       #
       # Same script and same repo Variables as publish.yml, publish-npm.yml and
-      # deploy-worker.yml. Guarded on `push` so a non-tag trigger (none today)
-      # cannot reach it with a branch name in GITHUB_REF_NAME.
+      # deploy-worker.yml.
+      #
+      # UNCONDITIONAL, BY DESIGN (WOR-892). This carried `if: github.event_name
+      # == 'push'` whose own comment conceded "a non-tag trigger (none today)"
+      # — i.e. it could never be false, because `on:` here is push-tags-`v*`
+      # only. It defended nothing, and it inverted into a hole: widen `on:` and
+      # the step SKIPS, and a skipped step is not a failed step, so the job
+      # stays green and the image is built, pushed and cosigned unverified.
+      # Running it always is strictly safer: on a non-tag ref verify-tag.sh
+      # fails closed (`git verify-tag` exits 1), which is the desired outcome.
+      #
+      # deploy-worker.yml deliberately KEEPS its guard — it has a real
+      # workflow_dispatch preview path, so there the condition is live.
       - name: Verify tag GPG signature (fatal — must precede every build and push)
-        if: github.event_name == 'push'
         env:
           MAINTAINER_PUBKEY: ${{ vars.MAINTAINER_GPG_PUBKEY }}
           MAINTAINER_FINGERPRINT: ${{ vars.MAINTAINER_GPG_FINGERPRINT }}

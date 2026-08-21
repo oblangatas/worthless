@@ -246,10 +246,21 @@ EXTRA_TRIGGERS_ALLOWED = {
 def test_publisher_has_no_trigger_that_skips_the_gate(name: str) -> None:
     """A publisher fires only on a pushed tag, unless a declared exception holds.
 
-    The verify step is guarded on `event_name == 'push'`, so any additional
-    trigger converts the gate from fail-closed to SKIPPED while the build, the
-    push and cosign still run — a signed artifact nobody checked. WOR-871 added
-    exactly such a trigger to publish-docker.yml once already.
+    An additional trigger means the build, the push and cosign can run against
+    a ref that is not a signed tag. WOR-871 added exactly such a trigger to
+    publish-docker.yml once already.
+
+    Historically the danger was sharper still: the verify step carried
+    `if: event_name == 'push'`, so a non-push trigger SKIPPED the gate — and a
+    skipped step is not a failed step, so the job stayed green and shipped a
+    signed artifact nobody checked. WOR-892 removed that guard from publish.yml
+    and publish-docker.yml, where `on:` was push-tags-only and the condition
+    could never be false. Those two now fail CLOSED on a non-tag ref instead of
+    silently skipping. deploy-worker.yml keeps its guard: it has a real
+    workflow_dispatch preview path, so there the condition is live.
+
+    This test is still the right gate — it stops a trigger being added in the
+    first place, which is upstream of either behaviour.
 
     deploy-worker.yml is the one legitimate exception: its dispatch input is a
     `choice` offering only "preview". That is asserted here, not assumed — add

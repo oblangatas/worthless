@@ -35,6 +35,7 @@ RAILWAY_TOML = DEPLOY_DIR / "railway.toml"
 RENDER_YAML = DEPLOY_DIR / "render.yaml"
 RELEASE_SYNC_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release-sync-check.yml"
 PUBLISH_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "publish.yml"
+DOCKER_SECURITY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "docker-security.yml"
 
 
 # ------------------------------------------------------------------
@@ -1269,16 +1270,26 @@ class TestReleaseSyncResolutionBehaviour:
 # ------------------------------------------------------------------
 
 
+@pytest.fixture(scope="module")
+def docker_security_data() -> dict:
+    """Parsed docker-security.yml workflow."""
+    return yaml.safe_load(DOCKER_SECURITY_WORKFLOW.read_text())
+
+
 class TestPublishTagVerification:
     """publish.yml must verify the maintainer's GPG-signed tag BEFORE it
     parses pyproject.toml or builds.
 
-    Today publish.yml builds + Trusted-Publishes to PyPI on ANY pushed `v*`
-    tag, while deploy-worker.yml already fail-closes on an unsigned tag — an
-    asymmetry where anyone who can push a tag gets a PyPI release. The verify
-    must be the FIRST step after checkout: the next step parses
-    attacker-controlled pyproject.toml and the build step runs its build
-    hooks (RCE surface), so the gate has to precede both.
+    publish.yml builds + Trusted-Publishes to PyPI on ANY pushed `v*` tag,
+    matching deploy-worker.yml, which also fail-closes on an unsigned tag.
+    Without the verify, anyone who can push a tag gets a PyPI release. It must
+    be the FIRST step after checkout: the next step parses attacker-controlled
+    pyproject.toml and the build step runs its build hooks (RCE surface), so
+    the gate has to precede both.
+
+    These tests pin ORDER. TestPublishBuildJobFailsClosed pins that the gate
+    cannot be skipped or neutered — the two are complementary, and neither is
+    sufficient alone.
     """
 
     def test_build_verifies_signed_tag_first(self, publish_data: dict):
@@ -1328,12 +1339,31 @@ class TestPublishTagVerification:
         on_block = publish_data.get("on", publish_data.get(True))
         assert isinstance(on_block, dict), "publish.yml must have an on: trigger mapping"
         triggers = set(on_block.keys())
-        # workflow_dispatch / workflow_call would let the `if: event_name ==
-        # 'push'` guard on the verify step be skipped — publishing without a
-        # signature check. Triggers must stay push-tags-only.
+        # NOT because a non-push trigger would skip an event-shaped guard — that
+        # guard is gone (WOR-892), and it was never true of `workflow_call`
+        # anyway, since a called workflow inherits the CALLER's event context
+        # (WOR-891). The reason is the `v-tags-signed` ruleset: it gates the TAG
+        # PUSH. Any other trigger reaches the publish path without one ever
+        # happening, so the ruleset never gets a say.
         assert triggers == {"push"}, (
             f"publish.yml triggers must be push-only (got {sorted(triggers)}); "
-            "workflow_dispatch/workflow_call would bypass the signed-tag verify."
+            "any other trigger reaches publish without a tag push, so the "
+            "v-tags-signed ruleset never evaluates."
+        )
+
+    def test_push_trigger_is_restricted_to_version_tags(self, publish_data: dict):
+        # Without this, `on: push: branches: [main]` keeps triggers == {"push"}
+        # and passes the test above while destroying the invariant it exists to
+        # protect: publishing happens on a TAG push and nothing else.
+        on_block = publish_data.get("on", publish_data.get(True))
+        push = on_block["push"]
+        assert set(push.keys()) == {"tags"}, (
+            f"publish.yml `on.push` must specify tags and nothing else (got "
+            f"{sorted(push.keys())}); a branches: filter would publish off a "
+            "branch push, which the v-tags-signed ruleset does not gate."
+        )
+        assert push["tags"] == ["v*"], (
+            f"publish.yml must trigger only on v* tags (got {push['tags']})."
         )
 
 
@@ -1351,6 +1381,12 @@ class TestPublishBuildJobFailsClosed:
     with an `if:` on any LATER step in the job (build/upload skipping still
     leaves `build` green). So the invariant is job-wide: every step runs, every
     failure is fatal, and `publish` cannot start without `build`.
+
+    YAML keys are not the whole attack surface. The verification itself lives
+    in a shell exit code, so `bash verify-tag.sh || true` reintroduces the
+    identical fail-open carrying no `if:` and no `continue-on-error` — and it
+    is the realistic regression, being the obvious move when a release is
+    stuck. test_verify_step_run_body_is_exact pins the command itself.
     """
 
     def test_no_build_step_is_skippable(self, publish_data: dict):
@@ -1367,21 +1403,143 @@ class TestPublishBuildJobFailsClosed:
             "without the signed-tag verify (WOR-892)."
         )
 
+    def test_verify_step_run_body_is_exact(self, publish_data: dict):
+        # test_build_verifies_signed_tag_first only checks that the string
+        # "verify-tag.sh" appears in `run`. `bash .github/scripts/verify-tag.sh
+        # || true` satisfies that, carries no `if:` and no `continue-on-error`,
+        # keeps `needs: build` — and checks nothing. Pin the command exactly.
+        steps = publish_data["jobs"]["build"]["steps"]
+        verify = next(s for s in steps if "verify-tag.sh" in str(s.get("run", "")))
+        assert verify["run"].strip() == "bash .github/scripts/verify-tag.sh", (
+            f"the verify step's `run` must be exactly "
+            f"`bash .github/scripts/verify-tag.sh` (got {verify['run']!r}). A "
+            "suffix like `|| true`, or a `set +e`, swallows the non-zero exit "
+            "and publishes an unverified tag with every YAML assertion green."
+        )
+        assert "shell" not in verify, (
+            "the verify step must not override `shell:` — a custom shell can "
+            "drop the `-e` that makes verify-tag.sh's exit code fatal."
+        )
+
     def test_build_job_itself_is_unconditional(self, publish_data: dict):
+        # NOT because a skipped build job would satisfy `needs: build` — it does
+        # not; GitHub skips every dependent of a skipped or failed job. The real
+        # bypass is job-level `continue-on-error`, which marks a FAILED build as
+        # successful, satisfying `needs:` and publishing an unverified tag. `if:`
+        # is barred alongside it because a silently-skipped release job is its
+        # own failure mode: the tag push looks handled and nothing shipped.
         build = publish_data["jobs"]["build"]
         for key in ("if", "continue-on-error"):
             assert key not in build, (
-                f"publish.yml `build` job must not declare `{key}` — a skipped "
-                "build job still satisfies `needs: build` on publish."
+                f"publish.yml `build` job must not declare `{key}` — job-level "
+                "continue-on-error reports a failed build as successful, which "
+                "satisfies `needs: build` and publishes unverified."
             )
 
     def test_publish_needs_build(self, publish_data: dict):
-        needs = publish_data["jobs"]["publish"].get("needs")
+        publish = publish_data["jobs"]["publish"]
+        needs = publish.get("needs")
         needs = [needs] if isinstance(needs, str) else (needs or [])
         assert "build" in needs, (
             "publish.yml `publish` job must declare `needs: build`; without it "
             "PyPI upload no longer waits on the signed-tag verify."
         )
+        # `needs:` only gates while the job has no explicit `if:`. `if: always()`
+        # (or `!cancelled()`) runs publish even after build FAILED, which is the
+        # whole fail-open again one job over.
+        for key in ("if", "continue-on-error"):
+            assert key not in publish, (
+                f"publish.yml `publish` job must not declare `{key}` — `if: "
+                "always()` overrides `needs: build` and runs the PyPI upload "
+                "after a failed verify."
+            )
+
+    def test_only_two_jobs_and_only_publish_can_mint_oidc(self, publish_data: dict):
+        # PyPI Trusted Publishing is pinned to the workflow FILENAME, not to a
+        # job. A third job in this file with `id-token: write` and
+        # `environment: pypi` and no `needs:` publishes to PyPI while every
+        # assertion above stays green, because none of them look at it.
+        jobs = publish_data["jobs"]
+        assert set(jobs) == {"build", "publish"}, (
+            f"publish.yml must contain exactly the build and publish jobs (got "
+            f"{sorted(jobs)}). Trusted Publishing is pinned to this filename, so "
+            "any job here can mint an OIDC token and upload."
+        )
+        for name, job in jobs.items():
+            perms = job.get("permissions") or {}
+            has_oidc = isinstance(perms, dict) and perms.get("id-token") == "write"
+            assert has_oidc == (name == "publish"), (
+                f"job `{name}` id-token permission is wrong: only `publish` may "
+                "request `id-token: write`."
+            )
+
+
+class TestSdistIsBuiltBeforeReleaseDay:
+    """A PR must build the sdist, install it, and load its package data.
+
+    publish.yml runs `python -m build`, which emits an sdist AND a wheel. Every
+    other path builds only the wheel, so without this job release day is the
+    first time an sdist exists. This class pins the job so it cannot be quietly
+    deleted — the same silent-removal risk TestPublishBuildJobFailsClosed
+    exists to prevent, applied to this PR's own addition.
+    """
+
+    def test_a_pr_job_builds_an_sdist(self, docker_security_data: dict):
+        steps = docker_security_data["jobs"]["sdist"]["steps"]
+        assert any("--sdist" in str(s.get("run", "")) for s in steps), (
+            "docker-security.yml's `sdist` job must build an sdist; otherwise "
+            "release day is the first time `python -m build` emits one."
+        )
+
+    def test_sdist_job_loads_packaged_data_files(self, docker_security_data: dict):
+        # `worthless --version` is importlib.metadata — it reads installed
+        # METADATA and never touches the package tree, so it prints fine with
+        # providers.toml and SKILL.md both missing from the distribution. Every
+        # entry in pyproject's [tool.setuptools.package-data] needs a real read.
+        #
+        # Scoped to the single step that does this, not to the whole job body:
+        # a job-wide substring search still passes when the step is gutted, as
+        # long as the identifier survives in a comment somewhere. Honest limit
+        # of a static check — it pins that the step exists and names both
+        # loaders. That the loaders actually RESOLVE is proven by CI running
+        # the job, not here.
+        steps = docker_security_data["jobs"]["sdist"]["steps"]
+        loader_steps = [s for s in steps if "package" in str(s.get("name", "")).lower()]
+        assert len(loader_steps) == 1, (
+            "docker-security.yml's `sdist` job must have exactly one step that "
+            f"reads the packaged data files (found {len(loader_steps)}). Without "
+            "it a dropped package-data entry ships to PyPI green."
+        )
+        body = str(loader_steps[0].get("run", ""))
+        for call in ("load_registry()", "_read_skill_asset()"):
+            assert call in body, (
+                f"the sdist job's package-data step must call `{call}` against "
+                "the INSTALLED package — `--version` cannot detect a missing "
+                "data file, so only a real read catches the break."
+            )
+        # noqa S108: not a tempfile this process opens — it is a literal from a
+        # CI runner's YAML being asserted on.
+        assert "/tmp/sdist-venv/bin/python" in body, (  # noqa: S108
+            "the package-data step must run under the sdist venv interpreter; "
+            "run it with the repo's own Python and it reads the source tree, "
+            "which passes no matter what the distribution actually contains."
+        )
+
+    def test_sdist_job_is_unconditional_and_unblocking(self, docker_security_data: dict):
+        job = docker_security_data["jobs"]["sdist"]
+        for key in ("if", "continue-on-error"):
+            assert key not in job, (
+                f"the `sdist` job must not declare `{key}` — per WOR-874 a "
+                "skipped job reports SUCCESS to branch protection."
+            )
+        assert "needs" not in job, (
+            "the `sdist` job must not be needed by, or need, another job: it was "
+            "moved out of `scan` precisely because `docker-e2e` needs `scan`, so "
+            "a packaging break there skipped ~11 minutes of unrelated E2E signal."
+        )
+        assert not any(
+            "sdist" in str(j.get("needs", "")) for j in docker_security_data["jobs"].values()
+        ), "no job may declare `needs: sdist` — that recreates the blast radius."
 
 
 # ------------------------------------------------------------------
