@@ -508,8 +508,18 @@ def _drain(proc: subprocess.Popen) -> None:
         proc.stderr.close()
 
 
-def _run_trial(te: TrialEnv, sig: int, delay: float) -> DiskState:
-    """Spawn the real CLI, signal its process group after *delay*, classify."""
+def _run_trial(te: TrialEnv, sig: int, delay: float, *, ready: Path | None = None) -> DiskState:
+    """Spawn the real CLI, signal its process group after *delay*, classify.
+
+    *ready*, when given, is a marker file the child creates once it has armed
+    itself and is safe to signal; we poll for it instead of trusting *delay*.
+    A blind sleep races interpreter startup, and a signal landing before the
+    child is armed KILLS it rather than wedging it — which looks like "no hang
+    happened" and silently guts whatever the caller was trying to prove.
+
+    The real chaos trials deliberately pass no *ready*: for them the blind
+    delay IS the variable under test, sweeping the orphan-vulnerable window.
+    """
     proc = subprocess.Popen(
         [*_cli(), "lock", "--env", str(te.env_file)],
         env=_child_env(te),
@@ -519,7 +529,16 @@ def _run_trial(te: TrialEnv, sig: int, delay: float) -> DiskState:
         stderr=subprocess.PIPE,
     )
     try:
-        time.sleep(delay)
+        if ready is None:
+            time.sleep(delay)
+        else:
+            deadline = time.monotonic() + WAIT_TIMEOUT
+            while not ready.exists():
+                if proc.poll() is not None:
+                    pytest.fail(f"wedge child exited before arming (rc={proc.returncode})")
+                if time.monotonic() > deadline:
+                    pytest.fail(f"wedge child never signalled ready within {WAIT_TIMEOUT}s")
+                time.sleep(0.01)
         _kill_group(proc, sig)
         try:
             proc.wait(timeout=WAIT_TIMEOUT)
@@ -636,10 +655,15 @@ def test_hang_guard_fires_with_diagnostic(tmp_path: Path, monkeypatch: pytest.Mo
     fails fast, with the actionable message, well inside the module timeout.
     """
     shim = tmp_path / "wedged_cli.py"
+    ready = tmp_path / "wedged_ready"
+    # The marker is written AFTER the handlers are installed, never before: it
+    # is the child asserting "I can now survive a signal". Ordering is the whole
+    # point — see the ready= gate in _run_trial.
     shim.write_text(
         "import signal, time\n"
         "signal.signal(signal.SIGINT, signal.SIG_IGN)\n"
         "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        f"open({str(ready)!r}, 'w').close()\n"
         "while True:\n"
         "    time.sleep(0.05)\n"
     )
@@ -651,13 +675,18 @@ def test_hang_guard_fires_with_diagnostic(tmp_path: Path, monkeypatch: pytest.Mo
     te = _make_trial_env(tmp_path, 0, 1)
     started = time.monotonic()
     with pytest.raises(pytest.fail.Exception, match=r"hung after sig="):
-        _run_trial(te, signal.SIGINT, 0.05)
+        _run_trial(te, signal.SIGINT, 0.05, ready=ready)
     elapsed = time.monotonic() - started
 
-    assert WAIT_TIMEOUT <= elapsed < WAIT_TIMEOUT + 10.0, (
-        f"hang guard fired at {elapsed:.1f}s; expected ~{WAIT_TIMEOUT}s. "
-        "Too early means a hair trigger on slow machines; too late means the "
-        "per-test timeout will swallow the diagnostic again."
+    # Upper bound is anchored on the module timeout (600s), NOT on a hand-picked
+    # margin above WAIT_TIMEOUT: `elapsed` now also covers interpreter startup
+    # while we wait for the ready marker, which is load-dependent by nature. The
+    # property worth pinning is "fired, and far inside the module timeout" —
+    # anything tighter is measuring the machine, not the guard.
+    assert WAIT_TIMEOUT <= elapsed < 60.0, (
+        f"hang guard fired at {elapsed:.1f}s; expected >= {WAIT_TIMEOUT}s and far "
+        f"inside the 600s module timeout. Too early means a hair trigger; too "
+        f"late means the per-test timeout will swallow the diagnostic again."
     )
 
 
