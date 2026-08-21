@@ -292,13 +292,47 @@ def _resolve_seam(
     )
 
 
+SEAM_ATTEMPTS = 3
+
+
 @pytest.fixture(scope="session")
 def seam(tmp_path_factory: pytest.TempPathFactory) -> float:
-    """Measure (once) when the first shard row appears in a warm-up lock.
+    """Measure when the first shard row appears in a warm-up lock.
 
     Returns the elapsed seconds from spawn to the first shard write — the start
     of the orphan-vulnerable window (DB rows exist, ``.env`` not yet rewritten).
+
+    Retried, because a single measurement is a coin flip on a stalled runner:
+    calibration has ``MAX_SEAM`` seconds to observe the write, and missing it
+    ERRORS the whole module. This is session-scoped, and xdist runs session
+    fixtures once PER WORKER — so splitting this module across workers
+    (worthless-7zl6) multiplied the number of calibrations, and with it the
+    chance that one of them trips (worthless-w1yu).
+
+    Retrying beats de-duplicating the calibrations: with per-attempt failure
+    probability p, N workers calibrating once each fail at ~Np, while N workers
+    retrying k times fail at ~Np**k. Making each attempt reliable dominates
+    making the attempts fewer, and costs no wall clock — the workers calibrate
+    in parallel.
+
+    A genuinely broken lock fails all ``SEAM_ATTEMPTS``, so this cannot mask a
+    product fault; the final diagnostic is the last attempt's, in full.
     """
+    last: pytest.fail.Exception | None = None
+    for _ in range(SEAM_ATTEMPTS):
+        try:
+            return _measure_seam(tmp_path_factory)
+        except pytest.fail.Exception as exc:  # noqa: PERF203
+            last = exc
+    assert last is not None
+    pytest.fail(
+        f"chaos seam calibration failed {SEAM_ATTEMPTS}x in a row — treat this as "
+        f"a real fault, not a slow runner.\nLast attempt:\n{last}"
+    )
+
+
+def _measure_seam(tmp_path_factory: pytest.TempPathFactory) -> float:
+    """One calibration attempt. Raises ``pytest.fail.Exception`` if it misses."""
     base = tmp_path_factory.mktemp("seam")
     te = _make_trial_env(base, 0, 2)
     proc = subprocess.Popen(
@@ -688,6 +722,54 @@ def test_hang_guard_fires_with_diagnostic(tmp_path: Path, monkeypatch: pytest.Mo
         f"inside the 600s module timeout. Too early means a hair trigger; too "
         f"late means the per-test timeout will swallow the diagnostic again."
     )
+
+
+def test_seam_calibration_retries_a_transient_miss(
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One missed measurement must not error the whole module.
+
+    Calibration gets MAX_SEAM seconds to observe the first shard write; a
+    stalled runner misses it. This fixture is session-scoped and xdist runs
+    those once per worker, so splitting this module across workers multiplied
+    how many calibrations happen, and with it the chance one trips.
+    """
+    # The miss count is LITERAL, never derived from SEAM_ATTEMPTS. A test whose
+    # success condition is written in terms of the constant it is testing passes
+    # for every value of that constant -- including 1, i.e. no retry at all.
+    assert SEAM_ATTEMPTS >= 3, "this test assumes calibration gets at least 3 goes"
+    calls: list[int] = []
+
+    def flaky(_factory: pytest.TempPathFactory) -> float:
+        calls.append(1)
+        if len(calls) <= 2:
+            pytest.fail("simulated: probe missed the shard write")
+        return 1.234
+
+    monkeypatch.setattr(f"{__name__}._measure_seam", flaky)
+    assert seam.__wrapped__(tmp_path_factory) == 1.234
+    assert len(calls) == 3
+
+
+def test_seam_calibration_still_fails_when_every_attempt_misses(
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retrying must not decay into "retry until green".
+
+    A slow runner is transient; a lock that writes nothing is not. The second
+    must still fail, or the retry has quietly converted a product fault into a
+    green run -- the exact substitution test_seam_calibration_refuses_to_fabricate
+    exists to prevent, reintroduced one level up.
+    """
+
+    def always_misses(_factory: pytest.TempPathFactory) -> float:
+        pytest.fail("simulated: lock wrote nothing")
+
+    monkeypatch.setattr(f"{__name__}._measure_seam", always_misses)
+    with pytest.raises(pytest.fail.Exception, match=rf"failed {SEAM_ATTEMPTS}x in a row"):
+        seam.__wrapped__(tmp_path_factory)
 
 
 def test_seam_calibration_refuses_to_fabricate() -> None:
