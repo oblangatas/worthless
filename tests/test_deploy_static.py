@@ -1382,11 +1382,9 @@ class TestPublishBuildJobFailsClosed:
     leaves `build` green). So the invariant is job-wide: every step runs, every
     failure is fatal, and `publish` cannot start without `build`.
 
-    YAML keys are not the whole attack surface. The verification itself lives
-    in a shell exit code, so `bash verify-tag.sh || true` reintroduces the
-    identical fail-open carrying no `if:` and no `continue-on-error` — and it
-    is the realistic regression, being the obvious move when a release is
-    stuck. test_verify_step_run_body_is_exact pins the command itself.
+    YAML keys are not the whole attack surface — the verification itself lives
+    in a shell exit code, which no `if:`/`continue-on-error` rule can see. That
+    half is covered by test_verify_step_run_body_is_exact below.
     """
 
     def test_no_build_step_is_skippable(self, publish_data: dict):
@@ -1404,17 +1402,23 @@ class TestPublishBuildJobFailsClosed:
         )
 
     def test_verify_step_run_body_is_exact(self, publish_data: dict):
-        # test_build_verifies_signed_tag_first only checks that the string
-        # "verify-tag.sh" appears in `run`. `bash .github/scripts/verify-tag.sh
-        # || true` satisfies that, carries no `if:` and no `continue-on-error`,
-        # keeps `needs: build` — and checks nothing. Pin the command exactly.
+        # NOT for `|| true` — that is already caught, and has been since PR #523
+        # (WOR-881), by test_tag_publishers_gated.py::test_the_gate_is_not_defanged,
+        # which rejects "||", "| true" and "set +e" in the verify step's `run`
+        # across all four publishers. An earlier version of this comment claimed
+        # otherwise; it was wrong.
+        #
+        # What an exact-match pin adds over that swallow-list: it also rejects a
+        # swapped script path, an appended `; exit 0`, an added `--dry-run`-style
+        # flag, and any other suffix nobody thought to blocklist. A blocklist
+        # enumerates known-bad; this enumerates the one known-good.
         steps = publish_data["jobs"]["build"]["steps"]
         verify = next(s for s in steps if "verify-tag.sh" in str(s.get("run", "")))
         assert verify["run"].strip() == "bash .github/scripts/verify-tag.sh", (
             f"the verify step's `run` must be exactly "
-            f"`bash .github/scripts/verify-tag.sh` (got {verify['run']!r}). A "
-            "suffix like `|| true`, or a `set +e`, swallows the non-zero exit "
-            "and publishes an unverified tag with every YAML assertion green."
+            f"`bash .github/scripts/verify-tag.sh` (got {verify['run']!r}). Any "
+            "suffix or substitution can neutralise the exit code that makes this "
+            "gate fatal, with every YAML-key assertion still green."
         )
         assert "shell" not in verify, (
             "the verify step must not override `shell:` — a custom shell can "

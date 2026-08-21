@@ -186,6 +186,14 @@ def test_the_gate_script_itself_exists() -> None:
 # workflow_dispatch was added in WOR-871 and removed only after review. publish.yml
 # is already guarded against it by test_deploy_static.py::test_no_skip_path_triggers;
 # these extend the same idea to every publisher.
+#
+# UPDATE (WOR-892). The fourth mutation no longer has that effect on publish.yml
+# or publish-docker.yml: their verify steps are now unconditional, so adding a
+# trigger makes verify-tag.sh run against a non-tag ref and fail CLOSED rather
+# than skip. test_the_gate_is_not_defanged now BANS the guard on a push-only
+# publisher for exactly that reason, and REQUIRES it on one with a non-push
+# trigger (deploy-worker.yml's preview dispatch), where the condition is live.
+# The trigger-classification tests above remain the first line either way.
 # --------------------------------------------------------------------------
 
 PUSH_GUARD = "github.event_name == 'push'"
@@ -227,7 +235,18 @@ def test_the_gate_is_not_defanged(name: str) -> None:
     condition = step.get("if")
     triggers = yaml.safe_load((WORKFLOWS / name).read_text())
     triggers = triggers.get("on", triggers.get(True)) or {}
-    push_only = set(triggers) == {"push"}
+    # `on:` may parse as a mapping, a list, or a bare scalar. `set("push")` on
+    # the scalar form yields {'p','u','s','h'}, which would silently flip a
+    # push-only publisher into the require-a-guard branch below — so normalise
+    # rather than assuming the mapping form.
+    if isinstance(triggers, str):
+        trigger_names = {triggers}
+    elif isinstance(triggers, dict):
+        trigger_names = set(triggers)
+    else:
+        trigger_names = set(triggers or [])
+    assert trigger_names, f"{name}: could not read any trigger from `on:`"
+    push_only = trigger_names == {"push"}
 
     if push_only:
         # WOR-892. With `push` as the ONLY trigger, `event_name == 'push'` can
@@ -250,7 +269,7 @@ def test_the_gate_is_not_defanged(name: str) -> None:
         # reach production.
         assert condition is not None and PUSH_GUARD in str(condition), (
             f"{name}: the verify step's `if:` is {condition!r}, but this "
-            f"publisher has non-push triggers {sorted(set(triggers) - {'push'})}. "
+            f"publisher has non-push triggers {sorted(trigger_names - {'push'})}. "
             f"It must carry exactly the push guard ({PUSH_GUARD}) so a non-push "
             "run cannot reach the publish path unverified."
         )
