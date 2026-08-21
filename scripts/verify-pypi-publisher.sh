@@ -46,14 +46,19 @@ SETTINGS_URL="https://pypi.org/manage/project/worthless/settings/publishing/"
 WORKFLOW="publish.yml"
 ENVIRONMENT="pypi"
 
-# Derive owner/repo from origin. Matches bump-version.sh's arms, including the
-# `git@<alias>:owner/repo` form used by per-account SSH host aliases.
-origin_url=$(git remote get-url origin 2>/dev/null || true)
-case "$origin_url" in
-    *@*:*/*)       owner_repo=${origin_url##*:}; owner_repo=${owner_repo%.git} ;;
-    https://*/*/*) owner_repo=${origin_url#https://*/}; owner_repo=${owner_repo%.git} ;;
-    *)             echo "ERROR: cannot derive owner from origin ('$origin_url')."; exit 1 ;;
-esac
+# Derive owner/repo from origin. One sed covers every real remote form:
+# scheme, userinfo, scp-style `host:owner/repo`, per-account SSH aliases, and
+# `host:PORT/owner/repo`. Kept identical to scripts/bump-version.sh — narrow
+# host globs used to miss the SSH-alias and port forms and silently yield the
+# wrong owner. Validated as exactly `owner/repo`; anything else is an error
+# rather than a guess, because this value gates a release.
+owner_repo=$(git remote get-url origin 2>/dev/null \
+    | sed -E 's#^[a-zA-Z+]+://##; s#^[^/@]*@##; s#^[^/:]+(:[0-9]+)?[:/]+##; s#/*$##; s#\.git$##' \
+    || true)
+if ! printf '%s' "$owner_repo" | grep -qE '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'; then
+    echo "ERROR: cannot derive owner/repo from origin ('$(git remote get-url origin 2>/dev/null)')."
+    exit 1
+fi
 owner=${owner_repo%%/*}
 repo=${owner_repo##*/}
 

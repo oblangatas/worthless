@@ -159,11 +159,19 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
-          refs=$(grep -rhoE 'ghcr\.io/[A-Za-z0-9._-]+/worthless-proxy:[A-Za-z0-9._-]+' docs/ | sort -u)
+          # `|| true`: grep exits 1 on no-match, which under `set -o pipefail`
+          # kills the step before the diagnostic below can explain why.
+          refs=$(grep -rhoE 'ghcr\.io/[A-Za-z0-9._-]+/worthless-proxy:[A-Za-z0-9._-]+' docs/ | sort -u || true)
           if [ -z "$refs" ]; then
             echo "::error::no ghcr.io image references found in docs/ — the grep or the docs moved"
             exit 1
           fi
+          # Deliberately checks EVERY tagged ref, not just canonical-owner ones.
+          # A tagged reference to a dead path is a broken instruction wherever it
+          # appears, including in a file test_repo_owner_refs.py allowlists -- so
+          # this stays broad rather than deferring to that guard's allowlist.
+          # install-docker.md's post-rename 403 note is untagged by design and so
+          # is not a pull target; tagging it would make it one, and CI should say so.
           failed=0
           for ref in $refs; do
             path=${ref#ghcr.io/}; repo=${path%:*}; tag=${path##*:}
