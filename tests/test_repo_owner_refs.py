@@ -84,6 +84,11 @@ _ALLOWLIST: dict[str, str] = {
     "tests/test_repo_owner_refs.py": (
         "This guard. It must name the old owner to document what it is guarding against."
     ),
+    "tests/test_pypi_publisher_gate.py": (
+        "Builds a synthetic repo declaring the PRE-rename owner, to prove the release "
+        "gate blocks on it. The stale owner is the fixture under test, not a live "
+        "reference — the URL is written into a tmp_path file, never used."
+    ),
 }
 
 # Prefixes whose contents are a point-in-time record, not live references.
