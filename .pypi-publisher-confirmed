@@ -1,0 +1,8 @@
+# PyPI Trusted Publisher confirmation — see scripts/verify-pypi-publisher.sh
+# An attestation that a human read the PyPI settings page, NOT a proof that
+# the binding works. Automatically invalidated if the repo owner changes.
+owner=oblangatas
+repo=worthless
+workflow=publish.yml
+environment=pypi
+date=2026-08-21
