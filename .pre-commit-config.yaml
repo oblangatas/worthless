@@ -225,7 +225,16 @@ repos:
         #                     worthless-lwvs; reopen if it re-fires.
         # If an ignore is ever needed again it MUST cite its tracking ticket
         # and be re-checked quarterly.
-        entry: sh -c 'uv export --frozen --no-emit-project | uv run pip-audit --disable-pip -r /dev/stdin'
+        # `bash -c`, not `sh -c`, and `set -o pipefail` is why. This is a
+        # PIPELINE: without pipefail the shell reports only pip-audit's exit
+        # code, so a `uv export` that dies partway hands over a truncated-but-
+        # valid stream, pip-audit audits the packages that arrived, and the hook
+        # passes over a fragment. CI got this fix via `shell: bash`
+        # (dependency-audit.yml); the hook was left carrying the defect until
+        # now. pipefail is not POSIX — dash, which /bin/sh often is, does not
+        # support it — so the shell has to be bash explicitly. beads
+        # worthless-mh0r.
+        entry: bash -c 'set -o pipefail; uv export --frozen --no-emit-project | uv run pip-audit --disable-pip -r /dev/stdin'
         pass_filenames: false
         stages: [pre-push]
 

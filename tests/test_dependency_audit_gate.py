@@ -43,20 +43,55 @@ def _audit_step() -> dict:
 
 
 def _hook_entry() -> str:
-    """The `uv-audit` hook's command, unwrapped from its `sh -c '...'` shell."""
+    """The `uv-audit` hook's command, unwrapped from its `<shell> -c '...'`."""
     cfg = yaml.safe_load(PRE_COMMIT.read_text())
     hooks = [h for repo in cfg["repos"] for h in repo.get("hooks", []) if h.get("id") == "uv-audit"]
     assert len(hooks) == 1, "uv-audit hook not found (renamed? then update this test)"
     entry = hooks[0]["entry"]
-    # entry is `sh -c '<command>'` — take what is inside the quotes.
-    m = re.fullmatch(r"sh -c '(.*)'", entry.strip(), re.DOTALL)
-    assert m, f"uv-audit entry is no longer a `sh -c '...'` wrapper: {entry!r}"
+    m = re.fullmatch(r"(?:sh|bash) -c '(.*)'", entry.strip(), re.DOTALL)
+    assert m, f"uv-audit entry is no longer a `<shell> -c '...'` wrapper: {entry!r}"
     return m.group(1).strip()
 
 
-def test_ci_command_matches_hook_exactly() -> None:
+def _hook_pipeline() -> str:
+    """The audit pipeline itself, with any shell-option prefix removed.
+
+    The hook needs `set -o pipefail` and the CI step gets the same behaviour from
+    `shell: bash`, so the two commands can no longer be byte-identical. Comparing
+    the pipeline is the invariant that actually matters: both sides must audit the
+    same thing. Byte-identity was the wrong invariant — it passed while the two
+    ran under different shells, and it twice forced a fix into a more awkward
+    shape purely to keep the strings equal.
+    """
+    entry = _hook_entry()
+    return re.sub(r"^set -o pipefail\s*;\s*", "", entry).strip()
+
+
+def test_hook_runs_with_pipefail() -> None:
+    """The hook's pipeline can otherwise report clean over a partial export.
+
+    `uv export | pip-audit` under a shell without pipefail reports only
+    pip-audit's exit code. A `uv export` that dies partway hands over a
+    truncated-but-valid stream, which audits what arrived and exits 0. CI got
+    this fix via `shell: bash`; the hook was left carrying the defect, so a
+    developer's pre-push check could still pass over a fragment.
+    """
+    cfg = yaml.safe_load(PRE_COMMIT.read_text())
+    hooks = [h for repo in cfg["repos"] for h in repo.get("hooks", []) if h.get("id") == "uv-audit"]
+    entry = hooks[0]["entry"]
+    assert "pipefail" in entry, (
+        "the uv-audit hook pipes uv export into pip-audit; without pipefail a "
+        "failed export is masked by pip-audit's exit code"
+    )
+    assert entry.strip().startswith("bash -c"), (
+        "`set -o pipefail` is not POSIX — dash, which /bin/sh often is, does not "
+        "support it, so the hook must invoke bash explicitly"
+    )
+
+
+def test_ci_command_matches_hook() -> None:
     """CI and the hook must audit the same thing, or they can disagree."""
-    assert _audit_step()["run"].strip() == _hook_entry()
+    assert _audit_step()["run"].strip() == _hook_pipeline()
 
 
 def test_audit_step_can_fail() -> None:

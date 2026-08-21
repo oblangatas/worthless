@@ -90,7 +90,12 @@ jobs:
           UV_CACHE_DIR: /tmp/uv-cache
         run: |
           uv sync --extra dev --extra test
-          uv run pytest --cov=worthless --cov-report=xml --cov-report=term-missing --cov-fail-under=80
+          # --max-worker-restart=2 for the same reason as the other lanes, and it
+          # matters more here: this job gates a RELEASE on --cov-fail-under=80, and a
+          # killed worker's coverage data is lost (pytest-cov only warns). Without a
+          # cap, repeated restarts surface as a misleading "coverage below 80"
+          # instead of the crash that actually happened.
+          uv run pytest --max-worker-restart=2 --cov=worthless --cov-report=xml --cov-report=term-missing --cov-fail-under=80
 
       - name: Check per-module coverage floors
         run: uv run python scripts/check-coverage-floors.py
