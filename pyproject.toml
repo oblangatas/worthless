@@ -50,9 +50,9 @@ test-openclaw = "worthless.testing.runners:openclaw"
 test-all = "worthless.testing.runners:all_tests"
 
 [project.urls]
-Homepage = "https://github.com/shacharm2/worthless"
-Repository = "https://github.com/shacharm2/worthless"
-Issues = "https://github.com/shacharm2/worthless/issues"
+Homepage = "https://github.com/oblangatas/worthless"
+Repository = "https://github.com/oblangatas/worthless"
+Issues = "https://github.com/oblangatas/worthless/issues"
 
 [project.optional-dependencies]
 mcp = [
