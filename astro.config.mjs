@@ -23,10 +23,10 @@ export default defineConfig({
         },
       ],
       social: [
-        { icon: 'github', label: 'GitHub', href: 'https://github.com/shacharm2/worthless' },
+        { icon: 'github', label: 'GitHub', href: 'https://github.com/oblangatas/worthless' },
       ],
       editLink: {
-        baseUrl: 'https://github.com/shacharm2/worthless/edit/main/',
+        baseUrl: 'https://github.com/oblangatas/worthless/edit/main/',
       },
       sidebar: [
         {

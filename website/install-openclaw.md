@@ -57,8 +57,8 @@ Run the Worthless proxy and OpenClaw in the same Docker network — no worthless
 
 ```bash
 # Download the compose file and env template
-curl -sSL https://raw.githubusercontent.com/shacharm2/worthless/main/deploy/docker-compose.yml -o docker-compose.yml
-curl -sSL https://raw.githubusercontent.com/shacharm2/worthless/main/deploy/docker-compose.env.example -o docker-compose.env
+curl -sSL https://raw.githubusercontent.com/oblangatas/worthless/main/deploy/docker-compose.yml -o docker-compose.yml
+curl -sSL https://raw.githubusercontent.com/oblangatas/worthless/main/deploy/docker-compose.env.example -o docker-compose.env
 
 # Start only the proxy — openclaw must not be running yet when you lock
 docker compose up -d

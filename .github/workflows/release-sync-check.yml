@@ -142,6 +142,48 @@ jobs:
           # for release-driven drift (a release moves, no docs PR fires).
           python3 scripts/check_docs_versions.py "$LATEST_VERSION"
 
+      - name: A1c — every image path in docs/ actually resolves on GHCR
+        # A1b proves the docs' pinned *version* is current. It says nothing
+        # about the *owner* segment of the path — so when the account was
+        # renamed (shacharm2 -> oblangatas, worthless-c478) and GHCR stopped
+        # serving the old path with a hard 403 (registries do NOT redirect a
+        # renamed account's packages, unlike github.com links), this workflow
+        # watched it for a month without complaining. Every documented
+        # `docker pull` was broken, including the `cosign verify` command
+        # whose whole job is to establish trust.
+        #
+        # Resolve each distinct image reference the docs name, anonymously,
+        # exactly as a reader would. tests/test_repo_owner_refs.py catches the
+        # same class statically at PR time; this is the live backstop for the
+        # half that static analysis cannot see (the registry's actual answer).
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          refs=$(grep -rhoE 'ghcr\.io/[A-Za-z0-9._-]+/worthless-proxy:[A-Za-z0-9._-]+' docs/ | sort -u)
+          if [ -z "$refs" ]; then
+            echo "::error::no ghcr.io image references found in docs/ — the grep or the docs moved"
+            exit 1
+          fi
+          failed=0
+          for ref in $refs; do
+            path=${ref#ghcr.io/}; repo=${path%:*}; tag=${path##*:}
+            token=$(curl -fsSL "https://ghcr.io/token?scope=repository:${repo}:pull&service=ghcr.io" \
+                      | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])') || {
+              echo "::error::$ref — could not get a pull token (package missing or private?)"
+              failed=1; continue; }
+            code=$(curl -o /dev/null -sw '%{http_code}' \
+                     -H "Authorization: Bearer $token" \
+                     -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json' \
+                     "https://ghcr.io/v2/${repo}/manifests/${tag}")
+            if [ "$code" = "200" ]; then
+              echo "  OK   $ref"
+            else
+              echo "::error::$ref — registry returned HTTP $code; readers copying this from the docs cannot pull it"
+              failed=1
+            fi
+          done
+          exit "$failed"
+
       # ===== Assertion 2a: worthless.sh content negotiation (curl) ==========
       - name: A2a — worthless.sh curl-UA serves install.sh @ latest tag
         env:

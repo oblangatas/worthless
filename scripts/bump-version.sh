@@ -132,22 +132,27 @@ if grep -q "^\[$new_version\]:" CHANGELOG.md; then
     echo "  ✓ CHANGELOG.md: [$new_version] link reference already present"
 else
     # Derive the repo URL from `git remote get-url origin` rather than
-    # hardcoding `shacharm2/worthless` — the org/owner can change (today
-    # `shacharm2` is a personal account, not a `worthless` org). Falls
-    # back to the historical hardcode if origin isn't a recognisable
-    # GitHub URL.
+    # hardcoding the owner — it has changed once already (the account was
+    # renamed in Aug 2026, worthless-c478) and is a personal account, not
+    # a `worthless` org, so it can change again.
+    #
+    # The SSH arm matches `git@<host>:owner/repo` for ANY host, not just
+    # `github.com`: a maintainer using a per-account SSH alias (this repo's
+    # own origin is `git@github-personal:oblangatas/worthless.git`) used to
+    # miss both narrow patterns and land on the fallback, writing CHANGELOG
+    # links for the WRONG owner while looking like it had derived them.
     origin_url=$(git remote get-url origin 2>/dev/null || true)
     case "$origin_url" in
-        git@github.com:*)
-            owner_repo=${origin_url#git@github.com:}
+        *@*:*/*)
+            owner_repo=${origin_url##*:}
             owner_repo=${owner_repo%.git}
             ;;
-        https://github.com/*)
-            owner_repo=${origin_url#https://github.com/}
+        https://*/*/*)
+            owner_repo=${origin_url#https://*/}
             owner_repo=${owner_repo%.git}
             ;;
         *)
-            owner_repo="shacharm2/worthless"
+            owner_repo="oblangatas/worthless"
             ;;
     esac
     new_link="[$new_version]: https://github.com/$owner_repo/releases/tag/v$new_version"
