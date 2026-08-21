@@ -86,7 +86,7 @@ normal and abnormal states, and finally test app-specific integrations.
 
 | Journey step | Current automated proof | Terminal trace proof | Checkout-local CI proof | Residual gap | Owning ticket |
 | --- | --- | --- | --- | --- | --- |
-| 1. Discover and install Worthless on a supported host | Installer static/logic tests plus install Docker matrix: `tests/test_install_static.py`, `tests/test_install_logic.py`, `tests/test_install_docker.py` | `TERMINAL_TRACES.md` starts with deterministic install/reinstall/manual-uninstall traces | `install-smoke.yml` runs checkout-local `sh ./install.sh` on macOS 15/14 and Ubuntu 24.04/22.04, plus Ubuntu proxy | **Being clarified by `WOR-568`:** published `curl https://worthless.sh \| sh` is a public-domain release/manual proof with required terminal evidence, not a per-PR pytest | `WOR-568`, `WOR-446` |
+| 1. Discover and install Worthless on a supported host | Installer static/logic tests plus install Docker matrix: `tests/test_install_static.py`, `tests/test_install_logic.py`, `tests/test_install_docker.py` | `TERMINAL_TRACES.md` starts with deterministic install/reinstall/manual-uninstall traces | `install-smoke.yml` runs checkout-local `sh ./install.sh` on macOS 15/14 and Ubuntu 24.04/22.04, plus Ubuntu proxy | **Partially covered:** `WOR-568` clarified public `curl https://worthless.sh \| sh` as release/manual proof; `WOR-597` adds second-pass install failure journeys like stale PATH binaries and older-version upgrades | `WOR-568`, `WOR-597`, `WOR-446` |
 | 2. Verify the installed CLI exists and prints a version | Install smoke runs `uv run --no-project worthless --version`; static tests assert installer smoke-test behavior | Install lifecycle trace includes successful installer output | `install-smoke.yml` uploads `verify-version-*` artifacts | **Covered** for repo checkout installer; public `worthless.sh` version proof is required in the release/manual transcript | `WOR-441`, `WOR-568` |
 | 3. Protect the first project `.env` with the default command | `test_native_cli_journeys.py::test_default_command_yes_detects_and_locks_project_env` | Covered indirectly by lock/status/scan/unlock trace; default command output is not rendered today | User-flow CI runs on Ubuntu 24.04 and macOS 15 | **Needs trace only:** add a rendered default-command trace when output review matters | `WOR-544` |
 | 4. Protect one key with explicit `lock --env` | `test_native_cli_journeys.py::test_lock_status_scan_unlock_round_trip_restores_original_key` | `Lock, Status, Scan, Unlock` trace shows `.env` before/after and stderr | User-flow CI runs on Ubuntu 24.04 and macOS 15 | **Covered** | `WOR-440` |
@@ -121,7 +121,8 @@ normal and abnormal states, and finally test app-specific integrations.
 | Open | `WOR-516` | OpenClaw config corruption / restore safety fix |
 | Open | `WOR-517` | Gateway lifecycle: restart, autostart, verification |
 | Done | `WOR-442` | Docker clean distro / host-Worthless app-container journeys |
-| In progress | `WOR-568` | Adversarial install proof: public curl/manual evidence, partial install/PATH/uninstall truth |
+| Done | `WOR-568` | Public curl/manual evidence boundary and checkout-local CI proof honesty |
+| In progress | `WOR-597` | Second-pass adversarial install failure journeys: stale PATH, older-version upgrades, partial install, PATH breakage, uninstall truth |
 | Backlog | `WOR-443` | OpenClaw end-to-end user journey lane |
 | Backlog | `WOR-444` | Agent/MCP user journey lane |
 | Backlog | `WOR-446` | CI matrix governance, Windows, WSL, nightly/full sweep |
@@ -132,10 +133,12 @@ normal and abnormal states, and finally test app-specific integrations.
   unlock, teammate failure, rotation, multi-project isolation, refused rewrite,
   and tamper handling from product promise to pytest and terminal output.
 - Install proof is better than unit tests but not identical to the public user
-  command. Per-PR CI runs `sh ./install.sh` from checkout; `WOR-568` makes
+  command. Per-PR CI runs `sh ./install.sh` from checkout; `WOR-568` made
   the public `curl https://worthless.sh | sh` path an explicit release/manual
   proof with copy-pasted terminal output until `WOR-446` adds a dedicated
-  published-domain smoke.
+  published-domain smoke. `WOR-597` covers the next adversarial install layer,
+  starting with stale binaries that shadow the fresh uv-installed tool and
+  older uv tool installs that must upgrade through the pinned path.
 - Windows and WSL are not proven by the current suite. The Windows job is an
   explicit deferral marker, and WSL needs either a real WSL runner or a manual
   release gate.
@@ -312,8 +315,8 @@ Trace first to:
 ### Journey H: install/reinstall/manual uninstall
 
 1. Run `sh ./install.sh` on a supported macOS/Linux shell.
-2. Inspect whether the output says `worthless` is already on PATH or only works in the current shell.
-3. Re-run the installer with the same pinned version.
+2. Inspect whether the output says `worthless` is already on PATH, only works after PATH activation, or is shadowed by a stale PATH binary.
+3. Re-run the installer with the same pinned version, then simulate an older uv-installed version and re-run again.
 4. Simulate a pipx conflict or uv/network failure when reviewing failure wording.
 5. For uninstall today, run `uv tool uninstall worthless` and then follow the platform docs for keychain/state cleanup.
 
@@ -321,9 +324,10 @@ Expected UX:
 
 - Install exits 0 and prints a usable next command.
 - Fresh shells without persistent `~/.local/bin` get a clear permanent PATH hint.
-- Reinstall is safe and avoids unnecessary work when the pinned version is already installed.
+- If an older `worthless` is first on PATH, the installer names both the stale PATH version and the installed version instead of claiming clean success.
+- Reinstall is safe and avoids unnecessary work when the pinned version is already installed; older uv tool installs upgrade through pinned `uv tool install --force`, not bare `uv tool upgrade`.
 - Failure output keeps the underlying uv error above proxy/mirror hints.
-- Uninstall guidance is honest: `uv tool uninstall worthless` removes the tool, but does not purge keychain or `~/.worthless` state until WOR-435 ships `worthless uninstall`.
+- Uninstall guidance is honest: `uv tool uninstall worthless` removes the tool, but does not purge keychain or `~/.worthless` state until WOR-435 ships `worthless uninstall`; the trace includes a leftover local-state file.
 
 Trace first to:
 
