@@ -533,65 +533,78 @@ def _assert_no_partial(state: DiskState, *, n_keys: int, sig: int, delay: float)
 # Storms — SIGINT / SIGTERM exercise Part-1's handler + unwind
 # ---------------------------------------------------------------------------
 
-
-@pytest.mark.parametrize("n_keys", [1, 2, 3], ids=["N1", "N2", "N3"])
-def test_sigint_storm(tmp_path: Path, seam: float, n_keys: int) -> None:
-    """~30 SIGINT trials per N across the calibrated seam — never partial."""
-    delays = _delays_for(seam)
-    for trial in range(TRIALS_PER_CELL):
-        delay = delays[trial % len(delays)]
-        te = _make_trial_env(tmp_path, trial, n_keys)
-        state = _run_trial(te, signal.SIGINT, delay)
-        _assert_no_partial(state, n_keys=n_keys, sig=signal.SIGINT, delay=delay)
-
-
-@pytest.mark.parametrize("n_keys", [1, 2, 3], ids=["N1", "N2", "N3"])
-def test_sigterm_storm(tmp_path: Path, seam: float, n_keys: int) -> None:
-    """~30 SIGTERM trials per N across the calibrated seam — never partial."""
-    delays = _delays_for(seam)
-    for trial in range(TRIALS_PER_CELL):
-        delay = delays[trial % len(delays)]
-        te = _make_trial_env(tmp_path, trial, n_keys)
-        state = _run_trial(te, signal.SIGTERM, delay)
-        _assert_no_partial(state, n_keys=n_keys, sig=signal.SIGTERM, delay=delay)
+# Each slow test below sits alone in its own class ON PURPOSE. ``--dist loadscope``
+# hands a whole GROUP to one xdist worker and cannot split it; the group is the
+# MODULE for bare functions but the CLASS for methods. As bare functions these were
+# a single ~10.7-minute group pinned to one worker while the other three idled,
+# which is what pushed `Test (ubuntu, py3.10)` past its 20m ceiling on an unlucky
+# shuffle (worthless-7zl6). One class each = one group each = they spread out.
+# Ceiling: the slowest single class is now the floor (~3.7m). If that becomes the
+# binding constraint again, split by ``n_keys`` rather than merging these back.
+# Do NOT collapse them into plain functions or into one shared class.
 
 
-def test_mashed_sigint(tmp_path: Path, seam: float) -> None:
-    """A burst of 5 SIGINTs ~5ms apart must NOT defeat the one-shot handler.
+class TestSigintStorm:
+    @pytest.mark.parametrize("n_keys", [1, 2, 3], ids=["N1", "N2", "N3"])
+    def test_sigint_storm(self, tmp_path: Path, seam: float, n_keys: int) -> None:
+        """~30 SIGINT trials per N across the calibrated seam — never partial."""
+        delays = _delays_for(seam)
+        for trial in range(TRIALS_PER_CELL):
+            delay = delays[trial % len(delays)]
+            te = _make_trial_env(tmp_path, trial, n_keys)
+            state = _run_trial(te, signal.SIGINT, delay)
+            _assert_no_partial(state, n_keys=n_keys, sig=signal.SIGINT, delay=delay)
 
-    Part-1 arms a one-shot handler; a panicked operator mashing Ctrl-C must not
-    re-enter cleanup or leave a torn state. Invariant still holds.
-    """
-    n_keys = 2
-    delays = _delays_for(seam)
-    for trial in range(TRIALS_PER_CELL):
-        delay = delays[trial % len(delays)]
-        te = _make_trial_env(tmp_path, trial, n_keys)
-        proc = subprocess.Popen(
-            [*_cli(), "lock", "--env", str(te.env_file)],
-            env=_child_env(te),
-            cwd=str(te.repo),
-            start_new_session=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        try:
-            time.sleep(delay)
-            for _ in range(5):
-                if proc.poll() is not None:
-                    break
-                _kill_group(proc, signal.SIGINT)
-                time.sleep(0.005)
+
+class TestSigtermStorm:
+    @pytest.mark.parametrize("n_keys", [1, 2, 3], ids=["N1", "N2", "N3"])
+    def test_sigterm_storm(self, tmp_path: Path, seam: float, n_keys: int) -> None:
+        """~30 SIGTERM trials per N across the calibrated seam — never partial."""
+        delays = _delays_for(seam)
+        for trial in range(TRIALS_PER_CELL):
+            delay = delays[trial % len(delays)]
+            te = _make_trial_env(tmp_path, trial, n_keys)
+            state = _run_trial(te, signal.SIGTERM, delay)
+            _assert_no_partial(state, n_keys=n_keys, sig=signal.SIGTERM, delay=delay)
+
+
+class TestMashedSigint:
+    def test_mashed_sigint(self, tmp_path: Path, seam: float) -> None:
+        """A burst of 5 SIGINTs ~5ms apart must NOT defeat the one-shot handler.
+
+        Part-1 arms a one-shot handler; a panicked operator mashing Ctrl-C must not
+        re-enter cleanup or leave a torn state. Invariant still holds.
+        """
+        n_keys = 2
+        delays = _delays_for(seam)
+        for trial in range(TRIALS_PER_CELL):
+            delay = delays[trial % len(delays)]
+            te = _make_trial_env(tmp_path, trial, n_keys)
+            proc = subprocess.Popen(
+                [*_cli(), "lock", "--env", str(te.env_file)],
+                env=_child_env(te),
+                cwd=str(te.repo),
+                start_new_session=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
             try:
-                proc.wait(timeout=WAIT_TIMEOUT)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=5)
-                pytest.fail(f"mashed-SIGINT hung at delay={delay:.3f}s — regression")
-        finally:
-            _drain(proc)
-        state = classify(te)
-        _assert_no_partial(state, n_keys=n_keys, sig=signal.SIGINT, delay=delay)
+                time.sleep(delay)
+                for _ in range(5):
+                    if proc.poll() is not None:
+                        break
+                    _kill_group(proc, signal.SIGINT)
+                    time.sleep(0.005)
+                try:
+                    proc.wait(timeout=WAIT_TIMEOUT)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                    pytest.fail(f"mashed-SIGINT hung at delay={delay:.3f}s — regression")
+            finally:
+                _drain(proc)
+            state = classify(te)
+            _assert_no_partial(state, n_keys=n_keys, sig=signal.SIGINT, delay=delay)
 
 
 # ---------------------------------------------------------------------------
@@ -677,33 +690,34 @@ def test_seam_calibration_refuses_to_fabricate() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason="WOR-646 Part 2: atomic Pass-1 transaction + atomic-.env. "
-    "SIGKILL allows no cleanup; only write-ordering/atomic commit prevents "
-    "orphan shards. Current code may leak — documented, not hidden.",
-    strict=False,
-)
-@pytest.mark.parametrize("n_keys", [2, 3], ids=["N2", "N3"])
-def test_sigkill_atomicity(tmp_path: Path, seam: float, n_keys: int) -> None:
-    """SIGKILL mid-lock: no handler runs, so only true atomicity holds the line.
-
-    Reports the partial/orphan rate. Marked xfail(strict=False) per the WOR-646
-    honesty rule: a green-able suite that still surfaces the real gap. If a run
-    is fully atomic it PASSES (xpass); any partial state fails the assertion,
-    which xfail records rather than hides.
-    """
-    delays = _delays_for(seam)
-    partials: list[str] = []
-    for trial in range(TRIALS_PER_CELL):
-        delay = delays[trial % len(delays)]
-        te = _make_trial_env(tmp_path, trial, n_keys)
-        state = _run_trial(te, signal.SIGKILL, delay)
-        if state.classification == "partial":
-            partials.append(f"delay={delay:.3f}s {state.detail}")
-
-    rate = len(partials) / TRIALS_PER_CELL
-    assert not partials, (
-        f"SIGKILL produced {len(partials)}/{TRIALS_PER_CELL} partial states "
-        f"({rate:.0%} orphan/partial rate) for N={n_keys}.\n"
-        + "\n".join(f"  - {p}" for p in partials[:8])
+class TestSigkillAtomicity:
+    @pytest.mark.xfail(
+        reason="WOR-646 Part 2: atomic Pass-1 transaction + atomic-.env. "
+        "SIGKILL allows no cleanup; only write-ordering/atomic commit prevents "
+        "orphan shards. Current code may leak — documented, not hidden.",
+        strict=False,
     )
+    @pytest.mark.parametrize("n_keys", [2, 3], ids=["N2", "N3"])
+    def test_sigkill_atomicity(self, tmp_path: Path, seam: float, n_keys: int) -> None:
+        """SIGKILL mid-lock: no handler runs, so only true atomicity holds the line.
+
+        Reports the partial/orphan rate. Marked xfail(strict=False) per the WOR-646
+        honesty rule: a green-able suite that still surfaces the real gap. If a run
+        is fully atomic it PASSES (xpass); any partial state fails the assertion,
+        which xfail records rather than hides.
+        """
+        delays = _delays_for(seam)
+        partials: list[str] = []
+        for trial in range(TRIALS_PER_CELL):
+            delay = delays[trial % len(delays)]
+            te = _make_trial_env(tmp_path, trial, n_keys)
+            state = _run_trial(te, signal.SIGKILL, delay)
+            if state.classification == "partial":
+                partials.append(f"delay={delay:.3f}s {state.detail}")
+
+        rate = len(partials) / TRIALS_PER_CELL
+        assert not partials, (
+            f"SIGKILL produced {len(partials)}/{TRIALS_PER_CELL} partial states "
+            f"({rate:.0%} orphan/partial rate) for N={n_keys}.\n"
+            + "\n".join(f"  - {p}" for p in partials[:8])
+        )
