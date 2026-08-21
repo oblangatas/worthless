@@ -1,0 +1,20 @@
+# Build the proxy from local source instead of pulling the published image.
+#
+# docker-compose.yml pins ghcr.io/oblangatas/worthless-proxy:<version> so that a
+# user who downloads that one file can run it with no repo (WOR-553). Contributors
+# testing an unreleased change need the opposite, so it lives here as an override
+# rather than as a second copy of the stack.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
+#
+# `context: ..` resolves to the repo root, which only exists in a clone — that is
+# exactly why it cannot live in the file people download.
+
+services:
+  proxy:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    # Compose merges this over the pinned `image:`. Naming a local tag keeps the
+    # build from being mistaken for — or pushed as — the published artifact.
+    image: worthless-proxy:local

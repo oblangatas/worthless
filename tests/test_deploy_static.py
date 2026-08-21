@@ -237,6 +237,76 @@ class TestDockerCompose:
         """The 'proxy' service must be defined."""
         assert "proxy" in compose_data["services"]
 
+    def test_proxy_pins_published_image_not_a_build_context(self, compose_data: dict):
+        """This file is downloaded standalone — it must not need the repo (WOR-553).
+
+        `website/install-openclaw.md` tells users to curl this one file. A `build:`
+        block makes that impossible: there is no `..` and no Dockerfile on their disk,
+        so `docker compose up` dies with "failed to read dockerfile" before anything
+        starts. The image has been published and anonymously pullable since WOR-871 /
+        WOR-881, so building from source here is pure breakage with no upside.
+
+        Contributors who still want a local build use the override file — see
+        ``test_build_override_restores_local_build``.
+        """
+        proxy = compose_data["services"]["proxy"]
+        assert "build" not in proxy, (
+            "proxy still builds from source; a user who downloaded only this file has "
+            "no build context and `docker compose up` fails"
+        )
+        assert "image" in proxy, "proxy must pin the published image"
+        assert proxy["image"].startswith("ghcr.io/"), proxy["image"]
+        assert "worthless-proxy" in proxy["image"], proxy["image"]
+
+    def test_proxy_image_names_the_current_owner(self, compose_data: dict):
+        """GHCR does not redirect renamed accounts — the old path hard-fails.
+
+        Verified against the live registry: ``ghcr.io/shacharm2/worthless-proxy``
+        returns an error while ``ghcr.io/oblangatas/worthless-proxy`` resolves. A stale
+        owner here is not cosmetic; it is a pull that cannot succeed.
+
+        ``publish-docker.yml`` pushes to ``ghcr.io/${{ github.repository_owner }}/…``,
+        so the registry side follows a rename automatically. Only hand-typed strings
+        like this one can rot.
+        """
+        image = compose_data["services"]["proxy"]["image"]
+        assert "shacharm2" not in image, (
+            f"{image} names the pre-rename account; GHCR will not redirect it"
+        )
+        assert image.startswith("ghcr.io/oblangatas/worthless-proxy"), image
+
+    def test_build_override_restores_local_build(self):
+        """Removing `build:` must not take local builds away from contributors.
+
+        The override is the reason pinning the published image is safe: someone
+        testing an unreleased change runs
+        ``docker compose -f docker-compose.yml -f docker-compose.build.yml up``.
+        Without this file, WOR-553 would fix the download path by breaking the
+        development one.
+        """
+        override = DEPLOY_DIR / "docker-compose.build.yml"
+        assert override.exists(), "contributors lost the local-build path"
+
+        data = yaml.safe_load(override.read_text())
+        proxy = data["services"]["proxy"]
+        assert proxy["build"]["context"] == "..", proxy["build"]
+        # A local tag, so an override build can never be confused with — or pushed
+        # as — the published artifact.
+        assert "ghcr.io" not in proxy.get("image", ""), proxy.get("image")
+
+    def test_proxy_image_is_version_pinned(self, compose_data: dict):
+        """Pin an exact version, never a floating tag.
+
+        ``:latest`` moves under a user who pulled months ago, so what they run stops
+        matching what our docs describe. A concrete version is also what
+        ``check_docs_versions.py`` can enforce against the release.
+        """
+        image = compose_data["services"]["proxy"]["image"]
+        assert ":" in image.split("/")[-1], f"{image} has no tag"
+        tag = image.rsplit(":", 1)[1]
+        assert tag != "latest", "pin an exact version, not a floating tag"
+        assert re.match(r"^\d+\.\d+\.\d+", tag), f"{tag} is not a version"
+
     def test_port_8787_mapped(self, compose_data: dict):
         """Port 8787 must be exposed, bound to localhost only."""
         ports = compose_data["services"]["proxy"]["ports"]
