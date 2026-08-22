@@ -41,6 +41,15 @@ def _redact(text: str) -> str:
     return text
 
 
+def redact(text: str) -> str:
+    """Public one-shot redaction for callers outside the logging-filter path.
+
+    The sidecar's uncaught-exception hook and its pre-logging stderr prints
+    (WOR-826) redact text directly rather than through a ``LogRecord``.
+    """
+    return _redact(text)
+
+
 class RedactingFilter(logging.Filter):
     """Scrubs key-shaped values out of every log record it sees.
 

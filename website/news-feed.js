@@ -1,4 +1,4 @@
-const NEWS_FEED_URL = "https://gist.githubusercontent.com/shacharm2/7f6e2293b540004c4a733258a2461800/raw/news-feed.json";
+const NEWS_FEED_URL = "https://gist.githubusercontent.com/oblangatas/7f6e2293b540004c4a733258a2461800/raw/news-feed.json";
 const NEWS_FEED_FALLBACK_URL = "news-feed.json";
 const NEWS_FEED_TIMEOUT_MS = 5000;
 

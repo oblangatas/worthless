@@ -11,7 +11,7 @@ from typer.testing import CliRunner
 from worthless.cli.app import app
 from worthless.cli.bootstrap import WorthlessHome
 
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner()
 
 # home_with_key fixture is in conftest.py
 

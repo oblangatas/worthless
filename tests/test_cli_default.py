@@ -24,7 +24,7 @@ from worthless.cli.errors import ErrorCode, WorthlessError
 
 from tests.helpers import fake_anthropic_key, fake_openai_key
 
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner()
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +128,7 @@ class TestHappyPaths:
             {"WORTHLESS_HOME": str(home_dir.base_dir)},
             input="y\n",
         )
-        assert result.exit_code == 0, result.output + result.stderr
+        assert result.exit_code == 0, result.stdout + result.stderr
 
         combined = result.stdout + result.stderr
         # Should show var names and providers
@@ -184,7 +184,7 @@ class TestHappyPaths:
         result = _invoke_default(
             {"WORTHLESS_HOME": str(home_with_key.base_dir)},
         )
-        assert result.exit_code == 0, result.output + result.stderr
+        assert result.exit_code == 0, result.stdout + result.stderr
         assert daemon_called, "Should have started proxy daemon"
         # No lock prompt
         combined = result.stdout + result.stderr
@@ -220,7 +220,7 @@ class TestHappyPaths:
         result = _invoke_default(
             {"WORTHLESS_HOME": str(home_with_key.base_dir)},
         )
-        assert result.exit_code == 0, result.output + result.stderr
+        assert result.exit_code == 0, result.stdout + result.stderr
         assert not supervised_called
         combined = result.stdout + result.stderr
         assert "[y/N]" not in combined
@@ -247,7 +247,7 @@ class TestHappyPaths:
             {"WORTHLESS_HOME": str(home_dir.base_dir)},
             input="y\n",
         )
-        assert result.exit_code == 0, result.output + result.stderr
+        assert result.exit_code == 0, result.stdout + result.stderr
         combined = result.stdout + result.stderr
         assert "OPENAI_API_KEY" in combined
 
@@ -300,7 +300,7 @@ class TestNonInteractive:
             {"WORTHLESS_HOME": str(home_dir.base_dir)},
             args=["--yes"],
         )
-        assert result.exit_code == 0, result.output + result.stderr
+        assert result.exit_code == 0, result.stdout + result.stderr
 
     def test_json_flag_returns_structured_state(
         self,
@@ -315,7 +315,7 @@ class TestNonInteractive:
             {"WORTHLESS_HOME": str(home_with_key.base_dir)},
             args=["--json"],
         )
-        assert result.exit_code == 0, result.output + result.stderr
+        assert result.exit_code == 0, result.stdout + result.stderr
         data = json.loads(result.stdout)
         assert "enrolled" in data or "keys" in data
         assert "proxy" in data
@@ -378,7 +378,7 @@ class TestEdgeCases:
             args=["--yes"],
         )
         # Should still succeed (proxy started) even with partial lock
-        assert result.exit_code == 0, result.output + result.stderr
+        assert result.exit_code == 0, result.stdout + result.stderr
 
     def test_many_keys_truncated_display(
         self,
@@ -437,7 +437,7 @@ class TestEdgeCases:
             {"WORTHLESS_HOME": str(home_dir.base_dir)},
             input="n\n",
         )
-        assert result.exit_code == 0, result.output + result.stderr
+        assert result.exit_code == 0, result.stdout + result.stderr
         assert not daemon_called, "Should not have started proxy after decline"
 
 
@@ -576,7 +576,7 @@ class TestSidecarSupervisedProxyStart:
         )
 
         result = _invoke_default({"WORTHLESS_HOME": str(home_with_key.base_dir)})
-        assert result.exit_code == 0, result.output + result.stderr
+        assert result.exit_code == 0, result.stdout + result.stderr
         assert supervised_called
         assert not daemon_called
 
@@ -607,7 +607,7 @@ class TestSidecarSupervisedProxyStart:
         )
 
         result = _invoke_default({"WORTHLESS_HOME": str(home_with_key.base_dir)})
-        assert result.exit_code == 0, result.output + result.stderr
+        assert result.exit_code == 0, result.stdout + result.stderr
         assert not supervised_called
 
 

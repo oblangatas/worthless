@@ -123,6 +123,11 @@ def check_proxy_health(port: int) -> dict[str, object]:
                 "port": port,
                 "mode": data.get("mode", "up"),
                 "requests_proxied": data.get("requests_proxied", 0),
+                # worthless-ax9d: traffic and spend are different numbers — a
+                # request the provider rejects is proxied but never billed. This
+                # dict is an allowlist, so omitting the billing count made it
+                # invisible to every CLI consumer even though /healthz serves it.
+                "requests_billed": data.get("requests_billed", 0),
             }
             # WOR-658: only surface bind_probe_count when the responder
             # actually included it. Missing field on a healthy responder

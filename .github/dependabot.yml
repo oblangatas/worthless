@@ -21,6 +21,26 @@ updates:
           - minor
           - patch
 
+  # The Worker subproject. Without this entry Dependabot raises advisories for
+  # workers/worthless-sh but never opens an update PR for them, so nothing ever
+  # clears — main carried 5 open undici alerts (via wrangler/vitest-pool-workers
+  # -> miniflare) with no remediation path. All of them are devDependencies: the
+  # Worker declares `"dependencies": {}`, so none of it ships. beads
+  # worthless-yhcc.
+  - package-ecosystem: npm
+    directory: /workers/worthless-sh
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      worker-dev:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
   - package-ecosystem: github-actions
     directory: /
     schedule:

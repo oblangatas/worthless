@@ -46,7 +46,8 @@ if sys.platform != "win32":
 else:
     _pwd = None  # type: ignore[assignment]
 
-from worthless.cli.key_patterns import KEY_PATTERN
+from worthless.cli.dotenv_rewriter import shannon_entropy
+from worthless.cli.key_patterns import ENTROPY_THRESHOLD, KEY_PATTERN
 from worthless.crypto.types import zero_buf
 from worthless.openclaw import config as _config_mod
 from worthless.openclaw import skill as _skill_mod
@@ -73,6 +74,51 @@ _DEEP_REDACT_SENTINEL = {"kind": "redacted-deep"}
 _DEEP_REDACT_KEY_PLACEHOLDER = "<redacted-deep-key>"
 
 
+# WOR-827: KEY_PATTERN is a prefix allowlist, so an unprefixed credential — a
+# bare UUID, a raw JWT, or a long hex/base64 admin token from a self-hosted /
+# Azure / Enterprise gateway — slips past it. These shape + entropy rungs catch
+# tokens with no recognized provider prefix. False positives are accepted (see
+# _deep_redact_key_strings): over-redacting a rollback field is safe; leaking a
+# key is not.
+_UUID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+_JWT_RE = re.compile(r"eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}")
+_HEX_TOKEN_RE = re.compile(r"[0-9a-fA-F]{32,}")
+# A run of base64/token characters (NO spaces or punctuation) long enough to be
+# a secret. Ordinary prose can't reach 32 chars without a break; the entropy
+# gate (reusing the scan-side ``ENTROPY_THRESHOLD``) then rejects long
+# low-information identifiers.
+_B64ISH_RUN_RE = re.compile(r"[A-Za-z0-9+/=_-]{32,}")
+
+
+def _looks_like_unprefixed_secret(s: str) -> bool:
+    """True if *s* contains credential material carrying no known provider
+    prefix: a UUID, a JWT, or a long hex token (matched on shape alone), or any
+    32+ char base64-ish run whose Shannon entropy clears the scan threshold.
+
+    A URL value is exempt: a provider ``baseUrl`` may legitimately embed an
+    Azure subscription GUID (or similar), and restore writes it back verbatim —
+    whole-redacting it would corrupt the provider entry on unlock. A real key
+    inside a URL is still caught by ``KEY_PATTERN`` via :func:`_is_secret_shaped`.
+
+    Residual (successor to WOR-827, tracked): a token shorter than 32 chars with
+    no known prefix (e.g. ``secrets.token_urlsafe(16)`` = 22 chars) is NOT
+    detected by this fallback.
+    """
+    parsed = urlsplit(s.strip())
+    if parsed.scheme in ("http", "https") and parsed.netloc:
+        return False
+    if _UUID_RE.search(s) or _JWT_RE.search(s) or _HEX_TOKEN_RE.search(s):
+        return True
+    return any(shannon_entropy(m.group(0)) >= ENTROPY_THRESHOLD for m in _B64ISH_RUN_RE.finditer(s))
+
+
+def _is_secret_shaped(s: str) -> bool:
+    """A known-prefix key (``KEY_PATTERN``) OR an unprefixed token (WOR-827)."""
+    return bool(KEY_PATTERN.search(s)) or _looks_like_unprefixed_secret(s)
+
+
 def _deep_redact_key_strings(value: object) -> object:
     """Walk *value* recursively; replace any key-shaped string with the
     G5-B sentinel. Dicts and lists are descended into; tuples are not (the
@@ -95,20 +141,19 @@ def _deep_redact_key_strings(value: object) -> object:
       string placeholder ``"<redacted-deep-key>"``. JSON dict keys are
       always strings, so this is the only path that needs the asymmetry.
 
-    **Coverage limitation (residual; tracked).** ``KEY_PATTERN`` is a
-    prefix-allowlist (``sk-``, ``sk-or-``, ``sk-ant-``, ``anthropic-``,
-    ``AIza``, ``xai-``). Tokens that do NOT carry a recognized provider
-    prefix — a bare UUID/JWT/hex admin token from a self-hosted gateway —
-    are NOT detected and survive into the rollback record. Follow-up
-    ``worthless-3l5l`` adds an entropy fallback for unprefixed tokens.
+    **Unprefixed tokens (WOR-827).** ``KEY_PATTERN`` is a prefix-allowlist
+    (``sk-``, ``sk-or-``, ``sk-ant-``, ``anthropic-``, ``AIza``, ``xai-``).
+    Detection is now backed by :func:`_is_secret_shaped`, which adds a shape +
+    entropy fallback (:func:`_looks_like_unprefixed_secret`) so a bare
+    UUID/JWT/hex/base64 admin token from a self-hosted gateway is also scrubbed.
     """
     if isinstance(value, str):
-        if KEY_PATTERN.search(value):
+        if _is_secret_shaped(value):
             return {"kind": "redacted-deep"}
         return value
     if isinstance(value, dict):
         return {
-            (_DEEP_REDACT_KEY_PLACEHOLDER if KEY_PATTERN.search(k) else k)
+            (_DEEP_REDACT_KEY_PLACEHOLDER if _is_secret_shaped(k) else k)
             if isinstance(k, str)
             else k: _deep_redact_key_strings(v)
             for k, v in value.items()

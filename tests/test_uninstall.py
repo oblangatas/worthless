@@ -8,11 +8,14 @@ holds the reconstructed real key — no group/other access to a secret.
 from __future__ import annotations
 
 import errno
+import json
 import sqlite3
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
+import worthless.cli.commands.uninstall as uninstall_mod
 from worthless.cli.app import app
 from worthless.cli.bootstrap import WorthlessHome
 from worthless.cli.errors import ErrorCode, WorthlessError
@@ -717,6 +720,37 @@ def test_uninstall_zeros_keys_when_the_mode_confirm_aborts(
     assert spied, "SR-02: built restore keys must be zeroed even when the confirm aborts"
 
 
+def test_ctrl_c_at_the_confirm_prompt_reads_as_cancelled_not_an_internal_error(
+    monkeypatch: pytest.MonkeyPatch, home_dir
+) -> None:
+    """Ctrl+C at the uninstall prompt must say "cancelled", never "internal error".
+
+    ``typer.confirm`` raises ``click.Abort`` on Ctrl+C. Unhandled, that surfaced as
+    ``WRTLS-199: an internal error occurred`` (worthless-6xuv, observed live on
+    0.3.10). That is the worst possible message on the one command that restores
+    real API keys: the user cannot tell whether nothing happened or whether it
+    died halfway through and left their .env files half-restored.
+
+    Aborting at the prompt is identical to answering "n" — nothing has been
+    touched yet — so it must produce the same calm outcome.
+    """
+    monkeypatch.setattr(uninstall_mod, "_stdin_is_tty", lambda: True)
+
+    def _ctrl_c(*_a, **_k):  # noqa: ANN002, ANN003, ANN202
+        raise typer.Abort()
+
+    monkeypatch.setattr(typer, "confirm", _ctrl_c)
+
+    result = runner.invoke(app, ["uninstall"], env={"WORTHLESS_HOME": str(home_dir.base_dir)})
+
+    combined = (result.output or "").lower()
+    assert "internal error" not in combined, (
+        "Ctrl+C surfaced an internal error — the user cannot tell if their keys are safe"
+    )
+    assert "cancel" in combined, "an aborted uninstall must say it was cancelled"
+    assert home_dir.base_dir.exists(), "cancelling must not remove anything"
+
+
 @pytest.mark.parametrize("extra", [[], ["--force"]], ids=["no-force", "force"])
 @pytest.mark.parametrize(
     "make_busy",
@@ -1007,3 +1041,71 @@ class TestMcpLeftoverReminder:
         )
         assert result.exit_code == 0, result.output
         assert "MCP server" not in result.output, "chat-history mention must not false-trigger"
+
+    def _seed_cursor_cfg(self, fake_home, servers: dict):  # noqa: ANN001, ANN202
+        cfg = fake_home / ".cursor" / "mcp.json"
+        cfg.parent.mkdir(parents=True)
+        cfg.write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
+        return cfg
+
+    def _lock_one(self, home_dir: WorthlessHome, work, fake_home):  # noqa: ANN001, ANN202
+        from tests.helpers import fake_key
+
+        env = work / ".env"
+        env.write_text(f"OPENAI_API_KEY={fake_key('sk-')}\n")
+        runner.invoke(
+            app,
+            ["lock", "--env", str(env)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir), "HOME": str(fake_home)},
+        )
+
+    def test_remove_mcp_flag_deletes_only_our_entry_and_leaves_others(
+        self, home_dir: WorthlessHome, tmp_path, monkeypatch
+    ) -> None:
+        """Proof of fix: --remove-mcp edits the config — our entry goes, others stay."""
+        work = tmp_path / "work"
+        work.mkdir()
+        monkeypatch.chdir(work)
+        fake_home = tmp_path / "home"
+        cfg = self._seed_cursor_cfg(
+            fake_home,
+            {
+                "worthless": {"command": "npx", "args": ["-y", "worthless-mcp"]},
+                "github": {"command": "docker"},
+            },
+        )
+        self._lock_one(home_dir, work, fake_home)
+
+        result = runner.invoke(
+            app,
+            ["uninstall", "--yes", "--remove-mcp"],
+            env=self._uninstall_env(home_dir, fake_home),
+        )
+
+        assert result.exit_code == 0, result.output
+        after = json.loads(cfg.read_text(encoding="utf-8"))
+        assert "worthless" not in after["mcpServers"], "--remove-mcp did not remove our entry"
+        assert after["mcpServers"]["github"] == {"command": "docker"}, "another server was altered"
+        assert "removed the Worthless MCP entry" in result.output
+
+    def test_default_uninstall_never_edits_the_editor_config(
+        self, home_dir: WorthlessHome, tmp_path, monkeypatch
+    ) -> None:
+        """No-noise invariant holds the other way too: without the flag the config
+        is byte-identical — uninstall only names it.
+        """
+        work = tmp_path / "work"
+        work.mkdir()
+        monkeypatch.chdir(work)
+        fake_home = tmp_path / "home"
+        cfg = self._seed_cursor_cfg(fake_home, {"worthless": {"args": ["worthless-mcp"]}})
+        before = cfg.read_bytes()
+        self._lock_one(home_dir, work, fake_home)
+
+        result = runner.invoke(
+            app, ["uninstall", "--yes"], env=self._uninstall_env(home_dir, fake_home)
+        )
+
+        assert result.exit_code == 0, result.output
+        assert cfg.read_bytes() == before, "default uninstall edited an editor config"
+        assert "MCP server" in result.output, "default run should still name the file"

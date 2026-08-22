@@ -89,7 +89,7 @@ Restart your editor. Cold-start install time on a fresh machine with only Node:
 ### Package Info
 - **Package name**: `worthless`
 - **npm wrapper**: `worthless-mcp`
-- **Version**: 0.3.9
+- **Version**: 0.3.12
 - **Entry point**: `worthless` (CLI command)
 - **Python**: 3.10+
 - **License**: AGPL-3.0
@@ -228,6 +228,21 @@ Locked keys:
   anthropic-a1b2c3  anthropic   PROTECTED
 
 Proxy: http://127.0.0.1:8787 (running)
+```
+
+#### `worthless verify [OPTIONS]`
+**Confirm the gateway is alive and routing a request right now.**
+
+Fires a live loopback probe through the proxy and reports a GREEN/RED verdict earned by a fresh delta this instant (not the cumulative `requests_proxied` counter, which can't say "now"). GREEN means the proxy is live and routing now — it does NOT prove OpenClaw isn't also bypassing on a cached token. RED (gateway down, or routing unproven) exits non-zero so scripts can gate on it.
+
+**Options:**
+- `--json`: emit a machine-readable verdict (`{"verdict", "healthy", "aliases", "reason"}`).
+
+**Output:**
+```
+GREEN — proxy is live and a request routed through it just now (alias: openai).
+        Note: proves the proxy is live and routing now; does NOT prove OpenClaw
+        isn't also bypassing on a cached token — see `worthless status`.
 ```
 
 ### worthless doctor

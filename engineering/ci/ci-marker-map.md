@@ -15,7 +15,6 @@ Cross-links: [pr-security-stack.md](pr-security-stack.md) (Layer 2 decoration), 
 | `live` | Real LLM providers (costs $) | No |
 | `user_flow` | Full CLI + keyring user journeys | No |
 | `quarantine` | Flaky under investigation | No — separate non-blocking job |
-| `contract` | Schema/protocol checks | Scheduled + manual only |
 | `benchmark` | pytest-benchmark | Manual only |
 | `adversarial` | Security/race/fuzz | Subset in default when not excluded |
 | `e2e` | Full lifecycle smoke | Mixed (see workflows) |
@@ -30,11 +29,11 @@ Cross-links: [pr-security-stack.md](pr-security-stack.md) (Layer 2 decoration), 
 | **tests.yml** → `sonarcloud` | PR (human only; skips `dependabot[bot]`) | N/A (Sonar on `src/`) | Yes |
 | **tests.yml** → `smoke-windows` | push, PR | Platform smoke subset | Yes |
 | **sast.yml** | push, PR | bandit, semgrep, gitleaks, actionlint, zizmor, license | Yes |
-| **docker-security.yml** | PR (`src/**`, `tests/**`, Dockerfiles) | `-m docker`, `-m openclaw`, `-m "openclaw and docker"` (load-bearing) | Yes |
+| **docker-security.yml** | **every PR** (no paths filter — WOR-874) + push to `main` | `-m docker`, `-m openclaw`, `-m "openclaw and docker"` (load-bearing) | Yes |
 | **install-docker.yml** | PR (install paths) | `-m docker` (install matrix) | Yes |
 | **user-flows.yml** | PR (user_flow paths) | `-m user_flow` | Yes |
-| **scheduled.yml** | cron + dispatch | mutmut crypto; `-m contract`; extended Hypothesis | Non-blocking contract |
-| **pre-release.yml** | tag `v*` | Full mutmut; pip-audit; full coverage | Release gate |
+| **scheduled.yml** | cron + dispatch | extended Hypothesis; TruffleHog full-history secret scan | No |
+| **pre-release.yml** | tag `v*-rc/alpha/beta` | pip-audit; full coverage | Pre-release gate |
 | **benchmarks.yml** | dispatch | `-m benchmark --benchmark-only` | No |
 | **flake-radar.yml** | schedule | `-m "not docker and not live and not user_flow and not quarantine"` | Informational |
 | **CodeQL** (default setup) | PR, weekly | Python, JS/TS, Actions | Yes |
@@ -43,7 +42,7 @@ Cross-links: [pr-security-stack.md](pr-security-stack.md) (Layer 2 decoration), 
 
 | Workflow | Runs when |
 |----------|-----------|
-| `docker-security.yml` | Changes under `src/`, `tests/`, Dockerfiles, compose |
+| `docker-security.yml` | **Every PR**, and pushes to `main`. It carries the container CVE gates and the load-bearing credential tests, so it must report on every PR to be usable as a required check — a filtered gate is silent on non-matching PRs and leaves them permanently BLOCKED. Do not re-add a paths filter; guarded by `test_gate_workflow_has_no_paths_filter`. WOR-874. |
 | `user-flows.yml` | Changes under `tests/user_flows/**`, CLI paths (see workflow) |
 | `install-docker.yml` | Install script / docker install paths |
 

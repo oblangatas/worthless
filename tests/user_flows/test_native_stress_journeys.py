@@ -15,7 +15,7 @@ from tests.user_flows.helpers import scrubbed_cli_env
 from worthless.cli.app import app
 
 
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner()
 
 
 def _invoke(args: list[str], home: Path, **kwargs: object):

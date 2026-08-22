@@ -19,7 +19,7 @@ from typer.testing import CliRunner
 
 from worthless.cli.app import app
 
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner()
 
 
 def test_truncated_file_exits_nonzero_and_appears_in_json(tmp_path: Path, monkeypatch) -> None:

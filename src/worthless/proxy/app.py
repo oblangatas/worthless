@@ -54,6 +54,7 @@ from worthless.proxy.rules import (
 from worthless.storage.schema import SCHEMA, migrate_db
 from worthless.cli.log_redaction import install_redaction_filter
 from worthless.storage.shard_reader import ShardReader
+from worthless.storage.sqlite import open_connection
 from worthless.storage.spend_ledger import SpendLedger
 
 logger = logging.getLogger(__name__)
@@ -223,84 +224,104 @@ async def _lifespan(app: FastAPI):
     """
     settings: ProxySettings = app.state.settings
 
-    db = await aiosqlite.connect(settings.db_path)
-    await db.executescript(SCHEMA)
-    await db.execute("PRAGMA journal_mode=WAL")
-    await db.execute("PRAGMA busy_timeout=5000")
-    await db.commit()
-    # executescript(SCHEMA) is CREATE TABLE IF NOT EXISTS only — it never adds
-    # new columns to a pre-existing table. A proxy restarted on a DB enrolled by
-    # an older version would lack columns like WOR-705's ceiling_override, which
-    # the fail-closed settle/sweep path reads on every disconnect. Apply
-    # forward-only migrations here too, mirroring ShardRepository.initialize().
-    await migrate_db(settings.db_path)
-    app.state.db = db
+    # open_connection(), not aiosqlite.connect(): an interrupt landing inside
+    # Connection.__await__'s Thread.start() otherwise strands a non-daemon
+    # worker that wedges interpreter shutdown. The connection is long-lived
+    # (closed in the shutdown half below), so the async-with helper `connect()`
+    # does not fit — only the open needs the guard.
+    db = await open_connection(settings.db_path)
+    # Everything BELOW the open needs its own guard, and for the opposite
+    # reason. Once the connection is open, ``app.state.db`` holds a reference to
+    # it, so ``Connection.__del__`` never runs — and __del__ is the only thing
+    # that would have stopped the worker for us. An interrupt (or a fail-loud
+    # IPCUnavailable out of ``ipc.connect()``) anywhere in the rest of startup
+    # therefore strands that non-daemon thread and wedges interpreter shutdown,
+    # exactly as an interrupt in the open does. The shutdown half below cannot
+    # cover this: it only runs once startup reaches the yield.
+    try:
+        await db.executescript(SCHEMA)
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA busy_timeout=5000")
+        await db.commit()
+        # executescript(SCHEMA) is CREATE TABLE IF NOT EXISTS only — it never adds
+        # new columns to a pre-existing table. A proxy restarted on a DB enrolled by
+        # an older version would lack columns like WOR-705's ceiling_override, which
+        # the fail-closed settle/sweep path reads on every disconnect. Apply
+        # forward-only migrations here too, mirroring ShardRepository.initialize().
+        await migrate_db(settings.db_path)
+        app.state.db = db
 
-    repo = ShardReader(settings.db_path)
-    app.state.repo = repo
-    # WOR-640: preload decoy hashes for O(1) per-request tripwire check.
-    app.state.decoy_hashes = await repo.fetch_decoy_hashes()
+        repo = ShardReader(settings.db_path)
+        app.state.repo = repo
+        # WOR-640: preload decoy hashes for O(1) per-request tripwire check.
+        app.state.decoy_hashes = await repo.fetch_decoy_hashes()
 
-    # Allow tests to inject a pre-configured supervisor (avoids spawning a
-    # real sidecar in unit tests). When absent, build one from settings and
-    # eager-connect — fail-loud if the sidecar is unreachable (no fallback).
-    ipc: IPCSupervisor = getattr(app.state, "ipc_supervisor", None) or IPCSupervisor(
-        socket_path=Path(settings.sidecar_socket_path),
-        protocol_version=settings.sidecar_protocol_version,
-        expected_caps=settings.sidecar_expected_caps,
-        max_concurrency=settings.sidecar_max_concurrency,
-        request_timeout_s=settings.sidecar_request_timeout_s,
-    )
-    if not getattr(app.state, "ipc_supervisor_preconnected", False):
-        await ipc.connect()
-    app.state.ipc_supervisor = ipc
+        # Allow tests to inject a pre-configured supervisor (avoids spawning a
+        # real sidecar in unit tests). When absent, build one from settings and
+        # eager-connect — fail-loud if the sidecar is unreachable (no fallback).
+        ipc: IPCSupervisor = getattr(app.state, "ipc_supervisor", None) or IPCSupervisor(
+            socket_path=Path(settings.sidecar_socket_path),
+            protocol_version=settings.sidecar_protocol_version,
+            expected_caps=settings.sidecar_expected_caps,
+            max_concurrency=settings.sidecar_max_concurrency,
+            request_timeout_s=settings.sidecar_request_timeout_s,
+        )
+        if not getattr(app.state, "ipc_supervisor_preconnected", False):
+            await ipc.connect()
+        app.state.ipc_supervisor = ipc
 
-    client = httpx.AsyncClient(
-        follow_redirects=False,
-        timeout=httpx.Timeout(
-            connect=10.0,
-            read=settings.streaming_timeout,
-            write=settings.upstream_timeout,
-            pool=10.0,
-        ),
-        limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
-    )
-    app.state.httpx_client = client
-
-    # One transaction lock per connection: every BEGIN IMMEDIATE path on `db`
-    # (the ledger inside SpendCapRule, and TokenBudgetRule) must share it, or two
-    # concurrent requests could nest a transaction on the one connection → crash.
-    db_lock = asyncio.Lock()
-    app.state.db_lock = db_lock
-    rules_engine = RulesEngine(
-        rules=[
-            TokenBudgetRule(db=db, lock=db_lock),
-            RateLimitRule(
-                default_rps=settings.default_rate_limit_rps,
-                db_path=settings.db_path,
+        client = httpx.AsyncClient(
+            follow_redirects=False,
+            timeout=httpx.Timeout(
+                connect=10.0,
+                read=settings.streaming_timeout,
+                write=settings.upstream_timeout,
+                pool=10.0,
             ),
-            # LAST — TokenBudgetRule and SpendCapRule both place reservations;
-            # SpendCapRule runs last to minimise denial-path leaks.
-            SpendCapRule(db=db, lock=db_lock),
-        ]
-    )
-    app.state.rules_engine = rules_engine
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+        )
+        app.state.httpx_client = client
 
-    # Sweeper background task: settle orphaned holds left by SIGKILL/crash.
-    # SpendCapRule's internal ledger shares the same db + db_lock, so we build
-    # a SpendLedger here with the same connection to avoid opening a second one.
-    ledger = SpendLedger(db, db_lock)
-    app.state.ledger = ledger
-    sweep_task = asyncio.create_task(
-        _sweep_loop(ledger, settings.sweep_interval_seconds, settings.sweep_max_age_seconds),
-        name="worthless-sweeper",
-    )
-    # worthless-ibw1: refresh the decoy tripwire on the same cadence so a key
-    # retired mid-session is caught without a proxy restart.
-    decoy_reload_task = asyncio.create_task(
-        _decoy_reload_loop(app, repo, settings.sweep_interval_seconds),
-        name="worthless-decoy-reload",
-    )
+        # One transaction lock per connection: every BEGIN IMMEDIATE path on `db`
+        # (the ledger inside SpendCapRule, and TokenBudgetRule) must share it, or two
+        # concurrent requests could nest a transaction on the one connection → crash.
+        db_lock = asyncio.Lock()
+        app.state.db_lock = db_lock
+        rules_engine = RulesEngine(
+            rules=[
+                TokenBudgetRule(db=db, lock=db_lock),
+                RateLimitRule(
+                    default_rps=settings.default_rate_limit_rps,
+                    db_path=settings.db_path,
+                ),
+                # LAST — TokenBudgetRule and SpendCapRule both place reservations;
+                # SpendCapRule runs last to minimise denial-path leaks.
+                SpendCapRule(db=db, lock=db_lock),
+            ]
+        )
+        app.state.rules_engine = rules_engine
+
+        # Sweeper background task: settle orphaned holds left by SIGKILL/crash.
+        # SpendCapRule's internal ledger shares the same db + db_lock, so we build
+        # a SpendLedger here with the same connection to avoid opening a second one.
+        ledger = SpendLedger(db, db_lock)
+        app.state.ledger = ledger
+        sweep_task = asyncio.create_task(
+            _sweep_loop(ledger, settings.sweep_interval_seconds, settings.sweep_max_age_seconds),
+            name="worthless-sweeper",
+        )
+        # worthless-ibw1: refresh the decoy tripwire on the same cadence so a key
+        # retired mid-session is caught without a proxy restart.
+        decoy_reload_task = asyncio.create_task(
+            _decoy_reload_loop(app, repo, settings.sweep_interval_seconds),
+            name="worthless-decoy-reload",
+        )
+    except BaseException:
+        # stop(), not close(): on an interrupt the loop may already be tearing
+        # down, and close() would await a future on it. Unblocking the worker is
+        # the only thing that matters here — same contract as open_connection().
+        db.stop()
+        raise
 
     try:
         yield
@@ -314,11 +335,21 @@ async def _lifespan(app: FastAPI):
         for _bg in (sweep_task, decoy_reload_task):
             with contextlib.suppress(asyncio.CancelledError):
                 await _bg
+        # Each close owns its own unwind (worthless-oz8u). Sharing one try meant
+        # a raising client.aclose() skipped db.close() entirely, leaving
+        # app.state.db holding an open connection whose non-daemon worker then
+        # wedges interpreter shutdown — the startup bug guarded above, at the
+        # other end of the lifespan. db.stop() covers the remaining case, where
+        # close() itself is cancelled on a forced exit; it is a no-op once
+        # close() has succeeded, since that already cleared _connection.
         try:
             await client.aclose()
-            await db.close()
         finally:
-            await ipc.aclose()
+            try:
+                await db.close()
+            finally:
+                db.stop()
+                await ipc.aclose()
 
 
 def create_app(settings: ProxySettings | None = None) -> FastAPI:
@@ -363,6 +394,14 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
     # never inflate the real-traffic meter and a real-traffic burst can
     # never fake a probe pass.
     app.state.bind_probe_count = 0
+    # worthless-ax9d: real-traffic meter. Counted in the forward path, NOT read
+    # off ``spend_log`` — that is the BILLING ledger, and a request the provider
+    # rejects is deliberately never billed (see the refund branch in
+    # ``_do_record_spend``). Deriving "requests proxied" from it made ``worthless
+    # status`` report 0 while every request was in fact being proxied correctly
+    # and the provider was refusing them. Same in-memory lifecycle as
+    # ``bind_probe_count`` above: per-process, resets on restart.
+    app.state.requests_proxied = 0
     # WOR-650 follow-up: per-alias probe counts. The global counter above moves
     # on *any* probe — a probe for alias X ticks it just as well as one for
     # alias Y. Recording per-alias lets ``worthless lock`` tell which alias a
@@ -394,15 +433,19 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
         not sensitive (already visible via ``ps``/``lsof`` to anyone on the
         host) and must never be forwarded into audit streams.
         """
-        count = 0
+        billed = 0
         try:
             db: aiosqlite.Connection = request.app.state.db
             async with db.execute("SELECT COUNT(*) FROM spend_log") as cursor:
                 row = await cursor.fetchone()
                 if row:
-                    count = row[0]
+                    billed = row[0]
         except Exception:  # noqa: S110 — spend_log may not exist yet  # nosec B110
             pass
+        # worthless-ax9d: ``requests_proxied`` is the forward-path meter, not the
+        # billing ledger. ``spend_log`` is still surfaced — as ``requests_billed``,
+        # which is what it has always actually counted.
+        requests_proxied = getattr(request.app.state, "requests_proxied", 0)
         # Expose the listening process PID so the CLI can write the
         # authoritative PID — the process actually bound to the port —
         # rather than whatever Popen returned on this platform.
@@ -414,7 +457,8 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
         bind_probe_count = getattr(request.app.state, "bind_probe_count", 0)
         body: dict[str, object] = {
             "status": "ok",
-            "requests_proxied": count,
+            "requests_proxied": requests_proxied,
+            "requests_billed": billed,
             "pid": os.getpid(),
             "bind_probe_count": bind_probe_count,
         }
@@ -694,6 +738,12 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
 
                 try:
                     upstream_resp = await httpx_client.send(upstream_req, stream=True)
+                    # worthless-ax9d: gated, reconstructed, forwarded, answered —
+                    # that is a proxied request. Whether the provider replied 200
+                    # or 401 is the billing ledger's business, not this meter's.
+                    request.app.state.requests_proxied = (
+                        getattr(request.app.state, "requests_proxied", 0) + 1
+                    )
                 except httpx.TimeoutException:
                     await _release_reservations()
                     return _make_gateway_response(504, "gateway timeout")

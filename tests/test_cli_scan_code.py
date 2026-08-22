@@ -14,7 +14,7 @@ from typer.testing import CliRunner
 
 from worthless.cli.app import app
 
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner()
 
 
 @pytest.fixture
