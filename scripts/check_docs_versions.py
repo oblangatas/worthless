@@ -30,6 +30,10 @@ import sys
 
 DOCS = pathlib.Path("docs")
 INSTALL_SH = pathlib.Path("install.sh")
+# WOR-553 pinned worthless-proxy:X.Y.Z in the compose file users download, which
+# put a third copy of the release version outside docs/. Scan it here rather than
+# leave it to rot — that drift already shipped broken twice (WOR-734, WOR-733).
+EXTRA_FILES = (pathlib.Path("deploy/docker-compose.yml"),)
 TAG_RE = re.compile(r"worthless-proxy:(\d+\.\d+\.\d+)")
 PIN_RE = re.compile(r'^WORTHLESS_VERSION_PIN="([^"]+)"', re.MULTILINE)
 
@@ -53,7 +57,9 @@ def main() -> int:
 
     bad: list[tuple[pathlib.Path, int, str, str]] = []
     checked = 0
-    for doc in sorted([*DOCS.rglob("*.md"), *DOCS.rglob("*.mdx")]):
+    scanned = [*DOCS.rglob("*.md"), *DOCS.rglob("*.mdx")]
+    scanned += [p for p in EXTRA_FILES if p.is_file()]
+    for doc in sorted(scanned):
         for lineno, line in enumerate(doc.read_text(encoding="utf-8").splitlines(), 1):
             for match in TAG_RE.finditer(line):
                 checked += 1
@@ -66,8 +72,8 @@ def main() -> int:
 
     if bad:
         print(
-            f"::error title=Stale docs image tag::docs/ pins worthless-proxy "
-            f"tags that are not the released version {expected}"
+            f"::error title=Stale image tag::pinned worthless-proxy tags that are "
+            f"not the released version {expected}"
         )
         for doc, lineno, found, line in bad:
             print(f"  {doc}:{lineno}  found :{found}  (expected :{expected})")
