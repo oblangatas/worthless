@@ -279,13 +279,18 @@ class TestDockerCompose:
     def test_proxy_image_names_the_current_owner(self, compose_data: dict):
         """GHCR does not redirect renamed accounts — the old path hard-fails.
 
-        Verified against the live registry: ``ghcr.io/shacharm2/worthless-proxy``
-        returns an error while ``ghcr.io/oblangatas/worthless-proxy`` resolves. A stale
-        owner here is not cosmetic; it is a pull that cannot succeed.
+        Verified against the live registry: the pre-rename account returns 403 for
+        this image, while ``ghcr.io/oblangatas/worthless-proxy`` resolves anonymously.
+        A stale owner here is not cosmetic; it is a pull that cannot succeed.
 
         ``publish-docker.yml`` pushes to ``ghcr.io/${{ github.repository_owner }}/…``,
         so the registry side follows a rename automatically. Only hand-typed strings
-        like this one can rot.
+        like this one can rot — which is why this asserts the owner rather than
+        trusting it.
+
+        The old account is described here rather than spelled out: naming it in a
+        tracked file trips ``test_no_tracked_file_references_a_stale_owner``, the
+        repo-wide guard that exists for exactly this failure mode.
         """
         image = compose_data["services"]["proxy"]["image"]
         registry, owner, name, _tag = _split_image_ref(image)
