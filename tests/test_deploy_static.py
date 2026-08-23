@@ -67,6 +67,22 @@ def dockerfile_final_stage(dockerfile_text: str) -> str:
     return dockerfile_text[from_indices[-1] :]
 
 
+def _split_image_ref(image: str) -> tuple[str, str, str, str]:
+    """Split ``registry/owner/name:tag`` into its four parts (WOR-553).
+
+    Assert on parsed components rather than substrings: ``"ghcr.io" in image``
+    or ``image.startswith("ghcr.io/")`` would also accept a reference that merely
+    *contains* the registry somewhere, and cannot tell the registry apart from the
+    owner. CodeQL flags exactly that pattern
+    (``py/incomplete-url-substring-sanitization``), and it is right to — a test
+    that can't distinguish ``ghcr.io/us/x`` from ``evil.io/ghcr.io/x`` is not
+    guarding the thing it claims to guard.
+    """
+    registry, owner, remainder = image.split("/", 2)
+    name, _, tag = remainder.partition(":")
+    return registry, owner, name, tag
+
+
 @pytest.fixture(scope="module")
 def compose_data() -> dict:
     """Parsed docker-compose.yml."""
@@ -236,6 +252,93 @@ class TestDockerCompose:
     def test_proxy_service_exists(self, compose_data: dict):
         """The 'proxy' service must be defined."""
         assert "proxy" in compose_data["services"]
+
+    def test_proxy_pins_published_image_not_a_build_context(self, compose_data: dict):
+        """This file is downloaded standalone — it must not need the repo (WOR-553).
+
+        `website/install-openclaw.md` tells users to curl this one file. A `build:`
+        block makes that impossible: there is no `..` and no Dockerfile on their disk,
+        so `docker compose up` dies with "failed to read dockerfile" before anything
+        starts. The image has been published and anonymously pullable since WOR-871 /
+        WOR-881, so building from source here is pure breakage with no upside.
+
+        Contributors who still want a local build use the override file — see
+        ``test_build_override_restores_local_build``.
+        """
+        proxy = compose_data["services"]["proxy"]
+        assert "build" not in proxy, (
+            "proxy still builds from source; a user who downloaded only this file has "
+            "no build context and `docker compose up` fails"
+        )
+        assert "image" in proxy, "proxy must pin the published image"
+        registry, owner, name, _tag = _split_image_ref(proxy["image"])
+        assert registry == "ghcr.io", proxy["image"]
+        assert name == "worthless-proxy", proxy["image"]
+        assert owner, proxy["image"]
+
+    def test_proxy_image_names_the_current_owner(self, compose_data: dict):
+        """GHCR does not redirect renamed accounts — the old path hard-fails.
+
+        Verified against the live registry: the pre-rename account returns 403 for
+        this image, while ``ghcr.io/oblangatas/worthless-proxy`` resolves anonymously.
+        A stale owner here is not cosmetic; it is a pull that cannot succeed.
+
+        ``publish-docker.yml`` pushes to ``ghcr.io/${{ github.repository_owner }}/…``,
+        so the registry side follows a rename automatically. Only hand-typed strings
+        like this one can rot — which is why this asserts the owner rather than
+        trusting it.
+
+        The old account is described here rather than spelled out: naming it in a
+        tracked file trips ``test_no_tracked_file_references_a_stale_owner``, the
+        repo-wide guard that exists for exactly this failure mode.
+        """
+        image = compose_data["services"]["proxy"]["image"]
+        registry, owner, name, _tag = _split_image_ref(image)
+        assert owner == "oblangatas", (
+            f"{image} names owner {owner!r}; GHCR does not redirect renamed accounts, "
+            "so any other owner is a pull that cannot succeed"
+        )
+        assert (registry, name) == ("ghcr.io", "worthless-proxy"), image
+
+    def test_build_override_restores_local_build(self):
+        """Removing `build:` must not take local builds away from contributors.
+
+        The override is the reason pinning the published image is safe: someone
+        testing an unreleased change runs
+        ``docker compose -f docker-compose.yml -f docker-compose.build.yml up``.
+        Without this file, WOR-553 would fix the download path by breaking the
+        development one.
+        """
+        override = DEPLOY_DIR / "docker-compose.build.yml"
+        assert override.exists(), "contributors lost the local-build path"
+
+        data = yaml.safe_load(override.read_text())
+        proxy = data["services"]["proxy"]
+        assert proxy["build"]["context"] == "..", proxy["build"]
+        # A local tag, so an override build can never be confused with — or pushed
+        # as — the published artifact.
+        override_image = proxy.get("image", "")
+        assert "/" not in override_image, (
+            f"{override_image!r} looks like a registry reference; the override must "
+            "use a bare local tag so it can never be pushed as the published image"
+        )
+
+    def test_proxy_image_is_version_pinned(self, compose_data: dict):
+        """Pin an exact version, never a floating tag.
+
+        ``:latest`` moves under a user who pulled months ago, so what they run stops
+        matching what our docs describe. A concrete version is also what
+        ``check_docs_versions.py`` can enforce against the release.
+        """
+        image = compose_data["services"]["proxy"]["image"]
+        _registry, _owner, _name, tag = _split_image_ref(image)
+        assert tag, f"{image} has no tag"
+        assert tag != "latest", "pin an exact version, not a floating tag"
+        # fullmatch, not match: a prefix match accepts `0.3.12.1` and
+        # `0.3.12-alpine` as "a version", so a typo ships an impossible image
+        # pull with this guard still green — the exact drift WOR-553 exists to
+        # stop. The tag must BE the version, not merely start with one.
+        assert re.fullmatch(r"\d+\.\d+\.\d+", tag), f"{tag} is not a version"
 
     def test_port_8787_mapped(self, compose_data: dict):
         """Port 8787 must be exposed, bound to localhost only."""

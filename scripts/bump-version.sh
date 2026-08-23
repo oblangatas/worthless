@@ -112,7 +112,13 @@ if [ ! -d docs/ ]; then
     echo "  ⚠ docs/: directory not found — skipping Docker image tag bump"
 else
     # --include must come before the path: BSD grep (macOS) ignores it otherwise.
+    # deploy/docker-compose.yml carries the same pin (WOR-553) and is enforced by
+    # check_docs_versions.py, so it must bump here too — otherwise the release PR
+    # fails its own drift check and needs a hand-edit every time.
     docs_hits=$(grep -rlF --include="*.md" --include="*.mdx" "worthless-proxy:${current_version}" docs/ || true)
+    if grep -qF "worthless-proxy:${current_version}" deploy/docker-compose.yml 2>/dev/null; then
+        docs_hits="$docs_hits deploy/docker-compose.yml"
+    fi
     if [ -n "$docs_hits" ]; then
         # Escape dots on the LHS so the sed pattern treats them as literals.
         escaped_current=$(printf '%s\n' "$current_version" | sed 's/[.]/\\./g')
@@ -187,7 +193,7 @@ Done. Next steps:
      uv run pytest tests/test_skill_md.py::TestVersionDrift -q
 
   4. Stage, commit (Conventional Commits), push:
-     git add pyproject.toml SKILL.md CHANGELOG.md uv.lock install.sh packages/worthless-mcp/package.json docs/
+     git add pyproject.toml SKILL.md CHANGELOG.md uv.lock install.sh packages/worthless-mcp/package.json docs/ deploy/docker-compose.yml
      git commit -m "chore(release): v$new_version"
      git push
 
