@@ -1997,9 +1997,9 @@ def _print_lock_result(
             console.print_hint("Check anytime with `worthless status`.")
         _maybe_prompt_code_scan(Path.cwd())
     elif oauth_skipped:
-        # worthless-7jn2: keys WERE found here. They were classified as rotating
-        # OAuth tokens and deliberately skipped above — the file is not clean,
-        # so "No unprotected API keys found." would be a false all-clear.
+        # worthless-7jn2: keys WERE found here. They were classified as Claude
+        # Code OAuth tokens and deliberately skipped above — the file is not
+        # clean, so "No unprotected API keys found." would be a false all-clear.
         console.print_warning(
             f"[WARN] Nothing was locked. The skipped OAuth token is still in "
             f"{env_path.name} in plaintext. Treat that file as a live secret."
@@ -2331,10 +2331,11 @@ def _lock_keys(
 
             # WOR-837: a Claude Code OAuth token (sk-ant-oat/ort) collides with
             # the static sk-ant- prefix, so scan_env_keys classifies it as
-            # "anthropic" — but it rotates every few hours, so a frozen shard is
-            # a dead credential within hours. Skip it (still lock the user's real
-            # keys) and say so loudly, before it can become a lock candidate.
-            # Anthropic-only by construction; see key_patterns.is_oauth_token.
+            # "anthropic" — but sharding rewrites the sk-ant-oat marker OpenClaw
+            # matches on, and the proxy cannot restore the OAuth request shape
+            # that loss costs. Skip it (still lock the user's real keys) and say
+            # so loudly, before it can become a lock candidate. Anthropic-only by
+            # construction; see key_patterns.is_oauth_token.
             oauth_skipped = [entry for entry in raw_scanned if is_oauth_token(entry[1])]
             if oauth_skipped:
                 raw_scanned = [entry for entry in raw_scanned if not is_oauth_token(entry[1])]
@@ -2347,9 +2348,9 @@ def _lock_keys(
                 )
                 console.print_warning(
                     f"[WARN] Skipped {oauth_vars}: looks like a Claude Code OAuth token "
-                    "(sk-ant-oat/ort), not a static API key. Locking it would freeze a "
-                    "credential that rotates every few hours — your other keys were locked "
-                    "normally."
+                    "(sk-ant-oat/ort), not a static API key. Sharding rewrites the "
+                    "sk-ant-oat marker Claude Code is recognised by, so locking it would "
+                    "break your login instead of protecting it."
                 )
 
             scanned = await _select_unlocked_keys(

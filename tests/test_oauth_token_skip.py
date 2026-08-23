@@ -3,8 +3,9 @@
 Claude Code's OAuth login issues tokens prefixed ``sk-ant-oat01-`` (access)
 and ``sk-ant-ort01-`` (refresh). Both collide with Worthless's static
 ``sk-ant-`` API-key prefix, so ``lock`` currently treats them as static keys
-and shards them. But they rotate every few hours — a frozen shard is a dead
-credential within hours, silently breaking the user's Claude Code. ``lock``
+and shards them. But sharding rewrites the ``sk-ant-oat`` marker OpenClaw
+matches on, and the proxy cannot restore the OAuth request shape that loss
+costs — so a locked token silently breaks the user's Claude Code. ``lock``
 must recognize them and skip with an honest warning instead.
 
 Scope: Anthropic only (verified — OpenAI/Google OAuth tokens are JWTs, xAI
@@ -30,7 +31,7 @@ runner = CliRunner()
 
 
 class TestIsOAuthToken:
-    """Unit: the classifier tells a rotating OAuth token from a static key."""
+    """Unit: the classifier tells a Claude Code OAuth token from a static key."""
 
     def test_access_token_is_oauth(self) -> None:
         assert is_oauth_token(fake_key("sk-ant-oat01-", "wor837-access")) is True
@@ -73,7 +74,8 @@ class TestLockSkipsOAuthToken:
         parsed = dotenv_values(env)
         # The OAuth token must be left byte-for-byte — never sharded.
         assert parsed["ANTHROPIC_API_KEY"] == oauth_token, (
-            "OAuth token was sharded — a frozen shard of a rotating token is dead on arrival"
+            "OAuth token was sharded — sharding destroys the sk-ant-oat marker Claude Code "
+            "is recognised by"
         )
         # The real static key must still lock (value replaced by shard-A).
         assert parsed["OPENAI_API_KEY"] != static_key, "static key should have been locked"
