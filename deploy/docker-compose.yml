@@ -33,6 +33,24 @@ services:
       # openclaw container (node user) must be able to read what the proxy
       # (worthless user) writes on the shared openclaw-config volume.
       WORTHLESS_OPENCLAW_CONFIG_SHARED: "1"
+      # Bind every interface INSIDE the container. Without these two,
+      # deploy/start.py defaults WORTHLESS_DEPLOY_MODE to `loopback` and
+      # _resolve_bind() returns 127.0.0.1 — the proxy then listens only on the
+      # container's own loopback. The published port gives the host
+      # RemoteDisconnected and the sibling `openclaw` service Connection
+      # refused, while the healthcheck (which runs INSIDE the container, over
+      # that same loopback) still passes. Healthy status, zero reachability.
+      #
+      # `lan` rather than `public`: `public` adds --proxy-headers
+      # --forwarded-allow-ips, i.e. it TRUSTS X-Forwarded-For, and
+      # entrypoint.sh refuses to boot without WORTHLESS_TRUSTED_PROXIES. A bare
+      # compose stack has no edge proxy to trust. `lan` + an explicit host binds
+      # all interfaces WITHOUT trusting forwarded headers (start.py only enables
+      # --proxy-headers for `lan` when WORTHLESS_TRUSTED_PROXIES is set), which
+      # is exactly what tests/openclaw/docker-compose.yml already does.
+      # Host exposure is still limited by the 127.0.0.1 port publish above.
+      WORTHLESS_DEPLOY_MODE: "lan"
+      WORTHLESS_HOST: "0.0.0.0"
     volumes:
       - worthless-data:/data
       # Keeps the decryption key off the same volume as shard data.

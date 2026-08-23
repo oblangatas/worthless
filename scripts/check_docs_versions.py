@@ -34,7 +34,15 @@ INSTALL_SH = pathlib.Path("install.sh")
 # put a third copy of the release version outside docs/. Scan it here rather than
 # leave it to rot — that drift already shipped broken twice (WOR-734, WOR-733).
 EXTRA_FILES = (pathlib.Path("deploy/docker-compose.yml"),)
-TAG_RE = re.compile(r"worthless-proxy:(\d+\.\d+\.\d+)")
+# The trailing ``[A-Za-z0-9_.-]*`` is a tag boundary, not decoration: a Docker
+# tag runs to the end of that character class, so without it the pattern matched
+# the ``0.3.12`` PREFIX of ``0.3.12.1`` and ``0.3.12-alpine`` and reported both
+# as the released version. A typo'd tag then sailed past this guard while
+# pointing at an image that does not exist. Capturing the whole tag makes the
+# equality check below reject it. ``:latest`` and partial ``:MAJOR.MINOR`` pins
+# still do not match at all — they are deliberately allowed (see the fix hint
+# printed by main()).
+TAG_RE = re.compile(r"worthless-proxy:(\d+\.\d+\.\d+[A-Za-z0-9_.-]*)")
 PIN_RE = re.compile(r'^WORTHLESS_VERSION_PIN="([^"]+)"', re.MULTILINE)
 
 # (path, found_version) pairs that are intentionally NOT the current release.

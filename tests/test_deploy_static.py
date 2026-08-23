@@ -334,7 +334,11 @@ class TestDockerCompose:
         _registry, _owner, _name, tag = _split_image_ref(image)
         assert tag, f"{image} has no tag"
         assert tag != "latest", "pin an exact version, not a floating tag"
-        assert re.match(r"^\d+\.\d+\.\d+", tag), f"{tag} is not a version"
+        # fullmatch, not match: a prefix match accepts `0.3.12.1` and
+        # `0.3.12-alpine` as "a version", so a typo ships an impossible image
+        # pull with this guard still green — the exact drift WOR-553 exists to
+        # stop. The tag must BE the version, not merely start with one.
+        assert re.fullmatch(r"\d+\.\d+\.\d+", tag), f"{tag} is not a version"
 
     def test_port_8787_mapped(self, compose_data: dict):
         """Port 8787 must be exposed, bound to localhost only."""
