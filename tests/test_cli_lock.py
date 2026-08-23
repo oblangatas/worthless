@@ -1336,6 +1336,34 @@ class TestLockChmodEnvFile:
         assert not (mode & stat.S_IRWXG), "Group permissions should be removed"
         assert not (mode & stat.S_IRWXO), "Other permissions should be removed"
 
+    def test_lock_restricts_env_permissions_with_only_an_oauth_token(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """WOR-837 regression: an OAuth-only .env must still be tightened.
+
+        A Claude Code OAuth token is skipped rather than sharded, so lock
+        freshly enrolls zero keys. The file nonetheless still holds a live
+        plaintext credential, so it must not be left group/other readable —
+        the hardening cannot be gated on how many keys were locked.
+        """
+        import stat
+
+        env = tmp_path / ".env"
+        env.write_text(f"ANTHROPIC_API_KEY={fake_key('sk-ant-oat01-', 'wor837-perms')}\n")
+        env.chmod(0o644)  # world-readable initially
+        assert (env.stat().st_mode & 0o777) == 0o644  # precondition
+
+        result = runner.invoke(
+            app,
+            ["lock", "--env", str(env)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+        )
+        assert result.exit_code == 0, result.output
+
+        mode = env.stat().st_mode
+        assert not (mode & stat.S_IRWXG), f"OAuth-only .env left group-readable: {mode & 0o777:o}"
+        assert not (mode & stat.S_IRWXO), f"OAuth-only .env left world-readable: {mode & 0o777:o}"
+
     def test_lock_keeps_perms_if_already_strict(
         self, home_dir: WorthlessHome, tmp_path: Path
     ) -> None:
