@@ -22,7 +22,7 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 - **The Worker's dev tooling is deliberately not gated.** The npm job audits `--omit=dev` — what the Worker actually ships. Its `package.json` declares `"dependencies": {}`, so production is empty and the job passes. The 5 advisories on `main` all arrive through `wrangler` and `@cloudflare/vitest-pool-workers` -> `miniflare` -> `undici`, every one a devDependency that never enters the bundle. Gating the full tree would have shipped a job red on arrival; Dependabot upgrades those instead.
 - **Neither audit job blocks yet.** `npm audit (worker production deps)` is not a required context either, so like its Python sibling it reports without preventing a merge.
 - **This corrects an earlier claim in this file.** The 0.3.7 entry below states "Snyk reports the dependency tree we actually ship". That was not true when written and never became true; the scan never completed successfully.
-- **Whether the Snyk dashboard reflects the right project is still unverified** (`worthless-7fey`). The repo was re-imported as `oblangatas/worthless` on 2026-08-19 while the org slug stayed `oblangatas`, and a stale duplicate project would now go uncontradicted.
+- **Whether the Snyk dashboard reflects the right project is still unverified** (`worthless-7fey`). The repo was re-imported as `oblangatas/worthless` on 2026-08-19 while the org slug stayed `shacharm2`, and a stale duplicate project would now go uncontradicted.
 - **The `SNYK_TOKEN` repo secret is not revoked by this change** (`worthless-s78g`). It is unused after this release but still present.
 
 ## [0.3.12] — 2026-08-11
