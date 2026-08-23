@@ -183,14 +183,24 @@ repos:
         pass_filenames: false
         files: '(pyproject\.toml|uv\.lock)$'
 
-      # Keep requirements.txt (the Snyk badge's scan source) in sync with
-      # uv.lock. Snyk's live badge can't parse uv.lock, so the README badge
-      # points at this exported, parseable manifest (?targetFile=requirements.txt).
+      # Keep the exported manifest (the Snyk badge's scan source) in sync
+      # with uv.lock. Snyk's live badge can't parse uv.lock, so the README
+      # badge points at this exported, parseable manifest via ?targetFile=.
       # --no-dev scopes it to the runtime tree users actually install.
+      #
+      # It lives in engineering/ci/ and NOT at the repo root, deliberately.
+      # Dependabot discovers Python manifests at `directory: /` and filed
+      # NINE pull requests against the root copy — each bumping a version
+      # in GENERATED OUTPUT while uv.lock, the file that actually resolves
+      # dependencies, went untouched. Merging one changed nothing, while
+      # the version number in the title made it look done. Seven were
+      # closed by hand and two more arrived on 2026-08-21.
+      #
+      # Do NOT move this back to the repo root. WOR-875.
       - id: uv-export-requirements
-        name: "supply chain: export requirements.txt for Snyk badge"
+        name: "supply chain: export the Snyk badge manifest"
         language: system
-        entry: uv export --no-dev --no-hashes --format requirements-txt -o requirements.txt
+        entry: uv export --no-dev --no-hashes --format requirements-txt -o engineering/ci/requirements.txt
         pass_filenames: false
         files: '(pyproject\.toml|uv\.lock)$'
 

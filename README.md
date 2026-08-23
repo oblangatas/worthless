@@ -12,7 +12,7 @@
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-green)](LICENSE)
 [![Tests](https://github.com/oblangatas/worthless/actions/workflows/tests.yml/badge.svg)](https://github.com/oblangatas/worthless/actions/workflows/tests.yml)
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/oblangatas/worthless/badge)](https://securityscorecards.dev/projects/github.com/oblangatas/worthless)
-[![Known Vulnerabilities](https://snyk.io/test/github/oblangatas/worthless/badge.svg?targetFile=requirements.txt)](https://snyk.io/test/github/oblangatas/worthless?targetFile=requirements.txt)
+[![Known Vulnerabilities](https://snyk.io/test/github/oblangatas/worthless/badge.svg?targetFile=engineering/ci/requirements.txt)](https://snyk.io/test/github/oblangatas/worthless?targetFile=engineering/ci/requirements.txt)
 <!-- SonarCloud quality-gate badge, held until the existing issues are triaged. Re-enable when ready:
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=oblangatas_worthless&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=oblangatas_worthless)
 -->
