@@ -188,19 +188,19 @@ repos:
       # badge points at this exported, parseable manifest via ?targetFile=.
       # --no-dev scopes it to the runtime tree users actually install.
       #
-      # It lives in engineering/ci/ and NOT at the repo root, deliberately.
-      # Dependabot discovers Python manifests at `directory: /` and filed
+      # It lives at the REPO ROOT because Snyk imported it there as a monitored
+      # project, and Snyk resolves that project by its imported path. Dependabot
       # NINE pull requests against the root copy — each bumping a version
-      # in GENERATED OUTPUT while uv.lock, the file that actually resolves
-      # dependencies, went untouched. Merging one changed nothing, while
-      # the version number in the title made it look done. Seven were
-      # closed by hand and two more arrived on 2026-08-21.
+      # a version in GENERATED OUTPUT while uv.lock, which actually resolves
+      # dependencies, went untouched. That is now handled by `exclude-paths` in
+      # .github/dependabot.yml, NOT by moving this file -- moving it silently
+      # broke the Snyk project once already.
       #
-      # Do NOT move this back to the repo root. WOR-875.
+      # Do NOT move this out of the repo root. WOR-904.
       - id: uv-export-requirements
         name: "supply chain: export the Snyk badge manifest"
         language: system
-        entry: uv export --no-dev --no-hashes --format requirements-txt -o engineering/ci/requirements.txt
+        entry: uv export --no-dev --no-hashes --format requirements-txt -o requirements.txt
         pass_filenames: false
         files: '(pyproject\.toml|uv\.lock)$'
 
