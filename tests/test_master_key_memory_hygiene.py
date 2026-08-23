@@ -1,209 +1,241 @@
-"""SR-02: the master Fernet key must not outlive the process that read it.
+"""SR-02: the master Fernet key must not outlive the code that read it.
 
 Two leaks, same parent (worthless-1ige):
 
-  * worthless-m7n0 — ``WorthlessHome._cached_fernet_key`` is a per-invocation
-    cache with no ``__del__``, no ``atexit`` hook and no explicit zero. Every
-    ``lock`` / ``unlock`` / ``doctor`` / ``status`` / ``up`` handed the
-    interpreter a bytearray of live master-key bytes to garbage-collect.
+  * worthless-m7n0 — ``WorthlessHome._cached_fernet_key`` had no ``__del__``, no
+    ``atexit`` hook and no explicit zero, so every CLI command handed the
+    interpreter a bytearray of live master-key bytes to collect.
   * worthless-g648 — ``doctor`` zeroed its own buffer but never called
     ``repo.close()``, so ``ShardRepository._fernet_key_bytes`` (a second copy)
-    survived for the rest of the process.
+    survived the command.
 
-These assert on the BYTES, not on a call. A test that only checks "close() was
-invoked" would pass against an implementation that rebinds the reference and
-leaves the original allocation intact — which is precisely the bug.
+Two things this module learned the hard way, both worth keeping in mind when
+editing it:
+
+1. **Assert on the BYTES.** A test that checks "close() was called" passes
+   against an implementation that rebinds the reference and leaves the original
+   allocation intact — which is the bug.
+2. **Check the BINDING, not the file or the function.** Three versions of the
+   sweep below shipped before it caught anything. v1 grepped one file. v2 asked
+   whether the module contained any ``.close()``. v3 asked per-function -- and
+   still passed, because ``doctor`` builds two repositories in one function, so
+   closing the first vouched for the second. It is now AST-based and
+   per-variable.
 """
 
 from __future__ import annotations
 
+import ast
 import base64
+import gc
 from pathlib import Path
 
-import pytest
-
-from worthless.cli import bootstrap
-from worthless.cli.bootstrap import (
-    WorthlessHome,
-    _track_home_holding_key,
-    _tracked_homes_holding_key,
-    _zero_cached_fernet_keys_at_exit,
-)
+from worthless.cli.bootstrap import WorthlessHome
 from worthless.storage.repository import ShardRepository
 
-# A REAL Fernet key (32 url-safe base64 bytes) — ShardRepository constructs a
-# Fernet from it, so a malformed value fails in the constructor and never
-# reaches the code under test. Deliberately non-zero: an all-zero key would
-# make every "is it zeroed?" assertion below pass vacuously.
+# A REAL Fernet key (32 url-safe base64 bytes) — ShardRepository builds a Fernet
+# from it, so a malformed value fails in the constructor and never reaches the
+# code under test. Deliberately non-zero: an all-zero key would make every
+# "is it zeroed?" assertion below pass vacuously.
 _KEY = base64.urlsafe_b64encode(bytes(range(1, 33)))
+_ZEROS = b"\x00" * len(_KEY)
 
 
-@pytest.fixture(autouse=True)
-def _isolated_registry(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Give each test its own tracking list.
+# --- worthless-m7n0: the cached key ---------------------------------------
 
-    The registry and the exit hook are process-global by design. Under xdist a
-    worker runs many test modules, so calling the real hook here would zero the
-    cached key of a WorthlessHome belonging to some unrelated test that is
-    mid-run. Swap the list per test so these stay hermetic.
+
+def test_cached_key_is_zeroed_when_the_home_is_collected(tmp_path: Path) -> None:
+    """The case an exit-only hook misses.
+
+    ``ensure_home()`` builds a fresh WorthlessHome at each of its ~37 call
+    sites, so a home dropped mid-command is collected long before interpreter
+    shutdown. The first implementation of this fix used an atexit hook and a
+    registry, and freed those buffers with the key still in them.
     """
-    monkeypatch.setattr(bootstrap, "_HOMES_HOLDING_KEY", [])
-
-
-def test_seeding_the_cache_registers_the_home_for_zeroing(tmp_path: Path) -> None:
-    home = WorthlessHome(base_dir=tmp_path)
-    assert home not in _tracked_homes_holding_key(), "a home with no key must not be tracked"
-
-    home._seed_cached_fernet_key(_KEY)
-    assert any(h is home for h in _tracked_homes_holding_key()), (
-        "a home that now holds key bytes must be tracked, or the exit hook cannot find it"
-    )
-
-
-def test_zeroing_wipes_the_buffer_in_place(tmp_path: Path) -> None:
-    """In place, not rebound — a dropped reference leaves the bytes readable."""
     home = WorthlessHome(base_dir=tmp_path)
     home._seed_cached_fernet_key(_KEY)
-
     buf = home._cached_fernet_key
     assert buf is not None and bytes(buf) == _KEY
 
-    home.zero_cached_fernet_key()
+    del home
+    gc.collect()
 
-    assert buf is not None, "must not rebind to None — the old buffer would survive"
-    assert bytes(buf) == b"\x00" * len(_KEY), "the original allocation must be zeroed"
-    assert _KEY[:8] not in bytes(buf)
+    assert bytes(buf) == _ZEROS, "the buffer must be zeroed when its home is collected"
 
 
-def test_exit_hook_zeroes_a_live_cached_key(tmp_path: Path) -> None:
-    """The atexit path is what actually fires on a normal CLI exit."""
+def test_reseeding_zeroes_the_buffer_it_orphans(tmp_path: Path) -> None:
+    """Four call sites can seed twice (e.g. an env read then a keyring read)."""
+    home = WorthlessHome(base_dir=tmp_path)
+    home._seed_cached_fernet_key(_KEY)
+    first = home._cached_fernet_key
+    assert first is not None and bytes(first) == _KEY
+
+    home._seed_cached_fernet_key(_KEY)
+
+    assert first is not home._cached_fernet_key, "a re-seed must allocate a new buffer"
+    assert bytes(first) == _ZEROS, "the orphaned buffer must be zeroed, not just dropped"
+
+
+def test_zeroing_happens_in_place_not_by_rebinding(tmp_path: Path) -> None:
+    """Dropping the reference leaves the bytes readable in the freed allocation."""
     home = WorthlessHome(base_dir=tmp_path)
     home._seed_cached_fernet_key(_KEY)
     buf = home._cached_fernet_key
     assert buf is not None
 
-    _zero_cached_fernet_keys_at_exit()
+    home._seed_cached_fernet_key(_KEY)  # triggers the zero-then-replace path
 
-    assert bytes(buf) == b"\x00" * len(_KEY), (
-        "the registered exit hook must wipe every tracked home's key"
-    )
-
-
-def test_zeroing_is_idempotent_and_safe_without_a_cache(tmp_path: Path) -> None:
-    """Called on a home that never read a key, and twice on one that did."""
-    WorthlessHome(base_dir=tmp_path).zero_cached_fernet_key()  # must not raise
-
-    home = WorthlessHome(base_dir=tmp_path)
-    home._seed_cached_fernet_key(_KEY)
-    home.zero_cached_fernet_key()
-    home.zero_cached_fernet_key()
-    assert bytes(home._cached_fernet_key or b"") == b"\x00" * len(_KEY)
+    assert len(buf) == len(_KEY), "must not truncate — the allocation is what matters"
+    assert _KEY[:8] not in bytes(buf)
 
 
-def test_exit_hook_survives_a_home_that_raises(tmp_path: Path) -> None:
-    """Shutdown must never turn a successful command into a crash.
-
-    One broken instance must not stop the others being wiped.
-    """
-
-    class Exploding(WorthlessHome):
-        def zero_cached_fernet_key(self) -> None:
-            raise RuntimeError("interpreter is already tearing down")
-
-    bad = Exploding(base_dir=tmp_path)
-    _track_home_holding_key(bad)
-
-    good = WorthlessHome(base_dir=tmp_path)
-    good._seed_cached_fernet_key(_KEY)
-    buf = good._cached_fernet_key
-    assert buf is not None
-
-    _zero_cached_fernet_keys_at_exit()  # must not propagate
-
-    assert bytes(buf) == b"\x00" * len(_KEY), "a raising peer must not block other wipes"
-
-
-# --- worthless-g648 -------------------------------------------------------
+# --- worthless-g648: the repository's copy --------------------------------
 
 
 def test_repository_close_zeroes_its_own_copy(tmp_path: Path) -> None:
     """The copy `doctor` was leaking: the repository's, not the caller's."""
-    key = bytearray(_KEY)
-    repo = ShardRepository(str(tmp_path / "w.db"), key)
+    repo = ShardRepository(str(tmp_path / "w.db"), bytearray(_KEY))
 
     inner = repo._fernet_key_bytes
     assert inner is not None and bytes(inner) == _KEY, "repo holds its own copy"
 
     repo.close()
 
-    assert bytes(inner) == b"\x00" * len(_KEY), "close() must zero the repo's copy in place"
+    assert bytes(inner) == _ZEROS, "close() must zero the repo's copy in place"
     assert repo._fernet is None, "the Fernet instance must be released"
 
 
-def test_every_repository_construction_site_is_closed() -> None:
-    """Every ShardRepository(...) in the CLI must have a close() in its module.
+def test_repository_close_is_idempotent(tmp_path: Path) -> None:
+    repo = ShardRepository(str(tmp_path / "w.db"), bytearray(_KEY))
+    repo.close()
+    repo.close()  # must not raise
 
-    Replaces an earlier test that grepped for `repo.close()` near the last
-    `finally:` in one file. That version was brittle (it would pass on a
-    commented-out call) and, worse, it passed while the DEFAULT `doctor` path
-    leaked two copies — it only ever looked at runner.py. Reviewers caught it;
-    the test did not.
 
-    Still static, because constructing a real repository needs a provisioned
-    home. But it now covers every site rather than one, so a NEW leak in a new
-    command fails here instead of shipping.
+_PLACEHOLDER_HINTS = ("placeholder", "PLACEHOLDER")
+
+
+def _closed_names(fn: ast.AST) -> set[str]:
+    """Names on which ``<name>.close()`` is called anywhere in *fn*."""
+    return {
+        n.func.value.id
+        for n in ast.walk(fn)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and n.func.attr == "close"
+        and isinstance(n.func.value, ast.Name)
+    }
+
+
+def _real_key_repo_bindings(fn: ast.AST) -> list[tuple[str, int]]:
+    """(variable, lineno) for each ShardRepository built from real key material.
+
+    Placeholder keys are excluded by inspecting the ARGUMENT, not the source
+    text: an earlier version skipped any line containing the word "placeholder",
+    so a trailing comment could launder a genuine leak.
+    """
+    out: list[tuple[str, int]] = []
+    for n in ast.walk(fn):
+        if not isinstance(n, ast.Assign) or len(n.targets) != 1:
+            continue
+        target, call = n.targets[0], n.value
+        if not isinstance(target, ast.Name):
+            continue
+        if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)):
+            continue
+        if call.func.id != "ShardRepository" or len(call.args) < 2:
+            continue
+        if any(h in ast.unparse(call.args[1]) for h in _PLACEHOLDER_HINTS):
+            continue
+        out.append((target.id, n.lineno))
+    return out
+
+
+def test_every_repository_built_from_a_real_key_is_closed_in_the_same_function() -> None:
+    """Per-VARIABLE, via AST. Three weaker versions of this passed on real leaks.
+
+    v1 grepped one file for ``repo.close()`` near the last ``finally:`` — it
+    looked only at runner.py while three other sites leaked. v2 asked whether
+    the MODULE contained any ``.close()`` — deleting a close() that the same PR
+    had just added still passed. Both were static string matching pretending to
+    be a guard.
     """
     cli = Path(__file__).resolve().parents[1] / "src/worthless/cli"
     offenders: list[str] = []
     checked = 0
 
     for path in sorted(cli.rglob("*.py")):
-        lines = path.read_text(encoding="utf-8").splitlines()
-        closes = any(".close()" in ln for ln in lines)
-
-        for lineno, line in enumerate(lines, 1):
-            if "ShardRepository(" not in line or "import" in line:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
                 continue
-            # Per-SITE, not per-module: service/_common.py builds one repository
-            # from PLACEHOLDER_FERNET_KEY (it only needs the DB, never decrypts)
-            # while a different function in the same file touches the real key.
-            # A module-level check called that a master-key leak. It is not.
-            if "placeholder" in line.lower():
-                continue
-            checked += 1
-            if not closes:
-                offenders.append(
-                    f"{path.relative_to(cli.parents[2])}:{lineno} builds a "
-                    "ShardRepository from real key material but the module never "
-                    "closes one — the repository's copy survives the command"
-                )
+            closed = _closed_names(node)
+            for name, lineno in _real_key_repo_bindings(node):
+                checked += 1
+                if name not in closed:
+                    offenders.append(
+                        f"{path.relative_to(cli.parents[2])}:{lineno} in "
+                        f"{node.name}(): '{name}' is built from real key material "
+                        "and never closed — the repository's copy survives"
+                    )
 
     assert checked >= 4, (
-        f"only {checked} real-key ShardRepository sites found; the glob or the "
-        "layout moved and this test no longer covers what it claims"
+        f"only {checked} real-key ShardRepository sites found; the layout moved "
+        "and this test no longer covers what it claims"
     )
     assert not offenders, "Un-closed ShardRepository (worthless-g648):\n" + "\n".join(offenders)
 
 
-def test_zero_buf_runs_before_close_in_cleanup_paths() -> None:
-    """A raising close() must not leave the caller's key live.
+def test_the_sweep_can_actually_see_a_leak() -> None:
+    """Guard the guard: the AST helpers must flag an unclosed real-key build.
 
-    Ordering matters in the `finally`: zero the buffer we own first, then close.
-    The reverse order means a close() failure both skips the zeroing and masks
-    the original exception.
+    Both previous versions of the sweep passed against genuine leaks. This pins
+    the detection itself against synthetic sources, so a future refactor of the
+    helpers cannot quietly neuter them.
     """
-    root = Path(__file__).resolve().parents[1]
-    for rel in (
-        "src/worthless/cli/commands/doctor/runner.py",
-        "src/worthless/cli/commands/up.py",
-    ):
-        text = (root / rel).read_text(encoding="utf-8")
-        block = text[text.rindex("finally:") :]
-        # Strip comments: an explanatory comment mentioning close() would
-        # otherwise be matched as the call itself (it was, first time round).
-        block = "\n".join(ln.split("#", 1)[0] for ln in block.splitlines())
-        if "zero_buf" not in block or "close()" not in block:
-            continue
-        assert block.index("zero_buf") < block.index("close()"), (
-            f"{rel}: zero_buf must precede close() in the cleanup path"
-        )
+    leaking = ast.parse(
+        "def f(home):\n"
+        "    repo = ShardRepository(str(home.db_path), home.fernet_key)\n"
+        "    return repo\n"
+    ).body[0]
+    binds = _real_key_repo_bindings(leaking)
+    assert binds and binds[0][0] == "repo", "must spot a real-key build and name it"
+    assert "repo" not in _closed_names(leaking), "must spot the missing close()"
+
+    # The hole that beat v3: one function building TWO repositories, where
+    # closing the first satisfied a per-function check for the second.
+    two = ast.parse(
+        "def f(home):\n"
+        "    a = ShardRepository(str(home.db_path), home.fernet_key)\n"
+        "    b = ShardRepository(str(home.db_path), home.fernet_key)\n"
+        "    a.close()\n"
+    ).body[0]
+    names = [n for n, _ in _real_key_repo_bindings(two)]
+    assert names == ["a", "b"], "must see BOTH builds"
+    assert _closed_names(two) == {"a"}, "closing 'a' must not vouch for 'b'"
+
+    fixed = ast.parse(
+        "def f(home):\n"
+        "    repo = ShardRepository(str(home.db_path), home.fernet_key)\n"
+        "    try:\n"
+        "        return repo\n"
+        "    finally:\n"
+        "        repo.close()\n"
+    ).body[0]
+    assert "repo" in _closed_names(fixed), "must accept a closed build"
+
+    placeholder = ast.parse(
+        "def f(home):\n    repo = ShardRepository(str(home.db_path), PLACEHOLDER_FERNET_KEY)\n"
+    ).body[0]
+    assert not _real_key_repo_bindings(placeholder), (
+        "a placeholder key holds no secret and must not be flagged"
+    )
+
+    # The hole in v2: a comment must not be able to launder a real-key build.
+    disguised = ast.parse(
+        "def f(home):\n"
+        "    repo = ShardRepository(str(home.db_path), home.fernet_key)  # placeholder\n"
+    ).body[0]
+    assert _real_key_repo_bindings(disguised), (
+        "a trailing 'placeholder' comment must NOT hide a real-key build — "
+        "the exclusion reads the argument, not the source line"
+    )
