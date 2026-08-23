@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import base64
 import hmac
 import logging
@@ -11,6 +12,7 @@ import secrets
 import sqlite3
 import threading
 import time
+import weakref
 from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -207,6 +209,7 @@ class WorthlessHome:
                     logger.debug("WorthlessHome.fernet_key cache MISS — reading from keystore")
                     try:
                         self._cached_fernet_key = read_fernet_key(self.base_dir)
+                        _track_home_holding_key(self)
                     except WorthlessError as exc:
                         if exc.code == ErrorCode.KEY_NOT_FOUND and _shard_rows_present(self):
                             raise WorthlessError(
@@ -228,6 +231,67 @@ class WorthlessHome:
         """
         with self._cache_lock:
             self._cached_fernet_key = bytearray(key)
+        _track_home_holding_key(self)
+
+    def zero_cached_fernet_key(self) -> None:
+        """Wipe the cached master key in place (SR-02, worthless-m7n0).
+
+        The cache exists so one CLI invocation triggers exactly one keychain
+        prompt. Nothing used to clear it: there was no ``__del__``, no
+        ``atexit`` hook and no explicit zero, so every ``lock`` / ``unlock`` /
+        ``doctor`` / ``status`` / ``up`` handed the interpreter a bytearray of
+        live master-key bytes to garbage-collect on a normal exit.
+
+        Zeroes in place rather than rebinding to ``None``: dropping the
+        reference would leave the original buffer's bytes intact in the freed
+        allocation, which is the whole failure being fixed. Idempotent, and
+        safe to call on an instance that never populated the cache.
+        """
+        with self._cache_lock:
+            if self._cached_fernet_key is not None:
+                zero_buf(self._cached_fernet_key)
+
+
+# worthless-m7n0: every WorthlessHome that has actually populated its key cache.
+#
+# A list of weakrefs rather than a WeakSet, because WorthlessHome is an eq=True
+# dataclass and therefore unhashable -- a WeakSet raises TypeError on insert.
+# Weak, so tracking never keeps an instance (or its key bytes) alive, and NOT an
+# atexit registration per instance: atexit holds a STRONG reference to whatever
+# it registers, which would guarantee the key survives to interpreter shutdown --
+# the exact opposite of the intent.
+_HOMES_HOLDING_KEY: list[weakref.ref[WorthlessHome]] = []
+_HOMES_HOLDING_KEY_LOCK = threading.Lock()
+
+
+def _track_home_holding_key(home: WorthlessHome) -> None:
+    """Register *home* for zeroing at exit. Idempotent, identity-based."""
+    with _HOMES_HOLDING_KEY_LOCK:
+        _HOMES_HOLDING_KEY[:] = [r for r in _HOMES_HOLDING_KEY if r() is not None]
+        if not any(r() is home for r in _HOMES_HOLDING_KEY):
+            _HOMES_HOLDING_KEY.append(weakref.ref(home))
+
+
+def _tracked_homes_holding_key() -> list[WorthlessHome]:
+    """Live homes currently registered for zeroing (dead refs dropped)."""
+    with _HOMES_HOLDING_KEY_LOCK:
+        return [h for h in (r() for r in _HOMES_HOLDING_KEY) if h is not None]
+
+
+@atexit.register
+def _zero_cached_fernet_keys_at_exit() -> None:
+    """Zero every live cached master key before the interpreter tears down.
+
+    Best-effort by construction: shutdown may already be part-way through, so a
+    failure here must never turn a successful command into a crash, and one
+    broken instance must not stop the rest being wiped. Nothing is logged --
+    logging may itself be torn down, and there is nothing actionable to say.
+    """
+    for home in _tracked_homes_holding_key():
+        try:
+            home.zero_cached_fernet_key()
+        except Exception:  # noqa: BLE001,S110  # nosec B110 — shutdown must not raise
+            pass
 
 
 def _fernet_key_present(home: WorthlessHome) -> bool:
