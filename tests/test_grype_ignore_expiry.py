@@ -928,3 +928,110 @@ def test_ordinary_names_including_dotted_ones_are_fine(tmp_path: Path, name: str
         f'    expiry: "2099-01-01"\n',
     )
     assert _load().check(cfg, TODAY) == []
+
+
+# Every workflow that runs on a cron must be watched by the failure alarm.
+# scheduled.yml failed 45 consecutive runs across four months and reached
+# nobody; GitHub's default owner email is demonstrably not a channel anyone
+# reads. WOR-878.
+ALARM_WORKFLOW = REPO / ".github" / "workflows" / "scheduled-failure-alarm.yml"
+
+
+def _scheduled_workflows() -> list[Path]:
+    """Every workflow carrying a `schedule:` trigger."""
+    root = REPO / ".github" / "workflows"
+    # BOTH extensions. GitHub honours .yaml, so globbing *.yml only would let a
+    # cron workflow named .yaml go unwatched while this guard stayed green.
+    found = []
+    for wf in sorted([*root.glob("*.yml"), *root.glob("*.yaml")]):
+        doc = yaml.safe_load(wf.read_text()) or {}
+        triggers = doc.get(True) or doc.get("on") or {}
+        if isinstance(triggers, dict) and "schedule" in triggers:
+            found.append(wf)
+    return found
+
+
+def test_a_failing_scheduled_run_reaches_a_human() -> None:
+    """The alarm exists, and watches every workflow rather than a list of names.
+
+    `workflows:` is a hand-maintained list that must agree with the set of cron
+    workflows — the same shape as the push/pull_request path filters in
+    WOR-874, which had drifted apart before anyone looked. Omitting the key
+    would watch everything, but actionlint and zizmor both reject that form.
+
+    So this test IS the drift protection: it asserts the list equals the set of
+    workflows carrying a `schedule:` trigger, in both directions. Adding a cron
+    workflow without wiring the alarm fails here rather than going unwatched.
+    """
+    assert ALARM_WORKFLOW.exists(), (
+        "no scheduled-failure alarm: a cron workflow can fail indefinitely with "
+        "nobody told, which is how three checks stayed broken for four months"
+    )
+    doc = yaml.safe_load(ALARM_WORKFLOW.read_text())
+    triggers = doc.get(True) or doc.get("on") or {}
+    assert "workflow_run" in triggers, "the alarm must fire on other runs completing"
+
+    watched = set(triggers["workflow_run"].get("workflows") or [])
+    actual = set()
+    for wf in _scheduled_workflows():
+        actual.add((yaml.safe_load(wf.read_text()) or {})["name"])
+
+    unwatched = actual - watched
+    assert not unwatched, (
+        f"these workflows run on a cron but the alarm does not watch them: "
+        f"{sorted(unwatched)}. They can fail indefinitely with nobody told — "
+        f"add them to `workflows:` in scheduled-failure-alarm.yml."
+    )
+    stale = watched - actual
+    assert not stale, (
+        f"the alarm watches {sorted(stale)}, which no longer run on a cron. "
+        f"A list that has drifted once will drift again — remove them."
+    )
+
+
+def test_the_alarm_can_actually_file_an_issue() -> None:
+    """`issues: write` is the whole mechanism — without it the alarm silently 403s.
+
+    This is the failure mode the ticket exists to end: a control that looks
+    present, runs green, and does nothing. A missing permission produces
+    exactly that, because the job still succeeds.
+    """
+    job = yaml.safe_load(ALARM_WORKFLOW.read_text())["jobs"]["alarm"]
+    assert job.get("permissions", {}).get("issues") == "write", (
+        "the alarm job lacks `issues: write`, so its API call 403s while the "
+        "job reports success — an alarm that cannot raise anything"
+    )
+    assert isinstance(job.get("timeout-minutes"), int), "the alarm job has no timeout"
+    # Assert the CALLS the alarm depends on, not merely that the step mentions
+    # a label. An earlier version checked only for the string "getLabel", which
+    # would have stayed green with `issues.create` deleted outright — a guard
+    # satisfiable while the property is false, which is the defect this whole
+    # suite exists to prevent.
+    script = str(job["steps"][0].get("with", {}).get("script", ""))
+    # Match the call WITH its opening paren. `issues.create` is a substring of
+    # both `issues.createComment` and `issues.createLabel`, so a bare substring
+    # check stayed green with the real create deleted — this guard was itself
+    # satisfiable while false on its first draft.
+    for call, why in (
+        ("issues.create({", "nothing would ever be filed"),
+        ("issues.createComment({", "a repeat failure would file a duplicate"),
+        ("issues.getLabel({", "the label is applied but never checked for"),
+        ("issues.createLabel({", "a missing label would crash the first alarm"),
+    ):
+        assert call in script, f"the alarm never calls {call.rstrip('({')}: {why}"
+
+    # The tolerance expression, not the bare number — "422" also appears in the
+    # comment explaining it, so checking the digits alone proved nothing.
+    assert "status !== 422" in script, (
+        "createLabel is not tolerant of 422 already_exists. Two cron workflows "
+        "failing in the same minute both create the label; the loser throws and "
+        "ITS alarm is lost — the exact failure this workflow prevents, one "
+        "layer down."
+    )
+
+    condition = str(job.get("if", ""))
+    assert "conclusion == 'failure'" in condition, "the alarm must fire only on failure"
+    assert "event == 'schedule'" in condition, (
+        "the alarm must fire only on SCHEDULED runs — a PR failure is already "
+        "visible in that PR's check list and needs no second channel"
+    )

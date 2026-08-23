@@ -50,8 +50,8 @@ worthless --json     # read-only state report, never writes
 ## Install from source
 
 ```bash
-git clone https://github.com/shacharm2/worthless && cd worthless
+git clone https://github.com/oblangatas/worthless && cd worthless
 uv pip install -e .
 ```
 
-See the [README quickstart](https://github.com/shacharm2/worthless/blob/main/README.md#quickstart) for the full walkthrough and command reference.
+See the [README quickstart](https://github.com/oblangatas/worthless/blob/main/README.md#quickstart) for the full walkthrough and command reference.

@@ -12,7 +12,7 @@ Worthless exists to protect API keys, a vulnerability here has real consequences
 
 ### How to Report
 
-- **Preferred:** [GitHub Private Vulnerability Reporting](https://github.com/shacharm2/worthless/security/advisories/new)
+- **Preferred:** [GitHub Private Vulnerability Reporting](https://github.com/oblangatas/worthless/security/advisories/new)
 - **Alternative:** Email `security@wless.io`
 
 ### Response timeline
