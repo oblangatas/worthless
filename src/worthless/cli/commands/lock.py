@@ -2540,7 +2540,10 @@ def _lock_keys(
     result = asyncio.run(_lock_async())
     relock_count = result.total - result.fresh_count
 
-    if result.fresh_count and env_path.exists():
+    # NOT gated on ``fresh_count``: an .env whose only credential was skipped
+    # (e.g. a WOR-837 OAuth token) locks zero keys but still holds a live
+    # plaintext secret, so it must be tightened to owner-only all the same.
+    if env_path.exists():
         current = env_path.stat().st_mode
         if current & (stat.S_IRWXG | stat.S_IRWXO):
             env_path.chmod(current & ~(stat.S_IRWXG | stat.S_IRWXO))
