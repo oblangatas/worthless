@@ -248,6 +248,13 @@ def register_wrap_commands(app: typer.Typer) -> None:
         """Start ephemeral proxy, inject env vars, run COMMAND, clean up."""
         fail_if_windows()
 
+        # Before get_home(): it loads home.fernet_key into memory, and cores
+        # must already be off by then (dupf.10). The dumpable bit is reset by
+        # execve, so COMMAND stays ptrace-able (gdb/lldb/py-spy still attach).
+        # RLIMIT_CORE, however, IS inherited across execve — the wrapped
+        # program does not get core files. That predates this change.
+        disable_core_dumps()
+
         # Load home, verify keys enrolled
         home = get_home()
         aliases = _list_enrolled_aliases(home)
@@ -262,9 +269,6 @@ def register_wrap_commands(app: typer.Typer) -> None:
         # silently spawning a child whose proxy might not be in the path is
         # exactly the silent-bypass class WOR-658 was built to expose.
         _warn_if_sentinel_degraded(home)
-
-        # Suppress core dumps
-        disable_core_dumps()
 
         # The proxy refuses to start without an IPC peer, so the sidecar
         # must come up first. ``up.py`` uses the same ordering.

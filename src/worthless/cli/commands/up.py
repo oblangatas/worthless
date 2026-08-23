@@ -684,6 +684,9 @@ def register_up_commands(app: typer.Typer) -> None:
         """Start the proxy server (foreground or daemon)."""
         fail_if_windows()
         console = get_console()
+        # Before get_home(): it loads home.fernet_key into memory, and cores
+        # must already be off by then (dupf.10).
+        disable_core_dumps()
         home = get_home()
 
         actual_port = _resolve_port(port)
@@ -725,9 +728,6 @@ def register_up_commands(app: typer.Typer) -> None:
                     # Stale PID file -- reclaim
                     cleanup_stale_pid(pid_file)
                     console.print_warning(f"Reclaimed stale PID file (was PID {existing_pid})")
-
-        # Disable core dumps
-        disable_core_dumps()
 
         # Build proxy env
         proxy_env = build_proxy_env(home)

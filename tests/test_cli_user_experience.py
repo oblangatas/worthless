@@ -259,6 +259,14 @@ class TestLockUx:
         import sys
 
         monkeypatch.setattr(sys, "platform", "linux")
+        # Faking the platform makes the core-dump hardening believe it is on
+        # Linux while the host is not, so it cannot load libc and correctly
+        # fail-closes (dupf.10) — which would abort lock before it ever prints
+        # the keychain hint this test is about. Stub it: this test asserts UX
+        # messaging, and core-dump behavior has its own suite.
+        monkeypatch.setattr(
+            "worthless.cli.commands.lock.disable_core_dumps", lambda *_a, **_k: None
+        )
         result = runner.invoke(
             app,
             ["lock", "--env", str(env_with_openai)],

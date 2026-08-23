@@ -749,8 +749,10 @@ def register_unlock_commands(app: typer.Typer) -> None:
         """
         console = get_console()
         db_was_missing, missing_db_path = _db_missing_after_completed_bootstrap()
-        home = get_home()
+        # Before get_home(): it loads home.fernet_key into memory, and cores
+        # must already be off by then (dupf.10).
         disable_core_dumps()
+        home = get_home()
 
         # Detect whether the user passed --env explicitly. The HF4
         # discriminator (raise on shard-shape values without DB rows)
