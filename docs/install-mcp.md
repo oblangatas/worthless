@@ -89,7 +89,7 @@ AI at the proxy via `OPENAI_BASE_URL` — which we have **not** verified:
 We have **not** verified that Cursor honors a custom `OPENAI_BASE_URL` for its
 built-in AI features. These steps mirror the Claude Code approach and are a
 reasonable starting point — but treat them as unverified. Tried it? [Open an
-issue](https://github.com/shacharm2/worthless/issues) and tell us what happened.
+issue](https://github.com/oblangatas/worthless/issues) and tell us what happened.
 :::
 
 Start the proxy, then configure Cursor's environment:

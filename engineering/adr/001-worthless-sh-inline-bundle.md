@@ -34,7 +34,7 @@ Per threat model findings F-12, F-34, F-35 — **A alone is not enough** if atta
    X-Worthless-Script-Sha256: <hex>
    X-Worthless-Script-Tag: v0.3.0
    X-Worthless-Script-Commit: <full sha>
-   X-Worthless-Build-Provenance: https://github.com/shacharm2/worthless/actions/runs/XXX
+   X-Worthless-Build-Provenance: https://github.com/oblangatas/worthless/actions/runs/XXX
    ```
 5. **Sigstore-signed artifact** (`install.sh.sig` + cert) published as GitHub Release asset. `cosign verify-blob` works against the published identity.
 

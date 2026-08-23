@@ -19,6 +19,7 @@ from pathlib import Path
 import aiosqlite
 
 from worthless.storage.models import EncryptedShard
+from worthless.storage.sqlite import connect as sqlite_connect
 
 
 class ShardReader:
@@ -33,7 +34,7 @@ class ShardReader:
 
     @asynccontextmanager
     async def _connect(self) -> AsyncIterator[aiosqlite.Connection]:
-        async with aiosqlite.connect(self._db_path) as db:
+        async with sqlite_connect(self._db_path) as db:
             await db.execute("PRAGMA foreign_keys = ON")
             yield db
 

@@ -75,7 +75,7 @@ Minimal, honest, no cause speculation. Channels in order:
 4. **Status page** — does not exist yet (§5).
 
 **Holding statement:**
-> The docs.wless.io and wless.io sites are returning 403 errors as of 2026-05-30 ~14:30 UTC. We are investigating and will restore service shortly. The CLI, proxy, and your existing keys are unaffected — this is a documentation-site issue only. Install instructions live at github.com/shacharm2/worthless in the meantime.
+> The docs.wless.io and wless.io sites are returning 403 errors as of 2026-05-30 ~14:30 UTC. We are investigating and will restore service shortly. The CLI, proxy, and your existing keys are unaffected — this is a documentation-site issue only. Install instructions live at github.com/oblangatas/worthless in the meantime.
 
 ## §5 Post-Incident Hardening (top 3)
 

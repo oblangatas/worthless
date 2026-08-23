@@ -1,6 +1,6 @@
 # PR #292 — merge plan (CLOSED)
 
-**PR:** https://github.com/shacharm2/worthless/pull/292 — **MERGED**
+**PR:** https://github.com/oblangatas/worthless/pull/292 — **MERGED**
 **Merge commit:** `876d102` on `main` (2026-06-25)
 
 Archive only. Living verification state → `engineering/testing/wor-193-wave-verification.md`.

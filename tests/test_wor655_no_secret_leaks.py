@@ -55,7 +55,7 @@ from worthless.openclaw.errors import (
 
 from tests.helpers import fake_anthropic_key, fake_openai_key
 
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner()
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +224,7 @@ class TestScanRenderRedaction:
         f = tmp_path / "config.py"
         f.write_text(f'API_KEY = "{key}"\n')
         result = runner.invoke(app, ["scan", "--json", str(f)])
-        assert result.exit_code == 1, result.output
+        assert result.exit_code == 1, result.stdout
         data = json.loads(result.stdout)
         assert data["findings"][0]["value_preview"] == "****"
         # No real prefix bytes anywhere in the structured payload.
@@ -235,7 +235,7 @@ class TestScanRenderRedaction:
         f = tmp_path / "config.py"
         f.write_text(f'API_KEY = "{key}"\n')
         result = runner.invoke(app, ["scan", "--show-suffix", str(f)])
-        assert result.exit_code == 1, result.output
+        assert result.exit_code == 1, result.stdout
         combined = result.stdout + result.stderr
         # The old behaviour leaked the last 4 real chars — never again.
         assert key[-4:] not in combined
@@ -258,7 +258,7 @@ class TestScanRenderRedaction:
         f.write_text(f'{{"a":"{k1}","b":"{k2}"}}\n')
 
         result = runner.invoke(app, ["scan", "--show-suffix", str(f)])
-        assert result.exit_code == 1, result.output
+        assert result.exit_code == 1, result.stdout
         combined = result.stdout + result.stderr
 
         fp1 = _make_alias("openai", k1).split("-")[-1]

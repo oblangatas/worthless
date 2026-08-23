@@ -1,6 +1,6 @@
 # PR #290 — Claude review handoff
 
-**URL:** https://github.com/shacharm2/worthless/pull/290
+**URL:** https://github.com/oblangatas/worthless/pull/290
 **Branch:** `gsd/wor-193-wave3-717-integration` → **`gsd/wor-193-service-lifecycle`** (#289)
 **Stack position:** 3 of 4
 **Tip:** `173f4ea1` (5 commits)

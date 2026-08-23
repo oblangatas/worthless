@@ -1,6 +1,6 @@
 # PR #288 — Claude review handoff
 
-**URL:** https://github.com/shacharm2/worthless/pull/288
+**URL:** https://github.com/oblangatas/worthless/pull/288
 **Branch:** `gsd/wor-193-wave1-service-skeleton` → **`main`**
 **Stack position:** 1 of 4 (merge first)
 **Tip:** `174d5ebd` (8 commits)

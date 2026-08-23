@@ -135,7 +135,7 @@ def test_full_dogfood_lock_break_doctor_recover(
 
     # Step 6b — doctor --json (WOR-753): the broken row now ships its fix.
     # Real-journey dogfood of the remediation field — not a seeded unit.
-    json_runner = CliRunner(mix_stderr=False)
+    json_runner = CliRunner()
     doctor_json = json_runner.invoke(app, ["doctor", "--json"], env=cli_env)
     assert doctor_json.exit_code == 0, f"doctor --json failed:\n{doctor_json.output}"
     payload = json.loads(doctor_json.stdout)

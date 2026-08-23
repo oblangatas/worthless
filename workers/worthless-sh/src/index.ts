@@ -155,7 +155,7 @@ function buildSecurityTxt(): string {
   return [
     "# Worthless security policy — RFC 9116",
     "Contact: mailto:security@worthless.sh",
-    "Contact: https://github.com/shacharm2/worthless/security/advisories/new",
+    "Contact: https://github.com/oblangatas/worthless/security/advisories/new",
     `Expires: ${expiresIso}`,
     "Preferred-Languages: en",
     "Canonical: https://worthless.sh/.well-known/security.txt",

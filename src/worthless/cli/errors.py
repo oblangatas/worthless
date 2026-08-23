@@ -205,6 +205,28 @@ def error_boundary(fn=None, *, exit_code: int = 1):  # noqa: ANN001, ANN201
                 return func(*args, **kwargs)
             except typer.Exit:
                 raise
+            except (typer.Abort, KeyboardInterrupt):
+                # Ctrl+C is a cancellation, not a crash. ``typer.confirm`` raises
+                # ``click.Abort`` (a RuntimeError), which the generic ``except
+                # Exception`` below turned into "WRTLS-199: an internal error
+                # occurred" — worst on the commands that touch real API keys, where
+                # the user cannot tell whether it died halfway (worthless-6xuv).
+                #
+                # Handled HERE rather than at each call site: there are nine
+                # ``typer.confirm`` prompts across uninstall, lock, doctor, service
+                # and the default command. Patching them individually is how this
+                # bug survived its first fix.
+                #
+                # The message stays generic — a prompt can appear mid-command, so
+                # the boundary cannot honestly promise nothing changed. Commands
+                # whose prompt runs before any work say so themselves.
+                #
+                # 130 = terminated by SIGINT. Exiting 0 would tell a script or agent
+                # the command succeeded; a deliberate "n" still exits 0.
+                from worthless.cli.console import get_console
+
+                get_console().print_hint("Cancelled.")
+                raise typer.Exit(code=130) from None
             except WorthlessError as exc:
                 if _debug:
                     _print_redacted_traceback()

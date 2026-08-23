@@ -12,8 +12,10 @@ import json
 import sqlite3
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
+import worthless.cli.commands.uninstall as uninstall_mod
 from worthless.cli.app import app
 from worthless.cli.bootstrap import WorthlessHome
 from worthless.cli.errors import ErrorCode, WorthlessError
@@ -716,6 +718,37 @@ def test_uninstall_zeros_keys_when_the_mode_confirm_aborts(
     assert result.exit_code != 0, "an aborted uninstall must not silently wipe"
     assert home_dir.base_dir.exists(), "abort before the wipe → home intact"
     assert spied, "SR-02: built restore keys must be zeroed even when the confirm aborts"
+
+
+def test_ctrl_c_at_the_confirm_prompt_reads_as_cancelled_not_an_internal_error(
+    monkeypatch: pytest.MonkeyPatch, home_dir
+) -> None:
+    """Ctrl+C at the uninstall prompt must say "cancelled", never "internal error".
+
+    ``typer.confirm`` raises ``click.Abort`` on Ctrl+C. Unhandled, that surfaced as
+    ``WRTLS-199: an internal error occurred`` (worthless-6xuv, observed live on
+    0.3.10). That is the worst possible message on the one command that restores
+    real API keys: the user cannot tell whether nothing happened or whether it
+    died halfway through and left their .env files half-restored.
+
+    Aborting at the prompt is identical to answering "n" — nothing has been
+    touched yet — so it must produce the same calm outcome.
+    """
+    monkeypatch.setattr(uninstall_mod, "_stdin_is_tty", lambda: True)
+
+    def _ctrl_c(*_a, **_k):  # noqa: ANN002, ANN003, ANN202
+        raise typer.Abort()
+
+    monkeypatch.setattr(typer, "confirm", _ctrl_c)
+
+    result = runner.invoke(app, ["uninstall"], env={"WORTHLESS_HOME": str(home_dir.base_dir)})
+
+    combined = (result.output or "").lower()
+    assert "internal error" not in combined, (
+        "Ctrl+C surfaced an internal error — the user cannot tell if their keys are safe"
+    )
+    assert "cancel" in combined, "an aborted uninstall must say it was cancelled"
+    assert home_dir.base_dir.exists(), "cancelling must not remove anything"
 
 
 @pytest.mark.parametrize("extra", [[], ["--force"]], ids=["no-force", "force"])

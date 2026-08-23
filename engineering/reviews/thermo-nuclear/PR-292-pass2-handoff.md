@@ -14,7 +14,7 @@ uv run pytest tests/cli/test_service_backends.py tests/cli/test_start_supervised
 ## Claude (security + thread closure)
 
 ```
-Review PR #292 on shacharm2/worthless (branch gsd/wor-193-wave3b-adversarial → main).
+Review PR #292 on oblangatas/worthless (branch gsd/wor-193-wave3b-adversarial → main).
 
 Context: Wave 3b adversarial guards. #288–#290 already merged. Pass-1 fixed:
 - keystore _validate_fernet_file S_ISREG guard

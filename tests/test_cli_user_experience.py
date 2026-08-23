@@ -20,8 +20,8 @@ from worthless.storage.repository import ShardRepository, StoredShard
 
 from tests.helpers import fake_anthropic_key, fake_openai_key
 
-# mix_stderr=False so we can inspect stdout vs stderr independently
-runner = CliRunner(mix_stderr=False)
+# click >=8.2 keeps stderr separate so we can inspect stdout vs stderr independently
+runner = CliRunner()
 
 # Scanner-safe fake keys (generated at runtime to avoid false positives).
 _OPENAI_KEY = fake_openai_key()
