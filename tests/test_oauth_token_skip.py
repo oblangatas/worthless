@@ -15,6 +15,7 @@ has no dev OAuth, OpenRouter OAuth yields a genuine static key).
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 
 from dotenv import dotenv_values
@@ -183,4 +184,51 @@ class TestOAuthSkipSuppressesProtectionVerdict:
         )
         assert "plaintext" in flat.lower(), (
             f"lock must say the skipped token is still in the file; output:\n{result.output}"
+        )
+
+    def test_oauth_only_env_does_not_claim_other_keys_were_locked(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """The skip warning must not offer comfort that only holds for a mixed .env.
+
+        The warning once ended "— your other keys were locked normally." On an
+        OAuth-only file there are no other keys and nothing was locked, so that
+        clause flatly contradicted the "Nothing was locked" line printed right
+        under it. The summary already carries the fact; the warning must not
+        restate it falsely.
+        """
+        env = tmp_path / ".env"
+        env.write_text(f"ANTHROPIC_API_KEY={fake_key('sk-ant-oat01-', 'wor837-onlyskip')}\n")
+
+        result = runner.invoke(
+            app,
+            ["lock", "--env", str(env)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+        )
+        assert result.exit_code == 0, result.output
+        low = _flat(result.output).lower()
+
+        # Not vacuous: the skip really was reported.
+        assert "oauth" in low, f"lock must report the skip; output:\n{result.output}"
+
+        # Match the SHAPE of the false claim, not the one sentence that carried
+        # it — a reworded relapse ("the rest of your keys locked fine") is the
+        # same lie. Nothing was locked here, so any claim that some *other* key
+        # was, or that locking went fine, is false however it is phrased.
+        for pattern in (
+            r"\b(other|remaining|rest of (?:your|the))\b[^.]*\block",
+            r"\block(?:ed)?\s+(?:normally|fine|as usual|successfully|without issue)\b",
+            # The house register for this comfort is "Your other keys are safe."
+            # (_remediation.py:25,51; uninstall.py:660) — no "lock" word at all,
+            # so the patterns above would miss a relapse phrased that way.
+            r"\b(?:other|remaining|rest of (?:your|the))\b[^.]*\b(?:safe|protected|secure)\b",
+        ):
+            assert re.search(pattern, low) is None, (
+                f"lock claimed keys were locked on an OAuth-only .env where "
+                f"nothing was locked (matched {pattern!r}); output:\n{result.output}"
+            )
+
+        # The truthful summary is the one line allowed to speak to what happened.
+        assert "nothing was locked" in low, (
+            f"the summary must state nothing was locked; output:\n{result.output}"
         )
