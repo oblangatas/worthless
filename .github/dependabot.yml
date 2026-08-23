@@ -24,6 +24,13 @@ updates:
     # the correct tool instead: the file stays where Snyk registered it, and
     # Dependabot is told to skip it explicitly.
     #
+    # SCOPE: exclude-paths suppresses SCHEDULED version updates only. It
+    # does NOT suppress Dependabot SECURITY update PRs — dependabot-core
+    # issue 14408. The nine no-ops this was added for were all scheduled
+    # bumps, so they are covered, but do not read this as "Dependabot will
+    # never touch this file again": a CVE in a pinned dependency will
+    # still file a security PR against it.
+    #
     # Do NOT move requirements.txt to silence Dependabot. WOR-904.
     exclude-paths:
       - requirements.txt
