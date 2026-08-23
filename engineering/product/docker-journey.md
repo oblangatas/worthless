@@ -9,14 +9,14 @@ Source: ux-researcher Docker pass + review of WOR-249 backlog.
    ```
    worthless.sh/docker — Docker install path
    Checking Docker... found docker 24.0.7
-   Pulling oblangatas/worthless:v0.3.0 (~50MB)...
+   Pulling shacharm2/worthless:v0.3.0 (~50MB)...
    ████████████████████████ 100%
    ```
 3. Consent prompt (unless `--yes`):
    ```
    About to add alias to ~/.zshrc:
      # BEGIN worthless
-     alias worthless='docker run --rm -it -v $PWD:/work -v ~/.worthless:/root/.worthless oblangatas/worthless:v0.3.0'
+     alias worthless='docker run --rm -it -v $PWD:/work -v ~/.worthless:/root/.worthless shacharm2/worthless:v0.3.0'
      # END worthless
    Continue? [y/N]:
    ```
@@ -37,7 +37,7 @@ Source: ux-researcher Docker pass + review of WOR-249 backlog.
 - User refuses alias (`n` at prompt) → print alternate usage:
   ```
   Not writing alias. Run worthless with:
-    docker run --rm -it -v $PWD:/work -v ~/.worthless:/root/.worthless oblangatas/worthless:v0.3.0 <subcommand>
+    docker run --rm -it -v $PWD:/work -v ~/.worthless:/root/.worthless shacharm2/worthless:v0.3.0 <subcommand>
   ```
 
 ## Where consent matters most

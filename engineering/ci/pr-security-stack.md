@@ -26,7 +26,7 @@ Additive layers on pull requests. **CodeRabbit stays** for LLM-style review (int
 | Step | Status | Action |
 |------|--------|--------|
 | CodeQL default setup | Done (configured 2026-04-24) | Repo → Settings → Code security → keep enabled |
-| Semgrep GitHub App | Installed (`semgrep-code-oblangatas`) | Confirm inline comments on next security-touching PR |
+| Semgrep GitHub App | Installed (`semgrep-code-shacharm2`) | Confirm inline comments on next security-touching PR |
 | SonarCloud GitHub binding | Verify | SonarCloud project must be imported from GitHub (not manual-only) for PR decoration |
 | Dependabot | After merge of `dependabot.yml` | First uv/actions PR within ~24h |
 | Dependabot + Sonar | After #334 | Rebase open bot PRs (`@dependabot rebase`) so they pick up the skip; tests/SAST still run |
