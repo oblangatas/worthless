@@ -108,3 +108,77 @@ class TestLockSkipsOAuthToken:
         assert "oauth" in result.output.lower(), result.output
         # ...and the bidi-override was neutralized, never emitted raw.
         assert bidi not in result.output, "unsanitized bidi-override reached the terminal"
+
+
+def _flat(output: str) -> str:
+    """Collapse Rich's soft-wrapping so assertions match sentences, not layout."""
+    return " ".join(output.split())
+
+
+class TestOAuthSkipSuppressesProtectionVerdict:
+    """worthless-7jn2: a skipped OAuth token is still a live secret in the file.
+
+    The skip itself is correct (sharding destroys the ``sk-ant-oat`` marker
+    OpenClaw tests for). What was wrong is the summary: ``lock`` printed the
+    product's headline verdict — "You're protected", ".env no longer contains a
+    usable secret" — over a plaintext credential it had just decided to leave
+    behind. These assert on the OUTPUT THE USER READS, not an internal flag.
+    """
+
+    def test_mixed_env_does_not_claim_protection(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        # One real key (locks) + one OAuth token (skipped, stays in plaintext).
+        env = tmp_path / ".env"
+        env.write_text(
+            f"OPENAI_API_KEY={fake_openai_key()}\n"
+            f"ANTHROPIC_API_KEY={fake_key('sk-ant-oat01-', 'wor7jn2-mixed')}\n"
+        )
+
+        result = runner.invoke(
+            app,
+            ["lock", "--env", str(env)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+        )
+        assert result.exit_code == 0, result.output
+        flat = _flat(result.output)
+
+        # The skip is reported — so this isn't a vacuous pass.
+        assert "oauth" in flat.lower(), f"lock must report the skip; output:\n{result.output}"
+
+        # The verdict is NOT earned: a live token is still in that file.
+        assert "You're protected" not in flat, (
+            f"lock claimed protection over a skipped OAuth token; output:\n{result.output}"
+        )
+        assert "no longer contains a usable secret" not in flat, (
+            f"lock claimed the .env holds no usable secret while a skipped OAuth "
+            f"token sits in it; output:\n{result.output}"
+        )
+
+        # The factual lines survive — only the derived verdict is suppressed.
+        assert "split between this machine" in flat, (
+            f"the factual split line must still print; output:\n{result.output}"
+        )
+
+    def test_oauth_only_env_is_not_reported_clean(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        # Nothing lockable — but a key WAS found, classified, and skipped.
+        env = tmp_path / ".env"
+        env.write_text(f"ANTHROPIC_API_KEY={fake_key('sk-ant-oat01-', 'wor7jn2-only')}\n")
+
+        result = runner.invoke(
+            app,
+            ["lock", "--env", str(env)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+        )
+        assert result.exit_code == 0, result.output
+        flat = _flat(result.output)
+
+        assert "oauth" in flat.lower(), f"lock must report the skip; output:\n{result.output}"
+        assert "No unprotected API keys found" not in flat, (
+            f"lock reported a clean file for a key it found and skipped; output:\n{result.output}"
+        )
+        assert "plaintext" in flat.lower(), (
+            f"lock must say the skipped token is still in the file; output:\n{result.output}"
+        )
