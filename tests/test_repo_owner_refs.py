@@ -73,10 +73,6 @@ _NEWS_FEED_GIST_ID = "7f6e2293b540004c4a733258a2461800"
 # Paths that keep a non-canonical owner ON PURPOSE. Every entry needs a reason:
 # a bare exclusion here is how the next rename hides again.
 _ALLOWLIST: dict[str, str] = {
-    "CHANGELOG.md": (
-        "Archival PR/release links from shipped versions. GitHub 301-redirects them, "
-        "and rewriting released history is noise, not a fix."
-    ),
     "docs/install-docker.md": (
         "Deliberately names the dead ghcr.io/shacharm2 path in the troubleshooting "
         "section, so a user hitting the 403 can search the error and find the fix."
@@ -91,13 +87,9 @@ _ALLOWLIST: dict[str, str] = {
     ),
 }
 
-# Prefixes whose contents are a point-in-time record, not live references.
-_ALLOWLIST_PREFIXES: dict[str, str] = {
-    "engineering/": (
-        "Review handoffs, research specs and product journeys are dated artifacts. "
-        "Rewriting them falsifies the record of what was true when they were written."
-    ),
-}
+# No prefix exemptions. engineering/ used to need one; those docs were swept
+# clean, and the drift check below is what surfaced that the entry was dead.
+_ALLOWLIST_PREFIXES: dict[str, str] = {}
 
 # References to OUR things, each capturing the owner segment.
 _OWNED_REF_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (

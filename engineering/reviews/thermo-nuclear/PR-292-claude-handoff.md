@@ -1,6 +1,6 @@
 # PR #292 — Claude review handoff
 
-**URL:** https://github.com/shacharm2/worthless/pull/292
+**URL:** https://github.com/oblangatas/worthless/pull/292
 **Branch:** `gsd/wor-193-wave3b-adversarial` → `main` (was 717-integration before #288–#290 merged)
 **Stack (merge bottom → top):** #288 → #289 → #290 → **#292**
 **Worktree:** `/Users/shachar/Projects/worthless/worthless-wor193-service`
