@@ -184,3 +184,39 @@ class TestOAuthSkipSuppressesProtectionVerdict:
         assert "plaintext" in flat.lower(), (
             f"lock must say the skipped token is still in the file; output:\n{result.output}"
         )
+
+    def test_oauth_only_env_does_not_claim_other_keys_were_locked(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """The skip warning must not offer comfort that only holds for a mixed .env.
+
+        The warning once ended "— your other keys were locked normally." On an
+        OAuth-only file there are no other keys and nothing was locked, so that
+        clause flatly contradicted the "Nothing was locked" line printed right
+        under it. The summary already carries the fact; the warning must not
+        restate it falsely.
+        """
+        env = tmp_path / ".env"
+        env.write_text(f"ANTHROPIC_API_KEY={fake_key('sk-ant-oat01-', 'wor837-onlyskip')}\n")
+
+        result = runner.invoke(
+            app,
+            ["lock", "--env", str(env)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+        )
+        assert result.exit_code == 0, result.output
+        flat = _flat(result.output)
+
+        # Not vacuous: the skip really was reported.
+        assert "oauth" in flat.lower(), f"lock must report the skip; output:\n{result.output}"
+
+        for claim in ("other keys were locked", "were locked normally"):
+            assert claim not in flat, (
+                f"lock claimed other keys were locked on an OAuth-only .env "
+                f"where nothing was locked; output:\n{result.output}"
+            )
+
+        # The truthful summary is the one line allowed to speak to what happened.
+        assert "Nothing was locked" in flat, (
+            f"the summary must state nothing was locked; output:\n{result.output}"
+        )
