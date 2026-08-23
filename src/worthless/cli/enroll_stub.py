@@ -45,8 +45,11 @@ async def enroll_stub(
     )
 
     repo = ShardRepository(db_path, fernet_key)
-    await repo.initialize()
-    await repo.store(alias, shard)
+    try:
+        await repo.initialize()
+        await repo.store(alias, shard)
+    finally:
+        repo.close()  # worthless-g648: zero the repo's copy of the caller's key
 
     shard_a = bytearray(sr.shard_a)
 

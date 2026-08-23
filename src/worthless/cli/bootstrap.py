@@ -11,6 +11,7 @@ import secrets
 import sqlite3
 import threading
 import time
+import weakref
 from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -207,6 +208,9 @@ class WorthlessHome:
                     logger.debug("WorthlessHome.fernet_key cache MISS — reading from keystore")
                     try:
                         self._cached_fernet_key = read_fernet_key(self.base_dir)
+                        # Same finalizer discipline as _seed_cached_fernet_key;
+                        # inlined because we already hold _cache_lock here.
+                        weakref.finalize(self, zero_buf, self._cached_fernet_key)
                     except WorthlessError as exc:
                         if exc.code == ErrorCode.KEY_NOT_FOUND and _shard_rows_present(self):
                             raise WorthlessError(
@@ -227,7 +231,25 @@ class WorthlessHome:
         ``home.fernet_key`` call cannot race the assignment.
         """
         with self._cache_lock:
+            # Zero the buffer we are about to orphan. Four call sites can seed a
+            # second time (a keyring read after an env-var read, say); without
+            # this the previous allocation is freed with the key still in it.
+            if self._cached_fernet_key is not None:
+                zero_buf(self._cached_fernet_key)
             self._cached_fernet_key = bytearray(key)
+            # worthless-m7n0: zero this buffer when the home is collected OR at
+            # interpreter exit, whichever comes first.
+            #
+            # weakref.finalize rather than a hand-rolled registry + atexit hook:
+            # it holds only a weak reference (so it cannot keep the key alive),
+            # runs at most once, isolates its own exceptions, and -- the reason
+            # it matters here -- fires on GARBAGE COLLECTION too. ensure_home()
+            # builds a fresh WorthlessHome on each of its ~37 call sites, so a
+            # home collected mid-command would never have reached an exit-only
+            # hook, and its key would have been freed intact. Registering
+            # against the BUFFER (not self) also means a re-seed leaves the old
+            # finalizer pointing at the old allocation, which is what we want.
+            weakref.finalize(self, zero_buf, self._cached_fernet_key)
 
 
 def _fernet_key_present(home: WorthlessHome) -> bool:

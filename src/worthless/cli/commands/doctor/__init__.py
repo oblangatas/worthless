@@ -895,11 +895,18 @@ def _doctor_run(*, fix: bool, yes: bool, dry_run: bool) -> None:
             )
 
         # ----------- check 2: orphan DB rows -----------
+        # worthless-g648: close() zeroes the repository's own copy of the master
+        # key. The first revision of that fix only patched runner.py (the --json
+        # path); this is the DEFAULT `worthless doctor`, where the same two
+        # copies were still surviving the command.
         repo = ShardRepository(str(home.db_path), home.fernet_key)
-        all_enrollments, orphans = _run_async(_list_orphans(repo))
-        openclaw_issues = _check_openclaw_section(
-            all_enrollments, repo=repo, fix=fix, dry_run=dry_run
-        )
+        try:
+            all_enrollments, orphans = _run_async(_list_orphans(repo))
+            openclaw_issues = _check_openclaw_section(
+                all_enrollments, repo=repo, fix=fix, dry_run=dry_run
+            )
+        finally:
+            repo.close()
 
         # ----------- check 3: home mismatch -----------
         had_mismatch = _check_home_mismatch(home)
@@ -957,7 +964,10 @@ def _doctor_run(*, fix: bool, yes: bool, dry_run: bool) -> None:
         # _list_orphans; reusing the same repo in a second asyncio.run()
         # call fails on Linux. A new instance avoids the closed-loop error.
         fix_repo = ShardRepository(str(home.db_path), home.fernet_key)
-        _doctor_apply(orphans, synced, fix_repo, home, console)
+        try:
+            _doctor_apply(orphans, synced, fix_repo, home, console)
+        finally:
+            fix_repo.close()  # worthless-g648
 
 
 def register_doctor_commands(app: typer.Typer) -> None:
