@@ -1060,18 +1060,31 @@ def test_the_generated_manifest_is_not_at_the_repo_root() -> None:
         "PRs that bump a version in a file nothing resolves from."
     )
     assert EXPORTED_MANIFEST.exists(), (
-        f"{EXPORTED_MANIFEST.relative_to(REPO)} is missing; the Snyk badge's "
-        f"?targetFile= points at it."
+        f"{EXPORTED_MANIFEST.relative_to(REPO)} is missing. The README badge's "
+        f"?targetFile= names it, though see the note below: that parameter is "
+        f"decorative. The file is kept by decision, not because anything reads it."
     )
 
 
 def test_the_exporter_and_the_badge_agree_on_where_it_lives() -> None:
     """Three things must name the same path, or one of them silently rots.
 
-    The exporter writes it, the badge reads it, and the file records the
-    command that produced it. If the exporter moves and the badge does not, the
-    badge 404s while every check stays green — the shape of defect this suite
-    exists to catch.
+    The exporter writes it, the badge's URL names it, and the file records the
+    command that produced it. If the exporter moves and the URL does not, they
+    disagree silently while every check stays green — the shape of defect this
+    suite exists to catch.
+
+    A correction worth recording, because it was believed and repeated: the
+    CHANGELOG entry for 338da36f states the badge "parses that file and cannot
+    parse uv.lock", and that is FALSE. Snyk's badge endpoint returns a
+    byte-identical SVG for this path, for a path that does not exist, and for
+    an organisation that does not exist — it is served from Snyk's own
+    monitored-project record, not from a live parse of ?targetFile=. So the
+    parameter is decorative and this file has no proven reader.
+
+    The file is therefore kept by DECISION, not by necessity. Whether it should
+    exist at all is a separate question and a separate ticket; this test only
+    holds the three references in agreement while it does exist.
     """
     rel = str(EXPORTED_MANIFEST.relative_to(REPO))
 
