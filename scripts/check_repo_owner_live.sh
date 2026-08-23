@@ -32,8 +32,14 @@
 #   * GitHub answers and agrees     -> exit 0.
 #   * GitHub cannot be reached, or `gh` is missing -> exit 0 with a warning.
 #     An unknown is not a disagreement. Blocking a release on a network blip
-#     would be worse than the rare rename this catches, and the daily
-#     release-sync-check run covers the drift window either way.
+#     would be worse than the rare rename this catches.
+#
+# WHERE THIS RUNS: tag time only, via verify-pypi-publisher.sh --check, which
+# tag-release.sh gates on. It used to also run daily as release-sync-check's
+# A1d; that was removed as redundant -- A1c already fails on a total rename,
+# because the docs keep naming the old owner and GHCR then refuses the pull.
+# PyPI has no equivalent symptom to trip over, which is why the tag-time call
+# stays.
 #
 # Usage:
 #     ./scripts/check_repo_owner_live.sh          # human output
