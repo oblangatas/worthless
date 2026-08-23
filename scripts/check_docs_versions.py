@@ -66,7 +66,13 @@ def main() -> int:
     bad: list[tuple[pathlib.Path, int, str, str]] = []
     checked = 0
     scanned = [*DOCS.rglob("*.md"), *DOCS.rglob("*.mdx")]
-    scanned += [p for p in EXTRA_FILES if p.is_file()]
+    for extra in EXTRA_FILES:
+        # Fail, don't skip. Silently dropping a moved file would print OK while the
+        # pin it guards went unchecked — the same fail-open the DOCS check above
+        # refuses. A rename should break loudly and get fixed here.
+        if not extra.is_file():
+            sys.exit(f"check_docs_versions: expected {extra} at CWD {pathlib.Path.cwd()}")
+        scanned.append(extra)
     for doc in sorted(scanned):
         for lineno, line in enumerate(doc.read_text(encoding="utf-8").splitlines(), 1):
             for match in TAG_RE.finditer(line):
