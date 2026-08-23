@@ -1,6 +1,6 @@
 # WOR-193 stack — Claude review handoff (index)
 
-**Merge order (bottom → top):** [#288](https://github.com/shacharm2/worthless/pull/288) → [#289](https://github.com/shacharm2/worthless/pull/289) → [#290](https://github.com/shacharm2/worthless/pull/290) → [#292](https://github.com/shacharm2/worthless/pull/292)
+**Merge order (bottom → top):** [#288](https://github.com/oblangatas/worthless/pull/288) → [#289](https://github.com/oblangatas/worthless/pull/289) → [#290](https://github.com/oblangatas/worthless/pull/290) → [#292](https://github.com/oblangatas/worthless/pull/292)
 
 **Worktree (tip of stack):** `/Users/shachar/Projects/worthless/worthless-wor193-service` on `gsd/wor-193-wave3b-adversarial`
 

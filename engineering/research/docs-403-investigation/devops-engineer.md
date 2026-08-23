@@ -52,4 +52,4 @@ Touching `website/`:
   - Custom-domain unbind
   - DNS record removal
 
-**Action:** investigate CF dashboard zone `wless.io` first (zone health, WAF/firewall, billing status), then `worthless-docs` Workers Builds deployments, then GitHub Pages custom-domain status for `shacharm2/worthless`. Do NOT touch repo deploys until zone-level state is confirmed clean.
+**Action:** investigate CF dashboard zone `wless.io` first (zone health, WAF/firewall, billing status), then `worthless-docs` Workers Builds deployments, then GitHub Pages custom-domain status for `oblangatas/worthless`. Do NOT touch repo deploys until zone-level state is confirmed clean.

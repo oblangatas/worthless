@@ -9,14 +9,14 @@ Source: ux-researcher Docker pass + review of WOR-249 backlog.
    ```
    worthless.sh/docker — Docker install path
    Checking Docker... found docker 24.0.7
-   Pulling shacharm2/worthless:v0.3.0 (~50MB)...
+   Pulling oblangatas/worthless:v0.3.0 (~50MB)...
    ████████████████████████ 100%
    ```
 3. Consent prompt (unless `--yes`):
    ```
    About to add alias to ~/.zshrc:
      # BEGIN worthless
-     alias worthless='docker run --rm -it -v $PWD:/work -v ~/.worthless:/root/.worthless shacharm2/worthless:v0.3.0'
+     alias worthless='docker run --rm -it -v $PWD:/work -v ~/.worthless:/root/.worthless oblangatas/worthless:v0.3.0'
      # END worthless
    Continue? [y/N]:
    ```
@@ -25,7 +25,7 @@ Source: ux-researcher Docker pass + review of WOR-249 backlog.
    ✅ worthless installed via Docker.
    Reload your shell:  exec $SHELL
    Try:                cd your-project && worthless lock
-   Source:             https://github.com/shacharm2/worthless
+   Source:             https://github.com/oblangatas/worthless
    ```
 5. User `exec $SHELL`. Runs `worthless lock`. **Same magic moment as P1**: .env rewritten, backup created, app still works.
 
@@ -37,7 +37,7 @@ Source: ux-researcher Docker pass + review of WOR-249 backlog.
 - User refuses alias (`n` at prompt) → print alternate usage:
   ```
   Not writing alias. Run worthless with:
-    docker run --rm -it -v $PWD:/work -v ~/.worthless:/root/.worthless shacharm2/worthless:v0.3.0 <subcommand>
+    docker run --rm -it -v $PWD:/work -v ~/.worthless:/root/.worthless oblangatas/worthless:v0.3.0 <subcommand>
   ```
 
 ## Where consent matters most
