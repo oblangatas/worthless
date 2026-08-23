@@ -244,6 +244,8 @@ def _doctor_run_json(*, fix: bool, dry_run: bool) -> None:
         # repository keeps its OWN bytearray copy (repository.py:123) which
         # only close() wipes. Without this the master key outlived every
         # `doctor` run. close() is idempotent and a no-op in IPC-only mode.
+        # zero_buf FIRST: close() raising must not leave the caller's key live
+        # nor mask the original exception.
+        zero_buf(fernet_key)
         if repo is not None:
             repo.close()
-        zero_buf(fernet_key)

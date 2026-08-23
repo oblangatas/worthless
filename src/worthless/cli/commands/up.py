@@ -72,6 +72,7 @@ async def _sidecar_open_probe_material(home: WorthlessHome) -> tuple[bytes, byte
     from worthless.storage.repository import ShardRepository
 
     key = read_fernet_key(home.base_dir)
+    repo: ShardRepository | None = None
     try:
         repo = ShardRepository(str(home.db_path), key)
         aliases = await repo.list_keys()
@@ -83,7 +84,11 @@ async def _sidecar_open_probe_material(home: WorthlessHome) -> tuple[bytes, byte
             return None
         return enc.shard_b_enc, alias.encode()
     finally:
+        # zero_buf FIRST: if close() were to raise, the caller's key must still
+        # be wiped and the original exception must not be masked (worthless-g648).
         zero_buf(key)
+        if repo is not None:
+            repo.close()
 
 
 def _managed_sidecar_healthy(home: WorthlessHome) -> bool:

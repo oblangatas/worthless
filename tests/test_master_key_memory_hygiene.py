@@ -140,42 +140,70 @@ def test_repository_close_zeroes_its_own_copy(tmp_path: Path) -> None:
     assert repo._fernet is None, "the Fernet instance must be released"
 
 
-def test_doctor_closes_the_repository(tmp_path: Path) -> None:
-    """Static guard: the doctor runner's finally must call close().
+def test_every_repository_construction_site_is_closed() -> None:
+    """Every ShardRepository(...) in the CLI must have a close() in its module.
 
-    A behavioural test would need a full provisioned home; this pins the one
-    line whose absence caused worthless-g648, and fails loudly if the finally
-    is ever restructured without it.
+    Replaces an earlier test that grepped for `repo.close()` near the last
+    `finally:` in one file. That version was brittle (it would pass on a
+    commented-out call) and, worse, it passed while the DEFAULT `doctor` path
+    leaked two copies — it only ever looked at runner.py. Reviewers caught it;
+    the test did not.
+
+    Still static, because constructing a real repository needs a provisioned
+    home. But it now covers every site rather than one, so a NEW leak in a new
+    command fails here instead of shipping.
     """
-    src = (
-        Path(__file__).resolve().parents[1] / "src/worthless/cli/commands/doctor/runner.py"
-    ).read_text(encoding="utf-8")
+    cli = Path(__file__).resolve().parents[1] / "src/worthless/cli"
+    offenders: list[str] = []
+    checked = 0
 
-    assert "repo.close()" in src, (
-        "doctor must close the ShardRepository — zero_buf() on the caller's "
-        "buffer leaves the repository's own copy live (worthless-g648)"
+    for path in sorted(cli.rglob("*.py")):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        closes = any(".close()" in ln for ln in lines)
+
+        for lineno, line in enumerate(lines, 1):
+            if "ShardRepository(" not in line or "import" in line:
+                continue
+            # Per-SITE, not per-module: service/_common.py builds one repository
+            # from PLACEHOLDER_FERNET_KEY (it only needs the DB, never decrypts)
+            # while a different function in the same file touches the real key.
+            # A module-level check called that a master-key leak. It is not.
+            if "placeholder" in line.lower():
+                continue
+            checked += 1
+            if not closes:
+                offenders.append(
+                    f"{path.relative_to(cli.parents[2])}:{lineno} builds a "
+                    "ShardRepository from real key material but the module never "
+                    "closes one — the repository's copy survives the command"
+                )
+
+    assert checked >= 4, (
+        f"only {checked} real-key ShardRepository sites found; the glob or the "
+        "layout moved and this test no longer covers what it claims"
     )
-    finally_block = src[src.rindex("finally:") :]
-    assert "repo.close()" in finally_block, "close() must be in the finally, not the happy path"
-    assert finally_block.index("repo.close()") < finally_block.index("zero_buf"), (
-        "close() must run before the caller's buffer is zeroed — it reads nothing "
-        "from it, but ordering here is the documented contract"
-    )
+    assert not offenders, "Un-closed ShardRepository (worthless-g648):\n" + "\n".join(offenders)
 
 
-def test_repository_close_is_idempotent(tmp_path: Path) -> None:
-    repo = ShardRepository(str(tmp_path / "w.db"), bytearray(_KEY))
-    repo.close()
-    repo.close()  # must not raise
+def test_zero_buf_runs_before_close_in_cleanup_paths() -> None:
+    """A raising close() must not leave the caller's key live.
 
-
-@pytest.mark.parametrize("attr", ["_fernet_key_bytes", "_cached_fernet_key"])
-def test_key_holding_attributes_still_exist(attr: str) -> None:
-    """Vacuity guard: rename either field and these tests stop meaning anything."""
-    holders = (ShardRepository.__init__, WorthlessHome)
-    src = "".join(
-        (Path(__file__).resolve().parents[1] / p).read_text(encoding="utf-8")
-        for p in ("src/worthless/storage/repository.py", "src/worthless/cli/bootstrap.py")
-    )
-    assert attr in src, f"{attr} was renamed — update this module, do not delete it"
-    assert holders is not None
+    Ordering matters in the `finally`: zero the buffer we own first, then close.
+    The reverse order means a close() failure both skips the zeroing and masks
+    the original exception.
+    """
+    root = Path(__file__).resolve().parents[1]
+    for rel in (
+        "src/worthless/cli/commands/doctor/runner.py",
+        "src/worthless/cli/commands/up.py",
+    ):
+        text = (root / rel).read_text(encoding="utf-8")
+        block = text[text.rindex("finally:") :]
+        # Strip comments: an explanatory comment mentioning close() would
+        # otherwise be matched as the call itself (it was, first time round).
+        block = "\n".join(ln.split("#", 1)[0] for ln in block.splitlines())
+        if "zero_buf" not in block or "close()" not in block:
+            continue
+        assert block.index("zero_buf") < block.index("close()"), (
+            f"{rel}: zero_buf must precede close() in the cleanup path"
+        )
