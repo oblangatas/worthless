@@ -29,9 +29,8 @@
 # checking carelessly, and it proves nothing about what PyPI will actually do.
 #
 # The record is bound to the owner it was confirmed for, and --check compares it
-# against pyproject.toml. So it fires as soon as a rename lands in the repo. It
-# does NOT detect a rename that nobody has applied anywhere -- for that, the
-# owner would have to come from a live `gh api repos/{owner}/{repo}` call.
+# against pyproject.toml -- so it fires as soon as a rename lands in the repo.
+# check_repo_owner_live.sh covers the case where the rename never landed at all.
 #
 # Usage:
 #     ./scripts/verify-pypi-publisher.sh          # interactive
@@ -58,8 +57,11 @@ ENVIRONMENT="pypi"
 # the moment a rename lands in the repo, this attestation stops matching and
 # --check demands a re-confirmation.
 #
-# It still cannot detect a rename that nobody has applied anywhere. Nothing in
-# the repo can; that needs a live `gh api repos/{owner}/{repo}` call.
+# A rename that nobody applied anywhere used to be invisible here -- pyproject
+# would be stale, everything would agree with it, and --check would pass.
+# scripts/check_repo_owner_live.sh now runs first and asks GitHub who this repo
+# actually is (worthless-jjap). A definite disagreement blocks; an unreachable
+# API only warns, so a network blip cannot wedge a release.
 repo_url=$(sed -n 's/^Repository *= *"\(.*\)"/\1/p' pyproject.toml | head -n1)
 owner_repo=$(printf '%s' "$repo_url" | sed -E 's#^https://github\.com/##; s#/*$##')
 if ! printf '%s' "$owner_repo" | grep -qE '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'; then
@@ -72,6 +74,14 @@ repo=${owner_repo##*/}
 # --- --check mode: used by tag-release.sh's pre-flight ----------------------
 
 if [ "${1:-}" = "--check" ]; then
+    # Before comparing the attestation to pyproject, confirm pyproject itself is
+    # not stale. Everything below compares the repo against itself, so a rename
+    # that nobody applied would agree with itself and pass (worthless-jjap).
+    # A definite disagreement exits 1; an unreachable API only warns.
+    if ! ./scripts/check_repo_owner_live.sh --quiet; then
+        echo "  PyPI publisher cannot be trusted while the declared owner is stale."
+        exit 1
+    fi
     if [ ! -f "$RECORD" ]; then
         echo "ERROR: PyPI Trusted Publisher has never been confirmed for this repo."
         echo "  publish.yml uploads with OIDC and no token; if the publisher does not"
@@ -87,7 +97,66 @@ if [ "${1:-}" = "--check" ]; then
         echo "  Run: ./scripts/verify-pypi-publisher.sh"
         exit 1
     fi
+    # The attestation names four fields; PyPI matches on all four. Comparing
+    # only the owner leaves the likelier drifts invisible: renaming the workflow
+    # file, or changing `environment:` in it, breaks the binding while this
+    # check keeps passing (raised on #546, folded in here per worthless-jjap).
+    confirmed_workflow=$(awk -F= '/^workflow=/ { print $2; exit }' "$RECORD")
+    confirmed_env=$(awk -F= '/^environment=/ { print $2; exit }' "$RECORD")
+
+    if [ -z "$confirmed_workflow" ] || [ -z "$confirmed_env" ]; then
+        echo "ERROR: $RECORD predates field checking (no workflow=/environment= lines)."
+        echo "  Re-confirm so the record covers everything PyPI matches on:"
+        echo "  ./scripts/verify-pypi-publisher.sh"
+        exit 1
+    fi
+
+    confirmed_repo=$(awk -F= '/^repo=/ { print $2; exit }' "$RECORD")
+    if [ -n "$confirmed_repo" ] && [ "$confirmed_repo" != "$repo" ]; then
+        echo "ERROR: attestation names repository '$confirmed_repo' but this repo is '$repo'."
+        echo "  PyPI matches on the repository name too — a repo rename breaks the binding."
+        exit 1
+    fi
+
+    # Reject a record that could escape .github/workflows/ via ../ before use.
+    if ! printf '%s' "$confirmed_workflow" | grep -qE '^[A-Za-z0-9._-]+\.ya?ml$'; then
+        echo "ERROR: attestation names workflow '$confirmed_workflow', which is not a plain"
+        echo "  .yml filename. Refusing to resolve it."
+        exit 1
+    fi
+    workflow_path=".github/workflows/$confirmed_workflow"
+    if [ ! -f "$workflow_path" ]; then
+        echo "ERROR: the attestation names workflow '$confirmed_workflow', which does not exist."
+        echo "  PyPI matches the OIDC claim on the workflow FILENAME. If it was renamed,"
+        echo "  the publisher on PyPI must be updated to match or the upload fails."
+        exit 1
+    fi
+
+    # The environment the publish job actually requests, read from the workflow.
+    # Scoped to the `publish:` job. A bare first-match would read whichever job
+    # happens to appear first -- publish.yml's `build:` job precedes `publish:`,
+    # so the day build gains an `environment:` the gate would compare the wrong
+    # one and pass while the real binding is broken.
+    actual_env=$(awk '
+        /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { job = $1; sub(/:$/, "", job) }
+        job == "publish" && /^[[:space:]]+environment:[[:space:]]/ { print $2; exit }
+    ' "$workflow_path")
+    if [ -z "$actual_env" ]; then
+        echo "ERROR: $workflow_path declares no 'environment:' — cannot confirm the binding."
+        echo "  PyPI matches on it; a publisher configured with one will not match a job without."
+        exit 1
+    fi
+    if [ "$actual_env" != "$confirmed_env" ]; then
+        echo "ERROR: attestation says environment '$confirmed_env' but $workflow_path"
+        echo "  now requests '$actual_env'. PyPI matches on this exactly — the next"
+        echo "  v* tag fails at upload with invalid-publisher."
+        echo "  Update the publisher on PyPI, then re-confirm:"
+        echo "  ./scripts/verify-pypi-publisher.sh"
+        exit 1
+    fi
+
     echo "PyPI publisher: confirmed for '$owner' ($(awk -F= '/^date=/ { print $2; exit }' "$RECORD"))"
+    echo "  workflow=$confirmed_workflow environment=$confirmed_env — both still match $workflow_path"
     exit 0
 fi
 
