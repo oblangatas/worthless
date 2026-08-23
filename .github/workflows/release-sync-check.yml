@@ -192,26 +192,6 @@ jobs:
           done
           exit "$failed"
 
-      - name: A1d — the declared repo owner is still the live one
-        # NOT a detection gap over A1c -- A1c already fails on a total rename,
-        # because the docs keep naming the old owner and GHCR then refuses the
-        # pull. An earlier version of this comment claimed otherwise; that was
-        # wrong, and the code disproving it is ten lines above.
-        #
-        # What this adds, daily, is the DIAGNOSIS. A1c reports "that image will
-        # not pull", which reads like a registry outage or a visibility flip --
-        # both of which have actually happened here. A1d names the cause and the
-        # one line to change. Time-to-fix, not time-to-detect.
-        #
-        # The real coverage gain is at TAG time, where the same script gates
-        # verify-pypi-publisher.sh --check and nothing resembling A1c runs
-        # (worthless-jjap). PyPI's publisher binding breaks on a rename with no
-        # GHCR symptom to trip over at all.
-        if: ${{ !cancelled() }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: ./scripts/check_repo_owner_live.sh
-
       # ===== Assertion 2a: worthless.sh content negotiation (curl) ==========
       - name: A2a — worthless.sh curl-UA serves install.sh @ latest tag
         env:
