@@ -1037,72 +1037,89 @@ def test_the_alarm_can_actually_file_an_issue() -> None:
     )
 
 
-# The Snyk badge's manifest is GENERATED from uv.lock. At the repo root it sat
-# where Dependabot discovers Python manifests, and Dependabot filed nine pull
-# requests against it — each bumping a version in generated output while
-# uv.lock, the file that actually resolves dependencies, went untouched.
-# Merging one changed nothing; the version in the title made it look done.
-# WOR-875.
-EXPORTED_MANIFEST = REPO / "engineering" / "ci" / "requirements.txt"
+# requirements.txt is GENERATED from uv.lock by a pre-commit hook, and it lives
+# at the REPO ROOT because Snyk imported it there as a monitored project
+# (target oblangatas/worthless, project `requirements.txt`, last tested
+# 2026-08-23). Snyk resolves that project by the path it was imported at.
+#
+# Dependabot also discovers it there and filed nine no-op pull requests against
+# it. WOR-875 moved the file to engineering/ci/ to hide it from Dependabot;
+# that worked and silently broke the Snyk project. The correct tool is
+# `exclude-paths` in .github/dependabot.yml, which is now in place. WOR-904.
+EXPORTED_MANIFEST = REPO / "requirements.txt"
+DEPENDABOT_CONFIG = REPO / ".github" / "dependabot.yml"
 
 
-def test_the_generated_manifest_is_not_at_the_repo_root() -> None:
-    """A generated file at the root attracts updates that cannot take effect.
+def test_the_generated_manifest_stays_where_snyk_imported_it() -> None:
+    """Moving this file breaks an external consumer that no grep can see.
 
-    Seven such PRs were closed by hand and two more arrived on 2026-08-21.
-    They are not merely noise: a reviewer seeing `bump certifi 2026.2.25 ->
-    2026.7.22` reasonably believes certifi was upgraded. It was not — certifi
-    sat five months stale in uv.lock the entire time those PRs were open.
+    The tree was grepped before WOR-875 moved it, and the grep was clean —
+    because a Snyk project registration lives in Snyk, not in this repository.
+    The move broke it silently: nothing failed, no check went red, and the
+    badge kept rendering because the badge never read the file anyway.
     """
-    assert not (REPO / "requirements.txt").exists(), (
-        "requirements.txt is back at the repo root. It is generated output, and "
-        "Dependabot discovers Python manifests there — it will resume filing "
-        "PRs that bump a version in a file nothing resolves from."
-    )
     assert EXPORTED_MANIFEST.exists(), (
-        f"{EXPORTED_MANIFEST.relative_to(REPO)} is missing. The README badge's "
-        f"?targetFile= names it, though see the note below: that parameter is "
-        f"decorative. The file is kept by decision, not because anything reads it."
+        "requirements.txt is not at the repo root. Snyk imported it there as a "
+        "monitored project and resolves it by that path — moving it breaks the "
+        "scan with no local signal. Silence Dependabot with `exclude-paths`, "
+        "not by relocating the file."
+    )
+    assert not (REPO / "engineering" / "ci" / "requirements.txt").exists(), (
+        "a second copy exists under engineering/ci/. One generated manifest, "
+        "one location, or they drift."
+    )
+
+
+def test_dependabot_skips_the_generated_manifest() -> None:
+    """The file must stay put, so Dependabot must be told to ignore it.
+
+    Without this the nine no-op pull requests resume. They are worse than
+    noise: `bump certifi 2026.2.25 -> 2026.7.22` reads as an upgrade, and
+    certifi sat five months stale in uv.lock while those PRs were open.
+    """
+    doc = yaml.safe_load(DEPENDABOT_CONFIG.read_text())
+    uv = [u for u in doc["updates"] if u.get("package-ecosystem") == "uv"]
+    assert uv, "no uv ecosystem entry in dependabot.yml"
+    excluded = set(uv[0].get("exclude-paths") or [])
+    assert "requirements.txt" in excluded, (
+        "the uv ecosystem does not exclude requirements.txt, so Dependabot will "
+        "resume filing pull requests that bump a version in generated output "
+        "while uv.lock — which actually resolves dependencies — goes untouched."
     )
 
 
 def test_the_exporter_and_the_badge_agree_on_where_it_lives() -> None:
-    """Three things must name the same path, or one of them silently rots.
+    """The exporter writes it, the badge URL names it, Snyk imports it.
 
-    The exporter writes it, the badge's URL names it, and the file records the
-    command that produced it. If the exporter moves and the URL does not, they
-    disagree silently while every check stays green — the shape of defect this
-    suite exists to catch.
+    If the exporter moves and the badge does not, they disagree silently while
+    every check stays green.
 
     A correction worth recording, because it was believed and repeated: the
     CHANGELOG entry for 338da36f states the badge "parses that file and cannot
-    parse uv.lock", and that is FALSE. Snyk's badge endpoint returns a
+    parse uv.lock". That is FALSE — Snyk's badge endpoint returns a
     byte-identical SVG for this path, for a path that does not exist, and for
-    an organisation that does not exist — it is served from Snyk's own
-    monitored-project record, not from a live parse of ?targetFile=. So the
-    parameter is decorative and this file has no proven reader.
+    an organisation that does not exist, and its text is a static
+    "Snyk security | monitored". The badge is a visitor-facing signal served
+    from Snyk's own record; `?targetFile=` does not drive it.
 
-    The file is therefore kept by DECISION, not by necessity. Whether it should
-    exist at all is a separate question and a separate ticket; this test only
-    holds the three references in agreement while it does exist.
+    The file's real reader is the Snyk PROJECT, imported at this path and
+    tested independently of the badge. Two different things, and conflating
+    them is what made the move look safe.
     """
     rel = str(EXPORTED_MANIFEST.relative_to(REPO))
 
     hook = (REPO / ".pre-commit-config.yaml").read_text()
     assert f"-o {rel}" in hook, f"the pre-commit exporter does not write to {rel}"
-    assert "-o requirements.txt" not in hook, "the exporter still writes to the repo root"
 
     readme = (REPO / "README.md").read_text()
-    assert f"targetFile={rel}" in readme, (
-        f"the Snyk badge does not point at {rel}, so it reads nothing"
-    )
-    assert "targetFile=requirements.txt" not in readme, (
-        "the badge still points at the old root path"
-    )
+    assert f"targetFile={rel}" in readme, f"the Snyk badge URL does not name {rel}"
 
-    # The generated header records its own origin — a cheap tell that the file
-    # was produced by the configured command rather than moved by hand.
-    assert rel in EXPORTED_MANIFEST.read_text().split("\n", 3)[1], (
-        "the manifest header does not name its own path; it was likely moved "
-        "by hand rather than regenerated by the hook"
+    # Match `-o <path>`, not the bare path. "requirements.txt" is a SUBSTRING
+    # of "engineering/ci/requirements.txt", so a bare check passes on a file
+    # that still records the old command — which is exactly the state this
+    # branch was in until the manifest was regenerated rather than moved.
+    assert f"-o {rel}" in EXPORTED_MANIFEST.read_text().split("\n", 3)[1], (
+        "the manifest header records a different output path than the exporter "
+        "writes to. It was moved by hand rather than regenerated by the hook, "
+        "so its contents may not match the current lockfile."
     )
