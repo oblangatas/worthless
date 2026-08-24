@@ -92,8 +92,23 @@ def pushed_commits(cwd: str | None = None) -> list[str]:
         rng = f"{frm}..{to}"
     else:
         rng = "origin/main..HEAD"
+    # ``--not origin/main`` drops commits already reachable from published main
+    # (worthless-fao1). Merging main into a feature branch makes main's own
+    # commits genuinely NEW TO THAT BRANCH REF, so ``rev-list`` returns them —
+    # and GitHub signs its squash/merge commits with a PGP key
+    # (``%GK B5690EEEBB952194``), which reads ``%G? = E`` for anyone whose local
+    # ``gpg.format`` is ``ssh``. The hook then demanded a signature nobody can
+    # supply: those commits are not ours to re-sign and are already on main.
+    # Re-judging them locally adds nothing — the server-side ruleset already
+    # accepted them (GitHub reports ``verified: true``).
+    #
+    # This does NOT weaken the gate. Commits being pushed TO main are not yet
+    # reachable from ``origin/main``, so they are still checked; only already
+    # published history is skipped. Verified: an unsigned new commit still
+    # blocks with ``%G? = N``.
+    argv = ["git", "rev-list", rng, "--not", "origin/main"]
     proc = subprocess.run(
-        ["git", "rev-list", rng],  # noqa: S607 — git resolved from PATH by design
+        argv,  # noqa: S607 — git resolved from PATH by design
         cwd=cwd,
         capture_output=True,
         text=True,
