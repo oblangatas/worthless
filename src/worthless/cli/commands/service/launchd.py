@@ -16,7 +16,7 @@ from worthless.cli.commands.service._common import (
     run_cmd,
     service_paths,
     unit_file_matches_home,
-    verify_proxy_health,
+    report_proxy_health,
 )
 from worthless.cli.errors import ErrorCode, WorthlessError
 from worthless.cli.process import poll_health, resolve_port
@@ -138,7 +138,7 @@ def install(home: WorthlessHome, *, port: int | None = None) -> None:
 
     run_cmd(["launchctl", "bootstrap", _launchctl_domain(), str(path)])
     run_cmd(["launchctl", "kickstart", "-k", _service_target()])
-    verify_proxy_health(actual_port)
+    report_proxy_health(actual_port)
 
 
 def uninstall(home: WorthlessHome) -> None:
@@ -169,7 +169,7 @@ def start(home: WorthlessHome) -> None:
     if not _is_loaded():
         run_cmd(["launchctl", "bootstrap", _launchctl_domain(), str(path)])
     run_cmd(["launchctl", "kickstart", "-k", _service_target()])
-    verify_proxy_health(resolve_port(None))
+    report_proxy_health(resolve_port(None))
 
 
 def restart(home: WorthlessHome) -> None:
@@ -185,7 +185,7 @@ def restart(home: WorthlessHome) -> None:
         run_cmd(["launchctl", "bootout", _launchctl_domain(), str(path)], check=False)
     run_cmd(["launchctl", "bootstrap", _launchctl_domain(), str(path)])
     run_cmd(["launchctl", "kickstart", "-k", _service_target()])
-    verify_proxy_health(resolve_port(None))
+    report_proxy_health(resolve_port(None))
 
 
 def tail_logs(home: WorthlessHome, *, follow: bool) -> None:

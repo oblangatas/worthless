@@ -44,7 +44,7 @@ class TestLaunchdBackend:
             patch.object(launchd, "resolve_worthless_binary", return_value=binary),
             patch.object(launchd, "run_cmd", side_effect=fake_run),
             patch.object(launchd, "_is_loaded", return_value=False),
-            patch.object(launchd, "verify_proxy_health"),
+            patch.object(launchd, "report_proxy_health"),
             patch.object(launchd.os, "getuid", return_value=501),
         ):
             launchd.install(home)
@@ -81,7 +81,7 @@ class TestLaunchdBackend:
             patch.object(launchd, "resolve_worthless_binary", return_value=binary),
             patch.object(launchd, "run_cmd", side_effect=fake_run),
             patch.object(launchd, "_is_loaded", return_value=False),
-            patch.object(launchd, "verify_proxy_health"),
+            patch.object(launchd, "report_proxy_health"),
             patch.object(launchd.os, "getuid", return_value=501),
         ):
             launchd.install(home)
@@ -115,7 +115,7 @@ class TestLaunchdBackend:
             patch.object(launchd, "resolve_worthless_binary", return_value=binary),
             patch.object(launchd, "run_cmd", side_effect=fake_run),
             patch.object(launchd, "_is_loaded", return_value=False),
-            patch.object(launchd, "verify_proxy_health"),
+            patch.object(launchd, "report_proxy_health"),
             patch.object(launchd.os, "getuid", return_value=501),
         ):
             launchd.install(home)
@@ -142,7 +142,7 @@ class TestLaunchdBackend:
             patch.object(launchd, "resolve_worthless_binary", return_value=binary),
             patch.object(launchd, "run_cmd", side_effect=fake_run),
             patch.object(launchd, "_is_loaded", return_value=False),
-            patch.object(launchd, "verify_proxy_health"),
+            patch.object(launchd, "report_proxy_health"),
             patch.object(launchd.os, "getuid", return_value=501),
         ):
             launchd.install(home)
@@ -213,7 +213,7 @@ class TestLaunchdBackend:
             patch.object(launchd, "resolve_worthless_binary", return_value=binary),
             patch.object(launchd, "run_cmd", side_effect=fake_run),
             patch.object(launchd, "_is_loaded", return_value=True),
-            patch.object(launchd, "verify_proxy_health"),
+            patch.object(launchd, "report_proxy_health"),
             patch.object(launchd.os, "getuid", return_value=501),
         ):
             launchd.install(home)
@@ -253,7 +253,7 @@ class TestSystemdBackend:
             patch.object(systemd, "unit_path", return_value=unit),
             patch.object(systemd, "resolve_worthless_binary", return_value=binary),
             patch.object(systemd, "run_cmd", side_effect=fake_run),
-            patch.object(systemd, "verify_proxy_health"),
+            patch.object(systemd, "report_proxy_health"),
             patch.dict("os.environ", {"USER": "testuser"}, clear=False),
         ):
             systemd.install(home)
@@ -283,7 +283,7 @@ class TestSystemdBackend:
             patch.object(systemd, "unit_path", return_value=unit),
             patch.object(systemd, "resolve_worthless_binary", return_value=binary),
             patch.object(systemd, "run_cmd", side_effect=fake_run),
-            patch.object(systemd, "verify_proxy_health"),
+            patch.object(systemd, "report_proxy_health"),
             patch.dict("os.environ", {"USER": "testuser"}, clear=False),
         ):
             systemd.install(home)
@@ -315,7 +315,7 @@ class TestSystemdBackend:
             patch.object(systemd, "unit_path", return_value=unit),
             patch.object(systemd, "resolve_worthless_binary", return_value=binary),
             patch.object(systemd, "run_cmd", side_effect=fake_run),
-            patch.object(systemd, "verify_proxy_health"),
+            patch.object(systemd, "report_proxy_health"),
             patch.dict("os.environ", {"USER": "testuser"}, clear=False),
         ):
             with pytest.raises(WorthlessError) as exc_info:
@@ -604,7 +604,7 @@ class TestOwnedUnitMutators:
             patch.object(launchd, "plist_path", return_value=plist),
             patch.object(launchd, "run_cmd", side_effect=fake_run),
             patch.object(launchd, "_is_loaded", return_value=False),
-            patch.object(launchd, "verify_proxy_health"),
+            patch.object(launchd, "report_proxy_health"),
             patch.object(launchd.os, "getuid", return_value=501),
         ):
             launchd.start(home)
@@ -625,7 +625,7 @@ class TestOwnedUnitMutators:
             patch.object(launchd, "plist_path", return_value=plist),
             patch.object(launchd, "run_cmd", side_effect=fake_run),
             patch.object(launchd, "_is_loaded", return_value=True),
-            patch.object(launchd, "verify_proxy_health"),
+            patch.object(launchd, "report_proxy_health"),
             patch.object(launchd.os, "getuid", return_value=501),
         ):
             launchd.restart(home)
@@ -703,7 +703,7 @@ class TestOwnedUnitMutators:
         with (
             patch.object(systemd, "unit_path", return_value=unit),
             patch.object(systemd, "run_cmd", side_effect=fake_run),
-            patch.object(systemd, "verify_proxy_health"),
+            patch.object(systemd, "report_proxy_health"),
         ):
             systemd.start(home)
 
@@ -722,7 +722,7 @@ class TestOwnedUnitMutators:
         with (
             patch.object(systemd, "unit_path", return_value=unit),
             patch.object(systemd, "run_cmd", side_effect=fake_run),
-            patch.object(systemd, "verify_proxy_health"),
+            patch.object(systemd, "report_proxy_health"),
         ):
             systemd.restart(home)
 
@@ -809,8 +809,10 @@ class TestTailLogs:
         assert exc_info.value.code == ErrorCode.PROXY_NOT_RUNNING
 
 
-class TestVerifyProxyHealthIntegration:
-    def test_install_health_failure(self, home: WorthlessHome, tmp_path: Path) -> None:
+class TestReportProxyHealthIntegration:
+    def test_install_survives_an_unconfirmed_health_check(
+        self, home: WorthlessHome, tmp_path: Path
+    ) -> None:
         binary = tmp_path / "worthless"
         binary.write_text("#!/bin/sh\n")
         binary.chmod(0o755)
@@ -826,16 +828,18 @@ class TestVerifyProxyHealthIntegration:
             patch.object(launchd, "resolve_worthless_binary", return_value=binary),
             patch.object(launchd, "run_cmd", side_effect=fake_run),
             patch.object(launchd, "_is_loaded", return_value=False),
-            patch.object(
-                launchd,
-                "verify_proxy_health",
-                side_effect=WorthlessError(ErrorCode.PROXY_UNREACHABLE, "nope"),
-            ),
+            # worthless-rnl8: the real thing that happens on a slow cold start —
+            # the proxy simply has not answered yet. Previously this test injected
+            # a raise to prove install aborted; that abort WAS the bug, so the
+            # injection is gone and the genuine condition is used instead.
+            patch("worthless.cli.commands.service._common.poll_health", return_value=False),
             patch.object(launchd.os, "getuid", return_value=501),
-            pytest.raises(WorthlessError) as exc_info,
         ):
-            launchd.install(home)
-        assert exc_info.value.code == ErrorCode.PROXY_UNREACHABLE
+            launchd.install(home)  # must NOT raise
+
+        # The install really did its job — the unit is on disk regardless of
+        # whether /healthz answered in time.
+        assert plist.is_file(), "install aborted before writing the unit"
 
 
 class TestSystemdSessionUser:
