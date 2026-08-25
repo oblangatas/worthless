@@ -34,11 +34,15 @@ from typer.testing import CliRunner
 
 from worthless.cli.app import app
 from worthless.cli.bootstrap import WorthlessHome
-from worthless.cli.commands.lock import _upstream_host_ip, _validate_upstream_base_url
+from worthless.cli.commands.lock import (
+    _is_loopback_host,
+    _upstream_host_ip,
+    _validate_upstream_base_url,
+)
 from worthless.cli.errors import WorthlessError
 from worthless.storage.repository import ShardRepository
 
-from tests.helpers import fake_openai_key
+from tests.helpers import fake_openai_key, fake_openrouter_key
 
 runner = CliRunner()
 
@@ -70,14 +74,22 @@ def sandboxed_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return home
 
 
-def _seed_openclaw(sandboxed_home: Path, openai_entry: dict) -> Path:
-    """Pre-stage ~/.openclaw/ with a workspace + an ``openai`` provider entry."""
+def _seed_openclaw(sandboxed_home: Path, openai_entry: dict | None = None, **providers) -> Path:
+    """Pre-stage ~/.openclaw/ with a workspace + provider entries.
+
+    ``openai_entry`` keeps the original single-entry call sites working;
+    ``**providers`` lets a test seed entries under other names, which is what
+    worthless-v4n2 needs — the bug only shows when the gateway sits under a
+    provider name that differs from the key's own vendor.
+    """
+    entries: dict[str, dict] = dict(providers)
+    if openai_entry is not None:
+        entries["openai"] = openai_entry
     openclaw_dir = sandboxed_home / ".openclaw"
     (openclaw_dir / "workspace").mkdir(parents=True)
     config_path = openclaw_dir / "openclaw.json"
     config_path.write_text(
-        json.dumps({"models": {"providers": {"openai": openai_entry}}}, indent=2, sort_keys=True)
-        + "\n",
+        json.dumps({"models": {"providers": entries}}, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
     return config_path
@@ -109,6 +121,52 @@ def _base_url(home: WorthlessHome, alias: str) -> str | None:
 )
 def test_validate_upstream_accepts_safe_urls(url: str) -> None:
     _validate_upstream_base_url(url)  # must not raise
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "localhost",  # the bundled [provider.ollama] spelling
+        "LOCALHOST",  # case
+        "localhost.",  # trailing FQDN dot
+        "ollama.localhost",  # RFC 6761 reserves the whole subtree
+        "127.0.0.1",  # literal, worked before
+        "::1",  # IPv6 literal
+        "127.1",  # short form
+    ],
+)
+def test_loopback_is_recognised_by_name_not_only_by_literal(host: str) -> None:
+    """worthless-f63f: ``localhost`` and ``127.0.0.1`` must agree.
+
+    ``_upstream_host_ip`` never resolves DNS, so it returns None for the NAME
+    ``localhost`` and the loopback bypass missed it. The URL then reached
+    ``_validate_upstream_base_url``, which RAISES — and with no per-key catch
+    in the lock loop, that aborted the ENTIRE run including unrelated keys.
+    Our own ``providers.toml`` ships ``http://localhost:11434/v1`` for Ollama,
+    so this fired for ordinary users with no attacker involved.
+    """
+    assert _is_loopback_host(host) is True
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "localhost.evil.com",  # the obvious attack on a naive suffix check
+        "notlocalhost",
+        "evil.com",
+        "169.254.169.254",  # cloud metadata is NOT loopback
+        "10.0.0.5",  # RFC1918 is NOT loopback
+        "8.8.8.8",
+    ],
+)
+def test_loopback_check_does_not_over_match(host: str) -> None:
+    """The fix must not turn every host containing 'localhost' into loopback.
+
+    ``localhost.evil.com`` is the one that matters: a suffix check written as
+    ``"localhost" in host`` would classify an attacker's domain as our own
+    plumbing and skip validation entirely.
+    """
+    assert _is_loopback_host(host) is False
 
 
 @pytest.mark.parametrize(
@@ -180,6 +238,68 @@ def test_lock_routes_to_openclaw_baseurl_for_unregistered_gateway(
         "openclaw gateway baseUrl must be routed as the upstream — "
         "not the api.openai.com fallback (the proxy would 401)."
     )
+
+
+def test_lock_does_not_route_openrouter_key_to_the_openai_gateway(
+    home_dir: WorthlessHome, sandboxed_home: Path, tmp_path: Path, fixed_key: str
+) -> None:
+    """worthless-v4n2: the gateway is chosen by VENDOR, not by wire protocol.
+
+    ``providers.toml`` declares ``protocol = "openai"`` for five bundled
+    vendors. The lookup used to be keyed by that protocol, so an OpenRouter key
+    picked up the user's ``openai`` OpenClaw entry — a corporate Azure gateway —
+    and the proxy then mailed an OpenRouter credential to Azure.
+    """
+    or_key = fake_openrouter_key()
+    # WRTLS-111: --env only accepts an allowlisted basename, so it must be
+    # literally ".env" — in its own subdir to avoid the fixture's .env.
+    env_dir = tmp_path / "orproj"
+    env_dir.mkdir()
+    env = env_dir / ".env"
+    env.write_text(f"OPENROUTER_API_KEY={or_key}\n", encoding="utf-8")
+    _seed_openclaw(sandboxed_home, {"baseUrl": AZURE_URL, "apiKey": fixed_key})
+
+    result = runner.invoke(
+        app,
+        ["lock", "--env", str(env)],
+        env={"WORTHLESS_HOME": str(home_dir.base_dir), "WORTHLESS_KEYRING_BACKEND": "null"},
+    )
+    assert result.exit_code == 0, result.output
+
+    # The alias prefix stays the PROTOCOL by design (adapter dispatch); only the
+    # upstream is vendor-keyed.
+    stored = _base_url(home_dir, _alias_for_key("openai", or_key))
+    assert stored != AZURE_URL, (
+        f"OpenRouter key was routed to the openai gateway {AZURE_URL!r} — "
+        "the key would be sent to the wrong vendor."
+    )
+    assert stored == "https://openrouter.ai/api/v1", stored
+
+
+def test_lock_still_routes_openai_key_to_a_gateway_with_no_apikey_in_the_entry(
+    home_dir: WorthlessHome, env_file: Path, sandboxed_home: Path, fixed_key: str
+) -> None:
+    """Guards the fix that was REJECTED for worthless-v4n2.
+
+    The tempting alternative — honour the gateway only when the entry's
+    ``apiKey`` equals the key being locked — regresses WOR-834: a real
+    ``openclaw.json`` using env-var indirection carries no literal ``apiKey``,
+    so the gateway would be discarded and the key would revert to
+    ``api.openai.com``, which is the exact 401 WOR-834 exists to prevent.
+    """
+    _seed_openclaw(sandboxed_home, {"baseUrl": AZURE_URL})  # no apiKey
+
+    result = runner.invoke(
+        app,
+        ["lock", "--env", str(env_file)],
+        env={"WORTHLESS_HOME": str(home_dir.base_dir), "WORTHLESS_KEYRING_BACKEND": "null"},
+    )
+    assert result.exit_code == 0, result.output
+
+    # Hash the ORIGINAL key: lock rewrites .env, so reading it back now would
+    # hash the shard instead.
+    alias = _alias_for_key("openai", fixed_key)
+    assert _base_url(home_dir, alias) == AZURE_URL
 
 
 @pytest.mark.parametrize(

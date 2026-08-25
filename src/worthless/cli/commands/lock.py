@@ -222,6 +222,29 @@ def _fold_embedded_ipv4(
     return ip
 
 
+def _is_loopback_host(host: str) -> bool:
+    """True when *host* is unambiguously this machine — by literal OR by name.
+
+    ``_upstream_host_ip`` deliberately does not resolve DNS, so it returns
+    ``None`` for the NAME ``localhost`` — the most common spelling of loopback.
+    Any caller using it to answer "is this our own plumbing rather than a
+    gateway?" must therefore also check the reserved local names, or an
+    ordinary ``http://localhost:11434`` (Ollama — the URL our own
+    ``providers.toml`` ships for ``[provider.ollama]``) falls through to
+    :func:`_validate_upstream_base_url` and aborts the WHOLE lock, unrelated
+    keys included (worthless-f63f).
+
+    ``localhost`` and ``*.localhost`` are reserved to loopback by RFC 6761
+    §6.3, so classifying them without a lookup is a definitional fact, not a
+    DNS assumption — this does not weaken the module's no-resolution stance.
+    """
+    name = host.rstrip(".").lower()
+    if name == "localhost" or name.endswith(".localhost"):
+        return True
+    ip = _upstream_host_ip(host)
+    return ip is not None and ip.is_loopback
+
+
 def _upstream_host_ip(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
     """The IP a URL host denotes, or ``None`` for a real DNS name.
 
@@ -355,8 +378,7 @@ def _genuine_oc_base_url(oc_config: dict | None, provider: str, proxy_base_url: 
         return None
     if _openclaw_integration._is_proxy_url(url, proxy_base_url):
         return None
-    ip = _upstream_host_ip(host)
-    if ip is not None and ip.is_loopback:
+    if _is_loopback_host(host):
         return None
     _validate_upstream_base_url(url)
     return url
@@ -776,7 +798,16 @@ async def _pass1_db_writes(
         # default (api.openai.com) on the SECOND lock. Reuse what this alias
         # was locked with instead. An explicit registered *_BASE_URL still
         # wins -- it is the first tier inside _resolve_upstream_base_url.
-        oc_base_url = _genuine_oc_base_url(oc_config, provider, oc_proxy_base_url)
+        # REGISTRY NAME, not the wire protocol. `provider` above is the
+        # protocol, and five bundled providers declare protocol = "openai", so
+        # keying this by protocol read the user's `openai` gateway entry for an
+        # OpenRouter/Groq/Together key and mailed that key to the wrong vendor
+        # (worthless-v4n2). This deliberately diverges from the G3 capture key
+        # in _decide_oc_capture, which stays on the protocol because it must
+        # mirror the entry apply_lock actually overwrites. Different questions:
+        # capture asks "which entry do we rewrite?", this asks "which vendor is
+        # this key for?".
+        oc_base_url = _genuine_oc_base_url(oc_config, detected_provider, oc_proxy_base_url)
         if oc_base_url is None and db_shard is not None:
             persisted = db_shard.base_url
             # Carry forward ONLY an UNREGISTERED gateway. Such a URL can only
