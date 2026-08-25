@@ -22,6 +22,11 @@ from worthless.cli.bootstrap import ensure_home
 from worthless.cli.commands.lock import _lock_keys
 from worthless.cli.commands.up import start_daemon
 from worthless.cli.console import WorthlessConsole, set_console
+from worthless.cli.sidecar_lifecycle import (
+    shutdown_sidecar,
+    spawn_sidecar,
+    split_to_tmpfs,
+)
 from worthless.cli.process import (
     build_proxy_env,
     check_pid,
@@ -31,13 +36,11 @@ from worthless.cli.process import (
     read_pid,
 )
 
-from tests._fakes import WOR309_SUBPROCESS_FOLLOWUP
 from tests.helpers import fake_openai_key
 
 
 @pytest.mark.e2e
 @pytest.mark.real_ipc
-@pytest.mark.skip(reason=WOR309_SUBPROCESS_FOLLOWUP)
 class TestEndToEndSmoke:
     """Full lifecycle: bootstrap → lock → proxy → healthz → stop."""
 
@@ -75,6 +78,17 @@ class TestEndToEndSmoke:
         # 4. Start proxy daemon
         disable_core_dumps()
         proxy_env = build_proxy_env(home)
+
+        # Mirror `worthless up` (up.py:504-519): the proxy cannot serve
+        # /healthz without a sidecar to answer decrypt IPC. SR-02: wipe the
+        # plaintext key as soon as the shares exist.
+        fernet_key = home.fernet_key
+        try:
+            shares = split_to_tmpfs(fernet_key, home.base_dir)
+        finally:
+            fernet_key[:] = bytearray(len(fernet_key))
+        handle = spawn_sidecar(shares.run_dir / "sidecar.sock", shares, allowed_uid=os.getuid())
+        proxy_env["WORTHLESS_SIDECAR_SOCKET"] = str(handle.socket_path)
         port = 18787  # high port to avoid conflicts
         pf = pid_path(home)
         log_file = home.base_dir / "proxy.log"
@@ -98,6 +112,7 @@ class TestEndToEndSmoke:
             assert recorded_port == port
 
         finally:
+            shutdown_sidecar(handle)
             # 6. Stop the proxy
             if check_pid(pid):
                 import signal

@@ -25,13 +25,21 @@ import pytest
 from worthless.cli.bootstrap import ensure_home
 from worthless.cli.process import check_pid, pid_path, poll_health, read_pid
 
-from tests._fakes import WOR309_SUBPROCESS_FOLLOWUP
 
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.real_ipc,
     pytest.mark.timeout(30),
-    pytest.mark.skip(reason=WOR309_SUBPROCESS_FOLLOWUP),
+    pytest.mark.skip(
+        reason=(
+            "worthless-qtxm: the WOR-309 sidecar blocker is fixed and no longer "
+            "applies here, but these spawn a daemon against a FRESH home, which "
+            "emits the first-run warranty notice (bootstrap.py:179 "
+            "warranty_notice_marker) and never reaches listening state. Needs the "
+            "notice pre-accepted in the fixture, or a non-interactive bypass. "
+            "Tracked separately — do NOT re-attribute this to WOR-309."
+        )
+    ),
 ]
 
 

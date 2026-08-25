@@ -10,7 +10,13 @@ from pathlib import Path
 
 import pytest
 
-from tests._fakes import WOR309_SUBPROCESS_FOLLOWUP
+from worthless.cli.bootstrap import ensure_home
+from worthless.cli.process import poll_health, spawn_proxy
+from worthless.cli.sidecar_lifecycle import (
+    shutdown_sidecar,
+    spawn_sidecar,
+    split_to_tmpfs,
+)
 
 
 class TestCreateLivenessPipe:
@@ -177,24 +183,29 @@ class TestForwardSignals:
 @pytest.mark.integration
 @pytest.mark.real_ipc
 @pytest.mark.timeout(30)
-@pytest.mark.skip(reason=WOR309_SUBPROCESS_FOLLOWUP)
 class TestSpawnProxyIntegration:
     """Integration test: spawn real proxy and check health."""
 
     def test_spawn_and_health(self, tmp_path: Path):
         """Spawn proxy on random port, poll health, shut down."""
-        from worthless.cli.process import poll_health, spawn_proxy
-
-        # Set up minimal WorthlessHome
-        from worthless.cli.bootstrap import ensure_home
-
         home = ensure_home(tmp_path / ".worthless")
 
         env = {
             "WORTHLESS_DB_PATH": str(home.db_path),
-            "WORTHLESS_FERNET_KEY": home.fernet_key.decode(),
             "WORTHLESS_ALLOW_INSECURE": "true",
         }
+
+        # The proxy answers /healthz only once a sidecar is serving decrypt
+        # IPC (WOR-309). Mirror `worthless up` (up.py:504-519) rather than
+        # passing the raw key through the environment.  SR-02: wipe the
+        # plaintext key as soon as the shares exist.
+        fernet_key = home.fernet_key
+        try:
+            shares = split_to_tmpfs(fernet_key, home.base_dir)
+        finally:
+            fernet_key[:] = bytearray(len(fernet_key))
+        handle = spawn_sidecar(shares.run_dir / "sidecar.sock", shares, allowed_uid=os.getuid())
+        env["WORTHLESS_SIDECAR_SOCKET"] = str(handle.socket_path)
 
         proc, port = spawn_proxy(env, port=0)
         try:
@@ -206,6 +217,7 @@ class TestSpawnProxyIntegration:
         finally:
             proc.terminate()
             proc.wait(timeout=5)
+            shutdown_sidecar(handle)
 
 
 class TestProxyCmdShape:
