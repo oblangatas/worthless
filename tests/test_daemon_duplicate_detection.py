@@ -32,12 +32,13 @@ pytestmark = [
     pytest.mark.timeout(30),
     pytest.mark.skip(
         reason=(
-            "worthless-qtxm: the WOR-309 sidecar blocker is fixed and no longer "
-            "applies here, but these spawn a daemon against a FRESH home, which "
-            "emits the first-run warranty notice (bootstrap.py:179 "
-            "warranty_notice_marker) and never reaches listening state. Needs the "
-            "notice pre-accepted in the fixture, or a non-interactive bypass. "
-            "Tracked separately — do NOT re-attribute this to WOR-309."
+            "worthless-0q7k: these drive `worthless up -d`, and daemon mode is "
+            "deliberately rejected while the sidecar is in play — up.py:706 exits "
+            "WRTLS-115 'daemon mode not yet supported with sidecar'. That refusal "
+            "is intentional and already asserted by "
+            "tests/cli/test_up_with_sidecar.py::test_up_rejects_daemon_mode_with_"
+            "clear_error, so these tests cover a mode the product no longer offers. "
+            "Re-enable when daemon mode returns; delete if it does not."
         )
     ),
 ]

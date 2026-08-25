@@ -1,4 +1,15 @@
-"""End-to-end smoke test — proves the core product promise.
+"""End-to-end smoke test — proves the proxy boots and goes live.
+
+Scope, honestly: this drives the lifecycle to a listening proxy and a 200
+from ``/healthz``. It does NOT issue a proxied request, so it proves none of
+the three product invariants (client-side split, gate-before-reconstruct,
+server-side upstream call). ``/healthz`` also swallows its own DB error
+(app.py:443-444), so a 200 is not a statement about storage health.
+
+What it does prove is that lifespan completed: schema, migrations, decoy
+preload, the sidecar IPC handshake, and the port bind. For proof that a real
+request transits a real proxy, see
+``tests/test_e2e.py::TestWrapProxiesRequest``.
 
 Lifecycle: bootstrap home → lock a key → start proxy → /healthz → stop.
 
@@ -12,6 +23,7 @@ Marked ``@pytest.mark.e2e`` so it can be selected or skipped in CI.
 from __future__ import annotations
 
 import os
+import signal
 import time
 from pathlib import Path
 
@@ -41,6 +53,7 @@ from tests.helpers import fake_openai_key
 
 @pytest.mark.e2e
 @pytest.mark.real_ipc
+@pytest.mark.timeout(60)
 class TestEndToEndSmoke:
     """Full lifecycle: bootstrap → lock → proxy → healthz → stop."""
 
@@ -80,22 +93,28 @@ class TestEndToEndSmoke:
         proxy_env = build_proxy_env(home)
 
         # Mirror `worthless up` (up.py:504-519): the proxy cannot serve
-        # /healthz without a sidecar to answer decrypt IPC. SR-02: wipe the
-        # plaintext key as soon as the shares exist.
+        # /healthz without a sidecar to answer decrypt IPC — app.py:262-271
+        # eager-connects the supervisor and fails loud with no fallback.
+        # The wipe mirrors up.py's SR-02 step. It is not a full guarantee
+        # here: ``home.fernet_key`` hands back a fresh copy each call, so
+        # this clears our own temporary, not the cached key.
         fernet_key = home.fernet_key
         try:
             shares = split_to_tmpfs(fernet_key, home.base_dir)
         finally:
             fernet_key[:] = bytearray(len(fernet_key))
-        handle = spawn_sidecar(shares.run_dir / "sidecar.sock", shares, allowed_uid=os.getuid())
-        proxy_env["WORTHLESS_SIDECAR_SOCKET"] = str(handle.socket_path)
+
         port = 18787  # high port to avoid conflicts
         pf = pid_path(home)
         log_file = home.base_dir / "proxy.log"
 
-        pid = start_daemon(proxy_env, port, pf, log_file, WorthlessConsole(quiet=True))
-
+        # spawn_sidecar must be inside the try: a failure in start_daemon
+        # would otherwise orphan the sidecar and its tmpfs shares.
+        handle = spawn_sidecar(shares.run_dir / "sidecar.sock", shares, allowed_uid=os.getuid())
+        pid = None
         try:
+            proxy_env["WORTHLESS_SIDECAR_SOCKET"] = str(handle.socket_path)
+            pid = start_daemon(proxy_env, port, pf, log_file, WorthlessConsole(quiet=True))
             # 5. Verify /healthz
             healthy = poll_health(port, timeout=10.0)
             assert healthy, "Proxy should be healthy after start"
@@ -112,11 +131,9 @@ class TestEndToEndSmoke:
             assert recorded_port == port
 
         finally:
-            shutdown_sidecar(handle)
-            # 6. Stop the proxy
-            if check_pid(pid):
-                import signal
-
+            # 6. Stop the proxy FIRST, then the sidecar it depends on —
+            # same order as up.py's supervised shutdown.
+            if pid is not None and check_pid(pid):
                 os.kill(pid, signal.SIGTERM)
                 # Wait for graceful shutdown
                 for _ in range(20):
@@ -127,5 +144,8 @@ class TestEndToEndSmoke:
                     # Force kill if SIGTERM didn't work
                     os.kill(pid, signal.SIGKILL)
 
+            shutdown_sidecar(handle)
+
             # 7. Clean up PID file
             pf.unlink(missing_ok=True)
+            assert not pf.exists(), "PID file should be gone after cleanup"

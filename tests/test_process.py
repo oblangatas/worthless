@@ -190,33 +190,42 @@ class TestSpawnProxyIntegration:
         """Spawn proxy on random port, poll health, shut down."""
         home = ensure_home(tmp_path / ".worthless")
 
+        # WORTHLESS_FERNET_KEY here is the INPUT to fernet_transport
+        # (process.py:347-360), which pops it and hands the key to the child
+        # over an os.pipe as WORTHLESS_FERNET_FD. It never reaches the child
+        # environment — prepare_proxy_env scrubs it at process.py:398-401.
+        # This is that transport's only real-spawn coverage; do not drop it.
         env = {
             "WORTHLESS_DB_PATH": str(home.db_path),
+            "WORTHLESS_FERNET_KEY": home.fernet_key.decode(),
             "WORTHLESS_ALLOW_INSECURE": "true",
         }
 
-        # The proxy answers /healthz only once a sidecar is serving decrypt
-        # IPC (WOR-309). Mirror `worthless up` (up.py:504-519) rather than
-        # passing the raw key through the environment.  SR-02: wipe the
-        # plaintext key as soon as the shares exist.
+        # Separately, the proxy answers /healthz only once a sidecar is
+        # serving decrypt IPC (WOR-309, app.py:262-271 fails loud with no
+        # fallback), so mirror `worthless up` (up.py:504-519).
         fernet_key = home.fernet_key
         try:
             shares = split_to_tmpfs(fernet_key, home.base_dir)
         finally:
             fernet_key[:] = bytearray(len(fernet_key))
-        handle = spawn_sidecar(shares.run_dir / "sidecar.sock", shares, allowed_uid=os.getuid())
-        env["WORTHLESS_SIDECAR_SOCKET"] = str(handle.socket_path)
 
-        proc, port = spawn_proxy(env, port=0)
+        # Inside the try below: a spawn_proxy failure would otherwise orphan
+        # the sidecar and its tmpfs shares.
+        handle = spawn_sidecar(shares.run_dir / "sidecar.sock", shares, allowed_uid=os.getuid())
+        proc = None
         try:
+            env["WORTHLESS_SIDECAR_SOCKET"] = str(handle.socket_path)
+            proc, port = spawn_proxy(env, port=0)
             assert port > 0
             assert proc.poll() is None  # Still running
 
             healthy = poll_health(port, timeout=15.0)
             assert healthy is True
         finally:
-            proc.terminate()
-            proc.wait(timeout=5)
+            if proc is not None:
+                proc.terminate()
+                proc.wait(timeout=5)
             shutdown_sidecar(handle)
 
 
