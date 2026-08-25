@@ -10,6 +10,7 @@ Run with:
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import uuid
 from pathlib import Path
@@ -54,6 +55,23 @@ IMAGE_TAG = os.environ.get("WORTHLESS_DOCKER_IMAGE", f"worthless-test:e2e-{_SESS
 # entire module unrunnable locally (CI keeps the plugin on a system path, so CI
 # never saw it), which is a large part of why worthless-za14 went unnoticed.
 _REAL_DOCKER_CONFIG = Path.home() / ".docker"
+
+
+def _local_build_tag() -> str:
+    """The image tag ``docker-compose.build.yml`` names, read from that file.
+
+    Derived rather than hardcoded so renaming the tag in the overlay cannot
+    leave this test asserting a name nobody builds any more — the assertion
+    would still pass while covering nothing, which is the exact failure mode
+    this test exists to catch (worthless-za14).
+    """
+    overlay = (REPO_ROOT / "deploy" / "docker-compose.build.yml").read_text()
+    match = re.search(r"^\s*image:\s*(\S+)\s*$", overlay, re.MULTILINE)
+    assert match, "deploy/docker-compose.build.yml declares no image: tag"
+    return match.group(1)
+
+
+_LOCAL_BUILD_TAG = _local_build_tag()
 
 
 def _docker_env(extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -1347,9 +1365,14 @@ class TestComposeSecurity:
             check=False,
         ).stdout.strip()
         assert image, f"could not read image for container {cname}"
-        assert not image.startswith("ghcr.io/"), (
-            f"compose stack is running the PUBLISHED image {image!r} — the "
-            "assertions in this class are testing the last release, not this "
+        # Assert the exact tag the build overlay names, rather than excluding a
+        # registry prefix. A prefix check is weak — a retag or a second registry
+        # defeats it, and CodeQL flags the substring form as incomplete URL
+        # sanitization (py/incomplete-url-substring-sanitization), correctly.
+        # deploy/docker-compose.build.yml sets `image: worthless-proxy:local`.
+        assert image == _LOCAL_BUILD_TAG, (
+            f"compose stack is running {image!r}, expected {_LOCAL_BUILD_TAG!r} — "
+            "the assertions in this class are testing some other image, not this "
             "change. Ensure deploy/docker-compose.build.yml is layered in."
         )
 
