@@ -112,7 +112,13 @@ if [ ! -d docs/ ]; then
     echo "  ⚠ docs/: directory not found — skipping Docker image tag bump"
 else
     # --include must come before the path: BSD grep (macOS) ignores it otherwise.
+    # deploy/docker-compose.yml carries the same pin (WOR-553) and is enforced by
+    # check_docs_versions.py, so it must bump here too — otherwise the release PR
+    # fails its own drift check and needs a hand-edit every time.
     docs_hits=$(grep -rlF --include="*.md" --include="*.mdx" "worthless-proxy:${current_version}" docs/ || true)
+    if grep -qF "worthless-proxy:${current_version}" deploy/docker-compose.yml 2>/dev/null; then
+        docs_hits="$docs_hits deploy/docker-compose.yml"
+    fi
     if [ -n "$docs_hits" ]; then
         # Escape dots on the LHS so the sed pattern treats them as literals.
         escaped_current=$(printf '%s\n' "$current_version" | sed 's/[.]/\\./g')
@@ -131,26 +137,19 @@ fi
 if grep -q "^\[$new_version\]:" CHANGELOG.md; then
     echo "  ✓ CHANGELOG.md: [$new_version] link reference already present"
 else
-    # Derive the repo URL from `git remote get-url origin` rather than
-    # hardcoding `shacharm2/worthless` — the org/owner can change (today
-    # `shacharm2` is a personal account, not a `worthless` org). Falls
-    # back to the historical hardcode if origin isn't a recognisable
-    # GitHub URL.
-    origin_url=$(git remote get-url origin 2>/dev/null || true)
-    case "$origin_url" in
-        git@github.com:*)
-            owner_repo=${origin_url#git@github.com:}
-            owner_repo=${owner_repo%.git}
-            ;;
-        https://github.com/*)
-            owner_repo=${origin_url#https://github.com/}
-            owner_repo=${owner_repo%.git}
-            ;;
-        *)
-            owner_repo="shacharm2/worthless"
-            ;;
-    esac
-    new_link="[$new_version]: https://github.com/$owner_repo/releases/tag/v$new_version"
+    # Read the repo URL from pyproject.toml's [project.urls] Repository — the
+    # declared single source of truth for this repo's identity, which
+    # tests/test_repo_owner_refs.py already enforces every other reference
+    # against. Earlier revisions parsed `git remote get-url origin` instead and
+    # got it wrong twice (worthless-c478): narrow host globs missed per-account
+    # SSH aliases and `host:PORT/` forms, silently producing CHANGELOG links for
+    # the WRONG owner while looking derived. There is no owner to parse here.
+    repo_url=$(sed -n 's/^Repository *= *"\(.*\)"/\1/p' pyproject.toml | head -n1)
+    if [ -z "$repo_url" ]; then
+        echo "ERROR: no [project.urls] Repository in pyproject.toml — cannot build the CHANGELOG link."
+        exit 1
+    fi
+    new_link="[$new_version]: $repo_url/releases/tag/v$new_version"
 
     # Find the first existing [X.Y.Z]: link and insert above it
     if grep -q "^\[$current_version\]:" CHANGELOG.md; then
@@ -194,7 +193,7 @@ Done. Next steps:
      uv run pytest tests/test_skill_md.py::TestVersionDrift -q
 
   4. Stage, commit (Conventional Commits), push:
-     git add pyproject.toml SKILL.md CHANGELOG.md uv.lock install.sh packages/worthless-mcp/package.json docs/
+     git add pyproject.toml SKILL.md CHANGELOG.md uv.lock install.sh packages/worthless-mcp/package.json docs/ deploy/docker-compose.yml
      git commit -m "chore(release): v$new_version"
      git push
 

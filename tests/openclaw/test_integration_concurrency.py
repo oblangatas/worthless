@@ -32,6 +32,20 @@ from pathlib import Path
 import pytest
 
 
+# This module launches ~90 child interpreters (CONC-45 spawns 50, CONC-46
+# spawns 40 across 20 iterations). Under a loaded ``-n auto`` run that can
+# blow the repo-global 30s budget, and a pytest-timeout SIGALRM is raised
+# WHEREVER the process happens to be. ``timeout_func_only`` defaults to
+# False, so the timer is armed across the whole ``pytest_runtest_protocol``
+# — including xdist's report serialize-and-send, which sits OUTSIDE every
+# ``CallInfo.from_call()`` catch. A ``Failed`` landing there means
+# ``runtest_protocol_complete`` is never sent, the master still thinks the
+# item is running, and the worker's session end trips
+# ``assert not crashitem`` (xdist ``dsession.py:217``) — killing the WHOLE
+# session, not just this test. Headroom keeps the alarm from arming here.
+pytestmark = pytest.mark.timeout(120)
+
+
 # ---------------------------------------------------------------------------
 # Module-level workers (spawn-context picklability)
 # ---------------------------------------------------------------------------
@@ -203,9 +217,14 @@ def test_conc22_held_flock_blocks_contender_until_release(
     ready = tmp_path / "ready.sentinel"
     release = tmp_path / "release.sentinel"
 
-    holder_pool = mp_spawn.Pool(1)
-    contender_pool = mp_spawn.Pool(1)
-    try:
+    # Pools via ``with`` (terminate-on-exit), matching CONC-45/46 below. A
+    # ``close()``/``join()`` teardown deadlocks if anything raises before
+    # ``release.touch()``: the holder is still polling for the release
+    # sentinel that now never arrives, and ``join()`` waits on it forever.
+    # That wedges the xdist worker permanently — no second alarm is armed
+    # to break it out. ``terminate()`` cannot block; both results are
+    # already collected by the time we exit on the success path.
+    with mp_spawn.Pool(1) as holder_pool, mp_spawn.Pool(1) as contender_pool:
         holder = holder_pool.apply_async(
             _worker_holds_lock, [(str(fake_home), str(ready), str(release))]
         )
@@ -236,11 +255,6 @@ def test_conc22_held_flock_blocks_contender_until_release(
         # Contender successfully wrote its entry post-release.
         # WOR-621 F1: lock rewrites the provider's ORIGINAL id, not worthless-*.
         assert "conc45-22" in contender_result["providers_set"]
-    finally:
-        holder_pool.close()
-        holder_pool.join()
-        contender_pool.close()
-        contender_pool.join()
 
 
 # ---------------------------------------------------------------------------

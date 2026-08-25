@@ -11,7 +11,7 @@ Walkthrough for worthless install.sh
 What you would have piped into sh, in plain English. Read this first if
 you'd rather audit than execute.
 
-Source: https://github.com/shacharm2/worthless
+Source: https://github.com/oblangatas/worthless
 
 ----------------------------------------------------------------------
 
@@ -48,9 +48,10 @@ Step 5 — Install or upgrade worthless
   script is idempotent. Network failures exit 10 with proxy/mirror hints.
 
 Step 6 — Smoke test
-  Runs `uv run --no-project worthless --version` to confirm the binary
-  starts. Failure exits 40 ("installed but won't run") — usually a
-  corrupt cache. Error message links to `worthless doctor`.
+  Asks uv where it installed the entry point (`uv tool dir --bin`) and
+  runs that binary's `--version` to confirm it starts, so the version
+  you see is the one you got. Failure exits 40 ("installed but won't
+  run"). Error message links to `worthless doctor`.
 
 Step 7 — PATH activation
   Detects shell (bash / zsh / fish) and prints the exact line to add to
@@ -70,5 +71,5 @@ What it does NOT do
 Still uncertain? Read the raw script:
   curl -sSL worthless.sh
 A specific release tag (pick one from the releases page):
-  https://github.com/shacharm2/worthless/releases
-Issues: https://github.com/shacharm2/worthless/issues
+  https://github.com/oblangatas/worthless/releases
+Issues: https://github.com/oblangatas/worthless/issues

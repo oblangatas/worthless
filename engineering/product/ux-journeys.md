@@ -41,7 +41,7 @@ Safe because: AI must explicitly pass `-y`, which is an auditable action in its 
 `install.sh` should detect `-y` / `WORTHLESS_OUTPUT=json` and on failure emit to stderr:
 
 ```
-{"error":"platform_unsupported","platform":"freebsd","suggest":"docker run shacharm2/worthless"}
+{"error":"platform_unsupported","platform":"freebsd","suggest":"docker run oblangatas/worthless"}
 ```
 
 Exit codes: `1=network, 2=platform, 3=conflict, 4=consent-missing`.

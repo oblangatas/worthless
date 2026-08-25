@@ -121,8 +121,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p install-smoke-traces
-          # PATH-independent — uv knows where it put the binary.
-          uv run --no-project worthless --version 2>&1 | tee install-smoke-traces/verify-version-${{ runner.os }}.log
+          # Verify the SAME artifact install.sh verifies: the entry point uv
+          # installed. `uv run --no-project` was used here, but it resolves an
+          # ephemeral env that can answer from a stale cache — which is why this
+          # job could not catch worthless-dc26 (banner reported 0.3.9 while 0.3.10
+          # was installed). `uv tool dir --bin` is uv's own answer.
+          "$(uv tool dir --bin)/worthless" --version 2>&1 | tee install-smoke-traces/verify-version-${{ runner.os }}.log
           # And via uv tool list (smoke that the tool is registered).
           uv tool list 2>&1 | tee install-smoke-traces/uv-tool-list-${{ runner.os }}.log
 
@@ -208,7 +212,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p install-smoke-traces
-          uv run --no-project worthless --version 2>&1 | tee install-smoke-traces/proxy-verify.log
+          # Same reasoning as the verify step above: check the installed entry
+          # point, not an ephemeral `uv run` env (worthless-dc26).
+          "$(uv tool dir --bin)/worthless" --version 2>&1 | tee install-smoke-traces/proxy-verify.log
 
       - name: Upload proxy install terminal traces
         if: always()

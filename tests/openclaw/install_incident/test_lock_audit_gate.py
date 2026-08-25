@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import yaml
+
 import pytest
 
 from worthless.openclaw.audit import (
@@ -768,9 +770,20 @@ class TestAC12WOR545LoadBearingTestExists:
             'load-bearing pytest step must pass -m "openclaw and docker" '
             "(pyproject addopts exclude docker/openclaw by default)"
         )
-        assert "tests/openclaw/**" in content, (
-            "docker-security paths must include tests/openclaw/**"
-        )
+        # WOR-874 deleted the workflow's `paths:` filter entirely, so it now
+        # triggers on every PR — these tests are covered by definition. The
+        # property is "a change here runs the load-bearing test", not "this
+        # glob appears in a list", so assert the property: either there is no
+        # filter, or the filter names this directory.
+        triggers = yaml.safe_load(content)[True]
+        for event in ("push", "pull_request"):
+            config = triggers.get(event)
+            if not isinstance(config, dict) or "paths" not in config:
+                continue  # unfiltered — every path triggers it, including this one
+            assert "tests/openclaw/**" in config["paths"], (
+                f"{event}: a paths filter was re-added without tests/openclaw/** — "
+                "changes to the load-bearing tests would ship without running them"
+            )
 
 
 # =========================================================================== #

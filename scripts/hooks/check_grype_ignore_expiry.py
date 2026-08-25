@@ -36,10 +36,30 @@ REPO = Path(__file__).resolve().parents[2]
 CONFIGS = (REPO / ".grype.yaml", REPO / ".grype" / "config.yaml")
 
 
-def check(config: Path, today: dt.date) -> list[str]:
+# How long before expiry to start warning. The window has to be long enough to
+# re-measure an upstream fix without panic, short enough that the warning still
+# means something when it appears.
+WARN_DAYS = 14
+
+# grype matches `package.name` as a LITERAL string — until the name contains a
+# regex metacharacter, at which point the whole name becomes a full-match
+# regex and every `.` in it turns into a wildcard. Measured on grype 0.114.0:
+# a bare `urllib.` does NOT match `urllib3`, but `urllib.|zzzz` DOES.
+#
+# `.` is deliberately absent from this set. Dotted package names are ordinary
+# (`backports.tarfile`, `gopkg.in/yaml.v2`) and inert on their own; flagging
+# them would be noise. It is the OTHER metacharacters that arm the dots.
+REGEX_ACTIVATORS = frozenset("*?+[](){}^$|\\")
+
+
+def check(config: Path, today: dt.date, warnings: list[str] | None = None) -> list[str]:
     """Return one problem string per bad ignore rule. Empty list = all good.
 
     Caller guarantees the file exists — check_all() filters first.
+
+    ponytail: warnings ride an optional out-param rather than a second return
+    value, so every existing caller and test keeps working unchanged. A
+    warning is never a problem — it must not affect the exit code.
     """
     data = yaml.safe_load(config.read_text()) or {}
     rules = data.get("ignore") or []
@@ -63,6 +83,20 @@ def check(config: Path, today: dt.date) -> list[str]:
             )
             continue
         vuln = f"{where}: {vuln}"
+
+        # A package name that is secretly a regex suppresses more than it says.
+        pkg = rule.get("package")
+        name = (pkg or {}).get("name") if isinstance(pkg, dict) else None
+        if name:
+            armed = sorted(set(str(name)) & REGEX_ACTIVATORS)
+            if armed:
+                problems.append(
+                    f"{vuln}: package name {name!r} contains {''.join(armed)!r}, which makes "
+                    f"grype treat the whole name as a full-match regex — every `.` in it "
+                    f"becomes a wildcard and the ignore silences packages it never named. "
+                    f"Use a literal name, or split into one entry per package."
+                )
+
         raw = rule.get("expiry")
 
         if raw is None:
@@ -91,11 +125,21 @@ def check(config: Path, today: dt.date) -> list[str]:
                 f"Re-measure the upstream fix status, then either drop the ignore "
                 f"or extend it with a fresh reason — do not extend it blind."
             )
+        elif warnings is not None and (expiry - today).days <= WARN_DAYS:
+            left = (expiry - today).days
+            when = "expires today" if left == 0 else f"expires in {left} day(s)"
+            warnings.append(
+                f"{vuln}: {when}, on {expiry.isoformat()}. Re-measure NOW, while this "
+                f"is still a notice. Once it lapses it blocks every commit in the repo, "
+                f"and the cheapest way out of that is a blind date bump."
+            )
 
     return problems
 
 
-def check_all(configs: tuple[Path, ...], today: dt.date) -> list[str]:
+def check_all(
+    configs: tuple[Path, ...], today: dt.date, warnings: list[str] | None = None
+) -> list[str]:
     """Check every grype config that exists. At least one must.
 
     Either location alone is legitimate — grype reads both, so a repo that
@@ -106,11 +150,25 @@ def check_all(configs: tuple[Path, ...], today: dt.date) -> list[str]:
     present = [c for c in configs if c.exists()]
     if not present:
         return [f"none of {[c.name for c in configs]} exist — no ignore policy to enforce."]
-    return [p for c in present for p in check(c, today)]
+    return [p for c in present for p in check(c, today, warnings)]
 
 
 def main() -> int:
-    problems = check_all(CONFIGS, dt.date.today())
+    warnings: list[str] = []
+    problems = check_all(CONFIGS, dt.date.today(), warnings)
+
+    # Warnings print FIRST so a real failure stays the last thing on screen —
+    # that is the line people actually read.
+    if warnings:
+        print(
+            f"NOTICE: {len(warnings)} grype ignore(s) expire within {WARN_DAYS} days. "
+            f"Not a failure — this commit proceeds.\n",
+            file=sys.stderr,
+        )
+        for w in warnings:
+            print(f"  ~ {w}", file=sys.stderr)
+        print("", file=sys.stderr)
+
     if not problems:
         return 0
 

@@ -89,6 +89,16 @@ if ! gpg --list-secret-keys "$GPG_FINGERPRINT" >/dev/null 2>&1; then
     exit 1
 fi
 
+# PyPI Trusted Publisher must be confirmed for the CURRENT owner.
+# publish.yml uploads via OIDC with no token, and PyPI does not follow a GitHub
+# account rename — so a rename silently breaks publishing, and the only place
+# that surfaces is the release itself (worthless-c478). This is an attestation
+# that someone looked, not a proof that the binding works; see the script.
+if ! ./scripts/verify-pypi-publisher.sh --check; then
+    echo "  Tag NOT created."
+    exit 1
+fi
+
 echo "Pre-flight OK: on main, pyproject=$version, GPG key present"
 echo
 
@@ -122,10 +132,31 @@ echo "Pushing $tag to origin ..."
 git push origin "$tag"
 
 echo
-echo "Tag pushed. The four publishers (PyPI, npm, GHCR, Cloudflare worker) are"
-echo "now running. Once all four pass, release-notes.yml creates the GitHub"
-echo "Release automatically from the CHANGELOG — no manual 'gh release create'."
-echo "Monitor at: https://github.com/shacharm2/worthless/actions"
+echo "Tag pushed. All four publishers (PyPI, npm, GHCR, Cloudflare Worker) are"
+echo "now running. When all four genuinely pass, release-notes.yml creates the"
+echo "GitHub Release itself — you do not run gh release create (WOR-909)."
+echo "Monitor at: https://github.com/oblangatas/worthless/actions"
+echo
+# WOR-873: the release scans BOTH architectures at severity-cutoff medium, but
+# pull requests only ever scan amd64 — arm64 is checked weekly (Monday cron).
+# So a release can fail on an arm64 CVE that no PR could have shown you, at the
+# worst moment: the tag exists, the image does not, and the documented `docker
+# pull` 404s until it is resolved.
+echo "IF THE RELEASE FAILS ON A CVE:"
+echo "  A fixable Medium+ blocks publish on either architecture. arm64 findings"
+echo "  never appear on a PR — that scan runs weekly — so an arm64-only CVE can"
+echo "  surface here for the first time."
+echo
+echo "  A re-run DOES help a transient failure (cosign 5xx, runner error)."
+echo "  It does NOT help a CVE finding — that replays the same tree and fails"
+echo "  identically. For a CVE:"
+echo "    1. Check both architectures at the TAGGED commit — not main, which"
+echo "       may already have moved past it:"
+echo "       gh workflow run docker-security.yml --ref $tag"
+echo "    2. Fix it — bump the pinned base image, or add a dated, argued entry"
+echo "       to .grype.yaml. Prefer bumping the base over widening the waiver."
+echo "    3. Delete the tag and re-push it at the new commit. That keeps the"
+echo "       trigger on refs/tags/v*, which the cosign identity depends on."
 echo
 echo "YOU MUST APPROVE ONE STEP. Once all four publishers are green, the"
 echo "'Create GitHub Release' run pauses for review (the 'release' environment)."

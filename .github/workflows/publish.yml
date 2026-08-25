@@ -2,10 +2,26 @@ name: Publish to PyPI
 
 on:
   # LOAD-BEARING: push-tags-only. Do NOT add workflow_dispatch or
-  # workflow_call — the GPG signed-tag verify step in the build job is
-  # guarded on `github.event_name == 'push'`, so any other trigger would
-  # publish to PyPI WITHOUT a signature check. tests/test_deploy_static.py
-  # (TestPublishTagVerification) enforces this.
+  # workflow_call. tests/test_deploy_static.py::test_no_skip_path_triggers
+  # enforces this.
+  #
+  # The reason is NOT the one this comment used to give. It claimed
+  # `workflow_call` "would publish WITHOUT a signature check" because the
+  # verify step was guarded on `event_name == 'push'`. That guard is gone
+  # (WOR-892), and it was wrong about `workflow_call` anyway: a called
+  # workflow inherits the CALLER's `github` context, so `event_name` there is
+  # the caller's event, never the literal `workflow_call` (WOR-891).
+  #
+  # The real reason: publishing must require pushing a signed `v*` tag,
+  # because that push is what the `v-tags-signed` ruleset gates. Any other
+  # trigger reaches the publish path without a tag push, so the ruleset never
+  # evaluates.
+  #
+  # Defense in depth, not the last line: with the verify now unconditional,
+  # such a run still dies at verify-tag.sh (a branch ref fails `git
+  # verify-tag`). `environment: pypi` and the trusted-publisher filename pin
+  # also still bind. Keep the pin anyway — the ruleset is the control that is
+  # auditable outside this file.
   push:
     tags:
       - "v*"
@@ -35,7 +51,15 @@ jobs:
         # It must run BEFORE the next step (which parses attacker-controlled
         # pyproject.toml) and before `python -m build` (which runs build hooks).
         # Reuses the same verify-tag.sh + repo Variables as deploy-worker.yml.
-        if: github.event_name == 'push'
+        #
+        # UNCONDITIONAL, BY DESIGN (WOR-892 / WOR-901). This step used to carry
+        # `if: github.event_name == 'push'`. Under the push-tags-only `on:`
+        # below that condition can never be false, so it was never a defense —
+        # it was a trap. Widen `on:` and it flips to false, the step SKIPS, and
+        # a skipped step is not a failed step: `build` completes green and the
+        # `publish` job's `needs: build` is satisfied, uploading to PyPI with
+        # no signature check at all. No `if:` and no `continue-on-error` may be
+        # (re)added to any step in this job — TestPublishBuildJobFailsClosed.
         env:
           MAINTAINER_PUBKEY: ${{ vars.MAINTAINER_GPG_PUBKEY }}
           MAINTAINER_FINGERPRINT: ${{ vars.MAINTAINER_GPG_FINGERPRINT }}
@@ -110,7 +134,7 @@ jobs:
           path: dist/
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # v1.14.1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           print-hash: true
           attestations: true

@@ -1,4 +1,4 @@
-name: Scheduled (Mutation + Hypothesis + Secret Scan)
+name: Scheduled (Hypothesis + Secret Scan)
 
 on:
   schedule:
@@ -8,28 +8,26 @@ on:
 permissions:
   contents: read
 
+# REMOVED: the `mutation` job. WOR-877.
+#
+# It ran `mutmut run --paths-to-mutate ... --runner ...`, flags mutmut 3.x
+# deleted. The lockfile pins mutmut==3.6.0, whose `run` accepts only
+# `--max-children`, so the job crashed before mutating anything. Every one of
+# the 45 retained runs of this workflow failed, back to 2026-04-04 — it has
+# never once been green. Nothing regressed; nothing is being restored.
+#
+# Not replaced with a working invocation, deliberately: mutmut 3.x's collection
+# phase shells out to pytest, and this repo's addopts (-n auto,
+# --strict-markers, --reruns 1, marker filters) break that call with
+# BadTestExecutionCommandsException — reproduced locally. Reconciling it means
+# a separate pytest config for mutmut, for unproven payoff against the 1,414
+# lines of crypto tests (incl. hypothesis properties) that already pass.
+#
+# Note for anyone restoring this: pyproject.toml's [tool.mutmut] excuses the
+# gap by citing scripts/mutation_spine_sweep.py as the real net. That script is
+# wired into nothing, and it covers lock.py/sentinel.py/app.py — not crypto.
+
 jobs:
-  mutation:
-    name: Mutation testing (crypto)
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v6
-        with:
-          persist-credentials: false
-
-      - name: Set up uv + Python
-        uses: ./.github/actions/setup-uv-python
-
-      - name: Run mutmut on crypto
-        env:
-          UV_CACHE_DIR: /tmp/uv-cache
-        run: |
-          uv sync --extra dev --extra test --extra qa
-          uv run python -m mutmut run --paths-to-mutate src/worthless/crypto --runner "uv run pytest tests/test_splitter.py tests/test_properties.py tests/test_security_properties.py -x --no-header -q"
-
   hypothesis-extended:
     name: Extended Hypothesis
     runs-on: ubuntu-latest
@@ -52,27 +50,17 @@ jobs:
           uv sync --extra dev --extra test
           uv run pytest tests/test_properties.py tests/test_security_properties.py -x --no-header -q -s
 
-  contract:
-    name: Contract tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    continue-on-error: true
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v6
-        with:
-          persist-credentials: false
-
-      - name: Set up uv + Python
-        uses: ./.github/actions/setup-uv-python
-
-      - name: Run contract tests
-        env:
-          UV_CACHE_DIR: /tmp/uv-cache
-        run: |
-          uv sync --extra dev --extra test --extra qa
-          uv run pytest -m contract -x --no-header -q
+  # REMOVED: the `contract` job. WOR-877.
+  #
+  # It ran `pytest -m contract`. The `contract` marker is declared in
+  # pyproject.toml and documented in engineering/ci/ci-marker-map.md, and is
+  # applied to ZERO tests — so pytest collected nothing and exited 5. The job
+  # has never executed a single test. `continue-on-error: true` kept it from
+  # failing the workflow while it still showed red on every run.
+  #
+  # The marker is removed too. If contract tests are written later, re-add both
+  # together — a marker with no tests and a job selecting it is not coverage,
+  # it is a red light people learn to ignore.
 
   trufflehog:
     name: Secret scan (full history)
@@ -86,10 +74,60 @@ jobs:
           persist-credentials: false
           fetch-depth: 0  # full history required for git scan
 
+      # `--exclude-detectors=lob` excludes ONE detector, not the scan. WOR-877.
+      #
+      # TruffleHog's Lob detector regex is:
+      #     \b((live|test)_[a-zA-Z0-9_]{35})\b
+      # No keyword-proximity requirement, and `_` is an allowed body character.
+      # So every pytest function named `test_` plus exactly 35 more characters
+      # — 40 total — matches it. This repo has a lot of those.
+      #
+      # This detector worked fine for months — the scan was green in 43 of 46
+      # runs and regressed on 2026-08-07 with no repo change, so the trigger is
+      # an upstream detector change. If upstream tightens it again, REMOVE this
+      # exclusion rather than carrying it forever.
+      #
+      # Measured: 149 "verified" findings, every one a test function name.
+      # Confirmed with --json, which gives file and line:
+      #     tests/test_confusables.py:93
+      #       -> test_clean_and_legit_names_get_no_marker
+      #     tests/test_cli_lock.py:2383
+      #       -> test_audit_gate_honours_non_default_port
+      # Zero key material. "Verified" carries no weight for this detector:
+      # Lob's verify() treats HTTP 403/422 from api.lob.com as success.
+      #
+      # Proven narrow before shipping: with this flag, a planted non-Lob token
+      # in a scratch dir was still detected (Github detector fired, Lob did
+      # not). Against the real repo the scan goes 149 findings / exit 183 ->
+      # 0 findings / exit 0.
+      #
+      # Do NOT widen this to silence a different detector without repeating
+      # that probe. Renaming tests to dodge the regex was considered and
+      # rejected — it lets a third-party pattern dictate our test names.
+      #
+      # The SHA above pins the ACTION, which is a thin wrapper that runs
+      # `docker run ghcr.io/trufflesecurity/trufflehog:${VERSION}`. Its
+      # `version` input defaults to `latest` — a mutable tag upstream can
+      # repoint at will — so without the pin below the scanner's actual code
+      # is unpinned and the SHA is decorative. Every other action in this repo
+      # is SHA-pinned on purpose; grype replaced Trivy here precisely because
+      # aquasecurity/trivy-action was supply-chain compromised. WOR-876.
+      #
+      # A version TAG, not a digest — the action interpolates "${IMAGE}:${VERSION}"
+      # with a colon (upstream action.yml:102), so a digest would produce the
+      # invalid ref `trufflehog:sha256:...`; digests require `@`. A release tag
+      # is therefore the strongest form this action accepts.
+      #
+      # 3.96.0 was published 2026-07-24 and currently resolves to
+      # sha256:aa821cf4ace8861c7d096d83818cdf7bb9719028a52d37a52eaad44086a52577
+      # — recorded so a silent repoint of the tag is detectable after the fact.
+      # Dependabot does not bump this value; re-pin it when you bump the action
+      # SHA above, taking the version from the matching release.
       - name: TruffleHog secret scan
-        uses: trufflesecurity/trufflehog@9b6b5326bfe25dbd856eccc8a8275eb5dea7bd52 # main
+        uses: trufflesecurity/trufflehog@82df476e759c1448517fac6bfb3677685cdcd78a # main
         with:
           path: ./
           base: ""
           head: HEAD
-          extra_args: --only-verified
+          extra_args: --only-verified --exclude-detectors=lob
+          version: "3.96.0"

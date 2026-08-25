@@ -15,7 +15,13 @@ from worthless.cli.bootstrap import WorthlessHome, get_home
 from worthless.cli.console import WorthlessConsole, get_console
 from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary
 from worthless.cli.platform import kill_tree, warn_windows_once
-from worthless.cli.process import MAX_VALID_PID, check_pid, pid_path, read_pid
+from worthless.cli.process import (
+    MAX_VALID_PID,
+    check_pid,
+    disable_core_dumps,
+    pid_path,
+    read_pid,
+)
 
 # Tunable for tests
 _TERM_TIMEOUT: float = 5.0
@@ -100,6 +106,10 @@ def register_down_commands(app: typer.Typer) -> None:
     @error_boundary
     def down() -> None:
         """Stop the running proxy daemon."""
+        # strict=False (dupf.10): down never reconstructs a key, but a first-run
+        # ensure_home() can create and store one, so harden anyway. Never block
+        # someone from stopping their proxy because a kernel lever was refused.
+        disable_core_dumps(strict=False)
         console = get_console()
         home = get_home()
         warn_windows_once(quiet=console.quiet)

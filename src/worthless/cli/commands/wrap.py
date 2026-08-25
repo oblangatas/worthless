@@ -17,7 +17,6 @@ combinable. Run one or the other.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import re
@@ -33,6 +32,7 @@ from worthless._async import run_sync
 from worthless.cli.bootstrap import WorthlessHome, get_home
 from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary, sanitize_exception
 from worthless.cli.platform import fail_if_windows, popen_platform_kwargs
+from worthless.storage.sqlite import connect as sqlite_connect
 from worthless.cli.sentinel import is_partial, read_sentinel
 from worthless.cli.process import (
     build_proxy_env,
@@ -133,41 +133,15 @@ def _list_enrolled_aliases(home: WorthlessHome) -> list[tuple[str, str]]:
         return []
 
     async def _query() -> list[tuple[str, str]]:
-        # Keep a reference to the Connection so the failure path below can join
-        # its worker thread; open it exactly once via `async with`. Awaiting the
-        # connection a second time (e.g. `await db` then `async with db`) would
-        # call Connection._thread.start() twice -> "threads can only be started
-        # once" and leak the still-running thread from the first open.
-        db = aiosqlite.connect(str(home.db_path))
-        try:
-            async with db:
-                cursor = await db.execute(
-                    "SELECT s.key_alias, s.provider "
-                    "FROM shards s "
-                    "JOIN enrollments e ON s.key_alias = e.key_alias "
-                    "ORDER BY s.key_alias"
-                )
-                rows = await cursor.fetchall()
-                return [(str(r[0]), str(r[1])) for r in rows if r[0] and r[1]]
-        except BaseException:
-            # Connection.__await__ starts a worker thread before the sqlite
-            # connect runs. On a FAILED connect, Connection._connect() only
-            # *queues* self.stop() without awaiting the future it returns, so
-            # that thread can still be shutting down when the exception reaches
-            # us. Propagating immediately lets asyncio.run() close our loop
-            # before the thread's completion callback lands (RuntimeError: Event
-            # loop is closed — the thread crashes instead of exiting cleanly),
-            # which under a busy CI host can leave it observably alive past a
-            # test's thread-leak check. Give it a bounded window to finish while
-            # our loop is still open. (The success path needs none of this:
-            # async with -> __aexit__ -> close() awaits the stop future itself.)
-            thread = getattr(db, "_thread", None)
-            if thread is not None:
-                loop = asyncio.get_event_loop()
-                deadline = loop.time() + 2.0
-                while thread.is_alive() and loop.time() < deadline:
-                    await asyncio.sleep(0.01)
-            raise
+        async with sqlite_connect(str(home.db_path)) as db:
+            cursor = await db.execute(
+                "SELECT s.key_alias, s.provider "
+                "FROM shards s "
+                "JOIN enrollments e ON s.key_alias = e.key_alias "
+                "ORDER BY s.key_alias"
+            )
+            rows = await cursor.fetchall()
+            return [(str(r[0]), str(r[1])) for r in rows if r[0] and r[1]]
 
     try:
         return run_sync(_query())
@@ -274,6 +248,13 @@ def register_wrap_commands(app: typer.Typer) -> None:
         """Start ephemeral proxy, inject env vars, run COMMAND, clean up."""
         fail_if_windows()
 
+        # Before get_home(): it loads home.fernet_key into memory, and cores
+        # must already be off by then (dupf.10). The dumpable bit is reset by
+        # execve, so COMMAND stays ptrace-able (gdb/lldb/py-spy still attach).
+        # RLIMIT_CORE, however, IS inherited across execve — the wrapped
+        # program does not get core files. That predates this change.
+        disable_core_dumps()
+
         # Load home, verify keys enrolled
         home = get_home()
         aliases = _list_enrolled_aliases(home)
@@ -288,9 +269,6 @@ def register_wrap_commands(app: typer.Typer) -> None:
         # silently spawning a child whose proxy might not be in the path is
         # exactly the silent-bypass class WOR-658 was built to expose.
         _warn_if_sentinel_degraded(home)
-
-        # Suppress core dumps
-        disable_core_dumps()
 
         # The proxy refuses to start without an IPC peer, so the sidecar
         # must come up first. ``up.py`` uses the same ordering.

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-import aiosqlite
+from worthless.storage.sqlite import connect as sqlite_connect
 
 
 @dataclass(frozen=True)
@@ -246,7 +246,7 @@ async def record_spend(
     provider: str,
 ) -> None:
     """Insert a spend record into the spend_log table."""
-    async with aiosqlite.connect(db_path) as db:
+    async with sqlite_connect(db_path) as db:
         await db.execute(
             "INSERT INTO spend_log (key_alias, tokens, model, provider) VALUES (?, ?, ?, ?)",
             (alias, tokens, model, provider),

@@ -18,6 +18,30 @@ on:
     tags:
       - "v*"
 
+# NO `workflow_dispatch`. It was added in WOR-871 as break-glass for a blocked
+# release, then removed in the same PR once reviewed:
+#
+#   - GitHub runs the workflow FROM the dispatched ref, so a branch dispatch
+#     supplies both the Dockerfile and this file — a branch could delete the
+#     release gate and still publish under this repo's OIDC identity.
+#   - `type=semver` yields no tags on a non-tag ref, so the build, the push by
+#     digest and `cosign sign` all SUCCEED and only promotion fails, leaving a
+#     signed orphan digest whose Fulcio SAN is `@refs/heads/...` — not the
+#     `@refs/tags/v.*` the verify command we document pins against.
+#
+# IF THE GATE BLOCKS A RELEASE, the recovery is NOT "re-run the job" — a re-run
+# replays the identical tree at the tag's SHA, so a lapsed expiry or a newly
+# published CVE fails again, deterministically. Re-run only helps a transient
+# failure (e.g. the cosign retry path below). The real path forward:
+#
+#   1. Fix the finding: bump the pinned base image, or add a dated, argued
+#      entry to .grype.yaml (see the reachability arguments already there).
+#   2. Delete the tag, re-push it at the new commit. That keeps the trigger,
+#      and therefore the Fulcio SAN, on `refs/tags/v*` where verify expects it.
+#
+# Doing this under release pressure is exactly how a suppression gets
+# rubber-stamped, so prefer fixing the base image over widening the waiver.
+
 # Workflow-scoped minimum. Per-job permissions widen as needed.
 permissions:
   contents: read
@@ -51,7 +75,43 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v6
         with:
+          # Full history so `git verify-tag` below can read the signed tag.
+          # Without this the tag object is not on disk and the gate cannot
+          # check a signature it never fetched (WOR-864).
+          fetch-depth: 0
           persist-credentials: false
+
+      # WOR-881. This is the FIRST thing after checkout, before QEMU, buildx,
+      # any build, and before cosign — a gate that runs after the image is
+      # pushed proves nothing, and cosign will happily attest whatever it is
+      # handed, so an unverified image would carry a valid signature.
+      #
+      # Until this existed, this workflow was the only tag-triggered publisher
+      # with no signature check. On all three v0.3.12 tag pushes the other three
+      # publishers failed closed and this one shipped anyway — twice from a tag
+      # that could not be verified at all, once from a tag signed with the
+      # wrong key type. GHCR overwrites by tag, so those images silently
+      # replaced whatever was behind that version.
+      #
+      # Same script and same repo Variables as publish.yml, publish-npm.yml and
+      # deploy-worker.yml.
+      #
+      # UNCONDITIONAL, BY DESIGN (WOR-892). This carried `if: github.event_name
+      # == 'push'` whose own comment conceded "a non-tag trigger (none today)"
+      # — i.e. it could never be false, because `on:` here is push-tags-`v*`
+      # only. It defended nothing, and it inverted into a hole: widen `on:` and
+      # the step SKIPS, and a skipped step is not a failed step, so the job
+      # stays green and the image is built, pushed and cosigned unverified.
+      # Running it always is strictly safer: on a non-tag ref verify-tag.sh
+      # fails closed (`git verify-tag` exits 1), which is the desired outcome.
+      #
+      # deploy-worker.yml deliberately KEEPS its guard — it has a real
+      # workflow_dispatch preview path, so there the condition is live.
+      - name: Verify tag GPG signature (fatal — must precede every build and push)
+        env:
+          MAINTAINER_PUBKEY: ${{ vars.MAINTAINER_GPG_PUBKEY }}
+          MAINTAINER_FINGERPRINT: ${{ vars.MAINTAINER_GPG_FINGERPRINT }}
+        run: bash .github/scripts/verify-tag.sh
 
       - name: Set up QEMU (arm64 emulation on amd64 runner)
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
@@ -91,6 +151,31 @@ jobs:
           flavor: |
             latest=auto
 
+      # Both release-gate scans below read .grype.yaml and honour every
+      # suppression in it. Grype silently drops the unknown `expiry` key, so
+      # without this step a lapsed suppression keeps suppressing forever on
+      # the one path that reaches users. docker-security.yml has run this
+      # since WOR-852; the release path did not. WOR-871.
+      #
+      # Placed BEFORE the builds, on the same principle the cosign preflight
+      # states above: this parses ~50 lines of YAML, so a lapsed date should
+      # fail in seconds rather than after 25 minutes of QEMU arm64 build.
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          # Caching is on by default and this workflow PUBLISHES a signed
+          # artifact — a poisoned cache would reach the image we cosign.
+          # zizmor flags it High here and is right to. This step parses ~50
+          # lines of YAML, so there is nothing worth caching anyway.
+          enable-cache: false
+      - name: Grype ignores are dated and current
+        # Version-pinned deliberately. This job holds `id-token: write` and
+        # `packages: write`, so an unpinned resolve would let a malicious
+        # release of this dependency run with the signing token. Every action
+        # here is SHA-pinned; this dependency gets the same treatment.
+        # --no-project: parsing one small YAML file does not justify syncing
+        # the whole project venv.
+        run: uv run --no-project --with 'pyyaml==6.0.3' python scripts/hooks/check_grype_ignore_expiry.py
+
       # Scan-before-push gate: amd64 loads to daemon, arm64 writes tarball
       # (foreign-arch daemon load is unreliable across runner images).
       - name: Build amd64 image locally for vulnerability scan
@@ -108,14 +193,24 @@ jobs:
       # compromise of aquasecurity/trivy-action in Feb-Mar 2026. Different
       # vendor, different codebase, different CI pipeline — limits blast
       # radius of any one scanner repo being compromised. Same archetype:
-      # OSS, OS-pkg + language-dep coverage, fails on fixable CRITICAL.
-      - name: Grype release-gate amd64 (fail on critical)
+      # OSS, OS-pkg + language-dep coverage.
+      #
+      # Cutoff MATCHES docker-security.yml. It sat at `critical` while the PR
+      # gate moved to `medium`, so a fixable High could be published to users
+      # while a Medium blocked a branch — the strict gate guarding the
+      # proposal, the loose one guarding the artifact. WOR-871.
+      - name: Grype release-gate amd64 (fail on MEDIUM+)
         uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
         with:
           image: worthless-proxy:scan-${{ github.sha }}
-          severity-cutoff: critical
+          severity-cutoff: medium
           only-fixed: true
           fail-build: true
+          # The action defaults to sarif, writes it to a file, and echoes the
+          # report to the log ONLY for `table`. Nothing here uploads that
+          # file, so without this a green release reports what it checked:
+          # nothing at all. Same fix as docker-security.yml. WOR-871.
+          output-format: table
 
       # arm64-specific CVEs (different Debian slim package variants) would
       # otherwise ship unscanned. Build arm64 to a local OCI tarball (more
@@ -133,15 +228,47 @@ jobs:
           tags: worthless-proxy:scan-arm64-${{ github.sha }}
           labels: ${{ steps.meta.outputs.labels }}
 
-      - name: Grype release-gate arm64 (fail on critical)
+      - name: Grype release-gate arm64 (fail on MEDIUM+)
         uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
         with:
           # docker-archive: scheme tells Grype to read the tarball directly
           # (via its internal libs). No daemon load needed for foreign arch.
           image: docker-archive:${{ env.ARM64_TAR }}
-          severity-cutoff: critical
+          severity-cutoff: medium
           only-fixed: true
           fail-build: true
+          output-format: table  # see the amd64 step above
+
+      # Informational, never blocking. The two gates above honour .grype.yaml,
+      # so a suppressed CVE is skipped by the gate AND filtered out of the
+      # gate's report — it would appear in NO release output at all, and a
+      # green release log would read "nothing found" while seven documented
+      # CVEs shipped. This scan reads the ignore-free config so the release
+      # record states what we chose to carry. Mirrors docker-security.yml.
+      - name: Grype full scan amd64 (including unfixed — informational)
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        env:
+          GRYPE_CONFIG: .grype-informational.yaml
+        with:
+          image: worthless-proxy:scan-${{ github.sha }}
+          only-fixed: false
+          fail-build: false
+          output-format: table
+
+      # arm64 needs its own informational pass. The gate above reads the arm64
+      # tarball but honours .grype.yaml and `only-fixed`, so an arm64-only
+      # suppressed or unfixable CVE would appear in NO release output — the
+      # amd64 informational scan cannot see it. Both arches ship; both arches
+      # get a record of what they carry.
+      - name: Grype full scan arm64 (including unfixed — informational)
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        env:
+          GRYPE_CONFIG: .grype-informational.yaml
+        with:
+          image: docker-archive:${{ env.ARM64_TAR }}
+          only-fixed: false
+          fail-build: false
+          output-format: table
 
       # Sign-before-tag invariant: we push by DIGEST ONLY (no human-readable
       # tags) so the image exists at sha256:... but is not yet pullable via

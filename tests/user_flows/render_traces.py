@@ -163,6 +163,7 @@ class TraceRunner:
   tool) shift; case "$1" in
     list) echo "worthless v0.3.0" ;;
     install|upgrade) echo "unexpected reinstall" >&2; exit 1 ;;
+    dir) echo "$HOME/.local/bin" ;;
     *) echo "uv tool: unhandled: $*" >&2; exit 1 ;;
   esac ;;
   run) echo "worthless 0.3.0" ;;

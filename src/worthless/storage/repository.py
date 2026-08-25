@@ -16,6 +16,7 @@ from worthless.defaults import DEFAULT_SPEND_CAP_TOKENS
 from worthless.defaults import GLOBAL_CEILING_TOKENS
 from worthless.storage.models import EncryptedShard, EnrollmentRecord, StoredShard
 from worthless.storage.schema import init_db, migrate_db
+from worthless.storage.sqlite import connect as sqlite_connect
 
 if TYPE_CHECKING:
     from worthless.ipc.client import IPCClient
@@ -175,7 +176,7 @@ class ShardRepository:
     @asynccontextmanager
     async def _connect(self) -> AsyncIterator[aiosqlite.Connection]:
         """Open a connection with foreign keys enabled."""
-        async with aiosqlite.connect(self._db_path) as db:
+        async with sqlite_connect(self._db_path) as db:
             await db.execute("PRAGMA foreign_keys = ON")
             yield db
 
@@ -962,7 +963,7 @@ class ShardRepository:
         Deletes spend_log, enrollment_config, and shards (CASCADE to enrollments).
         Returns True if the shard existed.
         """
-        async with aiosqlite.connect(self._db_path, isolation_level=None) as db:
+        async with sqlite_connect(self._db_path, isolation_level=None) as db:
             await db.execute("PRAGMA foreign_keys = ON")
             await db.execute("BEGIN IMMEDIATE")
             await db.execute("DELETE FROM spend_log WHERE key_alias = ?", (alias,))

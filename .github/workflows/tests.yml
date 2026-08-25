@@ -53,12 +53,30 @@ jobs:
           # Parallel pass — everything EXCEPT the real-subprocess sidecar/IPC
           # family. Coverage is accumulated, not gated here. Quarantined flaky
           # tests are excluded from the gating run (WOR-578).
-          uv run pytest --reruns 1 --cov=worthless --cov-report=xml --cov-report=term-missing -n auto --dist loadscope -x -m "not live and not docker and not user_flow and not real_ipc and not quarantine"
+          # --max-worker-restart=0: for a worker killed by the `thread` timeout
+          # method, restarting just re-runs the hanging test and pays its budget
+          # again. Measured: restart=0 -> 6s/1 failure; restart=3 -> 40s/4, and
+          # no variant recovered the dead worker's dropped scope-group sibling.
+          # Scoped to THIS lane on purpose — in global addopts it also applied to
+          # the user_flow lane, whose live-proxy crashes a restart legitimately
+          # recovers, and turned a self-healing crash into a red (run 31965508132).
+          # `--durations=25` is not decoration: without it CI has never printed a
+          # single timing, so nobody can see which module is pinning a loadscope
+          # group to one worker until they reproduce it by hand (worthless-9fth).
+          uv run pytest --reruns 1 --max-worker-restart=0 --cov=worthless --cov-report=xml --cov-report=term-missing -n auto --dist loadscope --durations=25 -x -m "not live and not docker and not user_flow and not real_ipc and not quarantine"
           # Serial pass — real_ipc tests that spawn real processes/sidecars;
           # kept serial because subprocess.run(waitpid) + PEP 475 EINTR-retry
           # makes pytest-timeout ineffective for these tests under xdist.
           # `--cov-append` rolls coverage into total; `--cov-fail-under` gates.
-          uv run pytest --reruns 1 --cov=worthless --cov-append --cov-report=xml --cov-report=term-missing --cov-fail-under=80 -n0 -m "real_ipc and not live and not docker and not quarantine"
+          # --timeout-method=signal: the repo default is `thread`, which kills the
+          # process outright. That is correct under `-n auto`, where the victim is
+          # an expendable xdist worker and the master reports it as one honest
+          # failure. Here there is no worker — os._exit() would take this pytest
+          # process down with exit 1 and NO test report, turning one slow test
+          # into a blind red lane (observed on run 31610847051). Serial has none
+          # of the problems `thread` exists to solve: no report-send window, no
+          # `assert not crashitem`. A hang here is bounded by timeout-minutes.
+          uv run pytest --reruns 1 --timeout-method=signal --cov=worthless --cov-append --cov-report=xml --cov-report=term-missing --cov-fail-under=80 -n0 -m "real_ipc and not live and not docker and not quarantine"
 
       - name: Lint
         env:
@@ -241,7 +259,7 @@ jobs:
           uv sync --extra dev --extra test
           uv run worthless --version
           uv run worthless --help
-          uv run pytest tests/test_platform.py tests/test_cli_down.py -v -k "not Integration" -o "addopts="
+          uv run pytest tests/test_platform.py tests/test_cli_down.py tests/test_cli_dumpable.py -v -k "not Integration" -o "addopts="
 
   quarantine:
     name: Quarantine tests

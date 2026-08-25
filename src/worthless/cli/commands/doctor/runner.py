@@ -212,6 +212,9 @@ def _doctor_run_json(*, fix: bool, dry_run: bool) -> None:
         # diagnostic; emit a single finding that points at the fix.
         typer.echo(json.dumps(_aggregate([_fernet_missing_result(home)])))
         return
+    # worthless-g648: repo is bound INSIDE the try, so the finally must tolerate
+    # ShardRepository.__init__ raising before assignment.
+    repo: ShardRepository | None = None
     try:
         repo = ShardRepository(str(home.db_path), fernet_key)
 
@@ -237,4 +240,12 @@ def _doctor_run_json(*, fix: bool, dry_run: bool) -> None:
         _stamp_remediation(results)
         typer.echo(json.dumps(_aggregate(results)))
     finally:
+        # worthless-g648: WOR-799 zeroed the caller's buffer here, but the
+        # repository keeps its OWN bytearray copy (repository.py:123) which
+        # only close() wipes. Without this the master key outlived every
+        # `doctor` run. close() is idempotent and a no-op in IPC-only mode.
+        # zero_buf FIRST: close() raising must not leave the caller's key live
+        # nor mask the original exception.
         zero_buf(fernet_key)
+        if repo is not None:
+            repo.close()

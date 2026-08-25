@@ -48,7 +48,7 @@ from worthless.cli.errors import (
     error_boundary,
     sanitize_exception,
 )
-from worthless.cli.key_patterns import CANONICAL_KEY_VAR_RE, detect_prefix
+from worthless.cli.key_patterns import CANONICAL_KEY_VAR_RE, detect_prefix, is_oauth_token
 from worthless.cli.log_redaction import _redact
 from worthless._flags import fernet_ipc_only_enabled
 from worthless.cli.keystore import (
@@ -1330,6 +1330,27 @@ def _print_openclaw_success_block(
     if result.skill_installed:
         console.print_hint("   • ~/.openclaw/workspace/skills/worthless/ — installed skill")
     console.print_hint("   • Undo: worthless unlock")
+    # WOR-599: OpenClaw keeps verbatim copies of its own config — a .bak ring
+    # written pre-edit on every config write, plus a .last-good promoted when the
+    # gateway observes a valid config. A copy written BEFORE this lock still holds
+    # the original key in plaintext, so "you're protected" is true of the live
+    # config and not of the directory.
+    #
+    # Measured against ghcr.io/openclaw/openclaw:2026.5.3-1: after a lock-style
+    # rewrite, .bak and .bak.1 STILL held the pre-lock key, while .last-good had
+    # been re-promoted to the post-lock contents (the daemon was running). With
+    # the daemon down at lock time, .last-good keeps the old copy until it starts.
+    #
+    # We do not delete them: they are daemon-owned, and .bak is the recovery path
+    # `worthless doctor` itself recommends. Saying so is the only control we have
+    # — asserted by tests/openclaw/test_lock_command_openclaw.py.
+    console.print_hint(
+        "   • OpenClaw keeps its own config backups (~/.openclaw/openclaw.json.bak, "
+        ".bak.1 …, and .last-good). Ones written before this lock still hold your "
+        "original key in plaintext. Rotate that key at your provider — that is "
+        "the only action that invalidates a copy which may already have been "
+        "synced or backed up elsewhere."
+    )
     # WOR-796 (scrub gap #1): a provider whose key var isn't a valid uppercase
     # SecretRef id was NOT scrubbed — its cached real key is still live in
     # OpenClaw's agent store even though openclaw.json reads "locked". Surface it
@@ -1905,6 +1926,7 @@ def _print_lock_result(
     env_path: Path,
     home_base_dir: Path,
     openclaw_failed: bool = False,
+    oauth_skipped: bool = False,
 ) -> None:
     """Emit the post-lock user-facing summary (called only when quiet=False).
 
@@ -1913,14 +1935,25 @@ def _print_lock_result(
     is NOT "you're protected". Suppress the verdict headline + the breezy
     closure (the caller's ``LOCK FAILED`` block carries the real,
     worst-component verdict); the factual ``[OK] split`` line still prints.
+
+    ``oauth_skipped`` (worthless-7jn2 honesty): a WOR-837 OAuth token was found,
+    classified, and deliberately left alone — so it is still in the ``.env`` in
+    plaintext, live for up to a year. Same shape as ``openclaw_failed``: the
+    derived verdict is NOT "you're protected", so suppress the headline + the
+    breezy closure. The factual lines still print, minus the "no longer
+    contains a usable secret" tail, which is a claim about the WHOLE file.
     """
+    # worthless-7jn2: two independent reasons the same verdict is unearned.
+    # Each keeps its own distinct messaging below; only the derived headline
+    # and the breezy closure are shared.
+    verdict_earned = not openclaw_failed and not oauth_skipped
     if fresh_count or relock_count:
         # WOR-779: the seatbelt click — lead with a plain verdict (Verdict →
         # Proof → Next). The verdict is DERIVED: on a partial OpenClaw failure
         # we must NOT claim "you're protected" above the LOCK FAILED footer.
         total = fresh_count + relock_count
         total_noun = "key" if total == 1 else "keys"
-        if not openclaw_failed:
+        if verdict_earned:
             console.print_success(
                 f"🔒 You're protected. {total} {total_noun} locked — a stolen "
                 f"{env_path.name} is now worthless to an attacker."
@@ -1930,10 +1963,15 @@ def _print_lock_result(
             # reinforce but are never the sole signal (monochrome, CI logs,
             # screen readers).
             noun = "key" if fresh_count == 1 else "keys"
+            # worthless-7jn2: the count is a fact and always prints. The tail is
+            # a claim about the whole file — false while a skipped OAuth token
+            # still sits in it.
+            tail = (
+                "." if oauth_skipped else f" — {env_path.name} no longer contains a usable secret."
+            )
             console.print_success(
                 f"[OK] {fresh_count} {noun} split between this machine and "
-                f"{_shard_b_storage_label()} — {env_path.name} no longer contains "
-                f"a usable secret."
+                f"{_shard_b_storage_label()}{tail}"
             )
         if relock_count:
             noun = "key" if relock_count == 1 else "keys"
@@ -1945,15 +1983,27 @@ def _print_lock_result(
             )
         # WOR-779 (CR): the daemon-mode "Next:" cue is a success next-step — keep
         # it off the partial-failure path so nothing above LOCK FAILED reads as OK.
+        # It stays on the OAuth-skip path: the keys that DID lock still need the
+        # proxy, and this is an action, not a reassurance.
         if fresh_count and not openclaw_failed:
             console.print_hint(
-                "Next: run `worthless wrap <command>` or `worthless up` for daemon mode"
+                "Next: run `worthless wrap <command>`, or `worthless up` to keep a "
+                "proxy running in this terminal."
             )
         # WOR-779: closure — the "pull anytime" reassurance home. Suppressed on
         # a partial failure — don't reassure when the lock didn't fully succeed.
-        if not openclaw_failed:
+        # worthless-7jn2: same for a skipped OAuth token still in the file.
+        if verdict_earned:
             console.print_hint("Check anytime with `worthless status`.")
         _maybe_prompt_code_scan(Path.cwd())
+    elif oauth_skipped:
+        # worthless-7jn2: keys WERE found here. They were classified as Claude
+        # Code OAuth tokens and deliberately skipped above — the file is not
+        # clean, so "No unprotected API keys found." would be a false all-clear.
+        console.print_warning(
+            f"[WARN] Nothing was locked. The skipped OAuth token is still in "
+            f"{env_path.name} in plaintext. Treat that file as a live secret."
+        )
     else:
         console.print_warning("No unprotected API keys found.")
     # WOR-797 (Gap 1): fires on BOTH paths, deliberately outside the branch
@@ -2245,6 +2295,9 @@ def _lock_keys(
         total: int
         fresh_count: int
         openclaw_exit: int  # 0 = ok, 73 = partial fail, 87 = infra blocked
+        # worthless-7jn2: a WOR-837 OAuth token was found and deliberately left
+        # in the .env — the summary must not claim the file is protected/clean.
+        oauth_skipped: bool = False
 
     async def _lock_async() -> _LockResult:
         from dotenv import dotenv_values  # noqa: PLC0415 — local import keeps test surface tight
@@ -2275,6 +2328,31 @@ def _lock_keys(
             all_enrollments = await repo.list_enrollments()
 
             raw_scanned = scan_env_keys(env_path)
+
+            # WOR-837: a Claude Code OAuth token (sk-ant-oat/ort) collides with
+            # the static sk-ant- prefix, so scan_env_keys classifies it as
+            # "anthropic" — but sharding rewrites the sk-ant-oat marker OpenClaw
+            # matches on, and the proxy cannot restore the OAuth request shape
+            # that loss costs. Skip it (still lock the user's real keys) and say
+            # so loudly, before it can become a lock candidate. Anthropic-only by
+            # construction; see key_patterns.is_oauth_token.
+            oauth_skipped = [entry for entry in raw_scanned if is_oauth_token(entry[1])]
+            if oauth_skipped:
+                raw_scanned = [entry for entry in raw_scanned if not is_oauth_token(entry[1])]
+                # Sanitise the user-controlled .env var names before printing —
+                # a crafted name (dotenv keys are permissive) could otherwise
+                # smuggle terminal-injection / bidi-override sequences into the
+                # warning. Same guard lock/doctor use everywhere else.
+                oauth_vars = ", ".join(
+                    _oc_audit.sanitise_for_message(var_name) for var_name, _, _ in oauth_skipped
+                )
+                console.print_warning(
+                    f"[WARN] Skipped {oauth_vars}: looks like a Claude Code OAuth token "
+                    "(sk-ant-oat/ort), not a static API key. Sharding rewrites the "
+                    "sk-ant-oat marker Claude Code is recognised by, so locking it would "
+                    "break your login instead of protecting it."
+                )
+
             scanned = await _select_unlocked_keys(
                 repo,
                 raw_scanned,
@@ -2282,7 +2360,12 @@ def _lock_keys(
                 env_str,
             )
             if not scanned:
-                return _LockResult(total=len(raw_scanned), fresh_count=0, openclaw_exit=0)
+                return _LockResult(
+                    total=len(raw_scanned),
+                    fresh_count=0,
+                    openclaw_exit=0,
+                    oauth_skipped=bool(oauth_skipped),
+                )
 
             # Snapshot .env so _pass1 can pull *_BASE_URL values into the DB row.
             env_values = dict(dotenv_values(env_path))
@@ -2435,7 +2518,12 @@ def _lock_keys(
                     repo, candidates, env_str, token_budget_daily, planned, env_values
                 )
                 if not planned:
-                    return _LockResult(total=0, fresh_count=0, openclaw_exit=0)
+                    return _LockResult(
+                        total=0,
+                        fresh_count=0,
+                        openclaw_exit=0,
+                        oauth_skipped=bool(oauth_skipped),
+                    )
                 _batch_rewrite(env_path, planned, keys_only, existing_env_keys)
                 if _oc_gate is not None:
                     _openclaw_audit_postflight(_oc_gate, managed_aliases, oc_proxy_base_url)
@@ -2455,7 +2543,10 @@ def _lock_keys(
                 openclaw_exit = _apply_openclaw(planned, console, quiet, home, adoption_policy)
                 fresh_count = sum(1 for p in planned if p.was_fresh_enroll)
                 return _LockResult(
-                    total=len(planned), fresh_count=fresh_count, openclaw_exit=openclaw_exit
+                    total=len(planned),
+                    fresh_count=fresh_count,
+                    openclaw_exit=openclaw_exit,
+                    oauth_skipped=bool(oauth_skipped),
                 )
             except (Exception, KeyboardInterrupt, asyncio.CancelledError) as exc:
                 # The signal handler is one-shot and stays installed here, so the
@@ -2494,7 +2585,10 @@ def _lock_keys(
     result = asyncio.run(_lock_async())
     relock_count = result.total - result.fresh_count
 
-    if result.fresh_count and env_path.exists():
+    # NOT gated on ``fresh_count``: an .env whose only credential was skipped
+    # (e.g. a WOR-837 OAuth token) locks zero keys but still holds a live
+    # plaintext secret, so it must be tightened to owner-only all the same.
+    if env_path.exists():
         current = env_path.stat().st_mode
         if current & (stat.S_IRWXG | stat.S_IRWXO):
             env_path.chmod(current & ~(stat.S_IRWXG | stat.S_IRWXO))
@@ -2507,6 +2601,7 @@ def _lock_keys(
             env_path,
             home.base_dir,
             openclaw_failed=bool(result.openclaw_exit),
+            oauth_skipped=result.oauth_skipped,
         )
 
     # Trust-fix (2026-05-08 verification gauntlet): when OpenClaw was
@@ -2634,6 +2729,12 @@ def register_lock_commands(app: typer.Typer) -> None:
         ),
     ) -> None:
         """Protect API keys in a .env file."""
+        # FIRST statement: get_home() below loads home.fernet_key, and the
+        # keyring probe above it can surface key material too. _lock_keys()
+        # also hardens, but that is a callee — by the time it runs the key is
+        # already resident here (dupf.10).
+        disable_core_dumps()
+
         # Pre-announce the macOS Keychain dialog so users aren't surprised by a
         # system prompt mid-command. The dialog labels itself "python3.10" not
         # "worthless"; without this hint, first-time users panic and click Deny.
@@ -2671,8 +2772,10 @@ def register_lock_commands(app: typer.Typer) -> None:
         provider: str = typer.Option(..., "--provider", "-p", help="Provider name"),
     ) -> None:
         """Enroll a single API key (scripting/CI primitive)."""
-        home = get_home()
+        # Before get_home(): it loads home.fernet_key into memory, and cores
+        # must already be off by then (dupf.10).
         disable_core_dumps()
+        home = get_home()
 
         # WOR-277: a raw key value on the command line survives in shell
         # history (and process listings) forever — no CLI flag may accept

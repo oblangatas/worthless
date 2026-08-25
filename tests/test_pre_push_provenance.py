@@ -118,7 +118,34 @@ def test_explicit_base_ref_overrides_pre_commit_range(monkeypatch) -> None:
     monkeypatch.setattr(hook.subprocess, "run", _git_ok)
 
     assert hook.pushed_commits() == ["abc123"]
-    assert seen == [["git", "rev-list", "origin/website-dev..HEAD"]]
+    # ``--not origin/main`` is appended on every path, explicit base included:
+    # a commit already on published main is un-resignable no matter which base
+    # the operator names (worthless-fao1).
+    assert seen == [["git", "rev-list", "origin/website-dev..HEAD", "--not", "origin/main"]]
+
+
+def test_commits_already_on_main_are_not_rechecked(monkeypatch) -> None:
+    """worthless-fao1: merging main into a branch must not block the push.
+
+    Main's own commits are genuinely new to the feature branch ref, so
+    ``rev-list`` returns them. GitHub signs its squash merges with PGP, which
+    reads ``%G? = E`` under a local ``gpg.format=ssh`` — a signature the
+    operator cannot supply and does not own. Excluding published history is
+    what keeps "merge main to unstick a stale branch" usable.
+    """
+    seen: list[list[str]] = []
+
+    def _git_ok(args, **_kwargs) -> subprocess.CompletedProcess:
+        seen.append(args)
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.delenv("WORTHLESS_PROVENANCE_BASE_REF", raising=False)
+    monkeypatch.setenv("PRE_COMMIT_FROM_REF", "origin/my-branch")
+    monkeypatch.setenv("PRE_COMMIT_TO_REF", "HEAD")
+    monkeypatch.setattr(hook.subprocess, "run", _git_ok)
+
+    assert hook.pushed_commits() == []
+    assert seen[0][-2:] == ["--not", "origin/main"]
 
 
 def test_success_path_reports_checked_commit_count(monkeypatch, capsys) -> None:
