@@ -12,6 +12,7 @@ import pytest
 
 from worthless.cli.bootstrap import ensure_home
 from worthless.cli.process import poll_health, spawn_proxy
+from worthless.crypto.types import zero_buf
 from worthless.cli.sidecar_lifecycle import (
     shutdown_sidecar,
     spawn_sidecar,
@@ -180,6 +181,31 @@ class TestForwardSignals:
             signal.signal(signal.SIGTERM, signal.SIG_DFL)
 
 
+def _spawn_sidecar_or_clean(shares):
+    """``spawn_sidecar``, but never leave shards on disk if it raises.
+
+    Ports the ``handle is None`` branch from ``up.py:540-556``. The two
+    share files together ARE the Fernet key (sidecar/__main__.py:85-89),
+    so a WRTLS-114 timeout must not strand them in pytest's basetemp,
+    which CI can upload as an artifact. SR-02: zero both shards too.
+    """
+    try:
+        return spawn_sidecar(shares.run_dir / "sidecar.sock", shares, allowed_uid=os.getuid())
+    except BaseException:
+        for path in (shares.share_a_path, shares.share_b_path):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        try:
+            shares.run_dir.rmdir()
+        except OSError:
+            pass
+        zero_buf(shares.shard_a)
+        zero_buf(shares.shard_b)
+        raise
+
+
 @pytest.mark.integration
 @pytest.mark.real_ipc
 @pytest.mark.timeout(30)
@@ -212,7 +238,7 @@ class TestSpawnProxyIntegration:
 
         # Inside the try below: a spawn_proxy failure would otherwise orphan
         # the sidecar and its tmpfs shares.
-        handle = spawn_sidecar(shares.run_dir / "sidecar.sock", shares, allowed_uid=os.getuid())
+        handle = _spawn_sidecar_or_clean(shares)
         proc = None
         try:
             env["WORTHLESS_SIDECAR_SOCKET"] = str(handle.socket_path)
