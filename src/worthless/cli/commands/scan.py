@@ -7,6 +7,7 @@ import contextlib
 import json
 import os
 import stat
+import subprocess
 import sys
 import tempfile
 import time
@@ -54,6 +55,57 @@ SCAN_TIME_BUDGET_S = 30.0
 # a pre-commit hook can tell the cases apart. Keep this constant in lockstep
 # with the human stderr block in ``_format_skipped_human``.
 SCAN_INCOMPLETE_EXIT_CODE = 2
+
+
+def _collect_staged_paths() -> list[Path] | None:
+    """Files staged for the current commit, or ``None`` if undeterminable.
+
+    worthless-2kuy: git invokes pre-commit hooks with zero arguments, so the
+    hook cannot be told what is being committed — it has to ask. ``None`` means
+    the question could not be answered (not a work tree, git missing, timeout);
+    the caller MUST fail closed on it rather than treat it as "nothing staged".
+    An empty list is a real answer: an empty or merge commit.
+    """
+    root = _find_git_dir()
+    if root is None:
+        return None
+    work_tree = root.parent
+
+    try:
+        # ``git`` from PATH is intentional — pinning to /usr/bin/git breaks
+        # Windows/WSL. Mirrors code_scanner._git_tracked_files.
+        result = subprocess.run(  # nosec B603,B607
+            [  # noqa: S607
+                "git",
+                "-C",
+                str(work_tree),
+                "diff",
+                "--cached",
+                "--name-only",
+                "--diff-filter=ACM",  # added/copied/modified — deletions hold no secret
+                "-z",
+            ],
+            capture_output=True,
+            text=False,  # bytes; -z is NUL-delimited → non-ASCII filenames survive
+            check=False,
+            timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    staged: list[Path] = []
+    for raw in result.stdout.split(b"\x00"):
+        if not raw:
+            continue
+        candidate = work_tree / Path(os.fsdecode(raw))
+        # A staged path can be absent from the work tree (staged then removed).
+        # Skip rather than fail — it is not what is entering history here.
+        if candidate.is_file():
+            staged.append(candidate)
+    return staged
 
 
 def _find_git_dir() -> Path | None:
@@ -699,24 +751,25 @@ def register_scan_commands(app: typer.Typer) -> None:
             # Collect files to scan
             explicit = list(paths) if paths else []
             if pre_commit:
-                scan_paths = explicit
-                # worthless-2kuy: git invokes pre-commit hooks with ZERO
-                # arguments, so the installed hook resolved no files, printed
-                # "No API keys found." and exited 0 — a clean verdict over
-                # nothing inspected. A security control that reports success
-                # without reading a byte is worse than an absent one: the user
-                # stops looking. Refuse loudly instead. Step 2 replaces this
-                # with real staged-file collection; until then this is the
-                # honest failure, not a fix.
-                if not scan_paths:
-                    raise WorthlessError(
-                        ErrorCode.SCAN_ERROR,
-                        "pre-commit hook received no files to scan, so nothing "
-                        "was checked. Your commit was NOT verified.\n"
-                        "  \u2022 Reinstall the hook: `worthless scan --install-hook`\n"
-                        "  \u2022 Or scan explicitly:  `worthless scan <file>...`",
-                        exit_code=2,
-                    )
+                # Git passes the hook zero arguments, so with no explicit paths
+                # scan must determine the staged set itself. None = could not
+                # determine → refuse; [] = genuinely nothing staged (empty or
+                # merge commit) → proceed and report clean honestly.
+                if explicit:
+                    scan_paths = explicit
+                else:
+                    staged = _collect_staged_paths()
+                    if staged is None:
+                        raise WorthlessError(
+                            ErrorCode.SCAN_ERROR,
+                            "pre-commit hook could not determine which files are "
+                            "staged, so nothing was checked. Your commit was NOT "
+                            "verified.\n"
+                            "  \u2022 Run inside a git work tree, or\n"
+                            "  \u2022 Scan explicitly: `worthless scan <file>...`",
+                            exit_code=2,
+                        )
+                    scan_paths = staged
             elif deep:
                 scan_paths, tmp_file = _collect_deep_paths(explicit)
             else:
