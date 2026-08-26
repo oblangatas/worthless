@@ -2419,3 +2419,56 @@ class TestHeadBindingOptOutCannotSpread:
             "resolves to the sha the publishers were verified for. The waiver is only "
             "acceptable because that proof exists a few steps earlier."
         )
+
+
+class TestManualFallbackCannotRatifyABrokenRelease:
+    """The human escape hatch must not be able to bless a release the robots refused.
+
+    tag-release.sh prints a fallback `gh release create` for the case where the
+    automation never fires. That command bypasses release-fanin.sh entirely, so it
+    can publish a Release for a tag whose PyPI job failed. Worse, release-notes.yml
+    then sees the Release already exists, skips, and reports GREEN forever — the
+    manual path poisons the automated one irreversibly.
+
+    A draft cannot be mistaken for a shipped release, and publishing it is a second,
+    deliberate act. The timer also has to outlast the approval pause: the release job
+    sits behind a protected environment, so "no Release yet" is the NORMAL state for
+    as long as approval takes.
+    """
+
+    def test_the_fallback_creates_a_draft(self):
+        script = (REPO_ROOT / "scripts" / "tag-release.sh").read_text()
+        # Only lines that PRINT A COMMAND for the operator to copy. Prose that
+        # merely names the command ("you do not run gh release create") and the
+        # comments explaining this rule both contain the string and neither is a
+        # command — matching them is how a guard ends up asserting nothing.
+        creates = [
+            ln for ln in script.splitlines() if ln.lstrip().startswith('echo "  gh release create')
+        ]
+        assert creates, "no fallback `gh release create` line found in tag-release.sh"
+        for line in creates:
+            assert "--draft" in line, (
+                "the printed fallback creates a PUBLISHED Release. It bypasses the "
+                "fan-in, so it can ratify a release a publisher failed, and afterwards "
+                "release-notes.yml sees it exists and skips green forever.\n"
+                f"  {line.strip()}"
+            )
+            assert "--verify-tag" in line, (
+                "the fallback must keep --verify-tag; without it gh mints an unsigned "
+                "tag and tombstones the version name, which is how v0.3.8 was lost."
+            )
+
+    def test_the_fallback_timer_outlasts_the_approval_pause(self):
+        # Comment-stripped: the comment that RECORDS this fix necessarily quotes
+        # the old wording, and a whole-file grep would fail on its own explanation.
+        script = "\n".join(
+            ln
+            for ln in (REPO_ROOT / "scripts" / "tag-release.sh").read_text().splitlines()
+            if not ln.lstrip().startswith("#")
+        )
+        assert "~15 min" not in script, (
+            "the fallback still advertises a ~15 minute timer. The release job waits "
+            "on a protected environment, so no Release after 15 minutes is the normal "
+            "state, not evidence the automation failed — and acting on it is what "
+            "triggers the race this class guards."
+        )

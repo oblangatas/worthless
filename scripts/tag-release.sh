@@ -169,11 +169,26 @@ echo "failed jobs'). Do not use 'Run workflow' — a manual dispatch is a differ
 echo "event and will not clear the gate. The Release is held until all four are"
 echo "green, then created exactly once. (WOR-846)"
 echo
-echo "FALLBACK — only if there is NO waiting run and no Release after ~15 min,"
-echo "the automation did not fire. Create it by hand (safe: the signed tag exists,"
-echo "so this attaches to it and cannot tombstone):"
+# The fallback creates a DRAFT deliberately. Creating a published Release by hand
+# bypasses release-fanin.sh, so it can ratify a tag whose PyPI or npm job actually
+# failed — and release-notes.yml then sees a Release already exists, skips, and
+# reports green forever. The manual path would poison the automated one, silently
+# and irreversibly. A draft cannot be mistaken for a shipped release, and
+# publishing it is a second, deliberate act by a human who has looked.
+#
+# The old text said "~15 min". That was wrong in a way that guaranteed the race:
+# the release job waits on a protected environment, so no Release after fifteen
+# minutes is the NORMAL state for as long as approval takes, not evidence that
+# anything failed. Anyone following that timer would hit the hatch on every
+# correctly-functioning release.
+echo "FALLBACK — only when there is NO waiting run, NO pending approval, and every"
+echo "publisher is green, yet no Release exists. That is the automation genuinely"
+echo "not firing, and the watchdog files an issue for it. Until then, waiting is"
+echo "the correct action. If you do need it, create a DRAFT — never a published"
+echo "Release — so it cannot silently ratify a release the robots refused:"
 if [ -n "$headline" ]; then
-    echo "  gh release create $tag --title \"$tag: $headline\" --verify-tag --generate-notes"
+    echo "  gh release create $tag --draft --title \"$tag: $headline\" --verify-tag --generate-notes"
 else
-    echo "  gh release create $tag --title \"$tag: <headline>\" --verify-tag --generate-notes"
+    echo "  gh release create $tag --draft --title \"$tag: <headline>\" --verify-tag --generate-notes"
 fi
+echo "Then look at why the automation did not fire before publishing the draft."
