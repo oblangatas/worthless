@@ -157,6 +157,15 @@ jobs:
           MAINTAINER_PUBKEY: ${{ vars.MAINTAINER_GPG_PUBKEY }}
           MAINTAINER_FINGERPRINT: ${{ vars.MAINTAINER_GPG_FINGERPRINT }}
           VERIFY_TAG_REF: ${{ github.event.workflow_run.head_branch }}
+          # This job checks out the DEFAULT BRANCH by design (see F4 above), so
+          # HEAD is main's tip and cannot equal the tag's commit once anything
+          # merges after the release. Waive that one binding by exact name rather
+          # than feeding the gate a sha of our own — a supplied sha would let the
+          # check compare a value to itself, and no mutation test can see that.
+          # Earned, not asserted: the re-bind step above already proved
+          # refs/tags/$TAG resolves to $HEAD_SHA, the sha all four publishers were
+          # verified green for. A test pins this waiver to this workflow alone.
+          VERIFY_TAG_HEAD_BINDING: not-applicable-default-branch-checkout
         run: bash .github/scripts/verify-tag.sh
 
       # F8: idempotent — if a prior firing already created the Release, do nothing.

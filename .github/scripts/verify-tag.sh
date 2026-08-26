@@ -17,13 +17,15 @@
 #                               DISCARDS assignments to GITHUB_*-prefixed vars, so
 #                               that override never arrives and the gate checks the
 #                               wrong ref (WOR-846, commit 92f08d71).
-#   VERIFY_TAG_EXPECT_COMMIT  — the commit the tag must peel to, when HEAD is
-#                               deliberately not it. release-notes.yml checks out
-#                               the DEFAULT BRANCH on purpose (pwn-request defense:
+#   VERIFY_TAG_HEAD_BINDING   — set to the exact string
+#                               "not-applicable-default-branch-checkout" to waive
+#                               the checked-out-revision binding below. Exactly one
+#                               caller may: the workflow_run listener, which takes
+#                               the DEFAULT BRANCH on purpose (pwn-request defense —
 #                               untrusted tag-side code must never run with base
-#                               permissions), so HEAD is main's tip, which moves
-#                               independently of the tag. Pass the sha the fan-in
-#                               proved all four publishers succeeded for.
+#                               permissions), so HEAD is main's tip and moves
+#                               independently of the tag. A test pins the waiver to
+#                               that one workflow.
 #
 # Defense layers (each fails closed):
 #   1. Both Variables must be set.
@@ -153,14 +155,29 @@ fi
 # but "every layer fails closed" is this script's contract, and a later refactor
 # that moves either check above the verify must not silently become a no-op.
 TAG_TARGET=$(git rev-parse --verify --quiet "${TAG_REF}^{commit}" || true)
-# HEAD is the right answer only when the tag is what got checked out. A caller
-# that deliberately checks out something else must say which commit it expects;
-# it may not simply opt out of the binding. An empty override still fails closed
-# at the -z check below, exactly as an unresolvable HEAD does.
-HEAD_COMMIT="${VERIFY_TAG_EXPECT_COMMIT:-$(git rev-parse --verify --quiet "HEAD^{commit}" || true)}"
-if [ -z "${TAG_TARGET}" ] || [ -z "${HEAD_COMMIT}" ] || [ "${TAG_TARGET}" != "${HEAD_COMMIT}" ]; then
+# HEAD is the right answer only when the tag is what got checked out.
+#
+# An earlier attempt let the caller pass its own expected sha. That was wrong: it
+# swapped a MEASUREMENT — `git rev-parse HEAD` reads what is actually on disk —
+# for an ASSERTION, the caller's claim. The dangerous input was never an empty
+# value but a plausible one derived from the tag itself, making this compare X to
+# X. A tautological VALUE is not a code change, so no mutation test could catch it.
+#
+# A single named waiver is greppable, and a test pins it to one workflow. The
+# waiver is sound only because that caller independently proves the tag resolves
+# to the sha its four publishers were verified for, before calling this.
+if [ -z "${TAG_TARGET}" ]; then
+  echo "::error title=Tag does not resolve::${TAG_REF} does not peel to a commit. Refusing to publish."
+  exit 1
+fi
+if [ "${VERIFY_TAG_HEAD_BINDING:-}" = "not-applicable-default-branch-checkout" ]; then
+  echo "::notice title=Revision binding waived::${TAG_REF} verified without the checked-out-revision binding, by explicit waiver — this caller runs on the default branch by design and proves the tag/commit correspondence itself."
+else
+HEAD_COMMIT=$(git rev-parse --verify --quiet "HEAD^{commit}" || true)
+if [ -z "${HEAD_COMMIT}" ] || [ "${TAG_TARGET}" != "${HEAD_COMMIT}" ]; then
   echo "::error title=Tag does not match the checked-out revision::${TAG_REF} points at ${TAG_TARGET:-<none>} but this job is running ${HEAD_COMMIT:-<none>}. The tag moved after checkout, or one side could not be resolved; refusing to publish code that was never verified."
   exit 1
+fi
 fi
 
 # `|| true` for the same reason as the two lines above, and it is load-bearing

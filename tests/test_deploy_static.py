@@ -2218,6 +2218,18 @@ GUARD_MUTATIONS = [
         "test_cannot_mint_a_tag",
     ),
     (
+        "waive the revision binding in a second workflow",
+        ".github/workflows/publish.yml",
+        # Any tag-triggered publisher gaining the waiver is the spread this guards.
+        "      - name: Verify tag GPG signature",
+        (
+            "      - name: Verify tag GPG signature\n"
+            "        env:\n"
+            "          VERIFY_TAG_HEAD_BINDING: not-applicable-default-branch-checkout"
+        ),
+        "test_exactly_one_workflow_waives_the_binding",
+    ),
+    (
         "pass the tag via a variable GitHub ignores",
         ".github/workflows/release-notes.yml",
         "VERIFY_TAG_REF:",
@@ -2355,4 +2367,55 @@ class TestGuardsCanActuallyFail:
             f"({label}). The guard is vacuous — it asserts something that cannot "
             f"fail, so it is not protecting the invariant it claims to.\n"
             f"{proc.stdout[-2000:]}"
+        )
+
+
+# The HEAD binding in verify-tag.sh compares the tag's commit to what is actually
+# checked out. release-notes.yml legitimately cannot satisfy it: it checks out the
+# DEFAULT BRANCH on purpose (pwn-request defense), so HEAD is main's tip.
+#
+# The first attempt let that caller pass its own expected sha. That was wrong in a
+# way worth remembering: it swapped a MEASUREMENT (`git rev-parse HEAD` reads what
+# is on disk) for an ASSERTION (the caller's claim). The dangerous input was never
+# an empty value — it was a plausible one derived from the tag itself, which makes
+# the comparison X == X. A tautological *value* is not a code change, so no
+# GUARD_MUTATIONS entry could ever catch it.
+#
+# A single named sentinel is auditable by grep. These tests pin that.
+HEAD_BINDING_OPT_OUT = "not-applicable-default-branch-checkout"
+
+
+class TestHeadBindingOptOutCannotSpread:
+    """The gate's HEAD binding may be waived in exactly one place, by exact name."""
+
+    def test_the_opt_out_is_a_single_exact_sentinel(self):
+        script = (REPO_ROOT / ".github" / "scripts" / "verify-tag.sh").read_text()
+        assert HEAD_BINDING_OPT_OUT in script, (
+            "verify-tag.sh does not recognise the named opt-out; the waiver would be inert"
+        )
+        assert "VERIFY_TAG_EXPECT_COMMIT" not in script, (
+            "VERIFY_TAG_EXPECT_COMMIT is back. A caller-supplied sha lets the gate "
+            "compare a value to itself, which no mutation test can detect. Use the "
+            "named sentinel instead."
+        )
+
+    def test_exactly_one_workflow_waives_the_binding(self):
+        waivers = sorted(
+            p.name
+            for p in (REPO_ROOT / ".github" / "workflows").glob("*.yml")
+            if HEAD_BINDING_OPT_OUT in p.read_text()
+        )
+        assert waivers == ["release-notes.yml"], (
+            f"the HEAD binding is waived in {waivers}. Exactly one workflow may waive "
+            "it — the workflow_run listener that checks out the default branch by "
+            "design. Anywhere else, the waiver is hiding a real mismatch."
+        )
+
+    def test_the_waiver_is_earned_not_asserted(self):
+        """The one caller must independently prove tag == the published sha."""
+        wf = (REPO_ROOT / ".github" / "workflows" / "release-notes.yml").read_text()
+        assert "rev-list -n 1" in wf and "HEAD_SHA" in wf, (
+            "release-notes.yml waives the HEAD binding but no longer proves the tag "
+            "resolves to the sha the publishers were verified for. The waiver is only "
+            "acceptable because that proof exists a few steps earlier."
         )
