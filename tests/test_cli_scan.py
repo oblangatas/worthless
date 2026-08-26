@@ -15,6 +15,7 @@ from worthless.cli.app import app
 from worthless.cli.bootstrap import WorthlessHome
 from worthless.cli.key_patterns import KEY_PATTERN
 
+from tests.helpers import fake_key
 from tests.helpers import fake_openai_key as _fake_openai_key
 from tests.helpers import fake_anthropic_key as _fake_anthropic_key
 
@@ -837,3 +838,49 @@ class TestFormatHumanBranches:
         ):
             result = runner.invoke(app, ["scan", "--deep"])
         assert result.exit_code in (0, 1)
+
+
+class TestScanAgreesWithLockOnOAuthTokens:
+    """worthless-p55g: scan and lock must not send the user in a circle.
+
+    ``lock`` deliberately refuses to shard a Claude Code OAuth token — sharding
+    rewrites the ``sk-ant-oat`` marker Claude Code is recognised by. ``scan``
+    had no matching filter, so it reported the token UNPROTECTED and told the
+    user to run ``lock``; ``lock`` declined and reported nothing was locked.
+    CI stayed red permanently with no remediation available.
+    """
+
+    def test_oauth_only_file_does_not_fail_the_scan(self, tmp_path: Path) -> None:
+        env = tmp_path / ".env"
+        env.write_text(f"ANTHROPIC_API_KEY={fake_key('sk-ant-oat01-', 'p55g-exit')}\n")
+
+        result = runner.invoke(app, ["scan", str(env)])
+        out = " ".join((result.stdout + result.stderr).split())
+
+        # Exit 1 is the "you have leaks, go run lock" signal. lock cannot help
+        # here, so this exit code strands CI with no available remediation.
+        assert result.exit_code != 1, (
+            f"scan failed the build over a token lock refuses to shard, "
+            f"leaving no way to go green; output:\n{out}"
+        )
+
+    def test_oauth_only_file_is_not_called_unprotected(self, tmp_path: Path) -> None:
+        env = tmp_path / ".env"
+        env.write_text(f"ANTHROPIC_API_KEY={fake_key('sk-ant-oat01-', 'p55g-verdict')}\n")
+
+        result = runner.invoke(app, ["scan", str(env)])
+        out = " ".join((result.stdout + result.stderr).split())
+        low = out.lower()
+
+        # Not vacuous: scan really did see the token.
+        assert "anthropic_api_key" in low, f"scan must report the token it found:\n{out}"
+
+        # "UNPROTECTED ... run worthless lock" is the false instruction — lock
+        # refuses this token by design, so the advice cannot be followed.
+        assert "unprotected" not in low, (
+            f"scan called an OAuth token unprotected; lock refuses to shard it, "
+            f"so the implied remediation does not exist; output:\n{out}"
+        )
+        assert "run `worthless lock`" not in low and "run worthless lock" not in low, (
+            f"scan told the user to run lock on a token lock will skip; output:\n{out}"
+        )
