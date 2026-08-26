@@ -324,6 +324,19 @@ jobs:
       - name: Run WOR-797 unshardable-credential load-bearing test
         run: uv run pytest tests/openclaw/install_incident/test_unshardable_credentials_load_bearing.py -v -m "openclaw and docker" --tb=short --timeout=900
 
+      # WOR-834: the enterprise-gateway upstream, proven against a REAL OpenClaw
+      # install. The unit/CLI tests hand-write an openclaw.json and never boot
+      # OpenClaw — and that gap bit: the hand-written {baseUrl, apiKey} shape is
+      # INVALID to real OpenClaw, which makes `openclaw secrets audit` exit 2, so
+      # lock's audit gate refuses BEFORE upstream resolution ever runs. Only a
+      # real-OpenClaw test can see that. Asserts the Azure/custom gateway baseUrl
+      # becomes the stored upstream, that a RE-LOCK keeps it (it silently reverted
+      # to api.openai.com before), and that an IPv6-mapped cloud-metadata gateway
+      # is refused fail-closed with nothing enrolled. Reuses the co-located
+      # worthless-oc-test:local image built for the rotation test above.
+      - name: Run WOR-834 enterprise-gateway upstream load-bearing test
+        run: uv run pytest tests/openclaw/install_incident/test_enterprise_gateway_upstream_load_bearing.py -v -m "openclaw and docker" --tb=short --timeout=900
+
   # WOR-749 Linux: lock → systemd service → proxied POST → mock upstream gets
   # real key (privileged systemd container). macOS launchd roundtrip stays
   # manual L7 — Keychain + LaunchAgent on shared GHA macOS runners is flaky.
