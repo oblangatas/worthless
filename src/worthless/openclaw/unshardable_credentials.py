@@ -67,7 +67,7 @@ class UnshardableCredentialFinding:
     needs_vertex_reauth_notice: bool = False
 
 
-class KeychainProbe(str, Enum):
+class KeychainProbe(Enum):
     """Outcome of a keychain presence check (WOR-835).
 
     PRESENT
@@ -81,9 +81,10 @@ class KeychainProbe(str, Enum):
 
     A plain ``bool`` cannot separate ABSENT from UNKNOWN, and collapsing them
     is precisely the false all-clear this module exists to prevent. The
-    members are deliberately checked with ``is``, never truthiness — every
-    member of a ``str`` enum is truthy, so ``if probe:`` would silently treat
-    ABSENT as PRESENT.
+    members are deliberately checked with ``is``, never truthiness — every enum
+    member is truthy, so ``if probe:`` would silently treat ABSENT as PRESENT.
+    A plain ``Enum`` rather than ``(str, Enum)``: nothing serialises this, and
+    the mixin would let ``probe == "absent"`` quietly succeed.
     """
 
     PRESENT = "present"
@@ -96,7 +97,7 @@ class KeychainProbe(str, Enum):
 _ERR_SEC_ITEM_NOT_FOUND = 44
 
 
-def _keychain_probe(service: str, caveats: list[str] | None = None) -> KeychainProbe:
+def _keychain_probe(service: str, caveats: list[str] | None) -> KeychainProbe:
     """Best-effort presence check via the ``security`` CLI binary.
 
     Matches real OpenClaw's own detection mechanism exactly
@@ -116,6 +117,10 @@ def _keychain_probe(service: str, caveats: list[str] | None = None) -> KeychainP
     as :func:`_probe_is_file` — "we couldn't look" must never be reported as
     "it isn't there" — but expressed in the return type, because unlike a file
     probe there are three distinguishable outcomes.
+
+    ``caveats`` is required, not defaulted, for the same reason as
+    :func:`_probe_is_file`: a call site that forgets it silently discards the
+    UNKNOWN signal and re-creates this bug.
 
     Only exit 44 counts as a genuine "not there". Treating every non-zero exit
     as UNKNOWN would caveat every clean Mac on every run, which is the

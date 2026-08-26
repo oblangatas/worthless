@@ -885,10 +885,13 @@ class TestKeychainProbeCaveats:
         assert any("could not be checked" in c for c in caveats), caveats
 
     def test_probe_timeout_is_caveated(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A hung keychain (locked, or prompting) hits the 5s timeout.
+        """A probe that hangs past 5s is an unanswered question, not an absence.
 
-        The most likely real-world trigger: the login keychain is locked, so
-        ``security`` blocks rather than answering.
+        Deliberately not claiming a locked keychain causes this: measured on
+        macOS, a locked keychain answers IMMEDIATELY with exit 0, because the
+        argv omits ``-w`` and so searches attributes only — no decrypt, no ACL
+        check, no SecurityAgent prompt. Real triggers are a wedged
+        ``securityd`` or a machine under heavy load.
         """
         monkeypatch.setattr(uc.sys, "platform", "darwin")
 
