@@ -7,6 +7,8 @@ in test_install_logic.py and Docker tests in test_install_docker.py.
 from __future__ import annotations
 
 import re
+import subprocess  # noqa: S404
+from pathlib import Path
 
 import pytest
 
@@ -942,3 +944,145 @@ def test_public_curl_manual_gate_requires_terminal_evidence() -> None:
         "public curl proof must say where the terminal evidence is recorded "
         "(Linear, PR, or release notes), not just local memory."
     )
+
+
+class TestPathLockdownIsActuallyTested:
+    """The PATH lockdown is install.sh's main defense — and had no test.
+
+    install.sh prepends system dirs to PATH (WOR-673/A2) so a poisoned
+    `~/evil/bin` on the caller's PATH cannot supply curl, sh, sha256sum, awk,
+    mktemp or uv. Without it the Astral SHA pin is worthless: the attacker's
+    own `sha256sum` computes the "expected" hash.
+
+    Every one of the 36 test modules that exercises install.sh routes through
+    helpers that set ``WORTHLESS_TRUST_PATH=1`` — necessarily, since they inject
+    stubs — which turns the lockdown OFF. So the single most security-relevant
+    line in the installer was never executed under test.
+
+    These tests run the real shell logic, extracted from the script rather than
+    hand-copied, so they cannot drift from it silently.
+    """
+
+    def _lockdown_snippet(self) -> str:
+        """The real lockdown block, read out of install.sh."""
+        text = INSTALL_SH.read_text()
+        start = text.index('if [ "${WORTHLESS_TRUST_PATH:-}" != "1" ]; then')
+        end = text.index("# --- Output helpers", start)
+        return text[start:end]
+
+    def _resolve(self, snippet: str, *, home: Path, caller_path: str, trust: str | None) -> str:
+        """Run the snippet, then report which dir wins for a planted binary."""
+        env = {"HOME": str(home), "PATH": caller_path}
+        if trust is not None:
+            env["WORTHLESS_TRUST_PATH"] = trust
+        script = f"{snippet}\ncommand -v plantme\n"
+        out = subprocess.run(  # noqa: S603
+            ["/bin/sh", "-c", script], capture_output=True, text=True, env=env, check=False
+        )
+        return out.stdout.strip()
+
+    def _plant(self, tmp_path: Path) -> tuple[Path, str]:
+        """A 'system' copy and an attacker copy of the same command name."""
+        sysbin = tmp_path / "sysbin"
+        evil = tmp_path / "evil" / "bin"
+        for d in (sysbin, evil):
+            d.mkdir(parents=True)
+            (d / "plantme").write_text("#!/bin/sh\nexit 0\n")
+            (d / "plantme").chmod(0o755)
+        return sysbin, str(evil)
+
+    def test_lockdown_puts_system_dirs_ahead_of_a_poisoned_caller_path(
+        self, tmp_path: Path
+    ) -> None:
+        """The whole point: caller-controlled dirs must not win."""
+        sysbin, evil = self._plant(tmp_path)
+        snippet = self._lockdown_snippet().replace("/usr/bin:/bin:/usr/local/bin", str(sysbin))
+        winner = self._resolve(
+            snippet, home=tmp_path / "home", caller_path=f"{evil}:{sysbin}", trust=None
+        )
+        assert winner.startswith(str(sysbin)), (
+            f"a poisoned caller PATH won over the system dir — the lockdown did not "
+            f"take effect. resolved: {winner!r}"
+        )
+
+    def test_trust_path_escape_hatch_needs_exactly_one(self, tmp_path: Path) -> None:
+        """Only literal "1" disables it — a typo-tolerant parse would be bypassable."""
+        sysbin, evil = self._plant(tmp_path)
+        snippet = self._lockdown_snippet().replace("/usr/bin:/bin:/usr/local/bin", str(sysbin))
+        for value in ("true", "yes", "01", "1 ", " 1", "TRUE"):
+            winner = self._resolve(
+                snippet, home=tmp_path / "home", caller_path=f"{evil}:{sysbin}", trust=value
+            )
+            assert winner.startswith(str(sysbin)), (
+                f"WORTHLESS_TRUST_PATH={value!r} disabled the lockdown; only literal '1' may"
+            )
+        # ...and the exact value genuinely does disable it, or the tests that
+        # rely on stub injection would be silently testing the wrong binaries.
+        winner = self._resolve(
+            snippet, home=tmp_path / "home", caller_path=f"{evil}:{sysbin}", trust="1"
+        )
+        assert winner.startswith(evil), "WORTHLESS_TRUST_PATH=1 must disable the lockdown"
+
+    def test_hostile_home_cannot_produce_a_root_owned_path_entry(self, tmp_path: Path) -> None:
+        """HOME=/ or HOME= must not yield "//.local/bin" or "/.local/bin"."""
+        sysbin, evil = self._plant(tmp_path)
+        snippet = self._lockdown_snippet().replace("/usr/bin:/bin:/usr/local/bin", str(sysbin))
+        for hostile in ("/", ""):
+            script = f'HOME={hostile!r}\n{snippet}\nprintf "%s" "$PATH"\n'
+            out = subprocess.run(  # noqa: S603
+                ["/bin/sh", "-c", script],
+                capture_output=True,
+                text=True,
+                env={"PATH": f"{evil}:{sysbin}"},
+                check=False,
+            )
+            assert "//.local/bin" not in out.stdout, (
+                f"HOME={hostile!r} produced a doubled-slash PATH entry: {out.stdout!r}"
+            )
+
+    def test_bootstrapped_uv_must_outrank_a_stale_system_uv(self) -> None:
+        """The one deliberate exception to the lockdown — do not "fix" it.
+
+        ``ensure_uv`` ends by prepending ``~/.local/bin`` and ``~/.cargo/bin``
+        AHEAD of the system dirs the lockdown installed. It is the only place in
+        install.sh that puts user-writable dirs first, and it reads like a bug.
+        It is load-bearing.
+
+        We only reach that line when uv was absent or at the WRONG version, so a
+        pre-existing ``/usr/bin/uv`` is by definition not the one we just pinned
+        and SHA-verified. The lockdown's own ``~/.local/bin`` entry sits AFTER
+        the system dirs, so without the prepend the stale system uv wins
+        ``command -v`` and every subsequent ``uv tool install`` runs from it —
+        silently defeating the version pin ensure_uv exists to establish:
+
+            PATH=/usr/bin:...:$HOME/.local/bin  -> resolves the SYSTEM uv
+            PATH=$HOME/.local/bin:...:/usr/bin  -> resolves the BOOTSTRAPPED uv
+
+        The accepted cost is that two user-writable dirs outrank /usr/bin for the
+        rest of the run. They are exactly where we just installed uv, and an
+        attacker able to write them could equally have poisoned the tool we are
+        about to execute. Nothing else moves; the lockdown still governs every
+        command before this point.
+
+        The rationale lives here rather than in install.sh because the served
+        script is held under a 24.5 KB injection-guard ceiling
+        (workers/worthless-sh/test/headers-and-integrity.test.ts) with well under
+        100 bytes of slack. A comment explaining this would not fit, and that
+        ceiling is deliberately not a ratchet.
+        """
+        text = INSTALL_SH.read_text()
+        start = text.index("    uvh=")
+        block = text[start : text.index("export PATH", start)]
+        assert 'uvh="${HOME:-/root}"' in block, (
+            "the HOME guard is gone — HOME=/ or HOME= would yield '//.local/bin'"
+        )
+        assert '[ "$uvh" = / ]' in block, "the HOME=/ guard is gone"
+        # The ordering itself: uv's dirs must come BEFORE the inherited $PATH.
+        path_line = next(ln for ln in block.splitlines() if ln.strip().startswith("PATH="))
+        assert path_line.strip().startswith('PATH="$uvh/.local/bin'), (
+            "uv's install dir no longer leads — a stale system uv would now win "
+            f"and defeat the version pin. got: {path_line.strip()!r}"
+        )
+        assert path_line.rstrip().endswith(':$PATH"'), (
+            f"the inherited PATH must stay last. got: {path_line.strip()!r}"
+        )
