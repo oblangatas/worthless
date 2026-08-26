@@ -465,10 +465,23 @@ class TestScanInstallHookEdgeCases:
 class TestScanPrecommitEdgeCases:
     """Additional edge cases for --pre-commit mode."""
 
-    def test_precommit_no_files_exits_0(self) -> None:
-        """--pre-commit with no files at all -> exit 0."""
+    def test_precommit_no_files_fails_closed(self) -> None:
+        """--pre-commit with no files at all -> exit 2, never a clean verdict.
+
+        Was ``test_precommit_no_files_exits_0``, added by a coverage-gap pass
+        (WOR-45) that pinned the behaviour rather than the contract. That exit 0
+        WAS the bug (worthless-2kuy): git invokes pre-commit hooks with zero
+        arguments, so the installed hook inspected nothing, printed "No API keys
+        found." and let a real key commit clean.
+
+        Step 2 will revisit this: once scan collects staged files itself, an
+        empty staged set becomes legitimate (empty/merge commit) and exit 0 is
+        correct again — for a different reason. Until then, no files can only
+        mean the hook is broken.
+        """
         result = runner.invoke(app, ["scan", "--pre-commit"])
-        assert result.exit_code == 0
+        assert result.exit_code == 2
+        assert "No API keys found" not in result.stdout + result.stderr
 
     def test_precommit_nonexistent_file_exits_0(self, tmp_path: Path) -> None:
         """--pre-commit with a nonexistent staged file should not crash."""

@@ -102,3 +102,42 @@ def test_human_path_emits_skip_block_without_file_contents(tmp_path: Path, monke
     assert secret_marker not in result.stderr, (
         "skip notice must not echo file contents — possible leak vector"
     )
+
+
+class TestPreCommitWithNoFilesFailsClosed:
+    """worthless-2kuy step 1: the hook must never report all-clear on nothing.
+
+    ``scan --install-hook`` writes ``worthless scan --pre-commit "$@"`` into
+    ``.git/hooks/pre-commit``. Git invokes pre-commit hooks with ZERO
+    arguments, and ``--pre-commit`` mode only scans explicitly-passed paths —
+    so the hook inspected no files, printed "No API keys found." and exited 0.
+    A real key committed clean while the user was told they were protected.
+
+    Step 1 does not make the hook work. It stops it lying: a hook that
+    resolved no files must fail loudly so the user reinstalls it, rather than
+    manufacturing confidence. Steps 2-3 add real staged-file scanning.
+    """
+
+    def test_pre_commit_with_no_paths_does_not_report_all_clear(self) -> None:
+        result = runner.invoke(app, ["scan", "--pre-commit"])
+        out = " ".join((result.stdout + result.stderr).split())
+
+        # Exit 0 is the "your commit is clean" signal. Emitting it after
+        # inspecting nothing is a fabricated verdict.
+        assert result.exit_code != 0, (
+            f"scan --pre-commit reported success without inspecting any file; output:\n{out}"
+        )
+
+        assert "No API keys found" not in out, (
+            f"scan --pre-commit claimed a clean result over zero files; output:\n{out}"
+        )
+
+    def test_pre_commit_with_no_paths_tells_the_user_what_to_do(self) -> None:
+        result = runner.invoke(app, ["scan", "--pre-commit"])
+        out = " ".join((result.stdout + result.stderr).split()).lower()
+
+        # Failing closed is only useful if the user learns why and what to do.
+        assert "no files" in out or "received no files" in out, (
+            f"scan --pre-commit must say it received no files; output:\n{out}"
+        )
+        assert "hook" in out, f"scan --pre-commit must point the user at the hook; output:\n{out}"

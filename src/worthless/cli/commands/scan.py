@@ -700,6 +700,23 @@ def register_scan_commands(app: typer.Typer) -> None:
             explicit = list(paths) if paths else []
             if pre_commit:
                 scan_paths = explicit
+                # worthless-2kuy: git invokes pre-commit hooks with ZERO
+                # arguments, so the installed hook resolved no files, printed
+                # "No API keys found." and exited 0 — a clean verdict over
+                # nothing inspected. A security control that reports success
+                # without reading a byte is worse than an absent one: the user
+                # stops looking. Refuse loudly instead. Step 2 replaces this
+                # with real staged-file collection; until then this is the
+                # honest failure, not a fix.
+                if not scan_paths:
+                    raise WorthlessError(
+                        ErrorCode.SCAN_ERROR,
+                        "pre-commit hook received no files to scan, so nothing "
+                        "was checked. Your commit was NOT verified.\n"
+                        "  \u2022 Reinstall the hook: `worthless scan --install-hook`\n"
+                        "  \u2022 Or scan explicitly:  `worthless scan <file>...`",
+                        exit_code=2,
+                    )
             elif deep:
                 scan_paths, tmp_file = _collect_deep_paths(explicit)
             else:
