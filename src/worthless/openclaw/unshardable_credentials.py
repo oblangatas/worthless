@@ -29,6 +29,7 @@ import os
 import subprocess  # nosec B404
 import sys
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 from worthless.openclaw import config as _config_mod
@@ -66,7 +67,36 @@ class UnshardableCredentialFinding:
     needs_vertex_reauth_notice: bool = False
 
 
-def _keychain_service_present(service: str) -> bool:
+class KeychainProbe(str, Enum):
+    """Outcome of a keychain presence check (WOR-835).
+
+    PRESENT
+        ``security`` answered: the credential is in the keychain.
+    ABSENT
+        ``security`` answered: it is not. Also non-macOS, where there is no
+        keychain to hold it — a definite answer, not a gap.
+    UNKNOWN
+        The question was never answered: the binary is missing, the probe
+        timed out, or it exited for a reason other than "not found".
+
+    A plain ``bool`` cannot separate ABSENT from UNKNOWN, and collapsing them
+    is precisely the false all-clear this module exists to prevent. The
+    members are deliberately checked with ``is``, never truthiness — every
+    member of a ``str`` enum is truthy, so ``if probe:`` would silently treat
+    ABSENT as PRESENT.
+    """
+
+    PRESENT = "present"
+    ABSENT = "absent"
+    UNKNOWN = "unknown"
+
+
+# errSecItemNotFound. The one non-zero exit that is a real answer rather than
+# a failure to look — mirrors the same constant in _clear_keychain_service.
+_ERR_SEC_ITEM_NOT_FOUND = 44
+
+
+def _keychain_probe(service: str, caveats: list[str] | None = None) -> KeychainProbe:
     """Best-effort presence check via the ``security`` CLI binary.
 
     Matches real OpenClaw's own detection mechanism exactly
@@ -79,9 +109,20 @@ def _keychain_service_present(service: str) -> bool:
     process with an uncatchable Objective-C exception (a Python
     ``try/except`` cannot catch a native-level abort). A subprocess crash,
     by contrast, only fails this one check.
+
+    WOR-835: this used to return a bare ``bool``, so a missing binary, a
+    timeout, or any unexpected exit code read exactly like an empty keychain
+    and the surface was reported clean without ever being inspected. Same rule
+    as :func:`_probe_is_file` — "we couldn't look" must never be reported as
+    "it isn't there" — but expressed in the return type, because unlike a file
+    probe there are three distinguishable outcomes.
+
+    Only exit 44 counts as a genuine "not there". Treating every non-zero exit
+    as UNKNOWN would caveat every clean Mac on every run, which is the
+    false-caveat inverse of the bug and would train users to ignore caveats.
     """
     if sys.platform != "darwin":
-        return False
+        return KeychainProbe.ABSENT
     try:
         result = subprocess.run(  # noqa: S603 - fixed argv, no shell, no user input  # nosec B603
             [_SECURITY_BIN, "find-generic-password", "-s", service],
@@ -89,9 +130,40 @@ def _keychain_service_present(service: str) -> bool:
             timeout=_KEYCHAIN_TIMEOUT_S,
             check=False,
         )
-        return result.returncode == 0
-    except (OSError, subprocess.SubprocessError):
-        return False
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning("could not probe keychain service %s: %s", service, exc)
+        _append_keychain_caveat(service, caveats, _describe_probe_failure(exc))
+        return KeychainProbe.UNKNOWN
+
+    if result.returncode == 0:
+        return KeychainProbe.PRESENT
+    if result.returncode == _ERR_SEC_ITEM_NOT_FOUND:
+        return KeychainProbe.ABSENT
+
+    logger.warning(
+        "keychain probe for %s exited %d — treating as unknown", service, result.returncode
+    )
+    _append_keychain_caveat(service, caveats, f"security exited {result.returncode}")
+    return KeychainProbe.UNKNOWN
+
+
+def _describe_probe_failure(exc: Exception) -> str:
+    """A short, non-secret reason for a caveat line."""
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return f"timed out after {_KEYCHAIN_TIMEOUT_S}s"
+    if isinstance(exc, FileNotFoundError):
+        return f"{_SECURITY_BIN} not found"
+    return getattr(exc, "strerror", None) or exc.__class__.__name__
+
+
+def _append_keychain_caveat(service: str, caveats: list[str] | None, reason: str) -> None:
+    """Record an unanswered keychain probe, naming the service but no secret.
+
+    Same wording as the file-surface caveats ("could not be checked") so the
+    doctor output reads consistently regardless of which probe fell short.
+    """
+    if caveats is not None:
+        caveats.append(f"macOS keychain service {service!r} could not be checked ({reason})")
 
 
 def _clear_keychain_service(service: str) -> bool:
@@ -149,7 +221,7 @@ def _detect_claude_cli(
     findings: list[UnshardableCredentialFinding], caveats: list[str] | None = None
 ) -> None:
     # Surface 1 — OS keychain "Claude Code-credentials" (cli-credentials.ts:18).
-    if _keychain_service_present(CLAUDE_CLI_KEYCHAIN_SERVICE):
+    if _keychain_probe(CLAUDE_CLI_KEYCHAIN_SERVICE, caveats) is KeychainProbe.PRESENT:
         findings.append(
             UnshardableCredentialFinding(
                 surface_id="claude_cli_keychain",
@@ -179,7 +251,7 @@ def _detect_codex_cli(
     findings: list[UnshardableCredentialFinding], caveats: list[str] | None = None
 ) -> None:
     # Surface 3 — ~/.codex/auth.json + its own keychain entry.
-    if _keychain_service_present(CODEX_CLI_KEYCHAIN_SERVICE):
+    if _keychain_probe(CODEX_CLI_KEYCHAIN_SERVICE, caveats) is KeychainProbe.PRESENT:
         findings.append(
             UnshardableCredentialFinding(
                 surface_id="codex_cli_keychain",
@@ -368,7 +440,7 @@ def detection_caveats() -> list[str]:
     part of the scan genuinely couldn't run — the whole point of this
     feature is honesty about what ``lock`` can and can't see. Keychain
     access (surfaces 1 and 3) is macOS-only; on any other platform those
-    two surfaces are silently skipped by ``_keychain_service_present``,
+    two surfaces are silently skipped by ``_keychain_probe``,
     so callers surface this explicitly rather than let a 0-finding result
     imply they were checked and came back clean.
     """
