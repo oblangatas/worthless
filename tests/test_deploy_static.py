@@ -2301,8 +2301,17 @@ class TestGuardsCanActuallyFail:
                     # Exclude this harness: `-k <name>` also matches the parametrize
                     # id below, which would make the subprocess re-run the harness
                     # recursively (and mask the guard's own verdict).
+                    #
+                    # The exclusion must spell out the FULL test name. `-k` matches
+                    # ancestor directory names too, and pytest truncates its temp dir
+                    # to 30 chars: `test_guard_fails_when_its_subj<N>`. A shorter
+                    # `not guard_fails_when` therefore matched that directory and
+                    # deselected every test in the copy — 122 deselected, exit 5 —
+                    # so the control below reported "harness broken" for all 7 cases.
+                    # The 43-char name still excludes this harness item but cannot be
+                    # a substring of the truncated directory.
                     "-k",
-                    f"{guard_test} and not guard_fails_when",
+                    f"{guard_test} and not test_guard_fails_when_its_subject_is_broken",
                     # -n0: the project's addopts carry `-n auto`, which a subprocess
                     # inherits — spinning up xdist workers per mutation for a handful
                     # of assertions. Serial is far faster here.
