@@ -83,7 +83,7 @@ def _spawn_sidecar_or_clean(shares):
 class TestEndToEndSmoke:
     """Full lifecycle: bootstrap → lock → proxy → healthz → stop."""
 
-    def test_lock_start_health_stop(self, tmp_path: Path) -> None:
+    def test_lock_start_health_stop(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """The product promise: lock a key, start the proxy, it's healthy.
 
         Steps:
@@ -105,7 +105,10 @@ class TestEndToEndSmoke:
         env_path.write_text(f"OPENAI_API_KEY={original_key}\n")
 
         # 3. Lock — key gets split, .env rewritten with decoy
-        os.chdir(tmp_path)
+        # monkeypatch.chdir restores the cwd at teardown. A bare os.chdir
+        # would leak into every later test in this xdist worker — harmless
+        # while this test was skipped, not harmless now that it runs.
+        monkeypatch.chdir(tmp_path)
         count = _lock_keys(env_path, home, quiet=True)
         assert count == 1, f"Expected 1 key locked, got {count}"
 
@@ -121,9 +124,10 @@ class TestEndToEndSmoke:
         # Mirror `worthless up` (up.py:504-519): the proxy cannot serve
         # /healthz without a sidecar to answer decrypt IPC — app.py:262-271
         # eager-connects the supervisor and fails loud with no fallback.
-        # The wipe mirrors up.py's SR-02 step. It is not a full guarantee
-        # here: ``home.fernet_key`` hands back a fresh copy each call, so
-        # this clears our own temporary, not the cached key.
+        # The wipe mirrors up.py's SR-02 step. ``home.fernet_key`` hands
+        # back a fresh copy each call, so this clears our own temporary —
+        # the cached original is covered separately by the weakref.finalize
+        # at bootstrap.py:213.
         fernet_key = home.fernet_key
         try:
             shares = split_to_tmpfs(fernet_key, home.base_dir)
