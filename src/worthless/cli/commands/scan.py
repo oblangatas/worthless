@@ -331,7 +331,20 @@ def _install_hook() -> None:
         content = hook_path.read_text()
         if marker in content:
             return  # already installed
-        hook_path.write_text(content + snippet)
+        # worthless-2kuy: `exec` REPLACES the shell process, so anything after
+        # it is unreachable. The pre-commit framework's generated hook ends in
+        # `exec ... hook-impl`, so a blind append installed a check that could
+        # never run — the same false confidence this ticket exists to kill.
+        # Insert above the first exec instead; hooks without one still append.
+        lines = content.splitlines(keepends=True)
+        exec_at = next(
+            (i for i, line in enumerate(lines) if line.lstrip().startswith("exec ")),
+            None,
+        )
+        if exec_at is None:
+            hook_path.write_text(content + snippet)
+        else:
+            hook_path.write_text("".join(lines[:exec_at]) + snippet + "".join(lines[exec_at:]))
     else:
         hook_path.write_text(f"#!/bin/sh\n{snippet}")
 
