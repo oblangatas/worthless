@@ -171,14 +171,30 @@ def _describe_probe_failure(exc: Exception) -> str:
     return getattr(exc, "strerror", None) or exc.__class__.__name__
 
 
+def _add_caveat(caveats: list[str] | None, text: str) -> None:
+    """Record a caveat once, preserving first-seen order.
+
+    Several probes run per scan and their caveat text is deliberately
+    surface-shaped, not path-shaped — naming the file would leak a home
+    directory into terminal output. That makes repeats genuinely identical:
+    six agent dirs with an unreadable auth-profiles.json produced the same
+    sentence six times, 600+ characters of it joined into one NOTE, carrying
+    no more information than one copy. A wall of repeated text reads as a
+    broken tool and trains people to skip the line — which defeats the point
+    of emitting it. Dedupe here rather than at each render site, so every
+    consumer benefits and no caller has to remember.
+    """
+    if caveats is not None and text not in caveats:
+        caveats.append(text)
+
+
 def _append_keychain_caveat(service: str, caveats: list[str] | None, reason: str) -> None:
     """Record an unanswered keychain probe, naming the service but no secret.
 
     Same wording as the file-surface caveats ("could not be checked") so the
     doctor output reads consistently regardless of which probe fell short.
     """
-    if caveats is not None:
-        caveats.append(f"macOS keychain service {service!r} could not be checked ({reason})")
+    _add_caveat(caveats, f"macOS keychain service {service!r} could not be checked ({reason})")
 
 
 def _clear_keychain_service(service: str) -> bool:
@@ -227,8 +243,9 @@ def _probe_is_file(path: Path, surface_label: str, caveats: list[str] | None) ->
         return path.is_file()
     except OSError as exc:
         logger.warning("could not probe %s at %s: %s", surface_label, path, exc)
-        if caveats is not None:
-            caveats.append(f"{surface_label} could not be checked ({exc.strerror or 'unreadable'})")
+        _add_caveat(
+            caveats, f"{surface_label} could not be checked ({exc.strerror or 'unreadable'})"
+        )
         return False
 
 
@@ -359,11 +376,11 @@ def _detect_auth_profiles_oauth_token(
             # unshardable credentials found" — a false all-clear caused by a
             # file we couldn't parse. Skip it, but say so.
             logger.warning("could not read %s: %s", auth_profiles_path, exc)
-            if caveats is not None:
-                caveats.append(
-                    "an OpenClaw auth-profiles.json could not be read — any "
-                    "OAuth/token profiles inside it were not checked"
-                )
+            _add_caveat(
+                caveats,
+                "an OpenClaw auth-profiles.json could not be read — any "
+                "OAuth/token profiles inside it were not checked",
+            )
             continue
         profiles = data.get("profiles")
         if not isinstance(profiles, dict):

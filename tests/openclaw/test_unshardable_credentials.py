@@ -14,6 +14,7 @@ honest warning, and ``doctor --fix`` clears a detected surface end to end.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 from dataclasses import dataclass
@@ -982,6 +983,135 @@ class TestKeychainProbeCaveats:
 
         assert probe is uc.KeychainProbe.PRESENT, probe
         assert caveats == []
+
+    @pytest.mark.parametrize(
+        ("failure", "expected_fragment"),
+        [
+            pytest.param(
+                subprocess.TimeoutExpired(cmd="security", timeout=5),
+                "timed out after",
+                id="timeout-says-it-timed-out",
+            ),
+            pytest.param(
+                FileNotFoundError(2, "No such file or directory"),
+                "not found",
+                id="missing-binary-says-it-is-missing",
+            ),
+            pytest.param(
+                None,  # not an exception: a real process exiting 51
+                "security exited 51",
+                id="odd-exit-names-the-code",
+            ),
+        ],
+    )
+    def test_each_failure_names_its_own_reason(
+        self,
+        failure: Exception | None,
+        expected_fragment: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The reason is the whole value of the caveat, so pin it per branch.
+
+        A surface audit of this change found every caveat test asserting only
+        the shared prefix "could not be checked". Replacing all three reasons
+        with the single letter "x" left the entire unit suite green — the
+        branches of ``_describe_probe_failure`` had no coverage at all. A user
+        told "could not be checked (x)" learns nothing and can fix nothing.
+        """
+        monkeypatch.setattr(uc.sys, "platform", "darwin")
+        if failure is None:
+            monkeypatch.setattr(uc.subprocess, "run", lambda *a, **k: _FakeProc(returncode=51))
+        else:
+
+            def _raise(*_a: object, **_k: object) -> object:
+                raise failure
+
+            monkeypatch.setattr(uc.subprocess, "run", _raise)
+
+        caveats: list[str] = []
+        probe = uc._keychain_probe("Some Service", caveats)
+
+        assert probe is uc.KeychainProbe.UNKNOWN
+        assert len(caveats) == 1, caveats
+        assert expected_fragment in caveats[0], (
+            f"the caveat must say WHY it could not look; got: {caveats[0]!r}"
+        )
+
+    def test_reasons_are_distinguishable_from_each_other(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Three different failures must not read identically.
+
+        The parametrized test above pins each reason individually, but would
+        still pass if two branches happened to share wording. A user comparing
+        two machines needs to see that one timed out and the other has no
+        binary at all.
+        """
+        monkeypatch.setattr(uc.sys, "platform", "darwin")
+        seen: list[str] = []
+        for failure in (
+            subprocess.TimeoutExpired(cmd="security", timeout=5),
+            FileNotFoundError(2, "No such file or directory"),
+        ):
+
+            def _raise(*_a: object, _exc: BaseException = failure, **_k: object) -> object:
+                raise _exc
+
+            monkeypatch.setattr(uc.subprocess, "run", _raise)
+            caveats: list[str] = []
+            uc._keychain_probe("Some Service", caveats)
+            seen.append(caveats[0])
+
+        monkeypatch.setattr(uc.subprocess, "run", lambda *a, **k: _FakeProc(returncode=51))
+        caveats = []
+        uc._keychain_probe("Some Service", caveats)
+        seen.append(caveats[0])
+
+        assert len(set(seen)) == 3, f"each failure needs its own wording, got: {seen}"
+
+    def test_the_same_caveat_is_never_repeated(self) -> None:
+        """A repeated sentence reads as a broken tool, not as emphasis.
+
+        Caveat text names the surface, not the path (a path would leak a home
+        directory into terminal output), so repeats are byte-identical. Six
+        agent directories with an unreadable auth-profiles.json produced the
+        same sentence six times — 622 characters carrying one sentence of
+        information. Found by a surface audit of this change.
+        """
+        caveats: list[str] = []
+        for _ in range(6):
+            uc._add_caveat(caveats, "the same thing could not be checked")
+        uc._add_caveat(caveats, "a different thing could not be checked")
+
+        assert caveats == [
+            "the same thing could not be checked",
+            "a different thing could not be checked",
+        ], f"duplicates must collapse and order must hold, got: {caveats}"
+
+    def test_a_failed_probe_is_written_to_the_log(
+        self, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The log is a surface too — it is what someone reads at 3am.
+
+        Nothing asserted the warning channel before this. It must name the
+        service and the reason, because a log line saying only "probe failed"
+        sends the reader back to the source to find out which of the two
+        keychain surfaces broke.
+        """
+        monkeypatch.setattr(uc.sys, "platform", "darwin")
+
+        def _raise(*_a: object, **_k: object) -> object:
+            raise FileNotFoundError(2, "No such file or directory")
+
+        monkeypatch.setattr(uc.subprocess, "run", _raise)
+
+        with caplog.at_level(logging.WARNING, logger=uc.logger.name):
+            uc._keychain_probe("Codex Auth", [])
+
+        assert caplog.records, "a probe that could not run must leave a log line"
+        message = caplog.records[0].getMessage()
+        assert "Codex Auth" in message, message
+        assert "could not probe" in message, message
 
     def test_absent_is_truthy_but_must_not_be_read_as_present(
         self, sandboxed_home: Path, monkeypatch: pytest.MonkeyPatch
