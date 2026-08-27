@@ -1148,3 +1148,123 @@ class TestPathLockdownIsActuallyTested:
             "/usr/bin would silently undo the whole defense.\n"
             f"  expected: {expected}\n  got:      {line.strip()}"
         )
+
+
+class TestPlantedBinariesCannotWin:
+    """worthless-rlio + worthless-v0tl: one defect, two symptoms.
+
+    The PATH lockdown (WOR-673/A2) prepends system dirs so trusted binaries
+    outrank caller-controlled ones. It PRESERVES the caller's PATH as the tail,
+    by design. So it only governs commands that actually EXIST in the trusted
+    dirs — anything else still resolves from the attacker's directory.
+
+    Two commands the installer depends on are not in those dirs:
+
+      sha256sum  absent from /usr/bin, /bin, /usr/local/bin on macOS
+                 (stock macOS ships /usr/bin/shasum instead)
+      uv         absent from all of them on every platform; it installs to
+                 ~/.local/bin
+
+    Both were found by adversarial review of PR #573 and confirmed on a real
+    Mac. They are filed separately but MUST be fixed together, because each
+    defeats the other's fix:
+
+      * Harden the hasher alone, and a planted `uv` short-circuits ensure_uv at
+        install.sh:262 before the hashing code is ever reached — the Astral
+        installer is never downloaded and the SHA pin never runs.
+      * Harden the uv lookup alone, and the download proceeds but a planted
+        `sha256sum` still reports the expected constant, so a tampered installer
+        passes and is executed.
+
+    These tests plant a hostile binary in a directory that is on PATH but is NOT
+    a trusted dir — the attacker's realistic position — and assert the installer
+    refuses to use it.
+    """
+
+    def _hostile(self, tmp_path: Path, name: str, prints: str) -> str:
+        d = tmp_path / "attacker" / "bin"
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / name
+        p.write_text(f"#!/bin/sh\necho '{prints}'\n")
+        p.chmod(0o755)
+        return str(d)
+
+    def test_hasher_is_resolved_from_a_trusted_dir_not_from_path(self, tmp_path: Path) -> None:
+        """A planted sha256sum must not be the one that verifies the download.
+
+        Today: install.sh:286 runs `command -v sha256sum`. On macOS that finds
+        nothing in the trusted prefix and falls through to the caller's tail, so
+        the attacker's copy answers — and it prints ASTRAL_INSTALLER_SHA256, so
+        the comparison at :294 passes on a tampered installer which is then
+        executed at :301.
+        """
+        text = INSTALL_SH.read_text()
+        assert "command -v sha256sum" not in text, (
+            "install.sh still resolves the hasher via `command -v`, which reaches "
+            "the caller's PATH tail. On macOS sha256sum is in no trusted dir, so an "
+            "attacker's copy verifies the download it also tampered with. Resolve "
+            "it to an absolute path inside a trusted dir and refuse otherwise."
+        )
+
+    def test_uv_is_not_trusted_merely_because_it_is_on_path(self, tmp_path: Path) -> None:
+        """A planted uv must not be able to skip the SHA-pinned bootstrap.
+
+        Today: install.sh:262 runs `command -v uv`, then trusts
+        `uv --version` — attacker-controlled output — to decide the pinned uv is
+        already present, returning 0 and skipping download + verification
+        entirely. uv lives in ~/.local/bin, so it is never in a trusted dir and
+        the lockdown cannot help.
+        """
+        text = INSTALL_SH.read_text()
+        assert "if command -v uv >/dev/null 2>&1; then" not in text, (
+            "ensure_uv still decides whether to bootstrap by asking PATH for `uv`. "
+            "Any writable dir on the user's PATH can supply one that prints the "
+            "pinned version, and the whole SHA-verified bootstrap is skipped. "
+            "Resolve uv from a bounded set of locations instead."
+        )
+
+    def test_a_trusted_lookup_helper_exists_and_excludes_the_caller_path(self) -> None:
+        """The fix must be a bounded allowlist, not another PATH lookup."""
+        text = INSTALL_SH.read_text()
+        assert "trusted_tool()" in text, (
+            "expected a helper that resolves a command to an absolute path within "
+            "an explicit list of trusted directories"
+        )
+        for fn in ("trusted_tool()", "resolve_uv()"):
+            start = text.index(fn)
+            body = text[start : text.index("\n}\n", start)]
+            # `command -v` is allowed ONLY inside the documented test escape
+            # hatch. An UNGATED fallback would reintroduce the caller's PATH,
+            # which is the entire bug. So every occurrence must sit under a
+            # strict WORTHLESS_TRUST_PATH = "1" check.
+            if "command -v" in body:
+                gate = '[ "${WORTHLESS_TRUST_PATH:-}" = "1" ]'
+                assert gate in body, (
+                    f"{fn} falls back to `command -v` without the escape-hatch "
+                    f"gate — that is the vulnerability, restored. got:\n{body}"
+                )
+                before_gate = body[: body.index(gate)]
+                assert "command -v" not in before_gate, (
+                    f"{fn} consults PATH BEFORE checking the escape hatch, so the "
+                    f"gate does not actually gate anything. got:\n{body}"
+                )
+            assert "/usr/bin" in body, f"{fn} should search /usr/bin"
+
+    def test_the_escape_hatch_in_the_resolvers_is_strict(self, tmp_path: Path) -> None:
+        """Only the literal "1" may opt out — same rule as the lockdown.
+
+        The resolvers defer to PATH when WORTHLESS_TRUST_PATH=1 so the test
+        harness can inject stubs. If that check were typo-tolerant, an attacker
+        who can set any environment variable could re-open the exact hole these
+        resolvers close, by setting it to "true".
+        """
+        text = INSTALL_SH.read_text()
+        for fn in ("trusted_tool()", "resolve_uv()"):
+            start = text.index(fn)
+            body = text[start : text.index("\n}\n", start)]
+            if "WORTHLESS_TRUST_PATH" not in body:
+                continue
+            assert '"${WORTHLESS_TRUST_PATH:-}" = "1"' in body, (
+                f'{fn} must compare against the literal "1"; a looser test '
+                f'(-n, != "", case-insensitive) is bypassable. got:\n{body}'
+            )
