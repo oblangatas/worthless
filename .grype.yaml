@@ -486,6 +486,13 @@ ignore:
   # All three are Denial of Service. Per the advisories there is no memory
   # disclosure, no controlled write, and no path to code execution.
   #
+  # Expiry matches the file's majority (2027-01-31), not the CVE-2026-14456
+  # pair above. An expired ignore HARD-FAILS every PR with 14 days' warning,
+  # so a short fuse on a low-severity, unreachable finding just schedules the
+  # outage this entry exists to end. Note the date cannot catch the risk that
+  # matters most here — us starting to USE DTLS/CMS/CMP — which is a code
+  # change, not a calendar event.
+  #
   # DELETE these entries — do not extend them — the moment either becomes
   # true: Debian ships 3.0.22+ for bookworm, or Worthless starts speaking
   # DTLS, CMS, or CMP. The second one silently makes these live.
@@ -493,24 +500,24 @@ ignore:
   - vulnerability: CVE-2026-54874
     package: {name: openssl, type: deb}
     reason: "OpenSSL 3.0.20 in the pinned bookworm base is in the affected range (fixed in 3.0.22), but the flaw is DTLS-only and the proxy is TLS over TCP — it never opens a DTLS endpoint. Upstream assesses this Low; grype reports High. fix=not-fixed: Debian has shipped no bookworm update, so there is no version to bump to. WOR-915."
-    expiry: "2026-11-30"
+    expiry: "2027-01-31"
   - vulnerability: CVE-2026-54874
     package: {name: libssl3, type: deb}
     reason: "OpenSSL 3.0.20 in the pinned bookworm base is in the affected range (fixed in 3.0.22), but the flaw is DTLS-only and the proxy is TLS over TCP — it never opens a DTLS endpoint. Upstream assesses this Low; grype reports High. fix=not-fixed: Debian has shipped no bookworm update, so there is no version to bump to. WOR-915."
-    expiry: "2026-11-30"
+    expiry: "2027-01-31"
   - vulnerability: CVE-2026-63072
     package: {name: openssl, type: deb}
     reason: "OpenSSL 3.0.20 in the pinned bookworm base is in the affected range (fixed in 3.0.22). The 8-byte OOB heap write is reachable only from CMS_decrypt(); Worthless never parses CMS/S-MIME messages. Consequence per upstream is heap corruption leading to DoS — no disclosure, no code execution. fix=not-fixed: no Debian bookworm update exists. WOR-915."
-    expiry: "2026-11-30"
+    expiry: "2027-01-31"
   - vulnerability: CVE-2026-63072
     package: {name: libssl3, type: deb}
     reason: "OpenSSL 3.0.20 in the pinned bookworm base is in the affected range (fixed in 3.0.22). The 8-byte OOB heap write is reachable only from CMS_decrypt(); Worthless never parses CMS/S-MIME messages. Consequence per upstream is heap corruption leading to DoS — no disclosure, no code execution. fix=not-fixed: no Debian bookworm update exists. WOR-915."
-    expiry: "2026-11-30"
+    expiry: "2027-01-31"
   - vulnerability: CVE-2026-63076
     package: {name: openssl, type: deb}
     reason: "OpenSSL 3.0.20 in the pinned bookworm base is in the affected range (fixed in 3.0.22). The NULL deref is in CMP password-based protection verification; upstream states CMP is a specialized feature an application must explicitly enable, and Worthless does not. Upstream: no memory disclosure, no controlled write, no path to code execution. fix=not-fixed: no Debian bookworm update exists. WOR-915."
-    expiry: "2026-11-30"
+    expiry: "2027-01-31"
   - vulnerability: CVE-2026-63076
     package: {name: libssl3, type: deb}
     reason: "OpenSSL 3.0.20 in the pinned bookworm base is in the affected range (fixed in 3.0.22). The NULL deref is in CMP password-based protection verification; upstream states CMP is a specialized feature an application must explicitly enable, and Worthless does not. Upstream: no memory disclosure, no controlled write, no path to code execution. fix=not-fixed: no Debian bookworm update exists. WOR-915."
-    expiry: "2026-11-30"
+    expiry: "2027-01-31"
