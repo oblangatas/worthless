@@ -638,6 +638,43 @@ def test_lock_surfaces_detection_caveats_on_non_macos(
     assert "worthless doctor" in out, "the NOTE must point the user at the full check"
 
 
+def test_lock_renders_a_failed_keychain_probe_to_the_terminal(
+    home_dir: WorthlessHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WOR-835: the probe caveat must reach the terminal a human actually reads.
+
+    The sibling test above monkeypatches ``detect_unshardable_credentials`` and
+    ``detection_caveats`` wholesale, so it never exercises the ``probe_caveats``
+    sink this fix added — deleting the ``[NOTE]`` render in ``lock`` left the
+    whole suite green. This drives the real chain instead: a genuinely failing
+    ``security`` invocation, through the real detector, to rendered output.
+    """
+    import subprocess as _subprocess
+
+    from worthless.openclaw import unshardable_credentials as uc
+
+    def _no_security_binary(*_a: object, **_k: object) -> object:
+        raise FileNotFoundError(2, "No such file or directory", uc._SECURITY_BIN)
+
+    monkeypatch.setattr(uc.sys, "platform", "darwin")
+    monkeypatch.setattr(_subprocess, "run", _no_security_binary)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    env_file = tmp_path / ".env"
+    env_file.write_text("PORT=8000\n")
+
+    result = runner.invoke(
+        app,
+        ["lock", "--env", str(env_file)],
+        env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+    )
+
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "[NOTE]" in out, "a probe that could not run must be rendered, not swallowed"
+    assert "could not be checked" in out, out
+    assert "keychain" in out.lower(), "the NOTE must name the surface that went unchecked"
+
+
 def test_doctor_summary_names_the_credentials_when_found(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
