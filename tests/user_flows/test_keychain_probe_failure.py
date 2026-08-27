@@ -15,15 +15,22 @@ not fussiness — an earlier review of this very change left a stray credential
 on a maintainer's login keychain, which is exactly the mess a "live keychain
 test" invites if written carelessly.
 
-Deliberately NOT gated behind ``WORTHLESS_TEST_KEYCHAIN_READY`` like
-``test_keychain_macos_writes.py``: that guard exists because real-keychain
-*writes* hang on headless CI. Nothing here goes near the keychain, so it runs
-on every macOS runner.
+Gated behind ``WORTHLESS_TEST_KEYCHAIN_READY``, exactly like
+``test_keychain_macos_writes.py``. An earlier revision of this file skipped that
+guard, reasoning that a stand-in binary never reaches the keychain. That was
+wrong twice over: the clean-machine test below does invoke the real
+``/usr/bin/security``, and ``doctor`` runs sibling checks that touch the
+keychain too. On a runner where the keychain is not non-interactively
+accessible, those block; the lane burned 15 minutes and was cancelled. The
+guard is not ceremony — it encodes a measured property of the CI hosts
+(worthless-fc14). Run locally on a real Mac, or on CI once the keychain step
+reports ready.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import stat
 import sys
 from pathlib import Path
@@ -34,11 +41,20 @@ from typer.testing import CliRunner
 from worthless.cli.app import app
 from worthless.openclaw import unshardable_credentials as uc
 
+_ON_CI = os.environ.get("CI") is not None
+_KEYCHAIN_READY = os.environ.get("WORTHLESS_TEST_KEYCHAIN_READY") == "1"
+
 pytestmark = [
     pytest.mark.user_flow,
     pytest.mark.skipif(
         sys.platform != "darwin",
         reason="the keychain probe only runs on macOS; elsewhere it is ABSENT by design",
+    ),
+    pytest.mark.skipif(
+        _ON_CI and not _KEYCHAIN_READY,
+        reason="the keychain is not non-interactively accessible on this runner, so "
+        "`security` blocks and takes the session with it (worthless-fc14); run "
+        "locally or on CI with the keychain step",
     ),
 ]
 
