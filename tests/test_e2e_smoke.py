@@ -6,6 +6,13 @@ the three product invariants (client-side split, gate-before-reconstruct,
 server-side upstream call). ``/healthz`` also swallows its own DB error
 (app.py:443-444), so a 200 is not a statement about storage health.
 
+It also drives ``start_daemon``, which has NO production caller: it is
+marked ``.. deprecated::`` in ``up.py:276`` with target removal in v1.2, and
+``test_never_invokes_start_daemon`` exists to keep it that way. The default
+command uses ``start_supervised_proxy``, and ``worthless up -d`` is refused
+outright (WRTLS-115). So the spawn path exercised here is not the one users
+take — a point worth knowing before trusting this test as a release gate.
+
 What it does prove is that lifespan completed: schema, migrations, decoy
 preload, the sidecar IPC handshake, and the port bind. For proof that a real
 request transits a real proxy, see
