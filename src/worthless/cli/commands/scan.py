@@ -7,7 +7,7 @@ import contextlib
 import json
 import os
 import stat
-import subprocess
+import subprocess  # nosec B404
 import sys
 import tempfile
 import time
