@@ -358,12 +358,34 @@ describe("body integrity — install.sh shape and bounded size (H-08)", () => {
     //     security content. Ceiling at 24.5 KB keeps ~1.3 KB slack — tight,
     //     intentionally. Each future bump must cite the WOR ticket that
     //     justifies the growth and be a real discussion, not a ratchet.
+    //   - Bumped 24.5 KB -> 26.4 KB for worthless-rlio + worthless-v0tl. This is
+    //     the "real discussion" the line above asks for, so here it is.
+    //
+    //     Both were exploitable. The PATH lockdown outranks the caller only for
+    //     commands that EXIST in the trusted dirs, and it keeps the caller's PATH
+    //     as the tail by design. `sha256sum` is in none of those dirs on macOS and
+    //     `uv` is in none of them anywhere, so `command -v` for either reached an
+    //     attacker's directory. A planted sha256sum returned the expected constant
+    //     and a tampered Astral installer passed verification and was executed; a
+    //     planted uv reported the pinned version and skipped the download and the
+    //     SHA check entirely. Both confirmed on a real Mac.
+    //
+    //     The fix is two resolver helpers that search an explicit list and never
+    //     fall back to PATH: ~900 chars of code plus the comment explaining why.
+    //     It could not be made smaller without deleting the reasoning, and this
+    //     ceiling exists to stop injected code hiding in bloat — not to stop the
+    //     script defending itself. Shrinking the script by removing a security
+    //     control to satisfy a guard against insecurity would invert its purpose.
+    //
+    //     Script is 25980 chars; slack after the bump is 420: still tight,
+    //     still not a ratchet.
+    //     The next bump needs its own argument.
     const res = await SELF.fetch("https://worthless.sh/", {
       headers: { "user-agent": CURL_UA },
     });
     expect(res.status).toBe(200);
     const body = await res.text();
-    expect(body.length).toBeLessThan(24_500);
+    expect(body.length).toBeLessThan(26_400);
   });
 
   it("install-script body Content-Length header matches actual byte length", async () => {
