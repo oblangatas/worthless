@@ -463,3 +463,187 @@ ignore:
     package: {name: libssl3, type: deb}
     reason: "OpenSSL 3.0.20 in the pinned bookworm base; QUIC server was added in 3.5, so the vulnerable code is not present (measured: `openssl help | grep -ci quic` = 0). The advisory states 3.0 is not affected. fix=not-fixed is Debian's postponement (bug #1144615, marked postponed for trixie), not an upstream gap. Do NOT bump to trixie — it ships 3.5.6, inside the affected range. WOR-885."
     expiry: "2026-11-30"
+
+
+  # ── OpenSSL advisory 20260825, base-image only (WOR-914 Track F) ────────
+  #
+  # --- CVE-2026-54874 / CVE-2026-63072 / CVE-2026-63076: openssl / libssl3 ---
+  #
+  # Read this before reaching for the obvious fix. Unlike the CVE-2026-14456
+  # block above, this is NOT a "code not present" argument. The vulnerable code
+  # IS compiled into our libcrypto/libssl. The claim here is UNREACHABLE, which
+  # is a weaker claim, and it is stated deliberately so nobody mistakes it for
+  # the stronger one.
+  #
+  # These three landed together in OpenSSL Security Advisory 20260825 and were
+  # published to NVD at 2026-08-25T13:19Z. They are ambient: the grype DB built
+  # 2026-08-25T06:17:15Z did not have them, the DB built 2026-08-26T06:18:26Z
+  # did. No dependency, Dockerfile, or base digest changed. Proof: on branch
+  # test/worthless-2z8y-wsl-end-to-end-coverage, commit d3432ecc PASSED at
+  # 05:42Z and commit e8982bd0 FAILED at 07:51Z; the only diff between them is
+  # tests/test_e2e_smoke.py (+9/-5).
+  #
+  # What each one is, and what it needs to fire:
+  #
+  #   CVE-2026-54874  DTLS future-epoch record buffering. CWE-405. A peer sends
+  #                   small forged records for the next epoch mid-handshake;
+  #                   OpenSSL retains a full ~16KB read buffer per record, up
+  #                   to 100 per connection (~1.7MB from a trickle of traffic).
+  #                   Needs: a DTLS endpoint on UDP.
+  #                   OpenSSL's own prose: "assessed as Low severity."
+  #                   grype/NVD: High, CVSS 7.5 AV:N/AC:L/PR:N/UI:N/A:H —
+  #                   a mechanical availability score, not the CNA's judgement.
+  #
+  #   CVE-2026-63072  CMS AES-WRAP-PAD key unwrap sizes its output buffer from
+  #                   a too-small query; deterministic 8-byte zero OOB heap
+  #                   write. CWE-787. Reached from public CMS_decrypt().
+  #                   Needs: the app decrypts an attacker-supplied CMS message.
+  #                   OpenSSL CNA severity: Moderate. grype: High (7.5).
+  #
+  #   CVE-2026-63076  CMP password-based-MAC verification casts protectionAlg
+  #                   to ASN1_STRING after only a NULL check, never checking
+  #                   the ASN.1 type -> invalid pointer deref. CWE-476.
+  #                   Needs: a CMP server accepting PBM-protected messages, or
+  #                   a CMP client talking to a hostile/on-path CMP server.
+  #                   The advisory notes CMP "is a specialized feature that an
+  #                   application must explicitly enable." We never enable it.
+  #                   OpenSSL CNA severity: Moderate. grype: High (7.5).
+  #
+  # Upstream says 3.0 IS affected by all three (fix = 3.0.22). We are NOT
+  # claiming otherwise. We are claiming the paths are unreachable in this image.
+  #
+  # MEASURED against an image built from the exact pinned base digest
+  # (python:3.13-slim-bookworm@sha256:fcbd8dfc2605...):
+  #
+  #     $ openssl version
+  #     OpenSSL 3.0.20 7 Apr 2026
+  #     $ dpkg-query -W openssl libssl3
+  #     openssl  3.0.20-1~deb12u2
+  #     libssl3  3.0.20-1~deb12u2
+  #
+  # Only three things in the image touch Debian's libssl.so.3 at all:
+  #   /usr/bin/openssl, libssl.so.3 itself, and CPython's _ssl.*.so.
+  #
+  # ELF .dynsym import counts. NOTE: nm and readelf are NOT installed in the
+  # image -- an in-container `nm` run returns 0 for EVERYTHING and is a false
+  # negative. These numbers come from parsing .dynsym directly, with
+  # SSL_CTX_new as a positive control:
+  #
+  #   _ssl.cpython-313.so   352 undefined syms
+  #                         SSL_CTX_new = 1   <- positive control, parser works
+  #                         CMS_        = 0
+  #                         OSSL_CMP    = 0
+  #                         DTLS        = 0
+  #
+  #   /usr/bin/openssl      CMS_ = 42, OSSL_CMP = 86, DTLS = 4
+  #                         (the CLI CAN reach all three -- see below)
+  #
+  #   libcrypto.so.3        DEFINES 135 CMS_ and 117 OSSL_CMP symbols
+  #   libssl.so.3           DEFINES 13 DTLS symbols
+  #                         ^ this is why the claim is "unreachable", not
+  #                           "not present". The code is compiled in.
+  #
+  # The Python TLS binding imports zero symbols from any of the three affected
+  # families. `ssl` and `_ssl` expose no DTLS, CMS, or CMP attribute at all, so
+  # there is no Python-reachable entry point even in principle.
+  #
+  # The one component that COULD reach them is the /usr/bin/openssl CLI. It is
+  # never invoked: zero matches for an openssl CLI call across src/, deploy/,
+  # Dockerfile, and entrypoint.sh, and it does not appear in the live process
+  # tree. Measured on a running container:
+  #
+  #     pid 1   tini -- /entrypoint.sh
+  #     pid 7   python3.13 uvicorn worthless.proxy.app:create_app --factory \
+  #             --host 127.0.0.1 --port 8787
+  #     pid 37  python -m worthless.sidecar
+  #
+  # Note what is absent from that uvicorn command line: --ssl-certfile,
+  # --ssl-keyfile, --ssl-cert-reqs. The container serves PLAINTEXT HTTP. It is
+  # never a TLS server, so it never presents a cert chain and never parses a
+  # client certificate. Its only TLS use is as a CLIENT to the upstream
+  # provider. Also measured on the running container: listening sockets are TCP
+  # 127.0.0.1:8787 and nothing else, and there are ZERO UDP sockets -- 54874
+  # requires a DTLS endpoint, which requires UDP.
+  #
+  # uv.lock has zero aioquic/dtls/quic/http3 entries. src/ and deploy/ have zero
+  # matches for ssl_certfile, ssl_keyfile, ssl_cert_reqs, CERT_REQUIRED,
+  # wrap_socket, load_cert_chain, DTLS, CMS_, SMIME, pkcs7, or cmp_.
+  #
+  # `cryptography` 50.0.1 is in the image but does NOT link Debian's libssl --
+  # it bundles its own OpenSSL 4.0.2, which is already fixed for all three.
+  #
+  # DO NOT "FIX" THIS BY BUMPING THE BASE IMAGE. Measured today:
+  #   bookworm (pinned)  apt candidate 3.0.20-1~deb12u2 == installed.
+  #                      There is NO fix to take. `fix=not-fixed` is literally
+  #                      true; DSA-6465-1 shipped for trixie ONLY. Adding an
+  #                      apt-get upgrade to the Dockerfile is a measured no-op.
+  #   python:3.13-slim-trixie TODAY ships openssl 3.5.6-1~deb13u2, which Debian
+  #                      marks VULNERABLE to all three. A tag bump fixes NOTHING
+  #                      and additionally walks into CVE-2026-14456 (QUIC,
+  #                      affects 3.5.0-3.5.7) and CVE-2026-18798 (QUIC double
+  #                      free, same 20260825 advisory) -- and bookworm is marked
+  #                      NOT AFFECTED for 18798. The bump strictly loses.
+  #
+  # The ONLY measured path that actually clears these: trixie PLUS an explicit
+  # apt install of openssl/libssl3t64 from trixie-security, which offers
+  # candidate 3.5.7-1~deb13u2 (fixed for all five). That is a migration, not an
+  # unblock: it also renames libssl3 -> libssl3t64, which silently breaks the
+  # libssl3-scoped ignore entries above. Track it, do not rush it.
+  #
+  # STALE-NOTE for whoever next edits the CVE-2026-14456 block: that block says
+  # trixie 3.5.6 is "inside the affected range" (still true), but it predates
+  # DSA-6465-1, which FIXED 14456 in trixie-security 3.5.7-1~deb13u2. The "do
+  # not bump" advice still holds for a plain tag bump; the "trixie is
+  # permanently worse" framing no longer does.
+  #
+  # Expiry is short on purpose. bookworm is oldstable heading into LTS and may
+  # yet receive a 3.0.22-based update. Re-check the Debian tracker at expiry: if
+  # bookworm has a fixed version, BUMP AND DELETE these entries rather than
+  # extending. Expiry does not re-expose -- grype keeps suppressing while
+  # check_grype_ignore_expiry.py turns the build red. It nags.
+  #
+  # WHAT THIS ARGUMENT DOES NOT COVER:
+  #   - It does NOT say the bugs are absent. The code is compiled in and a
+  #     future code change that shells out to `openssl cms`/`openssl cmp`, adds
+  #     a DTLS or CMP dependency, or terminates TLS in-container (uvicorn
+  #     --ssl-*, client certs) INVALIDATES this entry immediately.
+  #   - It does NOT cover anything that dlopen()s libssl at runtime rather than
+  #     linking it; the symbol counts above are static-link measurements.
+  #   - It does NOT cover the /usr/bin/openssl CLI being reachable by an
+  #     attacker who already has code execution in the container. That is a
+  #     post-compromise scenario and out of scope for this gate.
+  #   - It was measured on arm64 only (linux/arm64 resolution of the pinned
+  #     digest). Package versions are identical across arches for these deb
+  #     entries, but the symbol counts were not re-run on amd64. The weekly
+  #     arm64 scan is covered; an amd64 re-measure is advisable before relying
+  #     on the symbol numbers as an amd64 claim.
+  #   - It makes no claim about the OTHER two CVEs in advisory 20260825
+  #     (CVE-2026-18798 QUIC double free, CVE-2026-14457 RPK) -- bookworm is
+  #     not-affected for both, which is why they are not flagged here.
+
+  - vulnerability: CVE-2026-54874
+    package: {name: openssl, type: deb}
+    reason: "OpenSSL DTLS epoch-buffer memory amplification (CWE-405). OpenSSL's own advisory assesses it Low; grype reports High from a mechanical CVSS availability score. Unreachable: the container serves plaintext HTTP (uvicorn has no --ssl-* flags), has ZERO UDP sockets, and CPython's _ssl imports 0 DTLS symbols (measured via .dynsym; SSL_CTX_new=1 positive control). No DTLS/QUIC deps in uv.lock. bookworm apt candidate == installed 3.0.20-1~deb12u2, so fix=not-fixed is literal; DSA-6465-1 is trixie-only. Do NOT tag-bump to trixie: it ships 3.5.6, still vulnerable here AND inside CVE-2026-14456/18798. WOR-914."
+    expiry: "2026-11-30"
+  - vulnerability: CVE-2026-54874
+    package: {name: libssl3, type: deb}
+    reason: "OpenSSL DTLS epoch-buffer memory amplification (CWE-405). OpenSSL's own advisory assesses it Low; grype reports High from a mechanical CVSS availability score. Unreachable: the container serves plaintext HTTP (uvicorn has no --ssl-* flags), has ZERO UDP sockets, and CPython's _ssl imports 0 DTLS symbols (measured via .dynsym; SSL_CTX_new=1 positive control). No DTLS/QUIC deps in uv.lock. bookworm apt candidate == installed 3.0.20-1~deb12u2, so fix=not-fixed is literal; DSA-6465-1 is trixie-only. Do NOT tag-bump to trixie: it ships 3.5.6, still vulnerable here AND inside CVE-2026-14456/18798. WOR-914."
+    expiry: "2026-11-30"
+
+  - vulnerability: CVE-2026-63072
+    package: {name: openssl, type: deb}
+    reason: "OpenSSL CMS AES-WRAP-PAD 8-byte OOB heap write via CMS_decrypt() (CWE-787). OpenSSL CNA severity Moderate; grype reports High. Unreachable: nothing in the runtime decrypts CMS. CPython's _ssl imports 0 CMS_ symbols (measured via .dynsym; SSL_CTX_new=1 positive control) and ssl/_ssl expose no CMS API; the only CMS-capable component is /usr/bin/openssl, which is never invoked (0 matches in src//deploy//Dockerfile/entrypoint.sh, absent from the live process tree). bookworm apt candidate == installed 3.0.20-1~deb12u2; DSA-6465-1 is trixie-only. Do NOT tag-bump to trixie: it ships 3.5.6, still vulnerable here. WOR-914."
+    expiry: "2026-11-30"
+  - vulnerability: CVE-2026-63072
+    package: {name: libssl3, type: deb}
+    reason: "OpenSSL CMS AES-WRAP-PAD 8-byte OOB heap write via CMS_decrypt() (CWE-787). OpenSSL CNA severity Moderate; grype reports High. Unreachable: nothing in the runtime decrypts CMS. CPython's _ssl imports 0 CMS_ symbols (measured via .dynsym; SSL_CTX_new=1 positive control) and ssl/_ssl expose no CMS API; the only CMS-capable component is /usr/bin/openssl, which is never invoked (0 matches in src//deploy//Dockerfile/entrypoint.sh, absent from the live process tree). bookworm apt candidate == installed 3.0.20-1~deb12u2; DSA-6465-1 is trixie-only. Do NOT tag-bump to trixie: it ships 3.5.6, still vulnerable here. WOR-914."
+    expiry: "2026-11-30"
+
+  - vulnerability: CVE-2026-63076
+    package: {name: openssl, type: deb}
+    reason: "OpenSSL CMP PBM protectionAlg type-confusion pointer deref (CWE-476). OpenSSL CNA severity Moderate; grype reports High. Unreachable: the advisory states CMP must be explicitly enabled by the application; we never enable it, run no CMP server, and make no CMP client calls. CPython's _ssl imports 0 OSSL_CMP symbols (measured via .dynsym; SSL_CTX_new=1 positive control) and ssl/_ssl expose no CMP API; only /usr/bin/openssl links CMP and it is never invoked. bookworm apt candidate == installed 3.0.20-1~deb12u2; DSA-6465-1 is trixie-only. Do NOT tag-bump to trixie: it ships 3.5.6, still vulnerable here. WOR-914."
+    expiry: "2026-11-30"
+  - vulnerability: CVE-2026-63076
+    package: {name: libssl3, type: deb}
+    reason: "OpenSSL CMP PBM protectionAlg type-confusion pointer deref (CWE-476). OpenSSL CNA severity Moderate; grype reports High. Unreachable: the advisory states CMP must be explicitly enabled by the application; we never enable it, run no CMP server, and make no CMP client calls. CPython's _ssl imports 0 OSSL_CMP symbols (measured via .dynsym; SSL_CTX_new=1 positive control) and ssl/_ssl expose no CMP API; only /usr/bin/openssl links CMP and it is never invoked. bookworm apt candidate == installed 3.0.20-1~deb12u2; DSA-6465-1 is trixie-only. Do NOT tag-bump to trixie: it ships 3.5.6, still vulnerable here. WOR-914."
+    expiry: "2026-11-30"
