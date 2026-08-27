@@ -983,6 +983,34 @@ class TestKeychainProbeCaveats:
         assert probe is uc.KeychainProbe.PRESENT, probe
         assert caveats == []
 
+    def test_absent_is_truthy_but_must_not_be_read_as_present(
+        self, sandboxed_home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The one slip that silently restores the original bug.
+
+        ``KeychainProbe.ABSENT`` is a truthy object, like every enum member, so
+        a call site written ``if _keychain_probe(...)`` would report a finding
+        for a credential that is not there. Both call sites compare identities
+        instead; nothing failed if someone changed that, so this pins it.
+        """
+        assert bool(uc.KeychainProbe.ABSENT) is True, (
+            "if this ever becomes falsey the trap is gone and so is this test's reason "
+            "to exist — but until then, truthiness must never be used to read a probe"
+        )
+
+        monkeypatch.setattr(uc.sys, "platform", "darwin")
+        monkeypatch.setattr(uc, "_keychain_probe", lambda service, caveats: uc.KeychainProbe.ABSENT)
+
+        caveats: list[str] = []
+        findings = uc.detect_unshardable_credentials(caveats)
+
+        keychain_findings = [f for f in findings if f.clear_kind == "keychain"]
+        assert keychain_findings == [], (
+            "an ABSENT probe must produce no keychain finding — a truthiness check "
+            f"would invent these: {keychain_findings}"
+        )
+        assert caveats == [], "a definite ABSENT is an answer, so it carries no caveat"
+
     def test_non_darwin_is_absent_not_unknown(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Linux has no macOS keychain — that is a definite answer, not a gap.
 
