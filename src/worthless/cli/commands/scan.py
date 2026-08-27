@@ -11,12 +11,13 @@ import sys
 import tempfile
 import time
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import typer
 
 from worthless.cli.bootstrap import get_home
+from worthless.cli.safe_rewrite import _BASENAME_ALLOWLIST
 from worthless.cli.code_scanner import CodeFinding, scan_for_hardcoded_provider_urls
 from worthless.cli.console import get_console
 from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary
@@ -125,12 +126,76 @@ def _collect_deep_paths(explicit_paths: list[Path]) -> tuple[list[Path], Path | 
     return paths, tmp_path
 
 
-def _scan_verdict_line(protected: int, unprotected: int, total: int, broken: int) -> str:
+def _exposure_noun(files: Sequence[str]) -> tuple[str, str]:
+    """Describe WHERE the exposed keys are, and what can be done about it.
+
+    `lock` rewrites a file in place, and its basename allowlist accepts only the
+    nine `.env`-family names — so "Run `worthless lock`" is followable advice for
+    a `.env` and refused-by-design for `app.py`. Hardcoding both the noun and the
+    remedy was survivable while scan mostly read `.env` files; the pre-commit
+    hook (worthless-2kuy) made staged SOURCE files the common case.
+
+    Returns ``(where, remedy)``.
+    """
+    names = sorted({Path(f).name for f in files})
+    lockable = [n for n in names if n in _BASENAME_ALLOWLIST]
+
+    # A filename is attacker-controlled and this string reaches a terminal, so
+    # it gets the same treatment as every other path printed by this module
+    # (see f.file at the finding lines). The allowlist check above runs on the
+    # RAW name — sanitising first could turn a non-.env name into a lockable
+    # one and hand back advice that lock will refuse.
+    if names and len(lockable) == len(names):
+        where = sanitise_for_message(names[0]) if len(names) == 1 else f"{len(names)} .env files"
+        return where, " Run `worthless lock`."
+    if len(names) == 1:
+        return sanitise_for_message(names[0]), " Move it to a .env file, then run `worthless lock`."
+    return f"{len(names)} files", " Move them to a .env file, then run `worthless lock`."
+
+
+def _summary_line(total: int, protected: int, unprotected: int, broken: int) -> str:
+    """Trailing count line; the broken segment only appears when there are orphans."""
+    line = f"Found {total} keys: {protected} protected, {unprotected} unprotected"
+    return f"{line}, {broken} broken" if broken else line
+
+
+def _orphan_lines(orphans: Sequence[EnrollmentRecord]) -> list[str]:
+    """HF5: dedicated section for broken DB rows + recovery hint.
+
+    Section header carries the canonical PROBLEM_PHRASE; per-row drops it to
+    avoid the redundant "can't restore <alias> ... BROKEN" double-up.
+    """
+    if not orphans:
+        return []
+    out = ["", f"{PROBLEM_PHRASE.capitalize()} these keys (.env line deleted):"]
+    out.extend(f"  {o.key_alias}  BROKEN  ({o.var_name} -> {o.env_path})" for o in orphans)
+    out.append(f"  Run `{FIX_PHRASE}` to clean up.")
+    return out
+
+
+def _has_lockable_exposure(findings: Sequence[ScanFinding]) -> bool:
+    """True if any exposed finding sits in a file `lock` will actually accept.
+
+    lock rewrites in place and refuses any basename outside the .env family, so
+    "Run: worthless lock" is only followable advice when one of these exists.
+    """
+    return any(Path(f.file).name in _BASENAME_ALLOWLIST for f in findings if not f.is_protected)
+
+
+def _scan_verdict_line(
+    protected: int,
+    unprotected: int,
+    total: int,
+    broken: int,
+    files: Sequence[str] = (),
+) -> str:
     """WOR-779: the one-line verdict scan leads with (verdict-first)."""
     if unprotected > 0:
+        where, remedy = _exposure_noun(files)
+        location = f" in {where}" if where else ""
         return (
             f"{protected} of {total} keys protected — "
-            f"{unprotected} still exposed in .env. Run `worthless lock`."
+            f"{unprotected} still exposed{location}.{remedy}"
         )
     if broken:
         return (
@@ -194,24 +259,17 @@ def _format_human(
         else:
             unprotected_count += 1
 
-    # HF5: dedicated section for broken DB rows + recovery hint.
-    # Section header carries the canonical PROBLEM_PHRASE; per-row drops
-    # it to avoid the redundant "can't restore <alias> ... BROKEN" double-up.
-    if orphans:
-        lines.append("")
-        lines.append(f"{PROBLEM_PHRASE.capitalize()} these keys (.env line deleted):")
-        for o in orphans:
-            lines.append(f"  {o.key_alias}  BROKEN  ({o.var_name} -> {o.env_path})")
-        lines.append(f"  Run `{FIX_PHRASE}` to clean up.")
+    lines.extend(_orphan_lines(orphans))
 
     total = len(findings)
     lines.append("")
-    summary = f"Found {total} keys: {protected_count} protected, {unprotected_count} unprotected"
-    if orphans:
-        summary += f", {len(orphans)} broken"
-    lines.append(summary)
+    lines.append(_summary_line(total, protected_count, unprotected_count, len(orphans)))
 
-    if unprotected_count > 0:
+    # Only point at lock when lock can actually act: its basename allowlist
+    # refuses anything outside the .env family, so this line is unfollowable
+    # for a key in app.py. The verdict line above already carries the
+    # move-it-first remedy in that case.
+    if unprotected_count > 0 and _has_lockable_exposure(findings):
         if is_tty:
             lines.append("Run: worthless lock")
         else:
@@ -221,7 +279,16 @@ def _format_human(
     # detail. scan is the only surface that sees plaintext-in-.env, so the
     # honest exposure count lives here — status defers to it.
     lines.insert(0, "")
-    lines.insert(0, _scan_verdict_line(protected_count, unprotected_count, total, len(orphans)))
+    lines.insert(
+        0,
+        _scan_verdict_line(
+            protected_count,
+            unprotected_count,
+            total,
+            len(orphans),
+            files=[f.file for f in findings if not f.is_protected],
+        ),
+    )
 
     return "\n".join(lines) + "\n"
 
