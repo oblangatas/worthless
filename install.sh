@@ -304,7 +304,8 @@ ensure_uv() {
         exit "$EXIT_NETWORK"
     }
 
-    PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+    uvh="${HOME:-/root}"; [ "$uvh" = / ] && uvh=/root
+    PATH="$uvh/.local/bin:$uvh/.cargo/bin:$PATH"
     export PATH
 
     if ! command -v uv >/dev/null 2>&1; then
