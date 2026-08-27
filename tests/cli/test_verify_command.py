@@ -9,6 +9,9 @@ The contract these pin, from the pre-code expert review:
   and a recovery hint that matches how the proxy is managed.
 * verify's GREEN says the proxy is live and routing; it must SAY it does not
   prove OpenClaw isn't also bypassing on a cached token (the honesty line).
+* No home at all (never enrolled) is RED, and must never reach the keystore —
+  ``_list_enrolled_keys`` dereferences ``home``, so a None there is a crash on
+  a fresh install rather than a verdict.
 
 Collaborators are mocked at the ``verify`` module boundary so these stay
 deterministic and CI-able (no proxy, no docker).
@@ -24,6 +27,7 @@ from typer.testing import CliRunner
 from worthless.cli.app import app
 from worthless.cli.commands.service._common import ServiceState
 from worthless.cli.commands.service.proxy_state import ProxyRuntimeState
+from worthless.cli.commands.verify import _EXIT_RED
 
 runner = CliRunner()
 
@@ -48,6 +52,44 @@ def _invoke(args, *, runtime, confirm=None, aliases=("anthropic",)):
         patch("worthless.cli.commands.verify._confirm_bind_aliases", return_value=confirm),
     ):
         return runner.invoke(app, args)
+
+
+# --------------------------------------------------------------------------
+# No home at all — a machine that never enrolled
+# --------------------------------------------------------------------------
+
+
+def test_no_home_never_hands_none_to_the_keystore():
+    """``_resolve_home_for_status`` returns None on a machine with no home dir.
+
+    ``verify`` must answer RED from that alone. The guarantee used to be
+    indirect — ``detect_proxy_runtime`` was skipped when home was None, so
+    ``state`` came back None and the next branch returned. Correct, but the
+    invariant lived across two variables, so nothing enforced it and pyright
+    could not see it: it rejected the ``_list_enrolled_keys(home)`` call as
+    possibly receiving None.
+
+    That call is the real hazard — ``_list_enrolled_keys`` dereferences
+    ``home.db_path``, so a None home there is an ``AttributeError`` on a user's
+    fresh install, not a verdict. This pins that it is never reached.
+
+    Deliberately does NOT assert on ``detect_proxy_runtime``: probing it with
+    no home would be a reasonable way to produce a more honest verdict later
+    (see the known-wrong reason code noted in ``_evaluate``), and this test
+    should not forbid that.
+    """
+    with (
+        patch("worthless.cli.commands.verify._resolve_home_for_status", return_value=None),
+        patch("worthless.cli.commands.verify._list_enrolled_keys") as list_keys,
+    ):
+        result = runner.invoke(app, ["verify", "--json"])
+
+    # Exact code, not just non-zero: a crash also exits non-zero, and would
+    # then fail below on json.loads with a confusing JSONDecodeError.
+    assert result.exit_code == _EXIT_RED, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["verdict"] == "red"
+    list_keys.assert_not_called()
 
 
 # --------------------------------------------------------------------------

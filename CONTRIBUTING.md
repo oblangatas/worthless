@@ -16,11 +16,11 @@
 
 ## Reporting a security issue
 
-**Do not open a public issue or PR.** Use GitHub's [Private Vulnerability Reporting](https://github.com/shacharm2/worthless/security/advisories/new) or email `security@wless.io`. See [SECURITY.md](SECURITY.md) for details and expected response.
+**Do not open a public issue or PR.** Use GitHub's [Private Vulnerability Reporting](https://github.com/oblangatas/worthless/security/advisories/new) or email `security@wless.io`. See [SECURITY.md](SECURITY.md) for details and expected response.
 
 ## Reporting a non-security bug or feature request
 
-Open a [GitHub Issue](https://github.com/shacharm2/worthless/issues). Describe what happened, what you expected, your platform, and minimal steps to reproduce.
+Open a [GitHub Issue](https://github.com/oblangatas/worthless/issues). Describe what happened, what you expected, your platform, and minimal steps to reproduce.
 
 ## What kinds of changes are welcome
 

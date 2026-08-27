@@ -19,7 +19,7 @@ from worthless.cli.commands.service.proxy_state import detect_proxy_runtime
 from worthless.cli.console import get_console
 from worthless.cli.errors import error_boundary
 from worthless.cli.platform import fail_if_windows
-from worthless.cli.process import resolve_port
+from worthless.cli.process import disable_core_dumps, resolve_port
 
 
 def _backend():
@@ -73,6 +73,10 @@ def register_service_commands(app: typer.Typer) -> None:
     ) -> None:
         """Write platform unit, enable, start, and verify /healthz."""
         fail_if_windows()
+        # strict=False (dupf.10): service management never reconstructs a key,
+        # but a first-run ensure_home() can create one. Never block a user from
+        # installing or stopping their service because a kernel lever was refused.
+        disable_core_dumps(strict=False)
         console = get_console()
         home = get_home()
         backend = _backend()
@@ -120,6 +124,10 @@ def register_service_commands(app: typer.Typer) -> None:
     ) -> None:
         """Stop service, deregister, and remove unit/plist."""
         fail_if_windows()
+        # strict=False (dupf.10): service management never reconstructs a key,
+        # but a first-run ensure_home() can create one. Never block a user from
+        # installing or stopping their service because a kernel lever was refused.
+        disable_core_dumps(strict=False)
         console = get_console()
         home = get_home()
         if not yes and not console.json_mode:
@@ -136,6 +144,10 @@ def register_service_commands(app: typer.Typer) -> None:
     def service_status() -> None:
         """Report service install state and proxy health."""
         fail_if_windows()
+        # strict=False (dupf.10): service management never reconstructs a key,
+        # but a first-run ensure_home() can create one. Never block a user from
+        # installing or stopping their service because a kernel lever was refused.
+        disable_core_dumps(strict=False)
         console = get_console()
         home = get_home()
         backend = _backend()
@@ -185,6 +197,10 @@ def register_service_commands(app: typer.Typer) -> None:
     def service_start() -> None:
         """Start an installed service."""
         fail_if_windows()
+        # strict=False (dupf.10): service management never reconstructs a key,
+        # but a first-run ensure_home() can create one. Never block a user from
+        # installing or stopping their service because a kernel lever was refused.
+        disable_core_dumps(strict=False)
         backend = _backend()
         backend.start(get_home())
         # Show the port the installed unit actually binds, not the ambient
@@ -201,6 +217,10 @@ def register_service_commands(app: typer.Typer) -> None:
     def service_stop() -> None:
         """Stop an installed service without removing it."""
         fail_if_windows()
+        # strict=False (dupf.10): service management never reconstructs a key,
+        # but a first-run ensure_home() can create one. Never block a user from
+        # installing or stopping their service because a kernel lever was refused.
+        disable_core_dumps(strict=False)
         _backend().stop(get_home())
         get_console().print_success("Service stopped.")
 
@@ -209,6 +229,10 @@ def register_service_commands(app: typer.Typer) -> None:
     def service_restart() -> None:
         """Restart an installed service."""
         fail_if_windows()
+        # strict=False (dupf.10): service management never reconstructs a key,
+        # but a first-run ensure_home() can create one. Never block a user from
+        # installing or stopping their service because a kernel lever was refused.
+        disable_core_dumps(strict=False)
         _backend().restart(get_home())
         get_console().print_success("Service restarted.")
 
@@ -219,4 +243,6 @@ def register_service_commands(app: typer.Typer) -> None:
     ) -> None:
         """Show service logs (file on macOS, journal on Linux)."""
         fail_if_windows()
+        # strict=False (dupf.10): see the sibling service commands above.
+        disable_core_dumps(strict=False)
         _backend().tail_logs(get_home(), follow=follow)

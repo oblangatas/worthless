@@ -146,8 +146,28 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p user-flow-traces
-          uv sync --extra dev --extra test
-          uv run pytest tests/user_flows -m user_flow 2>&1 | tee user-flow-traces/pytest-${{ runner.os }}.log
+          # --extra mcp is load-bearing (worthless-ip28). Without it,
+          # tests/user_flows/test_mcp_lock_warns_when_proxy_down.py hits its
+          # `pytest.importorskip("mcp")` and SKIPS — so the only test that
+          # proves WOR-829's claim never executed here, while the lane still
+          # reported green. A skip that matters has to fail, not pass.
+          uv sync --extra dev --extra test --extra mcp
+          # --timeout-method=signal: keep this lane on the pre-existing behaviour.
+          # The repo default is `thread` (os._exit), which is right for the main
+          # parallel suite where a killed worker is expendable and xdist reports
+          # it as one honest failure. These journeys drive a live proxy and real
+          # subprocesses, and on macOS runners the traffic-metering flow kills its
+          # worker; under `thread` that became a crash the worker could not
+          # survive, and with restarts enabled a crash-restart loop burned the
+          # whole 15m job budget (run 31966179187). `signal` raises inside the
+          # test instead, so a slow flow is a reported failure that `--reruns 1`
+          # can retry -- exactly how this lane behaved before this PR.
+          # --max-worker-restart=2 bounds the blast radius regardless: xdist's
+          # default is numprocesses * 4 (dsession.py:556-568), not unlimited as an
+          # earlier version of this comment claimed — but 4x is still enough for a
+          # deterministically-dying worker to eat the job's 15m budget re-running
+          # one test. Two rides out a one-off and fails fast otherwise.
+          uv run pytest tests/user_flows -m user_flow --timeout-method=signal --max-worker-restart=2 2>&1 | tee user-flow-traces/pytest-${{ runner.os }}.log
 
       # worthless-d4h2: the step above proves the BRANCH build works. It cannot
       # catch a defect that only exists once the package is built and installed

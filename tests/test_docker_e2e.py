@@ -10,6 +10,7 @@ Run with:
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import uuid
 from pathlib import Path
@@ -46,9 +47,60 @@ IMAGE_TAG = os.environ.get("WORTHLESS_DOCKER_IMAGE", f"worthless-test:e2e-{_SESS
 # ---------------------------------------------------------------------------
 
 
+# Resolved at IMPORT time, before conftest's autouse ``_isolate_process_home``
+# redirects HOME at fixture time. Docker Desktop installs its CLI plugins under
+# ``~/.docker/cli-plugins``; with HOME moved, ``docker compose`` resolves to
+# nothing and docker reports ``unknown command: docker compose`` — which then
+# surfaces as the baffling ``unknown shorthand flag: 'f' in -f``. That made this
+# entire module unrunnable locally (CI keeps the plugin on a system path, so CI
+# never saw it), which is a large part of why worthless-za14 went unnoticed.
+_REAL_DOCKER_CONFIG = Path.home() / ".docker"
+
+
+def _local_build_tag() -> str:
+    """The image tag ``docker-compose.build.yml`` names, read from that file.
+
+    Derived rather than hardcoded so renaming the tag in the overlay cannot
+    leave this test asserting a name nobody builds any more — the assertion
+    would still pass while covering nothing, which is the exact failure mode
+    this test exists to catch (worthless-za14).
+    """
+    overlay = (REPO_ROOT / "deploy" / "docker-compose.build.yml").read_text()
+    match = re.search(r"^\s*image:\s*(\S+)\s*$", overlay, re.MULTILINE)
+    assert match, "deploy/docker-compose.build.yml declares no image: tag"
+    return match.group(1)
+
+
+_LOCAL_BUILD_TAG = _local_build_tag()
+
+
+def _docker_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """Environment for docker calls, with the real CLI-plugin dir preserved."""
+    env = dict(os.environ)
+    if "DOCKER_CONFIG" not in env and _REAL_DOCKER_CONFIG.is_dir():
+        env["DOCKER_CONFIG"] = str(_REAL_DOCKER_CONFIG)
+    if extra:
+        env.update(extra)
+    return env
+
+
 def _run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-    """Run a command, raise on failure by default."""
-    return subprocess.run(cmd, capture_output=True, text=True, check=True, **kwargs)
+    """Run a command, raising with the captured stderr on failure.
+
+    ``check=True`` alone raises ``CalledProcessError``, whose message carries
+    the argv and the exit code but NOT the captured output — so a compose
+    failure surfaced as a bare "returned non-zero exit status 125" with no
+    stated cause, in CI where nobody can reproduce it interactively. Re-raise
+    with stderr attached so the reason travels with the failure.
+    """
+    kwargs.setdefault("env", _docker_env())  # type: ignore[arg-type]
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False, **kwargs)
+    if proc.returncode != 0:
+        raise AssertionError(
+            f"command failed (exit {proc.returncode}): {' '.join(cmd)}\n"
+            f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
+        )
+    return proc
 
 
 def _run_ok(cmd: list[str]) -> str:
@@ -252,6 +304,13 @@ def compose_stack(docker_image: str) -> tuple[str, str]:
     """
     project = f"worthless-e2e-{uuid.uuid4().hex[:8]}"
     compose_file = REPO_ROOT / "deploy" / "docker-compose.yml"
+    # WOR-553 removed the `build:` stanza from docker-compose.yml so the file
+    # people download pulls the published image. That left `--build` below with
+    # nothing to build, so this stack silently ran the LAST RELEASE and the
+    # compose assertions stopped covering the code under review
+    # (worthless-za14). The build overlay exists for exactly this case and has
+    # to be layered in explicitly.
+    build_file = REPO_ROOT / "deploy" / "docker-compose.build.yml"
     env_file = REPO_ROOT / "deploy" / "docker-compose.env"
     override_file = REPO_ROOT / "deploy" / "docker-compose.override.yml"
 
@@ -267,8 +326,17 @@ def compose_stack(docker_image: str) -> tuple[str, str]:
         )
         created_env = True
 
-    # Override port to dynamic to avoid bind conflicts
-    override_file.write_text('services:\n  proxy:\n    ports:\n      - "127.0.0.1::8787"\n')
+    # Override port to dynamic to avoid bind conflicts.
+    #
+    # ``!override`` is load-bearing: compose MERGES sequences by default, so a
+    # plain ``ports:`` here ADDED a dynamic mapping while KEEPING the base
+    # file's hardcoded ``127.0.0.1:8787:8787``. The stack then still tried to
+    # bind 8787 and died with "address already in use" against any host that
+    # happens to run a proxy — which is every developer machine running
+    # Worthless. The comment claimed conflict-avoidance the code did not do.
+    override_file.write_text(
+        'services:\n  proxy:\n    ports: !override\n      - "127.0.0.1::8787"\n'
+    )
 
     try:
         _run(
@@ -277,6 +345,8 @@ def compose_stack(docker_image: str) -> tuple[str, str]:
                 "compose",
                 "-f",
                 str(compose_file),
+                "-f",
+                str(build_file),
                 "-f",
                 str(override_file),
                 "-p",
@@ -1271,6 +1341,40 @@ class TestDockerEdgeCases:
 
 class TestComposeSecurity:
     """Compose stack security hardening."""
+
+    def test_compose_stack_runs_locally_built_image_not_the_last_release(
+        self, compose_stack: tuple[str, str]
+    ) -> None:
+        """worthless-za14: the compose assertions must cover the code under review.
+
+        WOR-553 removed ``build:`` from ``docker-compose.yml`` so the file users
+        download pulls the published image. That left this fixture's ``--build``
+        with nothing to build, so the stack ran ``ghcr.io/...:<version>`` — the
+        LAST RELEASE — while the sibling assertions below reported green. Three
+        security checks were passing against code nobody had changed.
+
+        Without this guard the same silent-coverage-loss recurs the next time
+        the compose layering changes: nothing goes red, the tests just stop
+        meaning anything.
+        """
+        _project, cname = compose_stack
+        image = subprocess.run(
+            ["docker", "inspect", cname, "--format", "{{.Config.Image}}"],  # noqa: S607
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.strip()
+        assert image, f"could not read image for container {cname}"
+        # Assert the exact tag the build overlay names, rather than excluding a
+        # registry prefix. A prefix check is weak — a retag or a second registry
+        # defeats it, and CodeQL flags the substring form as incomplete URL
+        # sanitization (py/incomplete-url-substring-sanitization), correctly.
+        # deploy/docker-compose.build.yml sets `image: worthless-proxy:local`.
+        assert image == _LOCAL_BUILD_TAG, (
+            f"compose stack is running {image!r}, expected {_LOCAL_BUILD_TAG!r} — "
+            "the assertions in this class are testing some other image, not this "
+            "change. Ensure deploy/docker-compose.build.yml is layered in."
+        )
 
     def test_compose_fernet_on_secrets_volume(self, compose_stack: tuple[str, str]) -> None:
         _project, cname = compose_stack

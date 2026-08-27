@@ -183,12 +183,22 @@ repos:
         pass_filenames: false
         files: '(pyproject\.toml|uv\.lock)$'
 
-      # Keep requirements.txt (the Snyk badge's scan source) in sync with
-      # uv.lock. Snyk's live badge can't parse uv.lock, so the README badge
-      # points at this exported, parseable manifest (?targetFile=requirements.txt).
+      # Keep the exported manifest (the Snyk badge's scan source) in sync
+      # with uv.lock. Snyk's live badge can't parse uv.lock, so the README
+      # badge points at this exported, parseable manifest via ?targetFile=.
       # --no-dev scopes it to the runtime tree users actually install.
+      #
+      # It lives at the REPO ROOT because Snyk imported it there as a monitored
+      # project, and Snyk resolves that project by its imported path. Dependabot
+      # NINE pull requests against the root copy — each bumping a version
+      # a version in GENERATED OUTPUT while uv.lock, which actually resolves
+      # dependencies, went untouched. That is now handled by `exclude-paths` in
+      # .github/dependabot.yml, NOT by moving this file -- moving it silently
+      # broke the Snyk project once already.
+      #
+      # Do NOT move this out of the repo root. WOR-904.
       - id: uv-export-requirements
-        name: "supply chain: export requirements.txt for Snyk badge"
+        name: "supply chain: export the Snyk badge manifest"
         language: system
         entry: uv export --no-dev --no-hashes --format requirements-txt -o requirements.txt
         pass_filenames: false
@@ -225,7 +235,16 @@ repos:
         #                     worthless-lwvs; reopen if it re-fires.
         # If an ignore is ever needed again it MUST cite its tracking ticket
         # and be re-checked quarterly.
-        entry: sh -c 'uv export --frozen --no-emit-project | uv run pip-audit --disable-pip -r /dev/stdin'
+        # `bash -c`, not `sh -c`, and `set -o pipefail` is why. This is a
+        # PIPELINE: without pipefail the shell reports only pip-audit's exit
+        # code, so a `uv export` that dies partway hands over a truncated-but-
+        # valid stream, pip-audit audits the packages that arrived, and the hook
+        # passes over a fragment. CI got this fix via `shell: bash`
+        # (dependency-audit.yml); the hook was left carrying the defect until
+        # now. pipefail is not POSIX — dash, which /bin/sh often is, does not
+        # support it — so the shell has to be bash explicitly. beads
+        # worthless-mh0r.
+        entry: bash -c 'set -o pipefail; uv export --frozen --no-emit-project | uv run pip-audit --disable-pip -r /dev/stdin'
         pass_filenames: false
         stages: [pre-push]
 

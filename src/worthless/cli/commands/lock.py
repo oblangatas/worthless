@@ -4,20 +4,24 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import json
 import logging
 import os
 import re
 import signal
+import socket
 import stat
 import subprocess  # nosec B404
 import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import NamedTuple
+from typing import NamedTuple, NoReturn
 from pathlib import Path
+from urllib.parse import urlsplit
 
+import httpx
 import typer
 
 from worthless.cli._repo_factory import open_repo
@@ -48,7 +52,7 @@ from worthless.cli.errors import (
     error_boundary,
     sanitize_exception,
 )
-from worthless.cli.key_patterns import CANONICAL_KEY_VAR_RE, detect_prefix
+from worthless.cli.key_patterns import CANONICAL_KEY_VAR_RE, detect_prefix, is_oauth_token
 from worthless.cli.log_redaction import _redact
 from worthless._flags import fernet_ipc_only_enabled
 from worthless.cli.keystore import (
@@ -182,14 +186,216 @@ def _derive_base_url_var(var_name: str, provider: str) -> str:
     return _PROVIDER_ENV_MAP.get(provider, "OPENAI_BASE_URL")
 
 
+# RFC 6598 shared address space (carrier-grade NAT). Python's ``is_private`` did
+# NOT include this range before 3.13 (gh-113171), and some cloud metadata
+# services live here (e.g. Alibaba's ``100.100.100.200``). Deny it explicitly so
+# the guard is version-independent — see security review of WOR-834.
+_CGNAT_NET = ipaddress.ip_network("100.64.0.0/10")
+_NAT64_NET = ipaddress.ip_network("64:ff9b::/96")
+_6TO4_NET = ipaddress.ip_network("2002::/16")
+
+
+def _fold_embedded_ipv4(
+    ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    """Fold an IPv6-wrapped IPv4 address down to the IPv4 it really denotes.
+
+    ``::ffff:100.64.0.1`` and NAT64 ``64:ff9b::a9fe:a9fe`` route to the
+    embedded IPv4, so they must be classified as that IPv4 and not as the v6
+    wrapper. Python's own flags can't carry this: pre-3.10.15 treated all of
+    ``::ffff:0:0/96`` as private, while 3.10.15+/3.11.10+ delegate to the
+    embedded address — so CGNAT (which is NOT ``is_private``) reached through
+    the wrapper on py3.13 while py3.10 rejected it. Folding first makes the
+    guard identical on every interpreter and lets the v4-only CGNAT check fire.
+    """
+    if isinstance(ip, ipaddress.IPv6Address):
+        mapped = ip.ipv4_mapped
+        if mapped is None and ip in _NAT64_NET:
+            mapped = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+        if mapped is None and ip in _6TO4_NET:
+            # 6to4 (RFC 3056) embeds the IPv4 in the 2nd-5th bytes. Python's
+            # flags don't look through the wrapper, and on py3.10 a 6to4 of
+            # 127.0.0.1 is neither is_private nor is_reserved -> would pass.
+            mapped = ipaddress.IPv4Address((int(ip) >> 80) & 0xFFFFFFFF)
+        if mapped is not None:
+            return mapped
+    return ip
+
+
+def _is_loopback_host(host: str) -> bool:
+    """True when *host* is unambiguously this machine — by literal OR by name.
+
+    ``_upstream_host_ip`` deliberately does not resolve DNS, so it returns
+    ``None`` for the NAME ``localhost`` — the most common spelling of loopback.
+    Any caller using it to answer "is this our own plumbing rather than a
+    gateway?" must therefore also check the reserved local names, or an
+    ordinary ``http://localhost:11434`` (Ollama — the URL our own
+    ``providers.toml`` ships for ``[provider.ollama]``) falls through to
+    :func:`_validate_upstream_base_url` and aborts the WHOLE lock, unrelated
+    keys included (worthless-f63f).
+
+    ``localhost`` and ``*.localhost`` are reserved to loopback by RFC 6761
+    §6.3, so classifying them without a lookup is a definitional fact, not a
+    DNS assumption — this does not weaken the module's no-resolution stance.
+    """
+    name = host.rstrip(".").lower()
+    if name == "localhost" or name.endswith(".localhost"):
+        return True
+    ip = _upstream_host_ip(host)
+    return ip is not None and ip.is_loopback
+
+
+def _upstream_host_ip(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """The IP a URL host denotes, or ``None`` for a real DNS name.
+
+    Normalizes the SSRF-bypass IP encodings a canonical parse misses: a
+    trailing FQDN dot (``127.0.0.1.``) and decimal / octal / hex / short
+    IPv4 forms (``2852039166``, ``0xA9.0xFE.0xA9.0xFE``, ``127.1``) — all of
+    which ``getaddrinfo`` would still resolve to the literal address. We do
+    NOT resolve real DNS names (rebinding makes a lock-time lookup useless);
+    those return ``None`` and are handled as hostnames by the caller.
+    """
+    host = host.rstrip(".")
+    if not host:
+        return None
+    try:
+        return _fold_embedded_ipv4(ipaddress.ip_address(host))
+    except ValueError:
+        pass
+    try:  # decimal / octal / hex / short IPv4 → canonical dotted form
+        return ipaddress.ip_address(socket.inet_ntoa(socket.inet_aton(host)))
+    except (OSError, ValueError):
+        # ValueError as well as OSError: inet_aton raises ValueError (not
+        # OSError) on an embedded NUL, and _genuine_oc_base_url calls this
+        # BEFORE the guard runs — so an unhandled ValueError there would abort
+        # the lock with a traceback instead of a clean WRTLS-112 refusal.
+        return None
+
+
+def _validate_upstream_base_url(url: str) -> None:
+    """Fail-closed guard for a NON-registry upstream URL (WOR-834).
+
+    The openclaw ``baseUrl`` is a locally-writable source of truth for
+    unregistered enterprise gateways, so — unlike a ``.env`` URL — we can't
+    require registry membership. Instead we reject the dumb-dangerous
+    targets that a tampered file could point a live key at. Matches OWASP
+    SSRF guidance (block loopback / RFC1918 / link-local + metadata /
+    unspecified; require https), incl. the encoded-IP forms normalized by
+    :func:`_upstream_host_ip`.
+
+    Raises ``WorthlessError(INVALID_INPUT)`` on any violation. Does NOT
+    defend against a plausible *public* attacker URL (a lock-time static
+    check can't tell ``azure.com`` from ``evil.com``), DNS rebinding, or
+    post-lock DB tamper — those are worthless-rzi1 (per-request
+    re-validation) and worthless-8fbg (broader hardening).
+    """
+
+    def _reject(reason: str) -> NoReturn:
+        raise WorthlessError(
+            ErrorCode.INVALID_INPUT,
+            f"refusing openclaw gateway URL {url!r}: {reason}. Register a "
+            "trusted upstream instead: 'worthless providers register --name "
+            "<n> --url <url> --protocol openai|anthropic' and set the "
+            "matching *_BASE_URL.",
+        )
+
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        _reject("not a parseable URL")
+    if parts.scheme != "https":
+        _reject("must be https (cleartext would expose the key on the wire)")
+    if parts.username or parts.password:
+        _reject("must not embed credentials (userinfo)")
+    host = parts.hostname
+    if not host:
+        _reject("has no host")
+    # Close the parser differential. urlsplit and httpx disagree on Unicode
+    # label separators: urlsplit leaves U+FF0E / U+3002 / U+FF61 intact, so
+    # "169．254．169．254" reads as an opaque DNS name and sails past the IP
+    # checks -- while httpx IDNA/UTS-46-normalizes it back to 169.254.169.254
+    # and connects to the metadata service. Validating a different string than
+    # the one we dial is the whole bug class, so classify the host the client
+    # will ACTUALLY use. Fail closed if httpx can't parse what urlsplit did.
+    try:
+        client_host = httpx.URL(url).raw_host.decode("ascii")
+    except Exception:  # noqa: BLE001 -- any parse/encode failure is a refusal
+        _reject("host is not encodable to a normalized (IDNA) form")
+    if client_host:
+        host = client_host
+    ip = _upstream_host_ip(host)
+    if ip is None:
+        # A DNS name, not an IP literal. Only reject the obvious local names;
+        # we deliberately do NOT resolve DNS (rebinding makes it useless).
+        name = host.rstrip(".").lower()
+        if name == "localhost" or name.endswith(".localhost"):
+            _reject("resolves to localhost")
+        return
+    if (
+        ip.is_loopback
+        or ip.is_link_local
+        or ip.is_private
+        or ip.is_unspecified
+        or ip.is_reserved
+        or ip.is_multicast
+        or (ip.version == 4 and ip in _CGNAT_NET)
+    ):
+        _reject("points at a loopback / private / link-local / reserved / CGNAT address")
+
+
+def _genuine_oc_base_url(oc_config: dict | None, provider: str, proxy_base_url: str) -> str | None:
+    """The genuine (non-proxy-shaped) openclaw ``baseUrl`` for ``provider``.
+
+    Returns ``None`` when there's no usable gateway URL to honor (no
+    openclaw, no entry, empty/absent ``baseUrl``, or a stale proxy-shaped
+    entry from a previous lock — that's not a real upstream, so we fall
+    through to the registry). A genuine URL is guard-validated
+    (:func:`_validate_upstream_base_url`, raises on unsafe) before return.
+
+    ``provider`` is the wire protocol (matching the key used by the G3
+    capture path in :func:`_decide_oc_capture`), so behavior stays
+    consistent with the shipped rollback-capture lookup.
+    """
+    if not oc_config:
+        return None
+    providers = oc_config.get("models", {}).get("providers", {}) or {}
+    entry = providers.get(provider)
+    if not isinstance(entry, dict):
+        return None
+    url = entry.get("baseUrl")
+    if not isinstance(url, str) or not url:
+        return None
+    # Our proxy always lives on loopback, and a user would never point their
+    # upstream gateway at loopback — so any loopback baseUrl is our own
+    # (possibly stale, port-shifted) proxy rewrite, not a gateway to honor.
+    # Ignore it and fall through to the registry (always a safe public
+    # default); do NOT fail the lock on our own plumbing.
+    try:
+        host = urlsplit(url).hostname or ""
+    except ValueError:
+        # Malformed baseUrl (e.g. bad bracketed IPv6) — not a usable gateway.
+        # Ignore and fall through to the registry (safe); never crash the lock.
+        return None
+    if _openclaw_integration._is_proxy_url(url, proxy_base_url):
+        return None
+    if _is_loopback_host(host):
+        return None
+    _validate_upstream_base_url(url)
+    return url
+
+
 def _resolve_upstream_base_url(
-    base_url_var: str, env_values: dict[str, str | None], registry_name: str
+    base_url_var: str,
+    env_values: dict[str, str | None],
+    registry_name: str,
+    *,
+    oc_base_url: str | None = None,
 ) -> str:
     """Pick the upstream URL for the DB row.
 
-    Prefers the user's explicit ``*_BASE_URL`` value from ``.env`` when set
-    AND when that URL is in the provider registry. Otherwise falls back to
-    the bundled registry default for the provider.
+    Precedence: the user's explicit registered ``*_BASE_URL`` from ``.env``
+    > the provider's genuine openclaw ``baseUrl`` (``oc_base_url``, WOR-834)
+    > the bundled registry default > the hard fallback.
 
     ``registry_name`` MUST be the registry name (e.g. ``openrouter``), NOT
     the wire protocol (e.g. ``openai``). OpenRouter speaks the OpenAI
@@ -200,9 +406,12 @@ def _resolve_upstream_base_url(
 
     Refuses unregistered user URLs (M3 / Blocker #1): an attacker who can
     write to .env should not be able to redirect the proxy at an arbitrary
-    upstream. worthless-rzi1 (P1 follow-up) adds per-request re-validation
-    to close the post-lock-tamper variant; worthless-8fbg adds RFC1918 /
-    loopback hardening. See seam 2 in worthless-8rqs design notes.
+    upstream. ``oc_base_url`` is NOT registry-validated (unregistered
+    gateways are the whole point of WOR-834) but is guard-validated by the
+    caller via :func:`_validate_upstream_base_url`. worthless-rzi1 (P1
+    follow-up) adds per-request re-validation to close the post-lock-tamper
+    variant; worthless-8fbg adds RFC1918 / loopback hardening. See seam 2 in
+    worthless-8rqs design notes.
     """
     user_value = env_values.get(base_url_var)
     if user_value:
@@ -214,6 +423,8 @@ def _resolve_upstream_base_url(
                 "--url <url> --protocol openai|anthropic'.",
             )
         return user_value
+    if oc_base_url:  # genuine openclaw gateway URL, already guard-validated
+        return oc_base_url
     entry = lookup_by_name(registry_name)
     if entry is None:  # pragma: no cover — provider is validated above
         return "https://api.openai.com/v1"
@@ -554,13 +765,6 @@ async def _pass1_db_writes(
                 f"follow <PROVIDER>_API_KEY to silence this warning."
             )
 
-        # Resolve the upstream URL by the REGISTRY NAME (detected_provider, e.g.
-        # "openrouter"), not the wire PROTOCOL (provider, e.g. "openai"). They
-        # diverge for OpenAI-dialect-compatible services: OpenRouter's protocol
-        # is "openai" but its upstream is openrouter.ai. Using the protocol here
-        # mailed OpenRouter keys to api.openai.com → 401 (PR #276 review).
-        upstream_base_url = _resolve_upstream_base_url(base_url_var, env_values, detected_provider)
-
         alias = _make_alias(provider, value)
 
         # Cross-path collision check: if this alias is already enrolled from a
@@ -578,6 +782,57 @@ async def _pass1_db_writes(
                 break  # one warning per alias is sufficient
 
         db_shard = await repo.fetch_encrypted(alias)
+
+        # Resolve the upstream URL by the REGISTRY NAME (detected_provider, e.g.
+        # "openrouter"), not the wire PROTOCOL (provider, e.g. "openai"). They
+        # diverge for OpenAI-dialect-compatible services: OpenRouter's protocol
+        # is "openai" but its upstream is openrouter.ai. Using the protocol here
+        # mailed OpenRouter keys to api.openai.com -> 401 (PR #276 review).
+        #
+        # WOR-834: an unregistered enterprise gateway (Azure/custom) is in
+        # neither .env nor the registry -- its openclaw baseUrl is the only
+        # source of truth. Resolved AFTER the db_shard fetch on purpose: on
+        # re-lock the live openclaw entry is proxy-shaped, so the genuine
+        # gateway URL is no longer readable from it, and re-resolving from
+        # .env/registry would silently revert the alias to the registry
+        # default (api.openai.com) on the SECOND lock. Reuse what this alias
+        # was locked with instead. An explicit registered *_BASE_URL still
+        # wins -- it is the first tier inside _resolve_upstream_base_url.
+        # REGISTRY NAME, not the wire protocol. `provider` above is the
+        # protocol, and five bundled providers declare protocol = "openai", so
+        # keying this by protocol read the user's `openai` gateway entry for an
+        # OpenRouter/Groq/Together key and mailed that key to the wrong vendor
+        # (worthless-v4n2). This deliberately diverges from the G3 capture key
+        # in _decide_oc_capture, which stays on the protocol because it must
+        # mirror the entry apply_lock actually overwrites. Different questions:
+        # capture asks "which entry do we rewrite?", this asks "which vendor is
+        # this key for?".
+        oc_base_url = _genuine_oc_base_url(oc_config, detected_provider, oc_proxy_base_url)
+        if oc_base_url is None and db_shard is not None:
+            persisted = db_shard.base_url
+            # Carry forward ONLY an UNREGISTERED gateway. Such a URL can only
+            # have come from openclaw.json (WOR-834) and is unrecoverable once
+            # the live entry is proxy-shaped, so re-resolving would silently
+            # revert an Azure/enterprise alias to the registry default on the
+            # second lock. A REGISTERED url stays re-derivable from
+            # .env/registry, so re-lock keeps its documented semantics there:
+            # deleting *_BASE_URL resets the row to the registry default
+            # (test_relock_without_base_url_var_falls_back_to_registry_default).
+            if persisted and lookup_by_url(persisted) is None:
+                # Re-validate before trusting it. The row is locally writable,
+                # and a URL that was registered when it was first stored can be
+                # de-registered later (delete the providers.toml entry) — which
+                # would reclassify it as an "unregistered gateway" and carry it
+                # forward unchecked on every future lock. Running the same guard
+                # here keeps the DB from becoming an unvalidated persistence
+                # slot; a genuine gateway passes it exactly as it did at first
+                # lock. Fail-closed: a refusal raises rather than silently
+                # falling back, so a tampered row can never quietly reroute a key.
+                _validate_upstream_base_url(persisted)
+                oc_base_url = persisted
+        upstream_base_url = _resolve_upstream_base_url(
+            base_url_var, env_values, detected_provider, oc_base_url=oc_base_url
+        )
 
         if db_shard is not None:
             if not db_shard.prefix or not db_shard.charset:
@@ -1330,6 +1585,27 @@ def _print_openclaw_success_block(
     if result.skill_installed:
         console.print_hint("   • ~/.openclaw/workspace/skills/worthless/ — installed skill")
     console.print_hint("   • Undo: worthless unlock")
+    # WOR-599: OpenClaw keeps verbatim copies of its own config — a .bak ring
+    # written pre-edit on every config write, plus a .last-good promoted when the
+    # gateway observes a valid config. A copy written BEFORE this lock still holds
+    # the original key in plaintext, so "you're protected" is true of the live
+    # config and not of the directory.
+    #
+    # Measured against ghcr.io/openclaw/openclaw:2026.5.3-1: after a lock-style
+    # rewrite, .bak and .bak.1 STILL held the pre-lock key, while .last-good had
+    # been re-promoted to the post-lock contents (the daemon was running). With
+    # the daemon down at lock time, .last-good keeps the old copy until it starts.
+    #
+    # We do not delete them: they are daemon-owned, and .bak is the recovery path
+    # `worthless doctor` itself recommends. Saying so is the only control we have
+    # — asserted by tests/openclaw/test_lock_command_openclaw.py.
+    console.print_hint(
+        "   • OpenClaw keeps its own config backups (~/.openclaw/openclaw.json.bak, "
+        ".bak.1 …, and .last-good). Ones written before this lock still hold your "
+        "original key in plaintext. Rotate that key at your provider — that is "
+        "the only action that invalidates a copy which may already have been "
+        "synced or backed up elsewhere."
+    )
     # WOR-796 (scrub gap #1): a provider whose key var isn't a valid uppercase
     # SecretRef id was NOT scrubbed — its cached real key is still live in
     # OpenClaw's agent store even though openclaw.json reads "locked". Surface it
@@ -1905,6 +2181,7 @@ def _print_lock_result(
     env_path: Path,
     home_base_dir: Path,
     openclaw_failed: bool = False,
+    oauth_skipped: bool = False,
 ) -> None:
     """Emit the post-lock user-facing summary (called only when quiet=False).
 
@@ -1913,14 +2190,25 @@ def _print_lock_result(
     is NOT "you're protected". Suppress the verdict headline + the breezy
     closure (the caller's ``LOCK FAILED`` block carries the real,
     worst-component verdict); the factual ``[OK] split`` line still prints.
+
+    ``oauth_skipped`` (worthless-7jn2 honesty): a WOR-837 OAuth token was found,
+    classified, and deliberately left alone — so it is still in the ``.env`` in
+    plaintext, live for up to a year. Same shape as ``openclaw_failed``: the
+    derived verdict is NOT "you're protected", so suppress the headline + the
+    breezy closure. The factual lines still print, minus the "no longer
+    contains a usable secret" tail, which is a claim about the WHOLE file.
     """
+    # worthless-7jn2: two independent reasons the same verdict is unearned.
+    # Each keeps its own distinct messaging below; only the derived headline
+    # and the breezy closure are shared.
+    verdict_earned = not openclaw_failed and not oauth_skipped
     if fresh_count or relock_count:
         # WOR-779: the seatbelt click — lead with a plain verdict (Verdict →
         # Proof → Next). The verdict is DERIVED: on a partial OpenClaw failure
         # we must NOT claim "you're protected" above the LOCK FAILED footer.
         total = fresh_count + relock_count
         total_noun = "key" if total == 1 else "keys"
-        if not openclaw_failed:
+        if verdict_earned:
             console.print_success(
                 f"🔒 You're protected. {total} {total_noun} locked — a stolen "
                 f"{env_path.name} is now worthless to an attacker."
@@ -1930,10 +2218,15 @@ def _print_lock_result(
             # reinforce but are never the sole signal (monochrome, CI logs,
             # screen readers).
             noun = "key" if fresh_count == 1 else "keys"
+            # worthless-7jn2: the count is a fact and always prints. The tail is
+            # a claim about the whole file — false while a skipped OAuth token
+            # still sits in it.
+            tail = (
+                "." if oauth_skipped else f" — {env_path.name} no longer contains a usable secret."
+            )
             console.print_success(
                 f"[OK] {fresh_count} {noun} split between this machine and "
-                f"{_shard_b_storage_label()} — {env_path.name} no longer contains "
-                f"a usable secret."
+                f"{_shard_b_storage_label()}{tail}"
             )
         if relock_count:
             noun = "key" if relock_count == 1 else "keys"
@@ -1945,6 +2238,8 @@ def _print_lock_result(
             )
         # WOR-779 (CR): the daemon-mode "Next:" cue is a success next-step — keep
         # it off the partial-failure path so nothing above LOCK FAILED reads as OK.
+        # It stays on the OAuth-skip path: the keys that DID lock still need the
+        # proxy, and this is an action, not a reassurance.
         if fresh_count and not openclaw_failed:
             console.print_hint(
                 "Next: run `worthless wrap <command>`, or `worthless up` to keep a "
@@ -1952,9 +2247,18 @@ def _print_lock_result(
             )
         # WOR-779: closure — the "pull anytime" reassurance home. Suppressed on
         # a partial failure — don't reassure when the lock didn't fully succeed.
-        if not openclaw_failed:
+        # worthless-7jn2: same for a skipped OAuth token still in the file.
+        if verdict_earned:
             console.print_hint("Check anytime with `worthless status`.")
         _maybe_prompt_code_scan(Path.cwd())
+    elif oauth_skipped:
+        # worthless-7jn2: keys WERE found here. They were classified as Claude
+        # Code OAuth tokens and deliberately skipped above — the file is not
+        # clean, so "No unprotected API keys found." would be a false all-clear.
+        console.print_warning(
+            f"[WARN] Nothing was locked. The skipped OAuth token is still in "
+            f"{env_path.name} in plaintext. Treat that file as a live secret."
+        )
     else:
         console.print_warning("No unprotected API keys found.")
     # WOR-797 (Gap 1): fires on BOTH paths, deliberately outside the branch
@@ -2246,6 +2550,9 @@ def _lock_keys(
         total: int
         fresh_count: int
         openclaw_exit: int  # 0 = ok, 73 = partial fail, 87 = infra blocked
+        # worthless-7jn2: a WOR-837 OAuth token was found and deliberately left
+        # in the .env — the summary must not claim the file is protected/clean.
+        oauth_skipped: bool = False
 
     async def _lock_async() -> _LockResult:
         from dotenv import dotenv_values  # noqa: PLC0415 — local import keeps test surface tight
@@ -2276,6 +2583,31 @@ def _lock_keys(
             all_enrollments = await repo.list_enrollments()
 
             raw_scanned = scan_env_keys(env_path)
+
+            # WOR-837: a Claude Code OAuth token (sk-ant-oat/ort) collides with
+            # the static sk-ant- prefix, so scan_env_keys classifies it as
+            # "anthropic" — but sharding rewrites the sk-ant-oat marker OpenClaw
+            # matches on, and the proxy cannot restore the OAuth request shape
+            # that loss costs. Skip it (still lock the user's real keys) and say
+            # so loudly, before it can become a lock candidate. Anthropic-only by
+            # construction; see key_patterns.is_oauth_token.
+            oauth_skipped = [entry for entry in raw_scanned if is_oauth_token(entry[1])]
+            if oauth_skipped:
+                raw_scanned = [entry for entry in raw_scanned if not is_oauth_token(entry[1])]
+                # Sanitise the user-controlled .env var names before printing —
+                # a crafted name (dotenv keys are permissive) could otherwise
+                # smuggle terminal-injection / bidi-override sequences into the
+                # warning. Same guard lock/doctor use everywhere else.
+                oauth_vars = ", ".join(
+                    _oc_audit.sanitise_for_message(var_name) for var_name, _, _ in oauth_skipped
+                )
+                console.print_warning(
+                    f"[WARN] Skipped {oauth_vars}: looks like a Claude Code OAuth token "
+                    "(sk-ant-oat/ort), not a static API key. Sharding rewrites the "
+                    "sk-ant-oat marker Claude Code is recognised by, so locking it would "
+                    "break your login instead of protecting it."
+                )
+
             scanned = await _select_unlocked_keys(
                 repo,
                 raw_scanned,
@@ -2283,7 +2615,12 @@ def _lock_keys(
                 env_str,
             )
             if not scanned:
-                return _LockResult(total=len(raw_scanned), fresh_count=0, openclaw_exit=0)
+                return _LockResult(
+                    total=len(raw_scanned),
+                    fresh_count=0,
+                    openclaw_exit=0,
+                    oauth_skipped=bool(oauth_skipped),
+                )
 
             # Snapshot .env so _pass1 can pull *_BASE_URL values into the DB row.
             env_values = dict(dotenv_values(env_path))
@@ -2436,7 +2773,12 @@ def _lock_keys(
                     repo, candidates, env_str, token_budget_daily, planned, env_values
                 )
                 if not planned:
-                    return _LockResult(total=0, fresh_count=0, openclaw_exit=0)
+                    return _LockResult(
+                        total=0,
+                        fresh_count=0,
+                        openclaw_exit=0,
+                        oauth_skipped=bool(oauth_skipped),
+                    )
                 _batch_rewrite(env_path, planned, keys_only, existing_env_keys)
                 if _oc_gate is not None:
                     _openclaw_audit_postflight(_oc_gate, managed_aliases, oc_proxy_base_url)
@@ -2456,7 +2798,10 @@ def _lock_keys(
                 openclaw_exit = _apply_openclaw(planned, console, quiet, home, adoption_policy)
                 fresh_count = sum(1 for p in planned if p.was_fresh_enroll)
                 return _LockResult(
-                    total=len(planned), fresh_count=fresh_count, openclaw_exit=openclaw_exit
+                    total=len(planned),
+                    fresh_count=fresh_count,
+                    openclaw_exit=openclaw_exit,
+                    oauth_skipped=bool(oauth_skipped),
                 )
             except (Exception, KeyboardInterrupt, asyncio.CancelledError) as exc:
                 # The signal handler is one-shot and stays installed here, so the
@@ -2495,7 +2840,10 @@ def _lock_keys(
     result = asyncio.run(_lock_async())
     relock_count = result.total - result.fresh_count
 
-    if result.fresh_count and env_path.exists():
+    # NOT gated on ``fresh_count``: an .env whose only credential was skipped
+    # (e.g. a WOR-837 OAuth token) locks zero keys but still holds a live
+    # plaintext secret, so it must be tightened to owner-only all the same.
+    if env_path.exists():
         current = env_path.stat().st_mode
         if current & (stat.S_IRWXG | stat.S_IRWXO):
             env_path.chmod(current & ~(stat.S_IRWXG | stat.S_IRWXO))
@@ -2508,6 +2856,7 @@ def _lock_keys(
             env_path,
             home.base_dir,
             openclaw_failed=bool(result.openclaw_exit),
+            oauth_skipped=result.oauth_skipped,
         )
 
     # Trust-fix (2026-05-08 verification gauntlet): when OpenClaw was
@@ -2635,6 +2984,12 @@ def register_lock_commands(app: typer.Typer) -> None:
         ),
     ) -> None:
         """Protect API keys in a .env file."""
+        # FIRST statement: get_home() below loads home.fernet_key, and the
+        # keyring probe above it can surface key material too. _lock_keys()
+        # also hardens, but that is a callee — by the time it runs the key is
+        # already resident here (dupf.10).
+        disable_core_dumps()
+
         # Pre-announce the macOS Keychain dialog so users aren't surprised by a
         # system prompt mid-command. The dialog labels itself "python3.10" not
         # "worthless"; without this hint, first-time users panic and click Deny.
@@ -2672,8 +3027,10 @@ def register_lock_commands(app: typer.Typer) -> None:
         provider: str = typer.Option(..., "--provider", "-p", help="Provider name"),
     ) -> None:
         """Enroll a single API key (scripting/CI primitive)."""
-        home = get_home()
+        # Before get_home(): it loads home.fernet_key into memory, and cores
+        # must already be off by then (dupf.10).
         disable_core_dumps()
+        home = get_home()
 
         # WOR-277: a raw key value on the command line survives in shell
         # history (and process listings) forever — no CLI flag may accept

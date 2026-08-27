@@ -30,7 +30,19 @@ import sys
 
 DOCS = pathlib.Path("docs")
 INSTALL_SH = pathlib.Path("install.sh")
-TAG_RE = re.compile(r"worthless-proxy:(\d+\.\d+\.\d+)")
+# WOR-553 pinned worthless-proxy:X.Y.Z in the compose file users download, which
+# put a third copy of the release version outside docs/. Scan it here rather than
+# leave it to rot — that drift already shipped broken twice (WOR-734, WOR-733).
+EXTRA_FILES = (pathlib.Path("deploy/docker-compose.yml"),)
+# The trailing ``[A-Za-z0-9_.-]*`` is a tag boundary, not decoration: a Docker
+# tag runs to the end of that character class, so without it the pattern matched
+# the ``0.3.12`` PREFIX of ``0.3.12.1`` and ``0.3.12-alpine`` and reported both
+# as the released version. A typo'd tag then sailed past this guard while
+# pointing at an image that does not exist. Capturing the whole tag makes the
+# equality check below reject it. ``:latest`` and partial ``:MAJOR.MINOR`` pins
+# still do not match at all — they are deliberately allowed (see the fix hint
+# printed by main()).
+TAG_RE = re.compile(r"worthless-proxy:(\d+\.\d+\.\d+[A-Za-z0-9_.-]*)")
 PIN_RE = re.compile(r'^WORTHLESS_VERSION_PIN="([^"]+)"', re.MULTILINE)
 
 # (path, found_version) pairs that are intentionally NOT the current release.
@@ -53,7 +65,15 @@ def main() -> int:
 
     bad: list[tuple[pathlib.Path, int, str, str]] = []
     checked = 0
-    for doc in sorted([*DOCS.rglob("*.md"), *DOCS.rglob("*.mdx")]):
+    scanned = [*DOCS.rglob("*.md"), *DOCS.rglob("*.mdx")]
+    for extra in EXTRA_FILES:
+        # Fail, don't skip. Silently dropping a moved file would print OK while the
+        # pin it guards went unchecked — the same fail-open the DOCS check above
+        # refuses. A rename should break loudly and get fixed here.
+        if not extra.is_file():
+            sys.exit(f"check_docs_versions: expected {extra} at CWD {pathlib.Path.cwd()}")
+        scanned.append(extra)
+    for doc in sorted(scanned):
         for lineno, line in enumerate(doc.read_text(encoding="utf-8").splitlines(), 1):
             for match in TAG_RE.finditer(line):
                 checked += 1
@@ -66,8 +86,8 @@ def main() -> int:
 
     if bad:
         print(
-            f"::error title=Stale docs image tag::docs/ pins worthless-proxy "
-            f"tags that are not the released version {expected}"
+            f"::error title=Stale image tag::pinned worthless-proxy tags that are "
+            f"not the released version {expected}"
         )
         for doc, lineno, found, line in bad:
             print(f"  {doc}:{lineno}  found :{found}  (expected :{expected})")

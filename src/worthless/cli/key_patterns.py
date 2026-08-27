@@ -39,6 +39,45 @@ def detect_provider(api_key: str) -> str | None:
     return None
 
 
+# Claude Code's OAuth login issues an access token prefixed ``sk-ant-oat01-``
+# and a refresh token prefixed ``sk-ant-ort01-``. Both collide with the static
+# ``sk-ant-`` API-key prefix above, so ``detect_provider`` reports them as
+# "anthropic" and lock would try to shard them. Sharding destroys the marker:
+# no ``sk-ant-oat01-`` prefix is listed above, so ``detect_prefix`` returns
+# ``sk-ant-`` and shard-A reads ``sk-ant-<random>``. OpenClaw's
+# ``includes("sk-ant-oat")`` test then fails and it takes the static-API-key
+# path, which differs in the request BODY (Claude Code system prompt, renamed
+# tools) — a header-forwarding proxy cannot repair that. Locking cannot work
+# anyway: the ``oauth-2025-04-20`` beta header only goes to a direct Anthropic
+# endpoint, and lock points the base URL at loopback. So lock skips them.
+# Full analysis: ``worthless-lxed``.
+#
+# We match the ``oat``/``ort`` marker (not the ``01`` version digits) so a
+# future token version still classifies correctly. ``oat`` mirrors OpenClaw's
+# ``isAnthropicOAuthToken`` (``apiKey.includes("sk-ant-oat")``), which does not
+# cover ``ort``. ``ort`` is our own call: a refresh token is not a bearer
+# credential a proxy can forward, and sharding it strands the login it renews.
+#
+# Anthropic-only by construction: other providers' OAuth tokens don't collide
+# with any prefix here (OpenAI/Google issue JWTs, xAI has no dev OAuth,
+# OpenRouter OAuth returns a genuine static ``sk-or-v1-`` key that is safe to
+# shard). This is a classifier for the shard decision only — it deliberately
+# does NOT touch ``KEY_PATTERN``, so an OAuth token stays caught for log
+# redaction (it is still a secret).
+_OAUTH_TOKEN_PREFIXES: tuple[str, ...] = ("sk-ant-oat", "sk-ant-ort")
+
+
+def is_oauth_token(value: str) -> bool:
+    """True if *value* is a Claude Code OAuth access/refresh token.
+
+    ``lock`` skips these. Sharding rewrites the ``sk-ant-oat``/``ort`` marker
+    OpenClaw matches on, and the proxy cannot restore the OAuth request shape
+    that loss costs. Static API keys (including ``sk-ant-api03-`` console keys)
+    return ``False`` and lock normally.
+    """
+    return value.startswith(_OAUTH_TOKEN_PREFIXES)
+
+
 ENTROPY_THRESHOLD: float = 3.9
 # Lowered 4.5 → 3.9 so legitimate OpenRouter keys (entropy ~4.118) clear the
 # scan, while common placeholders ("sk-your-key-here" 3.03, "sk-aaaa" 0.88,

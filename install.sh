@@ -159,6 +159,41 @@ proxy_hints() {
     printf "         system trust store instead of pointing SSL_CERT_FILE at them.\n" >&2
 }
 
+# --- Trusted binary resolution (worthless-rlio / worthless-v0tl) ----------------
+
+# The PATH lockdown outranks the caller only for commands that EXIST in the
+# trusted dirs — it keeps the caller's PATH as the tail by design. sha256sum is
+# in none of them on macOS, and uv is in none of them anywhere, so `command -v`
+# for either reaches an attacker's dir. Resolve inside an explicit list; never
+# fall back to PATH. uv is bounded to where it actually installs, since an
+# attacker owning those dirs already owns the tool being installed there.
+# Both honor WORTHLESS_TRUST_PATH exactly as the lockdown does: only the literal
+# "1" opts out, so a typo-tolerant value cannot bypass. That hatch already means
+# "trust the caller's PATH" and already disables the lockdown, so deferring to it
+# here adds no new weakening — it is what lets the test harness inject stubs.
+trusted_tool() {
+    if [ "${WORTHLESS_TRUST_PATH:-}" = "1" ]; then
+        command -v "$1" 2>/dev/null && return 0
+        return 1
+    fi
+    for d in /usr/bin /bin /usr/local/bin /usr/sbin /sbin /opt/homebrew/bin; do
+        [ -x "$d/$1" ] && { printf '%s' "$d/$1"; return 0; }
+    done
+    return 1
+}
+
+resolve_uv() {
+    if [ "${WORTHLESS_TRUST_PATH:-}" = "1" ]; then
+        command -v uv 2>/dev/null && return 0
+        return 1
+    fi
+    _h="${HOME:-/root}"; [ "$_h" = / ] && _h=/root
+    for d in "$_h/.local/bin" "$_h/.cargo/bin" /usr/bin /bin /usr/local/bin /opt/homebrew/bin; do
+        [ -x "$d/uv" ] && { printf '%s' "$d/uv"; return 0; }
+    done
+    return 1
+}
+
 # --- Platform detection ------------------------------------------------------
 
 detect_os() {
@@ -259,8 +294,8 @@ check_pipx_conflict() {
 
 ensure_uv() {
     # Skip Astral installer entirely if uv is already at the pinned version.
-    if command -v uv >/dev/null 2>&1; then
-        existing_ver="$(uv --version 2>/dev/null | awk '{print $2}')"
+    if uv_bin="$(resolve_uv)"; then
+        existing_ver="$("$uv_bin" --version 2>/dev/null | awk '{print $2}')"
         if [ "$existing_ver" = "$UV_VERSION" ]; then
             ok "  uv ${UV_VERSION} already installed"
             return 0
@@ -283,12 +318,12 @@ ensure_uv() {
         exit "$EXIT_NETWORK"
     fi
 
-    if command -v sha256sum >/dev/null 2>&1; then
-        actual="$(sha256sum "$installer" | awk '{print $1}')"
-    elif command -v shasum >/dev/null 2>&1; then
-        actual="$(shasum -a 256 "$installer" | awk '{print $1}')"
+    if hasher="$(trusted_tool sha256sum)"; then
+        actual="$("$hasher" "$installer" | awk '{print $1}')"
+    elif hasher="$(trusted_tool shasum)"; then
+        actual="$("$hasher" -a 256 "$installer" | awk '{print $1}')"
     else
-        die "$EXIT_INTERNAL" "Neither sha256sum nor shasum found." \
+        die "$EXIT_INTERNAL" "No sha256sum or shasum in a trusted system directory." \
             "Cannot verify Astral installer integrity. Aborting for safety."
     fi
     if [ "$actual" != "$ASTRAL_INSTALLER_SHA256" ]; then
@@ -304,10 +339,11 @@ ensure_uv() {
         exit "$EXIT_NETWORK"
     }
 
-    PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+    uvh="${HOME:-/root}"; [ "$uvh" = / ] && uvh=/root
+    PATH="$uvh/.local/bin:$uvh/.cargo/bin:$PATH"
     export PATH
 
-    if ! command -v uv >/dev/null 2>&1; then
+    if ! resolve_uv >/dev/null 2>&1; then
         die "$EXIT_INTERNAL" "uv installed but not on PATH after bootstrap." \
             "Open a new shell and re-run, or add ~/.local/bin to PATH manually."
     fi
@@ -541,7 +577,7 @@ main() {
         printf "  ${BOLD}Try after PATH:${RESET} cd your-project && worthless lock\n"
     fi
     printf "  ${BOLD}Audit script:${RESET}  curl worthless.sh?explain=1 | less\n"
-    printf "  ${BOLD}Source:${RESET}        https://github.com/shacharm2/worthless\n"
+    printf "  ${BOLD}Source:${RESET}        https://github.com/oblangatas/worthless\n"
     printf "\n"
     printf "  worthless lock rewrites .env, splits your API keys, and starts a\n"
     printf "  local proxy. Your app code doesn't change.\n"

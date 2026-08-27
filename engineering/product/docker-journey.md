@@ -25,7 +25,7 @@ Source: ux-researcher Docker pass + review of WOR-249 backlog.
    ✅ worthless installed via Docker.
    Reload your shell:  exec $SHELL
    Try:                cd your-project && worthless lock
-   Source:             https://github.com/shacharm2/worthless
+   Source:             https://github.com/oblangatas/worthless
    ```
 5. User `exec $SHELL`. Runs `worthless lock`. **Same magic moment as P1**: .env rewritten, backup created, app still works.
 

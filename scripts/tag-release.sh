@@ -88,6 +88,16 @@ if ! gpg --list-secret-keys "$GPG_FINGERPRINT" >/dev/null 2>&1; then
     exit 1
 fi
 
+# PyPI Trusted Publisher must be confirmed for the CURRENT owner.
+# publish.yml uploads via OIDC with no token, and PyPI does not follow a GitHub
+# account rename — so a rename silently breaks publishing, and the only place
+# that surfaces is the release itself (worthless-c478). This is an attestation
+# that someone looked, not a proof that the binding works; see the script.
+if ! ./scripts/verify-pypi-publisher.sh --check; then
+    echo "  Tag NOT created."
+    exit 1
+fi
+
 echo "Pre-flight OK: on main, pyproject=$version, GPG key present"
 echo
 
@@ -122,7 +132,7 @@ git push origin "$tag"
 
 echo
 echo "Tag pushed. publish.yml is now running."
-echo "Monitor at: https://github.com/shacharm2/worthless/actions"
+echo "Monitor at: https://github.com/oblangatas/worthless/actions"
 echo
 # WOR-873: the release scans BOTH architectures at severity-cutoff medium, but
 # pull requests only ever scan amd64 — arm64 is checked weekly (Monday cron).

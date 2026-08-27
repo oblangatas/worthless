@@ -316,7 +316,7 @@ was discovered, when (commit), and how it was reconciled.
 ### Phase 2.a — module skeleton + detect()
 
 **Status:** ✅ Shipped on `feature/wor-421-openclaw-research-doc` over commits
-`fdbdf7a` → `967f441`. PR [#143](https://github.com/shacharm2/worthless/pull/143)
+`fdbdf7a` → `967f441`. PR [#143](https://github.com/oblangatas/worthless/pull/143)
 (draft).
 
 **Tests:** 63/63 pass (35 Phase 2.a + 27 Phase 1 regression + 1 frontmatter

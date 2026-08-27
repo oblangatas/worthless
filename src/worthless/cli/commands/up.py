@@ -72,6 +72,7 @@ async def _sidecar_open_probe_material(home: WorthlessHome) -> tuple[bytes, byte
     from worthless.storage.repository import ShardRepository
 
     key = read_fernet_key(home.base_dir)
+    repo: ShardRepository | None = None
     try:
         repo = ShardRepository(str(home.db_path), key)
         aliases = await repo.list_keys()
@@ -83,7 +84,11 @@ async def _sidecar_open_probe_material(home: WorthlessHome) -> tuple[bytes, byte
             return None
         return enc.shard_b_enc, alias.encode()
     finally:
+        # zero_buf FIRST: if close() were to raise, the caller's key must still
+        # be wiped and the original exception must not be masked (worthless-g648).
         zero_buf(key)
+        if repo is not None:
+            repo.close()
 
 
 def _managed_sidecar_healthy(home: WorthlessHome) -> bool:
@@ -679,6 +684,9 @@ def register_up_commands(app: typer.Typer) -> None:
         """Start the proxy server (foreground or daemon)."""
         fail_if_windows()
         console = get_console()
+        # Before get_home(): it loads home.fernet_key into memory, and cores
+        # must already be off by then (dupf.10).
+        disable_core_dumps()
         home = get_home()
 
         actual_port = _resolve_port(port)
@@ -720,9 +728,6 @@ def register_up_commands(app: typer.Typer) -> None:
                     # Stale PID file -- reclaim
                     cleanup_stale_pid(pid_file)
                     console.print_warning(f"Reclaimed stale PID file (was PID {existing_pid})")
-
-        # Disable core dumps
-        disable_core_dumps()
 
         # Build proxy env
         proxy_env = build_proxy_env(home)

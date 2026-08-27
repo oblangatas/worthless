@@ -2,8 +2,8 @@
 
 The homepage incident ticker loads from a public GitHub Gist:
 
-- Edit URL: https://gist.github.com/shacharm2/7f6e2293b540004c4a733258a2461800
-- Raw JSON URL: https://gist.githubusercontent.com/shacharm2/7f6e2293b540004c4a733258a2461800/raw/news-feed.json
+- Edit URL: https://gist.github.com/oblangatas/7f6e2293b540004c4a733258a2461800
+- Raw JSON URL: https://gist.githubusercontent.com/oblangatas/7f6e2293b540004c4a733258a2461800/raw/news-feed.json
 
 Expected shape:
 

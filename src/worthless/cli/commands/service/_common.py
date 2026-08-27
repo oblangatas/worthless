@@ -12,6 +12,7 @@ from enum import Enum
 from pathlib import Path
 
 from worthless.cli.bootstrap import WorthlessHome
+from worthless.cli.console import get_console
 from worthless.cli.errors import ErrorCode, WorthlessError
 from worthless.cli.keystore import PLACEHOLDER_FERNET_KEY, sync_fernet_for_launchd
 from worthless.cli.process import poll_health
@@ -130,12 +131,45 @@ def preflight_service_install(home: WorthlessHome) -> None:
         zero_buf(key)
 
 
-def verify_proxy_health(port: int, *, timeout: float = 15.0) -> None:
-    if not poll_health(port, timeout=timeout):
-        raise WorthlessError(
-            ErrorCode.PROXY_UNREACHABLE,
-            f"Service started but /healthz on port {port} did not respond within {timeout:.0f}s.",
-        )
+# worthless-rnl8: longer than the launchd cold start that produced the original
+# false failure. Observed live on macOS with v0.3.11: the first spawn exited 1,
+# launchd restarted it, and the proxy answered a few seconds after the old 15s
+# deadline had already aborted the install. This is a ceiling on how long we
+# WAIT, never a deadline the service must meet to be considered installed.
+_HEALTH_WAIT_SECONDS = 45.0
+
+
+def report_proxy_health(port: int, *, timeout: float = _HEALTH_WAIT_SECONDS) -> None:
+    """Wait for ``/healthz``, and report honestly if it does not answer in time.
+
+    This is deliberately NOT ``verify_*`` and deliberately does not raise.
+
+    Every caller reaches this line only after the platform's own install/start
+    calls have returned successfully — ``bootstrap`` + ``kickstart`` on launchd,
+    ``enable`` + ``start`` on systemd. Arriving here is therefore proof that the
+    unit is written and the service was started. The single open question is
+    whether the proxy has finished coming up.
+
+    Treating that open question as a failure is what worthless-rnl8 is: the user
+    ran ``service install``, got ``WRTLS-104`` in red, and had a healthy
+    service — install had simply stopped watching at 15s while launchd was
+    restarting the process. A user who believes that error will uninstall
+    something that works, or fall back to a foreground ``worthless up`` they
+    have to babysit.
+
+    So: say what was established, say what was not, and say how to settle it.
+    """
+    console = get_console()
+    # The wait itself was invisible before — the operator read the silence as a
+    # hang and interrupted it. Announce it before blocking.
+    console.print_hint(f"Waiting up to {timeout:.0f}s for the proxy to answer on port {port}...")
+    if poll_health(port, timeout=timeout):
+        return
+    console.print_warning(
+        f"Service installed and started, but the proxy has not answered on port {port} yet. "
+        "It may still be coming up — this is not an install error. "
+        "Check with `worthless service status`, and `worthless service logs` if it stays down."
+    )
 
 
 def service_paths(home: WorthlessHome) -> tuple[Path, str]:

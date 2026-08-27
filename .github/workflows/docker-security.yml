@@ -324,6 +324,19 @@ jobs:
       - name: Run WOR-797 unshardable-credential load-bearing test
         run: uv run pytest tests/openclaw/install_incident/test_unshardable_credentials_load_bearing.py -v -m "openclaw and docker" --tb=short --timeout=900
 
+      # WOR-834: the enterprise-gateway upstream, proven against a REAL OpenClaw
+      # install. The unit/CLI tests hand-write an openclaw.json and never boot
+      # OpenClaw — and that gap bit: the hand-written {baseUrl, apiKey} shape is
+      # INVALID to real OpenClaw, which makes `openclaw secrets audit` exit 2, so
+      # lock's audit gate refuses BEFORE upstream resolution ever runs. Only a
+      # real-OpenClaw test can see that. Asserts the Azure/custom gateway baseUrl
+      # becomes the stored upstream, that a RE-LOCK keeps it (it silently reverted
+      # to api.openai.com before), and that an IPv6-mapped cloud-metadata gateway
+      # is refused fail-closed with nothing enrolled. Reuses the co-located
+      # worthless-oc-test:local image built for the rotation test above.
+      - name: Run WOR-834 enterprise-gateway upstream load-bearing test
+        run: uv run pytest tests/openclaw/install_incident/test_enterprise_gateway_upstream_load_bearing.py -v -m "openclaw and docker" --tb=short --timeout=900
+
   # WOR-749 Linux: lock → systemd service → proxied POST → mock upstream gets
   # real key (privileged systemd container). macOS launchd roundtrip stays
   # manual L7 — Keychain + LaunchAgent on shared GHA macOS runners is flaky.
@@ -340,3 +353,84 @@ jobs:
         run: bash engineering/testing/scripts/run-service-lock-roundtrip-linux-docker.sh
         env:
           LIVE_PACK_NO_COLOR: "1"
+
+  # WOR-892: publish.yml runs `python -m build`, producing an sdist AND a wheel.
+  # Every pre-release path builds only the wheel (`uv build --wheel` in this
+  # file's docker-e2e job, in user-flows.yml and in verify-npm.yml), so release
+  # day is the first time the sdist is ever built.
+  #
+  # Its own job, not a step in `scan`: docker-e2e declares `needs: scan`, so a
+  # packaging break there would skip ~11 minutes of unrelated E2E signal and
+  # report under a check named "scan". Nothing needs this job. It inherits the
+  # unfiltered `pull_request:` trigger from the `on:` block above, which is a
+  # property of the FILE — and per WOR-874 that trigger must stay unfiltered and
+  # this job must never take a job-level `if:`, because a skipped job reports
+  # SUCCESS to branch protection.
+  sdist:
+    name: Sdist builds, installs, and carries its package data
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      # 3.13 to match publish.yml's `setup-python` pin: release day builds the
+      # sdist on 3.13, and this must prove THAT, not the runner's system 3.12.
+      # uv rather than a bare `python3 -m pip install build`, which would hit
+      # the system interpreter and pass only because the runner image happens
+      # to strip PEP 668's EXTERNALLY-MANAGED marker.
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          python-version: "3.13"
+
+      - name: Build the sdist with publish.yml's builder
+        # `uvx --from build pyproject-build` IS `python -m build` — the same
+        # builder publish.yml uses. `uv build --sdist` would prove a different
+        # tool's output. Note this writes src/*.egg-info into the checkout;
+        # harmless here because nothing in this job builds a Docker context.
+        run: uvx --from build pyproject-build --sdist --outdir /tmp/sdist-check
+
+      - name: Exactly one sdist was produced
+        # No `| head -1`: under `set -o pipefail` that is a SIGPIPE footgun, and
+        # silently picking the first of several is how a stale artifact gets
+        # tested instead of the new one.
+        run: |
+          set -euo pipefail
+          COUNT="$(find /tmp/sdist-check -maxdepth 1 -name '*.tar.gz' -type f | wc -l)"
+          test "$COUNT" -eq 1 || { echo "expected exactly 1 sdist, found $COUNT"; exit 1; }
+
+      - name: Install the sdist into a clean venv
+        run: |
+          set -euo pipefail
+          SDIST="$(find /tmp/sdist-check -maxdepth 1 -name '*.tar.gz' -type f)"
+          echo "sdist under test: $SDIST"
+          uv venv /tmp/sdist-venv --python 3.13
+          VIRTUAL_ENV=/tmp/sdist-venv uv pip install "$SDIST"
+
+      # THE POINT OF THIS JOB. `worthless --version` is importlib.metadata — it
+      # reads installed METADATA and never touches the package tree, so it
+      # prints happily with providers.toml and SKILL.md both missing. That is
+      # exactly the break pyproject.toml's [tool.setuptools.package-data]
+      # comment warns about: install() raising FileNotFoundError on a
+      # wheel-installed worthless. Verified by deleting SKILL.md from an
+      # installed venv — `--version` still printed the version.
+      #
+      # So load both data files for real, from the INSTALLED package, with cwd
+      # outside the source checkout so a stray relative path cannot rescue a
+      # missing file. Add a line here whenever package-data gains an entry.
+      - name: Installed sdist can read every packaged data file
+        run: |
+          set -euo pipefail
+          cd /tmp
+          /tmp/sdist-venv/bin/python - <<'PY'
+          from worthless.cli.providers import load_registry
+          from worthless.openclaw.skill import _read_skill_asset
+
+          registry = load_registry()
+          assert registry, "providers.toml loaded but registry is empty"
+          skill = _read_skill_asset()
+          assert "Version:" in skill, "SKILL.md loaded but has no Version: header"
+          print(f"providers.toml: {len(registry)} entries; SKILL.md: {len(skill)} bytes")
+          PY
+          /tmp/sdist-venv/bin/worthless --version

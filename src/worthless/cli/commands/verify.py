@@ -18,6 +18,7 @@ import sys
 
 import typer
 
+from worthless.cli.bootstrap import WorthlessHome
 from worthless.cli.commands.lock import _confirm_bind_aliases
 from worthless.cli.commands.service._common import ServiceState
 from worthless.cli.commands.service.proxy_state import detect_proxy_runtime
@@ -37,7 +38,7 @@ def _service_managed(service_state: ServiceState | None) -> bool:
     return service_state is not None and service_state != ServiceState.NOT_INSTALLED
 
 
-def _evaluate(home) -> dict:  # noqa: ANN001 — WorthlessHome | None, opaque here
+def _evaluate(home: WorthlessHome | None) -> dict:
     """Compute the verdict without touching output. Returns a plain dict.
 
     Verdicts:
@@ -47,15 +48,34 @@ def _evaluate(home) -> dict:  # noqa: ANN001 — WorthlessHome | None, opaque he
       * ``red`` / <reason> — up + locked, but the probe did NOT prove routing
         (silent bypass, squatter, or unreachable).
     """
-    state = detect_proxy_runtime(home, port=None) if home is not None else None
-    if state is None or not state.running:
-        managed = _service_managed(state.service_state) if state is not None else False
+    # No home: nothing is enrolled, so nothing can be proven — RED, checked
+    # first so ``home`` is narrowed for ``_list_enrolled_keys`` below.
+    #
+    # KNOWN-WRONG REASON CODE (worthless-verify-reason): ``proxy_down`` makes
+    # the human line claim an agent "may be sending your key in the clear right
+    # now". With no home there is no key and no exposure, and the real remedy is
+    # ``worthless lock``, not starting the proxy. Preserved byte-for-byte from
+    # the previous behaviour rather than changed inside a type-safety fix.
+    if home is None:
         return {
             "verdict": "red",
             "reason": "proxy_down",
             "healthy": False,
             "aliases": [],
-            "service_managed": managed,
+            "service_managed": False,
+        }
+
+    # ``detect_proxy_runtime`` is declared ``-> ProxyRuntimeState`` and never
+    # returns None; the old ``state is None`` arm was only reachable because the
+    # removed inline conditional produced it.
+    state = detect_proxy_runtime(home, port=None)
+    if not state.running:
+        return {
+            "verdict": "red",
+            "reason": "proxy_down",
+            "healthy": False,
+            "aliases": [],
+            "service_managed": _service_managed(state.service_state),
         }
 
     aliases = [k["alias"] for k in _list_enrolled_keys(home)]

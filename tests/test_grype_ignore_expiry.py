@@ -831,3 +831,295 @@ def test_gate_jobs_are_unconditional_and_time_limited() -> None:
             f"job {name!r} has no `timeout-minutes`, so it inherits GitHub's "
             f"6-hour default. A required job that hangs blocks every merge."
         )
+
+
+# --- warning window before expiry (worthless-kjld) -------------------------
+# The hook used to fail cold: on the expiry date every commit in the repo
+# blocked with no prior notice, and the cheapest escape was a blind date bump —
+# exactly what .grype.yaml's header forbids. A warning window makes the
+# re-measure happen before the wall instead of at it.
+
+
+def _dated(tmp_path: Path, expiry: dt.date) -> Path:
+    return _write(
+        tmp_path,
+        f'ignore:\n  - vulnerability: CVE-2026-11940\n    expiry: "{expiry.isoformat()}"\n',
+    )
+
+
+@pytest.mark.parametrize("days_out", [0, 1, 13, 14])
+def test_expiry_inside_the_window_warns_but_is_not_a_problem(tmp_path: Path, days_out: int) -> None:
+    """Inside the window: a warning, and still exit-code clean."""
+    mod = _load()
+    warnings: list[str] = []
+    problems = mod.check(_dated(tmp_path, TODAY + dt.timedelta(days=days_out)), TODAY, warnings)
+
+    assert problems == [], "a not-yet-expired ignore must never be a problem"
+    assert len(warnings) == 1
+    assert "CVE-2026-11940" in warnings[0]
+
+
+def test_expiry_beyond_the_window_is_silent(tmp_path: Path) -> None:
+    mod = _load()
+    warnings: list[str] = []
+    assert mod.check(_dated(tmp_path, TODAY + dt.timedelta(days=15)), TODAY, warnings) == []
+    assert warnings == []
+
+
+def test_an_expired_ignore_is_a_problem_not_a_warning(tmp_path: Path) -> None:
+    """Past the date the hard failure is unchanged — the window never softens it."""
+    mod = _load()
+    warnings: list[str] = []
+    problems = mod.check(_dated(tmp_path, TODAY - dt.timedelta(days=1)), TODAY, warnings)
+
+    assert len(problems) == 1
+    assert "expired" in problems[0]
+    assert warnings == [], "an expired ignore must not also warn — it must block"
+
+
+def test_warnings_are_optional_so_existing_callers_are_unaffected(tmp_path: Path) -> None:
+    """check() without the out-param behaves exactly as before."""
+    mod = _load()
+    assert mod.check(_dated(tmp_path, TODAY + dt.timedelta(days=1)), TODAY) == []
+
+
+def test_main_exits_zero_when_only_warnings(tmp_path: Path, monkeypatch, capsys) -> None:
+    """🚨 The load-bearing one.
+
+    A warning that returns non-zero would block every commit in the repo —
+    precisely the failure this window exists to prevent. Dated off the real
+    clock, so it is always inside the window and never expired.
+    """
+    mod = _load()
+    cfg = _dated(tmp_path, dt.date.today() + dt.timedelta(days=1))
+    monkeypatch.setattr(mod, "CONFIGS", (cfg,))
+
+    assert mod.main() == 0
+    assert "NOTICE" in capsys.readouterr().err
+
+
+# --- package names that are secretly regexes (worthless-yilt) --------------
+# grype matches package.name literally until it contains a metacharacter, at
+# which point the whole name becomes a full-match regex and its dots turn into
+# wildcards. Measured on grype 0.114.0: `urllib.` does not match `urllib3`,
+# but `urllib.|zzzz` does.
+
+
+@pytest.mark.parametrize("name", ["urllib.|zzzz", "ta.*", "libapt.*", "py[t]hon", "a+b"])
+def test_regex_armed_package_names_are_rejected(tmp_path: Path, name: str) -> None:
+    cfg = _write(
+        tmp_path,
+        f'ignore:\n  - vulnerability: CVE-1\n    package:\n      name: "{name}"\n'
+        f'    expiry: "2099-01-01"\n',
+    )
+    problems = _load().check(cfg, TODAY)
+    assert len(problems) == 1
+    assert "full-match regex" in problems[0]
+
+
+@pytest.mark.parametrize(
+    "name", ["python", "backports.tarfile", "gopkg.in/yaml.v2", "libapt-pkg6.0"]
+)
+def test_ordinary_names_including_dotted_ones_are_fine(tmp_path: Path, name: str) -> None:
+    """A bare `.` is inert in grype's matcher, so flagging dotted names is noise."""
+    cfg = _write(
+        tmp_path,
+        f'ignore:\n  - vulnerability: CVE-1\n    package:\n      name: "{name}"\n'
+        f'    expiry: "2099-01-01"\n',
+    )
+    assert _load().check(cfg, TODAY) == []
+
+
+# Every workflow that runs on a cron must be watched by the failure alarm.
+# scheduled.yml failed 45 consecutive runs across four months and reached
+# nobody; GitHub's default owner email is demonstrably not a channel anyone
+# reads. WOR-878.
+ALARM_WORKFLOW = REPO / ".github" / "workflows" / "scheduled-failure-alarm.yml"
+
+
+def _scheduled_workflows() -> list[Path]:
+    """Every workflow carrying a `schedule:` trigger."""
+    root = REPO / ".github" / "workflows"
+    # BOTH extensions. GitHub honours .yaml, so globbing *.yml only would let a
+    # cron workflow named .yaml go unwatched while this guard stayed green.
+    found = []
+    for wf in sorted([*root.glob("*.yml"), *root.glob("*.yaml")]):
+        doc = yaml.safe_load(wf.read_text()) or {}
+        triggers = doc.get(True) or doc.get("on") or {}
+        if isinstance(triggers, dict) and "schedule" in triggers:
+            found.append(wf)
+    return found
+
+
+def test_a_failing_scheduled_run_reaches_a_human() -> None:
+    """The alarm exists, and watches every workflow rather than a list of names.
+
+    `workflows:` is a hand-maintained list that must agree with the set of cron
+    workflows — the same shape as the push/pull_request path filters in
+    WOR-874, which had drifted apart before anyone looked. Omitting the key
+    would watch everything, but actionlint and zizmor both reject that form.
+
+    So this test IS the drift protection: it asserts the list equals the set of
+    workflows carrying a `schedule:` trigger, in both directions. Adding a cron
+    workflow without wiring the alarm fails here rather than going unwatched.
+    """
+    assert ALARM_WORKFLOW.exists(), (
+        "no scheduled-failure alarm: a cron workflow can fail indefinitely with "
+        "nobody told, which is how three checks stayed broken for four months"
+    )
+    doc = yaml.safe_load(ALARM_WORKFLOW.read_text())
+    triggers = doc.get(True) or doc.get("on") or {}
+    assert "workflow_run" in triggers, "the alarm must fire on other runs completing"
+
+    watched = set(triggers["workflow_run"].get("workflows") or [])
+    actual = set()
+    for wf in _scheduled_workflows():
+        actual.add((yaml.safe_load(wf.read_text()) or {})["name"])
+
+    unwatched = actual - watched
+    assert not unwatched, (
+        f"these workflows run on a cron but the alarm does not watch them: "
+        f"{sorted(unwatched)}. They can fail indefinitely with nobody told — "
+        f"add them to `workflows:` in scheduled-failure-alarm.yml."
+    )
+    stale = watched - actual
+    assert not stale, (
+        f"the alarm watches {sorted(stale)}, which no longer run on a cron. "
+        f"A list that has drifted once will drift again — remove them."
+    )
+
+
+def test_the_alarm_can_actually_file_an_issue() -> None:
+    """`issues: write` is the whole mechanism — without it the alarm silently 403s.
+
+    This is the failure mode the ticket exists to end: a control that looks
+    present, runs green, and does nothing. A missing permission produces
+    exactly that, because the job still succeeds.
+    """
+    job = yaml.safe_load(ALARM_WORKFLOW.read_text())["jobs"]["alarm"]
+    assert job.get("permissions", {}).get("issues") == "write", (
+        "the alarm job lacks `issues: write`, so its API call 403s while the "
+        "job reports success — an alarm that cannot raise anything"
+    )
+    assert isinstance(job.get("timeout-minutes"), int), "the alarm job has no timeout"
+    # Assert the CALLS the alarm depends on, not merely that the step mentions
+    # a label. An earlier version checked only for the string "getLabel", which
+    # would have stayed green with `issues.create` deleted outright — a guard
+    # satisfiable while the property is false, which is the defect this whole
+    # suite exists to prevent.
+    script = str(job["steps"][0].get("with", {}).get("script", ""))
+    # Match the call WITH its opening paren. `issues.create` is a substring of
+    # both `issues.createComment` and `issues.createLabel`, so a bare substring
+    # check stayed green with the real create deleted — this guard was itself
+    # satisfiable while false on its first draft.
+    for call, why in (
+        ("issues.create({", "nothing would ever be filed"),
+        ("issues.createComment({", "a repeat failure would file a duplicate"),
+        ("issues.getLabel({", "the label is applied but never checked for"),
+        ("issues.createLabel({", "a missing label would crash the first alarm"),
+    ):
+        assert call in script, f"the alarm never calls {call.rstrip('({')}: {why}"
+
+    # The tolerance expression, not the bare number — "422" also appears in the
+    # comment explaining it, so checking the digits alone proved nothing.
+    assert "status !== 422" in script, (
+        "createLabel is not tolerant of 422 already_exists. Two cron workflows "
+        "failing in the same minute both create the label; the loser throws and "
+        "ITS alarm is lost — the exact failure this workflow prevents, one "
+        "layer down."
+    )
+
+    condition = str(job.get("if", ""))
+    assert "conclusion == 'failure'" in condition, "the alarm must fire only on failure"
+    assert "event == 'schedule'" in condition, (
+        "the alarm must fire only on SCHEDULED runs — a PR failure is already "
+        "visible in that PR's check list and needs no second channel"
+    )
+
+
+# requirements.txt is GENERATED from uv.lock by a pre-commit hook, and it lives
+# at the REPO ROOT because Snyk imported it there as a monitored project
+# (target oblangatas/worthless, project `requirements.txt`, last tested
+# 2026-08-23). Snyk resolves that project by the path it was imported at.
+#
+# Dependabot also discovers it there and filed nine no-op pull requests against
+# it. WOR-875 moved the file to engineering/ci/ to hide it from Dependabot;
+# that worked and silently broke the Snyk project. The correct tool is
+# `exclude-paths` in .github/dependabot.yml, which is now in place. WOR-904.
+EXPORTED_MANIFEST = REPO / "requirements.txt"
+DEPENDABOT_CONFIG = REPO / ".github" / "dependabot.yml"
+
+
+def test_the_generated_manifest_stays_where_snyk_imported_it() -> None:
+    """Moving this file breaks an external consumer that no grep can see.
+
+    The tree was grepped before WOR-875 moved it, and the grep was clean —
+    because a Snyk project registration lives in Snyk, not in this repository.
+    The move broke it silently: nothing failed, no check went red, and the
+    badge kept rendering because the badge never read the file anyway.
+    """
+    assert EXPORTED_MANIFEST.exists(), (
+        "requirements.txt is not at the repo root. Snyk imported it there as a "
+        "monitored project and resolves it by that path — moving it breaks the "
+        "scan with no local signal. Silence Dependabot with `exclude-paths`, "
+        "not by relocating the file."
+    )
+    assert not (REPO / "engineering" / "ci" / "requirements.txt").exists(), (
+        "a second copy exists under engineering/ci/. One generated manifest, "
+        "one location, or they drift."
+    )
+
+
+def test_dependabot_skips_the_generated_manifest() -> None:
+    """The file must stay put, so Dependabot must be told to ignore it.
+
+    Without this the nine no-op pull requests resume. They are worse than
+    noise: `bump certifi 2026.2.25 -> 2026.7.22` reads as an upgrade, and
+    certifi sat five months stale in uv.lock while those PRs were open.
+    """
+    doc = yaml.safe_load(DEPENDABOT_CONFIG.read_text())
+    uv = [u for u in doc["updates"] if u.get("package-ecosystem") == "uv"]
+    assert uv, "no uv ecosystem entry in dependabot.yml"
+    excluded = set(uv[0].get("exclude-paths") or [])
+    assert "requirements.txt" in excluded, (
+        "the uv ecosystem does not exclude requirements.txt, so Dependabot will "
+        "resume filing pull requests that bump a version in generated output "
+        "while uv.lock — which actually resolves dependencies — goes untouched."
+    )
+
+
+def test_the_exporter_and_the_badge_agree_on_where_it_lives() -> None:
+    """The exporter writes it, the badge URL names it, Snyk imports it.
+
+    If the exporter moves and the badge does not, they disagree silently while
+    every check stays green.
+
+    A correction worth recording, because it was believed and repeated: the
+    CHANGELOG entry for 338da36f states the badge "parses that file and cannot
+    parse uv.lock". That is FALSE — Snyk's badge endpoint returns a
+    byte-identical SVG for this path, for a path that does not exist, and for
+    an organisation that does not exist, and its text is a static
+    "Snyk security | monitored". The badge is a visitor-facing signal served
+    from Snyk's own record; `?targetFile=` does not drive it.
+
+    The file's real reader is the Snyk PROJECT, imported at this path and
+    tested independently of the badge. Two different things, and conflating
+    them is what made the move look safe.
+    """
+    rel = str(EXPORTED_MANIFEST.relative_to(REPO))
+
+    hook = (REPO / ".pre-commit-config.yaml").read_text()
+    assert f"-o {rel}" in hook, f"the pre-commit exporter does not write to {rel}"
+
+    readme = (REPO / "README.md").read_text()
+    assert f"targetFile={rel}" in readme, f"the Snyk badge URL does not name {rel}"
+
+    # Match `-o <path>`, not the bare path. "requirements.txt" is a SUBSTRING
+    # of "engineering/ci/requirements.txt", so a bare check passes on a file
+    # that still records the old command — which is exactly the state this
+    # branch was in until the manifest was regenerated rather than moved.
+    assert f"-o {rel}" in EXPORTED_MANIFEST.read_text().split("\n", 3)[1], (
+        "the manifest header records a different output path than the exporter "
+        "writes to. It was moved by hand rather than regenerated by the hook, "
+        "so its contents may not match the current lockfile."
+    )
