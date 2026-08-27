@@ -75,6 +75,13 @@ class KeychainProbe(Enum):
     ABSENT
         ``security`` answered: it is not. Also non-macOS, where there is no
         keychain to hold it — a definite answer, not a gap.
+
+        Measured limit: exit 44 is NOT exclusive to "no such item". A missing
+        or corrupt keychain file returns 44 with byte-identical stderr, so an
+        unopenable keychain is indistinguishable from an empty one and lands
+        here rather than in UNKNOWN. Nothing in the exit code or stderr can
+        separate them; closing that gap needs a different probe, not a
+        different threshold. See WOR-835 follow-ups.
     UNKNOWN
         The question was never answered: the binary is missing, the probe
         timed out, or it exited for a reason other than "not found".
@@ -92,8 +99,11 @@ class KeychainProbe(Enum):
     UNKNOWN = "unknown"
 
 
-# errSecItemNotFound. The one non-zero exit that is a real answer rather than
+# errSecItemNotFound. The only non-zero exit treated as an answer rather than
 # a failure to look — mirrors the same constant in _clear_keychain_service.
+# It is the sole OSStatus in -25400..-25200 truncating to 44, but `security`
+# also returns it for a keychain it could not open, so 44 means "no item
+# visible", NOT "no item exists". Verified by measurement, not assumed.
 _ERR_SEC_ITEM_NOT_FOUND = 44
 
 
