@@ -323,3 +323,73 @@ class TestPreCommitReadsTheIndexNotTheWorkingTree:
         assert "renamed.txt" in out, (
             f"the finding must name the staged path, not the temp copy; output:\n{out}"
         )
+
+
+# Characters an attacker can legally put in a filename that a terminal will
+# ACT ON: a bidi override reverses displayed text, a line separator can push
+# following output onto its own line. Same set the audit-gate suite pins.
+_RLO = "‮"  # RIGHT-TO-LEFT OVERRIDE
+_LINE_SEP = " "  # LINE SEPARATOR
+
+
+class TestStagedFilenameCannotHijackTheTerminal:
+    """Cross-cutting: the staged FILENAME is attacker-controlled and printed.
+
+    Two changes combine here, and neither could be tested alone:
+
+    * the pre-commit hook now scans the STAGED SET, so a filename chosen by
+      whoever wrote the repo reaches scan's output path (worthless-2kuy);
+    * the verdict line now NAMES that file rather than saying ".env".
+
+    So a hostile filename reaches a terminal on every blocked commit. It is
+    sanitised — this pins that end to end, on a real repo with a really staged
+    file, rather than on a ScanFinding constructed in memory.
+
+    Limitation, stated rather than hidden: this asserts the dangerous
+    characters are absent from the output bytes. It does not render the output
+    in a terminal emulator and assert the screen is intact — `pyte` is not a
+    dependency here. Absence of the control characters is one altitude below
+    the real promise.
+    """
+
+    def _repo(self, path: Path) -> None:
+        import subprocess
+
+        for args in (
+            ["init", "-q"],
+            ["config", "user.email", "t@t.t"],
+            ["config", "user.name", "t"],
+        ):
+            subprocess.run(["git", "-C", str(path), *args], check=True, capture_output=True)  # noqa: S607
+
+    def test_hostile_staged_filename_is_scrubbed_from_output(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        self._repo(tmp_path)
+        hostile = f"{_RLO}evil{_LINE_SEP}app.py"
+        (tmp_path / hostile).write_text(f"OPENAI_API_KEY={fake_openai_key()}\n")
+
+        import subprocess
+
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", hostile],  # noqa: S607
+            check=True,
+            capture_output=True,
+        )
+        monkeypatch.chdir(tmp_path)
+
+        result = runner.invoke(app, ["scan", "--pre-commit"])
+        out = result.stdout + result.stderr
+
+        # Not vacuous: the commit really was blocked and the file really named.
+        assert result.exit_code == 1, f"the staged key must still be caught; output:\n{out}"
+        assert "evil" in out and "app.py" in out, (
+            f"the readable part of the filename must survive — a scrubber that "
+            f"drops everything would pass a bare absence check; output:\n{out}"
+        )
+
+        for ch, name in ((_RLO, "RIGHT-TO-LEFT OVERRIDE"), (_LINE_SEP, "LINE SEPARATOR")):
+            assert ch not in out, (
+                f"a staged filename carried {name} into terminal output; a crafted "
+                f"repo could rewrite what the user believes they are committing"
+            )
