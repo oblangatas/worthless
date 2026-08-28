@@ -6,11 +6,14 @@ import asyncio
 import contextlib
 import json
 import os
+import shutil
 import stat
+import subprocess  # nosec B404
 import sys
 import tempfile
 import time
 from collections import defaultdict
+from dataclasses import replace
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
@@ -55,6 +58,85 @@ SCAN_TIME_BUDGET_S = 30.0
 # a pre-commit hook can tell the cases apart. Keep this constant in lockstep
 # with the human stderr block in ``_format_skipped_human``.
 SCAN_INCOMPLETE_EXIT_CODE = 2
+
+
+def _git_index_names(work_tree: Path) -> list[str] | None:
+    """Paths staged for commit, or ``None`` if the question can't be answered."""
+    try:
+        # ``git`` from PATH is intentional — pinning breaks Windows/WSL.
+        result = subprocess.run(  # nosec B603,B607
+            [  # noqa: S607
+                "git",
+                "-C",
+                str(work_tree),
+                "diff",
+                "--cached",
+                "--name-only",
+                # ACMR, not ACM: R (rename) is a real staged change and may
+                # carry appended content. Excluding it returned an EMPTY list
+                # for `git mv x y` + append-key — reproducing the very bug this
+                # module exists to fix. D (delete) stays out: a deleted file
+                # contributes no content to the commit.
+                "--diff-filter=ACMR",
+                "-z",
+            ],
+            capture_output=True,
+            text=False,  # bytes; -z is NUL-delimited → non-ASCII names survive
+            check=False,
+            timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    return [os.fsdecode(raw) for raw in result.stdout.split(b"\x00") if raw]
+
+
+def _collect_staged_paths(tmp_root: Path) -> list[Path] | None:
+    """Materialise the STAGED CONTENT of each staged file under *tmp_root*.
+
+    worthless-2kuy: git invokes pre-commit hooks with zero arguments, so the
+    hook has to ask what is being committed. It must also read the right BYTES.
+    Scope comes from the index; content used to come from the working tree, and
+    those disagree — measured, all three committing a key past a green hook:
+
+      * `git add s.py; rm s.py`      -> index has the key, no file on disk
+      * stage key, then clean file   -> index has the key, disk copy is clean
+      * `git mv a b` + append key    -> ACM returned nothing at all
+
+    So content is read from the index (`git show :path`), not from disk.
+    ``None`` means the question could not be answered — the caller MUST fail
+    closed. An empty list is a real answer: an empty or merge commit.
+    """
+    root = _find_git_dir()
+    if root is None:
+        return None
+    work_tree = root.parent
+
+    names = _git_index_names(work_tree)
+    if names is None:
+        return None
+
+    staged: list[Path] = []
+    for name in names:
+        dest = tmp_root / name
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            blob = subprocess.run(  # nosec B603,B607
+                ["git", "-C", str(work_tree), "show", f":{name}"],  # noqa: S607
+                capture_output=True,
+                text=False,
+                check=False,
+                timeout=10,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return None
+        if blob.returncode != 0:
+            # A staged path we cannot read is not a path we may wave through.
+            return None
+        dest.write_bytes(blob.stdout)
+        staged.append(dest)
+    return staged
 
 
 def _find_git_dir() -> Path | None:
@@ -346,7 +428,20 @@ def _install_hook() -> None:
         content = hook_path.read_text()
         if marker in content:
             return  # already installed
-        hook_path.write_text(content + snippet)
+        # worthless-2kuy: `exec` REPLACES the shell process, so anything after
+        # it is unreachable. The pre-commit framework's generated hook ends in
+        # `exec ... hook-impl`, so a blind append installed a check that could
+        # never run — the same false confidence this ticket exists to kill.
+        # Insert above the first exec instead; hooks without one still append.
+        lines = content.splitlines(keepends=True)
+        exec_at = next(
+            (i for i, line in enumerate(lines) if line.lstrip().startswith("exec ")),
+            None,
+        )
+        if exec_at is None:
+            hook_path.write_text(content + snippet)
+        else:
+            hook_path.write_text("".join(lines[:exec_at]) + snippet + "".join(lines[exec_at:]))
     else:
         hook_path.write_text(f"#!/bin/sh\n{snippet}")
 
@@ -762,11 +857,31 @@ def register_scan_commands(app: typer.Typer) -> None:
         disable_core_dumps(strict=False)
 
         tmp_file: Path | None = None
+        staged_root: Path | None = None
         try:
             # Collect files to scan
             explicit = list(paths) if paths else []
             if pre_commit:
-                scan_paths = explicit
+                # Git passes the hook zero arguments, so with no explicit paths
+                # scan must determine the staged set itself. None = could not
+                # determine → refuse; [] = genuinely nothing staged (empty or
+                # merge commit) → proceed and report clean honestly.
+                if explicit:
+                    scan_paths = explicit
+                else:
+                    staged_root = Path(tempfile.mkdtemp(prefix="worthless-staged-"))
+                    staged = _collect_staged_paths(staged_root)
+                    if staged is None:
+                        raise WorthlessError(
+                            ErrorCode.SCAN_ERROR,
+                            "pre-commit hook could not determine which files are "
+                            "staged, so nothing was checked. Your commit was NOT "
+                            "verified.\n"
+                            "  \u2022 Run inside a git work tree, or\n"
+                            "  \u2022 Scan explicitly: `worthless scan <file>...`",
+                            exit_code=2,
+                        )
+                    scan_paths = staged
             elif deep:
                 scan_paths, tmp_file = _collect_deep_paths(explicit)
             else:
@@ -788,6 +903,17 @@ def register_scan_commands(app: typer.Typer) -> None:
                 deadline=deadline,
                 skipped=skipped,
             )
+
+            # Staged content was materialised under a temp root; report the
+            # paths the user actually staged, not where we happened to put a
+            # copy of the blob.
+            if staged_root is not None:
+                findings = [
+                    replace(f, file=str(Path(f.file).relative_to(staged_root)))
+                    if Path(f.file).is_relative_to(staged_root)
+                    else f
+                    for f in findings
+                ]
 
             # Count unprotected
             unprotected = [f for f in findings if not f.is_protected]
@@ -880,3 +1006,5 @@ def register_scan_commands(app: typer.Typer) -> None:
         finally:
             if tmp_file is not None:
                 tmp_file.unlink(missing_ok=True)
+            if staged_root is not None:
+                shutil.rmtree(staged_root, ignore_errors=True)
