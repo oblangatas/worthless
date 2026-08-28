@@ -27,7 +27,7 @@ EXIT_INTEGRITY=50
 # loop stops too (exit 130 alone does not propagate); HUP catches a dropped SSH.
 # Registered once — `trap` replaces rather than chains. Full rationale and the
 # proof for each choice: tests/user_flows/test_install_sigint_live.py.
-cleanup() { rm -rf "${tmpdir:-}"; rm -f "${uv_install_err:-}"; }
+cleanup() { rm -rf "${tmpdir:-}" 2>/dev/null || :; rm -f "${uv_install_err:-}" 2>/dev/null || :; }
 trap 'cleanup' EXIT
 trap 'trap - EXIT INT HUP; cleanup; kill -INT $$; exit 130' INT
 trap 'trap - EXIT TERM HUP; cleanup; exit 143' TERM

@@ -197,8 +197,12 @@ class TestInterruptAbortsTheInstaller:
         """A supervisor's TERM deserves the same treatment as a user's INT."""
         rc, out, _ = _run_and_interrupt(sig=signal.SIGTERM)
         assert _END_MARKER not in out, f"install.sh ran to completion after SIGTERM.\n{out[-600:]}"
-        assert rc not in (0, EXIT_NETWORK, EXIT_INTEGRITY), (
-            f"SIGTERM produced a misleading exit code {rc}.\n{out[-600:]}"
+        # Pin the exact code. "not in (0, 10, 50)" would stay green if the handler
+        # regressed to any arbitrary non-zero — a coverage audit caught that this
+        # test was weaker than it looked. 143 is 128+SIGTERM, the convention a
+        # supervisor reads.
+        assert rc in (-signal.SIGTERM, 143), (
+            f"SIGTERM must report 143 (128+15) or die by the signal; got {rc}.\n{out[-600:]}"
         )
 
     def test_sighup_aborts_and_cleans_up(self) -> None:
@@ -219,4 +223,6 @@ class TestInterruptAbortsTheInstaller:
             "trap the shell dies on the default action and never cleans up — a "
             "dropped SSH session mid `curl | sh` orphans the temp dir."
         )
-        assert rc != 0, f"hung-up install reported success (exit {rc})."
+        assert rc in (-signal.SIGHUP, 129), (
+            f"SIGHUP must report 129 (128+1) or die by the signal; got {rc}."
+        )

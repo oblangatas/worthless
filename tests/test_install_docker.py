@@ -943,10 +943,23 @@ def test_host_lock_unwritable_env_fails_without_phantom_enrollment(tmp_path: Pat
 SIGINT_TIMEOUT = 300
 
 
+# (image, shell) — install.sh is #!/bin/sh, so the shell it actually runs under
+# differs per distro. Trap semantics are exactly where shells diverge: `trap -`,
+# whether EXIT fires after signal death, and how `kill -INT $$` propagates. The
+# happy-path install matrix already spans these; the SIGNAL path did not.
+SIGINT_SHELL_MATRIX = [
+    ("debian-12-bare", "dash"),
+    ("alpine-bare", "busybox-ash"),
+]
+
+
 @pytest.mark.docker
 @pytest.mark.skipif(not docker_available(), reason="Docker not available")
 @pytest.mark.timeout(SIGINT_TIMEOUT)
-def test_interrupting_a_real_install_does_not_report_a_network_failure() -> None:
+@pytest.mark.parametrize(("fixture", "shell"), SIGINT_SHELL_MATRIX)
+def test_interrupting_a_real_install_does_not_report_a_network_failure(
+    fixture: str, shell: str
+) -> None:
     """Ctrl+C during a REAL install, in a bare container, with nothing stubbed.
 
     The unit-level sibling (tests/user_flows/test_install_sigint_live.py) stubs
@@ -963,8 +976,8 @@ def test_interrupting_a_real_install_does_not_report_a_network_failure() -> None
     and exited 10 (``EXIT_NETWORK``) — so CI keyed on 10 would auto-retry an
     install the operator deliberately stopped.
     """
-    dockerfile = INSTALL_FIXTURES / "Dockerfile.debian-12-bare"
-    tag = "worthless-ixca-sigint:test"
+    dockerfile = INSTALL_FIXTURES / f"Dockerfile.{fixture}"
+    tag = f"worthless-ixca-sigint-{fixture}:test"
     subprocess.run(  # noqa: S603
         [  # noqa: S607
             "docker",

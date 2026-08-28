@@ -886,7 +886,10 @@ def test_install_registers_signal_traps_once_and_they_abort() -> None:
     * INT RE-RAISES the signal instead of `exit 130`. Both stop this script, but
       only signal death propagates: a caller running `for … do sh install.sh; done`
       continues to the next iteration after a plain exit, and aborts after a
-      re-raise. The trailing `exit 130` is an unreachable fallback.
+      re-raise. The trailing `exit 130` is NOT dead code: as PID 1 in a
+      container the kernel suppresses default-action signals, so `kill` is a
+      no-op and the explicit exit is what reports 130. (Measured during the
+      security review of PR #582 — an earlier draft called it unreachable.)
     * HUP is trapped. A dropped SSH session mid `curl | sh` is common and
       previously leaked the temp dir, since only EXIT/INT/TERM were handled.
 
