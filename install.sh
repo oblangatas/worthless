@@ -456,11 +456,9 @@ smoke_test() {
     # (unscrubbed), killing a good install. Also beats a shadowing worthless on
     # PATH. worthless-dc26.
     worthless_bin="$(uv tool dir --bin 2>/dev/null)/worthless"
-    # The shadow check below compares this against what the caller's PATH
-    # resolves. That comparison is only meaningful when this side came from
-    # `uv tool dir --bin`; the fallback is itself a PATH lookup, so comparing
-    # PATH-to-PATH would silently answer "no shadow" for every shadowed user.
-    # Fail closed: no authoritative path, no claim either way.
+    # The shadow check needs this to come from `uv tool dir --bin`: the
+    # fallback is itself a PATH lookup, and comparing PATH-to-PATH would
+    # answer "no shadow" for every shadowed user. Fail closed.
     worthless_bin_authoritative=1
     if [ ! -x "$worthless_bin" ]; then
         worthless_bin_authoritative=0
@@ -508,26 +506,19 @@ path_is_persistent() {
     esac
 }
 
-# Resolve a path to its real directory + basename, following symlinks in the
-# dirname. `cd && pwd -P` is POSIX and, unlike `-ef` (not POSIX) or `realpath`
-# (absent on older macOS), is available in every sh install.sh runs under. It
-# resolves the DIRECTORY only, which is what matters: /opt/homebrew/bin and
-# ~/.local/bin are different dirs, and a bin dir that is itself a symlink is
-# the common Homebrew/Nix shape. Never executes anything.
+# Real path of $1, following symlinks. `cd && pwd -P` because `-ef` is not
+# POSIX and `realpath` is absent on older macOS. Never executes anything.
 canonical_path() {
     _cp_path="$1"
-    # Follow symlinks one hop at a time. `readlink -f` would do this in one
-    # call but is GNU-only — macOS has no -f until very recent versions, and
-    # install.sh supports both. The cap stops a symlink cycle from hanging an
-    # installer; a path 40 links deep is pathological, and returning failure
-    # means "cannot tell", which the caller treats as no-shadow.
+    # One hop at a time: `readlink -f` is GNU-only. Cap stops a cycle hanging
+    # the installer; failure means "cannot tell" and the caller stays silent.
     _cp_hops=0
     while [ -L "$_cp_path" ] && [ "$_cp_hops" -lt 40 ]; do
         _cp_target="$(readlink -- "$_cp_path" 2>/dev/null)" || return 1
         [ -n "$_cp_target" ] || return 1
         case "$_cp_target" in
             /*) _cp_path="$_cp_target" ;;
-            # A relative target is relative to the LINK's directory, not $PWD.
+            # Relative targets resolve against the LINK's dir, not $PWD.
             *) _cp_path="$(dirname -- "$_cp_path")/$_cp_target" ;;
         esac
         _cp_hops=$((_cp_hops + 1))
@@ -539,18 +530,14 @@ canonical_path() {
     printf '%s/%s' "$_cp_real" "$_cp_base"
 }
 
-# Strip terminal control bytes and bound the length before printing a path we
-# did not choose. printf '%s' already blocks format-string injection, but raw
-# 0x1b/0x0d/0x0a in a directory name pass through verbatim: a dir named with
-# ESC[2K ESC[1A scrolls up and erases the line above, letting whoever planted
-# the shadow wipe the very warning that names them.
+# A dir named with ESC[2K ESC[1A would scroll up and erase the warning that
+# names it. printf '%s' stops format injection; raw control bytes still pass.
 sanitize_for_display() {
     printf '%s' "$1" | tr -d '\001-\037\177' | cut -c1-200
 }
 
-# What the caller's shell would actually run for `worthless`, or empty.
-# `|| true` is load-bearing: under `set -eu` (:14) a command -v that finds
-# nothing aborts the whole installer, after a successful install.
+# What the caller's shell runs for `worthless`, or empty. `|| true` is
+# load-bearing: under `set -eu` a failed lookup would abort the installer.
 worthless_on_original_path() {
     _wop_cur="${PATH:-}"
     PATH="$ORIGINAL_PATH"
@@ -559,21 +546,18 @@ worthless_on_original_path() {
     printf '%s' "$_wop_found"
 }
 
-# Non-empty only when a DIFFERENT file than the one we installed is what the
-# user's PATH resolves. Empty means "no shadow, or cannot tell" — both of
-# which must stay silent.
+# Non-empty only when the user's PATH resolves a DIFFERENT file than the one
+# we installed. Empty means no shadow or cannot tell; both stay silent.
 shadowing_worthless_path() {
     [ "${worthless_bin_authoritative:-0}" = "1" ] || return 0
     [ -n "${worthless_bin:-}" ] || return 0
     _sw_user="$(worthless_on_original_path)"
-    # Empty = worthless is not on PATH at all. That is the legitimate
-    # "open a new terminal" case, already handled by print_activation_hint.
+    # Empty = not on PATH at all: the "open a new terminal" case below.
     [ -n "$_sw_user" ] || return 0
     _sw_user_real="$(canonical_path "$_sw_user")" || return 0
     _sw_ours_real="$(canonical_path "$worthless_bin")" || return 0
-    # A symlink whose dirname resolves to ours is a shortcut, not a shadow:
-    # following it runs the binary we just installed. Homebrew, ~/bin and Nix
-    # profiles all legitimately expose tools this way.
+    # A symlink resolving to ours is a shortcut, not a shadow — following it
+    # runs what we installed. Homebrew, ~/bin and Nix all do this.
     [ "$_sw_user_real" != "$_sw_ours_real" ] || return 0
     printf '%s' "$_sw_user"
 }
@@ -592,10 +576,8 @@ command_in_original_path() {
 
 # mode: "full" (default) prints both current-shell + make-permanent hints;
 # "activate" prints only the current-shell activation command.
-# Like print_activation_hint, but takes the directory instead of hardcoding
-# $HOME/.local/bin: in the shadow case the install may live anywhere
-# UV_TOOL_BIN_DIR/XDG_BIN_HOME points. Prints the export line only; making it
-# permanent is print_activation_hint's job and is not what unshadows a PATH.
+# print_activation_hint, parameterised: the install may live wherever
+# UV_TOOL_BIN_DIR/XDG_BIN_HOME points, not just $HOME/.local/bin.
 print_shadow_path_hint() {
     _psh_dir="$(sanitize_for_display "$1")"
     case "$(basename -- "${SHELL:-}")" in
@@ -663,12 +645,9 @@ main() {
     printf "\n"
     shadow_bin="$(shadowing_worthless_path)"
     if [ -n "$shadow_bin" ]; then
-        # The install succeeded — smoke_test already ran the real binary by
-        # absolute path. What failed is the user's expectation that typing
-        # `worthless` reaches it. Deliberately NOT an error: no red, no
-        # non-zero exit, and the file in the way is named but never touched.
-        # On stdout, not stderr: `curl worthless.sh | sh 2>/dev/null` is
-        # common and this warning is the whole point of the branch.
+        # Not an error: the install succeeded, smoke_test ran the real binary
+        # by absolute path. The file in the way is named, never touched. On
+        # stdout because `| sh 2>/dev/null` would swallow stderr.
         ok "Done! Worthless is installed at $(sanitize_for_display "$worthless_bin")."
         printf "\n"
         printf "  Heads up: typing 'worthless' runs a different, older copy that comes\n"
@@ -697,8 +676,7 @@ main() {
     fi
     printf "\n"
     if [ -n "${shadow_bin:-}" ]; then
-        # Bare `worthless` here would resolve to the shadow we just warned
-        # about — the absolute path is the only invocation that is true.
+        # Bare `worthless` here would resolve to the shadow we just warned about.
         printf "  ${BOLD}Try it:${RESET}        cd your-project && %s lock\n" \
             "$(sanitize_for_display "$worthless_bin")"
     elif command_in_original_path worthless; then
