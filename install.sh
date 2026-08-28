@@ -412,7 +412,10 @@ install_or_upgrade_worthless() {
     # user sets WORTHLESS_VERSION.
     installed_ver="$(uv tool list 2>/dev/null \
         | awk '/^worthless / {sub("^v", "", $2); print $2; exit}')"
-    if [ -n "$installed_ver" ] && [ "$installed_ver" = "$effective_version" ]; then
+    # worthless-mb6l: uv writes its receipt before the env is complete, so a
+    # version match alone would skip the --force repair of a broken install.
+    if [ -n "$installed_ver" ] && [ "$installed_ver" = "$effective_version" ] \
+       && [ -x "$(uv tool dir --bin 2>/dev/null)/worthless" ]; then
         ok "  worthless ${installed_ver} already installed"
         return 0
     fi
