@@ -20,6 +20,12 @@ on:
       # proxy-only change must trigger them. Without this a regression in the
       # request path runs no live guard on push.
       - "src/worthless/proxy/**"
+      # worthless-ixca: the live SIGINT lane is the ONLY behavioural proof that
+      # install.sh aborts on Ctrl+C rather than reporting a network failure. It
+      # ran on that PR solely because tests/user_flows/** changed; an
+      # install.sh-only change would have skipped it entirely. Third time this
+      # list has been found incomplete — see the two notes above.
+      - "install.sh"
       - "pyproject.toml"
       - "uv.lock"
       - ".github/actions/setup-uv-python/**"
@@ -76,6 +82,9 @@ jobs:
                 # skipped this whole job — wheel step included. These live tests
                 # drive the real proxy daemon; the two lists must agree.
                 src/worthless/proxy/*) relevant=true ;;
+                # worthless-ixca: same pairing rule — install.sh's live SIGINT
+                # tests are the only behavioural guard on its signal handling.
+                install.sh) relevant=true ;;
                 pyproject.toml|uv.lock) relevant=true ;;
                 .github/actions/setup-uv-python/*) relevant=true ;;
                 .github/workflows/user-flows.yml) relevant=true ;;

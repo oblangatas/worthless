@@ -10,6 +10,8 @@
 #   30  conflicting pipx-installed worthless detected
 #   40  unexpected internal failure (uv install crash, smoke-test failed)
 #   50  byte-integrity mismatch (CDN-poisoned download — CI MUST NOT auto-retry)
+#   128+N  killed by signal N (130 = Ctrl+C). NOT an app code — the guarantee
+#          is that an interrupt never reports 10 or 50. (worthless-ixca)
 
 set -eu
 
@@ -18,6 +20,21 @@ EXIT_PLATFORM=20
 EXIT_PIPX_CONFLICT=30
 EXIT_INTERNAL=40
 EXIT_INTEGRITY=50
+
+# worthless-ixca. A POSIX trap that does not exit RESUMES the script, so Ctrl+C
+# used to clean up and then report exit 10 "network failure" on a deliberate
+# abort. `trap -` first stops EXIT double-firing; INT re-raises so a caller's
+# loop stops too (exit 130 alone does not propagate); HUP catches a dropped SSH.
+# Registered once — `trap` replaces rather than chains. Full rationale and the
+# proof for each choice: tests/user_flows/test_install_sigint_live.py.
+# Own these before arming, or an early `die` rm -rf's whatever the ENVIRONMENT
+# called tmpdir (verified: it deleted a real directory).
+tmpdir='' uv_install_err=''
+cleanup() { rm -rf "${tmpdir:-}" 2>/dev/null || :; rm -f "${uv_install_err:-}" 2>/dev/null || :; }
+trap 'cleanup' EXIT
+trap 'trap - EXIT INT HUP; cleanup; kill -INT $$; exit 130' INT
+trap 'trap - EXIT TERM HUP; cleanup; exit 143' TERM
+trap 'trap - EXIT HUP; cleanup; exit 129' HUP
 
 UV_VERSION="0.11.7"
 
@@ -306,7 +323,6 @@ ensure_uv() {
     fi
 
     tmpdir="$(mktemp -d 2>/dev/null || mktemp -d -t worthless-uv-XXXXXX)"
-    trap 'rm -rf "$tmpdir"' EXIT INT TERM
     installer="$tmpdir/uv-installer.sh"
 
     if ! curl --fail --silent --show-error --location \
@@ -418,14 +434,6 @@ install_or_upgrade_worthless() {
     # warning. Pass an explicit `.XXXXXX` template so both backends behave
     # quietly. (CodeRabbit catch on PR #148.)
     uv_install_err="$(mktemp 2>/dev/null || mktemp -t worthless-uv-install-err.XXXXXX)"
-    # POSIX trap REPLACES rather than chains, so re-include ensure_uv's
-    # tmpdir cleanup here. Without this, ensure_uv's downloaded installer
-    # tmpdir leaks every time install_or_upgrade_worthless runs (the common
-    # path for any non-fresh box). `${tmpdir:-}` guards the case where
-    # ensure_uv short-circuited (uv already at pinned version → never set
-    # tmpdir → `set -u` would barf without the default). (CodeRabbit catch.)
-    # shellcheck disable=SC2064  # expand uv_install_err NOW; tmpdir resolves at trap-fire time
-    trap "rm -rf \"\${tmpdir:-}\"; rm -f \"$uv_install_err\"" EXIT INT TERM
 
     if ! uv tool install --force "$spec" >/dev/null 2>"$uv_install_err"; then
         err "Failed to install ${spec}."
