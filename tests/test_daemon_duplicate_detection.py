@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -126,9 +127,20 @@ def cli_home(cli_env: dict[str, str]) -> Path:
 
 @pytest.fixture()
 def worthless_bin() -> str:
+    """The console script for THIS interpreter's venv.
+
+    worthless-0q7k: a bare ``shutil.which`` resolves whatever install is first
+    on PATH. Outside ``uv run`` that is a globally installed worthless, not the
+    code under test — verified returning ~/.local/bin/worthless while the
+    worktree venv sat unused. Anchor to sys.executable instead, and fail rather
+    than skip: a missing console script is a broken environment, not a reason
+    to report green.
+    """
+    candidate = Path(sys.executable).parent / "worthless"
+    if candidate.exists():
+        return str(candidate)
     found = shutil.which("worthless")
-    if found is None:
-        pytest.skip("worthless CLI not found on PATH")
+    assert found is not None, "worthless console script not found next to sys.executable or on PATH"
     return found
 
 
