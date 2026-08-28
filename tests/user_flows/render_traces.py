@@ -212,6 +212,45 @@ esac""",
             )
             result = run_install(bin_dir)
             command = ["sh", "./install.sh"]
+        elif name == "stale worthless on PATH":
+            # An older copy sitting ahead of the fresh install on PATH. The
+            # installer used to announce "Done! 'worthless' is on your PATH."
+            # here — true of the shadow, false of what it just installed — and
+            # then hand over `worthless lock`, which ran the wrong binary
+            # (WOR-597). This trace is the record of what the user now sees
+            # instead. The stub deliberately reports a LOWER version than the
+            # install so the transcript reads unambiguously.
+            write_happy_path_stubs(bin_dir, with_worthless=False)
+            write_stub(bin_dir, "worthless", 'echo "worthless 0.1.0"')
+            entry_point = bin_dir.parent / ".local" / "bin"
+            entry_point.mkdir(parents=True, exist_ok=True)
+            write_stub(entry_point, "worthless", 'echo "worthless 0.3.0"')
+            result = run_install(bin_dir)
+            command = ["sh", "./install.sh"]
+        elif name == "upgrade older uv tool install":
+            # `uv tool list` already reports worthless, so install.sh must take
+            # the upgrade path rather than a fresh install. The uv stub fails
+            # loudly on `upgrade` being skipped, so a regression that silently
+            # reinstalls shows up in the transcript rather than passing quietly.
+            write_happy_path_stubs(bin_dir)
+            write_stub(
+                bin_dir,
+                "uv",
+                """case "$1" in
+  --version) echo "uv 0.11.7" ;;
+  tool) shift; case "$1" in
+    list) echo "worthless v0.2.0" ;;
+    install) echo "installed $3" ;;
+    upgrade) echo "upgraded $3" ;;
+    dir) echo "${UV_TOOL_BIN_DIR:-${XDG_BIN_HOME:-$HOME/.local/bin}}" ;;
+    *) echo "uv tool: unhandled: $*" >&2; exit 1 ;;
+  esac ;;
+  run) echo "worthless 0.3.0" ;;
+  *) echo "uv: unhandled: $*" >&2; exit 1 ;;
+esac""",
+            )
+            result = run_install(bin_dir)
+            command = ["sh", "./install.sh"]
         elif name == "manual uninstall current limitation":
             write_stub(
                 bin_dir,
@@ -332,7 +371,9 @@ def build_install_lifecycle() -> Journey:
         title="Install, Reinstall, Manual Uninstall Guidance",
         summary=(
             "The installer succeeds with and without persistent PATH setup, re-running a "
-            "pinned install is a no-op, failure paths keep actionable diagnostics visible, "
+            "pinned install is a no-op, an older copy shadowing the install is named "
+            "rather than silently overridden, failure paths keep actionable diagnostics "
+            "visible, "
             "and uninstall is currently documented as the manual `uv tool uninstall worthless` "
             "command plus platform cleanup notes until WOR-435 ships a first-class command."
         ),
@@ -340,6 +381,8 @@ def build_install_lifecycle() -> Journey:
     runner.run_install_case("fresh install with persistent PATH")
     runner.run_install_case("fresh install without persistent PATH")
     runner.run_install_case("reinstall pinned version already installed")
+    runner.run_install_case("stale worthless on PATH")
+    runner.run_install_case("upgrade older uv tool install")
     runner.run_install_case(
         "pipx conflict shows uninstall guidance",
         expect_exit=lambda code: code == 30,
