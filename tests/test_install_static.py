@@ -1268,3 +1268,33 @@ class TestPlantedBinariesCannotWin:
                 f'{fn} must compare against the literal "1"; a looser test '
                 f'(-n, != "", case-insensitive) is bypassable. got:\n{body}'
             )
+
+    def test_cleanup_cannot_delete_an_inherited_directory(self) -> None:
+        """The traps must own their variables before arming (worthless-ixca).
+
+        ``cleanup`` is live from the line after it is defined, but ``tmpdir`` and
+        ``uv_install_err`` are not assigned until ``ensure_uv`` and
+        ``install_or_upgrade_worthless`` — hundreds of lines later. Until then
+        ``${tmpdir:-}`` reads whatever the ENVIRONMENT exported under that name,
+        and every early exit (unsupported platform, pipx conflict) fires cleanup.
+
+        Introduced by moving trap registration to the top; impossible before,
+        because the trap was armed immediately after the assignment. Verified as a
+        real deletion::
+
+            env tmpdir=$T/victim sh install.sh   # unsupported OS -> die 20
+            -> $T/victim removed
+
+        Found by adversarial review, not by the suite. A static check because the
+        functional repro deletes a directory to prove itself, which is a poor
+        thing to run in CI.
+        """
+        text = INSTALL_SH.read_text()
+        init = text.index("tmpdir='' uv_install_err=''")
+        first_trap = text.index("\ntrap ")
+        assert init < first_trap, (
+            "tmpdir/uv_install_err must be initialised BEFORE the first trap is "
+            "armed, or an early exit rm -rf's an inherited value"
+        )
+        cleanup_at = text.index("cleanup() {")
+        assert init < cleanup_at, "initialise before cleanup is defined, for clarity"

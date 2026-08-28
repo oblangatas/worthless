@@ -997,7 +997,12 @@ def test_interrupting_a_real_install_does_not_report_a_network_failure(
         # 2s is comfortably inside the Astral download on a warm runner and
         # before it completes; the assertions do not depend on exactly where it
         # lands, only that the script was interrupted while working.
-        script = 'timeout -s INT --preserve-status 2 sh /w/install.sh; echo "IXCA-RC=$?"'
+        # busybox `timeout` has NO --preserve-status: passing it makes timeout exit 1
+        # WITHOUT EVER RUNNING install.sh, and the negative assertions below then
+        # pass vacuously. That is exactly what this arm did until a review caught
+        # it, so the flag is selected per shell rather than assumed.
+        flag = "" if shell == "busybox-ash" else "--preserve-status "
+        script = f'timeout -s INT {flag}2 sh /w/install.sh; echo "IXCA-RC=$?"'
         run = subprocess.run(  # noqa: S603
             [  # noqa: S607
                 "docker",
@@ -1029,6 +1034,12 @@ def test_interrupting_a_real_install_does_not_report_a_network_failure(
             f"'CDN-poisoned download - CI MUST NOT auto-retry'.\n{out[-800:]}"
         )
         assert rc != 0, f"an interrupted install reported success.\n{out[-800:]}"
+        # Pin 130 exactly. Negative-only assertions are how the busybox arm passed
+        # while never executing the script at all.
+        assert rc == 130, (
+            f"expected 130 (128+SIGINT) from a real interrupted install on {shell}; "
+            f"got {rc}.\n{out[-800:]}"
+        )
         assert "Done!" not in out, f"install ran to completion after SIGINT.\n{out[-800:]}"
     finally:
         subprocess.run(  # noqa: S603

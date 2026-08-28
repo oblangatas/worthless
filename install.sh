@@ -27,6 +27,9 @@ EXIT_INTEGRITY=50
 # loop stops too (exit 130 alone does not propagate); HUP catches a dropped SSH.
 # Registered once — `trap` replaces rather than chains. Full rationale and the
 # proof for each choice: tests/user_flows/test_install_sigint_live.py.
+# Own these before arming, or an early `die` rm -rf's whatever the ENVIRONMENT
+# called tmpdir (verified: it deleted a real directory).
+tmpdir='' uv_install_err=''
 cleanup() { rm -rf "${tmpdir:-}" 2>/dev/null || :; rm -f "${uv_install_err:-}" 2>/dev/null || :; }
 trap 'cleanup' EXIT
 trap 'trap - EXIT INT HUP; cleanup; kill -INT $$; exit 130' INT

@@ -180,12 +180,15 @@ class TestInterruptAbortsTheInstaller:
         ``subprocess`` reports signal death as a negative returncode.
         """
         rc, out, _ = _run_and_interrupt()
-        assert rc < 0 or rc == 130, (
-            "expected death by SIGINT (negative returncode) or the conventional "
-            f"130; got {rc}. A plain exit code hides the interrupt from the caller.\n{out[-600:]}"
+        # Assert the SIGNAL, not "signal or 130". The looser form accepted the very
+        # alternative the docstring argues against: deleting `kill -INT $$` and
+        # leaving a bare `exit 130` passed all six tests. Under a PTY (not PID 1)
+        # the re-raise always lands, so this is exact.
+        assert rc == -signal.SIGINT, (
+            f"expected death by SIGINT (returncode {-signal.SIGINT}); got {rc}. "
+            "A plain `exit 130` stops this script but does not propagate — a "
+            f"caller's loop runs the next iteration anyway.\n{out[-600:]}"
         )
-        if rc < 0:
-            assert rc == -signal.SIGINT, f"died by signal {-rc}, expected SIGINT"
 
     def test_the_temp_dir_is_cleaned_up(self) -> None:
         """Aborting must not trade a hung install for a leaked directory."""
