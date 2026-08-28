@@ -861,46 +861,87 @@ def test_install_failure_empty_stderr_still_shows_banner(tmp_path: Path) -> None
 # ---------------------------------------------------------------------------
 
 
-def test_install_trap_preserves_ensure_uv_tmpdir_cleanup() -> None:
-    """install_or_upgrade_worthless's trap must keep ensure_uv's tmpdir cleanup.
+def test_install_registers_signal_traps_once_and_they_abort() -> None:
+    """Replaces test_install_trap_preserves_ensure_uv_tmpdir_cleanup (worthless-ixca).
 
-    POSIX `trap CMD SIGNAL` REPLACES (not chains) the previously registered
-    trap for that signal. ensure_uv() registers an EXIT trap that cleans up
-    the downloaded-installer tmpdir; if install_or_upgrade_worthless()
-    registers a fresh EXIT trap without re-including that cleanup, the
-    tmpdir leaks every time install_or_upgrade_worthless runs (i.e. always,
-    on the common path of any non-fresh box).
+    THE OLD INVARIANT, and why it is gone. POSIX `trap CMD SIGNAL` REPLACES (not
+    chains) the previous trap for that signal. install.sh used to register traps
+    in TWO places — ensure_uv and install_or_upgrade_worthless — so the second
+    silently discarded the first, and the tmpdir leaked on every non-fresh box.
+    The old test guarded that by asserting the second directive re-included the
+    first's cleanup. It was a correct guard on a fragile arrangement.
 
-    Static check (per feedback_extract_and_test): grep the actual on-disk
-    install.sh and assert the install_or_upgrade_worthless trap line
-    references BOTH tmpdir AND uv_*_err. The functional repro would need
-    to force ensure_uv through the full mktemp-d path (no uv on PATH at
-    all) — heavy stub setup for a 1-line invariant. Static check catches
-    every regression mode that matters: someone re-overwriting the trap
-    without chaining. (CodeRabbit catch on PR #148.)
+    That fragility is now removed rather than guarded: cleanup is one function and
+    the traps are registered ONCE near the top. There is no second registration to
+    forget to chain. So the assertion changes from "the two directives agree" to
+    "there is only one registration site, and it aborts".
+
+    WHAT THE HANDLERS MUST DO, each proven in
+    tests/user_flows/test_install_sigint_live.py against the real script under a
+    real PTY:
+
+    * `trap -` FIRST in each handler. Without it the EXIT trap fires too and
+      cleanup runs twice under /bin/sh (dash runs it once — this also erases that
+      divergence).
+    * INT RE-RAISES the signal instead of `exit 130`. Both stop this script, but
+      only signal death propagates: a caller running `for … do sh install.sh; done`
+      continues to the next iteration after a plain exit, and aborts after a
+      re-raise. The trailing `exit 130` is an unreachable fallback.
+    * HUP is trapped. A dropped SSH session mid `curl | sh` is common and
+      previously leaked the temp dir, since only EXIT/INT/TERM were handled.
+
+    Static check (per feedback_extract_and_test): read the real on-disk install.sh
+    rather than restating it, so this cannot drift from the script.
     """
     install_sh = INSTALL_SH.read_text()
+    trap_lines = [ln.strip() for ln in install_sh.splitlines() if ln.strip().startswith("trap ")]
 
-    # Find the trap line inside install_or_upgrade_worthless. The function
-    # contains a single trap directive; locate it by searching for the
-    # uv_install_err reference (unique to install_or_upgrade_worthless).
-    trap_lines = [
-        line
-        for line in install_sh.splitlines()
-        if line.lstrip().startswith("trap ") and "uv_install_err" in line
-    ]
-    assert len(trap_lines) == 1, (
-        f"expected exactly one trap directive referencing uv_install_err in "
-        f"install.sh; found {len(trap_lines)}: {trap_lines!r}"
+    # One registration site: every trap directive sits in the same contiguous block.
+    idxs = [i for i, ln in enumerate(install_sh.splitlines()) if ln.strip().startswith("trap ")]
+    assert idxs, "install.sh registers no traps at all"
+    assert idxs[-1] - idxs[0] == len(idxs) - 1, (
+        "trap directives are no longer contiguous — install.sh has gone back to "
+        f"registering in more than one place, which POSIX trap REPLACES silently. "
+        f"lines: {idxs}"
     )
-    trap_line = trap_lines[0]
 
-    # Both cleanups must be present in the same directive.
-    assert "tmpdir" in trap_line, (
-        f"install_or_upgrade_worthless's EXIT trap dropped ensure_uv's "
-        f"tmpdir cleanup — POSIX trap REPLACES, must chain explicitly. "
-        f"got: {trap_line!r}"
+    # Parse the SIGNAL LIST — the tokens after the handler's closing quote — not
+    # the whole line. The INT handler contains "trap - EXIT INT HUP" in its own
+    # disarm list, so a naive `"HUP" in line` reports HUP as handled even when the
+    # HUP trap has been deleted. That false pass was caught by mutation testing.
+    def _signals(line: str) -> set[str]:
+        body_end = line.rfind("'")
+        return set(line[body_end + 1 :].split()) if body_end != -1 else set()
+
+    handled = {sig for ln in trap_lines for sig in _signals(ln)}
+    assert handled == {"EXIT", "INT", "TERM", "HUP"}, (
+        f"expected EXIT/INT/TERM/HUP to be handled; got {sorted(handled)}. "
+        "Dropping HUP leaks the temp dir when an SSH session dies mid-install."
     )
-    assert "uv_install_err" in trap_line, (
-        f"trap must clean the uv stderr tempfile. got: {trap_line!r}"
+
+    # Each signal handler must disarm itself first, then abort. EXIT must NOT exit.
+    for ln in trap_lines:
+        if ln.endswith(" EXIT"):
+            assert "exit" not in ln.replace("EXIT", ""), (
+                f"the EXIT trap must not exit — it fires on normal completion too: {ln}"
+            )
+            continue
+        assert ln.startswith("trap 'trap - "), (
+            f"signal handler must disarm itself first or cleanup double-fires: {ln}"
+        )
+        assert "cleanup" in ln, f"signal handler must still clean up: {ln}"
+
+    int_line = next(ln for ln in trap_lines if ln.endswith(" INT"))
+    assert "kill -INT $$" in int_line, (
+        "the INT handler must RE-RAISE the signal, not merely `exit 130`. An exit "
+        "code stops this script but does not propagate: a caller looping over "
+        f"installs runs the next iteration anyway. got: {int_line}"
     )
+
+    # Cleanup still covers both temporaries the two old directives covered.
+    cleanup_def = install_sh[install_sh.index("cleanup() {") :].split("\n", 1)[0]
+    for var in ("tmpdir", "uv_install_err"):
+        assert var in cleanup_def, (
+            f"cleanup() dropped ${var} — that is the leak the old two-directive "
+            f"chaining test existed to prevent. got: {cleanup_def}"
+        )
