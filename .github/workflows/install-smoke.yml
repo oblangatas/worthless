@@ -139,6 +139,49 @@ jobs:
           mkdir -p install-smoke-traces
           sh ./install.sh 2>&1 | tee install-smoke-traces/reinstall-${{ runner.os }}.log
 
+      # WOR-597: the unit tests for this live in tests/test_install_shadow_warning.py,
+      # which the `static` job runs on ubuntu only. Path resolution is exactly
+      # where macOS differs — /opt/homebrew/bin, /var symlinked to /private/var,
+      # a case-insensitive filesystem — so the shadow branch gets one real
+      # execution per matrix OS here. Same shape as the idempotency step above:
+      # run the actual script, assert on its actual output.
+      - name: Shadowed install must name both binaries and still exit 0
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p install-smoke-traces
+          real_bin="$(uv tool dir --bin)/worthless"
+          shadow_dir="$(mktemp -d)"
+          # A stub that would SCREAM if the installer ever executed it. The
+          # warning must be built from paths alone — running a binary that is
+          # squatting ahead of your install is the thing this feature refuses
+          # to do.
+          printf '#!/bin/sh\necho SHADOW_EXECUTED\necho "worthless 0.0.1-shadow"\n' \
+            > "$shadow_dir/worthless"
+          chmod +x "$shadow_dir/worthless"
+
+          set +e
+          PATH="$shadow_dir:$PATH" sh ./install.sh \
+            > install-smoke-traces/shadow-${{ runner.os }}.log 2>&1
+          rc=$?
+          set -e
+          log=install-smoke-traces/shadow-${{ runner.os }}.log
+          cat "$log"
+
+          test "$rc" -eq 0 || { echo "FAIL: shadowed install exited $rc, must be 0"; exit 1; }
+          grep -qF "$shadow_dir/worthless" "$log" \
+            || { echo "FAIL: the shadowing binary was not named"; exit 1; }
+          grep -qF "$real_bin" "$log" \
+            || { echo "FAIL: the installed binary was not named"; exit 1; }
+          if grep -q "SHADOW_EXECUTED" "$log"; then
+            echo "FAIL: the installer EXECUTED the shadowing binary"; exit 1
+          fi
+          if grep -q "is on your PATH" "$log"; then
+            echo "FAIL: still claims success while a different copy runs"; exit 1
+          fi
+          echo "OK: shadow named, not executed, exit 0"
+          rm -rf "$shadow_dir"
+
       - name: Upload install.sh terminal traces
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
