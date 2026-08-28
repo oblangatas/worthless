@@ -26,6 +26,17 @@
 set -euo pipefail
 
 PUBLISHERS="publish.yml publish-npm.yml publish-docker.yml deploy-worker.yml"
+
+# Jobs allowed to be non-green without holding the Release, as "<workflow>::<job>",
+# semicolon-separated. Keyed by workflow AND job name so an excuse cannot leak to a
+# different workflow that happens to name a job the same way.
+#
+# publish-docker.yml sets continue-on-error on this job itself, with the stated
+# reason that a visibility failure "keeps the RELEASE green (publish itself already
+# succeeded)". It genuinely failed on the real v0.3.12 while the image remained
+# publicly pullable. Blocking here would override a decision made deliberately in
+# that file; if that decision changes, remove continue-on-error there — not here.
+JOB_EXCUSES="publish-docker.yml::Flip GHCR package visibility to public"
 ready=true
 blocked=false
 
@@ -39,6 +50,36 @@ for wf in $PUBLISHERS; do
     '[.workflow_runs[] | select(.head_sha==$sha and .conclusion=="success")] | length')
   bad=$(printf '%s' "$runs" | jq --arg sha "$HEAD_SHA" \
     '[.workflow_runs[] | select(.head_sha==$sha and .status=="completed" and .conclusion!="success")] | length')
+  # A run's conclusion is not the whole truth. A job marked continue-on-error can
+  # be RED while the run reports success — publish-docker.yml does exactly that for
+  # its visibility job, deliberately. So a green run still has to have its jobs
+  # inspected before it counts as "really passed" (WOR-909 requirement 1).
+  #
+  # Allowlist by EXCEPTION, never enumeration. deploy-worker.yml's reusable-workflow
+  # calls report as "<caller job> / <callee job>", and the callee half is named in a
+  # different file — any expected-set of job names would break silently the moment
+  # that file is edited. Measured against the real v0.3.12 runs.
+  #
+  # `skipped` and a null conclusion are not failures. Treating skipped as failure
+  # would block a Release permanently the first time a conditional job is skipped.
+  if [ "$ok" -ge 1 ]; then
+    run_id=$(printf '%s' "$runs" | jq -r --arg sha "$HEAD_SHA" \
+      '[.workflow_runs[] | select(.head_sha==$sha and .conclusion=="success")][0].id')
+    jobs=$(gh api "/repos/${GH_REPO}/actions/runs/${run_id}/jobs?per_page=100" -X GET)
+    bad_jobs=$(printf '%s' "$jobs" | jq -r --arg wf "$wf" --arg allow "$JOB_EXCUSES" '
+      [ .jobs[]
+        | select(.conclusion != null and .conclusion != "success" and .conclusion != "skipped")
+        | select((($wf + "::" + .name) as $k | ($allow | split(";") | index($k))) == null)
+        | .name
+      ] | join(", ")')
+    if [ -n "$bad_jobs" ]; then
+      ok=0
+      ready=false
+      blocked=true
+      echo "::warning title=Release held::${wf} reports success for ${TAG} but these jobs did not pass: ${bad_jobs}. A job marked continue-on-error can fail while its run stays green, so the Release is held. Re-run the failed jobs on that run."
+    fi
+  fi
+
   if [ "$ok" -lt 1 ]; then
     ready=false
     if [ "$bad" -ge 1 ]; then

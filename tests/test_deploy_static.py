@@ -56,9 +56,43 @@ for p in "${pairs[@]}"; do [ "${p%%=*}" = "$wf" ] && spec="${p#*=}"; done
 if [ -z "$spec" ]; then echo '{"workflow_runs":[]}'; exit 0; fi
 st="${spec%%:*}"; cc="${spec#*:}"
 if [ "$cc" = "null" ]; then ccj=null; else ccj="\"$cc\""; fi
-run="{\"head_sha\":\"${HEAD_SHA}\",\"status\":\"${st}\",\"conclusion\":${ccj}}"
+run="{\"id\":\"${wf}\",\"head_sha\":\"${HEAD_SHA}\",\"status\":\"${st}\",\"conclusion\":${ccj}}"
 printf '{"workflow_runs":[%s]}\n' "$run"
 """
+
+# The runs shim above answers .../workflows/<wf>/runs. A jobs URL does not match
+# its dispatch at all, so before this the shim returned {"workflow_runs":[]} for a
+# jobs query — silently wrong rather than an error, which would have made every
+# job-level test vacuous.
+#
+# JOBS spec: "<wf>=<Job>:<concl>|<Job>:<concl>;<wf>=..."  (";" between
+# workflows, because real job names contain commas)
+# A workflow absent from JOBS reports one generic green job, so existing run-level
+# tests keep passing unchanged.
+_FANIN_JOBS_SHIM = r"""
+jobs_path=""
+for a in "$@"; do case "$a" in */actions/runs/*/jobs*) jobs_path="$a";; esac; done
+if [ -n "$jobs_path" ]; then
+  rid=$(printf '%s' "$jobs_path" | sed -E 's#.*/actions/runs/([^/]+)/jobs.*#\1#')
+  jspec=""
+  IFS=';' read -ra jpairs <<<"${JOBS:-}"
+  for p in "${jpairs[@]}"; do [ "${p%%=*}" = "$rid" ] && jspec="${p#*=}"; done
+  [ -z "$jspec" ] && jspec="generic:success"
+  printf '%s' "$jspec" | jq -Rc '
+    split("|")
+    | map(
+        (. | split(":")) as $parts
+        | {name: $parts[0], status: "completed",
+           conclusion: (if $parts[1] == "null" then null else $parts[1] end)}
+      )
+    | {jobs: .}'
+  exit 0
+fi
+"""
+
+# The jobs arm must be tried FIRST: a jobs URL also contains "/actions/", and the
+# runs arm's sed would mangle it into a nonsense workflow name.
+_FANIN_GH_SHIM = _FANIN_GH_SHIM.replace('path=""\n', _FANIN_JOBS_SHIM + '\npath=""\n', 1)
 
 
 # ------------------------------------------------------------------
@@ -1938,7 +1972,7 @@ class TestReleaseFaninBehaviour:
     )
 
     @staticmethod
-    def _run(tmp_path, runs_spec: str):
+    def _run(tmp_path, runs_spec: str, jobs_spec: str = ""):
         bindir = tmp_path / "bin"
         bindir.mkdir()
         gh = bindir / "gh"
@@ -1954,6 +1988,7 @@ class TestReleaseFaninBehaviour:
             "TAG": "v9.9.9",
             "HEAD_SHA": "deadbeef",
             "RUNS": runs_spec,
+            "JOBS": jobs_spec,
         }
         proc = subprocess.run(
             ["bash", str(REPO_ROOT / ".github" / "scripts" / "release-fanin.sh")],
@@ -2093,10 +2128,83 @@ class TestReleaseFaninBehaviour:
         assert ready == "false"
         assert rc == 0
 
+    # ------------------------------------------------------------------
+    # install.sh pin ↔ pyproject version invariant (WOR-598, option iii guard)
+    # ------------------------------------------------------------------
 
-# ------------------------------------------------------------------
-# install.sh pin ↔ pyproject version invariant (WOR-598, option iii guard)
-# ------------------------------------------------------------------
+    # ---- job-level polling (WOR-909 requirement 1) -------------------------
+    #
+    # A run's conclusion is not the whole truth. publish-docker.yml marks its
+    # `visibility` job continue-on-error BY DESIGN, so that job can be red while
+    # the run reports success. Trusting the run alone means a Release can be cut
+    # for a workflow that half-worked.
+    #
+    # The rule is allowlist-by-exception, never enumeration: every job must be
+    # green EXCEPT ones explicitly excused. Enumerating the expected jobs would
+    # break silently, because deploy-worker.yml's reusable-workflow calls report
+    # as "<caller> / <callee>" where the callee half lives in a different file.
+    # Measured on the real v0.3.12 runs.
+
+    VISIBILITY_JOB = "Flip GHCR package visibility to public"
+
+    def test_a_failed_job_blocks_even_when_the_run_says_success(self, tmp_path):
+        """The case run-level polling cannot see."""
+        ready, rc, out = self._run(
+            tmp_path,
+            self.ALL_GREEN,
+            jobs_spec="publish.yml=Build distribution:success|Publish to PyPI:failure",
+        )
+        assert ready == "false", (
+            "a job inside publish.yml failed, yet the fan-in called the release ready. "
+            "The run conclusion says success; only job-level polling can see this."
+        )
+        assert rc == 1
+
+    def test_the_excused_visibility_job_does_not_block(self, tmp_path):
+        """publish-docker's visibility job is continue-on-error on purpose.
+
+        It genuinely failed on the real v0.3.12 release while the image stayed
+        publicly pullable. Blocking on it would have withheld a Release from a
+        good release.
+        """
+        ready, rc, _ = self._run(
+            tmp_path,
+            self.ALL_GREEN,
+            jobs_spec=(
+                "publish-docker.yml=Build, scan, and push multi-arch image:success"
+                f"|{self.VISIBILITY_JOB}:failure"
+            ),
+        )
+        assert ready == "true", (
+            f"{self.VISIBILITY_JOB!r} is excused by design — its own workflow sets "
+            "continue-on-error so a visibility failure keeps the release green. "
+            "Blocking on it inverts a deliberate decision made in another file."
+        )
+        assert rc == 0
+
+    def test_a_skipped_job_does_not_block(self, tmp_path):
+        """Skipped is not failed. Treating it as failure blocks a Release forever."""
+        ready, rc, _ = self._run(
+            tmp_path,
+            self.ALL_GREEN,
+            jobs_spec="deploy-worker.yml=Deploy to Cloudflare:success|Wire probes:skipped",
+        )
+        assert ready == "true"
+        assert rc == 0
+
+    def test_the_excuse_is_scoped_to_its_own_workflow(self, tmp_path):
+        """A job excused in publish-docker must not be excused elsewhere."""
+        ready, rc, _ = self._run(
+            tmp_path,
+            self.ALL_GREEN,
+            jobs_spec=f"publish.yml=Build distribution:success|{self.VISIBILITY_JOB}:failure",
+        )
+        assert ready == "false", (
+            "the visibility excuse leaked to publish.yml. The allowlist is keyed by "
+            "workflow AND job name; a bare job-name match would excuse any workflow "
+            "that happens to name a job the same way."
+        )
+        assert rc == 1
 
 
 class TestInstallPinMatchesPyproject:
