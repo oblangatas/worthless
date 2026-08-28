@@ -385,7 +385,18 @@ describe("body integrity — install.sh shape and bounded size (H-08)", () => {
     });
     expect(res.status).toBe(200);
     const body = await res.text();
-    expect(body.length).toBeLessThan(26_400);
+    //   - WOR-597 (shadow warning): 26.4 KB -> 31 KB. install.sh now compares
+    //     the binary it installed against what the caller's PATH resolves, and
+    //     when they differ names both files instead of announcing success for
+    //     one it did not install. The bytes are three helpers (canonical_path
+    //     walks symlinks because `readlink -f` is GNU-only; sanitize_for_display
+    //     strips control bytes so a crafted dir name cannot erase the warning;
+    //     shadowing_worthless_path holds the guards) plus the warning block
+    //     itself. Comments were cut by ~1.6 KB before this bump was proposed —
+    //     the reasoning lives in tests/test_install_shadow_warning.py and the
+    //     PR, not in a file users download on every install. Slack is ~55 bytes,
+    //     as tight as the 23 bytes this ceiling left before.
+    expect(body.length).toBeLessThan(31_000);
   });
 
   it("install-script body Content-Length header matches actual byte length", async () => {
