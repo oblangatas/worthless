@@ -46,6 +46,20 @@ fi
 
 tag="v${version}"
 
+# --- 0. Is the local tag guard installed? ------------------------------------
+# Warn, never block: this check is redundant with the guard itself and with CI's
+# verify-tag.sh, and a blocking check here would invent a new way to not ship.
+# It exists because an uninstalled guard is otherwise silent -- and the release
+# script is the one thing guaranteed to run at the moment it matters.
+_hooks_dir=$(git config --get core.hooksPath || true)
+[ -n "$_hooks_dir" ] || _hooks_dir="$(git rev-parse --git-common-dir)/hooks"
+if [ ! -x "$_hooks_dir/reference-transaction" ]; then
+    echo "WARNING: the tag guard is not installed ($_hooks_dir/reference-transaction)."
+    echo "  A bare 'git tag' will not be refused on this machine. See RELEASING.md."
+    echo "  Install it with: ./scripts/install-git-hooks.sh"
+    echo
+fi
+
 # --- 2. Preflight checks -----------------------------------------------------
 
 # Must be on main
