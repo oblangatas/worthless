@@ -1298,3 +1298,19 @@ class TestPlantedBinariesCannotWin:
         )
         cleanup_at = text.index("cleanup() {")
         assert init < cleanup_at, "initialise before cleanup is defined, for clarity"
+
+        # Ordering alone is a shape check, not an invariant. Adversarial review
+        # found the escape: add a NEW variable to cleanup that is not on the init
+        # line — `rm -rf "${cachedir:-}"` — and the whole suite stayed green while
+        # `env cachedir=$T/victim sh install.sh` deleted the directory. The bug
+        # class was restored with 75/75 passing. So pin the SET, not the order.
+        init_line = text[init : text.index("\n", init)]
+        owned = set(re.findall(r"(\w+)=''", init_line))
+        body = text[cleanup_at : text.index("\n", cleanup_at)]
+        used = set(re.findall(r"\$\{(\w+):-\}", body))
+        assert used == owned, (
+            "every variable cleanup dereferences must be owned on the init line, or "
+            "an early exit rm -rf's an inherited value under that name.\n"
+            f"  cleanup uses: {sorted(used)}\n  init owns:    {sorted(owned)}\n"
+            f"  unowned:      {sorted(used - owned)}"
+        )

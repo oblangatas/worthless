@@ -1043,5 +1043,8 @@ def test_interrupting_a_real_install_does_not_report_a_network_failure(
         assert "Done!" not in out, f"install ran to completion after SIGINT.\n{out[-800:]}"
     finally:
         subprocess.run(  # noqa: S603
-            ["docker", "rmi", "-f", tag],  # noqa: S607, capture_output=True, check=False, timeout=120
+            ["docker", "rmi", "-f", tag],  # noqa: S607
+            capture_output=True,
+            check=False,
+            timeout=120,
         )
