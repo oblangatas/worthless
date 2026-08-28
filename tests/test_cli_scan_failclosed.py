@@ -246,3 +246,80 @@ class TestPreCommitScansStagedFiles:
         assert "No API keys found" not in out, (
             f"scan claimed a clean result it could not substantiate; output:\n{out}"
         )
+
+
+class TestPreCommitReadsTheIndexNotTheWorkingTree:
+    """worthless-2kuy follow-up: scope AND content must come from the index.
+
+    The first fix took scope from `git diff --cached` but read CONTENT off
+    disk. Those disagree, and each disagreement let a key reach a commit past a
+    green hook — the exact symptom the ticket exists to kill. All three were
+    measured on real repos before this guard existed.
+    """
+
+    def _repo(self, path: Path) -> None:
+        import subprocess
+
+        for args in (
+            ["init", "-q"],
+            ["config", "user.email", "t@t.t"],
+            ["config", "user.name", "t"],
+        ):
+            subprocess.run(["git", "-C", str(path), *args], check=True, capture_output=True)  # noqa: S607
+
+    def _git(self, path: Path, *args: str) -> None:
+        import subprocess
+
+        subprocess.run(["git", "-C", str(path), *args], check=True, capture_output=True)  # noqa: S607
+
+    def test_staged_then_deleted_from_disk_is_caught(self, tmp_path: Path, monkeypatch) -> None:
+        # The blob is in the index and WILL be committed; the file is gone from
+        # disk, so an is_file() check would skip it.
+        self._repo(tmp_path)
+        (tmp_path / "s.py").write_text(f"OPENAI_API_KEY={fake_openai_key()}\n")
+        self._git(tmp_path, "add", "s.py")
+        (tmp_path / "s.py").unlink()
+        monkeypatch.chdir(tmp_path)
+
+        result = runner.invoke(app, ["scan", "--pre-commit"])
+        assert result.exit_code == 1, (
+            f"a staged key whose file was deleted from disk still enters history; "
+            f"output:\n{result.stdout}{result.stderr}"
+        )
+
+    def test_staged_then_cleaned_on_disk_is_caught(self, tmp_path: Path, monkeypatch) -> None:
+        # Classic index/worktree divergence: stage the secret, then tidy the
+        # file. The commit carries the secret; the disk copy is innocent.
+        self._repo(tmp_path)
+        (tmp_path / "c.py").write_text(f"OPENAI_API_KEY={fake_openai_key()}\n")
+        self._git(tmp_path, "add", "c.py")
+        (tmp_path / "c.py").write_text("nothing secret here\n")
+        monkeypatch.chdir(tmp_path)
+
+        result = runner.invoke(app, ["scan", "--pre-commit"])
+        assert result.exit_code == 1, (
+            f"scan read the clean disk copy instead of the staged blob; "
+            f"output:\n{result.stdout}{result.stderr}"
+        )
+
+    def test_renamed_file_with_appended_key_is_caught(self, tmp_path: Path, monkeypatch) -> None:
+        # --diff-filter=ACM excludes R, so a rename+append returned an EMPTY
+        # file list: the hook scanned nothing and reported clean.
+        self._repo(tmp_path)
+        (tmp_path / "big.txt").write_text("line\n" * 40)
+        self._git(tmp_path, "add", "big.txt")
+        self._git(tmp_path, "commit", "-qm", "base")
+        self._git(tmp_path, "mv", "big.txt", "renamed.txt")
+        with (tmp_path / "renamed.txt").open("a") as fh:
+            fh.write(f"OPENAI_API_KEY={fake_openai_key()}\n")
+        self._git(tmp_path, "add", "renamed.txt")
+        monkeypatch.chdir(tmp_path)
+
+        result = runner.invoke(app, ["scan", "--pre-commit"])
+        out = " ".join((result.stdout + result.stderr).split())
+        assert result.exit_code == 1, (
+            f"a renamed file's appended key slipped through; output:\n{out}"
+        )
+        assert "renamed.txt" in out, (
+            f"the finding must name the staged path, not the temp copy; output:\n{out}"
+        )
