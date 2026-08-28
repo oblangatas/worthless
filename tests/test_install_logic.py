@@ -973,6 +973,16 @@ def test_a_half_finished_install_repairs_itself_on_the_next_run(tmp_path: Path) 
     entry point to actually EXIST, not merely for a version string to match.
     `uv tool dir --bin` is uv's own answer for where it put it, and honours
     UV_TOOL_BIN_DIR / XDG_BIN_HOME, which install.sh deliberately does not scrub.
+
+    KNOWN LIMIT, measured rather than assumed. Because those two variables are
+    unscrubbed, someone who can set UV_TOOL_BIN_DIR to a directory containing any
+    executable named `worthless` makes the new condition true and restores the
+    old skip. Compared against origin/main under exactly that env, both report
+    "already installed" and perform ZERO forced installs — so this is a ceiling on
+    how much the fix buys, NOT a regression: before the fix the fast-path keyed on
+    the version alone, so it skipped in that case regardless. The fix repairs the
+    ordinary interrupted install; it does not defend against an attacker who
+    already controls the environment. Do not cite it as if it did.
     """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -990,7 +1000,7 @@ case "$1" in
   tool) shift; case "$1" in
     install|upgrade) echo "ok" ;;
     list) echo "worthless v{pinned}" ;;
-    dir) echo "$HOME/.local/bin" ;;
+    dir) echo "${{UV_TOOL_BIN_DIR:-${{XDG_BIN_HOME:-$HOME/.local/bin}}}}" ;;
     *) exit 1 ;;
   esac ;;
   run) echo "worthless {pinned}" ;;
@@ -1044,7 +1054,7 @@ case "$1" in
   tool) shift; case "$1" in
     install|upgrade) echo "ok" ;;
     list) echo "worthless v{pinned}" ;;
-    dir) echo "$HOME/.local/bin" ;;
+    dir) echo "${{UV_TOOL_BIN_DIR:-${{XDG_BIN_HOME:-$HOME/.local/bin}}}}" ;;
     *) exit 1 ;;
   esac ;;
   run) echo "worthless {pinned}" ;;
@@ -1069,4 +1079,128 @@ esac""",
     )
     assert "already installed" in (result.stdout + result.stderr), (
         f"expected the 'already installed' fast-path message.\n{result.stdout[-400:]}"
+    )
+
+
+def test_a_present_but_broken_entry_point_still_repairs(tmp_path: Path) -> None:
+    """The state that actually happens — and that a stat-only guard misses.
+
+    An earlier version of this fix tested `[ -x ... ]`: the entry point exists and
+    is executable. Adversarial review measured the real timing on this machine and
+    it is the wrong artifact::
+
+        uv-receipt.toml            14:11:43
+        ~/.local/bin/worthless     14:11:43   <- shim lands WITH the receipt
+        site-packages/worthless    14:11:44   <- package finalises AFTER
+
+    So the window a stat closes (receipt without shim) is *thinner* than the one
+    it leaves open (shim present, package incomplete). Interrupt uv in the wider
+    window and you get an executable shim that cannot import — `-x` passes, the
+    fast-path fires, `smoke_test` dies at exit 40, and every subsequent run does
+    the same. The unrepairable trap, moved one layer deeper rather than removed.
+
+    Measured before the fix::
+
+        shim present + executable + broken -> forced installs: 0, exit 40
+
+    So the guard RUNS it — `"$bin" --version` — which is what smoke_test already
+    does a few lines later, so it costs no new concept.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    home = tmp_path
+    pinned = read_install_pin()
+    write_happy_path_stubs(bin_dir)
+    write_stub(
+        bin_dir,
+        "uv",
+        f"""printf 'uv %s\\n' "$*" >> "$HOME/uv-invocations.log"
+case "$1" in
+  --version) echo "uv 0.11.7" ;;
+  tool) shift; case "$1" in
+    install|upgrade) echo "ok" ;;
+    list) echo "worthless v{pinned}" ;;
+    dir) echo "${{UV_TOOL_BIN_DIR:-${{XDG_BIN_HOME:-$HOME/.local/bin}}}}" ;;
+    *) exit 1 ;;
+  esac ;;
+  run) echo "worthless {pinned}" ;;
+  *) exit 1 ;;
+esac""",
+    )
+    # Present, executable — and broken, exactly as an interrupted uv leaves it.
+    entry = home / ".local" / "bin" / "worthless"
+    entry.parent.mkdir(parents=True, exist_ok=True)
+    entry.write_text("#!/bin/sh\necho 'ModuleNotFoundError: worthless' >&2\nexit 1\n")
+    entry.chmod(0o755)
+
+    result = run_install(bin_dir)
+    log_path = home / "uv-invocations.log"
+    log = log_path.read_text() if log_path.exists() else ""
+
+    assert "tool install --force" in log, (
+        "the entry point exists and is executable but does not RUN, and install.sh "
+        "still took the fast path. A stat-only guard cannot see this — it is the "
+        "wider of the two interruption windows, and leaves the user permanently "
+        f"stuck at exit 40.\nuv invocations:\n{log}\nstderr:\n{result.stderr[-400:]}"
+    )
+
+
+def test_the_fast_path_looks_where_uv_actually_put_the_binary(tmp_path: Path) -> None:
+    """UV_TOOL_BIN_DIR relocates the entry point — the guard must follow it.
+
+    install.sh deliberately does NOT scrub UV_TOOL_BIN_DIR or XDG_BIN_HOME (see
+    the env-scrub block at the top, and smoke_test's comment for worthless-dc26):
+    they are how a user legitimately relocates uv's bin directory, and guessing
+    ``~/.local/bin`` would kill a good install on any box that sets either.
+
+    So the fast-path asks `uv tool dir --bin` rather than assuming. Without this
+    case that claim is untested: a mutation hardcoding ``$HOME/.local/bin`` passed
+    every other test here, because HOME and the default bin dir coincide in the
+    fixtures. Adversarial review found exactly that escape.
+
+    Healthy install, relocated bin dir -> the fast-path must still short-circuit.
+    A guard that hardcodes the default looks in the wrong place, finds nothing,
+    and reinstalls on every run — breaking the WOR-317 no-op guarantee for
+    precisely the users who customised their setup.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    home = tmp_path
+    pinned = read_install_pin()
+    relocated = tmp_path / "elsewhere" / "bin"
+    relocated.mkdir(parents=True)
+
+    write_happy_path_stubs(bin_dir)
+    write_stub(
+        bin_dir,
+        "uv",
+        f"""printf 'uv %s\\n' "$*" >> "$HOME/uv-invocations.log"
+case "$1" in
+  --version) echo "uv 0.11.7" ;;
+  tool) shift; case "$1" in
+    install|upgrade) echo "ok" ;;
+    list) echo "worthless v{pinned}" ;;
+    dir) echo "${{UV_TOOL_BIN_DIR:-${{XDG_BIN_HOME:-$HOME/.local/bin}}}}" ;;
+    *) exit 1 ;;
+  esac ;;
+  run) echo "worthless {pinned}" ;;
+  *) exit 1 ;;
+esac""",
+    )
+    # The binary lives ONLY in the relocated dir — nothing at the default path.
+    entry = relocated / "worthless"
+    entry.write_text(f"#!/bin/sh\necho 'worthless {pinned}'\n")
+    entry.chmod(0o755)
+    assert not (home / ".local" / "bin" / "worthless").exists()
+
+    result = run_install(bin_dir, env_extra={"UV_TOOL_BIN_DIR": str(relocated)})
+    log_path = home / "uv-invocations.log"
+    log = log_path.read_text() if log_path.exists() else ""
+
+    assert "tool install --force" not in log, (
+        "the fast-path did not find the entry point at the relocated "
+        "UV_TOOL_BIN_DIR, so it reinstalled on a healthy box. The guard must ask "
+        "`uv tool dir --bin` rather than assuming ~/.local/bin — that assumption "
+        f"breaks the no-op guarantee for anyone who relocates it.\n{log}\n"
+        f"{result.stderr[-300:]}"
     )
