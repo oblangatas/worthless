@@ -6,17 +6,21 @@ import asyncio
 import contextlib
 import json
 import os
+import shutil
 import stat
+import subprocess  # nosec B404
 import sys
 import tempfile
 import time
 from collections import defaultdict
-from collections.abc import Callable
+from dataclasses import replace
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import typer
 
 from worthless.cli.bootstrap import get_home
+from worthless.cli.safe_rewrite import _BASENAME_ALLOWLIST
 from worthless.cli.code_scanner import CodeFinding, scan_for_hardcoded_provider_urls
 from worthless.cli.console import get_console
 from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary
@@ -54,6 +58,85 @@ SCAN_TIME_BUDGET_S = 30.0
 # a pre-commit hook can tell the cases apart. Keep this constant in lockstep
 # with the human stderr block in ``_format_skipped_human``.
 SCAN_INCOMPLETE_EXIT_CODE = 2
+
+
+def _git_index_names(work_tree: Path) -> list[str] | None:
+    """Paths staged for commit, or ``None`` if the question can't be answered."""
+    try:
+        # ``git`` from PATH is intentional — pinning breaks Windows/WSL.
+        result = subprocess.run(  # nosec B603,B607
+            [  # noqa: S607
+                "git",
+                "-C",
+                str(work_tree),
+                "diff",
+                "--cached",
+                "--name-only",
+                # ACMR, not ACM: R (rename) is a real staged change and may
+                # carry appended content. Excluding it returned an EMPTY list
+                # for `git mv x y` + append-key — reproducing the very bug this
+                # module exists to fix. D (delete) stays out: a deleted file
+                # contributes no content to the commit.
+                "--diff-filter=ACMR",
+                "-z",
+            ],
+            capture_output=True,
+            text=False,  # bytes; -z is NUL-delimited → non-ASCII names survive
+            check=False,
+            timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    return [os.fsdecode(raw) for raw in result.stdout.split(b"\x00") if raw]
+
+
+def _collect_staged_paths(tmp_root: Path) -> list[Path] | None:
+    """Materialise the STAGED CONTENT of each staged file under *tmp_root*.
+
+    worthless-2kuy: git invokes pre-commit hooks with zero arguments, so the
+    hook has to ask what is being committed. It must also read the right BYTES.
+    Scope comes from the index; content used to come from the working tree, and
+    those disagree — measured, all three committing a key past a green hook:
+
+      * `git add s.py; rm s.py`      -> index has the key, no file on disk
+      * stage key, then clean file   -> index has the key, disk copy is clean
+      * `git mv a b` + append key    -> ACM returned nothing at all
+
+    So content is read from the index (`git show :path`), not from disk.
+    ``None`` means the question could not be answered — the caller MUST fail
+    closed. An empty list is a real answer: an empty or merge commit.
+    """
+    root = _find_git_dir()
+    if root is None:
+        return None
+    work_tree = root.parent
+
+    names = _git_index_names(work_tree)
+    if names is None:
+        return None
+
+    staged: list[Path] = []
+    for name in names:
+        dest = tmp_root / name
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            blob = subprocess.run(  # nosec B603,B607
+                ["git", "-C", str(work_tree), "show", f":{name}"],  # noqa: S607
+                capture_output=True,
+                text=False,
+                check=False,
+                timeout=10,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return None
+        if blob.returncode != 0:
+            # A staged path we cannot read is not a path we may wave through.
+            return None
+        dest.write_bytes(blob.stdout)
+        staged.append(dest)
+    return staged
 
 
 def _find_git_dir() -> Path | None:
@@ -125,12 +208,76 @@ def _collect_deep_paths(explicit_paths: list[Path]) -> tuple[list[Path], Path | 
     return paths, tmp_path
 
 
-def _scan_verdict_line(protected: int, unprotected: int, total: int, broken: int) -> str:
+def _exposure_noun(files: Sequence[str]) -> tuple[str, str]:
+    """Describe WHERE the exposed keys are, and what can be done about it.
+
+    `lock` rewrites a file in place, and its basename allowlist accepts only the
+    nine `.env`-family names — so "Run `worthless lock`" is followable advice for
+    a `.env` and refused-by-design for `app.py`. Hardcoding both the noun and the
+    remedy was survivable while scan mostly read `.env` files; the pre-commit
+    hook (worthless-2kuy) made staged SOURCE files the common case.
+
+    Returns ``(where, remedy)``.
+    """
+    names = sorted({Path(f).name for f in files})
+    lockable = [n for n in names if n in _BASENAME_ALLOWLIST]
+
+    # A filename is attacker-controlled and this string reaches a terminal, so
+    # it gets the same treatment as every other path printed by this module
+    # (see f.file at the finding lines). The allowlist check above runs on the
+    # RAW name — sanitising first could turn a non-.env name into a lockable
+    # one and hand back advice that lock will refuse.
+    if names and len(lockable) == len(names):
+        where = sanitise_for_message(names[0]) if len(names) == 1 else f"{len(names)} .env files"
+        return where, " Run `worthless lock`."
+    if len(names) == 1:
+        return sanitise_for_message(names[0]), " Move it to a .env file, then run `worthless lock`."
+    return f"{len(names)} files", " Move them to a .env file, then run `worthless lock`."
+
+
+def _summary_line(total: int, protected: int, unprotected: int, broken: int) -> str:
+    """Trailing count line; the broken segment only appears when there are orphans."""
+    line = f"Found {total} keys: {protected} protected, {unprotected} unprotected"
+    return f"{line}, {broken} broken" if broken else line
+
+
+def _orphan_lines(orphans: Sequence[EnrollmentRecord]) -> list[str]:
+    """HF5: dedicated section for broken DB rows + recovery hint.
+
+    Section header carries the canonical PROBLEM_PHRASE; per-row drops it to
+    avoid the redundant "can't restore <alias> ... BROKEN" double-up.
+    """
+    if not orphans:
+        return []
+    out = ["", f"{PROBLEM_PHRASE.capitalize()} these keys (.env line deleted):"]
+    out.extend(f"  {o.key_alias}  BROKEN  ({o.var_name} -> {o.env_path})" for o in orphans)
+    out.append(f"  Run `{FIX_PHRASE}` to clean up.")
+    return out
+
+
+def _has_lockable_exposure(findings: Sequence[ScanFinding]) -> bool:
+    """True if any exposed finding sits in a file `lock` will actually accept.
+
+    lock rewrites in place and refuses any basename outside the .env family, so
+    "Run: worthless lock" is only followable advice when one of these exists.
+    """
+    return any(Path(f.file).name in _BASENAME_ALLOWLIST for f in findings if not f.is_protected)
+
+
+def _scan_verdict_line(
+    protected: int,
+    unprotected: int,
+    total: int,
+    broken: int,
+    files: Sequence[str] = (),
+) -> str:
     """WOR-779: the one-line verdict scan leads with (verdict-first)."""
     if unprotected > 0:
+        where, remedy = _exposure_noun(files)
+        location = f" in {where}" if where else ""
         return (
             f"{protected} of {total} keys protected — "
-            f"{unprotected} still exposed in .env. Run `worthless lock`."
+            f"{unprotected} still exposed{location}.{remedy}"
         )
     if broken:
         return (
@@ -194,24 +341,17 @@ def _format_human(
         else:
             unprotected_count += 1
 
-    # HF5: dedicated section for broken DB rows + recovery hint.
-    # Section header carries the canonical PROBLEM_PHRASE; per-row drops
-    # it to avoid the redundant "can't restore <alias> ... BROKEN" double-up.
-    if orphans:
-        lines.append("")
-        lines.append(f"{PROBLEM_PHRASE.capitalize()} these keys (.env line deleted):")
-        for o in orphans:
-            lines.append(f"  {o.key_alias}  BROKEN  ({o.var_name} -> {o.env_path})")
-        lines.append(f"  Run `{FIX_PHRASE}` to clean up.")
+    lines.extend(_orphan_lines(orphans))
 
     total = len(findings)
     lines.append("")
-    summary = f"Found {total} keys: {protected_count} protected, {unprotected_count} unprotected"
-    if orphans:
-        summary += f", {len(orphans)} broken"
-    lines.append(summary)
+    lines.append(_summary_line(total, protected_count, unprotected_count, len(orphans)))
 
-    if unprotected_count > 0:
+    # Only point at lock when lock can actually act: its basename allowlist
+    # refuses anything outside the .env family, so this line is unfollowable
+    # for a key in app.py. The verdict line above already carries the
+    # move-it-first remedy in that case.
+    if unprotected_count > 0 and _has_lockable_exposure(findings):
         if is_tty:
             lines.append("Run: worthless lock")
         else:
@@ -221,7 +361,16 @@ def _format_human(
     # detail. scan is the only surface that sees plaintext-in-.env, so the
     # honest exposure count lives here — status defers to it.
     lines.insert(0, "")
-    lines.insert(0, _scan_verdict_line(protected_count, unprotected_count, total, len(orphans)))
+    lines.insert(
+        0,
+        _scan_verdict_line(
+            protected_count,
+            unprotected_count,
+            total,
+            len(orphans),
+            files=[f.file for f in findings if not f.is_protected],
+        ),
+    )
 
     return "\n".join(lines) + "\n"
 
@@ -279,7 +428,20 @@ def _install_hook() -> None:
         content = hook_path.read_text()
         if marker in content:
             return  # already installed
-        hook_path.write_text(content + snippet)
+        # worthless-2kuy: `exec` REPLACES the shell process, so anything after
+        # it is unreachable. The pre-commit framework's generated hook ends in
+        # `exec ... hook-impl`, so a blind append installed a check that could
+        # never run — the same false confidence this ticket exists to kill.
+        # Insert above the first exec instead; hooks without one still append.
+        lines = content.splitlines(keepends=True)
+        exec_at = next(
+            (i for i, line in enumerate(lines) if line.lstrip().startswith("exec ")),
+            None,
+        )
+        if exec_at is None:
+            hook_path.write_text(content + snippet)
+        else:
+            hook_path.write_text("".join(lines[:exec_at]) + snippet + "".join(lines[exec_at:]))
     else:
         hook_path.write_text(f"#!/bin/sh\n{snippet}")
 
@@ -695,11 +857,31 @@ def register_scan_commands(app: typer.Typer) -> None:
         disable_core_dumps(strict=False)
 
         tmp_file: Path | None = None
+        staged_root: Path | None = None
         try:
             # Collect files to scan
             explicit = list(paths) if paths else []
             if pre_commit:
-                scan_paths = explicit
+                # Git passes the hook zero arguments, so with no explicit paths
+                # scan must determine the staged set itself. None = could not
+                # determine → refuse; [] = genuinely nothing staged (empty or
+                # merge commit) → proceed and report clean honestly.
+                if explicit:
+                    scan_paths = explicit
+                else:
+                    staged_root = Path(tempfile.mkdtemp(prefix="worthless-staged-"))
+                    staged = _collect_staged_paths(staged_root)
+                    if staged is None:
+                        raise WorthlessError(
+                            ErrorCode.SCAN_ERROR,
+                            "pre-commit hook could not determine which files are "
+                            "staged, so nothing was checked. Your commit was NOT "
+                            "verified.\n"
+                            "  \u2022 Run inside a git work tree, or\n"
+                            "  \u2022 Scan explicitly: `worthless scan <file>...`",
+                            exit_code=2,
+                        )
+                    scan_paths = staged
             elif deep:
                 scan_paths, tmp_file = _collect_deep_paths(explicit)
             else:
@@ -721,6 +903,17 @@ def register_scan_commands(app: typer.Typer) -> None:
                 deadline=deadline,
                 skipped=skipped,
             )
+
+            # Staged content was materialised under a temp root; report the
+            # paths the user actually staged, not where we happened to put a
+            # copy of the blob.
+            if staged_root is not None:
+                findings = [
+                    replace(f, file=str(Path(f.file).relative_to(staged_root)))
+                    if Path(f.file).is_relative_to(staged_root)
+                    else f
+                    for f in findings
+                ]
 
             # Count unprotected
             unprotected = [f for f in findings if not f.is_protected]
@@ -813,3 +1006,5 @@ def register_scan_commands(app: typer.Typer) -> None:
         finally:
             if tmp_file is not None:
                 tmp_file.unlink(missing_ok=True)
+            if staged_root is not None:
+                shutil.rmtree(staged_root, ignore_errors=True)
