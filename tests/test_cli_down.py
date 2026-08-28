@@ -22,6 +22,7 @@ from worthless.cli.process import (
     check_pid,
     pid_path,
     poll_health,
+    poll_health_pid,
     read_pid,
     write_pid,
 )
@@ -342,11 +343,6 @@ class TestDownWindows:
 
 
 # ---------------------------------------------------------------------------
-# JSON output
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
 # Integration: real process lifecycle
 # ---------------------------------------------------------------------------
 
@@ -368,7 +364,14 @@ def _worthless_bin() -> str:
 
 
 def _free_port() -> int:
-    """An ephemeral port the OS just confirmed is free."""
+    """An ephemeral port the OS just confirmed is free.
+
+    TOCTOU: the socket closes before the proxy binds, so a parallel xdist
+    worker could take the port in between. Collision is unlikely across the
+    ephemeral range, and it cannot cause a false PASS — but if it happens,
+    poll_health_pid resolves the OTHER worker's PID and the finally block
+    SIGKILLs their process group. Accepted; revisit if this test ever flakes.
+    """
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
@@ -382,7 +385,7 @@ def _port_in_use(port: int) -> bool:
 
 
 @pytest.mark.integration
-@pytest.mark.timeout(60)
+@pytest.mark.timeout(150)
 class TestDownIntegration:
     """Real background-proxy -> down lifecycle with actual processes.
 
@@ -408,12 +411,35 @@ class TestDownIntegration:
 
         try:
             pid = start_supervised_proxy(home, port, log_file, WorthlessConsole(quiet=True))
-            assert pid is not None, "supervised start returned no PID"
-            assert poll_health(port, timeout=30.0), (
+            # up.py:394 returns 0 — not None — when the health check times
+            # out, so `is not None` would accept a failed start.
+            assert pid is not None and pid > 1, (
+                f"supervised start did not yield a live PID (got {pid!r})"
+            )
+            assert poll_health(port, timeout=15.0), (
                 f"proxy never became healthy on {port}; log:\n"
                 f"{log_file.read_text() if log_file.exists() else '<no log>'}"
             )
             assert _port_in_use(port), "health passed but nothing is listening"
+
+            # Carried over from the pre-rewrite test. It never reached these
+            # (it skipped first), but this one runs, so it should assert them.
+            assert pf.exists(), "PID file should exist once the proxy is up"
+            info = read_pid(pf)
+            assert info is not None, "PID file is unreadable"
+            recorded_pid, recorded_port = info
+            assert recorded_port == port, (
+                f"PID file records port {recorded_port}, proxy is on {port}"
+            )
+
+            # The PID file must name the process ACTUALLY listening — this is
+            # the assumption `down` kills on. Everywhere else poll_health_pid
+            # is exercised it is mocked (test_cli_up.py:250, 291, 382); this
+            # is the only place it runs against a real process.
+            live_pid = poll_health_pid(port, timeout=15.0)
+            assert live_pid == recorded_pid, (
+                f"/healthz is served by {live_pid}, PID file says {recorded_pid}"
+            )
 
             down_result = subprocess.run(
                 [_worthless_bin(), "down"],
@@ -450,16 +476,6 @@ class TestDownIntegration:
                     os.killpg(os.getpgid(pid), signal.SIGKILL)
                 except (ProcessLookupError, PermissionError, OSError):
                     pass
-
-
-# ---------------------------------------------------------------------------
-# JSON output
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Integration: real process lifecycle
-# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
