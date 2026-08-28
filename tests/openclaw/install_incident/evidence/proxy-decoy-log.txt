@@ -1,0 +1,3 @@
+decoy bearer token detected for alias 'openai-ef7fa37d'
+decoy bearer token detected for alias 'openai-ef7fa37d'
+decoy bearer token detected for alias 'openai-ef7fa37d'

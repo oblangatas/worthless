@@ -5,21 +5,26 @@ from __future__ import annotations
 import os
 import sqlite3
 import stat
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from cryptography.fernet import Fernet
 
+from worthless.cli import bootstrap as boot
 from worthless.cli.bootstrap import (
     WorthlessHome,
     _init_db,
+    _shard_rows_present,
     acquire_lock,
     check_stale_lock,
     ensure_home,
+    resolve_home,
 )
-from worthless.cli.errors import WorthlessError
+from worthless.cli.errors import ErrorCode, WorthlessError
 
 
 @pytest.fixture(autouse=True)
@@ -27,6 +32,45 @@ def _force_file_fallback():
     """Force file fallback in all bootstrap tests for hermetic behavior."""
     with patch("worthless.cli.keystore.keyring_available", return_value=False):
         yield
+
+
+def _insert_shard_row(base: Path) -> None:
+    """Seed one real locked-.env: a ``shards`` row AND its ``enrollments`` row.
+
+    ``_shard_rows_present`` gates on ENROLLMENTS (real .env references), so a bare
+    shard alone is orphan junk that does not count — a realistic "recoverable data
+    present" fixture needs the enrollment too. ``CREATE TABLE IF NOT EXISTS`` is a
+    no-op against the real schema (bare dir or bootstrapped home alike).
+    """
+    conn = sqlite3.connect(str(base / "worthless.db"))
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS shards "
+        "(key_alias TEXT PRIMARY KEY, shard_b_enc BLOB, commitment BLOB, nonce BLOB, provider TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS enrollments "
+        "(id INTEGER PRIMARY KEY, key_alias TEXT, var_name TEXT, env_path TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO shards (key_alias, shard_b_enc, commitment, nonce, provider) "
+        "VALUES ('t', X'00', X'00', X'00', 'openai')"
+    )
+    conn.execute(
+        "INSERT INTO enrollments (key_alias, var_name, env_path) "
+        "VALUES ('t', 'OPENAI_API_KEY', '/proj/.env')"
+    )
+    conn.commit()
+    conn.close()
+
+
+def _empty_db(base: Path) -> None:
+    """Create a real, valid, EMPTY DB (the actual schema, zero rows).
+
+    Uses the production ``_init_db`` so ``ensure_home``'s own idempotent
+    ``_init_db`` call afterwards is a no-op — a hand-rolled fake-shaped table
+    would make that later call raise WRTLS-103 and mask the real assertion.
+    """
+    _init_db(WorthlessHome(base_dir=base))
 
 
 class TestEnsureHome:
@@ -265,3 +309,216 @@ class TestLocking:
         home.lock_file.touch()
         with pytest.raises(WorthlessError):
             check_stale_lock(home)
+
+
+class TestShardRowsPresent:
+    """WOR-716: the cheap row-emptiness probe that gates every detection decision."""
+
+    def test_no_db_file_returns_false(self, tmp_path: Path):
+        base = tmp_path / ".worthless"
+        base.mkdir()
+        assert _shard_rows_present(WorthlessHome(base_dir=base)) is False
+
+    def test_empty_tables_return_false(self, tmp_path: Path):
+        base = tmp_path / ".worthless"
+        base.mkdir()
+        _empty_db(base)
+        assert _shard_rows_present(WorthlessHome(base_dir=base)) is False
+
+    def test_real_row_returns_true(self, tmp_path: Path):
+        base = tmp_path / ".worthless"
+        base.mkdir()
+        _insert_shard_row(base)
+        assert _shard_rows_present(WorthlessHome(base_dir=base)) is True
+
+    def test_corrupt_db_still_present_fails_closed_true(self, tmp_path: Path):
+        """A present-but-unreadable DB is fail-closed True — never let corruption
+        masquerade as 'empty' and trigger a silent key regeneration."""
+        base = tmp_path / ".worthless"
+        base.mkdir()
+        (base / "worthless.db").write_bytes(b"this is not a sqlite database at all")
+        assert _shard_rows_present(WorthlessHome(base_dir=base)) is True
+
+    def test_db_vanishes_mid_read_returns_false(self, tmp_path: Path, monkeypatch):
+        """A DB deleted mid-read (a concurrent uninstall's rmtree) is 'gone',
+        not 'corrupt' — return False so a bystander process isn't hard-blocked
+        with a false orphaned-data diagnosis during an ordinary uninstall."""
+        base = tmp_path / ".worthless"
+        base.mkdir()
+        db = base / "worthless.db"
+        db.write_text("placeholder so the top-level exists() check passes")
+        home = WorthlessHome(base_dir=base)
+
+        def _boom(*_a, **_k):
+            db.unlink()  # simulate the concurrent rmtree finishing during our read
+            raise sqlite3.DatabaseError("database disk image is malformed")
+
+        monkeypatch.setattr(boot.sqlite3, "connect", _boom)
+        assert _shard_rows_present(home) is False
+
+    def test_opens_exactly_one_connection(self, tmp_path: Path, monkeypatch):
+        """Bounded DB cost (WOR-716 panel, brutus's cost-honesty finding):
+        one connection per call, not a hidden fan-out."""
+        base = tmp_path / ".worthless"
+        base.mkdir()
+        _insert_shard_row(base)
+        home = WorthlessHome(base_dir=base)
+        count = {"n": 0}
+        real_connect = boot.sqlite3.connect
+
+        def _counting(*a, **k):
+            count["n"] += 1
+            return real_connect(*a, **k)
+
+        monkeypatch.setattr(boot.sqlite3, "connect", _counting)
+        assert _shard_rows_present(home) is True
+        assert count["n"] == 1
+
+
+class TestHalfUninstalledDetection:
+    """WOR-716: ``ensure_home`` detects a half-uninstalled machine (a stale
+    ``.bootstrapped`` marker whose DB/key partially survived a failed uninstall)
+    instead of crashing later or silently minting a new key over orphaned rows.
+    """
+
+    def test_marker_absent_with_real_rows_raises_orphaned(self, tmp_path: Path):
+        """The headline guard: real shard rows but no marker means the key that
+        encrypted them is gone — mint a fresh one and they orphan forever.
+        Refuse (before any mint)."""
+        base = tmp_path / ".worthless"
+        base.mkdir(mode=0o700)
+        _insert_shard_row(base)  # rows, but NO .bootstrapped marker
+        with pytest.raises(WorthlessError) as exc:
+            ensure_home(base_dir=base)
+        assert exc.value.code == ErrorCode.ORPHANED_SHARD_DATA
+
+    def test_marker_absent_no_rows_proceeds_as_fresh(self, tmp_path: Path):
+        """True fresh-install regression guard: no marker, no rows → normal mint."""
+        home = ensure_home(base_dir=tmp_path / ".worthless")
+        assert home.bootstrapped_marker.exists()
+        assert home._adoption_note is None
+        assert home.fernet_key  # minted, readable
+
+    def test_provably_keyless_marker_is_silently_adopted(self, tmp_path: Path):
+        """Marker present, no rows, no env/file key (keyring off in this file =
+        provably keyless) → self-heal: unlink+rewrite the marker, mint a key,
+        set the disclosure note."""
+        base = tmp_path / ".worthless"
+        base.mkdir(mode=0o700)
+        base.joinpath(".bootstrapped").write_text("")
+        _empty_db(base)  # empty rows, and no fernet.key file → provably keyless
+        home = ensure_home(base_dir=base)
+        assert home._adoption_note is not None
+        assert "stale" in home._adoption_note.lower()
+        assert home.bootstrapped_marker.exists()  # rewritten after _init_db
+        assert home.fernet_key  # freshly minted, readable
+
+    def test_reenroll_after_adopt_is_not_misdiagnosed(self, tmp_path: Path):
+        """The bug brutus caught: after a silent adopt, a normal re-enrollment
+        (rows now exist) must NOT read as a broken install on the next call."""
+        base = tmp_path / ".worthless"
+        base.mkdir(mode=0o700)
+        base.joinpath(".bootstrapped").write_text("")
+        _empty_db(base)
+        first = ensure_home(base_dir=base)
+        assert first._adoption_note is not None  # adopted
+        _insert_shard_row(base)  # user re-enrolls → real rows now exist
+        second = ensure_home(base_dir=base)
+        assert second._adoption_note is None, "healthy re-enrolled install misdiagnosed"
+        assert second.fernet_key  # key still readable
+
+    def test_marker_present_no_rows_key_in_file_no_adopt(self, tmp_path: Path):
+        """A cheap on-disk key present → not keyless → no adopt, marker untouched,
+        key unchanged."""
+        base = tmp_path / ".worthless"
+        base.mkdir(mode=0o700)
+        base.joinpath(".bootstrapped").write_text("")
+        _empty_db(base)
+        key = Fernet.generate_key()
+        kf = base / "fernet.key"
+        kf.write_bytes(key)
+        kf.chmod(0o600)
+        home = ensure_home(base_dir=base)
+        assert home._adoption_note is None
+        assert bytes(home.fernet_key) == key  # unchanged, not re-minted
+
+    def test_rows_present_key_gone_defers_to_property_raising_orphaned(self, tmp_path: Path):
+        """Marker present + real rows + key gone → ensure_home does NOT raise
+        (fast path); the danger surfaces at the natural lazy key access."""
+        base = tmp_path / ".worthless"
+        ensure_home(base_dir=base)  # real bootstrap (real schema + file key)
+        _insert_shard_row(base)  # add a real row
+        (base / "fernet.key").unlink()  # key now gone everywhere (keyring off)
+        ensure_home(base_dir=base)  # must NOT raise — rows present → fast path
+        fresh = WorthlessHome(base_dir=base)  # cold cache
+        with pytest.raises(WorthlessError) as exc:
+            _ = fresh.fernet_key
+        assert exc.value.code == ErrorCode.ORPHANED_SHARD_DATA
+
+    def test_concurrent_ensure_home_on_adopt_state_is_safe(self, tmp_path: Path):
+        """Two real threads race ``ensure_home`` on a provably-keyless adopt
+        state (``threading.Barrier(2)``, the pattern proven by
+        ``test_concurrent_first_read_triggers_one_keychain_call``). Any failure
+        must be a clean LOCK_IN_PROGRESS; the final state is a single readable
+        key + marker present + zero orphaned rows."""
+        base = tmp_path / ".worthless"
+        base.mkdir(mode=0o700)
+        base.joinpath(".bootstrapped").write_text("")
+        _empty_db(base)
+
+        barrier = threading.Barrier(2)
+        results: list[WorthlessHome] = []
+        errors: list[WorthlessError] = []
+
+        def worker(_: object) -> None:
+            barrier.wait()
+            try:
+                results.append(ensure_home(base_dir=base))
+            except WorthlessError as e:
+                errors.append(e)
+
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            list(ex.map(worker, range(2)))
+
+        for e in errors:
+            assert e.code == ErrorCode.LOCK_IN_PROGRESS, f"unexpected error: {e}"
+        assert len(results) >= 1, "at least one ensure_home must succeed"
+        final = ensure_home(base_dir=base)
+        assert final.bootstrapped_marker.exists()
+        assert final.fernet_key  # exactly one consistent, readable key
+        assert _shard_rows_present(final) is False  # nothing orphaned
+
+    def test_ensure_home_respects_a_held_lock_on_adopt_path(self, tmp_path: Path):
+        """Deterministic lock proof: while the lock is held, the adopt path's
+        ``acquire_lock`` refuses cleanly rather than making a bad decision."""
+        base = tmp_path / ".worthless"
+        base.mkdir(mode=0o700)
+        base.joinpath(".bootstrapped").write_text("")
+        _empty_db(base)  # provably-keyless → adopt path tries to acquire the lock
+        with acquire_lock(WorthlessHome(base_dir=base)):
+            with pytest.raises(WorthlessError) as exc:
+                ensure_home(base_dir=base)
+            assert exc.value.code == ErrorCode.LOCK_IN_PROGRESS
+
+    def test_orphaned_message_never_offers_recovery(self):
+        """SR-04/05: never promise key recovery — only rotation + --force."""
+        low = boot._MSG_ORPHANED_SHARD_DATA.lower()
+        assert "recover" not in low
+        assert "rotate" in low
+        assert "uninstall --force" in low
+
+    def test_resolve_home_propagates_orphaned(self, tmp_path: Path, monkeypatch):
+        """resolve_home must NOT swallow ORPHANED into None — a half-uninstalled
+        machine must never read as 'nothing installed here'."""
+        base = tmp_path / ".worthless"
+        base.mkdir(mode=0o700)
+        _insert_shard_row(base)  # rows, no marker → ensure_home raises ORPHANED
+        monkeypatch.setenv("WORTHLESS_HOME", str(base))
+        with pytest.raises(WorthlessError) as exc:
+            resolve_home()
+        assert exc.value.code == ErrorCode.ORPHANED_SHARD_DATA
+
+    def test_resolve_home_still_returns_none_when_absent(self, tmp_path: Path, monkeypatch):
+        """Unchanged behavior: a genuinely-absent install is still None."""
+        monkeypatch.setenv("WORTHLESS_HOME", str(tmp_path / "not-installed"))
+        assert resolve_home() is None

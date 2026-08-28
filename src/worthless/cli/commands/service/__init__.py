@@ -1,0 +1,248 @@
+"""``worthless service`` — persistent proxy via launchd (macOS) or systemd (Linux)."""
+
+from __future__ import annotations
+
+import json
+import sys
+
+import typer
+
+from worthless.cli.bootstrap import WorthlessHome, get_home
+from worthless.cli.commands.service import launchd, systemd
+from worthless.cli.commands.service._common import (
+    ServiceState,
+    current_platform_backend_name,
+    preflight_service_install,
+    resolve_worthless_binary,
+)
+from worthless.cli.commands.service.proxy_state import detect_proxy_runtime
+from worthless.cli.console import get_console
+from worthless.cli.errors import error_boundary
+from worthless.cli.platform import fail_if_windows
+from worthless.cli.process import disable_core_dumps, resolve_port
+
+
+def _backend():
+    name = current_platform_backend_name()
+    if name == "launchd":
+        return launchd
+    return systemd
+
+
+def _print_service_banner(console, *, platform: str, port: int) -> None:
+    """Confirm the persistence guarantee a first-run service user needs.
+
+    ``worthless up`` dies on Ctrl+C; a service-managed proxy does not. Say so
+    explicitly — otherwise the user can't tell the two apart. Suppressed in
+    ``--json`` mode (machine output is emitted separately by the caller).
+    """
+    if console.json_mode:
+        return
+    console.print_success(f"Worthless proxy running as a {platform} service on 127.0.0.1:{port}.")
+    console.print_hint("Auto-restarts on crash and survives reboot — no `worthless up` needed.")
+    console.print_hint("Status: `worthless service status` · Stop: `worthless service stop`")
+
+
+def uninstall_service(home: WorthlessHome) -> None:
+    """Remove the installed launchd/systemd unit for *home*.
+
+    Public entrypoint so other commands (e.g. ``worthless uninstall``) can tear
+    down the service unit without reaching into the private ``_backend``. Platform
+    policy stays with the caller: the ``service uninstall`` command refuses on
+    Windows via ``fail_if_windows``, and ``worthless uninstall`` guards on
+    ``IS_WINDOWS`` — there is no unit to remove on Windows.
+    """
+    _backend().uninstall(home)
+
+
+def register_service_commands(app: typer.Typer) -> None:
+    """Register the ``service`` subcommand group."""
+    service_group = typer.Typer(
+        help="Install and manage a persistent proxy (launchd on macOS, systemd on Linux).",
+        no_args_is_help=True,
+    )
+    app.add_typer(service_group, name="service")
+
+    @service_group.command("install")
+    @error_boundary
+    def service_install(
+        port: int | None = typer.Option(
+            None, "--port", "-p", help="Proxy port (default: WORTHLESS_PORT or 8787)"
+        ),
+        yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+    ) -> None:
+        """Write platform unit, enable, start, and verify /healthz."""
+        fail_if_windows()
+        # strict=False (dupf.10): service management never reconstructs a key,
+        # but a first-run ensure_home() can create one. Never block a user from
+        # installing or stopping their service because a kernel lever was refused.
+        disable_core_dumps(strict=False)
+        console = get_console()
+        home = get_home()
+        backend = _backend()
+        binary = resolve_worthless_binary()
+        actual_port = resolve_port(port)
+
+        if not yes and not console.json_mode:
+            platform = current_platform_backend_name()
+            if not typer.confirm(
+                f"Install worthless proxy as a {platform} user service on port {actual_port}?",
+                default=True,
+            ):
+                raise typer.Exit(code=0)
+
+        preflight_service_install(home)
+        backend.install(home, port=port)
+        if console.json_mode:
+            if backend is launchd:
+                unit = str(launchd.plist_path())
+            else:
+                unit = str(systemd.unit_path())
+            sys.stdout.write(
+                json.dumps(
+                    {
+                        "installed": True,
+                        "platform": current_platform_backend_name(),
+                        "binary": str(binary),
+                        "port": actual_port,
+                        "unit_path": unit,
+                    }
+                )
+                + "\n"
+            )
+        else:
+            _print_service_banner(
+                console,
+                platform=current_platform_backend_name(),
+                port=actual_port,
+            )
+
+    @service_group.command("uninstall")
+    @error_boundary
+    def service_uninstall(
+        yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+    ) -> None:
+        """Stop service, deregister, and remove unit/plist."""
+        fail_if_windows()
+        # strict=False (dupf.10): service management never reconstructs a key,
+        # but a first-run ensure_home() can create one. Never block a user from
+        # installing or stopping their service because a kernel lever was refused.
+        disable_core_dumps(strict=False)
+        console = get_console()
+        home = get_home()
+        if not yes and not console.json_mode:
+            if not typer.confirm("Remove the worthless user service?", default=False):
+                raise typer.Exit(code=0)
+        uninstall_service(home)
+        if console.json_mode:
+            sys.stdout.write(json.dumps({"installed": False}) + "\n")
+        else:
+            console.print_success("Service uninstalled.")
+
+    @service_group.command("status")
+    @error_boundary
+    def service_status() -> None:
+        """Report service install state and proxy health."""
+        fail_if_windows()
+        # strict=False (dupf.10): service management never reconstructs a key,
+        # but a first-run ensure_home() can create one. Never block a user from
+        # installing or stopping their service because a kernel lever was refused.
+        disable_core_dumps(strict=False)
+        console = get_console()
+        home = get_home()
+        backend = _backend()
+        port = backend.installed_port() or resolve_port(None)
+        status = backend.detect_status(home, port)
+        runtime = detect_proxy_runtime(home, port=port)
+        if console.json_mode:
+            sys.stdout.write(
+                json.dumps(
+                    {
+                        "state": status.state.value,
+                        "healthy": status.healthy,
+                        "port": status.port,
+                        "unit_path": str(status.unit_path) if status.unit_path else None,
+                        "binary": status.binary,
+                        "detail": status.detail,
+                        "platform": current_platform_backend_name(),
+                        "proxy": {
+                            "running": runtime.running,
+                            "source": runtime.source,
+                            "pid": runtime.pid,
+                        },
+                    },
+                    indent=2,
+                )
+                + "\n"
+            )
+            return
+        label = {
+            ServiceState.NOT_INSTALLED: "not installed",
+            ServiceState.STOPPED: "stopped",
+            ServiceState.RUNNING: "running",
+            ServiceState.FAILED: "failed",
+        }[status.state]
+        console.print_hint(f"Service: {label} ({current_platform_backend_name()})")
+        if status.unit_path:
+            console.print_hint(f"  Unit: {status.unit_path}")
+        if status.binary:
+            console.print_hint(f"  Binary: {status.binary}")
+        console.print_hint(f"  Port: {status.port}")
+        console.print_hint(f"  Health: {'ok' if status.healthy else 'fail'}")
+        if status.detail:
+            console.print_warning(status.detail)
+
+    @service_group.command("start")
+    @error_boundary
+    def service_start() -> None:
+        """Start an installed service."""
+        fail_if_windows()
+        # strict=False (dupf.10): service management never reconstructs a key,
+        # but a first-run ensure_home() can create one. Never block a user from
+        # installing or stopping their service because a kernel lever was refused.
+        disable_core_dumps(strict=False)
+        backend = _backend()
+        backend.start(get_home())
+        # Show the port the installed unit actually binds, not the ambient
+        # WORTHLESS_PORT of this shell (which may differ from install time).
+        port = backend.installed_port() or resolve_port(None)
+        _print_service_banner(
+            get_console(),
+            platform=current_platform_backend_name(),
+            port=port,
+        )
+
+    @service_group.command("stop")
+    @error_boundary
+    def service_stop() -> None:
+        """Stop an installed service without removing it."""
+        fail_if_windows()
+        # strict=False (dupf.10): service management never reconstructs a key,
+        # but a first-run ensure_home() can create one. Never block a user from
+        # installing or stopping their service because a kernel lever was refused.
+        disable_core_dumps(strict=False)
+        _backend().stop(get_home())
+        get_console().print_success("Service stopped.")
+
+    @service_group.command("restart")
+    @error_boundary
+    def service_restart() -> None:
+        """Restart an installed service."""
+        fail_if_windows()
+        # strict=False (dupf.10): service management never reconstructs a key,
+        # but a first-run ensure_home() can create one. Never block a user from
+        # installing or stopping their service because a kernel lever was refused.
+        disable_core_dumps(strict=False)
+        _backend().restart(get_home())
+        get_console().print_success("Service restarted.")
+
+    @service_group.command("logs")
+    @error_boundary
+    def service_logs(
+        follow: bool = typer.Option(False, "--follow", "-f", help="Tail continuously"),
+    ) -> None:
+        """Show service logs (file on macOS, journal on Linux)."""
+        fail_if_windows()
+        # strict=False (dupf.10): see the sibling service commands above.
+        disable_core_dumps(strict=False)
+        _backend().tail_logs(get_home(), follow=follow)

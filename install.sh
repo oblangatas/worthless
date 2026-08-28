@@ -9,6 +9,7 @@
 #   20  unsupported platform (Windows native, macOS <11, glibc <2.17)
 #   30  conflicting pipx-installed worthless detected
 #   40  unexpected internal failure (uv install crash, smoke-test failed)
+#   50  byte-integrity mismatch (CDN-poisoned download — CI MUST NOT auto-retry)
 
 set -eu
 
@@ -16,6 +17,7 @@ EXIT_NETWORK=10
 EXIT_PLATFORM=20
 EXIT_PIPX_CONFLICT=30
 EXIT_INTERNAL=40
+EXIT_INTEGRITY=50
 
 UV_VERSION="0.11.7"
 
@@ -36,7 +38,7 @@ UV_VERSION="0.11.7"
 # latest", and does NOT defend against a compromised Worker/origin (which
 # would serve a bad script AND a bad pin together). Wheel-hash verification is
 # a tracked follow-up. Override with `WORTHLESS_VERSION=x.y.z curl … | sh`.
-WORTHLESS_VERSION_PIN="0.3.7"
+WORTHLESS_VERSION_PIN="0.3.12"
 
 # SHA256 of https://astral.sh/uv/${UV_VERSION}/install.sh — bump with UV_VERSION.
 ASTRAL_INSTALLER_SHA256="efed99618cb5c31e4e36a700ab7c3698e83c0ae0f3c336714043d0f932c8d32c"
@@ -45,9 +47,77 @@ ASTRAL_INSTALLER_URL="https://astral.sh/uv/${UV_VERSION}/install.sh"
 DOCS_URL="https://docs.wless.io"
 WINDOWS_DOCS_URL="https://docs.wless.io/install/wsl"
 
-# Force uv to use its own managed Python for fresh-box reproducibility.
-export UV_PYTHON_PREFERENCE="${UV_PYTHON_PREFERENCE:-only-managed}"
+# Hermetic install: ignore caller env. uv+pip+Astral honor ~48 redirect/MitM
+# vars across 11 attack classes — same lanes a poisoned rc/.envrc/workspace
+# ENV uses. Pin defaults; scrub env. Closes ENV vector only — repo-local
+# uv.toml / pyproject.toml [tool.uv] is A3's job. (WOR-673 / A2)
+# Index:        UV_INDEX{,_URL}, UV_DEFAULT_INDEX, UV_EXTRA_INDEX_URL, UV_INDEX_STRATEGY,
+#               UV_FIND_LINKS, PIP_{,EXTRA_}INDEX_URL, PIP_FIND_LINKS, PIP_NO_INDEX
+# Config:       UV_CONFIG_FILE, PIP_CONFIG_FILE
+# Cache:        UV_NO_CACHE, UV_OFFLINE
+# Anti-MitM:    PIP_TRUSTED_HOST, UV_INSECURE_HOST, UV_NATIVE_TLS,
+#               SSL_CERT_{FILE,DIR}, REQUESTS_CA_BUNDLE, CURL_CA_BUNDLE,
+#               PIP_CERT, PIP_CLIENT_CERT
+# Python src:   UV_PYTHON_INSTALL_MIRROR, UV_PYTHON_PREFERENCE (re-set below)
+# Auth:         UV_KEYRING_PROVIDER, PIP_KEYRING_PROVIDER
+# Astral install dir: UV_INSTALL_DIR, UV_UNMANAGED_INSTALL, INSTALLER_DOWNLOAD_URL
+# Python hijack: PYTHONPATH, PYTHONSTARTUP
+# Shell init:   BASH_ENV, ENV, CDPATH, GLOBIGNORE
+# Dynamic loader: LD_PRELOAD, LD_AUDIT, LD_LIBRARY_PATH (Linux), DYLD_INSERT_LIBRARIES,
+#               DYLD_LIBRARY_PATH, DYLD_FALLBACK_LIBRARY_PATH, DYLD_FRAMEWORK_PATH,
+#               DYLD_FORCE_FLAT_NAMESPACE (macOS). Classic .so/.dylib injection lane:
+#               attacker's lib loads into curl's process, intercepts open() to serve
+#               one file to sha256sum and a different one to sh — SHA pin bypassed.
+# Proxy aliases: ALL_PROXY, all_proxy, http_proxy, https_proxy (lowercase) — curl
+#               honors these in addition to HTTP{,S}_PROXY; same MitM lane but
+#               undocumented for users. Scrub the aliases; keep documented uppercase.
+# Keep:         HTTP{,S}_PROXY (legit corp egress, documented; user accepts MitM risk
+#               at their corporate gateway by setting them)
+unset \
+    UV_INDEX UV_INDEX_URL UV_DEFAULT_INDEX UV_EXTRA_INDEX_URL UV_INDEX_STRATEGY \
+    UV_FIND_LINKS \
+    PIP_INDEX_URL PIP_EXTRA_INDEX_URL PIP_FIND_LINKS PIP_NO_INDEX \
+    UV_CONFIG_FILE PIP_CONFIG_FILE \
+    UV_NO_CACHE UV_OFFLINE \
+    PIP_TRUSTED_HOST UV_INSECURE_HOST UV_NATIVE_TLS \
+    SSL_CERT_FILE SSL_CERT_DIR REQUESTS_CA_BUNDLE CURL_CA_BUNDLE \
+    PIP_CERT PIP_CLIENT_CERT \
+    UV_PYTHON_INSTALL_MIRROR UV_PYTHON_PREFERENCE \
+    UV_KEYRING_PROVIDER PIP_KEYRING_PROVIDER \
+    UV_INSTALL_DIR UV_UNMANAGED_INSTALL INSTALLER_DOWNLOAD_URL \
+    PYTHONPATH PYTHONSTARTUP \
+    BASH_ENV ENV CDPATH GLOBIGNORE \
+    LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH \
+    DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH DYLD_FALLBACK_LIBRARY_PATH \
+    DYLD_FRAMEWORK_PATH DYLD_FORCE_FLAT_NAMESPACE \
+    ALL_PROXY all_proxy http_proxy https_proxy
+
+# uv-managed Python, unconditional. The `:-default` pattern honored hostile
+# non-empty values (UV_PYTHON_PREFERENCE=system → install onto attacker-
+# controllable Python with sitecustomize.py hijack). Scrub above + hard set.
+export UV_PYTHON_PREFERENCE=only-managed
+
+# Capture caller's actual PATH BEFORE lockdown — used by `command_in_original_path`
+# to tell the user whether `worthless` is reachable in THEIR shell (not just in
+# our locked-down PATH). Capturing post-lockdown would lie to the user.
 ORIGINAL_PATH="${PATH:-}"
+
+# Caller PATH lockdown. A poisoned ~/evil/bin in $PATH wins over /usr/bin for
+# curl, sh, sha256sum, awk, mktemp, uv — every external call becomes RCE
+# regardless of how clean our env is, and the Astral SHA pin computed by
+# attacker's `sha256sum` is worthless. Prepend system dirs + the uv install
+# dir so legitimate binaries always outrank caller-controlled prefixes.
+# Strict parsing: only literal "1" disables. WORTHLESS_TRUST_PATH=true / yes /
+# 01 / "1 " / etc. all keep lockdown active — attacker can't bypass with a
+# typo-tolerant value. Test harness sets exact "1" to inject stubs.
+if [ "${WORTHLESS_TRUST_PATH:-}" != "1" ]; then
+    # Guard against HOME=/ (would yield //.local/bin) and HOME= (empty).
+    # `${HOME:-/root}` fires on unset OR empty per POSIX `:-` semantics.
+    home_for_path="${HOME:-/root}"
+    [ "$home_for_path" = "/" ] && home_for_path="/root"
+    PATH="/usr/bin:/bin:/usr/local/bin:${home_for_path}/.local/bin:${PATH:-}"
+    export PATH
+fi
 
 # --- Output helpers ----------------------------------------------------------
 
@@ -80,10 +150,48 @@ die() {
 }
 
 proxy_hints() {
-    printf "       Behind a proxy or corporate network? Try:\n" >&2
-    printf "         export HTTPS_PROXY=https://your-proxy:port\n" >&2
-    printf "         export UV_PYTHON_INSTALL_MIRROR=https://your-mirror/python-build-standalone\n" >&2
-    printf "         export SSL_CERT_FILE=/path/to/corp-bundle.pem\n" >&2
+    printf "       Behind a proxy or corporate network?\n" >&2
+    printf "         HTTP_PROXY / HTTPS_PROXY are honored — set those.\n" >&2
+    printf "         For private PyPI mirror, custom CA bundle, or alternate\n" >&2
+    printf "         Python source: edit install.sh directly. Env-var overrides\n" >&2
+    printf "         for index URL, cert bundle, and Python mirror are\n" >&2
+    printf "         deliberately scrubbed (WOR-673) — install corp CAs in the\n" >&2
+    printf "         system trust store instead of pointing SSL_CERT_FILE at them.\n" >&2
+}
+
+# --- Trusted binary resolution (worthless-rlio / worthless-v0tl) ----------------
+
+# The PATH lockdown outranks the caller only for commands that EXIST in the
+# trusted dirs — it keeps the caller's PATH as the tail by design. sha256sum is
+# in none of them on macOS, and uv is in none of them anywhere, so `command -v`
+# for either reaches an attacker's dir. Resolve inside an explicit list; never
+# fall back to PATH. uv is bounded to where it actually installs, since an
+# attacker owning those dirs already owns the tool being installed there.
+# Both honor WORTHLESS_TRUST_PATH exactly as the lockdown does: only the literal
+# "1" opts out, so a typo-tolerant value cannot bypass. That hatch already means
+# "trust the caller's PATH" and already disables the lockdown, so deferring to it
+# here adds no new weakening — it is what lets the test harness inject stubs.
+trusted_tool() {
+    if [ "${WORTHLESS_TRUST_PATH:-}" = "1" ]; then
+        command -v "$1" 2>/dev/null && return 0
+        return 1
+    fi
+    for d in /usr/bin /bin /usr/local/bin /usr/sbin /sbin /opt/homebrew/bin; do
+        [ -x "$d/$1" ] && { printf '%s' "$d/$1"; return 0; }
+    done
+    return 1
+}
+
+resolve_uv() {
+    if [ "${WORTHLESS_TRUST_PATH:-}" = "1" ]; then
+        command -v uv 2>/dev/null && return 0
+        return 1
+    fi
+    _h="${HOME:-/root}"; [ "$_h" = / ] && _h=/root
+    for d in "$_h/.local/bin" "$_h/.cargo/bin" /usr/bin /bin /usr/local/bin /opt/homebrew/bin; do
+        [ -x "$d/uv" ] && { printf '%s' "$d/uv"; return 0; }
+    done
+    return 1
 }
 
 # --- Platform detection ------------------------------------------------------
@@ -152,14 +260,33 @@ detect_linux_subenv() {
 # --- Conflict detection ------------------------------------------------------
 
 check_pipx_conflict() {
-    # Stop early: a pipx shim on PATH would mask the uv-installed binary.
-    if command -v pipx >/dev/null 2>&1; then
-        if pipx list 2>/dev/null | grep -qi "package worthless "; then
-            die "$EXIT_PIPX_CONFLICT" "Detected a pipx-installed worthless." \
-                "uv and pipx both manage tool isolation; running both is confusing." \
-                "Remove the pipx version, then re-run this installer:" \
-                "  pipx uninstall worthless"
-        fi
+    # Pipx MUST resolve from a trusted system dir before we exec it. An
+    # attacker-controlled pipx (e.g. ~/evil/bin/pipx on a poisoned PATH)
+    # would run as arbitrary code in this process during `pipx list` — RCE
+    # before any uv call. WOR-709. Known limit: trust is path-based, not
+    # ownership-based — an attacker who can already write to a trusted dir
+    # or plant a symlink there bypasses this; WOR-707 covers the broader
+    # absolute-path / ownership defense.
+    pipx_path="$(command -v pipx 2>/dev/null || true)"
+    # POSIX `${HOME:-/root}` fires on UNSET or NULL — HOME="" expands to /root.
+    home_for_path="${HOME:-/root}"
+    # Trusted set: distro system dirs, macOS/Linux Homebrew, MacPorts, user pip.
+    case "$pipx_path" in
+        "") return 0 ;;
+        /usr/bin/pipx|/bin/pipx|/usr/local/bin/pipx|/usr/sbin/pipx|/sbin/pipx) ;;
+        /opt/homebrew/bin/pipx|/opt/local/bin/pipx|/home/linuxbrew/.linuxbrew/bin/pipx) ;;
+        "$home_for_path/.local/bin/pipx") ;;
+        *)
+            warn "pipx detected at ${pipx_path} (outside trusted dirs); skipping conflict check"
+            warn "  → if you have a pipx-installed worthless, run \`pipx uninstall worthless\` first"
+            return 0
+            ;;
+    esac
+    if pipx list 2>/dev/null | grep -qi "package worthless "; then
+        die "$EXIT_PIPX_CONFLICT" "Detected a pipx-installed worthless." \
+            "uv and pipx both manage tool isolation; running both is confusing." \
+            "Remove the pipx version, then re-run this installer:" \
+            "  pipx uninstall worthless"
     fi
 }
 
@@ -167,8 +294,8 @@ check_pipx_conflict() {
 
 ensure_uv() {
     # Skip Astral installer entirely if uv is already at the pinned version.
-    if command -v uv >/dev/null 2>&1; then
-        existing_ver="$(uv --version 2>/dev/null | awk '{print $2}')"
+    if uv_bin="$(resolve_uv)"; then
+        existing_ver="$("$uv_bin" --version 2>/dev/null | awk '{print $2}')"
         if [ "$existing_ver" = "$UV_VERSION" ]; then
             ok "  uv ${UV_VERSION} already installed"
             return 0
@@ -191,19 +318,19 @@ ensure_uv() {
         exit "$EXIT_NETWORK"
     fi
 
-    if command -v sha256sum >/dev/null 2>&1; then
-        actual="$(sha256sum "$installer" | awk '{print $1}')"
-    elif command -v shasum >/dev/null 2>&1; then
-        actual="$(shasum -a 256 "$installer" | awk '{print $1}')"
+    if hasher="$(trusted_tool sha256sum)"; then
+        actual="$("$hasher" "$installer" | awk '{print $1}')"
+    elif hasher="$(trusted_tool shasum)"; then
+        actual="$("$hasher" -a 256 "$installer" | awk '{print $1}')"
     else
-        die "$EXIT_INTERNAL" "Neither sha256sum nor shasum found." \
+        die "$EXIT_INTERNAL" "No sha256sum or shasum in a trusted system directory." \
             "Cannot verify Astral installer integrity. Aborting for safety."
     fi
     if [ "$actual" != "$ASTRAL_INSTALLER_SHA256" ]; then
-        die "$EXIT_INTERNAL" "SHA256 mismatch on Astral installer ${UV_VERSION}." \
+        die "$EXIT_INTEGRITY" "SHA256 mismatch on Astral installer ${UV_VERSION}." \
             "expected: ${ASTRAL_INSTALLER_SHA256}" \
             "actual:   ${actual}" \
-            "Refusing to execute. Re-run later or report at ${DOCS_URL}."
+            "Refusing to execute. Do NOT retry; investigate or report at ${DOCS_URL}."
     fi
 
     UV_INSTALL_VERSION="$UV_VERSION" sh "$installer" >/dev/null 2>&1 || {
@@ -212,10 +339,11 @@ ensure_uv() {
         exit "$EXIT_NETWORK"
     }
 
-    PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+    uvh="${HOME:-/root}"; [ "$uvh" = / ] && uvh=/root
+    PATH="$uvh/.local/bin:$uvh/.cargo/bin:$PATH"
     export PATH
 
-    if ! command -v uv >/dev/null 2>&1; then
+    if ! resolve_uv >/dev/null 2>&1; then
         die "$EXIT_INTERNAL" "uv installed but not on PATH after bootstrap." \
             "Open a new shell and re-run, or add ~/.local/bin to PATH manually."
     fi
@@ -315,12 +443,15 @@ install_or_upgrade_worthless() {
 }
 
 smoke_test() {
-    # `uv run` works even before the user activates PATH — uv knows where
-    # it put the binary. Capture output so we can both verify the install
-    # AND display the resolved version without a second invocation.
-    if ! version_output="$(uv run --no-project worthless --version 2>/dev/null)"; then
+    # Ask uv where it put the entry point: `uv run` answers from a stale cache,
+    # and guessing ~/.local/bin misses when UV_TOOL_BIN_DIR/XDG_BIN_HOME move it
+    # (unscrubbed), killing a good install. Also beats a shadowing worthless on
+    # PATH. worthless-dc26.
+    worthless_bin="$(uv tool dir --bin 2>/dev/null)/worthless"
+    [ -x "$worthless_bin" ] || worthless_bin="$(command -v worthless 2>/dev/null || true)"
+    if ! version_output="$("$worthless_bin" --version 2>/dev/null)"; then
         die "$EXIT_INTERNAL" "worthless installed but failed to run." \
-            "Try: uv run --no-project worthless --version" \
+            "Try: worthless --version" \
             "Or:  worthless doctor"
     fi
     actual_ver="$(printf '%s' "$version_output" | awk '{print $2}' | head -1)"
@@ -457,7 +588,7 @@ main() {
         printf "  ${BOLD}Try after PATH:${RESET} cd your-project && worthless lock\n"
     fi
     printf "  ${BOLD}Audit script:${RESET}  curl worthless.sh?explain=1 | less\n"
-    printf "  ${BOLD}Source:${RESET}        https://github.com/shacharm2/worthless\n"
+    printf "  ${BOLD}Source:${RESET}        https://github.com/oblangatas/worthless\n"
     printf "\n"
     printf "  worthless lock rewrites .env, splits your API keys, and starts a\n"
     printf "  local proxy. Your app code doesn't change.\n"

@@ -19,6 +19,7 @@ from pathlib import Path
 import aiosqlite
 
 from worthless.storage.models import EncryptedShard
+from worthless.storage.sqlite import connect as sqlite_connect
 
 
 class ShardReader:
@@ -33,9 +34,24 @@ class ShardReader:
 
     @asynccontextmanager
     async def _connect(self) -> AsyncIterator[aiosqlite.Connection]:
-        async with aiosqlite.connect(self._db_path) as db:
+        async with sqlite_connect(self._db_path) as db:
             await db.execute("PRAGMA foreign_keys = ON")
             yield db
+
+    async def fetch_decoy_hashes(self) -> frozenset[str]:
+        """Return all RETIRED-decoy HMAC hex strings (WOR-640 startup preload).
+
+        These are HMAC-SHA256 values of shard-A halves that were retired when
+        their .env was unlocked. The proxy loads them once at startup and uses
+        ipc.mac() at request time to 401 a Bearer that matches one — a stolen
+        old .env replayed after rotation. The currently-active shard-A is NEVER
+        here (it is the legitimate Bearer), so live traffic is not blocked.
+        No key material — only the hex strings already stored in the DB.
+        """
+        async with self._connect() as db:
+            cursor = await db.execute("SELECT decoy_hash FROM retired_decoys")
+            rows = await cursor.fetchall()
+            return frozenset(row[0] for row in rows)
 
     async def fetch_encrypted(self, alias: str) -> EncryptedShard | None:
         """Return ciphertext-at-rest for *alias*, or ``None``.

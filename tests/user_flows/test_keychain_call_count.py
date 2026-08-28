@@ -26,6 +26,7 @@ Why this lives here, not in ``tests/test_bootstrap_keyring.py``:
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import keyring
@@ -35,6 +36,20 @@ from typer.testing import CliRunner
 from tests.helpers import fake_openai_key
 from worthless.cli.app import app
 from worthless.cli.keystore import delete_fernet_key, keyring_available
+
+# Real macOS Keychain access needs a GUI to answer the access prompt. On a headless
+# CI runner with a LOCKED login keychain, `worthless lock` blocks on that prompt
+# until the job times out (worthless-3ynb). The user-flows workflow now provisions
+# an ephemeral UNLOCKED keychain on macOS CI (WORTHLESS_TEST_KEYCHAIN_READY=1), so
+# these run there too (worthless-fc14). Locally (no CI) they always run.
+_ON_CI = os.environ.get("CI") is not None
+_KEYCHAIN_READY = os.environ.get("WORTHLESS_TEST_KEYCHAIN_READY") == "1"
+pytestmark = pytest.mark.skipif(
+    _ON_CI and not _KEYCHAIN_READY,
+    reason="real macOS Keychain test hangs on headless CI without an ephemeral "
+    "unlocked keychain (worthless-3ynb / worthless-fc14); run locally or on CI "
+    "with the keychain step",
+)
 
 
 @pytest.mark.user_flow

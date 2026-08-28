@@ -16,19 +16,69 @@ import asyncio
 from typing import Literal
 
 from worthless.cli.commands.doctor.registry import CheckContext, CheckResult
-from worthless.cli.process import resolve_port
+from worthless.cli.process import resolve_openclaw_proxy_base_url, resolve_port
 from worthless.openclaw import audit as _oc_audit
 from worthless.openclaw import integration as _oc_integration
+
+# WOR-516: surface the OpenClaw .bak recovery path so operators know where to
+# look if openclaw.json is damaged after a failed lock.
+#
+# WOR-599 adds the other half of the truth. OpenClaw writes these itself, as
+# verbatim copies of the config. Measured against the pinned image
+# (ghcr.io/openclaw/openclaw:2026.5.3-1), seeding a plaintext key, booting the
+# gateway, then rewriting the config the way lock does:
+#   * openclaw.json.bak(.1…4) — a 5-slot ring written pre-edit on every config
+#     write. OBSERVED: both .bak and .bak.1 still held the pre-lock key after
+#     the rewrite. This is the file that actually retains it.
+#     Do NOT tell users it "ages out after five writes": rotation runs only in
+#     OpenClaw's own writer (mutate.ts -> maintainConfigBackups). Worthless
+#     rewrites openclaw.json with its own _atomic_write_json (temp + os.replace),
+#     so lock/unlock cycles never rotate the ring. A user counting their own
+#     `worthless lock` runs would wrongly conclude the copy had aged out.
+#   * openclaw.json.last-good — promoted when the gateway observes a valid
+#     config. OBSERVED: re-promoted to the post-lock contents within seconds
+#     when the daemon was RUNNING. But promotion only happens when the daemon
+#     next observes the config, so if it is down at lock time (common — the user
+#     locks, then restarts) the pre-lock copy persists until it starts again.
+# If the config held a plaintext apiKey when these were written — the normal case
+# for anyone who used OpenClaw before installing Worthless — that key is still in
+# them after `worthless lock`. Recommending a restore from .bak without saying so
+# would have doctor contradict lock's "your key is protected".
+#
+# We do not delete them: they are daemon-owned, .bak is this very recovery path,
+# and removing one can leave OpenClaw unable to restart. Disclosure is the whole
+# control, which is why the wording is asserted by
+# tests/openclaw/test_config_backup_disclosure.py.
+_RECOVERY_NOTE_TEXT = (
+    "Recovery: if openclaw.json is damaged, restore from "
+    "~/.openclaw/openclaw.json.bak "
+    "(written by the openclaw daemon on each config change). "
+    "Note: these are verbatim copies of your config, so one written before you "
+    "locked still holds your original API key in plaintext — "
+    "openclaw.json.bak, .bak.1 …, and openclaw.json.last-good. Worthless does "
+    "not touch them: they are OpenClaw's own recovery files, and Worthless's "
+    "own writes do not rotate them. "
+    "Rotate that key at your provider — that is the only action that "
+    "invalidates a copy which may already have been synced or backed up "
+    "elsewhere. Deleting these files afterwards is cleanup, not a fix."
+)
 
 check_id = "openclaw"
 
 
-def _audit_gate_findings() -> list[dict]:
+def _audit_gate_findings(managed_aliases: set[str] | None, proxy_base_url: str) -> list[dict]:
     """Run the secrets audit gate and return doctor findings.
 
     Returns a list of finding dicts describing any exit-73 (plaintext) or
     exit-87 (subprocess failure) conditions that would block ``worthless lock``.
     Returns an empty list when the gate would pass.
+
+    ``managed_aliases`` (this machine's ``shards`` keys) lets the gate recognize
+    worthless's own inert shard-A (WOR-777) so doctor's prediction matches what
+    ``worthless lock`` would actually do — no false "key exposed" alarm on an
+    entry worthless created. ``None`` recognizes nothing (fail-safe).
+    ``proxy_base_url`` host-pins that recognition to the worthless proxy, so an
+    attacker baseUrl on a foreign host is never trusted (WOR-777 / brutus).
     """
     try:
         openclaw_bin = _oc_audit.resolve_openclaw_bin()
@@ -46,7 +96,9 @@ def _audit_gate_findings() -> list[dict]:
         ]
 
     try:
-        _, classification = _oc_audit.run_and_classify(openclaw_bin)
+        _, classification = _oc_audit.run_and_classify(
+            openclaw_bin, managed_aliases=managed_aliases, proxy_base_url=proxy_base_url
+        )
     except _oc_audit.AuditGateError as exc:
         return [
             {
@@ -92,6 +144,7 @@ def _audit_gate_findings() -> list[dict]:
 
 def run(ctx: CheckContext) -> CheckResult:
     from worthless.cli.commands.doctor import (
+        _check_legacy_decoy_layout,
         _check_providers,
         _check_skill,
         is_orphan,
@@ -123,9 +176,21 @@ def run(ctx: CheckContext) -> CheckResult:
     port = resolve_port(None)
     provider_issues = _check_providers(state, healthy, port=port)
 
-    audit_findings = _audit_gate_findings()
+    # WOR-777: snapshot this machine's managed aliases so the audit gate
+    # recognizes worthless's own shard-A (matches what `worthless lock` does).
+    try:
+        managed_aliases: set[str] | None = set(asyncio.run(ctx.repo.list_keys()))
+    except Exception:  # noqa: BLE001 — recognition is best-effort, never blocks the check
+        managed_aliases = None
+    # CodeRabbit + BugBot (PR #387): must match the SAME resolved proxy base
+    # lock uses — host AND port. Reuses the already-resolved `port` above so
+    # a non-default WORTHLESS_PORT doesn't desync doctor from what lock wrote.
+    proxy_base_url = resolve_openclaw_proxy_base_url(port=port)
+    audit_findings = _audit_gate_findings(managed_aliases, proxy_base_url)
 
-    all_issues = skill_issues + provider_issues
+    # WOR-656 F6: surface a legacy decoy layout (advisory; `worthless lock` heals it).
+    legacy_issues = _check_legacy_decoy_layout(state, proxy_base_url)
+    all_issues = skill_issues + provider_issues + legacy_issues
     # Promote plain-string integration issues to the same structured shape as
     # audit_findings so all entries in findings[] have consistent keys.
     findings: list[dict] = [{"issue": s, "exit_code": None} for s in all_issues] + audit_findings
@@ -139,16 +204,8 @@ def run(ctx: CheckContext) -> CheckResult:
     else:
         status = "ok"
 
-    # WOR-516: always surface the OpenClaw .bak recovery path so operators
-    # know where to look if openclaw.json is damaged after a failed lock.
-    # The note is low-signal when everything is healthy (status=ok) but
-    # critical when a write-failed event appears in the findings list.
     recovery_note = {
-        "issue": (
-            "Recovery: if openclaw.json is damaged, restore from "
-            "~/.openclaw/openclaw.json.bak "
-            "(written by the openclaw daemon on each config change)"
-        ),
+        "issue": _RECOVERY_NOTE_TEXT,
         "exit_code": None,
     }
 

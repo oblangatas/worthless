@@ -21,6 +21,7 @@ on:
 
 permissions:
   contents: read
+  deployments: read
 
 concurrency:
   # Don't drop a scheduled run if a manual one fires — both are useful.
@@ -33,7 +34,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Check out repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v6
         with:
           # Need full tag history for `git show <tag>:install.sh`.
           fetch-depth: 0
@@ -41,7 +42,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Python (for tomllib + JSON parsing)
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.13"
 
@@ -120,6 +121,76 @@ jobs:
             exit 1
           fi
           echo "OK: PyPI = tag = pyproject@tag = install.sh pin = $LATEST_VERSION"
+
+      # ===== Assertion 1b: docs image tags match the released version =======
+      - name: A1b — docs/ pinned image tags == released version
+        # Run even if A1 / the resolve step failed: a transient PyPI/GH network
+        # blip must not silently skip this daily docs-drift backstop (the one
+        # run meant to catch a release that moved with no docs PR). If the
+        # network-resolved version is empty, check_docs_versions.py falls back
+        # to install.sh's in-repo pin — still a useful no-network check.
+        if: ${{ !cancelled() }}
+        env:
+          LATEST_VERSION: ${{ steps.versions.outputs.latest_version }}
+        run: |
+          set -euo pipefail
+          # WOR-736: docs hardcode `worthless-proxy:X.Y.Z` image tags. Twice
+          # they lagged a release (0.3.1 in WOR-734, 0.3.3 in WOR-733) and
+          # pointed readers at an outdated image. Assert every pinned tag in
+          # docs/ equals the released version. The same script runs on docs
+          # PRs (docs-spike.yml) for PR-time prevention; THIS is the backstop
+          # for release-driven drift (a release moves, no docs PR fires).
+          python3 scripts/check_docs_versions.py "$LATEST_VERSION"
+
+      - name: A1c — every image path in docs/ actually resolves on GHCR
+        # A1b proves the docs' pinned *version* is current. It says nothing
+        # about the *owner* segment of the path — so when the account was
+        # renamed (shacharm2 -> oblangatas, worthless-c478) and GHCR stopped
+        # serving the old path with a hard 403 (registries do NOT redirect a
+        # renamed account's packages, unlike github.com links), this workflow
+        # watched it for a month without complaining. Every documented
+        # `docker pull` was broken, including the `cosign verify` command
+        # whose whole job is to establish trust.
+        #
+        # Resolve each distinct image reference the docs name, anonymously,
+        # exactly as a reader would. tests/test_repo_owner_refs.py catches the
+        # same class statically at PR time; this is the live backstop for the
+        # half that static analysis cannot see (the registry's actual answer).
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          # `|| true`: grep exits 1 on no-match, which under `set -o pipefail`
+          # kills the step before the diagnostic below can explain why.
+          refs=$(grep -rhoE 'ghcr\.io/[A-Za-z0-9._-]+/worthless-proxy:[A-Za-z0-9._-]+' docs/ | sort -u || true)
+          if [ -z "$refs" ]; then
+            echo "::error::no ghcr.io image references found in docs/ — the grep or the docs moved"
+            exit 1
+          fi
+          # Deliberately checks EVERY tagged ref, not just canonical-owner ones.
+          # A tagged reference to a dead path is a broken instruction wherever it
+          # appears, including in a file test_repo_owner_refs.py allowlists -- so
+          # this stays broad rather than deferring to that guard's allowlist.
+          # install-docker.md's post-rename 403 note is untagged by design and so
+          # is not a pull target; tagging it would make it one, and CI should say so.
+          failed=0
+          for ref in $refs; do
+            path=${ref#ghcr.io/}; repo=${path%:*}; tag=${path##*:}
+            token=$(curl -fsSL "https://ghcr.io/token?scope=repository:${repo}:pull&service=ghcr.io" \
+                      | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])') || {
+              echo "::error::$ref — could not get a pull token (package missing or private?)"
+              failed=1; continue; }
+            code=$(curl -o /dev/null -sw '%{http_code}' \
+                     -H "Authorization: Bearer $token" \
+                     -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json' \
+                     "https://ghcr.io/v2/${repo}/manifests/${tag}")
+            if [ "$code" = "200" ]; then
+              echo "  OK   $ref"
+            else
+              echo "::error::$ref — registry returned HTTP $code; readers copying this from the docs cannot pull it"
+              failed=1
+            fi
+          done
+          exit "$failed"
 
       # ===== Assertion 2a: worthless.sh content negotiation (curl) ==========
       - name: A2a — worthless.sh curl-UA serves install.sh @ latest tag
@@ -276,10 +347,19 @@ jobs:
           STALE_HOURS: "24"
         run: |
           set -euo pipefail
-          # GitHub Pages deploys from the `website` branch (per WOR-326).
-          # Compare last `website` commit time to last successful Pages build.
-          WEBSITE_PUSH=$(gh api "repos/${REPO}/branches/website" --jq '.commit.commit.committer.date' 2>/dev/null || echo "")
-          PAGES_BUILD=$(gh api "repos/${REPO}/pages/builds/latest" --jq '.updated_at' 2>/dev/null || echo "")
+          # Pages no longer deploys from the website branch (WOR-326 is stale).
+          # Settings > Pages now shows Source: GitHub Actions, deployed by the
+          # "Deploy website" workflow, so repos/{repo}/pages/builds/latest 404s.
+          # gh api also prints error bodies to stdout, so the old
+          # 2>/dev/null || echo "" guard captured that JSON instead of an empty
+          # string, the -z skip below never fired, and date -d died on it.
+          gh_ts() {                     # $1 = api path, $2 = jq expression
+            local out
+            out=$(gh api "$1" --jq "$2" 2>/dev/null) || return 0
+            case "$out" in ????-??-??T*) printf '%s' "$out" ;; esac
+          }
+          WEBSITE_PUSH=$(gh_ts "repos/${REPO}/branches/website" '.commit.commit.committer.date')
+          PAGES_BUILD=$(gh_ts "repos/${REPO}/deployments?environment=github-pages&per_page=1" '.[0].updated_at')
 
           if [ -z "$WEBSITE_PUSH" ] || [ -z "$PAGES_BUILD" ]; then
             echo "::warning title=Deploy-lag check incomplete::Could not query Pages timestamps (website_push='$WEBSITE_PUSH', pages_build='$PAGES_BUILD'). Skipping."

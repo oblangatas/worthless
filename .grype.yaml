@@ -1,0 +1,523 @@
+# Grype configuration — read by anchore/scan-action when present at repo root.
+#
+# Ignores are time-boxed. Each entry MUST carry:
+#   - vulnerability ID
+#   - reason citing the upstream status
+#   - linear ticket for the bump/recheck obligation
+#   - expiry date (ISO YYYY-MM-DD)
+#
+# IMPORTANT — Grype does NOT honour `expiry`. Its IgnoreRule schema drops
+# unknown keys silently, so an entry dated 2020 still suppresses its finding
+# today (measured against grype 0.114.0 on 2026-08-01: a five-year-old expiry
+# changed nothing, exit stayed 0). An earlier version of this header claimed
+# Grype auto-re-fires past the date. It does not.
+#
+# The expiry is enforced by scripts/hooks/check_grype_ignore_expiry.py, wired
+# into pre-commit as "supply chain: grype ignores are dated and current".
+# That hook is the ONLY thing stopping a suppression from living forever.
+#
+# ARCHITECTURE: every reachability argument below was measured on **amd64**.
+# These rules match on `package.name` + `type` with no version pin, so they
+# apply to the arm64 image too — but the evidence behind them does not. arm64
+# was scanned once (2026-08-06) and carried the identical findings; nothing
+# keeps that true. WOR-873 added a weekly arm64 scan so divergence surfaces on
+# a Monday rather than at a release tag. Re-MEASURE per-arch before extending.
+
+ignore:
+  - vulnerability: CVE-2026-15308
+    package:
+      name: python
+      type: binary
+    # RE-MEASURED 2026-08-02 (grype 0.114.0), five candidate bases pulled fresh.
+    # There is still nowhere to upgrade to — not even a major version ahead:
+    #
+    #   python:3.13-slim-bookworm  3.13.14  present
+    #   python:3.13-slim-trixie    3.13.14  present
+    #   python:3.13-slim           3.13.14  present
+    #   python:3.14-slim-trixie    3.14.6   present
+    #   python:3.14-slim           3.14.6   present
+    #
+    # Grype's only fixed version remains 3.15.0 — a PRE-RELEASE. Shipping a
+    # release-candidate interpreter to users is the worse trade against a CVE
+    # whose attack surface here is bounded: non-root, network-isolated, and no
+    # untrusted input parsed at the Python boundary.
+    #
+    # Supersedes the prior CVE-2026-7210 ignore: that one affected 3.13.13 and
+    # is fixed in the current 3.13.14 base (grype no longer reports it).
+    #
+    # Linear: WOR-691 — bump the Docker base image when a stable 3.13.x or
+    # 3.14.x backport ships, then DELETE this entry rather than extending it.
+    reason: "Upstream fix only in Python 3.15.0 (pre-release). Re-measured 2026-08-02 across 3.13/3.14 slim bookworm+trixie: all still affected. Tracking WOR-691."
+    expiry: "2027-01-31"  # extended on a fresh measurement, not blind. Re-measure before extending again.
+
+  # ── CPython tarfile, base-image only (WOR-852 Track B) ──────────────
+  # All three are tarfile bugs in the digest-pinned python:3.13-slim-bookworm
+  # base. For CVE-2026-11940 and CVE-2026-11972, grype's only fixed version is
+  # 3.15.0b4 — a PRE-RELEASE.
+  #
+  # RE-MEASURED 2026-08-02 (grype 0.114.0), five candidate bases pulled fresh:
+  #   python:3.13-slim-bookworm  3.13.14  both present
+  #   python:3.13-slim-trixie    3.13.14  both present
+  #   python:3.13-slim           3.13.14  both present
+  #   python:3.14-slim-trixie    3.14.6   both present
+  #   python:3.14-slim           3.14.6   both present
+  # Even a full major version ahead still carries both. Only 3.15-rc scans
+  # clean, and shipping a release-candidate interpreter is the worse trade.
+  #
+  # CVE-2026-4360 is the OPPOSITE case, and the shortest-lived of the three.
+  # Grype reports `fix: []` with an empty state for it — but that is a fact
+  # about grype's record, not about CPython. Its record here is NVD-sourced
+  # (`provider: nvd`), and NVD carries no fixed-version mapping, so grype has
+  # nothing to report. Read as "no fix exists" it is simply wrong.
+  #
+  # NOTE ON METHOD: the five-base grype sweep above deliberately does NOT cover
+  # CVE-2026-4360. It cannot — grype's record for this one is version-blind, so
+  # scanning more images would return the same empty answer regardless of what
+  # each image contains. Upstream containment was checked at the git level
+  # instead, which is the only method that can answer the question:
+  #
+  # MEASURED 2026-08-05 against the CPython repo, not inferred:
+  #   GH-151988 (gh-151987) is merged and backported to every live branch:
+  #   3.10, 3.11, 3.12 (GH-152611, merged 2026-08-04), 3.13, 3.14 and 3.15.
+  #   `git`-level containment via the GitHub compare API:
+  #     v3.13.14 -> does NOT contain it   (our base image: still affected)
+  #     v3.13.15 -> CONTAINS it           (tagged upstream)
+  #     v3.14.6  -> does NOT contain it
+  #     v3.14.7  -> CONTAINS it           (tagged upstream)
+  # So a fixed CPython is released. What is missing is a published image:
+  #   python:3.13.15-slim-bookworm  not on Docker Hub as of 2026-08-05
+  #   python:3.13-slim-bookworm     still resolves to 3.13.14
+  #   python:3.14.7-slim-bookworm   published, and it carries the fix
+  #
+  # DO NOT expect a base-image bump to retire this entry. MEASURED 2026-08-06,
+  # from grype's own match record for CVE-2026-4360:
+  #
+  #     found.versionConstraint: "none (unknown)"
+  #     found.cpes: ["cpe:2.3:a:python:python:*:*:*:*:*:*:*:*"]
+  #
+  #   The package CPE grype searches WITH is version-pinned (3.13.14); the
+  #   record it matches AGAINST is the wildcard above, with no version range.
+  #   So the rule fires on every version. Confirmed by scanning
+  #   python:3.14.7-slim-bookworm — an interpreter that DOES contain the fix
+  #   per the containment check above — which still reports CVE-2026-4360.
+  #
+  # Bumping the base therefore removes the vulnerability without silencing the
+  # finding. Only NVD publishing version data (or grype changing provider for
+  # this CVE) retires the entry. Bump, delete this, expect green, get red.
+  #
+  # Not reachable in Worthless. MEASURED 2026-08-07 INSIDE THE SHIPPED IMAGE,
+  # by running the real container (`python /deploy/start.py`), serving real
+  # HTTP traffic, and instrumenting both imports and calls:
+  #
+  #   - src/worthless: zero imports of tarfile / zipfile, zero
+  #     shutil.unpack_archive. Enforced every CI run by
+  #     tests/test_archive_reachability.py — not a one-off observation.
+  #
+  #   - stdlib tarfile IS IMPORTED at runtime, by jaraco.context (via keyring).
+  #     An earlier version of this comment said otherwise, on two counts, both
+  #     wrong because they were measured on a dev laptop instead of the image:
+  #       * it claimed pygments was the only dep touching tarfile and was not
+  #         loaded. pygments IS loaded, via httpx._main.
+  #       * it claimed `backports.tarfile` was the resident one, so the CPython
+  #         module was untouched. It is not. jaraco/context/__init__.py:26-29
+  #         is a VERSION GATE, not an ImportError fallback:
+  #             if TYPE_CHECKING or sys.version_info >= (3, 12):
+  #                 import tarfile
+  #             else:
+  #                 from backports import tarfile
+  #         This image runs 3.13.14, so the stdlib branch is the PRIMARY one and
+  #         is taken whether or not backports is installed. (It is not installed
+  #         here, but that is incidental — installing it would NOT end stdlib
+  #         residency.) The vulnerable stdlib module is resident.
+  #
+  #   - tarfile is NEVER CALLED. With tarfile.open, TarFile.extract and
+  #     TarFile.extractall wrapped, container startup plus live HTTP requests
+  #     produced ZERO calls. Control: the same instrumentation fires
+  #     immediately on a deliberate tarfile.open, so the null result is a real
+  #     measurement and not a dead probe.
+  #     COVERAGE, stated precisely: only /healthz and / reached a handler.
+  #     /v1/messages and every other route tried (/v1/models, /docs, /metrics,
+  #     /openapi.json) returned 401 at the auth boundary, so NO forwarding or
+  #     response-decoding code ran. The authenticated proxy path has NOT been
+  #     exercised under this instrumentation. What carries that gap is the
+  #     first-party static guard, which proves no src/worthless module imports
+  #     tarfile on ANY path, authenticated or not.
+  #
+  # That is the honest shape of this argument. The module being loaded is not
+  # the risk; all three CVEs require CALLING into tarfile with an
+  # attacker-supplied archive. Nothing here does, and no code path carries
+  # attacker bytes toward one. "Imported but never called" is what holds — not
+  # "never loaded", which was the previous claim and was simply false.
+  #
+  # The ignore stays scoped to `package: {name: python, type: binary}`, so it
+  # cannot mask a finding filed against backports-tarfile or any other package.
+  #
+  # Linear: WOR-852 — move off EOL Debian 12, or re-check whether a stable
+  # 3.13.x / 3.14.x backport has shipped. Re-MEASURE before extending; do not
+  # extend blind.
+  - vulnerability: CVE-2026-11940
+    package:
+      name: python
+      type: binary
+    # tarfile.extractall() 'data'/'tar' filter bypass via a crafted archive
+    # where a hardlink references a symlink stored at a deeper name.
+    reason: "CPython tarfile; fix only in 3.15.0b4 (pre-release). Unreachable — no tarfile/archive use in src/worthless. Tracking WOR-852."
+    expiry: "2027-01-31"  # extended 2026-08-02 on the re-measurement above, not blind.
+
+  - vulnerability: CVE-2026-11972
+    package:
+      name: python
+      type: binary
+    # tarfile streaming mode (mode="r|") mishandles EOF, making archive
+    # parsing take exponentially longer — a DoS against archive parsing.
+    reason: "CPython tarfile; fix only in 3.15.0b4 (pre-release). Unreachable — no tarfile/archive use in src/worthless. Tracking WOR-852."
+    expiry: "2027-01-31"  # extended 2026-08-02 on the re-measurement above, not blind.
+
+  - vulnerability: CVE-2026-4360
+    package:
+      name: python
+      type: binary
+    # tarfile.extract() does not pass `filter` through when extracting
+    # hardlinks, so a crafted archive can land files with an unexpected
+    # uid/gid even when the caller passed filter='data'. Same class as
+    # CVE-2026-11940's extractall() filter bypass, same precondition: the
+    # caller must hand tarfile an attacker-supplied archive.
+    #
+    # WHY THIS ENTRY EXISTS AT ALL, given the cutoff moved to `medium`:
+    # it would NOT have failed the build without it. The gating scan runs
+    # `only-fixed: true`, which drops findings grype has no fixed version for —
+    # and grype has none for this one (NVD record, version-blind; see above).
+    # Measured 2026-08-02 against the built image: `grype --only-fixed
+    # --fail-on medium` exits 0 and reports zero findings with or without this
+    # entry. CI is green either way; this is not a green-CI change.
+    #
+    # That is the honest limit of the medium cutoff, and it is worth writing
+    # down: it catches a new Medium that grype can map to a fixed version, and
+    # misses one it cannot. Whether the fix exists upstream is irrelevant to
+    # the gate — only whether grype's provider records it.
+    #
+    # Nor does this entry hide the finding. The informational scan reads
+    # .grype-informational.yaml, which carries no ignores, so CVE-2026-4360
+    # keeps printing in that report exactly as before. What this entry adds is
+    # the argument and the expiry clock, not silence.
+    #
+    # Reachability is PARTLY enforced now, and it matters which part.
+    # tests/test_archive_reachability.py fails the build if anything under
+    # src/worthless imports tarfile/zipfile or calls shutil.unpack_archive —
+    # which an expiry date cannot detect, because a date fires on the calendar,
+    # not on the commit that breaks the claim.
+    #
+    # What it does NOT enforce. The argument has two legs now, not three —
+    # the old legs "pygments is not loaded" and "backports.tarfile is the
+    # resident one" were RETRACTED above: both were false in the shipped image.
+    # Do not re-measure those; they are dead.
+    #   1. src/worthless never imports tarfile
+    #        -> ENFORCED by tests/test_archive_reachability.py, every CI run.
+    #   2. the resident stdlib tarfile is never CALLED
+    #        -> measured live in-container 2026-08-07, NOT enforced.
+    #
+    # Leg 2 is the live one and the only one a dependency bump can silently
+    # invalidate: keyring -> jaraco.context already puts tarfile in the
+    # process, so a dep that starts CALLING it would end this argument with
+    # nothing going red. Nothing re-reads this file when Dependabot lands.
+    # Re-measure leg 2 — re-run the in-container call trace — before extending
+    # any entry in this block. Leg 1 re-measures itself on every CI run.
+    #
+    # One inversion worth knowing: an NVD backfill flips two things at once —
+    # the finding becomes gate-visible AND becomes retirable by a base bump.
+    # That refresh is the single event to watch, and what the expiry re-checks.
+    reason: "CPython tarfile; fixed upstream in v3.13.15/v3.14.7 (GH-151988) but grype's NVD record has no version data, so it reports on every version — a base bump does NOT retire this entry. Unreachable: no archive use in src/worthless, enforced by tests/test_archive_reachability.py. WOR-852."
+    expiry: "2027-01-31"  # aligned with its block-mates; re-measure the NVD record, not the image.
+
+  # ── CPython Mediums, base-image only (WOR-852 Track C) ──────────────
+  # These four became gating when the scan cutoff moved from `high` to
+  # `medium` (see .github/workflows/docker-security.yml). Two separate faults
+  # kept them quiet before that, and it matters that they were separate:
+  #   - UNGATED: they sat below the cutoff, so the build never failed on them.
+  #   - UNSEEN: the cutoff never filtered the report — it only sets grype's
+  #     exit code — so they WERE in the scan output all along. That output was
+  #     sarif written to a temp file nothing uploads, deleted with the runner.
+  # The cutoff moved so a FIFTH Medium fails the build instead of vanishing;
+  # these four are the measured, named exceptions.
+  #
+  # All four are fixed only in Python 3.15 PRE-RELEASES (a6/b3/b4). Same trade
+  # WOR-852 already rejected for the two Highs above: shipping a pre-release
+  # interpreter is worse than carrying a bounded, argued finding.
+  #
+  # MEASURED 2026-08-03 (grype 0.114.0) across every candidate base, with a
+  # 3.15 pre-release as the positive control — these four were NOT given the
+  # Highs' expiry on the strength of the Highs' measurement:
+  #
+  #   python:3.13-slim-bookworm  3.13.14  all four present   <- ours
+  #   python:3.13-slim-trixie    3.13.14  all four present
+  #   python:3.13-slim           3.13.14  all four present
+  #   python:3.14-slim-trixie    3.14.6   all four present
+  #   python:3.14-slim           3.14.6   all four present
+  #   python:3.15-rc-slim        3.15.0   ALL FOUR CLEAR     <- control
+  #
+  # A full major version ahead still carries all four. The control confirms
+  # the fix is real and pre-release-only, so there is no stable base to move
+  # to — the same trap as the Highs, now demonstrated rather than assumed.
+  #
+  # Reachability MEASURED 2026-08-02 against the built image, not assumed —
+  # first-party imports AND runtime-resident modules after importing
+  # worthless.proxy + worthless.cli. Re-MEASURE before extending.
+  - vulnerability: CVE-2025-15366
+    package:
+      name: python
+      type: binary
+    # imaplib: a user-controlled command can inject extra IMAP commands via
+    # newlines. Measured: zero `import imaplib` in src/worthless, and imaplib
+    # is NOT resident after importing worthless.proxy + worthless.cli.
+    # Worthless speaks HTTP to LLM providers; it has no mail client.
+    reason: "CPython imaplib injection; fix only in 3.15.0a6 (pre-release). Unreachable — imaplib not imported first-party and not resident at runtime. Tracking WOR-852."
+    expiry: "2027-01-31"  # set 2026-08-03 on the six-base measurement above, not blind.
+
+  - vulnerability: CVE-2025-15367
+    package:
+      name: python
+      type: binary
+    # poplib: same newline-injection shape as CVE-2025-15366, POP3 instead of
+    # IMAP. Measured identically: not imported first-party, not resident.
+    reason: "CPython poplib injection; fix only in 3.15.0a6 (pre-release). Unreachable — poplib not imported first-party and not resident at runtime. Tracking WOR-852."
+    expiry: "2027-01-31"  # set 2026-08-03 on the six-base measurement above, not blind.
+
+  - vulnerability: CVE-2026-12003
+    package:
+      name: python
+      type: binary
+    # VPATH landmark discovery: a Python that finds Modules/setup.local at a
+    # VPATH-relative path assumes it is running from a source tree and builds
+    # a different default sys.path. The image's interpreter is an INSTALLED
+    # layout, measured in-container: sys.prefix=/usr/local,
+    # sys.executable=/usr/local/bin/python, and Modules/setup.local absent.
+    # Planting that landmark needs write access beside the interpreter, which
+    # the non-root runtime user does not have.
+    reason: "CPython VPATH sys.path; fix only in 3.15.0b3 (pre-release). Unreachable — installed layout, no Modules/setup.local, non-root runtime. Tracking WOR-852."
+    expiry: "2027-01-31"  # set 2026-08-03 on the six-base measurement above, not blind.
+
+  - vulnerability: CVE-2026-0864
+    package:
+      name: python
+      type: binary
+    # configparser: WRITING a config whose multi-line value carries \r can
+    # inject extra keys. This is the only one of the four that is resident at
+    # runtime, so "we don't use it" was not available as an answer and the
+    # whole image had to be swept (2026-08-03). Five packages import
+    # configparser; exactly one WRITES with it:
+    #
+    #   pip (+ vendored distlib)  reads AND WRITES  not resident at runtime
+    #   keyring                   reads keyringrc   resident  (core.py:7/171)
+    #   rich                      reads a theme     resident
+    #   uvicorn                   reads log config  resident
+    #   pydantic                  mypy plugin only  not resident
+    #
+    # typer and starlette look like writers to a naive grep and are not:
+    # typer's hits are docstring examples, starlette's `parser.write()` is a
+    # multipart form parser unrelated to configparser.
+    #
+    # So the only writer in the image is pip, which is not loaded by the proxy
+    # or the CLI. src/worthless imports configparser nowhere. The CVE needs a
+    # write path to inject into; there isn't one.
+    reason: "CPython configparser write-injection; fix only in 3.15.0b4 (pre-release). Unreachable — swept whole image 2026-08-03: only pip writes via configparser and it is not resident. Tracking WOR-852."
+    expiry: "2027-01-31"  # set 2026-08-03 on the six-base measurement above, not blind.
+
+  # ── Debian perl-base, install-time tooling only (WOR-852 Track D) ────
+  # These seven became VISIBLE when the unmapped-findings gate landed
+  # (scripts/hooks/check_grype_unmapped_findings.py). They were always in the
+  # image; `only-fixed: true` dropped them because grype has no fixed version,
+  # so three CRITICALS sat behind a green build. That silence was the bug.
+  #
+  # WHY NOT JUST REMOVE PERL. Measured 2026-08-10 in the shipped image:
+  #   dpkg-query perl-base -> Essential=yes Priority=required
+  # Debian marks it undeletable; removing it breaks dpkg and apt. There is no
+  # bump either — every one reports fix=not-fixed, Debian has shipped nothing.
+  #
+  # REACHABILITY, measured not assumed. 18 files in the image invoke perl.
+  # Every single one is package or system administration tooling:
+  #   debconf-* (7)          package configuration
+  #   dpkg-reconfigure, dpkg-preconfigure, dpkg-fsys-usrunmess
+  #   deb-systemd-helper, deb-systemd-invoke, update-rc.d
+  #   adduser, deluser, pam-auth-update, pam_getenv, c_rehash
+  # None of that runs in the container's runtime path. The image starts
+  # `python /deploy/start.py` as a non-root user; no package management, no
+  # user administration, no PAM reconfiguration happens after build.
+  # src/worthless, deploy/ and the Dockerfile contain ZERO perl invocations
+  # (word-boundary grep, 2026-08-10).
+  #
+  # So exploiting any of these requires first getting arbitrary code to run in
+  # the container — at which point perl is not the interesting part. They are
+  # carried, not ignored, and this block is why.
+  #
+  # Linux: WOR-852 — re-check when Debian ships a perl-base security update,
+  # or when the base image moves off EOL Debian 12. DELETE then, do not extend.
+  - vulnerability: CVE-2026-12087
+    package: {name: perl-base, type: deb}
+    reason: "Debian perl-base, fix=not-fixed (no upstream fix to take). Essential=yes so it cannot be removed. Unreachable — every perl consumer in the image is install-time tooling (dpkg/adduser/PAM); the runtime path is python only. Tracking WOR-852."
+    expiry: "2027-01-31"
+  - vulnerability: CVE-2026-13221
+    package: {name: perl-base, type: deb}
+    reason: "Debian perl-base, fix=not-fixed. See the Track D block above: Essential, unremovable, and invoked only by install-time tooling. Tracking WOR-852."
+    expiry: "2027-01-31"
+  - vulnerability: CVE-2026-57433
+    package: {name: perl-base, type: deb}
+    reason: "Debian perl-base, fix=not-fixed. See the Track D block above: Essential, unremovable, and invoked only by install-time tooling. Tracking WOR-852."
+    expiry: "2027-01-31"
+  - vulnerability: CVE-2026-48959
+    package: {name: perl-base, type: deb}
+    reason: "Debian perl-base, fix=not-fixed. See the Track D block above: Essential, unremovable, and invoked only by install-time tooling. Tracking WOR-852."
+    expiry: "2027-01-31"
+  - vulnerability: CVE-2026-48962
+    package: {name: perl-base, type: deb}
+    reason: "Debian perl-base, fix=not-fixed. See the Track D block above: Essential, unremovable, and invoked only by install-time tooling. Tracking WOR-852."
+    expiry: "2027-01-31"
+  - vulnerability: CVE-2026-57432
+    package: {name: perl-base, type: deb}
+    reason: "Debian perl-base, fix=not-fixed. See the Track D block above: Essential, unremovable, and invoked only by install-time tooling. Tracking WOR-852."
+    expiry: "2027-01-31"
+  - vulnerability: CVE-2026-7017
+    package: {name: perl-base, type: deb}
+    reason: "Debian perl-base, fix=not-fixed. See the Track D block above: Essential, unremovable, and invoked only by install-time tooling. Tracking WOR-852."
+    expiry: "2027-01-31"
+
+  # --- CVE-2026-14456: openssl / libssl3 (QUIC server) -----------------------
+  #
+  # NOT "unreachable" — NOT PRESENT. This is a stronger claim than the blocks
+  # above and it is worth stating precisely, because the obvious remediation
+  # makes things WORSE.
+  #
+  # The bug is unbounded memory growth in OpenSSL's QUIC SERVER listener queue:
+  # a peer floods QUIC Initial packets carrying unknown connection IDs, and
+  # per-channel state queues without limit until the process dies. CWE-770.
+  # OpenSSL themselves rate it LOW; grype reports High from a mechanical CVSS
+  # DoS score, not the CNA's assessment.
+  #
+  # Affected: 3.5.0-3.5.7, 3.6.0-3.6.3, 4.0.0-4.0.1. Per the OpenSSL advisory
+  # the defect has existed since 3.5 — the release that ADDED the QUIC server.
+  #
+  # The advisory (20260813) states it directly:
+  #   "OpenSSL 3.4, 3.0, 1.1.1 and 1.0.2 are not affected by this issue."
+  # That is upstream declaring 3.0 not-affected. It is the primary evidence
+  # here; the measurement below independently confirms it on our exact image.
+  #
+  # Measured against the exact pinned base digest in our Dockerfile
+  # (python:3.13-slim-bookworm@sha256:fcbd8dfc2605..., Debian 12):
+  #
+  #     $ openssl version
+  #     OpenSSL 3.0.20 7 Apr 2026
+  #     $ openssl help | grep -ci quic
+  #     0
+  #     $ dpkg-query -W openssl libssl3
+  #     openssl  3.0.20-1~deb12u2
+  #     libssl3  3.0.20-1~deb12u2
+  #
+  # 3.0.20 predates the QUIC server by five minor releases. The vulnerable
+  # code is not compiled into this image.
+  #
+  # `fix=not-fixed` is Debian's own deferral, not an upstream gap. Debian bug
+  # #1144615 IS triaged — the tracker records
+  #     [trixie] - openssl <postponed> (Minor issue, fix along with future update)
+  # with no urgency assigned. Note the note is scoped to TRIXIE; bookworm ships
+  # 3.0.20, which upstream lists as not affected at all.
+  #
+  # DO NOT "FIX" THIS BY BUMPING THE BASE IMAGE.
+  #   bookworm (current)  openssl 3.0.20  QUIC absent          -> safe
+  #   trixie   (newer)    openssl 3.5.6   INSIDE affected range -> exposed
+  # Moving bookworm -> trixie would convert this false positive into a genuine
+  # exposure. The older base is the safer one here.
+  #
+  # Reachability fails twice over even if the code were present: zero
+  # aioquic/quic/http3 entries in uv.lock, uvicorn serves HTTP/1.1 and H2 over
+  # TCP, and Python's `ssl` module exposes no QUIC API at all. The bug needs an
+  # OpenSSL QUIC Listener object under SSL_accept, which cannot be constructed
+  # from this stack.
+  #
+  # Expiry is deliberately SHORTER than the 2027-01-31 block above: this is a
+  # false positive on a version upstream calls not-affected, not a long-lived
+  # accepted risk. Re-check the Debian tracker at expiry; if bookworm is marked
+  # not-affected, DELETE these two entries rather than extending them.
+  #
+  # What expiry actually does, so nobody is surprised: grype ignores the key,
+  # so on 2026-12-01 the CVE stays SUPPRESSED while check_grype_ignore_expiry.py
+  # turns the build red. It nags; it does not re-expose. And the trigger being
+  # waited on (Debian marking bookworm not-affected) is outside our control, so
+  # the likely December outcome is "nothing changed, re-measure and extend".
+  #
+  # Narrowing by version is NOT possible here yet. grype's IgnoreRule schema
+  # accepts package.version, but the check that actually fired on this finding,
+  # scripts/hooks/check_grype_unmapped_findings.py, builds its scope from name
+  # and type only and silently discards a version key — so a pin would buy
+  # nothing until that hook is taught to carry it. Tracked separately.
+  #
+  # Measured on BOTH architectures: the arm64 resolution of this digest also
+  # reports 3.0.20 with zero QUIC symbols, and grype emits the same package
+  # names and types, so the weekly arm64 scan is covered by these entries.
+  # (Note for a future trixie bump: trixie renames libssl3 -> libssl3t64, so
+  # the libssl3 entry stops matching on its own; the openssl entry does not.)
+  # WOR-885.
+  - vulnerability: CVE-2026-14456
+    package: {name: openssl, type: deb}
+    reason: "OpenSSL 3.0.20 in the pinned bookworm base; QUIC server was added in 3.5, so the vulnerable code is not present (measured: `openssl help | grep -ci quic` = 0). The advisory states 3.0 is not affected. fix=not-fixed is Debian's postponement (bug #1144615, marked postponed for trixie), not an upstream gap. Do NOT bump to trixie — it ships 3.5.6, inside the affected range. WOR-885."
+    expiry: "2026-11-30"
+  - vulnerability: CVE-2026-14456
+    package: {name: libssl3, type: deb}
+    reason: "OpenSSL 3.0.20 in the pinned bookworm base; QUIC server was added in 3.5, so the vulnerable code is not present (measured: `openssl help | grep -ci quic` = 0). The advisory states 3.0 is not affected. fix=not-fixed is Debian's postponement (bug #1144615, marked postponed for trixie), not an upstream gap. Do NOT bump to trixie — it ships 3.5.6, inside the affected range. WOR-885."
+    expiry: "2026-11-30"
+
+  # ── OpenSSL 3.0.x, unreachable attack surface (WOR-915) ─────────────
+  # NOT the CVE-2026-14456 case above. There, upstream states 3.0 is NOT
+  # AFFECTED — the vulnerable code is absent. Here OpenSSL explicitly lists
+  # 3.0 as vulnerable, fixed in 3.0.22. Measured inside the pinned base:
+  #
+  #   openssl 3.0.20-1~deb12u2   (OpenSSL 3.0.20 7 Apr 2026)
+  #
+  # Debian has shipped no bookworm update, which is what fix=not-fixed means,
+  # so there is nowhere to upgrade to. The claim below is therefore the WEAKER
+  # one — "we do not call this code" — and must be read as such:
+  #
+  #   CVE-2026-54874  DTLS record buffering. The proxy is TLS over TCP and
+  #                   never opens a DTLS endpoint. Upstream assesses this
+  #                   Low; grype reports High.
+  #   CVE-2026-63072  Reachable only from CMS_decrypt(). We never parse
+  #                   CMS/S-MIME.
+  #   CVE-2026-63076  CMP protocol. Upstream: "a specialized feature that an
+  #                   application must explicitly enable." We do not.
+  #
+  # All three are Denial of Service. Per the advisories there is no memory
+  # disclosure, no controlled write, and no path to code execution.
+  #
+  # Expiry matches the file's majority (2027-01-31), not the CVE-2026-14456
+  # pair above. An expired ignore HARD-FAILS every PR with 14 days' warning,
+  # so a short fuse on a low-severity, unreachable finding just schedules the
+  # outage this entry exists to end. Note the date cannot catch the risk that
+  # matters most here — us starting to USE DTLS/CMS/CMP — which is a code
+  # change, not a calendar event.
+  #
+  # DELETE these entries — do not extend them — the moment either becomes
+  # true: Debian ships 3.0.22+ for bookworm, or Worthless starts speaking
+  # DTLS, CMS, or CMP. The second one silently makes these live.
+  # Linear: WOR-915.
+  - vulnerability: CVE-2026-54874
+    package: {name: openssl, type: deb}
+    reason: "OpenSSL 3.0.20 in the pinned bookworm base is in the affected range (fixed in 3.0.22), but the flaw is DTLS-only and the proxy is TLS over TCP — it never opens a DTLS endpoint. Upstream assesses this Low; grype reports High. fix=not-fixed: Debian has shipped no bookworm update, so there is no version to bump to. WOR-915."
+    expiry: "2027-01-31"
+  - vulnerability: CVE-2026-54874
+    package: {name: libssl3, type: deb}
+    reason: "OpenSSL 3.0.20 in the pinned bookworm base is in the affected range (fixed in 3.0.22), but the flaw is DTLS-only and the proxy is TLS over TCP — it never opens a DTLS endpoint. Upstream assesses this Low; grype reports High. fix=not-fixed: Debian has shipped no bookworm update, so there is no version to bump to. WOR-915."
+    expiry: "2027-01-31"
+  - vulnerability: CVE-2026-63072
+    package: {name: openssl, type: deb}
+    reason: "OpenSSL 3.0.20 in the pinned bookworm base is in the affected range (fixed in 3.0.22). The 8-byte OOB heap write is reachable only from CMS_decrypt(); Worthless never parses CMS/S-MIME messages. Consequence per upstream is heap corruption leading to DoS — no disclosure, no code execution. fix=not-fixed: no Debian bookworm update exists. WOR-915."
+    expiry: "2027-01-31"
+  - vulnerability: CVE-2026-63072
+    package: {name: libssl3, type: deb}
+    reason: "OpenSSL 3.0.20 in the pinned bookworm base is in the affected range (fixed in 3.0.22). The 8-byte OOB heap write is reachable only from CMS_decrypt(); Worthless never parses CMS/S-MIME messages. Consequence per upstream is heap corruption leading to DoS — no disclosure, no code execution. fix=not-fixed: no Debian bookworm update exists. WOR-915."
+    expiry: "2027-01-31"
+  - vulnerability: CVE-2026-63076
+    package: {name: openssl, type: deb}
+    reason: "OpenSSL 3.0.20 in the pinned bookworm base is in the affected range (fixed in 3.0.22). The NULL deref is in CMP password-based protection verification; upstream states CMP is a specialized feature an application must explicitly enable, and Worthless does not. Upstream: no memory disclosure, no controlled write, no path to code execution. fix=not-fixed: no Debian bookworm update exists. WOR-915."
+    expiry: "2027-01-31"
+  - vulnerability: CVE-2026-63076
+    package: {name: libssl3, type: deb}
+    reason: "OpenSSL 3.0.20 in the pinned bookworm base is in the affected range (fixed in 3.0.22). The NULL deref is in CMP password-based protection verification; upstream states CMP is a specialized feature an application must explicitly enable, and Worthless does not. Upstream: no memory disclosure, no controlled write, no path to code execution. fix=not-fixed: no Debian bookworm update exists. WOR-915."
+    expiry: "2027-01-31"

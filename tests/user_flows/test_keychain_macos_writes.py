@@ -14,10 +14,26 @@ Run: ``uv run pytest -m user_flow tests/user_flows/test_keychain_macos_writes.py
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 import pytest
+
+# Real macOS Keychain access needs a GUI to answer the access prompt. On a headless
+# CI runner with a LOCKED login keychain these writes/probes block until the job
+# times out (worthless-3ynb). The user-flows workflow now provisions an ephemeral
+# UNLOCKED keychain on macOS CI (WORTHLESS_TEST_KEYCHAIN_READY=1), so the non-synced
+# tests run there too (worthless-fc14). The @REQUIRES_SYNC_ENTITLEMENT subset still
+# needs a code-signed interpreter and stays skipped. Locally (no CI) they run.
+_ON_CI = os.environ.get("CI") is not None
+_KEYCHAIN_READY = os.environ.get("WORTHLESS_TEST_KEYCHAIN_READY") == "1"
+pytestmark = pytest.mark.skipif(
+    _ON_CI and not _KEYCHAIN_READY,
+    reason="real macOS Keychain tests hang on headless CI without an ephemeral "
+    "unlocked keychain (worthless-3ynb / worthless-fc14); run locally or on CI "
+    "with the keychain step",
+)
 
 REQUIRES_DARWIN = pytest.mark.skipif(
     sys.platform != "darwin",
@@ -38,6 +54,10 @@ def _can_seed_synced_entries() -> bool:
     invariant — the actual production behavior change — is fully
     verifiable on unsigned binaries (tests 3, 11, 12).
     """
+    if _ON_CI:
+        # Never probe the real keychain on headless CI — SecItemAdd blocks on the
+        # GUI access prompt at COLLECTION time, hanging the whole job (worthless-3ynb).
+        return False
     if sys.platform != "darwin":
         return False
     from worthless.cli import keystore_macos as km

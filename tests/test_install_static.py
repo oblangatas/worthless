@@ -7,6 +7,8 @@ in test_install_logic.py and Docker tests in test_install_docker.py.
 from __future__ import annotations
 
 import re
+import subprocess  # noqa: S404
+from pathlib import Path
 
 import pytest
 
@@ -27,6 +29,287 @@ def test_set_eu_present(install_text: str) -> None:
 def test_uv_version_pinned(install_text: str) -> None:
     assert re.search(r"\bUV_VERSION\s*=\s*['\"]?\d+\.\d+", install_text), (
         "install.sh must pin UV_VERSION to a specific release"
+    )
+
+
+# --- WOR-679 (A8): EXIT_INTEGRITY=50 contract -------------------------------
+
+
+def test_header_documents_exit_integrity(install_text: str) -> None:
+    """The script header is the human-readable contract for operators wiring CI.
+
+    EXIT_INTEGRITY=50 means "byte-integrity mismatch; CI MUST NOT auto-retry."
+    If a future PR silently drops the header line, the contract decays into
+    folklore — A8's whole point is lost.
+    """
+    header = "\n".join(install_text.splitlines()[:14])
+    assert re.search(r"^#\s*50\b", header, re.MULTILINE), (
+        "install.sh header must document exit code 50 (byte-integrity) so "
+        "operators wiring CI retry policies see the contract before running."
+    )
+    assert "MUST NOT auto-retry" in header or "MUST NOT retry" in header, (
+        "header must name the no-auto-retry contract for code 50, not just the code itself."
+    )
+
+
+def test_exit_internal_die_site_count(install_text: str) -> None:
+    """A8 promises to flip ONLY the Astral SHA-mismatch die-site to
+    EXIT_INTEGRITY. The 5 other EXIT_INTERNAL sites (missing hash tool,
+    uv-not-on-PATH after install, install crash branches, smoke-test
+    failure) must stay at EXIT_INTERNAL — they're genuine transient
+    failures where retry is sane. If a future refactor silently flips
+    one of those to EXIT_INTEGRITY, the boundary between "retry-me-40"
+    and "stop-50" rots and the exit-code contract is meaningless.
+    """
+    die_sites = re.findall(r'\bdie\s+"\$EXIT_INTERNAL"', install_text)
+    assert len(die_sites) == 5, (
+        f'install.sh must have exactly 5 `die "$EXIT_INTERNAL"` sites '
+        f"after A8 (missing hash tool, uv-not-on-PATH, two install crash "
+        f"branches, smoke-test failure). Got {len(die_sites)}. "
+        f"If you intentionally moved one to EXIT_INTEGRITY or EXIT_NETWORK, "
+        f"update this count and document the boundary change."
+    )
+
+
+def test_exit_integrity_used_for_sha_mismatch_only(install_text: str) -> None:
+    """Inverse guard: EXIT_INTEGRITY appears exactly twice — once at the
+    constant declaration, once at the Astral SHA-mismatch die-site. If a
+    future PR sprouts new EXIT_INTEGRITY callers without updating tests
+    or the header, this fires.
+    """
+    occurrences = re.findall(r"\bEXIT_INTEGRITY\b", install_text)
+    assert len(occurrences) == 2, (
+        f"EXIT_INTEGRITY should appear exactly twice in install.sh "
+        f"(declaration + Astral SHA die-site). Got {len(occurrences)}. "
+        f"A1 (wheel hash) and A5 (uv-version match) will add more — when "
+        f"they land, update this count to match."
+    )
+
+
+# --- WOR-673 (A2): env-scrub for UV_*/PIP_* attack surface ------------------
+
+
+_SCRUBBED_VARS = (
+    # Index URL redirect class
+    "UV_INDEX",
+    "UV_INDEX_URL",
+    "UV_DEFAULT_INDEX",
+    "UV_EXTRA_INDEX_URL",
+    "UV_INDEX_STRATEGY",
+    "UV_FIND_LINKS",
+    "PIP_INDEX_URL",
+    "PIP_EXTRA_INDEX_URL",
+    "PIP_FIND_LINKS",
+    "PIP_NO_INDEX",
+    # Config-file redirect class
+    "UV_CONFIG_FILE",
+    "PIP_CONFIG_FILE",
+    # Cache / offline forcing class
+    "UV_NO_CACHE",
+    "UV_OFFLINE",
+    # Anti-MitM / cert-bundle class
+    "PIP_TRUSTED_HOST",
+    "UV_INSECURE_HOST",
+    "UV_NATIVE_TLS",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+    "PIP_CERT",
+    "PIP_CLIENT_CERT",
+    # Python source class (UV_PYTHON_PREFERENCE scrubbed then re-set unconditionally)
+    "UV_PYTHON_INSTALL_MIRROR",
+    "UV_PYTHON_PREFERENCE",
+    # Auth / keyring class
+    "UV_KEYRING_PROVIDER",
+    "PIP_KEYRING_PROVIDER",
+    # Astral installer redirect class
+    "UV_INSTALL_DIR",
+    "UV_UNMANAGED_INSTALL",
+    "INSTALLER_DOWNLOAD_URL",
+    # Python sitecustomize hijack class
+    "PYTHONPATH",
+    "PYTHONSTARTUP",
+    # Shell init hijack class
+    "BASH_ENV",
+    "ENV",
+    "CDPATH",
+    "GLOBIGNORE",
+    # Dynamic loader injection class (Panel B re-review BLOCKER)
+    "LD_PRELOAD",
+    "LD_AUDIT",
+    "LD_LIBRARY_PATH",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_FALLBACK_LIBRARY_PATH",
+    "DYLD_FRAMEWORK_PATH",
+    "DYLD_FORCE_FLAT_NAMESPACE",
+    # Proxy alias class (curl honors lowercase + ALL_PROXY in addition to
+    # documented uppercase HTTP_PROXY / HTTPS_PROXY; scrub the aliases so
+    # only the documented MitM lane stays open)
+    "ALL_PROXY",
+    "all_proxy",
+    "http_proxy",
+    "https_proxy",
+)
+
+
+def test_env_scrub_lists_every_known_redirect_var(install_text: str) -> None:
+    """A2 ships an `unset` block scrubbing the 4 attack classes documented in
+    WOR-673 (index URL redirect, config-file redirect, cache/offline forcing,
+    TLS bypass). If a future PR drops one of these vars, the attack surface
+    silently widens — A2's whole point lost.
+    """
+    # Find the `unset` block — must be a single multi-line statement.
+    match = re.search(r"^unset\s*\\?\n((?:[ \t]+.*\\?\n)+)", install_text, re.MULTILINE)
+    assert match is not None, (
+        "install.sh must contain a multi-line `unset` block scrubbing "
+        "UV_*/PIP_* redirect vars (WOR-673 / A2). Got no match."
+    )
+    # CodeRabbit catch: substring `v in block` false-passes — `UV_INDEX` is
+    # "found" inside `UV_INDEX_URL`. Tokenize the block instead so each var
+    # is matched as a whole identifier (uppercase OR lowercase for the proxy
+    # alias class: all_proxy, http_proxy, https_proxy).
+    block_body = match.group(1)
+    present = set(re.findall(r"\b[A-Za-z][A-Za-z0-9_]*\b", block_body))
+    missing = [v for v in _SCRUBBED_VARS if v not in present]
+    assert not missing, (
+        f"install.sh `unset` block is missing these env vars from the "
+        f"WOR-673 scrub list: {missing}\nfound block:\n{match.group(0)}"
+    )
+
+
+def test_env_scrub_runs_before_any_uv_invocation(install_text: str) -> None:
+    """Ordering invariant: the scrub must run before any `uv` invocation
+    inherits the poisoned env. install.sh defines all functions that call
+    uv (`ensure_uv`, `install_or_upgrade_worthless`, etc.) AFTER the scrub
+    block; this pins the order.
+    """
+    lines = install_text.splitlines()
+    unset_line = next(
+        (i for i, line in enumerate(lines) if line.strip().startswith("unset ")),
+        None,
+    )
+    assert unset_line is not None, "`unset` block must exist (WOR-673)."
+
+    # First function definition (POSIX sh: `name() {`) anchors where uv
+    # invocations can start. The scrub MUST come before any function.
+    first_fn_line = next(
+        (i for i, line in enumerate(lines) if re.match(r"^\s*\w+\s*\(\)\s*\{?\s*$", line)),
+        None,
+    )
+    assert first_fn_line is not None, "expected at least one function definition"
+    assert unset_line < first_fn_line, (
+        f"env scrub (line {unset_line + 1}) must run BEFORE any function "
+        f"definition (first at line {first_fn_line + 1}) — otherwise a uv "
+        f"call could inherit the poisoned env before the scrub fires."
+    )
+
+
+def test_path_prepend_defense_present(install_text: str) -> None:
+    """A poisoned PATH (`~/evil/bin:/usr/bin:...`) wins over /usr/bin for
+    curl, sh, sha256sum, awk, uv — making every external call attacker-RCE
+    regardless of env scrub (Panel B BLOCKER). install.sh must prepend
+    system dirs + the uv install dir so legitimate binaries outrank
+    caller-controlled prefixes.
+    """
+    # Look for the PATH assignment that contains /usr/bin AND a HOME-relative
+    # uv dir. The literal pattern is flexible — what matters is that PATH gets
+    # prepended with safe dirs, not replaced piecemeal.
+    match = re.search(
+        r'PATH="/usr/bin:/bin:/usr/local/bin:[^"]*\.local/bin[^"]*"',
+        install_text,
+    )
+    assert match is not None, (
+        "install.sh must prepend /usr/bin:/bin:/usr/local/bin:$HOME/.local/bin "
+        "to PATH so a poisoned caller PATH can't redirect external calls "
+        "(WOR-673 PATH lockdown, Panel B BLOCKER fix)."
+    )
+
+
+def test_pipx_conflict_check_gated_on_trusted_dir(install_text: str) -> None:
+    """WOR-709: install.sh MUST gate the `pipx list` invocation on pipx
+    resolving from a trusted system dir. Empirically demonstrated 2026-06-07:
+    an attacker-controlled pipx in caller PATH ran arbitrary code in
+    install.sh's process during the conflict check. The fix is a case-statement
+    gate before `pipx list`; this test pins it so a future refactor that
+    drops the gate (e.g. someone "simplifying" check_pipx_conflict back to
+    its pre-WOR-709 shape) fails CI.
+    """
+    match = re.search(
+        r"check_pipx_conflict\s*\(\)\s*\{(.+?)\n\}",
+        install_text,
+        re.DOTALL,
+    )
+    assert match is not None, "check_pipx_conflict() must exist"
+    body = match.group(1)
+
+    # Panel E pragmatist + brutus: don't pin implementation shape (the exact
+    # command or the literal list of paths — pinning paths blocks adding
+    # /opt/homebrew/bin etc. without test churn). Pin the USER CONTRACT
+    # (warning text) and the REGRESSION FEAR (unconditional invocation).
+    # The dynamic test test_pipx_in_untrusted_dir_is_not_invoked proves the
+    # behavior end-to-end; this static guard is the minimum belt-and-braces.
+    assert "outside trusted dirs" in body, (
+        "untrusted-pipx skip MUST emit a warning naming the threat — silent "
+        "skip leaves the user unaware their conflict surface wasn't checked."
+    )
+    # Defense: catch the regression that just drops the gate and runs
+    # `pipx list` unconditionally.
+    assert not re.search(
+        r"if\s+command\s+-v\s+pipx\s*>/dev/null[^;]*;\s*then\s*\n\s*if\s+pipx\s+list",
+        body,
+    ), (
+        "check_pipx_conflict must NOT use the pre-WOR-709 `command -v pipx && "
+        "pipx list` shape — that's the empirically-demonstrated RCE pattern."
+    )
+
+
+def test_worthless_trust_path_uses_exact_string_compare(install_text: str) -> None:
+    """The PATH-lockdown escape hatch must use exact-string comparison to "1"
+    so attacker-tolerant values ("01", "true", "yes", "1 ", lowercase "1\\n")
+    don't silently bypass the lockdown. The test harness sets literal "1";
+    anyone (attacker or otherwise) supplying anything else gets the lockdown.
+
+    Defense-in-depth: the env scrub still fires regardless of WORTHLESS_TRUST_PATH,
+    so even bypassing the lockdown leaves the 48-var scrub intact.
+    """
+    # Look for the exact `!= "1"` pattern. Bans variants like `!= 1` (numeric),
+    # `-eq 1`, `= "true"`, case-insensitive matches, etc.
+    assert re.search(
+        r'\bWORTHLESS_TRUST_PATH:-\}?"\s*!=\s*"1"',
+        install_text,
+    ), (
+        'install.sh must use exact-string compare against literal "1" for '
+        "the WORTHLESS_TRUST_PATH escape hatch — looser parsing (`-eq`, "
+        "case-insensitive, true/yes acceptance) lets an attacker bypass the "
+        "PATH lockdown with attacker-tolerant values."
+    )
+
+
+def test_uv_python_preference_unconditional(install_text: str) -> None:
+    """The original `export UV_PYTHON_PREFERENCE="${VAR:-only-managed}"` honored
+    a hostile non-empty value (Panel B BLOCKER — `:-default` only fires on
+    unset/empty). install.sh must unset UV_PYTHON_PREFERENCE in the scrub
+    block, then re-export with a hard literal — no `${VAR:-…}` fallback.
+    """
+    # The scrub block must include UV_PYTHON_PREFERENCE.
+    assert "UV_PYTHON_PREFERENCE" in install_text, (
+        "UV_PYTHON_PREFERENCE must be in the scrub block (Panel B BLOCKER)."
+    )
+    # Unconditional re-export, no `${VAR:-...}` fallback.
+    assert re.search(
+        r"^export\s+UV_PYTHON_PREFERENCE=only-managed\s*$",
+        install_text,
+        re.MULTILINE,
+    ), (
+        "install.sh must export UV_PYTHON_PREFERENCE=only-managed unconditionally "
+        "(no `${VAR:-...}` fallback that lets a hostile non-empty value through)."
+    )
+    # Defensive: forbid the old bypass-prone pattern from creeping back.
+    assert "UV_PYTHON_PREFERENCE:-" not in install_text, (
+        "install.sh must NOT use `${UV_PYTHON_PREFERENCE:-...}` — that honored "
+        "a hostile UV_PYTHON_PREFERENCE=system value (Panel B BLOCKER)."
     )
 
 
@@ -661,3 +944,327 @@ def test_public_curl_manual_gate_requires_terminal_evidence() -> None:
         "public curl proof must say where the terminal evidence is recorded "
         "(Linear, PR, or release notes), not just local memory."
     )
+
+
+class TestPathLockdownIsActuallyTested:
+    """The PATH lockdown is install.sh's main defense — and had no test.
+
+    install.sh prepends system dirs to PATH (WOR-673/A2) so a poisoned
+    `~/evil/bin` on the caller's PATH cannot supply curl, sh, sha256sum, awk,
+    mktemp or uv. Without it the Astral SHA pin is worthless: the attacker's
+    own `sha256sum` computes the "expected" hash.
+
+    38 test modules reference install.sh. The Python unit lane routes through
+    helpers that set ``WORTHLESS_TRUST_PATH=1`` — necessarily, since they inject
+    stubs — which turns the lockdown OFF. The Docker lanes
+    (``test_install_docker.py``, ``test_docker_e2e.py``) DO run it with the
+    lockdown active, so it is not true that the line never executed; what was
+    missing is that nothing ever *asserted* on it. A defense that runs but is
+    never checked fails silently, which is the gap these tests close.
+
+    KNOWN LIMIT, stated because the lockdown is easy to overrate: it only governs
+    commands that EXIST in the trusted dirs. ``sha256sum`` is in none of them on
+    macOS (worthless-rlio) and ``uv`` is in none of them anywhere
+    (worthless-v0tl), so both still resolve from the caller's PATH tail. Trust
+    here is also path-based, not ownership-based — an attacker who can already
+    write to a trusted dir, or plant a symlink there, is not stopped by any of
+    this. These tests prove the prefix ordering holds; they do not prove the
+    lockdown is sufficient, and it is not.
+
+    These tests run the real shell logic, extracted from the script rather than
+    hand-copied, so they cannot drift from it silently.
+    """
+
+    def _lockdown_snippet(self) -> str:
+        """The real lockdown block, read out of install.sh."""
+        text = INSTALL_SH.read_text()
+        start = text.index('if [ "${WORTHLESS_TRUST_PATH:-}" != "1" ]; then')
+        end = text.index("# --- Output helpers", start)
+        return text[start:end]
+
+    def _resolve(self, snippet: str, *, home: Path, caller_path: str, trust: str | None) -> str:
+        """Run the snippet, then report which dir wins for a planted binary."""
+        env = {"HOME": str(home), "PATH": caller_path}
+        if trust is not None:
+            env["WORTHLESS_TRUST_PATH"] = trust
+        script = f"{snippet}\ncommand -v plantme\n"
+        out = subprocess.run(  # noqa: S603
+            ["/bin/sh", "-c", script], capture_output=True, text=True, env=env, check=False
+        )
+        return out.stdout.strip()
+
+    def _plant(self, tmp_path: Path) -> tuple[Path, str]:
+        """A 'system' copy and an attacker copy of the same command name."""
+        sysbin = tmp_path / "sysbin"
+        evil = tmp_path / "evil" / "bin"
+        for d in (sysbin, evil):
+            d.mkdir(parents=True)
+            (d / "plantme").write_text("#!/bin/sh\nexit 0\n")
+            (d / "plantme").chmod(0o755)
+        return sysbin, str(evil)
+
+    def test_lockdown_puts_system_dirs_ahead_of_a_poisoned_caller_path(
+        self, tmp_path: Path
+    ) -> None:
+        """The whole point: caller-controlled dirs must not win."""
+        sysbin, evil = self._plant(tmp_path)
+        snippet = self._lockdown_snippet().replace("/usr/bin:/bin:/usr/local/bin", str(sysbin))
+        winner = self._resolve(
+            snippet, home=tmp_path / "home", caller_path=f"{evil}:{sysbin}", trust=None
+        )
+        assert winner.startswith(str(sysbin)), (
+            f"a poisoned caller PATH won over the system dir — the lockdown did not "
+            f"take effect. resolved: {winner!r}"
+        )
+
+    def test_trust_path_escape_hatch_needs_exactly_one(self, tmp_path: Path) -> None:
+        """Only literal "1" disables it — a typo-tolerant parse would be bypassable."""
+        sysbin, evil = self._plant(tmp_path)
+        snippet = self._lockdown_snippet().replace("/usr/bin:/bin:/usr/local/bin", str(sysbin))
+        for value in ("true", "yes", "01", "1 ", " 1", "TRUE"):
+            winner = self._resolve(
+                snippet, home=tmp_path / "home", caller_path=f"{evil}:{sysbin}", trust=value
+            )
+            assert winner.startswith(str(sysbin)), (
+                f"WORTHLESS_TRUST_PATH={value!r} disabled the lockdown; only literal '1' may"
+            )
+        # ...and the exact value genuinely does disable it, or the tests that
+        # rely on stub injection would be silently testing the wrong binaries.
+        winner = self._resolve(
+            snippet, home=tmp_path / "home", caller_path=f"{evil}:{sysbin}", trust="1"
+        )
+        assert winner.startswith(evil), "WORTHLESS_TRUST_PATH=1 must disable the lockdown"
+
+    def test_hostile_home_cannot_produce_a_root_owned_path_entry(self, tmp_path: Path) -> None:
+        """HOME=/ or HOME= must not yield "//.local/bin" or "/.local/bin"."""
+        sysbin, evil = self._plant(tmp_path)
+        snippet = self._lockdown_snippet().replace("/usr/bin:/bin:/usr/local/bin", str(sysbin))
+        for hostile in ("/", ""):
+            script = f'HOME={hostile!r}\n{snippet}\nprintf "%s" "$PATH"\n'
+            out = subprocess.run(  # noqa: S603
+                ["/bin/sh", "-c", script],
+                capture_output=True,
+                text=True,
+                env={"PATH": f"{evil}:{sysbin}"},
+                check=False,
+            )
+            elements = out.stdout.split(":")
+            # Exact-element assertion. Checking only for "//.local/bin" let a
+            # mutation that drops the /root default through: HOME="" then yields
+            # the element "/.local/bin", which contains no double slash and is
+            # just as wrong (security-engineer review of PR #573).
+            assert "/root/.local/bin" in elements, (
+                f"HOME={hostile!r} must fall back to /root, got elements: {elements!r}"
+            )
+            for bad in ("//.local/bin", "/.local/bin"):
+                assert bad not in elements, (
+                    f"HOME={hostile!r} produced the element {bad!r}: {out.stdout!r}"
+                )
+
+    def test_bootstrapped_uv_must_outrank_a_stale_system_uv(self) -> None:
+        """The one deliberate exception to the lockdown — do not "fix" it.
+
+        ``ensure_uv`` ends by prepending ``~/.local/bin`` and ``~/.cargo/bin``
+        AHEAD of the system dirs the lockdown installed. It is the only place in
+        install.sh that puts user-writable dirs first, and it reads like a bug.
+        It is load-bearing.
+
+        We only reach that line when uv was absent or at the WRONG version, so a
+        pre-existing ``/usr/bin/uv`` is by definition not the one we just pinned
+        and SHA-verified. The lockdown's own ``~/.local/bin`` entry sits AFTER
+        the system dirs, so without the prepend the stale system uv wins
+        ``command -v`` and every subsequent ``uv tool install`` runs from it —
+        silently defeating the version pin ensure_uv exists to establish:
+
+            PATH=/usr/bin:...:$HOME/.local/bin  -> resolves the SYSTEM uv
+            PATH=$HOME/.local/bin:...:/usr/bin  -> resolves the BOOTSTRAPPED uv
+
+        The accepted cost is that two user-writable dirs outrank /usr/bin for the
+        rest of the run. They are exactly where we just installed uv, and an
+        attacker able to write them could equally have poisoned the tool we are
+        about to execute. Nothing else moves; the lockdown still governs every
+        command before this point.
+
+        The rationale lives here rather than in install.sh because the served
+        script is held under a 24.5 KB injection-guard ceiling
+        (workers/worthless-sh/test/headers-and-integrity.test.ts) with 15 bytes of
+        slack (24485 of 24500; the assertion counts UTF-16 units, 24419). A
+        comment explaining this would not fit, and that ceiling is deliberately
+        not a ratchet.
+        """
+        text = INSTALL_SH.read_text()
+        start = text.index("    uvh=")
+        block = text[start : text.index("export PATH", start)]
+
+        # EXACT literal, not startswith/endswith. The loose form let three
+        # verified mutations through (security-engineer + brutus review of
+        # PR #573): an attacker dir injected mid-PATH, the HOME guard defeated
+        # for the second entry, and a reordered trusted set. Any of those keeps
+        # the prefix and suffix intact while changing what actually resolves.
+        expected = 'PATH="$uvh/.local/bin:$uvh/.cargo/bin:$PATH"'
+        path_line = next(ln for ln in block.splitlines() if ln.strip().startswith("PATH="))
+        assert path_line.strip() == expected, (
+            "ensure_uv's PATH line changed. It is load-bearing: uv's install dir "
+            "must lead, both entries must use the guarded $uvh (not bare $HOME), "
+            "nothing may be injected between them, and the inherited PATH must "
+            f"stay last.\n  expected: {expected}\n  got:      {path_line.strip()}"
+        )
+        assert 'uvh="${HOME:-/root}"' in block, (
+            "the HOME guard is gone — HOME=/ or HOME= would yield '//.local/bin'"
+        )
+        assert '[ "$uvh" = / ]' in block, "the HOME=/ guard is gone"
+
+    def test_the_trusted_set_itself_is_pinned(self) -> None:
+        """The set of trusted dirs, and their order, must not drift.
+
+        The other tests in this class substitute the trusted prefix with a temp
+        dir so they can plant binaries into it. That substitution overwrites the
+        very literal under test, so they verify POSIX prefix semantics rather
+        than install.sh's *choice* of directories. Demonstrated during review of
+        PR #573: moving ``${home_for_path}/.local/bin`` to the HEAD of the
+        trusted set — trusting a user-writable dir ahead of /usr/bin, exactly the
+        regression this class exists to catch — passed all four of them.
+
+        So the literal is pinned here, separately and exactly.
+
+        Ordering is the whole point: system dirs must lead, and the caller's
+        inherited PATH must come last so a poisoned entry can only ever be a
+        fallback for commands absent from the trusted set.
+
+        KNOWN AND DELIBERATE LIMIT — do not read this test as proof the lockdown
+        is sufficient. It only covers commands that EXIST in these dirs. On macOS
+        ``sha256sum`` is in none of them (worthless-rlio) and ``uv`` is in none of
+        them on any platform (worthless-v0tl), so both still resolve from the
+        caller's tail. Widening this set is one candidate fix for those; if that
+        happens, this test is the thing to update, deliberately.
+        """
+        text = INSTALL_SH.read_text()
+        block = text[text.index('if [ "${WORTHLESS_TRUST_PATH:-}" != "1" ]; then') :]
+        line = next(ln for ln in block.splitlines() if ln.strip().startswith("PATH="))
+        expected = 'PATH="/usr/bin:/bin:/usr/local/bin:${home_for_path}/.local/bin:${PATH:-}"'
+        assert line.strip() == expected, (
+            "the lockdown's trusted set changed. System dirs must lead and the "
+            "inherited PATH must stay last; a user-writable dir moved ahead of "
+            "/usr/bin would silently undo the whole defense.\n"
+            f"  expected: {expected}\n  got:      {line.strip()}"
+        )
+
+
+class TestPlantedBinariesCannotWin:
+    """worthless-rlio + worthless-v0tl: one defect, two symptoms.
+
+    The PATH lockdown (WOR-673/A2) prepends system dirs so trusted binaries
+    outrank caller-controlled ones. It PRESERVES the caller's PATH as the tail,
+    by design. So it only governs commands that actually EXIST in the trusted
+    dirs — anything else still resolves from the attacker's directory.
+
+    Two commands the installer depends on are not in those dirs:
+
+      sha256sum  absent from /usr/bin, /bin, /usr/local/bin on macOS
+                 (stock macOS ships /usr/bin/shasum instead)
+      uv         absent from all of them on every platform; it installs to
+                 ~/.local/bin
+
+    Both were found by adversarial review of PR #573 and confirmed on a real
+    Mac. They are filed separately but MUST be fixed together, because each
+    defeats the other's fix:
+
+      * Harden the hasher alone, and a planted `uv` short-circuits ensure_uv at
+        install.sh:262 before the hashing code is ever reached — the Astral
+        installer is never downloaded and the SHA pin never runs.
+      * Harden the uv lookup alone, and the download proceeds but a planted
+        `sha256sum` still reports the expected constant, so a tampered installer
+        passes and is executed.
+
+    These tests plant a hostile binary in a directory that is on PATH but is NOT
+    a trusted dir — the attacker's realistic position — and assert the installer
+    refuses to use it.
+    """
+
+    def _hostile(self, tmp_path: Path, name: str, prints: str) -> str:
+        d = tmp_path / "attacker" / "bin"
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / name
+        p.write_text(f"#!/bin/sh\necho '{prints}'\n")
+        p.chmod(0o755)
+        return str(d)
+
+    def test_hasher_is_resolved_from_a_trusted_dir_not_from_path(self, tmp_path: Path) -> None:
+        """A planted sha256sum must not be the one that verifies the download.
+
+        Today: install.sh:286 runs `command -v sha256sum`. On macOS that finds
+        nothing in the trusted prefix and falls through to the caller's tail, so
+        the attacker's copy answers — and it prints ASTRAL_INSTALLER_SHA256, so
+        the comparison at :294 passes on a tampered installer which is then
+        executed at :301.
+        """
+        text = INSTALL_SH.read_text()
+        assert "command -v sha256sum" not in text, (
+            "install.sh still resolves the hasher via `command -v`, which reaches "
+            "the caller's PATH tail. On macOS sha256sum is in no trusted dir, so an "
+            "attacker's copy verifies the download it also tampered with. Resolve "
+            "it to an absolute path inside a trusted dir and refuse otherwise."
+        )
+
+    def test_uv_is_not_trusted_merely_because_it_is_on_path(self, tmp_path: Path) -> None:
+        """A planted uv must not be able to skip the SHA-pinned bootstrap.
+
+        Today: install.sh:262 runs `command -v uv`, then trusts
+        `uv --version` — attacker-controlled output — to decide the pinned uv is
+        already present, returning 0 and skipping download + verification
+        entirely. uv lives in ~/.local/bin, so it is never in a trusted dir and
+        the lockdown cannot help.
+        """
+        text = INSTALL_SH.read_text()
+        assert "if command -v uv >/dev/null 2>&1; then" not in text, (
+            "ensure_uv still decides whether to bootstrap by asking PATH for `uv`. "
+            "Any writable dir on the user's PATH can supply one that prints the "
+            "pinned version, and the whole SHA-verified bootstrap is skipped. "
+            "Resolve uv from a bounded set of locations instead."
+        )
+
+    def test_a_trusted_lookup_helper_exists_and_excludes_the_caller_path(self) -> None:
+        """The fix must be a bounded allowlist, not another PATH lookup."""
+        text = INSTALL_SH.read_text()
+        assert "trusted_tool()" in text, (
+            "expected a helper that resolves a command to an absolute path within "
+            "an explicit list of trusted directories"
+        )
+        for fn in ("trusted_tool()", "resolve_uv()"):
+            start = text.index(fn)
+            body = text[start : text.index("\n}\n", start)]
+            # `command -v` is allowed ONLY inside the documented test escape
+            # hatch. An UNGATED fallback would reintroduce the caller's PATH,
+            # which is the entire bug. So every occurrence must sit under a
+            # strict WORTHLESS_TRUST_PATH = "1" check.
+            if "command -v" in body:
+                gate = '[ "${WORTHLESS_TRUST_PATH:-}" = "1" ]'
+                assert gate in body, (
+                    f"{fn} falls back to `command -v` without the escape-hatch "
+                    f"gate — that is the vulnerability, restored. got:\n{body}"
+                )
+                before_gate = body[: body.index(gate)]
+                assert "command -v" not in before_gate, (
+                    f"{fn} consults PATH BEFORE checking the escape hatch, so the "
+                    f"gate does not actually gate anything. got:\n{body}"
+                )
+            assert "/usr/bin" in body, f"{fn} should search /usr/bin"
+
+    def test_the_escape_hatch_in_the_resolvers_is_strict(self, tmp_path: Path) -> None:
+        """Only the literal "1" may opt out — same rule as the lockdown.
+
+        The resolvers defer to PATH when WORTHLESS_TRUST_PATH=1 so the test
+        harness can inject stubs. If that check were typo-tolerant, an attacker
+        who can set any environment variable could re-open the exact hole these
+        resolvers close, by setting it to "true".
+        """
+        text = INSTALL_SH.read_text()
+        for fn in ("trusted_tool()", "resolve_uv()"):
+            start = text.index(fn)
+            body = text[start : text.index("\n}\n", start)]
+            if "WORTHLESS_TRUST_PATH" not in body:
+                continue
+            assert '"${WORTHLESS_TRUST_PATH:-}" = "1"' in body, (
+                f'{fn} must compare against the literal "1"; a looser test '
+                f'(-n, != "", case-insensitive) is bypassable. got:\n{body}'
+            )

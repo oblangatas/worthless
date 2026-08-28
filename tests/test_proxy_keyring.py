@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.fixtures.dirty_home import write_secure_fernet_key
 from worthless.cli.process import build_proxy_env, fernet_transport
 from worthless.proxy.config import ProxySettings, _read_fernet_key
 
@@ -80,7 +81,7 @@ class TestReadFernetKeyCascade:
         monkeypatch.setenv("HOME", str(tmp_path))
         worthless_dir = tmp_path / ".worthless"
         worthless_dir.mkdir()
-        (worthless_dir / "fernet.key").write_bytes(b"keyring-key")
+        write_secure_fernet_key(worthless_dir / "fernet.key", b"keyring-key")
         result = _read_fernet_key()
         assert result == bytearray(b"keyring-key")
 

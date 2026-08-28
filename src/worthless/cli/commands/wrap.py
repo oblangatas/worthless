@@ -32,6 +32,8 @@ from worthless._async import run_sync
 from worthless.cli.bootstrap import WorthlessHome, get_home
 from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary, sanitize_exception
 from worthless.cli.platform import fail_if_windows, popen_platform_kwargs
+from worthless.storage.sqlite import connect as sqlite_connect
+from worthless.cli.sentinel import is_partial, read_sentinel
 from worthless.cli.process import (
     build_proxy_env,
     check_proxy_health,
@@ -131,7 +133,7 @@ def _list_enrolled_aliases(home: WorthlessHome) -> list[tuple[str, str]]:
         return []
 
     async def _query() -> list[tuple[str, str]]:
-        async with aiosqlite.connect(str(home.db_path)) as db:
+        async with sqlite_connect(str(home.db_path)) as db:
             cursor = await db.execute(
                 "SELECT s.key_alias, s.provider "
                 "FROM shards s "
@@ -212,6 +214,26 @@ def _cleanup_lifecycle(
             pass
 
 
+def _warn_if_sentinel_degraded(home: WorthlessHome) -> None:
+    """WOR-658 Fix 8: if the last lock's bind-confirmation left a DEGRADED
+    sentinel, warn the user before spawning the child. Cheap stderr write —
+    no failure path; missing or unreadable sentinel is silent.
+    """
+    try:
+        sentinel = read_sentinel(home.base_dir)
+    except Exception:  # noqa: BLE001 — best-effort warn, never crash wrap
+        return
+    if not is_partial(sentinel):
+        return
+    sys.stderr.write(
+        "[WARN] Last `worthless lock` left a DEGRADED sentinel — "
+        "OpenClaw routing is not proven.\n"
+        "       Run `worthless doctor` (or `worthless unlock` to roll back) "
+        "before relying on this child.\n"
+    )
+    sys.stderr.flush()
+
+
 def register_wrap_commands(app: typer.Typer) -> None:
     """Register the ``wrap`` command on the Typer app."""
 
@@ -226,6 +248,13 @@ def register_wrap_commands(app: typer.Typer) -> None:
         """Start ephemeral proxy, inject env vars, run COMMAND, clean up."""
         fail_if_windows()
 
+        # Before get_home(): it loads home.fernet_key into memory, and cores
+        # must already be off by then (dupf.10). The dumpable bit is reset by
+        # execve, so COMMAND stays ptrace-able (gdb/lldb/py-spy still attach).
+        # RLIMIT_CORE, however, IS inherited across execve — the wrapped
+        # program does not get core files. That predates this change.
+        disable_core_dumps()
+
         # Load home, verify keys enrolled
         home = get_home()
         aliases = _list_enrolled_aliases(home)
@@ -235,8 +264,11 @@ def register_wrap_commands(app: typer.Typer) -> None:
                 "No keys enrolled. Run 'worthless lock' first.",
             )
 
-        # Suppress core dumps
-        disable_core_dumps()
+        # WOR-658 Fix 8: warn the user if the last lock's bind-confirmation
+        # left a DEGRADED sentinel. wrap is the magic-moment command —
+        # silently spawning a child whose proxy might not be in the path is
+        # exactly the silent-bypass class WOR-658 was built to expose.
+        _warn_if_sentinel_degraded(home)
 
         # The proxy refuses to start without an IPC peer, so the sidecar
         # must come up first. ``up.py`` uses the same ordering.

@@ -6,12 +6,15 @@ Docker-gated tests live in test_lock_audit_gate_docker.py.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
+
+import yaml
 
 import pytest
 
@@ -504,6 +507,60 @@ class TestAC10DoctorSurface:
     with subprocess-layer mocks so no real openclaw binary is required.
     """
 
+    def test_doctor_uses_the_single_sourced_proxy_base_url(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CodeRabbit + BugBot (PR #387): doctor must use the SAME resolved
+        proxy base URL — host AND port — that a real ``worthless lock`` would
+        write. Three review passes each found a variant of doctor/lock/the
+        audit gate disagreeing on this URL; this pins doctor against the
+        single-sourced :func:`resolve_openclaw_proxy_base_url`, covering both
+        ``WORTHLESS_PROXY_HOST`` (host) and ``WORTHLESS_PORT`` (port) in one
+        assertion so the two can't silently re-drift independently."""
+        from worthless.cli.bootstrap import ensure_home
+        from worthless.cli.commands.doctor.checks import openclaw as _oc_check_mod
+        from worthless.cli.commands.doctor.registry import CheckContext
+        from worthless.openclaw.integration import IntegrationState
+        from worthless.storage.repository import ShardRepository
+
+        monkeypatch.setenv("WORTHLESS_PROXY_HOST", "proxy")  # all-container Docker service name
+        monkeypatch.setenv("WORTHLESS_PORT", "9123")
+
+        fake_home = ensure_home(tmp_path / ".worthless")
+        repo = ShardRepository(str(fake_home.db_path), bytes(fake_home.fernet_key))
+        asyncio.run(repo.initialize())
+        ctx = CheckContext(home=fake_home, repo=repo, fix=False, dry_run=False)
+
+        present_state = IntegrationState(
+            present=True,
+            config_path=None,
+            workspace_path=None,  # _check_skill short-circuits safely on None
+            skill_path=None,
+            home_dir=tmp_path,
+            notes=(),
+        )
+        captured: dict = {}
+
+        def _capture_audit_findings(managed_aliases, proxy_base_url):
+            captured["proxy_base_url"] = proxy_base_url
+            return []
+
+        with (
+            patch.object(_oc_check_mod._oc_integration, "detect", return_value=present_state),
+            patch.object(
+                _oc_check_mod,
+                "_audit_gate_findings",
+                side_effect=_capture_audit_findings,
+            ),
+        ):
+            _oc_check_mod.run(ctx)
+
+        assert captured.get("proxy_base_url") == "http://proxy:9123", (
+            f"doctor passed {captured.get('proxy_base_url')!r} — expected "
+            "'http://proxy:9123' (the WORTHLESS_PROXY_HOST + WORTHLESS_PORT-aware, "
+            "single-sourced value a real worthless lock would write)"
+        )
+
     def test_doctor_reports_exit_87_when_binary_unavailable(self) -> None:
         """Doctor surfaces exit-87 state when openclaw binary cannot be resolved."""
         from worthless.cli.commands.doctor.checks.openclaw import _audit_gate_findings
@@ -512,7 +569,7 @@ class TestAC10DoctorSurface:
             "worthless.cli.commands.doctor.checks.openclaw._oc_audit.resolve_openclaw_bin",
             side_effect=AuditGateError("openclaw binary not found — set WORTHLESS_OPENCLAW_BIN"),
         ):
-            findings = _audit_gate_findings()
+            findings = _audit_gate_findings(None, "http://127.0.0.1:8787")
 
         assert len(findings) == 1
         assert findings[0]["exit_code"] == 87
@@ -533,7 +590,7 @@ class TestAC10DoctorSurface:
                 side_effect=AuditGateError("openclaw secrets audit exited 1"),
             ),
         ):
-            findings = _audit_gate_findings()
+            findings = _audit_gate_findings(None, "http://127.0.0.1:8787")
 
         assert len(findings) == 1
         assert findings[0]["exit_code"] == 87
@@ -569,7 +626,7 @@ class TestAC10DoctorSurface:
                 return_value=(MagicMock(), mock_classification),
             ),
         ):
-            findings = _audit_gate_findings()
+            findings = _audit_gate_findings(None, "http://127.0.0.1:8787")
 
         assert len(findings) == 1
         assert findings[0]["exit_code"] == 73
@@ -598,9 +655,33 @@ class TestAC10DoctorSurface:
                 return_value=(MagicMock(), mock_classification),
             ),
         ):
-            findings = _audit_gate_findings()
+            findings = _audit_gate_findings(None, "http://127.0.0.1:8787")
 
         assert findings == []
+
+    def test_doctor_forwards_managed_aliases_for_recognition(self) -> None:
+        """WOR-777: doctor passes managed_aliases so the gate recognizes
+        worthless's own shard-A — its prediction matches ``worthless lock`` and
+        it does not false-alarm "key exposed" on an entry worthless created."""
+        from worthless.openclaw.audit import AuditClassification
+
+        from worthless.cli.commands.doctor.checks.openclaw import _audit_gate_findings
+
+        recognized_clean = AuditClassification(blocking=(), advisory_count=1, unknown_codes=())
+        with (
+            patch(
+                "worthless.cli.commands.doctor.checks.openclaw._oc_audit.resolve_openclaw_bin",
+                return_value=Path("/usr/local/bin/openclaw"),
+            ),
+            patch(
+                "worthless.cli.commands.doctor.checks.openclaw._oc_audit.run_and_classify",
+                return_value=(MagicMock(), recognized_clean),
+            ) as mock_rc,
+        ):
+            findings = _audit_gate_findings({"openai-a1b2c3d4"}, "http://127.0.0.1:8787")
+
+        assert findings == []
+        assert mock_rc.call_args.kwargs.get("managed_aliases") == {"openai-a1b2c3d4"}
 
 
 # --------------------------------------------------------------------------- #
@@ -660,12 +741,49 @@ class TestAC12WOR545LoadBearingTestExists:
             "WOR-545: test_proxy_load_bearing.py must exist before Phase 1 merges"
         )
 
-    def test_load_bearing_test_has_xfail_mark(self) -> None:
-        """AC 12: test_proxy_load_bearing.py is marked xfail(strict=True)."""
+    def test_load_bearing_test_no_longer_carries_xfail(self) -> None:
+        """AC 12 inversion: Phase 1 originally pinned ``xfail(strict=True)``
+        on ``test_proxy_load_bearing.py`` because the proxy was bypassable.
+        F1 fixed that (lock now rewrites the original entry to the proxy)
+        and the xfail marker was removed when the test went green —
+        per WOR-545's success criterion in the PR-1 plan.
+
+        This meta-test inverts the original assertion: the marker must
+        STAY removed so a regression that re-introduces it (silently
+        accepting the WOR-514 bypass again) fails this gate.
+        """
         test_file = Path(__file__).parent / "test_proxy_load_bearing.py"
         content = test_file.read_text()
-        assert "xfail" in content
-        assert "strict=True" in content
+        assert "xfail" not in content, (
+            "WOR-545 regression: xfail marker must stay removed (F1 success "
+            "criterion). Re-introducing it means the proxy bypass is back."
+        )
+
+    def test_load_bearing_test_wired_in_docker_security_workflow(self) -> None:
+        """AC 12b: docker-security.yml runs the behavioral load-bearing test."""
+        workflow = Path(__file__).resolve().parents[3] / ".github/workflows/docker-security.yml"
+        content = workflow.read_text()
+        assert "test_proxy_load_bearing.py" in content, (
+            "WOR-621: load-bearing test must run in docker-security workflow"
+        )
+        assert "openclaw and docker" in content, (
+            'load-bearing pytest step must pass -m "openclaw and docker" '
+            "(pyproject addopts exclude docker/openclaw by default)"
+        )
+        # WOR-874 deleted the workflow's `paths:` filter entirely, so it now
+        # triggers on every PR — these tests are covered by definition. The
+        # property is "a change here runs the load-bearing test", not "this
+        # glob appears in a list", so assert the property: either there is no
+        # filter, or the filter names this directory.
+        triggers = yaml.safe_load(content)[True]
+        for event in ("push", "pull_request"):
+            config = triggers.get(event)
+            if not isinstance(config, dict) or "paths" not in config:
+                continue  # unfiltered — every path triggers it, including this one
+            assert "tests/openclaw/**" in config["paths"], (
+                f"{event}: a paths filter was re-added without tests/openclaw/** — "
+                "changes to the load-bearing tests would ship without running them"
+            )
 
 
 # =========================================================================== #
@@ -842,7 +960,7 @@ class TestAdversarial:
             return_value=(MagicMock(), mock_classification),
         ):
             with pytest.raises(typer.Exit) as exc_info:
-                _openclaw_audit_postflight(gate)
+                _openclaw_audit_postflight(gate, None, "http://127.0.0.1:8787")
 
         assert exc_info.value.exit_code == 87
 
@@ -1020,7 +1138,9 @@ class TestRunAndClassifyWiring:
         fake_bin.chmod(0o755)
 
         with patch("subprocess.run", return_value=proc):
-            _result, classification = run_and_classify(fake_bin)
+            _result, classification = run_and_classify(
+                fake_bin, proxy_base_url="http://127.0.0.1:8787"
+            )
 
         assert len(classification.blocking) == 1
         assert classification.blocking[0].source == "auth-profiles-direct"
@@ -1054,7 +1174,9 @@ class TestRunAndClassifyWiring:
         fake_bin.chmod(0o755)
 
         with patch("subprocess.run", return_value=proc):
-            _result, classification = run_and_classify(fake_bin)
+            _result, classification = run_and_classify(
+                fake_bin, proxy_base_url="http://127.0.0.1:8787"
+            )
 
         assert len(classification.blocking) == 0
         assert len(classification.unknown_codes) == 0
@@ -1092,7 +1214,7 @@ class TestDoctorUnknownCodes:
                 return_value=(MagicMock(), mock_classification),
             ),
         ):
-            findings = _audit_gate_findings()
+            findings = _audit_gate_findings(None, "http://127.0.0.1:8787")
 
         assert len(findings) == 1
         assert findings[0]["exit_code"] == 87
@@ -1176,6 +1298,27 @@ class TestSanitiseForMessage:
         """BOM (U+FEFF) is stripped."""
         assert sanitise_for_message("﻿path/to/file") == "path/to/file"
 
+    def test_line_paragraph_separators_stripped(self) -> None:
+        """Unicode line/paragraph separators (U+2028/U+2029) are stripped.
+
+        These are legal in filenames on APFS/ext4 but render as line breaks in
+        many LLM and terminal contexts — a crafted filename could otherwise
+        inject a new instruction line into the pasted AI fix prompt.
+        """
+        ls = " "  # LINE SEPARATOR
+        ps = " "  # PARAGRAPH SEPARATOR
+        assert sanitise_for_message(f"a{ls}b{ps}c") == "abc"
+
+    def test_word_joiner_and_alm_stripped(self) -> None:
+        """Zero-width WORD JOINER (U+2060) and ARABIC LETTER MARK (U+061C) are stripped.
+
+        Invisible formatting characters in the same family as U+200B-200F — defense
+        in depth against invisible-glyph filename spoofing.
+        """
+        wj = "⁠"  # WORD JOINER
+        alm = "؜"  # ARABIC LETTER MARK
+        assert sanitise_for_message(f"a{wj}b{alm}c") == "abc"
+
     def test_clean_string_unchanged(self) -> None:
         """Normal ASCII strings pass through unchanged."""
         s = "/home/user/.openclaw/models.json"
@@ -1218,3 +1361,242 @@ class TestNonProviderPlaintextScope:
         assert len(classification.blocking) == 0
         assert classification.advisory_count == 1
         assert len(classification.unknown_codes) == 0
+
+
+# --------------------------------------------------------------------------- #
+# scan output paths run through sanitise_for_message (Trojan-Source / bidi)    #
+# Attacker-influenceable file paths AND scanned source content (hostile        #
+# dependency, malicious clone) must not smuggle control / format / separator   #
+# chars into the terminal -- the class PR #365 hardened the lock block against.#
+# Codepoints are written as explicit \u escapes so no invisible character ever #
+# lives in this test's source.                                                 #
+# --------------------------------------------------------------------------- #
+
+_RLO = "\u202e"  # RIGHT-TO-LEFT OVERRIDE (bidi)
+_LINE_SEP = "\u2028"  # LINE SEPARATOR
+_PARA_SEP = "\u2029"  # PARAGRAPH SEPARATOR
+# A path an attacker could create. Renders as "src/evil.env" once scrubbed.
+_HOSTILE_PATH = f"src/{_RLO}evil{_LINE_SEP}.env"
+_INJECTED = (_RLO, _LINE_SEP, _PARA_SEP)
+
+
+class TestScanOutputPathsSanitised:
+    def _assert_clean(self, out: str) -> None:
+        for ch in _INJECTED:
+            assert ch not in out
+        # Benign bytes survive -- only the control/format chars are removed.
+        assert "src/evil.env" in out
+
+    def _scan_finding(self, file: str, **over: object):
+        from worthless.cli.scanner import ScanFinding
+
+        kw = {
+            "file": file,
+            "line": 1,
+            "var_name": "K",
+            "provider": "openai",
+            "is_protected": False,
+            "value_preview": "sk-a",
+        }
+        kw.update(over)
+        return ScanFinding(**kw)  # type: ignore[arg-type]
+
+    def _code_finding(self, file: str, **over: object):
+        from worthless.cli.code_scanner import CodeFinding
+
+        kw = {
+            "file": file,
+            "line": 1,
+            "column": 1,
+            "matched_url": "https://api.openai.com",
+            "provider_name": "openai",
+            "suggested_env_var": "OPENAI_API_KEY",
+            "line_text": 'url = "https://api.openai.com"',
+        }
+        kw.update(over)
+        return CodeFinding(**kw)  # type: ignore[arg-type]
+
+    def test_scan_human_key_finding_path_sanitised(self) -> None:
+        """``_format_human`` strips bidi/separator chars from f.file."""
+        from worthless.cli.commands.scan import _format_human
+
+        self._assert_clean(_format_human([self._scan_finding(_HOSTILE_PATH)]))
+
+    def test_scan_code_finding_path_sanitised(self) -> None:
+        """Per-finding branch (collapse_tests=False, scan.py ~341)."""
+        from worthless.cli.commands.scan import _format_code_findings_human
+
+        self._assert_clean(_format_code_findings_human([self._code_finding(_HOSTILE_PATH)]))
+
+    def test_scan_code_finding_collapsed_path_sanitised(self) -> None:
+        """Grouped/compact branch (collapse_tests=True, scan.py ~335)."""
+        from worthless.cli.commands.scan import _format_code_findings_human
+
+        out = _format_code_findings_human([self._code_finding(_HOSTILE_PATH)], collapse_tests=True)
+        self._assert_clean(out)
+
+    def test_scan_code_finding_url_and_snippet_sanitised(self) -> None:
+        """matched_url and line_text are attacker content too (scan.py ~345/351)."""
+        from worthless.cli.commands.scan import _format_code_findings_human
+
+        finding = self._code_finding(
+            "src/clean.py",
+            matched_url=f"https://api.openai.com/{_RLO}x",
+            line_text=f"url = {_LINE_SEP}{_RLO}evil",
+        )
+        out = _format_code_findings_human([finding])
+        for ch in _INJECTED:
+            assert ch not in out
+
+    def test_scan_ai_prompt_block_path_sanitised(self) -> None:
+        """Copy-to-AI-agent prompt scrubs the path (scan.py ~465)."""
+        from worthless.cli.commands.scan import _format_ai_prompt_block
+
+        out = _format_ai_prompt_block([self._code_finding(_HOSTILE_PATH)])
+        for ch in _INJECTED:
+            assert ch not in out
+
+    def test_scan_skipped_human_path_sanitised(self) -> None:
+        """Skipped-files stderr block scrubs the path (scan.py ~501).
+
+        The skipped path is the *most* hostile input -- an oversized/unreadable
+        file we refused to scan, named by an attacker.
+        """
+        from worthless.cli.commands.scan import _format_skipped_human
+        from worthless.cli.scanner import SkippedFile
+
+        out = _format_skipped_human([SkippedFile(file=_HOSTILE_PATH, reason="timeout")])
+        for ch in _INJECTED:
+            assert ch not in out
+
+    def test_json_findings_preserve_raw_path(self) -> None:
+        """Display-only guarantee: machine output keeps the RAW path verbatim.
+
+        If sanitisation ever leaked into JSON (or was applied at the model
+        layer) this fails -- guarding against a 'fix' that silently corrupts
+        the path consumers re-open. This is the anti-false-positive contract.
+        """
+        from worthless.cli.commands.scan import (
+            _code_findings_to_json,
+            _format_json_findings,
+        )
+
+        key_json = json.loads(_format_json_findings([self._scan_finding(_HOSTILE_PATH)]))
+        assert key_json["findings"][0]["file"] == _HOSTILE_PATH  # raw, untouched
+
+        code_json = _code_findings_to_json([self._code_finding(_HOSTILE_PATH)])
+        assert code_json[0]["file"] == _HOSTILE_PATH  # raw, untouched
+
+    def test_formatters_leave_clean_path_intact(self) -> None:
+        """A benign path passes through every formatter byte-for-byte."""
+        from worthless.cli.commands.scan import (
+            _format_code_findings_human,
+            _format_human,
+        )
+
+        clean = "/home/user/project/.env"
+        assert clean in _format_human([self._scan_finding(clean, line=3)])
+        assert clean in _format_code_findings_human([self._code_finding(clean)])
+        assert clean in _format_code_findings_human(
+            [self._code_finding(clean)], collapse_tests=True
+        )
+
+    @pytest.mark.parametrize(
+        "ch",
+        [
+            "\x00",  # C0 control
+            "\x1b",  # ESC (defeats ANSI/OSC)
+            "\x9b",  # C1 CSI
+            "\u200b",  # zero-width space
+            "\u202e",  # RLO (bidi override)
+            "\u2066",  # LRI (bidi isolate)
+            "\ufeff",  # BOM
+            "\u2028",  # line separator
+            "\u2029",  # paragraph separator
+            "\u061c",  # ALM (Arabic Letter Mark) -- bidi control
+            "\u2060",  # WORD JOINER -- zero-width
+        ],
+    )
+    def test_formatters_strip_each_char_class(self, ch: str) -> None:
+        """Every stripped class is removed by both human formatters."""
+        from worthless.cli.commands.scan import (
+            _format_code_findings_human,
+            _format_human,
+        )
+
+        path = f"src/a{ch}b.env"
+        sf = self._scan_finding(path)
+        assert ch not in _format_human([sf])
+        assert ch not in _format_code_findings_human([self._code_finding(path)])
+
+    def test_sanitise_preserves_rtl_letters(self) -> None:
+        """FALSE-POSITIVE GUARD: legitimate Hebrew/Arabic filename letters
+        (category Lo) are NOT stripped -- only control/format/separator chars."""
+        rtl_name = "סוד.env"  # Hebrew letters, a valid filename
+        assert sanitise_for_message(rtl_name) == rtl_name
+
+
+class TestSanitiseCategoryHardening:
+    """worthless-1tbt: sanitise_for_message strips by Unicode CATEGORY
+    (Cc/Cf/Zl/Zp), not a fixed code-point list. These pin the gaps the old
+    fixed-range regex left through (FAIL on the regex, pass on the category
+    filter) plus the false-positive guards that must hold either way.
+    Code points are built with chr() so no invisible char lives in the source.
+    """
+
+    # Invisible format/control chars the OLD regex (max coverage U+FEFF, plus a
+    # few hand-added points) leaves through but a terminal/LLM can act on.
+    GAP_CODEPOINTS = [
+        (0x00AD, "SOFT HYPHEN"),
+        (0x2061, "FUNCTION APPLICATION"),
+        (0x2064, "INVISIBLE PLUS"),
+        (0x206A, "INHIBIT SYMMETRIC SWAPPING"),
+        (0x206F, "NOMINAL DIGIT SHAPES"),
+        (0xFFF9, "INTERLINEAR ANNOTATION ANCHOR"),
+        (0xE0001, "LANGUAGE TAG"),
+        (0xE0041, "TAG LATIN CAPITAL A"),
+    ]
+
+    @pytest.mark.parametrize("cp,name", GAP_CODEPOINTS)
+    def test_gap_codepoint_stripped(self, cp: int, name: str) -> None:
+        ch = chr(cp)
+        assert sanitise_for_message(f"a{ch}b") == "ab", f"{name} (U+{cp:04X}) leaked"
+
+    def test_strict_superset_of_old_regex(self) -> None:
+        """No regression: every code point the old regex stripped is still stripped."""
+        old_stripped = (
+            set(range(0x00, 0x20))
+            | {0x7F}
+            | set(range(0x80, 0xA0))
+            | {0x061C}
+            | set(range(0x200B, 0x2010))
+            | set(range(0x2028, 0x202F))
+            | {0x2060}
+            | set(range(0x2066, 0x206A))
+            | {0xFEFF}
+        )
+        structural = {0x09, 0x0A, 0x0D}  # tab/newlines: both impls strip; fine for 1-line msgs
+        leaked = [
+            hex(cp)
+            for cp in old_stripped - structural
+            if sanitise_for_message(f"x{chr(cp)}y") != "xy"
+        ]
+        assert not leaked, f"category filter misses what the regex stripped: {leaked}"
+
+    def test_rtl_letters_preserved(self) -> None:
+        """FALSE-POSITIVE GUARD: Hebrew/Arabic *letters* (cat Lo) survive intact."""
+        for name in ("סוד.env", "مفتاح.txt"):
+            assert sanitise_for_message(name) == name
+
+    def test_visible_scripts_preserved(self) -> None:
+        for s in ("café", "日本語", "emoji-😀", "naïve"):
+            assert sanitise_for_message(s) == s
+
+    def test_nbsp_and_normal_space_preserved(self) -> None:
+        """Zs spaces (NBSP U+00A0, normal) are separators, not control/format."""
+        assert sanitise_for_message("a b c") == "a b c"
+
+    def test_idempotent(self) -> None:
+        s = f"x{chr(0x202E)}{chr(0x00AD)}{chr(0xE0001)}y"
+        once = sanitise_for_message(s)
+        assert sanitise_for_message(once) == once

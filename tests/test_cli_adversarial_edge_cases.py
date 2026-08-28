@@ -526,11 +526,11 @@ class TestEnrollmentWithoutEnv:
                 "enroll",
                 "--alias",
                 "ci-key",
-                "--key",
-                _OPENAI_KEY,
+                "--key-stdin",
                 "--provider",
                 "openai",
             ],
+            input=f"{_OPENAI_KEY}\n",
             env=env_vars,
         )
         assert r.exit_code == 0, r.output
@@ -555,11 +555,11 @@ class TestEnrollmentWithoutEnv:
                 "enroll",
                 "--alias",
                 "recon-key",
-                "--key",
-                _OPENAI_KEY,
+                "--key-stdin",
                 "--provider",
                 "openai",
             ],
+            input=f"{_OPENAI_KEY}\n",
             env=env_vars,
         )
         assert r.exit_code == 0
@@ -882,7 +882,8 @@ class TestEnrollThenLock:
         alias = _make_alias("openai", _OPENAI_KEY)
         r1 = runner.invoke(
             app,
-            ["enroll", "--alias", alias, "--key", _OPENAI_KEY, "--provider", "openai"],
+            ["enroll", "--alias", alias, "--key-stdin", "--provider", "openai"],
+            input=f"{_OPENAI_KEY}\n",
             env=env_vars,
         )
         assert r1.exit_code == 0, r1.output
@@ -962,11 +963,11 @@ class TestEnrollAcquiresLock:
                 "enroll",
                 "--alias",
                 "lock-test",
-                "--key",
-                _OPENAI_KEY,
+                "--key-stdin",
                 "--provider",
                 "openai",
             ],
+            input=f"{_OPENAI_KEY}\n",
             env=env_vars,
         )
         # Should fail because lock is held
@@ -982,11 +983,11 @@ class TestEnrollAcquiresLock:
                 "enroll",
                 "--alias",
                 "clean-lock",
-                "--key",
-                _OPENAI_KEY,
+                "--key-stdin",
                 "--provider",
                 "openai",
             ],
+            input=f"{_OPENAI_KEY}\n",
             env=env_vars,
         )
         assert r.exit_code == 0, r.output
@@ -1061,11 +1062,11 @@ class TestWrapUsesDbProvider:
                 "enroll",
                 "--alias",
                 "my-custom-alias",
-                "--key",
-                _OPENAI_KEY,
+                "--key-stdin",
                 "--provider",
                 "openai",
             ],
+            input=f"{_OPENAI_KEY}\n",
             env=env_vars,
         )
         assert r.exit_code == 0, r.output

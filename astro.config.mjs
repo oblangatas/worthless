@@ -7,11 +7,26 @@ export default defineConfig({
     starlight({
       title: 'Worthless',
       description: 'Make API keys worthless to steal.',
+      head: [
+        {
+          tag: 'link',
+          attrs: { rel: 'icon', type: 'image/png', sizes: '32x32', href: '/favicon-32x32.png' },
+        },
+        {
+          tag: 'link',
+          attrs: { rel: 'icon', type: 'image/png', sizes: '16x16', href: '/favicon-16x16.png' },
+        },
+        { tag: 'link', attrs: { rel: 'shortcut icon', href: '/favicon.ico' } },
+        {
+          tag: 'link',
+          attrs: { rel: 'apple-touch-icon', sizes: '180x180', href: '/apple-touch-icon.png' },
+        },
+      ],
       social: [
-        { icon: 'github', label: 'GitHub', href: 'https://github.com/shacharm2/worthless' },
+        { icon: 'github', label: 'GitHub', href: 'https://github.com/oblangatas/worthless' },
       ],
       editLink: {
-        baseUrl: 'https://github.com/shacharm2/worthless/edit/main/',
+        baseUrl: 'https://github.com/oblangatas/worthless/edit/main/',
       },
       sidebar: [
         {
@@ -25,9 +40,21 @@ export default defineConfig({
           items: [
             { label: 'Solo Developer', slug: 'install-solo' },
             { label: 'Docker', slug: 'install-docker' },
+            { label: 'Self-Hosted', slug: 'install-self-hosted' },
             { label: 'Claude Code / Cursor / Windsurf', slug: 'install-mcp' },
             { label: 'GitHub Actions', slug: 'install-github-actions' },
             { label: 'Install Security', slug: 'install-security' },
+          ],
+        },
+        {
+          label: 'Install — by platform',
+          items: [
+            { label: 'Pick your platform', slug: 'install' },
+            { label: 'macOS', slug: 'install/mac' },
+            { label: 'Linux', slug: 'install/linux' },
+            { label: 'Windows (WSL2)', slug: 'install/wsl' },
+            { label: 'Docker (app in a container)', slug: 'install/docker' },
+            { label: 'Agent schema', slug: 'install/agent-schema' },
           ],
         },
         {
@@ -36,6 +63,8 @@ export default defineConfig({
             { label: 'Wire Protocol', slug: 'protocol' },
             { label: 'Security Model', slug: 'security' },
             { label: 'Recovery', slug: 'recovery' },
+            { label: 'Uninstall', slug: 'uninstall' },
+            { label: 'Uninstall Contract', slug: 'uninstall-contract' },
           ],
         },
       ],

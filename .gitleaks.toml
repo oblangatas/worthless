@@ -43,6 +43,7 @@ paths = [
     '''\.planning/ROADMAP\.md$''',
     '''tests/.*\.py$''',
     '''tests/.*\.sh$''',
+    '''scripts/verify-wless-internal-removed\.sh$''',
 ]
 # Public install docs (website/install-*.md) show sample `worthless status`
 # output with placeholder provider aliases like `anthropic-a1b2c3d4`.
@@ -62,7 +63,17 @@ regexTarget = "line"
 #   public project slug (visible in any SonarCloud badge), not a secret. Exempt
 #   ONLY that exact line rather than path-allowlisting the whole file, which would
 #   suppress every rule there (the over-broad-path mistake documented above).
+# - Third regex: the literal placeholder `sk-proj-faketestkey1234567890` used in
+#   src/worthless/openclaw/skill_assets/SKILL.md. That line is PROSE explaining that
+#   Worthless's own scanner IGNORES this string because it falls below the 3.9
+#   entropy threshold -- the doc exists to stop users testing `lock` with a
+#   placeholder and concluding it did nothing. gitleaks' openai-api-key rule has no
+#   entropy floor, so it flags the very example of a non-secret. It landed on main
+#   via b6812dd9 and, because `gitleaks protect --staged` rescans whatever a merge
+#   stages, it blocked EVERY branch merging main forward (found on WOR-597). Exact
+#   literal, not a pattern: a real `sk-proj-` key cannot match it. WOR-916.
 regexes = [
     '''(?i)(?:openai|anthropic|google|xai)-[a-f0-9]{8}\b''',
     '''sonar\.projectKey''',
+    '''sk-proj-faketestkey1234567890''',
 ]

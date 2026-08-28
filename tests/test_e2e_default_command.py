@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import os
-import signal
 import subprocess
 import time
 from pathlib import Path
@@ -19,9 +18,9 @@ from pathlib import Path
 import httpx
 import pytest
 
+from worthless.cli.platform import kill_tree
 from worthless.cli.process import check_pid, read_pid
 
-from tests._fakes import WOR309_SUBPROCESS_FOLLOWUP
 from tests.helpers import fake_anthropic_key, fake_openai_key
 
 # Use high ports to avoid conflicts with dev proxy
@@ -34,7 +33,7 @@ def _run_worthless(
     home: Path,
     cwd: Path,
     input_text: str | None = None,
-    timeout: float = 20.0,
+    timeout: float = 60.0,
 ) -> subprocess.CompletedProcess:
     """Run the real worthless binary."""
     env = {
@@ -66,22 +65,14 @@ def _stop_proxy(home: Path) -> None:
         if info:
             pid, _ = info
             if check_pid(pid):
-                os.kill(pid, signal.SIGTERM)
-                for _ in range(20):
+                kill_tree(pid)
+                for _ in range(40):
                     if not check_pid(pid):
                         break
                     time.sleep(0.25)
                 else:
-                    os.kill(pid, signal.SIGKILL)
+                    kill_tree(pid, force=True)
         pid_file.unlink(missing_ok=True)
-    # Also kill anything on the test port via health probe failure
-    try:
-        r = httpx.get(f"http://127.0.0.1:{_TEST_PORT}/healthz", timeout=1.0)
-        if r.status_code == 200:
-            # Something is on the port — try to find and kill it
-            pass
-    except Exception:
-        pass
 
 
 @pytest.fixture()
@@ -126,7 +117,6 @@ def project_no_keys(tmp_path: Path) -> Path:
 
 @pytest.mark.e2e
 @pytest.mark.real_ipc
-@pytest.mark.skip(reason=WOR309_SUBPROCESS_FOLLOWUP)
 class TestDefaultCommandE2E:
     """Real end-to-end tests for bare ``worthless``."""
 

@@ -43,7 +43,7 @@ Done! 'worthless' is installed.
 
   Try after PATH: cd your-project && worthless lock
   Audit script:  curl worthless.sh?explain=1 | less
-  Source:        https://github.com/shacharm2/worthless
+  Source:        https://github.com/oblangatas/worthless
 
   worthless lock rewrites .env, splits your API keys, and starts a
   local proxy. Your app code doesn't change.
@@ -100,7 +100,7 @@ Done! 'worthless' is installed.
 
   Try after PATH: cd your-project && worthless lock
   Audit script:  curl worthless.sh?explain=1 | less
-  Source:        https://github.com/shacharm2/worthless
+  Source:        https://github.com/oblangatas/worthless
 
   worthless lock rewrites .env, splits your API keys, and starts a
   local proxy. Your app code doesn't change.
@@ -213,7 +213,7 @@ Done! 'worthless' is on your PATH.
 
   Try it:        cd your-project && worthless lock
   Audit script:  curl worthless.sh?explain=1 | less
-  Source:        https://github.com/shacharm2/worthless
+  Source:        https://github.com/oblangatas/worthless
 
   worthless lock rewrites .env, splits your API keys, and starts a
   local proxy. Your app code doesn't change.

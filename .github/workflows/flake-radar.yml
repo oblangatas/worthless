@@ -34,7 +34,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v6
         with:
           persist-credentials: false
 
@@ -59,8 +59,16 @@ jobs:
             # we observe RAW flake rate, not retry-masked rate. Excludes
             # docker/live/user_flow (need real services) and quarantine
             # (already-known flakes — they're handled separately).
+            # --max-worker-restart=2: xdist's default is numprocesses * 4
+            # (dsession.py:556-568) — measured, `-n 2` produced gw0..gw9, i.e. one
+            # crash plus eight restarts re-running the same test. Bounded, but far
+            # too generous here. This loop runs 30
+            # iterations inside a 60m budget, and real_ipc is NOT excluded below —
+            # that family is documented in pyproject as crashing workers under
+            # `-n auto`. Without a cap, one such crash burns the entire job with
+            # nothing to show (the same shape as run 31966179187).
             uv run pytest \
-              -n auto --dist loadscope \
+              -n auto --dist loadscope --max-worker-restart=2 \
               -m "not docker and not live and not user_flow and not quarantine" \
               -o "addopts=--strict-config --strict-markers" \
               --tb=line -q --no-header 2>&1 \

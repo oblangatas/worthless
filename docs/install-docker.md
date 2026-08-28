@@ -5,11 +5,13 @@ description: "Pull a pre-built, signed multi-arch image from GHCR."
 
 # Install -- Docker (from GHCR)
 
-Pull a pre-built, multi-arch image from the GitHub Container Registry. No clone, no build. Every image is vulnerability-scanned with [Grype](https://github.com/anchore/grype) on both architectures and signed with cosign before publish.
+Pull a pre-built, multi-arch image from the GitHub Container Registry. No clone, no build. Every image is scanned with [Grype](https://github.com/anchore/grype) on both architectures, and cosign-signed before any release tag is promoted. The release fails on any **fixable Medium-or-higher** vulnerability — the same bar a pull request has to clear.
+
+"Scanned" is not "zero known CVEs". The image carries a small number of CPython vulnerabilities inherited from the base image that have no stable upstream fix, and each one is listed in [`.grype.yaml`](https://github.com/oblangatas/worthless/blob/main/.grype.yaml) with a written argument for why it is not reachable from the proxy and a date by which it must be re-examined. Read that file if you want to check our reasoning rather than take our word for it.
 
 ```bash
 docker run -d --name worthless -p 127.0.0.1:8787:8787 \
-  ghcr.io/shacharm2/worthless-proxy:0.3.1
+  ghcr.io/oblangatas/worthless-proxy:0.3.12
 ```
 
 The proxy starts on `localhost:8787`. Enroll your keys exactly like the Compose flow:
@@ -19,13 +21,13 @@ printf '%s' "${OPENAI_API_KEY:?set OPENAI_API_KEY first}" | docker exec -i worth
   worthless enroll --alias openai --key-stdin --provider openai
 ```
 
-For a production setup with volumes, secrets, and resource limits, use [`deploy/docker-compose.yml`](../deploy/docker-compose.yml) as a reference — it's the same image wired up with read-only root, capability-dropped, memory-capped.
+For a production setup with volumes, secrets, and resource limits, use [`deploy/docker-compose.yml`](https://github.com/oblangatas/worthless/blob/main/deploy/docker-compose.yml) as a reference — it's the same image wired up with read-only root, capability-dropped, memory-capped.
 
 ## Pin the version
 
 ```bash
-docker pull ghcr.io/shacharm2/worthless-proxy:0.3.1   # recommended
-docker pull ghcr.io/shacharm2/worthless-proxy:latest  # moves on every stable release
+docker pull ghcr.io/oblangatas/worthless-proxy:0.3.12   # recommended
+docker pull ghcr.io/oblangatas/worthless-proxy:latest  # moves on every stable release
 ```
 
 Pin to `:X.Y.Z` in anything you care about. `:latest` moves on every stable tag — fine for trying it out, a silent auto-upgrade footgun for deployed systems.
@@ -39,10 +41,10 @@ Both `linux/amd64` and `linux/arm64` (Apple Silicon, Graviton) are published. Do
 Every image is signed with [Sigstore cosign](https://www.sigstore.dev/) using keyless OIDC — no long-lived keys; the signature is cryptographically bound to a tag-triggered run of **this** workflow file (`.github/workflows/publish-docker.yml`) in this repo. Verifying proves the image digest was produced by that specific workflow identity and the tag you pulled resolves to that digest. It defends against tampered registries and images built outside this CI. It does **not** by itself defend against a compromised maintainer with tag-push rights running the legitimate workflow.
 
 ```bash
-cosign verify ghcr.io/shacharm2/worthless-proxy:0.3.1 \
-  --certificate-identity-regexp 'https://github.com/shacharm2/worthless/\.github/workflows/publish-docker\.yml@refs/tags/v.*' \
+cosign verify ghcr.io/oblangatas/worthless-proxy:0.3.12 \
+  --certificate-identity-regexp 'https://github.com/oblangatas/worthless/\.github/workflows/publish-docker\.yml@refs/tags/v.*' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --certificate-github-workflow-repository shacharm2/worthless
+  --certificate-github-workflow-repository oblangatas/worthless
 ```
 
 The regex pins the verifier to tag-triggered runs of the publish workflow. Install cosign via `brew install cosign` or see [sigstore.dev/install](https://www.sigstore.dev/install).
@@ -55,10 +57,13 @@ If you don't run this, you still get [SLSA build provenance](https://slsa.dev/) 
 GHCR packages are private by default on first publish. Our CI tries to flip visibility to public automatically; if that fails the release workflow shows a red "Flip GHCR package visibility" job with the exact `gh api` command to run once. Until that's done, the image exists but isn't pullable.
 
 **`cosign verify` returns "no matching signatures".**
-You're probably using an older image published before signing was added (pre v0.3.1), or the identity regex needs to match the owner of the repo you're pulling from (change both `shacharm2` occurrences if you forked).
+You're probably using an older image published before signing was added (pre v0.3.1), or the identity regex needs to match the owner of the repo you're pulling from (replace every `oblangatas` occurrence above with your own owner if you forked).
+
+**`docker pull ghcr.io/shacharm2/worthless-proxy` returns 403.**
+That was the old account name. It was renamed to `oblangatas` and GHCR does **not** redirect the old path — every tag moved with the account. Re-pull from `ghcr.io/oblangatas/worthless-proxy` and update any pinned image reference in your compose files or deployment manifests.
 
 ## Compared to
 
-- [install-solo.md](install-solo.md) — pipx / pip install, runs on your local machine directly. Simpler, no Docker needed. Recommended for individual dev laptops.
-- [install-self-hosted.md](install-self-hosted.md) — clone the repo, `docker compose up`. Use when you want to customize the build or run the hardened compose configuration.
+- [Solo Developer install](/install-solo/) — pipx / pip install, runs on your local machine directly. Simpler, no Docker needed. Recommended for individual dev laptops.
+- [Self-hosted Compose config](https://github.com/oblangatas/worthless/tree/main/deploy) — clone the repo, `docker compose up`. Use when you want to customize the build or run the hardened compose configuration.
 - This doc — pull the pre-built image. Use when you want the persistent proxy running without cloning anything.

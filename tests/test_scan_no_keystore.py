@@ -465,16 +465,30 @@ class TestEnsureHomeProbeGate:
     def test_probe_skipped_for_keyring_only_subsequent_run(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Marker present + no env var + no file (keyring-only) → probe
-        SKIPPED. The HF3 magic-moment state for read-only commands."""
+        """Marker present + no env var + no file, key lives ONLY in the OS
+        keyring → probe SKIPPED. The HF3 magic-moment state for read-only
+        commands.
+
+        WOR-716: an *available* keyring backend is what makes this a
+        healthy "keyring-only" install rather than a keyless leftover. The
+        default null test backend + no file/env + no rows is instead a
+        PROVABLY-keyless half-uninstall, which WOR-716 self-heals (covered by
+        tests/test_bootstrap.py::TestHalfUninstalledDetection). Patching
+        ``keyring_available`` True pins the case this test actually means:
+        the key IS in the keyring, so ensure_home defers to the lazy fetch
+        without an eager probe.
+        """
         monkeypatch.delenv("WORTHLESS_FERNET_KEY", raising=False)
         home_base = tmp_path / ".worthless"
         _mark_bootstrapped(home_base)
 
-        with patch(
-            "worthless.cli.bootstrap.read_fernet_key",
-            side_effect=AssertionError(
-                "ensure_home probed the keystore on a keyring-only subsequent run"
+        with (
+            patch("worthless.cli.bootstrap.keyring_available", return_value=True),
+            patch(
+                "worthless.cli.bootstrap.read_fernet_key",
+                side_effect=AssertionError(
+                    "ensure_home probed the keystore on a keyring-only subsequent run"
+                ),
             ),
         ):
             ensure_home(base_dir=home_base)

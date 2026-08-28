@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
+import shutil
 import signal
 import subprocess  # nosec B404 — required for daemon process management
 import sys
@@ -37,7 +39,9 @@ from worthless.cli.process import (
     disable_core_dumps,
     fernet_transport,
     finalize_fernet_transport,
+    is_service_managed,
     pid_path,
+    poll_health,
     poll_health_pid,
     prepare_proxy_env,
     proxy_cmd,
@@ -53,6 +57,147 @@ from worthless.cli.sidecar_lifecycle import (
     split_to_tmpfs,
 )
 from worthless.crypto.types import zero_buf
+from worthless.sidecar.health import (
+    find_sidecar_socket_for_open,
+    list_sidecar_sockets,
+    probe_socket,
+)
+
+
+async def _sidecar_open_probe_material(home: WorthlessHome) -> tuple[bytes, bytes] | None:
+    """Return ciphertext + key_id for the first enrolled alias, or None."""
+    if not home.db_path.is_file():
+        return None
+    from worthless.cli.keystore import read_fernet_key
+    from worthless.storage.repository import ShardRepository
+
+    key = read_fernet_key(home.base_dir)
+    repo: ShardRepository | None = None
+    try:
+        repo = ShardRepository(str(home.db_path), key)
+        aliases = await repo.list_keys()
+        if not aliases:
+            return None
+        alias = aliases[0]
+        enc = await repo.fetch_encrypted(alias)
+        if enc is None:
+            return None
+        return enc.shard_b_enc, alias.encode()
+    finally:
+        # zero_buf FIRST: if close() were to raise, the caller's key must still
+        # be wiped and the original exception must not be masked (worthless-g648).
+        zero_buf(key)
+        if repo is not None:
+            repo.close()
+
+
+def _managed_sidecar_healthy(home: WorthlessHome) -> bool:
+    """True when the newest sidecar under ``home/run/*/`` can serve decrypt IPC.
+
+    When enrollments exist, verifies IPC ``open`` (not HELLO-only) so a stale
+    Fernet sidecar from a prior session is not treated as healthy (WOR-749).
+    Without enrollments, falls back to HELLO probe on the newest socket only.
+    """
+    run_root = home.base_dir / "run"
+    sockets = list_sidecar_sockets(run_root)
+    if not sockets:
+        return False
+    if not home.db_path.is_file():
+        probe = None
+    else:
+        try:
+            probe = asyncio.run(_sidecar_open_probe_material(home))
+        except Exception:
+            probe = None
+    if probe is not None:
+        ciphertext, key_id = probe
+        try:
+            asyncio.run(
+                find_sidecar_socket_for_open(
+                    run_root,
+                    ciphertext=ciphertext,
+                    key_id=key_id,
+                    timeout=2.0,
+                )
+            )
+            return True
+        except Exception:
+            return False
+    return probe_socket(sockets[0])
+
+
+def _service_managed_session_owns_port(home: WorthlessHome, port: int) -> bool:
+    """True when a prior managed ``up`` owns *port* — not a stale orphan (worthless-6gkb).
+
+    launchd idempotent start must not treat ``GET /healthz`` alone as success: an
+    orphan uvicorn on the port would skip sidecar spawn and every proxied request
+    401s because IPC decrypt never runs.
+
+    ``poll_health_pid`` returns the listener's self-reported PID from ``/healthz``
+    JSON, not an OS-level port→PID attribution. That is sufficient within
+    worthless's loopback same-UID threat model (worthless-wfz7).
+    """
+    if not is_service_managed():
+        return False
+    if not poll_health(port, timeout=2.0):
+        return False
+    if not _managed_sidecar_healthy(home):
+        return False
+    info = read_pid(pid_path(home))
+    if info is None:
+        return False
+    stored_pid, _stored_port = info
+    if not check_pid(stored_pid):
+        return False
+    resolved = poll_health_pid(port, timeout=1.0)
+    return resolved == stored_pid
+
+
+def _reclaim_managed_proxy_without_sidecar(
+    home: WorthlessHome,
+    port: int,
+    pid_file: Path,
+    console,
+) -> None:
+    """Stop a proxy-only orphan so managed ``up`` can respawn sidecar+proxy."""
+    if not is_service_managed():
+        return
+    if _managed_sidecar_healthy(home):
+        return
+    if not poll_health(port, timeout=1.0):
+        cleanup_stale_pid(pid_file)
+        return
+    info = read_pid(pid_file)
+    if info is not None:
+        existing_pid, _existing_port = info
+        if check_pid(existing_pid):
+            listener_pid = poll_health_pid(port, timeout=1.0)
+            if listener_pid != existing_pid:
+                cleanup_stale_pid(pid_file)
+                return
+            console.print_warning(
+                f"Reclaiming proxy PID {existing_pid} — /healthz up but sidecar IPC dead"
+            )
+            if not check_pid(existing_pid):
+                cleanup_stale_pid(pid_file)
+                return
+            try:
+                os.kill(existing_pid, signal.SIGTERM)
+            except OSError:
+                pass
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and check_pid(existing_pid):
+                time.sleep(0.2)
+            if check_pid(existing_pid):
+                try:
+                    os.kill(existing_pid, signal.SIGKILL)
+                except OSError:
+                    pass
+    cleanup_stale_pid(pid_file)
+    run_root = home.base_dir / "run"
+    if run_root.is_dir():
+        shutil.rmtree(run_root, ignore_errors=True)
+
 
 # Poll cadence for the foreground supervisor. ``time.sleep`` is interrupted
 # by signals, so ``_shutdown`` flips within one tick of Ctrl+C.
@@ -129,9 +274,12 @@ def start_daemon(
 ) -> int:
     """Start proxy in daemon mode (setsid, write PID, detach).
 
+    .. deprecated::
+        Sidecar-less daemon start. Prefer ``start_supervised_proxy`` (default
+        command) or foreground ``worthless up``. Target removal v1.2.
+
     Returns the daemon PID on success.  Importable by other modules
-    (e.g. the default command pipeline) that need to start the proxy
-    programmatically.
+    (e.g. legacy tests) that need to start the proxy programmatically.
     """
     cmd = proxy_cmd(port)
 
@@ -190,6 +338,63 @@ def start_daemon(
     )
     console.print_success(f"Proxy running on 127.0.0.1:{port} (PID {canonical_pid})")
     return canonical_pid
+
+
+def start_supervised_proxy(
+    home: WorthlessHome,
+    port: int,
+    log_file: Path,
+    console,
+) -> int:
+    """Start sidecar+proxy by spawning detached ``worthless up`` (WOR-717).
+
+    Foreground ``up`` supervises the crypto sidecar; we run it in a new session
+    so the default command can return while the child keeps running.
+    """
+    from worthless.cli.commands.service._common import resolve_worthless_binary
+
+    binary = resolve_worthless_binary()
+    env = os.environ.copy()
+    env["WORTHLESS_HOME"] = str(home.base_dir)
+    env["WORTHLESS_PORT"] = str(port)
+
+    cmd = [str(binary), "up", "--port", str(port)]
+
+    log_fd: int = -1
+    try:
+        log_fd = os.open(str(log_file), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        subprocess.Popen(  # nosec B603 — argv from resolved binary + fixed flags
+            cmd,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=log_fd,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception as exc:
+        if not isinstance(exc, typer.Exit):
+            console.print_error(
+                WorthlessError(
+                    ErrorCode.PROXY_UNREACHABLE,
+                    sanitize_exception(exc, generic="failed to start supervised proxy"),
+                )
+            )
+        raise typer.Exit(code=1) from exc
+    finally:
+        if log_fd >= 0:
+            os.close(log_fd)
+
+    resolved_pid = poll_health_pid(port, timeout=30.0)
+    if resolved_pid is None:
+        console.print_warning(
+            "Supervised proxy starting but health check timed out. Check ~/.worthless/proxy.log"
+        )
+        pf = pid_path(home)
+        info = read_pid(pf)
+        return info[0] if info else 0
+
+    console.print_success(f"Proxy running on 127.0.0.1:{port} (PID {resolved_pid})")
+    return resolved_pid
 
 
 def _upgrade_pidfile_if_trusted(
@@ -421,7 +626,10 @@ def _supervise_proxy_with_sidecar(
         console=console,
     )
 
-    console.print_success(f"Proxy running on 127.0.0.1:{actual_port} (Ctrl+C to stop)")
+    if is_service_managed():
+        console.print_hint(f"Proxy running on 127.0.0.1:{actual_port} (service-managed)")
+    else:
+        console.print_success(f"Proxy running on 127.0.0.1:{actual_port} (Ctrl+C to stop)")
 
     # Watch both processes. If BOTH die in the same tick, ``proxy.poll()``
     # short-circuits the loop (proxy dead → exit) and we miss attribution
@@ -456,7 +664,8 @@ def _supervise_proxy_with_sidecar(
             "sidecar terminated unexpectedly during session",
         )
 
-    console.print_warning("Proxy stopped.")
+    if not is_service_managed():
+        console.print_warning("Proxy stopped.")
 
 
 def register_up_commands(app: typer.Typer) -> None:
@@ -475,9 +684,18 @@ def register_up_commands(app: typer.Typer) -> None:
         """Start the proxy server (foreground or daemon)."""
         fail_if_windows()
         console = get_console()
+        # Before get_home(): it loads home.fernet_key into memory, and cores
+        # must already be off by then (dupf.10).
+        disable_core_dumps()
         home = get_home()
 
         actual_port = _resolve_port(port)
+
+        # launchd/systemd may invoke ``up`` while a prior instance is still
+        # dying. Exit 0 only when OUR pidfile matches the healthy listener —
+        # not when a stale orphan holds /healthz (worthless-6gkb).
+        if _service_managed_session_owns_port(home, actual_port):
+            return
 
         # Daemon + sidecar IPC handle inheritance is unsolved. Reject
         # early — silently spawning a proxy without a sidecar would break
@@ -489,8 +707,10 @@ def register_up_commands(app: typer.Typer) -> None:
                 "(`worthless up` without `-d`).",
             )
 
-        # Check PID file for existing proxy
         pid_file = pid_path(home)
+        _reclaim_managed_proxy_without_sidecar(home, actual_port, pid_file, console)
+
+        # Check PID file for existing proxy
         if pid_file.exists():
             info = read_pid(pid_file)
             if info is not None:
@@ -508,9 +728,6 @@ def register_up_commands(app: typer.Typer) -> None:
                     # Stale PID file -- reclaim
                     cleanup_stale_pid(pid_file)
                     console.print_warning(f"Reclaimed stale PID file (was PID {existing_pid})")
-
-        # Disable core dumps
-        disable_core_dumps()
 
         # Build proxy env
         proxy_env = build_proxy_env(home)

@@ -160,6 +160,41 @@ async def test_seal_routes_through_ipc_when_constructed_with_client(
 
 
 @pytest.mark.asyncio
+async def test_atomic_upsert_and_enroll_routes_seal_through_ipc(
+    tmp_db_path: str,
+    backend_backed_client: _BackendBackedIPCClient,
+    sample_split_result: Any,
+) -> None:
+    """WOR-646 atomic Pass-1 write seals shard_b via ``ipc.seal`` in IPC mode.
+
+    Covers the IPC branch of ``upsert_locked_shard_and_enroll`` — sealing happens
+    BEFORE ``BEGIN IMMEDIATE`` so no write lock is held across the sidecar
+    round-trip.
+    """
+    from tests.conftest import stored_shard_from_split
+
+    repo = ShardRepository(tmp_db_path, backend_backed_client)
+    await repo.initialize()
+    shard = stored_shard_from_split(sample_split_result)
+
+    await repo.upsert_locked_shard_and_enroll(
+        "alias-atomic-ipc",
+        shard,
+        var_name="OPENAI_API_KEY",
+        env_path="/x/.env",
+        prefix="sk-",
+        charset="abcdef0123456789",
+        base_url="https://api.openai.com/v1",
+    )
+
+    assert len(backend_backed_client.seal_calls) == 1, (
+        f"expected exactly 1 seal call, got {len(backend_backed_client.seal_calls)}"
+    )
+    assert backend_backed_client.seal_calls[0] == bytes(shard.shard_b)
+    assert await repo.fetch_encrypted("alias-atomic-ipc") is not None
+
+
+@pytest.mark.asyncio
 async def test_open_routes_through_ipc_when_constructed_with_client(
     tmp_db_path: str,
     backend_backed_client: _BackendBackedIPCClient,

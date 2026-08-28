@@ -20,11 +20,15 @@ the planned action without writing.
 
 Design seams (foreseen extensions, NOT in this PR):
 
-* ``worthless-7db2`` (P3): a SECOND repair shape — partial-state recovery
-  when the home dir is intact but the fernet key is missing from every
-  source (manual keyring deletion). ``ensure_home`` will surface that
-  state and point users here; doctor will need a key-regeneration flow
-  guarded against silently destroying access to existing locked secrets.
+* ``worthless-7db2`` (P3, mostly resolved by WOR-716): partial-state
+  recovery when the home dir is intact but the fernet key is missing from
+  every source. ``ensure_home`` now surfaces this directly —
+  ``ORPHANED_SHARD_DATA`` when real rows exist and the key is genuinely
+  gone (see ``bootstrap.py::_guard_and_provision_keystore``), caught here
+  by the broad ``except WorthlessError`` a few lines below. No new
+  key-regeneration flow needed: the old shard-B is unrecoverable once the
+  key is truly gone, so the honest path is ``uninstall --force`` + rotate
+  at the provider, never regenerate a key that can't decrypt the old rows.
 * ``worthless-57ad`` (P3, post-v0.4): a BYO-key LLM agent diagnoses
   UNKNOWN stuck states using a user-locked enrollment.
 """
@@ -60,7 +64,12 @@ from worthless.cli.orphans import FIX_PHRASE, PROBLEM_PHRASE, find_orphans, is_o
 from worthless.openclaw import integration as _oc_integration
 from worthless.openclaw import skill as _oc_skill
 from worthless.openclaw.errors import OpenclawIntegrationError
-from worthless.openclaw.integration import IntegrationState
+from worthless.openclaw.integration import (
+    IntegrationState,
+    _alias_from_base_url,
+    _is_proxy_url,
+    _sanitize_alias_for_log,
+)
 from worthless.storage.repository import EnrollmentRecord, ShardRepository
 from worthless.crypto.splitter import reconstruct_key_fp
 
@@ -276,9 +285,7 @@ def _check_providers(
 
     fix_hint = "re-run `worthless lock`"
     if report.config_unreadable:
-        return [
-            f"worthless-{provider} config unreadable — {fix_hint}" for provider, _alias in expected
-        ]
+        return [f"{provider} config unreadable — {fix_hint}" for provider, _alias in expected]
 
     missing_where = (
         "not wired (no openclaw.json)"
@@ -336,17 +343,35 @@ def _read_worthless_providers_from_config(config_path: Path) -> dict[str, dict]:
     return {}
 
 
-_ALIAS_FROM_BASE_URL_RE = re.compile(r"/([^/]+)/v1(?:/|$)")
+def _check_legacy_decoy_layout(state: IntegrationState, proxy_base_url: str) -> list[str]:
+    """Detect the pre-WOR-647 legacy decoy layout (WOR-656 F6), read-only.
 
-
-def _alias_from_base_url(base_url: str) -> str | None:
-    """Extract the key alias from a worthless proxy baseUrl.
-
-    ``http://127.0.0.1:8787/openai-stale/v1`` -> ``openai-stale``
-    Returns ``None`` when the URL does not match the expected pattern.
+    Old installs left a proxy-shaped ``worthless-<provider>`` decoy entry
+    beside the real ``<provider>``. The current design rewrites the original in
+    place and keeps no decoy, so a lingering ``worthless-*`` entry whose
+    ``baseUrl`` is OUR proxy — host+port-pinned via ``_is_proxy_url``, the SAME
+    gate ``worthless lock`` uses to heal — means the install predates that
+    change. Flag it (advisory) so the user knows a plain ``worthless lock`` will
+    auto-heal it. NEVER mutates the config; the provider name (an
+    attacker-influenceable openclaw.json key) is sanitized before it reaches
+    doctor's output (SR-04 / terminal-injection defense).
     """
-    m = _ALIAS_FROM_BASE_URL_RE.search(base_url)
-    return m.group(1) if m else None
+    config_path = state.config_path
+    if config_path is None:
+        return []
+    findings: list[str] = []
+    for name, entry in _read_worthless_providers_from_config(config_path).items():
+        base_url = entry.get("baseUrl")
+        # Host+port-pinned to OUR proxy — the same gate lock uses to heal, so
+        # this is never a dead-end warning for a user's own worthless-* provider.
+        if not isinstance(base_url, str) or not _is_proxy_url(base_url, proxy_base_url):
+            continue
+        provider = _sanitize_alias_for_log(name[len("worthless-") :])
+        findings.append(
+            f"legacy OpenClaw decoy layout detected for '{provider}' — "
+            f"run `worthless lock` to auto-migrate (read-only; nothing changed)"
+        )
+    return findings
 
 
 def _check_openclaw_apikey_consistency(
@@ -532,6 +557,18 @@ def _check_home_mismatch(home: WorthlessHome) -> bool:
         return False
     pid, _port = pid_result
     env = read_process_env(pid)
+    if not env:
+        # read_process_env() returns {} for AccessDenied, NoSuchProcess AND
+        # ZombieProcess alike — in every case the proxy's home is unknowable,
+        # not "unset". A live process always has a non-empty environment, so {}
+        # means indeterminate; warning "home mismatch" here would be a guess.
+        #
+        # AccessDenied became reachable with dupf.10: a FOREGROUND `up` hardens
+        # itself with PR_SET_DUMPABLE=0, which makes its /proc/<pid> root-owned.
+        # (A --daemon proxy is exec'd, and execve resets the bit, so that one
+        # stays readable.) Known cost: a stale pidfile or a foreign-user proxy
+        # now reports no-mismatch instead of warning.
+        return False
     proxy_home_str = env.get("WORTHLESS_HOME")
     proxy_home = Path(proxy_home_str) if proxy_home_str else _DEFAULT_BASE
     if proxy_home.resolve() == home.base_dir.resolve():
@@ -841,7 +878,21 @@ def _doctor_run(*, fix: bool, yes: bool, dry_run: bool) -> None:
     A clean state on all four reports ``No issues found.`` and exits 0.
     """
     console = get_console()
-    home = get_home()
+
+    # BUG-1: a broken install — a corrupt DB (crashes get_home's init) or a
+    # missing/unreadable encryption key — can't be diagnosed by the checks below
+    # and would crash the very tool meant to help (WRTLS-102/103). Surface it in
+    # plain English and point at the fix instead of crashing. (--json does too.)
+    try:
+        home = get_home()
+        _ = home.fernet_key
+    except WorthlessError:
+        console.print_warning(
+            "Worthless looks broken — it can't be read (encryption key or database "
+            "missing/unreadable), so your locked keys can't be reconstructed. Remove "
+            "it with 'worthless uninstall --force', then rotate those keys at your provider."
+        )
+        return
 
     with _doctor_lock(home), acquire_lock(home):
         # ----------- check 1: recovery file imports -----------
@@ -856,11 +907,18 @@ def _doctor_run(*, fix: bool, yes: bool, dry_run: bool) -> None:
             )
 
         # ----------- check 2: orphan DB rows -----------
+        # worthless-g648: close() zeroes the repository's own copy of the master
+        # key. The first revision of that fix only patched runner.py (the --json
+        # path); this is the DEFAULT `worthless doctor`, where the same two
+        # copies were still surviving the command.
         repo = ShardRepository(str(home.db_path), home.fernet_key)
-        all_enrollments, orphans = _run_async(_list_orphans(repo))
-        openclaw_issues = _check_openclaw_section(
-            all_enrollments, repo=repo, fix=fix, dry_run=dry_run
-        )
+        try:
+            all_enrollments, orphans = _run_async(_list_orphans(repo))
+            openclaw_issues = _check_openclaw_section(
+                all_enrollments, repo=repo, fix=fix, dry_run=dry_run
+            )
+        finally:
+            repo.close()
 
         # ----------- check 3: home mismatch -----------
         had_mismatch = _check_home_mismatch(home)
@@ -918,7 +976,10 @@ def _doctor_run(*, fix: bool, yes: bool, dry_run: bool) -> None:
         # _list_orphans; reusing the same repo in a second asyncio.run()
         # call fails on Linux. A new instance avoids the closed-loop error.
         fix_repo = ShardRepository(str(home.db_path), home.fernet_key)
-        _doctor_apply(orphans, synced, fix_repo, home, console)
+        try:
+            _doctor_apply(orphans, synced, fix_repo, home, console)
+        finally:
+            fix_repo.close()  # worthless-g648
 
 
 def register_doctor_commands(app: typer.Typer) -> None:
@@ -943,8 +1004,23 @@ def register_doctor_commands(app: typer.Typer) -> None:
             "--json",
             help="Emit a single machine-readable JSON document. Disables prompts.",
         ),
+        explain: str | None = typer.Option(
+            None,
+            "--explain",
+            help=(
+                "Print a check's fix playbook (e.g. fernet_drift), or 'list' "
+                "to see all checks; then exit."
+            ),
+        ),
     ) -> None:
         """Diagnose and repair stuck DB/.env states (HF7 / worthless-3907)."""
+        if explain is not None:
+            # Static text only — works even under IPC_ONLY. Local import
+            # mirrors the JSON path below (the circular-import guard).
+            from worthless.cli.commands.doctor.runner import _doctor_explain
+
+            _doctor_explain(explain)
+            return
         # WOR-465 A4: under WORTHLESS_FERNET_IPC_ONLY=1 the doctor cannot
         # materialise home.fernet_key — the proxy uid cannot read the key
         # file by design, and the interactive prompts cannot be bracketed

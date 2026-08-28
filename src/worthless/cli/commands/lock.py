@@ -4,23 +4,40 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
+import json
 import logging
 import os
 import re
+import signal
+import socket
 import stat
+import subprocess  # nosec B404
 import sys
 import time
 from dataclasses import dataclass
-from typing import NamedTuple
+from datetime import datetime, timezone
+from typing import NamedTuple, NoReturn
 from pathlib import Path
+from urllib.parse import urlsplit
 
+import httpx
 import typer
 
 from worthless.cli._repo_factory import open_repo
 from worthless.cli.bootstrap import WorthlessHome, acquire_lock, get_home
 from worthless.cli.code_scanner import scan_for_hardcoded_provider_urls
-from worthless.cli.commands.scan import SCAN_TIME_BUDGET_S, _format_code_findings_human
-from worthless.cli.process import resolve_port
+from worthless.cli.commands.scan import (
+    SCAN_TIME_BUDGET_S,
+    _format_code_findings_human,
+    _format_lock_block_human,
+)
+from worthless.cli.process import (
+    check_proxy_health,
+    disable_core_dumps,
+    resolve_openclaw_proxy_base_url,
+    resolve_port,
+)
 from worthless.cli.console import WorthlessConsole, get_console
 from worthless.cli.scanner import SkippedFile, scan_source_for_hardcoded_provider_urls
 from worthless.cli.dotenv_rewriter import (
@@ -35,8 +52,14 @@ from worthless.cli.errors import (
     error_boundary,
     sanitize_exception,
 )
-from worthless.cli.key_patterns import CANONICAL_KEY_VAR_RE, detect_prefix
-from worthless.cli.keystore import keyring_available
+from worthless.cli.key_patterns import CANONICAL_KEY_VAR_RE, detect_prefix, is_oauth_token
+from worthless.cli.log_redaction import _redact
+from worthless._flags import fernet_ipc_only_enabled
+from worthless.cli.keystore import (
+    _fernet_file_bytes,
+    keyring_available,
+    sync_fernet_for_launchd,
+)
 from worthless.cli.providers import lookup_by_name, lookup_by_url
 from worthless.crypto.reconstruction import (
     _verify_commitment,  # noqa: PLC2701 — intentional internal use for re-lock guard
@@ -49,8 +72,13 @@ from worthless.crypto.splitter import (
 from worthless.crypto.types import zero_buf
 from worthless.exceptions import ShardTamperedError
 from worthless.openclaw import audit as _oc_audit
+from worthless.openclaw import config as _openclaw_config_mod
 from worthless.openclaw import integration as _openclaw_integration
 from worthless.openclaw.errors import OpenclawErrorCode, OpenclawIntegrationError
+from worthless.openclaw.unshardable_credentials import (
+    detect_unshardable_credentials,
+    detection_caveats,
+)
 from worthless.storage.repository import ShardRepository, StoredShard
 
 logger = logging.getLogger(__name__)
@@ -101,6 +129,51 @@ def _proxy_base_url(alias: str) -> str:
     return f"http://{host}:{resolve_port(None)}/{alias}/v1"
 
 
+def _detect_already_locked_env(env_values: dict[str, str | None]) -> str | None:
+    """worthless-ftmg — return the offending var name if the .env is already locked.
+
+    A successful ``worthless lock`` always writes ``*_BASE_URL`` pointing at
+    the local Worthless proxy. A subsequent ``lock`` against that same .env
+    would re-read the shard-A in the key field as if it were a fresh plaintext
+    key, split it, and overwrite both halves — destroying the only path back
+    to the original real key.
+
+    We refuse this scenario one preflight earlier: scan the parsed env_values
+    for any ``*_BASE_URL`` whose host:port matches our proxy. If found, the
+    caller raises ``ErrorCode.ENV_ALREADY_LOCKED`` and points the user at
+    ``worthless unlock`` (clean exit) or ``worthless doctor`` (recovery from
+    a half-state).
+
+    Detection is intentionally narrow: ONLY the host:port signal. A foreign
+    proxy on the same port is the worst-case false positive (we refuse; the
+    user changes ``WORTHLESS_PORT`` or stops the foreign service).
+    Higher-coverage commitment-scan detection is filed as a follow-up
+    (approach B in worthless-ftmg).
+    """
+    proxy_host = os.environ.get("WORTHLESS_PROXY_HOST", "127.0.0.1")
+    proxy_port = resolve_port(None)
+    # SONAR python:S5332 hotspot: these are LOOPBACK proxy URL prefixes used
+    # for host:port matching, not network endpoints. The worthless proxy
+    # binds 127.0.0.1 by design (see WOR-621 plan + security-reviewer
+    # signoff: "loopback http acceptable; SSRF guards apply to server-side
+    # outbound only"). HTTPS is meaningless on loopback. NOSONAR.
+    proxy_netloc_prefixes = (
+        f"http://{proxy_host}:{proxy_port}/",  # NOSONAR python:S5332 — loopback proxy
+        # Loopback aliases — ``127.0.0.1`` and ``localhost`` resolve to the
+        # same socket, so an entry written by one match still binds to the
+        # other. Catch both regardless of how WORTHLESS_PROXY_HOST is set.
+        f"http://127.0.0.1:{proxy_port}/",  # NOSONAR python:S5332 — loopback proxy
+        f"http://localhost:{proxy_port}/",  # NOSONAR python:S5332 — loopback proxy
+    )
+    for var_name, value in env_values.items():
+        if not (var_name.endswith("_BASE_URL") and isinstance(value, str)):
+            continue
+        normalised = value.rstrip("/") + "/"
+        if any(normalised.startswith(prefix) for prefix in proxy_netloc_prefixes):
+            return var_name
+    return None
+
+
 def _derive_base_url_var(var_name: str, provider: str) -> str:
     """Derive the corresponding ``*_BASE_URL`` variable name for a key var.
 
@@ -113,20 +186,232 @@ def _derive_base_url_var(var_name: str, provider: str) -> str:
     return _PROVIDER_ENV_MAP.get(provider, "OPENAI_BASE_URL")
 
 
+# RFC 6598 shared address space (carrier-grade NAT). Python's ``is_private`` did
+# NOT include this range before 3.13 (gh-113171), and some cloud metadata
+# services live here (e.g. Alibaba's ``100.100.100.200``). Deny it explicitly so
+# the guard is version-independent — see security review of WOR-834.
+_CGNAT_NET = ipaddress.ip_network("100.64.0.0/10")
+_NAT64_NET = ipaddress.ip_network("64:ff9b::/96")
+_6TO4_NET = ipaddress.ip_network("2002::/16")
+
+
+def _fold_embedded_ipv4(
+    ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    """Fold an IPv6-wrapped IPv4 address down to the IPv4 it really denotes.
+
+    ``::ffff:100.64.0.1`` and NAT64 ``64:ff9b::a9fe:a9fe`` route to the
+    embedded IPv4, so they must be classified as that IPv4 and not as the v6
+    wrapper. Python's own flags can't carry this: pre-3.10.15 treated all of
+    ``::ffff:0:0/96`` as private, while 3.10.15+/3.11.10+ delegate to the
+    embedded address — so CGNAT (which is NOT ``is_private``) reached through
+    the wrapper on py3.13 while py3.10 rejected it. Folding first makes the
+    guard identical on every interpreter and lets the v4-only CGNAT check fire.
+    """
+    if isinstance(ip, ipaddress.IPv6Address):
+        mapped = ip.ipv4_mapped
+        if mapped is None and ip in _NAT64_NET:
+            mapped = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+        if mapped is None and ip in _6TO4_NET:
+            # 6to4 (RFC 3056) embeds the IPv4 in the 2nd-5th bytes. Python's
+            # flags don't look through the wrapper, and on py3.10 a 6to4 of
+            # 127.0.0.1 is neither is_private nor is_reserved -> would pass.
+            mapped = ipaddress.IPv4Address((int(ip) >> 80) & 0xFFFFFFFF)
+        if mapped is not None:
+            return mapped
+    return ip
+
+
+def _is_loopback_host(host: str) -> bool:
+    """True when *host* is unambiguously this machine — by literal OR by name.
+
+    ``_upstream_host_ip`` deliberately does not resolve DNS, so it returns
+    ``None`` for the NAME ``localhost`` — the most common spelling of loopback.
+    Any caller using it to answer "is this our own plumbing rather than a
+    gateway?" must therefore also check the reserved local names, or an
+    ordinary ``http://localhost:11434`` (Ollama — the URL our own
+    ``providers.toml`` ships for ``[provider.ollama]``) falls through to
+    :func:`_validate_upstream_base_url` and aborts the WHOLE lock, unrelated
+    keys included (worthless-f63f).
+
+    ``localhost`` and ``*.localhost`` are reserved to loopback by RFC 6761
+    §6.3, so classifying them without a lookup is a definitional fact, not a
+    DNS assumption — this does not weaken the module's no-resolution stance.
+    """
+    name = host.rstrip(".").lower()
+    if name == "localhost" or name.endswith(".localhost"):
+        return True
+    ip = _upstream_host_ip(host)
+    return ip is not None and ip.is_loopback
+
+
+def _upstream_host_ip(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """The IP a URL host denotes, or ``None`` for a real DNS name.
+
+    Normalizes the SSRF-bypass IP encodings a canonical parse misses: a
+    trailing FQDN dot (``127.0.0.1.``) and decimal / octal / hex / short
+    IPv4 forms (``2852039166``, ``0xA9.0xFE.0xA9.0xFE``, ``127.1``) — all of
+    which ``getaddrinfo`` would still resolve to the literal address. We do
+    NOT resolve real DNS names (rebinding makes a lock-time lookup useless);
+    those return ``None`` and are handled as hostnames by the caller.
+    """
+    host = host.rstrip(".")
+    if not host:
+        return None
+    try:
+        return _fold_embedded_ipv4(ipaddress.ip_address(host))
+    except ValueError:
+        pass
+    try:  # decimal / octal / hex / short IPv4 → canonical dotted form
+        return ipaddress.ip_address(socket.inet_ntoa(socket.inet_aton(host)))
+    except (OSError, ValueError):
+        # ValueError as well as OSError: inet_aton raises ValueError (not
+        # OSError) on an embedded NUL, and _genuine_oc_base_url calls this
+        # BEFORE the guard runs — so an unhandled ValueError there would abort
+        # the lock with a traceback instead of a clean WRTLS-112 refusal.
+        return None
+
+
+def _validate_upstream_base_url(url: str) -> None:
+    """Fail-closed guard for a NON-registry upstream URL (WOR-834).
+
+    The openclaw ``baseUrl`` is a locally-writable source of truth for
+    unregistered enterprise gateways, so — unlike a ``.env`` URL — we can't
+    require registry membership. Instead we reject the dumb-dangerous
+    targets that a tampered file could point a live key at. Matches OWASP
+    SSRF guidance (block loopback / RFC1918 / link-local + metadata /
+    unspecified; require https), incl. the encoded-IP forms normalized by
+    :func:`_upstream_host_ip`.
+
+    Raises ``WorthlessError(INVALID_INPUT)`` on any violation. Does NOT
+    defend against a plausible *public* attacker URL (a lock-time static
+    check can't tell ``azure.com`` from ``evil.com``), DNS rebinding, or
+    post-lock DB tamper — those are worthless-rzi1 (per-request
+    re-validation) and worthless-8fbg (broader hardening).
+    """
+
+    def _reject(reason: str) -> NoReturn:
+        raise WorthlessError(
+            ErrorCode.INVALID_INPUT,
+            f"refusing openclaw gateway URL {url!r}: {reason}. Register a "
+            "trusted upstream instead: 'worthless providers register --name "
+            "<n> --url <url> --protocol openai|anthropic' and set the "
+            "matching *_BASE_URL.",
+        )
+
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        _reject("not a parseable URL")
+    if parts.scheme != "https":
+        _reject("must be https (cleartext would expose the key on the wire)")
+    if parts.username or parts.password:
+        _reject("must not embed credentials (userinfo)")
+    host = parts.hostname
+    if not host:
+        _reject("has no host")
+    # Close the parser differential. urlsplit and httpx disagree on Unicode
+    # label separators: urlsplit leaves U+FF0E / U+3002 / U+FF61 intact, so
+    # "169．254．169．254" reads as an opaque DNS name and sails past the IP
+    # checks -- while httpx IDNA/UTS-46-normalizes it back to 169.254.169.254
+    # and connects to the metadata service. Validating a different string than
+    # the one we dial is the whole bug class, so classify the host the client
+    # will ACTUALLY use. Fail closed if httpx can't parse what urlsplit did.
+    try:
+        client_host = httpx.URL(url).raw_host.decode("ascii")
+    except Exception:  # noqa: BLE001 -- any parse/encode failure is a refusal
+        _reject("host is not encodable to a normalized (IDNA) form")
+    if client_host:
+        host = client_host
+    ip = _upstream_host_ip(host)
+    if ip is None:
+        # A DNS name, not an IP literal. Only reject the obvious local names;
+        # we deliberately do NOT resolve DNS (rebinding makes it useless).
+        name = host.rstrip(".").lower()
+        if name == "localhost" or name.endswith(".localhost"):
+            _reject("resolves to localhost")
+        return
+    if (
+        ip.is_loopback
+        or ip.is_link_local
+        or ip.is_private
+        or ip.is_unspecified
+        or ip.is_reserved
+        or ip.is_multicast
+        or (ip.version == 4 and ip in _CGNAT_NET)
+    ):
+        _reject("points at a loopback / private / link-local / reserved / CGNAT address")
+
+
+def _genuine_oc_base_url(oc_config: dict | None, provider: str, proxy_base_url: str) -> str | None:
+    """The genuine (non-proxy-shaped) openclaw ``baseUrl`` for ``provider``.
+
+    Returns ``None`` when there's no usable gateway URL to honor (no
+    openclaw, no entry, empty/absent ``baseUrl``, or a stale proxy-shaped
+    entry from a previous lock — that's not a real upstream, so we fall
+    through to the registry). A genuine URL is guard-validated
+    (:func:`_validate_upstream_base_url`, raises on unsafe) before return.
+
+    ``provider`` is the wire protocol (matching the key used by the G3
+    capture path in :func:`_decide_oc_capture`), so behavior stays
+    consistent with the shipped rollback-capture lookup.
+    """
+    if not oc_config:
+        return None
+    providers = oc_config.get("models", {}).get("providers", {}) or {}
+    entry = providers.get(provider)
+    if not isinstance(entry, dict):
+        return None
+    url = entry.get("baseUrl")
+    if not isinstance(url, str) or not url:
+        return None
+    # Our proxy always lives on loopback, and a user would never point their
+    # upstream gateway at loopback — so any loopback baseUrl is our own
+    # (possibly stale, port-shifted) proxy rewrite, not a gateway to honor.
+    # Ignore it and fall through to the registry (always a safe public
+    # default); do NOT fail the lock on our own plumbing.
+    try:
+        host = urlsplit(url).hostname or ""
+    except ValueError:
+        # Malformed baseUrl (e.g. bad bracketed IPv6) — not a usable gateway.
+        # Ignore and fall through to the registry (safe); never crash the lock.
+        return None
+    if _openclaw_integration._is_proxy_url(url, proxy_base_url):
+        return None
+    if _is_loopback_host(host):
+        return None
+    _validate_upstream_base_url(url)
+    return url
+
+
 def _resolve_upstream_base_url(
-    base_url_var: str, env_values: dict[str, str | None], provider: str
+    base_url_var: str,
+    env_values: dict[str, str | None],
+    registry_name: str,
+    *,
+    oc_base_url: str | None = None,
 ) -> str:
     """Pick the upstream URL for the DB row.
 
-    Prefers the user's explicit ``*_BASE_URL`` value from ``.env`` when set
-    AND when that URL is in the provider registry. Otherwise falls back to
-    the bundled registry default for the provider.
+    Precedence: the user's explicit registered ``*_BASE_URL`` from ``.env``
+    > the provider's genuine openclaw ``baseUrl`` (``oc_base_url``, WOR-834)
+    > the bundled registry default > the hard fallback.
+
+    ``registry_name`` MUST be the registry name (e.g. ``openrouter``), NOT
+    the wire protocol (e.g. ``openai``). OpenRouter speaks the OpenAI
+    dialect, so its protocol is ``openai`` — but its upstream lives at
+    ``openrouter.ai``. Passing the wire protocol here looked up the OpenAI
+    URL and forwarded OpenRouter keys to ``api.openai.com`` → HTTP 401
+    (PR #276 thermo-nuclear review; live-container regression).
 
     Refuses unregistered user URLs (M3 / Blocker #1): an attacker who can
     write to .env should not be able to redirect the proxy at an arbitrary
-    upstream. worthless-rzi1 (P1 follow-up) adds per-request re-validation
-    to close the post-lock-tamper variant; worthless-8fbg adds RFC1918 /
-    loopback hardening. See seam 2 in worthless-8rqs design notes.
+    upstream. ``oc_base_url`` is NOT registry-validated (unregistered
+    gateways are the whole point of WOR-834) but is guard-validated by the
+    caller via :func:`_validate_upstream_base_url`. worthless-rzi1 (P1
+    follow-up) adds per-request re-validation to close the post-lock-tamper
+    variant; worthless-8fbg adds RFC1918 / loopback hardening. See seam 2 in
+    worthless-8rqs design notes.
     """
     user_value = env_values.get(base_url_var)
     if user_value:
@@ -138,7 +423,9 @@ def _resolve_upstream_base_url(
                 "--url <url> --protocol openai|anthropic'.",
             )
         return user_value
-    entry = lookup_by_name(provider)
+    if oc_base_url:  # genuine openclaw gateway URL, already guard-validated
+        return oc_base_url
+    entry = lookup_by_name(registry_name)
     if entry is None:  # pragma: no cover — provider is validated above
         return "https://api.openai.com/v1"
     return entry.url
@@ -278,7 +565,15 @@ async def _delete_superseded_location_enrollments(
     var_name: str,
     env_path: str,
 ) -> None:
-    """Remove stale enrollments for a var/path after a rotated key is locked."""
+    """Remove stale enrollments for a var/path after a rotated key is locked.
+
+    exx5/WOR-646: each stale alias's enrollment + now-unreferenced shard is
+    removed in ONE atomic transaction (``delete_superseded_enrollment_atomic``),
+    so a SIGINT mid-cleanup on a rotation re-lock can't strand the old alias's
+    ``shards`` row (enrollment gone, shard not). The stale set is computed
+    first; the "any enrollment left for this alias?" check that gates the shard
+    delete runs inside the transaction, not here.
+    """
     enrollments = await repo.list_enrollments()
     stale_aliases = {
         e.key_alias
@@ -286,9 +581,102 @@ async def _delete_superseded_location_enrollments(
         if e.var_name == var_name and e.env_path == env_path and e.key_alias != alias
     }
     for stale_alias in stale_aliases:
-        await repo.delete_enrollment(stale_alias, env_path)
-        if not await repo.list_enrollments(stale_alias):
-            await repo.delete_enrolled(stale_alias)
+        await repo.delete_superseded_enrollment_atomic(stale_alias, env_path=env_path)
+
+
+def _capture_original_mode(env_str: str) -> int | None:
+    """The ``.env``'s permission bits (``0o777``) before lock tightens it.
+
+    WOR-715: recorded so ``worthless uninstall`` (WOR-435) can restore the
+    original permissions, not just the contents. ``None`` on stat failure
+    (file vanished, EACCES on the dir) = "mode unknown — leave the file
+    as-is at restore" rather than crashing the whole lock.
+    """
+    try:
+        return Path(env_str).stat().st_mode & 0o777
+    except OSError:
+        return None
+
+
+async def _decide_oc_capture(
+    *,
+    repo: ShardRepository,
+    oc_config: dict | None,
+    proxy_base_url: str,
+    provider: str,
+    prior_record: str | None,
+) -> tuple[str | None, str | None]:
+    """G3 capture decision for one provider → (oc_record, oc_mac).
+
+    Bridges the pure sync classifier in
+    :mod:`worthless.openclaw.integration` with the async MAC computation
+    on :class:`ShardRepository` and the operator-facing warning channel.
+
+    Returns the pair threaded into :meth:`ShardRepository.upsert_locked_shard`
+    (and :meth:`store_enrolled` on fresh enrollments). Both values are
+    ``None`` on the no-capture branches:
+
+    * ``no_entry`` — no openclaw.json entry for this provider yet.
+    * ``relock_no_prior`` — entry is already proxy-shaped but the DB has
+      no prior record, so capturing shard-A as "the original" would let
+      unlock declare a fake success. Emits a CLI warning.
+
+    G5-C: the original ``baseUrl`` lives INSIDE ``oc_record`` (the
+    MAC-bound source of truth), so we don't return a separate base-URL
+    slot any more. Stage A unlock parses the URL out of the JSON record.
+
+    The MAC is computed in-process via the same fernet-derived HMAC
+    (:meth:`ShardRepository._compute_decoy_hash`) the G2 tamper-bind
+    uses. Caller pattern: no new crypto, no master-key oracle.
+    """
+    current_entry = None
+    if oc_config is not None:
+        providers = oc_config.get("models", {}).get("providers", {})
+        candidate = providers.get(provider)
+        if isinstance(candidate, dict):
+            current_entry = candidate
+
+    kind, _base_url, record_json = _openclaw_integration.classify_oc_entry_for_capture(
+        current_entry,
+        prior_entry_record_json=prior_record,
+        proxy_base_url=proxy_base_url,
+    )
+
+    if kind == "relock_no_prior":
+        get_console().print_warning(
+            f"OpenClaw {provider!r} entry is already proxy-shaped with no "
+            "stored rollback record (relock_no_prior); leaving rollback "
+            "columns unset. Run `worthless unlock` first if you want the "
+            "original captured."
+        )
+        return (None, None)
+
+    if record_json is None:
+        # 'no_entry' branch — nothing on disk to capture, no MAC to compute.
+        return (None, None)
+
+    mac = await repo._compute_decoy_hash(record_json)
+    return (record_json, mac)
+
+
+def _read_openclaw_providers_for_capture() -> dict | None:
+    """Read openclaw.json once for G3 rollback capture.
+
+    Returns the parsed config dict (so the caller can look up each
+    provider entry by name), or ``None`` if OpenClaw is absent, the
+    file is missing, or any read error fires. Capture is best-effort:
+    a failure here lets lock-core proceed without a rollback record
+    (unlock will fail-safe-skip later), which is strictly safer than
+    aborting the lock or crashing in pass1.
+    """
+    state = _openclaw_integration.detect()
+    if not state.present:
+        return None
+    try:
+        config_path = _openclaw_integration._resolve_active_config_path(state, state.home_dir)
+        return _openclaw_config_mod.read_config(config_path)
+    except Exception:  # noqa: BLE001 — fail-safe: missing rollback row is acceptable
+        return None
 
 
 async def _pass1_db_writes(
@@ -307,7 +695,29 @@ async def _pass1_db_writes(
     *env_values* is the parsed ``.env`` (from ``dotenv_values``) so we can
     read the user's existing ``*_BASE_URL`` value at lock time and store
     that as the upstream URL in the DB.
+
+    WOR-621 F2 G3: reads openclaw.json once at the top + per-candidate
+    classifies the current entry against the prior shards-row record
+    (via :func:`integration.classify_oc_entry_for_capture`). The rollback
+    pair (``oc_original_api_key_json``, ``oc_rollback_mac``) rides into
+    the DB on the existing :meth:`ShardRepository.upsert_locked_shard`
+    write so a crash between here and ``_apply_openclaw`` still leaves
+    a row unlock can roll back from (SM-2: StashDB → Rewrite). G5-C
+    dropped the dead third element (``oc_original_base_url``) — the
+    original URL lives inside the MAC-bound JSON record.
     """
+    # WOR-715: capture the .env's pre-lock permission bits ONCE, here in
+    # pass-1, BEFORE pass-2 (``_batch_rewrite``) rewrites the file via
+    # ``safe_rewrite`` and forces it to 0o600. During pass-1 the file is still
+    # untouched, so this is the true original mode — capturing any later would
+    # read the already-tightened 0o600 and silently record the wrong value.
+    original_mode = _capture_original_mode(env_str)
+    # G3: snapshot openclaw.json BEFORE we touch the DB. We classify each
+    # provider against this snapshot so a concurrent OpenClaw write doesn't
+    # poison our capture, and so the DB write is the first mutation.
+    oc_config = _read_openclaw_providers_for_capture()
+    oc_proxy_base_url = _openclaw_integration._resolve_proxy_base_url()
+
     for var_name, value, detected_provider in candidates:
         # Translate registry-name → wire-protocol. Post-HF1,
         # ``detect_provider`` returns registry names like ``openrouter``
@@ -355,8 +765,6 @@ async def _pass1_db_writes(
                 f"follow <PROVIDER>_API_KEY to silence this warning."
             )
 
-        upstream_base_url = _resolve_upstream_base_url(base_url_var, env_values, provider)
-
         alias = _make_alias(provider, value)
 
         # Cross-path collision check: if this alias is already enrolled from a
@@ -374,6 +782,57 @@ async def _pass1_db_writes(
                 break  # one warning per alias is sufficient
 
         db_shard = await repo.fetch_encrypted(alias)
+
+        # Resolve the upstream URL by the REGISTRY NAME (detected_provider, e.g.
+        # "openrouter"), not the wire PROTOCOL (provider, e.g. "openai"). They
+        # diverge for OpenAI-dialect-compatible services: OpenRouter's protocol
+        # is "openai" but its upstream is openrouter.ai. Using the protocol here
+        # mailed OpenRouter keys to api.openai.com -> 401 (PR #276 review).
+        #
+        # WOR-834: an unregistered enterprise gateway (Azure/custom) is in
+        # neither .env nor the registry -- its openclaw baseUrl is the only
+        # source of truth. Resolved AFTER the db_shard fetch on purpose: on
+        # re-lock the live openclaw entry is proxy-shaped, so the genuine
+        # gateway URL is no longer readable from it, and re-resolving from
+        # .env/registry would silently revert the alias to the registry
+        # default (api.openai.com) on the SECOND lock. Reuse what this alias
+        # was locked with instead. An explicit registered *_BASE_URL still
+        # wins -- it is the first tier inside _resolve_upstream_base_url.
+        # REGISTRY NAME, not the wire protocol. `provider` above is the
+        # protocol, and five bundled providers declare protocol = "openai", so
+        # keying this by protocol read the user's `openai` gateway entry for an
+        # OpenRouter/Groq/Together key and mailed that key to the wrong vendor
+        # (worthless-v4n2). This deliberately diverges from the G3 capture key
+        # in _decide_oc_capture, which stays on the protocol because it must
+        # mirror the entry apply_lock actually overwrites. Different questions:
+        # capture asks "which entry do we rewrite?", this asks "which vendor is
+        # this key for?".
+        oc_base_url = _genuine_oc_base_url(oc_config, detected_provider, oc_proxy_base_url)
+        if oc_base_url is None and db_shard is not None:
+            persisted = db_shard.base_url
+            # Carry forward ONLY an UNREGISTERED gateway. Such a URL can only
+            # have come from openclaw.json (WOR-834) and is unrecoverable once
+            # the live entry is proxy-shaped, so re-resolving would silently
+            # revert an Azure/enterprise alias to the registry default on the
+            # second lock. A REGISTERED url stays re-derivable from
+            # .env/registry, so re-lock keeps its documented semantics there:
+            # deleting *_BASE_URL resets the row to the registry default
+            # (test_relock_without_base_url_var_falls_back_to_registry_default).
+            if persisted and lookup_by_url(persisted) is None:
+                # Re-validate before trusting it. The row is locally writable,
+                # and a URL that was registered when it was first stored can be
+                # de-registered later (delete the providers.toml entry) — which
+                # would reclassify it as an "unregistered gateway" and carry it
+                # forward unchecked on every future lock. Running the same guard
+                # here keeps the DB from becoming an unvalidated persistence
+                # slot; a genuine gateway passes it exactly as it did at first
+                # lock. Fail-closed: a refusal raises rather than silently
+                # falling back, so a tampered row can never quietly reroute a key.
+                _validate_upstream_base_url(persisted)
+                oc_base_url = persisted
+        upstream_base_url = _resolve_upstream_base_url(
+            base_url_var, env_values, detected_provider, oc_base_url=oc_base_url
+        )
 
         if db_shard is not None:
             if not db_shard.prefix or not db_shard.charset:
@@ -404,23 +863,28 @@ async def _pass1_db_writes(
                     db_shard.prefix,
                     db_shard.charset,
                 )
-                # INSERT OR REPLACE keeps shard_a_enc in sync with the auth token
-                # written to openclaw.json.  INSERT OR IGNORE would leave the old
-                # shard_b in DB on re-lock, causing XOR reconstruction to fail permanently.
-                await repo.upsert_locked_shard(
-                    alias,
-                    stored_decrypted,
-                    prefix=db_shard.prefix,
-                    charset=db_shard.charset,
-                    base_url=db_shard.base_url or upstream_base_url,
+                # G3 capture (re-lock branch): the row already exists so the
+                # prior rollback record (if any) lives on db_shard. The classifier
+                # decides whether to reuse it, refuse to overwrite with shard-A
+                # ('relock_no_prior'), or — if the entry was untouched since the
+                # last unlock — re-capture as 'new'.
+                (
+                    oc_capture_record,
+                    oc_capture_mac,
+                ) = await _decide_oc_capture(
+                    repo=repo,
+                    oc_config=oc_config,
+                    proxy_base_url=oc_proxy_base_url,
+                    provider=provider,
+                    prior_record=db_shard.oc_original_api_key_json,
                 )
-                await repo.add_enrollment(alias, var_name=var_name, env_path=env_str)
-                await _delete_superseded_location_enrollments(
-                    repo,
-                    alias=alias,
-                    var_name=var_name,
-                    env_path=env_str,
-                )
+                # WOR-646 Part 2: record the planned update BEFORE any DB write,
+                # then commit the in-place shard UPDATE + enrollment as ONE
+                # transaction. An interrupt before the commit rolls the UPDATE
+                # back wholesale (clean); after it, the row is already in
+                # ``planned`` for the unwind. The upsert is ON CONFLICT DO UPDATE
+                # (NOT INSERT OR REPLACE) so sibling enrollments aren't
+                # CASCADE-wiped; INSERT OR IGNORE would strand the old shard_b.
                 planned_out.append(
                     _PlannedUpdate(
                         alias=alias,
@@ -436,6 +900,25 @@ async def _pass1_db_writes(
                         was_fresh_enroll=False,
                         base_url_var=base_url_var,
                     )
+                )
+                await repo.upsert_locked_shard_and_enroll(
+                    alias,
+                    stored_decrypted,
+                    var_name=var_name,
+                    env_path=env_str,
+                    prefix=db_shard.prefix,
+                    charset=db_shard.charset,
+                    base_url=upstream_base_url,
+                    original_mode=original_mode,
+                    write_config=False,
+                    oc_original_api_key_json=oc_capture_record,
+                    oc_rollback_mac=oc_capture_mac,
+                )
+                await _delete_superseded_location_enrollments(
+                    repo,
+                    alias=alias,
+                    var_name=var_name,
+                    env_path=env_str,
                 )
             finally:
                 zero_buf(verify_payload)
@@ -455,25 +938,27 @@ async def _pass1_db_writes(
                 nonce=sr.nonce,
                 provider=provider,
             )
-            # store_enrolled() handles enrollment rows; upsert_locked_shard()
-            # writes the shards row with shard_a_enc included from the first lock.
-            await repo.upsert_locked_shard(
-                alias,
-                stored,
-                prefix=sr.prefix,
-                charset=sr.charset,
-                base_url=upstream_base_url,
+            # G3 capture (fresh-enroll branch): no prior row, so prior_* are
+            # None. The classifier will return 'new' for a genuine original
+            # entry, 'relock_no_prior' if the user managed to leave openclaw.json
+            # already proxy-shaped without a DB row (legacy), or 'no_entry' if
+            # the provider has no entry at all yet.
+            (
+                oc_capture_record,
+                oc_capture_mac,
+            ) = await _decide_oc_capture(
+                repo=repo,
+                oc_config=oc_config,
+                proxy_base_url=oc_proxy_base_url,
+                provider=provider,
+                prior_record=None,
             )
-            await repo.store_enrolled(
-                alias,
-                stored,
-                var_name=var_name,
-                env_path=env_str,
-                token_budget_daily=token_budget_daily,
-                prefix=sr.prefix,
-                charset=sr.charset,
-                base_url=upstream_base_url,
-            )
+            # WOR-646 Part 2: record the planned update BEFORE the DB write, then
+            # write the shard + enrollment (+ config) as ONE atomic transaction.
+            # An interrupt before the commit leaves no row; after it, the row is
+            # already in ``planned`` for the unwind. Closes the orphan-shard
+            # window the prior two-commit sequence (upsert_locked_shard then
+            # store_enrolled) exposed under a real SIGINT.
             planned_out.append(
                 _PlannedUpdate(
                     alias=alias,
@@ -489,6 +974,20 @@ async def _pass1_db_writes(
                     was_fresh_enroll=True,
                     base_url_var=base_url_var,
                 )
+            )
+            await repo.upsert_locked_shard_and_enroll(
+                alias,
+                stored,
+                var_name=var_name,
+                env_path=env_str,
+                prefix=sr.prefix,
+                charset=sr.charset,
+                base_url=upstream_base_url,
+                original_mode=original_mode,
+                token_budget_daily=token_budget_daily,
+                write_config=True,
+                oc_original_api_key_json=oc_capture_record,
+                oc_rollback_mac=oc_capture_mac,
             )
             await _delete_superseded_location_enrollments(
                 repo,
@@ -561,11 +1060,830 @@ async def _compensating_unwind(
     return errors
 
 
+def _fire_synthetic_request(host: str, port: int, alias: str) -> bool:
+    """WOR-658: send one minimal request to the proxy's dedicated
+    bind-confirmation endpoint so the in-memory ``bind_probe_count``
+    counter increments.
+
+    Returns ``True`` iff the request reached the proxy's handler (got an HTTP
+    response, any status). Returns ``False`` on network/connection errors —
+    those mean the proxy couldn't be reached at all, so the counter delta
+    cannot be interpreted as evidence either way and ``_confirm_bind`` will
+    classify the result as ``skipped`` rather than ``fail``.
+
+    The endpoint ``/_bind_probe/{alias}`` is intentionally public on the
+    worthless proxy (no auth, no body) — its only purpose is to bump the
+    probe counter and return 204. A 1 s timeout caps the bind-confirmation
+    cost so a hung proxy can't stall ``worthless lock``.
+
+    HEAD over GET keeps the probe payload-free while still hitting the same
+    handler.
+    """
+    # Local import keeps lock.py's module-load cost untouched on the cold
+    # path (lock is in the hot CLI path; bind-confirmation only runs after
+    # a successful OpenClaw rewrite).
+    import httpx  # noqa: PLC0415
+
+    # NOSONAR python:S5332 — loopback-only probe; TLS is not provisioned at
+    # this layer and the proxy refuses non-loopback origins for /_bind_probe
+    # (see proxy/app.py: ``bind_probe`` returns 403 unless request.client.host
+    # is the local loopback range). Same shape as the long-standing
+    # ``check_proxy_health`` call at ``cli/process.py``.
+    url = f"http://{host}:{port}/_bind_probe/{alias}"  # NOSONAR
+    try:
+        with httpx.Client(timeout=1.0) as client:
+            client.head(url)
+    except (httpx.HTTPError, OSError):
+        return False
+    return True
+
+
+def _coerce_counter(value: object) -> int:
+    """Best-effort widen of ``check_proxy_health()``'s ``requests_proxied``.
+
+    The healthz JSON is loosely-typed (``dict[str, object]``-shaped at the
+    Python boundary). We accept ``int`` directly, parse numeric strings (any
+    older proxy that surfaced the count as a string still works), and fall
+    back to 0 for anything else so bind-confirmation can't crash lock just
+    because a future schema change altered the type.
+    """
+    if isinstance(value, bool):  # bool is an int subclass; reject by intent
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return 0
+    return 0
+
+
+def _classify_bind_per_alias(
+    aliases: list[str],
+    before_aliases: dict[str, object],
+    after_aliases: dict[str, object],
+    *,
+    delta: int,
+    reached: int,
+) -> dict[str, object]:
+    """WOR-650 follow-up: per-alias bind verdict.
+
+    Pass iff EVERY confirmed alias's own probe count moved — so on a
+    multi-provider lock a tick for one alias can't be mistaken for another's
+    (the global counter can't tell them apart). Honest scope: this proves the
+    proxy acknowledged a probe for each alias, NOT that each provider's rewrite
+    is a working route — the probe hits ``/_bind_probe``, not the real
+    ``/{alias}/v1`` path, so a typo'd baseUrl could still pass here; end-to-end
+    routing is proven by the live e2e tests. Mirrors :func:`_confirm_bind`'s
+    skip reasons so the per-alias path classifies restart / unreachable
+    identically; the only new verdict is a ``fail`` that names the aliases
+    whose probe did NOT register.
+    """
+    if delta < 0:
+        # Proxy bounced between the before/after reads (its in-memory counters
+        # reset to 0). That's inconclusive REGARDLESS of per-alias staleness —
+        # the restart signal wins, so we never manufacture a 'fail' against a
+        # moving target. Without this, an alias mix of previously-counted +
+        # fresh entries would fall through to 'fail' on a bounced proxy.
+        return {
+            "status": "skipped",
+            "reason": "proxy_restarted",
+            "delta": delta,
+            "aliases": aliases,
+            "reached": reached,
+        }
+    not_routing = [
+        a
+        for a in aliases
+        if _coerce_counter(after_aliases.get(a)) <= _coerce_counter(before_aliases.get(a))
+    ]
+    if not not_routing:
+        return {"status": "pass", "delta": delta, "aliases": aliases, "reached": reached}
+    if len(not_routing) == len(aliases):
+        # Nothing ticked and the proxy didn't restart — if nothing even reached
+        # it, that's inconclusive (same shape _confirm_bind uses for the global
+        # counter so callers/sentinel readers see consistent reasons).
+        if reached == 0:
+            return {
+                "status": "skipped",
+                "reason": "synthetic_unreachable",
+                "delta": delta,
+                "aliases": aliases,
+                "reached": reached,
+            }
+    # Proxy was reachable but one or more confirmed aliases didn't tick — those
+    # rewrites aren't routing. The silent-bypass class we refuse to pass.
+    return {
+        "status": "fail",
+        "delta": delta,
+        "aliases": aliases,
+        "reached": reached,
+        "not_routing": not_routing,
+    }
+
+
+# WOR-756: OpenClaw's gateway subsystem that emits config-reload events, and the
+# two message markers that classify a reload. Empirically characterized against
+# ghcr.io/openclaw/openclaw:2026.5.3-1 (2026-07-10) — see the WOR-756 engineering
+# report. Matched as SUBSTRINGS, not prefixes: the live logger prepends a
+# ``{"subsystem":"gateway/reload"} `` tag to the message, so the marker sits mid-
+# string (a real-image e2e proves the match; a startswith() here silently made the
+# whole check a no-op). These strings are OpenClaw-internal and version-coupled:
+# the image is pinned, and a bump must re-verify them (the e2e test turns red).
+_RELOAD_SUBSYSTEM = "gateway/reload"
+_RELOAD_APPLIED_MARKER = "config hot reload applied"
+_RELOAD_REJECTED_MARKER = "config reload skipped (invalid config)"
+
+
+def _parse_log_event_time(raw: object) -> datetime | None:
+    """Parse an ``openclaw logs --json`` event ``time`` to an **aware** datetime.
+
+    Robust to three real-world shapes so the comparison in
+    :func:`_classify_reload_lines` never raises (a naive-vs-aware ``<`` throws
+    ``TypeError``, which would crash ``worthless lock`` *after* its writes
+    committed — violating this function's never-raise contract):
+
+    * ``Z`` suffix — ``fromisoformat`` pre-3.11 rejects it.
+    * missing offset — a naive result is coerced to UTC, never returned bare.
+    * fractional seconds of any width — pre-3.11 ``fromisoformat`` accepts only
+      0/3/6 digits, so normalise to exactly 6 (Go loggers emit trimmed nanos).
+
+    Returns ``None`` for anything still unparsable so a garbage line is skipped.
+    """
+    if not isinstance(raw, str):
+        return None
+    text = raw.strip().replace("Z", "+00:00")
+    # Normalise the fractional-seconds field to exactly 6 digits (pad or trim)
+    # so Python 3.10's stricter fromisoformat accepts widths like .12 or .123456789.
+    frac = re.search(r"\.(\d+)", text)
+    if frac:
+        text = f"{text[: frac.start()]}.{(frac.group(1) + '000000')[:6]}{text[frac.end() :]}"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _reload_event_kind(message: str) -> str | None:
+    """Classify one subsystem-authenticated ``gateway/reload`` event message.
+
+    ``"rejected"`` — an invalid-config reload. Checked FIRST and on the marker
+    ALONE (independent of the "models" token): a structural rejection may report
+    "… invalid config: JSON parse error …" that never names "models", MISSING a
+    real rejection (→ skipped → ``[OK]``) is the unsafe direction, and checking
+    it first resolves a coalesced "applied (…); skipped (invalid config)" to
+    reject, not pass.
+
+    ``"applied"`` — a models reload landed. Requires the "models" subtree:
+    apply_lock writes the whole config once, so OpenClaw may coalesce to a single
+    "…(models)" event. This proves a fresh models reload landed after our write,
+    not that this specific baseUrl value took (per-alias routing is the
+    bind-confirmation's job; the live e2e proves actual routing).
+
+    ``None`` — neither. Markers are substrings because the live message is
+    prefixed with a ``{"subsystem":"gateway/reload"} `` tag, but they are matched
+    only INSIDE an already subsystem-authenticated event, never as a raw grep.
+    """
+    if _RELOAD_REJECTED_MARKER in message:
+        return "rejected"
+    if "models" in message and _RELOAD_APPLIED_MARKER in message:
+        return "applied"
+    return None
+
+
+def _classify_reload_lines(lines: list[str], since_ts: datetime) -> tuple[bool, bool]:
+    """Pure classifier over ``openclaw logs --json`` lines: did the gateway APPLY
+    or REJECT a models reload *after* ``since_ts``? Returns
+    ``(saw_applied, saw_rejected)``; malformed lines are skipped, never raise.
+
+    Split out from the subprocess call (:func:`_scan_reload_events`) on purpose:
+    a real-image e2e feeds the pinned container's ACTUAL captured log output
+    through this exact matcher, so a silent drift in OpenClaw's event strings
+    turns a test red instead of degrading the live check to a no-op (WOR-756).
+    """
+    saw_applied = saw_rejected = False
+    for raw in lines:
+        line = raw.strip()
+        if not line.startswith("{"):
+            continue  # the "Log file: …" header and any non-JSON noise
+        try:
+            event = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(event, dict) or event.get("subsystem") != _RELOAD_SUBSYSTEM:
+            continue
+        when = _parse_log_event_time(event.get("time"))
+        if when is None or when < since_ts:
+            continue  # stale event from a prior lock — must not count
+        kind = _reload_event_kind(str(event.get("message", "")))
+        if kind == "rejected":
+            saw_rejected = True
+        elif kind == "applied":
+            saw_applied = True
+    return (saw_applied, saw_rejected)
+
+
+def _scan_reload_events(bin_path: object, since_ts: datetime) -> tuple[bool, bool]:
+    """One poll of ``openclaw logs --json`` → :func:`_classify_reload_lines`.
+
+    Best-effort: a subprocess error yields ``(False, False)`` for that poll,
+    never raises — the caller keeps polling until its deadline.
+    """
+    try:
+        probe = subprocess.run(  # noqa: S603  # nosec B603 — cmd[0] validated absolute by resolve_openclaw_bin
+            [str(bin_path), "logs", "--json", "--limit", "500", "--plain"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return (False, False)
+    if probe.returncode != 0:
+        return (False, False)
+    return _classify_reload_lines(probe.stdout.splitlines(), since_ts)
+
+
+def _confirm_openclaw_reload(
+    *,
+    since_ts: datetime,
+    timeout: float = 15.0,
+    poll_interval: float = 0.75,
+) -> str:
+    """WOR-756: observe that the RUNNING OpenClaw gateway performed a fresh
+    models reload after lock's baseUrl write.
+
+    Honest scope: this is a benign-integrity check ("did the live gateway pick
+    up my write?"), NOT an anti-adversarial control and NOT per-write
+    correlation. It confirms *a* fresh ``gateway/reload`` applied-models event,
+    not that this specific ``baseUrl`` value routes — per-alias routing is the
+    bind-confirmation's job and the live e2e proves actual traffic. Under the
+    same-UID threat model a local attacker owns the log anyway (see the security
+    review); the value here is catching a stale/stuck gateway, not an attacker.
+
+    Polls ``openclaw logs --json`` for a ``gateway/reload`` event newer than
+    ``since_ts`` (captured by the caller *before* ``apply_lock``'s write, so a
+    stale historical reload is normally excluded). Tri-state, mirroring
+    :func:`_confirm_bind`:
+
+    * ``"pass"``    — a fresh "config hot reload applied (models…)" event: the
+      live gateway performed a models reload after our write.
+    * ``"fail"``    — a fresh "config reload skipped (invalid config)…" event:
+      the gateway actively REJECTED it (silent-bypass class, exit 92).
+    * ``"skipped"`` — inconclusive: nothing seen before the deadline, OR the
+      ``openclaw`` binary is absent. Not a failure.
+
+    Why a log poll and not ``config get``: ``config get`` reads the *file* lock
+    just wrote — a guaranteed false pass (WOR-756 report §F3). The live-state RPC
+    queries (``models.status`` etc.) are gated behind device pairing worthless
+    has no way to obtain (§F4). The reload log event is the only observable,
+    unpaired, in-band signal. The RPC log-tail lags the in-process apply by a few
+    seconds, hence the ≥10s default timeout (§F6).
+
+    Binary-absent policy mirrors the audit gate's set-vs-unset split:
+    ``WORTHLESS_OPENCLAW_BIN`` set-but-unresolvable → ``"fail"`` (a configured
+    path that's broken is an error); unset → ``"skipped"`` (openclaw may not be
+    co-located, and lock must not be blocked for that).
+
+    Clock assumption: ``since_ts`` (host clock) and the event timestamps
+    (gateway clock) must come from the same clock, which they do under the
+    co-location assumption (lock and the gateway share a host). A cross-clock
+    deployment is NOT purely fail-safe: if the gateway clock runs *ahead* of the
+    host, a prior lock's reload can carry ``time > since_ts`` and be judged
+    fresh → a false ``"pass"``. That only downgrades an advisory to a green on a
+    benign-integrity check (never a real ``"fail"`` → ``"pass"``), and
+    co-location prevents it — but it is a false-pass window, not a safe one, so
+    do not rely on this check across clocks.
+    """
+    try:
+        bin_path = _oc_audit.resolve_openclaw_bin()
+    except _oc_audit.AuditGateError:
+        return "fail" if os.environ.get("WORTHLESS_OPENCLAW_BIN") else "skipped"
+
+    deadline = time.monotonic() + timeout
+    while True:
+        saw_applied, saw_rejected = _scan_reload_events(bin_path, since_ts)
+        if saw_rejected:
+            return "fail"
+        if saw_applied:
+            return "pass"
+        if time.monotonic() >= deadline:
+            return "skipped"
+        time.sleep(poll_interval)
+
+
+def _confirm_bind(
+    planned: list[_PlannedUpdate],
+    *,
+    host: str,
+    port: int,
+) -> dict[str, object]:
+    """WOR-658 bind-confirmation. Prove the rewritten OpenClaw entry actually
+    routes through the proxy by firing one synthetic request per alias and
+    observing the proxy's ``requests_proxied`` counter.
+
+    Returns a result block suitable for the sentinel:
+    * ``status == "pass"`` — counter incremented by at least 1; the rewrite
+      is in the path.
+    * ``status == "fail"`` — counter did not move; the rewrite is NOT routing,
+      lock must refuse to claim success (silent-bypass class, WOR-514).
+    * ``status == "skipped"`` — proxy unhealthy at the before- or after-read,
+      OR there was nothing to confirm (no aliases). Inconclusive, not a fail.
+    """
+    return _confirm_bind_aliases([p.alias for p in planned], host=host, port=port)
+
+
+def _confirm_bind_aliases(
+    aliases: list[str],
+    *,
+    host: str,
+    port: int,
+) -> dict[str, object]:
+    """Bind-confirmation core, keyed by alias strings.
+
+    Shared by :func:`_confirm_bind` (lock, which passes ``[p.alias for p in
+    planned]``) and ``worthless verify`` (WOR-517, which passes the currently
+    locked aliases). Fires one loopback ``/_bind_probe/{alias}`` per alias and
+    classifies the ``bind_probe_count`` delta. See :func:`_confirm_bind` for
+    the ``pass``/``fail``/``skipped`` verdict semantics.
+    """
+    if not aliases:
+        return {
+            "status": "skipped",
+            "reason": "no_aliases",
+            "delta": 0,
+            "aliases": [],
+            "reached": 0,
+        }
+
+    try:
+        before_health = check_proxy_health(port)
+    except Exception:  # noqa: BLE001 — bind-confirmation must never crash lock
+        return {
+            "status": "skipped",
+            "reason": "proxy_check_raised_before",
+            "delta": 0,
+            "aliases": aliases,
+            "reached": 0,
+        }
+    if not before_health.get("healthy"):
+        return {
+            "status": "skipped",
+            "reason": "proxy_unhealthy_before",
+            "delta": 0,
+            "aliases": aliases,
+            "reached": 0,
+        }
+    # WOR-658 squatter-resistance: missing ``bind_probe_count`` on the
+    # ``/healthz`` body means the responder isn't a worthless proxy. Don't
+    # interpret real-traffic ticks (requests_proxied) as proof of routing
+    # — a foreign service answering /healthz could have any counter shape.
+    if "bind_probe_count" not in before_health:
+        return {
+            "status": "skipped",
+            "reason": "proxy_unrecognised",
+            "delta": 0,
+            "aliases": aliases,
+            "reached": 0,
+        }
+    before = _coerce_counter(before_health.get("bind_probe_count"))
+
+    reached = 0
+    for alias in aliases:
+        try:
+            if _fire_synthetic_request(host, port, alias):
+                reached += 1
+        except Exception:  # noqa: BLE001 — never crash lock from this layer
+            logger.debug("bind-confirmation fire raised for %s", alias, exc_info=True)
+
+    try:
+        after_health = check_proxy_health(port)
+    except Exception:  # noqa: BLE001
+        return {
+            "status": "skipped",
+            "reason": "proxy_check_raised_after",
+            "delta": 0,
+            "aliases": aliases,
+            "reached": reached,
+        }
+    if not after_health.get("healthy"):
+        return {
+            "status": "skipped",
+            "reason": "proxy_unhealthy_after",
+            "delta": 0,
+            "aliases": aliases,
+            "reached": reached,
+        }
+    # CodeRabbit gate-10 finding: re-check the field on the AFTER read. If
+    # BEFORE had ``bind_probe_count`` but AFTER doesn't (responder swap /
+    # restart-to-a-different-server mid-call), ``_coerce_counter(None)`` would
+    # silently become 0 and ``delta = 0 - before`` would look like a large
+    # negative — misclassified as ``proxy_restarted``. Classify the missing
+    # field as its own ``proxy_unrecognised_after`` skip so the verdict names
+    # the real condition instead of guessing "restart".
+    if "bind_probe_count" not in after_health:
+        return {
+            "status": "skipped",
+            "reason": "proxy_unrecognised_after",
+            "delta": 0,
+            "aliases": aliases,
+            "reached": reached,
+        }
+    after = _coerce_counter(after_health.get("bind_probe_count"))
+
+    delta = after - before
+
+    # WOR-650 follow-up: when the proxy reports per-alias counts, base the
+    # verdict on THEM — the global delta only proves "a probe reached the
+    # proxy", not "THIS alias's rewrite routes". Older proxies omit the field;
+    # fall back to the global tri-state below.
+    before_aliases = before_health.get("bind_probe_aliases")
+    after_aliases = after_health.get("bind_probe_aliases")
+    if isinstance(before_aliases, dict) and isinstance(after_aliases, dict):
+        return _classify_bind_per_alias(
+            aliases,
+            before_aliases,
+            after_aliases,
+            delta=delta,
+            reached=reached,
+        )
+
+    # Tri-state classify (global counter — older proxy without per-alias data):
+    # * delta > 0                    → pass (counter moved; the request reached
+    #                                  the counter via the rewritten alias path)
+    # * reached == 0 AND delta == 0  → skipped: every fire failed at the
+    #                                  network layer, so the proxy never saw
+    #                                  the synthetic request. We can't tell
+    #                                  whether the rewrite routes — only that
+    #                                  the test harness didn't.
+    # * reached >  0 AND delta == 0  → fail: the proxy received the request
+    #                                  but did NOT count it. That's the
+    #                                  silent-bypass class (WOR-514) we care
+    #                                  about — the rewritten entry isn't
+    #                                  routing through Worthless.
+    if delta > 0:
+        return {
+            "status": "pass",
+            "delta": delta,
+            "aliases": aliases,
+            "reached": reached,
+        }
+    if delta < 0:
+        # WOR-658 / Gate-3 chaos-engineer finding: the in-memory probe
+        # counter resets to 0 on proxy restart. If the proxy restarts
+        # between the before- and after-reads, ``after < before`` and
+        # the delta is large-negative. That's inconclusive (the proxy
+        # was probably fine — it just bounced), NOT a fail. Surfacing
+        # this as ``skipped`` keeps lock honest: we can't tell from
+        # this single observation whether the rewrite routes, and we
+        # refuse to manufacture a fail verdict against a moving target.
+        return {
+            "status": "skipped",
+            "reason": "proxy_restarted",
+            "delta": delta,
+            "aliases": aliases,
+            "reached": reached,
+        }
+    if reached == 0:
+        return {
+            "status": "skipped",
+            "reason": "synthetic_unreachable",
+            "delta": delta,
+            "aliases": aliases,
+            "reached": reached,
+        }
+    return {
+        "status": "fail",
+        "delta": delta,
+        "aliases": aliases,
+        "reached": reached,
+    }
+
+
+def _print_openclaw_success_block(
+    console,  # noqa: ANN001 — Console type is opaque from this layer
+    result,  # noqa: ANN001 — OpenclawApplyResult is opaque from this layer
+    *,
+    adoption_skipped: bool,
+    reload_status: str,
+) -> None:
+    """WOR-650/756: the user-visible ``[OK]``/``[WARN]`` block for a lock whose
+    reload did NOT fail. Split out to keep :func:`_finalise_openclaw_success`
+    under the xenon complexity ceiling."""
+    if adoption_skipped:
+        console.print_warning(
+            "[WARN] OpenClaw integration incomplete — an entry was left in place:"
+        )
+    else:
+        console.print_success("[OK] OpenClaw integration:")
+    for provider_name in result.providers_set:
+        console.print_hint(f"   • ~/.openclaw/openclaw.json — added provider '{provider_name}'")
+    if result.skill_installed:
+        console.print_hint("   • ~/.openclaw/workspace/skills/worthless/ — installed skill")
+    console.print_hint("   • Undo: worthless unlock")
+    # WOR-599: OpenClaw keeps verbatim copies of its own config — a .bak ring
+    # written pre-edit on every config write, plus a .last-good promoted when the
+    # gateway observes a valid config. A copy written BEFORE this lock still holds
+    # the original key in plaintext, so "you're protected" is true of the live
+    # config and not of the directory.
+    #
+    # Measured against ghcr.io/openclaw/openclaw:2026.5.3-1: after a lock-style
+    # rewrite, .bak and .bak.1 STILL held the pre-lock key, while .last-good had
+    # been re-promoted to the post-lock contents (the daemon was running). With
+    # the daemon down at lock time, .last-good keeps the old copy until it starts.
+    #
+    # We do not delete them: they are daemon-owned, and .bak is the recovery path
+    # `worthless doctor` itself recommends. Saying so is the only control we have
+    # — asserted by tests/openclaw/test_lock_command_openclaw.py.
+    console.print_hint(
+        "   • OpenClaw keeps its own config backups (~/.openclaw/openclaw.json.bak, "
+        ".bak.1 …, and .last-good). Ones written before this lock still hold your "
+        "original key in plaintext. Rotate that key at your provider — that is "
+        "the only action that invalidates a copy which may already have been "
+        "synced or backed up elsewhere."
+    )
+    # WOR-796 (scrub gap #1): a provider whose key var isn't a valid uppercase
+    # SecretRef id was NOT scrubbed — its cached real key is still live in
+    # OpenClaw's agent store even though openclaw.json reads "locked". Surface it
+    # unconditionally (reload state is irrelevant — nothing was scrubbed for it).
+    for event in result.events:
+        if event.code == OpenclawErrorCode.AGENT_AUTH_STORE_SCRUB_SKIPPED:
+            console.print_warning(f"   [WARN] {event.detail}")
+    # WOR-796: a scrub rewrote OpenClaw's OWN credential cache (auth-profiles.json
+    # / models.json) to a SecretRef on disk. A CONFIRMED models-config reload
+    # (reload_status == "pass") proves the new baseUrl ROUTES, but it does NOT
+    # prove OpenClaw evicted the OLD real key from its in-memory credential
+    # snapshot (runtime-snapshot.ts) — models-config reload ≠ credential
+    # eviction. So a restart is still required to drop the cached key, regardless
+    # of reload state. Show it whenever a scrub happened — NEVER suppressed on a
+    # confirmed reload, which would be a false all-clear (CodeRabbit, WOR-796).
+    if any(event.code == OpenclawErrorCode.AGENT_AUTH_STORE_SCRUBBED for event in result.events):
+        console.print_warning(
+            "   [WARN] Scrubbed a cached real key from OpenClaw's agent auth store "
+            "on disk — restart OpenClaw to drop the old key from the running daemon."
+        )
+    # WOR-756: reload couldn't be positively confirmed (openclaw binary not
+    # co-located, or no reload event before the deadline). Not a failure —
+    # OpenClaw reloads automatically — but say so honestly so the user can
+    # self-check rather than assume a proven route.
+    if reload_status == "skipped":
+        console.print_hint(
+            "   • Couldn't confirm OpenClaw picked up the change; if the next "
+            "chat still bypasses the proxy, run `worthless doctor`."
+        )
+    # WOR-650: tell the user when an unrecognized entry was adopted or skipped.
+    # The detail strings already name the benign cause and the --adopt remedy;
+    # on the normal recognized/real-key path there are no adoption events so
+    # this is silent.
+    for event in result.events:
+        if event.code in _ADOPTION_EVENT_CODES:
+            console.print_hint(f"   • {event.detail}")
+
+
+def _emit_reload_rejected(
+    console,  # noqa: ANN001 — Console type is opaque from this layer
+    quiet: bool,
+    home: WorthlessHome,
+    result,  # noqa: ANN001 — OpenclawApplyResult is opaque from this layer
+    confirmed_planned: list[_PlannedUpdate],
+) -> None:
+    """WOR-756: user-visible + sentinel side of a REJECTED reload (exit-92 path).
+
+    Split from :func:`_finalise_openclaw_success` to keep it under the xenon
+    complexity ceiling. The gateway rejected apply_lock's config (a fresh
+    "config reload skipped (invalid config)" event), so lock must not claim
+    ``[OK]`` — it writes a DEGRADED sentinel and prints the recovery path.
+    """
+    if not quiet:
+        console.print_failure(
+            "[FAIL] OpenClaw reload: the running gateway rejected the new "
+            "configuration, so it is NOT routing through the proxy."
+        )
+        console.print_warning(
+            "   Re-run `worthless lock` to re-confirm, or `worthless unlock` "
+            "to roll back. `worthless doctor` will tell you which."
+        )
+    _write_lock_sentinel(
+        home,
+        status="partial",
+        openclaw="failed",
+        alias_count=len(result.providers_set),
+        events=tuple(e.to_dict() for e in result.events),
+        bind_confirmation={
+            "status": "fail",
+            "reason": "reload_rejected",
+            "delta": 0,
+            "aliases": [p.alias for p in confirmed_planned],
+            "reached": 0,
+        },
+    )
+
+
+def _finalise_openclaw_success(
+    planned: list[_PlannedUpdate],
+    result,  # noqa: ANN001 — OpenclawApplyResult is opaque from this layer
+    console,  # noqa: ANN001 — Console type is opaque from this layer
+    quiet: bool,
+    home: WorthlessHome,
+    *,
+    proxy_host: str,
+    reload_since_ts: datetime,
+) -> int:
+    """WOR-658: finalise the success branch of ``_apply_openclaw``.
+
+    Runs reload-confirmation, bind-confirmation, writes the sentinel with the
+    correct paired ``status``/``openclaw`` state, prints the user-visible
+    result block, and returns the exit code (0 on success, 92 on reload-fail,
+    91 on bind-fail).
+
+    ``reload_since_ts`` is captured by the caller *before* ``apply_lock``'s
+    write so :func:`_confirm_openclaw_reload` only counts a reload event that
+    post-dates our config change (WOR-756).
+
+    WOR-650 follow-up: if an unrecognized entry was left in place (adoption
+    declined / DB snapshot unavailable without --adopt), the header is
+    ``[WARN]`` not ``[OK]`` and the sentinel is DEGRADED — but the exit code
+    stays 0 (the interactive user made that choice; it isn't a lock error).
+
+    Extracted so ``_apply_openclaw`` stays under the project's xenon
+    complexity ceiling — the bind-confirmation classify branches push it
+    over otherwise.
+    """
+    # WOR-650 follow-up: an entry left in place (interactive decline, or DB
+    # snapshot unavailable without --adopt) means lock REWIRED .env to the
+    # proxy but did NOT neutralize a foreign openclaw.json entry — that
+    # provider's agent traffic still escapes Worthless. Both skip paths append
+    # the same reason, so it's the one honest signal that something survived.
+    # The output must NOT read as a clean [OK] when this happened.
+    adoption_skipped = any(
+        reason == "unrecognized_not_adopted" for _, reason in result.providers_skipped
+    )
+
+    # WOR-650 follow-up: confirm ONLY the providers we actually wrote. A
+    # skipped (unadopted) provider's entry still points elsewhere, so probing
+    # its alias would tick the counter and read as a (misleading) "pass".
+    set_providers = set(result.providers_set)
+    confirmed_planned = [p for p in planned if p.provider in set_providers]
+
+    # WOR-756: prove the RUNNING OpenClaw gateway APPLIED apply_lock's baseUrl
+    # write before we claim success. OpenClaw hot-reloads models config on write
+    # (no restart) and logs a gateway/reload event; we poll for one newer than
+    # our write. Tri-state (empirically grounded — see the WOR-756 report):
+    #   fail    → the gateway REJECTED the config (invalid-config reload event);
+    #             block [OK], DEGRADED sentinel, exit 92.
+    #   skipped → inconclusive (binary not co-located, or no event before the
+    #             deadline). NOT a failure — proceed, but add a doctor advisory.
+    #   pass    → a fresh reload-applied event; proceed clean.
+    reload_status = (
+        _confirm_openclaw_reload(since_ts=reload_since_ts) if confirmed_planned else "pass"
+    )
+    if reload_status == "fail":
+        # 92 = RELOAD_FAILED. Distinct from 91 (bind-confirmation refusal —
+        # config was live but not routing) so scripts/agents can tell "OpenClaw
+        # rejected the write" from "took it but isn't routing".
+        _emit_reload_rejected(console, quiet, home, result, confirmed_planned)
+        return 92
+
+    if not quiet:
+        _print_openclaw_success_block(
+            console, result, adoption_skipped=adoption_skipped, reload_status=reload_status
+        )
+
+    # WOR-658: fire a self-test probe at the proxy for each written alias. A
+    # "fail" here means the proxy didn't acknowledge the probe — the entry
+    # almost certainly isn't reaching a live worthless proxy. Honest scope:
+    # this checks proxy reachability + per-alias acknowledgment, NOT that
+    # OpenClaw's rewrite is a working route (see _classify_bind_per_alias); the
+    # live e2e tests prove actual routing.
+    bind_confirmation = _confirm_bind(confirmed_planned, host=proxy_host, port=resolve_port(None))
+    # Bind-fail is a partial-success state at the trust layer:
+    # lock-core wrote the .env + DB, but the OpenClaw config isn't
+    # routing. ``openclaw="failed"`` (paired with ``status="partial"``)
+    # makes ``is_partial()`` fire so ``worthless status`` reports
+    # DEGRADED across sessions — the very failure mode WOR-658 was
+    # built to make visible.
+    bind_failed = bind_confirmation["status"] == "fail"
+    # DEGRADED when routing couldn't be proven (bind-fail) OR an entry was left
+    # in place (adoption skip). Either way the protection is incomplete, so the
+    # cross-session sentinel must say so — the same partial/failed pair
+    # ``is_partial()`` already recognises, so no schema change. ``worthless
+    # status`` then reports "your agent traffic may NOT be gated" until cleared.
+    degraded = bind_failed or adoption_skipped
+    _write_lock_sentinel(
+        home,
+        status="partial" if degraded else "ok",
+        openclaw="failed" if degraded else "ok",
+        alias_count=len(result.providers_set),
+        events=tuple(e.to_dict() for e in result.events),
+        bind_confirmation=bind_confirmation,
+    )
+    if bind_failed:
+        if not quiet:
+            # WOR-658 Fix 12: "test request" reads to a non-engineer; the
+            # term "synthetic" survives only in code identifiers, never the
+            # user-facing string. Regression-guarded in
+            # tests/openclaw/test_lock_bind_confirmation.py.
+            console.print_failure(
+                "[FAIL] Bind-confirmation: test request did not "
+                "reach the proxy. The rewritten OpenClaw entry is NOT "
+                "routing — do NOT trust this lock."
+            )
+            console.print_warning(
+                "   Recover: re-run `worthless lock` to re-confirm, "
+                "or `worthless unlock` to roll back. "
+                "`worthless doctor` will tell you which."
+            )
+        # Exit code 91 = bind-confirmation refusal. Distinct from
+        # 87 (CONFIG_UNREADABLE: infra blocked before any write) and
+        # 73 (OpenClaw integration partial-fail). Wrapping scripts can
+        # now branch on "lock didn't write" (87) vs "lock wrote but
+        # routing is broken" (91).
+        return 91
+
+    # WOR-658 Fix 9: surface inconclusive skipped states with a [WARN] so
+    # the user knows lock didn't actually prove routing. Without this the
+    # silent-bypass class (WOR-514) still hides behind a green [OK].
+    bind_status = bind_confirmation["status"]
+    bind_reason = bind_confirmation.get("reason")
+    if not quiet and bind_status == "skipped" and bind_reason and bind_reason != "no_aliases":
+        console.print_warning(
+            f"[WARN] Bind-confirmation inconclusive ({bind_reason}) — "
+            "routing wasn't proven. Run `worthless doctor` to investigate."
+        )
+    return 0
+
+
+def _openclaw_proxy_base_url() -> tuple[str, str]:
+    """``(proxy_host, proxy_base_url)`` for OpenClaw config writes.
+
+    Delegates URL construction to the single-sourced
+    :func:`worthless.cli.process.resolve_openclaw_proxy_base_url` so lock's
+    write, the WOR-650 consent preview, the WOR-777 audit gate, and
+    ``worthless doctor`` all agree on the same URL. ``proxy_host`` is
+    returned separately for callers (e.g. ``_confirm_bind``) that need the
+    bare host.
+    """
+    proxy_host = os.environ.get("WORTHLESS_PROXY_HOST", "127.0.0.1")
+    return proxy_host, resolve_openclaw_proxy_base_url()
+
+
+_ADOPTION_EVENT_CODES = frozenset(
+    {
+        OpenclawErrorCode.PROVIDER_ADOPTED_UNRECOGNIZED,
+        OpenclawErrorCode.PROVIDER_ADOPTION_SKIPPED,
+        OpenclawErrorCode.PROVIDER_RECOGNITION_UNAVAILABLE,
+    }
+)
+
+
+def _resolve_adoption_policy(
+    planned: list[_PlannedUpdate],
+    *,
+    managed_aliases: set[str] | None,
+    adopt: bool,
+    console,  # noqa: ANN001 — Console type is opaque from this layer
+    quiet: bool,
+):
+    """WOR-650: decide whether to adopt unrecognized OpenClaw proxy entries.
+
+    ``--adopt`` or a non-interactive shell → adopt (the agent/CI path: the
+    overwrite neutralizes any planted entry and the structured event is the
+    record). Interactive without ``--adopt`` → preview the foreign entries and,
+    if any, prompt once. ``managed_aliases is None`` (DB snapshot failed) is
+    threaded straight through — :func:`_classify_adoption` renders it as the
+    fail-safe ``recognition_unavailable`` state, never as "recognized".
+    """
+    AdoptionPolicy = _openclaw_integration.AdoptionPolicy
+    if adopt or not sys.stdin.isatty():
+        return AdoptionPolicy(managed_aliases=managed_aliases, adopt_unrecognized=True)
+    _, proxy_base_url = _openclaw_proxy_base_url()
+    unrecognized = _openclaw_integration.preview_unrecognized(
+        [(p.provider, p.alias, "") for p in planned],
+        proxy_base_url=proxy_base_url,
+        managed_aliases=managed_aliases,
+    )
+    if not unrecognized:
+        return AdoptionPolicy(managed_aliases=managed_aliases, adopt_unrecognized=False)
+    if not quiet:
+        names = ", ".join(sorted(set(unrecognized)))
+        console.print_warning(
+            f"OpenClaw has proxy-shaped entries not created on this machine: {names}. "
+            "These may be your own synced config — or left by something else."
+        )
+    decision = typer.confirm("Route them through Worthless?", default=False)
+    return AdoptionPolicy(managed_aliases=managed_aliases, adopt_unrecognized=decision)
+
+
 def _apply_openclaw(
     planned: list[_PlannedUpdate],
     console,  # noqa: ANN001 — Console type is opaque from this layer
     quiet: bool,
     home: WorthlessHome,
+    adoption_policy=None,  # noqa: ANN001 — AdoptionPolicy is opaque from this layer
 ) -> int:
     """OpenClaw integration call + sentinel write. Returns exit code (0/73/87).
 
@@ -588,6 +1906,7 @@ def _apply_openclaw(
         status`` can report DEGRADED state across terminal sessions.
         Sentinel write failure is itself best-effort (logged, swallowed).
     """
+
     # Each alias gets its own shard-A (format-preserving split value) as the
     # apiKey in openclaw.json. The agent sends shard-A as Bearer on each request;
     # the proxy validates via commitment check (no stable token needed).
@@ -601,11 +1920,20 @@ def _apply_openclaw(
     # Also honour WORTHLESS_PROXY_HOST so all-container Docker deployments
     # write the Docker-internal service name (e.g. "proxy") instead of
     # 127.0.0.1, which is unreachable inside the openclaw container.
-    _proxy_host = os.environ.get("WORTHLESS_PROXY_HOST", "127.0.0.1")
-    proxy_base_url = f"http://{_proxy_host}:{resolve_port(None)}"
+    _proxy_host, proxy_base_url = _openclaw_proxy_base_url()
+    # WOR-796: the *_API_KEY var name holding shard-A for each alias, so
+    # scrub_agent_auth_stores() can point the agent-cache SecretRef at it.
+    env_var_by_alias = {p.alias: p.var_name for p in planned}
+    # WOR-756: stamp the instant BEFORE the write so the reload-confirmation poll
+    # only counts a gateway reload event that post-dates our config change (the
+    # log tail also contains reloads from prior locks).
+    reload_since_ts = datetime.now(timezone.utc)
     try:
         result = _openclaw_integration.apply_lock(
-            planned_updates=triples, proxy_base_url=proxy_base_url
+            planned_updates=triples,
+            proxy_base_url=proxy_base_url,
+            adoption_policy=adoption_policy,
+            env_var_by_alias=env_var_by_alias,
         )
     except OpenclawIntegrationError as exc:
         # apply_lock's contract is "never raise". If it does, treat as
@@ -629,24 +1957,15 @@ def _apply_openclaw(
     # (single-sourced — see integration.py docstring). Lock + unlock both
     # call this property.
     if not result.has_failure:
-        # Fully successful integration — record OK + enumerate to user.
-        if not quiet:
-            console.print_success("[OK] OpenClaw integration:")
-            for provider_name in result.providers_set:
-                console.print_hint(
-                    f"   • ~/.openclaw/openclaw.json — added provider '{provider_name}'"
-                )
-            if result.skill_installed:
-                console.print_hint("   • ~/.openclaw/workspace/skills/worthless/ — installed skill")
-            console.print_hint("   • Undo: worthless unlock")
-        _write_lock_sentinel(
+        return _finalise_openclaw_success(
+            planned,
+            result,
+            console,
+            quiet,
             home,
-            status="ok",
-            openclaw="ok",
-            alias_count=len(result.providers_set),
-            events=tuple(e.to_dict() for e in result.events),
+            proxy_host=_proxy_host,
+            reload_since_ts=reload_since_ts,
         )
-        return 0
 
     # Detected + failed: the trust-failure path. Print [FAIL] block, write
     # sentinel as partial. Caller raises typer.Exit(openclaw_exit) after
@@ -733,9 +2052,7 @@ def _maybe_prompt_code_scan(cwd: Path) -> None:
     try:
         skipped: list[SkippedFile] = []
         deadline = time.monotonic() + SCAN_TIME_BUDGET_S
-        findings = scan_for_hardcoded_provider_urls(
-            [cwd], deadline=deadline, skipped=skipped
-        )
+        findings = scan_for_hardcoded_provider_urls([cwd], deadline=deadline, skipped=skipped)
         if skipped:
             # Advisory note ONLY — lock already succeeded; we don't prompt and
             # we don't change the exit code. The user can re-run the scan
@@ -748,8 +2065,7 @@ def _maybe_prompt_code_scan(cwd: Path) -> None:
             # rendered "{count} {reason}" reading order and gives a stable
             # output for the same input.
             reason_summary = ", ".join(
-                f"{n} {r}"
-                for r, n in sorted(reason_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+                f"{n} {r}" for r, n in sorted(reason_counts.items(), key=lambda kv: (-kv[1], kv[0]))
             )
             typer.echo(
                 f"\nNote: post-lock source scan incomplete ({reason_summary}). "
@@ -767,7 +2083,7 @@ def _maybe_prompt_code_scan(cwd: Path) -> None:
             confirmed = typer.confirm(f"\n{summary} Scan now?", default=True)
             if not confirmed:
                 return
-            typer.echo(_format_code_findings_human(findings), err=True)
+            typer.echo(_format_code_findings_human(findings, collapse_tests=True), err=True)
             typer.echo(
                 "\nRun `worthless scan --code` at any time to see this again with fix"
                 " instructions.",
@@ -810,6 +2126,10 @@ def _emit_openclaw_failure(
     in-line FAIL block above — we don't know exactly what failed, but the
     user is in a genuinely broken state and must be told loudly.
     """
+    # SR-04 (WOR-655): this inline-dict path bypasses the
+    # OpenclawIntegrationEvent choke point, so redact ``detail`` here — it
+    # feeds BOTH the console warning below AND the sentinel event dict.
+    detail = _redact(detail)
     if not quiet:
         console.print_failure("[FAIL] OpenClaw integration did NOT complete.")
         console.print_warning("   Your .env is locked, but OpenClaw is still calling the")
@@ -834,6 +2154,7 @@ def _write_lock_sentinel(
     openclaw: str,
     alias_count: int,
     events: tuple[dict[str, str], ...],
+    bind_confirmation: dict[str, object] | None = None,
 ) -> None:
     """Best-effort sentinel write. Failure is logged + swallowed."""
     try:
@@ -845,6 +2166,7 @@ def _write_lock_sentinel(
             openclaw=openclaw,
             alias_count=alias_count,
             events=list(events),
+            bind_confirmation=bind_confirmation,
         )
     except OSError as exc:
         logger.warning("sentinel write failed: %s", exc)
@@ -858,18 +2180,53 @@ def _print_lock_result(
     relock_count: int,
     env_path: Path,
     home_base_dir: Path,
+    openclaw_failed: bool = False,
+    oauth_skipped: bool = False,
 ) -> None:
-    """Emit the post-lock user-facing summary (called only when quiet=False)."""
+    """Emit the post-lock user-facing summary (called only when quiet=False).
+
+    ``openclaw_failed`` (WOR-779 honesty): on a partial OpenClaw failure the
+    ``.env`` IS split, but agent traffic is NOT gated — so the derived verdict
+    is NOT "you're protected". Suppress the verdict headline + the breezy
+    closure (the caller's ``LOCK FAILED`` block carries the real,
+    worst-component verdict); the factual ``[OK] split`` line still prints.
+
+    ``oauth_skipped`` (worthless-7jn2 honesty): a WOR-837 OAuth token was found,
+    classified, and deliberately left alone — so it is still in the ``.env`` in
+    plaintext, live for up to a year. Same shape as ``openclaw_failed``: the
+    derived verdict is NOT "you're protected", so suppress the headline + the
+    breezy closure. The factual lines still print, minus the "no longer
+    contains a usable secret" tail, which is a claim about the WHOLE file.
+    """
+    # worthless-7jn2: two independent reasons the same verdict is unearned.
+    # Each keeps its own distinct messaging below; only the derived headline
+    # and the breezy closure are shared.
+    verdict_earned = not openclaw_failed and not oauth_skipped
     if fresh_count or relock_count:
+        # WOR-779: the seatbelt click — lead with a plain verdict (Verdict →
+        # Proof → Next). The verdict is DERIVED: on a partial OpenClaw failure
+        # we must NOT claim "you're protected" above the LOCK FAILED footer.
+        total = fresh_count + relock_count
+        total_noun = "key" if total == 1 else "keys"
+        if verdict_earned:
+            console.print_success(
+                f"🔒 You're protected. {total} {total_noun} locked — a stolen "
+                f"{env_path.name} is now worthless to an attacker."
+            )
         if fresh_count:
             # [OK] text prefix is the accessibility carrier — color/glyph
             # reinforce but are never the sole signal (monochrome, CI logs,
             # screen readers).
             noun = "key" if fresh_count == 1 else "keys"
+            # worthless-7jn2: the count is a fact and always prints. The tail is
+            # a claim about the whole file — false while a skipped OAuth token
+            # still sits in it.
+            tail = (
+                "." if oauth_skipped else f" — {env_path.name} no longer contains a usable secret."
+            )
             console.print_success(
                 f"[OK] {fresh_count} {noun} split between this machine and "
-                f"{_shard_b_storage_label()} — {env_path.name} no longer contains "
-                f"a usable secret."
+                f"{_shard_b_storage_label()}{tail}"
             )
         if relock_count:
             noun = "key" if relock_count == 1 else "keys"
@@ -879,17 +2236,53 @@ def _print_lock_result(
             typer.echo(
                 f"Warning: using non-default home {home_base_dir} (WORTHLESS_HOME is set)", err=True
             )
-        if fresh_count:
+        # WOR-779 (CR): the daemon-mode "Next:" cue is a success next-step — keep
+        # it off the partial-failure path so nothing above LOCK FAILED reads as OK.
+        # It stays on the OAuth-skip path: the keys that DID lock still need the
+        # proxy, and this is an action, not a reassurance.
+        if fresh_count and not openclaw_failed:
             console.print_hint(
-                "Next: run `worthless wrap <command>` or `worthless up` for daemon mode"
+                "Next: run `worthless wrap <command>`, or `worthless up` to keep a "
+                "proxy running in this terminal."
             )
+        # WOR-779: closure — the "pull anytime" reassurance home. Suppressed on
+        # a partial failure — don't reassure when the lock didn't fully succeed.
+        # worthless-7jn2: same for a skipped OAuth token still in the file.
+        if verdict_earned:
+            console.print_hint("Check anytime with `worthless status`.")
         _maybe_prompt_code_scan(Path.cwd())
+    elif oauth_skipped:
+        # worthless-7jn2: keys WERE found here. They were classified as Claude
+        # Code OAuth tokens and deliberately skipped above — the file is not
+        # clean, so "No unprotected API keys found." would be a false all-clear.
+        console.print_warning(
+            f"[WARN] Nothing was locked. The skipped OAuth token is still in "
+            f"{env_path.name} in plaintext. Treat that file as a live secret."
+        )
     else:
         console.print_warning("No unprotected API keys found.")
+    # WOR-797 (Gap 1): fires on BOTH paths, deliberately outside the branch
+    # above. A user with ZERO shardable keys is exactly the population this
+    # warning exists for — a CLI-login-only OpenClaw user whose OAuth refresh
+    # tokens lock cannot protect. Gating it inside the has-keys branch left
+    # them with "No unprotected API keys found." and a false all-clear.
+    # Self-returns when there are no findings, so a genuinely clean install
+    # stays quiet.
+    _print_unshardable_credentials_warning(console)
 
 
-def _openclaw_audit_preflight() -> _oc_audit.AuditGateHandle | None:
+def _openclaw_audit_preflight(
+    managed_aliases: set[str] | None,
+    proxy_base_url: str,
+) -> _oc_audit.AuditGateHandle | None:
     """Run OpenClaw secrets audit pre-flight before worthless lock writes.
+
+    ``managed_aliases`` is this machine's ``shards`` keys (the WOR-650 snapshot).
+    It lets the gate recognize worthless's own inert shard-A — written into the
+    user's real provider entry (F1/WOR-647) and carrying a proxy ``baseUrl``
+    alias — so a re-lock (rotation) is not aborted by worthless's own prior
+    shard (WOR-777 / bead worthless-b8me). ``None`` (snapshot failed) recognizes
+    nothing — fail-safe.
 
     Returns None if OpenClaw is not detected on this host or binary is not
     available (gate skipped, _apply_openclaw handles the partial-failure path).
@@ -912,7 +2305,9 @@ def _openclaw_audit_preflight() -> _oc_audit.AuditGateHandle | None:
         return None
 
     try:
-        result, classification = _oc_audit.run_and_classify(openclaw_bin)
+        result, classification = _oc_audit.run_and_classify(
+            openclaw_bin, managed_aliases=managed_aliases, proxy_base_url=proxy_base_url
+        )
     except _oc_audit.AuditGateError as exc:
         typer.echo(f"worthless lock: openclaw audit gate failed: {exc}", err=True)
         raise typer.Exit(code=87) from exc
@@ -935,7 +2330,11 @@ def _openclaw_audit_preflight() -> _oc_audit.AuditGateHandle | None:
     )
 
 
-def _openclaw_audit_postflight(gate: _oc_audit.AuditGateHandle) -> None:
+def _openclaw_audit_postflight(
+    gate: _oc_audit.AuditGateHandle,
+    managed_aliases: set[str] | None,
+    proxy_base_url: str,
+) -> None:
     """Post-flight TOCTOU re-audit after lock-core write commits.
 
     Skips the second subprocess entirely if file hashes are unchanged since
@@ -959,7 +2358,9 @@ def _openclaw_audit_postflight(gate: _oc_audit.AuditGateHandle) -> None:
         return
 
     try:
-        _, post_class = _oc_audit.run_and_classify(gate.openclaw_bin)
+        _, post_class = _oc_audit.run_and_classify(
+            gate.openclaw_bin, managed_aliases=managed_aliases, proxy_base_url=proxy_base_url
+        )
     except _oc_audit.AuditGateError as exc:
         typer.echo(f"worthless lock: post-flight audit failed: {exc}", err=True)
         raise typer.Exit(code=87) from exc
@@ -982,6 +2383,61 @@ def _openclaw_audit_postflight(gate: _oc_audit.AuditGateHandle) -> None:
         raise typer.Exit(code=87)
 
 
+def _sync_fernet_after_lock(home: WorthlessHome) -> None:
+    """Copy canonical Fernet key to fernet.key after lock (WOR-748).
+
+    Skipped under Docker IPC-only (sidecar owns ``fernet.key``; proxy cannot
+    overwrite) and when on-disk ``fernet.key`` disagrees with the canonical
+    key already loaded for this lock (WOR-464 — never auto-pick a side).
+
+    Uses the ``home.fernet_key`` cache so lock does not fire a second
+    keyring read (HF2 contract).
+    """
+    if sys.platform not in ("darwin", "linux"):
+        return
+    if fernet_ipc_only_enabled():
+        return
+
+    key = home.fernet_key
+    try:
+        on_disk = _fernet_file_bytes(home.fernet_key_path)
+        if on_disk is not None and on_disk != key:
+            logger.debug(
+                "Skipping post-lock fernet sync — file bytes differ from canonical key (WOR-464)"
+            )
+            return
+        sync_fernet_for_launchd(home.base_dir, key=key)
+    finally:
+        zero_buf(key)
+
+
+def _print_unshardable_credentials_warning(console: WorthlessConsole) -> None:
+    """WOR-797: ``lock`` only shards a static API key. Warn (once, post-lock)
+    when any of the 8 unshardable OAuth/token credential surfaces are
+    present, so the user doesn't assume lock's protection extends to them —
+    see :mod:`worthless.openclaw.unshardable_credentials` for the full,
+    source-verified surface list.
+    """
+    probe_caveats: list[str] = []
+    findings = detect_unshardable_credentials(probe_caveats)
+    if findings:
+        n = len(findings)
+        console.print_warning(
+            f"[WARN] {n} OAuth/token credential{'s' if n != 1 else ''} found that lock "
+            "CANNOT protect (the proxy is not load-bearing for these) — run "
+            "`worthless doctor --fix` to clear the ones you don't need."
+        )
+    # WOR-797 (Gap 1, second surface): a Linux/WSL scan cannot inspect the two
+    # macOS-keychain surfaces. Surface that caveat here — exactly as `doctor`
+    # does — so a partial scan on the target platform never reads as a clean
+    # bill of health. Runs on both the has-keys and zero-keys paths.
+    caveats = detection_caveats() + probe_caveats
+    if caveats:
+        console.print_hint(
+            "[NOTE] " + "; ".join(caveats) + " — run `worthless doctor` for a full check."
+        )
+
+
 def _lock_keys(
     env_path: Path,
     home: WorthlessHome,
@@ -990,6 +2446,7 @@ def _lock_keys(
     quiet: bool = False,
     keys_only: bool = False,
     allow_hardcoded_urls: bool = False,
+    adopt: bool = False,
 ) -> int:
     """Transactional multi-key lock.
 
@@ -1004,6 +2461,11 @@ def _lock_keys(
         raise WorthlessError(ErrorCode.ENV_NOT_FOUND, f"File not found: {env_path}")
     if env_path.is_symlink():
         raise WorthlessError(ErrorCode.ENV_NOT_FOUND, f"Refusing to follow symlink: {env_path}")
+
+    # WOR-277: disable core dumps before any raw key material is read —
+    # matches the up.py/wrap.py placement (after validation, before key
+    # material touches memory).
+    disable_core_dumps()
 
     # c5kc-61tw: same fail-closed contract the CLI scan uses — bounded per-file
     # read + wall-clock deadline so a hostile / oversized source file can't hang
@@ -1034,9 +2496,7 @@ def _lock_keys(
         reason_counts: dict[str, int] = {}
         for s in hang_class_skipped:
             reason_counts[s.reason] = reason_counts.get(s.reason, 0) + 1
-        reason_summary = ", ".join(
-            f"{n} {r}" for r, n in sorted(reason_counts.items())
-        )
+        reason_summary = ", ".join(f"{n} {r}" for r, n in sorted(reason_counts.items()))
         skip_lines = [
             f"worthless: source scan incomplete ({reason_summary}) — refusing to lock.",
             "An incomplete scan can't prove no hardcoded provider URLs slipped past.",
@@ -1054,42 +2514,32 @@ def _lock_keys(
             # the bypass-findings path below already uses.
             safe_file = _oc_audit.sanitise_for_message(s.file)
             skip_lines.append(f"  {safe_file}  [{s.reason}]")
-        skip_lines.append(
-            "Resolve the cause (oversized source, permission, slow disk) and re-run."
-        )
+        skip_lines.append("Resolve the cause (oversized source, permission, slow disk) and re-run.")
         raise WorthlessError(
             ErrorCode.SCAN_ERROR,
             "\n".join(skip_lines),
             exit_code=2,
         )
     if bypass_findings:
-        header = "worthless: hardcoded provider URLs detected — these bypass the proxy:"
-        detail_lines = [header]
-        for f in bypass_findings:
-            safe_file = _oc_audit.sanitise_for_message(f.file)
-            safe_url = _oc_audit.sanitise_for_message(f.url)
-            detail_lines.append(f"  {safe_file}:{f.line}  {safe_url}  ({f.provider})")
-        findings_text = "\n".join(detail_lines)
-
+        _san = _oc_audit.sanitise_for_message
         if allow_hardcoded_urls:
-            console.print_warning(findings_text)
             console.print_warning(
-                "Proceeding with --allow-hardcoded-urls. Ensure these are not "
-                "active production code paths that bypass the proxy."
+                _format_lock_block_human(bypass_findings, blocking=False, sanitize=_san)
             )
+            console.print_warning("Proceeding with --allow-hardcoded-urls.")
         elif sys.stdin.isatty():
-            console.print_warning(findings_text)
+            console.print_warning(
+                _format_lock_block_human(bypass_findings, blocking=False, sanitize=_san)
+            )
             if not typer.confirm(
-                "\nThese URLs will bypass the proxy. Are these intentional "
-                "(e.g. test fixtures or docs)? Proceed anyway?",
+                "Are these test fixtures or docs? Proceed anyway?",
                 default=False,
             ):
                 raise WorthlessError(ErrorCode.SCAN_ERROR, "Aborted.", exit_code=1)
         else:
             raise WorthlessError(
                 ErrorCode.SCAN_ERROR,
-                findings_text + "\nIf this is intentional (e.g. test fixtures), re-run with "
-                "--allow-hardcoded-urls to bypass this check.",
+                _format_lock_block_human(bypass_findings, blocking=True, sanitize=_san),
                 exit_code=1,
             )
 
@@ -1100,6 +2550,9 @@ def _lock_keys(
         total: int
         fresh_count: int
         openclaw_exit: int  # 0 = ok, 73 = partial fail, 87 = infra blocked
+        # worthless-7jn2: a WOR-837 OAuth token was found and deliberately left
+        # in the .env — the summary must not claim the file is protected/clean.
+        oauth_skipped: bool = False
 
     async def _lock_async() -> _LockResult:
         from dotenv import dotenv_values  # noqa: PLC0415 — local import keeps test surface tight
@@ -1107,10 +2560,54 @@ def _lock_keys(
         async with open_repo(home) as repo:
             await repo.initialize()
 
+            # WOR-650: snapshot the aliases this machine created (the shards
+            # table) BEFORE pass-1 adds this lock's new aliases, so recognition
+            # judges the *existing* OpenClaw entry against prior state. None =
+            # the snapshot failed → fail-safe recognition_unavailable downstream.
+            try:
+                managed_aliases: set[str] | None = set(await repo.list_keys())
+            except Exception:  # noqa: BLE001 — recognition is best-effort, never blocks lock
+                managed_aliases = None
+
+            # WOR-777 / brutus: the audit gate host-pins recognition to the proxy
+            # (an attacker baseUrl on a foreign host must NOT be recognized as
+            # ours), so it needs the EXACT value apply_lock will write into the
+            # provider entries — not integration._resolve_proxy_base_url()
+            # (Docker-auto-detected host, hardcoded port). BugBot (PR #387): a
+            # mismatched port/host here means recognition can never match a
+            # real entry, reintroducing exit-73 on re-lock. Reuse the single
+            # source of truth apply_lock's caller actually uses below.
+            _, oc_proxy_base_url = _openclaw_proxy_base_url()
+
             env_str = str(env_path.resolve())
             all_enrollments = await repo.list_enrollments()
 
             raw_scanned = scan_env_keys(env_path)
+
+            # WOR-837: a Claude Code OAuth token (sk-ant-oat/ort) collides with
+            # the static sk-ant- prefix, so scan_env_keys classifies it as
+            # "anthropic" — but sharding rewrites the sk-ant-oat marker OpenClaw
+            # matches on, and the proxy cannot restore the OAuth request shape
+            # that loss costs. Skip it (still lock the user's real keys) and say
+            # so loudly, before it can become a lock candidate. Anthropic-only by
+            # construction; see key_patterns.is_oauth_token.
+            oauth_skipped = [entry for entry in raw_scanned if is_oauth_token(entry[1])]
+            if oauth_skipped:
+                raw_scanned = [entry for entry in raw_scanned if not is_oauth_token(entry[1])]
+                # Sanitise the user-controlled .env var names before printing —
+                # a crafted name (dotenv keys are permissive) could otherwise
+                # smuggle terminal-injection / bidi-override sequences into the
+                # warning. Same guard lock/doctor use everywhere else.
+                oauth_vars = ", ".join(
+                    _oc_audit.sanitise_for_message(var_name) for var_name, _, _ in oauth_skipped
+                )
+                console.print_warning(
+                    f"[WARN] Skipped {oauth_vars}: looks like a Claude Code OAuth token "
+                    "(sk-ant-oat/ort), not a static API key. Sharding rewrites the "
+                    "sk-ant-oat marker Claude Code is recognised by, so locking it would "
+                    "break your login instead of protecting it."
+                )
+
             scanned = await _select_unlocked_keys(
                 repo,
                 raw_scanned,
@@ -1118,10 +2615,40 @@ def _lock_keys(
                 env_str,
             )
             if not scanned:
-                return _LockResult(total=len(raw_scanned), fresh_count=0, openclaw_exit=0)
+                return _LockResult(
+                    total=len(raw_scanned),
+                    fresh_count=0,
+                    openclaw_exit=0,
+                    oauth_skipped=bool(oauth_skipped),
+                )
 
             # Snapshot .env so _pass1 can pull *_BASE_URL values into the DB row.
             env_values = dict(dotenv_values(env_path))
+
+            # worthless-ftmg: refuse to lock an already-locked .env BEFORE any
+            # state mutation. The legitimate idempotent re-lock case (same key
+            # value → same alias → DB row matches → commitment passes) already
+            # short-circuited via `if not scanned: return` above — anything
+            # still in `scanned` here has NO matching DB row. So a *_BASE_URL
+            # pointing at our proxy means we'd be about to re-split a value
+            # that's already shard-A from a previous lock cycle (DB-nuked,
+            # restored-from-backup, container rebuild, etc.) and overwrite
+            # both halves. That destroys the only path back to the original
+            # real key. Refuse here with zero side effects.
+            _already_locked_var = _detect_already_locked_env(env_values)
+            if _already_locked_var is not None:
+                raise WorthlessError(
+                    ErrorCode.ENV_ALREADY_LOCKED,
+                    f"This .env is already locked — {_already_locked_var} points at "
+                    "the Worthless proxy and the key field doesn't match any stored "
+                    "shard. Re-locking now would overwrite shard-A and make your "
+                    "original key unrecoverable.\n"
+                    "  • To return to the original key: `worthless unlock`\n"
+                    "  • To recover from a half-state:  `worthless doctor`\n"
+                    "Nothing was changed — your .env, database, and OpenClaw config "
+                    "are untouched.",
+                    exit_code=ErrorCode.ENV_ALREADY_LOCKED.value,
+                )
 
             candidates = [
                 (var_name, value, provider_override or detected_provider)
@@ -1133,9 +2660,106 @@ def _lock_keys(
             # DB/.env write so blocking plaintext findings abort the lock with
             # zero side effects (gate-before-write). Orthogonal to the
             # sidecar-IPC repo above — placement here is load-bearing.
-            _oc_gate = _openclaw_audit_preflight()
+            _oc_gate = _openclaw_audit_preflight(managed_aliases, oc_proxy_base_url)
+
+            # F7 (WOR-648 / WOR-621 AC5): proxy health gate, alongside the
+            # audit gate above — BEFORE any DB or .env write. Gated on
+            # ``_openclaw_integration.detect().present`` because non-OpenClaw
+            # users follow a documented ``worthless lock`` → ``worthless wrap``
+            # flow: lock writes ``*_BASE_URL`` pointing at the chosen port,
+            # then ``wrap`` binds that same port and forwards (the v0.3.4
+            # magic-moment contract, pinned by
+            # tests/user_flows/test_wrap_magic_moment.py). Requiring the proxy
+            # up at lock time would break that journey. For OpenClaw users
+            # the gate IS load-bearing: if the proxy is down, the lock
+            # would write the OpenClaw provider's baseUrl at a dead proxy
+            # and OpenClaw would route there permanently — a half-locked
+            # state that strands the key. Aborting here keeps .env, DB, and
+            # ~/.openclaw/openclaw.json byte-for-byte unchanged.
+            #
+            # KNOWN LIMITATION: ``detect()`` can false-negative on hosts
+            # that actually do have OpenClaw (foreign-owned ~/.openclaw in
+            # Docker shared-vol mode, non-standard home, container off at
+            # lock time). Tracked separately — harden detect() or add a
+            # raw-fs fallback so the gate fires even when detect() misses.
+            if _openclaw_integration.detect().present:
+                _probe_port = resolve_port(None)
+                if not check_proxy_health(_probe_port)["healthy"]:
+                    raise WorthlessError(
+                        ErrorCode.PROXY_NOT_RUNNING,
+                        f"Worthless proxy is not responding on port {_probe_port}. "
+                        "Nothing was changed — your .env, database, and "
+                        "~/.openclaw/openclaw.json are untouched. Start the proxy "
+                        "(`worthless up`) and re-run `worthless lock`.",
+                    )
 
             planned: list[_PlannedUpdate] = []
+
+            # WOR-646: arm SIGINT/SIGTERM BEFORE Pass-1's first DB write so an
+            # interrupt mid-lock unwinds the rows it already created instead of
+            # orphaning them. We use the asyncio-native ``add_signal_handler``
+            # (NOT ``signal.signal``) because we're inside ``asyncio.run``: a
+            # C-level handler would race the loop's wakeup fd and the
+            # cancellation wouldn't be seen until an unrelated wakeup — the same
+            # reason ``sidecar/__main__.py`` uses ``add_signal_handler``. The
+            # handler cancels THIS task, so a ``CancelledError`` surfaces at the
+            # next ``await`` inside the try below and is caught alongside
+            # ordinary failures, routing through ``_compensating_unwind``.
+            #
+            # On 3.11+ ``asyncio.Runner`` installs its own SIGINT handler; our
+            # ``add_signal_handler`` cleanly overrides it for the lock window
+            # and never touches SIGTERM (which the Runner ignores) — so this is
+            # the only uniform SIGINT+SIGTERM path across 3.10–3.13.
+            loop = asyncio.get_running_loop()
+            this_task = asyncio.current_task()
+            installed_signals: list[int] = []
+            interrupted = False
+
+            def _request_unwind() -> None:
+                # One-shot: cancel on the FIRST signal only. The handler stays
+                # installed (but inert) through the rollback below, so a mashed
+                # Ctrl-C lands here as a no-op instead of re-cancelling the task
+                # — or, worse, hitting the default SIGINT disposition that
+                # ``remove_signal_handler`` would restore and raising
+                # KeyboardInterrupt mid-unwind, orphaning the rows we're
+                # deleting. Disarm happens only in ``finally``.
+                nonlocal interrupted
+                if interrupted or this_task is None:
+                    return
+                interrupted = True
+                this_task.cancel()
+
+            def _disarm_signals() -> None:
+                # Idempotent: pop so calling from both the except clause AND the
+                # finally (or a partial install) is a safe no-op the second time.
+                while installed_signals:
+                    sig = installed_signals.pop()
+                    try:
+                        loop.remove_signal_handler(sig)
+                    except (NotImplementedError, RuntimeError, ValueError):
+                        pass
+
+            for _sig in (signal.SIGINT, signal.SIGTERM):
+                try:
+                    loop.add_signal_handler(_sig, _request_unwind)
+                except (NotImplementedError, RuntimeError):
+                    # Signal-driven cancellation is unavailable here:
+                    #   * Windows ProactorEventLoop (NotImplementedError), or
+                    #   * a non-main-thread event loop (RuntimeError) — e.g. the
+                    #     MCP ``worthless_lock`` tool runs ``_lock_keys`` via
+                    #     ``run_in_executor`` (mcp/server.py).
+                    # Python delivers SIGINT/SIGTERM ONLY to the process main
+                    # thread, so a worker-thread lock receives NO interrupt at all
+                    # — it is NOT true that "default SIGINT → KeyboardInterrupt
+                    # still applies" off the main thread. On these paths
+                    # crash-safety rests on the atomic Pass-1 transaction
+                    # (WOR-646 Part 2), not the signal handler. Real mid-lock
+                    # interrupt safety for the MCP path is tracked in worthless-dqzj.
+                    # Record only the signals that actually installed so cleanup
+                    # can't leak a handler when one of the two raises.
+                    continue
+                installed_signals.append(_sig)
+
             try:
                 if not quiet:
                     # HF2 UX: name the keys so the user knows exactly which env
@@ -1149,22 +2773,49 @@ def _lock_keys(
                     repo, candidates, env_str, token_budget_daily, planned, env_values
                 )
                 if not planned:
-                    return _LockResult(total=0, fresh_count=0, openclaw_exit=0)
+                    return _LockResult(
+                        total=0,
+                        fresh_count=0,
+                        openclaw_exit=0,
+                        oauth_skipped=bool(oauth_skipped),
+                    )
                 _batch_rewrite(env_path, planned, keys_only, existing_env_keys)
                 if _oc_gate is not None:
-                    _openclaw_audit_postflight(_oc_gate)
+                    _openclaw_audit_postflight(_oc_gate, managed_aliases, oc_proxy_base_url)
                 # Phase 2.b: OpenClaw magic. Per L1 in
                 # engineering/research/openclaw/WOR-431-phase-2-spec.md, this
                 # NEVER rolls back lock-core success. Per L2 (revised 2026-05-08
                 # by the verification gauntlet): detected+failed returns non-zero
                 # openclaw_exit so the caller can raise typer.Exit(openclaw_exit)
                 # AFTER lock-core's .env/DB writes are fully committed.
-                openclaw_exit = _apply_openclaw(planned, console, quiet, home)
+                adoption_policy = _resolve_adoption_policy(
+                    planned,
+                    managed_aliases=managed_aliases,
+                    adopt=adopt,
+                    console=console,
+                    quiet=quiet,
+                )
+                openclaw_exit = _apply_openclaw(planned, console, quiet, home, adoption_policy)
                 fresh_count = sum(1 for p in planned if p.was_fresh_enroll)
                 return _LockResult(
-                    total=len(planned), fresh_count=fresh_count, openclaw_exit=openclaw_exit
+                    total=len(planned),
+                    fresh_count=fresh_count,
+                    openclaw_exit=openclaw_exit,
+                    oauth_skipped=bool(oauth_skipped),
                 )
-            except Exception:
+            except (Exception, KeyboardInterrupt, asyncio.CancelledError) as exc:
+                # The signal handler is one-shot and stays installed here, so the
+                # rollback below runs uninterrupted by a mashed Ctrl-C; ``finally``
+                # disarms it. The interrupt types are caught EXPLICITLY (not a
+                # bare ``except BaseException``) so ``SystemExit`` keeps
+                # propagating. ``typer.Exit`` is a ``RuntimeError`` (an
+                # ``Exception``), so — exactly as before this change — it is
+                # caught and DOES unwind: the pre-existing post-flight recovery
+                # contract (``_openclaw_audit_postflight`` rewinds the DB rows
+                # after a ``.env`` commit for a recoverable re-lock). The
+                # ``isinstance`` guard below converts ONLY a genuine signal
+                # cancellation to ``KeyboardInterrupt``, leaving other exit codes
+                # (``typer.Exit`` 73/87, ``WorthlessError``) intact.
                 if planned:
                     unwind_errors = await _compensating_unwind(repo, planned)
                     if unwind_errors:
@@ -1172,21 +2823,41 @@ def _lock_keys(
                             f"Database may contain {len(unwind_errors)} stale row(s); "
                             "run `worthless unlock --all` to reconcile."
                         )
+                if isinstance(exc, asyncio.CancelledError):
+                    # Surface the signal-driven cancellation as a conventional
+                    # interrupt so the CLI exits cleanly instead of dumping an
+                    # asyncio ``CancelledError`` traceback — ``error_boundary``
+                    # handles ``Exception`` but not ``BaseException``.
+                    raise KeyboardInterrupt from None
                 raise
             finally:
+                # Idempotent backstop: removes handlers on the paths the except
+                # clause never runs (success, or an uncaught ``typer.Exit``).
+                _disarm_signals()
                 for p in planned:
                     p.zero()
 
     result = asyncio.run(_lock_async())
     relock_count = result.total - result.fresh_count
 
-    if result.fresh_count and env_path.exists():
+    # NOT gated on ``fresh_count``: an .env whose only credential was skipped
+    # (e.g. a WOR-837 OAuth token) locks zero keys but still holds a live
+    # plaintext secret, so it must be tightened to owner-only all the same.
+    if env_path.exists():
         current = env_path.stat().st_mode
         if current & (stat.S_IRWXG | stat.S_IRWXO):
             env_path.chmod(current & ~(stat.S_IRWXG | stat.S_IRWXO))
 
     if not quiet:
-        _print_lock_result(console, result.fresh_count, relock_count, env_path, home.base_dir)
+        _print_lock_result(
+            console,
+            result.fresh_count,
+            relock_count,
+            env_path,
+            home.base_dir,
+            openclaw_failed=bool(result.openclaw_exit),
+            oauth_skipped=result.oauth_skipped,
+        )
 
     # Trust-fix (2026-05-08 verification gauntlet): when OpenClaw was
     # detected on this host AND the integration stage failed, the user is
@@ -1206,6 +2877,7 @@ def _lock_keys(
         )
         raise typer.Exit(code=result.openclaw_exit)
 
+    _sync_fernet_after_lock(home)
     return result.fresh_count + relock_count
 
 
@@ -1302,8 +2974,22 @@ def register_lock_commands(app: typer.Typer) -> None:
                 "A warning is always printed."
             ),
         ),
+        adopt: bool = typer.Option(
+            False,
+            "--adopt",
+            help=(
+                "Take over pre-existing OpenClaw proxy entries not created on "
+                "this machine without prompting (e.g. a synced config or reinstall)."
+            ),
+        ),
     ) -> None:
         """Protect API keys in a .env file."""
+        # FIRST statement: get_home() below loads home.fernet_key, and the
+        # keyring probe above it can surface key material too. _lock_keys()
+        # also hardens, but that is a callee — by the time it runs the key is
+        # already resident here (dupf.10).
+        disable_core_dumps()
+
         # Pre-announce the macOS Keychain dialog so users aren't surprised by a
         # system prompt mid-command. The dialog labels itself "python3.10" not
         # "worthless"; without this hint, first-time users panic and click Deny.
@@ -1324,6 +3010,7 @@ def register_lock_commands(app: typer.Typer) -> None:
                 token_budget_daily=token_budget_daily,
                 keys_only=keys_only,
                 allow_hardcoded_urls=allow_hardcoded_urls,
+                adopt=adopt,
             )
 
     @app.command()
@@ -1334,22 +3021,35 @@ def register_lock_commands(app: typer.Typer) -> None:
             None,
             "--key",
             "-k",
-            help="API key (use --key-stdin instead to avoid shell history)",
+            help="REMOVED — leaks into shell history. Use --key-stdin.",
         ),
         key_stdin: bool = typer.Option(False, "--key-stdin", help="Read API key from stdin"),
         provider: str = typer.Option(..., "--provider", "-p", help="Provider name"),
     ) -> None:
         """Enroll a single API key (scripting/CI primitive)."""
+        # Before get_home(): it loads home.fernet_key into memory, and cores
+        # must already be off by then (dupf.10).
+        disable_core_dumps()
         home = get_home()
+
+        # WOR-277: a raw key value on the command line survives in shell
+        # history (and process listings) forever — no CLI flag may accept
+        # one. Checked before key_stdin so passing both still refuses.
+        if key is not None:
+            raise WorthlessError(
+                ErrorCode.INVALID_INPUT,
+                "--key is not accepted — a raw key value on the command line "
+                "leaks into shell history. Use --key-stdin instead, e.g.: "
+                '`echo "$API_KEY" | worthless enroll --key-stdin --alias '
+                "<alias> --provider <provider>`",
+            )
 
         if key_stdin:
             actual_key = sys.stdin.readline().strip()
             if not actual_key:
                 raise WorthlessError(ErrorCode.KEY_NOT_FOUND, "No key provided on stdin")
-        elif key:
-            actual_key = key
         else:
-            raise WorthlessError(ErrorCode.KEY_NOT_FOUND, "Provide --key or --key-stdin")
+            raise WorthlessError(ErrorCode.KEY_NOT_FOUND, "Provide --key-stdin")
 
         with acquire_lock(home):
             _enroll_single(alias, actual_key, provider, home)

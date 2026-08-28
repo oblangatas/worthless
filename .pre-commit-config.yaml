@@ -91,6 +91,28 @@ repos:
         files: '\.py$'
         stages: [pre-push]
 
+  # Commit provenance: reject unsigned / wrong-author commits at push time (WOR-589)
+  - repo: local
+    hooks:
+      - id: commit-provenance
+        name: "provenance: signed + canonical author (pre-push)"
+        language: system
+        entry: uv run python scripts/hooks/check_pushed_commit_provenance.py
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
+
+      # Grype has no `expiry` field — it silently drops unknown keys, so a
+      # suppression dated 2020 still suppresses today (measured on grype
+      # 0.114.0). This hook is the only thing making .grype.yaml's time-boxing
+      # real. WOR-852.
+      - id: grype-ignore-expiry
+        name: "supply chain: grype ignores are dated and current"
+        language: system
+        entry: uv run python scripts/hooks/check_grype_ignore_expiry.py
+        pass_filenames: false
+        always_run: true
+
   # Actionlint: GitHub Actions YAML syntax and logic errors
   - repo: https://github.com/rhysd/actionlint
     rev: v1.7.7
@@ -161,12 +183,22 @@ repos:
         pass_filenames: false
         files: '(pyproject\.toml|uv\.lock)$'
 
-      # Keep requirements.txt (the Snyk badge's scan source) in sync with
-      # uv.lock. Snyk's live badge can't parse uv.lock, so the README badge
-      # points at this exported, parseable manifest (?targetFile=requirements.txt).
+      # Keep the exported manifest (the Snyk badge's scan source) in sync
+      # with uv.lock. Snyk's live badge can't parse uv.lock, so the README
+      # badge points at this exported, parseable manifest via ?targetFile=.
       # --no-dev scopes it to the runtime tree users actually install.
+      #
+      # It lives at the REPO ROOT because Snyk imported it there as a monitored
+      # project, and Snyk resolves that project by its imported path. Dependabot
+      # NINE pull requests against the root copy — each bumping a version
+      # a version in GENERATED OUTPUT while uv.lock, which actually resolves
+      # dependencies, went untouched. That is now handled by `exclude-paths` in
+      # .github/dependabot.yml, NOT by moving this file -- moving it silently
+      # broke the Snyk project once already.
+      #
+      # Do NOT move this out of the repo root. WOR-904.
       - id: uv-export-requirements
-        name: "supply chain: export requirements.txt for Snyk badge"
+        name: "supply chain: export the Snyk badge manifest"
         language: system
         entry: uv export --no-dev --no-hashes --format requirements-txt -o requirements.txt
         pass_filenames: false
@@ -189,12 +221,30 @@ repos:
       - id: uv-audit
         name: "supply chain: vulnerability scan"
         language: system
-        # Ignore list — each entry MUST cite its tracking ticket.
-        # Re-check quarterly; drop an ID once the upstream fix lands.
-        #   GHSA-58qw-9mgm-455v : pip 26.0.1 tarball handling (dev-only; no fix
-        #                        available as of 2026-04-24). Tracked in beads
-        #                        worthless-lwvs. Drop when pip patches.
-        entry: sh -c 'uv export --frozen --no-emit-project | uv run pip-audit --disable-pip -r /dev/stdin --ignore-vuln GHSA-58qw-9mgm-455v'
+        # NOTHING is ignored here any more. Both former entries were dropped
+        # 2026-08-02 after verifying pip-audit reports clean without them:
+        #   PYSEC-2026-2132 : click.edit() injection (CVE-2026-7246). semgrep
+        #                     left the lock (now `uvx`-isolated in sast.yml),
+        #                     so click resolves to 8.4.2 >= the 8.3.3 fix.
+        #                     beads worthless-fnvz.
+        #   GHSA-58qw-9mgm-455v : pip tarball handling. pip is still in the
+        #                     exported set, but pip-audit no longer reports it,
+        #                     so the suppression was hiding nothing. A dead
+        #                     ignore is worse than none — it silently absorbs
+        #                     the NEXT finding for that package. beads
+        #                     worthless-lwvs; reopen if it re-fires.
+        # If an ignore is ever needed again it MUST cite its tracking ticket
+        # and be re-checked quarterly.
+        # `bash -c`, not `sh -c`, and `set -o pipefail` is why. This is a
+        # PIPELINE: without pipefail the shell reports only pip-audit's exit
+        # code, so a `uv export` that dies partway hands over a truncated-but-
+        # valid stream, pip-audit audits the packages that arrived, and the hook
+        # passes over a fragment. CI got this fix via `shell: bash`
+        # (dependency-audit.yml); the hook was left carrying the defect until
+        # now. pipefail is not POSIX — dash, which /bin/sh often is, does not
+        # support it — so the shell has to be bash explicitly. beads
+        # worthless-mh0r.
+        entry: bash -c 'set -o pipefail; uv export --frozen --no-emit-project | uv run pip-audit --disable-pip -r /dev/stdin'
         pass_filenames: false
         stages: [pre-push]
 

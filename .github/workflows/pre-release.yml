@@ -17,28 +17,25 @@ on:
 permissions:
   contents: read
 
+# REMOVED: the `full-mutation` job. WOR-877.
+#
+# It ran `mutmut run --paths-to-mutate ...`, flags mutmut 3.x deleted. The
+# lockfile pins mutmut==3.6.0, whose `run` accepts only `--max-children`, so
+# the job crashed on startup. It ran 4 times — 2026-04-03, 04-19, 04-19,
+# 04-29 — and failed 4 times. It has never once been green, so nothing
+# regressed and nothing is being restored.
+#
+# Not replaced with a working mutmut invocation, deliberately: mutmut 3.x's
+# collection phase shells out to pytest and this repo's addopts (-n auto,
+# --strict-markers, --reruns) break that call. Reconciling it is real work with
+# unproven payoff against 1,414 lines of existing crypto tests including
+# hypothesis properties. Tracked in WOR-877 if anyone wants to revisit.
+#
+# The mutation net this repo actually claims — scripts/mutation_spine_sweep.py
+# — is wired into nothing and covers lock.py/sentinel.py/app.py, not crypto.
+# See pyproject.toml [tool.mutmut].
+
 jobs:
-  full-mutation:
-    name: Full mutation testing
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          persist-credentials: false
-
-      - name: Set up uv + Python
-        uses: ./.github/actions/setup-uv-python
-
-      - name: Run mutmut on crypto and proxy
-        env:
-          UV_CACHE_DIR: /tmp/uv-cache
-        run: |
-          uv sync --extra dev --extra test --extra qa
-          uv run python -m mutmut run --paths-to-mutate src/worthless/crypto --paths-to-mutate src/worthless/proxy
-
   dependency-audit:
     name: Dependency audit
     runs-on: ubuntu-latest
@@ -46,7 +43,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v6
         with:
           persist-credentials: false
 
@@ -58,6 +55,20 @@ jobs:
           UV_CACHE_DIR: /tmp/uv-cache
         run: |
           uv sync --extra qa
+          # NOTHING is ignored here. Both former IDs were dropped 2026-08-02
+          # (WOR-852) after verifying this exact scope reports clean without
+          # them:
+          #   PYSEC-2026-2132 : click.edit() CVE. semgrep left the lock, so
+          #                     click resolves to 8.4.2 >= the 8.3.3 fix.
+          #                     beads worthless-fnvz.
+          #   GHSA-58qw-9mgm-455v : pip tarball. No longer reported at all.
+          #                     beads worthless-lwvs.
+          # This is the gate guarding a SHIPPED artifact, so a dead ignore here
+          # is the most expensive kind — it would silently absorb the next
+          # finding for that package on a release build.
+          # Any future ignore MUST be added to the uv-audit hook in
+          # .pre-commit-config.yaml at the same time, with its rationale and
+          # tracking ticket, so the two gates cannot drift apart again.
           uv run pip-audit
 
   full-test:
@@ -67,7 +78,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v6
         with:
           persist-credentials: false
 
@@ -79,7 +90,12 @@ jobs:
           UV_CACHE_DIR: /tmp/uv-cache
         run: |
           uv sync --extra dev --extra test
-          uv run pytest --cov=worthless --cov-report=xml --cov-report=term-missing --cov-fail-under=80
+          # --max-worker-restart=2 for the same reason as the other lanes, and it
+          # matters more here: this job gates a RELEASE on --cov-fail-under=80, and a
+          # killed worker's coverage data is lost (pytest-cov only warns). Without a
+          # cap, repeated restarts surface as a misleading "coverage below 80"
+          # instead of the crash that actually happened.
+          uv run pytest --max-worker-restart=2 --cov=worthless --cov-report=xml --cov-report=term-missing --cov-fail-under=80
 
       - name: Check per-module coverage floors
         run: uv run python scripts/check-coverage-floors.py

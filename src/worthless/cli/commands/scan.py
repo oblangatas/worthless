@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import stat
 import sys
 import tempfile
 import time
+from collections import defaultdict
+from collections.abc import Callable
 from pathlib import Path
 
 import typer
@@ -18,10 +21,26 @@ from worthless.cli.code_scanner import CodeFinding, scan_for_hardcoded_provider_
 from worthless.cli.console import get_console
 from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary
 from worthless.cli.key_patterns import KEY_PATTERN
+from worthless.cli.redaction import key_fingerprint
 from worthless.cli.dotenv_rewriter import build_enrolled_locations
 from worthless.cli.keystore import PLACEHOLDER_FERNET_KEY
 from worthless.cli.orphans import FIX_PHRASE, PROBLEM_PHRASE, find_orphans
-from worthless.cli.scanner import ScanFinding, SkippedFile, format_sarif, scan_files
+from worthless.cli.process import disable_core_dumps
+from worthless.cli.scanner import (
+    HardcodedUrlFinding,
+    ScanFinding,
+    SkippedFile,
+    format_sarif,
+    scan_files,
+)
+from worthless.cli.confusables import (
+    MARKER,
+    WARN_CODE,
+    ConfusableHit,
+    confusable_hits,
+    footnote,
+)
+from worthless.openclaw.audit import sanitise_for_message
 from worthless.storage.repository import EnrollmentRecord, ShardRepository
 
 
@@ -94,12 +113,31 @@ def _collect_deep_paths(explicit_paths: list[Path]) -> tuple[list[Path], Path | 
             tmp_path = Path(tmp)
             paths.append(tmp_path)
         except Exception:
-            try:
+            # WOR-277: mkstemp already created `tmp` on disk (possibly with a
+            # partial env dump written) — close the fd AND remove the file,
+            # or a plaintext secrets dump orphans on disk with no caller ever
+            # learning its path to clean it up.
+            with contextlib.suppress(Exception):
                 os.close(fd)
-            except Exception:  # noqa: S110 — fd cleanup on error path; can't recover usefully  # nosec B110
-                pass
+            with contextlib.suppress(OSError):
+                Path(tmp).unlink()
 
     return paths, tmp_path
+
+
+def _scan_verdict_line(protected: int, unprotected: int, total: int, broken: int) -> str:
+    """WOR-779: the one-line verdict scan leads with (verdict-first)."""
+    if unprotected > 0:
+        return (
+            f"{protected} of {total} keys protected — "
+            f"{unprotected} still exposed in .env. Run `worthless lock`."
+        )
+    if broken:
+        return (
+            f"{protected} of {total} keys are protected — "
+            f"but {broken} can't be restored (see below)."
+        )
+    return f"All {total} keys are protected — a leaked .env is worthless to an attacker."
 
 
 def _format_human(
@@ -129,17 +167,27 @@ def _format_human(
                 if f.file not in file_cache:
                     file_cache[f.file] = Path(f.file).read_text(errors="replace")
                 text = file_cache[f.file]
-                for line in text.splitlines():
-                    for match in KEY_PATTERN.finditer(line):
-                        value = match.group(0)
-                        if preview.startswith(value[:4]):
-                            preview = f.value_preview + "..." + value[-4:]
-                            break
+                # SR-04 (WOR-655): --show-suffix used to append the real last
+                # 4 chars of the key. Instead, locate the key on the finding's
+                # own 1-indexed line and append a NON-secret sha256[:8]
+                # fingerprint, so a human can still tell two keys apart:
+                # "**** (3f9a2b1c)".
+                lines_text = text.splitlines()
+                if 1 <= f.line <= len(lines_text):
+                    line_text = lines_text[f.line - 1]
+                    # Fingerprint THIS finding's key: start at its recorded
+                    # column so a second key on the same line gets its own
+                    # fingerprint, not the line's first match. Fall back to the
+                    # first match if column is unknown (e.g. legacy findings).
+                    match = KEY_PATTERN.search(line_text, f.column if f.column is not None else 0)
+                    if match:
+                        preview = f"{f.value_preview} ({key_fingerprint(match.group(0))})"
             except Exception:  # noqa: S110 — best-effort preview; display failure is non-critical  # nosec B110
                 pass
 
         var_part = f" ({f.var_name})" if f.var_name else ""
-        lines.append(f"  {f.file}:{f.line}  {f.provider}{var_part}  {status}  {preview}")
+        safe_file = sanitise_for_message(f.file)
+        lines.append(f"  {safe_file}:{f.line}  {f.provider}{var_part}  {status}  {preview}")
 
         if f.is_protected:
             protected_count += 1
@@ -168,6 +216,12 @@ def _format_human(
             lines.append("Run: worthless lock")
         else:
             lines.append("See: docs.worthless.dev/ci-setup")
+
+    # WOR-779: lead with a plain verdict ("am I safe?") before the per-finding
+    # detail. scan is the only surface that sees plaintext-in-.env, so the
+    # honest exposure count lives here — status defers to it.
+    lines.insert(0, "")
+    lines.insert(0, _scan_verdict_line(protected_count, unprotected_count, total, len(orphans)))
 
     return "\n".join(lines) + "\n"
 
@@ -286,28 +340,178 @@ _HONESTY_FOOTER = (
 )
 
 
-def _format_code_findings_human(findings: list[CodeFinding]) -> str:
+def _is_test_path(path: str) -> bool:
+    parts = path.replace("\\", "/").lower().split("/")
+    name = parts[-1] if parts else ""
+    return (
+        "tests" in parts
+        or name.startswith("test_")
+        or name.endswith("_test.py")
+        or name == "conftest.py"
+    )
+
+
+def _format_code_findings_human(
+    findings: list[CodeFinding],
+    *,
+    collapse_tests: bool = False,
+) -> str:
     """Render code findings + honesty footer for stderr output."""
     if not findings:
         return "No hardcoded provider URLs found.\n"
 
+    if collapse_tests:
+        display = [f for f in findings if not _is_test_path(f.file)]
+        test_count = len(findings) - len(display)
+    else:
+        display = findings
+        test_count = 0
+
     lines: list[str] = []
-    for f in findings:
+    # WOR-800: flag look-alike (confusable) filenames with an ASCII marker +
+    # a one-time footnote. Marker is appended OUTSIDE the scrubbed path so it
+    # can't reintroduce the terminal-injection surface #376 closed.
+    confusables: dict[str, ConfusableHit] = {}
+
+    def _mark(path: str) -> str:
+        hits = confusable_hits(path)
+        for h in hits:
+            confusables.setdefault(h.codepoint, h)
+        return f"  {MARKER}" if hits else ""
+
+    if collapse_tests:
+        # One line per file, occurrence count — no per-line detail.
+        by_file: defaultdict[str, list[CodeFinding]] = defaultdict(list)
+        for f in display:
+            by_file[f.file].append(f)
+        for file, file_findings in by_file.items():
+            count = len(file_findings)
+            env_vars = ", ".join(sorted({f.suggested_env_var for f in file_findings}))
+            suffix = f" x{count}" if count > 1 else ""
+            lines.append(f"[code] {sanitise_for_message(file)}  ({env_vars}){suffix}{_mark(file)}")
+        if lines:
+            lines.append("")
+    else:
+        for f in display:
+            safe_file = sanitise_for_message(f.file)
+            lines.append(
+                f"[code] {safe_file}:{f.line}:{f.column}  "
+                f"{f.provider_name} ({f.suggested_env_var}){_mark(f.file)}"
+            )
+            lines.append(f"       {sanitise_for_message(f.matched_url)}")
+            # Show the offending source line (trimmed so it doesn't blow up the
+            # terminal). The user's eyes go straight to the arrow + line. The
+            # line comes from the scanned (possibly hostile) file, so it gets
+            # the same control-char scrub as the path.
+            snippet = sanitise_for_message(f.line_text.strip())
+            if len(snippet) > 200:
+                snippet = snippet[:197] + "..."
+            lines.append(f"       → {snippet}")
+            lines.append("")
+
+    if test_count:
+        noun = "finding" if test_count == 1 else "findings"
         lines.append(
-            f"[code] {f.file}:{f.line}:{f.column}  {f.provider_name} ({f.suggested_env_var})"
+            f"+ {test_count} test-file {noun} omitted. Run `worthless scan --code` to see them."
         )
-        lines.append(f"       {f.matched_url}")
-        # Show the offending source line (trimmed so it doesn't blow up the
-        # terminal). The user's eyes go straight to the arrow + line.
-        snippet = f.line_text.strip()
-        if len(snippet) > 200:
-            snippet = snippet[:197] + "..."
-        lines.append(f"       → {snippet}")
+        lines.append("")
+
+    if confusables:
+        for h in confusables.values():
+            lines.append(footnote(h))
         lines.append("")
 
     lines.append(f"Found {len(findings)} hardcoded provider URL(s).")
     lines.append("")
     lines.append(_HONESTY_FOOTER)
+    return "\n".join(lines)
+
+
+_LOCK_BLOCK_SEP = "─" * 52
+
+
+def _format_lock_block_human(
+    findings: list[HardcodedUrlFinding],
+    *,
+    blocking: bool = True,
+    sanitize: Callable[[str], str] | None = None,
+) -> str:
+    """Collapsed pre-lock output + copy-pasteable AI fix prompt.
+
+    blocking=True  → "Can't lock" header (non-TTY / error path).
+    blocking=False → "Warning" header (TTY path where user can still proceed).
+    sanitize       → callable applied to file paths and URLs before display.
+    """
+    _san: Callable[[str], str] = sanitize if callable(sanitize) else (lambda x: x)
+
+    src = [f for f in findings if not _is_test_path(f.file)]
+    test_count = len(findings) - len(src)
+
+    lines: list[str] = []
+
+    # Header
+    if src:
+        file_count = len({f.file for f in src})
+        noun = "file" if file_count == 1 else "files"
+        verb = "has" if file_count == 1 else "have"
+        if blocking:
+            lines.append(f"Can't lock — {file_count} {noun} {verb} hardcoded provider URLs.")
+        else:
+            lines.append(f"Warning: {file_count} {noun} {verb} hardcoded provider URLs.")
+    else:
+        if blocking:
+            lines.append("Can't lock — hardcoded provider URLs in test files.")
+        else:
+            lines.append("Warning: hardcoded provider URLs detected in test files.")
+    lines.append("Those calls bypass worthless even after locking.")
+    lines.append("")
+
+    # Collapsed file list
+    by_file: defaultdict[str, list[HardcodedUrlFinding]] = defaultdict(list)
+    for f in src:
+        by_file[_san(f.file)].append(f)
+    for safe_file, file_findings in by_file.items():
+        line_nums = ", ".join(str(f.line) for f in file_findings)
+        env_vars = ", ".join(sorted({f.provider.upper() + "_BASE_URL" for f in file_findings}))
+        ln_noun = "line" if len(file_findings) == 1 else "lines"
+        lines.append(f"  • {safe_file} — {env_vars} ({ln_noun} {line_nums})")
+    if test_count:
+        t_noun = "file" if test_count == 1 else "files"
+        lines.append(f"  + {test_count} test {t_noun} (safe to ignore)")
+    lines.append("")
+
+    # AI fix prompt — only when there are src findings worth fixing
+    if src:
+        prompt_bullets = []
+        for f in src:
+            env_var = f.provider.upper() + "_BASE_URL"
+            prompt_bullets.append(f"    • {_san(f.file)}:{f.line} — {env_var}")
+
+        lines += (
+            [
+                "Paste this into Claude Code / Cursor to fix it:",
+                _LOCK_BLOCK_SEP,
+                "  worthless found hardcoded provider URLs I need to fix.",
+                "  Replace them with environment variables worthless uses.",
+                "",
+                "  Files and lines to fix:",
+            ]
+            + prompt_bullets
+            + [
+                "",
+                "  Before touching anything:",
+                "    • Read each file. Tell me if each change is safe.",
+                "    • Find how this project loads .env. Use that pattern.",
+                "    • If anything looks risky or unclear — stop and ask me.",
+                '    • Show me every change. Ask "ok to apply?" Wait for my yes.',
+                "",
+                "  Don't touch test files. Don't touch .env.",
+                _LOCK_BLOCK_SEP,
+                "Once fixed, re-run: worthless lock --env .env",
+                "",
+            ]
+        )
+
     return "\n".join(lines)
 
 
@@ -320,8 +524,12 @@ def _format_ai_prompt_block(findings: list[CodeFinding]) -> str:
     sep = "─" * 68
     bullets = []
     for f in findings:
+        # WOR-800: carry the look-alike marker into the AI-agent prompt too, so
+        # an agent acting on this list can't be steered to a confusable path
+        # without the same warning the human list shows.
+        mark = f"  {MARKER}" if confusable_hits(f.file) else ""
         bullets.append(
-            f"- {f.file}:{f.line}  → use environment variable "
+            f"- {sanitise_for_message(f.file)}:{f.line}{mark}  → use environment variable "
             f"{f.suggested_env_var} (default to {f.matched_url!r} when unset)"
         )
 
@@ -357,25 +565,43 @@ def _format_skipped_human(skipped: list[SkippedFile]) -> str:
         f"Skipped (scan incomplete — exit code {SCAN_INCOMPLETE_EXIT_CODE}):",
     ]
     for s in skipped:
-        lines.append(f"  {s.file}  [{s.reason}]")
+        lines.append(f"  {sanitise_for_message(s.file)}  [{s.reason}]")
     lines.append("A pre-commit hook will block on this — re-run after addressing the cause.")
     return "\n".join(lines) + "\n"
 
 
 def _code_findings_to_json(findings: list[CodeFinding]) -> list[dict[str, object]]:
-    """Serialize code findings for JSON output."""
-    return [
-        {
-            "file": f.file,
-            "line": f.line,
-            "column": f.column,
-            "matched_url": f.matched_url,
-            "provider_name": f.provider_name,
-            "suggested_env_var": f.suggested_env_var,
-            "line_text": f.line_text,
-        }
-        for f in findings
-    ]
+    """Serialize code findings for JSON output. ``file`` stays raw (display-only
+    invariant); confusable look-alike names surface as a structured ``warnings``
+    entry (WOR-800) — a machine flag, never a glyph in the terminal."""
+    out: list[dict[str, object]] = []
+    for f in findings:
+        hits = confusable_hits(f.file)
+        warnings = (
+            [
+                {
+                    "code": WARN_CODE,
+                    "confusable_chars": [
+                        {"codepoint": h.codepoint, "script": h.script} for h in hits
+                    ],
+                }
+            ]
+            if hits
+            else []
+        )
+        out.append(
+            {
+                "file": f.file,
+                "line": f.line,
+                "column": f.column,
+                "matched_url": f.matched_url,
+                "provider_name": f.provider_name,
+                "suggested_env_var": f.suggested_env_var,
+                "line_text": f.line_text,
+                "warnings": warnings,
+            }
+        )
+    return out
 
 
 def register_scan_commands(app: typer.Typer) -> None:
@@ -408,7 +634,7 @@ def register_scan_commands(app: typer.Typer) -> None:
         show_suffix: bool = typer.Option(
             False,
             "--show-suffix",
-            help="Show last 4 chars of keys",
+            help="Show a non-secret fingerprint (sha256[:8]) to tell keys apart.",
         ),
         install_hook: bool = typer.Option(
             False,
@@ -456,6 +682,17 @@ def register_scan_commands(app: typer.Typer) -> None:
                 f"Unknown format: {fmt!r} (use text, sarif, or json)",
                 exit_code=2,
             )
+
+        # WOR-277: scan reads raw key material from files/env into memory —
+        # disable core dumps before that starts, matching lock/unlock/up/wrap.
+        #
+        # strict=False (dupf.10): scan is a read-only diagnostic and never
+        # reconstructs a key from shards. The protection is applied either
+        # way; strict only decides what happens when the *kernel refuses*
+        # (libc unreachable). Aborting a diagnostic command in that case is
+        # worse than running it with a logged warning — the key-holding
+        # commands (lock/unlock/up/wrap) still fail closed.
+        disable_core_dumps(strict=False)
 
         tmp_file: Path | None = None
         try:

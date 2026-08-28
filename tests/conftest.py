@@ -8,6 +8,8 @@ import json
 import logging
 import os
 from pathlib import Path
+import signal
+import sys
 import threading
 import time
 
@@ -19,6 +21,7 @@ from hypothesis import HealthCheck, settings
 
 
 from worthless.cli import default_command  # used by _isolate_default_command_proxy autouse fixture
+from worthless.cli.commands.service.proxy_state import ProxyRuntimeState
 from worthless.cli.bootstrap import WorthlessHome, ensure_home
 from worthless.crypto import SplitResult
 from worthless.crypto.splitter import split_key
@@ -85,6 +88,19 @@ settings.register_profile(
 _profile = os.environ.get("HYPOTHESIS_PROFILE")
 if _profile in ("ci", "extended"):
     settings.load_profile(_profile)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_fernet_storage_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drop developer-shell exports that redirect keystore paths away from tmp_path.
+
+    Common on dogfood machines: ``WORTHLESS_FERNET_KEY_PATH``,
+    ``WORTHLESS_SERVICE_MANAGED=1``, or a leftover ``WORTHLESS_FERNET_KEY``.
+    Individual tests opt back in via ``monkeypatch.setenv``.
+    """
+    monkeypatch.delenv("WORTHLESS_FERNET_KEY_PATH", raising=False)
+    monkeypatch.delenv("WORTHLESS_FERNET_KEY", raising=False)
+    monkeypatch.delenv("WORTHLESS_SERVICE_MANAGED", raising=False)
 
 
 def make_repo(home: WorthlessHome) -> ShardRepository:
@@ -325,7 +341,6 @@ def _session_fake_ipc_supervisor():
     ``from ... import create_app`` and rebinds the captured reference to
     the wrapped version. Restored on session teardown.
     """
-    import sys
 
     wrapper = _make_create_app_wrapper(_ORIGINAL_CREATE_APP)
 
@@ -359,8 +374,6 @@ def _autouse_fake_ipc_supervisor(request: pytest.FixtureRequest, monkeypatch: py
     if request.node.get_closest_marker("real_ipc") is None:
         return
 
-    import sys
-
     monkeypatch.setattr(_proxy_app_module, "create_app", _ORIGINAL_CREATE_APP)
     for mod in list(sys.modules.values()):
         if mod is None or mod is _proxy_app_module:
@@ -385,9 +398,11 @@ def _isolate_default_command_proxy(request, monkeypatch):
     """Stop ``run_default()`` from spawning a real proxy daemon mid-test.
 
     Tests that hit the bare ``worthless`` no-args entry point flow through
-    ``default_command.run_default()`` → ``_proxy_is_running`` → ``poll_health(8787)``
-    → ``start_daemon(..., port=8787, ...)``. Under pytest-xdist, four workers
-    racing for the same port produces non-deterministic state: one wins the
+    ``default_command.run_default()`` → ``_proxy_is_running`` /
+    ``_service_start_hint`` → ``detect_proxy_runtime`` → ``poll_health(8787)``
+    and platform service queries → ``start_supervised_proxy(...)``. Under
+    pytest-xdist, four workers racing for the same port produces non-deterministic
+    state: one wins the
     bind, the others see a "running" daemon belonging to a different test's
     home, and assertions diverge. The same race also leaves orphan uvicorn
     children if a worker fails between spawn and cleanup.
@@ -404,7 +419,7 @@ def _isolate_default_command_proxy(request, monkeypatch):
     ``@pytest.mark.integration`` (already a registered marker in
     pyproject.toml) and own their own daemon teardown.
 
-    Tests that monkeypatch ``start_daemon`` / ``poll_health`` themselves
+    Tests that monkeypatch ``start_supervised_proxy`` / ``poll_health`` themselves
     still work — pytest's ``monkeypatch`` stacks LIFO within a single test,
     so the per-test override wins over this fixture's default. Verified
     against ``tests/test_cli_default.py`` which already does this for
@@ -413,11 +428,14 @@ def _isolate_default_command_proxy(request, monkeypatch):
     Mock return values are chosen to match the real shapes:
     - ``_proxy_is_running`` returns ``(running=False, pid=None, port=0)``
       — same tuple production code returns when the daemon is absent.
-    - ``start_daemon`` returns ``_FAKE_DAEMON_PID`` (12345). PID 0 would
+    - ``start_supervised_proxy`` returns ``_FAKE_DAEMON_PID`` (12345). PID 0 would
       hijack ``os.kill`` liveness probes (POSIX-reserved); a non-zero
       synthetic PID lets such probes fail honestly.
     - ``poll_health`` returns ``True`` so callers that only check
       "responsive?" don't loop.
+    - ``detect_proxy_runtime`` returns a neutral "not running, no service"
+      state so ``_service_start_hint`` never hits live sockets or launchd/systemd
+      (Q5 / WOR-717 review — closes the ~1s ``poll_health`` leak).
 
     Closes worthless-ba1c.
     """
@@ -431,13 +449,89 @@ def _isolate_default_command_proxy(request, monkeypatch):
     )
     monkeypatch.setattr(
         default_command,
-        "start_daemon",
+        "start_supervised_proxy",
         lambda *_a, **_kw: _FAKE_DAEMON_PID,
     )
     monkeypatch.setattr(
         default_command,
         "poll_health",
         lambda port, timeout=10.0: True,
+    )
+    monkeypatch.setattr(
+        default_command,
+        "detect_proxy_runtime",
+        lambda home, *, port=None: ProxyRuntimeState(
+            running=False,
+            pid=None,
+            port=0,
+            source="none",
+            service_state=None,
+        ),
+    )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_process_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Suite-wide $HOME/USERPROFILE sandbox for every test process.
+
+    worthless-q1k5 found 8 files hand-copying a "HOME": <tmp_path-derived dir>
+    line into a subprocess/CliRunner env dict because _resolve_home()
+    (openclaw/integration.py) reads Path.home(), not WORTHLESS_HOME. Without
+    isolation, a dev machine with a real ~/.openclaw makes detect().present
+    True inside the test process and trips the F7 proxy-health gate with a
+    failure unrelated to what the test checks. USERPROFILE travels with HOME
+    because native Windows Path.home() checks USERPROFILE first. Promotes
+    tests/cli/conftest.py's _isolate_cli_process_context pattern suite-wide;
+    that fixture still owns chdir, a CLI-package-specific concern this one
+    deliberately doesn't replicate. Unconditional (no ``integration`` opt-out
+    like its neighbors below) — this isn't mocking away real daemon/proxy
+    behavior, it's just keeping Path.home() off the real machine, which
+    matters for integration tests too.
+
+    Directory name is deliberately unusual (not "home") — ``tmp_path / "home"``
+    is already independently used as a local sandbox dir name by ~25 other
+    test files (mostly tests/openclaw/), and this fixture runs before every
+    one of them, so a collision would fail their own ``.mkdir()`` calls.
+    """
+    home = tmp_path / "_isolate_process_home_sandbox"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    return home
+
+
+@pytest.fixture(autouse=True)
+def _default_lock_proxy_probe_healthy(request, monkeypatch):
+    """Default the ``lock`` command's proxy pre-flight to "healthy" suite-wide.
+
+    F7 (WOR-648 / WOR-621 AC5) adds a proxy ``/healthz`` probe to the
+    OpenClaw-apply path in ``worthless.cli.commands.lock``: when OpenClaw is
+    detected on the host, ``lock`` aborts before writing ``openclaw.json`` if
+    the proxy is down. The bulk of the existing lock suite drives ``lock`` on
+    a host where OpenClaw IS present (a sandboxed ``~/.openclaw`` fixture, or
+    the developer's real install leaking through tests that don't pin ``HOME``)
+    but never starts a proxy — exactly the same neutralisation rationale as
+    ``_isolate_default_command_proxy`` above.
+
+    Without this default, every such test would now abort with
+    ``PROXY_NOT_RUNNING``. We therefore patch ``check_proxy_health`` in the
+    ``lock`` module's namespace to report healthy. Tests that exercise the
+    proxy-down abort (e.g. ``tests/openclaw/test_proxy_probe.py``) re-patch the
+    same name to "unhealthy"; pytest's ``monkeypatch`` stacks LIFO, so the
+    per-test override wins.
+
+    ``@pytest.mark.integration`` opts out so a real end-to-end run probes the
+    real proxy.
+    """
+    if request.node.get_closest_marker("integration"):
+        return
+
+    from worthless.cli.commands import lock as _lock_mod
+
+    monkeypatch.setattr(
+        _lock_mod,
+        "check_proxy_health",
+        lambda port: {"healthy": True, "port": port, "mode": "up", "requests_proxied": 0},
     )
 
 
@@ -516,8 +610,85 @@ def detect_thread_leak(request):
         )
 
 
+@pytest.hookimpl(trylast=True)
+def pytest_configure(config):
+    """Downgrade ``timeout_method`` to ``signal`` when there is no worker to kill.
+
+    ``timeout_method = "thread"`` (pyproject) makes a timeout call ``os._exit()``.
+    That is exactly right inside an xdist worker: the worker is expendable, the
+    master reports "worker 'gwN' crashed while running <nodeid>" as one honest
+    failure, and the session survives. It is exactly WRONG with no xdist, where
+    the process being killed is pytest itself — exit 1, no summary, no test
+    report, no indication which test did it.
+
+    Both halves of that were shipped broken on this branch and caught by CI, so
+    this decides it from the actual run shape instead of relying on every caller
+    to remember a flag. It has to: ``-o addopts=`` (used by several CI steps and
+    by scripts/hooks/live_e2e_gate.py) wipes ``-n auto`` while leaving
+    ``timeout_method`` set, silently producing the serial+thread combination.
+
+    trylast so it runs after pytest-timeout's own ``pytest_configure``, which is
+    what populates ``_env_timeout_method`` (pytest_timeout.py:160) — the value
+    actually read per test at ``_get_item_settings``.
+
+    Note: ``--noconftest`` skips this file entirely, so any such invocation still
+    has to pass ``--timeout-method=signal`` explicitly.
+    """
+    if not hasattr(signal, "SIGALRM"):
+        # `signal` mode IS pytest-timeout's SIGALRM path, and Windows has no
+        # SIGALRM — setting it here crashed the whole session at startup with
+        # `AttributeError: module 'signal' has no attribute 'SIGALRM'`, before a
+        # single test ran (Tests / Smoke (windows, py3.13)). The smoke job hits
+        # this branch because `-o addopts=` strips `-n auto`, making it serial.
+        #
+        # Keyed on the capability, not on `sys.platform == "win32"`, because that
+        # is exactly what pytest-timeout itself checks (pytest_timeout.py:26).
+        # Any interpreter lacking SIGALRM gets the same treatment without this
+        # needing to enumerate platforms.
+        #
+        # Such platforms keep pytest-timeout's configured default and do NOT get
+        # this branch's improvement. That is the honest trade: the alternative is
+        # running zero tests. The real suite runs on Linux, where the fix
+        # applies; Windows runs a two-file smoke job.
+        return
+    if hasattr(config, "workerinput"):
+        return  # inside an xdist worker — `thread` is the whole point
+    if getattr(config.option, "numprocesses", None) not in (None, 0):
+        return  # parallel: a worker will do the dying
+    config.option.timeout_method = "signal"
+    if hasattr(config, "_env_timeout_method"):
+        config._env_timeout_method = "signal"
+
+
 def pytest_collection_modifyitems(config, items):
-    """Mark tests in tests/quarantined_tests.txt with @pytest.mark.quarantine."""
+    """Give real-process test families timeout headroom, then mark quarantined."""
+    # Both families drive REAL processes, so their runtime is dominated by
+    # process startup on a loaded runner rather than by the code under test —
+    # and the repo-global 30s budget is sized for ordinary unit tests.
+    #
+    #   real_ipc   — Popen a real interpreter and wait for an AF_UNIX socket.
+    #                CI sets WORTHLESS_SIDECAR_READY_TIMEOUT_SECS=20 because cold
+    #                start is slow there, leaving only 10s of the 30s for the
+    #                test body. tests/ipc/test_roundtrip.py was cut at the wall
+    #                on CI run 31610847051.
+    #   user_flow  — full journeys against a live proxy. Measured 15.2s locally
+    #                for the slowest, ~32s on a macOS runner (~2.1x): straight
+    #                through the wall. It failed on CI run 31639231328, and the
+    #                next-slowest sits at 12.5s local (~26s there), i.e. next in
+    #                line to start flipping.
+    #
+    # Straddling the wall is the whole disease this PR treats: a test that
+    # sometimes finishes at 28s and sometimes at 33s is a coin flip every run,
+    # and the loss was silent because --reruns 1 retried it into a green
+    # summary. Headroom stops the alarm arming for tests that are merely slow,
+    # so a timeout once again means something is genuinely stuck.
+    slow_family_timeout = pytest.mark.timeout(120)
+    for item in items:
+        if item.get_closest_marker("timeout") is not None:
+            continue  # an explicit per-test budget always wins
+        if any(item.get_closest_marker(m) is not None for m in ("real_ipc", "user_flow")):
+            item.add_marker(slow_family_timeout)
+
     quarantine_file = Path(config.rootdir) / "tests" / "quarantined_tests.txt"
     if not quarantine_file.exists():
         return
@@ -541,6 +712,42 @@ def pytest_collection_modifyitems(config, items):
         # Match nodeid only (item.name match is too broad)
         if item.nodeid in quarantined:
             item.add_marker(quarantine_marker)
+
+
+@pytest.fixture(autouse=True)
+def _restore_process_dumpable():
+    """Stop in-process CLI tests leaving the pytest worker undumpable (dupf.10).
+
+    ``disable_core_dumps()`` sets ``PR_SET_DUMPABLE=0`` on the *calling*
+    process. Command bodies run in-process via ``CliRunner``, so without this
+    the first such test flips the pytest worker itself for the rest of the
+    session — every later subprocess inherits it (order-dependent under
+    xdist), and ptrace-based tooling (debuggers, py-spy, some coverage
+    plugins) stops working against the worker.
+
+    Only the dumpable bit is restorable; ``RLIMIT_CORE`` cannot be raised once
+    lowered, which is pre-existing behavior and unrelated to this fixture.
+    """
+    from worthless.sidecar import _hardening
+
+    before = _hardening.get_dumpable()
+    try:
+        yield
+    finally:
+        # Tests that mock libc (e.g. test_load_libc_falls_back_to_musl_when_glibc_fails)
+        # make get_dumpable() itself raise — its `if rc < 0` compares a MagicMock to
+        # an int. The read must be caught HERE, not guarded after the fact: the throw
+        # is inside the call. A mocked libc during teardown means there is nothing
+        # real to restore, so treat it as None. isinstance() then also skips the
+        # non-Linux (None) case; restore only when a test actually changed the bit.
+        try:
+            after = _hardening.get_dumpable()
+        except Exception:
+            after = None
+        if isinstance(before, int) and isinstance(after, int) and after != before:
+            libc = _hardening._load_libc()
+            if libc is not None:
+                libc.prctl(_hardening.PR_SET_DUMPABLE, before, 0, 0, 0)
 
 
 def pytest_runtest_logreport(report):

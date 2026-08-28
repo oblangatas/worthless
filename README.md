@@ -10,14 +10,18 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-green)](LICENSE)
-[![Tests](https://github.com/shacharm2/worthless/actions/workflows/tests.yml/badge.svg)](https://github.com/shacharm2/worthless/actions/workflows/tests.yml)
-[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/shacharm2/worthless/badge)](https://securityscorecards.dev/projects/github.com/shacharm2/worthless)
-[![Known Vulnerabilities](https://snyk.io/test/github/shacharm2/worthless/badge.svg?targetFile=requirements.txt)](https://snyk.io/test/github/shacharm2/worthless?targetFile=requirements.txt)
+[![Tests](https://github.com/oblangatas/worthless/actions/workflows/tests.yml/badge.svg)](https://github.com/oblangatas/worthless/actions/workflows/tests.yml)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/oblangatas/worthless/badge)](https://securityscorecards.dev/projects/github.com/oblangatas/worthless)
+[![Known Vulnerabilities](https://snyk.io/test/github/oblangatas/worthless/badge.svg?targetFile=requirements.txt)](https://snyk.io/test/github/oblangatas/worthless?targetFile=requirements.txt)
 <!-- SonarCloud quality-gate badge, held until the existing issues are triaged. Re-enable when ready:
-[![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=shacharm2_worthless&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=shacharm2_worthless)
+[![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=oblangatas_worthless&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=oblangatas_worthless)
 -->
 
 When your `.env` leaks, the keys inside are placeholders. The real key never sits in your repo, your shell history, or your laptop's memory.
+
+**Scope:** this makes a *leaked file* worthless — git history, CI logs, a screenshot, a scraper. It does **not** protect a machine an attacker already controls: with code execution or filesystem access they can read the shard and proxy config directly, or grab the key before it is split. Full [threat model](https://docs.wless.io/security/#threat-model-non-goals).
+
+> **Provided "AS IS", with no warranty of any kind**, to the fullest extent permitted by law (AGPL-3.0 sections 15-16). Worthless reduces the blast radius of a leaked key on a best-effort basis; it is not a guarantee. You run it at your own risk. See [`LICENSE`](LICENSE).
 
 ## Quickstart
 
@@ -32,7 +36,7 @@ Then `cd` into your project and run `worthless`. It detects keys in your `.env`,
 
 The Worker emits an `X-Worthless-Script-Sha256` header so you can [verify the bytes you ran match the bytes the Worker advertised](https://docs.wless.io/install-security/) before piping into `sh`. The check catches transit/cache tampering, not origin compromise, cosign-signed release manifests for that are tracked in [WOR-303](https://linear.app/plumbusai/issue/WOR-303).
 
-Full install options (Docker, MCP for Claude Code / Cursor / Windsurf, GitHub Actions, the verified-install flow, kill-switch runbook): **[docs.wless.io](https://docs.wless.io)**
+Full install options (Docker, MCP for AI editors — Claude Code & Cursor verified, Windsurf unverified, GitHub Actions, the verified-install flow, kill-switch runbook): **[docs.wless.io](https://docs.wless.io)**
 
 ## Scope
 
@@ -71,12 +75,33 @@ PyPI version, signed git tag (`vX.Y.Z`), and the `X-Worthless-Script-Tag` header
 
 ## Documentation
 
-Everything lives at **[docs.wless.io](https://docs.wless.io)**, install guides, the security model, wire protocol, recovery runbook, the verified-install flow, and the agent skill file (Claude Code / Cursor / Windsurf).
+Everything lives at **[docs.wless.io](https://docs.wless.io)**, install guides, the security model, wire protocol, recovery runbook, the verified-install flow, and the agent skill file (Claude Code & Cursor verified; Windsurf unverified).
+
+## For AI coding agents
+
+Add to your project's `.mcp.json` (Node ≥ 18, no Python needed upfront):
+
+```json
+{
+  "mcpServers": {
+    "worthless": {
+      "command": "npx",
+      "args": ["-y", "worthless-mcp"]
+    }
+  }
+}
+```
+
+Restart Claude Code or Cursor and the MCP tools appear immediately — verified on both; Windsurf reads MCP config from its own path and is unverified. On first run, `worthless-mcp` bootstraps `uv` and installs the Python package automatically. Install time < 30 s.
+
+Available tools: `worthless_status`, `worthless_lock`, `worthless_scan`, `worthless_spend`.
+
+See [SKILL.md](SKILL.md) for the full agent discovery file.
 
 ## Development
 
 ```bash
-git clone https://github.com/shacharm2/worthless && cd worthless
+git clone https://github.com/oblangatas/worthless && cd worthless
 uv sync --extra dev --extra test
 uv run pytest
 ```

@@ -68,7 +68,7 @@ jobs:
       target: ${{ steps.target.outputs.value }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v6
         with:
           # Need full history so `git tag --verify` can read the signed
           # tag object; shallow clone strips signatures.
@@ -166,7 +166,7 @@ jobs:
       contents: read
     steps:
       - name: Check out repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v6
         with:
           # Full history needed for the re-verify step below (`git
           # verify-tag` requires the signed tag object reachable;

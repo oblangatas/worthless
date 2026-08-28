@@ -1,17 +1,45 @@
 name: Docker Security Scan & E2E
 
 on:
+  # Manual trigger. The weekly `schedule:` below already exists, but without
+  # workflow_dispatch there is no way to answer "is main red RIGHT NOW?"
+  # between Mondays. During WOR-852 main was red and unscanned for 5 days and
+  # the only way to find out was to build the image and run grype locally.
+  workflow_dispatch:
   push:
-    paths:
-      - 'Dockerfile'
-      - 'deploy/**'
-      - 'pyproject.toml'
-      - 'src/**'
+    # Scoped to main. Without this, every push to every branch fires a full
+    # run ON TOP OF the pull_request run for the same commit — the concurrency
+    # key includes github.event_name, so the two cannot cancel each other.
+    # Measured on this branch before the fix: two `scan`, two `docker-e2e` and
+    # two `service lock roundtrip` check runs per push, ~26 runner-minutes
+    # instead of 13, and doubled anonymous pulls of the base image.
+    #
+    # This is a BRANCH restriction, not a paths filter, and the difference is
+    # the whole point: `pull_request` below stays unfiltered, so a required
+    # context still reports on every PR. Scoping by branch cannot deadlock a
+    # PR; scoping by path can, and did. WOR-874.
+    branches: [main]
+    # No paths filter, deliberately. These jobs used to run only when a PR
+    # touched one of ~22 globs. That made them USELESS AS GATES: a required
+    # check that never reports leaves a PR waiting forever, which is exactly
+    # what happened — nine PRs went BLOCKED with zero failing checks the day
+    # `scan` was made required, and the ruleset had to be reverted.
+    #
+    # What the filter bought: ~11 min of runner time per PR. This repo is
+    # public, so that time is free. What it cost: an outage, and silent drift
+    # — the push and pull_request lists had already diverged (pull_request
+    # carried src/worthless/openclaw/** that push did not), so a PR touching
+    # only OpenClaw code was checked before merge and unchecked after. Two
+    # hand-maintained lists that must agree will not stay agreeing.
+    #
+    # Measured over the last 12 runs: scan 94s (12/12 green), service lock
+    # roundtrip 63s (12/12), docker-e2e 640s (9/9). No flakiness to gate on.
+    #
+    # Do NOT re-add a filter here, and do NOT gate these jobs with a job-level
+    # `if:` — a skipped job reports SUCCESS to branch protection, turning the
+    # gate into a bypass instead of a deadlock. Unconditional is the only
+    # shape with neither a skipped nor a duplicate state. WOR-874.
   pull_request:
-    paths:
-      - 'Dockerfile'
-      - 'deploy/**'
-      - 'tests/test_docker_e2e.py'
   schedule:
     - cron: '0 6 * * 1'  # Monday 6am UTC — check if ignored CVEs have fixes
 
@@ -19,39 +47,188 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # `github.event_name` is in the key so the weekly cron gets its OWN lane.
+  # Without it, a scheduled run and a push to main both key on
+  # `refs/heads/main`, and `cancel-in-progress` lets any Monday-morning push
+  # kill the cron partway through its slowest step — the emulated arm64
+  # build. A cancelled run renders grey, not red, so arm64 coverage could sit
+  # at zero for weeks with nothing looking wrong. WOR-873.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   scan:
     runs-on: ubuntu-latest
+    # amd64 build (~3m) + scans, plus an emulated arm64 build (~8-12m) on
+    # scheduled runs. Matches publish-docker.yml's budget for the same work.
+    # Without this the job inherits the 6h default, so a hung QEMU build burns
+    # six hours of runner time before anyone hears about it. WOR-873.
+    timeout-minutes: 35
+    env:
+      ARM64_TAR: /tmp/worthless-proxy-arm64.tar
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
       - name: Build image
         run: docker build -t worthless-proxy:${{ github.sha }} .
 
+      # Grype silently drops the unknown `expiry` key in .grype.yaml, so a
+      # suppression dated 2020 still suppresses. The pre-commit hook that
+      # enforces expiry is bypassed by Dependabot, web edits, --no-verify and
+      # any clone that never ran `pre-commit install` — so it has to run here
+      # too, right before the scan it is protecting. WOR-852.
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+      - name: Grype ignores are dated and current
+        # --no-project: this only parses ~50 lines of YAML, so there is no
+        # reason to sync the whole project venv for it.
+        run: uv run --no-project --with pyyaml python scripts/hooks/check_grype_ignore_expiry.py
+
       # Grype (Anchore) replaces Trivy (Aqua) after the TeamPCP supply-chain
       # compromise of aquasecurity/trivy-action in Feb-Mar 2026. Same
       # archetype (OSS, OS-pkg + language-dep coverage), different vendor
       # and codebase, currently clean.
-      - name: Grype vulnerability scan (fixable only, fail on HIGH+)
+      # Cutoff is MEDIUM, not high. `severity-cutoff` becomes grype's
+      # `--fail-on`, which is an exit-code threshold only — it does not filter
+      # the report. So while this said `high`, fixable Mediums were neither
+      # gated nor surfaced anywhere, and a NEW one would have appeared in
+      # total silence. Measured blast radius when moving to medium: exactly 4
+      # findings, all four named with reachability arguments in .grype.yaml.
+      # A fifth now fails the build, which is the entire point. WOR-852.
+      - name: Grype vulnerability scan (fixable only, fail on MEDIUM+)
         uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
         with:
           image: worthless-proxy:${{ github.sha }}
-          severity-cutoff: high
+          severity-cutoff: medium
           only-fixed: true
           fail-build: true
 
-      - name: Grype full scan (including unfixed — informational)
+      # `output-format: json` so the next step can gate on it. This used to be
+      # `table` purely so a human could read the log; the summary printed by
+      # check_grype_unmapped_findings.py replaces that, and is shorter — the
+      # table was ~181 rows nobody reads on a green job.
+      - name: Grype full scan (including unfixed)
+        id: full_scan
         uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        env:
+          # Read the ignore-free config, NOT .grype.yaml. Otherwise this scan
+          # inherits the gate's suppressions and a CVE we have accepted shows
+          # up in no output at all — skipped by the gate, omitted from the
+          # report. This step exists to show what we chose to carry.
+          GRYPE_CONFIG: .grype-informational.yaml
         with:
           image: worthless-proxy:${{ github.sha }}
-          severity-cutoff: high
+          # No `severity-cutoff` here on purpose. It only sets grype's
+          # `--fail-on` exit code, which `fail-build: false` discards — so any
+          # value would be dead config implying a filter that does not exist.
           only-fixed: false
           fail-build: false
+          output-format: json
+
+      # The gate above runs `only-fixed: true`, which drops every finding grype
+      # cannot map to a fixed version — at ANY severity. Measured 2026-08-10:
+      # three CRITICALS sat in that blind spot behind a green build. That flag
+      # is effectively an ignore rule with no CVE id, no reason and no expiry,
+      # hiding in YAML where check_grype_ignore_expiry.py cannot see it.
+      #
+      # This step closes it, reusing the scan above rather than adding a job —
+      # the runner pool is already starved by ~41 checks per PR. WOR-852.
+      - name: Unmapped High/Critical findings must be argued
+        env:
+          # Via env, never interpolated into the shell: a `${{ }}` expansion
+          # inside `run:` is the template-injection shape zizmor flags, even
+          # when the value is a path from a trusted action.
+          REPORT: ${{ steps.full_scan.outputs.json }}
+        run: >-
+          uv run --no-project --with pyyaml
+          python scripts/hooks/check_grype_unmapped_findings.py "$REPORT"
+
+      # ── arm64, on the weekly schedule only (WOR-873) ────────────────────
+      # Everything above builds whatever the runner is — amd64. So until this,
+      # arm64 was scanned in exactly one place: the release job, which fires
+      # only on a `v*` tag. Debian slim ships different package variants per
+      # architecture, so one fixable Medium present in arm64 and absent in
+      # amd64 was enough to turn every PR green and then fail the release with
+      # the tag already pushed and no image behind it.
+      #
+      # WHY SCHEDULE-ONLY, not every PR: arm64 needs QEMU emulation, ~8-12min
+      # per run. Paying that on every PR that touches the image taxes every
+      # contributor to catch drift that originates upstream, not in our diff.
+      # The Monday run is already the mechanism that catches base-image drift.
+      #
+      # WHAT THIS DOES NOT CATCH: an arm64-only finding introduced AND released
+      # inside the same week. That window is the accepted cost of not taxing
+      # PRs; the release gate remains the backstop for it.
+      - name: Set up QEMU (arm64 emulation on amd64 runner)
+        if: contains(fromJSON('["schedule", "workflow_dispatch"]'), github.event_name)
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+
+      - name: Set up Docker Buildx
+        if: contains(fromJSON('["schedule", "workflow_dispatch"]'), github.event_name)
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          cache-binary: false
+
+      # Tarball, not `load: true` — foreign-arch daemon load is unreliable
+      # across runner images. Grype reads it via `docker-archive:`.
+      #
+      # Deliberately the same shape publish-docker.yml uses, so both paths
+      # scan alike — but note that is a shared DESIGN, not a proven one: that
+      # job's arm64 scan landed in WOR-871 on 2026-08-07 and its last run was
+      # v0.3.11 on 2026-07-28, so it had never executed either. Both were
+      # first exercised by a manual dispatch of THIS workflow (WOR-873); if
+      # you are debugging an arm64 scan failure, neither path has the mileage
+      # its comments might imply.
+      - name: Build arm64 image to tarball for vulnerability scan
+        if: contains(fromJSON('["schedule", "workflow_dispatch"]'), github.event_name)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/arm64
+          push: false
+          outputs: type=docker,dest=${{ env.ARM64_TAR }}
+          tags: worthless-proxy:scan-arm64-${{ github.sha }}
+
+      - name: Grype arm64 (fixable only, fail on MEDIUM+)
+        if: contains(fromJSON('["schedule", "workflow_dispatch"]'), github.event_name)
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        with:
+          image: docker-archive:${{ env.ARM64_TAR }}
+          severity-cutoff: medium
+          only-fixed: true
+          fail-build: true
+          output-format: table
+
+      - name: Grype arm64 full scan (including unfixed)
+        id: arm64_full_scan
+        if: contains(fromJSON('["schedule", "workflow_dispatch"]'), github.event_name)
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        env:
+          GRYPE_CONFIG: .grype-informational.yaml
+        with:
+          image: docker-archive:${{ env.ARM64_TAR }}
+          only-fixed: false
+          fail-build: false
+          output-format: json
+
+      # Same blind spot as the amd64 gate above: `only-fixed: true` drops every
+      # finding grype cannot map to a fixed version. arm64 is scanned only
+      # weekly (WOR-873), so without this a Critical could sit here for days.
+      - name: arm64 unmapped High/Critical findings must be argued
+        # Same guard as every other arm64 step. Without it this runs on PRs,
+        # where the arm64 scan above is skipped, so its `json` output is empty
+        # and the hook is handed "" — which resolves to the repo root.
+        if: contains(fromJSON('["schedule", "workflow_dispatch"]'), github.event_name)
+        env:
+          # Via env, never interpolated into the shell: a `${{ }}` expansion
+          # inside `run:` is the template-injection shape zizmor flags, even
+          # when the value is a path from a trusted action.
+          REPORT: ${{ steps.arm64_full_scan.outputs.json }}
+        run: >-
+          uv run --no-project --with pyyaml
+          python scripts/hooks/check_grype_unmapped_findings.py "$REPORT"
 
       - name: Dockle best-practice lint
         # ``.dockleignore`` in the repo root skips CIS-DI-0001 (image
@@ -59,7 +236,13 @@ jobs:
         # entrypoint).  See the .dockleignore comments for full
         # rationale.  Dockle reads .dockleignore from CWD, which is
         # the checkout root inside the action runner.
-        uses: erzz/dockle-action@69369bc745ee29813f730231a821bcd4f71cd290 # v1
+        #
+        # `always()` because the scans above it can fail the job: one arm64 CVE
+        # would otherwise skip this step entirely and silently cost an
+        # unrelated best-practice signal. A CVE and a Dockle regression are
+        # independent problems and should be reported independently. WOR-873.
+        if: always()
+        uses: erzz/dockle-action@e8a7c41f36f1236ca3282b298d425ffbfdb2e922 # v1
         with:
           image: worthless-proxy:${{ github.sha }}
           exit-code: "1"
@@ -67,16 +250,21 @@ jobs:
 
   docker-e2e:
     runs-on: ubuntu-latest
+    # Without this the job inherits GitHub's 6-hour default. This job is a
+    # candidate for a required check, and an untimed required check that hangs
+    # blocks every merge for the rest of the day. 25 min against a measured
+    # median of 640s (max 658s over 9 runs) — roughly 2.3x headroom. WOR-874.
+    timeout-minutes: 25
     needs: scan  # reuses the scan job's checkout; image rebuilt (no cache sharing across jobs)
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
       - name: Build image
         run: docker build -t worthless-proxy:test .
 
-      - uses: astral-sh/setup-uv@0c5e2b8115b80b4c7c5ddf6ffdd634974642d182 # v5
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
         with:
           enable-cache: true
 
@@ -88,5 +276,161 @@ jobs:
         env:
           WORTHLESS_DOCKER_IMAGE: worthless-proxy:test
 
+      - name: Run sidecar smoke test (handshake caps — worthless-l8ef)
+        run: uv run pytest tests/docker/test_container_smoke.py -v -m docker --tb=short
+
       - name: Run OpenClaw/Compose E2E tests
         run: uv run pytest tests/test_openclaw_e2e.py -v -m openclaw --tb=short --timeout=360
+
+      # WOR-621 F1/F7/WOR-545: the load-bearing claim — "kill the proxy and
+      # an OpenClaw agent on a locked provider reaches nothing." Real proxy +
+      # pinned OpenClaw container + mock upstream; baseline reaches the mock
+      # with the reconstructed real key, `docker stop` proxy → agent turn
+      # fails AND mock captured nothing, restart → resumes. Excluded from
+      # tests.yml (`-m "not docker"`); this is the regression net so a
+      # future PR can't re-introduce the WOR-514 bypass and ship green.
+      - name: Run WOR-621 proxy-load-bearing behavioral test
+        run: uv run pytest tests/openclaw/install_incident/test_proxy_load_bearing.py -v -m "openclaw and docker" --tb=short --timeout=900
+
+      # WOR-650: real `worthless lock --adopt` must produce a config the REAL
+      # OpenClaw binary accepts after adopting an unrecognized proxy entry —
+      # both providers. Closes the "passes in mock, OpenClaw rejects the shape
+      # live" gap. Lean (one short-lived container, no proxy stack).
+      - name: Run WOR-650 adopt-recognition live test
+        run: uv run pytest tests/openclaw/install_incident/test_adopt_recognition_docker.py -v -m "openclaw and docker" --tb=short --timeout=300
+
+      # WOR-777: re-locking a key must reach the OpenClaw RUNTIME, not just
+      # rewrite openclaw.json. A co-located OpenClaw + worthless + mock-upstream
+      # container drives a REAL agent chat: re-lock with a new key, then assert
+      # the mock receives the NEW key and never the old (the rotation guarantee),
+      # and that an exported env key cannot shadow the proxy entry. The image is
+      # built here as a HARD prerequisite so the test can never silently skip
+      # (its skipif checks for worthless-oc-test:local).
+      - name: Build co-located OpenClaw+worthless image (WOR-777 rotation test)
+        run: |
+          uv build --wheel
+          docker build -f tests/openclaw/Dockerfile.oc-worthless -t worthless-oc-test:local dist/
+
+      - name: Run WOR-777 rotation load-bearing test
+        run: uv run pytest tests/openclaw/install_incident/test_rotation_load_bearing.py -v -m "openclaw and docker" --tb=short --timeout=900
+
+      # WOR-797: the unshardable-credential detect/clear claim, proven against a
+      # REAL OpenClaw install (the unit suite is 100% mocked). Surfaces 5
+      # (MiniMax) + 8 (Vertex ADC) are planted at their real Path.home() paths;
+      # asserts the real `worthless doctor` DETECTS both there (the path-drift
+      # guard a mock can't make) and `--fix` removes them from the real
+      # filesystem with the gcloud re-auth remediation. Reuses the co-located
+      # worthless-oc-test:local image built for the rotation test above.
+      - name: Run WOR-797 unshardable-credential load-bearing test
+        run: uv run pytest tests/openclaw/install_incident/test_unshardable_credentials_load_bearing.py -v -m "openclaw and docker" --tb=short --timeout=900
+
+      # WOR-834: the enterprise-gateway upstream, proven against a REAL OpenClaw
+      # install. The unit/CLI tests hand-write an openclaw.json and never boot
+      # OpenClaw — and that gap bit: the hand-written {baseUrl, apiKey} shape is
+      # INVALID to real OpenClaw, which makes `openclaw secrets audit` exit 2, so
+      # lock's audit gate refuses BEFORE upstream resolution ever runs. Only a
+      # real-OpenClaw test can see that. Asserts the Azure/custom gateway baseUrl
+      # becomes the stored upstream, that a RE-LOCK keeps it (it silently reverted
+      # to api.openai.com before), and that an IPv6-mapped cloud-metadata gateway
+      # is refused fail-closed with nothing enrolled. Reuses the co-located
+      # worthless-oc-test:local image built for the rotation test above.
+      - name: Run WOR-834 enterprise-gateway upstream load-bearing test
+        run: uv run pytest tests/openclaw/install_incident/test_enterprise_gateway_upstream_load_bearing.py -v -m "openclaw and docker" --tb=short --timeout=900
+
+  # WOR-749 Linux: lock → systemd service → proxied POST → mock upstream gets
+  # real key (privileged systemd container). macOS launchd roundtrip stays
+  # manual L7 — Keychain + LaunchAgent on shared GHA macOS runners is flaky.
+  service-lock-roundtrip-linux:
+    name: service lock roundtrip (Linux Docker)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Run WOR-749 Linux lock roundtrip live pack
+        run: bash engineering/testing/scripts/run-service-lock-roundtrip-linux-docker.sh
+        env:
+          LIVE_PACK_NO_COLOR: "1"
+
+  # WOR-892: publish.yml runs `python -m build`, producing an sdist AND a wheel.
+  # Every pre-release path builds only the wheel (`uv build --wheel` in this
+  # file's docker-e2e job, in user-flows.yml and in verify-npm.yml), so release
+  # day is the first time the sdist is ever built.
+  #
+  # Its own job, not a step in `scan`: docker-e2e declares `needs: scan`, so a
+  # packaging break there would skip ~11 minutes of unrelated E2E signal and
+  # report under a check named "scan". Nothing needs this job. It inherits the
+  # unfiltered `pull_request:` trigger from the `on:` block above, which is a
+  # property of the FILE — and per WOR-874 that trigger must stay unfiltered and
+  # this job must never take a job-level `if:`, because a skipped job reports
+  # SUCCESS to branch protection.
+  sdist:
+    name: Sdist builds, installs, and carries its package data
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      # 3.13 to match publish.yml's `setup-python` pin: release day builds the
+      # sdist on 3.13, and this must prove THAT, not the runner's system 3.12.
+      # uv rather than a bare `python3 -m pip install build`, which would hit
+      # the system interpreter and pass only because the runner image happens
+      # to strip PEP 668's EXTERNALLY-MANAGED marker.
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          python-version: "3.13"
+
+      - name: Build the sdist with publish.yml's builder
+        # `uvx --from build pyproject-build` IS `python -m build` — the same
+        # builder publish.yml uses. `uv build --sdist` would prove a different
+        # tool's output. Note this writes src/*.egg-info into the checkout;
+        # harmless here because nothing in this job builds a Docker context.
+        run: uvx --from build pyproject-build --sdist --outdir /tmp/sdist-check
+
+      - name: Exactly one sdist was produced
+        # No `| head -1`: under `set -o pipefail` that is a SIGPIPE footgun, and
+        # silently picking the first of several is how a stale artifact gets
+        # tested instead of the new one.
+        run: |
+          set -euo pipefail
+          COUNT="$(find /tmp/sdist-check -maxdepth 1 -name '*.tar.gz' -type f | wc -l)"
+          test "$COUNT" -eq 1 || { echo "expected exactly 1 sdist, found $COUNT"; exit 1; }
+
+      - name: Install the sdist into a clean venv
+        run: |
+          set -euo pipefail
+          SDIST="$(find /tmp/sdist-check -maxdepth 1 -name '*.tar.gz' -type f)"
+          echo "sdist under test: $SDIST"
+          uv venv /tmp/sdist-venv --python 3.13
+          VIRTUAL_ENV=/tmp/sdist-venv uv pip install "$SDIST"
+
+      # THE POINT OF THIS JOB. `worthless --version` is importlib.metadata — it
+      # reads installed METADATA and never touches the package tree, so it
+      # prints happily with providers.toml and SKILL.md both missing. That is
+      # exactly the break pyproject.toml's [tool.setuptools.package-data]
+      # comment warns about: install() raising FileNotFoundError on a
+      # wheel-installed worthless. Verified by deleting SKILL.md from an
+      # installed venv — `--version` still printed the version.
+      #
+      # So load both data files for real, from the INSTALLED package, with cwd
+      # outside the source checkout so a stray relative path cannot rescue a
+      # missing file. Add a line here whenever package-data gains an entry.
+      - name: Installed sdist can read every packaged data file
+        run: |
+          set -euo pipefail
+          cd /tmp
+          /tmp/sdist-venv/bin/python - <<'PY'
+          from worthless.cli.providers import load_registry
+          from worthless.openclaw.skill import _read_skill_asset
+
+          registry = load_registry()
+          assert registry, "providers.toml loaded but registry is empty"
+          skill = _read_skill_asset()
+          assert "Version:" in skill, "SKILL.md loaded but has no Version: header"
+          print(f"providers.toml: {len(registry)} entries; SKILL.md: {len(skill)} bytes")
+          PY
+          /tmp/sdist-venv/bin/worthless --version

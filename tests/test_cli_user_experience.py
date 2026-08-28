@@ -20,8 +20,8 @@ from worthless.storage.repository import ShardRepository, StoredShard
 
 from tests.helpers import fake_anthropic_key, fake_openai_key
 
-# mix_stderr=False so we can inspect stdout vs stderr independently
-runner = CliRunner(mix_stderr=False)
+# click >=8.2 keeps stderr separate so we can inspect stdout vs stderr independently
+runner = CliRunner()
 
 # Scanner-safe fake keys (generated at runtime to avoid false positives).
 _OPENAI_KEY = fake_openai_key()
@@ -259,6 +259,14 @@ class TestLockUx:
         import sys
 
         monkeypatch.setattr(sys, "platform", "linux")
+        # Faking the platform makes the core-dump hardening believe it is on
+        # Linux while the host is not, so it cannot load libc and correctly
+        # fail-closes (dupf.10) — which would abort lock before it ever prints
+        # the keychain hint this test is about. Stub it: this test asserts UX
+        # messaging, and core-dump behavior has its own suite.
+        monkeypatch.setattr(
+            "worthless.cli.commands.lock.disable_core_dumps", lambda *_a, **_k: None
+        )
         result = runner.invoke(
             app,
             ["lock", "--env", str(env_with_openai)],
@@ -455,11 +463,11 @@ class TestEnrollUx:
                 "enroll",
                 "--alias",
                 "bad alias!@#",
-                "--key",
-                _OPENAI_KEY,
+                "--key-stdin",
                 "--provider",
                 "openai",
             ],
+            input=f"{_OPENAI_KEY}\n",
             env={"WORTHLESS_HOME": str(home_dir.base_dir)},
         )
         assert result.exit_code == 1

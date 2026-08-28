@@ -29,7 +29,7 @@ from worthless.cli.errors import (
 )
 
 
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner()
 
 
 def _app_raising(reason: UnsafeReason) -> typer.Typer:

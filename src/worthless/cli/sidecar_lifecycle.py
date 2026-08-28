@@ -239,7 +239,7 @@ def _resolve_short_socket_path(socket_path: Path) -> Path:
     digest = hashlib.sha256(encoded_path).hexdigest()[:8]
     try:
         fallback_dir = Path(
-            tempfile.mkdtemp(prefix=f"wls-{digest}-", dir="/tmp")  # noqa: S108
+            tempfile.mkdtemp(prefix=f"wls-{digest}-", dir="/tmp")  # noqa: S108  # nosec B108 — fallback dir is per-process tempfile.mkdtemp, hash-prefixed
         )
     except OSError as exc:
         raise WorthlessError(

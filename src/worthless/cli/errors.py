@@ -8,7 +8,22 @@ import sys
 import traceback
 from enum import Enum, IntEnum
 
+from worthless.cli.log_redaction import _redact
+
 logger = logging.getLogger(__name__)
+
+
+def _print_redacted_traceback() -> None:
+    """Write the current exception's traceback to stderr, key-redacted.
+
+    SR-04 (WOR-655): ``--debug`` mode used ``traceback.print_exc()``, which
+    streams the raw traceback — including an exception's own message, where
+    a future subclass could embed a key — straight past the log redactor.
+    Format to a string, scrub, then write. CPython does not print frame
+    locals by default, so the reconstructed key in a local variable does
+    not appear; this closes the message-text channel.
+    """
+    sys.stderr.write(_redact(traceback.format_exc()))
 
 
 class ErrorCode(IntEnum):
@@ -31,6 +46,10 @@ class ErrorCode(IntEnum):
     SIDECAR_NOT_READY = 114
     DAEMON_NOT_SUPPORTED = 115
     YAMA_PTRACE_SCOPE_TOO_LOW = 116
+    ENV_ALREADY_LOCKED = 117
+    ORPHANED_SHARD_DATA = 118
+    SERVICE_INSTALL_FAILED = 119
+    CORE_DUMP_PROTECTION_FAILED = 120
     UNKNOWN = 199
 
 
@@ -187,9 +206,31 @@ def error_boundary(fn=None, *, exit_code: int = 1):  # noqa: ANN001, ANN201
                 return func(*args, **kwargs)
             except typer.Exit:
                 raise
+            except (typer.Abort, KeyboardInterrupt):
+                # Ctrl+C is a cancellation, not a crash. ``typer.confirm`` raises
+                # ``click.Abort`` (a RuntimeError), which the generic ``except
+                # Exception`` below turned into "WRTLS-199: an internal error
+                # occurred" — worst on the commands that touch real API keys, where
+                # the user cannot tell whether it died halfway (worthless-6xuv).
+                #
+                # Handled HERE rather than at each call site: there are nine
+                # ``typer.confirm`` prompts across uninstall, lock, doctor, service
+                # and the default command. Patching them individually is how this
+                # bug survived its first fix.
+                #
+                # The message stays generic — a prompt can appear mid-command, so
+                # the boundary cannot honestly promise nothing changed. Commands
+                # whose prompt runs before any work say so themselves.
+                #
+                # 130 = terminated by SIGINT. Exiting 0 would tell a script or agent
+                # the command succeeded; a deliberate "n" still exits 0.
+                from worthless.cli.console import get_console
+
+                get_console().print_hint("Cancelled.")
+                raise typer.Exit(code=130) from None
             except WorthlessError as exc:
                 if _debug:
-                    traceback.print_exc(file=sys.stderr)
+                    _print_redacted_traceback()
                 else:
                     # Deferred: console imports errors, so we can't import at top.
                     from worthless.cli.console import get_console
@@ -201,7 +242,7 @@ def error_boundary(fn=None, *, exit_code: int = 1):  # noqa: ANN001, ANN201
                 raise typer.Exit(code=exc.exit_code) from exc
             except Exception as exc:
                 if _debug:
-                    traceback.print_exc(file=sys.stderr)
+                    _print_redacted_traceback()
                 else:
                     from worthless.cli.console import get_console
 

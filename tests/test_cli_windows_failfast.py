@@ -13,7 +13,7 @@ runner = CliRunner()
 
 
 _EXPECTED_MESSAGE = "Native Windows is not supported"
-_EXPECTED_LINK = "github.com/shacharm2/worthless#platforms"
+_EXPECTED_LINK = "github.com/oblangatas/worthless#platforms"
 
 
 @pytest.fixture()

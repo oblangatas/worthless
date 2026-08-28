@@ -408,8 +408,8 @@ class TestGateBeforeDecrypt:
         gate_idx = source.find("rules_engine.evaluate")
         assert gate_idx != -1
 
-        # Find the denial check that follows
-        denial_check_idx = source.find("if denial is not None:", gate_idx)
+        # Find the denial check that follows (gate.denial after the GateResult refactor)
+        denial_check_idx = source.find("if gate.denial is not None:", gate_idx)
         assert denial_check_idx != -1, "denial check must follow evaluate call"
 
         # Find the return statement inside the denial block

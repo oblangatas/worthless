@@ -4,12 +4,14 @@ on:
   pull_request:
     paths:
       - "website/**"
+      - "tests/test_website_publish_safety.py"
       - ".github/workflows/deploy-website.yml"
   push:
     branches:
       - main
     paths:
       - "website/**"
+      - "tests/test_website_publish_safety.py"
       - ".github/workflows/deploy-website.yml"
   workflow_dispatch:
 
@@ -26,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
@@ -46,6 +48,16 @@ jobs:
           grep -qx 'wless.io' website/CNAME
           grep -qx 'Canonical: https://wless.io/.well-known/security.txt' website/.well-known/security.txt
           grep -qx 'Sitemap: https://wless.io/sitemap.xml' website/robots.txt
+
+      - name: Set up uv + Python
+        uses: ./.github/actions/setup-uv-python
+
+      - name: Run website publish-safety tests
+        env:
+          UV_CACHE_DIR: /tmp/uv-cache
+        run: |
+          uv sync --extra test
+          uv run pytest -q tests/test_website_publish_safety.py
 
       - name: Upload website preview artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -68,7 +80,7 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 

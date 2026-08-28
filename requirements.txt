@@ -7,7 +7,7 @@ annotated-doc==0.0.4
     # via
     #   fastapi
     #   typer
-annotated-types==0.7.0
+annotated-types==0.8.0
     # via pydantic
 anyio==4.12.1
     # via
@@ -16,21 +16,20 @@ anyio==4.12.1
     #   watchfiles
 backports-tarfile==1.2.0 ; python_full_version < '3.12'
     # via jaraco-context
-certifi==2026.2.25
+certifi==2026.7.22
     # via
     #   httpcore
     #   httpx
 cffi==2.0.0 ; platform_python_implementation != 'PyPy'
     # via cryptography
-click==8.1.8
-    # via
-    #   typer
-    #   uvicorn
+click==8.4.2
+    # via uvicorn
 colorama==0.4.6 ; sys_platform == 'win32'
     # via
     #   click
+    #   typer
     #   uvicorn
-cryptography==46.0.7
+cryptography==50.0.0
     # via
     #   secretstorage
     #   worthless
@@ -48,7 +47,7 @@ httptools==0.7.1
     # via uvicorn
 httpx==0.28.1
     # via worthless
-idna==3.15
+idna==3.18
     # via
     #   anyio
     #   httpx
@@ -74,7 +73,7 @@ more-itertools==11.0.2
     # via
     #   jaraco-classes
     #   jaraco-functools
-msgpack==1.1.2
+msgpack==1.2.1
     # via worthless
 psutil==7.2.2
     # via worthless
@@ -100,13 +99,13 @@ secretstorage==3.5.0 ; sys_platform == 'linux'
     # via keyring
 shellingham==1.5.4
     # via typer
-starlette==1.0.1
+starlette==1.3.1
     # via
     #   fastapi
     #   worthless
-tomli==2.0.2 ; python_full_version < '3.11'
+tomli==2.4.1 ; python_full_version < '3.11'
     # via worthless
-typer==0.23.1
+typer==0.27.1
     # via worthless
 typing-extensions==4.15.0
     # via

@@ -1,64 +1,820 @@
-"""WOR-545: Behavioural CI test — proxy must be load-bearing after worthless lock.
+"""WOR-545 / WOR-621 — the proxy must be load-bearing after ``worthless lock``.
 
-RED through Phase 1 (audit-gate doesn't make proxy load-bearing for SecretRef users).
-GREEN at Phase 3 (proxy load-bearing implementation).
+This is the headline WOR-514 guarantee, proven end-to-end against a REAL
+OpenClaw container talking to the REAL Worthless proxy:
 
-Lifecycle: xfail(strict=True) until Phase 3's PR removes the mark.
+    OpenClaw ──(Bearer shard-A → proxy /<alias>/v1)──► Worthless proxy
+                                                            │ reconstruct shard-A ⊕ shard-B
+                                                            ▼
+                                                      mock upstream  (sees the REAL key)
+
+Kill the proxy and the two halves never combine, so OpenClaw cannot reach
+upstream — that failure is the feature. The flow:
+
+1. ``docker compose up`` the mock-upstream + worthless-proxy stack.
+2. ``worthless lock`` — shard-A to .env, shard-B to the DB (production split).
+3. Start a pinned OpenClaw container on the stack network; wire its
+   ``openai`` provider to the proxy's ``/<alias>/v1`` with shard-A as apiKey
+   (what ``lock``'s OpenClaw integration does when co-located), restart it.
+4. Drive a gateway chat — assert the mock received the REAL key (proxy
+   reconstructed it) and never shard-A.
+5. ``docker stop`` the proxy — drive a chat — assert the mock receives
+   NOTHING (the agent cannot reach upstream). **The load-bearing proof.**
+6. ``docker start`` the proxy — drive a chat — assert it reaches upstream
+   again.
+
+Honest scope: this proves "load-bearing after OpenClaw picks up the
+rewrite", which the ``_after_lock`` test does via an OpenClaw restart (step 3).
+The no-restart live-reload (WOR-756, formerly "PR-2") now also lives here:
+``test_gateway_hot_reloads_baseurl_without_restart`` and
+``test_real_openclaw_logs_match_the_reload_matcher``. OpenClaw is pinned so a
+release that changes routing OR its reload-log strings turns these red on purpose.
+
+Marks: ``openclaw`` + ``docker``; skipped when Docker is unavailable. Heavy
+(builds the proxy image, boots three containers, restarts OpenClaw, stops
+and starts the proxy) — runs in the OpenClaw CI lane only.
 """
 
 from __future__ import annotations
 
+import json
 import subprocess
+import time
+import uuid
+from datetime import datetime, timedelta
+from pathlib import Path
+
+import httpx
 import pytest
 
+from tests._docker_helpers import docker_available, docker_exec, wait_healthy
+from tests.helpers import fake_openai_key
+from worthless.cli.commands.lock import _classify_reload_lines, _make_alias
 
-def docker_available() -> bool:
-    import shutil
-
-    docker_bin = shutil.which("docker")
-    if not docker_bin:
-        return False
-    try:
-        result = subprocess.run(
-            [docker_bin, "info"],
-            capture_output=True,
-            timeout=5,
-        )
-        return result.returncode == 0
-    except (subprocess.TimeoutExpired, OSError, subprocess.SubprocessError):
-        return False
-
+REPO_ROOT = Path(__file__).resolve().parents[3]
+COMPOSE_FILE = REPO_ROOT / "tests" / "openclaw" / "docker-compose.yml"
+OPENCLAW_IMAGE = "ghcr.io/openclaw/openclaw:2026.5.3-1"
+_MODEL = "openai/gpt-4o"
 
 pytestmark = [
     pytest.mark.openclaw,
     pytest.mark.docker,
     pytest.mark.skipif(not docker_available(), reason="Docker not available"),
-    pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "WOR-515 Phase 3 — proxy not yet load-bearing. "
-            "Phase 1's audit-gate catches on-disk plaintext but does not make the proxy "
-            "load-bearing for users already on SecretRefs or env-based credentials. "
-            "Remove xfail when Phase 3 merges."
-        ),
-    ),
+    # Heavy: image build + 3 containers + OpenClaw restarts + proxy stop/start.
+    pytest.mark.timeout(900),
 ]
 
 
-def test_proxy_is_load_bearing_after_lock() -> None:
-    """After worthless lock, stopping the proxy must make OpenClaw unable to reach upstream.
+# --------------------------------------------------------------------------- #
+# Thin docker / OpenClaw helpers (subprocess; mirrors test_routing_contract).
+# --------------------------------------------------------------------------- #
+def _run(
+    args: list[str], *, check: bool = False, timeout: int = 120
+) -> subprocess.CompletedProcess:
+    return subprocess.run(args, capture_output=True, text=True, check=check, timeout=timeout)
 
-    Steps:
-    1. Spin up worthless proxy + mock-upstream + OpenClaw via compose --profile openclaw.
-    2. Run worthless lock — assert exit 0.
-    3. Send a chat — assert success, assert proxy requests_proxied increments by 1.
-    4. Stop the worthless proxy (docker compose stop proxy).
-    5. Send another chat — assert FAILS with upstream-unreachable.
-    6. Start proxy again — third chat succeeds, counter increments.
 
-    Failure message names the bypass so the gap is visible in CI.
+def _oc(container: str, *args: str, timeout: int = 120) -> subprocess.CompletedProcess:
+    return _run(["docker", "exec", container, "node", "openclaw.mjs", *args], timeout=timeout)
+
+
+def _dexec(container: str, cmd: list[str], *, timeout: int = 120) -> subprocess.CompletedProcess:
+    """``docker exec`` with a timeout — the shared ``docker_exec`` helper has
+    none, so a hung ``worthless lock``/``unlock`` would stall the module."""
+    return _run(["docker", "exec", container, *cmd], timeout=timeout)
+
+
+def _wait_oc(container: str, tries: int = 30) -> None:
+    for _ in range(tries):
+        if _oc(container, "config", "get", "gateway", timeout=30).returncode == 0:
+            return
+        time.sleep(2)
+    raise RuntimeError(f"OpenClaw container {container} did not become ready")
+
+
+def _route(container: str) -> subprocess.CompletedProcess:
+    """Drive one agent turn through the gateway (the real incident path)."""
+    sid = f"wor545-{uuid.uuid4().hex[:6]}"
+    return _oc(container, "agent", "--session-id", sid, "--message", "hi", "--json", timeout=120)
+
+
+def _captured(mock_port: int) -> list[dict]:
+    r = httpx.get(f"http://127.0.0.1:{mock_port}/captured-headers", timeout=10.0)
+    return r.json().get("headers", [])
+
+
+def _clear(mock_port: int) -> None:
+    httpx.delete(f"http://127.0.0.1:{mock_port}/captured-headers", timeout=10.0)
+
+
+def _host_port(container: str, internal: int) -> int:
+    out = _run(["docker", "port", container, str(internal)], check=True).stdout.strip()
+    return int(out.rsplit(":", 1)[-1])
+
+
+# --------------------------------------------------------------------------- #
+# Stack: mock-upstream + worthless-proxy (compose) + a pinned OpenClaw
+# container attached to the same network, wired to the proxy alias with
+# shard-A. Module-scoped: the slow build/boot/lock happens once.
+# --------------------------------------------------------------------------- #
+@pytest.fixture(scope="module")
+def loaded_stack():
+    project = f"wor545-{uuid.uuid4().hex[:8]}"
+    network = f"{project}_openclaw-net"
+    oc = f"{project}-openclaw-driver"
+    proxy = f"{project}-worthless-proxy-1"
+    mock = f"{project}-mock-upstream-1"
+    fake_key = fake_openai_key()
+    alias = _make_alias("openai", fake_key)
+
+    try:
+        _run(
+            ["docker", "compose", "-f", str(COMPOSE_FILE), "-p", project, "up", "-d", "--build"],
+            check=True,
+            timeout=300,
+        )
+        if not wait_healthy(proxy, timeout=120):
+            logs = _run(["docker", "logs", proxy]).stdout
+            pytest.fail(f"worthless-proxy did not become healthy.\n{logs}")
+        mock_port = _host_port(mock, 9999)
+
+        # Register the mock URL, then lock — shard-A to .env, shard-B to DB.
+        reg = docker_exec(
+            proxy,
+            [
+                "worthless",
+                "providers",
+                "register",
+                "--name",
+                "openai-mock",
+                "--url",
+                "http://mock-upstream:9999/openai/v1",
+                "--protocol",
+                "openai",
+            ],
+        )
+        assert reg.returncode == 0, f"register failed: {reg.stderr}"
+        env = (
+            "OPENAI_API_KEY=" + fake_key + "\nOPENAI_BASE_URL=http://mock-upstream:9999/openai/v1\n"
+        )
+        wr = docker_exec(proxy, ["sh", "-c", f"cat > /tmp/.env << 'EOF'\n{env}\nEOF"])
+        assert wr.returncode == 0, f"write .env failed: {wr.stderr}"
+        lock = docker_exec(proxy, ["worthless", "lock", "--env", "/tmp/.env"])  # noqa: S108
+        assert lock.returncode == 0, f"lock failed: {lock.stderr}"
+        shard_a = docker_exec(
+            proxy, ["sh", "-c", "grep '^OPENAI_API_KEY=' /tmp/.env | cut -d= -f2-"]
+        ).stdout.strip()
+        assert shard_a and shard_a != fake_key, "lock did not replace the key with shard-A"
+
+        # Boot a pinned OpenClaw container on the stack network and wire its
+        # provider to the proxy alias with shard-A (what lock's OpenClaw
+        # integration does when co-located with the config).
+        _run(
+            [
+                "docker",
+                "run",
+                "-d",
+                "--name",
+                oc,
+                "--network",
+                network,
+                "-e",
+                "OPENCLAW_ACCEPT_TERMS=yes",
+                "--user",
+                "node",
+                OPENCLAW_IMAGE,
+            ],
+            check=True,
+        )
+        _wait_oc(oc)
+        prov = {
+            "baseUrl": f"http://worthless-proxy:8787/{alias}/v1",
+            "api": "openai-completions",
+            "models": [],
+        }
+        assert (
+            _oc(
+                oc, "config", "set", "models.providers.openai", json.dumps(prov), "--strict-json"
+            ).returncode
+            == 0
+        )
+        _oc(oc, "config", "set", "models.providers.openai.apiKey", shard_a)
+        _oc(oc, "config", "set", "agents.defaults.model.primary", _MODEL)
+        _run(["docker", "restart", oc], check=True)
+        _wait_oc(oc)
+
+        yield {
+            "oc": oc,
+            "proxy": proxy,
+            "mock_port": mock_port,
+            "fake_key": fake_key,
+            "shard_a": shard_a,
+        }
+    finally:
+        _run(["docker", "rm", "-f", oc], timeout=60)
+        _run(
+            [
+                "docker",
+                "compose",
+                "-f",
+                str(COMPOSE_FILE),
+                "-p",
+                project,
+                "down",
+                "-v",
+                "--remove-orphans",
+            ],
+            timeout=90,
+        )
+
+
+def test_gateway_hot_reloads_baseurl_without_restart(loaded_stack):
+    """WOR-756 (PR-2, the no-restart proof): the RUNNING gateway picks up a
+    ``baseUrl`` change with NO restart.
+
+    The sibling load-bearing test restarts OpenClaw to apply config (docstring
+    step 3). This one proves the restart is unnecessary: flip the provider
+    ``baseUrl`` to an unrecognized proxy alias (routing must BREAK) and then back
+    (routing must be RESTORED) — both without restarting OpenClaw. Each flip is
+    only observable if the live gateway hot-reloaded ``openclaw.json``.
+
+    Runs before the load-bearing test (which stops/starts the proxy); restores
+    ``baseUrl`` in ``finally`` so it leaves the shared stack as it found it.
     """
-    pytest.fail(
-        "OpenClaw chat succeeded with worthless proxy stopped — "
-        "proxy is NOT load-bearing (WOR-515 Phase 3 not yet closed)."
+    oc = loaded_stack["oc"]
+    mock_port = loaded_stack["mock_port"]
+    fake_key = loaded_stack["fake_key"]
+    alias = _make_alias("openai", fake_key)
+    good = f"http://worthless-proxy:8787/{alias}/v1"
+    bogus = f"http://worthless-proxy:8787/bogus-{alias}/v1"
+
+    try:
+        # 0. Precondition: baseline (post-restart, valid alias) reaches the mock.
+        _clear(mock_port)
+        assert _route(oc).returncode == 0, "baseline turn failed — stack precondition broken"
+        assert _captured(mock_port), "baseline routing broken — stack precondition failed"
+
+        # 1. Point baseUrl at an UNKNOWN alias, NO restart. A hot-reloading
+        #    gateway now dials the unknown alias, which the proxy rejects, so the
+        #    mock is NOT reached. (A gateway that did NOT reload would keep hitting
+        #    the valid alias and the mock WOULD be reached — the discriminating
+        #    assertion.)
+        assert _oc(oc, "config", "set", "models.providers.openai.baseUrl", bogus).returncode == 0
+        time.sleep(3)  # let the in-process hot-reload settle (~100ms; margin for slow CI)
+        _clear(mock_port)
+        _route(oc)
+        assert _captured(mock_port) == [], (
+            "mock was reached after pointing baseUrl at an unknown alias with NO "
+            "restart — the running gateway did NOT hot-reload the change (WOR-756 "
+            "regression: lock's [OK] would be a lie without a manual restart)."
+        )
+
+        # 2. Point baseUrl BACK to the valid alias, NO restart. Routing restored
+        #    with the real key reconstructed by the proxy → the live gateway
+        #    hot-reloaded a second time.
+        assert _oc(oc, "config", "set", "models.providers.openai.baseUrl", good).returncode == 0
+        time.sleep(3)
+        _clear(mock_port)
+        assert _route(oc).returncode == 0, "turn failed after restoring baseUrl"
+        auths = " ".join(e.get("authorization", "") for e in _captured(mock_port))
+        assert fake_key in auths, (
+            "routing not restored after pointing baseUrl back with no restart — "
+            "the gateway did not hot-reload the recovery."
+        )
+    finally:
+        # Leave the shared stack pointing at the valid alias for the next test.
+        _oc(oc, "config", "set", "models.providers.openai.baseUrl", good)
+
+
+def test_real_openclaw_logs_match_the_reload_matcher(loaded_stack):
+    """WOR-756 anti-self-reference guard (closes the gap Jenny flagged): the 12
+    unit tests fabricate ``openclaw logs --json`` from the SAME strings the code
+    matches — a closed loop that stays green even if the real image's event
+    strings drift. This drives a REAL config change on the pinned container and
+    feeds its ACTUAL log output through the exact production classifier
+    (:func:`_classify_reload_lines`).
+
+    If OpenClaw's ``gateway/reload`` subsystem or message prefix ever changes,
+    this turns RED — instead of ``_confirm_openclaw_reload`` silently degrading
+    to ``"skipped"`` forever in production (which would make the AC3 exit-92 path
+    unreachable and the AC2 gate a no-op while lock still prints ``[OK]``).
+    """
+    oc = loaded_stack["oc"]
+    fake_key = loaded_stack["fake_key"]
+    alias = _make_alias("openai", fake_key)
+    good = f"http://worthless-proxy:8787/{alias}/v1"
+
+    try:
+        # Floor for "fresh" events derived from the CONTAINER's clock, not the
+        # host's: Docker Desktop's Linux VM clock drifts from the macOS host, and
+        # the events are timestamped by the container. (Production is immune —
+        # lock and the openclaw gateway are co-located on one clock.)
+        c_now = _run(["docker", "exec", oc, "date", "-u", "+%Y-%m-%dT%H:%M:%S+00:00"], check=True)
+        since = datetime.fromisoformat(c_now.stdout.strip()) - timedelta(seconds=2)
+        # A real config write → a real gateway hot-reload event on the pinned image.
+        assert (
+            _oc(
+                oc, "config", "set", "models.providers.openai.baseUrl", f"{good}?probe=matcher"
+            ).returncode
+            == 0
+        )
+        time.sleep(6)  # F6: the logs RPC lags the in-process apply by ~3-5s.
+
+        logs = _oc(oc, "logs", "--json", "--limit", "500", "--plain")
+        assert logs.returncode == 0, f"`openclaw logs` failed: {logs.stderr[-400:]}"
+        applied, rejected = _classify_reload_lines(logs.stdout.splitlines(), since)
+        assert applied and not rejected, (
+            "The pinned OpenClaw image's gateway/reload log strings no longer match "
+            "the production matcher (lock.py _RELOAD_SUBSYSTEM / _RELOAD_APPLIED_MARKER). "
+            "_confirm_openclaw_reload would silently return 'skipped' in production, "
+            "making lock's [OK] a lie. Re-verify against the image and update the "
+            f"constants.\nlogs tail:\n{logs.stdout[-900:]}"
+        )
+    finally:
+        _oc(oc, "config", "set", "models.providers.openai.baseUrl", good)
+
+
+def test_real_openclaw_logs_match_the_reject_marker(loaded_stack):
+    """WOR-756 reject-path mirror of the matcher test (closes the gap TCV
+    flagged): the exit-92 path fires only when the REAL image emits
+    ``config reload skipped (invalid config)``. Prove that marker against the
+    live image the same way the applied marker is proven — otherwise a drift in
+    the reject string silently turns exit-92 into ``skipped`` → ``[OK]``, exactly
+    the fail-loud guarantee this PR exists to make real.
+
+    Induce a genuinely schema-invalid config by writing ``baseUrl`` as an integer
+    STRAIGHT into openclaw.json — ``openclaw config set`` validates and would
+    reject it before the write, so we bypass it to reach the gateway's reload.
+    The gateway skips the invalid reload (keeping the last-valid config in
+    memory) and logs the reject event; the file is restored from a backup.
+    """
+    oc = loaded_stack["oc"]
+    cfg = "/home/node/.openclaw/openclaw.json"
+    backup = "/tmp/oc-good.json"  # noqa: S108 — path inside the container, not the host
+    try:
+        assert _dexec(oc, ["cp", cfg, backup]).returncode == 0
+        c_now = _run(["docker", "exec", oc, "date", "-u", "+%Y-%m-%dT%H:%M:%S+00:00"], check=True)
+        since = datetime.fromisoformat(c_now.stdout.strip()) - timedelta(seconds=2)
+        # node is guaranteed present (it's a node app); corrupt baseUrl to an int.
+        corrupt = (
+            f"const fs=require('fs');const d=JSON.parse(fs.readFileSync('{cfg}'));"
+            "d.models.providers.openai.baseUrl=12345;"
+            f"fs.writeFileSync('{cfg}',JSON.stringify(d))"
+        )
+        assert _dexec(oc, ["node", "-e", corrupt]).returncode == 0
+        time.sleep(6)  # F6: the gateway logs the reject event.
+
+        # `openclaw logs` loads config to reach the gateway, so it can't run while
+        # the config is schema-invalid — restore the valid file first. That also
+        # emits a fresh APPLIED event, so we assert only that the REJECT marker was
+        # seen (its co-occurrence with applied is expected and harmless).
+        assert _dexec(oc, ["cp", backup, cfg]).returncode == 0
+        time.sleep(6)
+        logs = _oc(oc, "logs", "--json", "--limit", "500", "--plain")
+        assert logs.returncode == 0, f"`openclaw logs` failed: {logs.stderr[-400:]}"
+        _applied, rejected = _classify_reload_lines(logs.stdout.splitlines(), since)
+        tail = logs.stdout[-1100:]
+        assert rejected, (
+            "The pinned OpenClaw image did not emit the reject marker the production "
+            "classifier matches (lock.py _RELOAD_REJECTED_MARKER). "
+            "_confirm_openclaw_reload would return 'skipped' instead of 'fail' on a "
+            "rejected config, so lock would print [OK]+advisory (exit 0) instead of "
+            f"exit 92. Re-verify against the image and update the marker.\nlogs tail:\n{tail}"
+        )
+    finally:
+        # Belt-and-suspenders: ensure the valid config is in place for siblings.
+        _dexec(oc, ["cp", backup, cfg])
+        time.sleep(2)
+
+
+def test_proxy_is_load_bearing_after_lock(loaded_stack):
+    """Kill the proxy → OpenClaw cannot reach upstream; restart → it can."""
+    oc = loaded_stack["oc"]
+    proxy = loaded_stack["proxy"]
+    mock_port = loaded_stack["mock_port"]
+    fake_key = loaded_stack["fake_key"]
+    shard_a = loaded_stack["shard_a"]
+
+    # 1. Baseline — proxy up: the chat SUCCEEDS and reaches the mock with the REAL key.
+    _clear(mock_port)
+    base_turn = _route(oc)
+    assert base_turn.returncode == 0, (
+        f"baseline agent turn did not succeed (rc={base_turn.returncode}); the kill-step proof is "
+        f"only meaningful if the agent works when the proxy is up.\n{base_turn.stderr[-600:]}"
     )
+    base = _captured(mock_port)
+    assert len(base) >= 1, "baseline chat did not reach the mock upstream through the proxy"
+    auths = " ".join(e.get("authorization", "") for e in base)
+    assert fake_key in auths, "proxy did not reconstruct the real key to upstream"
+    assert shard_a not in auths, "shard-A leaked to upstream — reconstruction is broken"
+
+    # 2. THE PROOF — stop the proxy: the next chat FAILS at the proxy hop AND reaches nothing.
+    # rc != 0 proves the agent actually TRIED and couldn't reach upstream, not that it no-op'd.
+    _run(["docker", "stop", proxy], check=True, timeout=60)
+    _clear(mock_port)
+    down_turn = _route(oc)
+    assert down_turn.returncode != 0, (
+        "agent turn SUCCEEDED with the Worthless proxy stopped — proxy is NOT load-bearing "
+        "(WOR-514 bypass reborn)."
+    )
+    assert _captured(mock_port) == [], (
+        "OpenClaw reached upstream with the Worthless proxy STOPPED — "
+        "the proxy is NOT load-bearing (WOR-514 bypass reborn)."
+    )
+
+    # 3. Restart the proxy: the chat SUCCEEDS again (rules out an unrelated agent failure).
+    _run(["docker", "start", proxy], check=True, timeout=60)
+    assert wait_healthy(proxy, timeout=120), "proxy did not recover after restart"
+    _clear(mock_port)
+    back_turn = _route(oc)
+    assert back_turn.returncode == 0, f"agent turn failed after restart: {back_turn.stderr[-400:]}"
+    assert len(_captured(mock_port)) >= 1, "proxy did not resume routing after restart"
+
+
+def test_verify_reports_live_routing(loaded_stack):
+    """WOR-517 CI anchor — ``worthless verify`` against a REAL proxy + locked DB.
+
+    This is the proof a unit mock cannot give: that verify's live loopback
+    bind-probe actually ticks through the running Worthless proxy. verify is
+    co-resident with the proxy by design (the ``/_bind_probe`` endpoint is
+    loopback-only), so it runs INSIDE the proxy container — the container
+    analogue of a user running ``worthless verify`` on the host where the
+    proxy also listens on localhost.
+
+    * GREEN: verify against the live proxy → verdict ``green`` and the alias
+      reports ``routed`` — earned by a fresh delta THIS call, not a counter.
+    * RED: same real install pointed at a dead port (fresh empty home so no
+      pidfile shadows the probe) → verdict ``red`` / ``proxy_down``, exit 73.
+      Proves the down-signal in the real container without stopping the shared
+      module-scoped proxy (the load-bearing test above owns the stop/start).
+    """
+    proxy = loaded_stack["proxy"]
+
+    green = _dexec(proxy, ["worthless", "verify", "--json"], timeout=60)
+    assert green.returncode == 0, f"verify was not GREEN against the live proxy:\n{green.stderr}"
+    payload = json.loads(green.stdout)
+    assert payload["verdict"] == "green", payload
+    assert payload["healthy"] is True, payload
+    assert payload["aliases"], "verify GREEN but named no locked alias"
+    assert all(a["routed"] for a in payload["aliases"]), payload
+
+    red = _dexec(
+        proxy,
+        ["sh", "-c", "WORTHLESS_HOME=/tmp/wv-empty WORTHLESS_PORT=9 worthless verify --json"],
+        timeout=60,
+    )
+    assert red.returncode == 73, (
+        f"verify exit was {red.returncode}, expected 73 (RED):\n{red.stderr}"
+    )
+    down = json.loads(red.stdout)
+    assert down["verdict"] == "red", down
+    assert down["healthy"] is False, down
+    assert down["reason"] == "proxy_down", down
+
+
+# --------------------------------------------------------------------------- #
+# WOR-791 — a stolen .env replayed AFTER rotation is refused at the proxy door
+# by the decoy tripwire, end-to-end through a real OpenClaw agent. Automated
+# form of the manual GUI proof in ./evidence/: lock a key, retire it (unlock),
+# re-lock so the alias is live again, point OpenClaw at the now-RETIRED shard-A,
+# and drive a real agent turn. The turn must fail AND the proxy must log the
+# decoy hit — proving it was the tripwire, not the commitment-mismatch backstop
+# (both return the same uniform 401 by design, so the log is the only tell).
+# --------------------------------------------------------------------------- #
+@pytest.fixture(scope="module")
+def retired_replay_stack():
+    project = f"wor791-{uuid.uuid4().hex[:8]}"
+    network = f"{project}_openclaw-net"
+    oc = f"{project}-openclaw-driver"
+    proxy = f"{project}-worthless-proxy-1"
+    fake_key = fake_openai_key()
+    alias = _make_alias("openai", fake_key)
+
+    try:
+        _run(
+            ["docker", "compose", "-f", str(COMPOSE_FILE), "-p", project, "up", "-d", "--build"],
+            check=True,
+            timeout=300,
+        )
+        if not wait_healthy(proxy, timeout=120):
+            pytest.fail(f"worthless-proxy not healthy.\n{_run(['docker', 'logs', proxy]).stdout}")
+
+        # Register a (never-reached) upstream, then lock — shard-A to .env.
+        # All setup calls are timed (_dexec) so a hung lock can't stall the module.
+        _dexec(
+            proxy,
+            [
+                "worthless",
+                "providers",
+                "register",
+                "--name",
+                "openai-mock",
+                "--url",
+                "http://mock-upstream:9999/openai/v1",
+                "--protocol",
+                "openai",
+            ],
+            timeout=60,
+        )
+        env = (
+            "OPENAI_API_KEY=" + fake_key + "\nOPENAI_BASE_URL=http://mock-upstream:9999/openai/v1\n"
+        )
+        _dexec(proxy, ["sh", "-c", f"cat > /tmp/.env << 'EOF'\n{env}\nEOF"], timeout=30)  # noqa: S108
+        lock = _dexec(proxy, ["worthless", "lock", "--env", "/tmp/.env"], timeout=120)  # noqa: S108
+        assert lock.returncode == 0, f"lock failed: {lock.stderr}"
+        shard_a = _dexec(
+            proxy, ["sh", "-c", "grep '^OPENAI_API_KEY=' /tmp/.env | cut -d= -f2-"], timeout=30
+        ).stdout.strip()
+        assert shard_a and shard_a != fake_key, "lock did not replace the key with shard-A"
+
+        # Boot OpenClaw; wire its provider to the proxy alias with this shard-A.
+        _run(
+            [
+                "docker",
+                "run",
+                "-d",
+                "--name",
+                oc,
+                "--network",
+                network,
+                "-e",
+                "OPENCLAW_ACCEPT_TERMS=yes",
+                "--user",
+                "node",
+                OPENCLAW_IMAGE,
+            ],
+            check=True,
+        )
+        _wait_oc(oc)
+        prov = {
+            "baseUrl": f"http://worthless-proxy:8787/{alias}/v1",
+            "api": "openai-completions",
+            "models": [],
+        }
+        _oc(oc, "config", "set", "models.providers.openai", json.dumps(prov), "--strict-json")
+        _oc(oc, "config", "set", "models.providers.openai.apiKey", shard_a)
+        _oc(oc, "config", "set", "agents.defaults.model.primary", _MODEL)
+
+        # ROTATE: unlock retires this shard-A; re-lock makes the alias live again
+        # with a fresh shard-A. OpenClaw still holds the OLD (retired) one — the
+        # stolen-old-.env replay an attacker would attempt.
+        unlocked = _dexec(proxy, ["worthless", "unlock", "--env", "/tmp/.env"], timeout=120)  # noqa: S108
+        assert unlocked.returncode == 0, f"unlock failed: {unlocked.stderr}"
+        relocked = _dexec(proxy, ["worthless", "lock", "--env", "/tmp/.env"], timeout=120)  # noqa: S108
+        assert relocked.returncode == 0, f"re-lock failed: {relocked.stderr}"
+        # Prove the rotation actually moved the secret: the freshly-locked shard-A
+        # must DIFFER from the retired one OpenClaw still holds. Otherwise a
+        # same-split regeneration bug would make the decoy reject the *live* key
+        # and this test would celebrate that catastrophe as a pass.
+        new_shard_a = _dexec(
+            proxy, ["sh", "-c", "grep '^OPENAI_API_KEY=' /tmp/.env | cut -d= -f2-"], timeout=30
+        ).stdout.strip()
+        assert new_shard_a and new_shard_a != shard_a, (
+            "re-lock did not rotate shard-A — the retired token is still the live key"
+        )
+
+        # Restart the proxy so it preloads the now-populated retired_decoys set
+        # (also exercises the startup-preload path), and OpenClaw to drop caches.
+        _run(["docker", "restart", proxy], check=True, timeout=60)
+        assert wait_healthy(proxy, timeout=120), "proxy did not recover after restart"
+        _run(["docker", "restart", oc], check=True, timeout=60)
+        _wait_oc(oc)
+
+        yield {"oc": oc, "proxy": proxy, "alias": alias, "shard_a": shard_a}
+    finally:
+        # Nest so the compose teardown runs even if driver removal raises
+        # (e.g. timeout) — otherwise the stack leaks in CI.
+        try:
+            _run(["docker", "rm", "-f", oc], timeout=60)
+        finally:
+            _run(
+                [
+                    "docker",
+                    "compose",
+                    "-f",
+                    str(COMPOSE_FILE),
+                    "-p",
+                    project,
+                    "down",
+                    "-v",
+                    "--remove-orphans",
+                ],
+                timeout=90,
+            )
+
+
+def test_replayed_retired_shard_a_refused_by_decoy(retired_replay_stack):
+    """A real OpenClaw agent replaying a RETIRED shard-A is refused at the proxy
+    door, and the proxy logs the decoy hit (WOR-791).
+
+    The agent turn must fail (the stolen key never reconstructs) AND the proxy
+    must log ``decoy bearer token detected`` — proving the *tripwire* fired
+    before reconstruction, not the commitment-mismatch backstop. Both return the
+    same uniform 401 by design (anti-enumeration), so the log line is the only
+    discriminator. This is the CI form of the manual GUI proof in ./evidence/.
+    """
+    oc = retired_replay_stack["oc"]
+    proxy = retired_replay_stack["proxy"]
+    alias = retired_replay_stack["alias"]
+
+    # Baseline the proxy log so we assert only on what THIS agent turn produces,
+    # not on decoy hits from any earlier traffic in the container's history.
+    before = _run(["docker", "logs", proxy])
+
+    turn = _route(oc)
+    assert turn.returncode != 0, (
+        "agent turn SUCCEEDED while presenting a RETIRED shard-A — the decoy "
+        f"tripwire failed to refuse the replay.\n{turn.stdout[-400:]}"
+    )
+
+    after = _run(["docker", "logs", proxy])
+    delta = after.stdout[len(before.stdout) :] + after.stderr[len(before.stderr) :]
+    # Assert the decoy line and THIS alias co-occur on the same log record — a
+    # bare "decoy fired somewhere" + "alias appears somewhere" pair would pass
+    # even if the tripwire fired for a different alias. The proxy emits both in
+    # one statement: `decoy bearer token detected for alias '<alias>'`.
+    assert f"decoy bearer token detected for alias '{alias}'" in delta, (
+        "proxy did NOT log a decoy detection for THIS alias's replayed retired "
+        f"shard-A — the 401 may be the commitment backstop, not the tripwire.\n{delta[-800:]}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# WOR-650 — a config produced by REAL ``worthless lock --adopt`` of an
+# UNRECOGNIZED proxy entry must not just be schema-valid (proven in
+# test_adopt_recognition_docker.py) but actually ROUTE. We seed a foreign
+# proxy-shaped entry in the proxy container's own ~/.openclaw, run the real
+# adopt flow (with WORTHLESS_PROXY_HOST so the rewritten baseUrl is reachable
+# across the docker network), copy the ADOPTED config into a real OpenClaw
+# container, and drive a real agent turn — asserting the mock upstream sees the
+# reconstructed real key. "Same code so it routes" proven, not assumed.
+# --------------------------------------------------------------------------- #
+@pytest.fixture(scope="module")
+def adopted_stack():
+    project = f"wor650-{uuid.uuid4().hex[:8]}"
+    network = f"{project}_openclaw-net"
+    oc = f"{project}-openclaw-driver"
+    proxy = f"{project}-worthless-proxy-1"
+    mock = f"{project}-mock-upstream-1"
+    fake_key = fake_openai_key()
+    foreign = {
+        "gateway": {"port": 18789},
+        "agents": {"defaults": {"model": {"primary": _MODEL}}},
+        "models": {
+            "providers": {
+                "openai": {
+                    # proxy-shaped (same host:port lock will resolve) but an
+                    # alias this machine never created → unrecognized → adopted.
+                    "baseUrl": "http://proxy:8787/openai-foreign-xyz/v1",
+                    "apiKey": "sk-foreign-not-ours",
+                    "api": "openai-completions",
+                    "models": [{"id": "gpt-4o", "name": "gpt-4o"}],
+                }
+            }
+        },
+    }
+    try:
+        _run(
+            ["docker", "compose", "-f", str(COMPOSE_FILE), "-p", project, "up", "-d", "--build"],
+            check=True,
+            timeout=300,
+        )
+        if not wait_healthy(proxy, timeout=120):
+            pytest.fail(
+                f"worthless-proxy did not become healthy.\n{_run(['docker', 'logs', proxy]).stdout}"
+            )
+        mock_port = _host_port(mock, 9999)
+
+        reg = docker_exec(
+            proxy,
+            [
+                "worthless",
+                "providers",
+                "register",
+                "--name",
+                "openai-mock",
+                "--url",
+                "http://mock-upstream:9999/openai/v1",
+                "--protocol",
+                "openai",
+            ],
+        )
+        assert reg.returncode == 0, f"register failed: {reg.stderr}"
+        env = (
+            "OPENAI_API_KEY=" + fake_key + "\nOPENAI_BASE_URL=http://mock-upstream:9999/openai/v1\n"
+        )
+        assert (
+            docker_exec(proxy, ["sh", "-c", f"cat > /tmp/.env << 'EOF'\n{env}\nEOF"]).returncode
+            == 0
+        )  # noqa: S108
+
+        # Seed the UNRECOGNIZED entry in the proxy container's own ~/.openclaw
+        # so lock's integration detects + adopts it.
+        phome = docker_exec(proxy, ["sh", "-c", "echo $HOME"]).stdout.strip()
+        pcfg = f"{phome}/.openclaw/openclaw.json"
+        seed = json.dumps(foreign)
+        assert docker_exec(proxy, ["sh", "-c", f'mkdir -p "{phome}/.openclaw"']).returncode == 0
+        assert (
+            docker_exec(proxy, ["sh", "-c", f"cat > {pcfg} << 'EOF'\n{seed}\nEOF"]).returncode == 0
+        )
+
+        # The real adopt flow. WORTHLESS_PROXY_HOST makes the rewritten baseUrl
+        # the docker-network service name, reachable from the OpenClaw container.
+        lock = _run(
+            [
+                "docker",
+                "exec",
+                "-e",
+                "WORTHLESS_PROXY_HOST=proxy",
+                proxy,
+                "worthless",
+                "lock",
+                "--adopt",
+                "--env",
+                "/tmp/.env",  # noqa: S108
+            ],
+            timeout=180,
+        )
+        # set_provider writes BEFORE bind-confirmation, so the config is
+        # rewritten regardless of the bind verdict — assert on the rewrite.
+        adopted = docker_exec(proxy, ["sh", "-c", f"cat {pcfg}"]).stdout
+        entry = json.loads(adopted)["models"]["providers"]["openai"]
+        assert "foreign" not in entry["baseUrl"], (
+            f"lock --adopt did not rewrite the foreign entry (lock rc={lock.returncode}):\n"
+            f"{entry['baseUrl']}\n{lock.stdout}\n{lock.stderr}"
+        )
+        assert "proxy:8787" in entry["baseUrl"]
+        shard_a = entry["apiKey"]
+        assert shard_a and shard_a != fake_key, "adopted entry doesn't carry shard-A"
+
+        # Boot a real OpenClaw container (its own onboarded config — gateway,
+        # agent state) and transplant the *adopted provider entry* onto it via
+        # `config set`, exactly as loaded_stack does. Overwriting the whole
+        # config file instead clobbers the container's gateway and the agent
+        # falls back to embedded + hangs — so we apply only what lock produced.
+        prov = {k: v for k, v in entry.items() if k != "apiKey"}  # baseUrl, api, models
+        _run(
+            [
+                "docker",
+                "run",
+                "-d",
+                "--name",
+                oc,
+                "--network",
+                network,
+                "-e",
+                "OPENCLAW_ACCEPT_TERMS=yes",
+                "--user",
+                "node",
+                OPENCLAW_IMAGE,
+            ],
+            check=True,
+        )
+        _wait_oc(oc)
+        assert (
+            _oc(
+                oc, "config", "set", "models.providers.openai", json.dumps(prov), "--strict-json"
+            ).returncode
+            == 0
+        )
+        assert _oc(oc, "config", "set", "models.providers.openai.apiKey", shard_a).returncode == 0
+        assert _oc(oc, "config", "set", "agents.defaults.model.primary", _MODEL).returncode == 0
+        _run(["docker", "restart", oc], check=True)
+        _wait_oc(oc)
+
+        yield {"oc": oc, "mock_port": mock_port, "fake_key": fake_key, "shard_a": shard_a}
+    finally:
+        _run(["docker", "rm", "-f", oc], timeout=60)
+        _run(
+            [
+                "docker",
+                "compose",
+                "-f",
+                str(COMPOSE_FILE),
+                "-p",
+                project,
+                "down",
+                "-v",
+                "--remove-orphans",
+            ],
+            timeout=90,
+        )
+
+
+def test_adopted_config_routes_through_proxy(adopted_stack):
+    """A real ``lock --adopt`` of an unrecognized entry produces a config that
+    actually routes a real OpenClaw agent turn through the proxy, with the key
+    reconstructed upstream (the load-bearing proof, on the adopt path)."""
+    oc = adopted_stack["oc"]
+    mock_port = adopted_stack["mock_port"]
+    fake_key = adopted_stack["fake_key"]
+    shard_a = adopted_stack["shard_a"]
+
+    _clear(mock_port)
+    turn = _route(oc)
+    assert turn.returncode == 0, f"agent turn on the adopted config failed:\n{turn.stderr[-600:]}"
+    cap = _captured(mock_port)
+    assert len(cap) >= 1, "the ADOPTED config did not route to upstream through the proxy"
+    auths = " ".join(e.get("authorization", "") for e in cap)
+    assert fake_key in auths, "proxy did not reconstruct the real key from the ADOPTED config"
+    assert shard_a not in auths, "shard-A leaked upstream from the adopted config"

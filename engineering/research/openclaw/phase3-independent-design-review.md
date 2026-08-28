@@ -1,8 +1,8 @@
 # Independent Design Review — Worthless Phase 3 (OpenClaw proxy load-bearing)
 
-**Reviewer role:** Security architect + skeptic (independent)  
-**OpenClaw version verified:** `ghcr.io/openclaw/openclaw:2026.5.3-1`  
-**Date:** 2026-06-01  
+**Reviewer role:** Security architect + skeptic (independent)
+**OpenClaw version verified:** `ghcr.io/openclaw/openclaw:2026.5.3-1`
+**Date:** 2026-06-01
 **Method:** Re-ran Docker probes in-repo, extracted `/app` from image, read bundled docs + `dist/models-config-CP8molHq.js`, `dist/zod-schema.core-CUAOqerC.js`.
 
 ---

@@ -1,9 +1,9 @@
 ---
-title: "Install — Docker"
+title: "Docker — your app in a container"
 description: "When your app runs in a container — how the host CLI, Docker image, and host.docker.internal fit together."
 ---
 
-# Install with Docker
+# Docker — your app in a container
 
 The Docker image is a worthless **server** — not the CLI. The CLI is
 always installed natively on your host. The scenarios below spell out
@@ -122,7 +122,7 @@ add the worthless server as a service:
 # docker-compose.yml
 services:
   worthless:
-    image: ghcr.io/shacharm2/worthless-proxy:0.3.3
+    image: ghcr.io/oblangatas/worthless-proxy:0.3.12
     ports:
       - "8787:8787"   # host:container — exposes for CLI lock-from-host
     environment:
@@ -172,13 +172,13 @@ worthless
 Run a shared worthless instance behind a TLS-terminating reverse proxy.
 Today this works as **single-tenant** (one shared enrollment table for
 the team) — multi-dev key isolation with per-user auth between CLI and
-remote proxy is not in v0.3.3.
+remote proxy is not in v0.3.8.
 
 ```yaml
 # docker-compose.yml on the team server box
 services:
   worthless:
-    image: ghcr.io/shacharm2/worthless-proxy:0.3.3
+    image: ghcr.io/oblangatas/worthless-proxy:0.3.12
     ports:
       - "8787:8787"
     environment:
@@ -214,24 +214,29 @@ services:
   or mounts the host filesystem, attacker-with-container = attacker-
   with-host = full read of `~/.worthless/`.
 - Compose secret leakage via env_file. `.env` mounted into the
-  container is readable by anything in the container. shard A is
-  decoy — but if your container is compromised, attacker has shard A
-  and the proxy URL. They still can't reconstruct without server-side
-  shard B + cap gate, but the audit log shows the request flow.
+  container is readable by anything in the container. Shard A alone
+  is cryptographically inert — but if your container is compromised,
+  attacker has shard A and the proxy URL. They still can't reconstruct
+  without server-side shard B + cap gate, and requests are bounded by
+  your spend cap. This is the *active* key, so the [retired-key
+  tripwire](/security/#retired-key-tripwire-decoy) does not fire on it —
+  re-lock (`worthless lock`) to retire the exposed shard-A and catch
+  any further replay.
 - Image supply chain. Use the cosign-signed image (regex must match
   the publish workflow's Fulcio SAN exactly — workflow path is the
   `LOAD-BEARING` filename `publish-docker.yml`):
   ```bash
-  cosign verify ghcr.io/shacharm2/worthless-proxy:0.3.3 \
-    --certificate-identity-regexp 'https://github.com/shacharm2/worthless/\.github/workflows/publish-docker\.yml@refs/tags/v.*' \
+  cosign verify ghcr.io/oblangatas/worthless-proxy:0.3.12 \
+    --certificate-identity-regexp 'https://github.com/oblangatas/worthless/\.github/workflows/publish-docker\.yml@refs/tags/v.*' \
     --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
   ```
-- `env_file: .env` puts the decoy + proxy URL into the container's
+- `env_file: .env` puts shard A + proxy URL into the container's
   process env, visible to anyone in the host's `docker` group via
-  `docker inspect <container>`. The decoy is harmless; the URL leak is
-  fine for `127.0.0.1` and minor for `host.docker.internal`. For
-  Scenario C team-server URLs, this matters — restrict `docker` group
-  access on shared hosts.
+  `docker inspect <container>`. Shard A alone is cryptographically
+  harmless (it's the active key — re-lock to retire it if this
+  concerns you, see above); the URL leak is fine for `127.0.0.1` and
+  minor for `host.docker.internal`. For Scenario C team-server URLs,
+  this matters — restrict `docker` group access on shared hosts.
 
 ## Why this is more complicated than mac/linux/wsl
 

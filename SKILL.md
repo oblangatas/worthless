@@ -29,7 +29,7 @@ metadata:
 Worthless protects API keys in three scenarios:
 
 1. **Local Development**: `worthless wrap` starts an ephemeral proxy and runs your command through it. Lock has already rewritten `*_BASE_URL` in your `.env` to point at the proxy, so your SDK picks it up via dotenv. The proxy reconstructs the real key only when the request passes the rules engine, then cleans up on exit.
-2. **Daemon Mode**: `worthless up` starts a persistent local proxy on port 8787 (configurable) that stays running and protects all enrolled keys.
+2. **Daemon Mode**: `worthless up` starts a persistent local proxy on port 8787 (configurable) that stays running and protects all enrolled keys. On macOS/Linux, `worthless service install` registers the same foreground `worthless up` path with launchd or systemd so it survives logout/reboot.
 3. **CI/CD & Sidecar**: The proxy is designed to run as a sidecar container or process, protecting keys across environments with per-key spending limits and time-window gates.
 
 ### Scope (important for agents)
@@ -40,16 +40,65 @@ Worthless scans for **LLM provider API key prefixes only** — currently `openai
 
 ## Installation & Setup
 
+### For AI agents — zero-Python install (recommended)
+
+Worthless is a Python package, but AI editors discover MCP servers via a JSON
+config — they speak npm, not Python. `.mcp.json` is the **Claude Code** path
+(verified); Cursor uses `~/.cursor/mcp.json` (also verified — shows all 4
+worthless MCP tools); Windsurf uses its own config path and is
+unverified. The `worthless-mcp`
+npm package bridges this gap: it is a thin Node.js shim with no npm dependencies
+that handles the entire Python bootstrap invisibly. To the editor, Worthless looks
+identical to every other npm-managed MCP server it already knows how to start.
+
+**Why this path exists:** Without it, onboarding requires explaining Python, uv,
+uvx, and the `[mcp]` extra — four prerequisites before the first tool call. The
+npm wrapper collapses the install to four lines of JSON and a restart. No Python
+knowledge required at any point.
+
+**What `worthless-mcp` does at runtime:**
+1. Finds `uv` on PATH, or downloads and installs it silently (one-time, ~5 s).
+2. Runs `uvx worthless[mcp]==<pinned-version> mcp` — `uvx` caches the Python
+   environment, so every subsequent start is instant (cache hit, < 2 s).
+3. Streams MCP protocol over stdio directly to the editor. No HTTP port, no
+   proxy, no config beyond `.mcp.json`.
+
+**Requirements:** Node ≥ 18. No Python, pip, or virtualenv needed upfront — the
+wrapper provisions everything the first time it runs.
+
+Add to your project's `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "worthless": {
+      "command": "npx",
+      "args": ["-y", "worthless-mcp"]
+    }
+  }
+}
+```
+
+Restart your editor. Cold-start install time on a fresh machine with only Node:
+**< 30 s**. After restart, all four MCP tools are available with no further steps.
+
+> **Note for agents:** Do not invoke `worthless mcp` directly in shell — that
+> requires a separate Python install. The `.mcp.json` path above handles Python
+> transparently via `uvx` and is the correct agent entry point.
+
 ### Package Info
 - **Package name**: `worthless`
-- **Version**: 0.3.7
+- **npm wrapper**: `worthless-mcp`
+- **Version**: 0.3.12
 - **Entry point**: `worthless` (CLI command)
 - **Python**: 3.10+
 - **License**: AGPL-3.0
 - **Status**: Beta
 
-### Quick Install
+### Quick Install (human CLI)
 ```bash
+curl -sSL https://worthless.sh | sh   # fresh machine — installs uv + worthless
+# or, if you already have Python 3.10+:
 pipx install worthless
 # or: pip install worthless (in a virtualenv)
 # or: curl -sSL worthless.sh | sh
@@ -127,6 +176,21 @@ Reverses the `lock` operation. Reads shard-A from `.env`, fetches encrypted Shar
 
 **Use case:** Temporary switch between `wrap`-mode and native SDK mode, or complete teardown.
 
+#### `worthless uninstall [OPTIONS]`
+**Restore every locked `.env` to its real key, undo OpenClaw, then remove Worthless.**
+
+Walks every `.env` Worthless locked on this machine, reconstructs each real key (reusing `unlock`), restores it in place, undoes the OpenClaw integration, then wipes the keychain entry and `~/.worthless`. Permissions are restored owner-only — a once-world-readable `.env` never comes back exposing the real key.
+
+**Options:**
+- `--yes` / `-y`: Skip the permission prompt (for agents / scripts); clamps loose modes to `0o600` by default.
+
+**Behavior:**
+- Restore-all-then-wipe: if ANY `.env` can't be restored, nothing is wiped (Shard B is kept for a retry)
+- Enroll-only keys (no `.env`) warn and are removed, but never block the uninstall
+- OpenClaw symmetric undo is best-effort and never blocks the wipe
+
+**Use case:** Clean, complete removal of Worthless with every project's real key handed back.
+
 #### `worthless scan [OPTIONS] [PATHS]`
 **Detect exposed API keys in files and environment.**
 
@@ -166,11 +230,28 @@ Locked keys:
 Proxy: http://127.0.0.1:8787 (running)
 ```
 
+#### `worthless verify [OPTIONS]`
+**Confirm the gateway is alive and routing a request right now.**
+
+Fires a live loopback probe through the proxy and reports a GREEN/RED verdict earned by a fresh delta this instant (not the cumulative `requests_proxied` counter, which can't say "now"). GREEN means the proxy is live and routing now — it does NOT prove OpenClaw isn't also bypassing on a cached token. RED (gateway down, or routing unproven) exits non-zero so scripts can gate on it.
+
+**Options:**
+- `--json`: emit a machine-readable verdict (`{"verdict", "healthy", "aliases", "reason"}`).
+
+**Output:**
+```
+GREEN — proxy is live and a request routed through it just now (alias: openai).
+        Note: proves the proxy is live and routing now; does NOT prove OpenClaw
+        isn't also bypassing on a cached token — see `worthless status`.
+```
+
 ### worthless doctor
 
 **Diagnose and repair stuck states across all known failure modes. WOR-464 adds a check registry + `--json` machine-readable output.**
 
 `worthless doctor` runs eight checks: `recovery_import`, `orphan_db`, `openclaw`, `icloud_keychain`, `orphan_keychain`, `stranded_shards`, `fernet_drift`, `broken_status`. Read-only by default. `--fix` enables repair for all checks EXCEPT `fernet_drift` (drift is hardcoded `fixable=False` — only the user can pick which side is canonical, never the tool).
+
+Every finding from a failing check carries a `remediation` — the exact command to fix it. `worthless doctor --explain <check_id>` prints a check's fix playbook on demand without running anything (offline, no proxy/keyring needed); an unknown id lists the valid check ids.
 
 **JSON mode:**
 
@@ -255,6 +336,29 @@ Reads the PID file (`~/.worthless/proxy.pid`), sends SIGTERM to the process grou
 - Idempotent: succeeds even if proxy is not running
 - Graceful: gives proxy time to flush logs and close connections
 - Process-tree aware: kills all child processes spawned by the proxy
+
+#### `worthless service [SUBCOMMAND]`
+**Install and manage a persistent proxy via the OS supervisor (macOS launchd / Linux systemd user unit).**
+
+Runs foreground `worthless up` (sidecar-supervised) under a platform unit — not the legacy sidecar-less daemon path. Windows is unsupported (`WRTLS-*` error). If a service is installed but stopped, bare `worthless` hints `worthless service start` instead of spawning a duplicate proxy.
+
+**Subcommands:**
+- `install`: Write unit/plist, enable linger (Linux), start, verify `/healthz`
+- `uninstall`: Stop, disable, remove unit (keys in `~/.worthless/` stay intact)
+- `status`: Install state + proxy health (`--json` for agents)
+- `start` / `stop` / `restart`: Control an installed unit
+- `logs`: Tail service logs (`--follow` / `-f`)
+
+**Examples:**
+```bash
+worthless service install              # interactive confirm
+worthless service install --yes        # non-interactive
+worthless service status --json
+worthless service start
+worthless service logs -f
+```
+
+**Interaction with default command:** Bare `worthless` starts a supervised proxy for the session; `worthless service install` is opt-in persistence (post-lock banner in a future release points here).
 
 #### `worthless revoke [OPTIONS] ALIAS`
 **Wipe an enrolled key (delete shards and all DB records).**
@@ -551,23 +655,37 @@ repos:
 
 ## Integration with AI Agents
 
-Agents (Claude Code, Cursor, OpenClaw) can invoke Worthless via:
+### Recommended: MCP server (native tool calls)
 
-1. **CLI shell commands** (primary):
-   ```bash
-   worthless status
-   worthless scan --deep
-   worthless scan --code             # detect hardcoded provider URLs before lock
-   worthless wrap pytest
-   ```
+Add to `.mcp.json` — works on any machine with Node ≥ 18, no Python required upfront:
 
-2. **MCP server** (when available):
-   ```text
-   Tool: worthless_status() -> {"keys": [...], "proxy": {...}}
-   Tool: worthless_scan(paths, deep) -> "key exposures found"
-   Tool: worthless_scan(paths, deep, code=True) -> includes code_findings
-   Tool: worthless_wrap(command, args) -> "command output"
-   ```
+```json
+{
+  "mcpServers": {
+    "worthless": {
+      "command": "npx",
+      "args": ["-y", "worthless-mcp"]
+    }
+  }
+}
+```
+
+After restart, agents get native MCP tools:
+```text
+Tool: worthless_status()            -> {"keys": [...], "proxy": {...}}
+Tool: worthless_lock(env_path)      -> {"protected_count": N}
+Tool: worthless_scan(paths, deep)   -> {"findings": [...], "summary": {...}}
+Tool: worthless_spend(alias)        -> {"spend": [...]}
+```
+
+### Alternative: CLI shell commands
+
+```bash
+worthless status
+worthless scan --deep
+worthless scan --code             # detect hardcoded provider URLs before lock
+worthless wrap pytest
+```
 
 Agents should:
 - Call `worthless status` to check if a proxy is running before issuing API calls

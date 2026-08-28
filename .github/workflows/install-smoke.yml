@@ -10,7 +10,9 @@ on:
   pull_request:
     paths:
       - "install.sh"
+      - "uninstall.sh"
       - "tests/test_install_*.py"
+      - "tests/test_uninstall_sh.py"
       - "tests/_install_helpers.py"
       - "tests/install_fixtures/**"
       - ".github/workflows/install-smoke.yml"
@@ -19,7 +21,9 @@ on:
       - main
     paths:
       - "install.sh"
+      - "uninstall.sh"
       - "tests/test_install_*.py"
+      - "tests/test_uninstall_sh.py"
       - "tests/_install_helpers.py"
       - "tests/install_fixtures/**"
       - ".github/workflows/install-smoke.yml"
@@ -38,19 +42,19 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Check out repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v6
         with:
           persist-credentials: false
 
       - name: Set up uv + Python
         uses: ./.github/actions/setup-uv-python
 
-      - name: Run install.sh static + shellcheck tests
+      - name: Run install.sh + uninstall.sh static + shellcheck tests
         env:
           UV_CACHE_DIR: /tmp/uv-cache
         run: |
           uv sync --extra test
-          uv run pytest -q tests/test_install_static.py tests/test_install_shellcheck.py tests/test_install_logic.py
+          uv run pytest -q tests/test_install_static.py tests/test_install_shellcheck.py tests/test_install_logic.py tests/test_uninstall_sh.py
 
   execute:
     name: Execute install.sh (${{ matrix.os }})
@@ -71,7 +75,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v6
         with:
           persist-credentials: false
 
@@ -117,8 +121,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p install-smoke-traces
-          # PATH-independent — uv knows where it put the binary.
-          uv run --no-project worthless --version 2>&1 | tee install-smoke-traces/verify-version-${{ runner.os }}.log
+          # Verify the SAME artifact install.sh verifies: the entry point uv
+          # installed. `uv run --no-project` was used here, but it resolves an
+          # ephemeral env that can answer from a stale cache — which is why this
+          # job could not catch worthless-dc26 (banner reported 0.3.9 while 0.3.10
+          # was installed). `uv tool dir --bin` is uv's own answer.
+          "$(uv tool dir --bin)/worthless" --version 2>&1 | tee install-smoke-traces/verify-version-${{ runner.os }}.log
           # And via uv tool list (smoke that the tool is registered).
           uv tool list 2>&1 | tee install-smoke-traces/uv-tool-list-${{ runner.os }}.log
 
@@ -147,7 +155,7 @@ jobs:
     needs: static
     steps:
       - name: Check out repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v6
         with:
           persist-credentials: false
 
@@ -204,7 +212,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p install-smoke-traces
-          uv run --no-project worthless --version 2>&1 | tee install-smoke-traces/proxy-verify.log
+          # Same reasoning as the verify step above: check the installed entry
+          # point, not an ephemeral `uv run` env (worthless-dc26).
+          "$(uv tool dir --bin)/worthless" --version 2>&1 | tee install-smoke-traces/proxy-verify.log
 
       - name: Upload proxy install terminal traces
         if: always()

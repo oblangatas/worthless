@@ -34,6 +34,18 @@ def fake_anthropic_key() -> str:
     return fake_key("sk-" + "ant-" + "api03-", seed="anthropic-fixture-seed")
 
 
+def fake_openrouter_key() -> str:
+    """A vendor whose wire protocol is ``openai`` but whose name is not.
+
+    Needed by worthless-v4n2: the gateway-lookup bug only shows when the key's
+    vendor differs from its protocol, and five bundled providers declare
+    ``protocol = "openai"``. Must be high-entropy — ``scan_env_keys`` drops
+    low-entropy values as placeholders, so a repetitive literal is silently
+    invisible to the scanner and any test built on one proves nothing.
+    """
+    return fake_key("sk-" + "or-" + "v1-", seed="openrouter-fixture-seed")
+
+
 class MockAsyncByteStream(httpx.AsyncByteStream):
     """Mock async byte stream that yields chunks one at a time."""
 

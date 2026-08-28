@@ -25,13 +25,22 @@ import pytest
 from worthless.cli.bootstrap import ensure_home
 from worthless.cli.process import check_pid, pid_path, poll_health, read_pid
 
-from tests._fakes import WOR309_SUBPROCESS_FOLLOWUP
 
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.real_ipc,
     pytest.mark.timeout(30),
-    pytest.mark.skip(reason=WOR309_SUBPROCESS_FOLLOWUP),
+    pytest.mark.skip(
+        reason=(
+            "worthless-0q7k: these drive `worthless up -d`, and daemon mode is "
+            "deliberately rejected while the sidecar is in play — up.py:706 exits "
+            "WRTLS-115 'daemon mode not yet supported with sidecar'. That refusal "
+            "is intentional and already asserted by "
+            "tests/cli/test_up_with_sidecar.py::test_up_rejects_daemon_mode_with_"
+            "clear_error, so these tests cover a mode the product no longer offers. "
+            "Re-enable when daemon mode returns; delete if it does not."
+        )
+    ),
 ]
 
 

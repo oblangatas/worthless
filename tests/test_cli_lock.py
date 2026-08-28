@@ -338,6 +338,195 @@ class TestLockFormatPreserving:
             f"OPENROUTER_BASE_URL should point at local proxy after lock; got .env: {rewritten!r}"
         )
 
+    def test_lock_captures_original_mode_before_tightening(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """WOR-715 AC-MODE-CAPTURED: lock records the .env's PRE-lock mode.
+
+        ``safe_rewrite`` tightens every locked .env to 0o600. lock must capture
+        the original 0o644 in pass-1 BEFORE that tighten, so the enrollment row
+        stores 0o644 — not the post-rewrite 0o600. This is the guard against a
+        capture placed at the wrong (post-rewrite) point, which would silently
+        record 0o600 for everyone and make uninstall restore the wrong mode.
+        """
+        from tests.helpers import fake_key
+
+        env = tmp_path / ".env"
+        env.write_text(f"OPENAI_API_KEY={fake_key('sk-')}\n")
+        env.chmod(0o644)
+        assert (env.stat().st_mode & 0o777) == 0o644  # precondition
+
+        result = runner.invoke(
+            app,
+            ["lock", "--env", str(env)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+        )
+        assert result.exit_code == 0, f"lock failed: {result.output[:400]}"
+
+        # lock DID tighten the file — proves capture-before-tighten matters.
+        assert (env.stat().st_mode & 0o777) == 0o600, (
+            f"expected lock to tighten .env to 0o600, got {env.stat().st_mode & 0o777:o}"
+        )
+
+        # The enrollment row stored the ORIGINAL 0o644, not the tightened 0o600.
+        con = sqlite3.connect(str(home_dir.db_path))
+        try:
+            rows = con.execute(
+                "SELECT original_mode FROM enrollments WHERE env_path = ?",
+                (str(env.resolve()),),
+            ).fetchall()
+        finally:
+            con.close()
+        assert rows, "no enrollment row found for the locked .env"
+        assert rows[0][0] == 0o644, (
+            f"expected original_mode 0o644 (pre-lock); got "
+            f"{oct(rows[0][0]) if rows[0][0] is not None else 'NULL'} — "
+            "capture likely happened AFTER the file was tightened to 0o600"
+        )
+
+    def test_capture_original_mode_reads_perm_bits(self, tmp_path: Path) -> None:
+        """WOR-715: _capture_original_mode returns the file's 0o777 bits."""
+        from worthless.cli.commands.lock import _capture_original_mode
+
+        f = tmp_path / ".env"
+        f.write_text("OPENAI_API_KEY=x\n")
+        f.chmod(0o640)
+        assert _capture_original_mode(str(f)) == 0o640
+
+    def test_capture_original_mode_missing_file_returns_none(self, tmp_path: Path) -> None:
+        """WOR-715: stat failure (vanished file / bad path) → None, not a crash.
+
+        This is the ``except OSError`` branch — proves lock degrades to
+        'mode unknown, leave as-is' instead of blowing up the whole command.
+        """
+        from worthless.cli.commands.lock import _capture_original_mode
+
+        missing = tmp_path / "nope" / ".env"  # parent dir doesn't exist → OSError
+        assert _capture_original_mode(str(missing)) is None
+
+    def test_lock_captures_setgid_bits_stripped_end_to_end(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """WOR-715 / Wave 4: setgid (0o2644) is stripped to 0o644 in original_mode."""
+        from tests.helpers import fake_key
+
+        env = tmp_path / ".env"
+        env.write_text(f"OPENAI_API_KEY={fake_key('sk-')}\n")
+        env.chmod(0o2644)  # setgid | rw-r--r--
+
+        result = runner.invoke(
+            app,
+            ["lock", "--env", str(env)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+        )
+        assert result.exit_code == 0, result.output[:400]
+
+        assert (env.stat().st_mode & 0o777) == 0o600, "lock must tighten .env to 0o600"
+
+        con = sqlite3.connect(str(home_dir.db_path))
+        try:
+            rows = con.execute(
+                "SELECT original_mode FROM enrollments WHERE env_path = ?",
+                (str(env.resolve()),),
+            ).fetchall()
+        finally:
+            con.close()
+        assert rows and rows[0][0] == 0o644, (
+            f"setgid must be stripped from captured mode; got {rows[0][0]!r}"
+        )
+
+    def test_lock_persists_null_original_mode_when_stat_unavailable(
+        self, home_dir: WorthlessHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """WOR-715 / Wave 4: OSError during capture → NULL original_mode in DB."""
+        from tests.helpers import fake_key
+
+        env = tmp_path / ".env"
+        env.write_text(f"OPENAI_API_KEY={fake_key('sk-')}\n")
+        env.chmod(0o644)
+
+        monkeypatch.setattr(
+            "worthless.cli.commands.lock._capture_original_mode",
+            lambda _path: None,
+        )
+
+        result = runner.invoke(
+            app,
+            ["lock", "--env", str(env)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+        )
+        assert result.exit_code == 0, result.output[:400]
+
+        con = sqlite3.connect(str(home_dir.db_path))
+        try:
+            rows = con.execute(
+                "SELECT original_mode FROM enrollments WHERE env_path = ?",
+                (str(env.resolve()),),
+            ).fetchall()
+        finally:
+            con.close()
+        assert rows, "expected enrollment row"
+        assert rows[0][0] is None, "stat failure must persist NULL original_mode"
+
+    def test_lock_openrouter_key_without_base_url_routes_to_openrouter(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """An OpenRouter key with NO explicit ``*_BASE_URL`` must store the
+        OpenRouter upstream URL in the DB — not fall back to OpenAI's URL.
+
+        Live-container bug (PR #276 thermo-nuclear review): the upstream URL
+        for the DB row was resolved from the WIRE PROTOCOL (``openai``, because
+        OpenRouter speaks the OpenAI dialect) instead of the REGISTRY NAME
+        (``openrouter``). ``_resolve_upstream_base_url`` was called with the
+        protocol-collapsed ``provider`` value, so its
+        ``lookup_by_name("openai")`` fallback returned
+        ``https://api.openai.com/v1``. The proxy then forwarded the
+        reconstructed OpenRouter key to OpenAI → HTTP 401, chat dead.
+
+        The two existing OpenRouter tests both set ``OPENROUTER_BASE_URL``
+        explicitly, so they take the user-value path and never exercise this
+        fallback. This test omits ``*_BASE_URL`` on purpose to hit it.
+
+        Contract: ``provider`` column stays ``openai`` (wire protocol, for
+        adapter dispatch) while ``base_url`` is OpenRouter's upstream.
+        """
+        from worthless.storage.repository import ShardRepository
+
+        or_key = fake_key("sk-" + "or-v1-")
+
+        env = tmp_path / ".env"
+        # NOTE: deliberately NO OPENROUTER_BASE_URL — forces the registry fallback.
+        env.write_text(f"OPENROUTER_API_KEY={or_key}\n")
+
+        result = runner.invoke(
+            app,
+            ["lock", "--env", str(env)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+        )
+        assert result.exit_code == 0, result.output
+
+        async def _check():
+            repo = ShardRepository(str(home_dir.db_path), home_dir.fernet_key)
+            await repo.initialize()
+            aliases = await repo.list_keys()
+            assert len(aliases) == 1, f"expected 1 enrollment, got: {aliases}"
+            enc = await repo.fetch_encrypted(aliases[0])
+            return enc.base_url, enc.provider, aliases[0]
+
+        base_url_in_db, provider_in_db, alias = asyncio.run(_check())
+
+        assert base_url_in_db == "https://openrouter.ai/api/v1", (
+            f"OpenRouter key routed to the wrong upstream: {base_url_in_db!r}. "
+            "Expected openrouter.ai — the proxy would 401 against api.openai.com."
+        )
+        # Wire protocol stays openai (OpenRouter speaks the OpenAI dialect) so
+        # the proxy adapter formats requests correctly and the alias namespace
+        # stays stable across re-locks.
+        assert provider_in_db == "openai", (
+            f"provider column should stay 'openai' (wire protocol), got: {provider_in_db!r}"
+        )
+        assert alias.startswith("openai-")
+
     def test_lock_warns_on_non_canonical_var_name(
         self, home_dir: WorthlessHome, tmp_path: Path
     ) -> None:
@@ -847,14 +1036,17 @@ class TestLockCommand:
         # Capture env_b pre-content (exactly the snapshot we expect restored).
         original_content = env_b.read_text()
 
-        # Sabotage enrollment (step 3) so step 1 (key) and step 2 (BASE_URL)
-        # are already on disk when the failure fires.
+        # Sabotage the atomic Pass-1 write (WOR-646 Part 2 folded the shard +
+        # enrollment into one transaction): the re-lock fails before `.env` is
+        # rewritten, so the compensating unwind must leave env_b byte-identical.
         from worthless.storage import repository as repo_mod
 
         async def _boom_on_enrollment(self, *args, **kwargs):
-            raise RuntimeError("db write failed after BASE_URL was persisted")
+            raise RuntimeError("db write failed during atomic Pass-1")
 
-        monkeypatch.setattr(repo_mod.ShardRepository, "add_enrollment", _boom_on_enrollment)
+        monkeypatch.setattr(
+            repo_mod.ShardRepository, "upsert_locked_shard_and_enroll", _boom_on_enrollment
+        )
 
         r2 = runner.invoke(app, ["lock", "--env", str(env_b)], env=env_vars)
         assert r2.exit_code == 1, r2.output
@@ -1020,13 +1212,13 @@ class TestLockErrorBranches:
     def test_lock_db_write_failure_exits_clean(
         self, home_dir: WorthlessHome, env_file: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """sqlite3.DatabaseError during store_enrolled -> exit_code=1 with WRTLS."""
+        """sqlite3.DatabaseError during the atomic Pass-1 write -> exit_code=1 with WRTLS."""
 
         async def _boom(self, *args, **kwargs):
             raise sqlite3.DatabaseError("disk I/O error")
 
         monkeypatch.setattr(
-            "worthless.storage.repository.ShardRepository.store_enrolled",
+            "worthless.storage.repository.ShardRepository.upsert_locked_shard_and_enroll",
             _boom,
         )
 
@@ -1144,6 +1336,34 @@ class TestLockChmodEnvFile:
         assert not (mode & stat.S_IRWXG), "Group permissions should be removed"
         assert not (mode & stat.S_IRWXO), "Other permissions should be removed"
 
+    def test_lock_restricts_env_permissions_with_only_an_oauth_token(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """WOR-837 regression: an OAuth-only .env must still be tightened.
+
+        A Claude Code OAuth token is skipped rather than sharded, so lock
+        freshly enrolls zero keys. The file nonetheless still holds a live
+        plaintext credential, so it must not be left group/other readable —
+        the hardening cannot be gated on how many keys were locked.
+        """
+        import stat
+
+        env = tmp_path / ".env"
+        env.write_text(f"ANTHROPIC_API_KEY={fake_key('sk-ant-oat01-', 'wor837-perms')}\n")
+        env.chmod(0o644)  # world-readable initially
+        assert (env.stat().st_mode & 0o777) == 0o644  # precondition
+
+        result = runner.invoke(
+            app,
+            ["lock", "--env", str(env)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+        )
+        assert result.exit_code == 0, result.output
+
+        mode = env.stat().st_mode
+        assert not (mode & stat.S_IRWXG), f"OAuth-only .env left group-readable: {mode & 0o777:o}"
+        assert not (mode & stat.S_IRWXO), f"OAuth-only .env left world-readable: {mode & 0o777:o}"
+
     def test_lock_keeps_perms_if_already_strict(
         self, home_dir: WorthlessHome, tmp_path: Path
     ) -> None:
@@ -1246,6 +1466,59 @@ class TestPrintHint:
 class TestEnrollCommand:
     """Tests for `worthless enroll`."""
 
+    def test_enroll_key_flag_rejected(self, home_dir: WorthlessHome) -> None:
+        """WOR-277: no CLI flag may accept a raw key value.
+
+        ``--key`` would land the real key in shell history forever —
+        ``enroll`` must refuse it outright and point at ``--key-stdin``,
+        never silently accept the value.
+        """
+        key = fake_openai_key()
+        result = runner.invoke(
+            app,
+            ["enroll", "--alias", "shell-history-test", "--key", key, "--provider", "openai"],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+        )
+        assert result.exit_code != 0
+        assert "--key-stdin" in result.output
+        assert key not in result.output
+
+        # Nothing should have been enrolled — the rejection must happen
+        # before any DB write.
+        repo = _repo(home_dir)
+        aliases = asyncio.run(repo.list_keys())
+        assert "shell-history-test" not in aliases
+
+    def test_enroll_key_and_key_stdin_both_given_rejected(self, home_dir: WorthlessHome) -> None:
+        """Passing --key alongside --key-stdin must still be rejected —
+        the mere presence of a raw key value on the command line is the
+        violation, regardless of what else is passed."""
+        key = fake_openai_key()
+        result = runner.invoke(
+            app,
+            [
+                "enroll",
+                "--alias",
+                "both-flags-test",
+                "--key",
+                key,
+                "--key-stdin",
+                "--provider",
+                "openai",
+            ],
+            input=f"{key}\n",
+            env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+        )
+        assert result.exit_code != 0
+        assert "--key-stdin" in result.output
+        assert key not in result.output
+
+        # Nothing should have been enrolled — the rejection must happen
+        # before any DB write, same as the --key-only rejection path.
+        repo = _repo(home_dir)
+        aliases = asyncio.run(repo.list_keys())
+        assert "both-flags-test" not in aliases
+
     def test_enroll_explicit_args(self, home_dir: WorthlessHome) -> None:
         """Enroll with explicit alias, key, and provider."""
         result = runner.invoke(
@@ -1254,11 +1527,11 @@ class TestEnrollCommand:
                 "enroll",
                 "--alias",
                 "my-test-key",
-                "--key",
-                fake_openai_key(),
+                "--key-stdin",
                 "--provider",
                 "openai",
             ],
+            input=f"{fake_openai_key()}\n",
             env={"WORTHLESS_HOME": str(home_dir.base_dir)},
         )
         assert result.exit_code == 0, result.output
@@ -1281,11 +1554,11 @@ class TestEnrollCommand:
                 "enroll",
                 "--alias",
                 "dup-test",
-                "--key",
-                fake_openai_key(),
+                "--key-stdin",
                 "--provider",
                 "openai",
             ],
+            input=f"{fake_openai_key()}\n",
             env={"WORTHLESS_HOME": str(home_dir.base_dir)},
         )
         assert result1.exit_code == 0, result1.output
@@ -1302,11 +1575,11 @@ class TestEnrollCommand:
                 "enroll",
                 "--alias",
                 "dup-test",
-                "--key",
-                fake_openai_key(),
+                "--key-stdin",
                 "--provider",
                 "openai",
             ],
+            input=f"{fake_openai_key()}\n",
             env={"WORTHLESS_HOME": str(home_dir.base_dir)},
         )
         assert result2.exit_code != 0, (
@@ -1338,11 +1611,11 @@ class TestEnrollCommand:
                 "enroll",
                 "--alias",
                 "orphan-test",
-                "--key",
-                fake_openai_key(),
+                "--key-stdin",
                 "--provider",
                 "openai",
             ],
+            input=f"{fake_openai_key()}\n",
             env={"WORTHLESS_HOME": str(home_dir.base_dir)},
         )
         # Command should fail
@@ -1559,7 +1832,7 @@ class TestLockHardcodedBaseUrlDetection:
         (tmp_path / "app.py").write_text('client = OpenAI(base_url="https://api.openai.com/v1")\n')
         result = self._run(home_dir, self._env(tmp_path))
         assert result.exit_code != 0, "Expected lock to fail with hardcoded base_url"
-        assert "(openai)" in result.output
+        assert "OPENAI_BASE_URL" in result.output
 
     def test_fails_ts_file_hardcoded_anthropic_url(
         self, home_dir: WorthlessHome, tmp_path: Path
@@ -1570,7 +1843,7 @@ class TestLockHardcodedBaseUrlDetection:
         )
         result = self._run(home_dir, self._env(tmp_path))
         assert result.exit_code != 0
-        assert "(anthropic)" in result.output
+        assert "ANTHROPIC_BASE_URL" in result.output
 
     def test_fails_openrouter_url(self, home_dir: WorthlessHome, tmp_path: Path) -> None:
         """Lock fails when OpenRouter's base URL is hardcoded."""
@@ -1579,7 +1852,7 @@ class TestLockHardcodedBaseUrlDetection:
         )
         result = self._run(home_dir, self._env(tmp_path))
         assert result.exit_code != 0
-        assert "(openrouter)" in result.output
+        assert "OPENROUTER_BASE_URL" in result.output
 
     def test_error_includes_line_number(self, home_dir: WorthlessHome, tmp_path: Path) -> None:
         """Error output includes file:line so the user can find the bypass."""
@@ -1593,7 +1866,7 @@ class TestLockHardcodedBaseUrlDetection:
         out = result.output
         # Rich wraps long paths at terminal width — check format components separately
         assert re.search(r":\d", out), "file:line format not in error output"
-        assert "(openai)" in out
+        assert "OPENAI_BASE_URL" in out
 
     def test_scans_subdirectory(self, home_dir: WorthlessHome, tmp_path: Path) -> None:
         """Lock scans recursively — catches bypasses in nested source files."""
@@ -1602,7 +1875,7 @@ class TestLockHardcodedBaseUrlDetection:
         (nested / "openai_client.py").write_text('BASE = "https://api.openai.com/v1"\n')
         result = self._run(home_dir, self._env(tmp_path))
         assert result.exit_code != 0
-        assert "(openai)" in result.output
+        assert "OPENAI_BASE_URL" in result.output
 
     def test_skips_node_modules(self, home_dir: WorthlessHome, tmp_path: Path) -> None:
         """Lock ignores node_modules — provider SDK source isn't user code."""
@@ -1651,7 +1924,7 @@ class TestLockHardcodedBaseUrlDetection:
         )
         result = self._run(home_dir, self._env(tmp_path))
         assert result.exit_code != 0
-        assert "(openai)" in result.output
+        assert "OPENAI_BASE_URL" in result.output
 
     # ------------------------------------------------------------------
     # Additional coverage — QA gap fills
@@ -1664,7 +1937,7 @@ class TestLockHardcodedBaseUrlDetection:
         )
         result = self._run(home_dir, self._env(tmp_path))
         assert result.exit_code != 0
-        assert "(groq)" in result.output
+        assert "GROQ_BASE_URL" in result.output
 
     def test_fails_together_url(self, home_dir: WorthlessHome, tmp_path: Path) -> None:
         """Together.ai is in the bundled registry — hardcoded Together URL must block lock."""
@@ -1673,7 +1946,7 @@ class TestLockHardcodedBaseUrlDetection:
         )
         result = self._run(home_dir, self._env(tmp_path))
         assert result.exit_code != 0
-        assert "(together)" in result.output
+        assert "TOGETHER_BASE_URL" in result.output
 
     def test_no_db_enrollment_when_scan_blocks(
         self, home_dir: WorthlessHome, tmp_path: Path
@@ -1713,7 +1986,7 @@ class TestLockHardcodedBaseUrlDetection:
             },
         )
         assert result.exit_code == 0, result.output
-        assert "(openai)" in result.output
+        assert "Proceeding with --allow-hardcoded-urls" in result.output
 
     def test_url_in_python_comment_triggers_block(
         self, home_dir: WorthlessHome, tmp_path: Path
@@ -1760,8 +2033,8 @@ class TestLockHardcodedBaseUrlDetection:
         )
         result = self._run(home_dir, self._env(tmp_path))
         assert result.exit_code != 0
-        assert "(openai)" in result.output
-        assert "(anthropic)" in result.output
+        assert "OPENAI_BASE_URL" in result.output
+        assert "ANTHROPIC_BASE_URL" in result.output
 
     def test_unreadable_source_file_does_not_crash(
         self, home_dir: WorthlessHome, tmp_path: Path
@@ -1800,14 +2073,14 @@ class TestLockHardcodedBaseUrlDetection:
         result = self._run(home_dir, self._env(tmp_path))
         assert result.exit_code == 0, result.output
 
-    def test_non_interactive_error_includes_flag_hint(
+    def test_non_interactive_error_includes_fix_guidance(
         self, home_dir: WorthlessHome, tmp_path: Path
     ) -> None:
-        """Non-interactive (no TTY) error output hints the user toward --allow-hardcoded-urls."""
+        """Non-interactive (no TTY) error output tells the user how to fix and re-run."""
         (tmp_path / "app.py").write_text('client = OpenAI(base_url="https://api.openai.com/v1")\n')
         result = self._run(home_dir, self._env(tmp_path))
         assert result.exit_code != 0
-        assert "--allow-hardcoded-urls" in result.output
+        assert "re-run: worthless lock" in result.output
 
     def test_no_false_positive_on_mismatched_quotes(
         self, home_dir: WorthlessHome, tmp_path: Path
@@ -2146,7 +2419,7 @@ class TestOpenClawGateWiredIntoLock:
         effects: .env is untouched (gate-before-write, SR-03)."""
         original_env = env_file.read_text(encoding="utf-8")
 
-        def _blocking_preflight() -> None:
+        def _blocking_preflight(managed_aliases: object, proxy_base_url: object) -> None:
             raise typer.Exit(code=73)
 
         monkeypatch.setattr(
@@ -2173,7 +2446,8 @@ class TestOpenClawGateWiredIntoLock:
         sentinel = object()
         postflight = MagicMock()
         monkeypatch.setattr(
-            "worthless.cli.commands.lock._openclaw_audit_preflight", lambda: sentinel
+            "worthless.cli.commands.lock._openclaw_audit_preflight",
+            lambda managed_aliases, proxy_base_url: sentinel,
         )
         monkeypatch.setattr("worthless.cli.commands.lock._openclaw_audit_postflight", postflight)
 
@@ -2184,4 +2458,36 @@ class TestOpenClawGateWiredIntoLock:
         assert result.exit_code == 0, (
             f"lock failed with gate handle present:\n{result.stdout}\n{result.exception!r}"
         )
-        postflight.assert_called_once_with(sentinel)
+        postflight.assert_called_once()
+        assert postflight.call_args.args[0] is sentinel
+
+    def test_audit_gate_honours_non_default_port(
+        self, home_dir: WorthlessHome, env_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """BugBot (PR #387): the audit gate's proxy_base_url must be the SAME
+        single-sourced, port-aware value ``apply_lock`` actually writes into
+        openclaw.json (``_openclaw_proxy_base_url()``) — not a bare resolver
+        hardcoded to port 8787. On a non-default ``WORTHLESS_PORT``, a mismatch
+        means recognition can never match a real entry, reintroducing exit-73
+        on re-lock for every non-default-port user."""
+        captured: dict = {}
+
+        def _capture_preflight(managed_aliases: object, proxy_base_url: str) -> None:
+            captured["proxy_base_url"] = proxy_base_url
+            return None  # gate skipped (OpenClaw absent) — lock proceeds normally
+
+        monkeypatch.setattr(
+            "worthless.cli.commands.lock._openclaw_audit_preflight", _capture_preflight
+        )
+
+        result = runner.invoke(
+            app,
+            ["lock", "--env", str(env_file)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir), "WORTHLESS_PORT": "9123"},
+        )
+
+        assert result.exit_code == 0, f"{result.stdout}\n{result.exception!r}"
+        assert captured.get("proxy_base_url", "").endswith(":9123"), (
+            f"audit gate used {captured.get('proxy_base_url')!r} — expected the "
+            "port-aware :9123, not a hardcoded :8787"
+        )

@@ -544,3 +544,17 @@ class IPCSupervisor:
         # there's nothing to zero on the bytes side (immutable). The buffer
         # we return is the only mutable copy.
         return buf
+
+    async def mac(self, value: bytes | bytearray) -> bytes:
+        """Compute HMAC-SHA256 of *value* via the sidecar (WOR-640 decoy check).
+
+        The sidecar holds the MAC subkey; the proxy delegates so it never
+        touches key material. Returns raw HMAC bytes. Callers convert to hex
+        for comparison against stored decoy hashes.
+
+        Raises :class:`IPCUnavailable` on transport failure. Callers that
+        use this for the decoy check MUST catch and ignore all exceptions
+        (best-effort — IPC errors must not block legitimate requests).
+        """
+        async with self.acquire() as client:
+            return await client.mac(value)

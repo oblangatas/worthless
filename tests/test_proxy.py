@@ -186,10 +186,16 @@ class TestHealthEndpoints:
         assert isinstance(data["requests_proxied"], int)
         assert data["requests_proxied"] >= 0
 
-    async def test_healthz_count_increments_after_spend_log(
+    async def test_healthz_billed_count_reflects_spend_log(
         self, proxy_app, proxy_client: httpx.AsyncClient
     ):
-        """After inserting a spend_log row, /healthz count should reflect it."""
+        """A spend_log row moves ``requests_billed`` — the ledger's own field.
+
+        This used to assert ``requests_proxied``, conflating "billed" with
+        "proxied". They are different numbers: a request the provider rejects is
+        proxied but never billed (worthless-ax9d). The ledger count is still
+        surfaced, under the name that describes what it actually counts.
+        """
         # Insert a spend_log row directly
         db = proxy_app.state.db
         await db.execute(
@@ -200,7 +206,10 @@ class TestHealthEndpoints:
 
         resp = await proxy_client.get("/healthz")
         data = resp.json()
-        assert data["requests_proxied"] >= 1
+        assert data["requests_billed"] >= 1
+        assert data["requests_proxied"] == 0, (
+            "a bare ledger row is not a proxied request — nothing was forwarded"
+        )
 
     async def test_readyz_returns_200_when_no_keys(
         self, proxy_settings: ProxySettings, tmp_db_path, fernet_key
@@ -305,18 +314,24 @@ class TestGateBeforeReconstruct:
         alias, shard_a_utf8, _ = enrolled_alias
 
         with patch("worthless.proxy.app.reconstruct_key_fp", wraps=None) as mock_reconstruct:
+            from worthless.proxy.rules import GateResult
+
             proxy_app.state.rules_engine = type(
                 "MockEngine",
                 (),
                 {
                     "evaluate": AsyncMock(
-                        return_value=ErrorResponse(
-                            status_code=status_code,
-                            body=error_body,
-                            headers={"content-type": "application/json", **extra_headers},
+                        return_value=GateResult(
+                            denial=ErrorResponse(
+                                status_code=status_code,
+                                body=error_body,
+                                headers={"content-type": "application/json", **extra_headers},
+                            )
                         )
                     ),
                     "release_spend_reservation": AsyncMock(return_value=None),
+                    "refund_spend": AsyncMock(return_value=None),
+                    "settle_spend": AsyncMock(return_value=None),
                 },
             )()
 

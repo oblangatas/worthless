@@ -8,11 +8,14 @@ Catches stale docs before agents hit them.
 from __future__ import annotations
 
 import re
+import subprocess
+import sys
 from pathlib import Path
+from typing import Any
 
-import click.testing
 import pytest
 import typer.testing
+from typer.core import TyperGroup
 
 from worthless.cli.app import app
 
@@ -28,11 +31,11 @@ def skill_content() -> str:
 
 
 @pytest.fixture(scope="module")
-def registered_commands() -> dict[str, click.Command]:
+def registered_commands() -> dict[str, Any]:
     """Get all commands registered on the Typer app."""
-    # Typer wraps Click internally; get the Click group
+    # Typer vendors its own Click since 0.26 — assert on Typer's group type.
     cli = typer.main.get_command(app)
-    assert isinstance(cli, click.Group)
+    assert isinstance(cli, TyperGroup)
     return {name: cmd for name, cmd in cli.commands.items()}
 
 
@@ -53,8 +56,13 @@ def skill_commands(skill_content: str) -> list[str]:
             body = skill_content[end + 4 :]
 
     # Match patterns like `worthless lock`, `worthless up`, etc.
-    # Exclude things inside URLs, code comments, or variable names
-    pattern = r"(?:^|\s)`?worthless\s+([a-z][\w-]*)`?"
+    # Exclude things inside URLs, code comments, or variable names.
+    # NOTE: the gap after `worthless` is [ \t]+ (NOT \s+) on purpose — \s
+    # matches newlines, so a line-ending "worthless" would bind to the first
+    # word of the next line. That made prose like "...worthless\nappears with
+    # its 4 tools" parse "appears" as a (non-existent) command. Real command
+    # references are always written inline (`worthless lock`), same line.
+    pattern = r"(?:^|\s)`?worthless[ \t]+([a-z][\w-]*)`?"
     matches = re.findall(pattern, body)
     # Deduplicate preserving order
     seen: set[str] = set()
@@ -123,7 +131,7 @@ class TestCliCommandsDrift:
     """Every CLI command mentioned in SKILL.md must actually exist."""
 
     def test_all_skill_commands_exist(
-        self, skill_commands: list[str], registered_commands: dict[str, click.Command]
+        self, skill_commands: list[str], registered_commands: dict[str, Any]
     ) -> None:
         missing = [cmd for cmd in skill_commands if cmd not in registered_commands]
         assert not missing, (
@@ -132,7 +140,7 @@ class TestCliCommandsDrift:
         )
 
     def test_all_registered_commands_documented(
-        self, skill_commands: list[str], registered_commands: dict[str, click.Command]
+        self, skill_commands: list[str], registered_commands: dict[str, Any]
     ) -> None:
         """Every registered command should appear in SKILL.md."""
         undocumented = [cmd for cmd in registered_commands if cmd not in skill_commands]
@@ -145,7 +153,7 @@ class TestCliFlagsDrift:
     def test_documented_flags_exist(
         self,
         skill_flags: dict[str, list[str]],
-        registered_commands: dict[str, click.Command],
+        registered_commands: dict[str, Any],
     ) -> None:
         """Every flag documented in SKILL.md must exist on the real command."""
         errors: list[str] = []
@@ -156,7 +164,7 @@ class TestCliFlagsDrift:
             # Get all option names from the Click command
             real_opts: set[str] = set()
             for param in cmd.params:
-                if isinstance(param, click.Option):
+                if param.param_type_name == "option":
                     real_opts.update(param.opts)
                     real_opts.update(param.secondary_opts)
             for flag in flags:
@@ -223,4 +231,30 @@ class TestVersionDrift:
 
         assert skill_version == real_version, (
             f"SKILL.md says version {skill_version} but pyproject.toml says {real_version}"
+        )
+
+    def test_docs_image_tags_match_pyproject(self) -> None:
+        """Every pinned ``worthless-proxy:X.Y.Z`` image tag in ``docs/`` must
+        match pyproject's version.
+
+        Runs the real release-time guard (``scripts/check_docs_versions.py``)
+        as a subprocess, so this test and the ``tag-release.sh`` gate share ONE
+        source of truth — same scan, same ``ALLOWLIST`` — with nothing to drift
+        (WOR-743 / worthless-zij5). v0.3.8 shipped docs stuck at 0.3.7; this
+        pins the contract in the baseline test lane on every PR.
+        """
+        pyproject = ROOT / "pyproject.toml"
+        match = re.search(r'^version\s*=\s*"([^"]+)"', pyproject.read_text(), re.MULTILINE)
+        assert match, "Could not find version in pyproject.toml"
+        real_version = match.group(1)
+
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "check_docs_versions.py"), real_version],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, (
+            f"docs/ pins worthless-proxy image tags that don't match pyproject {real_version}:\n"
+            f"{result.stdout}{result.stderr}"
         )

@@ -1,0 +1,30 @@
+# WOR-664 (F13b) — OpenClaw + Worthless test image, installed the REAL way.
+#
+# Worthless is NOT installed via pip. The real install path is install.sh
+# (`curl worthless.sh | sh`), which bootstraps a pinned `uv` and runs
+# `uv tool install worthless`. We mirror that here — same engine (`uv`,
+# pinned to install.sh's UV_VERSION 0.11.7) — but install the LOCALLY-BUILT
+# wheel instead of the published PyPI release, so the e2e exercises THIS
+# branch (F1/F2/the new skill), not whatever is currently on PyPI.
+#
+# A literal `curl worthless.sh | sh` against the published release is a
+# separate release-time smoke test (it validates the installer, not this
+# branch) — not this image.
+#
+# Build:  uv build --wheel
+#         docker build -f tests/openclaw/Dockerfile.oc-worthless -t worthless-oc-test:local dist/
+# Test-only. Not a shipped/published image.
+FROM ghcr.io/openclaw/openclaw:2026.5.3-1
+
+# Pinned uv — the same version install.sh bootstraps (UV_VERSION=0.11.7).
+# Copied from Astral's official image (no pip, no curl-pipe at build).
+COPY --from=ghcr.io/astral-sh/uv:0.11.7 /uv /usr/local/bin/uv
+
+USER node
+# uv tool install drops console scripts in ~/.local/bin for the node user —
+# the spike confirmed a worthless bin there flips the skill to modelVisible.
+ENV PATH=/home/node/.local/bin:$PATH
+COPY --chown=node:node worthless-*.whl /tmp/
+RUN uv tool install /tmp/worthless-*.whl \
+    && rm -f /tmp/worthless-*.whl \
+    && worthless --version

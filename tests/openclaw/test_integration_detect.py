@@ -598,7 +598,8 @@ class TestResolveProxyBaseUrl:
 
         data = json.loads(cfg.read_text())
         providers = data.get("models", {}).get("providers", {})
-        assert "worthless-openai" in providers
-        base = providers["worthless-openai"]["baseUrl"]
+        # WOR-621 F1: lock rewrites the provider's ORIGINAL id (``openai``).
+        assert "openai" in providers
+        base = providers["openai"]["baseUrl"]
         assert base.startswith(sentinel), f"expected sentinel prefix, got {base!r}"
         assert result.detected is True

@@ -32,6 +32,20 @@ from pathlib import Path
 import pytest
 
 
+# This module launches ~90 child interpreters (CONC-45 spawns 50, CONC-46
+# spawns 40 across 20 iterations). Under a loaded ``-n auto`` run that can
+# blow the repo-global 30s budget, and a pytest-timeout SIGALRM is raised
+# WHEREVER the process happens to be. ``timeout_func_only`` defaults to
+# False, so the timer is armed across the whole ``pytest_runtest_protocol``
+# — including xdist's report serialize-and-send, which sits OUTSIDE every
+# ``CallInfo.from_call()`` catch. A ``Failed`` landing there means
+# ``runtest_protocol_complete`` is never sent, the master still thinks the
+# item is running, and the worker's session end trips
+# ``assert not crashitem`` (xdist ``dsession.py:217``) — killing the WHOLE
+# session, not just this test. Headroom keeps the alarm from arming here.
+pytestmark = pytest.mark.timeout(120)
+
+
 # ---------------------------------------------------------------------------
 # Module-level workers (spawn-context picklability)
 # ---------------------------------------------------------------------------
@@ -96,7 +110,17 @@ def _worker_apply_unlock(args: tuple[str, str]) -> dict[str, list]:
     provider_id = f"conc46-{alias_suffix}"
     alias = f"conc46-alias-{alias_suffix}"
 
-    result = integration.apply_unlock(aliases=[(provider_id, alias)])
+    # WOR-621 F2: apply_unlock takes list[OcRestore], not aliases tuples.
+    # The flock-race contract under test fires regardless of payload.
+    restores = [
+        integration.OcRestore(
+            provider=provider_id,
+            alias=alias,
+            oc_original_api_key_json=None,
+            plaintext_key=None,
+        )
+    ]
+    result = integration.apply_unlock(restores=restores)
 
     return {
         "providers_set": list(result.providers_set),
@@ -193,9 +217,14 @@ def test_conc22_held_flock_blocks_contender_until_release(
     ready = tmp_path / "ready.sentinel"
     release = tmp_path / "release.sentinel"
 
-    holder_pool = mp_spawn.Pool(1)
-    contender_pool = mp_spawn.Pool(1)
-    try:
+    # Pools via ``with`` (terminate-on-exit), matching CONC-45/46 below. A
+    # ``close()``/``join()`` teardown deadlocks if anything raises before
+    # ``release.touch()``: the holder is still polling for the release
+    # sentinel that now never arrives, and ``join()`` waits on it forever.
+    # That wedges the xdist worker permanently — no second alarm is armed
+    # to break it out. ``terminate()`` cannot block; both results are
+    # already collected by the time we exit on the success path.
+    with mp_spawn.Pool(1) as holder_pool, mp_spawn.Pool(1) as contender_pool:
         holder = holder_pool.apply_async(
             _worker_holds_lock, [(str(fake_home), str(ready), str(release))]
         )
@@ -224,12 +253,8 @@ def test_conc22_held_flock_blocks_contender_until_release(
 
         assert holder_result == "released"
         # Contender successfully wrote its entry post-release.
-        assert "worthless-conc45-22" in contender_result["providers_set"]
-    finally:
-        holder_pool.close()
-        holder_pool.join()
-        contender_pool.close()
-        contender_pool.join()
+        # WOR-621 F1: lock rewrites the provider's ORIGINAL id, not worthless-*.
+        assert "conc45-22" in contender_result["providers_set"]
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +269,8 @@ def test_conc45_fifty_parallel_apply_lock_produces_coherent_state(
     calling ``apply_lock`` against the SAME ``openclaw.json`` with a
     distinct synthetic provider. After all complete:
 
-      (a) All 50 ``worthless-conc45-NN`` provider entries present.
+      (a) All 50 ``conc45-NN`` provider entries present (WOR-621 F1: lock
+          rewrites the provider's ORIGINAL id, not a ``worthless-*`` decoy).
       (b) JSON is valid (no torn write).
       (c) No duplicate or interleaved entries.
       (d) Every alias's baseUrl is correct for that alias.
@@ -267,7 +293,7 @@ def test_conc45_fifty_parallel_apply_lock_produces_coherent_state(
 
     # Sanity: every child reported success on its own slot.
     for i, result in enumerate(results):
-        expected = f"worthless-conc45-{i:02d}"
+        expected = f"conc45-{i:02d}"
         assert expected in result["providers_set"], (
             f"child {i} did not write its slot: providers_set={result['providers_set']}, "
             f"skipped={result['providers_skipped']}, events={result['events']}"
@@ -280,7 +306,7 @@ def test_conc45_fifty_parallel_apply_lock_produces_coherent_state(
     providers = data["models"]["providers"]
 
     # (a) All 50 entries present.
-    expected_keys = {f"worthless-conc45-{i:02d}" for i in range(n_children)}
+    expected_keys = {f"conc45-{i:02d}" for i in range(n_children)}
     actual_keys = set(providers.keys())
     missing = expected_keys - actual_keys
     assert not missing, (
@@ -290,7 +316,7 @@ def test_conc45_fifty_parallel_apply_lock_produces_coherent_state(
 
     # (c) No duplicates (set comparison) and (d) baseUrl correct per alias.
     for i in range(n_children):
-        key = f"worthless-conc45-{i:02d}"
+        key = f"conc45-{i:02d}"
         entry = providers[key]
         expected_alias = f"conc45-alias-{i:02d}"
         assert expected_alias in entry["baseUrl"], (

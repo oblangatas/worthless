@@ -2,6 +2,7 @@
   "name": "worthless-sh-worker",
   "version": "0.0.1",
   "private": true,
+  "license": "AGPL-3.0-only",
   "description": "Cloudflare Worker at worthless.sh — serves install.sh to curl, redirects browsers to wless.io",
   "type": "module",
   "scripts": {
@@ -15,10 +16,10 @@
     "deploy": "wrangler deploy"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.15.0",
-    "@cloudflare/workers-types": "^4.20250101.0",
-    "typescript": "^5.4.0",
-    "vitest": "~4.1.5",
-    "wrangler": "^4.85.0"
+    "@cloudflare/vitest-pool-workers": "^0.22.0",
+    "@cloudflare/workers-types": "^5.20260722.1",
+    "typescript": "^7.0.2",
+    "vitest": "~4.1.11",
+    "wrangler": "^4.118.0"
   }
 }

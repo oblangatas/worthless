@@ -106,8 +106,9 @@ def test_lock_with_openclaw_writes_openclaw_json_and_installs_skill(
     openclaw_present: dict[str, Path],
 ) -> None:
     """AC2: with OpenClaw staged at ~/.openclaw, ``lock`` populates the
-    config with ``worthless-openai`` and installs the skill folder, in
-    one invocation, with no prompts.
+    config with the ``openai`` entry (WOR-621 F1: lock rewrites the
+    provider's ORIGINAL id, not a ``worthless-*`` decoy) and installs the
+    skill folder, in one invocation, with no prompts.
     """
     result = runner.invoke(
         app,
@@ -119,10 +120,10 @@ def test_lock_with_openclaw_writes_openclaw_json_and_installs_skill(
 
     data = json.loads(openclaw_present["config_path"].read_text(encoding="utf-8"))
     providers = data["models"]["providers"]
-    assert "worthless-openai" in providers, providers
-    assert providers["worthless-openai"]["baseUrl"].startswith("http://127.0.0.1:")
-    assert providers["worthless-openai"]["baseUrl"].endswith("/v1")
-    assert providers["worthless-openai"]["apiKey"], "shard-A must be in apiKey"
+    assert "openai" in providers, providers
+    assert providers["openai"]["baseUrl"].startswith("http://127.0.0.1:")
+    assert providers["openai"]["baseUrl"].endswith("/v1")
+    assert providers["openai"]["apiKey"], "shard-A must be in apiKey"
 
     # Skill folder installed.
     skill_dir = openclaw_present["workspace"] / "skills" / "worthless"
@@ -236,11 +237,17 @@ def test_lock_with_uid_mismatch_outputs_failure_and_exits_73(
     """
     real_uid = openclaw_present["config_path"].stat().st_uid
     monkeypatch.setattr(os, "geteuid", lambda: real_uid + 1)
+    # Route Fernet through env so the SP4 geteuid mock does not trip keystore
+    # ownership validation on fernet.key (this test targets OpenClaw UID mismatch).
+    fernet_env = (home_dir.base_dir / "fernet.key").read_bytes().strip().decode()
 
     result = runner.invoke(
         app,
         ["lock", "--env", str(env_file)],
-        env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+        env={
+            "WORTHLESS_HOME": str(home_dir.base_dir),
+            "WORTHLESS_FERNET_KEY": fernet_env,
+        },
     )
 
     assert result.exit_code == 73, (
@@ -249,3 +256,39 @@ def test_lock_with_uid_mismatch_outputs_failure_and_exits_73(
     assert "[FAIL] OpenClaw" in result.output, (
         f"expected '[FAIL] OpenClaw' in output\n{result.output}"
     )
+
+
+# ---------------------------------------------------------------------------
+# WOR-599: lock names OpenClaw's own config backups and points at the remedy
+# ---------------------------------------------------------------------------
+
+
+def test_lock_tells_user_openclaw_backups_may_hold_the_old_key(
+    home_dir: WorthlessHome,
+    env_file: Path,
+    openclaw_present: dict[str, Path],
+) -> None:
+    """OpenClaw writes verbatim copies of its config — a ``.bak`` ring and a
+    ``.last-good`` promoted when the daemon observes the config. A copy written
+    before this lock still holds the ORIGINAL key, so "you're protected" is only
+    true of the live file.
+
+    We refuse to delete those files (daemon-owned, and ``.bak`` is our own
+    documented recovery path), which makes saying so the only control we have.
+    Rotation is named because it is the one action that invalidates a copy
+    that may already have been synced or snapshotted elsewhere.
+    """
+    result = runner.invoke(
+        app,
+        ["lock", "--env", str(env_file)],
+        env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+    )
+
+    assert result.exit_code == 0, result.output
+    out = result.output.lower()
+
+    assert "last-good" in out, "the non-rotating backup must be named"
+    assert "rotate" in out, "rotation is the only remedy that invalidates a leaked copy"
+    # SR-04: name paths, never key bytes.
+    for marker in ("sk-ant-", "sk-proj-", "sk-or-"):
+        assert marker not in result.output

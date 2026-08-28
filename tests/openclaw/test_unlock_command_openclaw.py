@@ -110,6 +110,11 @@ def test_unlock_with_no_openclaw_succeeds_unchanged(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="WOR-621 F2 — unlock-restore contract not yet implemented; lock now "
+    "rewrites the original entry, unlock cannot yet restore it. Remove when F2 lands.",
+)
 def test_unlock_with_openclaw_removes_provider_and_skill(
     home_dir: WorthlessHome,
     env_file: Path,

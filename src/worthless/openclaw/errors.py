@@ -18,6 +18,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 
+from worthless.cli.log_redaction import _redact
+
 
 class OpenclawErrorCode(str, Enum):
     """Wire-stable identifiers for OpenClaw integration events.
@@ -31,12 +33,25 @@ class OpenclawErrorCode(str, Enum):
     CONFIG_UPDATED = "openclaw.config_updated"
     CONFIG_MISSING = "openclaw.config_missing"
     PROVIDER_CONFLICT = "openclaw.provider_conflict"
+    PROVIDER_ADOPTED_UNRECOGNIZED = "openclaw.provider_adopted_unrecognized"
+    PROVIDER_ADOPTION_SKIPPED = "openclaw.provider_adoption_skipped"
+    PROVIDER_RECOGNITION_UNAVAILABLE = "openclaw.provider_recognition_unavailable"
     SYMLINK_REFUSED = "openclaw.symlink_refused"
     WRITE_FAILED = "openclaw.write_failed"
     LOCK_TIMEOUT = "openclaw.lock_timeout"
     SKILL_FOREIGN_OWNER = "openclaw.skill_foreign_owner"
     SKILL_INSTALL_FAILED = "openclaw.skill_install_failed"
     HOME_MISMATCH = "openclaw.home_mismatch"
+    # WOR-777 Layer 2: agent models.json projection rotation (re-lock).
+    MODELS_JSON_STALE_REMOVED = "openclaw.models_json_stale_removed"
+    MODELS_JSON_STALE_NOT_REMOVED = "openclaw.models_json_stale_not_removed"
+    AGENT_AUTH_STORE_SCRUBBED = "openclaw.agent_auth_store_scrubbed"
+    # WOR-796: a provider's cached real key was NOT scrubbed because its key var
+    # name isn't a valid uppercase SecretRef id — protection silently degrades
+    # unless we say so (openclaw.json still reads "locked").
+    AGENT_AUTH_STORE_SCRUB_SKIPPED = "openclaw.agent_auth_store_scrub_skipped"
+    # WOR-656 F6: a legacy decoy-layout install was auto-healed on lock.
+    LEGACY_DECOY_MIGRATED = "openclaw.legacy_decoy_migrated"
 
 
 @dataclass(frozen=True)
@@ -51,6 +66,29 @@ class OpenclawIntegrationEvent:
     level: str  # "info" | "warn" | "error"
     detail: str
     extra: dict[str, str] | None = field(default=None)
+
+    def __post_init__(self) -> None:
+        """SR-04 (WOR-655): every event is BORN redacted.
+
+        ``detail`` and each ``extra`` value are free-form strings populated
+        by call sites in ``integration.py``. The by-convention contract
+        ("don't put key bytes in here") is not enough for an audit-ready
+        guarantee, so we scrub at construction — the single choke point
+        every sink inherits: the human console (``console.py`` does NOT
+        self-redact), the inline sentinel dict, and ``to_dict()``/``--json``.
+
+        Frozen dataclass ⇒ ``object.__setattr__`` to rewrite in place. The
+        redactor is a no-op on already-clean strings, so non-secret
+        ``extra`` values (``path``, ``provider``, ``baseUrl``, ``nlink``)
+        pass through untouched.
+        """
+        object.__setattr__(self, "detail", _redact(self.detail))
+        if self.extra is not None:
+            object.__setattr__(
+                self,
+                "extra",
+                {k: (_redact(v) if isinstance(v, str) else v) for k, v in self.extra.items()},
+            )
 
     def to_dict(self) -> dict[str, str]:
         """Wire-stable serialization for sentinel + ``--json`` output.
@@ -82,7 +120,10 @@ class OpenclawIntegrationError(Exception):
 
     def __init__(self, code: OpenclawErrorCode, detail: str) -> None:
         self.code = code
-        super().__init__(detail)
+        # SR-04 (WOR-655): the detail becomes ``str(exc)`` and flows into
+        # event details / warnings — scrub any key-shaped bytes here so it
+        # is redacted at every downstream sink.
+        super().__init__(_redact(detail))
 
 
 class OpenclawConfigUnreadableError(Exception):

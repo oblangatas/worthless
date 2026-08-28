@@ -166,7 +166,12 @@ def test_wait_for_ready_succeeds_after_delayed_ready_line() -> None:
         bufsize=1,
     )
     try:
-        line = _wait_for_ready(proc, timeout=5.0)
+        # Generous timeout: the helper returns the instant the line appears, so
+        # a large bound never slows the happy path. It only guards against a
+        # fresh Python subprocess starting slowly under full-suite CPU
+        # saturation (-n auto) — a 5s clock false-failed there. Stays under the
+        # 30s pytest-timeout and the child's 30s post-print sleep.
+        line = _wait_for_ready(proc, timeout=25.0)
         assert line.startswith("sidecar: ready"), f"unexpected line: {line!r}"
     finally:
         proc.kill()

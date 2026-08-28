@@ -5,7 +5,15 @@ description: "Native install inside WSL2 Linux subsystem on Windows 10/11."
 
 # Install on WSL2 (Windows + Linux subsystem)
 
-WSL2 is the **documented happy path for Windows developers**.
+WSL2 is the **recommended path for Windows developers** — underneath it's a
+standard Linux install.
+
+:::caution[Not exercised in CI]
+The Linux mechanics underneath are CI-tested, but the WSL-specific layer
+(localhost forwarding, file-backed keystore, `/mnt/c` detection) is verified
+by hand, not in CI. If something here is off, [open an
+issue](https://github.com/oblangatas/worthless/issues).
+:::
 
 ## TL;DR
 
@@ -63,7 +71,7 @@ For best performance, install from your Linux home (~).
 
 ```bash
 worthless --version
-# worthless 0.3.3
+# worthless 0.3.8
 ```
 
 ## 3. First lock

@@ -24,7 +24,7 @@ from worthless.cli.bootstrap import ensure_home
 from worthless.cli.commands import doctor as doctor_module
 
 
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner()
 
 
 @pytest.fixture
@@ -47,7 +47,7 @@ def test_json_emits_single_parseable_document(fake_home, monkeypatch: pytest.Mon
     monkeypatch.setattr(runner_module, "get_home", lambda: fake_home)
 
     result = runner.invoke(app, ["doctor", "--json"])
-    assert result.exit_code == 0, f"non-zero exit: {result.output} stderr={result.stderr}"
+    assert result.exit_code == 0, f"non-zero exit: {result.stdout} stderr={result.stderr}"
 
     # stdout must parse as JSON in one shot.
     payload = json.loads(result.stdout)
@@ -87,6 +87,48 @@ def test_json_includes_all_check_ids(fake_home, monkeypatch: pytest.MonkeyPatch)
         "broken_status",
     }
     assert expected <= ids
+
+
+def test_json_zeroes_fernet_key_after_run(fake_home, monkeypatch: pytest.MonkeyPatch) -> None:
+    """WOR-799: the Fernet master key bytearray must be zeroed before
+    ``doctor --json`` returns, not left to linger in memory until GC.
+
+    Spies on ``runner_module.bytearray`` rather than the builtin globally —
+    ``LOAD_GLOBAL`` checks the module's own ``__dict__`` before falling back
+    to ``builtins``, so this only intercepts the one ``bytearray(...)`` call
+    inside ``runner.py`` (:207). ``ShardRepository``'s internal copy of the
+    key lives in a different module and is untouched by this patch.
+    """
+
+    async def _no_orphans(_repo):
+        return [], []
+
+    monkeypatch.setattr(doctor_module, "_list_orphans", _no_orphans)
+    monkeypatch.setattr(doctor_module, "_list_synced_keychain_entries", lambda: [])
+    from worthless.cli.commands.doctor import runner as runner_module
+
+    monkeypatch.setattr(runner_module, "get_home", lambda: fake_home)
+
+    captured: list[bytearray] = []
+    real_bytearray = bytearray
+
+    def _spy(*a, **kw):
+        buf = real_bytearray(*a, **kw)
+        captured.append(buf)
+        return buf
+
+    monkeypatch.setattr(runner_module, "bytearray", _spy, raising=False)
+
+    result = runner.invoke(app, ["doctor", "--json"])
+    assert result.exit_code == 0, f"non-zero exit: {result.stdout} stderr={result.stderr}"
+    assert len(captured) == 1, (
+        f"expected exactly one bytearray(...) call in runner.py, got {len(captured)}"
+    )
+
+    fernet_key = captured[0]
+    assert all(b == 0 for b in fernet_key), (
+        "fernet key bytearray was not zeroed after doctor --json returned"
+    )
 
 
 def test_json_ok_true_on_clean_install(fake_home, monkeypatch: pytest.MonkeyPatch) -> None:

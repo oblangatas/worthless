@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import hmac
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -14,8 +13,10 @@ from cryptography.fernet import Fernet, InvalidToken
 
 from worthless.crypto.kdf import derive_mac_secret
 from worthless.defaults import DEFAULT_SPEND_CAP_TOKENS
+from worthless.defaults import GLOBAL_CEILING_TOKENS
 from worthless.storage.models import EncryptedShard, EnrollmentRecord, StoredShard
 from worthless.storage.schema import init_db, migrate_db
+from worthless.storage.sqlite import connect as sqlite_connect
 
 if TYPE_CHECKING:
     from worthless.ipc.client import IPCClient
@@ -26,6 +27,68 @@ class _Sentinel(Enum):
 
 
 _USE_DEFAULT = _Sentinel.USE_DEFAULT
+
+
+def _perm_bits(mode: int | None) -> int | None:
+    """Permission bits (``0o777``) of a POSIX ``st_mode``, or ``None``.
+
+    ``enrollments.original_mode`` must store permission bits only — not the
+    full ``st_mode``, which carries file-type bits (``S_IFREG`` = ``0o100000``).
+    ``chmod`` ignores the type bits, but storing them would make ``f"{mode:o}"``
+    print ``100644`` and any ``& 0o777``-assuming reader wrong. Mask at the
+    storage boundary so no caller can persist type bits by accident.
+    """
+    return None if mode is None else mode & 0o777
+
+
+async def _exec_enrollment_insert(
+    db: aiosqlite.Connection,
+    alias: str,
+    *,
+    var_name: str,
+    env_path: str | None,
+    original_mode: int | None,
+) -> None:
+    """Run the canonical ``enrollments`` INSERT on an already-open *db* (y8ir).
+
+    The single source for the enrollment row written by ``store_enrolled``,
+    ``upsert_locked_shard_and_enroll``, and ``add_enrollment``. ``INSERT OR
+    IGNORE`` keeps the FIRST row for a ``(key_alias, var_name, env_path)`` tuple
+    — load-bearing for ``original_mode`` (see ``store_enrolled``).
+
+    Execute-only: the caller owns ``BEGIN``/``COMMIT``. No ``in_transaction``
+    assert — ``add_enrollment`` runs in autocommit (no explicit transaction), so
+    such an assert would false-fire there.
+    """
+    await db.execute(
+        "INSERT OR IGNORE INTO enrollments "
+        "(key_alias, var_name, env_path, original_mode) "
+        "VALUES (?, ?, ?, ?)",
+        (alias, var_name, env_path, _perm_bits(original_mode)),
+    )
+
+
+async def _exec_config_insert(
+    db: aiosqlite.Connection,
+    alias: str,
+    *,
+    spend_cap: int | None,
+    token_budget_daily: int | None,
+) -> None:
+    """Run the canonical ``enrollment_config`` INSERT on an already-open *db* (y8ir).
+
+    The single source for the config row written by ``store_enrolled`` and
+    ``upsert_locked_shard_and_enroll``. ``INSERT OR IGNORE`` so re-enrollment
+    never overwrites a user-modified spend cap. Execute-only (caller owns the
+    transaction); *spend_cap* must already be the resolved ``int | None`` — the
+    ``_USE_DEFAULT`` sentinel is resolved by the caller.
+    """
+    await db.execute(
+        "INSERT OR IGNORE INTO enrollment_config"
+        " (key_alias, spend_cap, token_budget_daily)"
+        " VALUES (?, ?, ?)",
+        (alias, spend_cap, token_budget_daily),
+    )
 
 
 class ShardRepository:
@@ -113,7 +176,7 @@ class ShardRepository:
     @asynccontextmanager
     async def _connect(self) -> AsyncIterator[aiosqlite.Connection]:
         """Open a connection with foreign keys enabled."""
-        async with aiosqlite.connect(self._db_path) as db:
+        async with sqlite_connect(self._db_path) as db:
             await db.execute("PRAGMA foreign_keys = ON")
             yield db
 
@@ -143,7 +206,14 @@ class ShardRepository:
         # bytes(), which would make an un-zeroable immutable copy of the key.
         # HKDF reads the buffer identically, so output stays byte-identical.
         mac_secret = derive_mac_secret(self._fernet_key_bytes)
-        return hmac.new(mac_secret, value.encode(), hashlib.sha256).hexdigest()
+        # HMAC-SHA256 MAC derivation (G2 tamper-bind), NOT password hashing.
+        # CodeQL's flow-tracking sees ``hashlib.sha256`` near sensitive data
+        # and fires py/weak-sensitive-data-hashing — but doesn't track the
+        # bare string ``"sha256"`` as a sensitive sink. Same workaround
+        # splitter._make_commitment uses (src/worthless/crypto/splitter.py:94).
+        return hmac.new(  # nosec B303 — HMAC-SHA256  # lgtm[py/weak-sensitive-data-hashing]
+            mac_secret, value.encode(), "sha256"
+        ).hexdigest()
 
     # ------------------------------------------------------------------
     # Shard CRUD
@@ -191,7 +261,8 @@ class ShardRepository:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 "SELECT shard_b_enc, commitment, nonce, provider, prefix, charset, base_url, "
-                "shard_a_enc "
+                "shard_a_enc, oc_original_api_key_json, "
+                "oc_rollback_mac "
                 "FROM shards WHERE key_alias = ?",
                 (alias,),
             )
@@ -218,6 +289,8 @@ class ShardRepository:
                 ).tobytes()
                 if raw_a is not None
                 else None,
+                oc_original_api_key_json=row["oc_original_api_key_json"],
+                oc_rollback_mac=row["oc_rollback_mac"],
             )
 
     async def decrypt_shard(self, encrypted: EncryptedShard) -> StoredShard:
@@ -369,6 +442,8 @@ class ShardRepository:
         prefix: str,
         charset: str,
         base_url: str,
+        oc_original_api_key_json: str | None = None,
+        oc_rollback_mac: str | None = None,
     ) -> None:
         """Upsert a shard row, storing only shard-B (NOT shard-A) encrypted.
 
@@ -419,8 +494,9 @@ class ShardRepository:
             await db.execute(
                 "INSERT INTO shards "
                 "(key_alias, shard_b_enc, commitment, nonce, provider, prefix, charset, "
-                " base_url, shard_a_enc) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL) "
+                " base_url, shard_a_enc, oc_original_api_key_json, "
+                " oc_rollback_mac) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?) "
                 "ON CONFLICT(key_alias) DO UPDATE SET "
                 "  shard_b_enc = excluded.shard_b_enc, "
                 "  commitment  = excluded.commitment, "
@@ -429,7 +505,9 @@ class ShardRepository:
                 "  prefix      = excluded.prefix, "
                 "  charset     = excluded.charset, "
                 "  base_url    = excluded.base_url, "
-                "  shard_a_enc = NULL",
+                "  shard_a_enc = NULL, "
+                "  oc_original_api_key_json = excluded.oc_original_api_key_json, "
+                "  oc_rollback_mac          = excluded.oc_rollback_mac",
                 (
                     alias,
                     shard_b_enc,
@@ -439,6 +517,8 @@ class ShardRepository:
                     prefix,
                     charset,
                     base_url,
+                    oc_original_api_key_json,
+                    oc_rollback_mac,
                 ),
             )
             await db.commit()
@@ -459,6 +539,9 @@ class ShardRepository:
         prefix: str | None = None,
         charset: str | None = None,
         base_url: str | None = None,
+        original_mode: int | None = None,
+        oc_original_api_key_json: str | None = None,
+        oc_rollback_mac: str | None = None,
     ) -> None:
         """Atomically store a shard, enrollment record, and enrollment config.
 
@@ -484,8 +567,10 @@ class ShardRepository:
             await db.execute("BEGIN IMMEDIATE")
             await db.execute(
                 "INSERT OR IGNORE INTO shards "
-                "(key_alias, shard_b_enc, commitment, nonce, provider, prefix, charset, base_url) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "(key_alias, shard_b_enc, commitment, nonce, provider, prefix, charset, "
+                " base_url, oc_original_api_key_json, "
+                " oc_rollback_mac) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     alias,
                     shard_b_enc,
@@ -495,24 +580,202 @@ class ShardRepository:
                     prefix,
                     charset,
                     base_url,
+                    oc_original_api_key_json,
+                    oc_rollback_mac,
                 ),
             )
-            await db.execute(
-                "INSERT OR IGNORE INTO enrollments "
-                "(key_alias, var_name, env_path) "
-                "VALUES (?, ?, ?)",
-                (alias, var_name, env_path),
+            # original_mode contract: INSERT OR IGNORE keeps the FIRST row for a
+            # (key_alias, var_name, env_path) tuple. That is correct on purpose —
+            # the true pre-lock mode is only knowable at the very first lock,
+            # before safe_rewrite tightens the file to 0o600. A re-lock would
+            # stat an already-0o600 file, so re-capturing would record the wrong
+            # value; keeping the first capture (or NULL, for pre-715 rows that
+            # were never captured) is the only correct behavior. Do NOT "fix"
+            # this into a backfill/UPSERT — it would persist 0o600 as "original".
+            await _exec_enrollment_insert(
+                db,
+                alias,
+                var_name=var_name,
+                env_path=env_path,
+                original_mode=original_mode,
             )
-            await db.execute(
-                "INSERT OR IGNORE INTO enrollment_config"
-                " (key_alias, spend_cap, token_budget_daily)"
-                " VALUES (?, ?, ?)",
-                (alias, effective_cap, token_budget_daily),
+            await _exec_config_insert(
+                db,
+                alias,
+                spend_cap=effective_cap,
+                token_budget_daily=token_budget_daily,
             )
             await db.commit()
 
+    async def upsert_locked_shard_and_enroll(
+        self,
+        alias: str,
+        shard: StoredShard,
+        *,
+        var_name: str,
+        env_path: str | None,
+        prefix: str,
+        charset: str,
+        base_url: str,
+        original_mode: int | None = None,
+        spend_cap: int | None | _Sentinel = _USE_DEFAULT,
+        token_budget_daily: int | None = None,
+        write_config: bool = True,
+        oc_original_api_key_json: str | None = None,
+        oc_rollback_mac: str | None = None,
+    ) -> None:
+        """WOR-646 Part 2: shard UPSERT + enrollment (+ config) in ONE transaction.
+
+        Pass-1 used to write a key's shard row (``upsert_locked_shard``) and its
+        enrollment row (``store_enrolled`` / ``add_enrollment``) as two separate
+        ``commit()``s on two connections. A SIGINT/cancellation landing between
+        them committed a shard with no enrollment — an orphan the compensating
+        unwind (which only rewinds recorded ``_PlannedUpdate``s) could not see.
+
+        Folding both into a single ``BEGIN IMMEDIATE … COMMIT`` makes the unit
+        atomic: an interrupt before the commit rolls back BOTH rows (clean), and
+        a re-lock's in-place shard UPDATE is reverted wholesale on rollback —
+        no separate prior-row snapshot needed. The caller records the
+        ``_PlannedUpdate`` BEFORE calling this so any committed row is always
+        covered by the unwind.
+
+        ``write_config`` mirrors the prior split: the fresh-enroll path wrote an
+        ``enrollment_config`` row (``store_enrolled``); the re-lock path did not
+        (``add_enrollment``). The shard write is always the ON CONFLICT DO UPDATE
+        upsert so re-lock patches the row in place (NOT INSERT OR REPLACE, which
+        would CASCADE-wipe sibling enrollments).
+
+        Sealing of shard-B happens BEFORE ``BEGIN`` (it may round-trip through
+        the sidecar in IPC mode); the transaction is local-sqlite only.
+        """
+        if prefix is None:
+            raise ValueError(
+                "prefix is required routing metadata — use '' for keys with no prefix."
+            )
+        if charset is None:
+            raise ValueError("charset is required routing metadata.")
+        if base_url is None:
+            raise ValueError("base_url is required routing metadata.")
+
+        shard_b_bytes = memoryview(shard.shard_b).tobytes()
+        if self._ipc is not None:
+            shard_b_enc = await self._ipc.seal(shard_b_bytes)
+        else:
+            fernet = self._get_fernet()
+            shard_b_enc = fernet.encrypt(shard_b_bytes)
+
+        effective_cap: int | None
+        if spend_cap is _USE_DEFAULT:
+            effective_cap = DEFAULT_SPEND_CAP_TOKENS
+        else:
+            effective_cap = spend_cap  # type: ignore[assignment]
+
+        async with self._connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            await db.execute(
+                "INSERT INTO shards "
+                "(key_alias, shard_b_enc, commitment, nonce, provider, prefix, charset, "
+                " base_url, shard_a_enc, oc_original_api_key_json, "
+                " oc_rollback_mac) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?) "
+                "ON CONFLICT(key_alias) DO UPDATE SET "
+                "  shard_b_enc = excluded.shard_b_enc, "
+                "  commitment  = excluded.commitment, "
+                "  nonce       = excluded.nonce, "
+                "  provider    = excluded.provider, "
+                "  prefix      = excluded.prefix, "
+                "  charset     = excluded.charset, "
+                "  base_url    = excluded.base_url, "
+                "  shard_a_enc = NULL, "
+                "  oc_original_api_key_json = excluded.oc_original_api_key_json, "
+                "  oc_rollback_mac          = excluded.oc_rollback_mac",
+                (
+                    alias,
+                    shard_b_enc,
+                    memoryview(shard.commitment).tobytes(),
+                    memoryview(shard.nonce).tobytes(),
+                    shard.provider,
+                    prefix,
+                    charset,
+                    base_url,
+                    oc_original_api_key_json,
+                    oc_rollback_mac,
+                ),
+            )
+            await _exec_enrollment_insert(
+                db,
+                alias,
+                var_name=var_name,
+                env_path=env_path,
+                original_mode=original_mode,
+            )
+            if write_config:
+                await _exec_config_insert(
+                    db,
+                    alias,
+                    spend_cap=effective_cap,
+                    token_budget_daily=token_budget_daily,
+                )
+            await db.commit()
+
+    async def delete_superseded_enrollment_atomic(
+        self, alias: str, *, env_path: str | None
+    ) -> bool:
+        """exx5/WOR-646: drop a superseded ``(alias, env_path)`` enrollment and
+        its now-unreferenced shard in ONE transaction.
+
+        After a key-ROTATION re-lock, the NEW alias is enrolled at
+        ``(var_name, env_path)`` and the OLD alias's enrollment there is stale.
+        Removing it used to be two separate commits —
+        :meth:`delete_enrollment` then a conditional :meth:`delete_enrolled` —
+        so a SIGINT between them left the old alias's ``shards`` row orphaned
+        (enrollment gone, shard not). The compensating unwind only covers the
+        new alias (``planned``), never the superseded one, so the orphan
+        survived. This is the one spot Part 2's atomicity claim still had an
+        asterisk.
+
+        Folding both into a single ``BEGIN IMMEDIATE … COMMIT`` makes it
+        atomic: an interrupt before the commit leaves the old rows fully intact
+        (a harmless duplicate the next lock reconciles), after it they are
+        fully gone — never half-deleted. This is the cleanup's OWN transaction,
+        NOT the new key's: a failure here can't roll back the freshly-locked
+        key (which would unprotect a live secret).
+
+        The shard is deleted ONLY when no enrollment for *alias* remains — an
+        unconditional ``DELETE FROM shards`` would CASCADE-wipe a shard still
+        locked from another ``.env`` path. The "any left?" check runs inside
+        the transaction so it sees a consistent view under the write lock.
+        Returns True if the shard was removed.
+        """
+        async with self._connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            if env_path is None:
+                await db.execute(
+                    "DELETE FROM enrollments WHERE key_alias = ? AND env_path IS NULL",
+                    (alias,),
+                )
+            else:
+                await db.execute(
+                    "DELETE FROM enrollments WHERE key_alias = ? AND env_path = ?",
+                    (alias, env_path),
+                )
+            cursor = await db.execute(
+                "SELECT 1 FROM enrollments WHERE key_alias = ? LIMIT 1", (alias,)
+            )
+            shard_removed = False
+            if await cursor.fetchone() is None:
+                del_cursor = await db.execute("DELETE FROM shards WHERE key_alias = ?", (alias,))
+                shard_removed = del_cursor.rowcount > 0
+            await db.commit()
+            return shard_removed
+
     async def add_enrollment(
-        self, alias: str, *, var_name: str, env_path: str | None = None
+        self,
+        alias: str,
+        *,
+        var_name: str,
+        env_path: str | None = None,
+        original_mode: int | None = None,
     ) -> None:
         """Add an enrollment row without touching the shards table.
 
@@ -520,10 +783,12 @@ class ShardRepository:
         are silently ignored.
         """
         async with self._connect() as db:
-            await db.execute(
-                "INSERT OR IGNORE INTO enrollments (key_alias, var_name, env_path) "
-                "VALUES (?, ?, ?)",
-                (alias, var_name, env_path),
+            await _exec_enrollment_insert(
+                db,
+                alias,
+                var_name=var_name,
+                env_path=env_path,
+                original_mode=original_mode,
             )
             await db.commit()
 
@@ -538,13 +803,15 @@ class ShardRepository:
         async with self._connect() as db:
             if env_path is None:
                 cursor = await db.execute(
-                    "SELECT key_alias, var_name, env_path, decoy_hash FROM enrollments "
+                    "SELECT key_alias, var_name, env_path, decoy_hash, original_mode "
+                    "FROM enrollments "
                     "WHERE key_alias = ? LIMIT 1",
                     (alias,),
                 )
             else:
                 cursor = await db.execute(
-                    "SELECT key_alias, var_name, env_path, decoy_hash FROM enrollments "
+                    "SELECT key_alias, var_name, env_path, decoy_hash, original_mode "
+                    "FROM enrollments "
                     "WHERE key_alias = ? AND env_path = ?",
                     (alias, env_path),
                 )
@@ -556,6 +823,7 @@ class ShardRepository:
                 var_name=row[1],
                 env_path=row[2],
                 decoy_hash=row[3],
+                original_mode=row[4],
             )
 
     async def find_enrollment_by_location(
@@ -564,7 +832,7 @@ class ShardRepository:
         """Return the enrollment for *var_name* + *env_path*, or ``None``."""
         async with self._connect() as db:
             cursor = await db.execute(
-                "SELECT key_alias, var_name, env_path, decoy_hash FROM enrollments "
+                "SELECT key_alias, var_name, env_path, decoy_hash, original_mode FROM enrollments "
                 "WHERE var_name = ? AND env_path = ?",
                 (var_name, env_path),
             )
@@ -576,6 +844,7 @@ class ShardRepository:
                 var_name=row[1],
                 env_path=row[2],
                 decoy_hash=row[3],
+                original_mode=row[4],
             )
 
     async def list_enrollments(
@@ -591,14 +860,16 @@ class ShardRepository:
         async with self._connect() as db:
             if alias is not None:
                 cursor = await db.execute(
-                    "SELECT e.key_alias, e.var_name, e.env_path, e.decoy_hash, s.provider "
+                    "SELECT e.key_alias, e.var_name, e.env_path, e.decoy_hash, s.provider, "
+                    "e.original_mode "
                     "FROM enrollments e LEFT JOIN shards s ON e.key_alias = s.key_alias "
                     "WHERE e.key_alias = ?",
                     (alias,),
                 )
             else:
                 cursor = await db.execute(
-                    "SELECT e.key_alias, e.var_name, e.env_path, e.decoy_hash, s.provider "
+                    "SELECT e.key_alias, e.var_name, e.env_path, e.decoy_hash, s.provider, "
+                    "e.original_mode "
                     "FROM enrollments e LEFT JOIN shards s ON e.key_alias = s.key_alias "
                     "ORDER BY e.key_alias"
                 )
@@ -610,6 +881,7 @@ class ShardRepository:
                     env_path=r[2],
                     decoy_hash=r[3],
                     provider=r[4],
+                    original_mode=r[5],
                 )
                 for r in rows
             ]
@@ -628,6 +900,33 @@ class ShardRepository:
             cursor = await db.execute(
                 "UPDATE enrollment_config SET spend_cap = ? WHERE key_alias = ?",
                 (spend_cap, alias),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+
+    async def set_ceiling_override(self, alias: str, tokens: int) -> bool:
+        """Set a per-key fail-closed ceiling override for *alias* (WOR-705).
+
+        Raise-only: *tokens* must be an int ``>= GLOBAL_CEILING_TOKENS``. A
+        lower value can't weaken the cap — the ledger read path clamps to the
+        global floor regardless — so we reject it as meaningless rather than
+        silently store a no-op. ``bool`` is rejected explicitly (it is an
+        ``int`` subclass and ``True`` would otherwise slip through as ``1``).
+
+        Returns True if an enrollment_config row existed and was updated,
+        False if the alias has no row.
+        """
+        if isinstance(tokens, bool) or not isinstance(tokens, int):
+            raise ValueError("ceiling override must be an int (got a non-int)")
+        if tokens < GLOBAL_CEILING_TOKENS:
+            raise ValueError(
+                f"ceiling override must be >= GLOBAL_CEILING_TOKENS "
+                f"({GLOBAL_CEILING_TOKENS}); a lower value cannot weaken the cap"
+            )
+        async with self._connect() as db:
+            cursor = await db.execute(
+                "UPDATE enrollment_config SET ceiling_override = ? WHERE key_alias = ?",
+                (tokens, alias),
             )
             await db.commit()
             return cursor.rowcount > 0
@@ -664,7 +963,7 @@ class ShardRepository:
         Deletes spend_log, enrollment_config, and shards (CASCADE to enrollments).
         Returns True if the shard existed.
         """
-        async with aiosqlite.connect(self._db_path, isolation_level=None) as db:
+        async with sqlite_connect(self._db_path, isolation_level=None) as db:
             await db.execute("PRAGMA foreign_keys = ON")
             await db.execute("BEGIN IMMEDIATE")
             await db.execute("DELETE FROM spend_log WHERE key_alias = ?", (alias,))
@@ -684,37 +983,33 @@ class ShardRepository:
     # Decoy hash registry (WOR-31)
     # ------------------------------------------------------------------
 
-    async def set_decoy_hash(self, alias: str, env_path: str | None, decoy_value: str) -> None:
-        """Store the HMAC-SHA256 hash of *decoy_value* on the enrollment row."""
-        h = await self._compute_decoy_hash(decoy_value)
+    async def record_retired_decoy(self, retired_value: str) -> None:
+        """Record the HMAC of a now-RETIRED shard-A in the decoy tripwire set.
+
+        Called at unlock — the moment a shard-A is invalidated. NEVER call this
+        with a currently-active shard-A: that value is the legitimate Bearer
+        token and recording it would make the proxy 401 all live traffic.
+        """
+        h = await self._compute_decoy_hash(retired_value)
         async with self._connect() as db:
-            if env_path is None:
-                await db.execute(
-                    "UPDATE enrollments SET decoy_hash = ? "
-                    "WHERE key_alias = ? AND env_path IS NULL",
-                    (h, alias),
-                )
-            else:
-                await db.execute(
-                    "UPDATE enrollments SET decoy_hash = ? WHERE key_alias = ? AND env_path = ?",
-                    (h, alias, env_path),
-                )
+            await db.execute(
+                "INSERT OR IGNORE INTO retired_decoys (decoy_hash) VALUES (?)",
+                (h,),
+            )
             await db.commit()
 
     async def is_known_decoy(self, value: str) -> bool:
-        """Return True if *value* matches any stored decoy hash."""
+        """Return True if *value* matches a retired-decoy hash."""
         h = await self._compute_decoy_hash(value)
         async with self._connect() as db:
             cursor = await db.execute(
-                "SELECT 1 FROM enrollments WHERE decoy_hash = ? LIMIT 1",
+                "SELECT 1 FROM retired_decoys WHERE decoy_hash = ? LIMIT 1",
                 (h,),
             )
             return await cursor.fetchone() is not None
 
     async def all_decoy_hashes(self) -> set[str]:
-        """Return the set of all non-NULL decoy_hash values (for batch checks)."""
+        """Return the set of all retired-decoy hashes (for the proxy tripwire)."""
         async with self._connect() as db:
-            cursor = await db.execute(
-                "SELECT decoy_hash FROM enrollments WHERE decoy_hash IS NOT NULL"
-            )
+            cursor = await db.execute("SELECT decoy_hash FROM retired_decoys")
             return {row[0] for row in await cursor.fetchall()}

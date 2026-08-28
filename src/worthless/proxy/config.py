@@ -10,11 +10,12 @@ from pathlib import Path
 
 from worthless._flags import fernet_ipc_only_enabled
 from worthless.cli.keystore import read_fernet_key
+from worthless.defaults import GLOBAL_CEILING_TOKENS  # noqa: F401 — re-exported for proxy consumers
 
 #: Capabilities the proxy expects from the sidecar HELLO frame (WOR-309).
 #: Caps shrinking across reconnects is fatal — see C3 in
 #: ``.research/10-security-signoff.md``.
-DEFAULT_SIDECAR_CAPS: frozenset[str] = frozenset({"open", "seal", "attest"})
+DEFAULT_SIDECAR_CAPS: frozenset[str] = frozenset({"open", "seal", "attest", "mac"})
 
 #: IPC protocol version (msgpack envelope schema). Bump on breaking changes.
 DEFAULT_SIDECAR_PROTOCOL_VERSION: int = 1
@@ -186,6 +187,32 @@ class ProxySettings:
     streaming_timeout: float = field(
         default_factory=lambda: float(os.environ.get("WORTHLESS_STREAMING_TIMEOUT", "300.0"))
     )
+    # WOR-696: total wall-clock cap on a single streaming response. Anthropic's
+    # own docs recommend batch API beyond ~15min (system timeouts + open
+    # connection limits). 15min covers Claude Code agentic loops (8-12 min
+    # legit) while killing slow-drip attackers who keep streams open forever.
+    max_stream_duration_seconds: float = field(
+        default_factory=lambda: float(
+            os.environ.get("WORTHLESS_MAX_STREAM_DURATION_SECONDS", "900.0")
+        )
+    )
+    # WOR-696: hard cut when a stream goes silent between chunks. 90s covers
+    # Anthropic extended-thinking pauses (45-60s legit; documented `ping`
+    # events keep the connection alive) while killing slow-drip variants
+    # where an attacker drips bytes minutes apart.
+    max_idle_between_chunks_seconds: float = field(
+        default_factory=lambda: float(
+            os.environ.get("WORTHLESS_MAX_IDLE_BETWEEN_CHUNKS_SECONDS", "90.0")
+        )
+    )
+    # Sweeper background task: how often to run and how old a hold must be
+    # before it gets billed at estimate (fail-closed: bill orphans, never refund).
+    sweep_interval_seconds: float = field(
+        default_factory=lambda: float(os.environ.get("WORTHLESS_SWEEP_INTERVAL_SECONDS", "60.0"))
+    )
+    sweep_max_age_seconds: float = field(
+        default_factory=lambda: float(os.environ.get("WORTHLESS_SWEEP_MAX_AGE_SECONDS", "300.0"))
+    )
     allow_insecure: bool = field(default_factory=lambda: _env_bool("WORTHLESS_ALLOW_INSECURE"))
     sidecar_socket_path: str = field(
         default_factory=lambda: os.environ.get(
@@ -226,6 +253,37 @@ class ProxySettings:
         any request reaches the IPC peer.
         """
         self._validate_deploy_mode()
+        self._validate_single_worker()
+
+    def _validate_single_worker(self) -> None:
+        """Refuse multi-worker launch — the spend cap is only exact per process.
+
+        WOR-662: spend-cap and token-budget reservations live in process-local
+        memory and are only correct with a single owning process per database.
+        ``WEB_CONCURRENCY``/``uvicorn --workers`` would spawn N processes that
+        each reserve independently against the same stale ``spend_log`` SUM,
+        overshooting the cap ~Nx. We refuse it here with a clear message. This
+        is the interim fail-closed guard; durable cross-process correctness
+        (and relaxing this check) lands with the WOR-659 pre-charge ledger.
+        Scale today with replicas that each own a distinct ``WORTHLESS_DB_PATH``.
+        """
+        raw = os.environ.get("WEB_CONCURRENCY", "").strip()
+        if not raw:
+            return
+        try:
+            workers = int(raw)
+        except ValueError as exc:
+            raise ConfigError(
+                f"WEB_CONCURRENCY={raw!r} is not an integer. Unset it or set it to 1 — "
+                "worthless-proxy runs a single worker per database (WOR-662)."
+            ) from exc
+        if workers > 1:
+            raise ConfigError(
+                f"WEB_CONCURRENCY={workers} is unsupported: worthless-proxy enforces a "
+                "single worker per database so the hard spend cap stays exact (WOR-662). "
+                "Set WEB_CONCURRENCY=1 and scale with replicas that each own a distinct "
+                "WORTHLESS_DB_PATH."
+            )
 
     def _validate_deploy_mode(self) -> None:
         paas = _detected_paas_vars()

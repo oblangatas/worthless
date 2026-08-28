@@ -236,7 +236,7 @@ class IPCClient:
             )
         return bytes(evidence)
 
-    async def mac(self, value: bytes) -> bytes:
+    async def mac(self, value: bytes | bytearray) -> bytes:
         """Request HMAC-SHA256(value) keyed with the derived MAC subkey.
 
         Returns the unwrapped MAC tag as bytes. The sidecar keys this with an

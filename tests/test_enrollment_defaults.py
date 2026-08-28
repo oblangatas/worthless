@@ -102,8 +102,8 @@ async def test_spend_cap_rule_enforces_default(repo: ShardRepository, tmp_db_pat
     async with aiosqlite.connect(tmp_db_path) as db:
         rule = SpendCapRule(db=db)
         result = await rule.evaluate("openai-enforce", object())
-        assert result is not None, "SpendCapRule should deny when tokens exceed default cap"
-        assert result.status_code == 402
+        assert result.denial is not None, "SpendCapRule should deny when tokens exceed default cap"
+        assert result.denial.status_code == 402
 
 
 @pytest.mark.asyncio
@@ -120,5 +120,6 @@ async def test_spend_cap_rule_allows_under_default(repo: ShardRepository, tmp_db
 
     async with aiosqlite.connect(tmp_db_path) as db:
         rule = SpendCapRule(db=db)
-        result = await rule.evaluate("openai-ok", object())
-        assert result is None
+        # Small valid request — 1000 spent + tiny estimate well under 1B default.
+        result = await rule.evaluate("openai-ok", object(), body=b'{"max_tokens": 50}')
+        assert result.denial is None

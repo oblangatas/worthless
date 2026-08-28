@@ -9,8 +9,13 @@ description: "Zero-to-working-proxy install guides for macOS, Linux, WSL2, and D
 |---|---|---|
 | **macOS** (Apple Silicon or Intel) | [macOS guide](/install/mac/) | ~2 min on a fast network |
 | **Linux** (Ubuntu / Debian / Alpine) | [Linux guide](/install/linux/) | ~1-2 min on a fast network |
-| **Windows + WSL2** | [WSL2 guide](/install/wsl/) | ~2-3 min on a fast network |
+| **Windows + WSL2** † | [WSL2 guide](/install/wsl/) | ~2-3 min on a fast network |
 | **Docker** (your app runs in a container) | [Docker guide](/install/docker/) | ~5 min (one-time per project) |
+
+> **† WSL2 is not exercised in CI.** The underlying install is identical to
+> Linux (which *is* CI-tested), but the WSL-specific layer — localhost
+> forwarding, file-backed keystore, `/mnt/c` detection — is verified by hand,
+> not automated. macOS, Linux, and Docker installs all run in CI.
 
 > **Note:** Worthless is **always installed natively on your host**,
 > even if your app runs in Docker. The Docker image is for self-hosting
@@ -62,17 +67,17 @@ ever leaving the proxy process.
 > exact exfiltration worthless protects against. Use the SDK pattern
 > above; it reads from `.env` at the right boundary.
 
-## Known limitations as of v0.3.3
+## Known limitations
 
 Honest list — these are tracked, not unknown.
 
 | Limitation | Tracked as |
 |---|---|
-| Proxy doesn't auto-restart on reboot — you must run `worthless up` after every boot | WOR-174 (macOS launchd) + WOR-175 (Linux systemd), v1.1 |
+| Proxy doesn't auto-restart on reboot unless you run `worthless service install` | Fixed by `worthless service install` (macOS launchd / Linux systemd) |
 | Docker containers can't reach `127.0.0.1:8787` from inside — edit `.env` to use `host.docker.internal:8787` | v1.2 work |
 | `worthless up &` may exit prematurely instead of staying attached | `worthless-n8tj`, v0.3.4 |
 | Stale orphan proxy can confuse `worthless up` PID detection | `worthless-6gkb`, v0.3.4 |
-| `uv tool uninstall worthless` doesn't purge the keychain entry or `~/.worthless/` | WOR-435, v1.2 |
+| `uv tool uninstall worthless` only removes the binary — run `worthless uninstall` first to restore your keys, then purge `~/.worthless/` + the keychain | see [Uninstall](/uninstall/) |
 | No `worthless` CLI is exposed by `docker run ghcr.io/.../worthless` — you still install natively | by design; see [Docker guide](/install/docker/) |
 
 If you hit something that isn't on this list, file a GitHub issue.

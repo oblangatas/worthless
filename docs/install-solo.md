@@ -1,6 +1,6 @@
 ---
 title: "Install — Solo Developer"
-description: "Install Worthless on your laptop in under 90 seconds."
+description: "Install Worthless on your laptop in one command."
 ---
 
 # Install — Solo Developer
@@ -23,6 +23,23 @@ What it does:
 
 Your existing code works identically. The proxy reconstructs the key only when the rules engine approves the request — blow your spend cap, the key never forms.
 
+## One-line install (curl)
+
+No Python or pipx set up? Install with a single command. The script is
+version-pinned, and verifies the SHA-256 of every sub-installer it fetches
+(e.g. the Astral/`uv` installer) before running it. To check the top-level
+script's own bytes weren't tampered with in transit, compare the
+`X-Worthless-Script-Sha256` response header against what you downloaded —
+see the [install security model](/install-security/) for exactly what that
+does and doesn't prove:
+
+```bash
+curl -sSL https://worthless.sh | sh
+# inspect first: curl -sSL 'https://worthless.sh?explain=1' | less
+```
+
+This installs the `worthless` CLI; then `cd your-project && worthless` exactly as above.
+
 ## Non-interactive (CI, scripts)
 
 ```bash
@@ -33,8 +50,8 @@ worthless --json     # read-only state report, never writes
 ## Install from source
 
 ```bash
-git clone https://github.com/shacharm2/worthless && cd worthless
+git clone https://github.com/oblangatas/worthless && cd worthless
 uv pip install -e .
 ```
 
-See the [README quickstart](../README.md#quickstart) for the full walkthrough and command reference.
+See the [README quickstart](https://github.com/oblangatas/worthless/blob/main/README.md#quickstart) for the full walkthrough and command reference.

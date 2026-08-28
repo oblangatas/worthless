@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 
 import pytest
 
@@ -418,6 +419,54 @@ class TestWrapCommandSanitization:
         assert "/usr/local/secret/bin" not in result.output
         # Must contain structured error info
         assert "WRTLS-" in result.output or "failed to start child" in result.output.lower()
+
+
+class TestDefaultCommandSanitization:
+    """WOR-277: the bare `worthless` (no-subcommand) flow — the product's
+    main entry point — must sanitize unexpected exceptions exactly like
+    every other command. Before this fix it was the ONE path that only
+    caught WorthlessError, so any other exception printed Python's raw,
+    unfiltered traceback straight to the user.
+    """
+
+    def test_unexpected_exception_in_default_flow_does_not_leak_traceback(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from typer.testing import CliRunner
+
+        from worthless.cli.app import app
+
+        def _boom(**_kw):
+            raise RuntimeError("boom at /home/user/.worthless/secret-internal-path")
+
+        monkeypatch.setattr("worthless.cli.app.run_default", _boom)
+
+        result = CliRunner().invoke(app, [], env={"WORTHLESS_HOME": str(tmp_path / ".worthless")})
+        assert result.exit_code != 0
+        assert "/home/user/.worthless/secret-internal-path" not in result.output
+        assert "Traceback (most recent call last)" not in result.output
+        assert "RuntimeError" not in result.output
+        assert "WRTLS-" in result.output
+
+    def test_worthless_error_in_default_flow_still_gets_clean_message(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A WorthlessError from run_default must still print its own
+        clean message via error_boundary — not regress to a generic one."""
+        from typer.testing import CliRunner
+
+        from worthless.cli.app import app
+        from worthless.cli.errors import ErrorCode, WorthlessError
+
+        def _fail_cleanly(**_kw):
+            raise WorthlessError(ErrorCode.KEY_NOT_FOUND, "no keys found to lock")
+
+        monkeypatch.setattr("worthless.cli.app.run_default", _fail_cleanly)
+
+        result = CliRunner().invoke(app, [], env={"WORTHLESS_HOME": str(tmp_path / ".worthless")})
+        assert result.exit_code != 0
+        assert "no keys found to lock" in result.output
+        assert "Traceback (most recent call last)" not in result.output
 
 
 class TestTyperConfiguration:

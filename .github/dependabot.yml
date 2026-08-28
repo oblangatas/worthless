@@ -1,0 +1,88 @@
+# Dependabot — supply-chain PRs (additive to CodeRabbit; does not replace LLM review).
+# See engineering/ci/pr-security-stack.md
+
+version: 2
+
+updates:
+  - package-ecosystem: uv
+    directory: /
+    # requirements.txt is GENERATED from uv.lock by a pre-commit hook, and it
+    # sits at the repo root because Snyk imported it there as a monitored
+    # project (target oblangatas/worthless, project `requirements.txt`).
+    # Snyk resolves that project by the path it was imported at, so the file
+    # cannot move without re-importing it on Snyk's side.
+    #
+    # Dependabot discovers it here too, and filed NINE pull requests bumping
+    # versions in generated output while uv.lock -- which actually resolves
+    # dependencies -- went untouched. Merging one changed nothing, while the
+    # version in the title made it look done. certifi sat five months stale
+    # in uv.lock the whole time those PRs were open.
+    #
+    # WOR-875 moved the file to engineering/ci/ to hide it from Dependabot.
+    # That worked (#534 and #535 self-closed on `@dependabot recreate`) and
+    # silently broke the Snyk project, which imports the root path. This is
+    # the correct tool instead: the file stays where Snyk registered it, and
+    # Dependabot is told to skip it explicitly.
+    #
+    # SCOPE: exclude-paths suppresses SCHEDULED version updates only. It
+    # does NOT suppress Dependabot SECURITY update PRs — dependabot-core
+    # issue 14408. The nine no-ops this was added for were all scheduled
+    # bumps, so they are covered, but do not read this as "Dependabot will
+    # never touch this file again": a CVE in a pinned dependency will
+    # still file a security PR against it.
+    #
+    # Do NOT move requirements.txt to silence Dependabot. WOR-904.
+    exclude-paths:
+      - requirements.txt
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      python-dev:
+        patterns:
+          - ruff*
+          - pytest*
+          - mypy*
+          - pre-commit*
+        update-types:
+          - minor
+          - patch
+
+  # The Worker subproject. Without this entry Dependabot raises advisories for
+  # workers/worthless-sh but never opens an update PR for them, so nothing ever
+  # clears — main carried 5 open undici alerts (via wrangler/vitest-pool-workers
+  # -> miniflare) with no remediation path. All of them are devDependencies: the
+  # Worker declares `"dependencies": {}`, so none of it ships. beads
+  # worthless-yhcc.
+  - package-ecosystem: npm
+    directory: /workers/worthless-sh
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      worker-dev:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    # Major action releases (v4→v6) often need manual review — patch/minor only here.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch

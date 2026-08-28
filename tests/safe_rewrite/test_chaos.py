@@ -189,7 +189,14 @@ def test_sigkill_between_fsync_and_rename_leaves_target_byte_identical(
     # thread on PR #86 (discussion_r3131811612) flagged that the prior
     # ``== ".env.lost"`` spot-check would miss real regressions.
     survivors = list(tmp_path.iterdir())
-    allowed_names = {".env", marker.name}
+    allowed_names = {
+        ".env",
+        marker.name,
+        # Created unconditionally, for every test, by the suite-wide autouse
+        # HOME/USERPROFILE isolation fixture (tests/conftest.py) -- unrelated
+        # to this test's rewrite logic, not a rewrite-path leak.
+        "_isolate_process_home_sandbox",
+    }
     unexpected = [
         p.name
         for p in survivors

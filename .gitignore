@@ -15,14 +15,20 @@ node_modules/
 docker-compose.env
 .mcp.json
 
-# Editor directories and files
+# Editor / IDE / agent tool directories
+.cursor/
+.gemini/
 .idea
+.kiro/
+.opencode/
+.qodo/
 .vscode
-*.suo
-*.ntvs*
 *.njsproj
+*.ntvs*
 *.sln
+*.suo
 *.sw?
+opencode.json
 
 # OS specific
 .DS_Store
@@ -31,22 +37,14 @@ docker-compose.env
 .dolt/
 *.db
 
-# Editor/tool directories
-.cursor/
-.gemini/
-.kiro/
-.opencode/
-.qodo/
-opencode.json
-
 # Developer tooling (symlinked from private repo)
 CLAUDE.md
 AGENTS.md
 TESTING.md
 
-# Internal security docs — symlinked from private worthless-cloud (WOR-593).
+# Internal security docs — symlinked in from a private repo (WOR-593).
 # Public repo: these enumerate threat models / attack surface, so they live
-# private and are symlinked back in via worthless-cloud/config/worthless/link.sh.
+# private and are linked back in by local tooling.
 /security-audit
 /engineering/modules.md
 
@@ -74,6 +72,7 @@ htmlcov/
 .hypothesis/
 testsprite_prd.md
 testsprite_tests/
+test-results/
 
 # Live end-to-end gate evidence (local-only; CI re-runs from scratch)
 .worthless/
@@ -98,5 +97,12 @@ dist/
 .astro/
 
 # Internal — not published to the public repo (WOR-532)
-.planning/
+# /reviews/ = expert-panel artifacts. Blanket-ignored; keep one subfolder per
+# topic (reviews/<topic>/) so parallel panels never collide.
 .beads/
+
+testsprite_tests/tmp/config.json
+tests/openclaw/_artifacts/
+.planning/
+.reviews/
+/reviews/

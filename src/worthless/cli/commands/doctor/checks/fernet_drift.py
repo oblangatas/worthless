@@ -23,10 +23,11 @@ logger = logging.getLogger(__name__)
 check_id = "fernet_drift"
 
 _INSTRUCTIONS = (
-    "Two Fernet keys exist (keyring + file) and they differ. "
-    "Worthless will not auto-pick a side — losing the canonical key "
-    "makes existing locked secrets unrecoverable.\n"
-    "  1. Identify which one decrypts your current secrets (`worthless status`).\n"
+    "At risk until you choose — two different Fernet keys exist (keyring + file). "
+    "Worthless will not auto-pick a side, because losing the right one makes your "
+    "existing locked secrets unrecoverable.\n"
+    "  1. Find the canonical key — the one your secrets were written under. Try "
+    "decrypting a known secret with each, or check `worthless status`.\n"
     "  2. Back up both values.\n"
     "  3. Delete the non-canonical source manually:\n"
     "     - File:   rm ~/.worthless/fernet.key\n"

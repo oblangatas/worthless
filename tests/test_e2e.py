@@ -19,10 +19,9 @@ from worthless.cli.app import app
 from worthless.cli.bootstrap import WorthlessHome
 from worthless.storage.repository import ShardRepository
 
-from tests._fakes import WOR309_SUBPROCESS_FOLLOWUP
 from tests.helpers import fake_openai_key
 
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner()
 _WRAP_BIND_ATTEMPTS = 5
 _WRAP_BIND_COLLISION_MARKERS = (
     "couldn't bind port",
@@ -49,7 +48,22 @@ def _make_e2e_env(
     env_file = project_dir / ".env"
     env_file.write_text(f"OPENAI_API_KEY={original_key}\n")
 
-    cli_env = {"WORTHLESS_HOME": str(worthless_home)}
+    # Pin HOME at the sandbox so ``openclaw.integration.detect()`` does NOT
+    # see the developer's real ``~/.openclaw`` and trigger F7's PROXY_NOT_RUNNING
+    # gate (WOR-648 / WOR-621 AC5). This test class is ``@pytest.mark.integration``,
+    # which opts out of the autouse ``check_proxy_health`` mock in
+    # ``tests/conftest.py``, so without HOME pinning, F7's real probe of
+    # ``WORTHLESS_PORT=1`` correctly returns "unhealthy" and ``lock`` exits 1
+    # before doing anything. The lifecycle being tested here (vanilla
+    # split → status → unlock) has no OpenClaw involvement.
+    home_sandbox = base_dir / "home"
+    home_sandbox.mkdir(parents=True, exist_ok=True)
+
+    cli_env = {
+        "WORTHLESS_HOME": str(worthless_home),
+        "HOME": str(home_sandbox),
+        "USERPROFILE": str(home_sandbox),
+    }
     if proxy_port is not None:
         cli_env["WORTHLESS_PORT"] = str(proxy_port)
     return env_file, worthless_home, original_key, cli_env
@@ -204,7 +218,6 @@ _CHILD_SCRIPT = textwrap.dedent("""\
 @pytest.mark.integration
 @pytest.mark.real_ipc
 @pytest.mark.timeout(60)
-@pytest.mark.skip(reason=WOR309_SUBPROCESS_FOLLOWUP)
 class TestWrapProxiesRequest:
     """Prove ``worthless wrap`` spawns a real proxy that transits requests."""
 
@@ -251,6 +264,14 @@ class TestWrapProxiesRequest:
                     # this subprocess must not leak fernet-key-* into the host
                     # keychain. Defense-in-depth.
                     "WORTHLESS_KEYRING_BACKEND": "null",
+                    # Isolate $HOME too, matching the runner.invoke call above —
+                    # _resolve_home() (openclaw/integration.py) reads Path.home(),
+                    # not WORTHLESS_HOME. cli_env["HOME"]/["USERPROFILE"] are
+                    # _make_e2e_env's sandbox dir, already isolated from the real
+                    # machine. USERPROFILE matters on native Windows, where
+                    # Path.home() checks it before $HOME.
+                    "HOME": cli_env["HOME"],
+                    "USERPROFILE": cli_env["USERPROFILE"],
                 },
                 timeout=45,
                 capture_output=True,
