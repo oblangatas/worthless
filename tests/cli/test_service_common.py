@@ -16,7 +16,7 @@ from worthless.cli.commands.service._common import (
     preflight_service_install,
     resolve_worthless_binary,
     unit_file_matches_home,
-    verify_proxy_health,
+    report_proxy_health,
 )
 from worthless.cli.errors import ErrorCode, WorthlessError
 
@@ -91,13 +91,21 @@ class TestPreflightAndHealth:
             preflight_service_install(home)
         assert exc_info.value.code == ErrorCode.KEY_NOT_FOUND
 
-    def test_verify_proxy_health_failure(self) -> None:
-        with (
-            patch("worthless.cli.commands.service._common.poll_health", return_value=False),
-            pytest.raises(WorthlessError) as exc_info,
-        ):
-            verify_proxy_health(8787, timeout=1.0)
-        assert exc_info.value.code == ErrorCode.PROXY_UNREACHABLE
+    def test_health_timeout_is_no_longer_an_error(self) -> None:
+        """Replaces test_verify_proxy_health_failure (worthless-rnl8).
+
+        That test pinned `verify_proxy_health` raising PROXY_UNREACHABLE when
+        `/healthz` did not answer in time. The contract was wrong, not the test:
+        this function runs only after the unit has been written and started, so a
+        silent proxy means "not up yet", not "install failed". Live proof on macOS
+        v0.3.11 — the aborted install had a healthy service moments later.
+
+        The behaviour is deliberately inverted and now lives in
+        TestHealthReportHonesty. Kept as a marker so the removal reads as a
+        decision rather than a dropped assertion.
+        """
+        with patch("worthless.cli.commands.service._common.poll_health", return_value=False):
+            report_proxy_health(8787, timeout=0.01)  # no raise: that is the fix
 
 
 class TestPlatformBackendName:
@@ -218,3 +226,67 @@ class TestTemplatesPortOverride:
             port=9090,
         )
         assert "9090" in content
+
+
+class TestHealthReportHonesty:
+    """worthless-rnl8: a health-check timeout is not an install failure.
+
+    Verified live on macOS with released v0.3.11: `worthless service install`
+    printed
+
+        WRTLS-104: Service started but /healthz on port 8787 did not respond within 15s.
+
+    and exited non-zero — while the service was, in fact, installed and about to
+    become healthy. `launchctl list` showed last exit status 1, so the first spawn
+    died and launchd's restart succeeded seconds later, after install had stopped
+    watching. The user was told a success was a failure, and a user who believes
+    that will uninstall a working service.
+
+    The load-bearing fact: `report_proxy_health` is only ever reached AFTER the
+    platform's bootstrap/kickstart (launchd) or enable/start (systemd) calls have
+    returned successfully. Reaching this line is itself proof the unit is written
+    and started. What has NOT been established is whether the proxy answered yet.
+    Those are different claims and must read differently.
+    """
+
+    def test_timeout_does_not_raise(self) -> None:
+        """An unconfirmed health check must not abort a successful install."""
+        with patch("worthless.cli.commands.service._common.poll_health", return_value=False):
+            report_proxy_health(8787, timeout=0.01)  # must not raise
+
+    def test_timeout_does_not_call_it_a_failure(self, capsys: pytest.CaptureFixture) -> None:
+        """The wording must not assert something failed when nothing did."""
+        with patch("worthless.cli.commands.service._common.poll_health", return_value=False):
+            report_proxy_health(8787, timeout=0.01)
+        out = " ".join((capsys.readouterr().err + capsys.readouterr().out).split()).lower()
+        for lie in ("failed", "did not respond within"):
+            assert lie not in out, (
+                f"still asserts failure ({lie!r}) on a successful install:\n{out}"
+            )
+
+    def test_timeout_says_what_did_succeed_and_how_to_check(
+        self, capsys: pytest.CaptureFixture
+    ) -> None:
+        """Name the established fact, then the open question, then the next step."""
+        with patch("worthless.cli.commands.service._common.poll_health", return_value=False):
+            report_proxy_health(8787, timeout=0.01)
+        out = " ".join((capsys.readouterr().err + capsys.readouterr().out).split()).lower()
+        assert "installed" in out or "started" in out, f"must state what succeeded:\n{out}"
+        assert "worthless service status" in out, f"must give the next step:\n{out}"
+
+    def test_healthy_proxy_stays_silent(self, capsys: pytest.CaptureFixture) -> None:
+        """No warning when the proxy answered — silence is the success signal."""
+        with patch("worthless.cli.commands.service._common.poll_health", return_value=True):
+            report_proxy_health(8787, timeout=0.01)
+        out = (capsys.readouterr().err + capsys.readouterr().out).lower()
+        assert "status" not in out, f"clean install should not nag:\n{out}"
+
+    def test_default_wait_exceeds_the_observed_cold_start(self) -> None:
+        """15s was shorter than a real launchd cold start — that is what broke."""
+        import inspect
+
+        default = inspect.signature(report_proxy_health).parameters["timeout"].default
+        assert default > 15.0, (
+            f"default wait is still {default}s; the live failure happened at 15s, so "
+            "keeping it there reproduces the bug even with better wording"
+        )

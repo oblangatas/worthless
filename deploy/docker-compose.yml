@@ -15,7 +15,9 @@ services:
     # not a cosmetic wart. Guarded by tests/test_deploy_static.py.
     #
     # Contributors building from source:
-    #   docker compose -f docker-compose.yml -f docker-compose.build.yml up
+    #   docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
+    # (--build matters: the override tags the local build `worthless-proxy:local`,
+    #  so a plain `up` happily reuses a stale image from an earlier checkout.)
     image: ghcr.io/oblangatas/worthless-proxy:0.3.12
     ports:
       # Bind to localhost only; use a reverse proxy for external access

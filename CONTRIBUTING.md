@@ -14,6 +14,12 @@
 
 5. **Use a conventional branch name and commit prefix.** Branches: `feature/<slug>`, `fix/<slug>`, `chore/<slug>`, `refactor/<slug>`, `docs/<slug>`, `test/<slug>`. Commit subjects: `feat:`, `fix:`, `chore:`, `refactor:`, `docs:`, `test:`.
 
+## Releasing
+
+Maintainers only. See **[RELEASING.md](RELEASING.md)** — it covers `./scripts/tag-release.sh`,
+the local tag guard (`./scripts/install-git-hooks.sh`, install once per clone), and the
+recovery path for a failed cut.
+
 ## Reporting a security issue
 
 **Do not open a public issue or PR.** Use GitHub's [Private Vulnerability Reporting](https://github.com/oblangatas/worthless/security/advisories/new) or email `security@wless.io`. See [SECURITY.md](SECURITY.md) for details and expected response.
