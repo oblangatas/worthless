@@ -45,7 +45,11 @@ for wf in $PUBLISHERS; do
   # is present, and there is no POST route for .../runs — it 404s, which under
   # `set -e` aborts the whole script and the Release is never created. Verified
   # against the live API on v0.3.10. Do not remove -X GET.
-  runs=$(gh api "/repos/${GH_REPO}/actions/workflows/${wf}/runs" -X GET -f event=push -f branch="${TAG}")
+  # per_page=100: the default is 30. A hot tag with re-runs can push the
+  # successful run past that window, and the gate then never clears — no
+  # Release, and no alarm either, which is the exact silent failure this
+  # whole workflow exists to remove. The jobs query below already pages.
+  runs=$(gh api "/repos/${GH_REPO}/actions/workflows/${wf}/runs" -X GET -f event=push -f branch="${TAG}" -f per_page=100)
   ok=$(printf '%s' "$runs" | jq --arg sha "$HEAD_SHA" \
     '[.workflow_runs[] | select(.head_sha==$sha and .conclusion=="success")] | length')
   bad=$(printf '%s' "$runs" | jq --arg sha "$HEAD_SHA" \
@@ -88,7 +92,11 @@ for wf in $PUBLISHERS; do
       # manual dispatch is a different event and is filtered out by `-f event=push`
       # above, so it can never clear this gate.
       echo "::warning title=Release held::${wf} finished without success for ${TAG} — Release NOT created. Open that run in Actions and use 'Re-run failed jobs' (a manual 'Run workflow' dispatch will NOT clear this gate)."
-    else
+    elif [ "$blocked" != "true" ]; then
+      # Guarded on $blocked: when the job-level check above trips it sets ok=0
+      # with bad=0, and without this guard the script printed "Release held"
+      # and then "waiting for it to finish" in the same breath — telling the
+      # maintainer to be patient about something that will never resolve.
       echo "::notice::${wf} has no successful run yet for ${TAG} — waiting for it to finish."
     fi
   fi

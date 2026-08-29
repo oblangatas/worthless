@@ -197,9 +197,14 @@ echo
 # correctly-functioning release.
 echo "FALLBACK — only when there is NO waiting run, NO pending approval, and every"
 echo "publisher is green, yet no Release exists. That is the automation genuinely"
-echo "not firing, and the watchdog files an issue for it. Until then, waiting is"
-echo "the correct action. If you do need it, create a DRAFT — never a published"
-echo "Release — so it cannot silently ratify a release the robots refused:"
+echo "not firing."
+echo
+echo "NOTHING WILL TELL YOU THIS HAPPENED. There is no watchdog yet (WOR-909"
+echo "requirement 3 is not shipped), so a silent no-Release looks exactly like a"
+echo "release still waiting on approval. Check Actions yourself before assuming."
+echo
+echo "If you do need the fallback, create a DRAFT — never a published Release —"
+echo "so it cannot silently ratify a release the publishers refused:"
 if [ -n "$headline" ]; then
     echo "  gh release create $tag --draft --title \"$tag: $headline\" --verify-tag --generate-notes"
 else

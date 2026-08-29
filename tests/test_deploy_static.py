@@ -54,9 +54,27 @@ spec=""
 IFS=',' read -ra pairs <<<"${RUNS:-}"
 for p in "${pairs[@]}"; do [ "${p%%=*}" = "$wf" ] && spec="${p#*=}"; done
 if [ -z "$spec" ]; then echo '{"workflow_runs":[]}'; exit 0; fi
-st="${spec%%:*}"; cc="${spec#*:}"
+st="${spec%%:*}"; cc="${spec#*:}"; cc="${cc%%:*}"
 if [ "$cc" = "null" ]; then ccj=null; else ccj="\"$cc\""; fi
-run="{\"id\":\"${wf}\",\"head_sha\":\"${HEAD_SHA}\",\"status\":\"${st}\",\"conclusion\":${ccj}}"
+# RUNS entries may carry an optional 4th field: the run's head_sha. Absent
+# means "the sha the caller asked about", which is the happy path. Supplying a
+# DIFFERENT one is how the head_sha filter becomes testable at all — before
+# this the shim echoed ${HEAD_SHA} back verbatim, so removing the filter from
+# release-fanin.sh changed nothing and no test could notice.
+rsha="${HEAD_SHA}"
+case "$spec" in *:*:*) rsha="${spec##*:}";; esac
+run="{\"id\":\"${wf}\",\"head_sha\":\"${rsha}\",\"status\":\"${st}\",\"conclusion\":${ccj}}"
+# Same problem for the event filter: the real API filters server-side, so a
+# shim that ignores `-f event=push` cannot catch its removal. Emit a decoy
+# non-push run ONLY when the caller failed to ask for event=push — then the
+# gate wrongly clears exactly when the filter is missing.
+saw_push=no
+for a in "$@"; do [ "$a" = "event=push" ] && saw_push=yes; done
+if [ "$saw_push" = "no" ] && [ -n "${DECOY_DISPATCH_RUN:-}" ]; then
+  decoy="{\"id\":\"${wf}\",\"head_sha\":\"${HEAD_SHA}\",\"status\":\"completed\",\"conclusion\":\"success\"}"
+  printf '{"workflow_runs":[%s,%s]}\n' "$run" "$decoy"
+  exit 0
+fi
 printf '{"workflow_runs":[%s]}\n' "$run"
 """
 
@@ -1972,7 +1990,7 @@ class TestReleaseFaninBehaviour:
     )
 
     @staticmethod
-    def _run(tmp_path, runs_spec: str, jobs_spec: str = ""):
+    def _run(tmp_path, runs_spec: str, jobs_spec: str = "", env_extra: dict | None = None):
         bindir = tmp_path / "bin"
         bindir.mkdir()
         gh = bindir / "gh"
@@ -1989,6 +2007,7 @@ class TestReleaseFaninBehaviour:
             "HEAD_SHA": "deadbeef",
             "RUNS": runs_spec,
             "JOBS": jobs_spec,
+            **(env_extra or {}),
         }
         proc = subprocess.run(
             ["bash", str(REPO_ROOT / ".github" / "scripts" / "release-fanin.sh")],
@@ -2146,6 +2165,51 @@ class TestReleaseFaninBehaviour:
     # Measured on the real v0.3.12 runs.
 
     VISIBILITY_JOB = "Flip GHCR package visibility to public"
+
+    def test_a_run_at_a_different_sha_does_not_satisfy_the_gate(self, tmp_path):
+        """WOR-909 R1: head_sha must match the release SHA.
+
+        Until the shim grew a per-run sha this was untestable — it echoed back
+        whatever sha the script asked about, so deleting the filter changed
+        nothing and every test stayed green. A real re-tag or a neighbouring
+        release produces exactly this: a genuinely successful run, for the wrong
+        commit.
+        """
+        # ALL FOUR must be green apart from the sha under test. Setting only one
+        # publisher makes the verdict false because the other three have no runs
+        # at all — the test then passes whether or not the filter exists. That is
+        # exactly how the first version of this test was vacuous.
+        runs = self.ALL_GREEN.replace(
+            "publish.yml=completed:success",
+            "publish.yml=completed:success:0000000000000000000000000000000000000000",
+        )
+        ready, rc, _ = self._run(tmp_path, runs)
+        assert ready == "false", (
+            "a successful run at a DIFFERENT commit satisfied the gate. The fan-in "
+            "must match head_sha, or a release is blessed by another commit's run."
+        )
+
+    def test_a_non_push_run_does_not_satisfy_the_gate(self, tmp_path):
+        """WOR-909 R1: event must be push.
+
+        deploy-worker.yml also fires on workflow_dispatch for previews, so a
+        preview emits a successful run unrelated to any tag. The real API filters
+        server-side, so the shim emits a decoy non-push run only when the caller
+        forgets `-f event=push` — the gate then wrongly clears precisely when the
+        filter is missing.
+        """
+        # Same trap: every publisher green except the one whose only run is at a
+        # foreign sha. The decoy then supplies a would-be-passing non-push run,
+        # so the gate clears if and only if the event filter is missing.
+        runs = self.ALL_GREEN.replace(
+            "publish.yml=completed:success",
+            "publish.yml=completed:success:0000000000000000000000000000000000000000",
+        )
+        ready, rc, _ = self._run(tmp_path, runs, env_extra={"DECOY_DISPATCH_RUN": "1"})
+        assert ready == "false", (
+            "a non-push run satisfied the gate. Without `-f event=push` a preview "
+            "dispatch counts as a release publish."
+        )
 
     def test_a_failed_job_blocks_even_when_the_run_says_success(self, tmp_path):
         """The case run-level polling cannot see."""
@@ -2338,6 +2402,61 @@ GUARD_MUTATIONS = [
         "test_exactly_one_workflow_waives_the_binding",
     ),
     (
+        "trust the run verdict, skip job-level polling",
+        ".github/scripts/release-fanin.sh",
+        'if [ "$ok" -ge 1 ]; then',
+        "if false; then",
+        "test_a_failed_job_blocks_even_when_the_run_says_success",
+    ),
+    (
+        # Dropping the workflow from the key makes the excuse match NOTHING —
+        # the list is workflow-qualified — so visibility starts blocking. That
+        # breaks the "excused job doesn't block" test, not the scoping one.
+        "drop the workflow from the excuse key",
+        ".github/scripts/release-fanin.sh",
+        '($wf + "::" + .name)',
+        "(.name)",
+        "test_the_excused_visibility_job_does_not_block",
+    ),
+    (
+        # Scoping needs the excuse pointed at the WRONG workflow: publish.yml's
+        # identically-named failing job then gets excused, which is precisely
+        # the leak the scoping test exists to catch.
+        "point the excuse at a different workflow",
+        ".github/scripts/release-fanin.sh",
+        'JOB_EXCUSES="publish-docker.yml::Flip',
+        'JOB_EXCUSES="publish.yml::Flip',
+        "test_the_excuse_is_scoped_to_its_own_workflow",
+    ),
+    (
+        "treat a skipped job as a failure",
+        ".github/scripts/release-fanin.sh",
+        'and .conclusion != "skipped"',
+        "",
+        "test_a_skipped_job_does_not_block",
+    ),
+    (
+        "stop filtering runs by event=push",
+        ".github/scripts/release-fanin.sh",
+        " -f event=push",
+        "",
+        "test_a_non_push_run_does_not_satisfy_the_gate",
+    ),
+    (
+        "stop matching the release head_sha",
+        ".github/scripts/release-fanin.sh",
+        'select(.head_sha==$sha and .conclusion=="success")',
+        'select(.conclusion=="success")',
+        "test_a_run_at_a_different_sha_does_not_satisfy_the_gate",
+    ),
+    (
+        "publish the fallback Release instead of drafting it",
+        "scripts/tag-release.sh",
+        "--draft --title",
+        "--title",
+        "test_the_fallback_creates_a_draft",
+    ),
+    (
         "pass the tag via a variable GitHub ignores",
         ".github/workflows/release-notes.yml",
         "VERIFY_TAG_REF:",
@@ -2408,6 +2527,9 @@ class TestGuardsCanActuallyFail:
     ):
         # Work on a full copy so nothing mutates the real tree — safe under xdist.
         shutil.copytree(REPO_ROOT / ".github", tmp_path / ".github")
+        # scripts/ too: tag-release.sh guards live there, and without this their
+        # mutations silently target a file the copy does not contain.
+        shutil.copytree(REPO_ROOT / "scripts", tmp_path / "scripts")
         (tmp_path / "tests").mkdir()
         shutil.copy(Path(__file__), tmp_path / "tests" / Path(__file__).name)
 
