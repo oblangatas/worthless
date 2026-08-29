@@ -1890,6 +1890,24 @@ class TestReleaseNotesGuardrails:
             "the gate validated."
         )
         code = self._code(release_notes_data)
+        # Substring checks on "rev-list" and "$HEAD_SHA" both survive replacing the
+        # whole guard with an echo that merely mentions them — verified: the entire
+        # suite stayed green with the comparison deleted. Require the comparison to
+        # exist AND to reach exit 1, so a measurement without an enforcement fails.
+        rebind = re.search(r"ACTUAL=\$\(git rev-list.*?\n(.*?)(?=\n\s*- name:|\Z)", code, re.S)
+        assert rebind, (
+            "the re-bind step no longer measures the tag with git rev-list. It is "
+            "the only thing tying the tag NAME to the commit the gate validated."
+        )
+        body = rebind.group(1)
+        assert re.search(r'\[\s*"\$ACTUAL"\s*!=\s*"\$HEAD_SHA"\s*\]', body), (
+            "the re-bind measures the tag but no longer COMPARES it to the validated "
+            "sha. A measurement that nothing acts on is not a guard."
+        )
+        assert "exit 1" in body, (
+            "the re-bind compares the tag to the validated sha but does not exit 1 "
+            "on mismatch, so a moved tag still cuts a Release."
+        )
         assert "rev-list" in code and "$HEAD_SHA" in code, (
             "must compare the tag's current commit against the gate's HEAD_SHA "
             "before creating the Release."
@@ -2402,6 +2420,17 @@ GUARD_MUTATIONS = [
         "test_exactly_one_workflow_waives_the_binding",
     ),
     (
+        # The existing entry swaps the VALUE (ACTUAL=$HEAD_SHA). That proves the
+        # guard notices a broken measurement. It does NOT prove the guard notices
+        # the comparison being deleted outright — the same tautology blind spot
+        # this branch already fixed once in verify-tag.sh, one layer up.
+        "neuter the tag-to-commit comparison",
+        ".github/workflows/release-notes.yml",
+        'if [ "$ACTUAL" != "$HEAD_SHA" ]; then',
+        "if false; then",
+        "test_rebinds_the_tag_to_the_validated_commit",
+    ),
+    (
         "trust the run verdict, skip job-level polling",
         ".github/scripts/release-fanin.sh",
         'if [ "$ok" -ge 1 ]; then',
@@ -2644,6 +2673,12 @@ class TestHeadBindingOptOutCannotSpread:
     def test_the_waiver_is_earned_not_asserted(self):
         """The one caller must independently prove tag == the published sha."""
         wf = (REPO_ROOT / ".github" / "workflows" / "release-notes.yml").read_text()
+        # "HEAD_SHA" appears in the env: blocks regardless, so this pair proves
+        # almost nothing on its own. Pin the comparison too.
+        assert re.search(r'\[\s*"\$ACTUAL"\s*!=\s*"\$HEAD_SHA"\s*\]', wf), (
+            "the tag-to-commit comparison is gone from release-notes.yml. Without it "
+            "the waiver in verify-tag.sh has no counterpart proving the binding."
+        )
         assert "rev-list -n 1" in wf and "HEAD_SHA" in wf, (
             "release-notes.yml waives the HEAD binding but no longer proves the tag "
             "resolves to the sha the publishers were verified for. The waiver is only "
@@ -2695,6 +2730,17 @@ class TestManualFallbackCannotRatifyABrokenRelease:
             ln
             for ln in (REPO_ROOT / "scripts" / "tag-release.sh").read_text().splitlines()
             if not ln.lstrip().startswith("#")
+        )
+        # "~15 min" alone is a tombstone: it pins one literal this diff already
+        # deleted, so re-adding the same bad advice in any other wording passes.
+        # The invariant is "no timer shorter than the approval pause", not "not
+        # this exact string" — verified: `about 20 minutes` defeated the old form.
+        timer = re.search(r"(\d+)\s*(?:-|to\s+)?\s*\d*\s*(?:min|minute)", script, re.I)
+        assert timer is None or int(timer.group(1)) >= 360, (
+            f"the fallback advertises a {timer.group(0)!r} timer. The release job "
+            "waits on a protected environment, so no Release after a few minutes is "
+            "the NORMAL state for as long as approval takes. Any short timer sends "
+            "the maintainer to the manual fallback on every correct release."
         )
         assert "~15 min" not in script, (
             "the fallback still advertises a ~15 minute timer. The release job waits "
