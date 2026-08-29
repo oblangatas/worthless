@@ -328,8 +328,8 @@ class TestPreCommitReadsTheIndexNotTheWorkingTree:
 # Characters an attacker can legally put in a filename that a terminal will
 # ACT ON: a bidi override reverses displayed text, a line separator can push
 # following output onto its own line. Same set the audit-gate suite pins.
-_RLO = "‮"  # RIGHT-TO-LEFT OVERRIDE
-_LINE_SEP = " "  # LINE SEPARATOR
+_RLO = "\u202e"  # RIGHT-TO-LEFT OVERRIDE (escape, never the literal byte)
+_LINE_SEP = "\u2028"  # LINE SEPARATOR (escape, never the literal byte)
 
 
 class TestStagedFilenameCannotHijackTheTerminal:
@@ -383,9 +383,13 @@ class TestStagedFilenameCannotHijackTheTerminal:
 
         # Not vacuous: the commit really was blocked and the file really named.
         assert result.exit_code == 1, f"the staged key must still be caught; output:\n{out}"
-        assert "evil" in out and "app.py" in out, (
-            f"the readable part of the filename must survive — a scrubber that "
-            f"drops everything would pass a bare absence check; output:\n{out}"
+        # A scrubber that dropped the filename entirely would satisfy a bare
+        # absence check, so require the readable parts individually.
+        assert "evil" in out, (
+            f"the readable stem of the filename must survive scrubbing; output:\n{out}"
+        )
+        assert "app.py" in out, (
+            f"the readable suffix of the filename must survive scrubbing; output:\n{out}"
         )
 
         for ch, name in ((_RLO, "RIGHT-TO-LEFT OVERRIDE"), (_LINE_SEP, "LINE SEPARATOR")):
