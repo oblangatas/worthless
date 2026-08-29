@@ -6,7 +6,7 @@ Key bodies and local temp paths are redacted for documentation safety.
 
 ## Install, Reinstall, Manual Uninstall Guidance
 
-The installer succeeds with and without persistent PATH setup, re-running a pinned install is a no-op, failure paths keep actionable diagnostics visible, and uninstall is currently documented as the manual `uv tool uninstall worthless` command plus platform cleanup notes until WOR-435 ships a first-class command.
+The installer succeeds with and without persistent PATH setup, re-running a pinned install is a no-op, an older copy shadowing the install is named rather than silently overridden, failure paths keep actionable diagnostics visible, and uninstall is currently documented as the manual `uv tool uninstall worthless` command plus platform cleanup notes until WOR-435 ships a first-class command.
 
 - Workspace: `$TRACE_ROOT/install-lifecycle`
 
@@ -180,6 +180,112 @@ exit=0
 
 ### 4. `sh ./install.sh`
 
+- cwd: `$TRACE_ROOT/install-lifecycle/stale-worthless-on-path`
+- WORTHLESS_HOME: `$TRACE_ROOT/install-lifecycle/.worthless`
+- exit: `0`
+
+**Files before**
+
+`$TRACE_ROOT/install-lifecycle/stale-worthless-on-path/install-state.txt`
+
+```text
+case=stale worthless on PATH
+phase=before
+```
+
+**stdout**
+
+```text
+
+Worthless installer (uv-bootstrap)
+
+  Platform: macos
+  uv 0.11.7 already installed
+  worthless 0.3.0
+
+Done! 'worthless' is on your PATH.
+
+  Try it:        cd your-project && worthless lock
+  Audit script:  curl worthless.sh?explain=1 | less
+  Source:        https://github.com/oblangatas/worthless
+
+  worthless lock rewrites .env, splits your API keys, and starts a
+  local proxy. Your app code doesn't change.
+
+  Docs: https://docs.wless.io
+```
+
+**stderr**
+
+```text
+<empty>
+```
+
+**Files after**
+
+`$TRACE_ROOT/install-lifecycle/stale-worthless-on-path/install-state.txt`
+
+```text
+case=stale worthless on PATH
+phase=after
+exit=0
+```
+
+### 5. `sh ./install.sh`
+
+- cwd: `$TRACE_ROOT/install-lifecycle/upgrade-older-uv-tool-install`
+- WORTHLESS_HOME: `$TRACE_ROOT/install-lifecycle/.worthless`
+- exit: `0`
+
+**Files before**
+
+`$TRACE_ROOT/install-lifecycle/upgrade-older-uv-tool-install/install-state.txt`
+
+```text
+case=upgrade older uv tool install
+phase=before
+```
+
+**stdout**
+
+```text
+
+Worthless installer (uv-bootstrap)
+
+  Platform: macos
+  uv 0.11.7 already installed
+  worthless 0.3.0
+
+Done! 'worthless' is on your PATH.
+
+  Try it:        cd your-project && worthless lock
+  Audit script:  curl worthless.sh?explain=1 | less
+  Source:        https://github.com/oblangatas/worthless
+
+  worthless lock rewrites .env, splits your API keys, and starts a
+  local proxy. Your app code doesn't change.
+
+  Docs: https://docs.wless.io
+```
+
+**stderr**
+
+```text
+<empty>
+```
+
+**Files after**
+
+`$TRACE_ROOT/install-lifecycle/upgrade-older-uv-tool-install/install-state.txt`
+
+```text
+case=upgrade older uv tool install
+phase=after
+exit=0
+```
+
+### 6. `sh ./install.sh`
+
 - cwd: `$TRACE_ROOT/install-lifecycle/pipx-conflict-shows-uninstall-guidance`
 - WORTHLESS_HOME: `$TRACE_ROOT/install-lifecycle/.worthless`
 - exit: `30`
@@ -221,7 +327,7 @@ phase=after
 exit=30
 ```
 
-### 5. `sh ./install.sh`
+### 7. `sh ./install.sh`
 
 - cwd: `$TRACE_ROOT/install-lifecycle/uv-failure-surfaces-network-hints`
 - WORTHLESS_HOME: `$TRACE_ROOT/install-lifecycle/.worthless`
@@ -274,7 +380,7 @@ phase=after
 exit=10
 ```
 
-### 6. `uv tool uninstall worthless`
+### 8. `uv tool uninstall worthless`
 
 - cwd: `$TRACE_ROOT/install-lifecycle/manual-uninstall-current-limitation`
 - WORTHLESS_HOME: `$TRACE_ROOT/install-lifecycle/.worthless`
