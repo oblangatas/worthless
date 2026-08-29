@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 import subprocess  # noqa: S404
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -1313,4 +1314,128 @@ class TestPlantedBinariesCannotWin:
             "an early exit rm -rf's an inherited value under that name.\n"
             f"  cleanup uses: {sorted(used)}\n  init owns:    {sorted(owned)}\n"
             f"  unowned:      {sorted(used - owned)}"
+        )
+
+
+class TestWslDetectionActuallyRuns:
+    """worthless-oi9b: the WSL branch had never been executed by anything.
+
+    ``detect_linux_subenv`` is the code path for this project's stated primary
+    user — a Windows developer working in WSL. Its only coverage was
+    ``test_wsl_allowed_not_rejected``, which greps the function body for the word
+    "microsoft". That pins the shape, not the behaviour: reverse the condition,
+    drop the ``/mnt`` case, or change the warning to a ``die``, and the grep is
+    still satisfied.
+
+    Nothing else reaches it either. The seven-distro Docker matrix runs real Linux
+    images whose ``/proc/version`` reads "Debian", so the branch is skipped in
+    every one. Bind-mounting a fake over ``/proc/version`` is not an option —
+    runc refuses any mount inside ``/proc`` ("cannot be mounted because it is
+    inside /proc"), verified.
+
+    So the function is extracted from install.sh and run for real with the one
+    absolute path substituted — the same approach the PATH-lockdown tests use, and
+    for the same reason: the path is baked in, so it cannot be reached by stubbing
+    PATH. Everything else about the function is genuinely executed.
+    """
+
+    def _run(self, install_text: str, *, proc_contents: str | None, cwd: Path) -> str:
+        """Run the real detect_linux_subenv with /proc/version substituted."""
+        body = _extract_shell_function(install_text, "detect_linux_subenv")
+        with tempfile.TemporaryDirectory() as td:
+            proc = Path(td) / "version"
+            if proc_contents is not None:
+                proc.write_text(proc_contents)
+            script = (
+                "warn() { printf 'WARN: %s\\n' \"$1\" >&2; }\n"
+                "IS_WSL=''\n"
+                f"detect_linux_subenv() {{{body.replace('/proc/version', str(proc))}}}\n"
+                "detect_linux_subenv\n"
+                'printf "IS_WSL=%s\\n" "${IS_WSL:-}"\n'
+            )
+            out = subprocess.run(  # noqa: S603
+                ["/bin/sh", "-c", script],
+                capture_output=True,
+                text=True,
+                cwd=str(cwd),
+                check=False,
+            )
+            return out.stdout + out.stderr
+
+    def test_wsl_on_a_windows_mounted_path_warns_about_speed(
+        self, install_text: str, tmp_path: Path
+    ) -> None:
+        """The case that exists to be helpful: WSL + /mnt = slow, say so."""
+        mnt = tmp_path / "mnt" / "c" / "proj"
+        mnt.mkdir(parents=True)
+        # `case "$(pwd)" in /mnt/*)` matches on the literal prefix, so the test
+        # must run from a real /mnt path rather than a tmp_path lookalike.
+        real_mnt = Path("/mnt/c-oi9b-test")
+        try:
+            real_mnt.mkdir(parents=True, exist_ok=True)
+        except (PermissionError, OSError):
+            pytest.skip("cannot create /mnt path on this machine")
+        try:
+            out = self._run(
+                install_text,
+                proc_contents="Linux version 5.15-microsoft-standard-WSL2\n",
+                cwd=real_mnt,
+            )
+        finally:
+            real_mnt.rmdir()
+        assert "IS_WSL=1" in out, f"WSL was not detected from /proc/version:\n{out}"
+        assert "WARN" in out and "slow" in out.lower(), (
+            f"a WSL user under /mnt got no warning that uv will be slow there:\n{out}"
+        )
+
+    def test_wsl_from_the_linux_home_is_silent(self, install_text: str, tmp_path: Path) -> None:
+        """WSL is fully supported — detected, but no nagging outside /mnt."""
+        out = self._run(
+            install_text,
+            proc_contents="Linux version 5.15-microsoft-standard-WSL2\n",
+            cwd=tmp_path,
+        )
+        assert "IS_WSL=1" in out, f"WSL not detected:\n{out}"
+        assert "WARN" not in out, (
+            f"a WSL user in their Linux home was warned anyway — the /mnt case is "
+            f"the only one that should warn:\n{out}"
+        )
+
+    @pytest.mark.parametrize(
+        "proc_line",
+        [
+            # WSL2 reports lowercase; WSL1 capitalises it. Both are real kernel
+            # strings, which is why the grep is `-i`. A mutation dropping the -i
+            # survived until this case existed.
+            "Linux version 5.15.90.1-microsoft-standard-WSL2 (oe-user@oe-host)\n",
+            "Linux version 4.4.0-19041-Microsoft (Microsoft@Microsoft.com)\n",
+        ],
+        ids=["wsl2-lowercase", "wsl1-capitalised"],
+    )
+    def test_both_real_wsl_kernel_spellings_are_detected(
+        self, install_text: str, tmp_path: Path, proc_line: str
+    ) -> None:
+        """WSL1 and WSL2 spell it differently — the case-insensitive grep matters."""
+        out = self._run(install_text, proc_contents=proc_line, cwd=tmp_path)
+        assert "IS_WSL=1" in out, (
+            f"this kernel string was not recognised as WSL:\n  {proc_line.strip()}\n{out}"
+        )
+
+    def test_ordinary_linux_is_not_flagged_as_wsl(self, install_text: str, tmp_path: Path) -> None:
+        """A real Linux box must not take the WSL branch."""
+        out = self._run(
+            install_text,
+            proc_contents="Linux version 6.1.0-13-amd64 (debian-kernel@lists.debian.org)\n",
+            cwd=tmp_path,
+        )
+        assert "IS_WSL=" in out and "IS_WSL=1" not in out, (
+            f"ordinary Linux was misdetected as WSL:\n{out}"
+        )
+        assert "WARN" not in out, f"unexpected warning on ordinary Linux:\n{out}"
+
+    def test_a_missing_proc_version_is_handled(self, install_text: str, tmp_path: Path) -> None:
+        """macOS and any kernel without /proc must not error under `set -eu`."""
+        out = self._run(install_text, proc_contents=None, cwd=tmp_path)
+        assert "IS_WSL=" in out and "IS_WSL=1" not in out, (
+            f"no /proc/version should mean 'not WSL', quietly:\n{out}"
         )
