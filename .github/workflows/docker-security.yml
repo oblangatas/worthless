@@ -97,7 +97,7 @@ jobs:
       # findings, all four named with reachability arguments in .grype.yaml.
       # A fifth now fails the build, which is the entire point. WOR-852.
       - name: Grype vulnerability scan (fixable only, fail on MEDIUM+)
-        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
         with:
           image: worthless-proxy:${{ github.sha }}
           severity-cutoff: medium
@@ -110,7 +110,7 @@ jobs:
       # table was ~181 rows nobody reads on a green job.
       - name: Grype full scan (including unfixed)
         id: full_scan
-        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
         env:
           # Read the ignore-free config, NOT .grype.yaml. Otherwise this scan
           # inherits the gate's suppressions and a CVE we have accepted shows
@@ -193,7 +193,7 @@ jobs:
 
       - name: Grype arm64 (fixable only, fail on MEDIUM+)
         if: contains(fromJSON('["schedule", "workflow_dispatch"]'), github.event_name)
-        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
         with:
           image: docker-archive:${{ env.ARM64_TAR }}
           severity-cutoff: medium
@@ -204,7 +204,7 @@ jobs:
       - name: Grype arm64 full scan (including unfixed)
         id: arm64_full_scan
         if: contains(fromJSON('["schedule", "workflow_dispatch"]'), github.event_name)
-        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
         env:
           GRYPE_CONFIG: .grype-informational.yaml
         with:
