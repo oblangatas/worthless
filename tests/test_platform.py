@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 import psutil
 import pytest
 
+from worthless.cli import platform
 from worthless.cli.platform import (
     IS_WINDOWS,
     check_pid_alive,
@@ -284,3 +285,47 @@ class TestPidInTree:
         monkeypatch.setattr("worthless.cli.platform.psutil.Process", _Root)
         assert pid_in_tree(os.getpid(), 54321) is True
         assert pid_in_tree(os.getpid(), 99999) is False
+
+
+class TestWslDetection:
+    """WOR-857: one WSL check, shared by scan and the systemd backend."""
+
+    def test_detects_wsl2_env_var(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")
+        monkeypatch.delenv("WSL_INTEROP", raising=False)
+        assert platform.is_wsl() is True
+
+    def test_detects_wsl1_env_var(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
+        monkeypatch.setenv("WSL_INTEROP", "/run/WSL/8_interop")
+        assert platform.is_wsl() is True
+
+    def test_plain_linux_is_not_wsl(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
+        monkeypatch.delenv("WSL_INTEROP", raising=False)
+        assert platform.is_wsl() is False
+
+
+class TestSystemdIsRunning:
+    """WOR-857: gate the install error message, never invent a failure."""
+
+    def test_true_when_systemd_is_pid_1(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(platform, "_read_proc_1_comm", lambda: "systemd")
+        assert platform.systemd_is_running() is True
+
+    def test_false_when_pid_1_is_the_wsl_shim(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(platform, "_read_proc_1_comm", lambda: "init")
+        assert platform.systemd_is_running() is False
+
+    def test_unknown_reads_as_running(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """No /proc means not-Linux, where this never gates anything real.
+
+        An inconclusive probe must not manufacture a failure — this decides an
+        error *message*, not a security boundary.
+        """
+
+        def _no_proc() -> str:
+            raise FileNotFoundError("/proc/1/comm")
+
+        monkeypatch.setattr(platform, "_read_proc_1_comm", _no_proc)
+        assert platform.systemd_is_running() is True
