@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import os
 import pwd
 import subprocess
 
@@ -860,3 +861,92 @@ class TestSystemdSessionUser:
         fake_passwd = type("Passwd", (), {"pw_name": "runner"})()
         monkeypatch.setattr(pwd, "getpwuid", lambda uid: fake_passwd)
         assert systemd._session_user() == "runner"
+
+
+class TestSystemdPreflight:
+    """WOR-857: WSL ships systemd off, so install must say so and write nothing."""
+
+    @staticmethod
+    def _binary(tmp_path: Path) -> Path:
+        binary = tmp_path / "worthless"
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+        return binary
+
+    def test_wsl_without_systemd_names_the_real_fix(
+        self, home: WorthlessHome, tmp_path: Path
+    ) -> None:
+        unit = tmp_path / "worthless-proxy.service"
+        with (
+            patch.object(systemd, "unit_path", return_value=unit),
+            patch.object(systemd, "resolve_worthless_binary", return_value=self._binary(tmp_path)),
+            patch.object(systemd, "report_proxy_health"),
+            patch("worthless.cli.platform._read_proc_1_comm", return_value="init"),
+            patch.dict("os.environ", {"WSL_DISTRO_NAME": "Ubuntu"}, clear=False),
+            pytest.raises(WorthlessError) as excinfo,
+        ):
+            systemd.install(home)
+
+        message = str(excinfo.value)
+        assert "/etc/wsl.conf" in message
+        assert "systemd=true" in message
+        assert "linger" not in message.lower(), "linger is the symptom, not the cause"
+
+    def test_wsl_without_systemd_leaves_no_orphan_unit(
+        self, home: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """The unit used to be written before linger was checked, so a failed
+        install left a file behind. Preflight runs first now."""
+        unit = tmp_path / "worthless-proxy.service"
+        with (
+            patch.object(systemd, "unit_path", return_value=unit),
+            patch.object(systemd, "resolve_worthless_binary", return_value=self._binary(tmp_path)),
+            patch.object(systemd, "report_proxy_health"),
+            patch("worthless.cli.platform._read_proc_1_comm", return_value="init"),
+            patch.dict("os.environ", {"WSL_DISTRO_NAME": "Ubuntu"}, clear=False),
+            pytest.raises(WorthlessError),
+        ):
+            systemd.install(home)
+
+        assert not unit.exists(), "failed install must not leave a unit file behind"
+
+    def test_linux_without_systemd_does_not_mention_wsl(
+        self, home: WorthlessHome, tmp_path: Path
+    ) -> None:
+        unit = tmp_path / "worthless-proxy.service"
+        env = {k: v for k, v in os.environ.items() if k not in ("WSL_DISTRO_NAME", "WSL_INTEROP")}
+        with (
+            patch.object(systemd, "unit_path", return_value=unit),
+            patch.object(systemd, "resolve_worthless_binary", return_value=self._binary(tmp_path)),
+            patch.object(systemd, "report_proxy_health"),
+            patch("worthless.cli.platform._read_proc_1_comm", return_value="init"),
+            patch.dict("os.environ", env, clear=True),
+            pytest.raises(WorthlessError) as excinfo,
+        ):
+            systemd.install(home)
+
+        assert "wsl.conf" not in str(excinfo.value).lower()
+
+    def test_systemd_present_installs_normally(self, home: WorthlessHome, tmp_path: Path) -> None:
+        """Guards against over-blocking: a WSL box with systemd=true is fine."""
+        unit = tmp_path / "worthless-proxy.service"
+
+        def fake_run(args: list[str], **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = "Linger=yes" if args[:2] == ["loginctl", "show-user"] else "active"
+            return result
+
+        with (
+            patch.object(systemd, "unit_path", return_value=unit),
+            patch.object(systemd, "resolve_worthless_binary", return_value=self._binary(tmp_path)),
+            patch.object(systemd, "run_cmd", side_effect=fake_run),
+            patch.object(systemd, "report_proxy_health"),
+            patch("worthless.cli.platform._read_proc_1_comm", return_value="systemd"),
+            patch.dict(
+                "os.environ", {"WSL_DISTRO_NAME": "Ubuntu", "USER": "testuser"}, clear=False
+            ),
+        ):
+            systemd.install(home)
+
+        assert unit.is_file()

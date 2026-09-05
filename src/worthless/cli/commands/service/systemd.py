@@ -20,6 +20,7 @@ from worthless.cli.commands.service._common import (
     report_proxy_health,
 )
 from worthless.cli.errors import ErrorCode, WorthlessError
+from worthless.cli.platform import is_wsl, systemd_is_running
 from worthless.cli.process import poll_health, resolve_port
 
 SYSTEMD_UNIT = templates.SYSTEMD_UNIT_NAME
@@ -130,7 +131,37 @@ def detect_status(home: WorthlessHome, port: int) -> ServiceStatus:
     )
 
 
+def _preflight_systemd_available() -> None:
+    """Refuse before writing anything when systemd cannot accept a unit.
+
+    Runs ahead of the unit write so a refusal leaves no orphan file behind.
+    Probing PID 1 rather than ``loginctl`` matters: on a systemd-less box
+    ``loginctl`` answers "Failed to connect to bus: Host is down", which is
+    what made the old linger error point users at a dead end (WOR-857).
+    """
+    if systemd_is_running():
+        return
+    if is_wsl():
+        raise WorthlessError(
+            ErrorCode.SERVICE_INSTALL_FAILED,
+            "systemd is not running in this WSL distro, so a background "
+            "service cannot be installed.\n\n"
+            "Fix - add this to /etc/wsl.conf:\n"
+            "  [boot]\n"
+            "  systemd=true\n\n"
+            "Then run `wsl --shutdown` from PowerShell and reopen your "
+            "terminal. Until then, start the proxy yourself with `worthless up`.",
+        )
+    raise WorthlessError(
+        ErrorCode.SERVICE_INSTALL_FAILED,
+        "systemd is not running (PID 1 is not systemd), so a background "
+        "service cannot be installed. Start the proxy yourself with "
+        "`worthless up`.",
+    )
+
+
 def install(home: WorthlessHome, *, port: int | None = None) -> None:
+    _preflight_systemd_available()
     path = unit_path()
     refuse_foreign_unit(path, home)
     binary = resolve_worthless_binary()
