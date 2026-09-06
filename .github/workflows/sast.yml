@@ -128,8 +128,17 @@ jobs:
 
       - name: Install and run zizmor
         run: |
-          pip install zizmor
-          zizmor .github/workflows/
+          # Pinned deliberately (worthless-sd13). An unpinned install turned
+          # every new PR red overnight when v1.30.0 shipped the
+          # self-repository audit, with no workflow change on our side.
+          # Bump on purpose, in a PR that also clears what the bump finds.
+          pip install zizmor==1.30.0
+          # Gate on medium+ only. The sole low findings are self-repository
+          # (26x `uses: ./...` -> `uses: $/...`), and we cannot take that fix
+          # yet: actionlint rejects `$/` as an invalid ref, so the two linters
+          # contradict each other. Cost of this line: new low-severity audits
+          # land silently. Revisit when actionlint supports `$/`.
+          zizmor --min-severity=medium .github/workflows/ .github/actions/
 
 
   pip-licenses:
