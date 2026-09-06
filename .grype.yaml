@@ -24,6 +24,63 @@
 # a Monday rather than at a release tag. Re-MEASURE per-arch before extending.
 
 ignore:
+  # ---------------------------------------------------------------------
+  # EOL Debian 12 base (worthless-tw1g). Added 2026-09-06.
+  #
+  # Grype: "105 packages from EOL distro debian 12 - vulnerability data may
+  # be incomplete or outdated". The Dockerfile already runs `apt-get upgrade
+  # -y` in BOTH stages and it does not clear these — bookworm security does
+  # not carry the fixes. Measured 2026-09-06 against the registry with
+  # --fail-on medium --only-fixed:
+  #
+  #   our pinned digest        1 High, 2 Medium, 2 Low
+  #   current slim-bookworm    1 High (libpcre2) still present
+  #   python:3.13-slim-trixie  CLEAN, exit 0
+  #
+  # The fix is the base bump, not these entries. worthless-tw1g owns it and
+  # must be build-tested (tini, glibc, package names).
+  #
+  # HONESTY: unlike the older entries below, these reachability arguments are
+  # SOURCE-level, not measured inside the built image — the Docker daemon was
+  # not running when they were written. That is why the expiry is 30 days and
+  # not a year. Re-measure in-image before extending, or land tw1g instead.
+  # ---------------------------------------------------------------------
+  - vulnerability: CVE-2026-86145
+    package:
+      name: libpcre2-8-0
+      type: deb
+    # High. CPython's `re` is the built-in sre engine and does not link
+    # libpcre2; `grep -rn 'pcre'` over src/ returns nothing. The runtime chain
+    # is tini -> deploy/entrypoint.sh -> `exec python /deploy/start.py`, and
+    # entrypoint.sh contains no grep/tar/xz invocation (0 matches). No
+    # attacker-reachable pcre2 parse of untrusted input identified.
+    # NOT measured in-image — see the honesty note above.
+    reason: "EOL Debian 12 base; bookworm security carries no fix. libpcre2 not linked by CPython re, not invoked in the runtime chain. Tracking worthless-tw1g (move to trixie, which scans clean)."
+    expiry: "2026-10-06"
+
+  - vulnerability: CVE-2026-34743
+    package:
+      name: liblzma5
+      type: deb
+    # Medium. CPython links liblzma for the `lzma` module, but we never import
+    # it: `grep -rn 'import lzma\|lzma\.\|tarfile\|\.xz'` over src/ returns
+    # nothing. No .xz decompression of untrusted input in the proxy path.
+    # NOT measured in-image — see the honesty note above.
+    reason: "EOL Debian 12 base; bookworm security carries no fix. lzma never imported in src/. Tracking worthless-tw1g (move to trixie, which scans clean)."
+    expiry: "2026-10-06"
+
+  - vulnerability: GHSA-qwm4-qh6w-59xr
+    package:
+      name: pip
+      type: python
+    # Medium, pip 26.1.2 -> 26.2.0. pip is a build artifact of the base image;
+    # it is never invoked at runtime. ENTRYPOINT is
+    # ["tini", "--", "/entrypoint.sh"] and entrypoint.sh ends in
+    # `exec python /deploy/start.py` with no pip reference anywhere.
+    # Exploiting a pip flaw requires running pip. NOT measured in-image.
+    reason: "pip is a base-image build artifact, never invoked at runtime (entrypoint execs python /deploy/start.py). Tracking worthless-tw1g."
+    expiry: "2026-10-06"
+
   - vulnerability: CVE-2026-15308
     package:
       name: python
