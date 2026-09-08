@@ -24,6 +24,35 @@
 # a Monday rather than at a release tag. Re-MEASURE per-arch before extending.
 
 ignore:
+  - vulnerability: CVE-2026-85091
+    package:
+      name: zlib1g
+      type: deb
+    # High, fix=not-fixed. Debian's tracker lists zlib as vulnerable in
+    # bookworm, trixie AND forky/sid — "(unstable) (unfixed)", Debian bug
+    # 1146895. There is nowhere to upgrade to, so this survives the Debian 13
+    # move (worthless-tw1g) rather than being solved by it.
+    #
+    # The flaw is a heap overflow in gz_vacate(), reachable only by calling
+    # gzprintf()/gzvprintf() after a non-blocking gzwrite() stall. That is
+    # zlib's gzip FILE api — NOT the deflate/inflate stream api that HTTP
+    # content-encoding uses, which is what a proxy actually exercises.
+    #
+    # MEASURED 2026-09-08 inside the built trixie image, not inferred:
+    #   - swept every executable and shared object: 951 files scanned,
+    #     0 referencing `gzprintf` or `gzvprintf`
+    #   - CPython's zlib module exposes no gz* API at all (compress/
+    #     decompress/compressobj/decompressobj only); Python's gzip module
+    #     is built on decompressobj, never zlib's gz file api
+    #   - zlib runtime 1.3.1
+    # So the vulnerable entry points are not reachable from anything shipped
+    # in this image.
+    #
+    # LIMIT: measured on arm64 (Apple Silicon build). The weekly arm64/amd64
+    # scans are what would surface divergence. Re-measure before extending.
+    reason: "zlib gz_vacate() overflow reachable only via gzprintf/gzvprintf; 951 binaries in the image reference neither, and CPython's zlib exposes no gz* API. Unfixed in every Debian release including sid (bug 1146895). Tracking worthless-tw1g."
+    expiry: "2026-12-08"
+
   - vulnerability: CVE-2026-15308
     package:
       name: python
