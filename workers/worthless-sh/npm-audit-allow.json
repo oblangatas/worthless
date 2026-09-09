@@ -1,0 +1,28 @@
+{
+  "_comment": [
+    "Time-boxed npm audit exceptions for the Worker's dependency tree.",
+    "",
+    "Enforced by scripts/hooks/check_npm_audit.py, NOT by npm — npm audit has",
+    "no native ignore mechanism, so a bare `npm audit` is all-or-nothing.",
+    "",
+    "Every entry MUST carry: the advisory id, why it is accepted, the ticket",
+    "that removes it, and an ISO expiry. An expired entry fails the build, so",
+    "an exception cannot outlive its argument.",
+    "",
+    "This does NOT reintroduce the --omit=dev shortcut this job rejected",
+    "earlier. That was rejected because `npm audit fix` cleared everything with",
+    "package.json unchanged — a fix existed and was being skipped. Here no fix",
+    "exists at any version, which is a different situation and is why each",
+    "entry has to say so explicitly."
+  ],
+  "allow": [
+    {
+      "id": "GHSA-rgj7-g3m4-5g8c",
+      "package": "sharp",
+      "severity": "high",
+      "reason": "libheif vulnerabilities reached via sharp <- miniflare <- wrangler / @cloudflare/vitest-pool-workers. sharp is NOT a declared dependency of this Worker; it arrives transitively with miniflare, the local Workers simulator. It runs on a developer machine and in CI, never in the deployed Worker - Cloudflare Workers cannot execute native binaries at all, so this code path does not exist in production. Verified 2026-09-09: no forward fix exists. @cloudflare/vitest-pool-workers is already at latest (0.22.0), and every wrangler >= 4.16.0 depends on a vulnerable miniflare. npm's only offered fix is `--force`, which downgrades vitest-pool-workers 0.22.0 -> 0.8.30, a breaking change to the test runner. Trading a dev-only advisory for a broken test suite is the worse deal.",
+      "ticket": "worthless-npm-sharp-libheif",
+      "expiry": "2026-11-09"
+    }
+  ]
+}
