@@ -28,6 +28,7 @@ from pathlib import Path
 
 from tests._install_helpers import (
     _UV_VERSION,
+    read_install_pin,
     run_install,
     write_happy_path_stubs,
     write_stub,
@@ -273,18 +274,14 @@ def test_uv_tool_dir_failure_does_not_warn(tmp_path: Path) -> None:
     and name a file that does not exist. Fail closed: no authoritative path,
     no claim.
 
-    HONEST LIMIT — this test does not isolate the `worthless_bin_authoritative`
-    guard. Deleting that guard leaves this test green, because the fallback
-    then resolves `command -v worthless` under install.sh's own PATH, which
-    the harness makes identical to ORIGINAL_PATH via WORTHLESS_TRUST_PATH=1
-    (_install_helpers.py:144). The two sides come out equal and the final
-    comparison keeps things quiet anyway.
-
-    In production those PATHs are NOT identical — the lockdown at install.sh
-    :104-118 prepends system dirs — so the fallback can resolve a different
-    binary than the user's shell would, which is the divergence the flag
-    exists to catch. The guard is therefore kept deliberately as defence the
-    harness cannot reach, not deleted for being unprovable here.
+    This test does not isolate the `worthless_bin_authoritative` guard —
+    deleting that guard leaves it green, because WORTHLESS_TRUST_PATH=1
+    collapses install.sh's PATH onto ORIGINAL_PATH and the final comparison
+    keeps things quiet anyway. An earlier version of this note concluded the
+    guard was therefore untestable. That was wrong: dropping the flag restores
+    the production divergence, and
+    `test_no_warning_when_install_location_is_unknown_and_paths_diverge`
+    below now kills that mutant.
     """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -371,5 +368,113 @@ def test_shadow_warning_strips_terminal_control_bytes(tmp_path: Path) -> None:
     assert "\x1b[2K" not in combined and "\x1b[1A" not in combined, (
         "raw terminal control bytes from a hostile path reached the terminal; "
         "they can erase the warning that names them"
+    )
+    assert result.returncode == 0
+
+
+def test_shadow_warning_fires_on_the_already_installed_fast_path(
+    tmp_path: Path,
+) -> None:
+    """The branch most real users hit had no shadow coverage at all.
+
+    Every other test here goes through `uv tool install --force`, because
+    write_happy_path_stubs answers `uv tool list` with nothing
+    (_install_helpers.py:87). But anyone re-running the installer — the common
+    case, not the edge — takes worthless-mb6l's fast path instead, which
+    returns early from install_or_upgrade_worthless.
+
+    That early return is safe today only because main() calls smoke_test
+    unconditionally on the next line, so worthless_bin_authoritative is always
+    set before the shadow check reads it. Nothing tested that. Moving the
+    assignment into install_or_upgrade_worthless above its `return 0` is a
+    plausible refactor that would silently disable the warning for exactly the
+    users most likely to have an old copy lying around.
+
+    The `install|upgrade` trap is the anti-vacuity guard: without it this test
+    would silently degrade into a duplicate of the first one the moment the
+    fast path stopped being taken.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_happy_path_stubs(bin_dir)
+    pin = read_install_pin()
+    write_stub(
+        bin_dir,
+        "uv",
+        f"""case "$1" in
+  --version) echo "uv {_UV_VERSION}" ;;
+  tool) shift; case "$1" in
+    list) echo "worthless v{pin}" ;;
+    install|upgrade) echo "UNEXPECTED_REINSTALL" >&2; exit 1 ;;
+    dir) echo "${{UV_TOOL_BIN_DIR:-${{XDG_BIN_HOME:-$HOME/.local/bin}}}}" ;;
+    *) echo "uv tool: unhandled: $*" >&2; exit 1 ;;
+  esac ;;
+  run) echo "worthless {pin}" ;;
+  *) echo "uv: unhandled: $*" >&2; exit 1 ;;
+esac""",
+    )
+    real = _install_real_entry_point(tmp_path, version=pin)
+    write_stub(bin_dir, "worthless", f'echo "worthless {SHADOW_VERSION}"')
+
+    result = run_install(bin_dir)
+    combined = _combined(result)
+
+    assert "UNEXPECTED_REINSTALL" not in combined, (
+        "the fast path was not taken, so this test proves nothing about it"
+    )
+    assert _shadow_warned(combined), f"no shadow warning on the already-installed path:\n{combined}"
+    assert str(real) in combined
+    assert str(bin_dir / "worthless") in combined
+    assert _SUCCESS_SENTENCE not in result.stdout
+    assert result.returncode == 0
+
+
+def test_no_warning_when_install_location_is_unknown_and_paths_diverge(
+    tmp_path: Path,
+) -> None:
+    """Isolates the authoritative guard — which I wrongly called untestable.
+
+    An earlier note in this file claimed the worthless_bin_authoritative guard
+    could not be mutation-tested, because WORTHLESS_TRUST_PATH=1 makes
+    install.sh's PATH identical to ORIGINAL_PATH. The collapse is real, but the
+    conclusion was wrong: the fix is to drop the flag, not to give up.
+
+    Without it install.sh prepends $HOME/.local/bin AHEAD of the caller's
+    bin_dir — the production divergence. With `uv tool dir --bin` empty, the
+    :451 fallback then resolves the entry point under install.sh's own PATH
+    while ORIGINAL_PATH still resolves the shadow. Two different files, so
+    deleting the guard makes the warning fire on an install that is fine.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_happy_path_stubs(bin_dir, with_worthless=False)
+    local_bin = tmp_path / ".local" / "bin"
+    local_bin.mkdir(parents=True, exist_ok=True)
+    # resolve_uv scans $HOME/.local/bin first, so uv is still found without
+    # the trusted-PATH shortcut.
+    write_stub(
+        local_bin,
+        "uv",
+        f"""case "$1" in
+  --version) echo "uv {_UV_VERSION}" ;;
+  tool) shift; case "$1" in
+    install|upgrade) echo "ok" ;;
+    list) ;;
+    dir) echo "" ;;
+    *) echo "uv tool: unhandled: $*" >&2; exit 1 ;;
+  esac ;;
+  run) echo "worthless {REAL_VERSION}" ;;
+  *) echo "uv: unhandled: $*" >&2; exit 1 ;;
+esac""",
+    )
+    write_stub(local_bin, "worthless", f'echo "worthless {REAL_VERSION}"')
+    write_stub(bin_dir, "worthless", f'echo "worthless {SHADOW_VERSION}"')
+
+    result = run_install(bin_dir, env_extra={"WORTHLESS_TRUST_PATH": ""})
+    combined = _combined(result)
+
+    assert not _shadow_warned(combined), (
+        "warned about a shadow while the install location was unknown, so the "
+        f"comparison had nothing authoritative to compare against:\n{combined}"
     )
     assert result.returncode == 0

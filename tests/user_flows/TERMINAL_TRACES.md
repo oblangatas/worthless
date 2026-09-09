@@ -249,18 +249,19 @@ Worthless installer (uv-bootstrap)
 **stderr**
 
 ```text
-error: Failed to install worthless.
+error: Failed to install worthless==0.3.12.
 
        uv tool install reported:
          x No solution found when resolving dependencies
 
-       uv tool upgrade also failed (same root cause likely).
-
        If this looks like a network issue:
-       Behind a proxy or corporate network? Try:
-         export HTTPS_PROXY=https://your-proxy:port
-         export UV_PYTHON_INSTALL_MIRROR=https://your-mirror/python-build-standalone
-         export SSL_CERT_FILE=/path/to/corp-bundle.pem
+       Behind a proxy or corporate network?
+         HTTP_PROXY / HTTPS_PROXY are honored — set those.
+         For private PyPI mirror, custom CA bundle, or alternate
+         Python source: edit install.sh directly. Env-var overrides
+         for index URL, cert bundle, and Python mirror are
+         deliberately scrubbed (WOR-673) — install corp CAs in the
+         system trust store instead of pointing SSL_CERT_FILE at them.
 ```
 
 **Files after**
@@ -333,18 +334,23 @@ OPENAI_API_KEY=sk-proj-<redacted:fake-raw:len=51:sha256=6628552e72>
 **stdout**
 
 ```text
-Warning: using non-default home $TRACE_ROOT/lock-status-scan-unlock/.worthless (WORTHLESS_HOME is set)
+<empty>
 ```
 
 **stderr**
 
 ```text
+Worthless is free software provided AS IS, WITHOUT WARRANTY OF ANY KIND, to the fullest extent permitted by law
+(AGPL-3.0 sections 15-16). You run it at your own risk. See the LICENSE file for full terms. (Shown once.)
 Scanning $TRACE_ROOT/lock-status-scan-unlock/project/.env
 for API keys...
   Protecting OPENAI_API_KEY...
 worthless: added OPENAI_BASE_URL=http://127.0.0.1:8787/openai-6628552e/v1 to $TRACE_ROOT/lock-status-scan-unlock/project/.env (was missing)
-[OK] 1 key(s) split between this machine and a local key file — .env no longer contains a usable secret.
-Next: run `worthless wrap <command>` or `worthless up` for daemon mode
+🔒 You're protected. 1 key locked — a stolen .env is now worthless to an attacker.
+[OK] 1 key split between this machine and a local key file — .env no longer contains a usable secret.
+Warning: using non-default home $TRACE_ROOT/lock-status-scan-unlock/.worthless (WORTHLESS_HOME is set)
+Next: run `worthless wrap <command>`, or `worthless up` to keep a proxy running in this terminal.
+Check anytime with `worthless status`.
 ```
 
 **Files after**
@@ -380,10 +386,16 @@ OPENAI_BASE_URL=http://127.0.0.1:8787/openai-6628552e/v1
 **stderr**
 
 ```text
+Worthless is free software provided AS IS, WITHOUT WARRANTY OF ANY KIND, to the fullest extent permitted by law
+(AGPL-3.0 sections 15-16). You run it at your own risk. See the LICENSE file for full terms. (Shown once.)
+🟡 Protected at rest — 1 key locked (a stolen .env is worthless), but the proxy is down so your apps can't reach them. Run `worthless up`.
+
 Enrolled keys:
   openai-6628552e  openai  PROTECTED
 
 Proxy: not running
+
+Checks enrolled keys + proxy. To scan this folder's .env for stray plaintext: `worthless scan`.
 ```
 
 **Files after**
@@ -419,7 +431,9 @@ OPENAI_BASE_URL=http://127.0.0.1:8787/openai-6628552e/v1
 **stderr**
 
 ```text
-  .env:1  openai (OPENAI_API_KEY)  PROTECTED  sk-p****
+All 1 keys are protected — a leaked .env is worthless to an attacker.
+
+  .env:1  openai (OPENAI_API_KEY)  PROTECTED  ****
 
 Found 1 keys: 1 protected, 0 unprotected
 ```
@@ -492,7 +506,7 @@ OPENAI_API_KEY=sk-proj-<redacted:fake-raw:len=51:sha256=6628552e72>
 **stderr**
 
 ```text
-No keys enrolled.
+No keys enrolled — nothing protected yet. Run `worthless lock` to protect your API keys.
 Proxy: not running
 ```
 
@@ -527,19 +541,24 @@ OPENAI_API_KEY=sk-proj-<redacted:fake-raw:len=51:sha256=fe67659040>
 **stdout**
 
 ```text
-Warning: using non-default home $TRACE_ROOT/teammate-handoff-failure/.worthless (WORTHLESS_HOME is set)
+<empty>
 ```
 
 **stderr**
 
 ```text
+Worthless is free software provided AS IS, WITHOUT WARRANTY OF ANY KIND, to the fullest extent permitted by law
+(AGPL-3.0 sections 15-16). You run it at your own risk. See the LICENSE file for full terms. (Shown once.)
 Scanning
 $TRACE_ROOT/teammate-handoff-failure/owner-project/.env
 for API keys...
   Protecting OPENAI_API_KEY...
 worthless: added OPENAI_BASE_URL=http://127.0.0.1:8787/openai-fe676590/v1 to $TRACE_ROOT/teammate-handoff-failure/owner-project/.env (was missing)
-[OK] 1 key(s) split between this machine and a local key file — .env no longer contains a usable secret.
-Next: run `worthless wrap <command>` or `worthless up` for daemon mode
+🔒 You're protected. 1 key locked — a stolen .env is now worthless to an attacker.
+[OK] 1 key split between this machine and a local key file — .env no longer contains a usable secret.
+Warning: using non-default home $TRACE_ROOT/teammate-handoff-failure/.worthless (WORTHLESS_HOME is set)
+Next: run `worthless wrap <command>`, or `worthless up` to keep a proxy running in this terminal.
+Check anytime with `worthless status`.
 ```
 
 **Files after**
@@ -575,6 +594,8 @@ OPENAI_BASE_URL=http://127.0.0.1:8787/openai-fe676590/v1
 **stderr**
 
 ```text
+Worthless is free software provided AS IS, WITHOUT WARRANTY OF ANY KIND, to the fullest extent permitted by law
+(AGPL-3.0 sections 15-16). You run it at your own risk. See the LICENSE file for full terms. (Shown once.)
 WRTLS-102: No enrollment found for shard-shape value(s) in
 $TRACE_ROOT/teammate-handoff-failure/teammate-project/.en
 v: OPENAI_API_KEY. If this .env was copied from another machine, those values are unrecognised shards here — re-lock
@@ -613,18 +634,23 @@ OPENAI_API_KEY=sk-proj-<redacted:fake-raw:len=51:sha256=0122837f50>
 **stdout**
 
 ```text
-Warning: using non-default home $TRACE_ROOT/rotation-relock/.worthless (WORTHLESS_HOME is set)
+<empty>
 ```
 
 **stderr**
 
 ```text
+Worthless is free software provided AS IS, WITHOUT WARRANTY OF ANY KIND, to the fullest extent permitted by law
+(AGPL-3.0 sections 15-16). You run it at your own risk. See the LICENSE file for full terms. (Shown once.)
 Scanning $TRACE_ROOT/rotation-relock/same-shape/.env for
 API keys...
   Protecting OPENAI_API_KEY...
 worthless: added OPENAI_BASE_URL=http://127.0.0.1:8787/openai-0122837f/v1 to $TRACE_ROOT/rotation-relock/same-shape/.env (was missing)
-[OK] 1 key(s) split between this machine and a local key file — .env no longer contains a usable secret.
-Next: run `worthless wrap <command>` or `worthless up` for daemon mode
+🔒 You're protected. 1 key locked — a stolen .env is now worthless to an attacker.
+[OK] 1 key split between this machine and a local key file — .env no longer contains a usable secret.
+Warning: using non-default home $TRACE_ROOT/rotation-relock/.worthless (WORTHLESS_HOME is set)
+Next: run `worthless wrap <command>`, or `worthless up` to keep a proxy running in this terminal.
+Check anytime with `worthless status`.
 ```
 
 **Files after**
@@ -653,18 +679,23 @@ OPENAI_API_KEY=sk-proj-<redacted:fake-raw:len=51:sha256=8190d0c36a>
 **stdout**
 
 ```text
-Warning: using non-default home $TRACE_ROOT/rotation-relock/.worthless (WORTHLESS_HOME is set)
+<empty>
 ```
 
 **stderr**
 
 ```text
+Worthless is free software provided AS IS, WITHOUT WARRANTY OF ANY KIND, to the fullest extent permitted by law
+(AGPL-3.0 sections 15-16). You run it at your own risk. See the LICENSE file for full terms. (Shown once.)
 Scanning $TRACE_ROOT/rotation-relock/same-shape/.env for
 API keys...
   Protecting OPENAI_API_KEY...
 worthless: added OPENAI_BASE_URL=http://127.0.0.1:8787/openai-8190d0c3/v1 to $TRACE_ROOT/rotation-relock/same-shape/.env (was missing)
-[OK] 1 key(s) split between this machine and a local key file — .env no longer contains a usable secret.
-Next: run `worthless wrap <command>` or `worthless up` for daemon mode
+🔒 You're protected. 1 key locked — a stolen .env is now worthless to an attacker.
+[OK] 1 key split between this machine and a local key file — .env no longer contains a usable secret.
+Warning: using non-default home $TRACE_ROOT/rotation-relock/.worthless (WORTHLESS_HOME is set)
+Next: run `worthless wrap <command>`, or `worthless up` to keep a proxy running in this terminal.
+Check anytime with `worthless status`.
 ```
 
 **Files after**
@@ -729,7 +760,7 @@ OPENAI_API_KEY=sk-proj-<redacted:fake-raw:len=51:sha256=54ddf68f39>
 **stdout**
 
 ```text
-Warning: using non-default home $TRACE_ROOT/rotation-relock/.worthless (WORTHLESS_HOME is set)
+<empty>
 ```
 
 **stderr**
@@ -739,8 +770,11 @@ Scanning $TRACE_ROOT/rotation-relock/different-shape/.env
 for API keys...
   Protecting OPENAI_API_KEY...
 worthless: added OPENAI_BASE_URL=http://127.0.0.1:8787/openai-54ddf68f/v1 to $TRACE_ROOT/rotation-relock/different-shape/.env (was missing)
-[OK] 1 key(s) split between this machine and a local key file — .env no longer contains a usable secret.
-Next: run `worthless wrap <command>` or `worthless up` for daemon mode
+🔒 You're protected. 1 key locked — a stolen .env is now worthless to an attacker.
+[OK] 1 key split between this machine and a local key file — .env no longer contains a usable secret.
+Warning: using non-default home $TRACE_ROOT/rotation-relock/.worthless (WORTHLESS_HOME is set)
+Next: run `worthless wrap <command>`, or `worthless up` to keep a proxy running in this terminal.
+Check anytime with `worthless status`.
 ```
 
 **Files after**
@@ -769,7 +803,7 @@ OPENAI_API_KEY=sk-<redacted:fake-raw:len=46:sha256=21f0003478>
 **stdout**
 
 ```text
-Warning: using non-default home $TRACE_ROOT/rotation-relock/.worthless (WORTHLESS_HOME is set)
+<empty>
 ```
 
 **stderr**
@@ -779,8 +813,11 @@ Scanning $TRACE_ROOT/rotation-relock/different-shape/.env
 for API keys...
   Protecting OPENAI_API_KEY...
 worthless: added OPENAI_BASE_URL=http://127.0.0.1:8787/openai-21f00034/v1 to $TRACE_ROOT/rotation-relock/different-shape/.env (was missing)
-[OK] 1 key(s) split between this machine and a local key file — .env no longer contains a usable secret.
-Next: run `worthless wrap <command>` or `worthless up` for daemon mode
+🔒 You're protected. 1 key locked — a stolen .env is now worthless to an attacker.
+[OK] 1 key split between this machine and a local key file — .env no longer contains a usable secret.
+Warning: using non-default home $TRACE_ROOT/rotation-relock/.worthless (WORTHLESS_HOME is set)
+Next: run `worthless wrap <command>`, or `worthless up` to keep a proxy running in this terminal.
+Check anytime with `worthless status`.
 ```
 
 **Files after**
@@ -857,19 +894,24 @@ OPENAI_API_KEY=sk-proj-<redacted:fake-raw:len=51:sha256=b6e34dbee6>
 **stdout**
 
 ```text
-Warning: using non-default home $TRACE_ROOT/multi-project-isolation/.worthless (WORTHLESS_HOME is set)
+<empty>
 ```
 
 **stderr**
 
 ```text
+Worthless is free software provided AS IS, WITHOUT WARRANTY OF ANY KIND, to the fullest extent permitted by law
+(AGPL-3.0 sections 15-16). You run it at your own risk. See the LICENSE file for full terms. (Shown once.)
 Scanning
 $TRACE_ROOT/multi-project-isolation/project-a/.env for
 API keys...
   Protecting OPENAI_API_KEY...
 worthless: added OPENAI_BASE_URL=http://127.0.0.1:8787/openai-fd488525/v1 to $TRACE_ROOT/multi-project-isolation/project-a/.env (was missing)
-[OK] 1 key(s) split between this machine and a local key file — .env no longer contains a usable secret.
-Next: run `worthless wrap <command>` or `worthless up` for daemon mode
+🔒 You're protected. 1 key locked — a stolen .env is now worthless to an attacker.
+[OK] 1 key split between this machine and a local key file — .env no longer contains a usable secret.
+Warning: using non-default home $TRACE_ROOT/multi-project-isolation/.worthless (WORTHLESS_HOME is set)
+Next: run `worthless wrap <command>`, or `worthless up` to keep a proxy running in this terminal.
+Check anytime with `worthless status`.
 ```
 
 **Files after**
@@ -911,19 +953,24 @@ OPENAI_API_KEY=sk-proj-<redacted:fake-raw:len=51:sha256=b6e34dbee6>
 **stdout**
 
 ```text
-Warning: using non-default home $TRACE_ROOT/multi-project-isolation/.worthless (WORTHLESS_HOME is set)
+<empty>
 ```
 
 **stderr**
 
 ```text
+Worthless is free software provided AS IS, WITHOUT WARRANTY OF ANY KIND, to the fullest extent permitted by law
+(AGPL-3.0 sections 15-16). You run it at your own risk. See the LICENSE file for full terms. (Shown once.)
 Scanning
 $TRACE_ROOT/multi-project-isolation/project-b/.env for
 API keys...
   Protecting OPENAI_API_KEY...
 worthless: added OPENAI_BASE_URL=http://127.0.0.1:8787/openai-b6e34dbe/v1 to $TRACE_ROOT/multi-project-isolation/project-b/.env (was missing)
-[OK] 1 key(s) split between this machine and a local key file — .env no longer contains a usable secret.
-Next: run `worthless wrap <command>` or `worthless up` for daemon mode
+🔒 You're protected. 1 key locked — a stolen .env is now worthless to an attacker.
+[OK] 1 key split between this machine and a local key file — .env no longer contains a usable secret.
+Warning: using non-default home $TRACE_ROOT/multi-project-isolation/.worthless (WORTHLESS_HOME is set)
+Next: run `worthless wrap <command>`, or `worthless up` to keep a proxy running in this terminal.
+Check anytime with `worthless status`.
 ```
 
 **Files after**
@@ -1022,10 +1069,14 @@ OPENAI_BASE_URL=http://127.0.0.1:8787/openai-b6e34dbe/v1
 **stderr**
 
 ```text
+🟡 Protected at rest — 1 key locked (a stolen .env is worthless), but the proxy is down so your apps can't reach them. Run `worthless up`.
+
 Enrolled keys:
   openai-b6e34dbe  openai  PROTECTED
 
 Proxy: not running
+
+Checks enrolled keys + proxy. To scan this folder's .env for stray plaintext: `worthless scan`.
 ```
 
 **Files after**
@@ -1120,6 +1171,8 @@ OPENAI_API_KEY=sk-proj-<redacted:fake-raw:len=51:sha256=686d33168b>
 **stderr**
 
 ```text
+Worthless is free software provided AS IS, WITHOUT WARRANTY OF ANY KIND, to the fullest extent permitted by law
+(AGPL-3.0 sections 15-16). You run it at your own risk. See the LICENSE file for full terms. (Shown once.)
 Scanning $TRACE_ROOT/native-stress/rewrite-refusal/.env
 for API keys...
   Protecting OPENAI_API_KEY...
@@ -1159,7 +1212,9 @@ OPENAI_API_KEY=sk-proj-<redacted:fake-raw:len=51:sha256=686d33168b>
 **stderr**
 
 ```text
-No keys enrolled.
+Worthless is free software provided AS IS, WITHOUT WARRANTY OF ANY KIND, to the fullest extent permitted by law
+(AGPL-3.0 sections 15-16). You run it at your own risk. See the LICENSE file for full terms. (Shown once.)
+No keys enrolled — nothing protected yet. Run `worthless lock` to protect your API keys.
 Proxy: not running
 ```
 
@@ -1194,7 +1249,9 @@ OPENAI_API_KEY=sk-proj-<redacted:fake-raw:len=51:sha256=686d33168b>
 **stderr**
 
 ```text
-  $TRACE_ROOT/native-stress/rewrite-refusal/.env:1  openai (OPENAI_API_KEY)  UNPROTECTED  sk-p****
+0 of 1 keys protected — 1 still exposed in .env. Run `worthless lock`.
+
+  $TRACE_ROOT/native-stress/rewrite-refusal/.env:1  openai (OPENAI_API_KEY)  UNPROTECTED  ****
 
 Found 1 keys: 0 protected, 1 unprotected
 See: docs.worthless.dev/ci-setup
@@ -1225,7 +1282,7 @@ OPENAI_API_KEY=sk-proj-<redacted:fake-raw:len=51:sha256=0ca90940b2>
 **stdout**
 
 ```text
-Warning: using non-default home $TRACE_ROOT/native-stress/.worthless (WORTHLESS_HOME is set)
+<empty>
 ```
 
 **stderr**
@@ -1235,8 +1292,11 @@ Scanning $TRACE_ROOT/native-stress/tampered-lock/.env for
 API keys...
   Protecting OPENAI_API_KEY...
 worthless: added OPENAI_BASE_URL=http://127.0.0.1:8787/openai-0ca90940/v1 to $TRACE_ROOT/native-stress/tampered-lock/.env (was missing)
-[OK] 1 key(s) split between this machine and a local key file — .env no longer contains a usable secret.
-Next: run `worthless wrap <command>` or `worthless up` for daemon mode
+🔒 You're protected. 1 key locked — a stolen .env is now worthless to an attacker.
+[OK] 1 key split between this machine and a local key file — .env no longer contains a usable secret.
+Warning: using non-default home $TRACE_ROOT/native-stress/.worthless (WORTHLESS_HOME is set)
+Next: run `worthless wrap <command>`, or `worthless up` to keep a proxy running in this terminal.
+Check anytime with `worthless status`.
 ```
 
 **Files after**
@@ -1306,10 +1366,14 @@ OPENAI_API_KEY=sk-proj-<redacted:fake-raw:len=51:sha256=aad839a097>
 **stderr**
 
 ```text
+🟡 Protected at rest — 1 key locked (a stolen .env is worthless), but the proxy is down so your apps can't reach them. Run `worthless up`.
+
 Enrolled keys:
   openai-0ca90940  openai  PROTECTED
 
 Proxy: not running
+
+Checks enrolled keys + proxy. To scan this folder's .env for stray plaintext: `worthless scan`.
 ```
 
 **Files after**

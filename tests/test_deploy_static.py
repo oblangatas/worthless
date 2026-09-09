@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 
@@ -36,6 +37,80 @@ RENDER_YAML = DEPLOY_DIR / "render.yaml"
 RELEASE_SYNC_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release-sync-check.yml"
 PUBLISH_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "publish.yml"
 DOCKER_SECURITY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "docker-security.yml"
+RELEASE_NOTES_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release-notes.yml"
+RELEASE_FANIN_SCRIPT = REPO_ROOT / ".github" / "scripts" / "release-fanin.sh"
+EXTRACT_CHANGELOG_SCRIPT = REPO_ROOT / ".github" / "scripts" / "extract_changelog.py"
+# The four independent publishers the auto-Release job fans in over.
+PUBLISHER_WORKFLOWS = ["publish.yml", "publish-npm.yml", "publish-docker.yml", "deploy-worker.yml"]
+
+# Fake `gh` for the fan-in behavioural tests: emits {"workflow_runs":[...]} per
+# workflow file, driven by RUNS="file=status:conclusion,...". A missing file =>
+# no runs (leg hasn't started). conclusion "null" => JSON null (in-progress).
+_FANIN_GH_SHIM = r"""#!/usr/bin/env bash
+path=""
+for a in "$@"; do case "$a" in */actions/workflows/*/runs) path="$a";; esac; done
+wf=$(printf '%s' "$path" | sed -E 's#.*/workflows/([^/]+)/runs#\1#')
+spec=""
+IFS=',' read -ra pairs <<<"${RUNS:-}"
+for p in "${pairs[@]}"; do [ "${p%%=*}" = "$wf" ] && spec="${p#*=}"; done
+if [ -z "$spec" ]; then echo '{"workflow_runs":[]}'; exit 0; fi
+st="${spec%%:*}"; cc="${spec#*:}"; cc="${cc%%:*}"
+if [ "$cc" = "null" ]; then ccj=null; else ccj="\"$cc\""; fi
+# RUNS entries may carry an optional 4th field: the run's head_sha. Absent
+# means "the sha the caller asked about", which is the happy path. Supplying a
+# DIFFERENT one is how the head_sha filter becomes testable at all — before
+# this the shim echoed ${HEAD_SHA} back verbatim, so removing the filter from
+# release-fanin.sh changed nothing and no test could notice.
+rsha="${HEAD_SHA}"
+case "$spec" in *:*:*) rsha="${spec##*:}";; esac
+run="{\"id\":\"${wf}\",\"head_sha\":\"${rsha}\",\"status\":\"${st}\",\"conclusion\":${ccj}}"
+# Same problem for the event filter: the real API filters server-side, so a
+# shim that ignores `-f event=push` cannot catch its removal. Emit a decoy
+# non-push run ONLY when the caller failed to ask for event=push — then the
+# gate wrongly clears exactly when the filter is missing.
+saw_push=no
+for a in "$@"; do [ "$a" = "event=push" ] && saw_push=yes; done
+if [ "$saw_push" = "no" ] && [ -n "${DECOY_DISPATCH_RUN:-}" ]; then
+  decoy="{\"id\":\"${wf}\",\"head_sha\":\"${HEAD_SHA}\",\"status\":\"completed\",\"conclusion\":\"success\"}"
+  printf '{"workflow_runs":[%s,%s]}\n' "$run" "$decoy"
+  exit 0
+fi
+printf '{"workflow_runs":[%s]}\n' "$run"
+"""
+
+# The runs shim above answers .../workflows/<wf>/runs. A jobs URL does not match
+# its dispatch at all, so before this the shim returned {"workflow_runs":[]} for a
+# jobs query — silently wrong rather than an error, which would have made every
+# job-level test vacuous.
+#
+# JOBS spec: "<wf>=<Job>:<concl>|<Job>:<concl>;<wf>=..."  (";" between
+# workflows, because real job names contain commas)
+# A workflow absent from JOBS reports one generic green job, so existing run-level
+# tests keep passing unchanged.
+_FANIN_JOBS_SHIM = r"""
+jobs_path=""
+for a in "$@"; do case "$a" in */actions/runs/*/jobs*) jobs_path="$a";; esac; done
+if [ -n "$jobs_path" ]; then
+  rid=$(printf '%s' "$jobs_path" | sed -E 's#.*/actions/runs/([^/]+)/jobs.*#\1#')
+  jspec=""
+  IFS=';' read -ra jpairs <<<"${JOBS:-}"
+  for p in "${jpairs[@]}"; do [ "${p%%=*}" = "$rid" ] && jspec="${p#*=}"; done
+  [ -z "$jspec" ] && jspec="generic:success"
+  printf '%s' "$jspec" | jq -Rc '
+    split("|")
+    | map(
+        (. | split(":")) as $parts
+        | {name: $parts[0], status: "completed",
+           conclusion: (if $parts[1] == "null" then null else $parts[1] end)}
+      )
+    | {jobs: .}'
+  exit 0
+fi
+"""
+
+# The jobs arm must be tried FIRST: a jobs URL also contains "/actions/", and the
+# runs arm's sed would mangle it into a nonsense workflow name.
+_FANIN_GH_SHIM = _FANIN_GH_SHIM.replace('path=""\n', _FANIN_JOBS_SHIM + '\npath=""\n', 1)
 
 
 # ------------------------------------------------------------------
@@ -105,6 +180,12 @@ def publish_text() -> str:
 def publish_data() -> dict:
     """Parsed publish.yml workflow."""
     return yaml.safe_load(PUBLISH_WORKFLOW.read_text())
+
+
+@pytest.fixture(scope="module")
+def release_notes_data() -> dict:
+    """Parsed release-notes.yml workflow (the auto-Release job)."""
+    return yaml.safe_load(RELEASE_NOTES_WORKFLOW.read_text())
 
 
 @pytest.fixture(scope="module")
@@ -1647,8 +1728,565 @@ class TestSdistIsBuiltBeforeReleaseDay:
 
 
 # ------------------------------------------------------------------
-# install.sh pin ↔ pyproject version invariant (WOR-598, option iii guard)
+# Auto-created GitHub Release guardrails (WOR-846)
 # ------------------------------------------------------------------
+
+
+class TestReleaseNotesGuardrails:
+    """release-notes.yml creates the GitHub Release once all four publishers pass.
+
+    It is the only workflow holding a ``contents: write`` token, so it must be
+    structurally unable to (a) mint a tag — ``gh release create`` creates an
+    unsigned tag if one is absent, which fails the GPG gate AND tombstones the
+    version name permanently — or (b) execute attacker-pushable tag content while
+    that token is live. Each test below pins one security-signed-off guardrail;
+    they are described inline rather than by number, because `.github/` already
+    uses an unrelated F-numbering (docker-security.yml) and the collision misled
+    more than the shorthand saved.
+    """
+
+    @staticmethod
+    def _job(data: dict) -> dict:
+        return data["jobs"]["create-release"]
+
+    @staticmethod
+    def _runs(data: dict) -> str:
+        steps = TestReleaseNotesGuardrails._job(data)["steps"]
+        return "\n".join(str(s.get("run", "")) for s in steps)
+
+    @staticmethod
+    def _code(data: dict) -> str:
+        """The run: blocks with shell comments stripped.
+
+        Asserting a required flag against raw text is vacuous: the comments
+        explaining WHY a flag matters also contain the flag, so deleting it from
+        the command leaves the assertion green. TestGuardsCanActuallyFail caught
+        exactly that here. Anything checking "this flag must be present" has to
+        look at executable text only.
+        """
+        out = []
+        for line in TestReleaseNotesGuardrails._runs(data).splitlines():
+            if line.lstrip().startswith("#"):
+                continue
+            out.append(line.split(" #", 1)[0])
+        return "\n".join(out)
+
+    def test_top_level_permissions_are_read_only(self, release_notes_data: dict):
+        # F3: the write scope must be opted into per-job, never granted workflow-wide.
+        assert release_notes_data.get("permissions") == {"contents": "read"}
+
+    def test_write_scope_is_job_local_and_minimal(self, release_notes_data: dict):
+        # F3: contents:write only, plus actions:read for the fan-in API reads.
+        perms = self._job(release_notes_data)["permissions"]
+        assert perms.get("contents") == "write"
+        assert set(perms) <= {"contents", "actions"}, (
+            f"release job must not hold scopes beyond contents/actions (got {sorted(perms)}); "
+            "id-token or packages would let it publish artifacts, not just notes."
+        )
+
+    def test_release_job_sits_behind_protected_environment(self, release_notes_data: dict):
+        # F3: `release` environment carries the required-reviewer rule, so a
+        # malicious workflow edit still can't cut a Release unattended.
+        assert self._job(release_notes_data).get("environment") == "release"
+
+    def test_fires_only_on_a_pushed_v_tag(self, release_notes_data: dict):
+        # F2: workflow_run inherits the triggering event; anything but a real tag
+        # push must be refused before the signed-tag verify is reachable. The gate
+        # job is the entry point, and the privileged job hangs off it.
+        cond = release_notes_data["jobs"]["gate"]["if"]
+        assert "workflow_run.event == 'push'" in cond
+        assert "head_branch, 'v'" in cond
+        assert self._job(release_notes_data).get("needs") == "gate"
+
+    def test_approval_is_requested_once_not_per_publisher(self, release_notes_data: dict):
+        """The environment gate must NOT sit on a job that runs every firing.
+
+        This workflow fires on each of four publisher completions. `environment:`
+        prompts a required reviewer before a job's first step, so an environment on
+        the every-firing job would ask for approval up to four times per release —
+        the opposite of "push a signed tag and walk away". Only the job guarded by
+        the fan-in verdict may carry it.
+        """
+        gate = release_notes_data["jobs"]["gate"]
+        assert "environment" not in gate, (
+            "the every-firing gate job must not carry `environment:` — it would "
+            "prompt for approval on every publisher completion."
+        )
+        assert gate["permissions"].get("contents") == "read"
+        assert self._job(release_notes_data)["if"] == "needs.gate.outputs.ready == 'true'"
+
+    def test_reverifies_the_signed_tag_independently(self, release_notes_data: dict):
+        """F5: the privileged job re-verifies the GPG signature itself.
+
+        Non-vacuous on purpose. The first version of this test only asserted that
+        the string "verify-tag.sh" appeared somewhere, which passed while the tag
+        was handed over via GITHUB_REF_NAME — an assignment GitHub silently
+        DISCARDS for GITHUB_*-prefixed names, so the script verified "main",
+        failed closed, and no Release could ever be created. Assert the override
+        actually reaches the script under a usable name.
+        """
+        step = next(
+            s
+            for s in self._job(release_notes_data)["steps"]
+            if "verify-tag.sh" in str(s.get("run", ""))
+        )
+        env = step.get("env", {})
+        assert "GITHUB_REF_NAME" not in env, (
+            "GitHub ignores assignments to GITHUB_*-prefixed variables, so this "
+            "override never arrives and verify-tag.sh checks the default branch."
+        )
+        ref = env.get("VERIFY_TAG_REF", "")
+        assert "workflow_run.head_branch" in ref, (
+            f"the tag under verification must come from the triggering event; got {ref!r}"
+        )
+        # ...and the script must actually honour that variable.
+        verify_sh = (REPO_ROOT / ".github" / "scripts" / "verify-tag.sh").read_text()
+        assert "VERIFY_TAG_REF" in verify_sh, (
+            "verify-tag.sh does not read VERIFY_TAG_REF — the override is inert."
+        )
+
+    def test_cannot_mint_a_tag(self, release_notes_data: dict):
+        # F1: --verify-tag aborts unless the git tag already exists; --target would
+        # let the Release point at an arbitrary commit.
+        code = self._code(release_notes_data)
+        assert "--verify-tag" in code, (
+            "gh release create must pass --verify-tag — without it, a missing tag is "
+            "silently created UNSIGNED and the version name is tombstoned forever."
+        )
+        assert "--target" not in code, "no --target: the Release must follow the signed tag only"
+
+    def test_runs_no_untrusted_tag_content(self, release_notes_data: dict):
+        # F4: the job checks out the default branch and runs only trusted scripts.
+        # A build/install step would execute tag-authored hooks with the write token live.
+        runs = self._runs(release_notes_data)
+        for forbidden in ("python -m build", "npm ci", "npm install", "pip install", "uv sync"):
+            assert forbidden not in runs, (
+                f"{forbidden!r} executes tag-content code while contents:write is live"
+            )
+        checkout = next(
+            s
+            for s in self._job(release_notes_data)["steps"]
+            if "checkout" in str(s.get("uses", "")).lower()
+        )
+        assert checkout.get("with", {}).get("persist-credentials") is False
+        # Dict-key membership, NOT a substring of str(dict): str({'ref': ...}) renders
+        # as "{'ref': ...}", so a "ref:" substring test never matches and the guard
+        # would pass even when the job checks out the tag (CodeRabbit, PR #462).
+        assert "ref" not in checkout.get("with", {}), (
+            "must check out the default branch, not the tag — scripts executed here must be trusted"
+        )
+
+    def test_rebinds_the_tag_to_the_validated_commit(self, release_notes_data: dict):
+        """The Release must be cut for the commit the gate actually validated.
+
+        The gate proves four publishers succeeded for a specific sha, but the rest
+        of the job works from the tag NAME. A re-tag during the approval wait
+        repoints that name at a commit whose publishers never ran, and approving
+        the stale run would publish notes for unpublished code.
+        """
+        job = self._job(release_notes_data)
+        assert "HEAD_SHA" in job.get("env", {}), (
+            "create-release must carry HEAD_SHA to re-bind the tag to the commit "
+            "the gate validated."
+        )
+        code = self._code(release_notes_data)
+        # Substring checks on "rev-list" and "$HEAD_SHA" both survive replacing the
+        # whole guard with an echo that merely mentions them — verified: the entire
+        # suite stayed green with the comparison deleted. Require the comparison to
+        # exist AND to reach exit 1, so a measurement without an enforcement fails.
+        rebind = re.search(r"ACTUAL=\$\(git rev-list.*?\n(.*?)(?=\n\s*- name:|\Z)", code, re.S)
+        assert rebind, (
+            "the re-bind step no longer measures the tag with git rev-list. It is "
+            "the only thing tying the tag NAME to the commit the gate validated."
+        )
+        body = rebind.group(1)
+        assert re.search(r'\[\s*"\$ACTUAL"\s*!=\s*"\$HEAD_SHA"\s*\]', body), (
+            "the re-bind measures the tag but no longer COMPARES it to the validated "
+            "sha. A measurement that nothing acts on is not a guard."
+        )
+        assert "exit 1" in body, (
+            "the re-bind compares the tag to the validated sha but does not exit 1 "
+            "on mismatch, so a moved tag still cuts a Release."
+        )
+        assert "rev-list" in code and "$HEAD_SHA" in code, (
+            "must compare the tag's current commit against the gate's HEAD_SHA "
+            "before creating the Release."
+        )
+
+    def test_is_idempotent_across_repeat_firings(self, release_notes_data: dict):
+        # F8: up to four publisher completions fire this workflow for one tag.
+        assert "concurrency" in release_notes_data
+        assert "gh release view" in self._runs(release_notes_data), (
+            "must skip when the Release already exists — repeat firings are expected"
+        )
+
+    def test_trigger_matches_the_publishers_actual_names(self, release_notes_data: dict):
+        # Drift guard: workflow_run matches on DISPLAY name. Renaming a publisher
+        # would silently orphan the fan-in and no Release would ever be created.
+        on_block = release_notes_data.get("on", release_notes_data.get(True))
+        listed = set(on_block["workflow_run"]["workflows"])
+        actual = {
+            yaml.safe_load((REPO_ROOT / ".github" / "workflows" / wf).read_text())["name"]
+            for wf in PUBLISHER_WORKFLOWS
+        }
+        assert listed == actual, (
+            "release-notes.yml workflow_run.workflows must equal the publishers' name: "
+            f"fields exactly.\n  listed: {sorted(listed)}\n  actual: {sorted(actual)}"
+        )
+
+    def test_fanin_polls_every_publisher(self):
+        # A publisher missing from the fan-in list would let the Release ship while
+        # that leg had failed.
+        text = RELEASE_FANIN_SCRIPT.read_text()
+        for wf in PUBLISHER_WORKFLOWS:
+            assert wf in text, f"release-fanin.sh must require {wf} to be green"
+
+    def test_fanin_forces_get_on_the_api_call(self):
+        # `gh api` silently POSTs when any -f field is present; the runs endpoint
+        # only exists for GET, so without -X GET it 404s and (under set -e) the
+        # whole fan-in aborts — no Release, ever. Verified live on v0.3.10. Pin it
+        # so a future "cleanup" can't drop the flag and silently break every release.
+        # Check the COMMAND, not the file text: the script's own comment says
+        # "Do not remove -X GET", so a whole-file grep passes even after the flag
+        # is deleted from the call — the guard was vacuous until TestGuardsCanActuallyFail
+        # caught it. Assert on the executable line only.
+        code = [
+            line.split("#", 1)[0]
+            for line in RELEASE_FANIN_SCRIPT.read_text().splitlines()
+            if not line.lstrip().startswith("#")
+        ]
+        api_calls = [line for line in code if "gh api" in line]
+        assert api_calls, "fan-in must call `gh api` to poll publisher status"
+        for call in api_calls:
+            assert "-X GET" in call, (
+                "the gh api call must force GET — without it `-f` fields make gh "
+                f"POST, the runs endpoint 404s, and the fan-in aborts:\n  {call.strip()}"
+            )
+
+    def test_changelog_extraction_picks_one_section(self):
+        sample = (
+            "# Changelog\n\n"
+            "## [Unreleased]\n\n"
+            "## [0.3.10] — 2026-07-21\n\n### Security\n- the released thing\n\n"
+            "## [0.3.9] — 2026-07-01\n\n- the older thing\n"
+        )
+        hit = subprocess.run(
+            [sys.executable, str(EXTRACT_CHANGELOG_SCRIPT), "0.3.10"],
+            input=sample,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert hit.returncode == 0
+        assert "the released thing" in hit.stdout
+        assert "the older thing" not in hit.stdout, "must stop at the next ## [ heading"
+        assert "Unreleased" not in hit.stdout
+
+        # Unknown version → exit 3 so the workflow falls back to --generate-notes
+        # rather than publishing a Release with empty notes.
+        miss = subprocess.run(
+            [sys.executable, str(EXTRACT_CHANGELOG_SCRIPT), "9.9.9"],
+            input=sample,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert miss.returncode == 3
+        assert miss.stdout.strip() == ""
+
+
+class TestReleaseFaninBehaviour:
+    """Behavioural coverage for release-fanin.sh — run the REAL script against a
+    fake `gh` on PATH and assert the ready verdict AND the exit code. Static
+    string-greps cannot catch the silent-permanent-hold class of bug (a terminal
+    non-success conclusion outside a hand-listed set being mistaken for "still
+    waiting"), so these run the classifier for real. WOR-846."""
+
+    ALL_GREEN = (
+        "publish.yml=completed:success,publish-npm.yml=completed:success,"
+        "publish-docker.yml=completed:success,deploy-worker.yml=completed:success"
+    )
+
+    @staticmethod
+    def _run(tmp_path, runs_spec: str, jobs_spec: str = "", env_extra: dict | None = None):
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        gh = bindir / "gh"
+        gh.write_text(_FANIN_GH_SHIM)
+        gh.chmod(0o755)
+        out = tmp_path / "gh_output"
+        out.touch()
+        env = {
+            **os.environ,
+            "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}",
+            "GITHUB_OUTPUT": str(out),
+            "GH_REPO": "o/w",
+            "TAG": "v9.9.9",
+            "HEAD_SHA": "deadbeef",
+            "RUNS": runs_spec,
+            "JOBS": jobs_spec,
+            **(env_extra or {}),
+        }
+        proc = subprocess.run(
+            ["bash", str(REPO_ROOT / ".github" / "scripts" / "release-fanin.sh")],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,  # a hung fan-in must fail this test fast, never stall the whole suite
+        )
+        ready = None
+        for line in out.read_text().splitlines():
+            if line.startswith("ready="):
+                ready = line.split("=", 1)[1]
+        return ready, proc.returncode, proc.stdout
+
+    def test_all_four_green_is_ready_and_exits_zero(self, tmp_path):
+        ready, rc, _ = self._run(tmp_path, self.ALL_GREEN)
+        assert ready == "true"
+        assert rc == 0
+
+    def test_query_shape_holds_against_the_real_github_api(self, tmp_path):
+        """Run the fan-in against the LIVE API and assert it reaches a verdict.
+
+        The fake-`gh` tests above pin the decision logic but drive a stub, so they
+        were blind to the bug that actually mattered: `gh api -f` silently switches
+        to POST, there is no POST route for .../runs, it 404s, and under `set -e`
+        the whole script aborts — no Release, on any tag, ever.
+
+        Asserts REACHING a verdict, not which verdict. A bad query shape aborts
+        mid-loop and never writes `ready=`, so absence of a verdict is the signal.
+        Deliberately NOT asserting ready=="true" against a pinned release: GitHub
+        expires workflow-run records (90 days by default), which would turn this
+        into a test that goes red on a calendar date for reasons unrelated to the
+        code. An expired tag simply yields ready=false — still a verdict, still a
+        pass. Read-only; creates nothing.
+        """
+        if shutil.which("gh") is None:
+            pytest.skip("gh CLI not installed")
+        probe = subprocess.run(
+            ["gh", "api", "/rate_limit"], capture_output=True, text=True, timeout=60, check=False
+        )
+        if probe.returncode != 0:
+            pytest.skip("no authenticated/reachable GitHub API from this environment")
+        slug = subprocess.run(
+            ["gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        if slug.returncode != 0 or not slug.stdout.strip():
+            pytest.skip("cannot resolve the repository slug from gh")
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        if head.returncode != 0 or not head.stdout.strip():
+            pytest.skip("cannot resolve HEAD (not a git checkout?)")
+
+        out = tmp_path / "gh_output"
+        out.touch()
+        env = {
+            **os.environ,
+            "GITHUB_OUTPUT": str(out),
+            "GH_REPO": slug.stdout.strip(),
+            # Any plausible tag works: we are exercising the QUERY, not a release.
+            "TAG": "v0.3.10",
+            "HEAD_SHA": head.stdout.strip(),
+        }
+        proc = subprocess.run(
+            ["bash", str(REPO_ROOT / ".github" / "scripts" / "release-fanin.sh")],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=120,
+        )
+        ready = None
+        for line in out.read_text().splitlines():
+            if line.startswith("ready="):
+                ready = line.split("=", 1)[1]
+        combined = f"{proc.stdout}\n{proc.stderr}"
+        assert ready in ("true", "false"), (
+            "fan-in never reached a verdict against the real API — it aborted "
+            "mid-query, which is exactly how the POST/404 bug presented. "
+            f"ready={ready!r}\n{combined}"
+        )
+        assert "404" not in combined and "Not Found" not in combined, (
+            f"real API rejected the fan-in's request shape:\n{combined}"
+        )
+
+    def test_a_failed_leg_holds_the_release_and_fails_loud(self, tmp_path):
+        spec = self.ALL_GREEN.replace(
+            "publish-npm.yml=completed:success", "publish-npm.yml=completed:failure"
+        )
+        ready, rc, out = self._run(tmp_path, spec)
+        assert ready == "false"
+        assert rc != 0, "a terminally-failed leg must fail the run so GitHub notifies"
+        assert "::error" in out
+
+    def test_startup_failure_is_not_mistaken_for_waiting(self, tmp_path):
+        # The exact bug the old {failure,cancelled,timed_out} list missed: a
+        # terminal non-success conclusion outside that set. Must block LOUD, not
+        # sit silently "waiting" forever.
+        spec = self.ALL_GREEN.replace(
+            "publish-docker.yml=completed:success",
+            "publish-docker.yml=completed:startup_failure",
+        )
+        ready, rc, _ = self._run(tmp_path, spec)
+        assert ready == "false"
+        assert rc != 0, "startup_failure/skipped/stale must block loudly, not wait forever"
+
+    def test_an_in_progress_leg_waits_quietly(self, tmp_path):
+        # Not-yet-finished is NOT a failure — exit 0 so a later firing can complete
+        # the fan-in. Failing here would turn every early firing red.
+        spec = self.ALL_GREEN.replace(
+            "deploy-worker.yml=completed:success", "deploy-worker.yml=in_progress:null"
+        )
+        ready, rc, out = self._run(tmp_path, spec)
+        assert ready == "false"
+        assert rc == 0, "an in-progress leg must not fail the run"
+        assert "::error" not in out
+
+    def test_a_never_started_leg_waits_not_blocks(self, tmp_path):
+        # A leg with no runs yet (omitted) is indistinguishable from "hasn't
+        # started", so it waits (exit 0), unlike a terminal failure.
+        spec = (
+            "publish.yml=completed:success,publish-npm.yml=completed:success,"
+            "publish-docker.yml=completed:success"  # deploy-worker absent
+        )
+        ready, rc, _ = self._run(tmp_path, spec)
+        assert ready == "false"
+        assert rc == 0
+
+    # ------------------------------------------------------------------
+    # install.sh pin ↔ pyproject version invariant (WOR-598, option iii guard)
+    # ------------------------------------------------------------------
+
+    # ---- job-level polling (WOR-909 requirement 1) -------------------------
+    #
+    # A run's conclusion is not the whole truth. publish-docker.yml marks its
+    # `visibility` job continue-on-error BY DESIGN, so that job can be red while
+    # the run reports success. Trusting the run alone means a Release can be cut
+    # for a workflow that half-worked.
+    #
+    # The rule is allowlist-by-exception, never enumeration: every job must be
+    # green EXCEPT ones explicitly excused. Enumerating the expected jobs would
+    # break silently, because deploy-worker.yml's reusable-workflow calls report
+    # as "<caller> / <callee>" where the callee half lives in a different file.
+    # Measured on the real v0.3.12 runs.
+
+    VISIBILITY_JOB = "Flip GHCR package visibility to public"
+
+    def test_a_run_at_a_different_sha_does_not_satisfy_the_gate(self, tmp_path):
+        """WOR-909 R1: head_sha must match the release SHA.
+
+        Until the shim grew a per-run sha this was untestable — it echoed back
+        whatever sha the script asked about, so deleting the filter changed
+        nothing and every test stayed green. A real re-tag or a neighbouring
+        release produces exactly this: a genuinely successful run, for the wrong
+        commit.
+        """
+        # ALL FOUR must be green apart from the sha under test. Setting only one
+        # publisher makes the verdict false because the other three have no runs
+        # at all — the test then passes whether or not the filter exists. That is
+        # exactly how the first version of this test was vacuous.
+        runs = self.ALL_GREEN.replace(
+            "publish.yml=completed:success",
+            "publish.yml=completed:success:0000000000000000000000000000000000000000",
+        )
+        ready, rc, _ = self._run(tmp_path, runs)
+        assert ready == "false", (
+            "a successful run at a DIFFERENT commit satisfied the gate. The fan-in "
+            "must match head_sha, or a release is blessed by another commit's run."
+        )
+
+    def test_a_non_push_run_does_not_satisfy_the_gate(self, tmp_path):
+        """WOR-909 R1: event must be push.
+
+        deploy-worker.yml also fires on workflow_dispatch for previews, so a
+        preview emits a successful run unrelated to any tag. The real API filters
+        server-side, so the shim emits a decoy non-push run only when the caller
+        forgets `-f event=push` — the gate then wrongly clears precisely when the
+        filter is missing.
+        """
+        # Same trap: every publisher green except the one whose only run is at a
+        # foreign sha. The decoy then supplies a would-be-passing non-push run,
+        # so the gate clears if and only if the event filter is missing.
+        runs = self.ALL_GREEN.replace(
+            "publish.yml=completed:success",
+            "publish.yml=completed:success:0000000000000000000000000000000000000000",
+        )
+        ready, rc, _ = self._run(tmp_path, runs, env_extra={"DECOY_DISPATCH_RUN": "1"})
+        assert ready == "false", (
+            "a non-push run satisfied the gate. Without `-f event=push` a preview "
+            "dispatch counts as a release publish."
+        )
+
+    def test_a_failed_job_blocks_even_when_the_run_says_success(self, tmp_path):
+        """The case run-level polling cannot see."""
+        ready, rc, out = self._run(
+            tmp_path,
+            self.ALL_GREEN,
+            jobs_spec="publish.yml=Build distribution:success|Publish to PyPI:failure",
+        )
+        assert ready == "false", (
+            "a job inside publish.yml failed, yet the fan-in called the release ready. "
+            "The run conclusion says success; only job-level polling can see this."
+        )
+        assert rc == 1
+
+    def test_the_excused_visibility_job_does_not_block(self, tmp_path):
+        """publish-docker's visibility job is continue-on-error on purpose.
+
+        It genuinely failed on the real v0.3.12 release while the image stayed
+        publicly pullable. Blocking on it would have withheld a Release from a
+        good release.
+        """
+        ready, rc, _ = self._run(
+            tmp_path,
+            self.ALL_GREEN,
+            jobs_spec=(
+                "publish-docker.yml=Build, scan, and push multi-arch image:success"
+                f"|{self.VISIBILITY_JOB}:failure"
+            ),
+        )
+        assert ready == "true", (
+            f"{self.VISIBILITY_JOB!r} is excused by design — its own workflow sets "
+            "continue-on-error so a visibility failure keeps the release green. "
+            "Blocking on it inverts a deliberate decision made in another file."
+        )
+        assert rc == 0
+
+    def test_a_skipped_job_does_not_block(self, tmp_path):
+        """Skipped is not failed. Treating it as failure blocks a Release forever."""
+        ready, rc, _ = self._run(
+            tmp_path,
+            self.ALL_GREEN,
+            jobs_spec="deploy-worker.yml=Deploy to Cloudflare:success|Wire probes:skipped",
+        )
+        assert ready == "true"
+        assert rc == 0
+
+    def test_the_excuse_is_scoped_to_its_own_workflow(self, tmp_path):
+        """A job excused in publish-docker must not be excused elsewhere."""
+        ready, rc, _ = self._run(
+            tmp_path,
+            self.ALL_GREEN,
+            jobs_spec=f"publish.yml=Build distribution:success|{self.VISIBILITY_JOB}:failure",
+        )
+        assert ready == "false", (
+            "the visibility excuse leaked to publish.yml. The allowlist is keyed by "
+            "workflow AND job name; a bare job-name match would excuse any workflow "
+            "that happens to name a job the same way."
+        )
+        assert rc == 1
 
 
 class TestInstallPinMatchesPyproject:
@@ -1672,4 +2310,441 @@ class TestInstallPinMatchesPyproject:
             f"install.sh pin {pin!r} != pyproject version {version!r}. "
             "The default `curl | sh` must install the version this repo ships — "
             "bump them together (scripts/bump-version.sh)."
+        )
+
+
+# ------------------------------------------------------------------
+# Meta-guards: catch the class of defect CI kept missing (WOR-846)
+#
+# Three times on this workstream a fully green suite hid a defect that made the
+# feature non-functional: `gh api -f` silently switching to POST, an assertion
+# that could not fail, and an env override GitHub discards. None were catchable
+# by the tests themselves — they need tests ABOUT the tests and about the
+# platform's rules.
+# ------------------------------------------------------------------
+
+
+# Variables GitHub sets automatically for every job. Assigning any of these in an
+# `env:` block is silently IGNORED, so the value you think you passed never
+# arrives. GITHUB_TOKEN is deliberately absent: it is NOT auto-provided, so
+# passing it explicitly is both legal and the documented convention.
+GITHUB_AUTOSET_ENV_VARS = frozenset(
+    {
+        "GITHUB_ACTION",
+        "GITHUB_ACTIONS",
+        "GITHUB_ACTOR",
+        "GITHUB_API_URL",
+        "GITHUB_BASE_REF",
+        "GITHUB_ENV",
+        "GITHUB_EVENT_NAME",
+        "GITHUB_EVENT_PATH",
+        "GITHUB_HEAD_REF",
+        "GITHUB_JOB",
+        "GITHUB_OUTPUT",
+        "GITHUB_PATH",
+        "GITHUB_REF",
+        "GITHUB_REF_NAME",
+        "GITHUB_REF_TYPE",
+        "GITHUB_REPOSITORY",
+        "GITHUB_REPOSITORY_OWNER",
+        "GITHUB_RUN_ATTEMPT",
+        "GITHUB_RUN_ID",
+        "GITHUB_RUN_NUMBER",
+        "GITHUB_SERVER_URL",
+        "GITHUB_SHA",
+        "GITHUB_STEP_SUMMARY",
+        "GITHUB_WORKFLOW",
+        "GITHUB_WORKSPACE",
+    }
+)
+
+
+class TestNoWorkflowOverridesAutosetVars:
+    """No workflow may assign a variable GitHub sets automatically.
+
+    Regression guard for the WOR-846 blocker: release-notes.yml passed the tag to
+    verify-tag.sh as ``GITHUB_REF_NAME``. GitHub discards assignments to its own
+    default variables, so the script kept reading the default branch, failed
+    closed, and no Release could ever be created — while actionlint, zizmor and
+    37 CI checks all stayed green. A one-second check catches the whole class.
+    """
+
+    def test_no_workflow_assigns_an_autoset_variable(self):
+        offenders: list[str] = []
+
+        def walk(node, path: str, wf: str) -> None:
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    if key == "env" and isinstance(value, dict):
+                        for name in value:
+                            if str(name) in GITHUB_AUTOSET_ENV_VARS:
+                                offenders.append(f"{wf}{path}.env.{name}")
+                    walk(value, f"{path}.{key}", wf)
+            elif isinstance(node, list):
+                for i, value in enumerate(node):
+                    walk(value, f"{path}[{i}]", wf)
+
+        workflow_dir = REPO_ROOT / ".github" / "workflows"
+        for wf in sorted(workflow_dir.glob("*.yml")):
+            walk(yaml.safe_load(wf.read_text()), "", wf.name)
+
+        assert not offenders, (
+            "these assignments are silently ignored by GitHub, so the value never "
+            "reaches the step — use a non-reserved name (e.g. VERIFY_TAG_REF):\n  "
+            + "\n  ".join(offenders)
+        )
+
+
+# Each entry: (label, file, find, replace, the guard test that MUST then fail).
+# Adding a security guard to TestReleaseNotesGuardrails without adding a mutation
+# here is how a vacuous assertion slips in — twice already on this workstream.
+GUARD_MUTATIONS = [
+    (
+        "drop --verify-tag (job could mint an unsigned tag)",
+        ".github/workflows/release-notes.yml",
+        # Anchor on the command, not the comment above it that also names the flag.
+        "--verify-tag $NOTES",
+        "$NOTES",
+        "test_cannot_mint_a_tag",
+    ),
+    (
+        "waive the revision binding in a second workflow",
+        ".github/workflows/publish.yml",
+        # Any tag-triggered publisher gaining the waiver is the spread this guards.
+        "      - name: Verify tag GPG signature",
+        (
+            "      - name: Verify tag GPG signature\n"
+            "        env:\n"
+            "          VERIFY_TAG_HEAD_BINDING: not-applicable-default-branch-checkout"
+        ),
+        "test_exactly_one_workflow_waives_the_binding",
+    ),
+    (
+        # The existing entry swaps the VALUE (ACTUAL=$HEAD_SHA). That proves the
+        # guard notices a broken measurement. It does NOT prove the guard notices
+        # the comparison being deleted outright — the same tautology blind spot
+        # this branch already fixed once in verify-tag.sh, one layer up.
+        "neuter the tag-to-commit comparison",
+        ".github/workflows/release-notes.yml",
+        'if [ "$ACTUAL" != "$HEAD_SHA" ]; then',
+        "if false; then",
+        "test_rebinds_the_tag_to_the_validated_commit",
+    ),
+    (
+        "trust the run verdict, skip job-level polling",
+        ".github/scripts/release-fanin.sh",
+        'if [ "$ok" -ge 1 ]; then',
+        "if false; then",
+        "test_a_failed_job_blocks_even_when_the_run_says_success",
+    ),
+    (
+        # Dropping the workflow from the key makes the excuse match NOTHING —
+        # the list is workflow-qualified — so visibility starts blocking. That
+        # breaks the "excused job doesn't block" test, not the scoping one.
+        "drop the workflow from the excuse key",
+        ".github/scripts/release-fanin.sh",
+        '($wf + "::" + .name)',
+        "(.name)",
+        "test_the_excused_visibility_job_does_not_block",
+    ),
+    (
+        # Scoping needs the excuse pointed at the WRONG workflow: publish.yml's
+        # identically-named failing job then gets excused, which is precisely
+        # the leak the scoping test exists to catch.
+        "point the excuse at a different workflow",
+        ".github/scripts/release-fanin.sh",
+        'JOB_EXCUSES="publish-docker.yml::Flip',
+        'JOB_EXCUSES="publish.yml::Flip',
+        "test_the_excuse_is_scoped_to_its_own_workflow",
+    ),
+    (
+        "treat a skipped job as a failure",
+        ".github/scripts/release-fanin.sh",
+        'and .conclusion != "skipped"',
+        "",
+        "test_a_skipped_job_does_not_block",
+    ),
+    (
+        "stop filtering runs by event=push",
+        ".github/scripts/release-fanin.sh",
+        " -f event=push",
+        "",
+        "test_a_non_push_run_does_not_satisfy_the_gate",
+    ),
+    (
+        "stop matching the release head_sha",
+        ".github/scripts/release-fanin.sh",
+        'select(.head_sha==$sha and .conclusion=="success")',
+        'select(.conclusion=="success")',
+        "test_a_run_at_a_different_sha_does_not_satisfy_the_gate",
+    ),
+    (
+        "publish the fallback Release instead of drafting it",
+        "scripts/tag-release.sh",
+        "--draft --title",
+        "--title",
+        "test_the_fallback_creates_a_draft",
+    ),
+    (
+        "pass the tag via a variable GitHub ignores",
+        ".github/workflows/release-notes.yml",
+        "VERIFY_TAG_REF:",
+        "GITHUB_REF_NAME:",
+        "test_reverifies_the_signed_tag_independently",
+    ),
+    (
+        "let the API call fall back to POST",
+        ".github/scripts/release-fanin.sh",
+        # Anchor on the call itself; the header comment also contains "-X GET".
+        '/runs" -X GET',
+        '/runs"',
+        "test_fanin_forces_get_on_the_api_call",
+    ),
+    (
+        "release a commit the publishers never ran",
+        ".github/workflows/release-notes.yml",
+        'ACTUAL=$(git rev-list -n 1 "refs/tags/${TAG}")',
+        'ACTUAL="$HEAD_SHA"',
+        "test_rebinds_the_tag_to_the_validated_commit",
+    ),
+    (
+        "grant write at the workflow level",
+        ".github/workflows/release-notes.yml",
+        "permissions:\n  contents: read",
+        "permissions:\n  contents: write",
+        "test_top_level_permissions_are_read_only",
+    ),
+    (
+        "drop the protected environment",
+        ".github/workflows/release-notes.yml",
+        "    environment: release\n",
+        "",
+        "test_release_job_sits_behind_protected_environment",
+    ),
+    (
+        "check out the tag instead of the default branch",
+        ".github/workflows/release-notes.yml",
+        # Anchor on fetch-depth so this lands on the create-release checkout, not
+        # the gate job's — the guard inspects create-release.
+        "          fetch-depth: 0\n          persist-credentials: false",
+        "          fetch-depth: 0\n          ref: refs/tags/v9.9.9\n"
+        "          persist-credentials: false",
+        "test_runs_no_untrusted_tag_content",
+    ),
+]
+
+
+class TestGuardsCanActuallyFail:
+    """Every security guard must be provably capable of failing.
+
+    Twice on this workstream a guard was structurally incapable of failing and
+    passed on broken code: ``"ref:" not in str(dict)`` (a substring that can never
+    occur once a dict is stringified) and a bare grep for ``"verify-tag.sh"`` that
+    stayed green while the tag was handed over via a variable GitHub discards.
+    Both looked like coverage. Neither was.
+
+    So: mutate the thing each guard protects, and require the guard to go RED.
+    A guard that survives its own mutation is not protecting anything.
+    """
+
+    @pytest.mark.parametrize(
+        ("label", "rel_path", "find", "replace", "guard_test"),
+        [pytest.param(*m, id=m[4]) for m in GUARD_MUTATIONS],
+    )
+    def test_guard_fails_when_its_subject_is_broken(
+        self, tmp_path, label, rel_path, find, replace, guard_test
+    ):
+        # Work on a full copy so nothing mutates the real tree — safe under xdist.
+        shutil.copytree(REPO_ROOT / ".github", tmp_path / ".github")
+        # scripts/ too: tag-release.sh guards live there, and without this their
+        # mutations silently target a file the copy does not contain.
+        shutil.copytree(REPO_ROOT / "scripts", tmp_path / "scripts")
+        (tmp_path / "tests").mkdir()
+        shutil.copy(Path(__file__), tmp_path / "tests" / Path(__file__).name)
+
+        def run_guard() -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pytest",
+                    str(tmp_path / "tests" / Path(__file__).name),
+                    # Exclude this harness: `-k <name>` also matches the parametrize
+                    # id below, which would make the subprocess re-run the harness
+                    # recursively (and mask the guard's own verdict).
+                    #
+                    # The exclusion must spell out the FULL test name. `-k` matches
+                    # ancestor directory names too, and pytest truncates its temp dir
+                    # to 30 chars: `test_guard_fails_when_its_subj<N>`. A shorter
+                    # `not guard_fails_when` therefore matched that directory and
+                    # deselected every test in the copy — 122 deselected, exit 5 —
+                    # so the control below reported "harness broken" for all 7 cases.
+                    # The 43-char name still excludes this harness item but cannot be
+                    # a substring of the truncated directory.
+                    "-k",
+                    f"{guard_test} and not test_guard_fails_when_its_subject_is_broken",
+                    # -n0: the project's addopts carry `-n auto`, which a subprocess
+                    # inherits — spinning up xdist workers per mutation for a handful
+                    # of assertions. Serial is far faster here.
+                    "-n0",
+                    "-p",
+                    "no:randomly",
+                    "-p",
+                    "no:cacheprovider",
+                    "-q",
+                    "--no-header",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                check=False,
+            )
+
+        # CONTROL FIRST. Without this the harness is itself vacuous: a bare
+        # `returncode != 0` also accepts collection errors (2/3), "no tests
+        # collected" (5) and usage errors (4) — so a renamed guard, or a copied
+        # tree that cannot import, would make this green while proving nothing.
+        # Requiring green-then-red pins BOTH directions (CodeRabbit, PR #462).
+        control = run_guard()
+        assert control.returncode == 0 and "1 passed" in control.stdout, (
+            f"harness broken: {guard_test} did not run green against the UNMUTATED "
+            f"copy, so a red result below would prove nothing. Check the test name "
+            f"still exists and the copied tree imports.\n{control.stdout[-2000:]}"
+        )
+
+        target = tmp_path / rel_path
+        original = target.read_text()
+        assert find in original, (
+            f"mutation {label!r} no longer applies — {rel_path} does not contain "
+            f"{find!r}. Update GUARD_MUTATIONS to match the current code."
+        )
+        target.write_text(original.replace(find, replace, 1))
+
+        proc = run_guard()
+        assert "1 failed" in proc.stdout, (
+            f"{guard_test} did not FAIL against a deliberately broken workflow "
+            f"({label}). The guard is vacuous — it asserts something that cannot "
+            f"fail, so it is not protecting the invariant it claims to.\n"
+            f"{proc.stdout[-2000:]}"
+        )
+
+
+# The HEAD binding in verify-tag.sh compares the tag's commit to what is actually
+# checked out. release-notes.yml legitimately cannot satisfy it: it checks out the
+# DEFAULT BRANCH on purpose (pwn-request defense), so HEAD is main's tip.
+#
+# The first attempt let that caller pass its own expected sha. That was wrong in a
+# way worth remembering: it swapped a MEASUREMENT (`git rev-parse HEAD` reads what
+# is on disk) for an ASSERTION (the caller's claim). The dangerous input was never
+# an empty value — it was a plausible one derived from the tag itself, which makes
+# the comparison X == X. A tautological *value* is not a code change, so no
+# GUARD_MUTATIONS entry could ever catch it.
+#
+# A single named sentinel is auditable by grep. These tests pin that.
+HEAD_BINDING_OPT_OUT = "not-applicable-default-branch-checkout"
+
+
+class TestHeadBindingOptOutCannotSpread:
+    """The gate's HEAD binding may be waived in exactly one place, by exact name."""
+
+    def test_the_opt_out_is_a_single_exact_sentinel(self):
+        script = (REPO_ROOT / ".github" / "scripts" / "verify-tag.sh").read_text()
+        assert HEAD_BINDING_OPT_OUT in script, (
+            "verify-tag.sh does not recognise the named opt-out; the waiver would be inert"
+        )
+        assert "VERIFY_TAG_EXPECT_COMMIT" not in script, (
+            "VERIFY_TAG_EXPECT_COMMIT is back. A caller-supplied sha lets the gate "
+            "compare a value to itself, which no mutation test can detect. Use the "
+            "named sentinel instead."
+        )
+
+    def test_exactly_one_workflow_waives_the_binding(self):
+        waivers = sorted(
+            p.name
+            for p in (REPO_ROOT / ".github" / "workflows").glob("*.yml")
+            if HEAD_BINDING_OPT_OUT in p.read_text()
+        )
+        assert waivers == ["release-notes.yml"], (
+            f"the HEAD binding is waived in {waivers}. Exactly one workflow may waive "
+            "it — the workflow_run listener that checks out the default branch by "
+            "design. Anywhere else, the waiver is hiding a real mismatch."
+        )
+
+    def test_the_waiver_is_earned_not_asserted(self):
+        """The one caller must independently prove tag == the published sha."""
+        wf = (REPO_ROOT / ".github" / "workflows" / "release-notes.yml").read_text()
+        # "HEAD_SHA" appears in the env: blocks regardless, so this pair proves
+        # almost nothing on its own. Pin the comparison too.
+        assert re.search(r'\[\s*"\$ACTUAL"\s*!=\s*"\$HEAD_SHA"\s*\]', wf), (
+            "the tag-to-commit comparison is gone from release-notes.yml. Without it "
+            "the waiver in verify-tag.sh has no counterpart proving the binding."
+        )
+        assert "rev-list -n 1" in wf and "HEAD_SHA" in wf, (
+            "release-notes.yml waives the HEAD binding but no longer proves the tag "
+            "resolves to the sha the publishers were verified for. The waiver is only "
+            "acceptable because that proof exists a few steps earlier."
+        )
+
+
+class TestManualFallbackCannotRatifyABrokenRelease:
+    """The human escape hatch must not be able to bless a release the robots refused.
+
+    tag-release.sh prints a fallback `gh release create` for the case where the
+    automation never fires. That command bypasses release-fanin.sh entirely, so it
+    can publish a Release for a tag whose PyPI job failed. Worse, release-notes.yml
+    then sees the Release already exists, skips, and reports GREEN forever — the
+    manual path poisons the automated one irreversibly.
+
+    A draft cannot be mistaken for a shipped release, and publishing it is a second,
+    deliberate act. The timer also has to outlast the approval pause: the release job
+    sits behind a protected environment, so "no Release yet" is the NORMAL state for
+    as long as approval takes.
+    """
+
+    def test_the_fallback_creates_a_draft(self):
+        script = (REPO_ROOT / "scripts" / "tag-release.sh").read_text()
+        # Only lines that PRINT A COMMAND for the operator to copy. Prose that
+        # merely names the command ("you do not run gh release create") and the
+        # comments explaining this rule both contain the string and neither is a
+        # command — matching them is how a guard ends up asserting nothing.
+        creates = [
+            ln for ln in script.splitlines() if ln.lstrip().startswith('echo "  gh release create')
+        ]
+        assert creates, "no fallback `gh release create` line found in tag-release.sh"
+        for line in creates:
+            assert "--draft" in line, (
+                "the printed fallback creates a PUBLISHED Release. It bypasses the "
+                "fan-in, so it can ratify a release a publisher failed, and afterwards "
+                "release-notes.yml sees it exists and skips green forever.\n"
+                f"  {line.strip()}"
+            )
+            assert "--verify-tag" in line, (
+                "the fallback must keep --verify-tag; without it gh mints an unsigned "
+                "tag and tombstones the version name, which is how v0.3.8 was lost."
+            )
+
+    def test_the_fallback_timer_outlasts_the_approval_pause(self):
+        # Comment-stripped: the comment that RECORDS this fix necessarily quotes
+        # the old wording, and a whole-file grep would fail on its own explanation.
+        script = "\n".join(
+            ln
+            for ln in (REPO_ROOT / "scripts" / "tag-release.sh").read_text().splitlines()
+            if not ln.lstrip().startswith("#")
+        )
+        # "~15 min" alone is a tombstone: it pins one literal this diff already
+        # deleted, so re-adding the same bad advice in any other wording passes.
+        # The invariant is "no timer shorter than the approval pause", not "not
+        # this exact string" — verified: `about 20 minutes` defeated the old form.
+        timer = re.search(r"(\d+)\s*(?:-|to\s+)?\s*\d*\s*(?:min|minute)", script, re.I)
+        assert timer is None or int(timer.group(1)) >= 360, (
+            f"the fallback advertises a {timer.group(0)!r} timer. The release job "
+            "waits on a protected environment, so no Release after a few minutes is "
+            "the NORMAL state for as long as approval takes. Any short timer sends "
+            "the maintainer to the manual fallback on every correct release."
+        )
+        assert "~15 min" not in script, (
+            "the fallback still advertises a ~15 minute timer. The release job waits "
+            "on a protected environment, so no Release after 15 minutes is the normal "
+            "state, not evidence the automation failed — and acting on it is what "
+            "triggers the race this class guards."
         )

@@ -379,23 +379,49 @@ describe("body integrity — install.sh shape and bounded size (H-08)", () => {
     //
     //     Script is 25980 chars; slack after the bump is 420: still tight,
     //     still not a ratchet.
+    //   - Bumped 26.4 KB -> 26.8 KB for worthless-mb6l. Baseline on main was
+    //     26385 of 26400 — 15 chars of headroom, so this fix could not fit at
+    //     any size. The fix is 218 chars: the idempotency fast-path must require
+    //     the entry point to EXIST, not merely for a version string to match.
+    //
+    //     Why it cannot be dropped or shrunk further: uv writes its tool receipt
+    //     before the environment is complete, so an interrupted install leaves
+    //     `uv tool list` reporting the right version for a tool that does not
+    //     run. The fast-path then skips the --force reinstall that would repair
+    //     it — and does so on EVERY subsequent run, so re-running the installer,
+    //     which is what the error message implies, can never fix it. The user is
+    //     stuck until they know to `uv tool uninstall worthless`.
+    //
+    //     Already minimised: the condition is inlined rather than using a
+    //     variable, and the rationale lives in the test docstring
+    //     (test_install_logic.py::test_a_half_finished_install_repairs_itself_on_the_next_run)
+    //     rather than in the script, which is the pattern PR #573 and #582 set.
+    //     What remains is the condition itself plus two comment lines.
+    //
+    //     Script is 26603 chars; slack after the bump is 197. Tighter than the
+    //     last bump left it. The next one needs its own argument, and at this
+    //     rate the honest next step is splitting the served script rather than
+    //     raising this again.
     //     The next bump needs its own argument.
     const res = await SELF.fetch("https://worthless.sh/", {
       headers: { "user-agent": CURL_UA },
     });
     expect(res.status).toBe(200);
     const body = await res.text();
-    //   - WOR-597 (shadow warning): 26.4 KB -> 31 KB. install.sh now compares
-    //     the binary it installed against what the caller's PATH resolves, and
-    //     when they differ names both files instead of announcing success for
-    //     one it did not install. The bytes are three helpers (canonical_path
-    //     walks symlinks because `readlink -f` is GNU-only; sanitize_for_display
-    //     strips control bytes so a crafted dir name cannot erase the warning;
-    //     shadowing_worthless_path holds the guards) plus the warning block
-    //     itself. Comments were cut by ~1.6 KB before this bump was proposed —
-    //     the reasoning lives in tests/test_install_shadow_warning.py and the
-    //     PR, not in a file users download on every install. Slack is ~55 bytes,
-    //     as tight as the 23 bytes this ceiling left before.
+    //   - WOR-597 (shadow warning) merged with worthless-mb6l: 26.8 KB -> 31 KB.
+    //     install.sh now compares the binary it installed against what the
+    //     caller's PATH resolves, and names both when they differ instead of
+    //     announcing success for one it did not install. Bytes are three
+    //     helpers -- canonical_path (walks symlinks; `readlink -f` is GNU-only
+    //     and `realpath` absent on older macOS), sanitize_for_display (strips
+    //     control bytes, so a crafted dir name cannot erase the warning that
+    //     names it), shadowing_worthless_path (the guards) -- plus the warning.
+    //     Both changes kept; 389 chars of duplication removed to fit rather
+    //     than bump twice: worthless_on_original_path folded into
+    //     command_in_original_path, and the repeated sanitize calls hoisted.
+    //     Slack ~50 bytes. NOTE: the worthless-mb6l line above miscounts --
+    //     measured slack at that commit was 29, not 197. The slack IS the
+    //     detection threshold for a surgical append, so do not let it rot.
     expect(body.length).toBeLessThan(31_000);
   });
 

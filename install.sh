@@ -412,7 +412,12 @@ install_or_upgrade_worthless() {
     # user sets WORTHLESS_VERSION.
     installed_ver="$(uv tool list 2>/dev/null \
         | awk '/^worthless / {sub("^v", "", $2); print $2; exit}')"
-    if [ -n "$installed_ver" ] && [ "$installed_ver" = "$effective_version" ]; then
+    # worthless-mb6l: RUN it, do not just stat it. uv lands the receipt and the
+    # shim together and finalises the package after, so an interrupted install
+    # leaves an executable shim that cannot import. `-x` passes; the tool is
+    # broken; the fast-path would skip the --force repair forever.
+    if [ -n "$installed_ver" ] && [ "$installed_ver" = "$effective_version" ] \
+       && "$(uv tool dir --bin 2>/dev/null)/worthless" --version >/dev/null 2>&1; then
         ok "  worthless ${installed_ver} already installed"
         return 0
     fi
@@ -456,9 +461,9 @@ smoke_test() {
     # (unscrubbed), killing a good install. Also beats a shadowing worthless on
     # PATH. worthless-dc26.
     worthless_bin="$(uv tool dir --bin 2>/dev/null)/worthless"
-    # The shadow check needs this to come from `uv tool dir --bin`: the
-    # fallback is itself a PATH lookup, and comparing PATH-to-PATH would
-    # answer "no shadow" for every shadowed user. Fail closed.
+    # The shadow check needs this from `uv tool dir --bin`: the fallback is
+    # itself a PATH lookup, so PATH-to-PATH would answer "no shadow" for every
+    # shadowed user. Fail closed.
     worthless_bin_authoritative=1
     if [ ! -x "$worthless_bin" ]; then
         worthless_bin_authoritative=0
@@ -510,8 +515,8 @@ path_is_persistent() {
 # POSIX and `realpath` is absent on older macOS. Never executes anything.
 canonical_path() {
     _cp_path="$1"
-    # One hop at a time: `readlink -f` is GNU-only. Cap stops a cycle hanging
-    # the installer; failure means "cannot tell" and the caller stays silent.
+    # One hop: `readlink -f` is GNU-only. Cap stops a cycle hanging the
+    # installer; failure means "cannot tell" and the caller stays silent.
     _cp_hops=0
     while [ -L "$_cp_path" ] && [ "$_cp_hops" -lt 40 ]; do
         _cp_target="$(readlink -- "$_cp_path" 2>/dev/null)" || return 1
@@ -530,20 +535,10 @@ canonical_path() {
     printf '%s/%s' "$_cp_real" "$_cp_base"
 }
 
-# A dir named with ESC[2K ESC[1A would scroll up and erase the warning that
-# names it. printf '%s' stops format injection; raw control bytes still pass.
+# A dir named with ESC[2K ESC[1A would scroll up and erase the warning naming
+# it. printf '%s' stops format injection; raw control bytes still pass.
 sanitize_for_display() {
     printf '%s' "$1" | tr -d '\001-\037\177' | cut -c1-200
-}
-
-# What the caller's shell runs for `worthless`, or empty. `|| true` is
-# load-bearing: under `set -eu` a failed lookup would abort the installer.
-worthless_on_original_path() {
-    _wop_cur="${PATH:-}"
-    PATH="$ORIGINAL_PATH"
-    _wop_found="$(command -v worthless 2>/dev/null || true)"
-    PATH="$_wop_cur"
-    printf '%s' "$_wop_found"
 }
 
 # Non-empty only when the user's PATH resolves a DIFFERENT file than the one
@@ -551,7 +546,7 @@ worthless_on_original_path() {
 shadowing_worthless_path() {
     [ "${worthless_bin_authoritative:-0}" = "1" ] || return 0
     [ -n "${worthless_bin:-}" ] || return 0
-    _sw_user="$(worthless_on_original_path)"
+    _sw_user="$(command_in_original_path worthless || true)"
     # Empty = not on PATH at all: the "open a new terminal" case below.
     [ -n "$_sw_user" ] || return 0
     _sw_user_real="$(canonical_path "$_sw_user")" || return 0
@@ -562,22 +557,22 @@ shadowing_worthless_path() {
     printf '%s' "$_sw_user"
 }
 
+# Prints the caller's resolution of $1, or returns 1. One helper so the PATH
+# swap cannot diverge; status-only callers redirect stdout.
 command_in_original_path() {
     name="$1"
     current_path="${PATH:-}"
     PATH="$ORIGINAL_PATH"
-    if command -v "$name" >/dev/null 2>&1; then
-        PATH="$current_path"
-        return 0
-    fi
+    _cip_found="$(command -v "$name" 2>/dev/null || true)"
     PATH="$current_path"
-    return 1
+    [ -n "$_cip_found" ] || return 1
+    printf '%s' "$_cip_found"
 }
 
 # mode: "full" (default) prints both current-shell + make-permanent hints;
 # "activate" prints only the current-shell activation command.
 # print_activation_hint, parameterised: the install may live wherever
-# UV_TOOL_BIN_DIR/XDG_BIN_HOME points, not just $HOME/.local/bin.
+# UV_TOOL_BIN_DIR/XDG_BIN_HOME points.
 print_shadow_path_hint() {
     _psh_dir="$(sanitize_for_display "$1")"
     case "$(basename -- "${SHELL:-}")" in
@@ -645,22 +640,23 @@ main() {
     printf "\n"
     shadow_bin="$(shadowing_worthless_path)"
     if [ -n "$shadow_bin" ]; then
-        # Not an error: the install succeeded, smoke_test ran the real binary
-        # by absolute path. The file in the way is named, never touched. On
-        # stdout because `| sh 2>/dev/null` would swallow stderr.
-        ok "Done! Worthless is installed at $(sanitize_for_display "$worthless_bin")."
+        # Not an error: the install succeeded. The file in the way is named,
+        # never touched. stdout, because `| sh 2>/dev/null` eats stderr.
+        _wb="$(sanitize_for_display "$worthless_bin")"
+        _sb="$(sanitize_for_display "$shadow_bin")"
+        ok "Done! Worthless is installed at ${_wb}."
         printf "\n"
         printf "  Heads up: typing 'worthless' runs a different, older copy that comes\n"
         printf "  first in your PATH:\n"
-        printf "    %s\n" "$(sanitize_for_display "$shadow_bin")"
+        printf "    %s\n" "$_sb"
         printf "\n"
-        printf "  Run the new one now:    %s lock\n" "$(sanitize_for_display "$worthless_bin")"
+        printf "  Run the new one now:    %s lock\n" "$_wb"
         print_shadow_path_hint "$(dirname -- "$worthless_bin")"
-        printf "  Identify the old one:   ls -l %s\n" "$(sanitize_for_display "$shadow_bin")"
+        printf "  Identify the old one:   ls -l %s\n" "$_sb"
         printf "\n"
         printf "  This installer left that file alone. Remove it with whatever installed\n"
         printf "  it (brew uninstall / pipx uninstall / rm) once you know which.\n"
-    elif command_in_original_path worthless; then
+    elif command_in_original_path worthless >/dev/null; then
         ok "Done! 'worthless' is on your PATH."
     else
         ok "Done! 'worthless' is installed."
@@ -678,8 +674,8 @@ main() {
     if [ -n "${shadow_bin:-}" ]; then
         # Bare `worthless` here would resolve to the shadow we just warned about.
         printf "  ${BOLD}Try it:${RESET}        cd your-project && %s lock\n" \
-            "$(sanitize_for_display "$worthless_bin")"
-    elif command_in_original_path worthless; then
+            "$_wb"
+    elif command_in_original_path worthless >/dev/null; then
         printf "  ${BOLD}Try it:${RESET}        cd your-project && worthless lock\n"
     else
         printf "  ${BOLD}Try after PATH:${RESET} cd your-project && worthless lock\n"
