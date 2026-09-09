@@ -27,6 +27,11 @@ import typer
 from worthless.cli._repo_factory import open_repo
 from worthless.cli.bootstrap import WorthlessHome, acquire_lock, get_home
 from worthless.cli.code_scanner import scan_for_hardcoded_provider_urls
+from worthless.cli.commands.service import _backend
+from worthless.cli.commands.service._common import (
+    current_platform_backend_name,
+    preflight_service_install,
+)
 from worthless.cli.commands.scan import (
     SCAN_TIME_BUDGET_S,
     _format_code_findings_human,
@@ -2858,6 +2863,11 @@ def _lock_keys(
             openclaw_failed=bool(result.openclaw_exit),
             oauth_skipped=result.oauth_skipped,
         )
+        # WOR-853: same guard as the "Next:" hint above — only offer when the
+        # lock actually succeeded. A partial failure has no business installing
+        # anything.
+        if result.fresh_count and not result.openclaw_exit:
+            _offer_service_after_lock(console, home=home, port=resolve_port(None))
 
     # Trust-fix (2026-05-08 verification gauntlet): when OpenClaw was
     # detected on this host AND the integration stage failed, the user is
@@ -2947,6 +2957,79 @@ def _enroll_single(
 
     console = get_console()
     console.print_success(f"Enrolled {alias} ({provider}).")
+
+
+def install_service_for_offer(home: WorthlessHome, *, port: int) -> None:
+    """Install the background service. Separate so the offer can stub it in tests."""
+    preflight_service_install(home)
+    _backend().install(home, port=port)
+
+
+def _offer_service_after_lock(console, *, home: WorthlessHome, port: int) -> bool:
+    """Offer to keep the proxy alive after this terminal closes (WOR-853).
+
+    ``lock`` is the first moment a Fernet key exists, so it is the earliest
+    point the service CAN be installed — ``install.sh`` cannot, because
+    ``preflight_service_install`` refuses without a key.
+
+    Returns True only if a service was actually installed.
+    """
+    if console.json_mode:
+        return False
+
+    if console.assume_yes:
+        accepted = True
+    elif not _scan_prompt_is_tty():
+        # Nobody is watching: piped, CI, or a captured stdin. Ask nothing.
+        # Reuses the existing prompt gate, which also suppresses under CI env
+        # vars where a pseudo-TTY would otherwise look interactive. Checking up
+        # front beats catching the failure — a captured stdin raises OSError,
+        # not EOFError, and a question nobody can answer must never be asked.
+        console.print_hint(
+            "Want it to keep running after you close this terminal? `worthless service install`"
+        )
+        return False
+    else:
+        try:
+            accepted = typer.confirm(
+                "\nKeep the proxy running after this terminal closes? "
+                f"(installs a user service on port {port})",
+                default=False,
+            )
+        except (typer.Abort, EOFError, OSError):
+            # Belt and braces for a stdin that claims to be a tty and then
+            # fails anyway. Declining is the only safe answer — the keys are
+            # already protected, and hanging a script is the worse outcome.
+            console.print_hint(
+                "Not a terminal — skipped. Run `worthless service install` when you want it."
+            )
+            return False
+
+    if not accepted:
+        console.print_hint(
+            "Want it to keep running after you close this terminal? `worthless service install`"
+        )
+        return False
+
+    try:
+        install_service_for_offer(home, port=port)
+    except WorthlessError as exc:
+        # The keys are already protected by the time we ask. A service that
+        # will not install is worse than no service, but it is NOT a reason to
+        # report that lock failed.
+        console.print_warning(f"Could not install the service: {exc}")
+        console.print_hint("Your keys are still protected. Try `worthless service install`.")
+        return False
+
+    # Deliberately NOT _print_service_banner: that one claims the service
+    # "survives reboot", which WOR-725 has never verified. Say only what is
+    # proven — it outlives this terminal.
+    console.print_success(
+        f"Worthless proxy now running as a {current_platform_backend_name()} "
+        f"service on 127.0.0.1:{port}."
+    )
+    console.print_hint("Status: `worthless service status` · Stop: `worthless service stop`")
+    return True
 
 
 def register_lock_commands(app: typer.Typer) -> None:
