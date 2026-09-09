@@ -55,7 +55,7 @@ def _main(
     """Worthless — make leaked API keys worthless."""
     install_redaction_filter()
     set_debug(debug)
-    console = WorthlessConsole(quiet=quiet, json_mode=json_output)
+    console = WorthlessConsole(quiet=quiet, json_mode=json_output, assume_yes=yes)
     set_console(console)
 
     # Show the AS-IS / no-warranty notice once per install (WOR-488).
