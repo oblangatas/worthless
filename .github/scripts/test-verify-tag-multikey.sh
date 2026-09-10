@@ -426,7 +426,11 @@ if [ -z "${VERIFY_TAG_MUTATION_CHILD:-}" ]; then
   # Compare TAG_TARGET to itself: the binding can never fire. TAG_TARGET remains.
   _mutate "bind tag to checked-out rev" '/TAG_TARGET.*!=.*HEAD_COMMIT/s/HEAD_COMMIT/TAG_TARGET/g'
   # Same for the release-name binding. EMBEDDED_TAG_NAME remains.
-  _mutate "bind tag to release name"    '/EMBEDDED_TAG_NAME.*!=.*GITHUB_REF_NAME/s/GITHUB_REF_NAME/EMBEDDED_TAG_NAME/g'
+  # Pattern follows the variable rename to TAG_REF. When it did not, this gate
+  # reported STALE rather than OK — refusing to certify a defense it could no
+  # longer mutate. That is the gate working; the rename had silently removed this
+  # defense's only behavioural test.
+  _mutate "bind tag to release name"    '/EMBEDDED_TAG_NAME.*!=.*TAG_REF/s/TAG_REF/EMBEDDED_TAG_NAME/g'
 
   echo ""
   if [ "$MUT_FAIL" -ne 0 ]; then
