@@ -79,6 +79,41 @@ ignore:
     reason: "Upstream fix only in Python 3.15.0 (pre-release). Re-measured 2026-08-02 across 3.13/3.14 slim bookworm+trixie: all still affected. Tracking WOR-691."
     expiry: "2027-01-31"  # extended on a fresh measurement, not blind. Re-measure before extending again.
 
+  # ── CPython, base-image only (worthless-kzfq) ───────────────────────
+  # Both arrived with the grype DB refresh of 2026-09-10 and turned every open
+  # PR red without a line of code changing — the same failure mode as the sharp
+  # advisory this branch also fixes. Unlike that one, here the fix really is
+  # unreachable, and this is the measurement rather than the assumption.
+  #
+  # MEASURED 2026-09-10 (grype 0.114.0), bases pulled fresh from the registry:
+  #
+  #   python:3.13-slim-trixie  3.13.15  BOTH present   <- the base this image uses
+  #   python:3.14-slim-trixie  3.14.7   BOTH present   <- a full minor ahead
+  #
+  # Grype's only fixed version for both is 3.15.0rc2 — a RELEASE CANDIDATE.
+  # Shipping an RC interpreter to users is the worse trade, the same call the
+  # CVE-2026-15308 entry above already made and re-measured.
+  #
+  # NOT parked on the bulk 2027-01-31 date that 21 other entries share. That
+  # clustering is how dated waivers quietly become permanent; these two get
+  # their own date so they are re-argued on their own evidence.
+  #
+  # To close: when CPython backports to a stable 3.13.x or 3.14.x, bump the
+  # base and DELETE these entries rather than extending them.
+  - vulnerability: CVE-2026-17084
+    package:
+      name: python
+      type: binary
+    reason: "Upstream fix only in Python 3.15.0rc2 (pre-release). Measured 2026-09-10: python:3.13-slim-trixie 3.13.15 and python:3.14-slim-trixie 3.14.7 are both still affected, so there is nowhere stable to upgrade to. Base-image interpreter only. Tracking worthless-kzfq."
+    expiry: "2026-12-08"
+
+  - vulnerability: CVE-2026-15806
+    package:
+      name: python
+      type: binary
+    reason: "Upstream fix only in Python 3.15.0rc2 (pre-release). Measured 2026-09-10: python:3.13-slim-trixie 3.13.15 and python:3.14-slim-trixie 3.14.7 are both still affected, so there is nowhere stable to upgrade to. Base-image interpreter only. Tracking worthless-kzfq."
+    expiry: "2026-12-08"
+
   # ── CPython tarfile, base-image only (WOR-852 Track B) ──────────────
   # All three are tarfile bugs in the digest-pinned python:3.13-slim-bookworm
   # base. For CVE-2026-11940 and CVE-2026-11972, grype's only fixed version is
