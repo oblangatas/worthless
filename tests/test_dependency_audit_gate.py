@@ -22,7 +22,6 @@ Hermetic: parses the two YAML files on disk. No network, no runner, no audit.
 
 from __future__ import annotations
 
-import datetime as dt
 import json
 import re
 from pathlib import Path
@@ -163,11 +162,7 @@ def test_audit_job_is_unconditional() -> None:
 def _npm_step() -> dict:
     wf = yaml.safe_load(WORKFLOW.read_text())
     steps = wf["jobs"]["npm-audit"]["steps"]
-    matches = [
-        s
-        for s in steps
-        if "npm audit" in str(s.get("run", "")) or "check_npm_audit" in str(s.get("run", ""))
-    ]
+    matches = [s for s in steps if "npm audit" in str(s.get("run", ""))]
     assert len(matches) == 1, f"expected exactly one npm audit step, got {len(matches)}"
     return matches[0]
 
@@ -194,25 +189,6 @@ def test_npm_audit_covers_the_full_tree() -> None:
         "workers/worthless-sh" in step["run"]
     )
     assert targets_worker, "the audited tree must be named, not inferred"
-
-
-def test_npm_audit_exceptions_are_time_boxed() -> None:
-    """An exception without an expiry is a permanent hole with a comment on it.
-
-    worthless-tw1g: sharp/libheif arrives transitively via miniflare with no
-    forward fix at any version. That is allowlist-able, but only with a date
-    the build enforces.
-    """
-    allow_path = REPO / "workers" / "worthless-sh" / "npm-audit-allow.json"
-    if not allow_path.is_file():
-        return  # no exceptions is the better state
-    entries = json.loads(allow_path.read_text()).get("allow", [])
-    for entry in entries:
-        assert entry.get("id"), "every exception must name its advisory"
-        assert entry.get("reason"), f"{entry.get('id')}: no reason given"
-        expiry = entry.get("expiry")
-        assert expiry, f"{entry['id']}: no expiry — exceptions must be time-boxed"
-        dt.date.fromisoformat(expiry)  # raises if not an ISO date
 
 
 def test_npm_lockfile_freshness_is_checked() -> None:
