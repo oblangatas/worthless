@@ -200,7 +200,7 @@ jobs:
       # while a Medium blocked a branch — the strict gate guarding the
       # proposal, the loose one guarding the artifact. WOR-871.
       - name: Grype release-gate amd64 (fail on MEDIUM+)
-        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
         with:
           image: worthless-proxy:scan-${{ github.sha }}
           severity-cutoff: medium
@@ -229,7 +229,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
 
       - name: Grype release-gate arm64 (fail on MEDIUM+)
-        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
         with:
           # docker-archive: scheme tells Grype to read the tarball directly
           # (via its internal libs). No daemon load needed for foreign arch.
@@ -246,7 +246,7 @@ jobs:
       # CVEs shipped. This scan reads the ignore-free config so the release
       # record states what we chose to carry. Mirrors docker-security.yml.
       - name: Grype full scan amd64 (including unfixed — informational)
-        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
         env:
           GRYPE_CONFIG: .grype-informational.yaml
         with:
@@ -261,7 +261,7 @@ jobs:
       # amd64 informational scan cannot see it. Both arches ship; both arches
       # get a record of what they carry.
       - name: Grype full scan arm64 (including unfixed — informational)
-        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
         env:
           GRYPE_CONFIG: .grype-informational.yaml
         with:
