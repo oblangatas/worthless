@@ -56,6 +56,14 @@ jobs:
               [boot]
               systemd=true
     steps:
+      # Windows runners check files out with CRLF line endings by default
+      # (core.autocrlf=true). Bash inside WSL then reads every `\r` as part of
+      # the command: the first run failed with `$'\r': command not found`
+      # before a single check executed. Scoped to this workflow rather than a
+      # repo-wide .gitattributes, so no other checkout changes behaviour.
+      - name: Keep Unix line endings on checkout
+        run: git config --global core.autocrlf false
+
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
