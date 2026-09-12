@@ -74,7 +74,10 @@ check "the real key is gone from .env" "! grep -q '$KEY' $PROJ/.env"
 
 say "6. service install — the WSL-specific behaviour"
 UNIT="$HOME_DIR/.config/systemd/user/worthless-proxy.service"
-runuser -l "$USER_NAME" -c "$RUN worthless --yes service install" > /tmp/svc.log 2>&1
+# The command's OWN --yes. The global `worthless --yes service install` is
+# ignored by this command, which then prompts, finds no stdin, and cancels with
+# exit 130 — the first real run did exactly that on both legs.
+runuser -l "$USER_NAME" -c "$RUN worthless service install --yes" > /tmp/svc.log 2>&1
 SVC_RC=$?
 sed 's/^/  | /' /tmp/svc.log | tail -12
 fact "service install exit" "$SVC_RC"
@@ -82,13 +85,17 @@ fact "unit file left on disk" "$([ -f "$UNIT" ] && echo yes || echo no)"
 
 if [ "$SYSTEMD_EXPECTED" = "on" ]; then
   check "service install succeeds with systemd on" "[ $SVC_RC -eq 0 ]"
+  check "it did not stop at a prompt" "! grep -q 'Cancelled' /tmp/svc.log"
   sleep 3
   CODE=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/healthz" 2>/dev/null || echo 000)
   fact "healthz" "$CODE"
   check "proxy answers" "[ '$CODE' = '200' ]"
 else
   # The default WSL user's reality. Must not claim success.
-  check "service install does NOT succeed with systemd off" "[ $SVC_RC -ne 0 ]"
+  # Must fail for a REAL reason. Exit 130 is a cancelled prompt, which says
+  # nothing about systemd — counting it as a pass would be a false green.
+  check "service install is refused with systemd off" "[ $SVC_RC -ne 0 ] && [ $SVC_RC -ne 130 ]"
+  check "the refusal is not a cancelled prompt" "! grep -q 'Cancelled' /tmp/svc.log"
   # Reported, not asserted: before PR #599 lands, the old path writes the unit
   # BEFORE checking linger and leaves it orphaned; #599 reorders that. Asserting
   # it would make this job red for a known, already-fixed bug.
