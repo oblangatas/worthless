@@ -224,8 +224,10 @@ echo "  - Red for another reason? Read its warning, fix that, and re-run it. Do 
 echo "    create a draft."
 echo
 echo "Only if there is no such run at all did the automation genuinely not fire."
-echo "NOTHING WILL TELL YOU THIS HAPPENED — there is no watchdog yet, so a silent"
-echo "no-Release looks exactly like a release still waiting on approval."
+echo "The release watchdog tells you (WOR-922): it opens ONE issue, assigned to you,"
+echo "when this tag has no Release a day after tagging — or after 3 days if the run"
+echo "is still waiting for your approval. A draft does not silence it; only the"
+echo "automation's Create step succeeding does."
 echo
 echo "If you do need the fallback, create a DRAFT — never a published Release —"
 echo "so it cannot silently ratify a release the publishers refused:"
