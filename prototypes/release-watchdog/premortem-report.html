@@ -1,0 +1,110 @@
+<title>Premortem — release watchdog</title>
+<style>
+  body { background:#0a0e1a; color:#e6e8ef; font:15px/1.55 system-ui,-apple-system,sans-serif; }
+  main { max-width:980px; margin:0 auto; padding:30px 18px 60px; }
+  h1 { font-size:24px; margin:0; } h2 { font-size:17px; margin:30px 0 12px; color:#9fb3ff; }
+  .muted { color:#8b92a8; } .card { background:#121829; border:1px solid #232b45; border-radius:12px; padding:16px 18px; margin-bottom:12px; }
+  .banner { background:#1b2a1f; border-color:#2f6b3c; } .banner b { color:#8fe3a2; }
+  .syn h3 { margin:0 0 4px; font-size:14px; color:#ffcf6e; text-transform:uppercase; letter-spacing:.04em; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:12px; }
+  .fm { border-left:4px solid var(--c); } .fm h4 { margin:0 0 6px; font-size:15px; }
+  .badges span { display:inline-block; font-size:12px; border-radius:4px; padding:1px 7px; margin-right:6px; background:#1f2740; }
+  .k { font-size:12px; color:#8b92a8; text-transform:uppercase; margin-top:8px; }
+  .adopt { color:#8fe3a2; } .reject { color:#ff9c8f; } .ask { color:#ffcf6e; }
+  ol, ul { padding-left:20px; margin:6px 0; } svg text { fill:#c9cfe0; font-size:11px; }
+</style>
+<main>
+  <h1>Premortem: release watchdog (WOR-922)</h1>
+  <p class="muted">Frame: it is 3 months (~6 releases) from now, and the watchdog failed. 8 investigators ran in parallel, one per failure reason, with read-only access to the repo and the GitHub API. 2026-09-12.</p>
+
+  <div class="card banner"><b>Committed action:</b> pending — your pick below.</div>
+
+  <h2>Synthesis</h2>
+  <div class="card syn"><h3>Most likely failure</h3>The tests pass against a fake GitHub that behaves differently from the real one (L4 I4). Real <code>--paginate</code> output arrives one page at a time, and the repo has 22,461 runs. Fan-in writes its verdict to a file, not stdout, and exits 1 on a blocked publisher. A naive watchdog then either crashes on every tick or misses the run on page 2.</div>
+  <div class="card syn"><h3>Most dangerous failure</h3>The issue gets filed and nobody reads it (L3 I5). There is real evidence already: alarm issues <b>#571</b> (open 17 days, only bot comments) and <b>#603</b> (open 5 days, 0 comments) were never acted on. A perfect watchdog that writes into a channel nobody reads is still silence.</div>
+  <div class="card syn"><h3>Hidden assumption</h3>That a GitHub issue reaches you better than the emails you already ignore. The data says it doesn't, yet. The design is sound; the delivery channel is unproven.</div>
+  <div class="card syn"><h3>Revised plan (what changes in the PR)</h3><ol>
+    <li class="adopt"><b>Contract test:</b> the run-name format, the <code>create-release</code> job and the "Create the GitHub Release" step are pinned between release-notes.yml and the script, and enrolled in GUARD_MUTATIONS. <span class="muted">(drift)</span></li>
+    <li class="adopt"><b>Realistic fake GitHub:</b> it returns multiple pages, with the matching run on page 2. Plus a live read-only test of the query shape, like fan-in's existing one. <span class="muted">(api-shape)</span></li>
+    <li class="adopt"><b>Fan-in verdict:</b> read from a temp output file with <code>|| true</code>. A blocked publisher files an issue; only a missing verdict counts as a crash. Tested both ways. <span class="muted">(api-shape, noise)</span></li>
+    <li class="adopt"><b>Stale approval named:</b> if the pending approval is for an old commit (after a re-tag), the issue says "reject the old run". <span class="muted">(approval-detect)</span></li>
+    <li class="adopt"><b>Honest issue text:</b> "never ran (or ran before this watchdog existed)" and "created it by hand? close this". <span class="muted">(first-release, drift)</span></li>
+  </ol></div>
+  <div class="card syn"><h3>Rejected, with reasons</h3><ul>
+    <li class="reject"><b>Skip tags whose tree lacks run-name:</b> wrong signal. release-notes.yml runs from main, not from the tag's files.</li>
+    <li class="reject"><b>"Re-tag keeps the old date":</b> false. Re-signing creates a new tag object with a new date. v0.3.12's date is its third signing.</li>
+    <li class="reject"><b>"Pending run skipped forever":</b> false. The rule checks "waiting" before "in flight", so it alarms after 72h.</li>
+    <li class="reject"><b>Exclude rc tags:</b> release-notes.yml deliberately creates prereleases for rc tags, so they are real releases.</li>
+    <li class="reject"><b>Tag-push self-health trigger:</b> L2, and it adds a second mode. Measured cron gaps are at most 34h, so a 6h cron still runs at least daily. Documented as a known limit.</li>
+    <li class="reject"><b>Separate test file:</b> you asked for guards enrolled in GUARD_MUTATIONS, whose harness only copies test_deploy_static.py. Instead, append at the end to keep rebases small.</li>
+  </ul></div>
+  <div class="card syn"><h3>Pre-launch checklist</h3><ol>
+    <li>Before merge: triage <b>#571</b> and <b>#603</b> (you) — don't add alarms to a channel full of ignored ones.</li>
+    <li>Fake GitHub paginates, and a test proves a match on page 2 is found.</li>
+    <li>Deleting the watchdog, the run-name, or the step name each turns a test red (GUARD_MUTATIONS).</li>
+    <li>After merge: run the workflow manually once and check the log says "ignored" for v0.3.10–12.</li>
+    <li>First real tag (v0.3.13): confirm the release-notes run title reads <code>Create GitHub Release v0.3.13@&lt;sha&gt;</code>.</li>
+  </ol></div>
+  <div class="card syn"><h3>Gap check</h3>Not explored: what <b>you</b> do when an issue is correct but inconvenient, such as a known-bad release you chose not to publish. There is no documented "I meant it" path besides closing the issue. That works until the tag moves.</div>
+
+  <h2>Likelihood × impact</h2>
+  <div class="card"><svg viewBox="0 0 520 300" width="100%" role="img" aria-label="Failure modes plotted by likelihood and impact">
+    <rect x="300" y="10" width="210" height="130" fill="#3a1f24" opacity=".5"/>
+    <line x1="60" y1="270" x2="510" y2="270" stroke="#3a4260"/><line x1="60" y1="10" x2="60" y2="270" stroke="#3a4260"/>
+    <text x="250" y="292">Likelihood →</text><text x="4" y="140" transform="rotate(-90 14 140)">Impact →</text>
+    <text x="450" y="28">priority</text>
+    <!-- x = 60 + (L-1)*112 ; y = 270 - (I-1)*62 -->
+    <circle cx="396" cy="84" r="7" fill="#ff7a6b"/><text x="406" y="80">api-shape 4/4</text>
+    <circle cx="284" cy="22" r="7" fill="#ff5c8a"/><text x="294" y="26">issue-unseen 3/5</text>
+    <circle cx="172" cy="22" r="7" fill="#c77dff"/><text x="120" y="44">cron-dies 2/5</text>
+    <circle cx="284" cy="84" r="7" fill="#ffb347"/><text x="200" y="100">drift 3/4</text>
+    <circle cx="396" cy="146" r="7" fill="#4ecdc4"/><text x="406" y="150">first-release 4/3</text>
+    <circle cx="276" cy="146" r="6" fill="#7ea2ff"/><circle cx="292" cy="150" r="6" fill="#95e06c"/><circle cx="284" cy="160" r="6" fill="#f7d794"/>
+    <text x="170" y="182">approval · noise · scope-drag 3/3</text>
+  </svg></div>
+
+  <h2>8 investigators, 8 findings</h2>
+  <div class="grid">
+    <div class="card fm" style="--c:#ff7a6b"><h4>Fake GitHub ≠ real GitHub</h4><div class="badges"><span>L4</span><span>I4</span></div>
+      <div class="k">Story</div>The fake returns one clean page; the real API returns many. Fan-in's verdict lands in a file and it exits 1 when a publisher is blocked, so the watchdog crashes every tick or misses runs.
+      <div class="k">Assumption</div>The fake matches paging, output channel and exit codes.
+      <div class="k">Warning sign</div>A scheduled-failure issue for the watchdog within 6h of merge.
+      <div class="k">Mitigation</div>Multi-page fake with the match on page 2, verdict read from a temp file, a live query-shape test. <b class="adopt">Adopted.</b></div>
+    <div class="card fm" style="--c:#ff5c8a"><h4>Issue nobody reads</h4><div class="badges"><span>L3</span><span>I5</span></div>
+      <div class="k">Story</div>The issue gets filed, sits unread, and the tag ages out of the window. Already happening: #571 and #603.
+      <div class="k">Assumption</div>An assigned issue beats ignored email.
+      <div class="k">Warning sign</div>A watchdog issue open 72h with no comment from you.
+      <div class="k">Mitigation</div>Show open alarm issues in the release flow you actually watch. <b class="ask">Your call.</b></div>
+    <div class="card fm" style="--c:#ffb347"><h4>Names drift between files</h4><div class="badges"><span>L3</span><span>I4</span></div>
+      <div class="k">Story</div>A tidy-up renames the step or the run-name, CI stays green, and every release false-alarms until the label becomes noise.
+      <div class="k">Assumption</div>Three strings never change, with nothing enforcing it.
+      <div class="k">Warning sign</div>An issue for a tag whose Release exists.
+      <div class="k">Mitigation</div>A contract test plus a GUARD_MUTATIONS entry. <b class="adopt">Adopted.</b></div>
+    <div class="card fm" style="--c:#4ecdc4"><h4>First real release misfires</h4><div class="badges"><span>L4</span><span>I3</span></div>
+      <div class="k">Story</div>About 4 weeks pass with no tag, so nothing gets exercised. v0.3.13 is tagged before the merge and false-alarms on day 1, which costs the alarm its credibility.
+      <div class="k">Assumption</div>Every tag went through the new run-name.
+      <div class="k">Warning sign</div>The tag is older than the merge.
+      <div class="k">Mitigation</div>Proposed tag-tree check <b class="reject">rejected</b> (release-notes runs from main). Instead: honest issue text, plus a checklist item to confirm the title on v0.3.13.</div>
+    <div class="card fm" style="--c:#c77dff"><h4>Cron quietly stops</h4><div class="badges"><span>L2</span><span>I5</span></div>
+      <div class="k">Story</div>Schedules drift up to 34h (measured), get disabled after inactivity, or get turned off by hand. A watchdog that never runs never fails.
+      <div class="k">Assumption</div>"Not running" shows up as a failure.
+      <div class="k">Warning sign</div>No scheduled run in 36h.
+      <div class="k">Mitigation</div>Self-check on tag push. <b class="reject">Deferred</b>: documented as a known limit.</div>
+    <div class="card fm" style="--c:#7ea2ff"><h4>Approval detection wrong</h4><div class="badges"><span>L3</span><span>I3</span></div>
+      <div class="k">Story</div>A re-tag lands while the old commit's approval is waiting, so new runs queue up behind it.
+      <div class="k">Assumption</div>"In flight" is always temporary.
+      <div class="k">Warning sign</div>A pending run and a waiting run with different SHAs.
+      <div class="k">Mitigation</div>Name the stale approval in the issue. <b class="adopt">Adopted</b> (the rule already alarms after 72h).</div>
+    <div class="card fm" style="--c:#95e06c"><h4>Noise trains you to ignore it</h4><div class="badges"><span>L3</span><span>I3</span></div>
+      <div class="k">Story</div>rc and test tags, re-tags, and a crash issue alongside the real issue.
+      <div class="k">Assumption</div>Exit code equals verdict.
+      <div class="k">Warning sign</div>Issues closed within an hour with no fix.
+      <div class="k">Mitigation</div>Read the <code>ready=</code> line with <code>|| true</code> <b class="adopt">(adopted)</b>. Exclude rc <b class="reject">(rejected: rc tags are real releases)</b>.</div>
+    <div class="card fm" style="--c:#f7d794"><h4>Bigger scope drags review</h4><div class="badges"><span>L3</span><span>I3</span></div>
+      <div class="k">Story</div>A 2,759-line shared test file, 22 open PRs; rebases break GUARD_MUTATIONS find-strings; it ships half-done.
+      <div class="k">Assumption</div>Rebase and review cost is less than the release gap.
+      <div class="k">Warning sign</div>A second rebase touches GUARD_MUTATIONS.
+      <div class="k">Mitigation</div>Separate test file <b class="reject">(rejected: harness)</b>. Append-only edits, one PR, push early.</div>
+  </div>
+  <p class="muted">Release watchdog premortem · WOR-922 · generated 2026-09-12</p>
+</main>

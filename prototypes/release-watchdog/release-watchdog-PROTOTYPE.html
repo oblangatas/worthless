@@ -1,0 +1,169 @@
+<title>Release watchdog — PROTOTYPE</title>
+<style>
+  :root { --bg:#f7f7f5; --card:#fff; --ink:#1d1d1f; --muted:#6b6b70; --line:#e3e3e0; --accent:#2f5fd0; --bad:#b3261e; --ok:#1e7a3c; --warn:#8a5a00; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#141416; --card:#1d1d20; --ink:#ececef; --muted:#9a9aa2; --line:#2e2e33; --accent:#7ea2ff; --bad:#ff8a80; --ok:#7bd88f; --warn:#f0c060; } }
+  :root[data-theme="dark"] { --bg:#141416; --card:#1d1d20; --ink:#ececef; --muted:#9a9aa2; --line:#2e2e33; --accent:#7ea2ff; --bad:#ff8a80; --ok:#7bd88f; --warn:#f0c060; }
+  body { background:var(--bg); color:var(--ink); font:15px/1.5 system-ui,-apple-system,sans-serif; }
+  main { max-width:900px; margin:0 auto; padding:28px 18px 60px; }
+  h1 { font-size:22px; margin:0 0 4px; } h2 { font-size:16px; margin:26px 0 10px; }
+  .muted { color:var(--muted); } .tag { font-size:12px; border:1px solid var(--line); border-radius:4px; padding:1px 6px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:10px 18px; }
+  .field b { display:block; font-size:12px; color:var(--muted); font-weight:500; }
+  .verdict { font-size:18px; font-weight:600; margin-top:12px; padding-top:12px; border-top:1px solid var(--line); }
+  .alarm { color:var(--bad); } .quiet { color:var(--ok); } .skip { color:var(--warn); }
+  .changed { background:color-mix(in srgb, var(--accent) 16%, transparent); border-radius:4px; }
+  button { font:inherit; font-size:14px; border:1px solid var(--line); background:var(--card); color:var(--ink); border-radius:7px; padding:6px 10px; margin:0 6px 6px 0; cursor:pointer; }
+  button:hover { border-color:var(--accent); } button.next { border-color:var(--accent); color:var(--accent); font-weight:600; } button:disabled { opacity:.4; cursor:default; }
+  .tabs button[aria-selected="true"] { background:var(--accent); color:#fff; border-color:var(--accent); }
+  table { border-collapse:collapse; width:100%; font-size:14px; } td,th { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  .scroll { overflow-x:auto; } ol { padding-left:20px; } code { font-size:13px; }
+</style>
+<main>
+  <h1>Release watchdog <span class="tag">PROTOTYPE — throwaway</span></h1>
+  <p class="muted">Question: does the rule "tag has no Release → open one issue, saying why" give the right answer in every real situation, without alarming on a release that is simply waiting for your approval click? Push buttons, watch the verdict. The watchdog looks every 6 hours.</p>
+
+  <h2>What the watchdog sees right now</h2>
+  <div class="card" id="state"></div>
+
+  <h2>Do things (any order)</h2>
+  <div class="card" id="free"></div>
+
+  <h2>Guided scenarios</h2>
+  <div class="card"><div class="tabs" id="tabs"></div><div id="scenario"></div></div>
+
+  <h2>Real data: v0.3.10 – v0.3.12 (measured 2026-09-12, read-only)</h2>
+  <div class="card scroll" id="real"></div>
+</main>
+
+<script>
+// ===== PURE LOGIC (liftable) — no DOM below this line until the page shell =====
+const H = 3600e3;
+const RULE = { minAgeH: 24, maxAgeH: 14 * 24, approvalGraceH: 72 };
+
+// runs: [{ tag, sha, status: queued|in_progress|pending|waiting|completed, createStep: success|skipped|failure|null }]
+// fanin: ready | blocked | not-ready | crash   (what release-fanin.sh wrote on its ready= line)
+// issue: null | { state: open|closed, sha }
+function classify({ tag, sha, tagTime, now, runs, fanin, blockedLeg, issue }) {
+  const ageH = (now - tagTime) / H;
+  const mine = runs.filter((r) => r.tag === tag); // title "Create GitHub Release <tag>@<sha>", any sha
+  const out = (verdict, reason) => ({ verdict, reason, ageH, issueAction: issueAction(verdict, sha, issue) });
+
+  if (ageH > RULE.maxAgeH) return out('ignored', 'Older than 14 days — outside the watch window.');
+  if (mine.some((r) => r.createStep === 'success')) return out('quiet', 'Released: the "Create the GitHub Release" step succeeded.');
+  if (ageH < RULE.minAgeH) return out('skip', 'Younger than 24h — give the robots time.');
+  if (mine.some((r) => r.status === 'waiting')) {
+    return ageH < RULE.approvalGraceH
+      ? out('skip', 'Waiting for your approval click — normal, under 72h.')
+      : out('alarm', 'Waiting for your approval for 3+ days. Check the commit before clicking.');
+  }
+  if (mine.some((r) => r.status !== 'completed')) return out('skip', 'A release run is still going — look again next tick.');
+  if (fanin === 'crash') return out('crash', 'Fan-in wrote no verdict: the watchdog run itself goes red (the scheduled-failure alarm catches that).');
+  if (fanin === 'blocked') return out('alarm', `Publisher failed: ${blockedLeg || 'one of the four'}. Re-run it; the Release follows.`);
+  if (fanin === 'not-ready') return out('alarm', 'Publishers never finished or never started for this commit.');
+  return out('alarm', mine.length
+    ? 'All four publishers green, but the Release step never succeeded (rejected, failed, or skipped because a Release/draft already existed).'
+    : 'All four publishers green, but the release automation never even ran for this tag.');
+}
+
+function issueAction(verdict, sha, issue) {
+  if (verdict !== 'alarm') return 'none';
+  if (!issue) return 'open a new issue (assigned to you)';
+  if (issue.state === 'open') return 'nothing — issue already open';
+  return issue.sha === sha ? 'nothing — you closed it for this exact commit' : 'reopen it (the tag moved to a new commit)';
+}
+
+// ===== PAGE SHELL (throwaway) =====
+const T0 = Date.parse('2026-10-01T10:00:00Z');
+const fresh = () => ({ tag: 'v0.3.13', sha: 'aaaa1111', tagTime: T0, now: T0, runs: [], fanin: 'not-ready', blockedLeg: '', issue: null, log: [] });
+let S = fresh(), prev = null;
+
+const actions = {
+  wait6h: ['Watchdog tick (+6h)', (s) => ({ ...s, now: s.now + 6 * H })],
+  wait3d: ['Skip ahead 3 days', (s) => ({ ...s, now: s.now + 72 * H })],
+  green: ['All 4 publishers finish green', (s) => ({ ...s, fanin: 'ready' })],
+  dockerFail: ['Docker publisher fails (CVE)', (s) => ({ ...s, fanin: 'blocked', blockedLeg: 'publish-docker.yml' })],
+  fires: ['Release robot runs → waits for your click', (s) => ({ ...s, runs: [...s.runs, { tag: s.tag, sha: s.sha, status: 'waiting', createStep: null }] })],
+  approve: ['You click Approve → Release created', (s) => ({ ...s, runs: s.runs.map((r) => (r.status === 'waiting' ? { ...r, status: 'completed', createStep: 'success' } : r)) })],
+  reject: ['You click Reject', (s) => ({ ...s, runs: s.runs.map((r) => (r.status === 'waiting' ? { ...r, status: 'completed', createStep: null } : r)) })],
+  draftFirst: ['Someone makes a manual draft, then approves', (s) => ({ ...s, runs: s.runs.map((r) => (r.status === 'waiting' ? { ...r, status: 'completed', createStep: 'skipped' } : r)) })],
+  // A re-tag is a NEW tag object with its own date, so the 24h clock restarts (found by this prototype).
+  retag: ['Re-tag to a new commit', (s) => ({ ...s, sha: 'bbbb2222', tagTime: s.now, fanin: 'not-ready' })],
+  crash: ['GitHub API errors during the check', (s) => ({ ...s, fanin: 'crash' })],
+  closeIssue: ['You close the issue', (s) => ({ ...s, issue: s.issue ? { ...s.issue, state: 'closed' } : s.issue })],
+  reset: ['Reset', () => fresh()],
+};
+
+function dispatch(key) {
+  prev = S;
+  S = actions[key][1](S);
+  const v = classify(S);
+  // simulate the watchdog acting on its own verdict
+  if (v.verdict === 'alarm') {
+    if (!S.issue) S = { ...S, issue: { state: 'open', sha: S.sha } };
+    else if (S.issue.state === 'closed' && S.issue.sha !== S.sha) S = { ...S, issue: { state: 'open', sha: S.sha } };
+  }
+  S = { ...S, log: [...S.log, `${actions[key][0]} → ${v.verdict}: ${v.issueAction}`] };
+  render(v);
+}
+
+const fmtH = (h) => (h < 48 ? `${h.toFixed(0)}h` : `${(h / 24).toFixed(1)} days`);
+function field(label, val, key) {
+  const changed = prev && JSON.stringify(prev[key]) !== JSON.stringify(S[key]);
+  return `<div class="field"><b>${label}</b><span class="${changed ? 'changed' : ''}">${val}</span></div>`;
+}
+function render(v = classify(S)) {
+  const runs = S.runs.length ? S.runs.map((r) => `${r.status}${r.createStep ? ` / create step: ${r.createStep}` : ''}`).join('<br>') : 'none yet';
+  const faninText = { ready: 'all 4 green', blocked: `blocked: ${S.blockedLeg}`, 'not-ready': 'still running / not started', crash: 'crashed (no verdict)' }[S.fanin];
+  document.getElementById('state').innerHTML = `<div class="grid">
+    ${field('Tag', `${S.tag} @ ${S.sha}`, 'sha')}
+    ${field('Tag age', fmtH(v.ageH), 'now')}
+    ${field('Publishers (fan-in)', faninText, 'fanin')}
+    ${field('Release robot runs', runs, 'runs')}
+    ${field('Issue', S.issue ? `${S.issue.state} (for ${S.issue.sha})` : 'none', 'issue')}
+  </div>
+  <div class="verdict ${v.verdict === 'alarm' || v.verdict === 'crash' ? 'alarm' : v.verdict === 'quiet' ? 'quiet' : 'skip'}">
+    ${{ alarm: '🔔 Alarm', quiet: '✓ Quiet', skip: '… Not yet', ignored: '— Ignored', crash: '💥 Watchdog run fails' }[v.verdict]} — ${v.reason}</div>
+  <div class="muted">Issue action: ${v.issueAction}</div>
+  ${S.log.length ? `<details style="margin-top:8px"><summary class="muted">History (${S.log.length})</summary><ol>${S.log.map((l) => `<li>${l}</li>`).join('')}</ol></details>` : ''}`;
+  renderScenario();
+}
+
+document.getElementById('free').innerHTML = Object.entries(actions).map(([k, [label]]) => `<button data-a="${k}">${label}</button>`).join('');
+document.getElementById('free').onclick = (e) => e.target.dataset.a && dispatch(e.target.dataset.a);
+
+const SCENARIOS = [
+  ['Happy path', 'Publishers go green, the robot waits for your click, you approve the next morning. Watch: NO alarm while it waits.', ['green', 'fires', 'wait6h', 'wait6h', 'wait6h', 'approve', 'wait6h']],
+  ['Forgotten click', 'Same, but you never click. Watch: quiet for 3 days, then exactly one issue — and no second issue on later ticks.', ['green', 'fires', 'wait6h', 'wait6h', 'wait3d', 'wait6h']],
+  ['Docker blocked', 'A CVE blocks Docker while PyPI/npm shipped. Watch: alarm after 24h naming the failed publisher.', ['dockerFail', 'wait6h', 'wait6h', 'wait6h', 'wait6h', 'wait6h']],
+  ['Robot never ran', 'Publishers green but the release robot never fires (renamed workflow, broken trigger). Watch: alarm after 24h.', ['green', 'wait6h', 'wait6h', 'wait6h', 'wait6h', 'wait6h']],
+  ['Draft poisoning', 'A manual draft exists before approval, so the job goes green but the Create step is skipped. Watch: still an alarm.', ['green', 'fires', 'draftFirst', 'wait6h', 'wait6h', 'wait6h', 'wait6h']],
+  ['Close, then re-tag', 'Alarm fires, you close it. Watch: stays closed. Then you re-tag to a new commit: the same issue reopens (no duplicate).', ['green', 'wait6h', 'wait6h', 'wait6h', 'wait6h', 'wait6h', 'closeIssue', 'wait6h', 'retag', 'wait6h', 'wait6h', 'wait6h', 'wait6h', 'wait6h']],
+  ['API crash', 'GitHub errors mid-check. Watch: no fake "all fine" — the watchdog run itself fails.', ['green', 'wait6h', 'wait6h', 'wait6h', 'wait6h', 'crash', 'wait6h']],
+];
+let tab = 0, step = 0;
+document.getElementById('tabs').innerHTML = SCENARIOS.map(([n], i) => `<button data-t="${i}">${n}</button>`).join('');
+document.getElementById('tabs').onclick = (e) => { if (e.target.dataset.t) { tab = +e.target.dataset.t; step = 0; prev = null; S = fresh(); render(); } };
+function renderScenario() {
+  [...document.querySelectorAll('#tabs button')].forEach((b, i) => b.setAttribute('aria-selected', i === tab));
+  const [name, desc, steps] = SCENARIOS[tab];
+  document.getElementById('scenario').innerHTML = `<p><b>${name}.</b> ${desc}</p>` +
+    steps.map((k, i) => `<button data-s="${i}" class="${i === step ? 'next' : ''}" ${i !== step ? 'disabled' : ''}>${i + 1}. ${actions[k][0]}</button>`).join('');
+}
+document.getElementById('scenario').onclick = (e) => { if (e.target.dataset.s && +e.target.dataset.s === step) { const k = SCENARIOS[tab][2][step]; step++; dispatch(k); } };
+
+// Real snapshot: tag dates from git, fan-in run for real (ready=true all three), release-notes.yml runs = 0 (it merged 2026-09-07).
+const REAL = [['v0.3.10', 'a5784c4f', '2026-07-23T17:06:14+03:00'], ['v0.3.11', 'd5986e5e', '2026-07-29T00:28:48+03:00'], ['v0.3.12', '07308847', '2026-08-16T23:48:32+03:00']];
+const MEASURED = Date.parse('2026-09-12T12:00:00Z');
+document.getElementById('real').innerHTML = `<table><tr><th>Tag</th><th>Today (with 14-day window)</th><th>Replay: 25h after the tag</th><th>Today if there were NO 14-day window</th></tr>` +
+  REAL.map(([tag, sha, d]) => {
+    const base = { tag, sha, tagTime: Date.parse(d), runs: [], fanin: 'ready', issue: null };
+    const today = classify({ ...base, now: MEASURED });
+    const replay = classify({ ...base, now: Date.parse(d) + 25 * H });
+    const saved = RULE.maxAgeH; RULE.maxAgeH = Infinity; const nowin = classify({ ...base, now: MEASURED }); RULE.maxAgeH = saved;
+    const cell = (v) => `<b class="${v.verdict === 'alarm' ? 'alarm' : 'muted'}">${v.verdict}</b><br><span class="muted">${v.reason}</span>`;
+    return `<tr><td>${tag}</td><td>${cell(today)}</td><td>${cell(replay)}</td><td>${cell(nowin)}</td></tr>`;
+  }).join('') + `</table><p class="muted">Reading: replayed at release time, the rule correctly says "the automation never ran" — true, those Releases were made by hand before it existed. Without the 14-day window, deploying the watchdog today would open 3 wrong issues.</p>`;
+
+render();
+</script>
