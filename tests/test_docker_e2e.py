@@ -428,7 +428,7 @@ class TestBuild:
         directly by walking ``/proc/<pid>/status`` for the uvicorn +
         sidecar runtime processes and asserting their Uid is non-zero.
 
-        slim-bookworm has no ``ps``; we walk ``/proc`` from a busybox-
+        slim-trixie has no ``ps``; we walk ``/proc`` from a busybox-
         compatible shell snippet that prints ``<pid> <uid> <comm>``
         per process.
         """
@@ -1394,7 +1394,7 @@ class TestComposeSecurity:
     def test_compose_non_root(self, compose_stack: tuple[str, str]) -> None:
         """Same as TestBuild::test_runs_as_non_root but for the compose stack.
 
-        slim-bookworm has no ``ps``; we walk ``/proc`` and assert the
+        slim-trixie has no ``ps``; we walk ``/proc`` and assert the
         runtime processes (uvicorn + python sidecar) are non-root.
         """
         _project, cname = compose_stack

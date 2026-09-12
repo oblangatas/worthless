@@ -771,8 +771,17 @@ class TestDockerfile:
     """Validate Dockerfile security and structure."""
 
     def test_python_base_image(self, dockerfile_text: str):
-        """Must use the official Python slim image."""
+        """Must use the official Python slim image on a supported Debian.
+
+        worthless-tw1g: the old pattern matched `-slim-bookworm` and
+        `-slim-trixie` alike, so a silent revert to end-of-life Debian 12
+        passed. Bookworm carries 35 High/Critical findings with no fix
+        available, because there will be no more Debian 12 security updates.
+        """
         assert re.search(r"FROM python:3\.\d+-slim", dockerfile_text)
+        assert "bookworm" not in dockerfile_text, (
+            "Debian 12 is end-of-life — its CVEs have no fix. Use slim-trixie."
+        )
 
     def test_pinned_digest(self, dockerfile_text: str):
         """Base image must be pinned by SHA256 digest for reproducibility.
