@@ -6,8 +6,8 @@ because that sentence was not enforced, and the same bug shipped twice.
 ## Cut a release
 
 ```
-./scripts/bump-version.sh <version>                # on a branch: bump, commit, open a PR
-#   ... merge the PR to main ...
+./scripts/bump-version.sh <version>                # on a branch: updates the version everywhere, prints next steps
+#   ... commit, open a PR, merge it to main ...
 ./scripts/tag-release.sh <version> "<headline>"    # on main, on the maintainer's machine
 ```
 
