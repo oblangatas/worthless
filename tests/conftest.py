@@ -20,7 +20,8 @@ from cryptography.fernet import Fernet
 from hypothesis import HealthCheck, settings
 
 
-from worthless.cli import console as _cli_console  # used by _isolate_console_singleton
+from worthless.cli import console as _cli_console  # used by _isolate_cli_globals
+from worthless.cli import errors as _cli_errors  # used by _isolate_cli_globals
 from worthless.cli import default_command  # used by _isolate_default_command_proxy autouse fixture
 from worthless.cli.commands.service.proxy_state import ProxyRuntimeState
 from worthless.cli.bootstrap import WorthlessHome, ensure_home
@@ -105,15 +106,20 @@ def _isolate_fernet_storage_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _isolate_console_singleton(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Restore the module-level console after every test.
+def _isolate_cli_globals(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Start every test with the CLI's process-globals at their defaults.
 
     ``set_console`` (called directly, or by the CLI callback for ``--quiet`` /
     ``--json``) replaces a process-global. Quiet/json consoles drop warnings
     and hints, so one un-restored test silently empties the console output of
-    every later test on the same xdist worker.
+    every later test on the same xdist worker. ``set_debug`` (``--debug``)
+    leaks the same way and changes error rendering for later tests.
+
+    Reset to defaults rather than snapshot: a snapshot would faithfully
+    restore a value polluted before the test started.
     """
-    monkeypatch.setattr(_cli_console, "_console", _cli_console._console)
+    monkeypatch.setattr(_cli_console, "_console", None)
+    monkeypatch.setattr(_cli_errors, "_debug", False)
 
 
 def make_repo(home: WorthlessHome) -> ShardRepository:

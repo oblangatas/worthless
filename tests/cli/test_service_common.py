@@ -260,7 +260,9 @@ class TestHealthReportHonesty:
             report_proxy_health(8787, timeout=0.01)
         cap = capsys.readouterr()
         out = " ".join((cap.err + cap.out).split()).lower()
-        assert out, "no output at all — absence of failure words would pass vacuously"
+        assert "has not answered" in out, (
+            f"warning not captured — absence of failure words would pass vacuously:\n{out}"
+        )
         for lie in ("failed", "did not respond within"):
             assert lie not in out, (
                 f"still asserts failure ({lie!r}) on a successful install:\n{out}"
@@ -282,7 +284,8 @@ class TestHealthReportHonesty:
         with patch("worthless.cli.commands.service._common.poll_health", return_value=True):
             report_proxy_health(8787, timeout=0.01)
         cap = capsys.readouterr()
-        out = (cap.err + cap.out).lower()
+        out = " ".join((cap.err + cap.out).split()).lower()
+        assert "waiting up to" in out, f"hint not captured — silence check would be vacuous:\n{out}"
         assert "status" not in out, f"clean install should not nag:\n{out}"
 
     def test_default_wait_exceeds_the_observed_cold_start(self) -> None:
