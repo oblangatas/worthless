@@ -31,6 +31,7 @@ import asyncio
 import json
 import os
 import sys
+from importlib.metadata import version
 from pathlib import Path
 
 import pytest
@@ -161,16 +162,20 @@ async def test_real_client_calls_tools_and_sees_results_and_errors(tmp_path: Pat
     env["WORTHLESS_HOME"] = str(tmp_path / "no-home")
     server = StdioServerParameters(command=str(worthless_bin), args=["mcp"], env=env)
 
-    async def _session() -> tuple[object, object, object]:
+    async def _session() -> tuple[object, object, object, object]:
         async with stdio_client(server) as (read, write):
             async with ClientSession(read, write) as session:
-                await session.initialize()
+                init = await session.initialize()
                 tools = await session.list_tools()
                 status = await session.call_tool("worthless_status", {})
                 spend = await session.call_tool("worthless_spend", {})
-                return tools, status, spend
+                return init, tools, status, spend
 
-    tools, status, spend = await asyncio.wait_for(_session(), timeout=_HANDSHAKE_TIMEOUT_S)
+    init, tools, status, spend = await asyncio.wait_for(_session(), timeout=_HANDSHAKE_TIMEOUT_S)
+
+    # Hosts show and log this; mcp 2.x reports "" unless the server says.
+    info = _wire(init)["serverInfo"]
+    assert (info["name"], info["version"]) == ("worthless", version("worthless"))
 
     schemas = {t.name: _wire(t)["inputSchema"] for t in tools.tools}  # type: ignore[attr-defined]
     props = {name: s.get("properties", {}) for name, s in schemas.items()}

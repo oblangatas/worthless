@@ -6,6 +6,7 @@ import asyncio
 import functools
 import json
 from collections.abc import Awaitable, Callable
+from importlib.metadata import version
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -22,7 +23,8 @@ from worthless.cli.errors import ErrorCode, WorthlessError
 from worthless.cli.process import check_proxy_health, resolve_port
 from worthless.storage.sqlite import connect as sqlite_connect
 
-mcp = MCPServer("worthless")
+# mcp 2.x reports an empty version unless told; hosts show and log it.
+mcp = MCPServer("worthless", version=version("worthless"))
 
 _ToolFn = TypeVar("_ToolFn", bound=Callable[..., Awaitable[str]])
 
