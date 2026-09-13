@@ -20,6 +20,8 @@ from cryptography.fernet import Fernet
 from hypothesis import HealthCheck, settings
 
 
+from worthless.cli import console as _cli_console  # used by _isolate_cli_globals
+from worthless.cli import errors as _cli_errors  # used by _isolate_cli_globals
 from worthless.cli import default_command  # used by _isolate_default_command_proxy autouse fixture
 from worthless.cli.commands.service.proxy_state import ProxyRuntimeState
 from worthless.cli.bootstrap import WorthlessHome, ensure_home
@@ -101,6 +103,19 @@ def _isolate_fernet_storage_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("WORTHLESS_FERNET_KEY_PATH", raising=False)
     monkeypatch.delenv("WORTHLESS_FERNET_KEY", raising=False)
     monkeypatch.delenv("WORTHLESS_SERVICE_MANAGED", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_cli_globals() -> None:
+    """Start every test with the CLI's console and debug flag at their defaults.
+
+    ``--quiet``/``--json``/``--debug`` set process-globals; one test left
+    quiet or in debug mode changes the output of every later test on its
+    worker. Plain assignment, not ``monkeypatch``, so a test calling
+    ``monkeypatch.undo()`` can't hand the leaked value back mid-test.
+    """
+    _cli_console._console = None
+    _cli_errors.set_debug(False)
 
 
 def make_repo(home: WorthlessHome) -> ShardRepository:
