@@ -2558,7 +2558,9 @@ class TestGuardsCanActuallyFail:
 
     # Two nested pytest runs per case: 13s measured on a loaded host, so the
     # repo-global 30s budget killed the xdist worker at load avg 143. Same
-    # headroom as the real-process families in conftest.py.
+    # headroom as the real-process families in conftest.py. Each nested run
+    # gets 50s (2 x 50 < 120) so a genuine hang fails as TimeoutExpired here
+    # instead of the thread-method timeout killing the worker.
     @pytest.mark.timeout(120)
     @pytest.mark.parametrize(
         ("label", "rel_path", "find", "replace", "guard_test"),
@@ -2609,7 +2611,7 @@ class TestGuardsCanActuallyFail:
                 ],
                 capture_output=True,
                 text=True,
-                timeout=300,
+                timeout=50,
                 check=False,
             )
 
