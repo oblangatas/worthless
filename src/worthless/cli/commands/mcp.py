@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from importlib.metadata import PackageNotFoundError, version
+
 import typer
 
 from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary
@@ -23,10 +25,16 @@ def register_mcp_commands(app: typer.Typer) -> None:
                 raise
             # `pip install -U worthless` without the extra keeps mcp 1.x (or
             # none), which lacks mcp.server.mcpserver (WOR-929).
+            try:
+                found = f"mcp {version('mcp')}"
+            except PackageNotFoundError:
+                found = "no mcp"
+            # Say what IS installed: a future 2.x minor that breaks the import
+            # must not read as "you don't have 2.x" and loop on reinstalls.
             raise WorthlessError(
                 ErrorCode.BOOTSTRAP_FAILED,
-                "`worthless mcp` needs the MCP SDK 2.x (mcp>=2.1,<3), which this "
-                "environment does not have. Reinstall with the extra: "
+                f"`worthless mcp` could not load the MCP SDK (needs mcp>=2.1,<3; "
+                f"found {found}). Reinstall with the extra: "
                 "pip install -U 'worthless[mcp]'",
             ) from exc
 

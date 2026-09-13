@@ -8,6 +8,7 @@ surface as an opaque WRTLS-199 "internal error".
 from __future__ import annotations
 
 import sys
+from importlib.metadata import version
 
 import pytest
 from typer.testing import CliRunner
@@ -26,3 +27,6 @@ def test_mcp_without_a_usable_sdk_says_how_to_fix_it(monkeypatch: pytest.MonkeyP
     assert result.exit_code != 0
     assert "worthless[mcp]" in result.output
     assert "WRTLS-199" not in result.output
+    # Name what IS installed, so a future broken 2.x minor isn't misread as
+    # "you don't have 2.x" and sent round a reinstall loop.
+    assert f"found mcp {version('mcp')}" in " ".join(result.output.split())
