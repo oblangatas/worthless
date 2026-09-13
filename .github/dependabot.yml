@@ -34,6 +34,11 @@ updates:
     # Do NOT move requirements.txt to silence Dependabot. WOR-904.
     exclude-paths:
       - requirements.txt
+    # Wait a week before proposing any new release. Instantly adopting
+    # brand-new versions is how a compromised package spreads fastest --
+    # and is what broke our own CI (worthless-sd13).
+    cooldown:
+      default-days: 7
     schedule:
       interval: weekly
       day: monday
@@ -57,6 +62,11 @@ updates:
   # worthless-yhcc.
   - package-ecosystem: npm
     directory: /workers/worthless-sh
+    # Wait a week before proposing any new release. Instantly adopting
+    # brand-new versions is how a compromised package spreads fastest --
+    # and is what broke our own CI (worthless-sd13).
+    cooldown:
+      default-days: 7
     schedule:
       interval: weekly
       day: monday
@@ -71,6 +81,11 @@ updates:
 
   - package-ecosystem: github-actions
     directory: /
+    # Wait a week before proposing any new release. Instantly adopting
+    # brand-new versions is how a compromised package spreads fastest --
+    # and is what broke our own CI (worthless-sd13).
+    cooldown:
+      default-days: 7
     schedule:
       interval: weekly
       day: monday
