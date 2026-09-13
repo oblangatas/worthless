@@ -2556,6 +2556,10 @@ class TestGuardsCanActuallyFail:
     A guard that survives its own mutation is not protecting anything.
     """
 
+    # Two nested pytest runs per case: 13s measured on a loaded host, so the
+    # repo-global 30s budget killed the xdist worker at load avg 143. Same
+    # headroom as the real-process families in conftest.py.
+    @pytest.mark.timeout(120)
     @pytest.mark.parametrize(
         ("label", "rel_path", "find", "replace", "guard_test"),
         [pytest.param(*m, id=m[4]) for m in GUARD_MUTATIONS],
