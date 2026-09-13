@@ -12,6 +12,7 @@ import signal
 import sys
 import threading
 import time
+from unittest import mock
 
 import keyring
 import keyring.backends.null
@@ -21,6 +22,7 @@ from hypothesis import HealthCheck, settings
 
 
 from worthless.cli import default_command  # used by _isolate_default_command_proxy autouse fixture
+from worthless.cli import sidecar_lifecycle  # used by _no_mock_stderr_drainer autouse fixture
 from worthless.cli.commands.service.proxy_state import ProxyRuntimeState
 from worthless.cli.bootstrap import WorthlessHome, ensure_home
 from worthless.crypto import SplitResult
@@ -101,6 +103,34 @@ def _isolate_fernet_storage_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("WORTHLESS_FERNET_KEY_PATH", raising=False)
     monkeypatch.delenv("WORTHLESS_FERNET_KEY", raising=False)
     monkeypatch.delenv("WORTHLESS_SERVICE_MANAGED", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_mock_stderr_drainer(monkeypatch: pytest.MonkeyPatch):
+    """Fail a test that hands spawn_sidecar a mock stderr pipe.
+
+    ``_collect_stderr`` reads until ``b""``; a Mock never returns that, so the
+    daemon thread spins forever and starves the xdist worker until an unrelated
+    test hits the 30s timeout (PR #593 crash). A post-test thread check is too
+    late — the spin stalls the test itself — so exit the drainer at once on a
+    mock and fail at teardown. Real pipes pass straight through.
+    """
+    mock_pipes: list[object] = []
+    real = sidecar_lifecycle._collect_stderr
+
+    def _guarded(pipe, buf):
+        if isinstance(pipe, mock.NonCallableMock):
+            mock_pipes.append(pipe)
+            return
+        real(pipe, buf)
+
+    monkeypatch.setattr(sidecar_lifecycle, "_collect_stderr", _guarded)
+    yield
+    if mock_pipes:
+        pytest.fail(
+            f"spawn_sidecar got a mock stderr pipe {len(mock_pipes)}x; its drainer "
+            "would spin forever — set fake_proc.stderr = None"
+        )
 
 
 def make_repo(home: WorthlessHome) -> ShardRepository:
