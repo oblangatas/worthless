@@ -1,7 +1,7 @@
 """Shared Docker helpers for integration tests.
 
 Leading underscore so pytest doesn't collect this as a test module.
-Consumers: tests/test_docker_e2e.py, tests/test_install_docker.py.
+Consumers: every docker-gated test module (``grep -r _docker_helpers tests``).
 
 Imports that actually shell out (subprocess) live inside functions, so
 importing this module at collection time does not probe the Docker daemon.
@@ -45,14 +45,16 @@ def image_present(ref: str) -> bool:
     """
     if not docker_available():
         return False
-    return (
-        subprocess.run(  # noqa: S603
+    try:
+        probe = subprocess.run(  # noqa: S603
             ["docker", "image", "inspect", ref],  # noqa: S607
             capture_output=True,
+            timeout=10,
             check=False,
-        ).returncode
-        == 0
-    )
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+    return probe.returncode == 0
 
 
 def docker_exec(container: str, cmd: list[str]) -> subprocess.CompletedProcess[str]:

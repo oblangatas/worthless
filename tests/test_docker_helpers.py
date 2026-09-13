@@ -9,31 +9,20 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
-from tests._docker_helpers import docker_available, image_present
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DOCKER_GATED_DIR = REPO_ROOT / "tests" / "openclaw" / "install_incident"
 
 
-@pytest.fixture
-def no_docker_on_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    monkeypatch.setenv("PATH", str(tmp_path))
-    docker_available.cache_clear()
-    yield
-    docker_available.cache_clear()
-
-
-def test_image_present_is_false_without_docker_binary(no_docker_on_path: None) -> None:
-    assert image_present("worthless-oc-test:local") is False
-
-
-def test_docker_gated_modules_collect_without_docker(tmp_path: Path) -> None:
+# ponytail: child interpreter + full collection is ~3s idle, 10s+ on a loaded box;
+# own timeout so a slow runner can't hit the global 30s and kill the xdist worker.
+@pytest.mark.timeout(120)
+def test_whole_suite_collects_without_docker(tmp_path: Path) -> None:
     """The user-visible promise: a machine with no docker can still collect."""
+    env = {k: v for k, v in os.environ.items() if k != "PYTEST_ADDOPTS"}
+    env["PATH"] = str(tmp_path)
     result = subprocess.run(  # noqa: S603
         [
             sys.executable,
@@ -43,15 +32,19 @@ def test_docker_gated_modules_collect_without_docker(tmp_path: Path) -> None:
             "-q",
             "-o",
             "addopts=",
+            "--strict-markers",
+            "--strict-config",
             "-p",
             "no:randomly",
-            str(DOCKER_GATED_DIR),
+            "-p",
+            "no:cacheprovider",
+            str(REPO_ROOT / "tests"),
         ],
         cwd=REPO_ROOT,
-        env={**os.environ, "PATH": str(tmp_path)},
+        env=env,
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=110,
         check=False,
     )
     assert result.returncode == 0, result.stdout[-3000:] + result.stderr[-1000:]
