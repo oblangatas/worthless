@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 import psutil
 import pytest
 
+from worthless.cli import platform
 from worthless.cli.platform import (
     IS_WINDOWS,
     check_pid_alive,
@@ -284,3 +285,82 @@ class TestPidInTree:
         monkeypatch.setattr("worthless.cli.platform.psutil.Process", _Root)
         assert pid_in_tree(os.getpid(), 54321) is True
         assert pid_in_tree(os.getpid(), 99999) is False
+
+
+class TestWslDetection:
+    """WOR-857: one WSL check, shared by scan and the systemd backend."""
+
+    def test_detects_wsl2_env_var(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")
+        monkeypatch.delenv("WSL_INTEROP", raising=False)
+        assert platform.is_wsl() is True
+
+    def test_detects_wsl1_env_var(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
+        monkeypatch.setenv("WSL_INTEROP", "/run/WSL/8_interop")
+        assert platform.is_wsl() is True
+
+    def test_plain_linux_is_not_wsl(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
+        monkeypatch.delenv("WSL_INTEROP", raising=False)
+        monkeypatch.setattr(platform, "_read_kernel_osrelease", lambda: "6.8.0-45-generic")
+        assert platform.is_wsl() is False
+
+    # --- Found on REAL WSL, not by reasoning --------------------------------
+    # The WSL CI workflow ran worthless via `runuser -l`, a login shell that
+    # clears the environment. WSL_DISTRO_NAME and WSL_INTEROP vanished, is_wsl()
+    # returned False on genuine WSL2, and the user got the generic Linux message
+    # instead of being told to set systemd=true in /etc/wsl.conf. The same
+    # happens under `sudo -i`, `su -`, or a background service. The kernel
+    # release string survives all of those.
+
+    @pytest.mark.parametrize(
+        "osrelease",
+        [
+            "5.15.167.4-microsoft-standard-WSL2",  # WSL2, as seen on the real runner
+            "4.4.0-19041-Microsoft",  # WSL1
+        ],
+    )
+    def test_detects_wsl_from_kernel_when_env_vars_are_gone(
+        self, monkeypatch: pytest.MonkeyPatch, osrelease: str
+    ) -> None:
+        monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
+        monkeypatch.delenv("WSL_INTEROP", raising=False)
+        monkeypatch.setattr(platform, "_read_kernel_osrelease", lambda: osrelease)
+        assert platform.is_wsl() is True
+
+    def test_unreadable_kernel_release_is_not_wsl(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """No /proc (macOS, or a sandbox) must not crash and must not claim WSL."""
+        monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
+        monkeypatch.delenv("WSL_INTEROP", raising=False)
+
+        def _no_proc() -> str:
+            raise FileNotFoundError("/proc/sys/kernel/osrelease")
+
+        monkeypatch.setattr(platform, "_read_kernel_osrelease", _no_proc)
+        assert platform.is_wsl() is False
+
+
+class TestSystemdIsRunning:
+    """WOR-857: gate the install error message, never invent a failure."""
+
+    def test_true_when_systemd_is_pid_1(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(platform, "_read_proc_1_comm", lambda: "systemd")
+        assert platform.systemd_is_running() is True
+
+    def test_false_when_pid_1_is_the_wsl_shim(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(platform, "_read_proc_1_comm", lambda: "init")
+        assert platform.systemd_is_running() is False
+
+    def test_unknown_reads_as_running(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """No /proc means not-Linux, where this never gates anything real.
+
+        An inconclusive probe must not manufacture a failure — this decides an
+        error *message*, not a security boundary.
+        """
+
+        def _no_proc() -> str:
+            raise FileNotFoundError("/proc/1/comm")
+
+        monkeypatch.setattr(platform, "_read_proc_1_comm", _no_proc)
+        assert platform.systemd_is_running() is True
