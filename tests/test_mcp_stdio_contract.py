@@ -28,6 +28,7 @@ already installs the ``[mcp]`` extra via ``uv sync --extra mcp``.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 from pathlib import Path
@@ -134,3 +135,58 @@ async def test_mcp_stdio_server_exposes_exactly_the_four_tools() -> None:
     # Exactly four — guards against a future tool sharing a name (dedupes in
     # the set above) by checking the raw advertised count too.
     assert len(tools_result.tools) == len(EXPECTED_TOOLS)
+
+
+def _wire(model: object) -> dict:
+    """The model as it travels on the wire (camelCase: ``isError``, ``inputSchema``).
+
+    mcp 2.x renamed the Python attributes to snake_case but the protocol is
+    unchanged, so reading the wire shape keeps these assertions valid on
+    either SDK major.
+    """
+    return model.model_dump(by_alias=True, mode="json")  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_real_client_calls_tools_and_sees_results_and_errors(tmp_path: Path) -> None:
+    """A real MCP client can call the tools and read results and errors (WOR-929).
+
+    Listing names alone stays green through an SDK port that breaks calling
+    them. This pins what an agent actually sees: argument schemas, a
+    successful result, and an error result.
+    """
+    worthless_bin = _worthless_executable()
+    env = _child_env(worthless_bin.parent)
+    # A home that does not exist: status answers "empty", spend refuses.
+    env["WORTHLESS_HOME"] = str(tmp_path / "no-home")
+    server = StdioServerParameters(command=str(worthless_bin), args=["mcp"], env=env)
+
+    async def _session() -> tuple[object, object, object]:
+        async with stdio_client(server) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                tools = await session.list_tools()
+                status = await session.call_tool("worthless_status", {})
+                spend = await session.call_tool("worthless_spend", {})
+                return tools, status, spend
+
+    tools, status, spend = await asyncio.wait_for(_session(), timeout=_HANDSHAKE_TIMEOUT_S)
+
+    schemas = {t.name: _wire(t)["inputSchema"] for t in tools.tools}  # type: ignore[attr-defined]
+    props = {name: s.get("properties", {}) for name, s in schemas.items()}
+    assert set(props["worthless_status"]) == set()
+    assert set(props["worthless_scan"]) == {"paths", "deep"}
+    assert props["worthless_scan"]["deep"]["default"] is False
+    assert set(props["worthless_lock"]) == {"env_path"}
+    assert props["worthless_lock"]["env_path"]["default"] == ".env"
+    assert set(props["worthless_spend"]) == {"alias"}
+
+    assert _wire(status)["isError"] is False
+    payload = json.loads(status.content[0].text)  # type: ignore[attr-defined]
+    assert payload["verdict"] == "empty"
+    assert set(payload) == {"verdict", "header", "keys", "proxy", "sentinel", "degraded"}
+
+    # A tool raising WorthlessError reaches the client as an error result
+    # carrying the message — not a protocol error, not a crash.
+    assert _wire(spend)["isError"] is True
+    assert "Worthless is not initialized" in spend.content[0].text  # type: ignore[attr-defined]
