@@ -67,7 +67,8 @@ fi
 current_branch=$(git branch --show-current)
 if [ "$current_branch" != "main" ]; then
     echo "ERROR: must be on main (currently on '$current_branch')."
-    echo "  git checkout main && git pull --rebase"
+    echo "  Run this where main is checked out (see: git worktree list), then:"
+    echo "  git switch main && git pull --ff-only"
     exit 1
 fi
 
@@ -146,9 +147,10 @@ echo "Pushing $tag to origin ..."
 git push origin "$tag"
 
 echo
-echo "Tag pushed. All four publishers (PyPI, npm, GHCR, Cloudflare Worker) are"
-echo "now running. When all four genuinely pass, release-notes.yml creates the"
-echo "GitHub Release itself — you do not run gh release create (WOR-909)."
+echo "Tag pushed. The four publishers are starting: PyPI, npm, the GHCR image and"
+echo "the worthless.sh Worker. Three of them wait for your approval (below). When all"
+echo "four genuinely pass, 'Create GitHub Release' creates the Release itself — you"
+echo "do not run gh release create."
 echo "Monitor at: https://github.com/oblangatas/worthless/actions"
 echo
 # WOR-873: the release scans BOTH architectures at severity-cutoff medium, but
@@ -169,19 +171,32 @@ echo "       may already have moved past it:"
 echo "       gh workflow run docker-security.yml --ref $tag"
 echo "    2. Fix it — bump the pinned base image, or add a dated, argued entry"
 echo "       to .grype.yaml. Prefer bumping the base over widening the waiver."
-echo "    3. Delete the tag and re-push it at the new commit. That keeps the"
-echo "       trigger on refs/tags/v*, which the cosign identity depends on."
+echo "    3. If PyPI and npm have NOT published this version yet, delete the tag"
+echo "       and re-push it at the new commit (that keeps the trigger on"
+echo "       refs/tags/v*, which the cosign identity depends on). If either already"
+echo "       has it, release a new version instead — never move a tag that shipped."
 echo
-echo "YOU MUST APPROVE ONE STEP. Once all four publishers are green, the"
-echo "'Create GitHub Release' run pauses for review (the 'release' environment)."
-echo "Open Actions, find the waiting run, and click Review deployments → Approve."
-echo "The Release page appears right after. Until you approve, it will NOT appear"
-echo "— that is the gate working, not a failure."
+tag_commit=$(git rev-parse --short "${tag}^{commit}")
+echo "YOU MUST APPROVE FOUR TIMES — Actions → the waiting run → Review deployments:"
+echo "  1. Publish to PyPI               (environment: pypi)"
+echo "  2. Publish worthless-mcp to npm  (environment: npm-publish)"
+echo "  3. Deploy Worker (worthless-sh)  (environment: worthless-sh-production)"
+echo "  4. Create GitHub Release         (environment: release) — only appears once"
+echo "     all four publishers are green. The GHCR image needs no approval."
 echo
-echo "If a publisher fails, re-run THAT RUN (Actions → the failed run → 'Re-run"
-echo "failed jobs'). Do not use 'Run workflow' — a manual dispatch is a different"
-echo "event and will not clear the gate. The Release is held until all four are"
-echo "green, then created exactly once. (WOR-846)"
+echo "BEFORE EACH APPROVAL: the run must be for $tag at commit $tag_commit."
+echo "Reject anything else, including re-runs of older tags. A green signature step"
+echo "does not prove the run is yours — it runs the tagged commit's own copy."
+echo
+echo "The Release page appears right after approval 4. Until then it will NOT"
+echo "appear — that is the approval step working, not a failure."
+echo
+echo "If a publisher fails for a reason outside the tagged code (a token, a setting,"
+echo "a flaky runner), fix that, then re-run THAT RUN: Actions → the failed run →"
+echo "'Re-run failed jobs' — it will ask for approval again. Never use 'Run workflow':"
+echo "a manual dispatch is a different event and the Release step will not count it."
+echo "A re-run replays the tagged commit, so if the code itself must change, see"
+echo "step 3 of the CVE section above."
 echo
 # The fallback creates a DRAFT deliberately. Creating a published Release by hand
 # bypasses release-fanin.sh, so it can ratify a tag whose PyPI or npm job actually
@@ -196,12 +211,17 @@ echo
 # anything failed. Anyone following that timer would hit the hatch on every
 # correctly-functioning release.
 echo "FALLBACK — only when there is NO waiting run, NO pending approval, and every"
-echo "publisher is green, yet no Release exists. That is the automation genuinely"
-echo "not firing."
+echo "publisher is green, yet no Release exists."
 echo
-echo "NOTHING WILL TELL YOU THIS HAPPENED. There is no watchdog yet (WOR-909"
-echo "requirement 3 is not shipped), so a silent no-Release looks exactly like a"
-echo "release still waiting on approval. Check Actions yourself before assuming."
+echo "First open Actions → 'Create GitHub Release' for $tag:"
+echo "  - Failed at 'Re-verify the tag GPG signature'? STOP: that tag is not yours."
+echo "    Create nothing."
+echo "  - Red for another reason? Read its warning, fix that, and re-run it. Do not"
+echo "    create a draft."
+echo
+echo "Only if there is no such run at all did the automation genuinely not fire."
+echo "NOTHING WILL TELL YOU THIS HAPPENED — there is no watchdog yet, so a silent"
+echo "no-Release looks exactly like a release still waiting on approval."
 echo
 echo "If you do need the fallback, create a DRAFT — never a published Release —"
 echo "so it cannot silently ratify a release the publishers refused:"
