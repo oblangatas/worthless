@@ -345,7 +345,7 @@ class TestWorthlessScan:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """c5kc / CodeRabbit follow-up: scan_files is synchronous and runs for
-        up to 30 s; calling it inline would block the FastMCP event loop and
+        up to 30 s; calling it inline would block the MCPServer event loop and
         starve other concurrent MCP tools. This test pins that the MCP tool
         actually offloads to a worker thread.
 

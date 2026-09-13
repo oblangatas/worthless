@@ -7,7 +7,7 @@ real MCP stdio handshake, which tools the server advertises.
 
 This module closes that gap. It boots the locally-installed ``worthless`` CLI as
 a subprocess (``worthless mcp`` → ``worthless.mcp.server:main`` →
-``FastMCP.run(transport="stdio")``), drives a genuine handshake with the
+``MCPServer.run(transport="stdio")``), drives a genuine handshake with the
 official ``mcp`` Python client (``stdio_client`` + ``ClientSession``:
 ``initialize`` then ``list_tools``), and pins the public surface to **exactly**
 four tools:
