@@ -17,8 +17,10 @@ import tempfile
 import time
 from pathlib import Path
 
-WT = Path("/Users/shachar/Projects/worthless/worthless/.claude/worktrees/"
-          "test+worthless-oi9b-installer-branch-coverage")
+WT = Path(
+    "/Users/shachar/Projects/worthless/worthless/.claude/worktrees/"
+    "test+worthless-oi9b-installer-branch-coverage"
+)
 INSTALL = WT / "install.sh"
 SRC = INSTALL.read_text()
 PIN_SHA = re.search(r'ASTRAL_INSTALLER_SHA256="([0-9a-f]+)"', SRC).group(1)
@@ -26,8 +28,25 @@ UV_VER = re.search(r'^UV_VERSION="([^"]+)"', SRC, re.M).group(1)
 
 # tools install.sh genuinely needs, EXCLUDING the hashers — lets a case hide
 # sha256sum/shasum without also losing awk/cut/mktemp.
-TOOLS = ["awk", "cut", "mktemp", "grep", "basename", "sed", "head", "tr",
-         "cat", "rm", "mkdir", "chmod", "dirname", "env", "sh", "tail", "wc"]
+TOOLS = [
+    "awk",
+    "cut",
+    "mktemp",
+    "grep",
+    "basename",
+    "sed",
+    "head",
+    "tr",
+    "cat",
+    "rm",
+    "mkdir",
+    "chmod",
+    "dirname",
+    "env",
+    "sh",
+    "tail",
+    "wc",
+]
 
 
 def toolbox(root: Path, exclude=()) -> Path:
@@ -50,12 +69,25 @@ def stub(d: Path, name: str, body: str) -> None:
 
 def run(env, cwd, tty=False, timeout=25):
     if not tty:
-        r = subprocess.run(["/bin/sh", str(INSTALL)], env=env, cwd=cwd,
-                           capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(
+            ["/bin/sh", str(INSTALL)],
+            env=env,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
         return r.returncode, r.stdout + r.stderr
     m, s = pty.openpty()
-    p = subprocess.Popen(["/bin/sh", str(INSTALL)], env=env, cwd=cwd,
-                         stdin=s, stdout=s, stderr=s, start_new_session=True)
+    p = subprocess.Popen(
+        ["/bin/sh", str(INSTALL)],
+        env=env,
+        cwd=cwd,
+        stdin=s,
+        stdout=s,
+        stderr=s,
+        start_new_session=True,
+    )
     os.close(s)
     out, end = b"", time.time() + timeout
     while time.time() < end:
@@ -79,11 +111,11 @@ def run(env, cwd, tty=False, timeout=25):
 
 
 def show(label, rc, out, markers=()):
-    lines = [l for l in out.splitlines() if l.strip()]
+    lines = [ln for ln in out.splitlines() if ln.strip()]
     print(f"\n── {label}")
     print(f"   rc={rc}")
-    for l in lines[-5:]:
-        print(f"   │ {l[:110]}")
+    for ln in lines[-5:]:
+        print(f"   │ {ln[:110]}")
     for name, path in markers:
         print(f"   marker[{name}] = {'WRITTEN' if path.exists() else 'absent'}")
 
@@ -97,8 +129,7 @@ def base(tmp: Path, *, uname="Darwin", sw="echo 14.5", hide_hashers=False):
     if sw is not None:
         stub(bind, "sw_vers", sw)
     tb = toolbox(tmp, exclude=("sha256sum", "shasum") if hide_hashers else ())
-    env = {"HOME": str(home), "NO_COLOR": "1", "WORTHLESS_TRUST_PATH": "1",
-           "PATH": f"{bind}:{tb}"}
+    env = {"HOME": str(home), "NO_COLOR": "1", "WORTHLESS_TRUST_PATH": "1", "PATH": f"{bind}:{tb}"}
     return env, home, bind
 
 
@@ -121,7 +152,7 @@ with tempfile.TemporaryDirectory() as t:
     show("(3a) Darwin, no sw_vers on PATH", rc, out)
     print(f"   reached warn? {'sw_vers not found' in out}")
 
-# (3b) unparseable macOS version
+# (3b) unparsable macOS version
 with tempfile.TemporaryDirectory() as t:
     env, home, bind = base(Path(t), sw="echo notaversion")
     show("(3b) sw_vers -> 'notaversion'", *run(env, t))
@@ -138,7 +169,11 @@ with tempfile.TemporaryDirectory() as t:
 with tempfile.TemporaryDirectory() as t:
     tp = Path(t)
     env, home, bind = base(tp, hide_hashers=True)
-    stub(bind, "curl", 'for a in "$@"; do [ "$p" = --output ] && printf "exit 1\\n" > "$a"; p="$a"; done')
+    stub(
+        bind,
+        "curl",
+        'for a in "$@"; do [ "$p" = --output ] && printf "exit 1\\n" > "$a"; p="$a"; done',
+    )
     stub(bind, "sha256sum", f'echo "{PIN_SHA}  $1"')
     show("(1b) installer exits 1, stub hasher returns pinned sha", *run(env, t))
 
@@ -146,7 +181,11 @@ with tempfile.TemporaryDirectory() as t:
 with tempfile.TemporaryDirectory() as t:
     tp = Path(t)
     env, home, bind = base(tp, hide_hashers=True)
-    stub(bind, "curl", 'for a in "$@"; do [ "$p" = --output ] && printf "exit 0\\n" > "$a"; p="$a"; done')
+    stub(
+        bind,
+        "curl",
+        'for a in "$@"; do [ "$p" = --output ] && printf "exit 0\\n" > "$a"; p="$a"; done',
+    )
     stub(bind, "sha256sum", f'echo "{PIN_SHA}  $1"')
     show("(1c) installer exits 0, places no uv", *run(env, t))
 
@@ -165,16 +204,25 @@ for no_color in (None, "1"):
 #     resolve_uv runs before any network, so the uv half may not need a container.
 with tempfile.TemporaryDirectory() as t:
     tp = Path(t)
-    home = tp / "home"; home.mkdir()
-    evil = tp / "evil"; evil.mkdir()
-    mk = tp / "markers"; mk.mkdir()
+    home = tp / "home"
+    home.mkdir()
+    evil = tp / "evil"
+    evil.mkdir()
+    mk = tp / "markers"
+    mk.mkdir()
     stub(evil, "uv", f'touch {mk}/uv-ran; echo "uv {UV_VER}"')
     stub(evil, "sha256sum", f'touch {mk}/sha-ran; echo "{PIN_SHA}  $1"')
     env = {"HOME": str(home), "NO_COLOR": "1", "PATH": f"{evil}:/usr/bin:/bin"}
     rc, out = run(env, t, timeout=40)
-    show("(5) NO escape hatch, planted uv + sha256sum first on PATH (real mac)",
-         rc, out, [("planted uv", mk / "uv-ran"), ("planted sha256sum", mk / "sha-ran")])
-    print(f"   took the 'already installed' shortcut via planted uv? "
-          f"{('uv ' + UV_VER + ' already installed') in out}")
+    show(
+        "(5) NO escape hatch, planted uv + sha256sum first on PATH (real mac)",
+        rc,
+        out,
+        [("planted uv", mk / "uv-ran"), ("planted sha256sum", mk / "sha-ran")],
+    )
+    print(
+        f"   took the 'already installed' shortcut via planted uv? "
+        f"{('uv ' + UV_VER + ' already installed') in out}"
+    )
     real_uvs = [p for p in ("/opt/homebrew/bin/uv", "/usr/local/bin/uv") if Path(p).exists()]
     print(f"   host has a real uv in resolve_uv's list: {real_uvs or 'none'}  <- confounder")

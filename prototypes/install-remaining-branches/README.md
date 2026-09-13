@@ -10,7 +10,7 @@ cheapest faithful way to observe it?
 |---|---|---|
 | unknown OS | yes, rc=20 | stub uname |
 | sw_vers missing | yes (warns, then continues) | a PATH without /usr/bin, because macOS has a real sw_vers there |
-| unparseable macOS version | yes, rc=20 | stub sw_vers |
+| unparsable macOS version | yes, rc=20 | stub sw_vers |
 | no trusted hasher | yes, rc=40 | only with the escape hatch, by hiding the hashers from PATH |
 | Astral installer fails | yes, rc=10 | only with a stub hasher that returns the pinned sha |
 | uv missing after bootstrap | yes, rc=40 | installer stub exits 0 and places nothing |
