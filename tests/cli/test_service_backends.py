@@ -14,6 +14,7 @@ from worthless.cli.bootstrap import WorthlessHome
 from worthless.cli.commands.service import launchd, systemd, templates
 from worthless.cli.commands.service._common import ServiceState, refuse_foreign_unit
 from worthless.cli.errors import ErrorCode, WorthlessError
+from tests.helpers import skip_if_root
 
 
 @pytest.fixture()
@@ -425,6 +426,7 @@ class TestRefuseForeignUnit:
     def test_noop_when_unit_owned_by_home(self, home: WorthlessHome, tmp_path: Path) -> None:
         refuse_foreign_unit(_owned_launchd_plist(home, tmp_path), home)
 
+    @skip_if_root
     def test_unreadable_unit_raises_clean_error(self, home: WorthlessHome, tmp_path: Path) -> None:
         unit = _owned_systemd_unit(home, tmp_path)
         unit.chmod(0o000)

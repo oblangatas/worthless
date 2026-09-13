@@ -20,6 +20,7 @@ from cryptography.fernet import Fernet
 from hypothesis import HealthCheck, settings
 
 
+from worthless._flags import ipc_mode_active
 from worthless.cli import console as _cli_console  # used by _isolate_cli_globals
 from worthless.cli import errors as _cli_errors  # used by _isolate_cli_globals
 from worthless.cli import default_command  # used by _isolate_default_command_proxy autouse fixture
@@ -154,6 +155,25 @@ def _no_spinning_stderr_drainer(monkeypatch: pytest.MonkeyPatch):
             f"fake stderr pipe returned {type(bad_reads[0]).__name__} from read(), not bytes; "
             "spawn_sidecar's drainer would spin forever — set fake_proc.stderr = None"
         )
+
+
+@pytest.fixture()
+def ipc_proxy_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run as the non-root proxy uid with ``WORTHLESS_FERNET_IPC_ONLY=1``.
+
+    ``ipc_mode_active()`` is flag-on AND euid != 0: root reads fernet.key
+    directly and never consults the sidecar. Tests that only set the flag
+    silently test the root bypass when the suite runs as root (Docker, some
+    CI) — bad-evidence rejection then "DID NOT RAISE" (worthless-x9z1).
+
+    Flag and uid are set together so "uid pinned, flag off" can't happen:
+    the patch is process-global (``worthless._flags.os`` IS ``os``), and with
+    the flag off a fake uid would feed keystore ownership checks. The root
+    side is pinned in tests/test_flags.py and test_bootstrap_ipc.py root tests.
+    """
+    monkeypatch.setenv("WORTHLESS_FERNET_IPC_ONLY", "1")
+    monkeypatch.setattr("worthless._flags.os.geteuid", lambda: 1001)
+    assert ipc_mode_active(), "ipc_proxy_mode must put the process in IPC mode"
 
 
 def make_repo(home: WorthlessHome) -> ShardRepository:
