@@ -11,8 +11,8 @@ import sys
 from importlib.metadata import version
 
 import pytest
-from typer.testing import CliRunner
 
+from tests.cli.conftest import runner
 from worthless.cli.app import app
 
 
@@ -22,7 +22,7 @@ def test_mcp_without_a_usable_sdk_says_how_to_fix_it(monkeypatch: pytest.MonkeyP
     monkeypatch.delitem(sys.modules, "worthless.mcp.server", raising=False)
     monkeypatch.setitem(sys.modules, "mcp.server.mcpserver", None)
 
-    result = CliRunner().invoke(app, ["mcp"])
+    result = runner.invoke(app, ["mcp"])
 
     assert result.exit_code != 0
     assert "worthless[mcp]" in result.output

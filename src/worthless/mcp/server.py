@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-import functools
 import json
-from collections.abc import Awaitable, Callable
 from importlib.metadata import version
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any
 
 from mcp.server.mcpserver import MCPServer  # type: ignore[import-not-found]  # optional dep
-from mcp.server.mcpserver.exceptions import ToolError  # type: ignore[import-not-found]
+from mcp.server.mcpserver.exceptions import (  # type: ignore[import-not-found]
+    ToolError,
+    UnexpectedToolError,
+)
 
 from worthless.cli.bootstrap import (
     WorthlessHome,
@@ -23,32 +24,27 @@ from worthless.cli.errors import ErrorCode, WorthlessError
 from worthless.cli.process import check_proxy_health, resolve_port
 from worthless.storage.sqlite import connect as sqlite_connect
 
-# mcp 2.x reports an empty version unless told; hosts show and log it.
-mcp = MCPServer("worthless", version=version("worthless"))
 
-_ToolFn = TypeVar("_ToolFn", bound=Callable[..., Awaitable[str]])
+class _WorthlessMCPServer(MCPServer):
+    """MCPServer whose tools' WorthlessError messages reach the agent (WOR-929).
 
-
-def _tool(fn: _ToolFn) -> _ToolFn:
-    """Register ``fn`` as an MCP tool whose WorthlessErrors reach the client.
-
-    mcp 2.x treats any exception other than ``ToolError`` as a crash and hides
-    its text, so an agent would see only "Error executing tool …" instead of
-    "Run `worthless lock` first". WorthlessError messages are written for users,
-    so they are re-raised as ToolError; genuine crashes stay hidden (WOR-929).
-    The undecorated function is returned so in-process callers still get
-    WorthlessError.
+    mcp 2.x hides the text of any tool exception other than ``ToolError``, so an
+    agent would see "Error executing tool …" instead of "Run `worthless lock`
+    first". WorthlessError messages are written for users, so they are re-raised
+    as ToolError; every other crash stays hidden.
     """
 
-    @functools.wraps(fn)
-    async def _registered(*args: Any, **kwargs: Any) -> str:
+    async def call_tool(self, name: str, arguments: dict[str, Any], context: Any = None) -> Any:
         try:
-            return await fn(*args, **kwargs)
-        except WorthlessError as exc:
-            raise ToolError(str(exc)) from exc
+            return await super().call_tool(name, arguments, context)
+        except UnexpectedToolError as exc:
+            if isinstance(exc.__cause__, WorthlessError):
+                raise ToolError(f"Error executing tool {name}: {exc.__cause__}") from exc
+            raise
 
-    mcp.tool()(_registered)
-    return fn
+
+# mcp 2.x reports an empty version unless told; hosts show and log it.
+mcp = _WorthlessMCPServer("worthless", version=version("worthless"))
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +137,7 @@ def _safe_sentinel(sentinel: dict[str, Any] | None) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 
 
-@_tool
+@mcp.tool()
 async def worthless_status() -> str:
     """Show the same protection verdict the CLI shows, plus keys and proxy health.
 
@@ -230,7 +226,7 @@ async def worthless_status() -> str:
     )
 
 
-@_tool
+@mcp.tool()
 async def worthless_scan(
     paths: list[str] | None = None,
     deep: bool = False,
@@ -327,7 +323,7 @@ async def worthless_scan(
             tmp_file.unlink(missing_ok=True)
 
 
-@_tool
+@mcp.tool()
 async def worthless_lock(env_path: str = ".env") -> str:
     """Protect API keys in a .env file.
 
@@ -429,7 +425,7 @@ async def worthless_lock(env_path: str = ".env") -> str:
     return json.dumps(result)
 
 
-@_tool
+@mcp.tool()
 async def worthless_spend(alias: str | None = None) -> str:
     """Show token spend history for enrolled keys.
 

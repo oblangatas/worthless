@@ -15,9 +15,9 @@ catches this — the drift only exists at resolve time. This asserts the
 constraint itself.
 
 Checking merely that a ``<`` appears is not enough: ``mcp>=2.1,<99`` contains
-one and still resolves straight to a future 3.x. Bounds have to be read as
-versions and compared, or the guard passes through the regression it exists
-to prevent.
+one and still resolves straight to a future 3.x. The range is evaluated as a
+real specifier against versions on both sides of 2.x, or the guard passes
+through the regression it exists to prevent.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ import re
 from pathlib import Path
 
 import pytest
-from packaging.version import Version
+from packaging.specifiers import SpecifierSet
 
 PYPROJECT = Path(__file__).resolve().parent.parent / "pyproject.toml"
 
@@ -35,37 +35,17 @@ PYPROJECT = Path(__file__).resolve().parent.parent / "pyproject.toml"
 # about one line.
 _MCP_REQUIREMENT = re.compile(r'^\s*"(mcp[^"]*)"', re.MULTILINE)
 
-# `<3`, `< 3.0.0`, `<=2.9` match. `>=2.1` does not — a lower bound is not a cap.
-_UPPER_BOUND = re.compile(r"<\s*(=?)\s*([0-9][0-9A-Za-z.\-+]*)")
-# `>=2.1`, `> 2` match. `<=2.9` does not — the `<` before `=` is excluded.
-_LOWER_BOUND = re.compile(r"(?<![<=])>\s*(=?)\s*([0-9][0-9A-Za-z.\-+]*)")
-
 # The server is written against 2.x (mcp.server.mcpserver). 1.x lacks it; 3.x
 # is the next major and may break it the same way 2.0.0 broke 1.x code.
-_SUPPORTED_MAJOR = Version("2")
-_NEXT_MAJOR = Version("3")
+# ponytail: probe versions, not interval math — enough for the ranges people
+# actually write; a `!=3.0`-style hole would need a denser probe list.
+_OUTSIDE_2X = ("1.0", "1.999", "3.0", "99")
 
 
 def _range_violation(spec: str) -> str | None:
-    """Return why `spec` can resolve outside mcp 2.x, or None if it cannot.
-
-    Split out from the test so the bounds can be pinned directly, without
-    rewriting pyproject.toml to exercise them.
-    """
-    low = _LOWER_BOUND.search(spec)
-    if low is None:
-        return "has no lower bound, so it admits mcp 1.x"
-    if Version(low.group(2)) < _SUPPORTED_MAJOR:
-        return f"lower bound >{low.group(1)}{low.group(2)} admits mcp 1.x"
-
-    high = _UPPER_BOUND.search(spec)
-    if high is None:
-        return "has no upper bound at all"
-    inclusive, raw = high.group(1) == "=", high.group(2)
-    bound = Version(raw)
-    if (inclusive and bound >= _NEXT_MAJOR) or (not inclusive and bound > _NEXT_MAJOR):
-        return f"upper bound <{high.group(1)}{raw} admits mcp {_NEXT_MAJOR}"
-    return None
+    """Return why `spec` can resolve outside mcp 2.x, or None if it cannot."""
+    admitted = [v for v in _OUTSIDE_2X if SpecifierSet(spec.removeprefix("mcp")).contains(v)]
+    return f"admits mcp {', '.join(admitted)}" if admitted else None
 
 
 def test_mcp_extra_resolves_to_2x_only() -> None:

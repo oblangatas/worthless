@@ -46,6 +46,7 @@ pytest.importorskip("mcp", reason="mcp extra not installed")
 
 from mcp import ClientSession  # noqa: E402
 from mcp.client.stdio import StdioServerParameters, stdio_client  # noqa: E402
+from mcp.types import CallToolResult, InitializeResult, ListToolsResult  # noqa: E402
 
 # The contract under test: the exact set of management tools the Worthless MCP
 # server is allowed to expose. Adding/removing/renaming a tool must be a
@@ -138,16 +139,6 @@ async def test_mcp_stdio_server_exposes_exactly_the_four_tools() -> None:
     assert len(tools_result.tools) == len(EXPECTED_TOOLS)
 
 
-def _wire(model: object) -> dict:
-    """The model as it travels on the wire (camelCase: ``isError``, ``inputSchema``).
-
-    mcp 2.x renamed the Python attributes to snake_case but the protocol is
-    unchanged, so reading the wire shape keeps these assertions valid on
-    either SDK major.
-    """
-    return model.model_dump(by_alias=True, mode="json")  # type: ignore[attr-defined]
-
-
 @pytest.mark.asyncio
 async def test_real_client_calls_tools_and_sees_results_and_errors(tmp_path: Path) -> None:
     """A real MCP client can call the tools and read results and errors (WOR-929).
@@ -162,7 +153,9 @@ async def test_real_client_calls_tools_and_sees_results_and_errors(tmp_path: Pat
     env["WORTHLESS_HOME"] = str(tmp_path / "no-home")
     server = StdioServerParameters(command=str(worthless_bin), args=["mcp"], env=env)
 
-    async def _session() -> tuple[object, object, object, object]:
+    async def _session() -> tuple[
+        InitializeResult, ListToolsResult, CallToolResult, CallToolResult
+    ]:
         async with stdio_client(server) as (read, write):
             async with ClientSession(read, write) as session:
                 init = await session.initialize()
@@ -174,10 +167,9 @@ async def test_real_client_calls_tools_and_sees_results_and_errors(tmp_path: Pat
     init, tools, status, spend = await asyncio.wait_for(_session(), timeout=_HANDSHAKE_TIMEOUT_S)
 
     # Hosts show and log this; mcp 2.x reports "" unless the server says.
-    info = _wire(init)["serverInfo"]
-    assert (info["name"], info["version"]) == ("worthless", version("worthless"))
+    assert (init.server_info.name, init.server_info.version) == ("worthless", version("worthless"))
 
-    schemas = {t.name: _wire(t)["inputSchema"] for t in tools.tools}  # type: ignore[attr-defined]
+    schemas = {t.name: t.input_schema for t in tools.tools}
     props = {name: s.get("properties", {}) for name, s in schemas.items()}
     assert set(props["worthless_status"]) == set()
     assert set(props["worthless_scan"]) == {"paths", "deep"}
@@ -186,12 +178,12 @@ async def test_real_client_calls_tools_and_sees_results_and_errors(tmp_path: Pat
     assert props["worthless_lock"]["env_path"]["default"] == ".env"
     assert set(props["worthless_spend"]) == {"alias"}
 
-    assert _wire(status)["isError"] is False
-    payload = json.loads(status.content[0].text)  # type: ignore[attr-defined]
+    assert status.is_error is False
+    payload = json.loads(status.content[0].text)  # type: ignore[union-attr]
     assert payload["verdict"] == "empty"
     assert set(payload) == {"verdict", "header", "keys", "proxy", "sentinel", "degraded"}
 
     # A tool raising WorthlessError reaches the client as an error result
     # carrying the message — not a protocol error, not a crash.
-    assert _wire(spend)["isError"] is True
-    assert "Worthless is not initialized" in spend.content[0].text  # type: ignore[attr-defined]
+    assert spend.is_error is True
+    assert "Worthless is not initialized" in spend.content[0].text  # type: ignore[union-attr]
