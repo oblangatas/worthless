@@ -1498,17 +1498,15 @@ class TestSDKSmokeDocker:
             api_key=shard_a,
             base_url=f"http://127.0.0.1:{port}/{alias}/v1",
         )
-        with pytest.raises(openai.APIError) as exc:
+        # APIStatusError = an HTTP response came back. APIConnectionError
+        # (proxy unreachable) is NOT a subclass, so it escapes and fails the test.
+        with pytest.raises(openai.APIStatusError) as exc:
             client.chat.completions.create(
                 model="gpt-4o-mini",
                 max_tokens=1,
                 messages=[{"role": "user", "content": "hi"}],
             )
-        err_name = type(exc.value).__name__
         err_str = str(exc.value).lower()
-        assert "connectionerror" != err_name, (
-            f"SDK raised raw ConnectionError — proxy unreachable: {exc.value}"
-        )
         assert "traceback" not in err_str
         assert "worthless" not in err_str
 
@@ -1526,14 +1524,13 @@ class TestSDKSmokeDocker:
             api_key=shard_a,
             base_url=f"http://127.0.0.1:{port}/{alias}",
         )
-        with pytest.raises(anthropic.APIError) as exc:
+        # See openai sibling: only an HTTP response from the proxy satisfies this.
+        with pytest.raises(anthropic.APIStatusError) as exc:
             client.messages.create(
                 model="claude-haiku-4-5-20251001",
                 max_tokens=1,
                 messages=[{"role": "user", "content": "hi"}],
             )
-        err_name = type(exc.value).__name__
         err_str = str(exc.value).lower()
-        assert "connectionerror" != err_name
         assert "traceback" not in err_str
         assert "worthless" not in err_str
