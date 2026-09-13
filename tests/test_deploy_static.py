@@ -2577,8 +2577,8 @@ GUARD_MUTATIONS = [
     (
         "retitle release runs so the watchdog cannot find them",
         ".github/workflows/release-notes.yml",
-        "@${{ github.event.workflow_run.head_sha }}",
-        " (${{ github.event.workflow_run.head_sha }})",
+        "head_branch }} ${{ github.event.workflow_run.head_sha }}",
+        "head_branch }}@${{ github.event.workflow_run.head_sha }}",
         "test_run_title_contract_matches_release_notes",
     ),
     (
@@ -2619,7 +2619,7 @@ GUARD_MUTATIONS = [
     (
         "stop naming an approval held for an old commit",
         ".github/scripts/release-watchdog.sh",
-        'if [ "$waiting" = "${RUN_TITLE_PREFIX} ${tag}@${sha}" ]; then',
+        'if [ "$waiting" = "${RUN_TITLE_PREFIX} ${tag} ${sha}" ]; then',
         "if true; then",
         "test_stale_approval_for_a_moved_tag_is_named",
     ),
@@ -2717,10 +2717,10 @@ GUARD_MUTATIONS = [
         "test_forged_pull_request_run_cannot_silence_the_alarm",
     ),
     (
-        "match run titles by tag prefix alone",
+        "match a longer tag name as this tag",
         ".github/scripts/release-watchdog.sh",
-        '(.title | startswith($p)) and (.title | ltrimstr($p) | test("^[0-9a-f]{40}$"))',
-        "(.title | startswith($p))",
+        '--arg p "${RUN_TITLE_PREFIX} ${tag} "',
+        '--arg p "${RUN_TITLE_PREFIX} ${tag}"',
         "test_run_for_a_lookalike_tag_does_not_count",
     ),
     (
@@ -2740,7 +2740,7 @@ GUARD_MUTATIONS = [
     (
         "drop the verify-the-commit advice",
         ".github/scripts/release-watchdog.sh",
-        'if [ "$waiting" = "${RUN_TITLE_PREFIX} ${tag}@${sha}" ]; then',
+        'if [ "$waiting" = "${RUN_TITLE_PREFIX} ${tag} ${sha}" ]; then',
         "if false; then",
         "test_forgotten_approval_files_one_assigned_issue",
     ),
@@ -3028,7 +3028,7 @@ if [ "${1:-}" = "label" ]; then wd_log "$@"; exit 0; fi
 case "$wd_method $wd_path" in
   POST\ *|PATCH\ *) wd_log "$@"; echo '{}'; exit 0 ;;
   GET\ */actions/workflows/release-notes.yml/runs*)
-    pages=${RN_PAGES:-}; [ -z "$pages" ] && pages='[[]]'
+    pages=$RN_PAGES
     n=$(printf '%s' "$pages" | jq length)
     for ((p = 0; p < n; p++)); do
       [ "$p" -gt 0 ] && [ "$wd_pag" = no ] && break
@@ -3038,15 +3038,14 @@ case "$wd_method $wd_path" in
     exit 0 ;;
   GET\ */actions/runs/rn*/jobs*)
     rid=$(printf '%s' "$wd_path" | sed -E 's#.*/actions/runs/([^/?]+)/jobs.*#\1#')
-    rj=${RN_JOBS:-}; [ -z "$rj" ] && rj='{}'
+    rj=$RN_JOBS
     ro='{}'
-    case "$wd_path" in *filter=all*) ro=${RN_JOBS_OLDER:-}; [ -z "$ro" ] && ro='{}';; esac
+    case "$wd_path" in *filter=all*) ro=$RN_JOBS_OLDER;; esac
     wd_emit "$(jq -cn --arg r "$rid" --argjson l "$rj" --argjson o "$ro" \
       '{jobs: (($o[$r] // []) + ($l[$r] // []))}')"
     exit 0 ;;
   GET\ */issues*)
-    is=${ISSUES:-}; [ -z "$is" ] && is='[]'
-    wd_emit "$is"
+    wd_emit "$ISSUES"
     exit 0 ;;
   GET\ */actions/workflows/*/runs*)
     if [ -n "${API_DOWN:-}" ]; then echo "gh: HTTP 502 Bad Gateway" >&2; exit 1; fi ;;
@@ -3077,7 +3076,7 @@ class TestReleaseWatchdogWiring:
             "without issues: write the alarm 403s and the job still goes green"
         )
         assert perms.get("actions") == "read", "the watchdog reads run and job status"
-        assert "contents" not in perms or perms["contents"] == "read"
+        assert perms.get("contents", "read") == "read"
         runs = [s.get("run", "") for s in job["steps"]]
         (step,) = [r for r in runs if "bash .github/scripts/release-watchdog.sh" in r]
         assert step.startswith("timeout "), (
@@ -3112,7 +3111,7 @@ class TestReleaseWatchdogWiring:
         rendered = run_name.replace(
             "${{ github.event.workflow_run.head_branch }}", "v1.2.3"
         ).replace("${{ github.event.workflow_run.head_sha }}", "0123abcd")
-        expected = f"{_watchdog_const('RUN_TITLE_PREFIX')} v1.2.3@0123abcd"
+        expected = f"{_watchdog_const('RUN_TITLE_PREFIX')} v1.2.3 0123abcd"
         assert rendered == expected, (
             f"release-notes.yml titles a run {rendered!r} but the watchdog looks for "
             f"{expected!r}. Every release would read as 'never ran' and false-alarm."
@@ -3144,7 +3143,12 @@ class TestReleaseWatchdogBehaviour:
 
     @staticmethod
     def _run_title(tag: str, sha: str) -> str:
-        return f"{_watchdog_const('RUN_TITLE_PREFIX')} {tag}@{sha}"
+        return f"{_watchdog_const('RUN_TITLE_PREFIX')} {tag} {sha}"
+
+    @staticmethod
+    def _one_run(status: str, title: str = "TITLE", **extra) -> list[list[dict]]:
+        """RN_PAGES holding a single release run with id rn1."""
+        return [[{"id": "rn1", "status": status, "display_title": title, **extra}]]
 
     @staticmethod
     def _jobs(create_step: str | None) -> list[dict]:
@@ -3163,12 +3167,12 @@ class TestReleaseWatchdogBehaviour:
         ]
 
     @staticmethod
-    def _issue(state: str, sha: str, author: str = "github-actions[bot]") -> dict:
+    def _issue(state: str, sha: str, author: str | None = None) -> dict:
         return {
             "number": 7,
             "state": state,
             "body": f"<!-- release-watchdog:v9.9.9 -->\n<!-- release-watchdog-sha:{sha} -->",
-            "user": {"login": author},
+            "user": {"login": author or _watchdog_const("ALARM_AUTHOR")},
         }
 
     def _run(
@@ -3236,9 +3240,7 @@ class TestReleaseWatchdogBehaviour:
     # --- when to stay quiet ------------------------------------------------
 
     def test_quiet_while_approval_is_fresh(self, tmp_path):
-        proc, writes, _ = self._run(
-            tmp_path, 30, rn_pages=[[{"id": "rn1", "status": "waiting", "display_title": "TITLE"}]]
-        )
+        proc, writes, _ = self._run(tmp_path, 30, rn_pages=self._one_run("waiting"))
         assert proc.returncode == 0, proc.stderr
         assert writes == [], (
             "a release waiting on its approval click is NORMAL; "
@@ -3250,14 +3252,14 @@ class TestReleaseWatchdogBehaviour:
             {
                 "id": f"rnx{i}",
                 "status": "completed",
-                "display_title": "Create GitHub Release main@x",
+                "display_title": "Create GitHub Release main x",
             }
             for i in range(3)
         ]
         proc, writes, _ = self._run(
             tmp_path,
             30,
-            rn_pages=[filler, [{"id": "rn1", "status": "completed", "display_title": "TITLE"}]],
+            rn_pages=[filler, *self._one_run("completed")],
             rn_jobs={"rn1": self._jobs("success")},
         )
         assert proc.returncode == 0, proc.stderr
@@ -3269,7 +3271,7 @@ class TestReleaseWatchdogBehaviour:
         proc, writes, _ = self._run(
             tmp_path,
             30,
-            rn_pages=[[{"id": "rn1", "status": "in_progress", "display_title": "TITLE"}]],
+            rn_pages=self._one_run("in_progress"),
         )
         assert proc.returncode == 0, proc.stderr
         assert writes == []
@@ -3297,9 +3299,7 @@ class TestReleaseWatchdogBehaviour:
     # --- when to alarm ------------------------------------------------------
 
     def test_forgotten_approval_files_one_assigned_issue(self, tmp_path):
-        proc, writes, sha = self._run(
-            tmp_path, 80, rn_pages=[[{"id": "rn1", "status": "waiting", "display_title": "TITLE"}]]
-        )
+        proc, writes, sha = self._run(tmp_path, 80, rn_pages=self._one_run("waiting"))
         assert proc.returncode == 0, proc.stderr
         created = self._created(writes)
         assert len(created) == 1, f"expected exactly one issue, got {writes}"
@@ -3313,21 +3313,13 @@ class TestReleaseWatchdogBehaviour:
         assert self._field(created[0], "assignees[]") == "o", (
             "an unassigned alarm is the same silence as none"
         )
-        assert self._field(created[0], "labels[]") == "release-watchdog"
+        assert self._field(created[0], "labels[]") == _watchdog_const("LABEL")
 
     def test_stale_approval_for_a_moved_tag_is_named(self, tmp_path):
         proc, writes, _ = self._run(
             tmp_path,
             80,
-            rn_pages=[
-                [
-                    {
-                        "id": "rn1",
-                        "status": "waiting",
-                        "display_title": self._run_title("v9.9.9", self.OLD_SHA),
-                    }
-                ]
-            ],
+            rn_pages=self._one_run("waiting", self._run_title("v9.9.9", self.OLD_SHA)),
         )
         assert proc.returncode == 0, proc.stderr
         (created,) = self._created(writes)
@@ -3349,7 +3341,7 @@ class TestReleaseWatchdogBehaviour:
         proc, writes, _ = self._run(
             tmp_path,
             30,
-            rn_pages=[[{"id": "rn1", "status": "completed", "display_title": "TITLE"}]],
+            rn_pages=self._one_run("completed"),
             rn_jobs={"rn1": self._jobs("skipped")},
         )
         assert proc.returncode == 0, proc.stderr
@@ -3381,9 +3373,7 @@ class TestReleaseWatchdogBehaviour:
     def test_open_issue_is_not_duplicated(self, tmp_path):
         proc, writes, _ = self._run(tmp_path, 30, issues=[self._issue("open", "SHA")])
         assert proc.returncode == 0, proc.stderr
-        assert [c for c in writes if "POST" in c or "PATCH" in c] == [], (
-            "every 6h tick would add an issue or comment"
-        )
+        assert writes == [], "every 6h tick would add an issue or comment"
 
     def test_open_issue_follows_a_moved_tag(self, tmp_path):
         """Open issue, then a re-tag: the issue must learn the new commit now, or
@@ -3398,7 +3388,7 @@ class TestReleaseWatchdogBehaviour:
     def test_issue_closed_for_this_commit_stays_closed(self, tmp_path):
         proc, writes, _ = self._run(tmp_path, 30, issues=[self._issue("closed", "SHA")])
         assert proc.returncode == 0, proc.stderr
-        assert [c for c in writes if "POST" in c or "PATCH" in c] == [], (
+        assert writes == [], (
             "you closed this for this exact commit; "
             "reopening it every 6h is how the watchdog gets disabled"
         )
@@ -3420,35 +3410,18 @@ class TestReleaseWatchdogBehaviour:
         proc, writes, _ = self._run(
             tmp_path,
             30,
-            rn_pages=[
-                [
-                    {
-                        "id": "rn1",
-                        "status": "completed",
-                        "display_title": "TITLE",
-                        "event": "pull_request",
-                    }
-                ]
-            ],
+            rn_pages=self._one_run("completed", event="pull_request"),
             rn_jobs={"rn1": self._jobs("success")},
         )
         assert proc.returncode == 0, proc.stderr
         assert len(self._created(writes)) == 1, "a pull_request run marked the tag released"
 
     def test_run_for_a_lookalike_tag_does_not_count(self, tmp_path):
-        """Git allows '@' in tag names: a run for v9.9.9@evil must not release v9.9.9."""
+        """A run for a longer tag name that starts with this one must not release it."""
         proc, writes, _ = self._run(
             tmp_path,
             30,
-            rn_pages=[
-                [
-                    {
-                        "id": "rn1",
-                        "status": "completed",
-                        "display_title": self._run_title("v9.9.9@evil", "SHA"),
-                    }
-                ]
-            ],
+            rn_pages=self._one_run("completed", self._run_title("v9.9.9@evil", "SHA")),
             rn_jobs={"rn1": self._jobs("success")},
         )
         assert proc.returncode == 0, proc.stderr
@@ -3460,7 +3433,7 @@ class TestReleaseWatchdogBehaviour:
         proc, writes, _ = self._run(
             tmp_path,
             30,
-            rn_pages=[[{"id": "rn1", "status": "completed", "display_title": "TITLE"}]],
+            rn_pages=self._one_run("completed"),
             rn_jobs={"rn1": self._jobs("skipped")},
             rn_jobs_older={"rn1": self._jobs("success")},
         )

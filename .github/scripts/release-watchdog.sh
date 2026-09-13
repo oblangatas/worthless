@@ -13,8 +13,8 @@
 #
 # Per v* tag:
 #   older than 14 days               -> ignored (also keeps pre-automation tags quiet)
-#   the create step succeeded        -> released
 #   younger than 24h                 -> too early; publishers need time
+#   the create step succeeded        -> released
 #   approval waiting, under 72h      -> the normal pause before the click
 #   approval waiting, 72h or more    -> ALARM
 #   a release run still in progress  -> next tick decides
@@ -125,11 +125,14 @@ while read -r tag created <&3; do
   watched=$((watched + 1))
   # A re-tag is a new tag object with a new date, so the clock restarts with it.
   sha=$(git rev-list -n 1 "refs/tags/${tag}")
-  # Any sha: a Release created before a re-tag still counts as released. But the rest
-  # of the title must be a whole commit id — git allows "@" in tag names, so a prefix
-  # match alone would let a run for v1@x count for v1.
-  mine=$(jq -c --arg p "${RUN_TITLE_PREFIX} ${tag}@" \
-    'select((.title | startswith($p)) and (.title | ltrimstr($p) | test("^[0-9a-f]{40}$")))' <<<"$runs")
+  if [ "$age_h" -lt "$MIN_AGE_H" ]; then
+    echo "${tag}: ${age_h}h old, too early to judge."
+    continue
+  fi
+  # Titles are "<prefix> <tag> <sha>". Git forbids spaces in tag names, so the
+  # trailing space makes this exact: a run for v1.2.3@x never counts for v1.2.3.
+  # Any sha: a Release created before a re-tag still counts as released.
+  mine=$(jq -c --arg p "${RUN_TITLE_PREFIX} ${tag} " 'select(.title | startswith($p))' <<<"$runs")
 
   released=false
   for id in $(jq -r 'select(.status == "completed") | .id' <<<"$mine"); do
@@ -147,10 +150,6 @@ while read -r tag created <&3; do
     echo "${tag}: released."
     continue
   fi
-  if [ "$age_h" -lt "$MIN_AGE_H" ]; then
-    echo "${tag}: ${age_h}h old, too early to judge."
-    continue
-  fi
 
   waiting=$(jq -rs 'map(select(.status == "waiting")) | first | .title // empty' <<<"$mine")
   if [ -n "$waiting" ]; then
@@ -158,10 +157,10 @@ while read -r tag created <&3; do
       echo "${tag}: waiting for approval (${age_h}h), which is normal."
       continue
     fi
-    if [ "$waiting" = "${RUN_TITLE_PREFIX} ${tag}@${sha}" ]; then
+    if [ "$waiting" = "${RUN_TITLE_PREFIX} ${tag} ${sha}" ]; then
       why="The release run has waited ${age_h}h for your approval. Before approving, check it was built from commit ${sha}, the one your signed tag points at. If you do not recognise it, reject it."
     else
-      why="A release run is waiting for approval for an OLD commit (${waiting##*@}), but the tag now points at ${sha}. Approving it will fail the tag re-bind check. Reject that run so the current commit can release."
+      why="A release run is waiting for approval for an OLD commit (${waiting##* }), but the tag now points at ${sha}. Approving it will fail the tag re-bind check. Reject that run so the current commit can release."
     fi
     alarm "$tag" "$sha" "$why"
     continue
