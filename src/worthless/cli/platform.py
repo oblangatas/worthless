@@ -31,14 +31,36 @@ _CREATE_NEW_PROCESS_GROUP = 0x00000200
 _warned: bool = False
 
 
+def _read_kernel_osrelease() -> str:
+    """Kernel release string. Separate so tests can inject (cf. fs_check)."""
+    with open("/proc/sys/kernel/osrelease") as f:  # noqa: PTH123
+        return f.read().strip()
+
+
 def is_wsl() -> bool:
     """True when running under Windows Subsystem for Linux (WSL1 or WSL2).
 
-    ``WSL_DISTRO_NAME`` (WSL2) and ``WSL_INTEROP`` (WSL1) are the canonical
-    env vars set by WSL. Checking a ``/mnt/`` prefix would false-positive on
-    any Linux mount (NFS, USB, EFS), so the env vars are the reliable signal.
+    Two signals, because either alone is fragile:
+
+    - ``WSL_DISTRO_NAME`` (WSL2) / ``WSL_INTEROP`` (WSL1) are set in a user's
+      interactive WSL shell, but a login shell clears them. On a real WSL2
+      runner, worthless run via ``runuser -l`` saw neither and reported
+      "not WSL" — so the user was never told how to enable systemd. ``sudo -i``,
+      ``su -`` and background services lose them the same way, which is
+      exactly when a service install is being attempted.
+    - The kernel release string carries ``microsoft`` on both WSL1
+      (``4.4.0-19041-Microsoft``) and WSL2 (``...-microsoft-standard-WSL2``),
+      and no environment reset touches it.
+
+    A ``/mnt/`` prefix check is still avoided: it false-positives on any
+    ordinary Linux mount (NFS, USB, EFS).
     """
-    return bool(os.environ.get("WSL_DISTRO_NAME") or os.environ.get("WSL_INTEROP"))
+    if os.environ.get("WSL_DISTRO_NAME") or os.environ.get("WSL_INTEROP"):
+        return True
+    try:
+        return "microsoft" in _read_kernel_osrelease().lower()
+    except OSError:
+        return False
 
 
 def _read_proc_1_comm() -> str:

@@ -920,6 +920,10 @@ class TestSystemdPreflight:
             patch.object(systemd, "resolve_worthless_binary", return_value=self._binary(tmp_path)),
             patch.object(systemd, "report_proxy_health"),
             patch("worthless.cli.platform._read_proc_1_comm", return_value="init"),
+            # Pin the kernel too. is_wsl() also reads it, so without this the
+            # test would FAIL for anyone running the suite on WSL — our primary
+            # platform — because their kernel genuinely says microsoft.
+            patch("worthless.cli.platform._read_kernel_osrelease", return_value="6.8.0-45-generic"),
             patch.dict("os.environ", env, clear=True),
             pytest.raises(WorthlessError) as excinfo,
         ):
