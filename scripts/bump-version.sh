@@ -203,9 +203,10 @@ Done. Next steps:
      on the maintainer's machine — in one line:
      git switch main && git pull --ff-only && ./scripts/tag-release.sh $new_version "<headline>"
 
-  6. tag-release.sh then prints the four approvals and the exact commit to check
-     before each one. The Release page is created automatically — never create it
-     yourself. Everything else, including what to do if something fails: RELEASING.md
+  6. tag-release.sh then prints the four approvals and exactly what to check before
+     each one. The Release page should then be created automatically (not yet proven
+     on a real release — check it). Never create it yourself. Everything else,
+     including what to do if something fails: RELEASING.md
 
      # WARNING: NEVER run gh release create before the signed tag is pushed.
      # It creates an unsigned tag and permanently tombstones the version name.

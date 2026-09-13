@@ -37,15 +37,17 @@ because that sentence was not enforced, and the same bug shipped twice.
    | Publish worthless-mcp to npm | `npm-publish` |
    | Deploy Worker (worthless-sh) | `worthless-sh-production` |
 
-   **Before each approval, check the run is for your tag, at the commit
+   **Before each of these approvals, check the run shows your tag, at the commit
    `git rev-parse --short v<version>^{commit}` prints.** Reject anything else, including re-runs of
-   older tags. A green signature step does not prove the run is yours — see
+   older tags you didn't start yourself (a rollback, say). A green signature step does not prove the run is yours — see
    [What a signed tag does NOT stop](#what-a-signed-tag-does-not-stop). The GHCR image
    (Publish Docker image to GHCR) publishes without an approval.
 
 4. **Approve the Release.** Once all four publishers are green, **Create GitHub Release** waits on
-   the `release` environment. Make the same check and approve. It then re-binds the tag to the
-   commit the publishers passed on, re-verifies the signature, and creates the Release.
+   the `release` environment. Its run shows `main`, not your tag — expected, because it runs from
+   `main`. Check its **gate** job instead: the log must show `TAG: v<version>` and a `HEAD_SHA`
+   starting with that same commit. Then approve. It re-binds the tag to that commit, re-verifies the
+   signature, and creates the Release.
 
 > **Not yet proven on a real release.** The three publisher approvals and the automatic Release were
 > set up in September 2026. A test run showed the Release step starts, checks the publishers, waits
@@ -58,12 +60,14 @@ because that sentence was not enforced, and the same bug shipped twice.
   Fix that, then open that run → **Re-run failed jobs**. It asks for approval again. Never use
   **Run workflow**: a manual dispatch is a different event, and the Release step will not count it.
 - **The code itself must change** — a CVE, a bug. A re-run replays the tagged commit, so it cannot
-  pick up a fix. If no registry has published this version yet, follow [Recovery](#recovery). If any
-  registry already has it, release a new version instead. Never move or delete a tag that shipped.
+  pick up a fix. If neither PyPI nor npm has published this version yet, follow [Recovery](#recovery).
+  If either has — neither ever accepts the same version twice — release a new version instead.
+  Never move or delete a tag that shipped.
 
 ### No Release appeared
 
-1. Open Actions → **Create GitHub Release** for your tag.
+1. Open Actions → **Create GitHub Release**. Its runs all show `main`; open the latest one whose
+   **gate** job log shows `TAG: v<version>`.
    - Failed at **Re-verify the tag GPG signature**? Stop: that tag is not yours. Create nothing.
    - Red for another reason? Read its warning, fix that, and re-run it. Don't create a draft.
 2. Only if there is no such run at all, with every publisher green and nothing waiting for approval,
@@ -134,8 +138,8 @@ So the hook does a plain text check on the tag object and never invokes gpg.
 
 ### Recovery
 
-A cut that failed before any registry published the version is recovered by deleting the tag
-and re-running the script. If any registry already has the version, release a new version instead:
+A cut that failed before PyPI or npm published the version is recovered by deleting the tag and
+re-running the script. If either already has it, release a new version instead:
 
 ```
 git tag -d v0.4.0 && git push --delete origin v0.4.0

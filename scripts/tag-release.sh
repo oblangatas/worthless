@@ -184,11 +184,14 @@ echo "  3. Deploy Worker (worthless-sh)  (environment: worthless-sh-production)"
 echo "  4. Create GitHub Release         (environment: release) — only appears once"
 echo "     all four publishers are green. The GHCR image needs no approval."
 echo
-echo "BEFORE EACH APPROVAL: the run must be for $tag at commit $tag_commit."
-echo "Reject anything else, including re-runs of older tags. A green signature step"
-echo "does not prove the run is yours — it runs the tagged commit's own copy."
+echo "BEFORE APPROVALS 1-3: the run must show $tag at commit $tag_commit."
+echo "Reject anything else, including re-runs of older tags you did not start. A green"
+echo "signature step does not prove the run is yours — it runs the tagged commit's copy."
+echo "APPROVAL 4 shows 'main', not the tag — expected, it runs from main. Open its"
+echo "'gate' job instead: the log must show TAG: $tag and a HEAD_SHA starting $tag_commit."
 echo
-echo "The Release page appears right after approval 4. Until then it will NOT"
+echo "The Release page should appear right after approval 4. That step has not run on"
+echo "a real release yet, so check the Releases page. Before approval 4 it will NOT"
 echo "appear — that is the approval step working, not a failure."
 echo
 echo "If a publisher fails for a reason outside the tagged code (a token, a setting,"
@@ -213,7 +216,8 @@ echo
 echo "FALLBACK — only when there is NO waiting run, NO pending approval, and every"
 echo "publisher is green, yet no Release exists."
 echo
-echo "First open Actions → 'Create GitHub Release' for $tag:"
+echo "First open Actions → 'Create GitHub Release'. Its runs all show 'main'; open the"
+echo "latest one whose 'gate' job log shows TAG: $tag."
 echo "  - Failed at 'Re-verify the tag GPG signature'? STOP: that tag is not yours."
 echo "    Create nothing."
 echo "  - Red for another reason? Read its warning, fix that, and re-run it. Do not"

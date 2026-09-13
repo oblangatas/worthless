@@ -137,10 +137,13 @@ Then in the repo's Settings → Secrets and variables → Actions →
 
 #### Verifying the setup
 
-Push a test signed tag against a sandbox branch:
+Push a test tag, signed the way `tag-release.sh` signs (a bare `git tag -s` signs with SSH on the
+maintainer's machine, and CI refuses it). The push starts all four publishers — reject their
+approvals:
 
 ```bash
-git tag -s v0.0.0-verify-test -m "test"
+# <fingerprint> = GPG_FINGERPRINT in scripts/tag-release.sh
+git -c gpg.format=openpgp -c user.signingkey=<fingerprint> tag -s v0.0.0-verify-test -m "test"
 git push origin v0.0.0-verify-test
 gh run watch
 # Verify step should print: "Tag v0.0.0-verify-test verified against pinned fingerprint <FPR>."
