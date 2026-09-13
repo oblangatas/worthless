@@ -106,7 +106,7 @@ def _isolate_fernet_storage_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _isolate_cli_globals(monkeypatch: pytest.MonkeyPatch) -> None:
+def _isolate_cli_globals() -> None:
     """Start every test with the CLI's process-globals at their defaults.
 
     ``set_console`` (called directly, or by the CLI callback for ``--quiet`` /
@@ -115,12 +115,12 @@ def _isolate_cli_globals(monkeypatch: pytest.MonkeyPatch) -> None:
     every later test on the same xdist worker. ``set_debug`` (``--debug``)
     leaks the same way and changes error rendering for later tests.
 
-    Each test starts from the defaults, not from whatever value it inherited,
-    so pollution from outside function scope can't reach the test body.
-    (Teardown still puts the inherited value back; the next test resets again.)
+    Plain assignment, not ``monkeypatch``: a test calling
+    ``monkeypatch.undo()`` would otherwise hand back the inherited, possibly
+    quiet, value mid-test. No teardown needed; the next test resets again.
     """
-    monkeypatch.setattr(_cli_console, "_console", None)
-    monkeypatch.setattr(_cli_errors, "_debug", False)
+    _cli_console._console = None
+    _cli_errors._debug = False
 
 
 def make_repo(home: WorthlessHome) -> ShardRepository:
