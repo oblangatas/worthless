@@ -408,7 +408,21 @@ describe("body integrity — install.sh shape and bounded size (H-08)", () => {
     });
     expect(res.status).toBe(200);
     const body = await res.text();
-    expect(body.length).toBeLessThan(26_800);
+    //   - WOR-597 (shadow warning) merged with worthless-mb6l: 26.8 KB -> 31 KB.
+    //     install.sh now compares the binary it installed against what the
+    //     caller's PATH resolves, and names both when they differ instead of
+    //     announcing success for one it did not install. Bytes are three
+    //     helpers -- canonical_path (walks symlinks; `readlink -f` is GNU-only
+    //     and `realpath` absent on older macOS), sanitize_for_display (strips
+    //     control bytes, so a crafted dir name cannot erase the warning that
+    //     names it), shadowing_worthless_path (the guards) -- plus the warning.
+    //     Both changes kept; 389 chars of duplication removed to fit rather
+    //     than bump twice: worthless_on_original_path folded into
+    //     command_in_original_path, and the repeated sanitize calls hoisted.
+    //     Slack ~50 bytes. NOTE: the worthless-mb6l line above miscounts --
+    //     measured slack at that commit was 29, not 197. The slack IS the
+    //     detection threshold for a surgical append, so do not let it rot.
+    expect(body.length).toBeLessThan(31_000);
   });
 
   it("install-script body Content-Length header matches actual byte length", async () => {
