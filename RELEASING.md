@@ -6,14 +6,35 @@ because that sentence was not enforced, and the same bug shipped twice.
 ## Cut a release
 
 ```
-./scripts/bump-version.sh <version>      # bump, commit, PR
+./scripts/bump-version.sh <version>                # on a branch: bump, commit, open a PR
 #   ... merge the PR to main ...
-./scripts/tag-release.sh <version> "<headline>"
+./scripts/tag-release.sh <version> "<headline>"    # on main, on the maintainer's machine
 ```
 
 `tag-release.sh` runs eight preflight checks, signs the tag with OpenPGP using an explicit
-per-invocation `gpg.format` override, verifies it locally, pushes it, and then prints the
-`gh release create` command to run **after** CI is green.
+per-invocation `gpg.format` override, verifies it locally, and pushes it. The push starts the
+four publishers. Then:
+
+1. **Approve three deployments.** `pypi`, `npm-publish` and `worthless-sh-production` each wait
+   for the maintainer: Actions → the waiting run → **Review deployments**. The GHCR image
+   publishes without an approval.
+2. **Approve `release`.** Once all four publishers pass, `release-notes.yml` checks every job —
+   not just each workflow's headline verdict — re-verifies the tag signature, and waits on the
+   `release` environment. After approval it creates the GitHub Release itself, with notes from
+   `CHANGELOG.md`.
+
+Do **not** create the Release by hand, in the GitHub UI or with `gh release create`.
+
+If a publisher fails, fix the cause and use **Re-run failed jobs** on that run. **Run workflow**
+is a different event and will not clear the release gate.
+
+If every publisher is green, nothing is waiting for approval, and still no Release appears, the
+automation did not fire — and nothing alerts you to that yet. Only then create a draft, and find
+out why before publishing it:
+
+```
+gh release create v<version> --draft --title "v<version>: <headline>" --verify-tag --generate-notes
+```
 
 **Never run `gh release create` before the tag is pushed.** It creates the git tag itself,
 unsigned, and permanently tombstones the name on GitHub — the name cannot be reused even
@@ -91,9 +112,16 @@ The override is honored by the hook and **logged** to
 - **A tag whose message contains a correctly-formatted PGP armor line.** The check is
   textual.
 - **Contributors, CI, and any clone that never ran the installer.**
-- **Wrong-key, wrong-commit, or wrong-name tags.** Only `.github/scripts/verify-tag.sh`
-  decides what actually ships. It is fingerprint-pinned, fail-closed, and enforced on all
-  four publishers by `tests/test_tag_publishers_gated.py`.
+- **Wrong-key, wrong-commit, or wrong-name tags.** `.github/scripts/verify-tag.sh` is the
+  check for those. It is fingerprint-pinned, fail-closed, and enforced on all four publishers
+  by `tests/test_tag_publishers_gated.py`.
+- **Anyone who can push to this repo.** Each publisher runs the copy of `verify-tag.sh` — and
+  of its own workflow file — that lives in the tagged commit, so a tag pointing at a commit
+  that edits them skips the check. A leaked token or an automation acting as the maintainer
+  can do this without the signing key. Today the backstop is the maintainer's approval on the
+  `pypi`, `npm-publish` and `worthless-sh-production` environments, which a token with enough
+  access can also give; the GHCR image has no approval at all. Moving the check onto code a
+  tag cannot change is tracked separately.
 
 ## Placements that do not work
 
