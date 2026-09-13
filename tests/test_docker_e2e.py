@@ -1497,6 +1497,7 @@ class TestSDKSmokeDocker:
         client = openai.OpenAI(
             api_key=shard_a,
             base_url=f"http://127.0.0.1:{port}/{alias}/v1",
+            max_retries=0,
         )
         # APIStatusError = an HTTP response came back. APIConnectionError
         # (proxy unreachable) is NOT a subclass, so it escapes and fails the test.
@@ -1506,6 +1507,12 @@ class TestSDKSmokeDocker:
                 max_tokens=1,
                 messages=[{"role": "user", "content": "hi"}],
             )
+        # 401 + sanitized upstream message = proxy dispatched the alias, rebuilt
+        # the fake key, and the real provider rejected it. A broken alias lookup
+        # ("authentication required"), unreachable upstream (502), dead sidecar
+        # (503), or crash page (500) all fail here.
+        assert exc.value.status_code == 401, exc.value.response.text
+        assert "upstream provider error" in exc.value.response.text
         err_str = str(exc.value).lower()
         assert "traceback" not in err_str
         assert "worthless" not in err_str
@@ -1523,14 +1530,17 @@ class TestSDKSmokeDocker:
         client = anthropic.Anthropic(
             api_key=shard_a,
             base_url=f"http://127.0.0.1:{port}/{alias}",
+            max_retries=0,
         )
-        # See openai sibling: only an HTTP response from the proxy satisfies this.
+        # See openai sibling for why each assertion is needed.
         with pytest.raises(anthropic.APIStatusError) as exc:
             client.messages.create(
                 model="claude-haiku-4-5-20251001",
                 max_tokens=1,
                 messages=[{"role": "user", "content": "hi"}],
             )
+        assert exc.value.status_code == 401, exc.value.response.text
+        assert "upstream provider error" in exc.value.response.text
         err_str = str(exc.value).lower()
         assert "traceback" not in err_str
         assert "worthless" not in err_str
