@@ -21,6 +21,7 @@ It is the canonical place to answer:
 - [flows.md](flows.md): the main end-to-end flows through the system
 - [operations.md](operations.md): operator and maintainer runtime notes
 - [release-gates.md](release-gates.md): hard go/no-go criteria for Starter and OpenClaw releases
+- [../RELEASING.md](../RELEASING.md): how a release is actually cut, the local tag guard, and what it does not defend against
 - [tooling.md](tooling.md): generated-docs workflow, verification, and helper tooling
 - [research/README.md](research/README.md): internal research inputs and retained working analysis
 - [research/ai-docs-tools-research-2026.md](research/ai-docs-tools-research-2026.md): preserved market research for AI-first docs tooling

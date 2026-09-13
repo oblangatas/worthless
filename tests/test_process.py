@@ -10,7 +10,14 @@ from pathlib import Path
 
 import pytest
 
-from tests._fakes import WOR309_SUBPROCESS_FOLLOWUP
+from worthless.cli.bootstrap import ensure_home
+from worthless.cli.process import poll_health, spawn_proxy
+from worthless.crypto.types import zero_buf
+from worthless.cli.sidecar_lifecycle import (
+    shutdown_sidecar,
+    spawn_sidecar,
+    split_to_tmpfs,
+)
 
 
 class TestCreateLivenessPipe:
@@ -174,38 +181,78 @@ class TestForwardSignals:
             signal.signal(signal.SIGTERM, signal.SIG_DFL)
 
 
+def _spawn_sidecar_or_clean(shares):
+    """``spawn_sidecar``, but never leave shards on disk if it raises.
+
+    Ports the ``handle is None`` branch from ``up.py:540-556``. The two
+    share files together ARE the Fernet key (sidecar/__main__.py:85-89),
+    so a WRTLS-114 timeout must not strand them in pytest's basetemp,
+    which CI can upload as an artifact. SR-02: zero both shards too.
+    """
+    try:
+        return spawn_sidecar(shares.run_dir / "sidecar.sock", shares, allowed_uid=os.getuid())
+    except BaseException:
+        for path in (shares.share_a_path, shares.share_b_path):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        try:
+            shares.run_dir.rmdir()
+        except OSError:
+            pass
+        zero_buf(shares.shard_a)
+        zero_buf(shares.shard_b)
+        raise
+
+
 @pytest.mark.integration
 @pytest.mark.real_ipc
 @pytest.mark.timeout(30)
-@pytest.mark.skip(reason=WOR309_SUBPROCESS_FOLLOWUP)
 class TestSpawnProxyIntegration:
     """Integration test: spawn real proxy and check health."""
 
     def test_spawn_and_health(self, tmp_path: Path):
         """Spawn proxy on random port, poll health, shut down."""
-        from worthless.cli.process import poll_health, spawn_proxy
-
-        # Set up minimal WorthlessHome
-        from worthless.cli.bootstrap import ensure_home
-
         home = ensure_home(tmp_path / ".worthless")
 
+        # WORTHLESS_FERNET_KEY here is the INPUT to fernet_transport
+        # (process.py:347-360), which pops it and hands the key to the child
+        # over an os.pipe as WORTHLESS_FERNET_FD. It never reaches the child
+        # environment — prepare_proxy_env scrubs it at process.py:398-401.
+        # This is that transport's only real-spawn coverage; do not drop it.
         env = {
             "WORTHLESS_DB_PATH": str(home.db_path),
             "WORTHLESS_FERNET_KEY": home.fernet_key.decode(),
             "WORTHLESS_ALLOW_INSECURE": "true",
         }
 
-        proc, port = spawn_proxy(env, port=0)
+        # Separately, the proxy answers /healthz only once a sidecar is
+        # serving decrypt IPC (WOR-309, app.py:262-271 fails loud with no
+        # fallback), so mirror `worthless up` (up.py:504-519).
+        fernet_key = home.fernet_key
         try:
+            shares = split_to_tmpfs(fernet_key, home.base_dir)
+        finally:
+            fernet_key[:] = bytearray(len(fernet_key))
+
+        # Inside the try below: a spawn_proxy failure would otherwise orphan
+        # the sidecar and its tmpfs shares.
+        handle = _spawn_sidecar_or_clean(shares)
+        proc = None
+        try:
+            env["WORTHLESS_SIDECAR_SOCKET"] = str(handle.socket_path)
+            proc, port = spawn_proxy(env, port=0)
             assert port > 0
             assert proc.poll() is None  # Still running
 
             healthy = poll_health(port, timeout=15.0)
             assert healthy is True
         finally:
-            proc.terminate()
-            proc.wait(timeout=5)
+            if proc is not None:
+                proc.terminate()
+                proc.wait(timeout=5)
+            shutdown_sidecar(handle)
 
 
 class TestProxyCmdShape:

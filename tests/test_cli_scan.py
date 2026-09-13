@@ -465,10 +465,23 @@ class TestScanInstallHookEdgeCases:
 class TestScanPrecommitEdgeCases:
     """Additional edge cases for --pre-commit mode."""
 
-    def test_precommit_no_files_exits_0(self) -> None:
-        """--pre-commit with no files at all -> exit 0."""
+    def test_precommit_no_files_fails_closed(self) -> None:
+        """--pre-commit with no files at all -> exit 2, never a clean verdict.
+
+        Was ``test_precommit_no_files_exits_0``, added by a coverage-gap pass
+        (WOR-45) that pinned the behaviour rather than the contract. That exit 0
+        WAS the bug (worthless-2kuy): git invokes pre-commit hooks with zero
+        arguments, so the installed hook inspected nothing, printed "No API keys
+        found." and let a real key commit clean.
+
+        Step 2 will revisit this: once scan collects staged files itself, an
+        empty staged set becomes legitimate (empty/merge commit) and exit 0 is
+        correct again — for a different reason. Until then, no files can only
+        mean the hook is broken.
+        """
         result = runner.invoke(app, ["scan", "--pre-commit"])
-        assert result.exit_code == 0
+        assert result.exit_code == 2
+        assert "No API keys found" not in result.stdout + result.stderr
 
     def test_precommit_nonexistent_file_exits_0(self, tmp_path: Path) -> None:
         """--pre-commit with a nonexistent staged file should not crash."""
@@ -787,7 +800,9 @@ class TestFormatHumanBranches:
         from worthless.cli.scanner import ScanFinding
 
         finding = ScanFinding(
-            file="/tmp/x.env",  # noqa: S108
+            file="/tmp/.env",  # noqa: S108 — must be a real .env basename: lock's
+            # allowlist refuses "x.env", so scan would (correctly) not
+            # suggest lock for it.
             line=1,
             var_name="KEY",
             provider="openai",
@@ -803,7 +818,9 @@ class TestFormatHumanBranches:
         from worthless.cli.scanner import ScanFinding
 
         finding = ScanFinding(
-            file="/tmp/x.env",  # noqa: S108
+            file="/tmp/.env",  # noqa: S108 — must be a real .env basename: lock's
+            # allowlist refuses "x.env", so scan would (correctly) not
+            # suggest lock for it.
             line=1,
             var_name="KEY",
             provider="openai",
@@ -837,3 +854,116 @@ class TestFormatHumanBranches:
         ):
             result = runner.invoke(app, ["scan", "--deep"])
         assert result.exit_code in (0, 1)
+
+
+class TestScanVerdictNamesTheRealFile:
+    """The verdict line must describe the file it actually scanned.
+
+    ``_scan_verdict_line`` hardcoded ".env" and "Run `worthless lock`". That was
+    survivable while scan mostly looked at ``.env`` files. Once the pre-commit
+    hook began scanning STAGED SOURCE FILES (worthless-2kuy), the common case
+    became a key in ``app.py`` — reported as "exposed in .env", sending the user
+    to look in the wrong file, and then to a command that cannot help: lock's
+    basename allowlist accepts only the 9 ``.env``-family names, so
+    ``worthless lock --env app.py`` is refused by design.
+    """
+
+    def test_source_file_verdict_does_not_say_dotenv(self, tmp_path: Path) -> None:
+        leaky = tmp_path / "app.py"
+        leaky.write_text(f'OPENAI_API_KEY = "{_fake_openai_key()}"\n')
+
+        result = runner.invoke(app, ["scan", str(leaky)])
+        out = " ".join((result.stdout + result.stderr).split())
+
+        # Not vacuous: the key really was found.
+        assert "app.py" in out, f"scan must report the file it scanned; output:\n{out}"
+
+        assert "exposed in .env" not in out, (
+            f"scan reported a key in app.py as exposed in .env, sending the user "
+            f"to a file that does not contain it; output:\n{out}"
+        )
+
+    def test_source_file_is_not_sent_to_lock(self, tmp_path: Path) -> None:
+        leaky = tmp_path / "app.py"
+        leaky.write_text(f'OPENAI_API_KEY = "{_fake_openai_key()}"\n')
+
+        result = runner.invoke(app, ["scan", str(leaky)])
+        out = " ".join((result.stdout + result.stderr).split()).lower()
+
+        # lock's basename allowlist refuses anything outside the .env family, so
+        # "run lock on this file" cannot be carried out. Advice that names the
+        # move first IS followable, so assert the guidance is right rather than
+        # banning the word — absence alone would also pass on silence.
+        assert "move it to a .env file" in out, (
+            f"scan must tell the user how to make this actionable; output:\n{out}"
+        )
+        assert "run: worthless lock" not in out, (
+            f"scan issued the bare instruction to run lock on a file lock "
+            f"refuses by design; output:\n{out}"
+        )
+
+    def test_dotenv_verdict_is_unchanged(self, tmp_path: Path) -> None:
+        # The .env path is the one where the existing wording is correct and the
+        # advice is followable. It must keep both.
+        env = tmp_path / ".env"
+        env.write_text(f"OPENAI_API_KEY={_fake_openai_key()}\n")
+
+        result = runner.invoke(app, ["scan", str(env)])
+        out = " ".join((result.stdout + result.stderr).split()).lower()
+
+        assert "worthless lock" in out, (
+            f"a .env with an exposed key must still point at lock; output:\n{out}"
+        )
+
+
+class TestInstallHookIntoExistingExecHook:
+    """worthless-2kuy step 3: never append below an ``exec``.
+
+    The pre-commit FRAMEWORK's generated hook ends with an ``exec ... hook-impl``
+    line. ``exec`` replaces the shell process, so anything appended after it is
+    unreachable. The installer's marker check only prevents double-installs, not
+    dead placement — so for users already running pre-commit (the most
+    hook-literate ones), worthless's line was installed and never ran.
+    """
+
+    def _framework_hook(self) -> str:
+        # Shape of the real pre-commit framework template.
+        return (
+            "#!/usr/bin/env bash\n"
+            "# start templated\n"
+            "INSTALL_PYTHON=/usr/bin/python3\n"
+            "ARGS=(hook-impl --config=.pre-commit-config.yaml --hook-type=pre-commit)\n"
+            "# end templated\n"
+            'exec "$INSTALL_PYTHON" -mpre_commit "${ARGS[@]}"\n'
+        )
+
+    def test_worthless_line_is_reachable_after_install(self, tmp_path: Path) -> None:
+        git_dir = tmp_path / ".git"
+        (git_dir / "hooks").mkdir(parents=True)
+        hook = git_dir / "hooks" / "pre-commit"
+        hook.write_text(self._framework_hook())
+
+        result = runner.invoke(app, ["scan", "--install-hook"], env={"GIT_DIR": str(git_dir)})
+        assert result.exit_code == 0, f"{result.stdout}{result.stderr}"
+
+        content = hook.read_text()
+        lines = [ln.strip() for ln in content.splitlines()]
+        exec_idx = next((i for i, ln in enumerate(lines) if ln.startswith("exec ")), None)
+        worthless_idx = next(
+            (i for i, ln in enumerate(lines) if "worthless scan --pre-commit" in ln), None
+        )
+
+        if worthless_idx is not None and exec_idx is not None:
+            assert worthless_idx < exec_idx, (
+                "worthless's hook line was installed AFTER an `exec`, so it can "
+                "never run — the user believes they are protected and is not.\n"
+                f"hook contents:\n{content}"
+            )
+        else:
+            # The other acceptable outcome: refuse to append and tell the user
+            # to add worthless to .pre-commit-config.yaml instead.
+            out = (result.stdout + result.stderr).lower()
+            assert "pre-commit-config" in out or "already" in out, (
+                "installer neither placed the line reachably nor told the user "
+                f"how to wire it up; output:\n{result.stdout}{result.stderr}"
+            )

@@ -17,14 +17,6 @@ from typing import Any
 from cryptography.fernet import Fernet
 
 
-WOR309_SUBPROCESS_FOLLOWUP = (
-    "WOR-309 follow-up: spawning a real proxy/daemon subprocess now "
-    "requires a real sidecar at WORTHLESS_SIDECAR_SOCKET. Re-enable once "
-    "the harness can launch a sidecar fixture and inject the socket path "
-    "into the spawned process's environment."
-)
-
-
 def pin_shard_b(app: Any, alias: str, shard_b: bytes | bytearray) -> None:
     """Pin a per-alias plaintext into the autouse FakeIPCSupervisor.
 

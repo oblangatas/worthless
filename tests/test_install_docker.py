@@ -934,3 +934,117 @@ def test_host_lock_unwritable_env_fails_without_phantom_enrollment(tmp_path: Pat
         "refused lock left a phantom enrollment behind:\n"
         f"stdout:\n{status.stdout}\nstderr:\n{status.stderr}"
     )
+
+
+# ---------------------------------------------------------------------------
+# worthless-ixca — a genuinely live interrupt
+# ---------------------------------------------------------------------------
+
+SIGINT_TIMEOUT = 300
+
+
+# (image, shell) — install.sh is #!/bin/sh, so the shell it actually runs under
+# differs per distro. Trap semantics are exactly where shells diverge: `trap -`,
+# whether EXIT fires after signal death, and how `kill -INT $$` propagates. The
+# happy-path install matrix already spans these; the SIGNAL path did not.
+SIGINT_SHELL_MATRIX = [
+    ("debian-12-bare", "dash"),
+    ("alpine-bare", "busybox-ash"),
+]
+
+
+@pytest.mark.docker
+@pytest.mark.skipif(not docker_available(), reason="Docker not available")
+@pytest.mark.timeout(SIGINT_TIMEOUT)
+@pytest.mark.parametrize(("fixture", "shell"), SIGINT_SHELL_MATRIX)
+def test_interrupting_a_real_install_does_not_report_a_network_failure(
+    fixture: str, shell: str
+) -> None:
+    """Ctrl+C during a REAL install, in a bare container, with nothing stubbed.
+
+    The unit-level sibling (tests/user_flows/test_install_sigint_live.py) stubs
+    ``curl`` with a sleep so the interrupt lands in a deterministic window. That
+    stub is the assumption most likely to be wrong — a fix that only works when
+    ``curl`` is a shell script that sleeps would pass there and fail in reality.
+
+    This runs the actual script against the actual network in debian-12-bare and
+    interrupts it mid-download for real. ``timeout -s INT --preserve-status``
+    delivers the signal and reports the SCRIPT's exit status rather than
+    timeout's own, which is the number under test.
+
+    Before the fix this printed the "Failed to download Astral installer" banner
+    and exited 10 (``EXIT_NETWORK``) — so CI keyed on 10 would auto-retry an
+    install the operator deliberately stopped.
+    """
+    dockerfile = INSTALL_FIXTURES / f"Dockerfile.{fixture}"
+    tag = f"worthless-ixca-sigint-{fixture}:test"
+    subprocess.run(  # noqa: S603
+        [  # noqa: S607
+            "docker",
+            "build",
+            "-f",
+            str(dockerfile),
+            "-t",
+            tag,
+            str(REPO_ROOT),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=SIGINT_TIMEOUT,
+    )
+    try:
+        # 2s is comfortably inside the Astral download on a warm runner and
+        # before it completes; the assertions do not depend on exactly where it
+        # lands, only that the script was interrupted while working.
+        # busybox `timeout` has NO --preserve-status: passing it makes timeout exit 1
+        # WITHOUT EVER RUNNING install.sh, and the negative assertions below then
+        # pass vacuously. That is exactly what this arm did until a review caught
+        # it, so the flag is selected per shell rather than assumed.
+        flag = "" if shell == "busybox-ash" else "--preserve-status "
+        script = f'timeout -s INT {flag}2 sh /w/install.sh; echo "IXCA-RC=$?"'
+        run = subprocess.run(  # noqa: S603
+            [  # noqa: S607
+                "docker",
+                "run",
+                "--rm",
+                "-v",
+                f"{REPO_ROOT}:/w:ro",
+                tag,
+                "sh",
+                "-c",
+                script,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=SIGINT_TIMEOUT,
+        )
+        out = run.stdout + run.stderr
+        rc_line = [ln for ln in out.splitlines() if ln.startswith("IXCA-RC=")]
+        assert rc_line, f"never captured the script's exit code:\n{out[-800:]}"
+        rc = int(rc_line[-1].split("=", 1)[1])
+
+        assert rc != 10, (
+            "a real interrupted install reported exit 10 (EXIT_NETWORK). A user "
+            "abort is not a network problem, and CI keyed on 10 auto-retries it."
+            f"\n{out[-800:]}"
+        )
+        assert rc != 50, (
+            "a real interrupted install reported exit 50, whose contract is "
+            f"'CDN-poisoned download - CI MUST NOT auto-retry'.\n{out[-800:]}"
+        )
+        assert rc != 0, f"an interrupted install reported success.\n{out[-800:]}"
+        # Pin 130 exactly. Negative-only assertions are how the busybox arm passed
+        # while never executing the script at all.
+        assert rc == 130, (
+            f"expected 130 (128+SIGINT) from a real interrupted install on {shell}; "
+            f"got {rc}.\n{out[-800:]}"
+        )
+        assert "Done!" not in out, f"install ran to completion after SIGINT.\n{out[-800:]}"
+    finally:
+        subprocess.run(  # noqa: S603
+            ["docker", "rmi", "-f", tag],  # noqa: S607
+            capture_output=True,
+            check=False,
+            timeout=120,
+        )

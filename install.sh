@@ -10,6 +10,8 @@
 #   30  conflicting pipx-installed worthless detected
 #   40  unexpected internal failure (uv install crash, smoke-test failed)
 #   50  byte-integrity mismatch (CDN-poisoned download — CI MUST NOT auto-retry)
+#   128+N  killed by signal N (130 = Ctrl+C). NOT an app code — the guarantee
+#          is that an interrupt never reports 10 or 50. (worthless-ixca)
 
 set -eu
 
@@ -18,6 +20,21 @@ EXIT_PLATFORM=20
 EXIT_PIPX_CONFLICT=30
 EXIT_INTERNAL=40
 EXIT_INTEGRITY=50
+
+# worthless-ixca. A POSIX trap that does not exit RESUMES the script, so Ctrl+C
+# used to clean up and then report exit 10 "network failure" on a deliberate
+# abort. `trap -` first stops EXIT double-firing; INT re-raises so a caller's
+# loop stops too (exit 130 alone does not propagate); HUP catches a dropped SSH.
+# Registered once — `trap` replaces rather than chains. Full rationale and the
+# proof for each choice: tests/user_flows/test_install_sigint_live.py.
+# Own these before arming, or an early `die` rm -rf's whatever the ENVIRONMENT
+# called tmpdir (verified: it deleted a real directory).
+tmpdir='' uv_install_err=''
+cleanup() { rm -rf "${tmpdir:-}" 2>/dev/null || :; rm -f "${uv_install_err:-}" 2>/dev/null || :; }
+trap 'cleanup' EXIT
+trap 'trap - EXIT INT HUP; cleanup; kill -INT $$; exit 130' INT
+trap 'trap - EXIT TERM HUP; cleanup; exit 143' TERM
+trap 'trap - EXIT HUP; cleanup; exit 129' HUP
 
 UV_VERSION="0.11.7"
 
@@ -159,6 +176,41 @@ proxy_hints() {
     printf "         system trust store instead of pointing SSL_CERT_FILE at them.\n" >&2
 }
 
+# --- Trusted binary resolution (worthless-rlio / worthless-v0tl) ----------------
+
+# The PATH lockdown outranks the caller only for commands that EXIST in the
+# trusted dirs — it keeps the caller's PATH as the tail by design. sha256sum is
+# in none of them on macOS, and uv is in none of them anywhere, so `command -v`
+# for either reaches an attacker's dir. Resolve inside an explicit list; never
+# fall back to PATH. uv is bounded to where it actually installs, since an
+# attacker owning those dirs already owns the tool being installed there.
+# Both honor WORTHLESS_TRUST_PATH exactly as the lockdown does: only the literal
+# "1" opts out, so a typo-tolerant value cannot bypass. That hatch already means
+# "trust the caller's PATH" and already disables the lockdown, so deferring to it
+# here adds no new weakening — it is what lets the test harness inject stubs.
+trusted_tool() {
+    if [ "${WORTHLESS_TRUST_PATH:-}" = "1" ]; then
+        command -v "$1" 2>/dev/null && return 0
+        return 1
+    fi
+    for d in /usr/bin /bin /usr/local/bin /usr/sbin /sbin /opt/homebrew/bin; do
+        [ -x "$d/$1" ] && { printf '%s' "$d/$1"; return 0; }
+    done
+    return 1
+}
+
+resolve_uv() {
+    if [ "${WORTHLESS_TRUST_PATH:-}" = "1" ]; then
+        command -v uv 2>/dev/null && return 0
+        return 1
+    fi
+    _h="${HOME:-/root}"; [ "$_h" = / ] && _h=/root
+    for d in "$_h/.local/bin" "$_h/.cargo/bin" /usr/bin /bin /usr/local/bin /opt/homebrew/bin; do
+        [ -x "$d/uv" ] && { printf '%s' "$d/uv"; return 0; }
+    done
+    return 1
+}
+
 # --- Platform detection ------------------------------------------------------
 
 detect_os() {
@@ -259,8 +311,8 @@ check_pipx_conflict() {
 
 ensure_uv() {
     # Skip Astral installer entirely if uv is already at the pinned version.
-    if command -v uv >/dev/null 2>&1; then
-        existing_ver="$(uv --version 2>/dev/null | awk '{print $2}')"
+    if uv_bin="$(resolve_uv)"; then
+        existing_ver="$("$uv_bin" --version 2>/dev/null | awk '{print $2}')"
         if [ "$existing_ver" = "$UV_VERSION" ]; then
             ok "  uv ${UV_VERSION} already installed"
             return 0
@@ -271,7 +323,6 @@ ensure_uv() {
     fi
 
     tmpdir="$(mktemp -d 2>/dev/null || mktemp -d -t worthless-uv-XXXXXX)"
-    trap 'rm -rf "$tmpdir"' EXIT INT TERM
     installer="$tmpdir/uv-installer.sh"
 
     if ! curl --fail --silent --show-error --location \
@@ -283,12 +334,12 @@ ensure_uv() {
         exit "$EXIT_NETWORK"
     fi
 
-    if command -v sha256sum >/dev/null 2>&1; then
-        actual="$(sha256sum "$installer" | awk '{print $1}')"
-    elif command -v shasum >/dev/null 2>&1; then
-        actual="$(shasum -a 256 "$installer" | awk '{print $1}')"
+    if hasher="$(trusted_tool sha256sum)"; then
+        actual="$("$hasher" "$installer" | awk '{print $1}')"
+    elif hasher="$(trusted_tool shasum)"; then
+        actual="$("$hasher" -a 256 "$installer" | awk '{print $1}')"
     else
-        die "$EXIT_INTERNAL" "Neither sha256sum nor shasum found." \
+        die "$EXIT_INTERNAL" "No sha256sum or shasum in a trusted system directory." \
             "Cannot verify Astral installer integrity. Aborting for safety."
     fi
     if [ "$actual" != "$ASTRAL_INSTALLER_SHA256" ]; then
@@ -304,10 +355,11 @@ ensure_uv() {
         exit "$EXIT_NETWORK"
     }
 
-    PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+    uvh="${HOME:-/root}"; [ "$uvh" = / ] && uvh=/root
+    PATH="$uvh/.local/bin:$uvh/.cargo/bin:$PATH"
     export PATH
 
-    if ! command -v uv >/dev/null 2>&1; then
+    if ! resolve_uv >/dev/null 2>&1; then
         die "$EXIT_INTERNAL" "uv installed but not on PATH after bootstrap." \
             "Open a new shell and re-run, or add ~/.local/bin to PATH manually."
     fi
@@ -360,7 +412,12 @@ install_or_upgrade_worthless() {
     # user sets WORTHLESS_VERSION.
     installed_ver="$(uv tool list 2>/dev/null \
         | awk '/^worthless / {sub("^v", "", $2); print $2; exit}')"
-    if [ -n "$installed_ver" ] && [ "$installed_ver" = "$effective_version" ]; then
+    # worthless-mb6l: RUN it, do not just stat it. uv lands the receipt and the
+    # shim together and finalises the package after, so an interrupted install
+    # leaves an executable shim that cannot import. `-x` passes; the tool is
+    # broken; the fast-path would skip the --force repair forever.
+    if [ -n "$installed_ver" ] && [ "$installed_ver" = "$effective_version" ] \
+       && "$(uv tool dir --bin 2>/dev/null)/worthless" --version >/dev/null 2>&1; then
         ok "  worthless ${installed_ver} already installed"
         return 0
     fi
@@ -382,14 +439,6 @@ install_or_upgrade_worthless() {
     # warning. Pass an explicit `.XXXXXX` template so both backends behave
     # quietly. (CodeRabbit catch on PR #148.)
     uv_install_err="$(mktemp 2>/dev/null || mktemp -t worthless-uv-install-err.XXXXXX)"
-    # POSIX trap REPLACES rather than chains, so re-include ensure_uv's
-    # tmpdir cleanup here. Without this, ensure_uv's downloaded installer
-    # tmpdir leaks every time install_or_upgrade_worthless runs (the common
-    # path for any non-fresh box). `${tmpdir:-}` guards the case where
-    # ensure_uv short-circuited (uv already at pinned version → never set
-    # tmpdir → `set -u` would barf without the default). (CodeRabbit catch.)
-    # shellcheck disable=SC2064  # expand uv_install_err NOW; tmpdir resolves at trap-fire time
-    trap "rm -rf \"\${tmpdir:-}\"; rm -f \"$uv_install_err\"" EXIT INT TERM
 
     if ! uv tool install --force "$spec" >/dev/null 2>"$uv_install_err"; then
         err "Failed to install ${spec}."

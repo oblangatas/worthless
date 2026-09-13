@@ -5,15 +5,27 @@ from __future__ import annotations
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
 from worthless.cli.app import app
-from worthless.cli.process import write_pid
+from worthless.cli.bootstrap import ensure_home
+from worthless.cli.console import WorthlessConsole
+from worthless.cli.commands.up import start_supervised_proxy
+from worthless.cli.process import (
+    check_pid,
+    pid_path,
+    poll_health,
+    poll_health_pid,
+    read_pid,
+    write_pid,
+)
 
 from tests.fixtures.dirty_home import make_bootstrapped_home
 
@@ -331,72 +343,126 @@ class TestDownWindows:
 
 
 # ---------------------------------------------------------------------------
-# JSON output
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
 # Integration: real process lifecycle
 # ---------------------------------------------------------------------------
 
 
+def _worthless_bin() -> str:
+    """The console script for THIS interpreter's venv.
+
+    Deliberately not a bare ``shutil.which("worthless")``: outside ``uv run``
+    that resolves whatever install happens to be first on PATH — a globally
+    installed worthless, not the code under test. Verified: it returned
+    ~/.local/bin/worthless while the worktree's venv sat unused.
+    """
+    candidate = Path(sys.executable).parent / "worthless"
+    if candidate.exists():
+        return str(candidate)
+    found = shutil.which("worthless")
+    assert found is not None, "worthless console script not found"
+    return found
+
+
+def _free_port() -> int:
+    """An ephemeral port the OS just confirmed is free.
+
+    TOCTOU: the socket closes before the proxy binds, so a parallel xdist
+    worker could take the port in between. Collision is unlikely across the
+    ephemeral range, and it cannot cause a false PASS — but if it happens,
+    poll_health_pid resolves the OTHER worker's PID and the finally block
+    SIGKILLs their process group. Accepted; revisit if this test ever flakes.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _port_in_use(port: int) -> bool:
+    """True when something is accepting connections on 127.0.0.1:port."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.5)
+        return sock.connect_ex(("127.0.0.1", port)) == 0
+
+
 @pytest.mark.integration
-@pytest.mark.timeout(30)
+@pytest.mark.timeout(150)
 class TestDownIntegration:
-    """Real up -d → down lifecycle with actual processes."""
+    """Real background-proxy -> down lifecycle with actual processes.
 
-    def test_up_daemon_then_down(self, tmp_path: Path) -> None:
-        """Start daemon on fixed port, verify it's alive, then stop it."""
-        from worthless.cli.bootstrap import ensure_home
-        from worthless.cli.process import check_pid, pid_path, read_pid
+    Rewritten for worthless-0q7k. This previously drove ``up --daemon`` and
+    carried ``pytest.skip(f"Daemon failed to start: ...")`` in its body. Once
+    daemon mode became a hard refusal (WRTLS-115, up.py:704) that skip fired
+    on every run: the test reported SKIPPED, never FAILED, and nobody looked.
+    So "after `down`, nothing is still listening" was covered by nothing while
+    the suite stayed green.
 
-        worthless_bin = shutil.which("worthless")
-        assert worthless_bin is not None, "worthless CLI not found in PATH"
+    It now drives ``start_supervised_proxy`` — the path the default command
+    actually uses (default_command.py:199) — and asserts rather than skips.
+    """
 
+    def test_supervised_proxy_then_down_frees_the_port(self, tmp_path: Path) -> None:
+        """Start the proxy the supported way, `down` it, prove the port is free."""
         home = ensure_home(tmp_path / ".worthless")
-        env = {
-            **os.environ,
-            "WORTHLESS_HOME": str(home.base_dir),
-        }
-
-        # Use a high ephemeral port to avoid conflicts
-        port = 18900 + os.getpid() % 100
-
-        up_result = subprocess.run(
-            [worthless_bin, "up", "--daemon", "--port", str(port)],
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-
+        env = {**os.environ, "WORTHLESS_HOME": str(home.base_dir)}
+        port = _free_port()
+        log_file = home.base_dir / "proxy.log"
         pf = pid_path(home)
+        pid = None
+
         try:
-            # Verify daemon started
-            if up_result.returncode != 0:
-                pytest.skip(f"Daemon failed to start: {up_result.stderr}")
+            pid = start_supervised_proxy(home, port, log_file, WorthlessConsole(quiet=True))
+            # up.py:394 returns 0 — not None — when the health check times
+            # out, so `is not None` would accept a failed start.
+            assert pid is not None and pid > 1, (
+                f"supervised start did not yield a live PID (got {pid!r})"
+            )
+            assert poll_health(port, timeout=15.0), (
+                f"proxy never became healthy on {port}; log:\n"
+                f"{log_file.read_text() if log_file.exists() else '<no log>'}"
+            )
+            assert _port_in_use(port), "health passed but nothing is listening"
 
-            assert pf.exists(), "PID file should exist after up --daemon"
+            # Carried over from the pre-rewrite test. It never reached these
+            # (it skipped first), but this one runs, so it should assert them.
+            assert pf.exists(), "PID file should exist once the proxy is up"
             info = read_pid(pf)
-            assert info is not None
-            pid, recorded_port = info
-            assert recorded_port == port
-            assert check_pid(pid), "Daemon process should be alive"
+            assert info is not None, "PID file is unreadable"
+            recorded_pid, recorded_port = info
+            assert recorded_port == port, (
+                f"PID file records port {recorded_port}, proxy is on {port}"
+            )
 
-            # Stop it with down
+            # The PID file must name the process ACTUALLY listening — this is
+            # the assumption `down` kills on. Everywhere else poll_health_pid
+            # is exercised it is mocked (test_cli_up.py:250, 291, 382); this
+            # is the only place it runs against a real process.
+            live_pid = poll_health_pid(port, timeout=15.0)
+            assert live_pid == recorded_pid, (
+                f"/healthz is served by {live_pid}, PID file says {recorded_pid}"
+            )
+
             down_result = subprocess.run(
-                [worthless_bin, "down"],
+                [_worthless_bin(), "down"],
                 env=env,
                 capture_output=True,
                 text=True,
-                timeout=15,
+                timeout=30,
             )
-            assert down_result.returncode == 0
-            assert "stopped" in down_result.stderr.lower()
+            assert down_result.returncode == 0, f"down failed: {down_result.stderr}"
+
+            # The point of this test: the port must actually be released.
+            # check_pid alone is not enough — a wedged child can hold the
+            # socket after the parent is reaped.
+            for _ in range(40):
+                if not _port_in_use(port):
+                    break
+                time.sleep(0.25)
+            else:
+                pytest.fail(f"port {port} still has a listener after `down`")
+
+            assert not check_pid(pid), "proxy process should be dead after down"
             assert not pf.exists(), "PID file should be cleaned after down"
-            assert not check_pid(pid), "Daemon should be dead after down"
         finally:
-            # Safety cleanup: kill daemon if test fails mid-way
             if pf.exists():
                 info = read_pid(pf)
                 if info:
@@ -405,6 +471,11 @@ class TestDownIntegration:
                     except (ProcessLookupError, PermissionError, OSError):
                         pass
                 pf.unlink(missing_ok=True)
+            if pid is not None and check_pid(pid):
+                try:
+                    os.killpg(os.getpgid(pid), signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
 
 
 # ---------------------------------------------------------------------------
