@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Proof & Limits: Worthless</title>
+  <meta name="description" content="What Worthless claims, what it proves, and what it does not claim." />
+  <meta name="robots" content="noindex, follow" />
+  <link rel="canonical" href="https://wless.io/red/claims.html" />
+  <meta name="theme-color" content="#f4f7fb" />
+  <meta property="og:title" content="Proof & Limits: Worthless" />
+  <meta property="og:description" content="What Worthless claims, what it proves, and what it does not claim." />
+  <meta property="og:image" content="https://wless.io/og-image.png" />
+  <meta property="og:url" content="https://wless.io/red/claims.html" />
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="Worthless" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="Proof & Limits: Worthless" />
+  <meta name="twitter:description" content="What Worthless claims, what it proves, and what it does not claim." />
+  <meta name="twitter:image" content="https://wless.io/og-image.png" />
+  <link rel="icon" type="image/x-icon" href="../favicon.ico" />
+  <style>
+    body { margin: 0; font-family: Inter, system-ui, sans-serif; background: #f4f7fb; color: #243042; line-height: 1.65; }
+    header, main, footer { max-width: 980px; margin: 0 auto; padding: 2rem 1.3rem; }
+    nav { display: flex; gap: .9rem; flex-wrap: wrap; font-size: .9rem; }
+    footer nav { justify-content: center; margin-top: .7rem; }
+    a { color: #9e2a2b; font-weight: 700; text-decoration: none; }
+    h1 { font-size: clamp(2.2rem, 6vw, 4.6rem); line-height: .96; letter-spacing: -.055em; margin: 2rem 0 1rem; }
+    .lead { max-width: 70ch; color: #5d6b7f; font-size: 1.05rem; }
+    section { margin-top: 2.2rem; padding-top: 1.4rem; border-top: 1px solid #dce4ee; }
+    h2 { letter-spacing: -.03em; }
+    .ledger { display: grid; gap: .9rem; }
+    .row { display: grid; grid-template-columns: 1.05fr 1fr 1fr; gap: 1rem; padding: 1rem; border: 1px solid #dce4ee; border-radius: 8px; background: #fbfcff; }
+    .row strong { display: block; margin-bottom: .35rem; color: #182233; }
+    .row p { margin: 0; color: #536176; font-size: .93rem; }
+    ul { padding-left: 1.2rem; }
+    li { margin: .45rem 0; }
+    code { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: .9em; background: #e9eef7; padding: .08rem .28rem; border-radius: 4px; }
+    @media (max-width: 760px) { .row { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <header>
+    <nav>
+      <a href="../index.html">Home</a>
+      <a href="index.html">Red Blog</a>
+      <a href="incidents.html">Incident notes</a>
+      <a href="security-model.html">Security model</a>
+    </nav>
+    <h1>Proof & limits.</h1>
+    <p class="lead">The short claim is strong and narrow: copied locked AI-key material alone is not enough to call the provider. Everything below is the boundary.</p>
+  </header>
+
+  <main>
+    <section>
+      <h2>What we claim</h2>
+      <div class="ledger">
+        <article class="row">
+          <div><strong>Copied key alone cannot call the provider.</strong><p>After locking, the value left in `.env` is a format-preserving .env shard, not the original provider key.</p></div>
+          <div><strong>Proof hook</strong><p>The local proxy reconstructs only on the working path. A copied shard by itself lacks the local side of the trust boundary.</p></div>
+          <div><strong>Limitation</strong><p>This is not protection against full same-user host compromise or attacker-controlled local code.</p></div>
+        </article>
+        <article class="row">
+          <div><strong>Your app keeps using normal SDK shapes.</strong><p>Worthless uses a local proxy and provider-compatible request routing instead of making you call a new application API.</p></div>
+          <div><strong>Proof hook</strong><p>The website install path points to `https://docs.wless.io/install/` and the repository contains the proxy implementation.</p></div>
+          <div><strong>Limitation</strong><p>Some Docker, CI, or unusual SDK flows may need explicit `BASE_URL` or environment wiring.</p></div>
+        </article>
+        <article class="row">
+          <div><strong>No cloud account required.</strong><p>The launch path is local-first. You do not need a hosted Worthless account to lock local AI keys.</p></div>
+          <div><strong>Proof hook</strong><p>The install path uses the open-source CLI and local proxy.</p></div>
+          <div><strong>Limitation</strong><p>Hosted team workflows are separate from the current local developer promise.</p></div>
+        </article>
+        <article class="row">
+          <div><strong>Supported platforms are macOS, Linux, and WSL.</strong><p>The public platform claim includes WSL for Windows users.</p></div>
+          <div><strong>Proof hook</strong><p>Install docs carry the platform-specific guidance.</p></div>
+          <div><strong>Limitation</strong><p>This is not native Windows support.</p></div>
+        </article>
+        <article class="row">
+          <div><strong>Scanning is LLM-provider-focused.</strong><p>`worthless scan --install-hook` can help catch supported AI key material before commits.</p></div>
+          <div><strong>Proof hook</strong><p>The scanner is scoped to LLM provider patterns and the true provider registry.</p></div>
+          <div><strong>Limitation</strong><p>Worthless is not a scanner replacement. Use tools like gitleaks or trufflehog for broad secret discovery.</p></div>
+        </article>
+        <article class="row">
+          <div><strong>The provider registry is explicit.</strong><p>The current registry centers OpenAI, Anthropic, OpenRouter, Groq, Together, and Ollama.</p></div>
+          <div><strong>Proof hook</strong><p>Supported providers are represented in the product registry rather than implied by marketing chips.</p></div>
+          <div><strong>Limitation</strong><p>Do not read this as broad cloud, payment, source-hosting, database, or generic credential support.</p></div>
+        </article>
+      </div>
+    </section>
+
+    <section>
+      <h2>What we do not claim</h2>
+      <ul>
+        <li>Worthless is not a general vault.</li>
+        <li>Worthless is not a scanner replacement.</li>
+        <li>Worthless is not native Windows support.</li>
+        <li>Worthless is not all-secret protection today.</li>
+        <li>Worthless is not protection against full same-user host compromise.</li>
+        <li>Worthless provides token-budget guardrails, not a hard spend cap.</li>
+        <li>Worthless does not remove the need to rotate a real provider key after a credible incident.</li>
+      </ul>
+    </section>
+  </main>
+
+  <footer>
+    Stable URL for references: <a href="https://wless.io/red/claims.html">https://wless.io/red/claims.html</a>
+    <nav aria-label="Legal">
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../security.html">Security</a>
+      <a href="../license.html">License</a>
+    </nav>
+  </footer>
+</body>
+</html>
