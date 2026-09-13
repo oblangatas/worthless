@@ -7,6 +7,7 @@ real pytest subprocess that loads the suite's own conftest as a plugin.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -14,6 +15,8 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+# A developer shell can reshape the child run; the order pin must not depend on it.
+_CHILD_ENV_DROP = ("PYTEST_ADDOPTS", "PYTEST_PLUGINS", "PYTHONSAFEPATH")
 
 ORDERED_TESTS = """
 from worthless.cli import console, errors
@@ -37,6 +40,8 @@ def test_quiet_console_and_debug_do_not_leak_into_the_next_test(tmp_path: Path) 
     test_file.write_text(ORDERED_TESTS)
     ini = tmp_path / "pytest.ini"
     ini.write_text("[pytest]\n")
+    env = {k: v for k, v in os.environ.items() if k not in _CHILD_ENV_DROP}
+    env["PYTHONPATH"] = str(REPO_ROOT)
 
     result = subprocess.run(  # noqa: S603 — fixed argv, no shell
         [
@@ -57,6 +62,7 @@ def test_quiet_console_and_debug_do_not_leak_into_the_next_test(tmp_path: Path) 
             "-q",
         ],
         cwd=REPO_ROOT,
+        env=env,
         capture_output=True,
         text=True,
         timeout=80,
