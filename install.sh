@@ -412,7 +412,12 @@ install_or_upgrade_worthless() {
     # user sets WORTHLESS_VERSION.
     installed_ver="$(uv tool list 2>/dev/null \
         | awk '/^worthless / {sub("^v", "", $2); print $2; exit}')"
-    if [ -n "$installed_ver" ] && [ "$installed_ver" = "$effective_version" ]; then
+    # worthless-mb6l: RUN it, do not just stat it. uv lands the receipt and the
+    # shim together and finalises the package after, so an interrupted install
+    # leaves an executable shim that cannot import. `-x` passes; the tool is
+    # broken; the fast-path would skip the --force repair forever.
+    if [ -n "$installed_ver" ] && [ "$installed_ver" = "$effective_version" ] \
+       && "$(uv tool dir --bin 2>/dev/null)/worthless" --version >/dev/null 2>&1; then
         ok "  worthless ${installed_ver} already installed"
         return 0
     fi
