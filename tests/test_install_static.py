@@ -341,7 +341,7 @@ def test_explain_audit_discoverable() -> None:
 def test_dockerfiles_pin_base_image_digests() -> None:
     """Every FROM line in install fixtures must pin to @sha256:<digest>.
 
-    Floating tags (`ubuntu:24.04`, `python:3.13-slim-bookworm`) let a
+    Floating tags (`ubuntu:24.04`, `python:3.13-slim-trixie`) let a
     compromised upstream ship malware through our install matrix. Pinning
     by sha256 digest makes the supply chain reproducible — the digest is
     the contract, the tag is just a label.
