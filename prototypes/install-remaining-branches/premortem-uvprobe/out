@@ -1,0 +1,8 @@
+
+Worthless installer (uv-bootstrap)
+
+  Platform: macos
+  uv 0.11.7 already installed
+error: worthless installed but failed to run.
+       Try: worthless --version
+       Or:  worthless doctor
