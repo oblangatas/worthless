@@ -25,6 +25,7 @@ from worthless.cli.code_scanner import (
     CodeFinding,
     scan_for_hardcoded_provider_urls,
 )
+from tests.helpers import skip_if_root
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +128,7 @@ class TestCodeScanHappyFlow:
 
 
 class TestCodeScanBadFlow:
+    @skip_if_root
     def test_unreadable_file_logged_skipped_not_crashed(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -143,9 +145,7 @@ class TestCodeScanBadFlow:
         assert any(f.file.endswith("ok.py") for f in findings)
         assert not any(f.file.endswith("secret.py") for f in findings)
         # The I/O error must be logged at DEBUG so operators can trace skips.
-        # Root bypasses chmod, so we only assert the log on normal users.
-        if hasattr(os, "getuid") and os.getuid() != 0:
-            assert any("skipping" in r.getMessage().lower() for r in caplog.records)
+        assert any("skipping" in r.getMessage().lower() for r in caplog.records)
 
     def test_binary_file_with_extension_collision_skipped(self, tmp_path: Path) -> None:
         (tmp_path / "blob.json").write_bytes(b"\x00\x01\x02\xff\xfe\xfd")

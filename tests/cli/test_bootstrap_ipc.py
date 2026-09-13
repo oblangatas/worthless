@@ -20,6 +20,8 @@ Bare metal never sets the flag and is therefore untouched.
 
 from __future__ import annotations
 
+import base64
+import os
 from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import patch
@@ -81,9 +83,13 @@ def _force_file_fallback() -> Iterator[None]:
 
 
 @pytest.fixture
-def flag_on(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Enable WORTHLESS_FERNET_IPC_ONLY=1 for the duration of the test."""
-    monkeypatch.setenv("WORTHLESS_FERNET_IPC_ONLY", "1")
+def flag_on(ipc_proxy_mode: None) -> None:
+    """Flag on AS the non-root proxy uid — the path these tests pin.
+
+    Setting only the env var made every test here silently exercise the root
+    bypass when the suite ran as root (worthless-x9z1). Root behaviour is
+    pinned separately by the ``test_root_*`` tests below.
+    """
 
 
 @pytest.fixture
@@ -400,7 +406,9 @@ def test_ensure_home_with_flag_no_socket_skips_validation_on_first_boot(
 
     Regression direction: this test goes RED if someone reverts the
     ``socket_path.exists()`` guard back to an unconditional
-    ``_validate_via_sidecar()`` call.
+    ``_validate_via_sidecar()`` call. ``flag_on`` pins the non-root uid so the
+    guard is actually reached (as root it is skipped entirely); the real
+    root-entrypoint side is covered by the ``test_root_*`` tests.
     """
     absent_sock = tmp_path / "nonexistent-sidecar.sock"
     assert not absent_sock.exists(), "precondition: socket must be absent"
@@ -422,6 +430,108 @@ def test_ensure_home_with_flag_no_socket_skips_validation_on_first_boot(
 
     assert instantiated == [], "no IPCClient call expected when socket is absent"
     assert home is not None, "ensure_home must return a home object even without the sidecar"
+
+
+# ---------------------------------------------------------------------------
+# Root (euid 0) — never consults the sidecar, so a stub can't fool it
+# ---------------------------------------------------------------------------
+
+
+def _root_home_with_stub_sidecar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, bootstrapped: bool
+) -> tuple[Path, bytes]:
+    """Flag on, euid 0, live-looking socket, a real 0400 fernet.key on disk.
+
+    The socket exists and the stub sidecar (patched by each test) returns
+    8-byte evidence — if root ever routed through IPC it would be refused.
+    """
+    monkeypatch.setenv("WORTHLESS_FERNET_IPC_ONLY", "1")
+    monkeypatch.setattr("worthless._flags.os.geteuid", lambda: 0)
+    sock = tmp_path / "sidecar.sock"
+    sock.touch()
+    monkeypatch.setenv("WORTHLESS_SIDECAR_SOCKET", str(sock))
+
+    base = tmp_path / ".worthless"
+    base.mkdir(mode=0o700)
+    seed = base64.urlsafe_b64encode(os.urandom(32))
+    key_path = base / "fernet.key"
+    key_path.write_bytes(seed)
+    key_path.chmod(0o400)
+    if bootstrapped:
+        (base / ".bootstrapped").touch(mode=0o600)
+    return base, seed
+
+
+def _bytes_and_inode(path: Path) -> tuple[bytes, int]:
+    with open(path, "rb") as fh:  # noqa: PTH123 — Path.read_bytes may be patched
+        return fh.read(), path.stat().st_ino
+
+
+def test_root_with_stub_sidecar_uses_real_key_post_bootstrap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Root + stub sidecar with bad evidence: root keeps the real key, untouched."""
+    base, seed = _root_home_with_stub_sidecar(tmp_path, monkeypatch, bootstrapped=True)
+    before = _bytes_and_inode(base / "fernet.key")
+    fake = _FakeIPCClient(evidence=b"\x00" * 8)
+
+    with patch("worthless.cli.bootstrap.IPCClient", return_value=fake) as mock_ipc:
+        home = ensure_home(base_dir=base)
+
+    assert bytes(home.fernet_key) == seed.strip(), "root must use the key on disk"
+    assert _bytes_and_inode(base / "fernet.key") == before, "fernet.key must not be rewritten"
+    mock_ipc.assert_not_called()
+
+
+def test_root_first_boot_reads_existing_key_without_rewriting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No marker (first-boot path, where a mint could happen): an existing
+    readable key is used as-is — never replaced by a fresh one."""
+    base, seed = _root_home_with_stub_sidecar(tmp_path, monkeypatch, bootstrapped=False)
+    before = _bytes_and_inode(base / "fernet.key")
+    fake = _FakeIPCClient(evidence=b"\x00" * 8)
+
+    with patch("worthless.cli.bootstrap.IPCClient", return_value=fake) as mock_ipc:
+        home = ensure_home(base_dir=base)
+
+    assert bytes(home.fernet_key) == seed.strip(), "root must use the key on disk"
+    assert _bytes_and_inode(base / "fernet.key") == before, "fernet.key must not be rewritten"
+    mock_ipc.assert_not_called()
+
+
+def test_root_unreadable_key_fails_loudly_and_writes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Root that cannot read fernet.key (userns remap, dropped caps) MUST fail
+    with BOOTSTRAP_FAILED — not fall back to the stub sidecar, not mint a key."""
+    base, _seed = _root_home_with_stub_sidecar(tmp_path, monkeypatch, bootstrapped=True)
+    key_path = base / "fernet.key"
+    before = _bytes_and_inode(key_path)
+    real_read_bytes = Path.read_bytes
+    denial = PermissionError(13, "Permission denied", str(key_path))
+
+    def _deny_key(self: Path) -> bytes:
+        if self.name == "fernet.key":
+            raise denial
+        return real_read_bytes(self)
+
+    fake = _FakeIPCClient(evidence=b"\x00" * 8)
+    with (
+        patch.object(Path, "read_bytes", _deny_key),
+        patch("worthless.cli.bootstrap.IPCClient", return_value=fake) as mock_ipc,
+        pytest.raises(WorthlessError) as excinfo,
+    ):
+        ensure_home(base_dir=base)
+
+    assert excinfo.value.code is ErrorCode.BOOTSTRAP_FAILED
+    # Pin the cause: a mint-over-the-key regression also ends in BOOTSTRAP_FAILED
+    # (EACCES on the 0400 file) when this runs non-root.
+    assert excinfo.value.__cause__ is denial, "failure must come from the denied key read"
+    assert (base / ".bootstrapped").exists(), "self-heal/mint path must not drop the marker"
+    assert _bytes_and_inode(key_path) == before, "fernet.key must not be rewritten"
+    assert not (base / "worthless.db").exists(), "no DB init after a failed bootstrap"
+    mock_ipc.assert_not_called()
 
 
 def test_validate_via_sidecar_with_embedded_null_path_raises_cleanly(
