@@ -40,6 +40,7 @@ atomic-Pass-1 saves it. Per the WOR-646 honesty rule, known gaps are marked
 
 from __future__ import annotations
 
+import contextlib
 import os
 import signal
 import sqlite3
@@ -49,6 +50,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+import psutil
 import pytest
 
 from tests.helpers import fake_anthropic_key, fake_key
@@ -217,6 +219,8 @@ def _resolve_seam(
     returncode: int | None = None,
     elapsed: float | None = None,
     stderr: str = "",
+    harness_killed: bool = False,
+    evidence: str = "",
 ) -> float:
     """Turn the probe result into a usable seam, or refuse to run.
 
@@ -228,8 +232,12 @@ def _resolve_seam(
     aim correctly, or it may put every trial inside process startup, and a green
     run looks identical either way. So refuse, and say why.
 
-    Two faults produce the same "no measurement" symptom, because the probe loop
-    exits when the child does as well as on ``MAX_SEAM``:
+    Three faults produce the same "no measurement" symptom, because the probe loop
+    exits when the child does as well as on ``WAIT_TIMEOUT``. The third is the
+    harness itself: when time runs out it SIGKILLs a lock that is still running,
+    so an empty DB then says nothing about the product. Reporting that as a
+    PRODUCT fault was reproduced under CPU load (2026-09-13, 2/6 runs at load
+    ~300), and ``harness_killed`` exists so it can never happen again:
 
     * the lock wrote shards but the 4ms polling missed the moment — a HARNESS
       problem, fix by polling faster or raising the ceiling;
@@ -246,9 +254,22 @@ def _resolve_seam(
     delay into process startup, so nothing reaches the orphan window and the
     suite passes vacuously with a clean conscience.
     """
+    evidence_line = f"  evidence: {evidence}\n" if evidence else ""
     if first_shard is not None:
         if SEAM_FLOOR <= first_shard <= MAX_SEAM * 0.9:
             return first_shard
+        if first_shard > MAX_SEAM * 0.9:
+            # Too LARGE is not implausible: the lock really did take that long.
+            # The harness cannot tell a loaded host from a slower lock, so the
+            # message must not pick one.
+            pytest.fail(
+                f"chaos seam calibration measured a {first_shard:.2f}s seam, which exceeds "
+                f"the storm budget (max {MAX_SEAM * 0.9:.2f}s: {TRIALS_PER_CELL} trials per "
+                "cell must fit the module timeout).\n"
+                "  Cause NOT determined here: host load OR a lock latency regression. "
+                "Compare load/cores below with an idle run before blaming either.\n"
+                f"{evidence_line}"
+            )
         pytest.fail(
             f"chaos seam calibration returned an implausible seam: {first_shard:.4f}s "
             f"(expected {SEAM_FLOOR}s .. {MAX_SEAM * 0.9:.2f}s).\n"
@@ -259,7 +280,14 @@ def _resolve_seam(
             "or a warm-up lock that wrote its first shard before the probe's first poll."
         )
 
-    if shards_after is None:
+    if harness_killed:
+        verdict = (
+            f"the HARNESS killed the probe after {WAIT_TIMEOUT}s, before the probe saw a "
+            "shard row — either the lock was stuck before its first write, or the host "
+            "starved it. shards_after below is what landed by the kill; an empty DB here "
+            "is NOT evidence the lock writes nothing. Judge by load/cores below."
+        )
+    elif shards_after is None:
         verdict = (
             "the warm-up lock wrote no shard row the probe could see, AND the DB "
             "could not be read afterwards, so the cause cannot be determined here."
@@ -268,13 +296,13 @@ def _resolve_seam(
         verdict = (
             f"the probe MISSED the write — the DB holds {shards_after} shard row(s) "
             "after the child exited. The lock worked; calibration did not. This is a "
-            "HARNESS problem: the 4ms poll interval or the MAX_SEAM ceiling is wrong "
+            "HARNESS problem: the 4ms poll interval or the WAIT_TIMEOUT ceiling is wrong "
             "for this machine, NOT a product fault."
         )
     else:
         verdict = (
-            "the warm-up lock wrote NO shard rows at all — the DB is empty after it "
-            "exited. This is a PRODUCT or environment fault; raising MAX_SEAM would "
+            "the warm-up lock exited on its own and wrote NO shard rows at all — the DB "
+            "is empty. This is a PRODUCT or environment fault; raising WAIT_TIMEOUT would "
             "only hide it. Read the stderr tail below."
         )
 
@@ -283,9 +311,10 @@ def _resolve_seam(
 
     pytest.fail(
         "chaos seam calibration FAILED — the orphan-vulnerable window could not be "
-        f"located within MAX_SEAM={MAX_SEAM}s.\n"
+        f"located within WAIT_TIMEOUT={WAIT_TIMEOUT}s.\n"
         f"  Diagnosis: {verdict}\n"
         f"{detail}"
+        f"{evidence_line}"
         "  Refusing to substitute a fabricated seam: an unmeasured seam is "
         "unfalsifiable, and a green run would not distinguish it from a real one.\n"
         f"{tail}"
@@ -303,7 +332,7 @@ def seam(tmp_path_factory: pytest.TempPathFactory) -> float:
     of the orphan-vulnerable window (DB rows exist, ``.env`` not yet rewritten).
 
     Retried, because a single measurement is a coin flip on a stalled runner:
-    calibration has ``MAX_SEAM`` seconds to observe the write, and missing it
+    calibration has ``WAIT_TIMEOUT`` seconds to observe the write, and missing it
     ERRORS the whole module. This is session-scoped, and xdist runs session
     fixtures once PER WORKER — so splitting this module across workers
     (worthless-7zl6) multiplied the number of calibrations, and with it the
@@ -335,20 +364,14 @@ def _measure_seam(tmp_path_factory: pytest.TempPathFactory) -> float:
     """One calibration attempt. Raises ``pytest.fail.Exception`` if it misses."""
     base = tmp_path_factory.mktemp("seam")
     te = _make_trial_env(base, 0, 2)
-    proc = subprocess.Popen(
-        [*_cli(), "lock", "--env", str(te.env_file)],
-        env=_child_env(te),
-        cwd=str(te.repo),
-        start_new_session=True,
-        stdout=subprocess.DEVNULL,
-        # stderr is CAPTURED, not discarded: when calibration fails it is the
-        # only thing that distinguishes "runner too slow" from "lock is broken".
-        stderr=subprocess.PIPE,
-    )
-    t0 = time.time()
+    # stderr goes to a file (see _spawn_lock): when calibration fails it is the
+    # only thing that distinguishes "runner too slow" from "lock is broken".
+    proc = _spawn_lock(te)
+    t0 = time.monotonic()
     first_shard: float | None = None
+    harness_killed = False
     try:
-        while proc.poll() is None and (time.time() - t0) < MAX_SEAM:
+        while proc.poll() is None and (time.monotonic() - t0) < WAIT_TIMEOUT:
             db = _db_path(te.home)
             if db is not None:
                 try:
@@ -356,24 +379,22 @@ def _measure_seam(tmp_path_factory: pytest.TempPathFactory) -> float:
                     n = conn.execute("SELECT count(*) FROM shards").fetchone()[0]
                     conn.close()
                     if n > 0:
-                        first_shard = time.time() - t0
+                        first_shard = time.monotonic() - t0
                         break
                 except sqlite3.Error:
                     pass
             time.sleep(0.004)
+        evidence = _evidence(proc)
+        harness_killed = first_shard is None and proc.poll() is None
     finally:
-        # communicate(), NOT wait(): stderr is a pipe, and a child that fills the
-        # ~64KB buffer blocks forever while we wait for an exit that cannot come.
-        # That would surface as returncode=-9 after the kill, which the diagnosis
-        # below would report as a PRODUCT fault — a harness deadlock blamed on
-        # the product. communicate() drains while it waits.
-        try:
-            err_bytes = proc.communicate(timeout=WAIT_TIMEOUT)[1]
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            err_bytes = proc.communicate(timeout=5)[1]
-    elapsed = time.time() - t0
-    err = (err_bytes or b"").decode("utf-8", errors="replace")
+        # Never wait for the warm-up lock to FINISH: the seam is all calibration
+        # needs, and under load that wait is exactly what outlived WAIT_TIMEOUT
+        # and raised a raw TimeoutExpired past every retry (reproduced
+        # 2026-09-13). Killing the group here also reaps helpers like
+        # `docker info` that a leader-only kill left running.
+        _reap(proc)
+    elapsed = time.monotonic() - t0
+    err = _stderr_path(te).read_bytes().decode("utf-8", errors="replace")
 
     # The child is gone, so the rows it wrote are now stable on disk. Ask.
     # "Probe missed the write" and "lock wrote nothing" are opposite faults with
@@ -397,6 +418,8 @@ def _measure_seam(tmp_path_factory: pytest.TempPathFactory) -> float:
         returncode=proc.returncode,
         elapsed=elapsed,
         stderr=err,
+        harness_killed=harness_killed,
+        evidence=evidence,
     )
 
 
@@ -525,21 +548,86 @@ def classify(te: TrialEnv) -> DiskState:
 # ---------------------------------------------------------------------------
 
 
-def _kill_group(proc: subprocess.Popen, sig: int) -> None:
+def _stderr_path(te: TrialEnv) -> Path:
+    return te.home.parent / "stderr.log"
+
+
+def _stderr_tail(te: TrialEnv) -> str:
     try:
-        os.killpg(os.getpgid(proc.pid), sig)
-    except ProcessLookupError:
-        pass  # already exited — fine, just classify what's on disk.
+        tail = _stderr_path(te).read_bytes()[-2000:].decode("utf-8", errors="replace")
+    except OSError:
+        return "  stderr: (unreadable)"
+    return f"  stderr tail:\n{tail}" if tail.strip() else "  stderr: (empty)"
 
 
-def _drain(proc: subprocess.Popen) -> None:
-    if proc.poll() is None:
-        _kill_group(proc, signal.SIGKILL)
+def _spawn_lock(te: TrialEnv) -> subprocess.Popen:
+    """Start the real CLI in its own process group.
+
+    stderr goes to a FILE, never an unread PIPE: a chatty child that fills the
+    ~64KB pipe buffer blocks forever, and the harness would report that
+    self-inflicted wedge as a product hang. A file also keeps the tail after a
+    SIGKILL, so a rare real PARTIAL or hang arrives with the lock's own words.
+    """
+    with _stderr_path(te).open("wb") as err:
+        return subprocess.Popen(
+            [*_cli(), "lock", "--env", str(te.env_file)],
+            env=_child_env(te),
+            cwd=str(te.repo),
+            start_new_session=True,  # own process group -> killpg hits the whole tree
+            stdout=subprocess.DEVNULL,
+            stderr=err,
+        )
+
+
+def _kill_group(proc: subprocess.Popen, sig: int) -> None:
+    # start_new_session=True makes pgid == pid, so signal it directly. Never
+    # os.getpgid(): once the leader is a zombie that lookup fails, and the
+    # lock's helpers (`docker info`, `security`) survive to skew later trials.
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(proc.pid, sig)
+
+
+def _evidence(proc: subprocess.Popen) -> str:
+    """Facts for a timeout message — deliberately NOT a verdict.
+
+    Prototyped 2026-09-14 (170 CPU hogs on 10 cores): a spinning wedge used
+    0.11s CPU in 3s and a starved real lock 0.20s, so CPU time cannot tell
+    "hung" from "host drowning" at exactly the load where this fires. Host
+    load per core can, and the live group members show which helper was stuck.
+    """
+    try:
+        load = f"load/cores={os.getloadavg()[0] / (os.cpu_count() or 1):.1f}"
+    except OSError:
+        load = "load/cores=unavailable"
+    try:
+        leader = psutil.Process(proc.pid)
+        members = [p.name() for p in (leader, *leader.children(recursive=True))]
+    except psutil.Error:
+        return f"{load} group=unavailable"
+    return f"{load} group={members}"
+
+
+def _reap(proc: subprocess.Popen) -> None:
+    """SIGKILL the whole group and wait for the leader, bounded.
+
+    Runs even when the leader already exited: a helper that outlived it could
+    still touch disk while ``classify()`` reads it.
+    """
+    _kill_group(proc, signal.SIGKILL)
+    try:
         proc.wait(timeout=5)
-    if proc.stdout:
-        proc.stdout.close()
-    if proc.stderr:
-        proc.stderr.close()
+    except subprocess.TimeoutExpired:
+        pytest.fail(f"pid {proc.pid} survived SIGKILL for 5s (stuck in the kernel?)")
+
+
+def _await_exit(proc: subprocess.Popen, te: TrialEnv, what: str) -> None:
+    """The hang guard: fail with evidence if the signalled lock outlives WAIT_TIMEOUT."""
+    try:
+        proc.wait(timeout=WAIT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        evidence = _evidence(proc)  # before the kill, while the group is alive
+        _reap(proc)
+        pytest.fail(f"{what} — a hang is a regression\n  evidence: {evidence}\n{_stderr_tail(te)}")
 
 
 def _run_trial(te: TrialEnv, sig: int, delay: float, *, ready: Path | None = None) -> DiskState:
@@ -554,14 +642,7 @@ def _run_trial(te: TrialEnv, sig: int, delay: float, *, ready: Path | None = Non
     The real chaos trials deliberately pass no *ready*: for them the blind
     delay IS the variable under test, sweeping the orphan-vulnerable window.
     """
-    proc = subprocess.Popen(
-        [*_cli(), "lock", "--env", str(te.env_file)],
-        env=_child_env(te),
-        cwd=str(te.repo),
-        start_new_session=True,  # own process group -> killpg hits the whole tree
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    proc = _spawn_lock(te)
     try:
         if ready is None:
             time.sleep(delay)
@@ -574,23 +655,21 @@ def _run_trial(te: TrialEnv, sig: int, delay: float, *, ready: Path | None = Non
                     pytest.fail(f"wedge child never signalled ready within {WAIT_TIMEOUT}s")
                 time.sleep(0.01)
         _kill_group(proc, sig)
-        try:
-            proc.wait(timeout=WAIT_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5)
-            pytest.fail(f"lock hung after sig={sig} delay={delay:.3f}s — a hang is a regression")
+        _await_exit(proc, te, f"lock hung after sig={sig} delay={delay:.3f}s")
     finally:
-        _drain(proc)
+        _reap(proc)
     return classify(te)
 
 
-def _assert_no_partial(state: DiskState, *, n_keys: int, sig: int, delay: float) -> None:
+def _assert_no_partial(
+    state: DiskState, *, te: TrialEnv, n_keys: int, sig: int, delay: float
+) -> None:
     assert state.classification in ("clean", "locked"), (
         f"PARTIAL/ORPHAN on-disk state after interrupt — invariant violated.\n"
         f"  signal={signal.Signals(sig).name} n_keys={n_keys} jitter={delay:.3f}s\n"
         f"  {state.detail}\n"
-        f"  Expected: fully clean (rolled back) XOR fully locked. Got partial."
+        f"  Expected: fully clean (rolled back) XOR fully locked. Got partial.\n"
+        f"{_stderr_tail(te)}"
     )
 
 
@@ -618,7 +697,7 @@ class TestSigintStorm:
             delay = delays[trial % len(delays)]
             te = _make_trial_env(tmp_path, trial, n_keys)
             state = _run_trial(te, signal.SIGINT, delay)
-            _assert_no_partial(state, n_keys=n_keys, sig=signal.SIGINT, delay=delay)
+            _assert_no_partial(state, te=te, n_keys=n_keys, sig=signal.SIGINT, delay=delay)
 
 
 class TestSigtermStorm:
@@ -630,7 +709,7 @@ class TestSigtermStorm:
             delay = delays[trial % len(delays)]
             te = _make_trial_env(tmp_path, trial, n_keys)
             state = _run_trial(te, signal.SIGTERM, delay)
-            _assert_no_partial(state, n_keys=n_keys, sig=signal.SIGTERM, delay=delay)
+            _assert_no_partial(state, te=te, n_keys=n_keys, sig=signal.SIGTERM, delay=delay)
 
 
 class TestMashedSigint:
@@ -645,14 +724,7 @@ class TestMashedSigint:
         for trial in range(TRIALS_PER_CELL):
             delay = delays[trial % len(delays)]
             te = _make_trial_env(tmp_path, trial, n_keys)
-            proc = subprocess.Popen(
-                [*_cli(), "lock", "--env", str(te.env_file)],
-                env=_child_env(te),
-                cwd=str(te.repo),
-                start_new_session=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
+            proc = _spawn_lock(te)
             try:
                 time.sleep(delay)
                 for _ in range(5):
@@ -660,16 +732,11 @@ class TestMashedSigint:
                         break
                     _kill_group(proc, signal.SIGINT)
                     time.sleep(0.005)
-                try:
-                    proc.wait(timeout=WAIT_TIMEOUT)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait(timeout=5)
-                    pytest.fail(f"mashed-SIGINT hung at delay={delay:.3f}s — regression")
+                _await_exit(proc, te, f"mashed-SIGINT hung at delay={delay:.3f}s")
             finally:
-                _drain(proc)
+                _reap(proc)
             state = classify(te)
-            _assert_no_partial(state, n_keys=n_keys, sig=signal.SIGINT, delay=delay)
+            _assert_no_partial(state, te=te, n_keys=n_keys, sig=signal.SIGINT, delay=delay)
 
 
 # ---------------------------------------------------------------------------
@@ -690,13 +757,20 @@ def test_hang_guard_fires_with_diagnostic(tmp_path: Path, monkeypatch: pytest.Mo
     """
     shim = tmp_path / "wedged_cli.py"
     ready = tmp_path / "wedged_ready"
+    helper_pid = tmp_path / "helper_pid"
     # The marker is written AFTER the handlers are installed, never before: it
     # is the child asserting "I can now survive a signal". Ordering is the whole
     # point — see the ready= gate in _run_trial.
+    #
+    # The helper `sleep` stands in for the real lock's `docker info` / `security`
+    # children. It starts AFTER SIG_IGN (ignored signals survive exec), so only a
+    # group SIGKILL can reap it — a leader-only kill leaves it orphaned.
     shim.write_text(
-        "import signal, time\n"
+        "import signal, subprocess, time\n"
         "signal.signal(signal.SIGINT, signal.SIG_IGN)\n"
         "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "helper = subprocess.Popen(['sleep', '300'])\n"
+        f"open({str(helper_pid)!r}, 'w').write(str(helper.pid))\n"
         f"open({str(ready)!r}, 'w').close()\n"
         "while True:\n"
         "    time.sleep(0.05)\n"
@@ -708,9 +782,16 @@ def test_hang_guard_fires_with_diagnostic(tmp_path: Path, monkeypatch: pytest.Mo
 
     te = _make_trial_env(tmp_path, 0, 1)
     started = time.monotonic()
-    with pytest.raises(pytest.fail.Exception, match=r"hung after sig="):
-        _run_trial(te, signal.SIGINT, 0.05, ready=ready)
-    elapsed = time.monotonic() - started
+    try:
+        with pytest.raises(pytest.fail.Exception, match=r"hung after sig=") as excinfo:
+            _run_trial(te, signal.SIGINT, 0.05, ready=ready)
+        elapsed = time.monotonic() - started
+        survivors = _surviving_helper(helper_pid)
+        assert survivors == [], f"hang cleanup orphaned the lock's helper process: {survivors}"
+        # Evidence, not a verdict: the reader needs the host load to judge.
+        assert "load/cores=" in str(excinfo.value)
+    finally:
+        _reap_helper(helper_pid)
 
     # Upper bound is anchored on the module timeout (600s), NOT on a hand-picked
     # margin above WAIT_TIMEOUT: `elapsed` now also covers interpreter startup
@@ -722,6 +803,76 @@ def test_hang_guard_fires_with_diagnostic(tmp_path: Path, monkeypatch: pytest.Mo
         f"inside the 600s module timeout. Too early means a hair trigger; too "
         f"late means the per-test timeout will swallow the diagnostic again."
     )
+
+
+def _helper_process(pid_file: Path) -> psutil.Process | None:
+    """The shim's `sleep 300` helper, if it is still alive (and still ours)."""
+    try:
+        proc = psutil.Process(int(pid_file.read_text()))
+        return proc if "sleep" in proc.name() else None
+    except (FileNotFoundError, ValueError, psutil.Error):
+        return None
+
+
+def _surviving_helper(pid_file: Path) -> list[psutil.Process]:
+    helper = _helper_process(pid_file)
+    if helper is None:
+        return []
+    # Poll, never a one-shot check: a SIGKILLed orphan is briefly a zombie
+    # until init reaps it, and that reap is scheduler-dependent under load.
+    _gone, alive = psutil.wait_procs([helper], timeout=5)
+    return alive
+
+
+def _reap_helper(pid_file: Path) -> None:
+    helper = _helper_process(pid_file)
+    if helper is not None:
+        with contextlib.suppress(psutil.Error):
+            helper.kill()
+
+
+def test_calibration_timeout_is_retryable_and_blames_the_harness(
+    tmp_path_factory: pytest.TempPathFactory,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A probe the harness had to kill must fail as a retryable HARNESS verdict.
+
+    Reproduced 2026-09-13 under CPU load: calibration outlived WAIT_TIMEOUT, the
+    harness SIGKILLed it, then reported "lock wrote NO shard rows — PRODUCT
+    fault" (2/6 runs). Separately, a helper child holding the stderr pipe made
+    the post-kill ``communicate()`` raise a raw ``TimeoutExpired``, which is not
+    a ``pytest.fail`` and so skipped every ``SEAM_ATTEMPTS`` retry.
+
+    The shim plants an empty ``shards`` table (so the "wrote nothing" branch is
+    reachable), starts a helper that inherits stderr, and never finishes.
+    """
+    shim = tmp_path / "stuck_lock.py"
+    helper_pid = tmp_path / "helper_pid"
+    shim.write_text(
+        "import os, sqlite3, subprocess, time\n"
+        "db = sqlite3.connect(os.path.join(os.environ['WORTHLESS_HOME'], 'probe.db'))\n"
+        "db.execute('CREATE TABLE shards (key_alias TEXT)')\n"
+        "db.commit()\n"
+        "helper = subprocess.Popen(['sleep', '300'])\n"
+        f"open({str(helper_pid)!r}, 'w').write(str(helper.pid))\n"
+        "while True:\n"
+        "    time.sleep(0.05)\n"
+    )
+    monkeypatch.setattr(f"{__name__}._cli", lambda: [sys.executable, str(shim)])
+    # Scoped to this test: _run_trial's ready deadline reads the same constant.
+    monkeypatch.setattr(f"{__name__}.WAIT_TIMEOUT", 1.0)
+
+    try:
+        with pytest.raises(pytest.fail.Exception) as excinfo:
+            _measure_seam(tmp_path_factory)
+        msg = str(excinfo.value)
+        assert "HARNESS killed" in msg, msg
+        assert "PRODUCT" not in msg, msg
+        assert "load/cores=" in msg, msg
+        assert _surviving_helper(helper_pid) == [], "calibration cleanup orphaned a helper"
+    finally:
+        _reap_helper(helper_pid)
 
 
 def test_seam_calibration_retries_a_transient_miss(
@@ -790,8 +941,15 @@ def test_seam_calibration_refuses_to_fabricate() -> None:
     # _resolve_seam(0.0) == 0.0 — it blessed the bug.)
     with pytest.raises(pytest.fail.Exception, match=r"implausible"):
         _resolve_seam(0.0)
-    with pytest.raises(pytest.fail.Exception, match=r"implausible"):
+    # A seam too LARGE is not implausible — it is a slow host or a slower lock,
+    # and the message must not pick one without evidence.
+    with pytest.raises(pytest.fail.Exception, match=r"exceeds the storm budget"):
         _resolve_seam(MAX_SEAM)
+
+    # The harness killed a probe that never wrote: never a PRODUCT verdict.
+    with pytest.raises(pytest.fail.Exception, match=r"HARNESS killed") as killed:
+        _resolve_seam(None, shards_after=0, returncode=-9, elapsed=15.0, harness_killed=True)
+    assert "PRODUCT" not in str(killed.value)
 
     # No measurement + the DB HAS shards -> the lock worked, the probe missed
     # the timing. Actionable as a harness problem.
