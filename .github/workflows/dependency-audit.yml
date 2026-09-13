@@ -147,5 +147,18 @@ jobs:
       # No `npm ci` install on purpose: `npm audit` resolves from the lockfile
       # alone, verified against this lockfile with no node_modules present.
       - name: Audit the Worker's dependency tree
+        # Bare and unsuppressible on purpose. An allowlist lived here briefly,
+        # holding GHSA-rgj7-g3m4-5g8c (sharp/libheif) on the argument that no
+        # forward fix existed. That argument was wrong: the advisory's range is
+        # `<0.35.4` and sharp 0.35.4 is published. npm only offered the breaking
+        # @cloudflare/vitest-pool-workers 0.22.0 -> 0.8.30 downgrade because
+        # miniflare pins "sharp": "0.35.2" EXACTLY, so npm's resolver can only
+        # walk backwards -- `overrides` is a different search space and reaches
+        # the patch. See workers/worthless-sh/README.md. beads worthless-kzfq.
+        #
+        # Keep it bare. The comment block above already argues that dev tooling
+        # is in scope because wrangler and miniflare run in CI and on machines
+        # holding deploy credentials; a suppression mechanism here re-opens a
+        # slice of exactly that.
         working-directory: workers/worthless-sh
         run: npm audit
