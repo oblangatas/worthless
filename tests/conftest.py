@@ -20,6 +20,7 @@ from cryptography.fernet import Fernet
 from hypothesis import HealthCheck, settings
 
 
+from worthless.cli import console as _cli_console  # used by _isolate_console_singleton
 from worthless.cli import default_command  # used by _isolate_default_command_proxy autouse fixture
 from worthless.cli.commands.service.proxy_state import ProxyRuntimeState
 from worthless.cli.bootstrap import WorthlessHome, ensure_home
@@ -101,6 +102,18 @@ def _isolate_fernet_storage_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("WORTHLESS_FERNET_KEY_PATH", raising=False)
     monkeypatch.delenv("WORTHLESS_FERNET_KEY", raising=False)
     monkeypatch.delenv("WORTHLESS_SERVICE_MANAGED", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_console_singleton(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Restore the module-level console after every test.
+
+    ``set_console`` (called directly, or by the CLI callback for ``--quiet`` /
+    ``--json``) replaces a process-global. Quiet/json consoles drop warnings
+    and hints, so one un-restored test silently empties the console output of
+    every later test on the same xdist worker.
+    """
+    monkeypatch.setattr(_cli_console, "_console", _cli_console._console)
 
 
 def make_repo(home: WorthlessHome) -> ShardRepository:

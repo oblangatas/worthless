@@ -258,7 +258,9 @@ class TestHealthReportHonesty:
         """The wording must not assert something failed when nothing did."""
         with patch("worthless.cli.commands.service._common.poll_health", return_value=False):
             report_proxy_health(8787, timeout=0.01)
-        out = " ".join((capsys.readouterr().err + capsys.readouterr().out).split()).lower()
+        cap = capsys.readouterr()
+        out = " ".join((cap.err + cap.out).split()).lower()
+        assert out, "no output at all — absence of failure words would pass vacuously"
         for lie in ("failed", "did not respond within"):
             assert lie not in out, (
                 f"still asserts failure ({lie!r}) on a successful install:\n{out}"
@@ -270,7 +272,8 @@ class TestHealthReportHonesty:
         """Name the established fact, then the open question, then the next step."""
         with patch("worthless.cli.commands.service._common.poll_health", return_value=False):
             report_proxy_health(8787, timeout=0.01)
-        out = " ".join((capsys.readouterr().err + capsys.readouterr().out).split()).lower()
+        cap = capsys.readouterr()
+        out = " ".join((cap.err + cap.out).split()).lower()
         assert "installed" in out or "started" in out, f"must state what succeeded:\n{out}"
         assert "worthless service status" in out, f"must give the next step:\n{out}"
 
@@ -278,7 +281,8 @@ class TestHealthReportHonesty:
         """No warning when the proxy answered — silence is the success signal."""
         with patch("worthless.cli.commands.service._common.poll_health", return_value=True):
             report_proxy_health(8787, timeout=0.01)
-        out = (capsys.readouterr().err + capsys.readouterr().out).lower()
+        cap = capsys.readouterr()
+        out = (cap.err + cap.out).lower()
         assert "status" not in out, f"clean install should not nag:\n{out}"
 
     def test_default_wait_exceeds_the_observed_cold_start(self) -> None:
