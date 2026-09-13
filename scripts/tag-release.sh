@@ -202,7 +202,8 @@ echo
 echo "The release watchdog tells you (WOR-922): it opens ONE issue, assigned to you,"
 echo "when this tag has no Release a day after tagging — or after 3 days if the run"
 echo "is still waiting for your approval. A draft does not silence it; only the"
-echo "automation's Create step succeeding does."
+echo "automation's Create step succeeding does. It times a tag from when it was"
+echo "signed, so a tag pushed long after signing may never be watched."
 echo
 echo "If you do need the fallback, create a DRAFT — never a published Release —"
 echo "so it cannot silently ratify a release the publishers refused:"

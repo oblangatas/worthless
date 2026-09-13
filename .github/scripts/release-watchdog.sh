@@ -39,6 +39,9 @@ readonly RUN_TITLE_PREFIX="Create GitHub Release"
 readonly CREATE_JOB="create-release"
 readonly CREATE_STEP="Create the GitHub Release"
 readonly LABEL="release-watchdog"
+# The job token files as this login. Only its issues count for dedupe, or anyone who
+# can label an issue could plant a "closed for this commit" one and silence a tag.
+readonly ALARM_AUTHOR="github-actions[bot]"
 readonly MIN_AGE_H=24
 readonly APPROVAL_GRACE_H=72
 readonly MAX_AGE_H=336
@@ -50,8 +53,10 @@ since=$(jq -nr --argjson t "$((now - MAX_AGE_H * 3600))" '$t | todate')
 # Every release-notes run in the window, one JSON object per line.
 # -X GET: `gh api` silently turns -f into a POST (see release-fanin.sh).
 # --paginate: a busy window spans pages; a run on page 2 would read as "never ran".
+# event=workflow_run: a PR that edits release-notes.yml runs under the same path and
+# can title itself like a release; only workflow_run runs use the default branch's file.
 runs=$(gh api "/repos/${GH_REPO}/actions/workflows/release-notes.yml/runs" -X GET \
-  -f created=">=${since}" -f per_page=100 --paginate \
+  -f event=workflow_run -f created=">=${since}" -f per_page=100 --paginate \
   --jq '.workflow_runs[] | {id, status, title: .display_title}')
 
 # One issue per tag, found by marker. Open -> leave it. Closed for this commit ->
@@ -72,8 +77,9 @@ Filed by release-watchdog.yml (WOR-922). It stays quiet once the Release step su
 
   local existing
   existing=$(gh api "/repos/${GH_REPO}/issues" -X GET -f state=all -f labels="$LABEL" -f per_page=100 \
-    --paginate --jq '.[] | {number, state, body}' |
-    jq -sc --arg m "$marker" 'map(select((.body // "") | contains($m))) | first // empty')
+    --paginate --jq '.[] | {number, state, body, author: .user.login}' |
+    jq -sc --arg m "$marker" --arg bot "$ALARM_AUTHOR" \
+      'map(select(.author == $bot and ((.body // "") | contains($m)))) | first // empty')
 
   if [ -z "$existing" ]; then
     gh label create "$LABEL" --color b60205 --description "A release tag has no GitHub Release (WOR-922)" --force >/dev/null
@@ -119,12 +125,17 @@ while read -r tag created <&3; do
   watched=$((watched + 1))
   # A re-tag is a new tag object with a new date, so the clock restarts with it.
   sha=$(git rev-list -n 1 "refs/tags/${tag}")
-  # Any sha: a Release created before a re-tag still counts as released.
-  mine=$(jq -c --arg p "${RUN_TITLE_PREFIX} ${tag}@" 'select(.title | startswith($p))' <<<"$runs")
+  # Any sha: a Release created before a re-tag still counts as released. But the rest
+  # of the title must be a whole commit id — git allows "@" in tag names, so a prefix
+  # match alone would let a run for v1@x count for v1.
+  mine=$(jq -c --arg p "${RUN_TITLE_PREFIX} ${tag}@" \
+    'select((.title | startswith($p)) and (.title | ltrimstr($p) | test("^[0-9a-f]{40}$")))' <<<"$runs")
 
   released=false
   for id in $(jq -r 'select(.status == "completed") | .id' <<<"$mine"); do
-    jobs=$(gh api "/repos/${GH_REPO}/actions/runs/${id}/jobs?per_page=100" -X GET)
+    # filter=all: a re-run skips the create step (the Release exists) and the API
+    # otherwise shows only that latest attempt, hiding the one that created it.
+    jobs=$(gh api "/repos/${GH_REPO}/actions/runs/${id}/jobs?filter=all&per_page=100" -X GET)
     if jq -e --arg j "$CREATE_JOB" --arg s "$CREATE_STEP" \
       'any(.jobs[]; .name == $j and any(.steps[]?; .name == $s and .conclusion == "success"))' \
       <<<"$jobs" >/dev/null; then
@@ -188,5 +199,5 @@ $(grep -E '^::(warning|notice)' "$log" | sed -E 's/^::[a-z]+( title=[^:]*)?::/- 
   esac
   rm -f "$out" "$log"
   alarm "$tag" "$sha" "$why"
-done 3< <(git for-each-ref --format='%(refname:short) %(creatordate:unix)' 'refs/tags/v*')
+done 3< <(git for-each-ref --format='%(refname:lstrip=2) %(creatordate:unix)' 'refs/tags/v*')
 echo "Watched ${watched} tag(s) from the last $((MAX_AGE_H / 24)) days."

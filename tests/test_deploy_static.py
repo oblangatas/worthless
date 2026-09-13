@@ -2709,6 +2709,55 @@ GUARD_MUTATIONS = [
         "-X GET -f state=open",
         "test_issue_reopens_when_the_tag_moves",
     ),
+    (
+        "count a pull request's forged release run",
+        ".github/scripts/release-watchdog.sh",
+        "-f event=workflow_run ",
+        "",
+        "test_forged_pull_request_run_cannot_silence_the_alarm",
+    ),
+    (
+        "match run titles by tag prefix alone",
+        ".github/scripts/release-watchdog.sh",
+        '(.title | startswith($p)) and (.title | ltrimstr($p) | test("^[0-9a-f]{40}$"))',
+        "(.title | startswith($p))",
+        "test_run_for_a_lookalike_tag_does_not_count",
+    ),
+    (
+        "look only at a run's latest attempt",
+        ".github/scripts/release-watchdog.sh",
+        "jobs?filter=all&per_page=100",
+        "jobs?per_page=100",
+        "test_release_created_on_an_earlier_attempt_stays_quiet",
+    ),
+    (
+        "trust any issue that carries the markers",
+        ".github/scripts/release-watchdog.sh",
+        ".author == $bot and ",
+        "",
+        "test_planted_closed_issue_cannot_silence_the_alarm",
+    ),
+    (
+        "drop the verify-the-commit advice",
+        ".github/scripts/release-watchdog.sh",
+        'if [ "$waiting" = "${RUN_TITLE_PREFIX} ${tag}@${sha}" ]; then',
+        "if false; then",
+        "test_forgotten_approval_files_one_assigned_issue",
+    ),
+    (
+        "stop naming the failed publisher",
+        ".github/scripts/release-watchdog.sh",
+        "grep -E '^::(warning|notice)' \"$log\"",
+        "true",
+        "test_blocked_publisher_files_an_issue_not_a_crash",
+    ),
+    (
+        "stop naming the unfinished publisher",
+        ".github/scripts/release-watchdog.sh",
+        "grep -E '^::(warning|notice)' \"$log\"",
+        "true",
+        "test_publisher_still_running_after_a_day_is_named",
+    ),
 ]
 
 
@@ -2953,16 +3002,22 @@ def _hours_ago(hours: float) -> str:
 # --paginate regression is visible), their jobs, and issues; records every
 # write. Anything else falls through to the fan-in shim, so the REAL
 # release-fanin.sh runs unmodified against RUNS/JOBS.
-#   RN_PAGES  JSON array of pages, each a list of runs {id,status,display_title}
-#   RN_JOBS   JSON object run-id -> jobs list (ids must start with "rn")
-#   ISSUES    JSON list of issues {number,state,body}
+#   RN_PAGES  JSON array of pages, each a list of runs {id,status,display_title,event?}
+#             (event defaults to workflow_run; `-f event=X` filters like the real API)
+#   RN_JOBS   JSON object run-id -> jobs list of the LATEST attempt (ids start "rn")
+#   RN_JOBS_OLDER  run-id -> jobs of earlier attempts, served only for ?filter=all
+#   ISSUES    JSON list of issues {number,state,body,user:{login}}
 #   API_DOWN  non-empty => publisher run queries fail like a 502
 #   GH_CALLS  file; each write call appended as args joined by \x1f, ended by \x1e
 _WATCHDOG_GH_SHIM = r"""#!/usr/bin/env bash
-wd_path=""; wd_method=GET; wd_jq=""; wd_pag=no; wd_prev=""
+wd_path=""; wd_method=GET; wd_jq=""; wd_pag=no; wd_prev=""; wd_event=""
 for a in "$@"; do
   case "$wd_prev" in -X) wd_method="$a";; --jq) wd_jq="$a";; esac
-  case "$a" in /repos/*) [ -z "$wd_path" ] && wd_path="$a";; --paginate) wd_pag=yes;; esac
+  case "$a" in
+    /repos/*) [ -z "$wd_path" ] && wd_path="$a";;
+    --paginate) wd_pag=yes;;
+    event=*) wd_event="${a#event=}";;
+  esac
   wd_prev="$a"
 done
 wd_emit() {
@@ -2977,13 +3032,17 @@ case "$wd_method $wd_path" in
     n=$(printf '%s' "$pages" | jq length)
     for ((p = 0; p < n; p++)); do
       [ "$p" -gt 0 ] && [ "$wd_pag" = no ] && break
-      wd_emit "$(printf '%s' "$pages" | jq -c --argjson p "$p" '{workflow_runs: .[$p]}')"
+      wd_emit "$(printf '%s' "$pages" | jq -c --argjson p "$p" --arg ev "$wd_event" \
+        '{workflow_runs: [.[$p][] | select($ev == "" or ((.event // "workflow_run") == $ev))]}')"
     done
     exit 0 ;;
   GET\ */actions/runs/rn*/jobs*)
-    rid=$(printf '%s' "$wd_path" | sed -E 's#.*/actions/runs/([^/]+)/jobs.*#\1#')
+    rid=$(printf '%s' "$wd_path" | sed -E 's#.*/actions/runs/([^/?]+)/jobs.*#\1#')
     rj=${RN_JOBS:-}; [ -z "$rj" ] && rj='{}'
-    wd_emit "$(printf '%s' "$rj" | jq -c --arg r "$rid" '{jobs: (.[$r] // [])}')"
+    ro='{}'
+    case "$wd_path" in *filter=all*) ro=${RN_JOBS_OLDER:-}; [ -z "$ro" ] && ro='{}';; esac
+    wd_emit "$(jq -cn --arg r "$rid" --argjson l "$rj" --argjson o "$ro" \
+      '{jobs: (($o[$r] // []) + ($l[$r] // []))}')"
     exit 0 ;;
   GET\ */issues*)
     is=${ISSUES:-}; [ -z "$is" ] && is='[]'
@@ -3080,6 +3139,8 @@ class TestReleaseWatchdogBehaviour:
     premortem found hard to reason about on paper. WOR-922."""
 
     ALL_GREEN = TestReleaseFaninBehaviour.ALL_GREEN
+    # A full-length commit id the tag no longer points at.
+    OLD_SHA = "0123456789abcdef0123456789abcdef01234567"
 
     @staticmethod
     def _run_title(tag: str, sha: str) -> str:
@@ -3101,6 +3162,15 @@ class TestReleaseWatchdogBehaviour:
             },
         ]
 
+    @staticmethod
+    def _issue(state: str, sha: str, author: str = "github-actions[bot]") -> dict:
+        return {
+            "number": 7,
+            "state": state,
+            "body": f"<!-- release-watchdog:v9.9.9 -->\n<!-- release-watchdog-sha:{sha} -->",
+            "user": {"login": author},
+        }
+
     def _run(
         self,
         tmp_path: Path,
@@ -3109,6 +3179,7 @@ class TestReleaseWatchdogBehaviour:
         runs: str | None = None,
         rn_pages=None,
         rn_jobs=None,
+        rn_jobs_older=None,
         issues=None,
         env_extra: dict | None = None,
     ):
@@ -3138,6 +3209,7 @@ class TestReleaseWatchdogBehaviour:
             "RUNS": self.ALL_GREEN if runs is None else runs,
             "RN_PAGES": resolve(rn_pages if rn_pages is not None else [[]]),
             "RN_JOBS": resolve(rn_jobs or {}),
+            "RN_JOBS_OLDER": resolve(rn_jobs_older or {}),
             "ISSUES": resolve(issues or []),
             **(env_extra or {}),
         }
@@ -3234,7 +3306,10 @@ class TestReleaseWatchdogBehaviour:
         body = self._field(created[0], "body") or ""
         assert "<!-- release-watchdog:v9.9.9 -->" in body
         assert f"<!-- release-watchdog-sha:{sha} -->" in body
-        assert "approv" in body.lower()
+        assert f"check it was built from commit {sha}" in body, (
+            "a days-old approval request is the one clicked without thinking; the issue must "
+            "say to verify the commit first"
+        )
         assert self._field(created[0], "assignees[]") == "o", (
             "an unassigned alarm is the same silence as none"
         )
@@ -3249,7 +3324,7 @@ class TestReleaseWatchdogBehaviour:
                     {
                         "id": "rn1",
                         "status": "waiting",
-                        "display_title": self._run_title("v9.9.9", "0ld5ha"),
+                        "display_title": self._run_title("v9.9.9", self.OLD_SHA),
                     }
                 ]
             ],
@@ -3257,7 +3332,7 @@ class TestReleaseWatchdogBehaviour:
         assert proc.returncode == 0, proc.stderr
         (created,) = self._created(writes)
         body = self._field(created, "body") or ""
-        assert "0ld5ha" in body and "reject" in body.lower(), (
+        assert self.OLD_SHA in body and "reject" in body.lower(), (
             "the pending approval is for a commit the tag no longer points at; approving it "
             "fails the re-bind, so the issue must say to reject it"
         )
@@ -3304,14 +3379,7 @@ class TestReleaseWatchdogBehaviour:
     # --- one issue, not many --------------------------------------------------
 
     def test_open_issue_is_not_duplicated(self, tmp_path):
-        issues = [
-            {
-                "number": 7,
-                "state": "open",
-                "body": "<!-- release-watchdog:v9.9.9 -->\n<!-- release-watchdog-sha:SHA -->",
-            }
-        ]
-        proc, writes, _ = self._run(tmp_path, 30, issues=issues)
+        proc, writes, _ = self._run(tmp_path, 30, issues=[self._issue("open", "SHA")])
         assert proc.returncode == 0, proc.stderr
         assert [c for c in writes if "POST" in c or "PATCH" in c] == [], (
             "every 6h tick would add an issue or comment"
@@ -3320,14 +3388,7 @@ class TestReleaseWatchdogBehaviour:
     def test_open_issue_follows_a_moved_tag(self, tmp_path):
         """Open issue, then a re-tag: the issue must learn the new commit now, or
         closing it later reopens it once with 'the tag moved'."""
-        issues = [
-            {
-                "number": 7,
-                "state": "open",
-                "body": "<!-- release-watchdog:v9.9.9 -->\n<!-- release-watchdog-sha:0ld5ha -->",
-            }
-        ]
-        proc, writes, sha = self._run(tmp_path, 30, issues=issues)
+        proc, writes, sha = self._run(tmp_path, 30, issues=[self._issue("open", "0ld5ha")])
         assert proc.returncode == 0, proc.stderr
         assert self._created(writes) == [] and not [c for c in writes if "comments" in " ".join(c)]
         (patch,) = [c for c in writes if "PATCH" in c]
@@ -3335,14 +3396,7 @@ class TestReleaseWatchdogBehaviour:
         assert self._field(patch, "state") is None, "it is already open; only the body changes"
 
     def test_issue_closed_for_this_commit_stays_closed(self, tmp_path):
-        issues = [
-            {
-                "number": 7,
-                "state": "closed",
-                "body": "<!-- release-watchdog:v9.9.9 -->\n<!-- release-watchdog-sha:SHA -->",
-            }
-        ]
-        proc, writes, _ = self._run(tmp_path, 30, issues=issues)
+        proc, writes, _ = self._run(tmp_path, 30, issues=[self._issue("closed", "SHA")])
         assert proc.returncode == 0, proc.stderr
         assert [c for c in writes if "POST" in c or "PATCH" in c] == [], (
             "you closed this for this exact commit; "
@@ -3350,19 +3404,87 @@ class TestReleaseWatchdogBehaviour:
         )
 
     def test_issue_reopens_when_the_tag_moves(self, tmp_path):
-        issues = [
-            {
-                "number": 7,
-                "state": "closed",
-                "body": "<!-- release-watchdog:v9.9.9 -->\n<!-- release-watchdog-sha:0ld5ha -->",
-            }
-        ]
-        proc, writes, sha = self._run(tmp_path, 30, issues=issues)
+        proc, writes, sha = self._run(tmp_path, 30, issues=[self._issue("closed", "0ld5ha")])
         assert proc.returncode == 0, proc.stderr
         assert self._created(writes) == [], "reopen, never duplicate"
         patch = [c for c in writes if "PATCH" in c and any(a.endswith("/issues/7") for a in c)]
         assert len(patch) == 1 and self._field(patch[0], "state") == "open"
         assert f"<!-- release-watchdog-sha:{sha} -->" in (self._field(patch[0], "body") or "")
+
+    # --- things that must not silence the alarm (review findings, PR #616) -----
+
+    def test_forged_pull_request_run_cannot_silence_the_alarm(self, tmp_path):
+        """A PR that edits release-notes.yml runs under the same workflow path and can
+        title itself like a release with a green create step. Only workflow_run runs
+        come from the default branch's file, so only those may count."""
+        proc, writes, _ = self._run(
+            tmp_path,
+            30,
+            rn_pages=[
+                [
+                    {
+                        "id": "rn1",
+                        "status": "completed",
+                        "display_title": "TITLE",
+                        "event": "pull_request",
+                    }
+                ]
+            ],
+            rn_jobs={"rn1": self._jobs("success")},
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert len(self._created(writes)) == 1, "a pull_request run marked the tag released"
+
+    def test_run_for_a_lookalike_tag_does_not_count(self, tmp_path):
+        """Git allows '@' in tag names: a run for v9.9.9@evil must not release v9.9.9."""
+        proc, writes, _ = self._run(
+            tmp_path,
+            30,
+            rn_pages=[
+                [
+                    {
+                        "id": "rn1",
+                        "status": "completed",
+                        "display_title": self._run_title("v9.9.9@evil", "SHA"),
+                    }
+                ]
+            ],
+            rn_jobs={"rn1": self._jobs("success")},
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert len(self._created(writes)) == 1
+
+    def test_release_created_on_an_earlier_attempt_stays_quiet(self, tmp_path):
+        """Re-running a release run that already created the Release skips the step
+        on the new attempt; the jobs API hides older attempts unless asked."""
+        proc, writes, _ = self._run(
+            tmp_path,
+            30,
+            rn_pages=[[{"id": "rn1", "status": "completed", "display_title": "TITLE"}]],
+            rn_jobs={"rn1": self._jobs("skipped")},
+            rn_jobs_older={"rn1": self._jobs("success")},
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert writes == [], "the Release was created on attempt 1; attempt 2's skip is not a miss"
+
+    def test_planted_closed_issue_cannot_silence_the_alarm(self, tmp_path):
+        """Anyone who can label an issue could plant a closed one carrying the markers,
+        so 'closed for this commit' would swallow the real alarm. Only the watchdog's
+        own issues count."""
+        proc, writes, _ = self._run(tmp_path, 30, issues=[self._issue("closed", "SHA", "mallory")])
+        assert proc.returncode == 0, proc.stderr
+        assert len(self._created(writes)) == 1
+
+    def test_publisher_still_running_after_a_day_is_named(self, tmp_path):
+        runs = self.ALL_GREEN.replace(
+            "publish-docker.yml=completed:success", "publish-docker.yml=in_progress:null"
+        )
+        proc, writes, _ = self._run(tmp_path, 30, runs=runs)
+        assert proc.returncode == 0, proc.stderr
+        (created,) = self._created(writes)
+        assert "publish-docker.yml" in (self._field(created, "body") or ""), (
+            "a publisher that never finished is a missing Release too; the issue must name it"
+        )
 
     # --- the fake gh cannot prove the real API shape ---------------------------
 
