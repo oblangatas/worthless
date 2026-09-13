@@ -37,6 +37,24 @@ def docker_available() -> bool:
     return probe.returncode == 0
 
 
+def image_present(ref: str) -> bool:
+    """True iff Docker is usable AND image `ref` exists locally. Never raises.
+
+    Safe inside a module-level ``skipif``: those conditions all evaluate at
+    import, so a raise here is a collection error, not a skip.
+    """
+    if not docker_available():
+        return False
+    return (
+        subprocess.run(  # noqa: S603
+            ["docker", "image", "inspect", ref],  # noqa: S607
+            capture_output=True,
+            check=False,
+        ).returncode
+        == 0
+    )
+
+
 def docker_exec(container: str, cmd: list[str]) -> subprocess.CompletedProcess[str]:
     """Run `cmd` inside an already-running container via `docker exec`."""
     return subprocess.run(  # noqa: S603
