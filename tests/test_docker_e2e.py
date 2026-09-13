@@ -1441,6 +1441,30 @@ class TestComposeSecurity:
         )
 
 
+# In-container fake upstream for the upstream_500 fault (stdlib only; /tmp is noexec).
+_UPSTREAM_500_STUB = """
+import http.server as h
+class H(h.BaseHTTPRequestHandler):
+    def do_POST(self):
+        self.send_response(500)
+        self.send_header("content-type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"error": {"type": "server_error"}}')
+h.HTTPServer(("127.0.0.1", 18080), H).serve_forever()
+"""
+_WAIT_FOR_18080 = """
+import socket, time
+for _ in range(50):
+    try:
+        socket.create_connection(("127.0.0.1", 18080), 0.2).close()
+        break
+    except OSError:
+        time.sleep(0.1)
+else:
+    raise SystemExit("port 18080 not listening")
+"""
+
+
 class TestSDKSmokeDocker:
     """Smoke: SDKs on the host can reach the production Docker image's proxy.
 
@@ -1484,11 +1508,34 @@ class TestSDKSmokeDocker:
         assert result.returncode == 0
         return result.stdout.strip()
 
-    def _enroll(self, container_name: str, provider: str) -> tuple[str, str]:
-        """Lock a fake key in the container; return (alias, shard_a)."""
+    def _enroll(
+        self, container_name: str, provider: str, upstream: str | None = None
+    ) -> tuple[str, str]:
+        """Lock a fake key in the container; return (alias, shard_a).
+
+        ``upstream`` registers a custom provider URL and locks against it.
+        """
         fake_key = fake_openai_key() if provider == "openai" else fake_anthropic_key()
         env_var = f"{provider.upper()}_API_KEY"
-        self._enroll_fake_key(container_name, env_var, fake_key)
+        env_line = fake_key
+        if upstream:
+            reg = docker_exec(
+                container_name,
+                [
+                    "worthless",
+                    "providers",
+                    "register",
+                    "--name",
+                    f"stub-{provider}",
+                    "--url",
+                    upstream,
+                    "--protocol",
+                    provider,
+                ],
+            )
+            assert reg.returncode == 0, f"register failed: {reg.stderr}"
+            env_line = f"{fake_key}\n{provider.upper()}_BASE_URL={upstream}"
+        self._enroll_fake_key(container_name, env_var, env_line)
         shard_a = self._read_shard_a(container_name, env_var)
         assert shard_a != fake_key
         assert shard_a.startswith("sk-ant-" if provider == "anthropic" else "sk-")
@@ -1562,6 +1609,21 @@ class TestSDKSmokeDocker:
             pytest.param(
                 "sidecar_killed", AssertionError, "sidecar unavailable", id="sidecar_killed"
             ),
+            # Upstream never resolves (RFC 6761 .invalid): proxy answers 502.
+            pytest.param(
+                "upstream_unreachable",
+                AssertionError,
+                r"(?s)bad gateway.*assert 502 == 401",
+                id="upstream_unreachable",
+            ),
+            # Upstream answers 500: proxy relays it sanitized. "server_error" comes
+            # only from the stub, so a proxy-side crash can't satisfy this.
+            pytest.param(
+                "upstream_500",
+                AssertionError,
+                r"(?s)server_error.*upstream provider error.*assert 500 == 401",
+                id="upstream_500",
+            ),
         ],
     )
     def test_smoke_assertion_fails_on_broken_proxy(
@@ -1573,13 +1635,25 @@ class TestSDKSmokeDocker:
         match: str | None,
     ) -> None:
         name, port = container
-        alias, shard_a = self._enroll(name, provider)
+        upstream = None
+        if fault == "upstream_unreachable":
+            upstream = "https://upstream.invalid"
+        elif fault == "upstream_500":
+            upstream = "http://127.0.0.1:18080"
+            subprocess.run(
+                ["docker", "exec", "-d", name, "python", "-c", _UPSTREAM_500_STUB],
+                capture_output=True,
+                check=True,
+            )
+            ready = docker_exec(name, ["python", "-c", _WAIT_FOR_18080])
+            assert ready.returncode == 0, f"stub upstream never listened: {ready.stderr}"
+        alias, shard_a = self._enroll(name, provider, upstream)
         base_url = f"http://127.0.0.1:{port}/{alias}"
         if fault == "unreachable_port":
             base_url = f"http://127.0.0.1:1/{alias}"
         elif fault == "unknown_alias":
             base_url = f"http://127.0.0.1:{port}/{provider}-00000000"
-        else:
+        elif fault in ("proxy_killed", "sidecar_killed"):
             uid = "10001" if fault == "proxy_killed" else "10002"
             # kill -1 as that uid signals only that uid's processes (no CAP_KILL needed).
             subprocess.run(
