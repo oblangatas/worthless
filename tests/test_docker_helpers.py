@@ -6,12 +6,18 @@ the whole run on any machine without a ``docker`` binary.
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
 from tests._docker_helpers import docker_available, image_present
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DOCKER_GATED_DIR = REPO_ROOT / "tests" / "openclaw" / "install_incident"
 
 
 @pytest.fixture
@@ -24,3 +30,28 @@ def no_docker_on_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterat
 
 def test_image_present_is_false_without_docker_binary(no_docker_on_path: None) -> None:
     assert image_present("worthless-oc-test:local") is False
+
+
+def test_docker_gated_modules_collect_without_docker(tmp_path: Path) -> None:
+    """The user-visible promise: a machine with no docker can still collect."""
+    result = subprocess.run(  # noqa: S603
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "--collect-only",
+            "-q",
+            "-o",
+            "addopts=",
+            "-p",
+            "no:randomly",
+            str(DOCKER_GATED_DIR),
+        ],
+        cwd=REPO_ROOT,
+        env={**os.environ, "PATH": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout[-3000:] + result.stderr[-1000:]
