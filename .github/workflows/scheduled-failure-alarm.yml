@@ -54,6 +54,7 @@ on:  # zizmor: ignore[dangerous-triggers]
       - "Flake radar (nightly)"
       - "Pip-audit canary (weekly)"
       - "Release Sync Check"
+      - "Release watchdog"
       - "Scheduled (Hypothesis + Secret Scan)"
       - "Scorecard security analysis"
       - "Wire-attack canary (scheduled)"

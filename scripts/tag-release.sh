@@ -199,9 +199,11 @@ echo "FALLBACK — only when there is NO waiting run, NO pending approval, and e
 echo "publisher is green, yet no Release exists. That is the automation genuinely"
 echo "not firing."
 echo
-echo "NOTHING WILL TELL YOU THIS HAPPENED. There is no watchdog yet (WOR-909"
-echo "requirement 3 is not shipped), so a silent no-Release looks exactly like a"
-echo "release still waiting on approval. Check Actions yourself before assuming."
+echo "The release watchdog tells you (WOR-922): it opens ONE issue, assigned to you,"
+echo "when this tag has no Release a day after tagging — or after 3 days if the run"
+echo "is still waiting for your approval. A draft does not silence it; only the"
+echo "automation's Create step succeeding does. It times a tag from when it was"
+echo "signed, so a tag pushed long after signing may never be watched."
 echo
 echo "If you do need the fallback, create a DRAFT — never a published Release —"
 echo "so it cannot silently ratify a release the publishers refused:"

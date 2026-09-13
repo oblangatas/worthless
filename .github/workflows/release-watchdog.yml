@@ -1,0 +1,55 @@
+name: Release watchdog
+
+# A release tag whose GitHub Release never appears files an issue instead of
+# staying silent. WOR-922.
+#
+# release-notes.yml creates the Release, but nothing notices when it does not: an
+# orphaned workflow_run listener produces no failed run, a forgotten approval click
+# looks like a normal pause, and a blocked publisher's red run is the same red this
+# repo already missed for four months (see scheduled-failure-alarm.yml). So this
+# watches from outside, on its own clock. The rules and why each exists live in
+# .github/scripts/release-watchdog.sh; pinned by TestReleaseWatchdogWiring and
+# TestReleaseWatchdogBehaviour in tests/test_deploy_static.py.
+#
+# If this workflow itself fails, scheduled-failure-alarm.yml files that — it is in
+# that workflow's watched list.
+#
+# Not a dangerous trigger: schedule (default-branch code) and manual dispatch (which
+# already needs write access), no secrets beyond the job token. It reads tags and run status and files issues;
+# it never touches Releases or tags.
+on:
+  schedule:
+    - cron: "41 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-watchdog
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read # release run and job status
+      issues: write # the alarm itself
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      # fetch-depth: 0 brings every tag with its date; that is all it reads from git.
+      - name: Checkout default branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # `timeout` turns a hung gh call into a plain failure, which
+      # scheduled-failure-alarm files. A job killed by timeout-minutes may conclude
+      # "cancelled" instead, and that alarm ignores cancelled runs.
+      - name: Look for releases that never appeared
+        run: timeout 600 bash .github/scripts/release-watchdog.sh
