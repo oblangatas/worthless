@@ -16,7 +16,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 # A developer shell can reshape the child run; the order pin must not depend on it.
-_CHILD_ENV_DROP = ("PYTEST_ADDOPTS", "PYTEST_PLUGINS", "PYTHONSAFEPATH")
+_CHILD_ENV_DROP = ("PYTEST_ADDOPTS", "PYTEST_PLUGINS")
 
 ORDERED_TESTS = """
 from worthless.cli import console, errors
@@ -29,7 +29,8 @@ def test_1_leaves_quiet_console_and_debug_on():
 
 
 def test_2_starts_with_cli_defaults():
-    assert console._console is None
+    active = console.get_console()
+    assert not active.quiet and not active.json_mode
     assert errors._debug is False
 """
 
@@ -51,8 +52,6 @@ def test_quiet_console_and_debug_do_not_leak_into_the_next_test(tmp_path: Path) 
             str(test_file),
             "-c",
             str(ini),
-            "--rootdir",
-            str(tmp_path),
             "-p",
             "tests.conftest",
             "-p",

@@ -107,20 +107,15 @@ def _isolate_fernet_storage_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def _isolate_cli_globals() -> None:
-    """Start every test with the CLI's process-globals at their defaults.
+    """Start every test with the CLI's console and debug flag at their defaults.
 
-    ``set_console`` (called directly, or by the CLI callback for ``--quiet`` /
-    ``--json``) replaces a process-global. Quiet/json consoles drop warnings
-    and hints, so one un-restored test silently empties the console output of
-    every later test on the same xdist worker. ``set_debug`` (``--debug``)
-    leaks the same way and changes error rendering for later tests.
-
-    Plain assignment, not ``monkeypatch``: a test calling
-    ``monkeypatch.undo()`` would otherwise hand back the inherited, possibly
-    quiet, value mid-test. No teardown needed; the next test resets again.
+    ``--quiet``/``--json``/``--debug`` set process-globals; one test left
+    quiet or in debug mode changes the output of every later test on its
+    worker. Plain assignment, not ``monkeypatch``, so a test calling
+    ``monkeypatch.undo()`` can't hand the leaked value back mid-test.
     """
     _cli_console._console = None
-    _cli_errors._debug = False
+    _cli_errors.set_debug(False)
 
 
 def make_repo(home: WorthlessHome) -> ShardRepository:
