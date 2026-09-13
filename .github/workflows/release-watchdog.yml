@@ -14,8 +14,8 @@ name: Release watchdog
 # If this workflow itself fails, scheduled-failure-alarm.yml files that — it is in
 # that workflow's watched list.
 #
-# Not a dangerous trigger: schedule and manual dispatch only, default-branch code,
-# no secrets beyond the job token. It reads tags and run status and files issues;
+# Not a dangerous trigger: schedule (default-branch code) and manual dispatch (which
+# already needs write access), no secrets beyond the job token. It reads tags and run status and files issues;
 # it never touches Releases or tags.
 on:
   schedule:
