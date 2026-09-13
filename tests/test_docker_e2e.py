@@ -1542,7 +1542,7 @@ class TestSDKSmokeDocker:
         return _make_alias(provider, fake_key), shard_a
 
     def _assert_sdk_reached_upstream(self, provider: str, base_url: str, shard_a: str) -> None:
-        """The smoke assertion. TestSDKSmokeFaultsDocker proves it rejects broken proxies."""
+        """The smoke assertion; test_smoke_assertion_fails_on_broken_proxy proves it goes red."""
         if provider == "openai":
             client = openai.OpenAI(api_key=shard_a, base_url=f"{base_url}/v1", max_retries=0)
             # APIStatusError = an HTTP response came back. APIConnectionError
