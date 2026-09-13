@@ -169,6 +169,10 @@ def test_spawn_sidecar_passes_close_fds_and_empty_pass_fds(
     fake_proc = MagicMock()
     fake_proc.pid = 12345
     fake_proc.poll.return_value = None
+    # MagicMock().stderr never returns b"", so spawn_sidecar's _collect_stderr
+    # drainer would spin forever and starve the xdist worker until an
+    # unrelated test hits the 30s timeout (same guard as test_sidecar_lifecycle.py).
+    fake_proc.stderr = None
 
     def fake_popen(*_args: object, **kwargs: object) -> MagicMock:
         captured_kwargs.update(kwargs)
@@ -469,6 +473,10 @@ def test_spawn_sidecar_passes_preexec_fn_when_service_uids_set(
     fake_proc = MagicMock()
     fake_proc.pid = 12345
     fake_proc.poll.return_value = None
+    # MagicMock().stderr never returns b"", so spawn_sidecar's _collect_stderr
+    # drainer would spin forever and starve the xdist worker until an
+    # unrelated test hits the 30s timeout (same guard as test_sidecar_lifecycle.py).
+    fake_proc.stderr = None
 
     def fake_popen(*_args: object, **kwargs: object) -> MagicMock:
         captured_kwargs.update(kwargs)
@@ -512,6 +520,10 @@ def test_spawn_sidecar_omits_preexec_fn_when_service_uids_is_none(
     fake_proc = MagicMock()
     fake_proc.pid = 12345
     fake_proc.poll.return_value = None
+    # MagicMock().stderr never returns b"", so spawn_sidecar's _collect_stderr
+    # drainer would spin forever and starve the xdist worker until an
+    # unrelated test hits the 30s timeout (same guard as test_sidecar_lifecycle.py).
+    fake_proc.stderr = None
 
     def fake_popen(*_args: object, **kwargs: object) -> MagicMock:
         captured_kwargs.update(kwargs)
@@ -1232,6 +1244,10 @@ def test_property_spawn_sidecar_accepts_any_valid_uid_triple(
     fake_proc = MagicMock()
     fake_proc.pid = 12345
     fake_proc.poll.return_value = None
+    # MagicMock().stderr never returns b"", so spawn_sidecar's _collect_stderr
+    # drainer would spin forever and starve the xdist worker until an
+    # unrelated test hits the 30s timeout (same guard as test_sidecar_lifecycle.py).
+    fake_proc.stderr = None
 
     with (
         patch.object(_sidecar_lifecycle.subprocess, "Popen", return_value=fake_proc),
@@ -1773,7 +1789,7 @@ def test_spawn_sidecar_lstats_socket_after_ready_and_rejects_symlink(
     monkeypatch.setattr(
         _sidecar_lifecycle.subprocess,
         "Popen",
-        lambda *_a, **_kw: MagicMock(pid=12345, poll=lambda: None),
+        lambda *_a, **_kw: MagicMock(pid=12345, poll=lambda: None, stderr=None),
     )
 
     try:
@@ -1817,7 +1833,7 @@ def test_spawn_sidecar_lstat_passes_when_socket_is_real_socket(
     monkeypatch.setattr(
         _sidecar_lifecycle.subprocess,
         "Popen",
-        lambda *_a, **_kw: MagicMock(pid=12345, poll=lambda: None),
+        lambda *_a, **_kw: MagicMock(pid=12345, poll=lambda: None, stderr=None),
     )
 
     try:
@@ -1850,6 +1866,10 @@ def test_spawn_sidecar_accepts_when_proxy_and_crypto_share_gid(
     fake_proc = MagicMock()
     fake_proc.pid = 12345
     fake_proc.poll.return_value = None
+    # MagicMock().stderr never returns b"", so spawn_sidecar's _collect_stderr
+    # drainer would spin forever and starve the xdist worker until an
+    # unrelated test hits the 30s timeout (same guard as test_sidecar_lifecycle.py).
+    fake_proc.stderr = None
 
     with (
         patch.object(_sidecar_lifecycle.subprocess, "Popen", return_value=fake_proc),
