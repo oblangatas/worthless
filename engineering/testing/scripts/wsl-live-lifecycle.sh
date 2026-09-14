@@ -5,8 +5,9 @@
 # Vampire/setup-wsl. Not Docker, not a monkeypatched platform: this is the
 # environment our primary user — a Windows developer working in WSL — runs.
 #
-# Expects SYSTEMD_EXPECTED=on|off from the workflow matrix, which controls
-# whether /etc/wsl.conf enabled systemd before WSL booted.
+# Expects SYSTEMD_EXPECTED=on|off|default from the workflow matrix, which
+# controls whether /etc/wsl.conf enabled systemd before WSL booted. `default`
+# writes no wsl.conf and records what the distro ships.
 #
 # WHAT THIS DOES NOT PROVE: this is WSL2 inside a GitHub VM, not a user's
 # laptop. It says nothing about /mnt/c interop — though worthless refuses
@@ -14,7 +15,7 @@
 set -uo pipefail
 
 REPO="${REPO:-$(pwd)}"
-SYSTEMD_EXPECTED="${SYSTEMD_EXPECTED:?set SYSTEMD_EXPECTED=on|off}"
+SYSTEMD_EXPECTED="${SYSTEMD_EXPECTED:?set SYSTEMD_EXPECTED=on|off|default}"
 USER_NAME=worthless-wsl
 PORT=8787
 FAILURES=0
@@ -36,7 +37,13 @@ say "2. is systemd in the state the matrix asked for?"
 PID1=$(cat /proc/1/comm 2>/dev/null)
 fact "expected" "$SYSTEMD_EXPECTED"
 fact "actual PID 1" "$PID1"
-if [ "$SYSTEMD_EXPECTED" = "on" ]; then
+if [ "$SYSTEMD_EXPECTED" = "default" ]; then
+  # No wsl-conf was written: record what the distro really ships, don't assert.
+  echo "  /etc/wsl.conf as shipped:"
+  sed 's/^/  | /' /etc/wsl.conf 2>/dev/null || echo "  | <no /etc/wsl.conf>"
+  SYSTEMD_EXPECTED=$([ "$PID1" = "systemd" ] && echo on || echo off)
+  fact "shipped default" "systemd $SYSTEMD_EXPECTED"
+elif [ "$SYSTEMD_EXPECTED" = "on" ]; then
   check "systemd is PID 1" '[ "$PID1" = "systemd" ]'
 else
   check "systemd is NOT PID 1" '[ "$PID1" != "systemd" ]'

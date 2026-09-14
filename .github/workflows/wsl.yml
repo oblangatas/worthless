@@ -8,9 +8,17 @@ name: WSL
 # installs a real WSL2 distribution on a Windows runner and runs steps INSIDE
 # it — not Docker, not a monkeypatched platform.
 #
-# Two legs, because they are two different products for the user:
-#   systemd=off  WSL's default. A background service cannot run at all.
-#   systemd=on   what a user gets after enabling systemd in /etc/wsl.conf.
+# Legs:
+#   off          systemd disabled (old or `wsl --import` installs). A background
+#                service cannot run at all.
+#   on (control) systemd enabled, default Windows config. Also proves WSL stops
+#                the distro ~15 s after the last wsl.exe exits — which kills the
+#                proxy. If this leg cannot SEE that shutdown, the fix leg's pass
+#                means nothing, so the control leg goes red instead.
+#   on (fix)     same, plus `[general] instanceIdleTimeout=-1` in .wslconfig.
+#                Must show the proxy survived (same boot_id and InvocationID).
+#   default      no wsl.conf written: records what Ubuntu 24.04 really ships.
+#                (Current Ubuntu images ship systemd=true, not off.)
 #
 # NOT a required check, deliberately. WSL install is slow and windows-latest is
 # flakier than Linux, and early instability must not block unrelated PRs. The
@@ -30,6 +38,7 @@ on:
     paths:
       - ".github/workflows/wsl.yml"
       - "engineering/testing/scripts/wsl-live-lifecycle.sh"
+      - "engineering/testing/scripts/wsl-idle-survival.sh"
 
 permissions:
   contents: read
@@ -40,21 +49,33 @@ concurrency:
 
 jobs:
   wsl:
-    name: WSL (systemd ${{ matrix.systemd }})
+    name: WSL (${{ matrix.leg }})
     runs-on: windows-latest
     timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
         include:
-          - systemd: "off"
+          - leg: "systemd off"
+            systemd: "off"
             wslconf: |
               [boot]
               systemd=false
-          - systemd: "on"
+          - leg: "systemd on, idle control"
+            systemd: "on"
+            idle: control
             wslconf: |
               [boot]
               systemd=true
+          - leg: "systemd on, idle fix"
+            systemd: "on"
+            idle: fix
+            wslconf: |
+              [boot]
+              systemd=true
+          # No wslconf: setup-wsl only writes /etc/wsl.conf when it is non-empty.
+          - leg: "distro default"
+            systemd: "default"
     steps:
       # Windows runners check files out with CRLF line endings by default
       # (core.autocrlf=true). Bash inside WSL then reads every `\r` as part of
@@ -75,6 +96,16 @@ jobs:
           wsl-conf: ${{ matrix.wslconf }}
           additional-packages: python3 python3-venv python3-pip curl
 
+      # Before the lifecycle, so the service is installed under the new config.
+      # .wslconfig is read when the WSL VM starts; `wsl --shutdown` forces that.
+      - name: "Idle fix: instanceIdleTimeout=-1 in .wslconfig"
+        if: matrix.idle == 'fix'
+        shell: pwsh
+        run: |
+          Set-Content -Path "$env:USERPROFILE\.wslconfig" -Encoding ascii -Value "[general]`ninstanceIdleTimeout=-1"
+          Get-Content "$env:USERPROFILE\.wslconfig"
+          wsl --shutdown
+
       - name: Run the lifecycle inside WSL
         shell: wsl-bash {0}
         env:
@@ -83,3 +114,48 @@ jobs:
           SYSTEMD_EXPECTED: ${{ matrix.systemd }}
           WSLENV: SYSTEMD_EXPECTED/u
         run: bash engineering/testing/scripts/wsl-live-lifecycle.sh
+
+      - name: "Idle 1: record boot_id and service InvocationID"
+        if: matrix.idle != ''
+        shell: wsl-bash {0}
+        env:
+          IDLE_EXPECTED: ${{ matrix.idle }}
+          WSLENV: IDLE_EXPECTED/u
+        run: bash engineering/testing/scripts/wsl-idle-survival.sh save
+
+      # Windows only. Any wsl.exe here would reset WSL's idle timer and hide the
+      # shutdown; `wsl -l --running` only queries and does not start a distro.
+      - name: "Idle 2: wait 120 s from Windows with no wsl.exe open"
+        if: matrix.idle != ''
+        shell: pwsh
+        env:
+          IDLE_EXPECTED: ${{ matrix.idle }}
+        run: |
+          $env:WSL_UTF8 = 1  # otherwise wsl.exe prints UTF-16 and -match fails
+          wsl --version
+          "Windows-side WSL clients still open before the wait (should be none):"
+          Get-Process wsl, wslhost -ErrorAction SilentlyContinue | Format-Table Id, Name, StartTime
+          Start-Sleep -Seconds 120
+          $running = wsl -l --running | Out-String
+          $running
+          try { $code = (Invoke-WebRequest http://127.0.0.1:8787/healthz -UseBasicParsing -TimeoutSec 5).StatusCode }
+          catch { $code = "no answer" }
+          "healthz from Windows: $code (reported, not asserted: localhost forwarding varies)"
+          $alive = $running -match 'Ubuntu-24.04'
+          if ($env:IDLE_EXPECTED -eq 'control') {
+            if ($alive) { "FAIL  control: distro still running after 120 s on default config. This test cannot see the idle shutdown, so no fix-leg pass can be trusted."; exit 1 }
+            "PASS  control: WSL stopped the distro on its own"
+          } else {
+            if (-not $alive) { "FAIL  fix: distro stopped despite instanceIdleTimeout=-1"; exit 1 }
+            "PASS  fix: distro still running"
+          }
+          exit 0
+
+      # Runs even if Idle 2 failed, so a red run still carries the evidence.
+      - name: "Idle 3: did the proxy survive, or restart?"
+        if: matrix.idle != '' && !cancelled()
+        shell: wsl-bash {0}
+        env:
+          IDLE_EXPECTED: ${{ matrix.idle }}
+          WSLENV: IDLE_EXPECTED/u
+        run: bash engineering/testing/scripts/wsl-idle-survival.sh compare
