@@ -301,7 +301,8 @@ check_pipx_conflict() {
             return 0
             ;;
     esac
-    if pipx list 2>/dev/null | grep -qi "package worthless "; then
+    # Trusted prefix only: pipx >=1.7 runs `uv --version` via PATH (worthless-52lm).
+    if PATH="${PATH%":$ORIGINAL_PATH"}" pipx list 2>/dev/null | grep -qi "package worthless "; then
         die "$EXIT_PIPX_CONFLICT" "Detected a pipx-installed worthless." \
             "uv and pipx both manage tool isolation; running both is confusing." \
             "Remove the pipx version, then re-run this installer:" \
