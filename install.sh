@@ -535,6 +535,8 @@ shadowing_worthless_path() {
     # -ef: same device and inode, so a symlink, a symlinked parent, a trailing
     # slash or another letter case on a case-insensitive disk is still our file.
     # Text comparison of resolved paths got all four wrong in some shell.
+    # -ef is POSIX.1-2024 and works in every sh we ship to; older shellcheck flags it.
+    # shellcheck disable=SC3013
     [ "$_sw_user" -ef "$worthless_bin" ] && return 0
     printf '%s' "$_sw_user"
 }
