@@ -23,6 +23,7 @@ from hypothesis import HealthCheck, settings
 from worthless.cli import console as _cli_console  # used by _isolate_cli_globals
 from worthless.cli import errors as _cli_errors  # used by _isolate_cli_globals
 from worthless.cli import default_command  # used by _isolate_default_command_proxy autouse fixture
+from worthless.cli import sidecar_lifecycle  # used by _no_spinning_stderr_drainer autouse fixture
 from worthless.cli.commands.service.proxy_state import ProxyRuntimeState
 from worthless.cli.bootstrap import WorthlessHome, ensure_home
 from worthless.crypto import SplitResult
@@ -116,6 +117,43 @@ def _isolate_cli_globals() -> None:
     """
     _cli_console._console = None
     _cli_errors.set_debug(False)
+
+
+@pytest.fixture(autouse=True)
+def _no_spinning_stderr_drainer(monkeypatch: pytest.MonkeyPatch):
+    """Fail a test whose fake stderr pipe would spin spawn_sidecar's drainer.
+
+    ``_collect_stderr`` reads until ``b""``; a MagicMock's ``read()`` returns a
+    falsy-length-but-truthy Mock, never ``b""``, so the daemon thread spins
+    forever and starves the xdist worker until an unrelated test hits the 30s
+    timeout (PR #593 crash). A post-test thread check is too late — the spin
+    stalls the test itself — so stop the drainer on the first non-bytes read
+    and fail at teardown. Real pipes and finite fakes (bytes, then ``b""``)
+    pass straight through.
+    """
+    bad_reads: list[object] = []
+    real = sidecar_lifecycle._collect_stderr
+
+    class _Pipe:
+        def __init__(self, pipe):
+            self._pipe = pipe
+
+        def read(self, n):
+            chunk = self._pipe.read(n)
+            if isinstance(chunk, bytes):
+                return chunk
+            bad_reads.append(chunk)
+            return b""
+
+    monkeypatch.setattr(
+        sidecar_lifecycle, "_collect_stderr", lambda pipe, buf: real(_Pipe(pipe), buf)
+    )
+    yield
+    if bad_reads:
+        pytest.fail(
+            f"fake stderr pipe returned {type(bad_reads[0]).__name__} from read(), not bytes; "
+            "spawn_sidecar's drainer would spin forever — set fake_proc.stderr = None"
+        )
 
 
 def make_repo(home: WorthlessHome) -> ShardRepository:

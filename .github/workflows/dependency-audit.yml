@@ -162,3 +162,34 @@ jobs:
         # slice of exactly that.
         working-directory: workers/worthless-sh
         run: npm audit
+
+  # The docs site (docs.wless.io, Astro + Starlight) owns the ROOT package.json
+  # and package-lock.json, and the job above only covers workers/worthless-sh.
+  # Root sat unaudited while it accumulated 1 critical + 4 high (astro, sharp,
+  # js-yaml, smol-toml, svgo). `npm audit fix --package-lock-only` cleared all 5
+  # with package.json unchanged, and that refresh ships alongside this job, so
+  # it is green on arrival.
+  #
+  # Same shape and same reasoning as the worker job: full tree, bare audit, no
+  # suppression. The site is static with no adapter, but its build runs in
+  # Cloudflare Workers Builds, so build tooling is in scope.
+  npm-audit-docs:
+    name: npm audit (docs site)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: ./.github/actions/setup-node-worker
+
+      # See the worker job: `npm audit` trusts a stale lockfile, this does not.
+      - name: Lock is in sync with package.json
+        run: npm ci --dry-run
+
+      - name: Audit the docs site's dependency tree
+        run: npm audit

@@ -12,7 +12,10 @@ import pytest
 
 pytest.importorskip("mcp", reason="mcp extra not installed")
 
+from mcp.client import Client  # noqa: E402
+
 from worthless.mcp.server import (  # noqa: E402
+    mcp,
     worthless_lock,
     worthless_scan,
     worthless_spend,
@@ -345,7 +348,7 @@ class TestWorthlessScan:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """c5kc / CodeRabbit follow-up: scan_files is synchronous and runs for
-        up to 30 s; calling it inline would block the FastMCP event loop and
+        up to 30 s; calling it inline would block the MCPServer event loop and
         starve other concurrent MCP tools. This test pins that the MCP tool
         actually offloads to a worker thread.
 
@@ -633,3 +636,40 @@ class TestWorthlessSpend:
             result = json.loads(await worthless_spend(alias="openai-abc"))
         assert len(result["spend"]) == 1
         assert result["spend"][0]["alias"] == "openai-abc"
+
+
+# ---------------------------------------------------------------------------
+# What an agent sees when a tool fails (WOR-929)
+# ---------------------------------------------------------------------------
+
+
+class TestToolErrorsSeenByAgent:
+    """mcp 2.x hides the text of any tool exception except its own ToolError.
+
+    Driven through the SDK's in-memory client, so the assertions are on the
+    CallToolResult an agent receives, not on the Python exception.
+    """
+
+    @pytest.mark.asyncio
+    async def test_agent_reads_the_worthless_error_message(self, tmp_path: Path) -> None:
+        with patch.dict(os.environ, {"WORTHLESS_HOME": str(tmp_path / "no-home")}):
+            async with Client(mcp) as client:
+                result = await client.call_tool("worthless_spend", {})
+
+        assert result.is_error is True
+        assert result.content[0].text == (
+            "Error executing tool worthless_spend: WRTLS-100: "
+            "Worthless is not initialized. Run `worthless lock` first."
+        )
+
+    @pytest.mark.asyncio
+    async def test_agent_never_reads_crash_details(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _crash() -> None:
+            raise RuntimeError("/Users/victim/.worthless/shard_a leaked")
+
+        monkeypatch.setattr("worthless.mcp.server._require_home", _crash)
+        async with Client(mcp) as client:
+            result = await client.call_tool("worthless_spend", {})
+
+        assert result.is_error is True
+        assert result.content[0].text == "Error executing tool worthless_spend"
