@@ -398,7 +398,9 @@ def _measure_seam(tmp_path_factory: pytest.TempPathFactory) -> float:
         # and raised a raw TimeoutExpired past every retry (reproduced
         # 2026-09-13). Killing the group here also reaps helpers like
         # `docker info` that a leader-only kill left running.
-        _reap(proc)
+        survived = _reap(proc)
+    if survived:
+        _fail_unkillable(proc)
     elapsed = time.monotonic() - t0
     err = _stderr_path(te).read_bytes().decode("utf-8", errors="replace")
 
@@ -621,6 +623,11 @@ def _reap(proc: subprocess.Popen) -> bool:
 
     Runs even when the leader already exited: a helper that outlived it could
     still touch disk while ``classify()`` reads it.
+
+    Never raises: it runs in ``finally`` blocks, where raising would replace a
+    failure already on its way out (the hang message, its evidence and stderr
+    tail). Callers act on the result AFTER the ``finally`` — a line that only
+    runs when nothing else is failing.
     """
     helpers: list[psutil.Process] = []
     if proc.returncode is None:  # once reaped, the pid may belong to someone else
@@ -632,15 +639,14 @@ def _reap(proc: subprocess.Popen) -> bool:
     _kill_group(proc, signal.SIGKILL)
     try:
         proc.wait(timeout=5)
-    except subprocess.TimeoutExpired as exc:
-        # Never replace a failure already on its way out (the hang message
-        # with its evidence and stderr tail); only raise when nothing else is.
-        # __context__ is set exactly when another exception was propagating.
-        if exc.__context__ is None:
-            pytest.fail(f"pid {proc.pid} survived SIGKILL for 5s (stuck in the kernel?)")
+    except subprocess.TimeoutExpired:
         return True
     psutil.wait_procs(helpers, timeout=5)
     return False
+
+
+def _fail_unkillable(proc: subprocess.Popen) -> None:
+    pytest.fail(f"pid {proc.pid} survived SIGKILL for 5s (stuck in the kernel?)")
 
 
 def _await_exit(proc: subprocess.Popen, te: TrialEnv, what: str) -> None:
@@ -686,7 +692,9 @@ def _run_trial(te: TrialEnv, sig: int, delay: float, *, ready: Path | None = Non
         _kill_group(proc, sig)
         _await_exit(proc, te, f"lock hung after sig={sig} delay={delay:.3f}s")
     finally:
-        _reap(proc)
+        survived = _reap(proc)
+    if survived:
+        _fail_unkillable(proc)
     return classify(te)
 
 
@@ -763,7 +771,9 @@ class TestMashedSigint:
                     time.sleep(0.005)
                 _await_exit(proc, te, f"mashed-SIGINT hung at delay={delay:.3f}s")
             finally:
-                _reap(proc)
+                survived = _reap(proc)
+            if survived:
+                _fail_unkillable(proc)
             state = classify(te)
             _assert_no_partial(state, te=te, n_keys=n_keys, sig=signal.SIGINT, delay=delay)
 
@@ -851,15 +861,12 @@ def _surviving_helper(pid_file: Path) -> list[psutil.Process]:
     # until init reaps it, and that reap is scheduler-dependent under load.
     _gone, alive = psutil.wait_procs([helper], timeout=5)
     # A zombie is dead: in an init-less container nothing ever reaps it.
-    zombie = psutil.STATUS_ZOMBIE
-    return [p for p in alive if not _status_is(p, zombie)]
-
-
-def _status_is(proc: psutil.Process, status: str) -> bool:
-    try:
-        return proc.status() == status
-    except psutil.Error:
-        return True  # gone between the wait and the check
+    survivors = []
+    for proc in alive:
+        with contextlib.suppress(psutil.Error):  # gone between the wait and the check
+            if proc.status() != psutil.STATUS_ZOMBIE:
+                survivors.append(proc)
+    return survivors
 
 
 def _reap_helper(pid_file: Path) -> None:
@@ -918,33 +925,44 @@ def test_calibration_timeout_is_retryable_and_never_blames_the_product(
         _reap_helper(helper_pid)
 
 
-def test_cleanup_never_replaces_the_failure_already_raised(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cleanup_never_replaces_the_failure_already_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """An unkillable process must not erase the hang message that found it.
 
-    ``_reap`` runs in ``finally`` blocks. If it raised its own "survived SIGKILL"
-    failure while a hang failure was propagating, the evidence and stderr tail
-    would be lost from the report.
+    Drives the real ``_run_trial`` with a process that never dies. Cleanup runs
+    in ``finally``; if it raised there, the hang message with its evidence and
+    stderr tail would be lost. Separately, a process that exits on the signal
+    but whose group survives SIGKILL must still fail loudly.
     """
 
-    class Unkillable:
+    class FakeLock:
         pid = 2**22 + 7  # never a live pid; _kill_group is also stubbed out below
-        returncode = 0
+        returncode = None
+
+        def __init__(self, exits_on_signal: bool) -> None:
+            self.exits_on_signal = exits_on_signal
+
+        def poll(self) -> None:
+            return None
 
         def wait(self, timeout: float) -> int:
+            if self.exits_on_signal:  # the hang guard's wait succeeds, reaping does not
+                self.exits_on_signal = False
+                return 0
             raise subprocess.TimeoutExpired("lock", timeout)
 
     monkeypatch.setattr(f"{__name__}._kill_group", lambda _proc, _sig: None)
-    proc = Unkillable()
+    te = _make_trial_env(tmp_path, 0, 1)
 
-    with pytest.raises(pytest.fail.Exception, match=r"lock hung after sig="):
-        try:
-            pytest.fail("lock hung after sig=2 delay=0.050s")
-        finally:
-            _reap(proc)  # type: ignore[arg-type]
+    monkeypatch.setattr(f"{__name__}._spawn_lock", lambda _te: FakeLock(exits_on_signal=False))
+    with pytest.raises(pytest.fail.Exception, match=r"lock hung after sig=") as hang:
+        _run_trial(te, signal.SIGINT, 0.0)
+    assert "survived SIGKILL for 5s" in str(hang.value)  # folded into the hang message
 
-    # With nothing in flight, an unkillable process is still a loud failure.
+    monkeypatch.setattr(f"{__name__}._spawn_lock", lambda _te: FakeLock(exits_on_signal=True))
     with pytest.raises(pytest.fail.Exception, match=r"survived SIGKILL"):
-        _reap(proc)  # type: ignore[arg-type]
+        _run_trial(te, signal.SIGINT, 0.0)
 
 
 def test_seam_calibration_retries_a_transient_miss(
@@ -953,7 +971,7 @@ def test_seam_calibration_retries_a_transient_miss(
 ) -> None:
     """One missed measurement must not error the whole module.
 
-    Calibration gets MAX_SEAM seconds to observe the first shard write; a
+    Calibration gets WAIT_TIMEOUT seconds to observe the first shard write; a
     stalled runner misses it. This fixture is session-scoped and xdist runs
     those once per worker, so splitting this module across workers multiplied
     how many calibrations happen, and with it the chance one trips.
@@ -1034,7 +1052,7 @@ def test_seam_calibration_refuses_to_fabricate() -> None:
         _resolve_seam(None, shards_after=2, returncode=0, elapsed=0.4)
 
     # No measurement + the DB is EMPTY -> the lock never wrote. Product or
-    # environment fault; raising MAX_SEAM would only hide it.
+    # environment fault; raising WAIT_TIMEOUT would only hide it.
     with pytest.raises(pytest.fail.Exception, match=r"wrote NO shard"):
         _resolve_seam(None, shards_after=0, returncode=1, elapsed=0.2, stderr="boom")
 
