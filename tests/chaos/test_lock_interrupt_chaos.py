@@ -616,8 +616,8 @@ def _evidence(proc: subprocess.Popen) -> str:
     return f"{load} descendants={members}"
 
 
-def _reap(proc: subprocess.Popen) -> None:
-    """SIGKILL the whole group and wait for it, bounded.
+def _reap(proc: subprocess.Popen) -> bool:
+    """SIGKILL the whole group and wait for it, bounded. True if the leader survived.
 
     Runs even when the leader already exited: a helper that outlived it could
     still touch disk while ``classify()`` reads it.
@@ -638,7 +638,9 @@ def _reap(proc: subprocess.Popen) -> None:
         # __context__ is set exactly when another exception was propagating.
         if exc.__context__ is None:
             pytest.fail(f"pid {proc.pid} survived SIGKILL for 5s (stuck in the kernel?)")
+        return True
     psutil.wait_procs(helpers, timeout=5)
+    return False
 
 
 def _await_exit(proc: subprocess.Popen, te: TrialEnv, what: str) -> None:
@@ -647,8 +649,14 @@ def _await_exit(proc: subprocess.Popen, te: TrialEnv, what: str) -> None:
         proc.wait(timeout=WAIT_TIMEOUT)
     except subprocess.TimeoutExpired:
         evidence = _evidence(proc)  # before the kill, while the group is alive
-        _reap(proc)
-        pytest.fail(f"{what} — a hang is a regression\n  evidence: {evidence}\n{_stderr_tail(te)}")
+        if _reap(proc):
+            evidence += "  (and it survived SIGKILL for 5s: stuck in the kernel, e.g. slow I/O)"
+        pytest.fail(
+            f"{what} — the lock did not exit within {WAIT_TIMEOUT}s of the signal. Treat it "
+            "as a hang regression unless the evidence shows a drowning host (high "
+            "load/cores) or a process stuck in the kernel.\n"
+            f"  evidence: {evidence}\n{_stderr_tail(te)}"
+        )
 
 
 def _run_trial(te: TrialEnv, sig: int, delay: float, *, ready: Path | None = None) -> DiskState:
