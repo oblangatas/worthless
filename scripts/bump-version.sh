@@ -192,22 +192,23 @@ Done. Next steps:
   3. Run the version-drift test:
      uv run pytest tests/test_skill_md.py::TestVersionDrift -q
 
-  4. Stage, commit (Conventional Commits), push:
+  4. Commit on a branch (commits to main are blocked), push, open a PR, merge it:
+     git switch -c chore/release-v$new_version     # if you are still on main
      git add pyproject.toml SKILL.md CHANGELOG.md uv.lock install.sh packages/worthless-mcp/package.json docs/ deploy/docker-compose.yml
      git commit -m "chore(release): v$new_version"
-     git push
+     git push -u origin HEAD
+     gh pr create --fill
 
-  5. After PR merges to main — tag FIRST, release SECOND:
-     git checkout main && git pull --rebase
-     ./scripts/tag-release.sh $new_version "<headline>"
-     # ↑ GPG-signs the tag, verifies it locally, pushes it.
-     # publish.yml fires automatically on the push → PyPI + npm.
+  5. After the PR merges — in the checkout that has main (git worktree list),
+     on the maintainer's machine — in one line:
+     git switch main && git pull --ff-only && ./scripts/tag-release.sh $new_version "<headline>"
 
-     # WAIT for publish.yml to pass, then create the GitHub Release:
-     # gh release create v$new_version --title "v$new_version: <headline>" --generate-notes
-     #
-     # WARNING: NEVER run gh release create before pushing the signed tag.
-     # gh release create creates an unsigned tag that (a) fails the GPG gate
-     # in publish.yml and (b) permanently tombstones the tag name in GitHub.
+  6. tag-release.sh then prints the four approvals and exactly what to check before
+     each one. The Release page should then be created automatically (not yet proven
+     on a real release — check it). Never create it yourself. Everything else,
+     including what to do if something fails: RELEASING.md
+
+     # WARNING: NEVER run gh release create before the signed tag is pushed.
+     # It creates an unsigned tag and permanently tombstones the version name.
 
 EOF
