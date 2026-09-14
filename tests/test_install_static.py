@@ -1141,7 +1141,10 @@ class TestPathLockdownIsActuallyTested:
         text = INSTALL_SH.read_text()
         block = text[text.index('if [ "${WORTHLESS_TRUST_PATH:-}" != "1" ]; then') :]
         line = next(ln for ln in block.splitlines() if ln.strip().startswith("PATH="))
-        expected = 'PATH="/usr/bin:/bin:/usr/local/bin:${home_for_path}/.local/bin:${PATH:-}"'
+        expected = (
+            'PATH="/usr/bin:/bin:/usr/local/bin:/usr/sbin:/sbin:/opt/homebrew/bin:'
+            '${home_for_path}/.local/bin:${PATH:-}"'
+        )
         assert line.strip() == expected, (
             "the lockdown's trusted set changed. System dirs must lead and the "
             "inherited PATH must stay last; a user-writable dir moved ahead of "
@@ -1314,3 +1317,47 @@ class TestPlantedBinariesCannotWin:
             f"  cleanup uses: {sorted(used)}\n  init owns:    {sorted(owned)}\n"
             f"  unowned:      {sorted(used - owned)}"
         )
+
+
+def test_children_inherit_a_path_that_prefers_every_trusted_dir() -> None:
+    """worthless-2qfm: what install.sh trusts, the programs it launches must too.
+
+    ``trusted_tool`` searches a fixed list of directories so install.sh's OWN
+    lookups ignore anything planted on the caller's PATH. But install.sh then runs
+    other programs — Astral's uv installer above all — and those inherit PATH,
+    which the lockdown builds from a DIFFERENT, shorter list.
+
+    On macOS ``sha256sum`` exists only in /sbin. ``trusted_tool`` searches /sbin,
+    so install.sh's own hash check was safe. The lockdown did not prepend /sbin, so
+    when Astral's installer looked up ``sha256sum`` to verify the uv tarball, it
+    fell through to the caller's PATH and a planted one executed. Observed on a
+    real Mac, no escape hatch::
+
+        planted sha256sum invoked
+        args:   -b .../input.tar.gz
+        parent: sh .../uv-installer.sh
+
+    Spies on all 297 sbin-only tools during a real install showed sha256sum was
+    the only one reached — but the rule below closes the whole class rather than
+    that one name: any directory install.sh trusts must also sit in the lockdown's
+    prefix, ahead of the caller's PATH.
+    """
+    text = INSTALL_SH.read_text()
+
+    tt = text[text.index("trusted_tool() {") :]
+    tt = tt[: tt.index("\n}\n")]
+    loop = re.search(r"for d in ([^;]+);", tt)
+    assert loop, "could not find trusted_tool's directory list"
+    trusted = loop.group(1).split()
+
+    lock = re.search(r'^\s*PATH="([^"]*)\$\{PATH:-\}"', text, re.MULTILINE)
+    assert lock, "could not find the PATH lockdown literal"
+    prefix = [d for d in lock.group(1).split(":") if d]
+
+    missing = [d for d in trusted if d not in prefix]
+    assert not missing, (
+        "install.sh trusts these directories for its own lookups but does not put "
+        "them in the PATH it hands to child processes, so a launched program (e.g. "
+        f"Astral's uv installer) can be fooled where install.sh was not: {missing}\n"
+        f"  trusted_tool: {trusted}\n  lockdown:     {prefix}"
+    )

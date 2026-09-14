@@ -8,7 +8,10 @@ test_install_docker.py (marked 'docker').
 
 from __future__ import annotations
 
+import subprocess  # noqa: S404
 from pathlib import Path
+
+import pytest
 
 from tests._install_helpers import (
     EXIT_INTEGRITY,
@@ -1203,4 +1206,135 @@ esac""",
         "`uv tool dir --bin` rather than assuming ~/.local/bin — that assumption "
         f"breaks the no-op guarantee for anyone who relocates it.\n{log}\n"
         f"{result.stderr[-300:]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# worthless-52lm / worthless-2qfm — planted binaries must never run, with the
+# installer's real defences switched ON
+# ---------------------------------------------------------------------------
+
+
+def _run_install_like_a_user(home: Path, first_on_path: Path) -> subprocess.CompletedProcess[str]:
+    """Run the real install.sh the way a user's shell would.
+
+    Deliberately NOT ``run_install``: that helper sets WORTHLESS_TRUST_PATH=1 so
+    it can inject stubs, and the escape hatch switches off exactly the defences
+    these tests exist to prove — the PATH lockdown, ``trusted_tool`` and
+    ``resolve_uv`` all defer to ``command -v`` when it is set. Every earlier test
+    of those defences ran with them disabled, which is how worthless-52lm shipped
+    with a green suite.
+
+    ``env -i`` so nothing from the developer's shell leaks in. The attacker's
+    directory is FIRST on PATH, which is the realistic position: any writable
+    directory the user already has on PATH ahead of the system dirs.
+    """
+    env = {
+        "HOME": str(home),
+        "PATH": f"{first_on_path}:/usr/bin:/bin",
+        "NO_COLOR": "1",
+        "WORTHLESS_KEYRING_BACKEND": "null",
+    }
+    return subprocess.run(  # noqa: S603
+        ["/bin/sh", str(INSTALL_SH)],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+
+@pytest.mark.parametrize("already_installed", [False, True], ids=["fresh", "already-installed"])
+def test_a_planted_uv_never_performs_the_install(tmp_path: Path, already_installed: bool) -> None:
+    """worthless-52lm: the genuine pinned uv must do the install, not a planted one.
+
+    worthless-v0tl (#580) made ensure_uv find uv through ``resolve_uv`` — a bounded
+    list of directories — rather than ``command -v``. That fixed the VERSION CHECK.
+    But when the uv it finds is already pinned, ensure_uv returns early, BEFORE the
+    line that prepends uv's directory to PATH. Every later call is a bare ``uv``
+    resolved through PATH, and the lockdown only prepends
+    /usr/bin:/bin:/usr/local/bin:~/.local/bin. So a pinned uv in ~/.cargo/bin or
+    /opt/homebrew/bin (where Homebrew puts it) loses every later call to whatever
+    is first on the caller's PATH.
+
+    Reproduced before this test existed::
+
+        LEGIT --version
+        EVIL  tool list
+        EVIL  tool install --force worthless==0.3.12
+        EVIL  tool dir --bin
+
+    The attacker's binary runs during ``curl | sh`` and decides what gets
+    installed — the outcome worthless-v0tl was filed to prevent, one step later.
+
+    Asserts the EXACT call sequence the genuine uv receives, not merely that the
+    attacker stayed silent: a bare ``uv`` can also land on a host's own
+    /opt/homebrew/bin/uv (now in the lockdown prefix), which logs nothing. A
+    missing LEGIT line catches that on every host. ``already-installed`` reaches
+    the idempotency fast-path's call site, which a fresh install never does.
+
+    Offline by construction: the genuine uv is already pinned, so the Astral
+    bootstrap (and its download) is never reached.
+    """
+    home = tmp_path / "home"
+    log = tmp_path / "uv-calls.log"
+    pin = read_install_pin()
+
+    shim = f'#!/bin/sh\\necho "worthless {pin}"\\n'
+    genuine = home / ".cargo" / "bin"
+    genuine.mkdir(parents=True)
+    write_stub(
+        genuine,
+        "uv",
+        f"""echo "LEGIT $*" >> {log}
+case "$1" in
+  --version) echo "uv 0.11.7" ;;
+  tool) case "$2" in
+    list) [ -x "$HOME/.local/bin/worthless" ] && echo "worthless v{pin}" ;;
+    install)
+      mkdir -p "$HOME/.local/bin"
+      printf '{shim}' > "$HOME/.local/bin/worthless"
+      chmod +x "$HOME/.local/bin/worthless" ;;
+    dir) echo "$HOME/.local/bin" ;;
+  esac ;;
+esac""",
+    )
+    if already_installed:
+        (home / ".local" / "bin").mkdir(parents=True)
+        write_stub(home / ".local" / "bin", "worthless", f'echo "worthless {pin}"')
+
+    attacker = tmp_path / "attacker"
+    attacker.mkdir()
+    write_stub(
+        attacker,
+        "uv",
+        f"""echo "EVIL  $*" >> {log}
+case "$1" in
+  --version) echo "uv 0.11.7" ;;
+  tool) case "$2" in dir) echo "$HOME/.local/bin" ;; esac ;;
+esac""",
+    )
+
+    result = _run_install_like_a_user(home, attacker)
+    calls = log.read_text() if log.exists() else ""
+
+    assert "EVIL" not in calls, (
+        "a planted uv earlier on PATH was executed during install, with the "
+        "installer's defences switched ON. The genuine pinned uv lives in "
+        "~/.cargo/bin, outside the PATH lockdown's prefix, so ensure_uv's early "
+        f"return left every later bare `uv` resolving through the caller's PATH.\n"
+        f"uv calls:\n{calls}\nstderr:\n{result.stderr[-400:]}"
+    )
+    if already_installed:
+        expected = ["--version", "tool list", "tool dir --bin", "tool dir --bin"]
+    else:
+        install = f"tool install --force worthless=={pin}"
+        expected = ["--version", "tool list", install, "tool dir --bin"]
+    got = [line.removeprefix("LEGIT ") for line in calls.splitlines()]
+    assert got == expected, (
+        "the genuine pinned uv did not receive every uv call — some call site "
+        "resolved `uv` through PATH instead of the vetted absolute path.\n"
+        f"expected: {expected}\ngot:      {got}\n"
+        f"rc={result.returncode}\n{result.stdout[-300:]}\n{result.stderr[-300:]}"
     )
