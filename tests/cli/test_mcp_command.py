@@ -8,7 +8,7 @@ surface as an opaque WRTLS-199 "internal error".
 from __future__ import annotations
 
 import sys
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 
 import pytest
 
@@ -28,5 +28,10 @@ def test_mcp_without_a_usable_sdk_says_how_to_fix_it(monkeypatch: pytest.MonkeyP
     assert "worthless[mcp]" in result.output
     assert "WRTLS-199" not in result.output
     # Name what IS installed, so a future broken 2.x minor isn't misread as
-    # "you don't have 2.x" and sent round a reinstall loop.
-    assert f"found mcp {version('mcp')}" in " ".join(result.output.split())
+    # "you don't have 2.x" and sent round a reinstall loop. Without the [mcp]
+    # extra (plain dev sync) nothing is installed and the message says so.
+    try:
+        installed = f"mcp {version('mcp')}"
+    except PackageNotFoundError:
+        installed = "no mcp"
+    assert f"found {installed}" in " ".join(result.output.split())

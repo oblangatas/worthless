@@ -4,10 +4,27 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import os
 from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
+import pytest
+
+
+# ---------------------------------------------------------------------------
+# Root runners (Docker, some CI) — worthless-x9z1
+# ---------------------------------------------------------------------------
+# Root bypasses POSIX permission checks, so a test that provokes EACCES via
+# chmod can't observe it as root. Skip those there; non-root CI still runs them.
+# ---------------------------------------------------------------------------
+
+RUNNING_AS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
+
+skip_if_root = pytest.mark.skipif(
+    RUNNING_AS_ROOT,
+    reason="root bypasses POSIX permission checks; covered on non-root CI",
+)
 
 
 # ---------------------------------------------------------------------------
