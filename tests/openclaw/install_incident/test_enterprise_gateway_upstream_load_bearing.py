@@ -49,7 +49,7 @@ from collections.abc import Iterator
 
 import pytest
 
-from tests._docker_helpers import docker_available
+from tests._docker_helpers import docker_available, image_present
 
 OC_WORTHLESS_IMAGE = "worthless-oc-test:local"
 
@@ -82,16 +82,12 @@ import json; print(json.dumps([list(r) for r in rows]))
 """
 
 
-def _image_present(ref: str) -> bool:
-    return subprocess.run(["docker", "image", "inspect", ref], capture_output=True).returncode == 0
-
-
 pytestmark = [
     pytest.mark.openclaw,
     pytest.mark.docker,
     pytest.mark.skipif(not docker_available(), reason="Docker not available"),
     pytest.mark.skipif(
-        not _image_present(OC_WORTHLESS_IMAGE),
+        not image_present(OC_WORTHLESS_IMAGE),
         reason=f"{OC_WORTHLESS_IMAGE} not built (see module docstring)",
     ),
     pytest.mark.timeout(900),
