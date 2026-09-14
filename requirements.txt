@@ -73,7 +73,7 @@ more-itertools==11.0.2
     # via
     #   jaraco-classes
     #   jaraco-functools
-msgpack==1.2.1
+msgpack==1.2.2
     # via worthless
 psutil==7.2.2
     # via worthless
@@ -85,7 +85,7 @@ pydantic-core==2.41.5
     # via pydantic
 pygments==2.20.0
     # via rich
-python-dotenv==1.2.2
+python-dotenv==1.2.3
     # via
     #   uvicorn
     #   worthless
