@@ -1062,57 +1062,41 @@ class TestPathLockdownIsActuallyTested:
                 )
 
     def test_bootstrapped_uv_must_outrank_a_stale_system_uv(self) -> None:
-        """The one deliberate exception to the lockdown — do not "fix" it.
+        """The pinned uv we just bootstrapped must win over a stale system uv.
 
-        ``ensure_uv`` ends by prepending ``~/.local/bin`` and ``~/.cargo/bin``
-        AHEAD of the system dirs the lockdown installed. It is the only place in
-        install.sh that puts user-writable dirs first, and it reads like a bug.
-        It is load-bearing.
+        ``ensure_uv`` reaches its bootstrap only when uv was absent or at the
+        WRONG version, so a pre-existing ``/usr/bin/uv`` is by definition not the
+        one we pinned and SHA-verified. If it performed ``uv tool install`` the
+        version pin would be silently defeated.
 
-        We only reach that line when uv was absent or at the WRONG version, so a
-        pre-existing ``/usr/bin/uv`` is by definition not the one we just pinned
-        and SHA-verified. The lockdown's own ``~/.local/bin`` entry sits AFTER
-        the system dirs, so without the prepend the stale system uv wins
-        ``command -v`` and every subsequent ``uv tool install`` runs from it —
-        silently defeating the version pin ensure_uv exists to establish:
+        History: this used to be guaranteed by prepending ``~/.local/bin`` and
+        ``~/.cargo/bin`` AHEAD of /usr/bin after the bootstrap, so a bare ``uv``
+        resolved to the new one. worthless-52lm removed every bare ``uv`` — calls
+        go through ``"$UV"``, captured from ``resolve_uv`` — and the prepend then
+        did nothing but let planted ``awk``/``tr``/``mktemp`` in ~/.cargo/bin run
+        (7 hits in bare Debian; see
+        test_tools_planted_in_cargo_bin_never_run_during_a_fresh_install, which
+        also plants a stale /usr/local/bin/uv and proves it never installs).
 
-            PATH=/usr/bin:...:$HOME/.local/bin  -> resolves the SYSTEM uv
-            PATH=$HOME/.local/bin:...:/usr/bin  -> resolves the BOOTSTRAPPED uv
-
-        The accepted cost is that two user-writable dirs outrank /usr/bin for the
-        rest of the run. They are exactly where we just installed uv, and an
-        attacker able to write them could equally have poisoned the tool we are
-        about to execute. Nothing else moves; the lockdown still governs every
-        command before this point.
-
-        The rationale lives here rather than in install.sh because the served
-        script is held under a 24.5 KB injection-guard ceiling
-        (workers/worthless-sh/test/headers-and-integrity.test.ts) with 15 bytes of
-        slack (24485 of 24500; the assertion counts UTF-16 units, 24419). A
-        comment explaining this would not fit, and that ceiling is deliberately
-        not a ratchet.
+        The guarantee now lives in ``resolve_uv``'s search ORDER: uv's install
+        dirs first, via the HOME=/ guard, before any system dir. Pinned exactly.
         """
         text = INSTALL_SH.read_text()
-        start = text.index("    uvh=")
-        block = text[start : text.index("export PATH", start)]
-
-        # EXACT literal, not startswith/endswith. The loose form let three
-        # verified mutations through (security-engineer + brutus review of
-        # PR #573): an attacker dir injected mid-PATH, the HOME guard defeated
-        # for the second entry, and a reordered trusted set. Any of those keeps
-        # the prefix and suffix intact while changing what actually resolves.
-        expected = 'PATH="$uvh/.local/bin:$uvh/.cargo/bin:$PATH"'
-        path_line = next(ln for ln in block.splitlines() if ln.strip().startswith("PATH="))
-        assert path_line.strip() == expected, (
-            "ensure_uv's PATH line changed. It is load-bearing: uv's install dir "
-            "must lead, both entries must use the guarded $uvh (not bare $HOME), "
-            "nothing may be injected between them, and the inherited PATH must "
-            f"stay last.\n  expected: {expected}\n  got:      {path_line.strip()}"
+        body = text[text.index("resolve_uv() {") :]
+        body = body[: body.index("\n}\n")]
+        assert '_h="${HOME:-/root}"; [ "$_h" = / ] && _h=/root' in body, (
+            "resolve_uv's HOME guard is gone — HOME=/ or HOME= would yield '//.local/bin'"
         )
-        assert 'uvh="${HOME:-/root}"' in block, (
-            "the HOME guard is gone — HOME=/ or HOME= would yield '//.local/bin'"
+        loop = re.search(r"for d in ([^;]+);", body)
+        assert loop, "could not find resolve_uv's directory list"
+        expected = (
+            '"$_h/.local/bin" "$_h/.cargo/bin" /usr/bin /bin /usr/local/bin /opt/homebrew/bin'
         )
-        assert '[ "$uvh" = / ]' in block, "the HOME=/ guard is gone"
+        assert loop.group(1).strip() == expected, (
+            "resolve_uv's search order changed. uv's install dirs must lead, or a "
+            "stale system uv is captured into $UV after a bootstrap and performs "
+            f"the install.\n  expected: {expected}\n  got:      {loop.group(1).strip()}"
+        )
 
     def test_the_trusted_set_itself_is_pinned(self) -> None:
         """The set of trusted dirs, and their order, must not drift.
@@ -1360,4 +1344,28 @@ def test_children_inherit_a_path_that_prefers_every_trusted_dir() -> None:
         "them in the PATH it hands to child processes, so a launched program (e.g. "
         f"Astral's uv installer) can be fooled where install.sh was not: {missing}\n"
         f"  trusted_tool: {trusted}\n  lockdown:     {prefix}"
+    )
+
+
+def test_no_path_assignment_puts_a_user_dir_ahead_of_the_system_dirs() -> None:
+    """worthless-52lm follow-up: after bootstrapping uv, install.sh used to run
+    ``PATH="$uvh/.local/bin:$uvh/.cargo/bin:$PATH"`` — ahead of /usr/bin. Every
+    later bare ``awk``/``tr``/``mktemp``/``head``/``basename`` then resolved to a
+    planted copy in ~/.cargo/bin. Observed in bare Debian: 7 spy hits before,
+    0 after removing the line (uv is called by absolute path, nothing needs it).
+
+    Only two kinds of PATH assignment are allowed: the lockdown (system dirs
+    first) and ``command_in_original_path``'s save/restore swap.
+    """
+    allowed = {
+        'PATH="/usr/bin:/bin:/usr/local/bin:/usr/sbin:/sbin:/opt/homebrew/bin:'
+        '${home_for_path}/.local/bin:${PATH:-}"',
+        'PATH="$ORIGINAL_PATH"',
+        'PATH="$current_path"',
+    }
+    found = [ln.strip() for ln in INSTALL_SH.read_text().splitlines() if re.match(r"\s*PATH=", ln)]
+    unexpected = [a for a in found if a not in allowed]
+    assert not unexpected, (
+        "a new PATH assignment in install.sh — anything placing a user-writable dir "
+        f"ahead of /usr/bin lets planted tools run during install: {unexpected}"
     )

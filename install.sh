@@ -113,6 +113,8 @@ unset \
 # non-empty values (UV_PYTHON_PREFERENCE=system → install onto attacker-
 # controllable Python with sitecustomize.py hijack). Scrub above + hard set.
 export UV_PYTHON_PREFERENCE=only-managed
+# ~/.config/uv/uv.toml can repoint the index; unset UV_CONFIG_FILE misses it.
+export UV_NO_CONFIG=1
 
 # Capture caller's actual PATH BEFORE lockdown — used by `command_in_original_path`
 # to tell the user whether `worthless` is reachable in THEIR shell (not just in
@@ -355,12 +357,8 @@ ensure_uv() {
         exit "$EXIT_NETWORK"
     }
 
-    uvh="${HOME:-/root}"; [ "$uvh" = / ] && uvh=/root
-    PATH="$uvh/.local/bin:$uvh/.cargo/bin:$PATH"
-    export PATH
-
-    # worthless-52lm: call uv by absolute path from here on — a bare `uv`
-    # re-resolves via PATH and a planted uv earlier on it would win.
+    # worthless-52lm: call uv by absolute path from here on. No PATH prepend:
+    # putting ~/.cargo/bin ahead of /usr/bin let planted awk/tr/mktemp win.
     if ! UV="$(resolve_uv)"; then
         die "$EXIT_INTERNAL" "uv installed but not on PATH after bootstrap." \
             "Open a new shell and re-run, or add ~/.local/bin to PATH manually."

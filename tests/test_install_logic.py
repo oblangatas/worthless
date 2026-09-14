@@ -1293,6 +1293,7 @@ case "$1" in
   tool) case "$2" in
     list) [ -x "$HOME/.local/bin/worthless" ] && echo "worthless v{pin}" ;;
     install)
+      printf '%s' "${{UV_NO_CONFIG:-unset}}" > "$HOME/uv-no-config"
       mkdir -p "$HOME/.local/bin"
       printf '{shim}' > "$HOME/.local/bin/worthless"
       chmod +x "$HOME/.local/bin/worthless" ;;
@@ -1331,6 +1332,11 @@ esac""",
     else:
         install = f"tool install --force worthless=={pin}"
         expected = ["--version", "tool list", install, "tool dir --bin"]
+    if not already_installed:
+        # Brutus on this PR: ~/.config/uv/uv.toml pointed the GENUINE uv at an
+        # attacker index (UV_CONFIG_FILE is scrubbed; the user config file is not).
+        seen = (home / "uv-no-config").read_text()
+        assert seen == "1", f"uv tool install ran without UV_NO_CONFIG=1 (saw {seen!r})"
     got = [line.removeprefix("LEGIT ") for line in calls.splitlines()]
     assert got == expected, (
         "the genuine pinned uv did not receive every uv call — some call site "
