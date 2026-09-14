@@ -22,10 +22,11 @@ name: WSL
 #
 # NOT a required check, deliberately. WSL install is slow and windows-latest is
 # flakier than Linux, and early instability must not block unrelated PRs. The
-# `paths:` filter below is therefore safe: the WOR-874 rule against path
-# filters exists because a skipped REQUIRED check reports success to branch
-# protection. This job is not required, so skipping it bypasses nothing.
-# Promote to required only after ~2 weeks of stable runs.
+# `paths:` filter below is safe only because this job is not required: a
+# path-filtered REQUIRED check that is skipped never reports, so branch
+# protection leaves the PR Pending forever (WOR-874). Keep it non-required
+# while the filter exists; promote only after dropping the filter and ~2 weeks
+# of stable runs.
 #
 # WHAT A GREEN RUN DOES NOT PROVE: this is WSL2 inside a GitHub VM, not a
 # user's laptop. Cite that wherever this job's result is cited.
@@ -39,6 +40,11 @@ on:
       - ".github/workflows/wsl.yml"
       - "engineering/testing/scripts/wsl-live-lifecycle.sh"
       - "engineering/testing/scripts/wsl-idle-survival.sh"
+      # The code whose WSL behaviour this job exercises.
+      - "src/worthless/cli/commands/service/**"
+      - "src/worthless/cli/platform.py"
+      - "src/worthless/cli/commands/lock.py"
+      - "pyproject.toml"
 
 permissions:
   contents: read
