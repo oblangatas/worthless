@@ -280,7 +280,13 @@ def _resolve_seam(
             "or a warm-up lock that wrote its first shard before the probe's first poll."
         )
 
-    if harness_killed:
+    if harness_killed and shards_after:
+        verdict = (
+            f"the probe saw no shard row within {WAIT_TIMEOUT}s and the harness SIGKILLed "
+            f"it, but {shards_after} row(s) had landed by the kill — the lock was writing, "
+            "just late. Host starvation or a slower lock; judge by load/cores below."
+        )
+    elif harness_killed:
         verdict = (
             f"no shard row appeared within {WAIT_TIMEOUT}s, so the harness SIGKILLed the "
             "probe — either the lock is stuck before its first write, or the host starved "
@@ -583,6 +589,8 @@ def _kill_group(proc: subprocess.Popen, sig: int) -> None:
     # start_new_session=True makes pgid == pid, so signal it directly. Never
     # os.getpgid(): once the leader is a zombie that lookup fails, and the
     # lock's helpers (`docker info`, `security`) survive to skew later trials.
+    if proc.pid <= 0:  # killpg(0) would signal the test worker's OWN group
+        return
     with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(proc.pid, sig)
 
@@ -834,7 +842,16 @@ def _surviving_helper(pid_file: Path) -> list[psutil.Process]:
     # Poll, never a one-shot check: a SIGKILLed orphan is briefly a zombie
     # until init reaps it, and that reap is scheduler-dependent under load.
     _gone, alive = psutil.wait_procs([helper], timeout=5)
-    return alive
+    # A zombie is dead: in an init-less container nothing ever reaps it.
+    zombie = psutil.STATUS_ZOMBIE
+    return [p for p in alive if not _status_is(p, zombie)]
+
+
+def _status_is(proc: psutil.Process, status: str) -> bool:
+    try:
+        return proc.status() == status
+    except psutil.Error:
+        return True  # gone between the wait and the check
 
 
 def _reap_helper(pid_file: Path) -> None:
@@ -902,7 +919,7 @@ def test_cleanup_never_replaces_the_failure_already_raised(monkeypatch: pytest.M
     """
 
     class Unkillable:
-        pid = 0
+        pid = 2**22 + 7  # never a live pid; _kill_group is also stubbed out below
         returncode = 0
 
         def wait(self, timeout: float) -> int:
@@ -997,6 +1014,11 @@ def test_seam_calibration_refuses_to_fabricate() -> None:
     with pytest.raises(pytest.fail.Exception, match=r"the harness SIGKILLed the probe") as killed:
         _resolve_seam(None, shards_after=0, returncode=-9, elapsed=15.0, harness_killed=True)
     assert "PRODUCT" not in str(killed.value)
+
+    # Rows landed between the last poll and the kill: say so, don't claim "no row".
+    with pytest.raises(pytest.fail.Exception, match=r"row\(s\) had landed by the kill") as late:
+        _resolve_seam(None, shards_after=2, returncode=-9, elapsed=15.2, harness_killed=True)
+    assert "no shard row appeared" not in str(late.value)
 
     # No measurement + the DB HAS shards -> the lock worked, the probe missed
     # the timing. Actionable as a harness problem.
