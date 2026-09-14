@@ -408,7 +408,11 @@ describe("body integrity — install.sh shape and bounded size (H-08)", () => {
     });
     expect(res.status).toBe(200);
     const body = await res.text();
-    expect(body.length).toBeLessThan(26_800);
+    //   - WOR-597 (shadow warning): cap raised to 31 KB; the redesign then shrank
+    //     the script to ~29.8 KB. body.length is the file's UTF-16 length (served
+    //     unchanged), and the slack is the surgical-append detection threshold --
+    //     re-measure it, don't trust a number here. worthless-oo6q: report slack.
+    expect(body.length).toBeLessThan(31_000);
   });
 
   it("install-script body Content-Length header matches actual byte length", async () => {
