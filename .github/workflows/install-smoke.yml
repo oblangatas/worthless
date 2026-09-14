@@ -39,7 +39,7 @@ jobs:
   static:
     name: Static checks (set -eu, shellcheck, pinned versions)
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - name: Check out repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v6
@@ -49,12 +49,19 @@ jobs:
       - name: Set up uv + Python
         uses: ./.github/actions/setup-uv-python
 
+      # WOR-597: the shadow-warning paste tests run the installer's output
+      # through every shell a user might paste into. Missing shells must fail
+      # the job, not silently shrink coverage.
+      - name: Install paste-test shells
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zsh fish busybox dash
+
       - name: Run install.sh + uninstall.sh static + shellcheck tests
         env:
           UV_CACHE_DIR: /tmp/uv-cache
+          WORTHLESS_PASTE_SHELLS_REQUIRED: sh,bash,dash,zsh,fish,busybox
         run: |
           uv sync --extra test
-          uv run pytest -q tests/test_install_static.py tests/test_install_shellcheck.py tests/test_install_logic.py tests/test_uninstall_sh.py
+          uv run pytest -q tests/test_install_static.py tests/test_install_shellcheck.py tests/test_install_logic.py tests/test_uninstall_sh.py tests/test_install_shadow_warning.py
 
   execute:
     name: Execute install.sh (${{ matrix.os }})
@@ -140,7 +147,7 @@ jobs:
           sh ./install.sh 2>&1 | tee install-smoke-traces/reinstall-${{ runner.os }}.log
 
       # WOR-597: the unit tests for this live in tests/test_install_shadow_warning.py,
-      # which the `static` job runs on ubuntu only. Path resolution is exactly
+      # run by the `static` job above and the tests.yml macOS job. Path resolution is exactly
       # where macOS differs — /opt/homebrew/bin, /var symlinked to /private/var,
       # a case-insensitive filesystem — so the shadow branch gets one real
       # execution per matrix OS here. Same shape as the idempotency step above:
@@ -179,6 +186,10 @@ jobs:
           if grep -q "is on your PATH" "$log"; then
             echo "FAIL: still claims success while a different copy runs"; exit 1
           fi
+          grep -qF "runs another copy first on your PATH" "$log" \
+            || { echo "FAIL: the shadow warning text is missing"; exit 1; }
+          grep -qF "command -v worthless" "$log" \
+            || { echo "FAIL: the path-free check command is missing"; exit 1; }
           echo "OK: shadow named, not executed, exit 0"
           rm -rf "$shadow_dir"
 

@@ -511,34 +511,19 @@ path_is_persistent() {
     esac
 }
 
-# Real path of $1, following symlinks. `cd && pwd -P` because `-ef` is not
-# POSIX and `realpath` is absent on older macOS. Never executes anything.
-canonical_path() {
-    _cp_path="$1"
-    # One hop: `readlink -f` is GNU-only. Cap stops a cycle hanging the
-    # installer; failure means "cannot tell" and the caller stays silent.
-    _cp_hops=0
-    while [ -L "$_cp_path" ] && [ "$_cp_hops" -lt 40 ]; do
-        _cp_target="$(readlink -- "$_cp_path" 2>/dev/null)" || return 1
-        [ -n "$_cp_target" ] || return 1
-        case "$_cp_target" in
-            /*) _cp_path="$_cp_target" ;;
-            # Relative targets resolve against the LINK's dir, not $PWD.
-            *) _cp_path="$(dirname -- "$_cp_path")/$_cp_target" ;;
-        esac
-        _cp_hops=$((_cp_hops + 1))
-    done
-    _cp_dir="$(dirname -- "$_cp_path")"
-    _cp_base="$(basename -- "$_cp_path")"
-    _cp_real="$(cd "$_cp_dir" 2>/dev/null && pwd -P)" || return 1
-    [ -n "$_cp_real" ] || return 1
-    printf '%s/%s' "$_cp_real" "$_cp_base"
-}
-
-# A dir named with ESC[2K ESC[1A would scroll up and erase the warning naming
-# it. printf '%s' stops format injection; raw control bytes still pass.
+# Shows a path we did not choose. Anything that could run, chain, split into
+# two arguments or disguise text prints as \xNN: spaces, quotes, $, and every
+# non-ASCII byte. LC_ALL=C keeps od/awk byte-exact on BSD, GNU and busybox.
 sanitize_for_display() {
-    printf '%s' "$1" | tr -d '\001-\037\177' | cut -c1-200
+    printf '%s' "$1" | LC_ALL=C od -An -tx1 -v | LC_ALL=C awk '{
+        for (i = 1; i <= NF; i++) {
+            n = index("0123456789abcdef", substr($i, 1, 1)) * 16 + index("0123456789abcdef", substr($i, 2, 1)) - 17
+            c = sprintf("%c", n)
+            t = (n < 128 && index("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/+@:,=%-", c)) ? c : "\\x" $i
+            if (length(s) + length(t) > 240) exit
+            s = s t
+        }
+    } END { printf "%s", s }'
 }
 
 # Non-empty only when the user's PATH resolves a DIFFERENT file than the one
@@ -547,13 +532,10 @@ shadowing_worthless_path() {
     [ "${worthless_bin_authoritative:-0}" = "1" ] || return 0
     [ -n "${worthless_bin:-}" ] || return 0
     _sw_user="$(command_in_original_path worthless || true)"
-    # Empty = not on PATH at all: the "open a new terminal" case below.
-    [ -n "$_sw_user" ] || return 0
-    _sw_user_real="$(canonical_path "$_sw_user")" || return 0
-    _sw_ours_real="$(canonical_path "$worthless_bin")" || return 0
-    # A symlink resolving to ours is a shortcut, not a shadow — following it
-    # runs what we installed. Homebrew, ~/bin and Nix all do this.
-    [ "$_sw_user_real" != "$_sw_ours_real" ] || return 0
+    # -ef: same device and inode, so a symlink, a symlinked parent, a trailing
+    # slash or another letter case on a case-insensitive disk is still our file.
+    # Text comparison of resolved paths got all four wrong in some shell.
+    [ "$_sw_user" -ef "$worthless_bin" ] && return 0
     printf '%s' "$_sw_user"
 }
 
@@ -571,22 +553,6 @@ command_in_original_path() {
 
 # mode: "full" (default) prints both current-shell + make-permanent hints;
 # "activate" prints only the current-shell activation command.
-# print_activation_hint, parameterised: the install may live wherever
-# UV_TOOL_BIN_DIR/XDG_BIN_HOME points.
-print_shadow_path_hint() {
-    _psh_dir="$(sanitize_for_display "$1")"
-    case "$(basename -- "${SHELL:-}")" in
-        fish)
-            printf "  Make it the default:    %s\n" \
-                "set -gx PATH $_psh_dir \$PATH"
-            ;;
-        *)
-            printf "  Make it the default:    %s\n" \
-                "export PATH=\"$_psh_dir:\$PATH\""
-            ;;
-    esac
-}
-
 print_activation_hint() {
     mode="${1:-full}"
     user_shell="$(basename "${SHELL:-/bin/sh}")"
@@ -640,22 +606,21 @@ main() {
     printf "\n"
     shadow_bin="$(shadowing_worthless_path)"
     if [ -n "$shadow_bin" ]; then
-        # Not an error: the install succeeded. The file in the way is named,
-        # never touched. stdout, because `| sh 2>/dev/null` eats stderr.
+        # Not an error: the install succeeded. The file in the way is named but
+        # never touched, and no path ever goes inside a command — no escaping is
+        # safe in every shell a user might paste into. Removing the old copy is
+        # the fix, so no PATH edit and no `lock` until it's gone. stdout, because
+        # `| sh 2>/dev/null` eats stderr.
         _wb="$(sanitize_for_display "$worthless_bin")"
         _sb="$(sanitize_for_display "$shadow_bin")"
         ok "Done! Worthless is installed at ${_wb}."
         printf "\n"
-        printf "  Heads up: typing 'worthless' runs a different, older copy that comes\n"
-        printf "  first in your PATH:\n"
+        printf "  Heads up: 'worthless' runs another copy first on your PATH:\n"
         printf "    %s\n" "$_sb"
-        printf "\n"
-        printf "  Run the new one now:    %s lock\n" "$_wb"
-        print_shadow_path_hint "$(dirname -- "$worthless_bin")"
-        printf "  Identify the old one:   ls -l %s\n" "$_sb"
-        printf "\n"
-        printf "  This installer left that file alone. Remove it with whatever installed\n"
-        printf "  it (brew uninstall / pipx uninstall / rm) once you know which.\n"
+        case "$_wb$_sb" in *'\x'*) printf "    (some characters shown as codes)\n" ;; esac
+        printf "  Remove that copy. Until you do, new terminals and agents still run it.\n"
+        printf "  Then open a new terminal and check which one runs:\n"
+        printf "    command -v worthless\n"
     elif command_in_original_path worthless >/dev/null; then
         ok "Done! 'worthless' is on your PATH."
     else
@@ -672,9 +637,7 @@ main() {
     fi
     printf "\n"
     if [ -n "${shadow_bin:-}" ]; then
-        # Bare `worthless` here would resolve to the shadow we just warned about.
-        printf "  ${BOLD}Try it:${RESET}        cd your-project && %s lock\n" \
-            "$_wb"
+        : # no next step until the old copy is gone; bare `worthless` runs it
     elif command_in_original_path worthless >/dev/null; then
         printf "  ${BOLD}Try it:${RESET}        cd your-project && worthless lock\n"
     else

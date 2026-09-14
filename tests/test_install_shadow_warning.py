@@ -24,9 +24,17 @@ own guard below:
 
 from __future__ import annotations
 
+import os
+import re
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
+import pytest
+
 from tests._install_helpers import (
+    INSTALL_SH,
     _UV_VERSION,
     read_install_pin,
     run_install,
@@ -43,7 +51,7 @@ SHADOW_VERSION = "0.3.7"
 # Substrings that indicate the warning fired. Matching on several keeps the
 # tests from locking exact copy — asserting a full sentence would turn red on
 # every wording tweak while catching no bug.
-_SHADOW_MARKERS = ("Heads up", "different, older copy")
+_SHADOW_MARKERS = ("Heads up", "another copy")
 _SUCCESS_SENTENCE = "is on your PATH"
 
 
@@ -175,31 +183,34 @@ def test_shadow_still_exits_zero(tmp_path: Path) -> None:
     )
 
 
-def test_try_it_line_points_at_the_installed_binary_when_shadowed(
-    tmp_path: Path,
-) -> None:
-    """:573 re-tests PATH separately from :559 — fixing one is not enough.
+def test_shadow_warning_offers_no_path_edit_or_lock(tmp_path: Path) -> None:
+    """Removing the old copy is the fix; the warning must not suggest anything else.
 
-    install.sh asks `command_in_original_path worthless` a second time to
-    choose between "Try it:" and "Try after PATH:". Left alone, a shadowed
-    user is told to run a bare `worthless lock`, which invokes the shadow —
-    the precise thing the new warning just told them not to trust.
+    The earlier design printed `export PATH=...`, a fish `set -gx` line, and
+    `<path> lock`. Pasted as a block, the fish line changes shell options in zsh
+    and the bash line wipes PATH in fish. And `lock` run before the old copy is
+    gone writes state that every new terminal and agent then reads with the old
+    copy. The only command offered is `command -v worthless`, which runs nothing
+    and shows which copy wins.
     """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     write_happy_path_stubs(bin_dir)
     write_stub(bin_dir, "worthless", f'echo "worthless {SHADOW_VERSION}"')
-    real = _install_real_entry_point(tmp_path)
+    _install_real_entry_point(tmp_path)
 
-    result = run_install(bin_dir)
-    combined = _combined(result)
+    out = run_install(bin_dir).stdout
 
-    try_lines = [ln for ln in combined.splitlines() if "lock" in ln and "Try" in ln]
-    assert try_lines, f"no 'Try it'/'Try after PATH' line found in:\n{combined}"
-    assert all(str(real) in ln for ln in try_lines), (
-        "the try-it line still tells a shadowed user to run a bare `worthless`, "
-        f"which resolves to the shadow. Lines were: {try_lines}"
+    assert "Heads up" in out, f"shadow warning did not fire:\n{out}"
+    assert "command -v worthless" in out
+    # bash, dash and busybox remember where they last found a command, so in the
+    # same terminal `command -v` still names the copy the user just deleted.
+    assert "open a new terminal" in out.lower(), (
+        f"check step must say to open a new terminal:\n{out}"
     )
+    assert out.lower().index("open a new terminal") < out.index("command -v worthless")
+    for banned in ("export PATH=", "set -gx PATH", "Run the new one now", "Try it:"):
+        assert banned not in out, f"shadowed output still offers {banned!r}:\n{out}"
 
 
 def test_happy_path_emits_no_shadow_warning(tmp_path: Path) -> None:
@@ -241,13 +252,10 @@ def test_no_shadow_warning_when_worthless_is_not_on_path_at_all(
     wrong. The fixture shape is real:
     test_install_logic.py::test_install_succeeds_when_uv_installs_outside_home_local_bin.
 
-    HONEST LIMIT — like the uv-failure test above, this does not isolate the
-    empty-string guard specifically. Removing `[ -n "$_sw_user" ]` leaves this
-    green, because canonical_path("") then produces a value that differs from
-    ours and the function returns the empty `$_sw_user` regardless, which the
-    caller's own `-n` check rejects. Three layers each independently suppress
-    the warning here. The guard is kept for legibility at the point where the
-    condition is actually meaningful.
+    There is no separate empty-path guard to isolate: with `-ef`, an empty user
+    path is never "the same file", so the function prints the empty string and
+    the caller's `-n` check stays silent. A dedicated guard would be an
+    equivalent mutant no test could kill, so it was removed.
     """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -324,9 +332,8 @@ def test_symlinked_alias_is_not_reported_as_a_shadow(tmp_path: Path) -> None:
     binary we just installed. Warning here would cry wolf at the largest
     group of correctly-configured users.
 
-    This is why the implementation resolves both sides with `cd && pwd -P`
-    rather than comparing strings. `-ef` is not POSIX and `realpath` is absent
-    on older macOS, so neither is available in install.sh.
+    This is why install.sh compares the files with `[ a -ef b ]` (same device
+    and inode) rather than comparing path strings.
     """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -348,7 +355,8 @@ def test_shadow_warning_strips_terminal_control_bytes(tmp_path: Path) -> None:
     """A crafted directory name must not be able to erase the warning.
 
     install.sh prints with printf '%s', so there is no format-string
-    injection — but raw control bytes in a path pass through verbatim. A
+    injection — but raw control bytes would pass through verbatim, so
+    sanitize_for_display shows them as \\xNN codes instead. A
     directory named with ESC[2K ESC[1A scrolls the terminal up and wipes the
     line above, letting whoever planted the shadow suppress the very message
     that exposes it. Not new code execution: they already own a PATH
@@ -478,3 +486,322 @@ esac""",
         f"comparison had nothing authoritative to compare against:\n{combined}"
     )
     assert result.returncode == 0
+
+
+# --- Paste safety (WOR-597 / CodeRabbit) --------------------------------------
+#
+# The warning prints paths a user will copy: the old copy's path (they are told
+# to remove it) and the install path. Both can be attacker- or user-influenced.
+# These tests paste the installer's real output into real shells and check that
+# no folder name can make a pasted line run anything.
+
+_NOTE = "some characters shown as codes"
+
+# Payloads that DO execute when the raw path is pasted, in at least one shell.
+# Pure quote payloads (x';... , x";...) are inert raw in every shell tried, so
+# they cannot prove anything here; test_sanitize_for_display_escapes covers them.
+_LIVE_PAYLOADS = {
+    "command_substitution": "p$(touch PWN);x",
+    "backtick": "x`touch PWN`y",
+    "semicolon": "x;touch PWN;#",
+    "pipe": "x|touch PWN;#",
+    "and_list": "x&&touch PWN;#",
+    "redirect": "x >PWN;#",
+    "escaped_quote": "x\\';touch PWN;#'",
+    "cyrillic_wrapped": "Андрей$(touch PWN)東京",
+    "newline": "x\ntouch PWN #",
+}
+
+_PASTE_SHELLS = {
+    "sh": ("sh", "-c"),
+    "bash": ("bash", "--norc", "--noprofile", "-c"),
+    "dash": ("dash", "-c"),
+    "zsh": ("zsh", "-f", "-c"),
+    "fish": ("fish", "--no-config", "-c"),
+    "busybox": ("busybox", "sh", "-c"),
+}
+
+
+def _paste_shells() -> dict[str, tuple[str, ...]]:
+    """Installed paste shells, as absolute argv prefixes.
+
+    A shell missing locally is skipped, but CI names the ones it must have in
+    WORTHLESS_PASTE_SHELLS_REQUIRED so a missing shell fails instead of quietly
+    shrinking coverage.
+    """
+    found: dict[str, tuple[str, ...]] = {}
+    for name, argv in _PASTE_SHELLS.items():
+        exe = shutil.which(argv[0])
+        if exe:
+            found[name] = (exe, *argv[1:])
+    required = {s for s in os.environ.get("WORTHLESS_PASTE_SHELLS_REQUIRED", "").split(",") if s}
+    missing = required - found.keys()
+    assert not missing, f"required paste shells are not installed: {sorted(missing)}"
+    return found
+
+
+def _paste(argv: tuple[str, ...], script: str, box: Path, touch_dir: Path) -> None:
+    """Run pasted text in a locked-down shell: no startup files, only `touch` on PATH."""
+    subprocess.run(  # noqa: S603
+        [*argv, script],
+        cwd=box,
+        env={"HOME": str(box), "PATH": str(touch_dir)},
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        timeout=10,
+        check=False,
+        start_new_session=True,
+    )
+
+
+def _install_with_hostile_dir(tmp_path: Path, position: str, name: str) -> tuple[str, Path]:
+    """Run the real installer with a hostile folder name in one position.
+
+    shadow  — the old copy lives in the hostile folder
+    install — uv installs into the hostile folder (UV_TOOL_BIN_DIR)
+    home    — HOME itself is the hostile folder
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_happy_path_stubs(bin_dir, with_worthless=False)
+    hostile = tmp_path / name
+    benign = tmp_path / "benign"
+    env: dict[str, str] = {}
+    if position == "shadow":
+        _install_real_entry_point(tmp_path)
+        hostile.mkdir()
+        write_stub(hostile, "worthless", f'echo "worthless {SHADOW_VERSION}"')
+        first = hostile
+    elif position == "install":
+        hostile.mkdir()
+        write_stub(hostile, "worthless", f'echo "worthless {REAL_VERSION}"')
+        env["UV_TOOL_BIN_DIR"] = str(hostile)
+        first = benign
+    else:
+        home = hostile / "home"
+        _install_real_entry_point(home)
+        env["HOME"] = str(home)
+        first = benign
+    if first is benign:
+        benign.mkdir()
+        write_stub(benign, "worthless", f'echo "worthless {SHADOW_VERSION}"')
+    env["PATH"] = f"{first}:{bin_dir}:/usr/bin:/bin"
+    return run_install(bin_dir, env_extra=env).stdout, hostile / "worthless"
+
+
+@pytest.mark.flaky(reruns=0)
+@pytest.mark.parametrize("position", ["shadow", "install", "home"])
+@pytest.mark.parametrize("payload", list(_LIVE_PAYLOADS))
+def test_pasting_warning_output_never_runs_code(
+    tmp_path: Path, position: str, payload: str
+) -> None:
+    """Paste every line, and the whole block, into every shell — nothing runs.
+
+    A positive control comes first in each shell: the raw hostile path is pasted
+    on its own. If that does not fire, the payload is inert in that shell and the
+    shell is skipped for it, so "nothing fired" can never mean "nothing ran".
+    """
+    shells = _paste_shells()
+    out, raw = _install_with_hostile_dir(tmp_path, position, _LIVE_PAYLOADS[payload])
+    assert "Heads up" in out, f"shadow warning did not fire, so nothing was tested:\n{out}"
+
+    touch_dir = tmp_path / "touchbin"
+    touch_dir.mkdir()
+    (touch_dir / "touch").symlink_to(shutil.which("touch"))
+    live = []
+    for shell, argv in shells.items():
+        box = tmp_path / f"paste-{shell}"
+        box.mkdir()
+        sentinel = box / "PWN"
+        _paste(argv, f": {raw}", box, touch_dir)
+        if not sentinel.exists():
+            continue
+        sentinel.unlink()
+        live.append(shell)
+        for line in out.split("\n"):
+            if line.strip():
+                _paste(argv, line, box, touch_dir)
+        _paste(argv, out, box, touch_dir)
+        assert not sentinel.exists(), (
+            f"pasting the installer's output ran code in {shell} ({position} / {payload}):\n{out}"
+        )
+    assert live, f"{payload!r} fired in no installed shell, so this case proves nothing"
+
+
+def test_machine_paths_appear_only_in_prose_lines(tmp_path: Path) -> None:
+    """No path from the machine is ever printed inside a command.
+
+    Escaping cannot be safe for every shell a user might paste into, so a command
+    must contain no path at all. Only the "Done!" line and the indented old-copy
+    line may show one.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_happy_path_stubs(bin_dir)
+    write_stub(bin_dir, "worthless", f'echo "worthless {SHADOW_VERSION}"')
+    _install_real_entry_point(tmp_path)
+
+    out = run_install(bin_dir).stdout
+
+    assert "Heads up" in out, f"shadow warning did not fire:\n{out}"
+    offenders = [
+        line
+        for line in out.split("\n")
+        if str(tmp_path) in line and not line.lstrip().startswith(("Done!", str(tmp_path)))
+    ]
+    assert not offenders, "a machine path is inside a non-prose line:\n" + "\n".join(offenders)
+
+
+@pytest.mark.parametrize(("folder", "noted"), [("old", False), ("old copy", True)])
+def test_codes_note_appears_only_when_codes_are_shown(
+    tmp_path: Path, folder: str, noted: bool
+) -> None:
+    """A path shown with codes says why; a plain path doesn't clutter the warning."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_happy_path_stubs(bin_dir, with_worthless=False)
+    _install_real_entry_point(tmp_path)
+    shadow = tmp_path / folder
+    shadow.mkdir()
+    write_stub(shadow, "worthless", f'echo "worthless {SHADOW_VERSION}"')
+
+    out = run_install(bin_dir, env_extra={"PATH": f"{shadow}:{bin_dir}:/usr/bin:/bin"}).stdout
+
+    assert "Heads up" in out, f"shadow warning did not fire:\n{out}"
+    assert (_NOTE in out) is noted, f"codes note presence should be {noted}:\n{out}"
+
+
+# --- sanitize_for_display, tested directly ------------------------------------
+#
+# Direct, not through run_install: macOS refuses folder names that aren't valid
+# UTF-8, so the byte cases can't be built as real directories there.
+
+_SANITIZE_RE = re.compile(r"^sanitize_for_display\s*\(\)\s*\{(.*?)^\}", re.S | re.M)
+_UTF8_LOCALE = "en_US.UTF-8" if sys.platform == "darwin" else "C.UTF-8"
+_ALLOWED = rb"[A-Za-z0-9._/+@:,=%-]"
+
+
+def _sanitize(raw: bytes, locale: str) -> bytes:
+    match = _SANITIZE_RE.search(INSTALL_SH.read_text(encoding="utf-8"))
+    assert match, "sanitize_for_display() not found in install.sh"
+    script = f'sanitize_for_display() {{{match.group(1)}}}\nsanitize_for_display "$1"\n'
+    result = subprocess.run(  # noqa: S603
+        ["sh", "-c", script, "sh", raw],  # noqa: S607
+        capture_output=True,
+        env={"PATH": "/usr/bin:/bin", "LC_ALL": locale},
+        timeout=10,
+        check=False,
+    )
+    return result.stdout
+
+
+_SANITIZE_CASES = {
+    "plain": (b"/opt/homebrew/bin/worthless", b"/opt/homebrew/bin/worthless"),
+    "space": (b"/Users/John Smith/bin", rb"/Users/John\x20Smith/bin"),
+    "command_substitution": (b"/b/p$(touch X);x", rb"/b/p\x24\x28touch\x20X\x29\x3bx"),
+    "single_quote": (b"/b/x';y", rb"/b/x\x27\x3by"),
+    "backslash": (b"/a\\b", rb"/a\x5cb"),
+    "newline": (b"/a\nb", rb"/a\x0ab"),
+    "invalid_byte": (b"/opt/homebrew\xff/bin/worthless", rb"/opt/homebrew\xff/bin/worthless"),
+    "cyrillic": ("/home/Ан".encode(), rb"/home/\xd0\x90\xd0\xbd"),
+    "rtl_override": ("/opt/\u202ex".encode(), rb"/opt/\xe2\x80\xaex"),
+}
+
+
+@pytest.mark.flaky(reruns=0)
+@pytest.mark.parametrize("locale", ["C", _UTF8_LOCALE])
+@pytest.mark.parametrize("case", list(_SANITIZE_CASES))
+def test_sanitize_for_display_escapes(case: str, locale: str) -> None:
+    """Only characters that can't run, chain, or disguise text print as themselves.
+
+    Everything else prints as \\xNN — including spaces (`rm /a b` would delete
+    `/a`) and every non-ASCII byte (lookalikes and text-flipping characters can't
+    pass a blocklist). The old `tr | cut` truncated macOS paths at the first
+    invalid byte, so `/opt/homebrew\\xff/bin` displayed as `/opt/homebrew`.
+    """
+    raw, want = _SANITIZE_CASES[case]
+    assert case == "plain" or raw != want, "a non-plain case must actually need escaping"
+    assert _sanitize(raw, locale) == want
+
+
+def test_sanitized_long_path_never_splits_a_code() -> None:
+    """A truncated path ends on a whole character or code, never half of `\\xNN`."""
+    out = _sanitize(("/" + "東" * 120).encode(), "C")
+    assert len(out) <= 243, f"not truncated: {len(out)} bytes"
+    assert re.fullmatch(rb"(?:" + _ALLOWED + rb"|\\x[0-9a-f]{2})*", out), out
+
+
+# --- Same file, different spelling (the -ef check) ----------------------------
+
+
+def test_link_inside_a_symlinked_folder_is_not_a_shadow(tmp_path: Path) -> None:
+    """A link whose `../` climbs above a symlinked folder still runs our copy.
+
+    The shell resolves `..` by name, the kernel by the real folder. Here those
+    disagree: by name the PATH entry points at a decoy; for real it points at the
+    installed binary. Resolving paths as text warned about a shadow that isn't.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_happy_path_stubs(bin_dir, with_worthless=False)
+    installed = tmp_path / "deep" / "real"
+    installed.mkdir(parents=True)
+    write_stub(installed, "worthless", f'echo "worthless {REAL_VERSION}"')
+    (tmp_path / "deep" / "phys" / "bin").mkdir(parents=True)
+    (tmp_path / "deep" / "phys" / "bin" / "worthless").symlink_to("../../real/worthless")
+    (tmp_path / "logical").symlink_to(tmp_path / "deep" / "phys")
+    decoy = tmp_path / "real"
+    decoy.mkdir()
+    write_stub(decoy, "worthless", f'echo "worthless {SHADOW_VERSION}"')
+
+    out = run_install(
+        bin_dir,
+        env_extra={
+            "UV_TOOL_BIN_DIR": str(installed),
+            "PATH": f"{tmp_path / 'logical' / 'bin'}:{bin_dir}:/usr/bin:/bin",
+        },
+    ).stdout
+
+    assert _SUCCESS_SENTENCE in out, f"fixture did not put worthless on PATH:\n{out}"
+    assert "Heads up" not in out, f"warned about a link that runs our own copy:\n{out}"
+
+
+def test_mixed_case_path_entry_is_not_a_shadow(tmp_path: Path) -> None:
+    """On a case-insensitive disk, `/USERS/x` and `/Users/x` are one folder.
+
+    macOS's /bin/sh (bash 3.2) keeps the typed case in `pwd -P`, so comparing
+    resolved paths as text warned about the user's own install.
+    """
+    (tmp_path / "CaseProbe").mkdir()
+    if not (tmp_path / "caseprobe").exists():
+        pytest.skip("filesystem is case-sensitive; this case cannot occur here")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_happy_path_stubs(bin_dir, with_worthless=False)
+    real = _install_real_entry_point(tmp_path)
+
+    out = run_install(
+        bin_dir, env_extra={"PATH": f"{str(real.parent).upper()}:{bin_dir}:/usr/bin:/bin"}
+    ).stdout
+
+    assert _SUCCESS_SENTENCE in out, f"fixture did not put worthless on PATH:\n{out}"
+    assert "Heads up" not in out, f"warned about the same folder spelled differently:\n{out}"
+
+
+def test_trailing_slash_install_dir_is_not_a_shadow(tmp_path: Path) -> None:
+    """`UV_TOOL_BIN_DIR=.../bin/` and PATH `.../bin` name the same binary."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_happy_path_stubs(bin_dir, with_worthless=False)
+    real = _install_real_entry_point(tmp_path)
+
+    out = run_install(
+        bin_dir,
+        env_extra={
+            "UV_TOOL_BIN_DIR": f"{real.parent}/",
+            "PATH": f"{real.parent}:{bin_dir}:/usr/bin:/bin",
+        },
+    ).stdout
+
+    assert _SUCCESS_SENTENCE in out, f"fixture did not put worthless on PATH:\n{out}"
+    assert "Heads up" not in out, f"warned about a trailing slash:\n{out}"
