@@ -24,6 +24,35 @@
 # a Monday rather than at a release tag. Re-MEASURE per-arch before extending.
 
 ignore:
+  - vulnerability: CVE-2026-85091
+    package:
+      name: zlib1g
+      type: deb
+    # High, fix=not-fixed. Debian's tracker lists zlib as vulnerable in
+    # bookworm, trixie AND forky/sid — "(unstable) (unfixed)", Debian bug
+    # 1146895. There is nowhere to upgrade to, so this survives the Debian 13
+    # move (worthless-tw1g) rather than being solved by it.
+    #
+    # The flaw is a heap overflow in gz_vacate(), reachable only by calling
+    # gzprintf()/gzvprintf() after a non-blocking gzwrite() stall. That is
+    # zlib's gzip FILE api — NOT the deflate/inflate stream api that HTTP
+    # content-encoding uses, which is what a proxy actually exercises.
+    #
+    # MEASURED 2026-09-08 inside the built trixie image, not inferred:
+    #   - swept every executable and shared object: 951 files scanned,
+    #     0 referencing `gzprintf` or `gzvprintf`
+    #   - CPython's zlib module exposes no gz* API at all (compress/
+    #     decompress/compressobj/decompressobj only); Python's gzip module
+    #     is built on decompressobj, never zlib's gz file api
+    #   - zlib runtime 1.3.1
+    # So the vulnerable entry points are not reachable from anything shipped
+    # in this image.
+    #
+    # LIMIT: measured on arm64 (Apple Silicon build). The weekly arm64/amd64
+    # scans are what would surface divergence. Re-measure before extending.
+    reason: "zlib gz_vacate() overflow reachable only via gzprintf/gzvprintf; 951 binaries in the image reference neither, and CPython's zlib exposes no gz* API. Unfixed in every Debian release including sid (bug 1146895). Tracking worthless-tw1g."
+    expiry: "2026-12-08"
+
   - vulnerability: CVE-2026-15308
     package:
       name: python
@@ -49,6 +78,41 @@ ignore:
     # 3.14.x backport ships, then DELETE this entry rather than extending it.
     reason: "Upstream fix only in Python 3.15.0 (pre-release). Re-measured 2026-08-02 across 3.13/3.14 slim bookworm+trixie: all still affected. Tracking WOR-691."
     expiry: "2027-01-31"  # extended on a fresh measurement, not blind. Re-measure before extending again.
+
+  # ── CPython, base-image only (worthless-kzfq) ───────────────────────
+  # Both arrived with the grype DB refresh of 2026-09-10 and turned every open
+  # PR red without a line of code changing — the same failure mode as the sharp
+  # advisory this branch also fixes. Unlike that one, here the fix really is
+  # unreachable, and this is the measurement rather than the assumption.
+  #
+  # MEASURED 2026-09-10 (grype 0.114.0), bases pulled fresh from the registry:
+  #
+  #   python:3.13-slim-trixie  3.13.15  BOTH present   <- the base this image uses
+  #   python:3.14-slim-trixie  3.14.7   BOTH present   <- a full minor ahead
+  #
+  # Grype's only fixed version for both is 3.15.0rc2 — a RELEASE CANDIDATE.
+  # Shipping an RC interpreter to users is the worse trade, the same call the
+  # CVE-2026-15308 entry above already made and re-measured.
+  #
+  # NOT parked on the bulk 2027-01-31 date that 21 other entries share. That
+  # clustering is how dated waivers quietly become permanent; these two get
+  # their own date so they are re-argued on their own evidence.
+  #
+  # To close: when CPython backports to a stable 3.13.x or 3.14.x, bump the
+  # base and DELETE these entries rather than extending them.
+  - vulnerability: CVE-2026-17084
+    package:
+      name: python
+      type: binary
+    reason: "Upstream fix only in Python 3.15.0rc2 (pre-release). Measured 2026-09-10: python:3.13-slim-trixie 3.13.15 and python:3.14-slim-trixie 3.14.7 are both still affected, so there is nowhere stable to upgrade to. Base-image interpreter only. Tracking worthless-kzfq."
+    expiry: "2026-12-08"
+
+  - vulnerability: CVE-2026-15806
+    package:
+      name: python
+      type: binary
+    reason: "Upstream fix only in Python 3.15.0rc2 (pre-release). Measured 2026-09-10: python:3.13-slim-trixie 3.13.15 and python:3.14-slim-trixie 3.14.7 are both still affected, so there is nowhere stable to upgrade to. Base-image interpreter only. Tracking worthless-kzfq."
+    expiry: "2026-12-08"
 
   # ── CPython tarfile, base-image only (WOR-852 Track B) ──────────────
   # All three are tarfile bugs in the digest-pinned python:3.13-slim-bookworm

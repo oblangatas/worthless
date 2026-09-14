@@ -1,5 +1,6 @@
 #!/bin/sh
-# tag-release.sh — GPG-sign and push a release tag, then print the gh release command.
+# tag-release.sh — GPG-sign and push a release tag; release-notes.yml then
+# auto-creates the GitHub Release once all publishers pass.
 #
 # NEVER create a GitHub Release before pushing the signed tag.  gh release create
 # also creates the git tag (unsigned), which (a) fails the GPG gate in publish.yml
@@ -9,8 +10,8 @@
 #
 #   1. GPG-sign the tag (openpgp, explicit fingerprint)
 #   2. Verify the signature locally
-#   3. Push the tag  →  publish.yml fires automatically
-#   4. Print the gh release create command to run AFTER CI passes
+#   3. Push the tag  →  the four publishers fire automatically
+#   4. release-notes.yml auto-creates the GitHub Release once all publishers pass
 #
 # Usage:
 #   ./scripts/tag-release.sh 0.3.9 "agents and exits"
@@ -139,13 +140,15 @@ fi
 echo "Signature OK"
 echo
 
-# --- 5. Push tag — triggers publish.yml --------------------------------------
+# --- 5. Push tag — triggers the publishers + auto-Release --------------------
 
 echo "Pushing $tag to origin ..."
 git push origin "$tag"
 
 echo
-echo "Tag pushed. publish.yml is now running."
+echo "Tag pushed. All four publishers (PyPI, npm, GHCR, Cloudflare Worker) are"
+echo "now running. When all four genuinely pass, release-notes.yml creates the"
+echo "GitHub Release itself — you do not run gh release create (WOR-909)."
 echo "Monitor at: https://github.com/oblangatas/worthless/actions"
 echo
 # WOR-873: the release scans BOTH architectures at severity-cutoff medium, but
@@ -169,12 +172,42 @@ echo "       to .grype.yaml. Prefer bumping the base over widening the waiver."
 echo "    3. Delete the tag and re-push it at the new commit. That keeps the"
 echo "       trigger on refs/tags/v*, which the cosign identity depends on."
 echo
-echo "WAIT for publish.yml to succeed, THEN create the GitHub Release:"
-if [ -n "$headline" ]; then
-    echo "  gh release create $tag --title \"$tag: $headline\" --generate-notes"
-else
-    echo "  gh release create $tag --title \"$tag: <headline>\" --generate-notes"
-fi
+echo "YOU MUST APPROVE ONE STEP. Once all four publishers are green, the"
+echo "'Create GitHub Release' run pauses for review (the 'release' environment)."
+echo "Open Actions, find the waiting run, and click Review deployments → Approve."
+echo "The Release page appears right after. Until you approve, it will NOT appear"
+echo "— that is the gate working, not a failure."
 echo
-echo "DO NOT run gh release create before publish.yml passes — it creates an"
-echo "unsigned tag and tombstones the name permanently."
+echo "If a publisher fails, re-run THAT RUN (Actions → the failed run → 'Re-run"
+echo "failed jobs'). Do not use 'Run workflow' — a manual dispatch is a different"
+echo "event and will not clear the gate. The Release is held until all four are"
+echo "green, then created exactly once. (WOR-846)"
+echo
+# The fallback creates a DRAFT deliberately. Creating a published Release by hand
+# bypasses release-fanin.sh, so it can ratify a tag whose PyPI or npm job actually
+# failed — and release-notes.yml then sees a Release already exists, skips, and
+# reports green forever. The manual path would poison the automated one, silently
+# and irreversibly. A draft cannot be mistaken for a shipped release, and
+# publishing it is a second, deliberate act by a human who has looked.
+#
+# The old text said "~15 min". That was wrong in a way that guaranteed the race:
+# the release job waits on a protected environment, so no Release after fifteen
+# minutes is the NORMAL state for as long as approval takes, not evidence that
+# anything failed. Anyone following that timer would hit the hatch on every
+# correctly-functioning release.
+echo "FALLBACK — only when there is NO waiting run, NO pending approval, and every"
+echo "publisher is green, yet no Release exists. That is the automation genuinely"
+echo "not firing."
+echo
+echo "NOTHING WILL TELL YOU THIS HAPPENED. There is no watchdog yet (WOR-909"
+echo "requirement 3 is not shipped), so a silent no-Release looks exactly like a"
+echo "release still waiting on approval. Check Actions yourself before assuming."
+echo
+echo "If you do need the fallback, create a DRAFT — never a published Release —"
+echo "so it cannot silently ratify a release the publishers refused:"
+if [ -n "$headline" ]; then
+    echo "  gh release create $tag --draft --title \"$tag: $headline\" --verify-tag --generate-notes"
+else
+    echo "  gh release create $tag --draft --title \"$tag: <headline>\" --verify-tag --generate-notes"
+fi
+echo "Then look at why the automation did not fire before publishing the draft."

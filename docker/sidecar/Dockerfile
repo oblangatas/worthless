@@ -17,7 +17,7 @@
 # Pin patch versions; update quarterly or on CVE.
 
 # -----------------------------------------------------------
-FROM python:3.13-slim-bookworm AS builder
+FROM python:3.13-slim-trixie AS builder
 
 WORKDIR /build
 COPY pyproject.toml ./
@@ -26,7 +26,7 @@ COPY src/ src/
 RUN pip install --no-cache-dir .
 
 # -----------------------------------------------------------
-FROM python:3.13-slim-bookworm
+FROM python:3.13-slim-trixie
 
 # tini     — PID 1 signal handler + reaper
 # gosu     — drop-privileges shim used by supervise.sh (safer than su)

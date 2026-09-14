@@ -9,3 +9,21 @@
 # tests/test_install_docker.py and the priv-drop unit suite in
 # tests/cli/test_sidecar_lifecycle_priv_drop.py.
 CIS-DI-0001
+
+# worthless-tw1g: the Debian 13 base (python:3.13-slim-trixie) clears its
+# package lists with `apt-get dist-clean`, where the Debian 12 base used
+# `rm -rf /var/lib/apt/lists`.  Dockle's DKL-DI-0005 pattern-matches the
+# older command in the layer history and does not recognise `dist-clean`,
+# so it fires FATAL on a base-image layer we do not author.
+#
+# The check is satisfied in substance, MEASURED 2026-09-08 inside the built
+# amd64 image:  `ls -A /var/lib/apt/lists/` is EMPTY.  Our own two RUN
+# layers additionally end in `rm -rf /var/lib/apt/lists/*` (Dockerfile:10,
+# Dockerfile:19), so nothing we add reintroduces a cache.
+#
+# What remains is `/var/cache/apt/archives/lock` — a zero-byte lockfile, not
+# a package cache.
+#
+# Remove this entry if Dockle learns `apt-get dist-clean`, or if the base
+# reverts to the older idiom.
+DKL-DI-0005

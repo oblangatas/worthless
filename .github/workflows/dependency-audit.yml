@@ -147,5 +147,49 @@ jobs:
       # No `npm ci` install on purpose: `npm audit` resolves from the lockfile
       # alone, verified against this lockfile with no node_modules present.
       - name: Audit the Worker's dependency tree
+        # Bare and unsuppressible on purpose. An allowlist lived here briefly,
+        # holding GHSA-rgj7-g3m4-5g8c (sharp/libheif) on the argument that no
+        # forward fix existed. That argument was wrong: the advisory's range is
+        # `<0.35.4` and sharp 0.35.4 is published. npm only offered the breaking
+        # @cloudflare/vitest-pool-workers 0.22.0 -> 0.8.30 downgrade because
+        # miniflare pins "sharp": "0.35.2" EXACTLY, so npm's resolver can only
+        # walk backwards -- `overrides` is a different search space and reaches
+        # the patch. See workers/worthless-sh/README.md. beads worthless-kzfq.
+        #
+        # Keep it bare. The comment block above already argues that dev tooling
+        # is in scope because wrangler and miniflare run in CI and on machines
+        # holding deploy credentials; a suppression mechanism here re-opens a
+        # slice of exactly that.
         working-directory: workers/worthless-sh
+        run: npm audit
+
+  # The docs site (docs.wless.io, Astro + Starlight) owns the ROOT package.json
+  # and package-lock.json, and the job above only covers workers/worthless-sh.
+  # Root sat unaudited while it accumulated 1 critical + 4 high (astro, sharp,
+  # js-yaml, smol-toml, svgo). `npm audit fix --package-lock-only` cleared all 5
+  # with package.json unchanged, and that refresh ships alongside this job, so
+  # it is green on arrival.
+  #
+  # Same shape and same reasoning as the worker job: full tree, bare audit, no
+  # suppression. The site is static with no adapter, but its build runs in
+  # Cloudflare Workers Builds, so build tooling is in scope.
+  npm-audit-docs:
+    name: npm audit (docs site)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: ./.github/actions/setup-node-worker
+
+      # See the worker job: `npm audit` trusts a stale lockfile, this does not.
+      - name: Lock is in sync with package.json
+        run: npm ci --dry-run
+
+      - name: Audit the docs site's dependency tree
         run: npm audit

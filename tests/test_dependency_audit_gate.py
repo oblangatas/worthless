@@ -22,6 +22,7 @@ Hermetic: parses the two YAML files on disk. No network, no runner, no audit.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -181,7 +182,13 @@ def test_npm_audit_covers_the_full_tree() -> None:
         "credentials; excluding them from a credential-protection product's "
         "supply-chain gate needs a real cost, and the measured cost is zero"
     )
-    assert step.get("working-directory") == "workers/worthless-sh"
+    # The step now wraps npm audit to allow argued, dated exceptions. The tree
+    # it audits must still be named explicitly, whether by working-directory
+    # or as an argument.
+    targets_worker = step.get("working-directory") == "workers/worthless-sh" or (
+        "workers/worthless-sh" in step["run"]
+    )
+    assert targets_worker, "the audited tree must be named, not inferred"
 
 
 def test_npm_lockfile_freshness_is_checked() -> None:
@@ -217,3 +224,77 @@ def test_dependabot_covers_the_worker() -> None:
     npm = [u for u in cfg["updates"] if u["package-ecosystem"] == "npm"]
     assert npm, "no npm ecosystem entry: Dependabot raises Worker advisories but never fixes them"
     assert any(u["directory"].rstrip("/").endswith("workers/worthless-sh") for u in npm)
+
+
+# ── sharp override (worthless-kzfq) ────────────────────────────────────────
+#
+# GHSA-rgj7-g3m4-5g8c (libheif heap overflow, CWE-122) covers sharp < 0.35.4.
+# miniflare pins `"sharp": "0.35.2"` EXACTLY, so npm's resolver can only walk
+# backwards: its only offered fix was @cloudflare/vitest-pool-workers 0.22.0 ->
+# 0.8.30, isSemVerMajor. An `overrides` entry reaches the patch instead, and
+# takes the audit to 0 vulnerabilities with every other version unchanged.
+#
+# Why these tests exist when `npm audit` already gates this in CI: that job
+# resolves advisories from the registry at run time. It is exactly as available
+# as the registry is, and it says nothing at all offline. These two read the
+# committed lockfile, so the guarantee survives a registry outage and fails in
+# under a second locally instead of after a CI round trip.
+
+WORKER = REPO / "workers" / "worthless-sh"
+
+# The first version outside the advisory's `<0.35.4` range.
+SHARP_FIXED = (0, 35, 4)
+
+
+def _version_tuple(raw: str) -> tuple[int, ...]:
+    """Numeric release part of a semver string, for ordering comparisons."""
+    return tuple(int(p) for p in re.split(r"[-+]", raw, maxsplit=1)[0].split("."))
+
+
+def test_worker_sharp_is_not_vulnerable() -> None:
+    """Every resolved sharp in the Worker lockfile is >= 0.35.4.
+
+    Deliberately walks the whole `packages` map rather than checking one known
+    key: a future tree could resolve sharp at a nested path, and a check keyed
+    to today's single location would pass over it.
+    """
+    lock = json.loads((WORKER / "package-lock.json").read_text())
+
+    found = {
+        path: meta["version"]
+        for path, meta in lock["packages"].items()
+        if path.split("node_modules/")[-1] == "sharp" and "version" in meta
+    }
+    assert found, (
+        "no sharp in the Worker lockfile — if miniflare genuinely dropped it, "
+        "delete the override in package.json and this test together"
+    )
+
+    stale = {p: v for p, v in found.items() if _version_tuple(v) < SHARP_FIXED}
+    assert not stale, (
+        f"sharp back inside GHSA-rgj7-g3m4-5g8c's `<0.35.4` range: {stale}. "
+        "The override in workers/worthless-sh/package.json is the thing that "
+        "holds this; check it survived the last relock."
+    )
+
+
+def test_sharp_override_is_declared() -> None:
+    """package.json carries the override that produces that resolution.
+
+    The lockfile assertion above can be satisfied transiently by a relock that
+    happens to hoist a newer sharp. This pins the *cause*, so dropping the
+    override fails here loudly rather than waiting for the next resolve to
+    quietly reinstate miniflare's exact 0.35.2 pin.
+    """
+    pkg = json.loads((WORKER / "package.json").read_text())
+    override = pkg.get("overrides", {}).get("sharp")
+
+    assert override, (
+        "overrides.sharp is gone from workers/worthless-sh/package.json. "
+        "miniflare pins sharp exactly, so without it the next `npm install` "
+        "resolves back to 0.35.2 and re-opens GHSA-rgj7-g3m4-5g8c."
+    )
+    assert _version_tuple(override.lstrip("^~>=")) >= SHARP_FIXED, (
+        f"overrides.sharp is {override!r}, which still allows a version inside "
+        "the advisory's `<0.35.4` range"
+    )

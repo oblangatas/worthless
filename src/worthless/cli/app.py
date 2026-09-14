@@ -105,12 +105,10 @@ from worthless.cli.commands.down import register_down_commands  # noqa: E402
 
 register_down_commands(app)
 
-try:
-    from worthless.cli.commands.mcp import register_mcp_commands  # noqa: E402
+# Imports no mcp code: a missing or outdated SDK is reported by the command.
+from worthless.cli.commands.mcp import register_mcp_commands  # noqa: E402
 
-    register_mcp_commands(app)
-except ImportError:
-    pass  # mcp extra not installed — worthless[mcp]
+register_mcp_commands(app)
 
 from worthless.cli.commands.revoke import register_revoke_commands  # noqa: E402
 

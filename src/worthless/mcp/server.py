@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP  # type: ignore[import-not-found]  # optional dep
+from mcp.server.mcpserver import MCPServer  # type: ignore[import-not-found]  # optional dep
+from mcp.server.mcpserver.exceptions import (  # type: ignore[import-not-found]
+    ToolError,
+    UnexpectedToolError,
+)
 
 from worthless.cli.bootstrap import (
     WorthlessHome,
@@ -19,7 +24,27 @@ from worthless.cli.errors import ErrorCode, WorthlessError
 from worthless.cli.process import check_proxy_health, resolve_port
 from worthless.storage.sqlite import connect as sqlite_connect
 
-mcp = FastMCP("worthless")
+
+class _WorthlessMCPServer(MCPServer):
+    """MCPServer whose tools' WorthlessError messages reach the agent (WOR-929).
+
+    mcp 2.x hides the text of any tool exception other than ``ToolError``, so an
+    agent would see "Error executing tool …" instead of "Run `worthless lock`
+    first". WorthlessError messages are written for users, so they are re-raised
+    as ToolError; every other crash stays hidden.
+    """
+
+    async def call_tool(self, name: str, arguments: dict[str, Any], context: Any = None) -> Any:
+        try:
+            return await super().call_tool(name, arguments, context)
+        except UnexpectedToolError as exc:
+            if isinstance(exc.__cause__, WorthlessError):
+                raise ToolError(f"Error executing tool {name}: {exc.__cause__}") from exc
+            raise
+
+
+# mcp 2.x reports an empty version unless told; hosts show and log it.
+mcp = _WorthlessMCPServer("worthless", version=version("worthless"))
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +192,7 @@ async def worthless_status() -> str:
     sentinel: dict[str, Any] | None = None
     if home is not None:
         # _list_enrolled_keys calls asyncio.run() internally, raising
-        # RuntimeError inside FastMCP's running event loop. Run in a thread
+        # RuntimeError inside MCPServer's running event loop. Run in a thread
         # executor — the same pattern used by worthless_lock in this file.
         loop = asyncio.get_running_loop()
         keys = await loop.run_in_executor(None, _list_enrolled_keys, home)
@@ -246,7 +271,7 @@ async def worthless_scan(
         # the agent doesn't misread "0 findings" as "clean" on a partial scan.
         #
         # scan_files is synchronous and can run for up to SCAN_TIME_BUDGET_S
-        # seconds. Calling it inline would block the FastMCP event loop and
+        # seconds. Calling it inline would block the MCPServer event loop and
         # starve other concurrent MCP tool calls — offload to a thread executor
         # (same pattern worthless_status / worthless_lock use in this file).
         # ``skipped`` is mutated in-place inside the executor; the reference

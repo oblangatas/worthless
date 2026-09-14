@@ -7,7 +7,7 @@ real MCP stdio handshake, which tools the server advertises.
 
 This module closes that gap. It boots the locally-installed ``worthless`` CLI as
 a subprocess (``worthless mcp`` → ``worthless.mcp.server:main`` →
-``FastMCP.run(transport="stdio")``), drives a genuine handshake with the
+``MCPServer.run(transport="stdio")``), drives a genuine handshake with the
 official ``mcp`` Python client (``stdio_client`` + ``ClientSession``:
 ``initialize`` then ``list_tools``), and pins the public surface to **exactly**
 four tools:
@@ -28,8 +28,10 @@ already installs the ``[mcp]`` extra via ``uv sync --extra mcp``.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
+from importlib.metadata import version
 from pathlib import Path
 
 import pytest
@@ -44,6 +46,7 @@ pytest.importorskip("mcp", reason="mcp extra not installed")
 
 from mcp import ClientSession  # noqa: E402
 from mcp.client.stdio import StdioServerParameters, stdio_client  # noqa: E402
+from mcp.types import CallToolResult, InitializeResult, ListToolsResult  # noqa: E402
 
 # The contract under test: the exact set of management tools the Worthless MCP
 # server is allowed to expose. Adding/removing/renaming a tool must be a
@@ -134,3 +137,53 @@ async def test_mcp_stdio_server_exposes_exactly_the_four_tools() -> None:
     # Exactly four — guards against a future tool sharing a name (dedupes in
     # the set above) by checking the raw advertised count too.
     assert len(tools_result.tools) == len(EXPECTED_TOOLS)
+
+
+@pytest.mark.asyncio
+async def test_real_client_calls_tools_and_sees_results_and_errors(tmp_path: Path) -> None:
+    """A real MCP client can call the tools and read results and errors (WOR-929).
+
+    Listing names alone stays green through an SDK port that breaks calling
+    them. This pins what an agent actually sees: argument schemas, a
+    successful result, and an error result.
+    """
+    worthless_bin = _worthless_executable()
+    env = _child_env(worthless_bin.parent)
+    # A home that does not exist: status answers "empty", spend refuses.
+    env["WORTHLESS_HOME"] = str(tmp_path / "no-home")
+    server = StdioServerParameters(command=str(worthless_bin), args=["mcp"], env=env)
+
+    async def _session() -> tuple[
+        InitializeResult, ListToolsResult, CallToolResult, CallToolResult
+    ]:
+        async with stdio_client(server) as (read, write):
+            async with ClientSession(read, write) as session:
+                init = await session.initialize()
+                tools = await session.list_tools()
+                status = await session.call_tool("worthless_status", {})
+                spend = await session.call_tool("worthless_spend", {})
+                return init, tools, status, spend
+
+    init, tools, status, spend = await asyncio.wait_for(_session(), timeout=_HANDSHAKE_TIMEOUT_S)
+
+    # Hosts show and log this; mcp 2.x reports "" unless the server says.
+    assert (init.server_info.name, init.server_info.version) == ("worthless", version("worthless"))
+
+    schemas = {t.name: t.input_schema for t in tools.tools}
+    props = {name: s.get("properties", {}) for name, s in schemas.items()}
+    assert set(props["worthless_status"]) == set()
+    assert set(props["worthless_scan"]) == {"paths", "deep"}
+    assert props["worthless_scan"]["deep"]["default"] is False
+    assert set(props["worthless_lock"]) == {"env_path"}
+    assert props["worthless_lock"]["env_path"]["default"] == ".env"
+    assert set(props["worthless_spend"]) == {"alias"}
+
+    assert status.is_error is False
+    payload = json.loads(status.content[0].text)  # type: ignore[union-attr]
+    assert payload["verdict"] == "empty"
+    assert set(payload) == {"verdict", "header", "keys", "proxy", "sentinel", "degraded"}
+
+    # A tool raising WorthlessError reaches the client as an error result
+    # carrying the message — not a protocol error, not a crash.
+    assert spend.is_error is True
+    assert "Worthless is not initialized" in spend.content[0].text  # type: ignore[union-attr]

@@ -165,9 +165,14 @@ jobs:
           UV_CACHE_DIR: /tmp/uv-cache
           HYPOTHESIS_PROFILE: ci
           WORTHLESS_SIDECAR_READY_TIMEOUT_SECS: "20"
+          # WOR-597: the paste-safety tests must not quietly skip a shell the
+          # runner ships with. fish and busybox aren't on macOS runners; the
+          # install-smoke static job requires them on Linux.
+          WORTHLESS_PASTE_SHELLS_REQUIRED: sh,bash,dash,zsh
         run: |
           uv sync --extra dev --extra test --extra mcp
           uv run pytest -n auto --dist loadscope \
+            tests/test_install_shadow_warning.py \
             tests/test_lock_write_invariants.py \
             tests/test_lock_sigint_atomicity.py \
             tests/test_mcp_server.py \

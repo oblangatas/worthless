@@ -412,7 +412,12 @@ install_or_upgrade_worthless() {
     # user sets WORTHLESS_VERSION.
     installed_ver="$(uv tool list 2>/dev/null \
         | awk '/^worthless / {sub("^v", "", $2); print $2; exit}')"
-    if [ -n "$installed_ver" ] && [ "$installed_ver" = "$effective_version" ]; then
+    # worthless-mb6l: RUN it, do not just stat it. uv lands the receipt and the
+    # shim together and finalises the package after, so an interrupted install
+    # leaves an executable shim that cannot import. `-x` passes; the tool is
+    # broken; the fast-path would skip the --force repair forever.
+    if [ -n "$installed_ver" ] && [ "$installed_ver" = "$effective_version" ] \
+       && "$(uv tool dir --bin 2>/dev/null)/worthless" --version >/dev/null 2>&1; then
         ok "  worthless ${installed_ver} already installed"
         return 0
     fi
@@ -456,7 +461,14 @@ smoke_test() {
     # (unscrubbed), killing a good install. Also beats a shadowing worthless on
     # PATH. worthless-dc26.
     worthless_bin="$(uv tool dir --bin 2>/dev/null)/worthless"
-    [ -x "$worthless_bin" ] || worthless_bin="$(command -v worthless 2>/dev/null || true)"
+    # The shadow check needs this from `uv tool dir --bin`: the fallback is
+    # itself a PATH lookup, so PATH-to-PATH would answer "no shadow" for every
+    # shadowed user. Fail closed.
+    worthless_bin_authoritative=1
+    if [ ! -x "$worthless_bin" ]; then
+        worthless_bin_authoritative=0
+        worthless_bin="$(command -v worthless 2>/dev/null || true)"
+    fi
     if ! version_output="$("$worthless_bin" --version 2>/dev/null)"; then
         die "$EXIT_INTERNAL" "worthless installed but failed to run." \
             "Try: worthless --version" \
@@ -499,16 +511,46 @@ path_is_persistent() {
     esac
 }
 
+# Shows a path we did not choose. Anything that could run, chain, split into
+# two arguments or disguise text prints as \xNN: spaces, quotes, $, and every
+# non-ASCII byte. LC_ALL=C keeps od/awk byte-exact on BSD, GNU and busybox.
+sanitize_for_display() {
+    printf '%s' "$1" | LC_ALL=C od -An -tx1 -v | LC_ALL=C awk '{
+        for (i = 1; i <= NF; i++) {
+            n = index("0123456789abcdef", substr($i, 1, 1)) * 16 + index("0123456789abcdef", substr($i, 2, 1)) - 17
+            c = sprintf("%c", n)
+            t = (n < 128 && index("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/+@:,=%-", c)) ? c : "\\x" $i
+            if (length(s) + length(t) > 240) exit
+            s = s t
+        }
+    } END { printf "%s", s }'
+}
+
+# Non-empty only when the user's PATH resolves a DIFFERENT file than the one
+# we installed. Empty means no shadow or cannot tell; both stay silent.
+shadowing_worthless_path() {
+    [ "${worthless_bin_authoritative:-0}" = "1" ] || return 0
+    [ -n "${worthless_bin:-}" ] || return 0
+    _sw_user="$(command_in_original_path worthless || true)"
+    # -ef: same device and inode, so a symlink, a symlinked parent, a trailing
+    # slash or another letter case on a case-insensitive disk is still our file.
+    # Text comparison of resolved paths got all four wrong in some shell.
+    # -ef is POSIX.1-2024 and works in every sh we ship to; older shellcheck flags it.
+    # shellcheck disable=SC3013
+    [ "$_sw_user" -ef "$worthless_bin" ] && return 0
+    printf '%s' "$_sw_user"
+}
+
+# Prints the caller's resolution of $1, or returns 1. One helper so the PATH
+# swap cannot diverge; status-only callers redirect stdout.
 command_in_original_path() {
     name="$1"
     current_path="${PATH:-}"
     PATH="$ORIGINAL_PATH"
-    if command -v "$name" >/dev/null 2>&1; then
-        PATH="$current_path"
-        return 0
-    fi
+    _cip_found="$(command -v "$name" 2>/dev/null || true)"
     PATH="$current_path"
-    return 1
+    [ -n "$_cip_found" ] || return 1
+    printf '%s' "$_cip_found"
 }
 
 # mode: "full" (default) prints both current-shell + make-permanent hints;
@@ -564,7 +606,24 @@ main() {
     smoke_test
 
     printf "\n"
-    if command_in_original_path worthless; then
+    shadow_bin="$(shadowing_worthless_path)"
+    if [ -n "$shadow_bin" ]; then
+        # Not an error: the install succeeded. The file in the way is named but
+        # never touched, and no path ever goes inside a command — no escaping is
+        # safe in every shell a user might paste into. Removing the old copy is
+        # the fix, so no PATH edit and no `lock` until it's gone. stdout, because
+        # `| sh 2>/dev/null` eats stderr.
+        _wb="$(sanitize_for_display "$worthless_bin")"
+        _sb="$(sanitize_for_display "$shadow_bin")"
+        ok "Done! Worthless is installed at ${_wb}."
+        printf "\n"
+        printf "  Heads up: 'worthless' runs another copy first on your PATH:\n"
+        printf "    %s\n" "$_sb"
+        case "$_wb$_sb" in *'\x'*) printf "    (some characters shown as codes)\n" ;; esac
+        printf "  Remove that copy. Until you do, new terminals and agents still run it.\n"
+        printf "  Then open a new terminal and check which one runs:\n"
+        printf "    command -v worthless\n"
+    elif command_in_original_path worthless >/dev/null; then
         ok "Done! 'worthless' is on your PATH."
     else
         ok "Done! 'worthless' is installed."
@@ -579,7 +638,9 @@ main() {
         fi
     fi
     printf "\n"
-    if command_in_original_path worthless; then
+    if [ -n "${shadow_bin:-}" ]; then
+        : # no next step until the old copy is gone; bare `worthless` runs it
+    elif command_in_original_path worthless >/dev/null; then
         printf "  ${BOLD}Try it:${RESET}        cd your-project && worthless lock\n"
     else
         printf "  ${BOLD}Try after PATH:${RESET} cd your-project && worthless lock\n"

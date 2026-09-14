@@ -428,7 +428,7 @@ class TestBuild:
         directly by walking ``/proc/<pid>/status`` for the uvicorn +
         sidecar runtime processes and asserting their Uid is non-zero.
 
-        slim-bookworm has no ``ps``; we walk ``/proc`` from a busybox-
+        slim-trixie has no ``ps``; we walk ``/proc`` from a busybox-
         compatible shell snippet that prints ``<pid> <uid> <comm>``
         per process.
         """
@@ -1394,7 +1394,7 @@ class TestComposeSecurity:
     def test_compose_non_root(self, compose_stack: tuple[str, str]) -> None:
         """Same as TestBuild::test_runs_as_non_root but for the compose stack.
 
-        slim-bookworm has no ``ps``; we walk ``/proc`` and assert the
+        slim-trixie has no ``ps``; we walk ``/proc`` and assert the
         runtime processes (uvicorn + python sidecar) are non-root.
         """
         _project, cname = compose_stack
@@ -1441,6 +1441,30 @@ class TestComposeSecurity:
         )
 
 
+# In-container fake upstream for the upstream_500 fault (stdlib only; /tmp is noexec).
+_UPSTREAM_500_STUB = """
+import http.server as h
+class H(h.BaseHTTPRequestHandler):
+    def do_POST(self):
+        self.send_response(500)
+        self.send_header("content-type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"error": {"type": "server_error"}}')
+h.HTTPServer(("127.0.0.1", 18080), H).serve_forever()
+"""
+_WAIT_FOR_18080 = """
+import socket, time
+for _ in range(50):
+    try:
+        socket.create_connection(("127.0.0.1", 18080), 0.2).close()
+        break
+    except OSError:
+        time.sleep(0.1)
+else:
+    raise SystemExit("port 18080 not listening")
+"""
+
+
 class TestSDKSmokeDocker:
     """Smoke: SDKs on the host can reach the production Docker image's proxy.
 
@@ -1484,56 +1508,158 @@ class TestSDKSmokeDocker:
         assert result.returncode == 0
         return result.stdout.strip()
 
-    def test_openai_sdk_reaches_proxy_from_host(self, container: tuple[str, int]) -> None:
-        name, port = container
-        fake_key = fake_openai_key()
-        alias = _make_alias("openai", fake_key)
+    def _enroll(
+        self, container_name: str, provider: str, upstream: str | None = None
+    ) -> tuple[str, str]:
+        """Lock a fake key in the container; return (alias, shard_a).
 
-        self._enroll_fake_key(name, "OPENAI_API_KEY", fake_key)
-        shard_a = self._read_shard_a(name, "OPENAI_API_KEY")
-        assert shard_a != fake_key
-        assert shard_a.startswith("sk-")
-
-        client = openai.OpenAI(
-            api_key=shard_a,
-            base_url=f"http://127.0.0.1:{port}/{alias}/v1",
-        )
-        with pytest.raises(openai.APIError) as exc:
-            client.chat.completions.create(
-                model="gpt-4o-mini",
-                max_tokens=1,
-                messages=[{"role": "user", "content": "hi"}],
+        ``upstream`` registers a custom provider URL and locks against it.
+        """
+        fake_key = fake_openai_key() if provider == "openai" else fake_anthropic_key()
+        env_var = f"{provider.upper()}_API_KEY"
+        env_line = fake_key
+        if upstream:
+            reg = docker_exec(
+                container_name,
+                [
+                    "worthless",
+                    "providers",
+                    "register",
+                    "--name",
+                    f"stub-{provider}",
+                    "--url",
+                    upstream,
+                    "--protocol",
+                    provider,
+                ],
             )
-        err_name = type(exc.value).__name__
+            assert reg.returncode == 0, f"register failed: {reg.stderr}"
+            env_line = f"{fake_key}\n{provider.upper()}_BASE_URL={upstream}"
+        self._enroll_fake_key(container_name, env_var, env_line)
+        shard_a = self._read_shard_a(container_name, env_var)
+        assert shard_a != fake_key
+        assert shard_a.startswith("sk-ant-" if provider == "anthropic" else "sk-")
+        return _make_alias(provider, fake_key), shard_a
+
+    def _assert_sdk_reached_upstream(self, provider: str, base_url: str, shard_a: str) -> None:
+        """The smoke assertion; test_smoke_assertion_fails_on_broken_proxy proves it goes red."""
+        if provider == "openai":
+            client = openai.OpenAI(api_key=shard_a, base_url=f"{base_url}/v1", max_retries=0)
+            # APIStatusError = an HTTP response came back. APIConnectionError
+            # (proxy unreachable) is NOT a subclass, so it escapes and fails.
+            with pytest.raises(openai.APIStatusError) as exc:
+                client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    max_tokens=1,
+                    messages=[{"role": "user", "content": "hi"}],
+                )
+        else:
+            client = anthropic.Anthropic(api_key=shard_a, base_url=base_url, max_retries=0)
+            with pytest.raises(anthropic.APIStatusError) as exc:
+                client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=1,
+                    messages=[{"role": "user", "content": "hi"}],
+                )
+        # 401 + sanitized upstream message = proxy dispatched the alias, rebuilt
+        # the fake key, and the real provider rejected it. A broken alias lookup
+        # ("authentication required"), unreachable upstream (502), dead sidecar
+        # (503), or crash page (500) all fail here.
+        assert exc.value.status_code == 401, exc.value.response.text
+        assert "upstream provider error" in exc.value.response.text
         err_str = str(exc.value).lower()
-        assert "connectionerror" != err_name, (
-            f"SDK raised raw ConnectionError — proxy unreachable: {exc.value}"
-        )
         assert "traceback" not in err_str
         assert "worthless" not in err_str
+
+    def test_openai_sdk_reaches_proxy_from_host(self, container: tuple[str, int]) -> None:
+        name, port = container
+        alias, shard_a = self._enroll(name, "openai")
+        self._assert_sdk_reached_upstream("openai", f"http://127.0.0.1:{port}/{alias}", shard_a)
 
     def test_anthropic_sdk_reaches_proxy_from_host(self, container: tuple[str, int]) -> None:
         name, port = container
-        fake_key = fake_anthropic_key()
-        alias = _make_alias("anthropic", fake_key)
+        alias, shard_a = self._enroll(name, "anthropic")
+        self._assert_sdk_reached_upstream("anthropic", f"http://127.0.0.1:{port}/{alias}", shard_a)
 
-        self._enroll_fake_key(name, "ANTHROPIC_API_KEY", fake_key)
-        shard_a = self._read_shard_a(name, "ANTHROPIC_API_KEY")
-        assert shard_a != fake_key
-        assert shard_a.startswith("sk-ant-")
-
-        client = anthropic.Anthropic(
-            api_key=shard_a,
-            base_url=f"http://127.0.0.1:{port}/{alias}",
-        )
-        with pytest.raises(anthropic.APIError) as exc:
-            client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=1,
-                messages=[{"role": "user", "content": "hi"}],
+    # Proves the smoke assertion goes RED on a broken image. Without this, a
+    # future edit could loosen it back to "any error" and stay green on a dead proxy.
+    @pytest.mark.parametrize("provider", ["openai", "anthropic"])
+    @pytest.mark.parametrize(
+        ("fault", "expected", "match"),
+        [
+            # Nothing listening on the port.
+            pytest.param(
+                "unreachable_port",
+                (openai.APIConnectionError, anthropic.APIConnectionError),
+                None,
+                id="unreachable_port",
+            ),
+            # Proxy up, alias unknown: uniform 401 "authentication required".
+            pytest.param(
+                "unknown_alias", AssertionError, "authentication required", id="unknown_alias"
+            ),
+            # uvicorn (uid 10001) is tini's child: killing it stops the container.
+            pytest.param(
+                "proxy_killed",
+                (openai.APIConnectionError, anthropic.APIConnectionError),
+                None,
+                id="proxy_killed",
+            ),
+            # Sidecar (uid 10002) dead, proxy up: 503 "sidecar unavailable".
+            pytest.param(
+                "sidecar_killed", AssertionError, "sidecar unavailable", id="sidecar_killed"
+            ),
+            # Upstream never resolves (RFC 6761 .invalid): proxy answers 502.
+            pytest.param(
+                "upstream_unreachable",
+                AssertionError,
+                r"(?s)bad gateway.*assert 502 == 401",
+                id="upstream_unreachable",
+            ),
+            # Upstream answers 500: proxy relays it sanitized. "server_error" comes
+            # only from the stub, so a proxy-side crash can't satisfy this.
+            pytest.param(
+                "upstream_500",
+                AssertionError,
+                r"(?s)server_error.*upstream provider error.*assert 500 == 401",
+                id="upstream_500",
+            ),
+        ],
+    )
+    def test_smoke_assertion_fails_on_broken_proxy(
+        self,
+        container: tuple[str, int],
+        provider: str,
+        fault: str,
+        expected: type[BaseException] | tuple[type[BaseException], ...],
+        match: str | None,
+    ) -> None:
+        name, port = container
+        upstream = None
+        if fault == "upstream_unreachable":
+            upstream = "https://upstream.invalid"
+        elif fault == "upstream_500":
+            upstream = "http://127.0.0.1:18080"
+            subprocess.run(
+                ["docker", "exec", "-d", name, "python", "-c", _UPSTREAM_500_STUB],
+                capture_output=True,
+                check=True,
             )
-        err_name = type(exc.value).__name__
-        err_str = str(exc.value).lower()
-        assert "connectionerror" != err_name
-        assert "traceback" not in err_str
-        assert "worthless" not in err_str
+            ready = docker_exec(name, ["python", "-c", _WAIT_FOR_18080])
+            assert ready.returncode == 0, f"stub upstream never listened: {ready.stderr}"
+        alias, shard_a = self._enroll(name, provider, upstream)
+        base_url = f"http://127.0.0.1:{port}/{alias}"
+        if fault == "unreachable_port":
+            base_url = f"http://127.0.0.1:1/{alias}"
+        elif fault == "unknown_alias":
+            base_url = f"http://127.0.0.1:{port}/{provider}-00000000"
+        elif fault in ("proxy_killed", "sidecar_killed"):
+            uid = "10001" if fault == "proxy_killed" else "10002"
+            # kill -1 as that uid signals only that uid's processes (no CAP_KILL needed).
+            subprocess.run(
+                ["docker", "exec", "-u", uid, name, "sh", "-c", "kill -9 -1"],
+                capture_output=True,
+                check=False,
+            )
+        with pytest.raises(expected, match=match):
+            self._assert_sdk_reached_upstream(provider, base_url, shard_a)

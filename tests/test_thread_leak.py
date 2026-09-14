@@ -26,13 +26,15 @@ def test_leaky():
 
     try:
         # Run pytest on the temporary test file in a subprocess. ``timeout``
-        # guards against a stuck child hanging the suite indefinitely.
+        # guards against a stuck child hanging the suite indefinitely; it must
+        # sit under the repo-global 30s test budget, or the thread-method
+        # timeout kills the xdist worker first. Measured ~2s.
         result = subprocess.run(
             [sys.executable, "-m", "pytest", str(test_file), "-vv", "-o", "addopts="],
             capture_output=True,
             text=True,
             cwd=str(Path(__file__).parent.parent),  # Run from project root so conftest.py is loaded
-            timeout=30,
+            timeout=20,
         )
 
         assert (

@@ -121,9 +121,18 @@ repos:
 
   # Zizmor: GitHub Actions security scanner (script injection, permissions, etc.)
   - repo: https://github.com/woodruffw/zizmor-pre-commit
-    rev: v1.5.2
+    # Keep in lockstep with the pinned version in .github/workflows/sast.yml.
+    # v1.5.2 had rotted: its online known-vulnerable-actions audit died with
+    # "io error: unexpected end of file" on every workflow (worthless-sd13).
+    rev: v1.30.0
     hooks:
       - id: zizmor
+        # Offline + medium, matching what CI actually gates on. CI has no
+        # token, so its online audits (ref-version-mismatch) never fire there;
+        # without --offline this hook fails locally on 45 findings CI cannot
+        # see. Those are real and tracked separately — but a pre-commit hook
+        # should not make network calls to disagree with CI.
+        args: [--offline, --min-severity=medium]
 
   # Pip-licenses: block deps with non-permissive licenses (pre-push)
   - repo: local

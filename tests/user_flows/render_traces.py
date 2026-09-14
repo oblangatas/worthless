@@ -170,6 +170,26 @@ class TraceRunner:
   *) echo "uv: unhandled: $*" >&2; exit 1 ;;
 esac""",
             )
+            # worthless-mb6l: the fast-path now requires the entry point to EXIST,
+            # not merely for `uv tool list` to report a matching version — uv
+            # writes that receipt before the environment is complete, so version
+            # alone also matches a half-finished install that can never repair
+            # itself. This fixture previously described an impossible state
+            # (installed, yet the binary exists nowhere), so create it the way a
+            # real install does: at `uv tool dir --bin`.
+            entry = case_root / ".local" / "bin" / "worthless"
+            entry.parent.mkdir(parents=True, exist_ok=True)
+            entry.write_text("#!/bin/sh\necho 'worthless 0.3.0'\n")
+            entry.chmod(0o755)
+            # WOR-597: write_happy_path_stubs also drops a `worthless` in bin_dir
+            # so PATH resolves one. With the entry point above, that is two
+            # DIFFERENT files -- which is precisely a shadowed install, and the
+            # installer now says so. A real reinstall is not shadowed: what PATH
+            # finds IS the uv entry point. Point the PATH copy at it so this
+            # journey describes a healthy machine rather than a broken one.
+            path_copy = bin_dir / "worthless"
+            path_copy.unlink(missing_ok=True)
+            path_copy.symlink_to(entry)
             result = run_install(bin_dir, env_extra={"WORTHLESS_VERSION": "0.3.0"})
             command = ["WORTHLESS_VERSION=0.3.0", "sh", "./install.sh"]
         elif name == "pipx conflict shows uninstall guidance":
