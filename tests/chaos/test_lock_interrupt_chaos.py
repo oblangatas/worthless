@@ -282,10 +282,10 @@ def _resolve_seam(
 
     if harness_killed:
         verdict = (
-            f"the HARNESS killed the probe after {WAIT_TIMEOUT}s, before the probe saw a "
-            "shard row — either the lock was stuck before its first write, or the host "
-            "starved it. shards_after below is what landed by the kill; an empty DB here "
-            "is NOT evidence the lock writes nothing. Judge by load/cores below."
+            f"no shard row appeared within {WAIT_TIMEOUT}s, so the harness SIGKILLed the "
+            "probe — either the lock is stuck before its first write, or the host starved "
+            "it; this run alone cannot tell which. On an idle host (low load/cores) treat "
+            "it as a stuck lock. shards_after below is what landed by the kill."
         )
     elif shards_after is None:
         verdict = (
@@ -313,8 +313,8 @@ def _resolve_seam(
         "chaos seam calibration FAILED — the orphan-vulnerable window could not be "
         f"located within WAIT_TIMEOUT={WAIT_TIMEOUT}s.\n"
         f"  Diagnosis: {verdict}\n"
-        f"{detail}"
         f"{evidence_line}"
+        f"{detail}"
         "  Refusing to substitute a fabricated seam: an unmeasured seam is "
         "unfalsifiable, and a green run would not distinguish it from a real one.\n"
         f"{tail}"
@@ -593,7 +593,8 @@ def _evidence(proc: subprocess.Popen) -> str:
     Prototyped 2026-09-14 (170 CPU hogs on 10 cores): a spinning wedge used
     0.11s CPU in 3s and a starved real lock 0.20s, so CPU time cannot tell
     "hung" from "host drowning" at exactly the load where this fires. Host
-    load per core can, and the live group members show which helper was stuck.
+    load per core can, and the leader's live descendants show which helper was
+    stuck (a helper already reparented to init is not listed).
     """
     try:
         load = f"load/cores={os.getloadavg()[0] / (os.cpu_count() or 1):.1f}"
@@ -603,21 +604,33 @@ def _evidence(proc: subprocess.Popen) -> str:
         leader = psutil.Process(proc.pid)
         members = [p.name() for p in (leader, *leader.children(recursive=True))]
     except psutil.Error:
-        return f"{load} group=unavailable"
-    return f"{load} group={members}"
+        return f"{load} descendants=unavailable"
+    return f"{load} descendants={members}"
 
 
 def _reap(proc: subprocess.Popen) -> None:
-    """SIGKILL the whole group and wait for the leader, bounded.
+    """SIGKILL the whole group and wait for it, bounded.
 
     Runs even when the leader already exited: a helper that outlived it could
     still touch disk while ``classify()`` reads it.
     """
+    helpers: list[psutil.Process] = []
+    if proc.returncode is None:  # once reaped, the pid may belong to someone else
+        with contextlib.suppress(psutil.Error):
+            helpers = psutil.Process(proc.pid).children(recursive=True)
+    # ponytail: killpg after the leader was reaped can, in theory, hit a new
+    # session that reused this pid with an empty old group; tracking members by
+    # pgid across process_iter() is the upgrade if that ever shows up.
     _kill_group(proc, signal.SIGKILL)
     try:
         proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        pytest.fail(f"pid {proc.pid} survived SIGKILL for 5s (stuck in the kernel?)")
+    except subprocess.TimeoutExpired as exc:
+        # Never replace a failure already on its way out (the hang message
+        # with its evidence and stderr tail); only raise when nothing else is.
+        # __context__ is set exactly when another exception was propagating.
+        if exc.__context__ is None:
+            pytest.fail(f"pid {proc.pid} survived SIGKILL for 5s (stuck in the kernel?)")
+    psutil.wait_procs(helpers, timeout=5)
 
 
 def _await_exit(proc: subprocess.Popen, te: TrialEnv, what: str) -> None:
@@ -831,12 +844,12 @@ def _reap_helper(pid_file: Path) -> None:
             helper.kill()
 
 
-def test_calibration_timeout_is_retryable_and_blames_the_harness(
+def test_calibration_timeout_is_retryable_and_never_blames_the_product(
     tmp_path_factory: pytest.TempPathFactory,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A probe the harness had to kill must fail as a retryable HARNESS verdict.
+    """A probe the harness had to kill must fail retryably, never as a PRODUCT fault.
 
     Reproduced 2026-09-13 under CPU load: calibration outlived WAIT_TIMEOUT, the
     harness SIGKILLed it, then reported "lock wrote NO shard rows — PRODUCT
@@ -867,12 +880,46 @@ def test_calibration_timeout_is_retryable_and_blames_the_harness(
         with pytest.raises(pytest.fail.Exception) as excinfo:
             _measure_seam(tmp_path_factory)
         msg = str(excinfo.value)
-        assert "HARNESS killed" in msg, msg
+        assert "the harness SIGKILLed the probe" in msg, msg
         assert "PRODUCT" not in msg, msg
         assert "load/cores=" in msg, msg
-        assert _surviving_helper(helper_pid) == [], "calibration cleanup orphaned a helper"
+        assert "shards_after=" in msg, msg
+        # Only meaningful if the shim got far enough to start its helper before
+        # the 1s timeout; under heavy load it may not. Group reaping is proven
+        # deterministically by the ready-gated test_hang_guard_fires_with_diagnostic.
+        if helper_pid.exists():
+            assert _surviving_helper(helper_pid) == [], "calibration cleanup orphaned a helper"
     finally:
         _reap_helper(helper_pid)
+
+
+def test_cleanup_never_replaces_the_failure_already_raised(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unkillable process must not erase the hang message that found it.
+
+    ``_reap`` runs in ``finally`` blocks. If it raised its own "survived SIGKILL"
+    failure while a hang failure was propagating, the evidence and stderr tail
+    would be lost from the report.
+    """
+
+    class Unkillable:
+        pid = 0
+        returncode = 0
+
+        def wait(self, timeout: float) -> int:
+            raise subprocess.TimeoutExpired("lock", timeout)
+
+    monkeypatch.setattr(f"{__name__}._kill_group", lambda _proc, _sig: None)
+    proc = Unkillable()
+
+    with pytest.raises(pytest.fail.Exception, match=r"lock hung after sig="):
+        try:
+            pytest.fail("lock hung after sig=2 delay=0.050s")
+        finally:
+            _reap(proc)  # type: ignore[arg-type]
+
+    # With nothing in flight, an unkillable process is still a loud failure.
+    with pytest.raises(pytest.fail.Exception, match=r"survived SIGKILL"):
+        _reap(proc)  # type: ignore[arg-type]
 
 
 def test_seam_calibration_retries_a_transient_miss(
@@ -947,7 +994,7 @@ def test_seam_calibration_refuses_to_fabricate() -> None:
         _resolve_seam(MAX_SEAM)
 
     # The harness killed a probe that never wrote: never a PRODUCT verdict.
-    with pytest.raises(pytest.fail.Exception, match=r"HARNESS killed") as killed:
+    with pytest.raises(pytest.fail.Exception, match=r"the harness SIGKILLed the probe") as killed:
         _resolve_seam(None, shards_after=0, returncode=-9, elapsed=15.0, harness_killed=True)
     assert "PRODUCT" not in str(killed.value)
 
