@@ -61,10 +61,19 @@ def test_install_lifecycle_trace_documents_current_install_contract(
     journey = render_traces.build_install_lifecycle()
     report = "\n".join(render_traces.render_journey(journey))
 
-    assert len(journey.traces) == 6
-    assert [trace.exit_code for trace in journey.traces] == [0, 0, 0, 30, 10, 0]
+    # Order matches build_install_lifecycle(). The exit codes are the contract:
+    # a shadowed install and an upgrade both still succeed (0) — only the pipx
+    # conflict (EXIT_PIPX_CONFLICT=30) and a uv failure (EXIT_NETWORK=10) are
+    # fatal. A shadow is a PATH problem, not an install failure, so a 0 here is
+    # load-bearing rather than incidental (WOR-597).
+    assert len(journey.traces) == 8
+    assert [trace.exit_code for trace in journey.traces] == [0, 0, 0, 0, 0, 30, 10, 0]
     assert "Install, Reinstall, Manual Uninstall Guidance" in report
     assert "fresh install" in report.lower()
+    assert "stale worthless on PATH" in report, (
+        "the shadowed-install journey is missing from the rendered report"
+    )
+    assert "upgrade older uv tool install" in report
     assert "reinstall" in report.lower()
     assert "Done! 'worthless' is on your PATH." in report
     assert "Done! 'worthless' is installed." in report
