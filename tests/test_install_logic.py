@@ -8,6 +8,7 @@ test_install_docker.py (marked 'docker').
 
 from __future__ import annotations
 
+import re
 import subprocess  # noqa: S404
 from pathlib import Path
 
@@ -1349,3 +1350,54 @@ esac""",
         f"expected: {expected}\ngot:      {got}\n"
         f"rc={result.returncode}\n{result.stdout[-300:]}\n{result.stderr[-300:]}"
     )
+
+
+def test_an_unpinned_uv_left_after_bootstrap_never_installs(tmp_path: Path) -> None:
+    """worthless-ir3s: after bootstrapping uv, install.sh must verify the uv it
+    picked is the pinned version before using it.
+
+    The bootstrap can land the new uv somewhere ``resolve_uv`` doesn't look —
+    Astral's installer honours ``XDG_BIN_HOME``, which is not scrubbed — while an
+    older uv (e.g. Homebrew's) is still found. Before this check, that stale uv
+    silently performed ``uv tool install``, defeating the version pin.
+
+    Modelled offline: the "installer" downloads and verifies but places nothing,
+    so the only uv install.sh can find is the stale one.
+    """
+    home = tmp_path / "home"
+    bin_dir = home / "bin"
+    bin_dir.mkdir(parents=True)
+    log = tmp_path / "stale-uv.log"
+    sha = re.search(r'ASTRAL_INSTALLER_SHA256="([0-9a-f]+)"', INSTALL_SH.read_text()).group(1)
+
+    write_stub(bin_dir, "uname", "echo Darwin")
+    write_stub(bin_dir, "sw_vers", 'echo "14.5"')
+    write_stub(
+        bin_dir,
+        "uv",
+        f"""case "$1" in --version) echo "uv 0.1.0" ;; *) echo "$*" >> {log} ;; esac""",
+    )
+    # The "downloaded" Astral installer: records where it was told to put uv,
+    # places nothing.
+    fake_installer = tmp_path / "uv-installer.sh"
+    fake_installer.write_text(f'echo "$UV_INSTALL_DIR" > {home / "uv-install-dir"}\n')
+    write_stub(
+        bin_dir,
+        "curl",
+        f'for a in "$@"; do [ "$p" = --output ] && cp {fake_installer} "$a"; p="$a"; done',
+    )
+    write_stub(bin_dir, "sha256sum", f'echo "{sha}  $1"')
+
+    result = run_install(bin_dir)
+    calls = log.read_text() if log.exists() else ""
+
+    assert "tool install" not in calls, (
+        f"a stale, unpinned uv performed the install after bootstrap.\nuv calls:\n{calls}"
+    )
+    assert result.returncode == EXIT_INTERNAL, (
+        f"install must stop with EXIT_INTERNAL.\n{result.stdout}\n{result.stderr}"
+    )
+    assert "not the pinned" in result.stderr, result.stderr
+    # Brutus on PR #643: Astral's installer follows XDG_BIN_HOME / XDG_DATA_HOME.
+    # install.sh pins its target to the first dir resolve_uv searches.
+    assert (home / "uv-install-dir").read_text().strip() == str(home / ".local" / "bin")
