@@ -73,27 +73,57 @@ class TestResolveWorthlessBinary:
         assert exc_info.value.code == ErrorCode.BOOTSTRAP_FAILED
 
 
+def _record_fernet_copies(monkeypatch: pytest.MonkeyPatch) -> list[bytearray]:
+    """Record every Fernet key copy handed out (fernet_key returns a fresh copy per read)."""
+    handed_out: list[bytearray] = []
+    real = WorthlessHome.fernet_key
+
+    def recording(self: WorthlessHome) -> bytearray:
+        buf = real.fget(self)
+        handed_out.append(buf)
+        return buf
+
+    monkeypatch.setattr(WorthlessHome, "fernet_key", property(recording))
+    return handed_out
+
+
+def _assert_all_wiped(handed_out: list[bytearray]) -> None:
+    assert handed_out, "preflight never read the Fernet key"
+    leaked = [buf for buf in handed_out if any(buf)]
+    assert not leaked, f"{len(leaked)} Fernet key copy/copies left in memory after preflight"
+
+
 class TestPreflightAndHealth:
     def test_preflight_zeroes_key(
         self, home: WorthlessHome, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # fernet_key hands out a fresh copy per read, so record every copy and
-        # check preflight wiped each one — not just that it didn't raise.
-        handed_out: list[bytearray] = []
-        real = WorthlessHome.fernet_key
-
-        def recording(self: WorthlessHome) -> bytearray:
-            buf = real.fget(self)
-            handed_out.append(buf)
-            return buf
-
-        monkeypatch.setattr(WorthlessHome, "fernet_key", property(recording))
+        handed_out = _record_fernet_copies(monkeypatch)
 
         preflight_service_install(home)
 
-        assert handed_out, "preflight never read the Fernet key"
-        leaked = [buf for buf in handed_out if any(buf)]
-        assert not leaked, f"{len(leaked)} Fernet key copy/copies left in memory after preflight"
+        _assert_all_wiped(handed_out)
+
+    def test_preflight_zeroes_key_when_launchd_sync_fails(
+        self, home: WorthlessHome, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The wipe lives in `finally`: a failed key sync must not leave the key behind.
+        handed_out = _record_fernet_copies(monkeypatch)
+        monkeypatch.setattr(
+            "worthless.cli.commands.service._common.current_platform_backend_name",
+            lambda: "launchd",
+        )
+
+        def failing_sync(*_args: object, **_kwargs: object) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(
+            "worthless.cli.commands.service._common.sync_fernet_for_launchd", failing_sync
+        )
+
+        with pytest.raises(OSError, match="disk full"):
+            preflight_service_install(home)
+
+        _assert_all_wiped(handed_out)
 
     def test_preflight_missing_fernet(self, tmp_path: Path) -> None:
         base = tmp_path / ".worthless"
