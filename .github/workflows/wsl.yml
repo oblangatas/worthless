@@ -1,0 +1,85 @@
+name: WSL
+
+# Real WSL coverage (worthless-2z8y).
+#
+# Our primary user is a Windows developer working inside WSL, and until this
+# workflow that platform had ZERO test coverage: every runner here is macOS,
+# ubuntu or plain windows, and GitHub has no WSL runner. Vampire/setup-wsl
+# installs a real WSL2 distribution on a Windows runner and runs steps INSIDE
+# it — not Docker, not a monkeypatched platform.
+#
+# Two legs, because they are two different products for the user:
+#   systemd=off  WSL's default. A background service cannot run at all.
+#   systemd=on   what a user gets after enabling systemd in /etc/wsl.conf.
+#
+# NOT a required check, deliberately. WSL install is slow and windows-latest is
+# flakier than Linux, and early instability must not block unrelated PRs. The
+# `paths:` filter below is therefore safe: the WOR-874 rule against path
+# filters exists because a skipped REQUIRED check reports success to branch
+# protection. This job is not required, so skipping it bypasses nothing.
+# Promote to required only after ~2 weeks of stable runs.
+#
+# WHAT A GREEN RUN DOES NOT PROVE: this is WSL2 inside a GitHub VM, not a
+# user's laptop. Cite that wherever this job's result is cited.
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"  # Mondays; off the hour to avoid the top-of-hour rush
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/wsl.yml"
+      - "engineering/testing/scripts/wsl-live-lifecycle.sh"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wsl-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  wsl:
+    name: WSL (systemd ${{ matrix.systemd }})
+    runs-on: windows-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - systemd: "off"
+            wslconf: |
+              [boot]
+              systemd=false
+          - systemd: "on"
+            wslconf: |
+              [boot]
+              systemd=true
+    steps:
+      # Windows runners check files out with CRLF line endings by default
+      # (core.autocrlf=true). Bash inside WSL then reads every `\r` as part of
+      # the command: the first run failed with `$'\r': command not found`
+      # before a single check executed. Scoped to this workflow rather than a
+      # repo-wide .gitattributes, so no other checkout changes behaviour.
+      - name: Keep Unix line endings on checkout
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install real WSL2 (Ubuntu 24.04)
+        uses: Vampire/setup-wsl@d1da7f2c0322a5ee4f24975344f67fc0f5baf364 # v7.0.0
+        with:
+          distribution: Ubuntu-24.04
+          wsl-conf: ${{ matrix.wslconf }}
+          additional-packages: python3 python3-venv python3-pip curl
+
+      - name: Run the lifecycle inside WSL
+        shell: wsl-bash {0}
+        env:
+          # Passed through env, never interpolated into the script body —
+          # interpolating a matrix value into `run:` is a script-injection shape.
+          SYSTEMD_EXPECTED: ${{ matrix.systemd }}
+          WSLENV: SYSTEMD_EXPECTED/u
+        run: bash engineering/testing/scripts/wsl-live-lifecycle.sh
