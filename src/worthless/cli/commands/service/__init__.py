@@ -18,7 +18,7 @@ from worthless.cli.commands.service._common import (
 from worthless.cli.commands.service.proxy_state import detect_proxy_runtime
 from worthless.cli.console import get_console
 from worthless.cli.errors import error_boundary
-from worthless.cli.platform import fail_if_windows
+from worthless.cli.platform import fail_if_windows, is_wsl
 from worthless.cli.process import disable_core_dumps, resolve_port
 
 
@@ -39,7 +39,21 @@ def _print_service_banner(console, *, platform: str, port: int) -> None:
     if console.json_mode:
         return
     console.print_success(f"Worthless proxy running as a {platform} service on 127.0.0.1:{port}.")
-    console.print_hint("Auto-restarts on crash and survives reboot — no `worthless up` needed.")
+    # No "survives reboot": WOR-725 has never verified it.
+    console.print_hint("Auto-restarts on crash — no `worthless up` needed.")
+    if is_wsl():
+        # Proven on real WSL (WOR-853, .github/workflows/wsl.yml idle legs):
+        # with the default config the distro, and this service, stop ~15 s
+        # after the last WSL terminal closes. Same fix text as systemd.py.
+        console.print_warning(
+            "On WSL the proxy stops about 15 seconds after your last WSL terminal "
+            "closes, because WSL shuts the distro down. To keep it running, add "
+            "this to %USERPROFILE%\\.wslconfig on Windows (WSL 2.5.4 or newer):\n"
+            "  [general]\n"
+            "  instanceIdleTimeout=-1\n"
+            "It takes effect once WSL fully restarts: restart Windows, or run "
+            "`wsl --shutdown` (this also stops Docker Desktop and other distros)."
+        )
     console.print_hint("Status: `worthless service status` · Stop: `worthless service stop`")
 
 
