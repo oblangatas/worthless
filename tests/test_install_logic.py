@@ -1301,8 +1301,13 @@ case "$1" in
   esac ;;
 esac""",
     )
+    # A modern pipx (>=1.7) probes `uv --version` through PATH on `pipx list`.
+    # Hosts with a system pipx or a uv in a trusted dir (e.g. Homebrew) shadow
+    # this stub, so the pipx route is also pinned statically in
+    # test_pipx_list_never_sees_the_callers_path.
+    (home / ".local" / "bin").mkdir(parents=True)
+    write_stub(home / ".local" / "bin", "pipx", "uv --version >/dev/null 2>&1; exit 0")
     if already_installed:
-        (home / ".local" / "bin").mkdir(parents=True)
         write_stub(home / ".local" / "bin", "worthless", f'echo "worthless {pin}"')
 
     attacker = tmp_path / "attacker"

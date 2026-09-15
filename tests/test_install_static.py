@@ -1369,3 +1369,21 @@ def test_no_path_assignment_puts_a_user_dir_ahead_of_the_system_dirs() -> None:
         "a new PATH assignment in install.sh — anything placing a user-writable dir "
         f"ahead of /usr/bin lets planted tools run during install: {unexpected}"
     )
+
+
+def test_pipx_list_never_sees_the_callers_path() -> None:
+    """worthless-52lm: pipx >=1.7 runs ``uv --version`` through PATH on ``pipx list``.
+
+    The conflict check ran it under the lockdown PATH, whose tail is still the
+    caller's PATH, so a planted uv executed (caught on ubuntu CI runners with a
+    modern pipx; reproduced with pipx 1.17.2). A runtime test can't see this on a
+    host whose trusted dirs already hold pipx or uv (Homebrew answers first), so
+    the trim itself is pinned here.
+    """
+    lines = [ln.strip() for ln in INSTALL_SH.read_text().splitlines() if "pipx list" in ln]
+    calls = [ln for ln in lines if not ln.startswith("#") and "|" in ln]
+    assert calls, "could not find install.sh's `pipx list` call"
+    for ln in calls:
+        assert ln.startswith('if PATH="${PATH%":$ORIGINAL_PATH"}" pipx list'), (
+            f"`pipx list` must run with the caller's PATH trimmed off: {ln}"
+        )
