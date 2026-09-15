@@ -172,14 +172,16 @@ class TestServiceInstall:
 
     def test_start_banner_states_persistence_guarantee(self, home_dir: Path) -> None:
         """WOR-726: the banner must tell the user the proxy now survives crashes
-        and reboot — the thing that distinguishes it from `worthless up`. It must
-        also show the port the INSTALLED unit binds, not the ambient WORTHLESS_PORT
-        of this shell (CodeRabbit)."""
+        — the thing that distinguishes it from `worthless up`. It must also show
+        the port the INSTALLED unit binds, not the ambient WORTHLESS_PORT of this
+        shell (CodeRabbit). It must NOT claim "survives reboot": WOR-725 has
+        never verified that."""
         mock_backend = MagicMock()
         mock_backend.installed_port.return_value = 9191
         with (
             patch("worthless.cli.commands.service._backend", return_value=mock_backend),
             patch("worthless.cli.commands.service.get_home") as mock_home,
+            patch("worthless.cli.commands.service.is_wsl", return_value=False),
         ):
             mock_home.return_value.base_dir = home_dir
             result = runner.invoke(
@@ -195,9 +197,26 @@ class TestServiceInstall:
         # closes (proven on real WSL2, run 35055982192). A test that pins an
         # unverified promise is a test that keeps it shipping.
         assert "survives reboot" not in result.output
+        assert "wslconfig" not in result.output.lower(), "no WSL advice off WSL"
         # Installed port (9191) wins over the shell's WORTHLESS_PORT (8787).
         assert "9191" in result.output
         assert "8787" not in result.output
+
+    def test_banner_on_wsl_warns_the_proxy_stops_with_the_terminal(self, home_dir: Path) -> None:
+        """WOR-853: on real WSL the distro, and the service, stop ~15 s after the
+        last terminal closes unless .wslconfig sets instanceIdleTimeout=-1. The
+        banner must not let a WSL user believe otherwise."""
+        mock_backend = MagicMock()
+        mock_backend.installed_port.return_value = 8787
+        with (
+            patch("worthless.cli.commands.service._backend", return_value=mock_backend),
+            patch("worthless.cli.commands.service.get_home") as mock_home,
+            patch("worthless.cli.commands.service.is_wsl", return_value=True),
+        ):
+            mock_home.return_value.base_dir = home_dir
+            result = runner.invoke(app, ["service", "start"], env={"WORTHLESS_HOME": str(home_dir)})
+        assert result.exit_code == 0, result.output
+        assert "instanceIdleTimeout=-1" in result.output
 
     def test_restart_invokes_backend(self, home_dir: Path) -> None:
         mock_backend = MagicMock()

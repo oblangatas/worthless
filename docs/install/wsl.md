@@ -125,16 +125,27 @@ SDK snippet. Same on every platform.
 
 | You do | What survives | What you do |
 |---|---|---|
-| Close WSL terminal | Proxy keeps running (WSL2 keeps the distro alive) | Nothing |
+| Close your last WSL terminal | **Proxy stops ~15 s later** — WSL shuts the distro down | Set `instanceIdleTimeout=-1` once (below), or `worthless up` next time |
 | `wsl --shutdown` from Windows | **Proxy is gone** + WSL state cleared | `worthless up` next time you start WSL |
 | Reboot Windows | Proxy is gone | `worthless up` |
 | Sleep / wake Windows | WSL usually survives — check `worthless status` | `worthless status`; if proxy is gone, `worthless up` |
 
-**WSL2 idles aggressively.** If you don't use WSL for a few minutes
-and Windows decides to suspend it, the proxy's process state is
-suspended too — usually transparent, but if you see hangs, check
-that the WSL distro is still running with `wsl -l -v` from
-PowerShell.
+**WSL stops the distro when no terminal is open.** About 15 seconds
+after your last WSL terminal (any `wsl.exe` window) closes, WSL shuts
+the distro down, and the proxy with it. That holds even with systemd
+and `worthless service install`. To keep it running, add this to
+`%USERPROFILE%\.wslconfig` on Windows (needs WSL 2.5.4 or newer —
+check with `wsl --version`, update with `wsl --update`):
+
+```ini
+[general]
+instanceIdleTimeout=-1
+```
+
+It takes effect once WSL fully restarts: restart Windows, or run
+`wsl --shutdown` (this also stops Docker Desktop and other distros).
+The trade-off: the distro then keeps using memory until you stop it.
+Both behaviours were checked on real WSL 2.7.13 in CI.
 
 ## 7. Uninstall (manual, until WOR-435 ships)
 
