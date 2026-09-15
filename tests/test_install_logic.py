@@ -1377,10 +1377,14 @@ def test_an_unpinned_uv_left_after_bootstrap_never_installs(tmp_path: Path) -> N
         "uv",
         f"""case "$1" in --version) echo "uv 0.1.0" ;; *) echo "$*" >> {log} ;; esac""",
     )
+    # The "downloaded" Astral installer: records where it was told to put uv,
+    # places nothing.
+    fake_installer = tmp_path / "uv-installer.sh"
+    fake_installer.write_text(f'echo "$UV_INSTALL_DIR" > {home / "uv-install-dir"}\n')
     write_stub(
         bin_dir,
         "curl",
-        'for a in "$@"; do [ "$p" = --output ] && printf "exit 0\n" > "$a"; p="$a"; done',
+        f'for a in "$@"; do [ "$p" = --output ] && cp {fake_installer} "$a"; p="$a"; done',
     )
     write_stub(bin_dir, "sha256sum", f'echo "{sha}  $1"')
 
@@ -1394,3 +1398,6 @@ def test_an_unpinned_uv_left_after_bootstrap_never_installs(tmp_path: Path) -> N
         f"install must stop with EXIT_INTERNAL.\n{result.stdout}\n{result.stderr}"
     )
     assert "not the pinned" in result.stderr, result.stderr
+    # Brutus on PR #643: Astral's installer follows XDG_BIN_HOME / XDG_DATA_HOME.
+    # install.sh pins its target to the first dir resolve_uv searches.
+    assert (home / "uv-install-dir").read_text().strip() == str(home / ".local" / "bin")

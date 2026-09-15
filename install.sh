@@ -352,7 +352,7 @@ ensure_uv() {
             "Refusing to execute. Do NOT retry; investigate or report at ${DOCS_URL}."
     fi
 
-    UV_INSTALL_VERSION="$UV_VERSION" sh "$installer" >/dev/null 2>&1 || {
+    UV_INSTALL_VERSION="$UV_VERSION" UV_INSTALL_DIR="${HOME:-/root}/.local/bin" sh "$installer" >/dev/null 2>&1 || {
         err "Astral uv installer failed."
         proxy_hints
         exit "$EXIT_NETWORK"
@@ -364,12 +364,11 @@ ensure_uv() {
         die "$EXIT_INTERNAL" "uv installed but not on PATH after bootstrap." \
             "Open a new shell and re-run, or add ~/.local/bin to PATH manually."
     fi
-    # worthless-ir3s: resolve_uv can still pick an older uv when the bootstrap
-    # landed elsewhere (e.g. XDG_BIN_HOME). Never install with an unpinned uv.
+    # worthless-ir3s: UV_INSTALL_DIR above beats XDG_*; backstop anyway.
     got="$("$UV" --version 2>/dev/null | awk '{print $2}')"
     [ "$got" = "$UV_VERSION" ] || die "$EXIT_INTERNAL" \
         "uv at ${UV} is ${got:-unknown}, not the pinned ${UV_VERSION}." \
-        "Remove it or unset XDG_BIN_HOME, then re-run."
+        "Remove that uv, then re-run."
 }
 
 install_or_upgrade_worthless() {
