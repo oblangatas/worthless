@@ -27,7 +27,7 @@ import typer
 from worthless.cli._repo_factory import open_repo
 from worthless.cli.bootstrap import WorthlessHome, acquire_lock, get_home
 from worthless.cli.code_scanner import scan_for_hardcoded_provider_urls
-from worthless.cli.commands.service import _backend
+from worthless.cli.commands.service import _backend, _print_service_banner
 from worthless.cli.commands.service._common import (
     current_platform_backend_name,
     preflight_service_install,
@@ -3021,14 +3021,9 @@ def _offer_service_after_lock(console, *, home: WorthlessHome, port: int) -> boo
         console.print_hint("Your keys are still protected. Try `worthless service install`.")
         return False
 
-    # Deliberately NOT _print_service_banner: that one claims the service
-    # "survives reboot", which WOR-725 has never verified. Say only what is
-    # proven — it outlives this terminal.
-    console.print_success(
-        f"Worthless proxy now running as a {current_platform_backend_name()} "
-        f"service on 127.0.0.1:{port}."
-    )
-    console.print_hint("Status: `worthless service status` · Stop: `worthless service stop`")
+    # Same banner as `worthless service install`, so WSL users get the
+    # idle-shutdown warning here too.
+    _print_service_banner(console, platform=current_platform_backend_name(), port=port)
     return True
 
 
