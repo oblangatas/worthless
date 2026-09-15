@@ -864,7 +864,7 @@ class TestSystemdSessionUser:
 
 
 class TestSystemdPreflight:
-    """WOR-857: WSL ships systemd off, so install must say so and write nothing."""
+    """WOR-857: WSL without systemd must say how to fix it and write nothing."""
 
     @staticmethod
     def _binary(tmp_path: Path) -> Path:
@@ -891,6 +891,12 @@ class TestSystemdPreflight:
         assert "/etc/wsl.conf" in message
         assert "systemd=true" in message
         assert "linger" not in message.lower(), "linger is the symptom, not the cause"
+        # Restart only this distro; `wsl --shutdown` also kills Docker Desktop.
+        assert "wsl --terminate Ubuntu" in message
+        assert "wsl --update" in message
+        # WSL stops the distro ~15 s after the last terminal closes (proven on
+        # real WSL, WOR-853); without this the service dies with the terminal.
+        assert "instanceIdleTimeout=-1" in message
 
     def test_wsl_without_systemd_leaves_no_orphan_unit(
         self, home: WorthlessHome, tmp_path: Path

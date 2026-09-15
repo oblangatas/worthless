@@ -317,7 +317,8 @@ class TestWslDetection:
     @pytest.mark.parametrize(
         "osrelease",
         [
-            "5.15.167.4-microsoft-standard-WSL2",  # WSL2, as seen on the real runner
+            # WSL2 `uname -r`, copied from real-WSL CI run 34894024635.
+            "6.18.33.2-microsoft-standard-WSL2",
             "4.4.0-19041-Microsoft",  # WSL1
         ],
     )
@@ -327,7 +328,23 @@ class TestWslDetection:
         monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
         monkeypatch.delenv("WSL_INTEROP", raising=False)
         monkeypatch.setattr(platform, "_read_kernel_osrelease", lambda: osrelease)
+        # Pinned: the suite itself may run inside Docker.
+        monkeypatch.setattr(platform, "_in_container", lambda: False)
         assert platform.is_wsl() is True
+
+    def test_dev_container_on_wsl_kernel_is_not_wsl(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Docker Desktop containers run on the WSL2 kernel but are not WSL.
+
+        Calling them WSL would tell a dev-container user to edit wsl.conf and
+        run wsl.exe, neither of which exists in there.
+        """
+        monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
+        monkeypatch.delenv("WSL_INTEROP", raising=False)
+        monkeypatch.setattr(
+            platform, "_read_kernel_osrelease", lambda: "6.18.33.2-microsoft-standard-WSL2"
+        )
+        monkeypatch.setattr(platform, "_in_container", lambda: True)
+        assert platform.is_wsl() is False
 
     def test_unreadable_kernel_release_is_not_wsl(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """No /proc (macOS, or a sandbox) must not crash and must not claim WSL."""

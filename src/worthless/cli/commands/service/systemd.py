@@ -142,15 +142,30 @@ def _preflight_systemd_available() -> None:
     if systemd_is_running():
         return
     if is_wsl():
+        # `wsl --terminate <distro>`, never `wsl --shutdown` for step 2: shutdown
+        # stops every distro, Docker Desktop included. Step 3 is proven on real
+        # WSL by the idle control/fix legs in .github/workflows/wsl.yml (WOR-853).
+        distro = os.environ.get("WSL_DISTRO_NAME") or "<name from `wsl -l`>"
         raise WorthlessError(
             ErrorCode.SERVICE_INSTALL_FAILED,
             "systemd is not running in this WSL distro, so a background "
             "service cannot be installed.\n\n"
-            "Fix - add this to /etc/wsl.conf:\n"
-            "  [boot]\n"
-            "  systemd=true\n\n"
-            "Then run `wsl --shutdown` from PowerShell and reopen your "
-            "terminal. Until then, start the proxy yourself with `worthless up`.",
+            "Fix:\n"
+            "  1. In /etc/wsl.conf, under [boot], set systemd=true. If the file "
+            "already has a systemd= line, change that line: WSL uses the first "
+            "one it reads.\n"
+            f"  2. From PowerShell, run `wsl --terminate {distro}` and reopen "
+            "your terminal. Needs WSL 0.67.6 or newer: if `wsl --version` fails "
+            "or shows an older version, run `wsl --update` first.\n"
+            "  3. WSL stops this distro about 15 seconds after your last WSL "
+            "terminal closes, and the proxy stops with it. To keep it running, "
+            "add this to %USERPROFILE%\\.wslconfig on Windows (WSL 2.5.4 or "
+            "newer):\n"
+            "       [general]\n"
+            "       instanceIdleTimeout=-1\n"
+            "     It takes effect once WSL fully restarts: restart Windows, or run "
+            "`wsl --shutdown` (this also stops Docker Desktop and other distros).\n\n"
+            "Until then, start the proxy yourself with `worthless up`.",
         )
     raise WorthlessError(
         ErrorCode.SERVICE_INSTALL_FAILED,

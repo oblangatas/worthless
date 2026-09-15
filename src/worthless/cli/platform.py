@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 
 import psutil
 
@@ -37,6 +38,11 @@ def _read_kernel_osrelease() -> str:
         return f.read().strip()
 
 
+def _in_container() -> bool:
+    """Docker / Podman marker files. Separate so tests can inject."""
+    return Path("/.dockerenv").exists() or Path("/run/.containerenv").exists()
+
+
 def is_wsl() -> bool:
     """True when running under Windows Subsystem for Linux (WSL1 or WSL2).
 
@@ -52,15 +58,21 @@ def is_wsl() -> bool:
       (``4.4.0-19041-Microsoft``) and WSL2 (``...-microsoft-standard-WSL2``),
       and no environment reset touches it.
 
+    Docker Desktop runs containers on the WSL2 kernel, so a dev container
+    carries the same kernel string without being WSL. A container marker file
+    overrides the kernel signal (same rule as npm's ``is-wsl``); otherwise a
+    dev-container user would be told to edit wsl.conf and run wsl.exe.
+
     A ``/mnt/`` prefix check is still avoided: it false-positives on any
     ordinary Linux mount (NFS, USB, EFS).
     """
     if os.environ.get("WSL_DISTRO_NAME") or os.environ.get("WSL_INTEROP"):
         return True
     try:
-        return "microsoft" in _read_kernel_osrelease().lower()
+        kernel_says_wsl = "microsoft" in _read_kernel_osrelease().lower()
     except OSError:
         return False
+    return kernel_says_wsl and not _in_container()
 
 
 def _read_proc_1_comm() -> str:
@@ -72,8 +84,9 @@ def _read_proc_1_comm() -> str:
 def systemd_is_running() -> bool:
     """False only when we can positively tell systemd is not PID 1.
 
-    WSL ships with systemd disabled by default; there PID 1 is WSL's own
-    ``init`` shim and no unit of any kind can run.
+    Current Ubuntu and Debian WSL images enable systemd, but older and
+    ``wsl --import`` distros do not; there PID 1 is WSL's own ``init`` shim
+    and no unit of any kind can run.
 
     ponytail: an unreadable ``/proc/1/comm`` means not-Linux, where the
     systemd backend never runs in production. That reads as True on purpose —
