@@ -113,6 +113,8 @@ unset \
 # non-empty values (UV_PYTHON_PREFERENCE=system → install onto attacker-
 # controllable Python with sitecustomize.py hijack). Scrub above + hard set.
 export UV_PYTHON_PREFERENCE=only-managed
+# ~/.config/uv/uv.toml can repoint the index; unset UV_CONFIG_FILE misses it.
+export UV_NO_CONFIG=1
 
 # Capture caller's actual PATH BEFORE lockdown — used by `command_in_original_path`
 # to tell the user whether `worthless` is reachable in THEIR shell (not just in
@@ -132,7 +134,7 @@ if [ "${WORTHLESS_TRUST_PATH:-}" != "1" ]; then
     # `${HOME:-/root}` fires on unset OR empty per POSIX `:-` semantics.
     home_for_path="${HOME:-/root}"
     [ "$home_for_path" = "/" ] && home_for_path="/root"
-    PATH="/usr/bin:/bin:/usr/local/bin:${home_for_path}/.local/bin:${PATH:-}"
+    PATH="/usr/bin:/bin:/usr/local/bin:/usr/sbin:/sbin:/opt/homebrew/bin:${home_for_path}/.local/bin:${PATH:-}"
     export PATH
 fi
 
@@ -299,7 +301,8 @@ check_pipx_conflict() {
             return 0
             ;;
     esac
-    if pipx list 2>/dev/null | grep -qi "package worthless "; then
+    # Trusted prefix only: pipx >=1.7 runs `uv --version` via PATH (worthless-52lm).
+    if PATH="${PATH%":$ORIGINAL_PATH"}" pipx list 2>/dev/null | grep -qi "package worthless "; then
         die "$EXIT_PIPX_CONFLICT" "Detected a pipx-installed worthless." \
             "uv and pipx both manage tool isolation; running both is confusing." \
             "Remove the pipx version, then re-run this installer:" \
@@ -315,7 +318,7 @@ ensure_uv() {
         existing_ver="$("$uv_bin" --version 2>/dev/null | awk '{print $2}')"
         if [ "$existing_ver" = "$UV_VERSION" ]; then
             ok "  uv ${UV_VERSION} already installed"
-            return 0
+            UV="$uv_bin"; return 0
         fi
         info "  uv ${existing_ver} found; bootstrapping pinned uv ${UV_VERSION}"
     else
@@ -355,11 +358,9 @@ ensure_uv() {
         exit "$EXIT_NETWORK"
     }
 
-    uvh="${HOME:-/root}"; [ "$uvh" = / ] && uvh=/root
-    PATH="$uvh/.local/bin:$uvh/.cargo/bin:$PATH"
-    export PATH
-
-    if ! resolve_uv >/dev/null 2>&1; then
+    # worthless-52lm: call uv by absolute path from here on. No PATH prepend:
+    # putting ~/.cargo/bin ahead of /usr/bin let planted awk/tr/mktemp win.
+    if ! UV="$(resolve_uv)"; then
         die "$EXIT_INTERNAL" "uv installed but not on PATH after bootstrap." \
             "Open a new shell and re-run, or add ~/.local/bin to PATH manually."
     fi
@@ -410,14 +411,14 @@ install_or_upgrade_worthless() {
     # repeated `curl ... | sh` runs. Keyed on effective_version (pin OR
     # override) so it fires on the common default path too, not just when the
     # user sets WORTHLESS_VERSION.
-    installed_ver="$(uv tool list 2>/dev/null \
+    installed_ver="$("$UV" tool list 2>/dev/null \
         | awk '/^worthless / {sub("^v", "", $2); print $2; exit}')"
     # worthless-mb6l: RUN it, do not just stat it. uv lands the receipt and the
     # shim together and finalises the package after, so an interrupted install
     # leaves an executable shim that cannot import. `-x` passes; the tool is
     # broken; the fast-path would skip the --force repair forever.
     if [ -n "$installed_ver" ] && [ "$installed_ver" = "$effective_version" ] \
-       && "$(uv tool dir --bin 2>/dev/null)/worthless" --version >/dev/null 2>&1; then
+       && "$("$UV" tool dir --bin 2>/dev/null)/worthless" --version >/dev/null 2>&1; then
         ok "  worthless ${installed_ver} already installed"
         return 0
     fi
@@ -440,7 +441,7 @@ install_or_upgrade_worthless() {
     # quietly. (CodeRabbit catch on PR #148.)
     uv_install_err="$(mktemp 2>/dev/null || mktemp -t worthless-uv-install-err.XXXXXX)"
 
-    if ! uv tool install --force "$spec" >/dev/null 2>"$uv_install_err"; then
+    if ! "$UV" tool install --force "$spec" >/dev/null 2>"$uv_install_err"; then
         err "Failed to install ${spec}."
         if [ -s "$uv_install_err" ]; then
             printf "\n       uv tool install reported:\n" >&2
@@ -460,7 +461,7 @@ smoke_test() {
     # and guessing ~/.local/bin misses when UV_TOOL_BIN_DIR/XDG_BIN_HOME move it
     # (unscrubbed), killing a good install. Also beats a shadowing worthless on
     # PATH. worthless-dc26.
-    worthless_bin="$(uv tool dir --bin 2>/dev/null)/worthless"
+    worthless_bin="$("$UV" tool dir --bin 2>/dev/null)/worthless"
     # The shadow check needs this from `uv tool dir --bin`: the fallback is
     # itself a PATH lookup, so PATH-to-PATH would answer "no shadow" for every
     # shadowed user. Fail closed.

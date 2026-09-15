@@ -1048,3 +1048,102 @@ def test_interrupting_a_real_install_does_not_report_a_network_failure(
             check=False,
             timeout=120,
         )
+
+
+_PLANT_AND_INSTALL = r"""
+set -e
+mkdir -p /root/.cargo/bin
+for t in awk sed tr mktemp head grep basename od cut uv; do
+  printf '#!/bin/sh\necho "SPY %s" >> /tmp/spy\nexit 1\n' "$t" > /root/.cargo/bin/$t
+  chmod +x /root/.cargo/bin/$t
+done
+rm -f /root/.cargo/bin/uv
+# A stale system uv: answers --version (wrong version) so ensure_uv bootstraps,
+# and logs anything else — it must never be the uv that installs.
+cat > /usr/local/bin/uv <<'STALE'
+#!/bin/sh
+case "$1" in
+  --version) echo "uv 0.1.0" ;;
+  *) echo "SPY stale-uv $*" >> /tmp/spy; exit 1 ;;
+esac
+STALE
+chmod +x /usr/local/bin/uv
+# A poisoned user uv config: the index is a dead port. If uv honours it the
+# install fails and the address shows up in the output.
+mkdir -p /root/.config/uv
+printf '[[index]]\nurl = "http://127.0.0.1:9/simple"\ndefault = true\n' > /root/.config/uv/uv.toml
+set +e
+env -i HOME=/root NO_COLOR=1 PATH=/usr/local/bin:/usr/bin:/bin sh /work/install.sh
+rc=$?
+echo "INSTALL_RC=$rc"
+echo "SPIES=$(cat /tmp/spy 2>/dev/null | tr '\n' ' ')"
+"""
+
+
+@pytest.mark.timeout(INSTALL_TIMEOUT)
+def test_tools_planted_in_cargo_bin_never_run_during_a_fresh_install() -> None:
+    """worthless-52lm follow-up, the live half of the static PATH guard.
+
+    A real bootstrap (no uv present) with the defences ON — no
+    WORTHLESS_TRUST_PATH. Before the fix, install.sh prepended ~/.cargo/bin
+    ahead of /usr/bin after installing uv, and planted awk/basename/head/
+    mktemp/tr there ran 7 times. The spies here fail loudly (exit 1) so a hit
+    also breaks the install rather than hiding behind a pass-through.
+    """
+    image_tag = f"worthless-install-test:planted-cargo-{uuid.uuid4().hex[:8]}"
+    dockerfile = INSTALL_FIXTURES / "Dockerfile.debian-12-bare"
+    try:
+        build = subprocess.run(  # noqa: S603
+            [  # noqa: S607
+                "docker",
+                "build",
+                "--platform",
+                BUILD_PLATFORM,
+                "--file",
+                str(dockerfile),
+                "--tag",
+                image_tag,
+                str(REPO_ROOT),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=BUILD_S,
+            check=False,
+            env={**os.environ, "DOCKER_BUILDKIT": "1"},
+        )
+        assert build.returncode == 0, f"docker build failed:\n{build.stderr}"
+        run = subprocess.run(  # noqa: S603
+            [  # noqa: S607
+                "docker",
+                "run",
+                "--rm",
+                *_published_version_run_args(),
+                "--platform",
+                BUILD_PLATFORM,
+                "--entrypoint",
+                "/bin/sh",
+                image_tag,
+                "-c",
+                _PLANT_AND_INSTALL,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=RUN_S,
+            check=False,
+        )
+        out = run.stdout + run.stderr
+        assert "SPIES=" in out, f"harness did not finish:\n{out[-1500:]}"
+        assert "SPY" not in out, (
+            f"a tool planted in ~/.cargo/bin ran during install:\n{out[-1500:]}"
+        )
+        assert "127.0.0.1:9" not in out, (
+            f"uv honoured ~/.config/uv/uv.toml and used its index:\n{out[-1500:]}"
+        )
+        assert "INSTALL_RC=0" in out, f"install failed:\n{out[-1500:]}"
+    finally:
+        subprocess.run(  # noqa: S603
+            ["docker", "rmi", "-f", image_tag],  # noqa: S607
+            capture_output=True,
+            check=False,
+            timeout=60,
+        )
