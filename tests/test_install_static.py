@@ -54,7 +54,7 @@ def test_header_documents_exit_integrity(install_text: str) -> None:
 
 def test_exit_internal_die_site_count(install_text: str) -> None:
     """A8 promises to flip ONLY the Astral SHA-mismatch die-site to
-    EXIT_INTEGRITY. The 5 other EXIT_INTERNAL sites (missing hash tool,
+    EXIT_INTEGRITY. The 6 other EXIT_INTERNAL sites (missing hash tool, unpinned uv after bootstrap,
     uv-not-on-PATH after install, install crash branches, smoke-test
     failure) must stay at EXIT_INTERNAL — they're genuine transient
     failures where retry is sane. If a future refactor silently flips
@@ -62,10 +62,11 @@ def test_exit_internal_die_site_count(install_text: str) -> None:
     and "stop-50" rots and the exit-code contract is meaningless.
     """
     die_sites = re.findall(r'\bdie\s+"\$EXIT_INTERNAL"', install_text)
-    assert len(die_sites) == 5, (
-        f'install.sh must have exactly 5 `die "$EXIT_INTERNAL"` sites '
+    assert len(die_sites) == 6, (
+        f'install.sh must have exactly 6 `die "$EXIT_INTERNAL"` sites '
         f"after A8 (missing hash tool, uv-not-on-PATH, two install crash "
-        f"branches, smoke-test failure). Got {len(die_sites)}. "
+        f"branches, smoke-test failure, unpinned uv after bootstrap). "
+        f"Got {len(die_sites)}. "
         f"If you intentionally moved one to EXIT_INTEGRITY or EXIT_NETWORK, "
         f"update this count and document the boundary change."
     )

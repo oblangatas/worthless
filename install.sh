@@ -364,6 +364,12 @@ ensure_uv() {
         die "$EXIT_INTERNAL" "uv installed but not on PATH after bootstrap." \
             "Open a new shell and re-run, or add ~/.local/bin to PATH manually."
     fi
+    # worthless-ir3s: resolve_uv can still pick an older uv when the bootstrap
+    # landed elsewhere (e.g. XDG_BIN_HOME). Never install with an unpinned uv.
+    got="$("$UV" --version 2>/dev/null | awk '{print $2}')"
+    [ "$got" = "$UV_VERSION" ] || die "$EXIT_INTERNAL" \
+        "uv at ${UV} is ${got:-unknown}, not the pinned ${UV_VERSION}." \
+        "Remove it or unset XDG_BIN_HOME, then re-run."
 }
 
 install_or_upgrade_worthless() {
