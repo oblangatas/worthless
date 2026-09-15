@@ -352,7 +352,8 @@ ensure_uv() {
             "Refusing to execute. Do NOT retry; investigate or report at ${DOCS_URL}."
     fi
 
-    UV_INSTALL_VERSION="$UV_VERSION" UV_INSTALL_DIR="${HOME:-/root}/.local/bin" sh "$installer" >/dev/null 2>&1 || {
+    uvh="${HOME:-/root}"; [ "$uvh" = / ] && uvh=/root
+    UV_INSTALL_VERSION="$UV_VERSION" UV_INSTALL_DIR="$uvh/.local/bin" sh "$installer" >/dev/null 2>&1 || {
         err "Astral uv installer failed."
         proxy_hints
         exit "$EXIT_NETWORK"
