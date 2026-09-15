@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from tests._install_helpers import (
     EXIT_INTEGRITY,
     EXIT_INTERNAL,
@@ -1204,3 +1206,147 @@ esac""",
         f"breaks the no-op guarantee for anyone who relocates it.\n{log}\n"
         f"{result.stderr[-300:]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# worthless-oi9b — branch arms that no test executed
+# ---------------------------------------------------------------------------
+
+
+def test_a_broken_install_reports_an_error_not_success(tmp_path: Path) -> None:
+    """smoke_test's exit-40 guarantee — the last gate before "Done!".
+
+    ``main`` runs ``smoke_test`` immediately before printing the success block, and
+    its failure branch is ``die "$EXIT_INTERNAL"``. So a broken install cannot
+    print "Done!" — that is structurally impossible, not merely unobserved.
+
+    But NOTHING ASSERTED IT. The three existing EXIT_INTERNAL assertions all cover
+    version-pin and charset-validation paths. Ranked #1 on worthless-oi9b because
+    it is the final check standing between a broken install and a user being told
+    they are set up: if someone reorders ``main`` or softens that ``die`` to a
+    warning, every user with a broken install would be told it worked, and no test
+    would notice.
+
+    (An earlier draft of that bead claimed a broken install *could* print "Done!".
+    That was wrong and is corrected there — the guarantee holds today. This test
+    is what keeps it holding.)
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    pinned = read_install_pin()
+    write_happy_path_stubs(bin_dir)
+    # The install "succeeds" — uv reports the pinned version installed — but the
+    # entry point does not run. Exactly the shape smoke_test exists to catch.
+    write_stub(
+        bin_dir,
+        "uv",
+        f"""case "$1" in
+  --version) echo "uv 0.11.7" ;;
+  tool) shift; case "$1" in
+    install|upgrade) echo "ok" ;;
+    list) ;;
+    dir) echo "${{UV_TOOL_BIN_DIR:-${{XDG_BIN_HOME:-$HOME/.local/bin}}}}" ;;
+    *) exit 1 ;;
+  esac ;;
+  run) echo "worthless {pinned}" ;;
+  *) exit 1 ;;
+esac""",
+    )
+    entry = tmp_path / ".local" / "bin" / "worthless"
+    entry.parent.mkdir(parents=True, exist_ok=True)
+    entry.write_text("#!/bin/sh\nexit 1\n")
+    entry.chmod(0o755)
+    write_stub(bin_dir, "worthless", "exit 1")
+
+    result = run_install(bin_dir)
+
+    assert result.returncode == EXIT_INTERNAL, (
+        "an install whose binary does not run must exit 40, not report success. "
+        "smoke_test is the last gate before the 'Done!' block.\n"
+        f"rc={result.returncode}\n{result.stdout[-400:]}\n{result.stderr[-400:]}"
+    )
+    combined = result.stdout + result.stderr
+    assert "Done!" not in combined, (
+        f"a broken install printed the success block.\n{combined[-500:]}"
+    )
+    assert "failed to run" in combined, f"expected smoke_test's diagnostic, got:\n{combined[-400:]}"
+
+
+@pytest.mark.parametrize(
+    ("shell", "rc_name", "permanent_hint"),
+    [
+        ("/bin/bash", ".bashrc", "~/.bashrc"),
+        ("/bin/zsh", ".zshrc", "~/.zshrc"),
+        ("/usr/bin/fish", ".config/fish/config.fish", "fish_add_path"),
+    ],
+)
+def test_path_advice_matches_the_users_actual_shell(
+    tmp_path: Path, shell: str, rc_name: str, permanent_hint: str
+) -> None:
+    """Per-shell PATH advice — only the zsh arm had ever executed.
+
+    ``run_install`` hardcodes ``SHELL=/bin/zsh`` (tests/_install_helpers.py), so
+    every install test drove the zsh branch of ``path_is_persistent`` and
+    ``print_activation_hint``. The bash, fish and unknown arms were never run —
+    and most people who pipe a script into their shell are on bash.
+
+    The failure this guards is quiet and universal: tell a bash user to add a line
+    to a file they do not use, or tell someone whose PATH is already configured to
+    configure it again, and the install "works" while the advice is wrong. Nothing
+    would fail. Ranked #2 on worthless-oi9b.
+
+    Asserts the shape that matters per shell: with the rc file ALREADY configured,
+    install.sh must not tell the user to make it permanent again.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    home = tmp_path
+    write_happy_path_stubs(bin_dir, with_worthless=False)
+
+    rc = home / rc_name
+    rc.parent.mkdir(parents=True, exist_ok=True)
+    rc.write_text('export PATH="$HOME/.local/bin:$PATH"\n')
+
+    result = run_install(bin_dir, env_extra={"SHELL": shell})
+    out = result.stdout + result.stderr
+
+    assert result.returncode == 0, f"install failed for {shell}:\n{out[-400:]}"
+    assert "Make permanent" not in out, (
+        f"{shell}: install.sh told a user whose {rc_name} ALREADY references "
+        f".local/bin to make it permanent again. path_is_persistent's arm for "
+        f"this shell did not fire.\n{out[-500:]}"
+    )
+    assert permanent_hint not in out, (
+        f"{shell}: emitted the make-permanent hint despite {rc_name} being "
+        f"configured.\n{out[-500:]}"
+    )
+
+
+def test_an_unknown_shell_still_gets_usable_advice(tmp_path: Path) -> None:
+    """The `*` arm: never executed, and it is the one that must not guess.
+
+    ``path_is_persistent`` returns false for anything it does not recognise, so
+    the hint always prints — deliberately conservative. ``print_activation_hint``
+    then falls through to a POSIX-ish export plus a note naming the detected
+    shell, rather than inventing rc-file advice it cannot verify.
+
+    Untested until now, so nothing stopped someone "simplifying" that arm into
+    bash-specific advice for users who are not on bash.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_happy_path_stubs(bin_dir, with_worthless=False)
+
+    result = run_install(bin_dir, env_extra={"SHELL": "/opt/weird/nushell"})
+    out = result.stdout + result.stderr
+
+    assert result.returncode == 0, f"install failed on an unknown shell:\n{out[-400:]}"
+    assert "nushell" in out, (
+        f"the unknown-shell arm should name the shell it detected so the user can "
+        f"adapt the advice.\n{out[-500:]}"
+    )
+    assert "export PATH=" in out, f"expected a POSIX activation line.\n{out[-500:]}"
+    for guess in ("~/.bashrc", "~/.zshrc", "fish_add_path"):
+        assert guess not in out, (
+            f"invented rc-file advice ({guess}) for an unrecognised shell.\n{out[-500:]}"
+        )
