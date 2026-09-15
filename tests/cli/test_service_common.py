@@ -74,8 +74,26 @@ class TestResolveWorthlessBinary:
 
 
 class TestPreflightAndHealth:
-    def test_preflight_zeroes_key(self, home: WorthlessHome) -> None:
+    def test_preflight_zeroes_key(
+        self, home: WorthlessHome, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # fernet_key hands out a fresh copy per read, so record every copy and
+        # check preflight wiped each one — not just that it didn't raise.
+        handed_out: list[bytearray] = []
+        real = WorthlessHome.fernet_key
+
+        def recording(self: WorthlessHome) -> bytearray:
+            buf = real.fget(self)
+            handed_out.append(buf)
+            return buf
+
+        monkeypatch.setattr(WorthlessHome, "fernet_key", property(recording))
+
         preflight_service_install(home)
+
+        assert handed_out, "preflight never read the Fernet key"
+        leaked = [buf for buf in handed_out if any(buf)]
+        assert not leaked, f"{len(leaked)} Fernet key copy/copies left in memory after preflight"
 
     def test_preflight_missing_fernet(self, tmp_path: Path) -> None:
         base = tmp_path / ".worthless"
