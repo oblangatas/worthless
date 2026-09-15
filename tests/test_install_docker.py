@@ -1068,6 +1068,10 @@ case "$1" in
 esac
 STALE
 chmod +x /usr/local/bin/uv
+# A poisoned user uv config: the index is a dead port. If uv honours it the
+# install fails and the address shows up in the output.
+mkdir -p /root/.config/uv
+printf '[[index]]\nurl = "http://127.0.0.1:9/simple"\ndefault = true\n' > /root/.config/uv/uv.toml
 set +e
 env -i HOME=/root NO_COLOR=1 PATH=/usr/local/bin:/usr/bin:/bin sh /work/install.sh
 rc=$?
@@ -1131,6 +1135,9 @@ def test_tools_planted_in_cargo_bin_never_run_during_a_fresh_install() -> None:
         assert "SPIES=" in out, f"harness did not finish:\n{out[-1500:]}"
         assert "SPY" not in out, (
             f"a tool planted in ~/.cargo/bin ran during install:\n{out[-1500:]}"
+        )
+        assert "127.0.0.1:9" not in out, (
+            f"uv honoured ~/.config/uv/uv.toml and used its index:\n{out[-1500:]}"
         )
         assert "INSTALL_RC=0" in out, f"install failed:\n{out[-1500:]}"
     finally:
