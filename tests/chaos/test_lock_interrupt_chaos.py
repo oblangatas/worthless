@@ -316,6 +316,13 @@ def _resolve_seam(
             "HARNESS problem: the 4ms poll interval or the WAIT_TIMEOUT ceiling is wrong "
             "for this machine, NOT a product fault."
         )
+    elif (returncode or 0) < 0:
+        verdict = (
+            f"the warm-up lock was killed by signal {-(returncode or 0)} from OUTSIDE the "
+            "harness (the harness did not kill it) and the DB is empty. That is a host "
+            "symptom — an OOM kill under load looks exactly like this — not evidence the "
+            "lock writes nothing."
+        )
     else:
         verdict = (
             "the warm-up lock exited on its own and wrote NO shard rows at all — the DB "
@@ -325,9 +332,12 @@ def _resolve_seam(
 
     detail = f"  child: exit={returncode} elapsed={elapsed:.2f}s shards_after={shards_after}\n"
     tail = f"  stderr tail:\n{stderr[-800:]}\n" if stderr.strip() else "  stderr: (empty)\n"
-    # Only the "wrote nothing" branch belongs to the product; every other verdict
-    # here is a host or harness symptom and stays retryable.
-    product_fault = not harness_killed and shards_after == 0
+    # Only "the lock exited ON ITS OWN having written nothing" belongs to the
+    # product. A negative returncode means something outside the harness killed
+    # it (OOM under load looks exactly like this), which is a host symptom and
+    # keeps its retries — fast-failing that would reintroduce the false product
+    # blame worthless-xk7x removed, minus the retries that used to absorb it.
+    product_fault = not harness_killed and shards_after == 0 and (returncode or 0) >= 0
 
     _fail(
         product_fault,
@@ -1061,6 +1071,22 @@ def test_seam_calibration_fails_fast_on_a_product_fault(
         seam.__wrapped__(tmp_path_factory)
     assert len(calls) == 1, f"a product fault was retried {len(calls)}x"
     assert "in a row" not in str(excinfo.value)
+
+    # An empty DB after an OUTSIDE kill (OOM under load: returncode -9, no
+    # harness kill) is a host symptom, so it keeps every retry and never says
+    # PRODUCT — fast-failing it would reintroduce worthless-xk7x's false blame.
+    calls.clear()
+
+    def killed_from_outside(_factory: pytest.TempPathFactory) -> float:
+        calls.append(1)
+        return _resolve_seam(None, shards_after=0, returncode=-9, elapsed=3.0)
+
+    monkeypatch.setattr(f"{__name__}._measure_seam", killed_from_outside)
+    with pytest.raises(pytest.fail.Exception, match=rf"failed {SEAM_ATTEMPTS}x in a row") as oom:
+        seam.__wrapped__(tmp_path_factory)
+    assert len(calls) == SEAM_ATTEMPTS, "a host symptom must keep its retries"
+    assert "PRODUCT" not in str(oom.value), oom.value
+    assert "signal 9 from OUTSIDE" in str(oom.value)
 
 
 def test_sigkill_atomicity_xfail_covers_only_partial_states() -> None:
