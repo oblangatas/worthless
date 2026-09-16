@@ -145,7 +145,16 @@ def _preflight_systemd_available() -> None:
         # `wsl --terminate <distro>`, never `wsl --shutdown` for step 2: shutdown
         # stops every distro, Docker Desktop included. Step 3 is proven on real
         # WSL by the idle control/fix legs in .github/workflows/wsl.yml (WOR-853).
-        distro = os.environ.get("WSL_DISTRO_NAME") or "<name from `wsl -l`>"
+        # WSL_DISTRO_NAME is unset under a login shell (`runuser -l`, `sudo -i`),
+        # which is the very case this message exists for — a real WSL2 run printed
+        # the raw placeholder. When the name is unknown, give an instruction the
+        # user can follow instead of a token they have to decode.
+        distro = os.environ.get("WSL_DISTRO_NAME", "")
+        terminate = (
+            f"`wsl --terminate {distro}`"
+            if distro
+            else "`wsl -l -v` to find your distro name, then `wsl --terminate <that name>`"
+        )
         raise WorthlessError(
             ErrorCode.SERVICE_INSTALL_FAILED,
             "systemd is not running in this WSL distro, so a background "
@@ -154,7 +163,7 @@ def _preflight_systemd_available() -> None:
             "  1. In /etc/wsl.conf, under [boot], set systemd=true. If the file "
             "already has a systemd= line, change that line: WSL uses the first "
             "one it reads.\n"
-            f"  2. From PowerShell, run `wsl --terminate {distro}` and reopen "
+            f"  2. From PowerShell, run {terminate}, then reopen "
             "your terminal. Needs WSL 0.67.6 or newer: if `wsl --version` fails "
             "or shows an older version, run `wsl --update` first.\n"
             "  3. WSL stops this distro about 15 seconds after your last WSL "

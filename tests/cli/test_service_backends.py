@@ -7,11 +7,13 @@ from unittest.mock import MagicMock, patch
 
 import os
 import pwd
+import re
 import subprocess
 
 import pytest
 
 from worthless.cli.bootstrap import WorthlessHome
+from worthless.cli.console import WorthlessConsole
 from worthless.cli.commands.service import launchd, systemd, templates
 from worthless.cli.commands.service._common import ServiceState, refuse_foreign_unit
 from worthless.cli.errors import ErrorCode, WorthlessError
@@ -960,3 +962,33 @@ class TestSystemdPreflight:
             systemd.install(home)
 
         assert unit.is_file()
+
+
+class TestWslIdleShutdownCaveat:
+    """A WSL user must be told the proxy stops ~15 s after their last window.
+
+    Measured on real WSL2 (run 35055982192): with stock settings WSL stops the
+    distro on its own, and the proxy stops with it. Saying "auto-restarts"
+    without saying that is a promise the platform does not keep.
+    """
+
+    def test_wsl_success_names_the_idle_shutdown_and_the_fix(self, capsys) -> None:
+        from worthless.cli.commands.service import _print_service_banner
+
+        console = WorthlessConsole()
+        with patch("worthless.cli.commands.service.is_wsl", return_value=True):
+            _print_service_banner(console, platform="systemd", port=8787)
+        # readouterr() drains the buffer — capture ONCE, then read both streams.
+        captured = capsys.readouterr()
+        out = re.sub(r"\s+", " ", captured.out + captured.err)
+        assert "15 s" in out or "15s" in out
+        assert "instanceIdleTimeout=-1" in out
+
+    def test_plain_linux_gets_no_wsl_caveat(self, capsys) -> None:
+        from worthless.cli.commands.service import _print_service_banner
+
+        console = WorthlessConsole()
+        with patch("worthless.cli.commands.service.is_wsl", return_value=False):
+            _print_service_banner(console, platform="systemd", port=8787)
+        captured = capsys.readouterr()
+        assert "wslconfig" not in (captured.out + captured.err).lower()
