@@ -203,9 +203,14 @@ Worthless installer (uv-bootstrap)
   uv 0.11.7 already installed
   worthless 0.3.0
 
-Done! 'worthless' is on your PATH.
+Done! Worthless is installed at $TRACE_ROOT/install-lifecycle/stale-worthless-on-path/.local/bin/worthless.
 
-  Try it:        cd your-project && worthless lock
+  Heads up: 'worthless' runs another copy first on your PATH:
+    $TRACE_ROOT/install-lifecycle/stale-worthless-on-path/bin/worthless
+  Remove that copy. Until you do, new terminals and agents still run it.
+  Then open a new terminal and check which one runs:
+    command -v worthless
+
   Audit script:  curl worthless.sh?explain=1 | less
   Source:        https://github.com/oblangatas/worthless
 

@@ -73,6 +73,25 @@ def test_install_lifecycle_trace_documents_current_install_contract(
     assert "stale worthless on PATH" in report, (
         "the shadowed-install journey is missing from the rendered report"
     )
+    # WOR-597. The committed document is checked too, not only this in-process
+    # render: README.md and UX_PRODUCT_REPORT.md cite TERMINAL_TRACES.md as the
+    # evidence that install UX is honest, and CI renders only to a throwaway
+    # artifact. Without the on-disk half, the published proof can keep showing
+    # the false success ("Done! 'worthless' is on your PATH." + a `lock` line)
+    # forever with CI green.
+    committed = (Path(render_traces.__file__).parent / "TERMINAL_TRACES.md").read_text()
+    for source, text in (("rendered report", report), ("committed TERMINAL_TRACES.md", committed)):
+        shadow = text[
+            text.index("stale worthless on PATH") : text.index("upgrade older uv tool install")
+        ]
+        assert "runs another copy first on your PATH" in shadow, (
+            f"{source}: the shadowed-install trace must show the shadow warning, "
+            "not a false success"
+        )
+        assert "command -v worthless" in shadow, f"{source}: the check command is missing"
+        assert "Try it:" not in shadow, (
+            f"{source}: a shadowed install must not offer a next step that runs the old copy"
+        )
     assert "upgrade older uv tool install" in report
     assert "reinstall" in report.lower()
     assert "Done! 'worthless' is on your PATH." in report
