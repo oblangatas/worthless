@@ -49,6 +49,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NoReturn
 
 import psutil
 import pytest
@@ -212,6 +213,16 @@ def _child_env(te: TrialEnv) -> dict[str, str]:
 SEAM_FLOOR = 0.05
 
 
+class _ProductFault(pytest.fail.Exception):
+    """A calibration verdict the PRODUCT owns — never retried.
+
+    Retries exist for a stalled host. "The lock exited on its own and wrote
+    nothing" is not a host symptom, and retrying it lets a lock that only
+    SOMETIMES does nothing calibrate on a lucky attempt (worthless-nqce).
+    Subclasses ``Failed`` so pytest still reports it as an ordinary failure.
+    """
+
+
 def _resolve_seam(
     first_shard: float | None,
     *,
@@ -314,8 +325,12 @@ def _resolve_seam(
 
     detail = f"  child: exit={returncode} elapsed={elapsed:.2f}s shards_after={shards_after}\n"
     tail = f"  stderr tail:\n{stderr[-800:]}\n" if stderr.strip() else "  stderr: (empty)\n"
+    # Only the "wrote nothing" branch belongs to the product; every other verdict
+    # here is a host or harness symptom and stays retryable.
+    product_fault = not harness_killed and shards_after == 0
 
-    pytest.fail(
+    _fail(
+        product_fault,
         "chaos seam calibration FAILED — the orphan-vulnerable window could not be "
         f"located within WAIT_TIMEOUT={WAIT_TIMEOUT}s.\n"
         f"  Diagnosis: {verdict}\n"
@@ -323,8 +338,15 @@ def _resolve_seam(
         f"{detail}"
         "  Refusing to substitute a fabricated seam: an unmeasured seam is "
         "unfalsifiable, and a green run would not distinguish it from a real one.\n"
-        f"{tail}"
+        f"{tail}",
     )
+
+
+def _fail(product_fault: bool, msg: str) -> NoReturn:
+    """``pytest.fail(msg)``, as ``_ProductFault`` when the product owns the verdict."""
+    if product_fault:
+        raise _ProductFault(msg)
+    pytest.fail(msg)
 
 
 SEAM_ATTEMPTS = 3
@@ -350,14 +372,19 @@ def seam(tmp_path_factory: pytest.TempPathFactory) -> float:
     making the attempts fewer, and costs no wall clock — the workers calibrate
     in parallel.
 
-    A genuinely broken lock fails all ``SEAM_ATTEMPTS``, so this cannot mask a
-    product fault; the final diagnostic is the last attempt's, in full.
+    A verdict the PRODUCT owns (``_ProductFault``: the lock exited on its own
+    having written nothing) is NOT retried — it fails on the first attempt, so a
+    lock that only sometimes does nothing cannot calibrate on a lucky try.
+    Host and harness verdicts keep their ``SEAM_ATTEMPTS`` goes; a genuinely
+    stuck lock exhausts them, and the final diagnostic is the last attempt's.
     """
     last: pytest.fail.Exception | None = None
     for _ in range(SEAM_ATTEMPTS):
         try:
             return _measure_seam(tmp_path_factory)
-        except pytest.fail.Exception as exc:  # noqa: PERF203
+        except _ProductFault:  # noqa: PERF203
+            raise
+        except pytest.fail.Exception as exc:
             last = exc
     assert last is not None
     pytest.fail(
@@ -1013,6 +1040,40 @@ def test_seam_calibration_still_fails_when_every_attempt_misses(
         seam.__wrapped__(tmp_path_factory)
 
 
+def test_seam_calibration_fails_fast_on_a_product_fault(
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lock that exits on its own having written nothing is not retried.
+
+    Retries exist for a slow host. "Wrote NO shard rows" is the product's own
+    verdict, and retrying it lets a lock that only SOMETIMES does nothing
+    calibrate on a lucky attempt and run the storms (worthless-nqce).
+    """
+    calls: list[int] = []
+
+    def lock_wrote_nothing(_factory: pytest.TempPathFactory) -> float:
+        calls.append(1)
+        return _resolve_seam(None, shards_after=0, returncode=1, elapsed=0.2, stderr="boom")
+
+    monkeypatch.setattr(f"{__name__}._measure_seam", lock_wrote_nothing)
+    with pytest.raises(pytest.fail.Exception, match=r"wrote NO shard") as excinfo:
+        seam.__wrapped__(tmp_path_factory)
+    assert len(calls) == 1, f"a product fault was retried {len(calls)}x"
+    assert "in a row" not in str(excinfo.value)
+
+
+def test_sigkill_atomicity_xfail_covers_only_partial_states() -> None:
+    """Only the documented partial-state gap may be expected to fail.
+
+    Without ``raises=``, a hang, an unkillable process, or a calibration failure
+    inside the SIGKILL cells is recorded as XFAIL instead of red (worthless-7zys).
+    """
+    marks = [m for m in TestSigkillAtomicity.test_sigkill_atomicity.pytestmark if m.name == "xfail"]
+    assert len(marks) == 1
+    assert marks[0].kwargs.get("raises") is AssertionError
+
+
 def test_seam_calibration_refuses_to_fabricate() -> None:
     """A seam the probe could not measure must fail, not silently become 0.5.
 
@@ -1072,6 +1133,11 @@ class TestSigkillAtomicity:
         "SIGKILL allows no cleanup; only write-ordering/atomic commit prevents "
         "orphan shards. Current code may leak — documented, not hidden.",
         strict=False,
+        # ONLY the partial-state assertion below is expected to fail. Without
+        # this, a hang (pytest.fail from _await_exit), an unkillable process or
+        # a calibration failure inside these cells is recorded as XFAIL instead
+        # of red — the guard hiding the thing it guards (worthless-7zys).
+        raises=AssertionError,
     )
     @pytest.mark.parametrize("n_keys", [2, 3], ids=["N2", "N3"])
     def test_sigkill_atomicity(self, tmp_path: Path, seam: float, n_keys: int) -> None:
