@@ -61,10 +61,38 @@ def test_install_lifecycle_trace_documents_current_install_contract(
     journey = render_traces.build_install_lifecycle()
     report = "\n".join(render_traces.render_journey(journey))
 
-    assert len(journey.traces) == 6
-    assert [trace.exit_code for trace in journey.traces] == [0, 0, 0, 30, 10, 0]
+    # Order matches build_install_lifecycle(). The exit codes are the contract:
+    # a shadowed install and an upgrade both still succeed (0) — only the pipx
+    # conflict (EXIT_PIPX_CONFLICT=30) and a uv failure (EXIT_NETWORK=10) are
+    # fatal. A shadow is a PATH problem, not an install failure, so a 0 here is
+    # load-bearing rather than incidental (WOR-597).
+    assert len(journey.traces) == 8
+    assert [trace.exit_code for trace in journey.traces] == [0, 0, 0, 0, 0, 30, 10, 0]
     assert "Install, Reinstall, Manual Uninstall Guidance" in report
     assert "fresh install" in report.lower()
+    assert "stale worthless on PATH" in report, (
+        "the shadowed-install journey is missing from the rendered report"
+    )
+    # WOR-597. The committed document is checked too, not only this in-process
+    # render: README.md and UX_PRODUCT_REPORT.md cite TERMINAL_TRACES.md as the
+    # evidence that install UX is honest, and CI renders only to a throwaway
+    # artifact. Without the on-disk half, the published proof can keep showing
+    # the false success ("Done! 'worthless' is on your PATH." + a `lock` line)
+    # forever with CI green.
+    committed = (Path(render_traces.__file__).parent / "TERMINAL_TRACES.md").read_text()
+    for source, text in (("rendered report", report), ("committed TERMINAL_TRACES.md", committed)):
+        shadow = text[
+            text.index("stale worthless on PATH") : text.index("upgrade older uv tool install")
+        ]
+        assert "runs another copy first on your PATH" in shadow, (
+            f"{source}: the shadowed-install trace must show the shadow warning, "
+            "not a false success"
+        )
+        assert "command -v worthless" in shadow, f"{source}: the check command is missing"
+        assert "Try it:" not in shadow, (
+            f"{source}: a shadowed install must not offer a next step that runs the old copy"
+        )
+    assert "upgrade older uv tool install" in report
     assert "reinstall" in report.lower()
     assert "Done! 'worthless' is on your PATH." in report
     assert "Done! 'worthless' is installed." in report
