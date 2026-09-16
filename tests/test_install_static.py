@@ -1413,15 +1413,29 @@ class TestWslDetectionActuallyRuns:
     PATH. Everything else about the function is genuinely executed.
     """
 
-    def _run(self, install_text: str, *, proc_contents: str | None, cwd: Path) -> str:
-        """Run the real detect_linux_subenv with /proc/version substituted."""
+    def _run(
+        self,
+        install_text: str,
+        *,
+        proc_contents: str | None,
+        cwd: Path,
+        reported_cwd: str | None = None,
+    ) -> str:
+        """Run the real detect_linux_subenv with /proc/version substituted.
+
+        ``reported_cwd`` shadows the ``pwd`` builtin with a shell function, which is
+        what ``case "$(pwd)" in /mnt/*)`` actually consults. Creating a real
+        /mnt path needs root, so the earlier version of the /mnt test skipped
+        everywhere — including CI — while reading as coverage (karen on #589).
+        """
         body = _extract_shell_function(install_text, "detect_linux_subenv")
         with tempfile.TemporaryDirectory() as td:
             proc = Path(td) / "version"
             if proc_contents is not None:
                 proc.write_text(proc_contents)
             script = (
-                "warn() { printf 'WARN: %s\\n' \"$1\" >&2; }\n"
+                (f"pwd() {{ printf '%s\\n' '{reported_cwd}'; }}\n" if reported_cwd else "")
+                + "warn() { printf 'WARN: %s\\n' \"$1\" >&2; }\n"
                 "IS_WSL=''\n"
                 f"detect_linux_subenv() {{{body.replace('/proc/version', str(proc))}}}\n"
                 "detect_linux_subenv\n"
@@ -1440,23 +1454,12 @@ class TestWslDetectionActuallyRuns:
         self, install_text: str, tmp_path: Path
     ) -> None:
         """The case that exists to be helpful: WSL + /mnt = slow, say so."""
-        mnt = tmp_path / "mnt" / "c" / "proj"
-        mnt.mkdir(parents=True)
-        # `case "$(pwd)" in /mnt/*)` matches on the literal prefix, so the test
-        # must run from a real /mnt path rather than a tmp_path lookalike.
-        real_mnt = Path("/mnt/c-oi9b-test")
-        try:
-            real_mnt.mkdir(parents=True, exist_ok=True)
-        except (PermissionError, OSError):
-            pytest.skip("cannot create /mnt path on this machine")
-        try:
-            out = self._run(
-                install_text,
-                proc_contents="Linux version 5.15-microsoft-standard-WSL2\n",
-                cwd=real_mnt,
-            )
-        finally:
-            real_mnt.rmdir()
+        out = self._run(
+            install_text,
+            proc_contents="Linux version 5.15-microsoft-standard-WSL2\n",
+            cwd=tmp_path,
+            reported_cwd="/mnt/c/proj",
+        )
         assert "IS_WSL=1" in out, f"WSL was not detected from /proc/version:\n{out}"
         assert "WARN" in out and "slow" in out.lower(), (
             f"a WSL user under /mnt got no warning that uv will be slow there:\n{out}"
