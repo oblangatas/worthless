@@ -1,0 +1,167 @@
+name: WSL
+
+# Real WSL coverage (worthless-2z8y).
+#
+# Our primary user is a Windows developer working inside WSL, and until this
+# workflow that platform had ZERO test coverage: every runner here is macOS,
+# ubuntu or plain windows, and GitHub has no WSL runner. Vampire/setup-wsl
+# installs a real WSL2 distribution on a Windows runner and runs steps INSIDE
+# it — not Docker, not a monkeypatched platform.
+#
+# Legs:
+#   off          systemd disabled (old or `wsl --import` installs). A background
+#                service cannot run at all.
+#   on (control) systemd enabled, default Windows config. Also proves WSL stops
+#                the distro ~15 s after the last wsl.exe exits — which kills the
+#                proxy. If this leg cannot SEE that shutdown, the fix leg's pass
+#                means nothing, so the control leg goes red instead.
+#   on (fix)     same, plus `[general] instanceIdleTimeout=-1` in .wslconfig.
+#                Must show the proxy survived (same boot_id and InvocationID).
+#   default      no wsl.conf written: records what Ubuntu 24.04 really ships.
+#                (Current Ubuntu images ship systemd=true, not off.)
+#
+# NOT a required check, deliberately. WSL install is slow and windows-latest is
+# flakier than Linux, and early instability must not block unrelated PRs. The
+# `paths:` filter below is safe only because this job is not required: a
+# path-filtered REQUIRED check that is skipped never reports, so branch
+# protection leaves the PR Pending forever (WOR-874). Keep it non-required
+# while the filter exists; promote only after dropping the filter and ~2 weeks
+# of stable runs.
+#
+# WHAT A GREEN RUN DOES NOT PROVE: this is WSL2 inside a GitHub VM, not a
+# user's laptop. Cite that wherever this job's result is cited.
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"  # Mondays; off the hour to avoid the top-of-hour rush
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/wsl.yml"
+      - "engineering/testing/scripts/wsl-live-lifecycle.sh"
+      - "engineering/testing/scripts/wsl-idle-survival.sh"
+      # The code whose WSL behaviour this job exercises.
+      - "src/worthless/cli/commands/service/**"
+      - "src/worthless/cli/platform.py"
+      - "src/worthless/cli/commands/lock.py"
+      - "pyproject.toml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wsl-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  wsl:
+    name: WSL (${{ matrix.leg }})
+    runs-on: windows-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - leg: "systemd off"
+            systemd: "off"
+            wslconf: |
+              [boot]
+              systemd=false
+          - leg: "systemd on, idle control"
+            systemd: "on"
+            idle: control
+            wslconf: |
+              [boot]
+              systemd=true
+          - leg: "systemd on, idle fix"
+            systemd: "on"
+            idle: fix
+            wslconf: |
+              [boot]
+              systemd=true
+          # No wslconf: setup-wsl only writes /etc/wsl.conf when it is non-empty.
+          - leg: "distro default"
+            systemd: "default"
+    steps:
+      # Windows runners check files out with CRLF line endings by default
+      # (core.autocrlf=true). Bash inside WSL then reads every `\r` as part of
+      # the command: the first run failed with `$'\r': command not found`
+      # before a single check executed. Scoped to this workflow rather than a
+      # repo-wide .gitattributes, so no other checkout changes behaviour.
+      - name: Keep Unix line endings on checkout
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install real WSL2 (Ubuntu 24.04)
+        uses: Vampire/setup-wsl@d1da7f2c0322a5ee4f24975344f67fc0f5baf364 # v7.0.0
+        with:
+          distribution: Ubuntu-24.04
+          wsl-conf: ${{ matrix.wslconf }}
+          additional-packages: python3 python3-venv python3-pip curl
+
+      # Before the lifecycle, so the service is installed under the new config.
+      # .wslconfig is read when the WSL VM starts; `wsl --shutdown` forces that.
+      - name: "Idle fix: instanceIdleTimeout=-1 in .wslconfig"
+        if: matrix.idle == 'fix'
+        shell: pwsh
+        run: |
+          Set-Content -Path "$env:USERPROFILE\.wslconfig" -Encoding ascii -Value "[general]`ninstanceIdleTimeout=-1"
+          Get-Content "$env:USERPROFILE\.wslconfig"
+          wsl --shutdown
+
+      - name: Run the lifecycle inside WSL
+        shell: wsl-bash {0}
+        env:
+          # Passed through env, never interpolated into the script body —
+          # interpolating a matrix value into `run:` is a script-injection shape.
+          SYSTEMD_EXPECTED: ${{ matrix.systemd }}
+          WSLENV: SYSTEMD_EXPECTED/u
+        run: bash engineering/testing/scripts/wsl-live-lifecycle.sh
+
+      - name: "Idle 1: record boot_id and service InvocationID"
+        if: matrix.idle != ''
+        shell: wsl-bash {0}
+        env:
+          IDLE_EXPECTED: ${{ matrix.idle }}
+          WSLENV: IDLE_EXPECTED/u
+        run: bash engineering/testing/scripts/wsl-idle-survival.sh save
+
+      # Windows only. Any wsl.exe here would reset WSL's idle timer and hide the
+      # shutdown; `wsl -l --running` only queries and does not start a distro.
+      - name: "Idle 2: wait 120 s from Windows with no wsl.exe open"
+        if: matrix.idle != ''
+        shell: pwsh
+        env:
+          IDLE_EXPECTED: ${{ matrix.idle }}
+        run: |
+          $env:WSL_UTF8 = 1  # otherwise wsl.exe prints UTF-16 and -match fails
+          wsl --version
+          "Windows-side WSL clients still open before the wait (should be none):"
+          Get-Process wsl, wslhost -ErrorAction SilentlyContinue | Format-Table Id, Name, StartTime
+          Start-Sleep -Seconds 120
+          $running = wsl -l --running | Out-String
+          $running
+          try { $code = (Invoke-WebRequest http://127.0.0.1:8787/healthz -UseBasicParsing -TimeoutSec 5).StatusCode }
+          catch { $code = "no answer" }
+          "healthz from Windows: $code (reported, not asserted: localhost forwarding varies)"
+          $alive = $running -match 'Ubuntu-24.04'
+          if ($env:IDLE_EXPECTED -eq 'control') {
+            if ($alive) { "FAIL  control: distro still running after 120 s on default config. This test cannot see the idle shutdown, so no fix-leg pass can be trusted."; exit 1 }
+            "PASS  control: WSL stopped the distro on its own"
+          } else {
+            if (-not $alive) { "FAIL  fix: distro stopped despite instanceIdleTimeout=-1"; exit 1 }
+            "PASS  fix: distro still running"
+          }
+          exit 0
+
+      # Runs even if Idle 2 failed, so a red run still carries the evidence.
+      - name: "Idle 3: did the proxy survive, or restart?"
+        if: matrix.idle != '' && !cancelled()
+        shell: wsl-bash {0}
+        env:
+          IDLE_EXPECTED: ${{ matrix.idle }}
+          WSLENV: IDLE_EXPECTED/u
+        run: bash engineering/testing/scripts/wsl-idle-survival.sh compare

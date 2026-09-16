@@ -1,6 +1,6 @@
 name: Scheduled failure alarm
 
-# Seven workflows in this repo run on a cron. Until now, none of them told
+# Several workflows in this repo run on a cron. Until now, none of them told
 # anyone when they failed. scheduled.yml failed 45 consecutive runs across four
 # months — a mutmut invocation using flags mutmut 3.x had deleted, a contract
 # job selecting a marker no test carried, and a secret scanner that regressed
@@ -9,7 +9,7 @@ name: Scheduled failure alarm
 # work in practice. WOR-878.
 #
 # Deliberately NOT a step copied into each scheduled workflow. That would be
-# seven hand-maintained copies which must agree, and WOR-874 is the standing
+# one hand-maintained copy per workflow, all of which must agree, and WOR-874 is the standing
 # proof in this repo that two such lists drift apart on their own (its push and
 # pull_request path filters had already diverged before anyone noticed).
 #
@@ -57,6 +57,7 @@ on:  # zizmor: ignore[dangerous-triggers]
       - "Scheduled (Hypothesis + Secret Scan)"
       - "Scorecard security analysis"
       - "Wire-attack canary (scheduled)"
+      - "WSL"
 
 permissions:
   contents: read
