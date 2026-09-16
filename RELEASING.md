@@ -71,11 +71,25 @@ because that sentence was not enforced, and the same bug shipped twice.
    - Failed at **Re-verify the tag GPG signature**? Stop: that tag is not yours. Create nothing.
    - Red for another reason? Read its warning, fix that, and re-run it. Don't create a draft.
 2. Only if there is no such run at all, with every publisher green and nothing waiting for approval,
-   did the automation genuinely not fire — and nothing alerts you to that yet. Then create a draft,
-   and find out why before publishing it:
+   did the automation genuinely not fire. Then create a draft, and find out why before publishing it:
    ```
    gh release create v<version> --draft --title "v<version>: <headline>" --verify-tag --generate-notes
    ```
+
+**You are told about this.** `release-watchdog.yml` checks every tag from the last 14 days, every
+6 hours, and opens ONE issue assigned to the maintainer (label `release-watchdog`) when a tag has no
+Release: after 24h if a publisher failed, never finished, or the automation never ran, and after 72h
+if a run is still waiting for approval — naming the commit to check before approving, or the stale
+approval to reject after a re-tag. It stays quiet during the normal approval pause. A draft does not
+silence it; only the automation's **Create the GitHub Release** step succeeding does. Closing an
+issue silences that commit only; a re-tag that is still unreleased reopens it (WOR-922).
+
+**What the watchdog does NOT catch.** A watchdog that never runs — GitHub starts cron jobs up to
+about a day late and disables them after 60 days without repo activity, and nothing alarms on that.
+A tag is timed from its signing date, so one pushed more than 14 days after signing is never
+watched. Removing the `release-watchdog` label from an open alarm makes the next check file a
+duplicate. It reports a missing Release; it does not check that an existing Release is correct, or
+notice one deleted afterwards.
 
 > **"Preflight check", not "gate".** In this repo `release gate` means a product go/no-go
 > item — see `engineering/release-gates.md`. The automated checks inside `tag-release.sh`

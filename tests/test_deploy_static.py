@@ -2710,6 +2710,16 @@ GUARD_MUTATIONS = [
         "test_issue_reopens_when_the_tag_moves",
     ),
     (
+        # The guide half of this guard cannot be mutated here — the harness copies
+        # .github/, scripts/ and this file, not RELEASING.md — so mutate the script
+        # half back to the line PR #628 shipped before the watchdog existed.
+        "leave the release script saying nobody is watching",
+        "scripts/tag-release.sh",
+        'echo "The release watchdog tells you (WOR-922): it opens ONE issue, assigned to you,"',
+        'echo "NOTHING WILL TELL YOU THIS HAPPENED — there is no watchdog yet, so a silent"',
+        "test_the_release_guide_matches_the_watchdog",
+    ),
+    (
         "count a pull request's forged release run",
         ".github/scripts/release-watchdog.sh",
         "-f event=workflow_run ",
@@ -2792,6 +2802,9 @@ class TestGuardsCanActuallyFail:
         # scripts/ too: tag-release.sh guards live there, and without this their
         # mutations silently target a file the copy does not contain.
         shutil.copytree(REPO_ROOT / "scripts", tmp_path / "scripts")
+        # RELEASING.md: the release-guide guard reads it, and without a copy that
+        # guard errors in the control run instead of proving anything.
+        shutil.copy(REPO_ROOT / "RELEASING.md", tmp_path / "RELEASING.md")
         (tmp_path / "tests").mkdir()
         shutil.copy(Path(__file__), tmp_path / "tests" / Path(__file__).name)
 
@@ -3106,6 +3119,29 @@ class TestReleaseWatchdogWiring:
                 f"{path.name} reads GitHub Release objects ({hit.group(0)!r}). They are "
                 "spoofable and ungated; decide from git tags and run data (WOR-922)."
             )
+
+    def test_the_release_guide_matches_the_watchdog(self):
+        """The guide and the release script told the maintainer nobody was watching.
+
+        That was true until this workflow existed, and it is the kind of line that
+        rots silently: PR #628 rewrote both while this branch was open. While the
+        watchdog ships, saying otherwise sends the maintainer to the manual fallback
+        on a release the automation is already reporting.
+        """
+        guide = (REPO_ROOT / "RELEASING.md").read_text()
+        script = (REPO_ROOT / "scripts" / "tag-release.sh").read_text()
+        for name, text in (("RELEASING.md", guide), ("tag-release.sh", script)):
+            stale = re.search(
+                r"no watchdog yet|nothing alerts you|nothing will tell you", text, re.I
+            )
+            assert stale is None, (
+                f"{name} still says {stale.group(0)!r} while release-watchdog.yml ships — "
+                "the release instructions contradict the automation (WOR-922)."
+            )
+        assert "release-watchdog" in guide, (
+            "RELEASING.md's 'No Release appeared' section must say the watchdog files an issue, "
+            "and what it does not catch — otherwise the maintainer still assumes silence"
+        )
 
     def test_run_title_contract_matches_release_notes(self, release_notes_data: dict):
         """workflow_run runs report head_branch=main and the workflow name as their
