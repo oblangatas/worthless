@@ -2711,6 +2711,37 @@ GUARD_MUTATIONS = [
     ),
     (
         # The guide half of this guard cannot be mutated here — the harness copies
+        "alarm while the publishers await their own approvals",
+        ".github/scripts/release-watchdog.sh",
+        "if ! grep -q 'Release held\\|Release blocked' \"$log\" && "
+        '[ "$age_h" -lt "$APPROVAL_GRACE_H" ]; then',
+        "if false; then",
+        "test_publishers_waiting_on_their_own_approvals_stay_quiet",
+    ),
+    (
+        "never alarm on publishers stuck for days",
+        ".github/scripts/release-watchdog.sh",
+        "if ! grep -q 'Release held\\|Release blocked' \"$log\" && "
+        '[ "$age_h" -lt "$APPROVAL_GRACE_H" ]; then',
+        "if true; then",
+        "test_publisher_still_waiting_after_three_days_is_named",
+    ),
+    (
+        "let a wedged release run sit unreported",
+        ".github/scripts/release-watchdog.sh",
+        'if [ -n "$waiting" ] || [ "$unfinished" = "true" ]; then',
+        'if [ -n "$waiting" ]; then',
+        "test_stuck_release_run_alarms_after_three_days",
+    ),
+    (
+        "judge tags older than the run labels",
+        ".github/scripts/release-watchdog.sh",
+        'if [ -n "$run_labels_since" ] && [ "$created" -lt "$run_labels_since" ]; then',
+        "if false; then",
+        "test_tag_from_before_the_run_labels_is_ignored",
+    ),
+    (
+        # The guide half of this guard cannot be mutated here — the harness copies
         # .github/, scripts/ and this file, not RELEASING.md — so mutate the script
         # half back to the line PR #628 shipped before the watchdog existed.
         "leave the release script saying nobody is watching",
@@ -2766,7 +2797,7 @@ GUARD_MUTATIONS = [
         ".github/scripts/release-watchdog.sh",
         "grep -E '^::(warning|notice)' \"$log\"",
         "true",
-        "test_publisher_still_running_after_a_day_is_named",
+        "test_publisher_still_waiting_after_three_days_is_named",
     ),
 ]
 
@@ -3227,10 +3258,19 @@ class TestReleaseWatchdogBehaviour:
         rn_jobs=None,
         rn_jobs_older=None,
         issues=None,
+        run_name_landed_hours_ago: float | None = None,
         env_extra: dict | None = None,
     ):
         """Tag v9.9.9 `hours_ago`; placeholders SHA/TITLE in fixtures resolve to it."""
         repo = _seed_repo(tmp_path)
+        if run_name_landed_hours_ago is not None:
+            # The commit that gave release-notes.yml its run-name: tags older than
+            # this have runs the watchdog cannot recognise.
+            wf = repo / ".github" / "workflows"
+            wf.mkdir(parents=True)
+            (wf / "release-notes.yml").write_text("run-name: Create GitHub Release x y\n")
+            _git(repo, "add", ".github/workflows/release-notes.yml")
+            _git(repo, "commit", "-q", "-m", "run-name", when=_hours_ago(run_name_landed_hours_ago))
         _git(repo, "tag", "-a", "v9.9.9", "-m", "v9.9.9", when=_hours_ago(hours_ago))
         sha = subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
@@ -3490,15 +3530,54 @@ class TestReleaseWatchdogBehaviour:
         assert proc.returncode == 0, proc.stderr
         assert len(self._created(writes)) == 1
 
-    def test_publisher_still_running_after_a_day_is_named(self, tmp_path):
+    def test_publisher_still_waiting_after_three_days_is_named(self, tmp_path):
         runs = self.ALL_GREEN.replace(
             "publish-docker.yml=completed:success", "publish-docker.yml=in_progress:null"
         )
-        proc, writes, _ = self._run(tmp_path, 30, runs=runs)
+        proc, writes, _ = self._run(tmp_path, 80, runs=runs)
         assert proc.returncode == 0, proc.stderr
         (created,) = self._created(writes)
         assert "publish-docker.yml" in (self._field(created, "body") or ""), (
             "a publisher that never finished is a missing Release too; the issue must name it"
+        )
+
+    def test_publishers_waiting_on_their_own_approvals_stay_quiet(self, tmp_path):
+        """Three of the four publishers sit behind their own environment approvals
+        (pypi, npm-publish, worthless-sh-production — see scripts/tag-release.sh).
+
+        While those wait, fan-in correctly says "not all green". Alarming at 24h
+        would fire on every release the maintainer approves the next working day —
+        the false alarm that killed the two earlier designs.
+        """
+        runs = self.ALL_GREEN.replace("publish.yml=completed:success", "publish.yml=waiting:null")
+        proc, writes, _ = self._run(tmp_path, 30, runs=runs)
+        assert proc.returncode == 0, proc.stderr
+        assert writes == [], (
+            "a publisher still waiting for its own approval is the NORMAL path; "
+            f"the watchdog alarmed anyway:\n{proc.stdout}"
+        )
+
+    def test_stuck_release_run_alarms_after_three_days(self, tmp_path):
+        """A run queued behind the release concurrency group reports pending/queued,
+        not waiting. Skipping every non-completed run forever means a release stuck
+        that way is silent until it ages out — the failure this exists to end."""
+        proc, writes, _ = self._run(tmp_path, 80, rn_pages=self._one_run("in_progress"))
+        assert proc.returncode == 0, proc.stderr
+        (created,) = self._created(writes)
+        body = self._field(created, "body") or ""
+        assert "unfinished for 80h" in body, (
+            "the issue must say the run is wedged, not blame the create step — "
+            f"otherwise it sends you looking in the wrong place:\n{body}"
+        )
+
+    def test_tag_from_before_the_run_labels_is_ignored(self, tmp_path):
+        """Tags cut before release-notes.yml gained its run-name have runs titled
+        with the bare workflow name, so they read as "the automation never ran"."""
+        proc, writes, _ = self._run(tmp_path, 30, run_name_landed_hours_ago=10)
+        assert proc.returncode == 0, proc.stderr
+        assert writes == [], (
+            "a tag older than the run labels cannot be judged; alarming on it makes "
+            f"the first release after merge a false alarm:\n{proc.stdout}"
         )
 
     # --- the fake gh cannot prove the real API shape ---------------------------
@@ -3507,9 +3586,9 @@ class TestReleaseWatchdogBehaviour:
         """Drive the watchdog down its whole alarm path against the LIVE API.
 
         The fake gh above pins decisions; it cannot catch a query the real API
-        rejects (fan-in's -f POST trap was exactly that). A probe tag 30h old that
-        no publisher ever ran for makes it list real release runs, run the real
-        fan-in, and look up real issues — then try to file one.
+        rejects (fan-in's -f POST trap was exactly that). A probe tag 80h old (past
+        the approval grace) that no publisher ever ran for makes it list real release
+        runs, run the real fan-in, and look up real issues — then try to file one.
 
         Read-only: a wrapper refuses every write and records it. What this does
         NOT prove: the POST's labels[]/assignees[] syntax, and the jobs query
@@ -3533,7 +3612,7 @@ class TestReleaseWatchdogBehaviour:
         if not slug:
             pytest.skip("cannot resolve the repository slug from gh")
         repo = _seed_repo(tmp_path)
-        _git(repo, "tag", "-a", "v0.0.0-watchdog-probe", "-m", "probe", when=_hours_ago(30))
+        _git(repo, "tag", "-a", "v0.0.0-watchdog-probe", "-m", "probe", when=_hours_ago(80))
         bindir = tmp_path / "bin"
         bindir.mkdir()
         refused = tmp_path / "refused"

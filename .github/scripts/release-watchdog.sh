@@ -14,12 +14,14 @@
 # Per v* tag:
 #   older than 14 days               -> ignored (also keeps pre-automation tags quiet)
 #   younger than 24h                 -> too early; publishers need time
+#   tagged before run labels existed -> not judgeable; skipped
 #   the create step succeeded        -> released
-#   approval waiting, under 72h      -> the normal pause before the click
-#   approval waiting, 72h or more    -> ALARM
-#   a release run still in progress  -> next tick decides
+#   a run waiting/unfinished, <72h   -> the normal pause before the clicks
+#   a run waiting/unfinished, >=72h  -> ALARM (approval forgotten, or run wedged)
 #   fan-in ready=true                -> ALARM: the automation never created it
-#   fan-in ready=false               -> ALARM: a publisher failed or never finished
+#   fan-in ready=false, nothing held -> publishers still awaiting their own
+#                                       approvals; quiet until 72h, then ALARM
+#   fan-in ready=false, leg held     -> ALARM: a publisher failed
 #   fan-in wrote no verdict          -> this run FAILS, and scheduled-failure-alarm
 #                                       files that — a broken check never reads as fine
 #
@@ -48,6 +50,9 @@ readonly MAX_AGE_H=336
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 now=$(date +%s)
+# When release-notes.yml gained the run-name this matches on. Empty in a checkout
+# without that history, which simply means no floor.
+run_labels_since=$(git log -1 --format=%ct -S'run-name:' -- .github/workflows/release-notes.yml 2>/dev/null || true)
 since=$(jq -nr --argjson t "$((now - MAX_AGE_H * 3600))" '$t | todate')
 
 # Every release-notes run in the window, one JSON object per line.
@@ -129,6 +134,13 @@ while read -r tag created <&3; do
     echo "${tag}: ${age_h}h old, too early to judge."
     continue
   fi
+  # Tags cut before release-notes.yml gained its run-name have runs titled with the
+  # bare workflow name, so every one of them would read as "the automation never
+  # ran". The floor is when that line landed, read from git rather than hard-coded.
+  if [ -n "$run_labels_since" ] && [ "$created" -lt "$run_labels_since" ]; then
+    echo "${tag}: tagged before release runs carried their tag name; not watched."
+    continue
+  fi
   # Titles are "<prefix> <tag> <sha>". Git forbids spaces in tag names, so the
   # trailing space makes this exact: a run for v1.2.3@x never counts for v1.2.3.
   # Any sha: a Release created before a re-tag still counts as released.
@@ -151,23 +163,28 @@ while read -r tag created <&3; do
     continue
   fi
 
+  # An unfinished release run is normal for as long as the approval pause lasts —
+  # and "waiting" is not the only shape of blocked: a run queued behind the
+  # release-notes concurrency group reports pending or queued. Both get the grace,
+  # and after it both alarm: a run stuck for days is a Release that never appeared.
   waiting=$(jq -rs 'map(select(.status == "waiting")) | first | .title // empty' <<<"$mine")
-  if [ -n "$waiting" ]; then
+  unfinished=false
+  if jq -se 'any(.[]; .status != "completed")' <<<"$mine" >/dev/null; then
+    unfinished=true
+  fi
+  if [ -n "$waiting" ] || [ "$unfinished" = "true" ]; then
     if [ "$age_h" -lt "$APPROVAL_GRACE_H" ]; then
-      echo "${tag}: waiting for approval (${age_h}h), which is normal."
+      echo "${tag}: a release run is waiting or still going (${age_h}h), which is normal."
       continue
     fi
-    if [ "$waiting" = "${RUN_TITLE_PREFIX} ${tag} ${sha}" ]; then
+    if [ -z "$waiting" ]; then
+      why="A release run for this tag has been unfinished for ${age_h}h — queued or stuck rather than waiting for you. Open it in Actions; re-run it if it is wedged."
+    elif [ "$waiting" = "${RUN_TITLE_PREFIX} ${tag} ${sha}" ]; then
       why="The release run has waited ${age_h}h for your approval. Before approving, check it was built from commit ${sha}, the one your signed tag points at. If you do not recognise it, reject it."
     else
       why="A release run is waiting for approval for an OLD commit (${waiting##* }), but the tag now points at ${sha}. Approving it will fail the tag re-bind check. Reject that run so the current commit can release."
     fi
     alarm "$tag" "$sha" "$why"
-    continue
-  fi
-
-  if jq -se 'any(.[]; .status != "completed")' <<<"$mine" >/dev/null; then
-    echo "${tag}: a release run is still in progress."
     continue
   fi
 
@@ -186,6 +203,16 @@ while read -r tag created <&3; do
       fi
       ;;
     false)
+      # Three publishers sit behind their OWN environment approvals (pypi,
+      # npm-publish, worthless-sh-production), so ready=false is the normal state
+      # for as long as those clicks take. Fan-in marks a leg that finished without
+      # success with "Release held"; without that, nothing failed — it is still
+      # waiting, and alarming at 24h would fire on every correctly-approved release.
+      if ! grep -q 'Release held\|Release blocked' "$log" && [ "$age_h" -lt "$APPROVAL_GRACE_H" ]; then
+        echo "${tag}: publishers still running or awaiting their approvals (${age_h}h), which is normal."
+        rm -f "$out" "$log"
+        continue
+      fi
       why="Not all four publishers passed for this commit (one failed, is stuck, or never started). Fan-in said:
 $(grep -E '^::(warning|notice)' "$log" | sed -E 's/^::[a-z]+( title=[^:]*)?::/- /' || true)"
       ;;

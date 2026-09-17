@@ -84,6 +84,14 @@ approval to reject after a re-tag. It stays quiet during the normal approval pau
 silence it; only the automation's **Create the GitHub Release** step succeeding does. Closing an
 issue silences that commit only; a re-tag that is still unreleased reopens it (WOR-922).
 
+**First release after the watchdog shipped — check this once (WOR-922, `worthless-d2q6`).** The
+watchdog finds a tag's release runs by their title, and that title has never rendered for real. On
+the next release, open Actions → **Create GitHub Release** and confirm the run is titled
+`Create GitHub Release v<version> <sha>`, not the bare workflow name. If it shows the bare name,
+disable **Release watchdog** in Actions and reopen WOR-922: every tag would read as "the automation
+never ran" and it would file a false alarm a day later. Also confirm no watchdog issue appears while
+the `release` approval is still waiting.
+
 **What the watchdog does NOT catch.** A watchdog that never runs — GitHub starts cron jobs up to
 about a day late and disables them after 60 days without repo activity, and nothing alarms on that.
 A tag is timed from its signing date, so one pushed more than 14 days after signing is never
