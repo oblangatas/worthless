@@ -239,6 +239,119 @@ def test_uninstall_delegates_to_a_pipx_install(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
 
 
+def test_a_refusal_from_the_program_does_not_become_a_wipe(tmp_path: Path) -> None:
+    """`worthless uninstall` exiting non-zero means "I kept your keys" — honour it.
+
+    The CLI refuses rather than force-wipe when an install is still recoverable
+    (a busy DB, an IPC blip): it exits non-zero having destroyed nothing. The
+    script used to read any non-zero as "didn't finish cleanly" and fall into
+    the tier 2 wipe, which deletes the keychain entry and rm -rf's ~/.worthless —
+    the fernet key and the database the restore needs. A recoverable install
+    became an unrecoverable one, which is the outcome the CLI refused to cause.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    real_bin_dir = tmp_path / "uv-tools" / "bin"
+    real_bin_dir.mkdir(parents=True)
+    home = tmp_path / "wless-home"
+    _seed_home(home, ["/proj/a/.env"])
+    write_stub(
+        real_bin_dir,
+        "worthless",
+        'case "$1" in\n'
+        '  --version) echo "worthless 0.3.12" ;;\n'
+        '  uninstall) echo "refusing: database is busy" >&2; exit 1 ;;\n'
+        "esac",
+    )
+    _write_uv_stub(bin_dir, real_bin_dir)
+
+    result = run_uninstall(bin_dir, worthless_home=home)
+    out = result.stdout + result.stderr
+
+    assert home.exists(), f"a refusal wiped the home the restore needs:\n{out}"
+    assert (home / "fernet.key").exists(), "the key that can unscramble the shards was deleted"
+    assert result.returncode != 0, "a refused uninstall must not report success"
+    assert "nothing was deleted" in out.lower(), (
+        f"the user must be told the state is intact:\n{out}"
+    )
+
+
+def test_force_wipes_after_a_refusal(tmp_path: Path) -> None:
+    """--force is the escape hatch: wipe anyway, and say keys are not restored."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    real_bin_dir = tmp_path / "uv-tools" / "bin"
+    real_bin_dir.mkdir(parents=True)
+    home = tmp_path / "wless-home"
+    _seed_home(home, ["/proj/a/.env"])
+    write_stub(
+        real_bin_dir,
+        "worthless",
+        'case "$1" in\n  --version) echo "worthless 0.3.12" ;;\n  uninstall) exit 1 ;;\nesac',
+    )
+    _write_uv_stub(bin_dir, real_bin_dir)
+
+    result = run_uninstall(bin_dir, worthless_home=home, args=("--yes", "--force"))
+    out = (result.stdout + result.stderr).lower()
+
+    assert not home.exists(), "--force must still wipe"
+    assert "rotate" in out, "a forced wipe must tell the user to rotate their keys"
+    assert result.returncode == 0, result.stderr
+
+
+def test_a_poisoned_uv_tool_bin_dir_does_not_beat_a_real_install(tmp_path: Path) -> None:
+    """WOR-597 through the environment instead of PATH.
+
+    UV_TOOL_BIN_DIR / XDG_BIN_HOME steer `uv tool dir --bin`, so a hostile value
+    would hand `uninstall --yes` to a binary of the attacker's choosing — the
+    same defeat as a stale copy on PATH. Resolution therefore asks uv with those
+    variables unset first; only if that finds nothing do we honour them, because
+    install.sh honours them too and the tool may genuinely live there.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    real_bin_dir = tmp_path / "uv-tools" / "bin"
+    real_bin_dir.mkdir(parents=True)
+    evil_bin_dir = tmp_path / "evil"
+    evil_bin_dir.mkdir()
+    home = tmp_path / "wless-home"
+    _seed_home(home, ["/proj/a/.env"])
+
+    sentinel = tmp_path / "evil-was-executed"
+    write_stub(evil_bin_dir, "worthless", f'echo executed >> "{sentinel}"\necho "worthless 9.9.9"')
+    write_stub(
+        real_bin_dir,
+        "worthless",
+        'case "$1" in\n'
+        '  --version) echo "worthless 0.3.12" ;;\n'
+        '  uninstall) echo "REAL_RESTORED_KEYS" ;;\n'
+        "esac",
+    )
+    # uv honours UV_TOOL_BIN_DIR when set, and reports the real dir when it is not.
+    write_stub(
+        bin_dir,
+        "uv",
+        'printf "uv %s\\n" "$*" >> "$HOME/uv.log"\n'
+        'case "$1 $2 $3" in\n'
+        '  "tool dir --bin")\n'
+        f'    if [ -n "${{UV_TOOL_BIN_DIR:-}}" ]; then echo "$UV_TOOL_BIN_DIR"; '
+        f'else echo "{real_bin_dir}"; fi ;;\n'
+        '  "tool uninstall worthless") echo "removed" ;;\n'
+        "  *) ;;\n"
+        "esac",
+    )
+
+    result = run_uninstall(
+        bin_dir,
+        worthless_home=home,
+        env_extra={"UV_TOOL_BIN_DIR": str(evil_bin_dir)},
+    )
+    out = result.stdout + result.stderr
+
+    assert not sentinel.exists(), f"a hostile UV_TOOL_BIN_DIR got its binary executed:\n{out}"
+    assert "REAL_RESTORED_KEYS" in out, f"the real install should have done the work:\n{out}"
+
+
 def test_uninstall_is_honest_when_it_cannot_find_the_installed_binary(tmp_path: Path) -> None:
     """WOR-597. No authoritative answer → never guess with PATH, never claim restoration.
 
