@@ -5,12 +5,15 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import os
 import pwd
+import re
 import subprocess
 
 import pytest
 
 from worthless.cli.bootstrap import WorthlessHome
+from worthless.cli.console import WorthlessConsole
 from worthless.cli.commands.service import launchd, systemd, templates
 from worthless.cli.commands.service._common import ServiceState, refuse_foreign_unit
 from worthless.cli.errors import ErrorCode, WorthlessError
@@ -862,3 +865,132 @@ class TestSystemdSessionUser:
         fake_passwd = type("Passwd", (), {"pw_name": "runner"})()
         monkeypatch.setattr(pwd, "getpwuid", lambda uid: fake_passwd)
         assert systemd._session_user() == "runner"
+
+
+class TestSystemdPreflight:
+    """WOR-857: WSL without systemd must say how to fix it and write nothing."""
+
+    @staticmethod
+    def _binary(tmp_path: Path) -> Path:
+        binary = tmp_path / "worthless"
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+        return binary
+
+    def test_wsl_without_systemd_names_the_real_fix(
+        self, home: WorthlessHome, tmp_path: Path
+    ) -> None:
+        unit = tmp_path / "worthless-proxy.service"
+        with (
+            patch.object(systemd, "unit_path", return_value=unit),
+            patch.object(systemd, "resolve_worthless_binary", return_value=self._binary(tmp_path)),
+            patch.object(systemd, "report_proxy_health"),
+            patch("worthless.cli.platform._read_proc_1_comm", return_value="init"),
+            patch.dict("os.environ", {"WSL_DISTRO_NAME": "Ubuntu"}, clear=False),
+            pytest.raises(WorthlessError) as excinfo,
+        ):
+            systemd.install(home)
+
+        message = str(excinfo.value)
+        assert "/etc/wsl.conf" in message
+        assert "systemd=true" in message
+        assert "linger" not in message.lower(), "linger is the symptom, not the cause"
+        # Restart only this distro; `wsl --shutdown` also kills Docker Desktop.
+        assert "wsl --terminate Ubuntu" in message
+        assert "wsl --update" in message
+        # WSL stops the distro ~15 s after the last terminal closes (proven on
+        # real WSL, WOR-853); without this the service dies with the terminal.
+        assert "instanceIdleTimeout=-1" in message
+
+    def test_wsl_without_systemd_leaves_no_orphan_unit(
+        self, home: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """The unit used to be written before linger was checked, so a failed
+        install left a file behind. Preflight runs first now."""
+        unit = tmp_path / "worthless-proxy.service"
+        with (
+            patch.object(systemd, "unit_path", return_value=unit),
+            patch.object(systemd, "resolve_worthless_binary", return_value=self._binary(tmp_path)),
+            patch.object(systemd, "report_proxy_health"),
+            patch("worthless.cli.platform._read_proc_1_comm", return_value="init"),
+            patch.dict("os.environ", {"WSL_DISTRO_NAME": "Ubuntu"}, clear=False),
+            pytest.raises(WorthlessError),
+        ):
+            systemd.install(home)
+
+        assert not unit.exists(), "failed install must not leave a unit file behind"
+
+    def test_linux_without_systemd_does_not_mention_wsl(
+        self, home: WorthlessHome, tmp_path: Path
+    ) -> None:
+        unit = tmp_path / "worthless-proxy.service"
+        env = {k: v for k, v in os.environ.items() if k not in ("WSL_DISTRO_NAME", "WSL_INTEROP")}
+        with (
+            patch.object(systemd, "unit_path", return_value=unit),
+            patch.object(systemd, "resolve_worthless_binary", return_value=self._binary(tmp_path)),
+            patch.object(systemd, "report_proxy_health"),
+            patch("worthless.cli.platform._read_proc_1_comm", return_value="init"),
+            # Pin the kernel too. is_wsl() also reads it, so without this the
+            # test would FAIL for anyone running the suite on WSL — our primary
+            # platform — because their kernel genuinely says microsoft.
+            patch("worthless.cli.platform._read_kernel_osrelease", return_value="6.8.0-45-generic"),
+            patch.dict("os.environ", env, clear=True),
+            pytest.raises(WorthlessError) as excinfo,
+        ):
+            systemd.install(home)
+
+        assert "wsl.conf" not in str(excinfo.value).lower()
+
+    def test_systemd_present_installs_normally(self, home: WorthlessHome, tmp_path: Path) -> None:
+        """Guards against over-blocking: a WSL box with systemd=true is fine."""
+        unit = tmp_path / "worthless-proxy.service"
+
+        def fake_run(args: list[str], **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = "Linger=yes" if args[:2] == ["loginctl", "show-user"] else "active"
+            return result
+
+        with (
+            patch.object(systemd, "unit_path", return_value=unit),
+            patch.object(systemd, "resolve_worthless_binary", return_value=self._binary(tmp_path)),
+            patch.object(systemd, "run_cmd", side_effect=fake_run),
+            patch.object(systemd, "report_proxy_health"),
+            patch("worthless.cli.platform._read_proc_1_comm", return_value="systemd"),
+            patch.dict(
+                "os.environ", {"WSL_DISTRO_NAME": "Ubuntu", "USER": "testuser"}, clear=False
+            ),
+        ):
+            systemd.install(home)
+
+        assert unit.is_file()
+
+
+class TestWslIdleShutdownCaveat:
+    """A WSL user must be told the proxy stops ~15 s after their last window.
+
+    Measured on real WSL2 (run 35055982192): with stock settings WSL stops the
+    distro on its own, and the proxy stops with it. Saying "auto-restarts"
+    without saying that is a promise the platform does not keep.
+    """
+
+    def test_wsl_success_names_the_idle_shutdown_and_the_fix(self, capsys) -> None:
+        from worthless.cli.commands.service import _print_service_banner
+
+        console = WorthlessConsole()
+        with patch("worthless.cli.commands.service.is_wsl", return_value=True):
+            _print_service_banner(console, platform="systemd", port=8787)
+        # readouterr() drains the buffer — capture ONCE, then read both streams.
+        captured = capsys.readouterr()
+        out = re.sub(r"\s+", " ", captured.out + captured.err)
+        assert "15 s" in out or "15s" in out
+        assert "instanceIdleTimeout=-1" in out
+
+    def test_plain_linux_gets_no_wsl_caveat(self, capsys) -> None:
+        from worthless.cli.commands.service import _print_service_banner
+
+        console = WorthlessConsole()
+        with patch("worthless.cli.commands.service.is_wsl", return_value=False):
+            _print_service_banner(console, platform="systemd", port=8787)
+        captured = capsys.readouterr()
+        assert "wslconfig" not in (captured.out + captured.err).lower()

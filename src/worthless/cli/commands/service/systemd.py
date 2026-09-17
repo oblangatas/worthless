@@ -20,6 +20,7 @@ from worthless.cli.commands.service._common import (
     report_proxy_health,
 )
 from worthless.cli.errors import ErrorCode, WorthlessError
+from worthless.cli.platform import is_wsl, systemd_is_running
 from worthless.cli.process import poll_health, resolve_port
 
 SYSTEMD_UNIT = templates.SYSTEMD_UNIT_NAME
@@ -130,7 +131,61 @@ def detect_status(home: WorthlessHome, port: int) -> ServiceStatus:
     )
 
 
+def _preflight_systemd_available() -> None:
+    """Refuse before writing anything when systemd cannot accept a unit.
+
+    Runs ahead of the unit write so a refusal leaves no orphan file behind.
+    Probing PID 1 rather than ``loginctl`` matters: on a systemd-less box
+    ``loginctl`` answers "Failed to connect to bus: Host is down", which is
+    what made the old linger error point users at a dead end (WOR-857).
+    """
+    if systemd_is_running():
+        return
+    if is_wsl():
+        # `wsl --terminate <distro>`, never `wsl --shutdown` for step 2: shutdown
+        # stops every distro, Docker Desktop included. Step 3 is proven on real
+        # WSL by the idle control/fix legs in .github/workflows/wsl.yml (WOR-853).
+        # WSL_DISTRO_NAME is unset under a login shell (`runuser -l`, `sudo -i`),
+        # which is the very case this message exists for — a real WSL2 run printed
+        # the raw placeholder. When the name is unknown, give an instruction the
+        # user can follow instead of a token they have to decode.
+        distro = os.environ.get("WSL_DISTRO_NAME", "")
+        terminate = (
+            f"`wsl --terminate {distro}`"
+            if distro
+            else "`wsl -l -v` to find your distro name, then `wsl --terminate <that name>`"
+        )
+        raise WorthlessError(
+            ErrorCode.SERVICE_INSTALL_FAILED,
+            "systemd is not running in this WSL distro, so a background "
+            "service cannot be installed.\n\n"
+            "Fix:\n"
+            "  1. In /etc/wsl.conf, under [boot], set systemd=true. If the file "
+            "already has a systemd= line, change that line: WSL uses the first "
+            "one it reads.\n"
+            f"  2. From PowerShell, run {terminate}, then reopen "
+            "your terminal. Needs WSL 0.67.6 or newer: if `wsl --version` fails "
+            "or shows an older version, run `wsl --update` first.\n"
+            "  3. WSL stops this distro about 15 seconds after your last WSL "
+            "terminal closes, and the proxy stops with it. To keep it running, "
+            "add this to %USERPROFILE%\\.wslconfig on Windows (WSL 2.5.4 or "
+            "newer):\n"
+            "       [general]\n"
+            "       instanceIdleTimeout=-1\n"
+            "     It takes effect once WSL fully restarts: restart Windows, or run "
+            "`wsl --shutdown` (this also stops Docker Desktop and other distros).\n\n"
+            "Until then, start the proxy yourself with `worthless up`.",
+        )
+    raise WorthlessError(
+        ErrorCode.SERVICE_INSTALL_FAILED,
+        "systemd is not running (PID 1 is not systemd), so a background "
+        "service cannot be installed. Start the proxy yourself with "
+        "`worthless up`.",
+    )
+
+
 def install(home: WorthlessHome, *, port: int | None = None) -> None:
+    _preflight_systemd_available()
     path = unit_path()
     refuse_foreign_unit(path, home)
     binary = resolve_worthless_binary()
