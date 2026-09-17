@@ -199,11 +199,25 @@ remove_tool() {
 
 # Tier 1: the binary runs → let it do the real work (restore keys, then wipe),
 # and we just remove the installed tool afterwards.
+# Where WE installed the tool, per uv itself. PATH is not an answer: an older
+# Homebrew or pip copy earlier on PATH knows nothing about this install, so
+# delegating to it restores no keys, exits 0, and costs the user the only
+# program that could have unscrambled their shards (WOR-597).
+installed_worthless() {
+    command -v uv >/dev/null 2>&1 || return 1
+    _iw_dir="$(uv tool dir --bin 2>/dev/null)" || return 1
+    [ -n "$_iw_dir" ] || return 1
+    [ -x "${_iw_dir}/worthless" ] || return 1
+    printf '%s' "${_iw_dir}/worthless"
+}
+
 tier1_delegate() {
-    command -v worthless >/dev/null 2>&1 || return 1
-    worthless --version >/dev/null 2>&1 || return 1
-    info "Found a working 'worthless' — using it to restore your keys first."
-    if worthless uninstall --yes; then
+    # No authoritative answer means no delegation: tier 2 wipes and says plainly
+    # that the keys could not be restored. A wrong "restored" claim is worse.
+    _tier1_bin="$(installed_worthless)" || return 1
+    "$_tier1_bin" --version >/dev/null 2>&1 || return 1
+    info "Found the installed 'worthless' — using it to restore your keys first."
+    if "$_tier1_bin" uninstall --yes; then
         remove_tool
         printf "\n"
         ok "Done. Worthless removed; your real keys were restored to your .env files."

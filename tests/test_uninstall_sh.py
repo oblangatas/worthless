@@ -90,14 +90,20 @@ def test_tier2_lists_affected_env_files(tmp_path: Path) -> None:
 
 
 def test_tier1_delegates_to_a_working_binary_then_removes_the_tool(tmp_path: Path) -> None:
-    """A working `worthless` → the script delegates to `worthless uninstall`
-    (which restores keys) and then removes the installed tool via uv."""
+    """A working installed `worthless` → the script delegates to
+    `worthless uninstall` (which restores keys) and then removes the tool via uv.
+
+    The binary lives where `uv tool dir --bin` reports, not merely on PATH:
+    since WOR-597 a PATH hit alone is not proof it is the copy we installed.
+    """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
+    real_bin_dir = tmp_path / "uv-tools" / "bin"
+    real_bin_dir.mkdir(parents=True)
     home = tmp_path / "wless-home"
     _seed_home(home, ["/proj/a/.env"])
     write_stub(
-        bin_dir,
+        real_bin_dir,
         "worthless",
         'case "$1" in\n'
         '  --version) echo "worthless 0.3.8" ;;\n'
@@ -105,15 +111,7 @@ def test_tier1_delegates_to_a_working_binary_then_removes_the_tool(tmp_path: Pat
         '  *) echo "stub: $*" ;;\n'
         "esac",
     )
-    write_stub(
-        bin_dir,
-        "uv",
-        'printf "uv %s\\n" "$*" >> "$HOME/uv.log"\n'
-        'case "$1 $2" in\n'
-        '  "tool uninstall") echo "removed" ;;\n'
-        "  *) ;;\n"
-        "esac",
-    )
+    _write_uv_stub(bin_dir, real_bin_dir)
 
     result = run_uninstall(bin_dir, worthless_home=home)
 
@@ -124,6 +122,101 @@ def test_tier1_delegates_to_a_working_binary_then_removes_the_tool(tmp_path: Pat
     assert uv_log.exists() and "tool uninstall worthless" in uv_log.read_text(), (
         "Tier 1 must remove the installed tool after delegating"
     )
+
+
+def _write_uv_stub(bin_dir: Path, tool_bin_dir: Path) -> None:
+    """A uv stub that answers `tool dir --bin` and logs `tool uninstall`."""
+    write_stub(
+        bin_dir,
+        "uv",
+        'printf "uv %s\\n" "$*" >> "$HOME/uv.log"\n'
+        'case "$1 $2 $3" in\n'
+        f'  "tool dir --bin") echo "{tool_bin_dir}" ;;\n'
+        '  "tool uninstall worthless") echo "removed" ;;\n'
+        "  *) ;;\n"
+        "esac",
+    )
+
+
+def test_uninstall_never_runs_a_shadowing_copy(tmp_path: Path) -> None:
+    """WOR-597. The copy PATH resolves may not be the one we installed.
+
+    uninstall.sh delegates the key restoration to `worthless uninstall` — the
+    only thing that can unscramble the shards. Resolving that binary through
+    PATH hands the job to whatever sits earliest: a stale Homebrew or pip copy
+    that knows nothing about this install. It "succeeds", the real tool is then
+    deleted, and the user is told their keys were restored while the shards are
+    still on disk and the stale copy still wins `command -v`.
+
+    The installed binary is what uv reports, so that is what must run. A stale
+    copy is never executed: it is a file of unknown provenance, and running it
+    is the thing this test exists to forbid.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    real_bin_dir = tmp_path / "uv-tools" / "bin"
+    real_bin_dir.mkdir(parents=True)
+    home = tmp_path / "wless-home"
+    _seed_home(home, ["/proj/a/.env"])
+
+    sentinel = tmp_path / "shadow-was-executed"
+    write_stub(
+        bin_dir,
+        "worthless",
+        f'echo executed >> "{sentinel}"\n'
+        'case "$1" in\n'
+        '  --version) echo "worthless 0.0.1-shadow" ;;\n'
+        '  uninstall) echo "SHADOW_RESTORED_NOTHING" ;;\n'
+        "esac",
+    )
+    write_stub(
+        real_bin_dir,
+        "worthless",
+        'case "$1" in\n'
+        '  --version) echo "worthless 0.3.12" ;;\n'
+        '  uninstall) echo "REAL_RESTORED_KEYS" ;;\n'
+        "esac",
+    )
+    _write_uv_stub(bin_dir, real_bin_dir)
+
+    result = run_uninstall(bin_dir, worthless_home=home)
+    out = result.stdout + result.stderr
+
+    assert not sentinel.exists(), (
+        f"uninstall.sh executed the shadowing copy; it must run the binary uv installed:\n{out}"
+    )
+    assert "REAL_RESTORED_KEYS" in out, f"the installed binary did not do the uninstall:\n{out}"
+    assert "SHADOW_RESTORED_NOTHING" not in out
+    assert result.returncode == 0, result.stderr
+
+
+def test_uninstall_is_honest_when_it_cannot_find_the_installed_binary(tmp_path: Path) -> None:
+    """WOR-597. No authoritative answer → never guess with PATH, never claim restoration.
+
+    Without uv there is no way to tell our binary from a stale one, so the
+    script must not run either. It falls back to the honest wipe, which says
+    the keys could not be restored and to rotate them — a recoverable truth,
+    unlike a false "your keys were restored".
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    home = tmp_path / "wless-home"
+    _seed_home(home, ["/proj/a/.env"])
+
+    sentinel = tmp_path / "shadow-was-executed"
+    write_stub(
+        bin_dir,
+        "worthless",
+        f'echo executed >> "{sentinel}"\necho "worthless 0.0.1-shadow"',
+    )
+
+    result = run_uninstall(bin_dir, worthless_home=home)
+    out = (result.stdout + result.stderr).lower()
+
+    assert not sentinel.exists(), "a PATH-resolved copy was executed with no way to verify it"
+    assert "restored to your .env files" not in out, "claimed a restoration that never happened"
+    assert "rotate" in out, "must tell the user to rotate their keys"
+    assert result.returncode == 0, result.stderr
 
 
 def test_refuses_without_yes_when_noninteractive(tmp_path: Path) -> None:
