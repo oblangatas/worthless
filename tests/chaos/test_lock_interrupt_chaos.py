@@ -291,6 +291,9 @@ def _resolve_seam(
             "or a warm-up lock that wrote its first shard before the probe's first poll."
         )
 
+    # Each branch declares whether the PRODUCT owns its verdict, at the point
+    # the verdict is decided. Deriving it again afterwards let the two drift.
+    product_fault = False
     if harness_killed and shards_after:
         verdict = (
             f"the probe saw no shard row within {WAIT_TIMEOUT}s and the harness SIGKILLed "
@@ -316,14 +319,29 @@ def _resolve_seam(
             "HARNESS problem: the 4ms poll interval or the WAIT_TIMEOUT ceiling is wrong "
             "for this machine, NOT a product fault."
         )
-    elif (returncode or 0) < 0:
+    elif returncode is None:
         verdict = (
-            f"the warm-up lock was killed by signal {-(returncode or 0)} from OUTSIDE the "
-            "harness (the harness did not kill it) and the DB is empty. That is a host "
-            "symptom — an OOM kill under load looks exactly like this — not evidence the "
-            "lock writes nothing."
+            "the warm-up lock left no exit code to read, so who ended it cannot be "
+            "determined here. Treated as a harness symptom, not a product fault."
+        )
+    elif -returncode in _EXTERNAL_KILL_SIGNALS:
+        verdict = (
+            f"the warm-up lock was killed by {signal.Signals(-returncode).name} from "
+            "OUTSIDE the harness (the harness did not kill it) and the DB is empty. That "
+            "is a host symptom — an OOM kill under load looks exactly like this — not "
+            "evidence the lock writes nothing."
+        )
+    elif returncode < 0:
+        # A crash signal is the lock killing ITSELF. Exonerating it as an
+        # "outside kill" would retry away exactly the fault this module hunts.
+        product_fault = True
+        verdict = (
+            f"the warm-up lock died of {signal.Signals(-returncode).name} — a crash it "
+            "raised itself, not a kill from outside — and the DB is empty. This is a "
+            "PRODUCT fault. Read the stderr tail below."
         )
     else:
+        product_fault = True
         verdict = (
             "the warm-up lock exited on its own and wrote NO shard rows at all — the DB "
             "is empty. This is a PRODUCT or environment fault; raising WAIT_TIMEOUT would "
@@ -332,12 +350,6 @@ def _resolve_seam(
 
     detail = f"  child: exit={returncode} elapsed={elapsed:.2f}s shards_after={shards_after}\n"
     tail = f"  stderr tail:\n{stderr[-800:]}\n" if stderr.strip() else "  stderr: (empty)\n"
-    # Only "the lock exited ON ITS OWN having written nothing" belongs to the
-    # product. A negative returncode means something outside the harness killed
-    # it (OOM under load looks exactly like this), which is a host symptom and
-    # keeps its retries — fast-failing that would reintroduce the false product
-    # blame worthless-xk7x removed, minus the retries that used to absorb it.
-    product_fault = not harness_killed and shards_after == 0 and (returncode or 0) >= 0
 
     _fail(
         product_fault,
@@ -350,6 +362,23 @@ def _resolve_seam(
         "unfalsifiable, and a green run would not distinguish it from a real one.\n"
         f"{tail}",
     )
+
+
+class _PartialState(AssertionError):
+    """The documented WOR-646 Part 2 gap: SIGKILL left a partial on-disk state.
+
+    Its own type so ``TestSigkillAtomicity``'s ``xfail`` can name exactly this
+    and nothing else — a bare ``AssertionError`` there would also absorb a
+    stray assert from anywhere in the call path (worthless-7zys).
+    """
+
+
+# Signals that mean "something else ended it": the OOM killer, an operator, a
+# CI runner tearing the job down. Anything else (SIGSEGV, SIGABRT, SIGBUS,
+# SIGFPE, SIGILL) is the lock crashing itself, which the product owns.
+_EXTERNAL_KILL_SIGNALS = frozenset(
+    {signal.SIGKILL, signal.SIGTERM, signal.SIGHUP, signal.SIGINT, signal.SIGPIPE}
+)
 
 
 def _fail(product_fault: bool, msg: str) -> NoReturn:
@@ -1086,7 +1115,35 @@ def test_seam_calibration_fails_fast_on_a_product_fault(
         seam.__wrapped__(tmp_path_factory)
     assert len(calls) == SEAM_ATTEMPTS, "a host symptom must keep its retries"
     assert "PRODUCT" not in str(oom.value), oom.value
-    assert "signal 9 from OUTSIDE" in str(oom.value)
+    assert "SIGKILL from OUTSIDE" in str(oom.value)
+
+    # A CRASH signal is the lock killing itself, which is exactly the fault this
+    # module hunts. Exonerating it as an "outside kill" would retry it away.
+    calls.clear()
+
+    def lock_crashed(_factory: pytest.TempPathFactory) -> float:
+        calls.append(1)
+        return _resolve_seam(None, shards_after=0, returncode=-11, elapsed=0.4)
+
+    monkeypatch.setattr(f"{__name__}._measure_seam", lock_crashed)
+    with pytest.raises(pytest.fail.Exception, match=r"died of SIGSEGV") as crash:
+        seam.__wrapped__(tmp_path_factory)
+    assert len(calls) == 1, f"a self-inflicted crash was retried {len(calls)}x"
+    assert "PRODUCT fault" in str(crash.value)
+
+    # An exit code nobody could read is a harness symptom: keep the retries
+    # rather than fast-failing on a verdict the harness cannot support.
+    calls.clear()
+
+    def exit_code_unknown(_factory: pytest.TempPathFactory) -> float:
+        calls.append(1)
+        return _resolve_seam(None, shards_after=0, returncode=None, elapsed=0.4)
+
+    monkeypatch.setattr(f"{__name__}._measure_seam", exit_code_unknown)
+    with pytest.raises(pytest.fail.Exception, match=rf"failed {SEAM_ATTEMPTS}x in a row") as unk:
+        seam.__wrapped__(tmp_path_factory)
+    assert len(calls) == SEAM_ATTEMPTS
+    assert "PRODUCT" not in str(unk.value), unk.value
 
 
 def test_sigkill_atomicity_xfail_covers_only_partial_states() -> None:
@@ -1097,7 +1154,10 @@ def test_sigkill_atomicity_xfail_covers_only_partial_states() -> None:
     """
     marks = [m for m in TestSigkillAtomicity.test_sigkill_atomicity.pytestmark if m.name == "xfail"]
     assert len(marks) == 1
-    assert marks[0].kwargs.get("raises") is AssertionError
+    # The gap's OWN type, not a bare AssertionError: that would also absorb a
+    # stray assert from anywhere in the call path, e.g. the seam fixture's.
+    assert marks[0].kwargs.get("raises") is _PartialState
+    assert issubclass(_PartialState, AssertionError)
 
 
 def test_seam_calibration_refuses_to_fabricate() -> None:
@@ -1159,11 +1219,13 @@ class TestSigkillAtomicity:
         "SIGKILL allows no cleanup; only write-ordering/atomic commit prevents "
         "orphan shards. Current code may leak — documented, not hidden.",
         strict=False,
-        # ONLY the partial-state assertion below is expected to fail. Without
-        # this, a hang (pytest.fail from _await_exit), an unkillable process or
-        # a calibration failure inside these cells is recorded as XFAIL instead
-        # of red — the guard hiding the thing it guards (worthless-7zys).
-        raises=AssertionError,
+        # ONLY the partial-state failure below is expected. Without this, a hang
+        # (pytest.fail from _await_exit), an unkillable process or a calibration
+        # failure inside these cells is recorded as XFAIL instead of red — the
+        # guard hiding the thing it guards (worthless-7zys). The gap raises its
+        # OWN type rather than a bare AssertionError, so a stray assert anywhere
+        # in the call path (e.g. the seam fixture's own) cannot slip in with it.
+        raises=_PartialState,
     )
     @pytest.mark.parametrize("n_keys", [2, 3], ids=["N2", "N3"])
     def test_sigkill_atomicity(self, tmp_path: Path, seam: float, n_keys: int) -> None:
@@ -1184,8 +1246,9 @@ class TestSigkillAtomicity:
                 partials.append(f"delay={delay:.3f}s {state.detail}")
 
         rate = len(partials) / TRIALS_PER_CELL
-        assert not partials, (
-            f"SIGKILL produced {len(partials)}/{TRIALS_PER_CELL} partial states "
-            f"({rate:.0%} orphan/partial rate) for N={n_keys}.\n"
-            + "\n".join(f"  - {p}" for p in partials[:8])
-        )
+        if partials:
+            raise _PartialState(
+                f"SIGKILL produced {len(partials)}/{TRIALS_PER_CELL} partial states "
+                f"({rate:.0%} orphan/partial rate) for N={n_keys}.\n"
+                + "\n".join(f"  - {p}" for p in partials[:8])
+            )
