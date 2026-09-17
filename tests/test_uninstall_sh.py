@@ -190,6 +190,55 @@ def test_uninstall_never_runs_a_shadowing_copy(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
 
 
+def test_uninstall_delegates_to_a_pipx_install(tmp_path: Path) -> None:
+    """A pipx-installed worthless still gets to restore the user's keys.
+
+    `pipx install worthless` is a documented install path, so requiring uv would
+    send those users to the tier 2 wipe — which deletes ~/.worthless and the
+    keychain entry, leaving keys unrecoverable while a working program that
+    could have unscrambled them sits on disk. pipx knows where it put the
+    binary, so ask pipx, exactly as we ask uv.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    pipx_bin_dir = tmp_path / "pipx" / "bin"
+    pipx_bin_dir.mkdir(parents=True)
+    home = tmp_path / "wless-home"
+    _seed_home(home, ["/proj/a/.env"])
+
+    sentinel = tmp_path / "shadow-was-executed"
+    write_stub(
+        bin_dir,
+        "worthless",
+        f'echo executed >> "{sentinel}"\necho "worthless 0.0.1-shadow"',
+    )
+    write_stub(
+        pipx_bin_dir,
+        "worthless",
+        'case "$1" in\n'
+        '  --version) echo "worthless 0.3.12" ;;\n'
+        '  uninstall) echo "PIPX_RESTORED_KEYS" ;;\n'
+        "esac",
+    )
+    # uv exists but has no such tool — the pipx cohort's exact shape.
+    _write_uv_stub(bin_dir, tmp_path / "uv-tools" / "bin")
+    write_stub(
+        bin_dir,
+        "pipx",
+        'case "$1 $2 $3" in\n'
+        f'  "environment --value PIPX_BIN_DIR") echo "{pipx_bin_dir}" ;;\n'
+        "  *) ;;\n"
+        "esac",
+    )
+
+    result = run_uninstall(bin_dir, worthless_home=home)
+    out = result.stdout + result.stderr
+
+    assert "PIPX_RESTORED_KEYS" in out, f"a pipx install must still restore keys:\n{out}"
+    assert not sentinel.exists(), "the PATH copy was executed instead of the pipx one"
+    assert result.returncode == 0, result.stderr
+
+
 def test_uninstall_is_honest_when_it_cannot_find_the_installed_binary(tmp_path: Path) -> None:
     """WOR-597. No authoritative answer → never guess with PATH, never claim restoration.
 

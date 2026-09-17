@@ -203,12 +203,26 @@ remove_tool() {
 # Homebrew or pip copy earlier on PATH knows nothing about this install, so
 # delegating to it restores no keys, exits 0, and costs the user the only
 # program that could have unscrambled their shards (WOR-597).
+# Ask each installer where IT put the tool. pipx is asked too: `pipx install
+# worthless` is a documented path, and sending those users to the tier 2 wipe
+# would delete ~/.worthless and the keychain entry while a program that could
+# have unscrambled their shards sat on disk.
 installed_worthless() {
-    command -v uv >/dev/null 2>&1 || return 1
-    _iw_dir="$(uv tool dir --bin 2>/dev/null)" || return 1
-    [ -n "$_iw_dir" ] || return 1
-    [ -x "${_iw_dir}/worthless" ] || return 1
-    printf '%s' "${_iw_dir}/worthless"
+    if command -v uv >/dev/null 2>&1; then
+        _iw_dir="$(uv tool dir --bin 2>/dev/null || true)"
+        if [ -n "${_iw_dir:-}" ] && [ -f "${_iw_dir}/worthless" ] && [ -x "${_iw_dir}/worthless" ]; then
+            printf '%s' "${_iw_dir}/worthless"
+            return 0
+        fi
+    fi
+    if command -v pipx >/dev/null 2>&1; then
+        _iw_dir="$(pipx environment --value PIPX_BIN_DIR 2>/dev/null || true)"
+        if [ -n "${_iw_dir:-}" ] && [ -f "${_iw_dir}/worthless" ] && [ -x "${_iw_dir}/worthless" ]; then
+            printf '%s' "${_iw_dir}/worthless"
+            return 0
+        fi
+    fi
+    return 1
 }
 
 tier1_delegate() {
@@ -216,7 +230,11 @@ tier1_delegate() {
     # that the keys could not be restored. A wrong "restored" claim is worse.
     _tier1_bin="$(installed_worthless)" || return 1
     "$_tier1_bin" --version >/dev/null 2>&1 || return 1
-    info "Found the installed 'worthless' — using it to restore your keys first."
+    # Name the file. UV_TOOL_BIN_DIR / XDG_BIN_HOME still steer uv (install.sh
+    # honours them too, so uninstall must follow the tool wherever install put
+    # it), which means the path is worth showing rather than assuming.
+    info "Restoring your keys with the installed 'worthless' first:"
+    info "  ${_tier1_bin}"
     if "$_tier1_bin" uninstall --yes; then
         remove_tool
         printf "\n"
