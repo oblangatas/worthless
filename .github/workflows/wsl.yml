@@ -17,6 +17,10 @@ name: WSL
 #                means nothing, so the control leg goes red instead.
 #   on (fix)     same, plus `[general] instanceIdleTimeout=-1` in .wslconfig.
 #                Must show the proxy survived (same boot_id and InvocationID).
+#   on (restart) the reboot question: stop the distro with `wsl --terminate`,
+#                start it again, and check the proxy came back on its own. This
+#                is not a Windows reboot — a hosted runner cannot reboot — but
+#                it is the same event from the distro's side.
 #   default      no wsl.conf written: records what Ubuntu 24.04 really ships.
 #                (Current Ubuntu images ship systemd=true, not off.)
 #
@@ -79,6 +83,12 @@ jobs:
             wslconf: |
               [boot]
               systemd=true
+          - leg: "systemd on, restart"
+            systemd: "on"
+            idle: restart
+            wslconf: |
+              [boot]
+              systemd=true
           # No wslconf: setup-wsl only writes /etc/wsl.conf when it is non-empty.
           - leg: "distro default"
             systemd: "default"
@@ -132,7 +142,7 @@ jobs:
       # Windows only. Any wsl.exe here would reset WSL's idle timer and hide the
       # shutdown; `wsl -l --running` only queries and does not start a distro.
       - name: "Idle 2: wait 120 s from Windows with no wsl.exe open"
-        if: matrix.idle != ''
+        if: matrix.idle == 'control' || matrix.idle == 'fix'
         shell: pwsh
         env:
           IDLE_EXPECTED: ${{ matrix.idle }}
@@ -157,8 +167,23 @@ jobs:
           }
           exit 0
 
-      # Runs even if Idle 2 failed, so a red run still carries the evidence.
-      - name: "Idle 3: did the proxy survive, or restart?"
+      # The reboot question, as close as a hosted runner can get. `--terminate`
+      # stops THIS distro only; `--shutdown` would also stop Docker Desktop's.
+      # Nothing starts the proxy afterwards — the next wsl-bash step boots the
+      # distro, exactly as a user opening a terminal after a restart would.
+      - name: "Restart: stop the distro"
+        if: matrix.idle == 'restart'
+        shell: pwsh
+        run: |
+          $env:WSL_UTF8 = 1  # otherwise wsl.exe prints UTF-16 and -match fails
+          wsl --terminate Ubuntu-24.04
+          $running = wsl -l --running | Out-String
+          $running
+          if ($running -match 'Ubuntu-24.04') { "FAIL  distro still running after --terminate"; exit 1 }
+          "PASS  distro stopped; the next WSL step starts it again"
+
+      # Runs even if the step above failed, so a red run still carries evidence.
+      - name: "Idle 3: did the proxy survive, restart, or come back?"
         if: matrix.idle != '' && !cancelled()
         shell: wsl-bash {0}
         env:
