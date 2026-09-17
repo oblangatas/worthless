@@ -181,6 +181,10 @@ jobs:
           $running
           if ($running -match 'Ubuntu-24.04') { "FAIL  distro still running after --terminate"; exit 1 }
           "PASS  distro stopped; the next WSL step starts it again"
+          # `wsl -l --running` exits 1 when nothing is running, and the pwsh
+          # wrapper propagates the last exit code. Without this the step fails
+          # right after printing PASS.
+          exit 0
 
       # Runs even if the step above failed, so a red run still carries evidence.
       - name: "Idle 3: did the proxy survive, restart, or come back?"
