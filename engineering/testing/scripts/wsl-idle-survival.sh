@@ -36,6 +36,11 @@ inv() {
 
 ids() {
   printf 'boot_id=%s\n' "$(cat /proc/sys/kernel/random/boot_id)"
+  # PID 1's start time. Measured 2026-09-17: `wsl --terminate` restarts the
+  # distro but NOT the lightweight VM every distro shares, so boot_id does NOT
+  # change (only `wsl --shutdown` changes it). A new PID 1 is what proves this
+  # distro restarted.
+  printf 'pid1_start=%s\n' "$(awk '{print $22}' /proc/1/stat)"
   printf 'invocation=%s\n' "$(inv)"
 }
 
@@ -59,10 +64,12 @@ case "$MODE" in
     printf 'before:\n%s\nafter:\n%s\n' "$(cat "$STATE")" "$AFTER"
 
     if [ "$IDLE_EXPECTED" = restart ]; then
-      BOOT_BEFORE=$(field boot_id "$(cat "$STATE")")
-      BOOT_AFTER=$(field boot_id "$AFTER")
-      if [ "$BOOT_BEFORE" = "$BOOT_AFTER" ]; then
-        echo "FAIL  boot_id unchanged — the distro never actually restarted, so this leg proves nothing"
+      if [ "$(field pid1_start "$(cat "$STATE")")" = "$(field pid1_start "$AFTER")" ]; then
+        echo "FAIL  same PID 1 — the distro never actually restarted, so this leg proves nothing"
+        exit 1
+      fi
+      if [ "$(field invocation "$(cat "$STATE")")" = "$(field invocation "$AFTER")" ]; then
+        echo "FAIL  same InvocationID across a restart — impossible; the save step's state is stale"
         exit 1
       fi
       if [ -z "$(field invocation "$AFTER")" ]; then
