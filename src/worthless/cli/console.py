@@ -45,9 +45,15 @@ class WorthlessConsole:
     Respects ``--quiet``, ``--json``, and ``NO_COLOR``.
     """
 
-    def __init__(self, quiet: bool = False, json_mode: bool = False) -> None:
+    def __init__(
+        self, quiet: bool = False, json_mode: bool = False, assume_yes: bool = False
+    ) -> None:
         self.quiet = quiet
         self.json_mode = json_mode
+        # WOR-853: the global --yes existed but only reached run_default, so
+        # `worthless --yes lock` still stopped to ask. Carrying it here is what
+        # lets any command honour the flag the CLI already advertises.
+        self.assume_yes = assume_yes
         no_color = self._no_color
         self._err = Console(stderr=True, no_color=no_color)
         self._out = Console(no_color=no_color)
