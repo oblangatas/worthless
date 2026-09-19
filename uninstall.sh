@@ -17,12 +17,18 @@
 #   1   refused (no --yes in a non-interactive shell, or the user declined)
 #   20  unsupported platform (Windows native)
 #   40  wipe failed (something could not be removed; manual cleanup needed)
+#   41  `worthless uninstall` refused; NOTHING was deleted and your keys are
+#       still restorable. Fix what it reported and re-run, or pass --force.
+#   73  the tool was removed, but it could not restore every locked .env
+#       (passed through from `worthless uninstall`)
 
 set -eu
 
 EXIT_REFUSED=1
 EXIT_PLATFORM=20
 EXIT_INTERNAL=40
+EXIT_TOOL_REFUSED=41
+EXIT_TOOL_PARTIAL=73
 
 UNINSTALL_DOCS_URL="https://docs.wless.io/uninstall"
 
@@ -64,6 +70,8 @@ unset \
     UV_PYTHON_INSTALL_MIRROR UV_PYTHON_PREFERENCE \
     UV_KEYRING_PROVIDER PIP_KEYRING_PROVIDER \
     UV_INSTALL_DIR UV_UNMANAGED_INSTALL INSTALLER_DOWNLOAD_URL \
+    UV_TOOL_BIN_DIR UV_TOOL_DIR XDG_BIN_HOME XDG_DATA_HOME \
+    PIPX_HOME PIPX_BIN_DIR \
     PYTHONPATH PYTHONSTARTUP \
     BASH_ENV ENV CDPATH GLOBIGNORE \
     LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH \
@@ -215,19 +223,12 @@ _usable_worthless() {
 }
 
 installed_worthless() {
+    # UV_TOOL_BIN_DIR, XDG_BIN_HOME and PIPX_BIN_DIR are scrubbed at the top of
+    # this script, so these answers come from the installers' own defaults. An
+    # earlier version consulted those variables when the default turned up
+    # nothing — which is precisely when an attacker-set value would have been
+    # obeyed, so the guard only held where it was not needed.
     if command -v uv >/dev/null 2>&1; then
-        # Hermetic first: UV_TOOL_BIN_DIR / XDG_BIN_HOME steer this answer, and a
-        # hostile value would hand `uninstall --yes` to a binary of someone
-        # else's choosing — the env twin of a stale copy on PATH. A normal
-        # install is found here, so the variables never get a vote.
-        _iw_dir="$(unset UV_TOOL_BIN_DIR XDG_BIN_HOME XDG_DATA_HOME 2>/dev/null; uv tool dir --bin 2>/dev/null || true)"
-        if _usable_worthless "${_iw_dir:-}"; then
-            printf '%s' "${_iw_dir}/worthless"
-            return 0
-        fi
-        # Nothing there: install.sh honours those variables too, so the tool may
-        # genuinely live where they point. Follow them rather than strand the
-        # user in a wipe — and tier1 prints the path it ends up running.
         _iw_dir="$(uv tool dir --bin 2>/dev/null || true)"
         if _usable_worthless "${_iw_dir:-}"; then
             printf '%s' "${_iw_dir}/worthless"
@@ -254,29 +255,72 @@ tier1_delegate() {
     # it), which means the path is worth showing rather than assuming.
     info "Restoring your keys with the installed 'worthless' first:"
     info "  ${_tier1_bin}"
-    if "$_tier1_bin" uninstall --yes; then
+    _tier1_status=0
+    "$_tier1_bin" uninstall --yes || _tier1_status=$?
+
+    if [ "$_tier1_status" -eq 0 ]; then
         remove_tool
         printf "\n"
         ok "Done. Worthless removed; your real keys were restored to your .env files."
         exit 0
     fi
-    # It ran and said no. The program is the only thing that can tell a
-    # recoverable install from a broken one, and it refuses rather than destroy
-    # shards it could still unscramble (a busy database, an IPC blip). Wiping
-    # here would delete the key and the database the restore needs and turn a
-    # recoverable install into an unrecoverable one — the exact outcome it
-    # refused to cause. Leave everything alone unless the user insists.
+
+    # 73: it finished and already wiped its own state, but could not restore
+    # every locked .env. The tool still has to go, and the user has to be told
+    # which keys are now stranded — "nothing was deleted" would be false here.
+    if [ "$_tier1_status" -eq "$EXIT_TOOL_PARTIAL" ]; then
+        remove_tool
+        printf "\n"
+        warn "Worthless is removed, but it could not restore every locked .env — see above."
+        warn "Rotate the keys for any .env it named."
+        printf "\n  Docs: %s\n" "$UNINSTALL_DOCS_URL" >&2
+        exit "$EXIT_TOOL_PARTIAL"
+    fi
+
+    # Anything else: it ran and declined. The program is the only thing that can
+    # tell a recoverable install from a broken one, and it refuses rather than
+    # destroy shards it could still unscramble (a busy database, an IPC blip, or
+    # a Ctrl+C). Wiping here would delete the key and the database the restore
+    # needs, turning a recoverable install into an unrecoverable one — the exact
+    # outcome it refused to cause. Leave it alone unless the user insists.
     if [ "$FORCE" = "1" ]; then
-        warn "'worthless uninstall' did not finish — --force given, wiping anyway."
+        warn "'worthless uninstall' exited ${_tier1_status} — --force given, wiping anyway."
         return 1
     fi
     printf "\n" >&2
-    warn "'worthless uninstall' did not finish, so it kept your keys instead of destroying them."
-    warn "Nothing was deleted. Your keys are still locked, and still restorable."
+    if [ "$_tier1_status" -eq 130 ]; then
+        warn "'worthless uninstall' was interrupted, so it stopped rather than destroy anything."
+    else
+        warn "'worthless uninstall' declined (exit ${_tier1_status}), keeping your keys."
+    fi
+    warn "Nothing was deleted here. Your keys are still locked, and still restorable."
     warn "Fix what it reported and run this again, or wipe anyway (keys stay locked) with:"
     printf "    --force\n" >&2
     printf "\n  Docs: %s\n" "$UNINSTALL_DOCS_URL" >&2
-    exit "$EXIT_INTERNAL"
+    exit "$EXIT_TOOL_REFUSED"
+}
+
+# Between the tiers: neither uv nor pipx admits to installing worthless, yet
+# some `worthless` answers PATH. It may well be the user's install in a custom
+# bin dir (install.sh honours UV_TOOL_BIN_DIR; this script scrubs it, so we
+# cannot see it), or it may be a stale copy of unknown provenance. We will not
+# execute it to find out, and wiping would destroy keys it could still restore.
+# So: stop, and hand the decision to the person who can tell the difference.
+# Returns 1 when there is nothing on PATH, letting tier 2 wipe as before.
+refuse_unverified_copy() {
+    [ "$FORCE" = "1" ] && return 1
+    command -v worthless >/dev/null 2>&1 || return 1
+    printf "\n" >&2
+    warn "A 'worthless' answers on your PATH, but neither uv nor pipx installed it,"
+    warn "so this script cannot tell your install from a leftover copy — and it will"
+    warn "not run an unknown one. Nothing was deleted."
+    warn "Restore your keys yourself, then re-run this uninstaller:"
+    printf "    command -v worthless\n" >&2
+    printf "    worthless uninstall --yes\n" >&2
+    warn "Or wipe now without restoring anything (keys stay locked) with:"
+    printf "    --force\n" >&2
+    printf "\n  Docs: %s\n" "$UNINSTALL_DOCS_URL" >&2
+    exit "$EXIT_TOOL_REFUSED"
 }
 
 # Tier 2: no working binary → wipe what a script safely can, and be honest that
@@ -324,7 +368,7 @@ main() {
     printf "\n"
     detect_os
     confirm
-    tier1_delegate || tier2_wipe
+    tier1_delegate || refuse_unverified_copy || tier2_wipe
 }
 
 OS=""

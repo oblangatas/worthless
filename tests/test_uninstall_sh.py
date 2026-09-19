@@ -118,6 +118,10 @@ def test_tier1_delegates_to_a_working_binary_then_removes_the_tool(tmp_path: Pat
     assert result.returncode == 0, result.stderr
     out = result.stdout + result.stderr
     assert "STUB_RESTORED_KEYS" in out, "Tier 1 must delegate to the working binary"
+    assert str(real_bin_dir / "worthless") in out, (
+        "the binary being handed `uninstall --yes` must be named, so a redirected "
+        "lookup is visible rather than silent"
+    )
     uv_log = tmp_path / "uv.log"
     assert uv_log.exists() and "tool uninstall worthless" in uv_log.read_text(), (
         "Tier 1 must remove the installed tool after delegating"
@@ -264,15 +268,56 @@ def test_a_refusal_from_the_program_does_not_become_a_wipe(tmp_path: Path) -> No
         "esac",
     )
     _write_uv_stub(bin_dir, real_bin_dir)
+    # The keychain half of the state is as load-bearing as the files.
+    keychain_log = tmp_path / "security.log"
+    write_stub(bin_dir, "security", f'echo "$*" >> "{keychain_log}"')
 
     result = run_uninstall(bin_dir, worthless_home=home)
     out = result.stdout + result.stderr
 
+    assert not keychain_log.exists(), f"a refusal deleted the keychain entry:\n{out}"
     assert home.exists(), f"a refusal wiped the home the restore needs:\n{out}"
     assert (home / "fernet.key").exists(), "the key that can unscramble the shards was deleted"
     assert result.returncode != 0, "a refused uninstall must not report success"
     assert "nothing was deleted" in out.lower(), (
         f"the user must be told the state is intact:\n{out}"
+    )
+
+
+def test_a_partial_restore_removes_the_tool_and_says_which_keys_are_stranded(
+    tmp_path: Path,
+) -> None:
+    """Exit 73 means the CLI finished and wiped, but could not restore every .env.
+
+    It is not a refusal: claiming "nothing was deleted" there would be false,
+    and leaving the tool installed would contradict the CLI's own state. The
+    tool goes, and the user is told to rotate what could not be restored.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    real_bin_dir = tmp_path / "uv-tools" / "bin"
+    real_bin_dir.mkdir(parents=True)
+    home = tmp_path / "wless-home"
+    _seed_home(home, ["/proj/a/.env"])
+    write_stub(
+        real_bin_dir,
+        "worthless",
+        'case "$1" in\n'
+        '  --version) echo "worthless 0.3.12" ;;\n'
+        '  uninstall) echo "could not restore /proj/a/.env"; exit 73 ;;\n'
+        "esac",
+    )
+    _write_uv_stub(bin_dir, real_bin_dir)
+
+    result = run_uninstall(bin_dir, worthless_home=home)
+    out = (result.stdout + result.stderr).lower()
+
+    assert result.returncode == 73, f"the CLI's partial-restore code must survive:\n{out}"
+    assert "nothing was deleted" not in out, "the wipe already happened; that claim is false"
+    assert "rotate" in out, "the user must be told to rotate what could not be restored"
+    uv_log = tmp_path / "uv.log"
+    assert uv_log.exists() and "tool uninstall worthless" in uv_log.read_text(), (
+        "the tool must still be removed after a partial restore"
     )
 
 
@@ -296,6 +341,10 @@ def test_force_wipes_after_a_refusal(tmp_path: Path) -> None:
 
     assert not home.exists(), "--force must still wipe"
     assert "rotate" in out, "a forced wipe must tell the user to rotate their keys"
+    uv_log = tmp_path / "uv.log"
+    assert uv_log.exists() and "tool uninstall worthless" in uv_log.read_text(), (
+        "a forced wipe must still remove the installed tool"
+    )
     assert result.returncode == 0, result.stderr
 
 
@@ -352,13 +401,18 @@ def test_a_poisoned_uv_tool_bin_dir_does_not_beat_a_real_install(tmp_path: Path)
     assert "REAL_RESTORED_KEYS" in out, f"the real install should have done the work:\n{out}"
 
 
-def test_uninstall_is_honest_when_it_cannot_find_the_installed_binary(tmp_path: Path) -> None:
-    """WOR-597. No authoritative answer → never guess with PATH, never claim restoration.
+def test_an_unverifiable_copy_stops_the_script_instead_of_wiping(tmp_path: Path) -> None:
+    """WOR-597. A `worthless` we cannot vouch for is neither run nor wiped around.
 
-    Without uv there is no way to tell our binary from a stale one, so the
-    script must not run either. It falls back to the honest wipe, which says
-    the keys could not be restored and to rotate them — a recoverable truth,
-    unlike a false "your keys were restored".
+    Neither uv nor pipx claims this install, yet something answers PATH. It may
+    be the user's own install in a custom bin dir (install.sh honours
+    UV_TOOL_BIN_DIR; this script scrubs it, so we cannot see it) or a leftover
+    copy. Running it is out — unknown provenance. Wiping is also out: it would
+    delete the key and database that copy could still use to restore. So stop,
+    tell the user how to do it themselves, and leave --force as the way out.
+
+    A genuinely broken install — nothing on PATH at all — still gets the tier 2
+    wipe (test_tier2_wipes_a_broken_install).
     """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -377,7 +431,26 @@ def test_uninstall_is_honest_when_it_cannot_find_the_installed_binary(tmp_path: 
 
     assert not sentinel.exists(), "a PATH-resolved copy was executed with no way to verify it"
     assert "restored to your .env files" not in out, "claimed a restoration that never happened"
-    assert "rotate" in out, "must tell the user to rotate their keys"
+    assert home.exists(), "the home a recoverable copy needs was wiped"
+    assert (home / "fernet.key").exists(), "the key that unscrambles the shards was deleted"
+    assert "nothing was deleted" in out, f"the user must be told the state is intact:\n{out}"
+    assert "--force" in out, "the escape hatch must be offered"
+    assert result.returncode == 41, f"a refusal needs its own exit code, got {result.returncode}"
+
+
+def test_force_wipes_when_the_copy_cannot_be_verified(tmp_path: Path) -> None:
+    """--force is how a user says "I know, wipe it anyway" — keys stay locked."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    home = tmp_path / "wless-home"
+    _seed_home(home, ["/proj/a/.env"])
+    write_stub(bin_dir, "worthless", 'echo "worthless 0.0.1-shadow"')
+
+    result = run_uninstall(bin_dir, worthless_home=home, args=("--yes", "--force"))
+    out = (result.stdout + result.stderr).lower()
+
+    assert not home.exists(), "--force must wipe"
+    assert "rotate" in out, "a forced wipe must tell the user to rotate their keys"
     assert result.returncode == 0, result.stderr
 
 
