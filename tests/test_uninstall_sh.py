@@ -438,6 +438,48 @@ def test_an_unverifiable_copy_stops_the_script_instead_of_wiping(tmp_path: Path)
     assert result.returncode == 41, f"a refusal needs its own exit code, got {result.returncode}"
 
 
+def test_the_custom_bin_dir_user_can_actually_finish(tmp_path: Path) -> None:
+    """The advice must terminate for a legitimate install we cannot see.
+
+    Someone who installed with UV_TOOL_BIN_DIR set has a real worthless that
+    neither uv's default dir nor pipx reports — this script scrubs that variable
+    on purpose. Run 1 refuses and tells them to restore by hand. `worthless
+    uninstall` wipes ~/.worthless once every key is back, so run 2 finds no
+    state left to protect and finishes the cleanup instead of refusing again.
+    A loop with no exit but --force would be worse than the bug we fixed.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    home = tmp_path / "wless-home"
+    _seed_home(home, ["/proj/a/.env"])
+    write_stub(bin_dir, "worthless", 'echo "worthless 0.3.12"')
+    write_stub(
+        bin_dir,
+        "uv",
+        'printf "uv %s\\n" "$*" >> "$HOME/uv.log"\n'
+        'case "$1 $2 $3" in\n'
+        f'  "tool dir --bin") echo "{tmp_path / "empty-bin"}" ;;\n'
+        '  "tool uninstall worthless") echo "removed" ;;\n'
+        "  *) ;;\n"
+        "esac",
+    )
+
+    first = run_uninstall(bin_dir, worthless_home=home)
+    assert first.returncode == 41, "run 1 must refuse while keys are still locked"
+    assert home.exists(), "run 1 must not delete the state the user still needs"
+
+    # The user follows the advice: `worthless uninstall --yes` restores every
+    # key and removes the home. Simulated here by removing it.
+    shutil.rmtree(home)
+
+    second = run_uninstall(bin_dir, worthless_home=home)
+    out = second.stdout + second.stderr
+
+    assert second.returncode == 0, f"run 2 must finish the cleanup, not refuse again:\n{out}"
+    uv_log = tmp_path / "uv.log"
+    assert "tool uninstall worthless" in uv_log.read_text(), "run 2 must remove the tool"
+
+
 def test_force_wipes_when_the_copy_cannot_be_verified(tmp_path: Path) -> None:
     """--force is how a user says "I know, wipe it anyway" — keys stay locked."""
     bin_dir = tmp_path / "bin"

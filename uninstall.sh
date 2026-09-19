@@ -250,11 +250,13 @@ tier1_delegate() {
     # that the keys could not be restored. A wrong "restored" claim is worse.
     _tier1_bin="$(installed_worthless)" || return 1
     "$_tier1_bin" --version >/dev/null 2>&1 || return 1
-    # Name the file. UV_TOOL_BIN_DIR / XDG_BIN_HOME still steer uv (install.sh
-    # honours them too, so uninstall must follow the tool wherever install put
-    # it), which means the path is worth showing rather than assuming.
+    # Name the file we are about to hand `uninstall --yes` to. Nothing should
+    # be able to redirect this now that the location vars are scrubbed, so the
+    # line is a check on that claim rather than a caveat about it.
     info "Restoring your keys with the installed 'worthless' first:"
-    info "  ${_tier1_bin}"
+    # LC_ALL=C so BSD tr does not abort on a byte that is not valid UTF-8; a
+    # path is shown, never run, and control bytes could rewrite the line above.
+    info "  $(printf '%s' "$_tier1_bin" | LC_ALL=C tr -d '\001-\037\177')"
     _tier1_status=0
     "$_tier1_bin" uninstall --yes || _tier1_status=$?
 
@@ -294,8 +296,8 @@ tier1_delegate() {
         warn "'worthless uninstall' declined (exit ${_tier1_status}), keeping your keys."
     fi
     warn "Nothing was deleted here. Your keys are still locked, and still restorable."
-    warn "Fix what it reported and run this again, or wipe anyway (keys stay locked) with:"
-    printf "    --force\n" >&2
+    warn "Fix what it reported and run this again, or wipe anyway (keys stay locked):"
+    printf "    curl -sSL https://worthless.sh/uninstall | sh -s -- --yes --force\n" >&2
     printf "\n  Docs: %s\n" "$UNINSTALL_DOCS_URL" >&2
     exit "$EXIT_TOOL_REFUSED"
 }
@@ -310,15 +312,20 @@ tier1_delegate() {
 refuse_unverified_copy() {
     [ "$FORCE" = "1" ] && return 1
     command -v worthless >/dev/null 2>&1 || return 1
+    # Only worth refusing while there is still something to lose. `worthless
+    # uninstall` wipes this directory once it has put every key back, so its
+    # absence means the restore already happened (or there was never anything
+    # locked) — and the run below is just leftover cleanup. Without this the
+    # advice would loop forever: restore by hand, re-run, get refused again.
+    [ -d "$WORTHLESS_HOME_DIR" ] || return 1
     printf "\n" >&2
     warn "A 'worthless' answers on your PATH, but neither uv nor pipx installed it,"
     warn "so this script cannot tell your install from a leftover copy — and it will"
-    warn "not run an unknown one. Nothing was deleted."
-    warn "Restore your keys yourself, then re-run this uninstaller:"
-    printf "    command -v worthless\n" >&2
+    warn "not run an unknown one. Nothing was deleted; your keys are still locked."
+    warn "Restore them yourself, then run this again — it will finish the cleanup:"
     printf "    worthless uninstall --yes\n" >&2
-    warn "Or wipe now without restoring anything (keys stay locked) with:"
-    printf "    --force\n" >&2
+    warn "Or wipe now and leave the keys locked (you would have to rotate them):"
+    printf "    curl -sSL https://worthless.sh/uninstall | sh -s -- --yes --force\n" >&2
     printf "\n  Docs: %s\n" "$UNINSTALL_DOCS_URL" >&2
     exit "$EXIT_TOOL_REFUSED"
 }
@@ -326,7 +333,13 @@ refuse_unverified_copy() {
 # Tier 2: no working binary → wipe what a script safely can, and be honest that
 # the keys cannot be restored.
 tier2_wipe() {
-    warn "No working 'worthless' binary found."
+    # Two ways in: nothing usable exists, or --force overrode a copy we would
+    # not trust. Saying "none found" in the second case is simply untrue.
+    if [ "$FORCE" = "1" ]; then
+        warn "Wiping without restoring your keys (--force)."
+    else
+        warn "No working 'worthless' binary found."
+    fi
     warn "A plain script can't unscramble your split keys — only the program can — so"
     warn "your real keys can't be restored here. Wiping the leftovers anyway."
     printf "\n"
