@@ -14,7 +14,10 @@ honest warning, and ``doctor --fix`` clears a detected surface end to end.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -68,7 +71,13 @@ def test_surface1_claude_cli_keychain(
     # and exercised against Worthless's own service string) — mock at the
     # function level rather than mocking subprocess argv construction.
     monkeypatch.setattr(
-        uc, "_keychain_service_present", lambda service: service == uc.CLAUDE_CLI_KEYCHAIN_SERVICE
+        uc,
+        "_keychain_probe",
+        lambda service, caveats=None: (
+            uc.KeychainProbe.PRESENT
+            if service == uc.CLAUDE_CLI_KEYCHAIN_SERVICE
+            else uc.KeychainProbe.ABSENT
+        ),
     )
     cleared_services: list[str] = []
     monkeypatch.setattr(
@@ -92,7 +101,9 @@ def test_surface1_claude_cli_keychain(
 def test_surface2_claude_cli_credentials_file(
     sandboxed_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(uc, "_keychain_service_present", lambda service: False)
+    monkeypatch.setattr(
+        uc, "_keychain_probe", lambda service, caveats=None: uc.KeychainProbe.ABSENT
+    )
     creds_path = sandboxed_home / ".claude" / ".credentials.json"
     _write_json(creds_path, {"type": "oauth", "access": "fake", "refresh": "fake"})
 
@@ -119,7 +130,13 @@ def test_surface3_codex_cli_auth_file_and_keychain(
     _write_json(auth_path, {"tokens": {"access_token": "fake", "refresh_token": "fake"}})
 
     monkeypatch.setattr(
-        uc, "_keychain_service_present", lambda service: service == uc.CODEX_CLI_KEYCHAIN_SERVICE
+        uc,
+        "_keychain_probe",
+        lambda service, caveats=None: (
+            uc.KeychainProbe.PRESENT
+            if service == uc.CODEX_CLI_KEYCHAIN_SERVICE
+            else uc.KeychainProbe.ABSENT
+        ),
     )
     cleared_services: list[str] = []
     monkeypatch.setattr(
@@ -147,7 +164,9 @@ def test_surface3_codex_cli_auth_file_and_keychain(
 def test_surface4_gemini_cli_oauth_file(
     sandboxed_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(uc, "_keychain_service_present", lambda service: False)
+    monkeypatch.setattr(
+        uc, "_keychain_probe", lambda service, caveats=None: uc.KeychainProbe.ABSENT
+    )
     creds_path = sandboxed_home / ".gemini" / "oauth_creds.json"
     _write_json(creds_path, {"access_token": "fake", "refresh_token": "fake"})
 
@@ -168,7 +187,9 @@ def test_surface4_gemini_cli_oauth_file(
 def test_surface5_minimax_cli_oauth_file(
     sandboxed_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(uc, "_keychain_service_present", lambda service: False)
+    monkeypatch.setattr(
+        uc, "_keychain_probe", lambda service, caveats=None: uc.KeychainProbe.ABSENT
+    )
     creds_path = sandboxed_home / ".minimax" / "oauth_creds.json"
     _write_json(creds_path, {"access_token": "fake", "refresh_token": "fake"})
 
@@ -190,7 +211,9 @@ def test_surface5_minimax_cli_oauth_file(
 def test_surface6_auth_profiles_oauth_type(
     sandboxed_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(uc, "_keychain_service_present", lambda service: False)
+    monkeypatch.setattr(
+        uc, "_keychain_probe", lambda service, caveats=None: uc.KeychainProbe.ABSENT
+    )
     auth_profiles_path = (
         sandboxed_home / ".openclaw" / "agents" / "main" / "agent" / "auth-profiles.json"
     )
@@ -229,7 +252,9 @@ def test_surface6_auth_profiles_oauth_type(
 def test_surface7_auth_profiles_token_type(
     sandboxed_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(uc, "_keychain_service_present", lambda service: False)
+    monkeypatch.setattr(
+        uc, "_keychain_probe", lambda service, caveats=None: uc.KeychainProbe.ABSENT
+    )
     auth_profiles_path = (
         sandboxed_home / ".openclaw" / "agents" / "main" / "agent" / "auth-profiles.json"
     )
@@ -264,7 +289,9 @@ def test_surface7_auth_profiles_token_type(
 def test_surface8_vertex_adc_needs_reauth_notice(
     sandboxed_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(uc, "_keychain_service_present", lambda service: False)
+    monkeypatch.setattr(
+        uc, "_keychain_probe", lambda service, caveats=None: uc.KeychainProbe.ABSENT
+    )
     adc_path = sandboxed_home / ".config" / "gcloud" / "application_default_credentials.json"
     _write_json(
         adc_path,
@@ -293,7 +320,9 @@ def test_lock_prints_warning_when_unshardable_credential_present(
 ) -> None:
     from worthless.openclaw import unshardable_credentials as uc_mod
 
-    monkeypatch.setattr(uc_mod, "_keychain_service_present", lambda service: False)
+    monkeypatch.setattr(
+        uc_mod, "_keychain_probe", lambda service, caveats=None: uc.KeychainProbe.ABSENT
+    )
     monkeypatch.setenv("HOME", str(tmp_path))
     _write_json(
         tmp_path / ".gemini" / "oauth_creds.json",
@@ -324,7 +353,9 @@ def test_lock_warns_about_oauth_credentials_when_no_shardable_keys_exist(
     """
     from worthless.openclaw import unshardable_credentials as uc_mod
 
-    monkeypatch.setattr(uc_mod, "_keychain_service_present", lambda service: False)
+    monkeypatch.setattr(
+        uc_mod, "_keychain_probe", lambda service, caveats=None: uc.KeychainProbe.ABSENT
+    )
     monkeypatch.setenv("HOME", str(tmp_path))
     _write_json(
         tmp_path / ".gemini" / "oauth_creds.json",
@@ -353,7 +384,9 @@ def test_lock_warns_about_oauth_credentials_when_no_shardable_keys_exist(
 def test_doctor_fix_clears_unshardable_credential_via_cli(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(uc, "_keychain_service_present", lambda service: False)
+    monkeypatch.setattr(
+        uc, "_keychain_probe", lambda service, caveats=None: uc.KeychainProbe.ABSENT
+    )
     monkeypatch.setenv("HOME", str(tmp_path))
     fake_home = ensure_home(tmp_path / ".worthless")
     # Pre-ack the one-time AS-IS notice (WOR-488) — irrelevant to this test,
@@ -390,7 +423,9 @@ def test_doctor_fix_vertex_adc_prints_gcloud_reauth_remediation(
     suite green while breaking the acceptance criterion. Pin it end-to-end
     through `doctor --fix --json`.
     """
-    monkeypatch.setattr(uc, "_keychain_service_present", lambda service: False)
+    monkeypatch.setattr(
+        uc, "_keychain_probe", lambda service, caveats=None: uc.KeychainProbe.ABSENT
+    )
     monkeypatch.setenv("HOME", str(tmp_path))
     # _vertex_adc_path() prefers $GOOGLE_APPLICATION_CREDENTIALS over the default
     # home path — clear it so this exercises the default ADC location, not
@@ -545,7 +580,9 @@ def test_clear_auth_profile_entry_when_path_contains_hash(
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
-    monkeypatch.setattr(uc, "_keychain_service_present", lambda service: False)
+    monkeypatch.setattr(
+        uc, "_keychain_probe", lambda service, caveats=None: uc.KeychainProbe.ABSENT
+    )
     auth_profiles = home / ".openclaw" / "agents" / "main" / "agent" / "auth-profiles.json"
     _write_json(
         auth_profiles,
@@ -602,6 +639,43 @@ def test_lock_surfaces_detection_caveats_on_non_macos(
     assert "worthless doctor" in out, "the NOTE must point the user at the full check"
 
 
+def test_lock_renders_a_failed_keychain_probe_to_the_terminal(
+    home_dir: WorthlessHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WOR-835: the probe caveat must reach the terminal a human actually reads.
+
+    The sibling test above monkeypatches ``detect_unshardable_credentials`` and
+    ``detection_caveats`` wholesale, so it never exercises the ``probe_caveats``
+    sink this fix added — deleting the ``[NOTE]`` render in ``lock`` left the
+    whole suite green. This drives the real chain instead: a genuinely failing
+    ``security`` invocation, through the real detector, to rendered output.
+    """
+    import subprocess as _subprocess
+
+    from worthless.openclaw import unshardable_credentials as uc
+
+    def _no_security_binary(*_a: object, **_k: object) -> object:
+        raise FileNotFoundError(2, "No such file or directory", uc._SECURITY_BIN)
+
+    monkeypatch.setattr(uc.sys, "platform", "darwin")
+    monkeypatch.setattr(_subprocess, "run", _no_security_binary)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    env_file = tmp_path / ".env"
+    env_file.write_text("PORT=8000\n")
+
+    result = runner.invoke(
+        app,
+        ["lock", "--env", str(env_file)],
+        env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+    )
+
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "[NOTE]" in out, "a probe that could not run must be rendered, not swallowed"
+    assert "could not be checked" in out, out
+    assert "keychain" in out.lower(), "the NOTE must name the surface that went unchecked"
+
+
 def test_doctor_summary_names_the_credentials_when_found(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -613,7 +687,9 @@ def test_doctor_summary_names_the_credentials_when_found(
     from worthless.storage.repository import ShardRepository
 
     monkeypatch.setattr(check_mod, "detection_caveats", lambda: [])
-    monkeypatch.setattr(uc, "_keychain_service_present", lambda service: False)
+    monkeypatch.setattr(
+        uc, "_keychain_probe", lambda service, caveats=None: uc.KeychainProbe.ABSENT
+    )
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
     _write_json(
@@ -647,7 +723,9 @@ def test_doctor_fix_reports_symlinked_credential_as_unfixed_with_reason(
     from worthless.cli.commands.doctor.checks import unshardable_credentials as check_mod
     from worthless.storage.repository import ShardRepository
 
-    monkeypatch.setattr(uc, "_keychain_service_present", lambda service: False)
+    monkeypatch.setattr(
+        uc, "_keychain_probe", lambda service, caveats=None: uc.KeychainProbe.ABSENT
+    )
     monkeypatch.setattr(check_mod, "detection_caveats", lambda: [])
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
@@ -704,7 +782,9 @@ def test_unreadable_credential_dir_is_caveated_not_crashed(
     straight out of detection and take down the whole scan (confirmed
     empirically). It must now fail soft AND say what it couldn't check.
     """
-    monkeypatch.setattr(uc, "_keychain_service_present", lambda service: False)
+    monkeypatch.setattr(
+        uc, "_keychain_probe", lambda service, caveats=None: uc.KeychainProbe.ABSENT
+    )
     gemini_dir = sandboxed_home / ".gemini"
     gemini_dir.mkdir(parents=True)
     (gemini_dir / "oauth_creds.json").write_text('{"refresh_token": "fake"}')
@@ -731,7 +811,9 @@ def test_clean_machine_emits_no_probe_caveats(
     ENOENT as "couldn't inspect" would print a false caveat on every single
     run for every user.
     """
-    monkeypatch.setattr(uc, "_keychain_service_present", lambda service: False)
+    monkeypatch.setattr(
+        uc, "_keychain_probe", lambda service, caveats=None: uc.KeychainProbe.ABSENT
+    )
     caveats: list[str] = []
     findings = uc.detect_unshardable_credentials(caveats)
     assert findings == []
@@ -747,7 +829,9 @@ def test_malformed_auth_profiles_json_is_reported_not_silently_skipped(
     caused by a file we couldn't parse is the worst failure mode this feature
     has, so the unreadable file must be named.
     """
-    monkeypatch.setattr(uc, "_keychain_service_present", lambda service: False)
+    monkeypatch.setattr(
+        uc, "_keychain_probe", lambda service, caveats=None: uc.KeychainProbe.ABSENT
+    )
     auth_profiles = sandboxed_home / ".openclaw" / "agents" / "main" / "agent"
     auth_profiles.mkdir(parents=True)
     (auth_profiles / "auth-profiles.json").write_text('{"profiles": {"leaky": {"type": "oau')
@@ -772,7 +856,9 @@ def test_doctor_reports_probe_caveats_so_a_blind_scan_is_not_verified_clean(
     from worthless.cli.commands.doctor.checks import unshardable_credentials as check_mod
     from worthless.storage.repository import ShardRepository
 
-    monkeypatch.setattr(uc, "_keychain_service_present", lambda service: False)
+    monkeypatch.setattr(
+        uc, "_keychain_probe", lambda service, caveats=None: uc.KeychainProbe.ABSENT
+    )
     monkeypatch.setattr(check_mod, "detection_caveats", lambda: [])
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
@@ -793,3 +879,301 @@ def test_doctor_reports_probe_caveats_so_a_blind_scan_is_not_verified_clean(
     assert result["caveats"], "the blind spot must reach the structured output"
     assert any("could not be read" in c for c in result["caveats"])
     assert "NOTE:" in result["summary"], "and the prose a terminal user reads"
+
+
+@dataclass(frozen=True)
+class _FakeProc:
+    """Stand-in for ``subprocess.CompletedProcess`` — only returncode is read."""
+
+    returncode: int
+
+
+# ---------------------------------------------------------------------------
+# WOR-835 — trigger 3: the keychain probe itself couldn't run
+# ---------------------------------------------------------------------------
+
+
+class TestKeychainProbeCaveats:
+    """A keychain probe that failed to RUN must not read as "nothing there".
+
+    WOR-823 fixed the two file-surface triggers of this bug. The keychain probe
+    kept the original defect: ``security`` missing, timing out, or exiting
+    non-zero for any reason other than a clean "not found" all collapsed to
+    ``False`` — indistinguishable from a genuinely empty keychain, with no
+    caveat. Same rule as ``_probe_is_file``: "we couldn't look" must never be
+    reported as "it isn't there".
+    """
+
+    def test_missing_security_binary_is_caveated(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A macOS without ``/usr/bin/security`` cannot answer the question.
+
+        Reported absent before this fix, silently — the operator would read a
+        clean bill of health for a surface that was never inspected.
+        """
+        monkeypatch.setattr(uc.sys, "platform", "darwin")
+
+        def _boom(*_a: object, **_k: object) -> None:
+            raise FileNotFoundError(2, "No such file or directory")
+
+        monkeypatch.setattr(uc.subprocess, "run", _boom)
+        caveats: list[str] = []
+        probe = uc._keychain_probe(uc.CLAUDE_CLI_KEYCHAIN_SERVICE, caveats)
+
+        assert probe is uc.KeychainProbe.UNKNOWN, probe
+        assert any("could not be checked" in c for c in caveats), caveats
+
+    def test_probe_timeout_is_caveated(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A probe that hangs past 5s is an unanswered question, not an absence.
+
+        Deliberately not claiming a locked keychain causes this: measured on
+        macOS, a locked keychain answers IMMEDIATELY with exit 0, because the
+        argv omits ``-w`` and so searches attributes only — no decrypt, no ACL
+        check, no SecurityAgent prompt. Real triggers are a wedged
+        ``securityd`` or a machine under heavy load.
+        """
+        monkeypatch.setattr(uc.sys, "platform", "darwin")
+
+        def _timeout(*_a: object, **_k: object) -> None:
+            raise subprocess.TimeoutExpired(cmd="security", timeout=uc._KEYCHAIN_TIMEOUT_S)
+
+        monkeypatch.setattr(uc.subprocess, "run", _timeout)
+        caveats: list[str] = []
+        probe = uc._keychain_probe(uc.CODEX_CLI_KEYCHAIN_SERVICE, caveats)
+
+        assert probe is uc.KeychainProbe.UNKNOWN, probe
+        assert any("could not be checked" in c for c in caveats), caveats
+
+    def test_unexpected_exit_code_is_caveated(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Exit 51 (authorization denied) is not "absent" — it is "blocked".
+
+        Only 44 (``errSecItemNotFound``) means the item genuinely is not there.
+        Anything else is an unanswered question.
+        """
+        monkeypatch.setattr(uc.sys, "platform", "darwin")
+        monkeypatch.setattr(uc.subprocess, "run", lambda *_a, **_k: _FakeProc(returncode=51))
+        caveats: list[str] = []
+        probe = uc._keychain_probe(uc.CLAUDE_CLI_KEYCHAIN_SERVICE, caveats)
+
+        assert probe is uc.KeychainProbe.UNKNOWN, probe
+        assert any("could not be checked" in c for c in caveats), caveats
+
+    def test_item_not_found_is_absent_and_silent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Exit 44 on a clean Mac is a REAL answer, and must stay silent.
+
+        This is the guard that keeps the feature usable. Treating a clean
+        keychain as "couldn't inspect" would print a caveat on every run for
+        every macOS user — the false-caveat inverse of the bug being fixed.
+        """
+        monkeypatch.setattr(uc.sys, "platform", "darwin")
+        monkeypatch.setattr(uc.subprocess, "run", lambda *_a, **_k: _FakeProc(returncode=44))
+        caveats: list[str] = []
+        probe = uc._keychain_probe(uc.CLAUDE_CLI_KEYCHAIN_SERVICE, caveats)
+
+        assert probe is uc.KeychainProbe.ABSENT, probe
+        assert caveats == [], (
+            f"a clean keychain must not be reported as a coverage gap: {caveats!r}"
+        )
+
+    def test_present_service_is_present(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Exit 0 means the credential really is in the keychain."""
+        monkeypatch.setattr(uc.sys, "platform", "darwin")
+        monkeypatch.setattr(uc.subprocess, "run", lambda *_a, **_k: _FakeProc(returncode=0))
+        caveats: list[str] = []
+        probe = uc._keychain_probe(uc.CLAUDE_CLI_KEYCHAIN_SERVICE, caveats)
+
+        assert probe is uc.KeychainProbe.PRESENT, probe
+        assert caveats == []
+
+    @pytest.mark.parametrize(
+        ("failure", "expected_fragment"),
+        [
+            pytest.param(
+                subprocess.TimeoutExpired(cmd="security", timeout=5),
+                "timed out after",
+                id="timeout-says-it-timed-out",
+            ),
+            pytest.param(
+                FileNotFoundError(2, "No such file or directory"),
+                "not found",
+                id="missing-binary-says-it-is-missing",
+            ),
+            pytest.param(
+                None,  # not an exception: a real process exiting 51
+                "security exited 51",
+                id="odd-exit-names-the-code",
+            ),
+        ],
+    )
+    def test_each_failure_names_its_own_reason(
+        self,
+        failure: Exception | None,
+        expected_fragment: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The reason is the whole value of the caveat, so pin it per branch.
+
+        A surface audit of this change found every caveat test asserting only
+        the shared prefix "could not be checked". Replacing all three reasons
+        with the single letter "x" left the entire unit suite green — the
+        branches of ``_describe_probe_failure`` had no coverage at all. A user
+        told "could not be checked (x)" learns nothing and can fix nothing.
+        """
+        monkeypatch.setattr(uc.sys, "platform", "darwin")
+        if failure is None:
+            monkeypatch.setattr(uc.subprocess, "run", lambda *a, **k: _FakeProc(returncode=51))
+        else:
+
+            def _raise(*_a: object, **_k: object) -> object:
+                raise failure
+
+            monkeypatch.setattr(uc.subprocess, "run", _raise)
+
+        caveats: list[str] = []
+        probe = uc._keychain_probe("Some Service", caveats)
+
+        assert probe is uc.KeychainProbe.UNKNOWN
+        assert len(caveats) == 1, caveats
+        assert expected_fragment in caveats[0], (
+            f"the caveat must say WHY it could not look; got: {caveats[0]!r}"
+        )
+
+    def test_reasons_are_distinguishable_from_each_other(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Three different failures must not read identically.
+
+        The parametrized test above pins each reason individually, but would
+        still pass if two branches happened to share wording. A user comparing
+        two machines needs to see that one timed out and the other has no
+        binary at all.
+        """
+        monkeypatch.setattr(uc.sys, "platform", "darwin")
+        seen: list[str] = []
+        for failure in (
+            subprocess.TimeoutExpired(cmd="security", timeout=5),
+            FileNotFoundError(2, "No such file or directory"),
+        ):
+
+            def _raise(*_a: object, _exc: BaseException = failure, **_k: object) -> object:
+                raise _exc
+
+            monkeypatch.setattr(uc.subprocess, "run", _raise)
+            caveats: list[str] = []
+            uc._keychain_probe("Some Service", caveats)
+            seen.append(caveats[0])
+
+        monkeypatch.setattr(uc.subprocess, "run", lambda *a, **k: _FakeProc(returncode=51))
+        caveats = []
+        uc._keychain_probe("Some Service", caveats)
+        seen.append(caveats[0])
+
+        assert len(set(seen)) == 3, f"each failure needs its own wording, got: {seen}"
+
+    def test_the_same_caveat_is_never_repeated(self) -> None:
+        """A repeated sentence reads as a broken tool, not as emphasis.
+
+        Caveat text names the surface, not the path (a path would leak a home
+        directory into terminal output), so repeats are byte-identical. Six
+        agent directories with an unreadable auth-profiles.json produced the
+        same sentence six times — 622 characters carrying one sentence of
+        information. Found by a surface audit of this change.
+        """
+        caveats: list[str] = []
+        for _ in range(6):
+            uc._add_caveat(caveats, "the same thing could not be checked")
+        uc._add_caveat(caveats, "a different thing could not be checked")
+
+        assert caveats == [
+            "the same thing could not be checked",
+            "a different thing could not be checked",
+        ], f"duplicates must collapse and order must hold, got: {caveats}"
+
+    def test_a_failed_probe_is_written_to_the_log(
+        self, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The log is a surface too — it is what someone reads at 3am.
+
+        Nothing asserted the warning channel before this. It must name the
+        service and the reason, because a log line saying only "probe failed"
+        sends the reader back to the source to find out which of the two
+        keychain surfaces broke.
+        """
+        monkeypatch.setattr(uc.sys, "platform", "darwin")
+
+        def _raise(*_a: object, **_k: object) -> object:
+            raise FileNotFoundError(2, "No such file or directory")
+
+        monkeypatch.setattr(uc.subprocess, "run", _raise)
+
+        with caplog.at_level(logging.WARNING, logger=uc.logger.name):
+            uc._keychain_probe("Codex Auth", [])
+
+        assert caplog.records, "a probe that could not run must leave a log line"
+        message = caplog.records[0].getMessage()
+        assert "Codex Auth" in message, message
+        assert "could not probe" in message, message
+
+    def test_absent_is_truthy_but_must_not_be_read_as_present(
+        self, sandboxed_home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The one slip that silently restores the original bug.
+
+        ``KeychainProbe.ABSENT`` is a truthy object, like every enum member, so
+        a call site written ``if _keychain_probe(...)`` would report a finding
+        for a credential that is not there. Both call sites compare identities
+        instead; nothing failed if someone changed that, so this pins it.
+        """
+        assert bool(uc.KeychainProbe.ABSENT) is True, (
+            "if this ever becomes falsey the trap is gone and so is this test's reason "
+            "to exist — but until then, truthiness must never be used to read a probe"
+        )
+
+        monkeypatch.setattr(uc.sys, "platform", "darwin")
+        monkeypatch.setattr(uc, "_keychain_probe", lambda service, caveats: uc.KeychainProbe.ABSENT)
+
+        caveats: list[str] = []
+        findings = uc.detect_unshardable_credentials(caveats)
+
+        keychain_findings = [f for f in findings if f.clear_kind == "keychain"]
+        assert keychain_findings == [], (
+            "an ABSENT probe must produce no keychain finding — a truthiness check "
+            f"would invent these: {keychain_findings}"
+        )
+        assert caveats == [], "a definite ABSENT is an answer, so it carries no caveat"
+
+    def test_non_darwin_is_absent_not_unknown(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Linux has no macOS keychain — that is a definite answer, not a gap.
+
+        ``detection_caveats()`` already states the platform limitation once,
+        globally. Emitting a per-surface caveat here would double-report it on
+        every Linux run.
+        """
+        monkeypatch.setattr(uc.sys, "platform", "linux")
+        caveats: list[str] = []
+        probe = uc._keychain_probe(uc.CLAUDE_CLI_KEYCHAIN_SERVICE, caveats)
+
+        assert probe is uc.KeychainProbe.ABSENT, probe
+        assert caveats == []
+
+    def test_unknown_probe_does_not_invent_a_finding(
+        self, sandboxed_home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End to end: an unanswerable probe yields no finding AND a caveat.
+
+        The pairing matters. Reporting a finding would invent a credential that
+        may not exist; reporting nothing without a caveat is the false
+        all-clear. It has to be neither.
+        """
+        monkeypatch.setattr(uc.sys, "platform", "darwin")
+
+        def _boom(*_a: object, **_k: object) -> None:
+            raise FileNotFoundError(2, "No such file or directory")
+
+        monkeypatch.setattr(uc.subprocess, "run", _boom)
+        caveats: list[str] = []
+        findings = uc.detect_unshardable_credentials(caveats)
+
+        assert not any(f.clear_kind == "keychain" for f in findings), (
+            "an unanswered probe must not invent a keychain finding"
+        )
+        assert any("could not be checked" in c for c in caveats), caveats
