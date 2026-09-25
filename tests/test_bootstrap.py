@@ -91,6 +91,69 @@ class TestEnsureHome:
         mode = home.fernet_key_path.stat().st_mode
         assert stat.S_IMODE(mode) == 0o600
 
+    def test_docker_group_traverse_mode_survives(self, tmp_path: Path):
+        """0710 on the home dir MUST survive ensure_home (worthless-agmg).
+
+        deploy/start.py sets /data to 0710 in the Docker split-uid topology so
+        the sidecar (worthless-crypto, group worthless) can traverse into
+        /data/run/<pid>/. ensure_home used to chmod 0700 unconditionally, so a
+        later ``docker exec --user root <container> worthless ...`` — the very
+        command doctor's SIDECAR_NOT_READY hint recommends — cut the sidecar
+        off. The privdrop env signal is set inside entrypoint.sh only and is
+        invisible to a docker exec session, so the mode itself is the signal.
+        """
+        base = tmp_path / ".worthless"
+        ensure_home(base_dir=base)
+        base.chmod(0o710)  # what deploy/start.py does in Docker
+
+        with patch("worthless.cli.bootstrap._grp.getgrgid") as fake_grp:
+            fake_grp.return_value.gr_name = "worthless"  # the container's group
+            ensure_home(base_dir=base)
+
+        assert stat.S_IMODE(base.stat().st_mode) == 0o710, (
+            "ensure_home must not narrow the Docker group-traverse mode"
+        )
+
+    def test_foreign_group_cannot_keep_group_traverse(self, tmp_path: Path):
+        """0710 owned by someone else's group is NOT ours — tighten it.
+
+        Otherwise anyone who pre-creates WORTHLESS_HOME at 0710 with a group
+        they control keeps traverse into it forever, since ensure_home's mkdir
+        is exist_ok and never chowns.
+        """
+        base = tmp_path / ".worthless"
+        ensure_home(base_dir=base)
+        base.chmod(0o710)
+
+        with patch("worthless.cli.bootstrap._grp.getgrgid") as fake_grp:
+            fake_grp.return_value.gr_name = "attacker"
+            ensure_home(base_dir=base)
+
+        assert stat.S_IMODE(base.stat().st_mode) == 0o700
+
+    def test_loose_home_mode_is_still_tightened(self, tmp_path: Path):
+        """Anything looser than the two modes we set ourselves is still fixed."""
+        base = tmp_path / ".worthless"
+        ensure_home(base_dir=base)
+        for loose in (0o755, 0o770, 0o777):
+            base.chmod(loose)
+
+            ensure_home(base_dir=base)
+
+            assert stat.S_IMODE(base.stat().st_mode) == 0o700, (
+                f"ensure_home must tighten {loose:#o} back to 0o700"
+            )
+
+    def test_shard_dir_is_always_owner_only(self, tmp_path: Path):
+        """shard_a holds the shares; nothing widens it, 0710 included."""
+        base = tmp_path / ".worthless"
+        home = ensure_home(base_dir=base)
+        home.shard_a_dir.chmod(0o710)
+
+        ensure_home(base_dir=base)
+
+        assert stat.S_IMODE(home.shard_a_dir.stat().st_mode) == 0o700
+
     def test_idempotent(self, tmp_path: Path):
         base = tmp_path / ".worthless"
         home1 = ensure_home(base_dir=base)

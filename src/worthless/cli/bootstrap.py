@@ -9,6 +9,8 @@ import logging
 import os
 import secrets
 import sqlite3
+import stat
+import sys
 import threading
 import time
 import weakref
@@ -33,6 +35,13 @@ from worthless.cli.keystore import (
     store_fernet_key,
 )
 from worthless.cli.platform import IS_WINDOWS
+
+# grp is POSIX-only; the module must stay importable on Windows so the CLI can
+# print its refusal (mirrors worthless/openclaw/integration.py).
+if sys.platform != "win32":
+    import grp as _grp
+else:
+    _grp = None  # type: ignore[assignment]
 from worthless.crypto.types import zero_buf
 from worthless.ipc.client import IPCClient, IPCError
 from worthless.proxy.config import DEFAULT_SIDECAR_SOCKET_PATH
@@ -410,6 +419,32 @@ def _guard_and_provision_keystore(home: WorthlessHome) -> bool:
         return True
 
 
+_DOCKER_TRAVERSE_MODE = 0o710
+_DOCKER_TRAVERSE_GROUP = "worthless"
+
+
+def _is_docker_group_traverse_dir(path: Path) -> bool:
+    """True when ``path`` is the Docker split-uid home we ourselves widened.
+
+    ``deploy/start.py`` sets ``/data`` to 0o710 so the sidecar (worthless-crypto,
+    group worthless) can traverse into ``/data/run/<pid>/``. ``ensure_home`` used
+    to chmod 0o700 unconditionally, so ``docker exec --user root <c> worthless …``
+    — the command doctor's SIDECAR_NOT_READY hint recommends — cut the sidecar
+    off until the next restart (worthless-agmg).
+
+    Gated on the group too: a pre-created home at 0o710 with an attacker's group
+    is NOT ours and is still tightened. Compares the full 0o7777 so setgid or
+    sticky variants fall through to the tightening branch.
+    """
+    try:
+        st = path.stat()
+        if stat.S_IMODE(st.st_mode) != _DOCKER_TRAVERSE_MODE:
+            return False
+        return _grp.getgrgid(st.st_gid).gr_name == _DOCKER_TRAVERSE_GROUP
+    except (OSError, KeyError):
+        return False
+
+
 def _provision_keystore_path(home: WorthlessHome) -> bool:
     """Run the bare-metal keystore cascade for ``ensure_home``.
 
@@ -551,7 +586,8 @@ def ensure_home(base_dir: Path | None = None) -> WorthlessHome:
         home.shard_a_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
 
         if not IS_WINDOWS:
-            home.base_dir.chmod(0o700)
+            if not _is_docker_group_traverse_dir(home.base_dir):
+                home.base_dir.chmod(0o700)
             home.shard_a_dir.chmod(0o700)
 
         # WOR-465 A3b / A4: under the proxy uid, bypass the keystore cascade
