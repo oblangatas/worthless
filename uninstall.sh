@@ -173,8 +173,16 @@ delete_keychain_entry() {
     case "${OS:-}" in
         macos)
             # Delete every matching item (there can be duplicates). Non-zero just
-            # means "no more entries" — never an error for us.
-            while security delete-generic-password -s worthless -a "$acct" >/dev/null 2>&1; do : ; done
+            # means "no more entries" — never an error for us. Capped because
+            # the only exit was `security` failing: one that keeps exiting 0
+            # (wedged, shimmed, stubbed) hung this loop for as long as it was
+            # watched. Thirty is far past any real duplicate count.
+            _kc_tries=0
+            while [ "$_kc_tries" -lt 30 ] &&
+                security delete-generic-password -s worthless -a "$acct" >/dev/null 2>&1; do
+                _kc_tries=$((_kc_tries + 1))
+            done
+            [ "$_kc_tries" -lt 30 ] || warn "Stopped after 30 keychain deletions; some entries may remain."
             ;;
         linux)
             if command -v secret-tool >/dev/null 2>&1; then
