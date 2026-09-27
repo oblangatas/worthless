@@ -203,6 +203,13 @@ jobs:
   # thing time-boxing a waiver, and nothing re-checked it on a branch nobody
   # committed to. A CVE waiver that outlives its date is indistinguishable
   # from one nobody ever intended to revisit.
+  #
+  # ENFORCEMENT, stated exactly: this job REPORTS. It does not block until
+  # "grype ignores are dated and current" is added to the required contexts of
+  # the `main` ruleset — verified 2026-09-27 that it is not in that list, while
+  # `uv-audit (locked runtime tree)` above is. A red X beside a green merge
+  # button is how a dated waiver quietly becomes permanent, so adding the
+  # context is part of landing this, not a follow-up.
   grype-ignore-expiry:
     name: grype ignores are dated and current
     runs-on: ubuntu-24.04

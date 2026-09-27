@@ -126,20 +126,34 @@ ignore:
   # substitution then matches the empty string and the loop never consumes
   # input. Reaching it requires FORMATTING AN ATTACKER-SUPPLIED POD DOCUMENT.
   #
-  # Reachability here, measured in the built image on 2026-09-27:
-  #   /usr/bin/perl exists (Debian base pulls it in; we never asked for it)
-  #   grep -rl perl /entrypoint.sh /deploy  ->  no matches
-  # Nothing this image runs invokes perl at all, let alone hands it a POD file.
-  # The path to this CVE is: exec into the container, then run perldoc or
-  # pod2text on a hostile document by hand.
+  # Reachability, MEASURED IN THE BUILT IMAGE 2026-09-27 — and the honest
+  # answer is stronger than "we don't call it". The vulnerable module is NOT
+  # PRESENT:
   #
-  # Debian has no fixed version, so there is nothing to bump to. Re-measure at
-  # expiry: if a fixed perl-base has landed by then, take it and DELETE this.
+  #   dpkg -l | grep "^ii  perl"    ->  perl-base only (no perl, no
+  #                                     perl-modules-5.40)
+  #   find / -name Text.pm -path '*Pod*'  ->  empty
+  #   command -v perldoc / pod2text       ->  absent, both
+  #
+  # grype matched the perl-base VERSION, not vulnerable code on disk. Pod::Text
+  # ships in perl-modules, which this image does not install. There is no
+  # perldoc or pod2text to run even by hand after `docker exec`.
+  #
+  # An earlier version of this entry argued from `grep -rl perl` over our
+  # entrypoint and deploy scripts. That was weaker AND rots: it says nothing
+  # about the Python package, a future subprocess call, or the healthcheck.
+  # File existence does not rot.
+  #
+  # Debian has no fixed version, so there is nothing to bump to — and nothing
+  # to wait for either. Re-measure at expiry by re-running the three commands
+  # above: this entry dies the day perl-modules appears in the image (then it
+  # is really reachable and needs a fix), or the day grype stops matching
+  # perl-base for it.
   - vulnerability: CVE-2026-82560
     package:
       name: perl-base
       type: deb
-    reason: "Pod::Text <6.1.1 CPU/memory exhaustion, reachable only by formatting an attacker-supplied POD document. Debian fix=not-fixed, so there is nothing to upgrade to. Measured 2026-09-27 in the built image: perl is present from the base but nothing we ship invokes it (grep of /entrypoint.sh and /deploy is empty), so no code path of ours reaches Pod::Text. Tracking WOR-934."
+    reason: "Pod::Text <6.1.1 CPU/memory exhaustion when formatting an attacker-supplied POD document. THE MODULE IS NOT IN THE IMAGE: measured 2026-09-27, only perl-base is installed (no perl-modules-5.40), `find / -name Text.pm -path '*Pod*'` is empty, and perldoc/pod2text do not exist. Grype matched the perl-base version, not vulnerable code on disk. Debian fix=not-fixed, so there is nothing to upgrade to. Re-measure by re-running those commands; this dies when perl-modules appears. Tracking WOR-934."
     expiry: "2026-12-31"  # no fix exists; re-measure for a fixed perl-base, do not blind-extend.
 
   # ── CPython tarfile, base-image only — A FIX EXISTS (WOR-934) ───────
