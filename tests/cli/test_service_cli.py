@@ -189,7 +189,12 @@ class TestServiceInstall:
             )
         assert result.exit_code == 0, result.output
         assert "Auto-restarts" in result.output
-        assert "survives reboot" in result.output
+        # Deliberately NOT asserting "survives reboot". WOR-725 has never verified
+        # that on any platform, and on WSL it is measurably false by default: with
+        # stock settings WSL stops the distro ~15 s after the last WSL window
+        # closes (proven on real WSL2, run 35055982192). A test that pins an
+        # unverified promise is a test that keeps it shipping.
+        assert "survives reboot" not in result.output
         # Installed port (9191) wins over the shell's WORTHLESS_PORT (8787).
         assert "9191" in result.output
         assert "8787" not in result.output

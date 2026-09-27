@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 
 import pytest
+from tests.helpers import skip_if_root
 
 
 # ---------------------------------------------------------------------------
@@ -104,6 +105,7 @@ def test_detect_with_dangling_workspace_symlink_returns_absent(
     assert state.workspace_path is None
 
 
+@skip_if_root
 def test_detect_with_unreadable_workspace_returns_absent(
     fake_home: Path,
 ) -> None:

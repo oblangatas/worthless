@@ -60,20 +60,23 @@ async def test_sweep_loop_continues_after_exception() -> None:
     """An exception from ledger.sweep() does not kill the loop; the next tick runs."""
     ledger = MagicMock()
     call_count = 0
+    swept_again = asyncio.Event()
 
     async def _sweep_side_effect(max_age: float) -> int:  # noqa: ARG001
         nonlocal call_count
         call_count += 1
         if call_count == 1:
             raise RuntimeError("transient DB error")
+        swept_again.set()
         return 0
 
     ledger.sweep = _sweep_side_effect
 
     interval = 0.05
     task = asyncio.create_task(_sweep_loop(ledger, interval, max_age=300.0))
-    # Wait for three ticks: first raises, second and third succeed.
-    await asyncio.sleep(interval * 3.5)
+    # Wait for the tick AFTER the failing one — an event, not a wall-clock
+    # budget, so a loaded machine can't starve it (worthless-hw8l).
+    await asyncio.wait_for(swept_again.wait(), timeout=5.0)
     task.cancel()
     with pytest.raises((asyncio.CancelledError, Exception)):
         await task

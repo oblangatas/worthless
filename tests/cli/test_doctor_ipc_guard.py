@@ -9,6 +9,9 @@ Three pinned invariants:
   - Flag ON + non-root → refused with non-zero exit.
   - Refusal message contains the operator escape hatch (``docker exec``).
   - Flag OFF → doctor proceeds normally (regression direction).
+
+"Non-root" is enforced by the ``ipc_proxy_mode`` fixture; setting only the
+env var tested the root bypass when the suite ran as root (worthless-x9z1).
 """
 
 from __future__ import annotations
@@ -22,10 +25,9 @@ from tests.cli.conftest import cli_invoke
 
 class TestDoctorIpcGuard:
     def test_doctor_refused_under_ipc_mode(
-        self, home_dir: WorthlessHome, monkeypatch: pytest.MonkeyPatch
+        self, home_dir: WorthlessHome, ipc_proxy_mode: None
     ) -> None:
         """Flag ON + non-root: doctor exits non-zero with actionable hint."""
-        monkeypatch.setenv("WORTHLESS_FERNET_IPC_ONLY", "1")
         result = cli_invoke(["doctor"], home_dir)
 
         assert result.exit_code != 0, "doctor must exit non-zero under WORTHLESS_FERNET_IPC_ONLY=1"
@@ -35,10 +37,9 @@ class TestDoctorIpcGuard:
         )
 
     def test_doctor_fix_flag_does_not_bypass_ipc_guard(
-        self, home_dir: WorthlessHome, monkeypatch: pytest.MonkeyPatch
+        self, home_dir: WorthlessHome, ipc_proxy_mode: None
     ) -> None:
         """--fix does not bypass the IPC guard."""
-        monkeypatch.setenv("WORTHLESS_FERNET_IPC_ONLY", "1")
         result = cli_invoke(["doctor", "--fix", "--yes"], home_dir)
 
         assert result.exit_code != 0

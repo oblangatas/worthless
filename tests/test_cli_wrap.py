@@ -23,6 +23,7 @@ from worthless.cli.commands.wrap import (
     _run_child_and_wait,
 )
 from worthless.cli.process import create_liveness_pipe
+from tests.helpers import skip_if_root
 
 runner = CliRunner()
 
@@ -260,13 +261,16 @@ class TestListEnrolledAliasesWithDB:
         assert all(isinstance(a, str) and isinstance(p, str) for a, p in aliases)
 
     def test_returns_aliases_under_ipc_only_flag_without_sidecar(
-        self, home_with_key, monkeypatch: pytest.MonkeyPatch
+        self, home_with_key, ipc_proxy_mode: None
     ) -> None:
         """Under WORTHLESS_FERNET_IPC_ONLY=1, alias listing must NOT depend on a
         running sidecar. The pre-flight enrollment check is a pure DB read —
         no Fernet key, no IPC socket needed. A missing socket must not cause
-        _list_enrolled_aliases to silently return [] and mislead the user."""
-        monkeypatch.setenv("WORTHLESS_FERNET_IPC_ONLY", "1")
+        _list_enrolled_aliases to silently return [] and mislead the user.
+
+        ``ipc_proxy_mode`` (requested after ``home_with_key`` so the home is
+        bootstrapped normally) pins the non-root uid: as root, IPC mode is
+        never active and this guard could not catch a regression."""
         aliases = _list_enrolled_aliases(home_with_key)
         assert len(aliases) >= 1, (
             "Expected enrolled aliases but got []. "
@@ -468,6 +472,7 @@ class TestListEnrolledAliasesAdversarial:
         aliases = _list_enrolled_aliases(home_with_key)
         assert aliases == []
 
+    @skip_if_root
     def test_permission_denied_returns_empty(self, home_with_key) -> None:
         """DB file readable to the user at exists()-time but unreadable
         at connect()-time (chmod 000, ownership flip, mount remount)

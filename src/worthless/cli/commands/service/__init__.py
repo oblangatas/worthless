@@ -18,7 +18,7 @@ from worthless.cli.commands.service._common import (
 from worthless.cli.commands.service.proxy_state import detect_proxy_runtime
 from worthless.cli.console import get_console
 from worthless.cli.errors import error_boundary
-from worthless.cli.platform import fail_if_windows
+from worthless.cli.platform import fail_if_windows, is_wsl
 from worthless.cli.process import disable_core_dumps, resolve_port
 
 
@@ -39,7 +39,16 @@ def _print_service_banner(console, *, platform: str, port: int) -> None:
     if console.json_mode:
         return
     console.print_success(f"Worthless proxy running as a {platform} service on 127.0.0.1:{port}.")
-    console.print_hint("Auto-restarts on crash and survives reboot — no `worthless up` needed.")
+    console.print_hint("Auto-restarts on crash — no `worthless up` needed.")
+    if is_wsl():
+        # Measured on real WSL2: with default settings WSL stops the distro ~15 s
+        # after the last WSL window closes, and the proxy stops with it. Promising
+        # survival here without saying that would be false on the default setup.
+        console.print_hint(
+            "On WSL it stops ~15 s after your last WSL terminal closes. To keep it "
+            "running, add `[general]` / `instanceIdleTimeout=-1` to "
+            "%USERPROFILE%\\.wslconfig on Windows (WSL 2.5.4 or newer)."
+        )
     console.print_hint("Status: `worthless service status` · Stop: `worthless service stop`")
 
 

@@ -15,6 +15,7 @@ import pytest
 
 from worthless.cli.errors import UnsafeReason, UnsafeRewriteRefused
 from worthless.cli.safe_rewrite import safe_rewrite
+from tests.helpers import skip_if_root
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +165,7 @@ def test_tmp_cleanup_on_generic_failure(tmp_path, make_env_file, sha256_of) -> N
     assert list(tmp_path.glob(".env.tmp-*")) == []
 
 
+@skip_if_root
 def test_parent_dir_eacces_refuses_cleanly(tmp_path, make_env_file, sha256_of) -> None:
     """Parent dir without write permission → refused, target untouched."""
     env = make_env_file(tmp_path / ".env", b"KEY=v\n")

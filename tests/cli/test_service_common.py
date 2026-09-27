@@ -19,6 +19,7 @@ from worthless.cli.commands.service._common import (
     report_proxy_health,
 )
 from worthless.cli.errors import ErrorCode, WorthlessError
+from tests.helpers import skip_if_root
 
 
 @pytest.fixture()
@@ -227,6 +228,7 @@ class TestUnitFileMatchesHome:
         )
         assert unit_file_matches_home(unit, home)
 
+    @skip_if_root
     def test_unreadable_unit_raises_clean_error(self, home: WorthlessHome, tmp_path: Path) -> None:
         unit = tmp_path / "worthless-proxy.service"
         unit.write_text(

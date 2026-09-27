@@ -205,6 +205,6 @@ proxy:
 limitations:
   - "Run from WSL home (~), not /mnt/c/* (5-20× slower NTFS via 9P)"
   - "Native Windows unsupported — install.sh exits 20 with doc link"
-  - "Manual `worthless up` after `wsl --shutdown` or Windows reboot — WOR-175"
+  - "Manual `worthless up` after `wsl --shutdown` or Windows reboot — WOR-857 (systemd off by default in WSL; no unit type survives it)"
   - "uv tool uninstall doesn't purge file-backed keystore — WOR-435"
 ```

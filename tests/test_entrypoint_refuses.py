@@ -9,6 +9,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests.helpers import RUNNING_AS_ROOT
 
 ENTRYPOINT = Path(__file__).resolve().parents[1] / "deploy" / "entrypoint.sh"
 EX_CONFIG = 78
@@ -97,6 +98,10 @@ class TestEntrypointPrecheck:
         assert result.returncode == EX_CONFIG, result.stderr
         assert "unknown WORTHLESS_DEPLOY_MODE" in result.stderr
 
+    @pytest.mark.skipif(
+        RUNNING_AS_ROOT,
+        reason="root runs the image-only chown branch in entrypoint.sh; Docker e2e covers it",
+    )
     def test_public_with_proxies_passes_precheck(
         self, stubbed_path: dict[str, str], home: Path
     ) -> None:
@@ -111,6 +116,10 @@ class TestEntrypointPrecheck:
         )
         assert result.returncode == 0, result.stderr
 
+    @pytest.mark.skipif(
+        RUNNING_AS_ROOT,
+        reason="root runs the image-only chown branch in entrypoint.sh; Docker e2e covers it",
+    )
     def test_loopback_default_passes_precheck(
         self, stubbed_path: dict[str, str], home: Path
     ) -> None:
