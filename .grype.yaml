@@ -114,6 +114,34 @@ ignore:
     reason: "Upstream fix only in Python 3.15.0rc2 (pre-release). Measured 2026-09-10: python:3.13-slim-trixie 3.13.15 and python:3.14-slim-trixie 3.14.7 are both still affected, so there is nowhere stable to upgrade to. Base-image interpreter only. Tracking worthless-kzfq."
     expiry: "2026-12-08"
 
+  # ── perl's POD formatter, base-image only (WOR-934) ─────────────────
+  # Arrived with the grype DB refresh of 2026-09-2x and turned main red. It is
+  # fix=not-fixed, so `only-fixed: true` drops it and the fixed-only gate never
+  # sees it — check_grype_unmapped_findings.py is what caught it, which is the
+  # job that hook exists to do.
+  #
+  # The flaw (MEASURED from grype's own record, 2026-09-27): Pod::Text before
+  # 6.1.1 exhausts CPU and memory formatting a POD document whose `=over`
+  # nesting drives the margin to the output width — the line-splitting
+  # substitution then matches the empty string and the loop never consumes
+  # input. Reaching it requires FORMATTING AN ATTACKER-SUPPLIED POD DOCUMENT.
+  #
+  # Reachability here, measured in the built image on 2026-09-27:
+  #   /usr/bin/perl exists (Debian base pulls it in; we never asked for it)
+  #   grep -rl perl /entrypoint.sh /deploy  ->  no matches
+  # Nothing this image runs invokes perl at all, let alone hands it a POD file.
+  # The path to this CVE is: exec into the container, then run perldoc or
+  # pod2text on a hostile document by hand.
+  #
+  # Debian has no fixed version, so there is nothing to bump to. Re-measure at
+  # expiry: if a fixed perl-base has landed by then, take it and DELETE this.
+  - vulnerability: CVE-2026-82560
+    package:
+      name: perl-base
+      type: deb
+    reason: "Pod::Text <6.1.1 CPU/memory exhaustion, reachable only by formatting an attacker-supplied POD document. Debian fix=not-fixed, so there is nothing to upgrade to. Measured 2026-09-27 in the built image: perl is present from the base but nothing we ship invokes it (grep of /entrypoint.sh and /deploy is empty), so no code path of ours reaches Pod::Text. Tracking WOR-934."
+    expiry: "2026-12-31"  # no fix exists; re-measure for a fixed perl-base, do not blind-extend.
+
   # ── CPython tarfile, base-image only — A FIX EXISTS (WOR-934) ───────
   # Read this one differently from every other entry in this file. The others
   # are waivers because there is nowhere to upgrade to. This one is a DELAY:
