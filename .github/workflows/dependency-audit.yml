@@ -193,3 +193,30 @@ jobs:
 
       - name: Audit the docs site's dependency tree
         run: npm audit
+
+  # The CI half of the `grype-ignore-expiry` pre-commit hook, for the same
+  # reason the `audit` job above exists: that hook is client-side, so
+  # `--no-verify`, a web edit, or a clone that never ran `pre-commit install`
+  # skips it. Grype itself does NOT honour the `expiry` key — it drops unknown
+  # keys silently, so a suppression dated 2020 still suppresses today
+  # (measured, see .grype.yaml's header). The hook was therefore the ONLY
+  # thing time-boxing a waiver, and nothing re-checked it on a branch nobody
+  # committed to. A CVE waiver that outlives its date is indistinguishable
+  # from one nobody ever intended to revisit.
+  grype-ignore-expiry:
+    name: grype ignores are dated and current
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up uv + Python
+        uses: ./.github/actions/setup-uv-python
+
+      # Byte-identical to the hook entry in .pre-commit-config.yaml.
+      - name: Every grype ignore carries a date that has not passed
+        run: uv run python scripts/hooks/check_grype_ignore_expiry.py

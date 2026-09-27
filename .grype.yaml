@@ -114,6 +114,43 @@ ignore:
     reason: "Upstream fix only in Python 3.15.0rc2 (pre-release). Measured 2026-09-10: python:3.13-slim-trixie 3.13.15 and python:3.14-slim-trixie 3.14.7 are both still affected, so there is nowhere stable to upgrade to. Base-image interpreter only. Tracking worthless-kzfq."
     expiry: "2026-12-08"
 
+  # ── CPython tarfile, base-image only — A FIX EXISTS (WOR-934) ───────
+  # Read this one differently from every other entry in this file. The others
+  # are waivers because there is nowhere to upgrade to. This one is a DELAY:
+  # the fix is real, shipped, and stable, and we are not taking it yet.
+  #
+  # MEASURED 2026-09-26 (grype 0.118.0), bases pulled fresh:
+  #
+  #   python:3.13-slim-trixie  3.13.15  present   <- the base this image uses
+  #   python:3.14-slim-trixie  3.14.7   ABSENT
+  #   python:3.14-slim         3.14.7   ABSENT
+  #
+  # Why we are not on 3.14 today, measured the same day:
+  #   1. The suite fails there. unshardable_credentials.py relies on
+  #      Path.is_file() raising for EACCES to record a "could not be checked"
+  #      caveat; 3.14's pathlib swallows it, so an unreadable credential
+  #      surface reports CLEAN with no caveat — the false all-clear that
+  #      module exists to prevent (1 failed / 1136 passed, worthless-epnw P1).
+  #      Taking the fix today trades a CVE we do not call for a regression in
+  #      a guarantee we advertise.
+  #   2. The Dockerfile copies /usr/local/lib/python3.13/site-packages, so a
+  #      3.14 image does not build until that path moves too.
+  #
+  # Reachability: worthless calls no tarfile/unpack_archive/extract API at all
+  # (grep of src/ on 2026-09-26 is empty). This is the interpreter we ship
+  # inside the image, not a path our code takes. That argument is a grep taken
+  # on one day — it is not enforced by anything, so re-check it, do not
+  # inherit it.
+  #
+  # THIRTY DAYS, not the bulk date. A fix exists; the clock should hurt.
+  # WOR-934 (due 2026-10-27) carries the bump. DELETE this entry then.
+  - vulnerability: CVE-2026-82049
+    package:
+      name: python
+      type: binary
+    reason: "DELAY, not a dead end: Python 3.14.7 IS fixed. Measured 2026-09-26 — python:3.13-slim-trixie 3.13.15 affected, python:3.14-slim-trixie and python:3.14-slim 3.14.7 both clean. Not taken yet because the suite fails on 3.14 (worthless-epnw: an unreadable credential surface is reported clean with no caveat) and the Dockerfile hardcodes the python3.13 site-packages path. Base-image interpreter only; worthless calls no tarfile API. Tracking WOR-934, due 2026-10-27."
+    expiry: "2026-10-27"  # matches WOR-934's due date on purpose. Do not extend — fix it.
+
   # ── CPython tarfile, base-image only (WOR-852 Track B) ──────────────
   # All three are tarfile bugs in the digest-pinned python:3.13-slim-bookworm
   # base. For CVE-2026-11940 and CVE-2026-11972, grype's only fixed version is
