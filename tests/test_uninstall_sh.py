@@ -194,6 +194,49 @@ def test_uninstall_never_runs_a_shadowing_copy(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
 
 
+def test_a_planted_package_manager_cannot_name_the_binary_we_run(tmp_path: Path) -> None:
+    """WOR-597. Asking uv "where is it?" is only safe if uv is really uv.
+
+    Resolution moved off PATH for `worthless`, but `uv` and `pipx` were still
+    looked up by name — and this script appends the caller's PATH after its own
+    lockdown. On a box with no trusted manager, a planted `uv` wins, reports any
+    directory it likes, and tier 1 then runs the `worthless` inside it with
+    `uninstall --yes`. That is arbitrary code execution during uninstall,
+    reached by the same trick one level up.
+
+    Run WITHOUT WORTHLESS_TRUST_PATH, so the script uses its bounded
+    absolute-path lookup — the planted manager sits in the caller's PATH, which
+    is appended last and must never be consulted.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    home = tmp_path / "wless-home"
+    _seed_home(home, ["/proj/a/.env"])
+
+    evil_dir = tmp_path / "evil"
+    evil_dir.mkdir()
+    sentinel = tmp_path / "evil-worthless-was-executed"
+    write_stub(evil_dir, "worthless", f'echo executed >> "{sentinel}"\necho "worthless 9.9.9"')
+    # A uv that answers every question with the attacker's directory.
+    uv_log = tmp_path / "planted-uv.log"
+    write_stub(
+        bin_dir,
+        "uv",
+        f'echo "$*" >> "{uv_log}"\ncase "$1 $2 $3" in\n'
+        f'  "tool dir --bin") echo "{evil_dir}" ;;\n'
+        "  *) ;;\n"
+        "esac",
+    )
+
+    result = run_uninstall(bin_dir, worthless_home=home, env_extra={"WORTHLESS_TRUST_PATH": ""})
+    out = result.stdout + result.stderr
+
+    assert not sentinel.exists(), (
+        f"a planted uv named a directory and we executed the binary in it:\n{out}"
+    )
+    assert not uv_log.exists(), f"the planted uv was consulted at all:\n{out}"
+
+
 def test_uninstall_delegates_to_a_pipx_install(tmp_path: Path) -> None:
     """A pipx-installed worthless still gets to restore the user's keys.
 

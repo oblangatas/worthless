@@ -88,6 +88,16 @@ if [ "${WORTHLESS_TRUST_PATH:-}" != "1" ]; then
     [ "$home_for_path" = "/" ] && home_for_path="/root"
     PATH="/usr/bin:/bin:/usr/local/bin:${home_for_path}/.local/bin:${PATH:-}"
     export PATH
+    # The PATH above still ENDS with the caller's, which is fine for us — we
+    # resolve every binary we run from absolute paths. It is not fine for the
+    # package managers we invoke: pipx probes `uv --version` through PATH
+    # (measured, not assumed), so a planted uv would execute as the user
+    # through pipx even though it can no longer tell us what to run. Managers
+    # therefore get a PATH with no caller-controlled tail.
+    MANAGER_PATH="${home_for_path}/.local/bin:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"
+else
+    # Sandbox mode: the harness's stub directory IS the point.
+    MANAGER_PATH="${PATH:-}"
 fi
 
 # --- Output helpers (same vocabulary as install.sh) --------------------------
@@ -205,13 +215,16 @@ list_affected_envs() {
 }
 
 remove_tool() {
-    if command -v uv >/dev/null 2>&1; then
-        uv tool uninstall worthless >/dev/null 2>&1 || true
+    # Same bounded resolution as installed_worthless: a planted manager here
+    # runs as the user too, and `uninstall worthless` is not an argv you want
+    # an attacker choosing the binary for.
+    if _rt_uv="$(resolve_manager uv)"; then
+        PATH="$MANAGER_PATH" "$_rt_uv" tool uninstall worthless >/dev/null 2>&1 || true
     fi
     # Legacy: a pipx-installed worthless (install.sh refuses to coexist, but an
     # older box may have one). Best-effort.
-    if command -v pipx >/dev/null 2>&1; then
-        pipx uninstall worthless >/dev/null 2>&1 || true
+    if _rt_pipx="$(resolve_manager pipx)"; then
+        PATH="$MANAGER_PATH" "$_rt_pipx" uninstall worthless >/dev/null 2>&1 || true
     fi
 }
 
@@ -230,21 +243,42 @@ _usable_worthless() {
     [ -n "${1:-}" ] && [ -f "${1}/worthless" ] && [ -x "${1}/worthless" ]
 }
 
+# Resolve a package manager from bounded absolute paths, the way install.sh
+# resolves uv — never by name. The lockdown above appends the caller's PATH
+# after our own directories, so `command -v uv` still selects a planted uv on a
+# box that has no real one. And a manager we trust to say WHERE our binary
+# lives is a manager we trust to name a binary we then run with
+# `uninstall --yes`: the same substitution as a shadowing `worthless`, one
+# level up. WORTHLESS_TRUST_PATH=1 is the test harness's sandbox escape, same
+# contract as install.sh's resolve_uv.
+resolve_manager() {
+    if [ "${WORTHLESS_TRUST_PATH:-}" = "1" ]; then
+        command -v "$1" 2>/dev/null && return 0
+        return 1
+    fi
+    _rm_home="${HOME:-/root}"
+    [ "$_rm_home" = "/" ] && _rm_home=/root
+    for _rm_d in "$_rm_home/.local/bin" "$_rm_home/.cargo/bin" /usr/bin /bin /usr/local/bin /opt/homebrew/bin; do
+        [ -x "${_rm_d}/$1" ] && { printf '%s' "${_rm_d}/$1"; return 0; }
+    done
+    return 1
+}
+
 installed_worthless() {
     # UV_TOOL_BIN_DIR, XDG_BIN_HOME and PIPX_BIN_DIR are scrubbed at the top of
     # this script, so these answers come from the installers' own defaults. An
     # earlier version consulted those variables when the default turned up
     # nothing — which is precisely when an attacker-set value would have been
     # obeyed, so the guard only held where it was not needed.
-    if command -v uv >/dev/null 2>&1; then
-        _iw_dir="$(uv tool dir --bin 2>/dev/null || true)"
+    if _iw_uv="$(resolve_manager uv)"; then
+        _iw_dir="$(PATH="$MANAGER_PATH" "$_iw_uv" tool dir --bin 2>/dev/null || true)"
         if _usable_worthless "${_iw_dir:-}"; then
             printf '%s' "${_iw_dir}/worthless"
             return 0
         fi
     fi
-    if command -v pipx >/dev/null 2>&1; then
-        _iw_dir="$(pipx environment --value PIPX_BIN_DIR 2>/dev/null || true)"
+    if _iw_pipx="$(resolve_manager pipx)"; then
+        _iw_dir="$(PATH="$MANAGER_PATH" "$_iw_pipx" environment --value PIPX_BIN_DIR 2>/dev/null || true)"
         if _usable_worthless "${_iw_dir:-}"; then
             printf '%s' "${_iw_dir}/worthless"
             return 0
