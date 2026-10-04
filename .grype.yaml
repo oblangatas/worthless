@@ -107,6 +107,35 @@ ignore:
     reason: "Upstream fix only in Python 3.15.0rc2 (pre-release). Measured 2026-09-10: python:3.13-slim-trixie 3.13.15 and python:3.14-slim-trixie 3.14.7 are both still affected, so there is nowhere stable to upgrade to. Base-image interpreter only. Tracking worthless-kzfq."
     expiry: "2026-12-08"
 
+  # ── libstdc++ erase_if, nothing here links it (worthless-11ix) ──────
+  # A use-after-free in libstdc++: erase_if on a binary heap priority queue
+  # reallocates storage without updating the internal entry pointer. Debian
+  # has no fix in ANY release — gcc-12, 14, 15 and 16 are all marked
+  # vulnerable, unfixed, on the security tracker (read 2026-10-05), so
+  # fix=not-fixed is the real upstream state, not a stale grype record.
+  #
+  # MEASURED 2026-10-05, not assumed. Installed requirements.txt into
+  # python:3.13-slim-trixie (amd64, Python 3.13.15) and read every compiled
+  # extension's dynamic section:
+  #   44 packages, 11 .so files, 0 linking libstdc++
+  # The interpreter does not link it either. libstdc++ is present only
+  # because the base image ships the gcc runtime; no Worthless code path
+  # reaches a C++ priority queue, so erase_if is never called.
+  #
+  # NO `package` key on purpose, and the expiry hook is why. It rejects any
+  # package name holding a regex activator, because grype turns such a name
+  # into a full-match regex and the ignore then silences packages it never
+  # named. `libstdc++6` carries two `+`, and escaping them adds `\` — also an
+  # activator — so there is no spelling of that name the hook will accept.
+  # Keying on the vulnerability alone is the narrower choice here anyway:
+  # CVE-2026-102010 is a gcc advisory and matches nothing else in the image.
+  #
+  # To close: drop this when Debian ships a fixed gcc, or when the base image
+  # stops shipping the gcc runtime at all.
+  - vulnerability: CVE-2026-102010
+    reason: "Use-after-free in libstdc++ erase_if on a binary heap priority queue; hits gcc-14-base, libgcc-s1 and libstdc++6. Debian has no fix in any release (gcc-12/14/15/16 all vulnerable, unfixed — tracker read 2026-10-05), so there is nowhere to upgrade. Measured 2026-10-05: requirements.txt installed into python:3.13-slim-trixie (amd64, 3.13.15) gives 44 packages and 11 compiled extensions, none linking libstdc++, and the interpreter does not link it either. Base-image gcc runtime only; no Worthless code path reaches a C++ priority queue. Tracking worthless-11ix."
+    expiry: "2027-01-31"
+
   # ── CPython tarfile, unreachable here (worthless-jsx6) ──────────────
   # Different from the two above, and the difference matters: here a stable
   # fix DOES exist. python:3.14-slim-trixie 3.14.7 is clean. We do not take it
