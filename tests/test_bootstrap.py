@@ -16,8 +16,10 @@ from cryptography.fernet import Fernet
 
 from worthless.cli import bootstrap as boot
 from worthless.cli.bootstrap import (
+    _DOCKER_TRAVERSE_GROUP,
     WorthlessHome,
     _init_db,
+    _is_docker_group_traverse_dir,
     _shard_rows_present,
     acquire_lock,
     check_stale_lock,
@@ -130,6 +132,38 @@ class TestEnsureHome:
             ensure_home(base_dir=base)
 
         assert stat.S_IMODE(base.stat().st_mode) == 0o700
+
+    def test_unresolvable_group_fails_closed(self, tmp_path: Path):
+        """A gid with no group entry must TIGHTEN, not keep 0710.
+
+        Real lookup, no mock: the other tests patch ``_grp.getgrgid``, so this
+        is the one that exercises the actual gid -> name path and its failure
+        branch (KeyError -> False -> chmod runs).
+        """
+        base = tmp_path / ".worthless"
+        ensure_home(base_dir=base)
+        base.chmod(0o710)
+
+        with patch("worthless.cli.bootstrap.Path.stat") as fake_stat:
+            fake_stat.return_value = os.stat_result(
+                (0o040710, 0, 0, 1, 0, 2**31 - 1, 0, 0, 0, 0)  # gid that owns nothing
+            )
+            resolved = _is_docker_group_traverse_dir(base)
+
+        assert resolved is False, "an unresolvable group must not keep group traverse"
+
+    def test_traverse_group_matches_the_dockerfile(self):
+        """The group we trust is the group the image actually creates.
+
+        Nothing else ties the constant to ``groupadd`` — renaming the group in
+        the Dockerfile would silently turn the carve-out off and bring the
+        narrowing bug back.
+        """
+        dockerfile = Path(__file__).resolve().parents[1] / "Dockerfile"
+
+        assert f"groupadd -r -g 10001 {_DOCKER_TRAVERSE_GROUP}" in dockerfile.read_text(), (
+            f"Dockerfile no longer creates group {_DOCKER_TRAVERSE_GROUP!r}"
+        )
 
     def test_loose_home_mode_is_still_tightened(self, tmp_path: Path):
         """Anything looser than the two modes we set ourselves is still fixed."""
