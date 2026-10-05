@@ -107,6 +107,38 @@ ignore:
     reason: "Upstream fix only in Python 3.15.0rc2 (pre-release). Measured 2026-09-10: python:3.13-slim-trixie 3.13.15 and python:3.14-slim-trixie 3.14.7 are both still affected, so there is nowhere stable to upgrade to. Base-image interpreter only. Tracking worthless-kzfq."
     expiry: "2026-12-08"
 
+  # ── tempfile.TemporaryDirectory cleanup race (worthless-11ix) ───────
+  # A race in TemporaryDirectory's cleanup: an attacker who can modify the
+  # tree mid-cleanup swaps a directory for a symlink, so files OUTSIDE the
+  # temp dir get deleted, or their permissions and flags reset.
+  #
+  # Grype lists the fix as 3.15.0. That is not a stable release, and the
+  # advisory records no 3.13 backport, so there is nowhere to upgrade — the
+  # base image already runs 3.13.16, the newest 3.13 there is.
+  #
+  # MEASURED 2026-10-05 against the built image, not asserted:
+  #   1. `tempfile.TemporaryDirectory` — the vulnerable class — appears
+  #      ZERO times in src/. Worthless uses mkdtemp and mkstemp, which have
+  #      no auto-cleanup and so never reach the racing finalizer.
+  #   2. We do call shutil.rmtree on mkdtemp dirs (openclaw/skill.py,
+  #      cli/sidecar_lifecycle.py), which is the same underlying path the
+  #      advisory names. In this image that path is the SAFE one:
+  #      shutil.rmtree.avoids_symlink_attacks is True on Linux 3.13.16,
+  #      read from inside the container. The advisory's own caveat applies
+  #      only where that flag is False.
+  #   3. The residual on all platforms is file-flag reset, a BSD/macOS
+  #      chflags concern that does not exist on this Linux image.
+  #
+  # The attacker also needs concurrent write access inside the container's
+  # temp tree — they are already executing there.
+  #
+  # To close: drop this when CPython backports to 3.13.x, or when 3.15 is
+  # stable and worthless-jsx6 moves the base image.
+  - vulnerability: CVE-2026-12345
+    package: {name: python, type: binary}
+    reason: "Race in tempfile.TemporaryDirectory cleanup: a directory swapped for a symlink mid-cleanup deletes or re-permissions files outside the temp tree. Fix listed as 3.15.0, which is not stable, and no 3.13 backport exists — the image already runs 3.13.16, the newest 3.13. Measured 2026-10-05 on the built image: TemporaryDirectory appears zero times in src/ (worthless uses mkdtemp/mkstemp, which have no auto-cleanup finalizer), and where we do call shutil.rmtree on those dirs, shutil.rmtree.avoids_symlink_attacks reads True inside the container, which is the condition the advisory says removes the deletion attack. Remaining file-flag reset is a BSD/macOS chflags concern, absent on Linux. Tracking worthless-11ix."
+    expiry: "2026-12-31"
+
   # ── libstdc++ erase_if, nothing here links it (worthless-11ix) ──────
   # A use-after-free in libstdc++: erase_if on a binary heap priority queue
   # reallocates storage without updating the internal entry pointer. Debian
