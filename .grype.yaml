@@ -165,7 +165,20 @@ ignore:
   # To close: drop this when Debian ships a fixed gcc, or when the base image
   # stops shipping the gcc runtime at all.
   - vulnerability: CVE-2026-102010
-    reason: "Use-after-free in libstdc++ erase_if on a binary heap priority queue; hits gcc-14-base, libgcc-s1 and libstdc++6. Debian has no fix in any release (gcc-12/14/15/16 all vulnerable, unfixed — tracker read 2026-10-05), so there is nowhere to upgrade. Measured 2026-10-05: requirements.txt installed into python:3.13-slim-trixie (amd64, 3.13.15) gives 44 packages and 11 compiled extensions, none linking libstdc++, and the interpreter does not link it either. Base-image gcc runtime only; no Worthless code path reaches a C++ priority queue. Tracking worthless-11ix."
+    reason: "Use-after-free in libstdc++ erase_if on a binary heap priority queue; hits gcc-14-base, libgcc-s1 and libstdc++6. Debian has no fix in any release (gcc-12/14/15/16 all vulnerable, unfixed — tracker read 2026-10-05), so there is nowhere to upgrade. Measured 2026-10-05 on the built image: 11 compiled extensions, none linking libstdc++, and the interpreter does not link it either. Base-image gcc runtime only; no Worthless code path reaches a C++ priority queue. Tracking worthless-11ix."
+    expiry: "2027-01-31"
+
+  # Second advisory, same libstdc++, same measurement. An integer overflow in
+  # the aligned `operator new`: a large enough request wraps and under-allocates,
+  # so the caller writes past the block. `operator new` is the C++ allocation
+  # operator — only C++ code calls it, and nothing here is C++. Debian is again
+  # unfixed across gcc-12/14/15/16 (tracker read 2026-10-05).
+  #
+  # RE-MEASURED 2026-10-05 on the REPINNED image (Python 3.13.16), not carried
+  # over from the entry above: 11 compiled extensions, 0 linking libstdc++,
+  # interpreter 0.
+  - vulnerability: CVE-2026-95619
+    reason: "Integer overflow in libstdc++'s aligned operator new: a large request wraps to an undersized allocation, so the caller writes past the block. Hits gcc-14-base, libgcc-s1 and libstdc++6. Debian has no fix in any release (gcc-12/14/15/16 all vulnerable, unfixed — tracker read 2026-10-05). Re-measured 2026-10-05 inside the repinned image (Python 3.13.16): 11 compiled extensions, none linking libstdc++, and the interpreter does not link it either. operator new is the C++ allocation operator and no Worthless code is C++; the gcc runtime is present only because the base image ships it. Tracking worthless-11ix."
     expiry: "2027-01-31"
 
   # ── CPython tarfile, unreachable here (worthless-jsx6) ──────────────
