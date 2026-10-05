@@ -160,10 +160,20 @@ ignore:
   #
   # Reachability, MEASURED IN THE BUILT IMAGE 2026-10-05:
   #   command -v gcc / g++              ->  ABSENT, both
-  #   files referencing libstdc++       ->  6, and all six are apt's own
-  #                                         binaries (apt, apt-get, apt-cache,
-  #                                         apt-cdrom, apt-config, apt-mark)
+  #   ELF files referencing libstdc++   ->  21: libstdc++.so.6.0.33 itself plus
+  #                                         20 apt-family files (apt, apt-get,
+  #                                         apt-cache, apt-cdrom, apt-config,
+  #                                         apt-mark, libapt-pkg, libapt-private,
+  #                                         apt-extracttemplates, apt-helper,
+  #                                         9 apt methods, 1 apt solver)
   #   anything under /usr/local or the python tree  ->  none
+  #
+  # An earlier revision of this entry said "6, and all six are apt's own
+  # binaries". That count came from a probe that only walked /usr/bin. The
+  # number above is from a full-filesystem walk carrying a libc control (751
+  # hits) so an empty section means absent rather than unmeasured. The
+  # conclusion is unchanged — every consumer is apt — but the count was wrong
+  # and a waiver argued from a measurement is only as good as the measurement.
   #
   # We ship a Python application. The interpreter does not link libstdc++, no
   # wheel in the runtime tree does, and the only consumers are apt binaries
@@ -181,8 +191,54 @@ ignore:
   # pin two and leave the third red, this is scoped to the CVE id, which is one
   # flaw in one source package. It stays as narrow as the finding itself.
   - vulnerability: CVE-2026-102010
-    reason: "libstdc++ erase_if use-after-free on a binary-heap priority_queue — needs C++ code performing that operation. Measured 2026-10-05 in the built image: gcc and g++ are both ABSENT, and the only files referencing libstdc++ are apt's six binaries (apt, apt-get, apt-cache, apt-cdrom, apt-config, apt-mark), which run at build time and never during serving. Nothing in the Python runtime tree links it. Reported against libstdc++6, libgcc-s1 and gcc-14-base; not pinned per package because `libstdc++6` is regex-unsafe as a grype package name. Debian fix=not-fixed. Tracking worthless-w7s2."
+    reason: "libstdc++ erase_if use-after-free on a binary-heap priority_queue — needs C++ code performing that operation. Measured 2026-10-05 in the built image: gcc and g++ are both ABSENT, and every ELF file referencing libstdc++ is apt-family (20 files plus the library itself), all of which run at build time and never during serving. Nothing in the Python runtime tree links libstdc++. Reported against libstdc++6, libgcc-s1 and gcc-14-base; not pinned per package because `libstdc++6` is regex-unsafe as a grype package name. Debian fix=not-fixed. Tracking worthless-w7s2."
     expiry: "2026-12-31"  # no fix exists; re-measure the two checks above rather than extending blind.
+
+  # ── libstdc++ aligned operator new, second advisory (worthless-w7s2) ──
+  # Arrived in the grype DB AFTER this branch's local verification passed, and
+  # turned the PR red. Same source package and same three reported binaries as
+  # CVE-2026-102010 above, but a different flaw, so it needs its own entry and
+  # its own argument.
+  #
+  # The flaw (from grype's own record): an integer overflow processing large
+  # inputs to the ALIGNED operator new, which can under-size an allocation.
+  #
+  # This one needs a sharper argument than 102010, because the runtime DOES
+  # link one of the three reported packages. MEASURED IN THE BUILT IMAGE
+  # 2026-10-05, full-filesystem walk with a libc control (751 hits):
+  #
+  #   ELF files referencing libgcc_s   ->  apt-family, AND three Rust
+  #                                        extensions in the Python runtime:
+  #                                        cryptography, pydantic_core,
+  #                                        watchfiles
+  #   ELF files referencing libstdc++  ->  apt-family only (see 102010 above)
+  #
+  # So the question is whether the vulnerable code is in libgcc_s (which we
+  # load) or libstdc++ (which we do not). grype reports libgcc-s1 and
+  # gcc-14-base because they are built from the gcc-14 SOURCE package, not
+  # because the flaw lives in them. Checked at symbol level in the image:
+  #
+  #   _ZnwmSt11align_val_t  (operator new(size_t, align_val_t))
+  #   _ZnamSt11align_val_t  (operator new[](size_t, align_val_t))
+  #     in libstdc++.so.6.0.33  ->  PRESENT, both
+  #     in libgcc_s.so.1        ->  absent, both
+  #     referenced by any of the 3 Rust extensions  ->  no, none of them
+  #   control (_Znwm in libstdc++)  ->  present, so the probe works
+  #
+  # The vulnerable allocator lives only in libstdc++, nothing in the serving
+  # path loads libstdc++, and the libgcc_s that IS loaded does not carry the
+  # symbol. The gcc-14-base and libgcc-s1 rows are source-package attribution.
+  #
+  # Debian fix=not-fixed, and the overflow is present in 3.14's base too, so
+  # there is nowhere to bump. CVE-scoped for the same reason as 102010:
+  # `libstdc++6` is regex-unsafe as a grype package name.
+  #
+  # Re-measure by re-running the symbol check above. This entry dies the day
+  # anything in the runtime tree links libstdc++, which is the same day it
+  # stops being unreachable.
+  - vulnerability: CVE-2026-95619
+    reason: "libstdc++ integer overflow in the aligned operator new. Measured 2026-10-05 in the built image: the vulnerable symbols _ZnwmSt11align_val_t and _ZnamSt11align_val_t are PRESENT in libstdc++.so.6.0.33 and ABSENT from libgcc_s.so.1, and no file in the Python runtime tree links libstdc++ at all. The runtime does link libgcc_s (cryptography, pydantic_core, watchfiles) but none of those three reference the aligned operator new. Reported against libstdc++6, libgcc-s1 and gcc-14-base as source-package attribution; CVE-scoped because `libstdc++6` is regex-unsafe as a grype package name. Debian fix=not-fixed, and present in 3.14's base too. Tracking worthless-w7s2."
+    expiry: "2026-12-31"  # no fix exists; re-run the symbol check rather than extending blind.
 
   # ── perl's POD formatter, base-image only (WOR-934) ─────────────────
   # Arrived with the grype DB refresh of 2026-09-2x and turned main red. It is
