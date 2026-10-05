@@ -191,46 +191,17 @@ ignore:
     reason: "Integer overflow in libstdc++'s aligned operator new: a large request wraps to an undersized allocation, so the caller writes past the block. Hits gcc-14-base, libgcc-s1 and libstdc++6. Debian has no fix in any release (gcc-12/14/15/16 all vulnerable, unfixed — tracker read 2026-10-05). Re-measured 2026-10-05 inside the repinned image (Python 3.13.16): 11 compiled extensions, none linking libstdc++, and the interpreter does not link it either. operator new is the C++ allocation operator and no Worthless code is C++; the gcc runtime is present only because the base image ships it. Tracking worthless-11ix."
     expiry: "2027-01-31"
 
-  # ── CPython tarfile, unreachable here (worthless-jsx6) ──────────────
-  # Different from the two above, and the difference matters: here a stable
-  # fix DOES exist. python:3.14-slim-trixie 3.14.7 is clean. We do not take it
-  # because nothing tests 3.14 — the pyproject classifiers stop at 3.13 and CI
-  # runs 3.10 and 3.13 only, so shipping a 3.14 container would trade a
-  # scanner finding for an untested runtime. That swap is worthless-jsx6's job,
-  # not a side effect of unblocking every open PR.
-  #
-  # MEASURED 2026-09-29, fresh grype DB, bases pulled from the registry:
-  #   python:3.13-slim-trixie  3.13.15  affected
-  #   python:3.14-slim-trixie  3.14.7   clean
-  #
-  # Reachability: the flaw is in tarfile's extraction FILTERS, which only run
-  # during extraction. Nothing here extracts.
-  #
-  # An earlier version of this entry claimed no runtime dependency imports
-  # tarfile. That was FALSE, and review caught it. Corrected by measurement
-  # inside the built image on 2026-10-05:
-  #   keyring/backend.py:16      imports jaraco.context at import time
-  #   jaraco/context/__init__.py:128  evaluates tarfile.data_filter at module
-  #                                   level — the very subsystem at issue
-  #   `import worthless.cli.keystore` leaves tarfile in sys.modules: True
-  #
-  # So tarfile IS loaded in a running worthless process. What still holds is
-  # the part that matters: nothing EXTRACTS. jaraco.context.tarball
-  # (__init__.py:106) is the only tarfile.open/extract site in the runtime
-  # tree, and it has zero callers — grepped across site-packages. `tarfile`
-  # appears nowhere in src/. A filter that never runs cannot be tricked.
-  #
-  # Keep this distinction when re-measuring: the question is not "is tarfile
-  # imported" but "does anything extract an archive".
-  #
-  # To close: land worthless-jsx6 (3.14 in CI + classifiers, then bump the
-  # base image) and DELETE this entry rather than extending it.
-  - vulnerability: CVE-2026-82049
-    package:
-      name: python
-      type: binary
-    reason: "CPython tarfile extraction filters mishandle a hard link to a symlink (CWE-59), letting a crafted archive alter permissions or mtime outside the destination, or expose that file's contents inside the extracted tree. The filters only run during extraction, and nothing here extracts: tarfile appears nowhere in src/, and jaraco.context.tarball — the only tarfile.open/extract site in the runtime tree — has zero callers. Note tarfile IS imported at runtime (keyring imports jaraco.context, which evaluates tarfile.data_filter at module level; measured 2026-10-05 inside the built image), so this is an argument about extraction, not about the module being absent. Fixed in 3.14.0b1 with no 3.13 backport; measured 2026-09-29 that python:3.14-slim-trixie 3.14.7 is clean while 3.13.15 is not, so the fix is a base-image minor bump that needs 3.14 test coverage first. Tracking worthless-jsx6."
-    expiry: "2026-11-30"
+  # CVE-2026-82049 (CPython tarfile extraction filters) was suppressed here
+  # and is now DELETED rather than extended. Repinning the base image to
+  # Python 3.13.16 retired it: measured 2026-10-06 against the built image
+  # with ignores disabled, the finding is absent entirely. This file's rule
+  # is to delete a suppression once its finding is gone, not to leave it
+  # sitting there silencing nothing. The reachability argument it carried
+  # (nothing EXTRACTS archives; tarfile is imported via keyring ->
+  # jaraco.context but jaraco.context.tarball has no callers) is preserved
+  # in tests/test_archive_reachability.py, which still guards the three
+  # older tarfile CVEs below.
+
 
   - vulnerability: CVE-2026-15806
     package:
