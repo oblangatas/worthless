@@ -1,9 +1,20 @@
 """Guard the reachability argument that three .grype.yaml suppressions rest on.
 
-WOR-852. The image carries three CPython ``tarfile`` CVEs — CVE-2026-11940,
-CVE-2026-11972 and CVE-2026-4360 — and all three are suppressed on one claim:
-nothing in ``src/worthless`` ever hands an archive to the stdlib. The proxy
-forwards JSON; it does not open tarballs.
+WOR-852. The image carries four CPython ``tarfile`` CVEs — CVE-2026-11940,
+CVE-2026-11972, CVE-2026-4360 and CVE-2026-82049 (worthless-jsx6, added
+2026-10-05 and living in its own .grype.yaml block with its own expiry) — and
+all four are suppressed on one claim: nothing in ``src/worthless`` ever hands
+an archive to the stdlib. The proxy forwards JSON; it does not open tarballs.
+
+SCOPE, stated because review found it assumed: this walks ``src/worthless``
+only. It says NOTHING about dependencies. That half of the argument rotted
+unnoticed once already — the CVE-2026-82049 entry originally claimed no
+runtime dependency imports ``tarfile``, which was false (``keyring`` imports
+``jaraco.context``, which evaluates ``tarfile.data_filter`` at module level).
+The conclusion survived, because importing the module is not extracting an
+archive and ``jaraco.context.tarball`` has no callers — but nothing here
+would have caught it. Extending this guard across the runtime tree is
+worthless-qtby's sibling work.
 
 That claim was true when it was measured and written down. Nothing stopped it
 from quietly becoming false. A suppression's expiry date cannot catch this —
