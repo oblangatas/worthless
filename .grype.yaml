@@ -159,8 +159,18 @@ ignore:
   # into a full-match regex and the ignore then silences packages it never
   # named. `libstdc++6` carries two `+`, and escaping them adds `\` — also an
   # activator — so there is no spelling of that name the hook will accept.
-  # Keying on the vulnerability alone is the narrower choice here anyway:
-  # CVE-2026-102010 is a gcc advisory and matches nothing else in the image.
+  #
+  # BE CLEAR ABOUT THE COST: dropping `package` makes these entries WIDER, not
+  # narrower. Each one now suppresses its CVE for EVERY package in the image,
+  # not just the gcc runtime. That is tolerable only because both are gcc
+  # advisories that match nothing else here — verified against grype output
+  # with ignores disabled — and not because omitting the key is tidy.
+  #
+  # The expiry hook does not catch this: it guards package names for regex
+  # activators (check_grype_ignore_expiry.py:88-97) but says nothing about a
+  # rule with no package at all. These two entries are the first through that
+  # gap. Closing it — a literal-match flag, so `libstdc++6` can be named —
+  # is worthless-11ix follow-up work, not a reason to keep the wider form.
   #
   # To close: drop this when Debian ships a fixed gcc, or when the base image
   # stops shipping the gcc runtime at all.
