@@ -16,12 +16,25 @@
 # into pre-commit as "supply chain: grype ignores are dated and current".
 # That hook is the ONLY thing stopping a suppression from living forever.
 #
-# ARCHITECTURE: every reachability argument below was measured on **amd64**.
-# These rules match on `package.name` + `type` with no version pin, so they
+# ARCHITECTURE: most reachability arguments below were measured on **amd64**.
+# Those rules match on `package.name` + `type` with no version pin, so they
 # apply to the arm64 image too — but the evidence behind them does not. arm64
 # was scanned once (2026-08-06) and carried the identical findings; nothing
 # keeps that true. WOR-873 added a weekly arm64 scan so divergence surfaces on
 # a Monday rather than at a release tag. Re-MEASURE per-arch before extending.
+#
+# TWO EXCEPTIONS, stated so the next reader does not inherit a wrong default:
+# the libstdc++ pair (CVE-2026-102010, CVE-2026-95619) was measured on an
+# **arm64** image — the probe reported /usr/lib/aarch64-linux-gnu/... — while
+# CI's blocking scan runs amd64. The specific claims (which libraries carry the
+# aligned-operator-new symbols, and that every libstdc++ consumer is apt) come
+# from the same Debian source package on both arches and are not expected to
+# differ, but "not expected to differ" is an argument, not a measurement.
+# Re-run the symbol probe on amd64 before extending either date.
+#
+# Those two also carry an exact `version:` pin, unlike every other rule here.
+# That is deliberate: it makes them stop matching the day Debian bumps the
+# package, so they cannot outlive the fix. See the block above CVE-2026-102010.
 
 ignore:
   - vulnerability: CVE-2026-85091
@@ -183,15 +196,39 @@ ignore:
   # Debian has no fixed version, so there is nothing to bump to. Re-measure by
   # re-running the two checks above; this entry dies the day a C++ extension
   # enters the runtime tree, which is also the day it stops being unreachable.
-  # NO `package:` BLOCK ON PURPOSE. Grype reports this CVE against three
+  # SCOPE, and why it is not per-package. Grype reports this CVE against three
   # binaries of one source package: libstdc++6, libgcc-s1 and gcc-14-base.
-  # Two of those names are safe to pin; `libstdc++6` is not — the `+` turns the
-  # whole name into a full-match regex, which this repo's own expiry hook
-  # rejects because such an entry silences packages it never named. Rather than
-  # pin two and leave the third red, this is scoped to the CVE id, which is one
-  # flaw in one source package. It stays as narrow as the finding itself.
+  # `libgcc-s1` and `gcc-14-base` are safe to name; `libstdc++6` is not — the
+  # `+` arms grype's regex matching, so the whole name becomes a full-match
+  # regex and every `.` in it turns into a wildcard. check_grype_ignore_expiry
+  # rejects such names (REGEX_ACTIVATORS), and escaping does not help: `\+`
+  # adds `\`, which is also an activator.
+  #
+  # An earlier revision of this entry therefore carried NO `package:` block and
+  # called itself "as narrow as the finding itself". That was wrong, and wrong
+  # in the one direction that matters. check_grype_unmapped_findings._is_argued
+  # returns True on an empty scope ("rule named no package: covers everything"),
+  # and that hook's own docstring names this shape as the thing it exists to
+  # prevent: one written argument silently excusing every future package it
+  # never examined — including a first-party one, in any ecosystem.
+  #
+  # So it is scoped as narrowly as the tooling permits instead: `type: deb`
+  # plus the exact source-package version. MEASURED, by contrast, that grype
+  # honours the version (grype 0.114.0, this image): the same rule at
+  # version 14.2.0-19 suppresses all 3 matches; at 99.9.9-99 it suppresses 0
+  # of 3. That is what makes this safe to date — the waiver stops matching the
+  # moment Debian bumps the package, which is the same moment a fix exists and
+  # the finding becomes actionable. It cannot outlive the fix.
+  #
+  # Residual breadth, stated honestly: `type: deb` without a name still covers
+  # any Debian package at that exact version, and the unmapped hook reads only
+  # name+type (it ignores `version`), so to that hook the scope is "any deb".
+  # Narrower than "everything"; not as narrow as a name.
   - vulnerability: CVE-2026-102010
-    reason: "libstdc++ erase_if use-after-free on a binary-heap priority_queue — needs C++ code performing that operation. Measured 2026-10-05 in the built image: gcc and g++ are both ABSENT, and every ELF file referencing libstdc++ is apt-family (20 files plus the library itself), all of which run at build time and never during serving. Nothing in the Python runtime tree links libstdc++. Reported against libstdc++6, libgcc-s1 and gcc-14-base; not pinned per package because `libstdc++6` is regex-unsafe as a grype package name. Debian fix=not-fixed. Tracking worthless-w7s2."
+    package:
+      type: deb
+      version: 14.2.0-19
+    reason: "libstdc++ erase_if use-after-free on a binary-heap priority_queue — needs C++ code performing that operation. Measured 2026-10-05 in the built image: gcc and g++ are both ABSENT, and every ELF file referencing libstdc++ is apt-family (20 files plus the library itself), all of which run at build time and never during serving. Nothing in the Python runtime tree links libstdc++. Reported against libstdc++6, libgcc-s1 and gcc-14-base; scoped to `type: deb` at the exact version 14.2.0-19 rather than by name, because `libstdc++6` is regex-unsafe as a grype package name; the version pin makes this waiver stop matching the day Debian bumps the package. Debian fix=not-fixed. Tracking worthless-w7s2."
     expiry: "2026-12-31"  # no fix exists; re-measure the two checks above rather than extending blind.
 
   # ── libstdc++ aligned operator new, second advisory (worthless-w7s2) ──
@@ -237,7 +274,10 @@ ignore:
   # anything in the runtime tree links libstdc++, which is the same day it
   # stops being unreachable.
   - vulnerability: CVE-2026-95619
-    reason: "libstdc++ integer overflow in the aligned operator new. Measured 2026-10-05 in the built image: the vulnerable symbols _ZnwmSt11align_val_t and _ZnamSt11align_val_t are PRESENT in libstdc++.so.6.0.33 and ABSENT from libgcc_s.so.1, and no file in the Python runtime tree links libstdc++ at all. The runtime does link libgcc_s (cryptography, pydantic_core, watchfiles) but none of those three reference the aligned operator new. Reported against libstdc++6, libgcc-s1 and gcc-14-base as source-package attribution; CVE-scoped because `libstdc++6` is regex-unsafe as a grype package name. Debian fix=not-fixed, and present in 3.14's base too. Tracking worthless-w7s2."
+    package:
+      type: deb
+      version: 14.2.0-19
+    reason: "libstdc++ integer overflow in the aligned operator new. Measured 2026-10-05 in the built image: the vulnerable symbols _ZnwmSt11align_val_t and _ZnamSt11align_val_t are PRESENT in libstdc++.so.6.0.33 and ABSENT from libgcc_s.so.1, and no file in the Python runtime tree links libstdc++ at all. The runtime does link libgcc_s (cryptography, pydantic_core, watchfiles) but none of those three reference the aligned operator new. Reported against libstdc++6, libgcc-s1 and gcc-14-base as source-package attribution; scoped to `type: deb` at the exact version 14.2.0-19 rather than by name, because `libstdc++6` is regex-unsafe as a grype package name; the version pin makes this waiver stop matching the day Debian bumps the package. Debian fix=not-fixed, and present in 3.14's base too. Tracking worthless-w7s2."
     expiry: "2026-12-31"  # no fix exists; re-run the symbol check rather than extending blind.
 
   # ── perl's POD formatter, base-image only (WOR-934) ─────────────────
