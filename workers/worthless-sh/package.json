@@ -23,7 +23,8 @@
     "wrangler": "^4.147.0"
   },
   "overrides": {
-    "sharp": "^0.35.4",
-    "undici": "^7.30.0"
+    "sharp": "^0.35.5",
+    "undici": "^7.30.0",
+    "source-map-js": "^1.2.2"
   }
 }

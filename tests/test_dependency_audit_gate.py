@@ -228,11 +228,20 @@ def test_dependabot_covers_the_worker() -> None:
 
 # ── sharp override (worthless-kzfq) ────────────────────────────────────────
 #
-# GHSA-rgj7-g3m4-5g8c (libheif heap overflow, CWE-122) covers sharp < 0.35.4.
+# TWO advisories now, and the floor is the later one:
+#   GHSA-rgj7-g3m4-5g8c  libheif heap overflow, CWE-122   sharp < 0.35.4
+#   GHSA-wq5f-xc86-pv6w  librsvg CVE-2026-96889           sharp < 0.35.5
+# The second landed 2026-10-07 and made the then-current 0.35.4 pin vulnerable,
+# so the floor moved to 0.35.5. Leaving it at 0.35.4 would have let this guard
+# bless a pin inside a live advisory — exactly what it exists to prevent.
+#
 # miniflare pins `"sharp": "0.35.2"` EXACTLY, so npm's resolver can only walk
-# backwards: its only offered fix was @cloudflare/vitest-pool-workers 0.22.0 ->
-# 0.8.30, isSemVerMajor. An `overrides` entry reaches the patch instead, and
-# takes the audit to 0 vulnerabilities with every other version unchanged.
+# backwards: its offered fix was @cloudflare/vitest-pool-workers 0.22.0 ->
+# 0.8.30, isSemVerMajor, and on the second wave a wrangler downgrade to 4.15.2.
+# An `overrides` entry reaches the patch instead, and takes the audit to 0
+# vulnerabilities with every other version unchanged. miniflare, wrangler and
+# vitest-pool-workers appear in the audit only BECAUSE they depend on sharp;
+# one bump clears all three.
 #
 # Why these tests exist when `npm audit` already gates this in CI: that job
 # resolves advisories from the registry at run time. It is exactly as available
@@ -242,8 +251,8 @@ def test_dependabot_covers_the_worker() -> None:
 
 WORKER = REPO / "workers" / "worthless-sh"
 
-# The first version outside the advisory's `<0.35.4` range.
-SHARP_FIXED = (0, 35, 4)
+# The first version outside BOTH advisories; the binding one is `<0.35.5`.
+SHARP_FIXED = (0, 35, 5)
 
 
 def _version_tuple(raw: str) -> tuple[int, ...]:
@@ -272,7 +281,7 @@ def test_worker_sharp_is_not_vulnerable() -> None:
 
     stale = {p: v for p, v in found.items() if _version_tuple(v) < SHARP_FIXED}
     assert not stale, (
-        f"sharp back inside GHSA-rgj7-g3m4-5g8c's `<0.35.4` range: {stale}. "
+        f"sharp back inside GHSA-wq5f-xc86-pv6w's `<0.35.5` range: {stale}. "
         "The override in workers/worthless-sh/package.json is the thing that "
         "holds this; check it survived the last relock."
     )
@@ -292,7 +301,8 @@ def test_sharp_override_is_declared() -> None:
     assert override, (
         "overrides.sharp is gone from workers/worthless-sh/package.json. "
         "miniflare pins sharp exactly, so without it the next `npm install` "
-        "resolves back to 0.35.2 and re-opens GHSA-rgj7-g3m4-5g8c."
+        "resolves back to 0.35.2 and re-opens GHSA-rgj7-g3m4-5g8c and "
+        "GHSA-wq5f-xc86-pv6w."
     )
     assert _version_tuple(override.lstrip("^~>=")) >= SHARP_FIXED, (
         f"overrides.sharp is {override!r}, which still allows a version inside "
