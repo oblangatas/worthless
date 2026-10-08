@@ -474,3 +474,44 @@ class TestTheOfferCannotAbortACommittedLock:
             "_sync_fernet_after_lock must run BEFORE the service offer: anything "
             "raised by the offer would otherwise skip it on a committed lock"
         )
+
+
+class TestTheDeclineHintIsHonestOnWsl:
+    """The hint must not re-make the promise the question was rewritten to drop.
+
+    Review (Cursor Bugbot, 2026-10-08), defect 11 — the same shape as 9 and 10:
+    one message was fixed and its sibling left alone. `_offer_question()` stops
+    telling WSL users the proxy keeps running after their terminal closes, but
+    the decline hint still said exactly that. On a piped lock the hint is the
+    ONLY thing printed, and on a declined prompt it lands one line under the
+    honest question and contradicts it.
+    """
+
+    def _hint(self, console: WorthlessConsole, capsys, *, on_wsl: bool, tty: bool) -> str:
+        with (
+            patch("worthless.cli.commands.lock.is_wsl", return_value=on_wsl),
+            patch("worthless.cli.commands.lock._scan_prompt_is_tty", return_value=tty),
+            patch("worthless.cli.commands.lock._backend") as backend,
+            patch("worthless.cli.commands.lock.typer.confirm", return_value=False),
+            patch("worthless.cli.commands.lock.install_service_for_offer"),
+        ):
+            backend.return_value.detect_status.return_value = MagicMock(
+                state=ServiceState.NOT_INSTALLED
+            )
+            _offer_service_after_lock(console, home=_home(), port=8787)
+        return _flat(capsys.readouterr())
+
+    @pytest.mark.parametrize("tty", [True, False], ids=["declined-at-tty", "piped"])
+    def test_wsl_is_not_promised_terminal_survival(
+        self, console: WorthlessConsole, capsys: pytest.CaptureFixture[str], tty: bool
+    ) -> None:
+        hint = self._hint(console, capsys, on_wsl=True, tty=tty).lower()
+        assert "keep running after you close this terminal" not in hint
+        assert "worthless service install" in hint, "it must still name the command"
+
+    @pytest.mark.parametrize("tty", [True, False], ids=["declined-at-tty", "piped"])
+    def test_off_wsl_the_hint_is_unchanged(
+        self, console: WorthlessConsole, capsys: pytest.CaptureFixture[str], tty: bool
+    ) -> None:
+        hint = self._hint(console, capsys, on_wsl=False, tty=tty).lower()
+        assert "keep running after you close this terminal" in hint

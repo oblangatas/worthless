@@ -2976,9 +2976,23 @@ def install_service_for_offer(home: WorthlessHome, *, port: int) -> None:
     _backend().install(home, port=port)
 
 
-_OFFER_DECLINED_HINT = (
-    "Want it to keep running after you close this terminal? `worthless service install`"
-)
+def _offer_declined_hint() -> str:
+    """What to print when the offer is declined, or never asked.
+
+    WSL gets different words for the same reason `_offer_question()` does: the
+    plain version promises the proxy keeps running after the terminal closes,
+    and WSL does not honour that. It matters more here than in the question —
+    on a piped lock this hint is the ONLY thing printed, and on a declined
+    prompt it lands one line under the honest question and contradicts it.
+    (Review, defect 11, 2026-10-08.)
+    """
+    if is_wsl():
+        return (
+            "Want a background service? `worthless service install` — on WSL it also "
+            "needs instanceIdleTimeout=-1 in %USERPROFILE%\\.wslconfig to outlive "
+            "your last terminal."
+        )
+    return "Want it to keep running after you close this terminal? `worthless service install`"
 
 
 def _offer_question(port: int) -> str:
@@ -3022,7 +3036,7 @@ def _offer_service_after_lock(console, *, home: WorthlessHome, port: int) -> boo
     # no prompt at all (confirmed live, 2026-10-05). --yes auto-approves
     # PROMPTS; where nobody can see a prompt there is nothing to approve.
     if not _scan_prompt_is_tty():
-        console.print_hint(_OFFER_DECLINED_HINT)
+        console.print_hint(_offer_declined_hint())
         return False
 
     # Nothing to offer if one is already installed. install() rewrites the unit
@@ -3047,11 +3061,11 @@ def _offer_service_after_lock(console, *, home: WorthlessHome, port: int) -> boo
         except (typer.Abort, EOFError):
             # Ctrl-C or Ctrl-D at a real terminal. The gate above already excluded
             # the captured-stdin case, which raises OSError rather than EOFError.
-            console.print_hint(_OFFER_DECLINED_HINT)
+            console.print_hint(_offer_declined_hint())
             return False
 
     if not accepted:
-        console.print_hint(_OFFER_DECLINED_HINT)
+        console.print_hint(_offer_declined_hint())
         return False
 
     try:
