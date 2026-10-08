@@ -17,7 +17,7 @@ from worthless.cli.bootstrap import WorthlessHome
 from worthless.cli.commands.scan import _format_human
 from worthless.cli.key_patterns import KEY_PATTERN
 from worthless.cli import scanner as scanner_mod
-from worthless.cli.scanner import ScanFinding, scan_files
+from worthless.cli.scanner import ScanFinding, format_sarif, scan_files
 
 from tests.helpers import fake_key
 from tests.helpers import fake_openai_key as _fake_openai_key
@@ -1030,6 +1030,24 @@ class TestScanAgreesWithLockOnOAuthTokens:
         # Never "0 unprotected" next to a live plaintext token.
         assert "0 unprotected" not in low, out
 
+    def test_sarif_keeps_a_protected_key_as_a_warning(self) -> None:
+        # Pre-existing behaviour, moved into _sarif_verdict by this PR: a key
+        # worthless protects is reported at "warning", never as a login token.
+        protected = ScanFinding(
+            file="/p/.env",
+            line=1,
+            var_name="OPENAI_API_KEY",
+            provider="openai",
+            is_protected=True,
+            value_preview="****",
+        )
+
+        [res] = format_sarif([protected], "0")["runs"][0]["results"]
+
+        assert res["level"] == "warning", res
+        assert res["ruleId"] == "worthless/exposed-api-key", res
+        assert "(protected by worthless)" in res["message"]["text"], res
+
     def test_a_file_with_an_unprotectable_token_never_reads_as_clean(self) -> None:
         findings = [
             ScanFinding(
@@ -1241,6 +1259,41 @@ class TestScanAgreesWithLockOnOAuthTokens:
 
         assert finding.is_login_token is True
         assert finding.is_unshardable is False
+
+    def test_a_gitignored_env_in_a_repo_passes(self, tmp_path: Path) -> None:
+        # The everyday local setup: a project repo whose .env is gitignored.
+        env = self._env(tmp_path, self._oauth("p55g-gitignored"))
+        subprocess.run(["git", "init", "-q", str(env.parent)], check=True)  # noqa: S607
+        (env.parent / ".gitignore").write_text(".env\n")
+
+        [finding] = scan_files([env])
+
+        assert finding.is_unshardable is True
+
+    @pytest.mark.parametrize(
+        ("returncode", "stderr"),
+        [(1, b"error: pathspec '.env' did not match"), (128, b"fatal: not a git repository")],
+        ids=["untracked-in-repo", "not-a-repo"],
+    )
+    def test_a_clear_untracked_answer_lets_the_token_pass(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        returncode: int,
+        stderr: bytes,
+    ) -> None:
+        # Only these two answers mean "not in git". Pinned with a simulated git,
+        # so the test doesn't depend on whether TMPDIR sits inside a repo.
+        env = self._env(tmp_path, self._oauth(f"p55g-clear-{returncode}"))
+
+        def fake_git(cmd, **_kwargs):  # noqa: ANN001, ANN202
+            return subprocess.CompletedProcess(cmd, returncode, b"", stderr)
+
+        monkeypatch.setattr(scanner_mod.subprocess, "run", fake_git)
+
+        [finding] = scan_files([env])
+
+        assert finding.is_unshardable is True
 
     def test_git_is_asked_once_per_file_not_once_per_token(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
