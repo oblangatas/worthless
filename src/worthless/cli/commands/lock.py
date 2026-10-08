@@ -29,6 +29,7 @@ from worthless.cli.bootstrap import WorthlessHome, acquire_lock, get_home
 from worthless.cli.code_scanner import scan_for_hardcoded_provider_urls
 from worthless.cli.commands.service import _backend, _print_service_banner
 from worthless.cli.commands.service._common import (
+    ServiceState,
     current_platform_backend_name,
     preflight_service_install,
 )
@@ -3013,6 +3014,20 @@ def _offer_service_after_lock(console, *, home: WorthlessHome, port: int) -> boo
     # PROMPTS; where nobody can see a prompt there is nothing to approve.
     if not _scan_prompt_is_tty():
         console.print_hint(_OFFER_DECLINED_HINT)
+        return False
+
+    # Nothing to offer if one is already installed. install() rewrites the unit
+    # and on launchd boots out the running agent first, so re-running it over a
+    # working service risks stopping it — and rollback would not restore it,
+    # because the file it would delete is not one this call created. A second
+    # lock with new keys used to ask again and do exactly that.
+    # (Cursor Bugbot, 2026-10-08.)
+    try:
+        if _backend().detect_status(home, port).state is not ServiceState.NOT_INSTALLED:
+            return False
+    except (WorthlessError, subprocess.CalledProcessError, OSError):
+        # Cannot tell. Saying nothing beats crashing a lock that worked, and
+        # beats installing over something we failed to inspect.
         return False
 
     if console.assume_yes:

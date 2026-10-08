@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+
 import os
 from pathlib import Path
 
@@ -147,6 +149,13 @@ def install(home: WorthlessHome, *, port: int | None = None) -> None:
         run_cmd(["launchctl", "kickstart", "-k", _service_target()])
     except BaseException:
         if created_here:
+            # A successful `bootstrap` followed by a failed `kickstart` leaves
+            # the job loaded. Removing only the plist would leave a loaded job
+            # with nothing behind it, while detect_status reports NOT_INSTALLED.
+            # Best-effort, and deliberately not allowed to skip the unlink:
+            # if launchctl itself is what blew up, the plist must still go.
+            with contextlib.suppress(Exception):
+                run_cmd(["launchctl", "bootout", _launchctl_domain(), str(path)], check=False)
             path.unlink(missing_ok=True)
         raise
     report_proxy_health(actual_port)

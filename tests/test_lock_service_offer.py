@@ -22,6 +22,7 @@ import typer
 
 from worthless.cli.commands.lock import _offer_service_after_lock
 from worthless.cli.console import WorthlessConsole
+from worthless.cli.commands.service._common import ServiceState
 from worthless.cli.errors import ErrorCode, WorthlessError
 
 
@@ -306,3 +307,57 @@ class TestWslIsAskedHonestly:
         question = self._ask(console, on_wsl=False)
         assert "after this terminal closes" in question
         assert "instanceIdleTimeout" not in question
+
+
+class TestNoOfferWhenAlreadyInstalled:
+    """Do not re-run install() over a service that already exists.
+
+    Review (Cursor Bugbot, 2026-10-08): the offer never checked. A second lock
+    with new keys asked again, and accepting called the full install(), which
+    rewrites the unit and on launchd boots out the running agent first. If
+    activation then failed, rollback would NOT restore it — `created_here` is
+    false for a file that already existed — so a working proxy could be left
+    stopped while lock reported success.
+    """
+
+    def _offer_with_state(self, console: WorthlessConsole, state):
+        backend = MagicMock()
+        backend.detect_status.return_value = MagicMock(state=state)
+        with (
+            patch("worthless.cli.commands.lock._backend", return_value=backend),
+            patch("worthless.cli.commands.lock._scan_prompt_is_tty", return_value=True),
+            patch("worthless.cli.commands.lock.typer.confirm", return_value=True) as confirm,
+            patch("worthless.cli.commands.lock.install_service_for_offer") as install,
+            patch("worthless.cli.commands.lock._print_service_banner"),
+        ):
+            accepted = _offer_service_after_lock(console, home=_home(), port=8787)
+        return accepted, confirm, install
+
+    @pytest.mark.parametrize(
+        "state", [ServiceState.RUNNING, ServiceState.STOPPED, ServiceState.FAILED]
+    )
+    def test_existing_service_is_not_touched(self, console: WorthlessConsole, state) -> None:
+        accepted, confirm, install = self._offer_with_state(console, state)
+        assert accepted is False
+        confirm.assert_not_called()
+        install.assert_not_called()
+
+    def test_still_offers_when_nothing_is_installed(self, console: WorthlessConsole) -> None:
+        accepted, confirm, install = self._offer_with_state(console, ServiceState.NOT_INSTALLED)
+        assert accepted is True
+        confirm.assert_called_once()
+        install.assert_called_once()
+
+    def test_a_broken_detect_does_not_fail_the_lock(self, console: WorthlessConsole) -> None:
+        """If we cannot tell, say nothing rather than crash a successful lock."""
+        backend = MagicMock()
+        backend.detect_status.side_effect = OSError("launchctl missing")
+        with (
+            patch("worthless.cli.commands.lock._backend", return_value=backend),
+            patch("worthless.cli.commands.lock._scan_prompt_is_tty", return_value=True),
+            patch("worthless.cli.commands.lock.typer.confirm") as confirm,
+            patch("worthless.cli.commands.lock.install_service_for_offer") as install,
+        ):
+            assert _offer_service_after_lock(console, home=_home(), port=8787) is False
+        confirm.assert_not_called()
+        install.assert_not_called()
