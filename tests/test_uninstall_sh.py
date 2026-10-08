@@ -52,7 +52,16 @@ def test_tier2_wipes_a_broken_install(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert not home.exists(), "Tier 2 must wipe ~/.worthless"
     combined = (result.stdout + result.stderr).lower()
-    assert "rotate" in combined, "must tell the user to rotate their keys"
+    # Assert the SPECIFIC sentence, not the bare word "rotate". The .env
+    # follow-up line ("These .env files still hold an inert key half (rotate
+    # the keys they used)") also contains it and fires on a different
+    # condition, so a substring check here passes even when the real warning
+    # has gone missing — measured: deleting the warning entirely left all 16
+    # tests green. This wipe DID strand real keys, so this is the one case
+    # where demanding a rotation is true and must not be silenced.
+    assert "could not be restored automatically" in combined, (
+        "a wipe that stranded locked keys must say so explicitly:\n" + combined
+    )
 
 
 def test_tier2_wipes_even_without_a_database(tmp_path: Path) -> None:
@@ -521,6 +530,25 @@ def test_the_custom_bin_dir_user_can_actually_finish(tmp_path: Path) -> None:
     assert second.returncode == 0, f"run 2 must finish the cleanup, not refuse again:\n{out}"
     uv_log = tmp_path / "uv.log"
     assert "tool uninstall worthless" in uv_log.read_text(), "run 2 must remove the tool"
+
+    # Terminating is not enough — run 2 also has to tell the truth. This user
+    # followed the advice, so `worthless uninstall` already put every key back.
+    # Telling them the keys could not be restored, and to rotate at the
+    # provider, is WOR-597's own failure inverted: the script lying about key
+    # state. Rotating live credentials is expensive and irreversible-ish; a
+    # false alarm here costs real money and trust.
+    assert "rotate them at your provider" not in out, (
+        "run 2 told a user whose keys were just restored to rotate them:\n" + out
+    )
+    assert "could NOT be restored" not in out, (
+        "run 2 claimed the restore failed after it succeeded:\n" + out
+    )
+    # And it must not claim nothing was there — a worthless IS on PATH; the
+    # script simply declined to trust it. Saying "none found" is a different
+    # untruth about the same situation.
+    assert "No working 'worthless' binary found" not in out, (
+        "run 2 reported no binary while one answers on PATH:\n" + out
+    )
 
 
 def test_force_wipes_when_the_copy_cannot_be_verified(tmp_path: Path) -> None:

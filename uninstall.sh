@@ -375,15 +375,32 @@ refuse_unverified_copy() {
 # Tier 2: no working binary → wipe what a script safely can, and be honest that
 # the keys cannot be restored.
 tier2_wipe() {
-    # Two ways in: nothing usable exists, or --force overrode a copy we would
-    # not trust. Saying "none found" in the second case is simply untrue.
+    # Is there anything left to lose? If the home is already gone there are no
+    # locked keys here — either `worthless uninstall` put them all back (the
+    # exact path refuse_unverified_copy sends people down) or nothing was ever
+    # locked. Both make every "your keys are stranded, go rotate them" line
+    # below a lie, and that is WOR-597's own failure class inverted: the script
+    # misreporting key state. Telling someone to rotate live credentials they
+    # already recovered costs them real money and real trust.
+    _t2_had_state=0
+    [ -d "$WORTHLESS_HOME_DIR" ] && _t2_had_state=1
+
+    # Three ways in, and they are not the same sentence. Saying "none found"
+    # when a copy answers on PATH — we simply refused to trust it — is untrue.
     if [ "$FORCE" = "1" ]; then
         warn "Wiping without restoring your keys (--force)."
+    elif command -v worthless >/dev/null 2>&1; then
+        warn "The 'worthless' on your PATH could not be verified, so it was not run."
     else
         warn "No working 'worthless' binary found."
     fi
-    warn "A plain script can't unscramble your split keys — only the program can — so"
-    warn "your real keys can't be restored here. Wiping the leftovers anyway."
+
+    if [ "$_t2_had_state" = "1" ]; then
+        warn "A plain script can't unscramble your split keys — only the program can — so"
+        warn "your real keys can't be restored here. Wiping the leftovers anyway."
+    else
+        warn "Nothing left here to restore — clearing the leftovers."
+    fi
     printf "\n"
 
     envs="$(list_affected_envs || true)"
@@ -401,7 +418,12 @@ tier2_wipe() {
 
     ok "Worthless removed from this machine."
     printf "\n"
-    warn "Your real API keys could NOT be restored automatically — rotate them at your provider."
+    # Only a wipe that destroyed locked state stranded anything. See the
+    # _t2_had_state comment above: with no home there were no keys here to
+    # strand, so demanding a rotation would be a false alarm.
+    if [ "$_t2_had_state" = "1" ]; then
+        warn "Your real API keys could NOT be restored automatically — rotate them at your provider."
+    fi
     if [ -n "${envs:-}" ]; then
         printf "\n  These .env files still hold an inert key half (rotate the keys they used):\n" >&2
         printf '%s\n' "$envs" | sed 's/^/    /' >&2
