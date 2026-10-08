@@ -21,7 +21,6 @@ from worthless.cli.bootstrap import (
     resolve_home,
 )
 from worthless.cli.errors import ErrorCode, WorthlessError
-from worthless.cli.key_patterns import UNSHARDABLE_REMEDY
 from worthless.cli.process import check_proxy_health, resolve_port
 from worthless.storage.sqlite import connect as sqlite_connect
 
@@ -237,10 +236,11 @@ async def worthless_scan(
     Detects unprotected API keys in .env files and config files.
     Returns structured findings with provider, location, and protection status.
 
-    ``summary.unprotected`` counts keys ``worthless lock`` can fix. A Claude
-    Code login token in a .env file is counted in ``summary.unshardable``
-    instead: lock can't protect it, so don't run lock for it — follow the
-    finding's ``remediation``. ``unshardable > 0`` means the file is NOT clean.
+    ``summary.unprotected`` counts every key that isn't protected.
+    ``summary.unshardable`` is the subset ``worthless lock`` can't fix: a
+    Claude Code login token in a local, uncommitted .env file. Don't run lock
+    for those — follow the finding's ``remediation``. Any finding with a
+    ``remediation`` is a login token lock refuses, wherever it sits.
 
     Args:
         paths: Files to scan. If empty, scans .env and .env.local in cwd.
@@ -255,7 +255,7 @@ async def worthless_scan(
         _collect_fast_paths,
         _load_db_state_async,
     )
-    from worthless.cli.scanner import SkippedFile, scan_files
+    from worthless.cli.scanner import SkippedFile, remediation_for, scan_files
 
     explicit = [Path(p) for p in (paths or [])]
 
@@ -303,11 +303,7 @@ async def worthless_scan(
                 # Counted apart from "unprotected" so an agent doesn't loop on
                 # `worthless lock` for it.
                 "is_unshardable": f.is_unshardable,
-                **(
-                    {"remediation": UNSHARDABLE_REMEDY}
-                    if f.is_unshardable and not f.is_protected
-                    else {}
-                ),
+                **({"remediation": remediation_for(f)} if remediation_for(f) else {}),
                 "value_preview": f.value_preview,
             }
             for f in findings
@@ -315,7 +311,7 @@ async def worthless_scan(
 
         protected = sum(1 for f in findings if f.is_protected)
         unshardable = sum(1 for f in findings if f.is_unshardable and not f.is_protected)
-        unprotected = len(findings) - protected - unshardable
+        unprotected = len(findings) - protected  # unshardable is a subset of this
 
         return json.dumps(
             {

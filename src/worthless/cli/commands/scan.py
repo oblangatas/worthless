@@ -24,7 +24,7 @@ from worthless.cli.safe_rewrite import _BASENAME_ALLOWLIST
 from worthless.cli.code_scanner import CodeFinding, scan_for_hardcoded_provider_urls
 from worthless.cli.console import get_console
 from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary
-from worthless.cli.key_patterns import KEY_PATTERN, UNSHARDABLE_REMEDY
+from worthless.cli.key_patterns import KEY_PATTERN, LEAKED_LOGIN_REMEDY, UNSHARDABLE_REMEDY
 from worthless.cli.platform import is_wsl
 from worthless.cli.redaction import key_fingerprint
 from worthless.cli.dotenv_rewriter import build_enrolled_locations
@@ -36,6 +36,7 @@ from worthless.cli.scanner import (
     ScanFinding,
     SkippedFile,
     format_sarif,
+    remediation_for,
     scan_files,
 )
 from worthless.cli.confusables import (
@@ -239,10 +240,14 @@ def _exposure_noun(files: Sequence[str]) -> tuple[str, str]:
 def _summary_line(
     total: int, protected: int, unprotected: int, broken: int, unshardable: int = 0
 ) -> str:
-    """Trailing count line; the broken and can't-protect segments only appear when non-zero."""
+    """Trailing count line; the broken and can't-protect segments only appear when non-zero.
+
+    ``unprotected`` counts every key that isn't protected; ``unshardable`` is
+    the subset lock can't fix — never "0 unprotected" beside a live token.
+    """
     line = f"Found {total} keys: {protected} protected, {unprotected} unprotected"
     if unshardable:
-        line += f", {unshardable} can't protect"
+        line += f" ({unshardable} can't protect)"
     return f"{line}, {broken} broken" if broken else line
 
 
@@ -293,6 +298,28 @@ def _unshardable_lines(findings: Sequence[ScanFinding], committing: bool = False
     return lines
 
 
+def _leaked_token_lines(findings: Sequence[ScanFinding]) -> list[str]:
+    """A login token outside an untracked .env file: in git, a non-.env file, a
+    symlink, or the environment. It fails the build, and the fix is to revoke
+    it — never "run worthless lock", which refuses it wherever it sits.
+    """
+    names = [
+        sanitise_for_message(f.var_name or f.provider)
+        for f in findings
+        if f.is_login_token and _is_exposed(f)
+    ]
+    if not names:
+        return []
+    s = "s" if len(names) != 1 else ""
+    return [
+        "",
+        f"Exposed {len(names)} Claude Code login token{s}: {', '.join(names)}.",
+        "`worthless lock` refuses this kind of token, and this one can leave "
+        "the machine (git, a non-.env file, a symlink, or the environment).",
+        LEAKED_LOGIN_REMEDY,
+    ]
+
+
 def _orphan_lines(orphans: Sequence[EnrollmentRecord]) -> list[str]:
     """HF5: dedicated section for broken DB rows + recovery hint.
 
@@ -313,7 +340,11 @@ def _has_lockable_exposure(findings: Sequence[ScanFinding]) -> bool:
     lock rewrites in place and refuses any basename outside the .env family, so
     "Run: worthless lock" is only followable advice when one of these exists.
     """
-    return any(Path(f.file).name in _BASENAME_ALLOWLIST for f in findings if _is_exposed(f))
+    return any(
+        Path(f.file).name in _BASENAME_ALLOWLIST
+        for f in findings
+        if _is_exposed(f) and not f.is_login_token
+    )
 
 
 def _scan_verdict_line(
@@ -323,10 +354,17 @@ def _scan_verdict_line(
     broken: int,
     files: Sequence[str] = (),
     unshardable: int = 0,
+    tokens_only: bool = False,
 ) -> str:
-    """WOR-779: the one-line verdict scan leads with (verdict-first)."""
+    """WOR-779: the one-line verdict scan leads with (verdict-first).
+
+    ``tokens_only``: every exposed key is a login token, so "run worthless
+    lock" would be the p55g dead end — the fix is spelled out below instead.
+    """
     if unprotected > 0:
         where, remedy = _exposure_noun(files)
+        if tokens_only:
+            remedy = " See below."
         location = f" in {where}" if where else ""
         return (
             f"{protected} of {total} keys protected — "
@@ -410,7 +448,9 @@ def _format_human(
 
     lines.append("")
     lines.append(
-        _summary_line(total, protected_count, unprotected_count, len(orphans), unshardable_count)
+        _summary_line(
+            total, protected_count, total - protected_count, len(orphans), unshardable_count
+        )
     )
 
     # Only point at lock when lock can actually act: its basename allowlist
@@ -424,6 +464,8 @@ def _format_human(
             lines.append("See: docs.worthless.dev/ci-setup")
 
     lines.extend(_unshardable_lines(findings, committing))
+    lines.extend(_leaked_token_lines(findings))
+    exposed = [f for f in findings if _is_exposed(f)]
 
     # WOR-779: lead with a plain verdict ("am I safe?") before the per-finding
     # detail. scan is the only surface that sees plaintext-in-.env, so the
@@ -436,8 +478,9 @@ def _format_human(
             unprotected_count,
             total,
             len(orphans),
-            files=[f.file for f in findings if _is_exposed(f)],
+            files=[f.file for f in exposed],
             unshardable=unshardable_count,
+            tokens_only=bool(exposed) and all(f.is_login_token for f in exposed),
         ),
     )
 
@@ -464,8 +507,9 @@ def _format_json_findings(findings: list[ScanFinding], orphans: list | None = No
             "is_unshardable": f.is_unshardable,
             "value_preview": f.value_preview,
         }
-        if f.is_unshardable and not f.is_protected:
-            item["remediation"] = UNSHARDABLE_REMEDY
+        remedy = remediation_for(f)
+        if remedy:
+            item["remediation"] = remedy
         items.append(item)
     orphan_items = [
         {

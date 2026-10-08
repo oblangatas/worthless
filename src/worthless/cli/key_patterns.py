@@ -83,8 +83,16 @@ def is_oauth_token(value: str) -> bool:
 # drift apart. It deliberately does not say "run worthless lock" — lock skips
 # this token, and that advice is the dead end the user was stuck in.
 UNSHARDABLE_REMEDY = (
-    "worthless can only protect a static API key (sk-ant-api03-...). "
+    "worthless can only protect a static API key (sk-ant-api03-..., billed per token, "
+    "not by subscription). "
     "Swap the token for one, or delete the line if nothing reads it."
+)
+
+# The same token anywhere it can leave the machine — a file git tracks, a
+# non-.env file, a symlink, the environment. Still never "run worthless lock".
+LEAKED_LOGIN_REMEDY = (
+    "Treat it as leaked: revoke it, then take it out of the file "
+    "(and out of git with `git rm --cached`, if it was committed)."
 )
 
 

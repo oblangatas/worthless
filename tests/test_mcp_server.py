@@ -334,8 +334,13 @@ class TestWorthlessScan:
         assert finding["is_protected"] is False
         assert finding["is_unshardable"] is True, finding
         assert "sk-ant-api03" in finding["remediation"], finding
-        assert result["summary"]["unprotected"] == 0, result["summary"]
-        assert result["summary"]["unshardable"] == 1, result["summary"]
+        # Additive contract: "unprotected" keeps its meaning (not protected), so
+        # an agent checking unprotected == 0 never reads this file as clean.
+        # "unshardable" is the subset lock can't fix.
+        summary = result["summary"]
+        assert summary["unprotected"] == 1, summary
+        assert summary["unshardable"] == 1, summary
+        assert summary["total"] == summary["protected"] + summary["unprotected"], summary
 
     @pytest.mark.asyncio
     async def test_scan_no_paths_defaults(

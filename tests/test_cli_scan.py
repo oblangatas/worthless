@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -15,6 +16,7 @@ from worthless.cli.app import app
 from worthless.cli.bootstrap import WorthlessHome
 from worthless.cli.commands.scan import _format_human
 from worthless.cli.key_patterns import KEY_PATTERN
+from worthless.cli import scanner as scanner_mod
 from worthless.cli.scanner import ScanFinding, scan_files
 
 from tests.helpers import fake_key
@@ -1025,6 +1027,8 @@ class TestScanAgreesWithLockOnOAuthTokens:
         assert "can't protect" in low, out
         assert "plain text" in low, out
         assert "sk-ant-api03" in low, out
+        # Never "0 unprotected" next to a live plaintext token.
+        assert "0 unprotected" not in low, out
 
     def test_a_file_with_an_unprotectable_token_never_reads_as_clean(self) -> None:
         findings = [
@@ -1133,6 +1137,67 @@ class TestScanAgreesWithLockOnOAuthTokens:
         assert "can't protect" not in out.lower(), out
         sarif = json.loads(runner.invoke(app, ["scan", str(leak), "--format", "sarif"]).stdout)
         assert [r["level"] for r in sarif["runs"][0]["results"]] == ["error"], sarif
+        # Still the p55g dead end if it says "run lock": lock refuses this
+        # token wherever it sits. The fix that exists is to revoke it.
+        assert "run `worthless lock`" not in out.lower(), out
+        assert "revoke" in out.lower(), out
+
+    def test_a_token_in_a_committed_env_still_fails(self, tmp_path: Path) -> None:
+        # A .env in git is a leak, and in CI the scan is the backstop for
+        # people who never installed the hook. Main failed it; the pass must
+        # not cover it. The fix that exists: revoke it, take it out of git.
+        env = self._env(tmp_path, self._oauth("p55g-committed"))
+        subprocess.run(["git", "init", "-q", str(env.parent)], check=True)  # noqa: S607
+        subprocess.run(["git", "-C", str(env.parent), "add", ".env"], check=True)  # noqa: S607
+
+        result = runner.invoke(app, ["scan", str(env)])
+        low = self._flat(result).lower()
+
+        assert result.exit_code == 1, low
+        assert "revoke" in low, low
+        assert "run `worthless lock`" not in low, low
+        data = json.loads(runner.invoke(app, ["scan", str(env), "--json"]).stdout)
+        assert data["findings"][0]["is_unshardable"] is False, data
+        assert "revoke" in data["findings"][0]["remediation"].lower(), data
+
+    @pytest.mark.parametrize("git_answer", ["no-git", "timeout", "dubious-ownership"])
+    def test_an_unknown_git_answer_fails_closed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, git_answer: str
+    ) -> None:
+        # The pass needs git to say "not tracked". If git can't answer — not
+        # installed, hung, or refusing a checkout it doesn't own (common in CI
+        # containers) — the token must not pass because the check couldn't run.
+        env = self._env(tmp_path, self._oauth(f"p55g-{git_answer}"))
+
+        def fake_git(cmd, **_kwargs):  # noqa: ANN001, ANN202
+            if git_answer == "no-git":
+                raise FileNotFoundError("git")
+            if git_answer == "timeout":
+                raise subprocess.TimeoutExpired(cmd, 10)
+            return subprocess.CompletedProcess(
+                cmd, 128, b"", b"fatal: detected dubious ownership in repository at '/x'"
+            )
+
+        monkeypatch.setattr(scanner_mod.subprocess, "run", fake_git)
+
+        [finding] = scan_files([env])
+
+        assert finding.is_login_token is True
+        assert finding.is_unshardable is False
+
+    def test_a_symlinked_env_still_fails(self, tmp_path: Path) -> None:
+        # Lock refuses symlinks outright, so "a .env file lock manages" is false
+        # for a .env that points at some other (possibly committed) file.
+        target = tmp_path / "proj" / "prod.secrets"
+        target.parent.mkdir()
+        target.write_text(f"{self._oauth('p55g-symlink')}\n")
+        link = tmp_path / "proj" / ".env"
+        link.symlink_to(target)
+
+        result = runner.invoke(app, ["scan", str(link)])
+
+        assert result.exit_code == 1, self._flat(result)
+        assert "can't protect" not in self._flat(result).lower(), self._flat(result)
 
     def test_a_login_token_is_never_counted_as_protected(self, tmp_path: Path) -> None:
         # Protection is looked up by variable name and file. If ANTHROPIC_API_KEY

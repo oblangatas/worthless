@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import subprocess  # nosec B404
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -13,6 +14,7 @@ from worthless.cli.dotenv_rewriter import shannon_entropy
 from worthless.cli.key_patterns import (
     ENTROPY_THRESHOLD,
     KEY_PATTERN,
+    LEAKED_LOGIN_REMEDY,
     UNSHARDABLE_REMEDY,
     detect_provider,
     is_oauth_token,
@@ -225,12 +227,59 @@ class ScanFinding:
     # fingerprint THIS finding's key rather than the line's first match, which
     # would show one shared fingerprint for every key on a minified JSON line.
     column: int | None = None
-    # worthless-p55g: a key `lock` refuses by design (a Claude Code OAuth
-    # token) sitting in a .env-family file lock manages. Decided here, while the
-    # raw value is still in hand — after this only the masked preview exists.
-    # Not "unprotected": lock can't fix it, so scan must not fail the build or
-    # send the user to lock over it. A token in any other file is plain exposed.
+    # worthless-p55g: a Claude Code OAuth login token. `lock` refuses these by
+    # design, wherever they sit. Decided here, while the raw value is still in
+    # hand — after this only the masked preview exists.
+    is_login_token: bool = False
+    # A login token that stays on this machine: an untracked, non-symlink
+    # .env-family file. Not "unprotected" — lock can't fix it and nothing else
+    # will, so scan must not fail the build over it. Anywhere else (in git, a
+    # non-.env file, a symlink, the environment) the token is plain exposed.
     is_unshardable: bool = False
+
+
+def _is_git_tracked(path: Path) -> bool:
+    """True if git tracks *path* — or if git can't say.
+
+    Fails closed: only git's own "not tracked" (exit 1) or "not a git
+    repository" counts as untracked. No git, a timeout, or any other refusal
+    (e.g. "dubious ownership" in a CI container) is treated as tracked, so a
+    token can't pass because the check couldn't run.
+    """
+    try:
+        result = subprocess.run(  # nosec B603,B607
+            [  # noqa: S607
+                "git",
+                "-C",
+                str(path.parent),
+                "ls-files",
+                "--error-unmatch",
+                "--",
+                path.name,
+            ],
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return True
+    if result.returncode == 1:
+        return False
+    if result.returncode == 128 and b"not a git repository" in result.stderr:
+        return False
+    return True
+
+
+def _stays_local(path: Path) -> bool:
+    """A .env-family file lock manages, that isn't a symlink and isn't in git."""
+    return path.name in _BASENAME_ALLOWLIST and not path.is_symlink() and not _is_git_tracked(path)
+
+
+def remediation_for(f: ScanFinding) -> str | None:
+    """The fix that exists for a login token — never "run worthless lock"."""
+    if f.is_protected or not f.is_login_token:
+        return None
+    return UNSHARDABLE_REMEDY if f.is_unshardable else LEAKED_LOGIN_REMEDY
 
 
 def scan_files(
@@ -315,10 +364,8 @@ def scan_files(
                         is_protected=is_protected,
                         value_preview=_mask(value),
                         column=match.start(),
-                        # Only where lock genuinely can't help: the .env family it
-                        # manages. Anywhere else a fix exists (move it out of the
-                        # file, rotate it if committed), so it stays exposed.
-                        is_unshardable=token and path.name in _BASENAME_ALLOWLIST,
+                        is_login_token=token,
+                        is_unshardable=token and _stays_local(path),
                     )
                 )
     return findings
@@ -365,6 +412,9 @@ def format_sarif(findings: list[ScanFinding], tool_version: str) -> dict:
                 f"Claude Code login token{in_var} — worthless can't protect it. "
                 + UNSHARDABLE_REMEDY
             )
+        elif f.is_login_token and not f.is_protected:
+            rule_id, level = EXPOSED_RULE_ID, "error"
+            text = f"Exposed Claude Code login token{in_var}. " + LEAKED_LOGIN_REMEDY
         else:
             rule_id, level = EXPOSED_RULE_ID, "warning" if f.is_protected else "error"
             text = f"Exposed {f.provider} API key{in_var}" + (
