@@ -437,13 +437,17 @@ _ANSWER_WITHIN_S = 3.0  # a pressed Ctrl-C must end the lock well before that
 
 
 def _openclaw_step_blocks_then_ctrl_c(
-    monkeypatch: pytest.MonkeyPatch, *, presses: int = 1
+    monkeypatch: pytest.MonkeyPatch, *, presses: int = 1, step: str = "_apply_openclaw"
 ) -> list[float]:
-    """Swap the OpenClaw step for a child-free block; Ctrl-C lands mid-block.
+    """Swap an OpenClaw *step* for a child-free block; Ctrl-C lands mid-block.
 
     Returns a list that receives the monotonic time of the first press.
     """
     import worthless.cli.commands.lock as lock_mod
+
+    if step == "_openclaw_audit_postflight":
+        # The post-flight re-audit only runs when a pre-flight gate exists.
+        monkeypatch.setattr(lock_mod, "_openclaw_audit_preflight", lambda *_a, **_k: object())
 
     pressed_at: list[float] = []
 
@@ -457,7 +461,7 @@ def _openclaw_step_blocks_then_ctrl_c(
         time.sleep(_BLOCK_S)
         return 0
 
-    monkeypatch.setattr(lock_mod, "_apply_openclaw", _blocking_openclaw_step)
+    monkeypatch.setattr(lock_mod, step, _blocking_openclaw_step)
     return pressed_at
 
 
@@ -505,6 +509,34 @@ class TestCtrlCAfterCommitIsAnswered:
         )
         assert result.exit_code == 130, result.output
         assert "interrupted" in result.output.lower(), result.output
+        _assert_still_locked(home_dir, two_key_env, pre_sha, result.output)
+
+
+class TestCtrlCDuringPostflightAuditIsAnswered:
+    def test_ctrl_c_during_postflight_reaudit_keeps_keys_locked(
+        self,
+        home_dir: WorthlessHome,
+        two_key_env: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The post-flight re-audit runs after ``.env`` is rewritten. A press there
+        used to kill the audit, trigger its retry (deaf again), then exit 87 down
+        the unwind path — deleting rows the rewritten ``.env`` already needs."""
+        pre_sha = _sha256_of(two_key_env)
+        pressed_at = _openclaw_step_blocks_then_ctrl_c(
+            monkeypatch, step="_openclaw_audit_postflight"
+        )
+
+        result = _invoke_lock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
+
+        assert pressed_at, f"the post-flight audit never ran:\n{result.output}"
+        answered_in = time.monotonic() - pressed_at[0]
+        assert answered_in < _ANSWER_WITHIN_S, (
+            f"Ctrl-C was ignored for {answered_in:.1f}s during the post-flight audit "
+            f"(exit {result.exit_code}) — worthless-3clz.\n{result.output}"
+        )
+        assert result.exit_code == 130, result.output
         _assert_still_locked(home_dir, two_key_env, pre_sha, result.output)
 
 
