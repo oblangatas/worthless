@@ -1242,6 +1242,56 @@ def _apply_lock_write_providers(
     return False  # no rollback needed
 
 
+def _config_changed_since(config_path: Path, original_config: dict | None) -> bool:
+    """Has ``openclaw.json`` moved off *original_config*? Read without the lock."""
+    try:
+        return json.loads(config_path.read_text(encoding="utf-8")) != original_config
+    except FileNotFoundError:
+        return original_config is not None
+    except (OSError, ValueError):
+        return True
+
+
+def _apply_lock_stages_a(
+    config_path: Path,
+    original_config: dict | None,
+    resolved_proxy_base_url: str,
+    planned_updates: list[tuple[str, str, str]],
+    events: list[OpenclawIntegrationEvent],
+    providers_set: list[str],
+    providers_skipped: list[tuple[str, str]],
+    adoption_policy: AdoptionPolicy | None,
+) -> bool:
+    """Stage A(pre) + Stage A writes; returns ``rollback_needed``.
+
+    ``worthless lock`` lets Ctrl-C raise here (worthless-3clz), so a press can
+    land between two writes: a decoy repoint and its unset, or provider 1 and
+    provider 2 while 2 waits for OpenClaw's config-file lock. Put the file back
+    if this run changed it, then let the interrupt through. Unchanged means
+    hands off: rewriting anyway could clobber whoever holds that lock.
+    """
+    try:
+        if _apply_lock_migrate_legacy_decoy(
+            config_path, resolved_proxy_base_url, planned_updates, events
+        ):
+            return True
+        return _apply_lock_write_providers(
+            config_path,
+            resolved_proxy_base_url,
+            planned_updates,
+            events,
+            providers_set,
+            providers_skipped,
+            adoption_policy,
+        )
+    except KeyboardInterrupt:
+        if _config_changed_since(config_path, original_config):
+            _apply_lock_rollback(
+                config_path, original_config, events, providers_set, providers_skipped
+            )
+        raise
+
+
 def _apply_lock_rollback(
     config_path: Path,
     original_config: dict | None,
@@ -2119,26 +2169,20 @@ def apply_lock(
     # place. Runs under apply_lock's existing ``original_config`` rollback
     # umbrella, so a mid-migration write failure restores byte-identically and
     # Stage A is skipped.
-    rollback_needed = _apply_lock_migrate_legacy_decoy(
-        config_path,
-        resolved_proxy_base_url,
-        planned_updates,
-        events,
-    )
-
+    #
     # ---- Stage A: write providers ----------------------------------------
     # F-CFG-13 / DV-01/DV-02 handling is inside _apply_lock_write_providers.
     # Extracted to keep apply_lock within xenon's complexity budget (rank C).
-    if not rollback_needed:
-        rollback_needed = _apply_lock_write_providers(
-            config_path,
-            resolved_proxy_base_url,
-            planned_updates,
-            events,
-            providers_set,
-            providers_skipped,
-            adoption_policy,
-        )
+    rollback_needed = _apply_lock_stages_a(
+        config_path,
+        original_config,
+        resolved_proxy_base_url,
+        planned_updates,
+        events,
+        providers_set,
+        providers_skipped,
+        adoption_policy,
+    )
 
     # ---- Transactional rollback on write failure -------------------------
     if rollback_needed:

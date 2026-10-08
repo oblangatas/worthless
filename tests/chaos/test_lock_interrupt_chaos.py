@@ -200,8 +200,12 @@ def _child_env(te: TrialEnv) -> dict[str, str]:
     / ``HOME`` / ``XDG_DATA_HOME`` are redirected into the trial sandbox.
     """
     root = te.home.parent
+    # Hermetic: a WORTHLESS_* var leaked from the developer's shell or a sibling
+    # test (WORTHLESS_OPENCLAW_BIN, WORTHLESS_PORT, ...) must not change what the
+    # child does. Callers add back exactly the ones a test controls.
+    inherited = {k: v for k, v in os.environ.items() if not k.startswith("WORTHLESS_")}
     return {
-        **os.environ,
+        **inherited,
         "WORTHLESS_HOME": str(te.home),
         "WORTHLESS_KEYRING_BACKEND": "null",
         "HOME": str(te.home),
