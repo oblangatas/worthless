@@ -26,6 +26,14 @@ from pathlib import Path
 
 import yaml
 
+# _grype_scope is a sibling module. Pre-commit runs this file as a script, which
+# puts scripts/hooks on sys.path[0] and makes a bare import work — but the tests
+# load this file through importlib.spec_from_file_location, where it does not.
+# Adding our own directory explicitly makes the import resolve under both.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _grype_scope import is_bounded, scope_of
+
 REPO = Path(__file__).resolve().parents[2]
 
 # Every repo-root config grype auto-discovers. Verified with `grype config
@@ -105,28 +113,29 @@ def check(config: Path, today: dt.date, warnings: list[str] | None = None) -> li
         # same CVE id in a first-party wheel nobody looked at. Two such entries
         # reached main before this check existed.
         #
-        # `type` alone counts: a package whose name contains a regex activator
-        # (`libstdc++6`) cannot be named at all — the check above rejects it and
-        # escaping adds `\`, also an activator — so type plus an exact version
-        # is the narrowest form available for those. Requiring `name` would
-        # leave no legal way to argue such a finding.
-        scoped = isinstance(pkg, dict) and (pkg.get("name") or pkg.get("type"))
-        if not scoped:
+        # `type` alone counts only when a `version` bounds it: `type: deb` is
+        # every Debian package in the image, ~100 of them for this base. The type
+        # escape hatch exists because a name holding a regex activator
+        # (`libstdc++6`) is rejected by the check above, and the escaped spelling
+        # `libstdc\+\+6` adds `\` — also an activator. Whether grype would in
+        # fact match that escaped form literally was NOT measured; the honest
+        # statement is that the hook rejects it, not that no spelling exists.
+        # Teaching the hook to accept a fully-escaped name is worthless-11ix.
+        #
+        # What counts as a scope, and as a BOUNDED one, is defined in
+        # _grype_scope and shared with check_grype_unmapped_findings. It has to
+        # be: when the two drifted, the validator blessed a `version` the matcher
+        # ignored, and the pin bound nothing on the gate that blocks.
+        scope = scope_of(rule)
+        if not scope:
             problems.append(
                 f"{vuln}: no `package` scope — this ignore would silence the CVE on "
                 f"EVERY package, including ones nobody measured. Add `package.name`, "
                 f"or `package.type` plus a `version` when the name is regex-unsafe."
             )
-        elif not pkg.get("name") and not pkg.get("version"):
-            # `type` alone is barely a scope: `type: deb` covers every Debian
-            # package in the image, which for this base is ~100 of them. It is
-            # permitted only as the escape hatch for a regex-unsafe NAME, and
-            # that escape hatch is only narrow when a version bounds it. An
-            # earlier revision of this check accepted bare `type:` while its own
-            # error message promised "plus a version" — the message was the
-            # contract and the code did not keep it.
+        elif not is_bounded(scope):
             problems.append(
-                f"{vuln}: `package.type` with no `version` — `type: {pkg.get('type')}` alone "
+                f"{vuln}: `package.type` with no `version` — `type: {scope.get('type')}` alone "
                 f"covers every package of that ecosystem in the image. Scoping by type is "
                 f"only for a name grype would treat as a regex; bound it with the exact "
                 f"affected `version`, or name the package."

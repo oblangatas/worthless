@@ -1241,7 +1241,7 @@ def test_a_type_scope_with_a_version_is_accepted(tmp_path: Path) -> None:
     assert _load().check(config, TODAY) == []
 
 
-def test_the_repos_own_config_scopes_every_waiver(tmp_path: Path) -> None:
+def test_the_repos_own_config_scopes_every_waiver() -> None:
     """The real .grype.yaml, not a fixture. Guards against a merge reintroducing
     an unscoped entry — which is exactly how this got onto main."""
     problems = _load().check(REPO / ".grype.yaml", TODAY)
