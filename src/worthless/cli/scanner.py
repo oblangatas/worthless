@@ -13,7 +13,7 @@ from worthless.cli.dotenv_rewriter import shannon_entropy
 from worthless.cli.key_patterns import (
     ENTROPY_THRESHOLD,
     KEY_PATTERN,
-    OAUTH_LOGIN_REMEDY,
+    UNSHARDABLE_REMEDY,
     detect_provider,
     is_oauth_token,
 )
@@ -363,7 +363,7 @@ def format_sarif(findings: list[ScanFinding], tool_version: str) -> dict:
             rule_id, level = UNSHARDABLE_RULE_ID, "note"
             text = (
                 f"Claude Code login token{in_var} — worthless can't protect it. "
-                + OAUTH_LOGIN_REMEDY
+                + UNSHARDABLE_REMEDY
             )
         else:
             rule_id, level = EXPOSED_RULE_ID, "warning" if f.is_protected else "error"

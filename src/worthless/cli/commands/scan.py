@@ -24,7 +24,7 @@ from worthless.cli.safe_rewrite import _BASENAME_ALLOWLIST
 from worthless.cli.code_scanner import CodeFinding, scan_for_hardcoded_provider_urls
 from worthless.cli.console import get_console
 from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary
-from worthless.cli.key_patterns import KEY_PATTERN, OAUTH_LOGIN_REMEDY
+from worthless.cli.key_patterns import KEY_PATTERN, UNSHARDABLE_REMEDY
 from worthless.cli.platform import is_wsl
 from worthless.cli.redaction import key_fingerprint
 from worthless.cli.dotenv_rewriter import build_enrolled_locations
@@ -283,7 +283,7 @@ def _unshardable_lines(findings: Sequence[ScanFinding], committing: bool = False
         f"Can't protect {len(names)} key{s}: {', '.join(names)} (Claude Code login token{s}).",
         "`worthless lock` skips this kind of token on purpose: splitting it breaks "
         "the marker Claude Code looks for.",
-        f"Still in plain text. {OAUTH_LOGIN_REMEDY}",
+        f"Still in plain text. {UNSHARDABLE_REMEDY}",
     ]
     if committing:
         lines.append(
@@ -465,7 +465,7 @@ def _format_json_findings(findings: list[ScanFinding], orphans: list | None = No
             "value_preview": f.value_preview,
         }
         if f.is_unshardable and not f.is_protected:
-            item["remediation"] = OAUTH_LOGIN_REMEDY
+            item["remediation"] = UNSHARDABLE_REMEDY
         items.append(item)
     orphan_items = [
         {

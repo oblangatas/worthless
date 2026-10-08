@@ -21,7 +21,7 @@ from worthless.cli.bootstrap import (
     resolve_home,
 )
 from worthless.cli.errors import ErrorCode, WorthlessError
-from worthless.cli.key_patterns import OAUTH_LOGIN_REMEDY
+from worthless.cli.key_patterns import UNSHARDABLE_REMEDY
 from worthless.cli.process import check_proxy_health, resolve_port
 from worthless.storage.sqlite import connect as sqlite_connect
 
@@ -304,7 +304,7 @@ async def worthless_scan(
                 # `worthless lock` for it.
                 "is_unshardable": f.is_unshardable,
                 **(
-                    {"remediation": OAUTH_LOGIN_REMEDY}
+                    {"remediation": UNSHARDABLE_REMEDY}
                     if f.is_unshardable and not f.is_protected
                     else {}
                 ),

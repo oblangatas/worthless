@@ -27,7 +27,7 @@ from worthless.cli.process import poll_health, resolve_port
 from worthless.cli.console import get_console
 from worthless.cli.dotenv_rewriter import build_enrolled_locations, scan_env_keys
 from worthless.cli.errors import ErrorCode, WorthlessError
-from worthless.cli.key_patterns import OAUTH_LOGIN_REMEDY, is_oauth_token
+from worthless.cli.key_patterns import UNSHARDABLE_REMEDY, is_oauth_token
 from worthless.openclaw.audit import sanitise_for_message
 from worthless.cli.commands.service._common import ServiceState
 from worthless.cli.commands.service.proxy_state import ProxyRuntimeState, detect_proxy_runtime
@@ -167,7 +167,7 @@ def _run_enrollment_if_needed(
         names = ", ".join(sanitise_for_message(var_name) for var_name, _, _ in oauth)
         console.print_warning(
             f"Can't protect {names}: a Claude Code login token, still in plain text. "
-            + OAUTH_LOGIN_REMEDY
+            + UNSHARDABLE_REMEDY
         )
 
     if not keys:
