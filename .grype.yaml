@@ -154,23 +154,36 @@ ignore:
   # because the base image ships the gcc runtime; no Worthless code path
   # reaches a C++ priority queue, so erase_if is never called.
   #
-  # NO `package` key on purpose, and the expiry hook is why. It rejects any
-  # package name holding a regex activator, because grype turns such a name
-  # into a full-match regex and the ignore then silences packages it never
-  # named. `libstdc++6` carries two `+`, and escaping them adds `\` — also an
-  # activator — so there is no spelling of that name the hook will accept.
+  # SCOPED BY TYPE + VERSION, not by name, and the expiry hook is why. It
+  # rejects any package name holding a regex activator, because grype turns
+  # such a name into a full-match regex and the ignore then silences packages
+  # it never named. `libstdc++6` carries two `+`, and escaping them adds `\` —
+  # also an activator — so there is no spelling of that name the hook accepts.
   #
-  # BE CLEAR ABOUT THE COST: dropping `package` makes these entries WIDER, not
-  # narrower. Each one now suppresses its CVE for EVERY package in the image,
-  # not just the gcc runtime. That is tolerable only because both are gcc
-  # advisories that match nothing else here — verified against grype output
-  # with ignores disabled — and not because omitting the key is tidy.
+  # An earlier revision of these two entries therefore carried NO `package`
+  # key at all, and said so, calling the cost "tolerable". It was not: with an
+  # empty scope, check_grype_unmapped_findings._is_argued returns True for the
+  # CVE id on EVERY package in every ecosystem ("rule named no package: covers
+  # everything"), including a future first-party one nobody measured. That gap
+  # — the one the old comment here described and deferred to worthless-11ix —
+  # is now CLOSED: check_grype_ignore_expiry rejects a rule with no package
+  # scope, and rejects a `type`-only scope that carries no `version`.
   #
-  # The expiry hook does not catch this: it guards package names for regex
-  # activators (check_grype_ignore_expiry.py:88-97) but says nothing about a
-  # rule with no package at all. These two entries are the first through that
-  # gap. Closing it — a literal-match flag, so `libstdc++6` can be named —
-  # is worthless-11ix follow-up work, not a reason to keep the wider form.
+  # WHAT THE SCOPE ACTUALLY BOUNDS, stated precisely, because the two gates
+  # read it differently:
+  #   - grype honours `version`. MEASURED by contrast (grype 0.114.0, this
+  #     image): the rule at 14.2.0-19 suppresses 3 of 3 matches; at 99.9.9-99
+  #     it suppresses 0 of 3. So the blocking image scan stops suppressing the
+  #     day Debian bumps the package — the waiver cannot outlive the fix.
+  #   - check_grype_unmapped_findings compares name and type and honours
+  #     `version` as well (added alongside this entry); without that it read
+  #     the scope as "any deb" and the pin bought nothing on the gate that
+  #     actually blocks.
+  # Residual breadth: `type: deb` at that exact version covers any Debian
+  # package built from gcc-14 at 14.2.0-19 — today exactly the three reported
+  # ones, but a future gcc-14-sourced addition (libgomp1 via numpy, say) would
+  # be silently covered for these two CVE ids. Narrower than a name would be
+  # is not available here; narrower than "everything" it certainly is.
   #
   # To close: drop this when Debian ships a fixed gcc, or when the base image
   # stops shipping the gcc runtime at all.
@@ -178,7 +191,7 @@ ignore:
     package:
       type: deb
       version: 14.2.0-19
-    reason: "Use-after-free in libstdc++ erase_if on a binary heap priority queue; hits gcc-14-base, libgcc-s1 and libstdc++6. Debian has no fix in any release (gcc-12/14/15/16 all vulnerable, unfixed — tracker read 2026-10-05), so there is nowhere to upgrade. Measured 2026-10-05 on the built image: 11 compiled extensions, none linking libstdc++, and the interpreter does not link it either. Base-image gcc runtime only; no Worthless code path reaches a C++ priority queue. Tracking worthless-11ix."
+    reason: "Use-after-free in libstdc++ erase_if on a binary heap priority queue; hits gcc-14-base, libgcc-s1 and libstdc++6. Debian has no fix in any release (gcc-12/14/15/16 all vulnerable, unfixed — tracker read 2026-10-05), so there is nowhere to upgrade. Measured 2026-10-05 on the built image: 11 compiled extensions, none linking libstdc++, and the interpreter does not link it either. Base-image gcc runtime only; no Worthless code path reaches a C++ priority queue. Tracking worthless-11ix. SCOPE: pinned to `type: deb` at version 14.2.0-19 rather than by package name, because `libstdc++6` contains a `+` that grype treats as a regex and this repo's expiry hook rejects. Measured by contrast that grype honours the version: the rule at 14.2.0-19 suppressed 3 of 3 matches, at 99.9.9-99 it suppressed 0 of 3. NOTE the limit of that — check_grype_unmapped_findings compares name and type only, so the version pin binds grype but not that gate."
     expiry: "2027-01-31"
 
   # Second advisory, same libstdc++, same measurement. An integer overflow in
@@ -194,7 +207,7 @@ ignore:
     package:
       type: deb
       version: 14.2.0-19
-    reason: "Integer overflow in libstdc++'s aligned operator new: a large request wraps to an undersized allocation, so the caller writes past the block. Hits gcc-14-base, libgcc-s1 and libstdc++6. Debian has no fix in any release (gcc-12/14/15/16 all vulnerable, unfixed — tracker read 2026-10-05). Re-measured 2026-10-05 inside the repinned image (Python 3.13.16): 11 compiled extensions, none linking libstdc++, and the interpreter does not link it either. operator new is the C++ allocation operator and no Worthless code is C++; the gcc runtime is present only because the base image ships it. Tracking worthless-11ix."
+    reason: "Integer overflow in libstdc++'s aligned operator new: a large request wraps to an undersized allocation, so the caller writes past the block. Hits gcc-14-base, libgcc-s1 and libstdc++6. Debian has no fix in any release (gcc-12/14/15/16 all vulnerable, unfixed — tracker read 2026-10-05). Re-measured 2026-10-05 inside the repinned image (Python 3.13.16): 11 compiled extensions, none linking libstdc++, and the interpreter does not link it either. operator new is the C++ allocation operator and no Worthless code is C++; the gcc runtime is present only because the base image ships it. Tracking worthless-11ix. SCOPE: pinned to `type: deb` at version 14.2.0-19 rather than by package name, because `libstdc++6` contains a `+` that grype treats as a regex and this repo's expiry hook rejects. Measured by contrast that grype honours the version: the rule at 14.2.0-19 suppressed 3 of 3 matches, at 99.9.9-99 it suppressed 0 of 3. NOTE the limit of that — check_grype_unmapped_findings compares name and type only, so the version pin binds grype but not that gate."
     expiry: "2027-01-31"
 
   # CVE-2026-82049 (CPython tarfile extraction filters) was suppressed here
@@ -764,5 +777,5 @@ ignore:
     expiry: "2027-01-31"
   - vulnerability: CVE-2026-63076
     package: {name: libssl3, type: deb}
-    reason: "OpenSSL 3.0.20 in the pinned bookworm base is in the affected range (fixed in 3.0.22). The NULL deref is in CMP password-based protection verification; upstream states CMP is a specialized feature an application must explicitly enable, and Worthless does not. Upstream: no memory disclosure, no controlled write, no path to code execution. fix=not-fixed: no Debian bookworm update exists. WOR-915. SCOPE: pinned to `type: deb` at version 14.2.0-19 rather than by package name, because `libstdc++6` contains a `+` that grype treats as a regex and this repo's expiry hook rejects. Measured by contrast that grype honours the version (right version suppresses 3 of 3, a wrong one 0 of 3), so this entry stops matching the day Debian bumps the package and cannot outlive the fix. SCOPE: pinned to `type: deb` at version 14.2.0-19 rather than by package name, because `libstdc++6` contains a `+` that grype treats as a regex and this repo's expiry hook rejects. Measured by contrast that grype honours the version (right version suppresses 3 of 3, a wrong one 0 of 3), so this entry stops matching the day Debian bumps the package and cannot outlive the fix."
+    reason: "OpenSSL 3.0.20 in the pinned bookworm base is in the affected range (fixed in 3.0.22). The NULL deref is in CMP password-based protection verification; upstream states CMP is a specialized feature an application must explicitly enable, and Worthless does not. Upstream: no memory disclosure, no controlled write, no path to code execution. fix=not-fixed: no Debian bookworm update exists. WOR-915."
     expiry: "2027-01-31"

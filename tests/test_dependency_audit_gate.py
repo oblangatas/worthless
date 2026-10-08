@@ -250,6 +250,10 @@ def test_dependabot_covers_the_worker() -> None:
 # under a second locally instead of after a CI round trip.
 
 WORKER = REPO / "workers" / "worthless-sh"
+# The docs site owns the ROOT manifest and lockfile. It is a SEPARATE npm
+# tree from the Worker, resolves independently, and declared a sharp floor
+# inside the advisory while the Worker was being guarded.
+DOCS = REPO
 
 # The first version outside BOTH advisories; the binding one is `<0.35.5`.
 SHARP_FIXED = (0, 35, 5)
@@ -308,3 +312,34 @@ def test_sharp_override_is_declared() -> None:
         f"overrides.sharp is {override!r}, which still allows a version inside "
         "the advisory's `<0.35.4` range"
     )
+
+
+def test_the_docs_site_sharp_floor_is_also_outside_the_advisory() -> None:
+    """The root tree is a separate npm tree and was the unguarded one.
+
+    Both sharp guards above read only `workers/worthless-sh`. Meanwhile the docs
+    site declared `^0.35.3` — a floor admitting 0.35.3 and 0.35.4, both inside
+    GHSA-wq5f-xc86-pv6w's `<0.35.5`. Its lockfile happened to resolve 0.35.5, so
+    the audit was green and nothing was watching the declaration that would
+    decide the NEXT resolve. Same reasoning that moved SHARP_FIXED: a guard that
+    blesses a pin inside a live advisory is the thing it exists to prevent.
+    """
+    declared = json.loads((DOCS / "package.json").read_text())
+    floor = (declared.get("dependencies") or {}).get("sharp") or (
+        declared.get("devDependencies") or {}
+    ).get("sharp")
+    assert floor, "sharp is no longer a docs-site dependency — delete this test with it"
+    assert _version_tuple(floor.lstrip("^~>=")) >= SHARP_FIXED, (
+        f"docs site declares sharp {floor!r}, whose floor is inside the advisory. "
+        f"A relock could legally resolve a vulnerable version."
+    )
+
+    lock = json.loads((DOCS / "package-lock.json").read_text())
+    stale = {
+        path: meta["version"]
+        for path, meta in lock["packages"].items()
+        if path.split("node_modules/")[-1] == "sharp"
+        and "version" in meta
+        and _version_tuple(meta["version"]) < SHARP_FIXED
+    }
+    assert not stale, f"docs lockfile resolves a vulnerable sharp: {stale}"

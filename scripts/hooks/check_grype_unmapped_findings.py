@@ -61,6 +61,16 @@ def argued_cves(configs: tuple[Path, ...]) -> dict[str, list[dict[str, str]]]:
     CVE surfacing in python — dropping the scope here would let one written
     argument silently excuse every future package it never examined.
 
+    `version` is carried too, and that matters more than it looks. A waiver
+    scoped `{type: deb, version: 14.2.0-19}` exists because its package name
+    (`libstdc++6`) is regex-unsafe and cannot be named; the version is the only
+    thing keeping it from meaning "every deb". Reading name and type alone made
+    this gate treat that as exactly "every deb" — and since the blocking grype
+    step runs `only-fixed: true`, not-fixed findings reach ONLY this gate, so
+    the pin bound nothing where it counted. Worse, it meant the waiver kept
+    suppressing after Debian shipped a fix: grype's own ignore stops matching
+    on the version bump, the finding re-fires, and this gate excused it again.
+
     An empty scope list means the rule named no package, so it covers any.
     Whether the date is still valid is check_grype_ignore_expiry.py's job;
     duplicating it would mean two places to fix when the contract changes.
@@ -75,7 +85,9 @@ def argued_cves(configs: tuple[Path, ...]) -> dict[str, list[dict[str, str]]]:
                 continue
             pkg = rule.get("package") or {}
             scope = {
-                k: str(pkg[k]) for k in ("name", "type") if isinstance(pkg, dict) and pkg.get(k)
+                k: str(pkg[k])
+                for k in ("name", "type", "version")
+                if isinstance(pkg, dict) and pkg.get(k)
             }
             argued.setdefault(str(rule["vulnerability"]), []).append(scope)
     return argued
@@ -93,12 +105,17 @@ def _is_argued(cve: str, artifact: dict, argued: dict[str, list[dict[str, str]]]
         return False
     name = str(artifact.get("name") or "")
     ptype = str(artifact.get("type") or "")
+    version = str(artifact.get("version") or "")
     for scope in scopes:
         if not scope:
             return True  # rule named no package: covers everything
         if "name" in scope and scope["name"] != name:
             continue
         if "type" in scope and scope["type"] != ptype:
+            continue
+        # A version-pinned waiver stops excusing the finding the moment the
+        # package moves off that version — which is the moment a fix exists.
+        if "version" in scope and scope["version"] != version:
             continue
         return True
     return False

@@ -1218,8 +1218,8 @@ def test_a_waiver_without_a_package_scope_is_rejected(tmp_path: Path) -> None:
     assert any("no `package`" in p for p in problems), problems
 
 
-def test_a_type_only_scope_is_accepted(tmp_path: Path) -> None:
-    """`type:` alone is a legitimate scope, and sometimes the only one available.
+def test_a_type_scope_with_a_version_is_accepted(tmp_path: Path) -> None:
+    """Type + exact version is legitimate, and sometimes the only form available.
 
     A package whose name contains a regex activator (`libstdc++6`) cannot be
     named at all — REGEX_ACTIVATORS rejects it and escaping adds a backslash,
@@ -1276,3 +1276,28 @@ def test_the_libstdcpp_waivers_stay_version_pinned() -> None:
             f"on every Debian package for as long as the expiry allows, including after "
             f"Debian ships a fix. Re-pin it, or argue the entry afresh."
         )
+
+
+def test_a_type_scope_without_a_version_is_rejected(tmp_path: Path) -> None:
+    """Bare `type:` is not a scope — it is every package of that ecosystem.
+
+    `type: deb` alone covers ~100 Debian packages in this base image. The type
+    escape hatch exists only for a name grype would treat as a regex, and it is
+    only narrow when a version bounds it. A previous revision of this check
+    accepted bare `type:` while its own error message promised "plus a version":
+    the message was the contract and the code did not keep it.
+    """
+    config = tmp_path / ".grype.yaml"
+    config.write_text(
+        "ignore:\n"
+        "  - vulnerability: CVE-2026-99999\n"
+        "    package:\n"
+        "      type: deb\n"
+        '    reason: "argued for one gcc runtime, not for every deb"\n'
+        '    expiry: "2099-01-01"\n'
+    )
+
+    problems = _load().check(config, TODAY)
+
+    assert problems, "a type-only scope with no version was accepted"
+    assert any("no `version`" in p for p in problems), problems

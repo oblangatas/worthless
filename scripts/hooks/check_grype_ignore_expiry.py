@@ -110,11 +110,26 @@ def check(config: Path, today: dt.date, warnings: list[str] | None = None) -> li
         # escaping adds `\`, also an activator — so type plus an exact version
         # is the narrowest form available for those. Requiring `name` would
         # leave no legal way to argue such a finding.
-        if not (isinstance(pkg, dict) and (pkg.get("name") or pkg.get("type"))):
+        scoped = isinstance(pkg, dict) and (pkg.get("name") or pkg.get("type"))
+        if not scoped:
             problems.append(
                 f"{vuln}: no `package` scope — this ignore would silence the CVE on "
                 f"EVERY package, including ones nobody measured. Add `package.name`, "
-                f"or `package.type` (plus a `version`) when the name is regex-unsafe."
+                f"or `package.type` plus a `version` when the name is regex-unsafe."
+            )
+        elif not pkg.get("name") and not pkg.get("version"):
+            # `type` alone is barely a scope: `type: deb` covers every Debian
+            # package in the image, which for this base is ~100 of them. It is
+            # permitted only as the escape hatch for a regex-unsafe NAME, and
+            # that escape hatch is only narrow when a version bounds it. An
+            # earlier revision of this check accepted bare `type:` while its own
+            # error message promised "plus a version" — the message was the
+            # contract and the code did not keep it.
+            problems.append(
+                f"{vuln}: `package.type` with no `version` — `type: {pkg.get('type')}` alone "
+                f"covers every package of that ecosystem in the image. Scoping by type is "
+                f"only for a name grype would treat as a regex; bound it with the exact "
+                f"affected `version`, or name the package."
             )
 
         raw = rule.get("expiry")
