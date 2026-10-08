@@ -3083,7 +3083,9 @@ def _offer_service_after_lock(console, *, home: WorthlessHome, port: int) -> boo
 
     # Same banner as `worthless service install`, so WSL users get the
     # idle-shutdown warning here too.
-    _print_service_banner(console, platform=current_platform_backend_name(), port=port)
+    _print_service_banner(
+        console, platform=current_platform_backend_name(), port=port, after_install=True
+    )
     return True
 
 
