@@ -228,11 +228,20 @@ def test_dependabot_covers_the_worker() -> None:
 
 # ── sharp override (worthless-kzfq) ────────────────────────────────────────
 #
-# GHSA-rgj7-g3m4-5g8c (libheif heap overflow, CWE-122) covers sharp < 0.35.4.
+# TWO advisories now, and the floor is the later one:
+#   GHSA-rgj7-g3m4-5g8c  libheif heap overflow, CWE-122   sharp < 0.35.4
+#   GHSA-wq5f-xc86-pv6w  librsvg CVE-2026-96889           sharp < 0.35.5
+# The second landed 2026-10-07 and made the then-current 0.35.4 pin vulnerable,
+# so the floor moved to 0.35.5. Leaving it at 0.35.4 would have let this guard
+# bless a pin inside a live advisory — exactly what it exists to prevent.
+#
 # miniflare pins `"sharp": "0.35.2"` EXACTLY, so npm's resolver can only walk
-# backwards: its only offered fix was @cloudflare/vitest-pool-workers 0.22.0 ->
-# 0.8.30, isSemVerMajor. An `overrides` entry reaches the patch instead, and
-# takes the audit to 0 vulnerabilities with every other version unchanged.
+# backwards: its offered fix was @cloudflare/vitest-pool-workers 0.22.0 ->
+# 0.8.30, isSemVerMajor, and on the second wave a wrangler downgrade to 4.15.2.
+# An `overrides` entry reaches the patch instead, and takes the audit to 0
+# vulnerabilities with every other version unchanged. miniflare, wrangler and
+# vitest-pool-workers appear in the audit only BECAUSE they depend on sharp;
+# one bump clears all three.
 #
 # Why these tests exist when `npm audit` already gates this in CI: that job
 # resolves advisories from the registry at run time. It is exactly as available
@@ -241,9 +250,13 @@ def test_dependabot_covers_the_worker() -> None:
 # under a second locally instead of after a CI round trip.
 
 WORKER = REPO / "workers" / "worthless-sh"
+# The docs site owns the ROOT manifest and lockfile. It is a SEPARATE npm
+# tree from the Worker, resolves independently, and declared a sharp floor
+# inside the advisory while the Worker was being guarded.
+DOCS = REPO
 
-# The first version outside the advisory's `<0.35.4` range.
-SHARP_FIXED = (0, 35, 4)
+# The first version outside BOTH advisories; the binding one is `<0.35.5`.
+SHARP_FIXED = (0, 35, 5)
 
 
 def _version_tuple(raw: str) -> tuple[int, ...]:
@@ -272,7 +285,7 @@ def test_worker_sharp_is_not_vulnerable() -> None:
 
     stale = {p: v for p, v in found.items() if _version_tuple(v) < SHARP_FIXED}
     assert not stale, (
-        f"sharp back inside GHSA-rgj7-g3m4-5g8c's `<0.35.4` range: {stale}. "
+        f"sharp back inside GHSA-wq5f-xc86-pv6w's `<0.35.5` range: {stale}. "
         "The override in workers/worthless-sh/package.json is the thing that "
         "holds this; check it survived the last relock."
     )
@@ -292,9 +305,41 @@ def test_sharp_override_is_declared() -> None:
     assert override, (
         "overrides.sharp is gone from workers/worthless-sh/package.json. "
         "miniflare pins sharp exactly, so without it the next `npm install` "
-        "resolves back to 0.35.2 and re-opens GHSA-rgj7-g3m4-5g8c."
+        "resolves back to 0.35.2 and re-opens GHSA-rgj7-g3m4-5g8c and "
+        "GHSA-wq5f-xc86-pv6w."
     )
     assert _version_tuple(override.lstrip("^~>=")) >= SHARP_FIXED, (
         f"overrides.sharp is {override!r}, which still allows a version inside "
         "the advisory's `<0.35.4` range"
     )
+
+
+def test_the_docs_site_sharp_floor_is_also_outside_the_advisory() -> None:
+    """The root tree is a separate npm tree and was the unguarded one.
+
+    Both sharp guards above read only `workers/worthless-sh`. Meanwhile the docs
+    site declared `^0.35.3` — a floor admitting 0.35.3 and 0.35.4, both inside
+    GHSA-wq5f-xc86-pv6w's `<0.35.5`. Its lockfile happened to resolve 0.35.5, so
+    the audit was green and nothing was watching the declaration that would
+    decide the NEXT resolve. Same reasoning that moved SHARP_FIXED: a guard that
+    blesses a pin inside a live advisory is the thing it exists to prevent.
+    """
+    declared = json.loads((DOCS / "package.json").read_text())
+    floor = (declared.get("dependencies") or {}).get("sharp") or (
+        declared.get("devDependencies") or {}
+    ).get("sharp")
+    assert floor, "sharp is no longer a docs-site dependency — delete this test with it"
+    assert _version_tuple(floor.lstrip("^~>=")) >= SHARP_FIXED, (
+        f"docs site declares sharp {floor!r}, whose floor is inside the advisory. "
+        f"A relock could legally resolve a vulnerable version."
+    )
+
+    lock = json.loads((DOCS / "package-lock.json").read_text())
+    stale = {
+        path: meta["version"]
+        for path, meta in lock["packages"].items()
+        if path.split("node_modules/")[-1] == "sharp"
+        and "version" in meta
+        and _version_tuple(meta["version"]) < SHARP_FIXED
+    }
+    assert not stale, f"docs lockfile resolves a vulnerable sharp: {stale}"

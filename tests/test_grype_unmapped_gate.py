@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import importlib.util
 from pathlib import Path
 
 import pytest
@@ -154,3 +155,88 @@ def test_directory_argument_is_rejected() -> None:
     )
     assert result.returncode == 2
     assert "not a file" in result.stderr
+
+
+def _hook():
+    """Import the hook module directly, to exercise its scope matching."""
+    spec = importlib.util.spec_from_file_location("grype_unmapped_hook", HOOK)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_a_version_pinned_argument_stops_at_the_fixed_version(tmp_path: Path) -> None:
+    """The point of pinning a version: the waiver dies when the fix lands.
+
+    These waivers exist for packages whose NAME grype would treat as a regex
+    (`libstdc++6`), so the scope is `type` + exact `version` and the version is
+    the only thing standing between it and "every deb". Read name+type alone and
+    the pin binds nothing HERE — which is the gate that matters, because the
+    blocking grype step runs only-fixed and never sees a not-fixed finding.
+
+    Concretely: Debian ships 14.2.0-20, grype's own ignore stops matching, the
+    finding re-fires, and this gate must NOT wave it through on an argument
+    written about -19.
+    """
+    config = tmp_path / ".grype.yaml"
+    config.write_text(
+        "ignore:\n"
+        "  - vulnerability: CVE-2026-95619\n"
+        "    package:\n"
+        "      type: deb\n"
+        "      version: 14.2.0-19\n"
+        '    reason: "measured unreachable at this version"\n'
+        '    expiry: "2099-01-01"\n'
+    )
+    hook = _hook()
+    argued = hook.argued_cves((config,))
+
+    at_pinned = {"name": "libstdc++6", "type": "deb", "version": "14.2.0-19"}
+    after_fix = {"name": "libstdc++6", "type": "deb", "version": "14.2.0-20"}
+
+    assert hook._is_argued("CVE-2026-95619", at_pinned, argued) is True
+    assert hook._is_argued("CVE-2026-95619", after_fix, argued) is False, (
+        "the waiver still excused the finding after the package moved off the "
+        "pinned version — it would outlive the fix"
+    )
+
+
+def test_a_type_scope_still_needs_the_version_to_match(tmp_path: Path) -> None:
+    """The version must be what decides — so this fixture names no package.
+
+    An earlier version of this test DID pin `name: libstdcpp6`, which meant
+    _is_argued rejected on the name comparison and never reached the version
+    branch at all: it passed for the wrong reason, duplicated
+    test_an_argument_does_not_travel_to_another_package, and would have stayed
+    green with the version comparison deleted. With no name in the scope, the
+    only thing that can decide either case is the version.
+    """
+    config = tmp_path / ".grype.yaml"
+    config.write_text(
+        "ignore:\n"
+        "  - vulnerability: CVE-2026-95619\n"
+        "    package:\n"
+        "      type: deb\n"
+        "      version: 14.2.0-19\n"
+        '    reason: "scoped by type at one version"\n'
+        '    expiry: "2099-01-01"\n'
+    )
+    hook = _hook()
+    argued = hook.argued_cves((config,))
+
+    # Same ecosystem, same version as argued -> covered.
+    assert (
+        hook._is_argued(
+            "CVE-2026-95619", {"name": "libgomp1", "type": "deb", "version": "14.2.0-19"}, argued
+        )
+        is True
+    )
+    # Same ecosystem, DIFFERENT version -> not covered, and the version is the
+    # only field that differs, so nothing else can be producing that result.
+    assert (
+        hook._is_argued(
+            "CVE-2026-95619", {"name": "libgomp1", "type": "deb", "version": "14.2.0-20"}, argued
+        )
+        is False
+    )
