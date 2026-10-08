@@ -79,7 +79,11 @@ def argued_cves(configs: tuple[Path, ...]) -> dict[str, list[dict[str, str]]]:
     suppressing after Debian shipped a fix: grype's own ignore stops matching
     on the version bump, the finding re-fires, and this gate excused it again.
 
-    An empty scope list means the rule named no package, so it covers any.
+    An empty scope list means the rule named no package. That USED TO mean it
+    covered everything; covers() now matches nothing on an empty scope, so such
+    a rule excuses no finding at all. Nothing legitimate relies on either
+    behaviour — check_grype_ignore_expiry rejects unscoped rules outright — but
+    failing closed is the safe direction for one that slips past it.
     Whether the date is still valid is check_grype_ignore_expiry.py's job;
     duplicating it would mean two places to fix when the contract changes.
     """

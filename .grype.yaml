@@ -161,10 +161,10 @@ ignore:
   # also an activator — so there is no spelling of that name the hook accepts.
   #
   # An earlier revision of these two entries therefore carried NO `package`
-  # key at all, and said so, calling the cost "tolerable". It was not: with an
-  # empty scope, check_grype_unmapped_findings._is_argued returns True for the
-  # CVE id on EVERY package in every ecosystem ("rule named no package: covers
-  # everything"), including a future first-party one nobody measured. That gap
+  # key at all, and said so, calling the cost "tolerable". It was not: an empty
+  # scope USED TO make check_grype_unmapped_findings return True for the CVE id
+  # on EVERY package in every ecosystem, including a future first-party one
+  # nobody measured. It now matches nothing instead. That gap
   # — the one the old comment here described and deferred to worthless-11ix —
   # is now CLOSED: check_grype_ignore_expiry rejects a rule with no package
   # scope, and rejects a `type`-only scope that carries no `version`.

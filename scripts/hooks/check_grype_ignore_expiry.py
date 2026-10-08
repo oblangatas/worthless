@@ -106,12 +106,13 @@ def check(config: Path, today: dt.date, warnings: list[str] | None = None) -> li
                 )
 
         # The mirror image of the no-CVE case above, and the wider mistake of
-        # the two. A rule naming a CVE but no package is read by
-        # check_grype_unmapped_findings._is_argued as covering EVERY package in
-        # every ecosystem ("rule named no package: covers everything"), so one
-        # argument measured about a base-image C++ runtime would also excuse the
-        # same CVE id in a first-party wheel nobody looked at. Two such entries
-        # reached main before this check existed.
+        # the two. A rule naming a CVE but no package USED TO be read by
+        # check_grype_unmapped_findings as covering EVERY package in every
+        # ecosystem, so one argument measured about a base-image C++ runtime also
+        # excused the same CVE id in a first-party wheel nobody looked at. Two
+        # such entries reached main that way. Both ends are closed now: this
+        # check rejects the rule here, and covers() matches nothing on an empty
+        # scope rather than everything.
         #
         # `type` alone counts only when a `version` bounds it: `type: deb` is
         # every Debian package in the image, ~100 of them for this base. The type
