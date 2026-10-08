@@ -191,6 +191,11 @@ def _make_trial_env(tmp_path: Path, trial: int, n_keys: int) -> TrialEnv:
     )
 
 
+def _leaks_a_real_install(var: str) -> bool:
+    """Env vars that would point a child lock at a real worthless/OpenClaw setup."""
+    return var.startswith(("WORTHLESS_", "OPENCLAW_")) or var == "PI_CODING_AGENT_DIR"
+
+
 def _child_env(te: TrialEnv) -> dict[str, str]:
     """Child process environment.
 
@@ -199,10 +204,10 @@ def _child_env(te: TrialEnv) -> dict[str, str]:
     / ``HOME`` / ``XDG_DATA_HOME`` are redirected into the trial sandbox.
     """
     root = te.home.parent
-    # Hermetic: a WORTHLESS_* var leaked from the developer's shell or a sibling
-    # test (WORTHLESS_OPENCLAW_BIN, WORTHLESS_PORT, ...) must not change what the
-    # child does. Callers add back exactly the ones a test controls.
-    inherited = {k: v for k, v in os.environ.items() if not k.startswith("WORTHLESS_")}
+    # Hermetic: a WORTHLESS_* / OpenClaw var leaked from the developer's shell or a
+    # sibling test (WORTHLESS_OPENCLAW_BIN, OPENCLAW_STATE_DIR, ...) must not point
+    # the child at a real install. Callers add back exactly the ones a test controls.
+    inherited = {k: v for k, v in os.environ.items() if not _leaks_a_real_install(k)}
     return {
         **inherited,
         "WORTHLESS_HOME": str(te.home),
@@ -640,10 +645,12 @@ def _stderr_tail(te: TrialEnv) -> str:
         text = _stderr_path(te).read_bytes().decode("utf-8", errors="replace")
     except OSError:
         return "  stderr: (unreadable)"
-    # A faulthandler dump lists the innermost frame FIRST. On the real CLI's deep
-    # stack a plain tail cuts exactly the line that names where the lock is stuck.
-    start = text.find("(most recent call first)")
-    tail = text[start:][:2000] if start != -1 else text[-2000:]
+    # A faulthandler dump lists the innermost frame FIRST, per thread, and the
+    # main thread is not always first (aiosqlite's worker can precede it). Start
+    # at the thread that took the SIGABRT; a plain tail cuts exactly the line
+    # that names where the lock is stuck.
+    start = text.find("Current thread")
+    tail = text[start:][:5000] if start != -1 else text[-2000:]
     return f"  stderr tail:\n{tail}" if tail.strip() else "  stderr: (empty)"
 
 
@@ -1310,7 +1317,11 @@ class TestSigkillAtomicity:
 # reached the step under test. Fast in-process twins live in
 # tests/test_lock_sigint_atomicity.py.
 
-TAIL_DEADLINE = 3.0  # strictly under WAIT_TIMEOUT, so this fires before the hang guard
+# A deaf lock only exits after the ~15s reload wait (or never, on the flock), so
+# anything well under that still convicts it; 8s leaves CI teardown headroom
+# (worst measured single-SIGINT exit: 1.40s under 10 CPU hogs). Must stay under
+# WAIT_TIMEOUT so this fires before the hang guard.
+TAIL_DEADLINE = 8.0
 TAIL_TRIALS = 3
 _CLEAN_AUDIT = json.dumps(
     {

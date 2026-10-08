@@ -1937,9 +1937,11 @@ class _LockInterrupts:
         self.committed = False
 
     def __call__(self) -> None:
-        if self.task is None or self.committed:
+        if self.task is None:
             return
-        if self.pressed:
+        if self.pressed or self.committed:
+            # Never cancel twice, never after the commit. After it the loop only
+            # runs this during post-flight's exit-87 rollback: answer that too.
             if self.planned:
                 self.console.print_notice(_STILL_ROLLING_BACK)
             return

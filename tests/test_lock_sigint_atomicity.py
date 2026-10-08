@@ -477,8 +477,11 @@ def _invoke_lock_sandboxed(
     monkeypatch: pytest.MonkeyPatch,
     *flags: str,
 ):  # noqa: ANN202 — click's Result
-    # A real ~/.openclaw on the dev box would trip the proxy-health gate first.
+    # A real ~/.openclaw on the dev box would trip the proxy-health gate first;
+    # OpenClaw env vars from the developer's shell would point lock at it too.
     monkeypatch.chdir(tmp_path)
+    for var in [v for v in os.environ if v.startswith("OPENCLAW_")] + ["PI_CODING_AGENT_DIR"]:
+        monkeypatch.delenv(var, raising=False)
     return runner.invoke(
         app,
         [*flags, "lock", "--env", str(env_file)],
@@ -580,8 +583,10 @@ class _InteractiveStdin:
 
 
 class TestCtrlCAtAdoptionPromptKeepsKeys:
+    @pytest.mark.parametrize("key", ["ctrl-c", "ctrl-d"])
     def test_ctrl_c_at_the_real_adoption_prompt_keeps_keys(
         self,
+        key: str,
         home_dir: WorthlessHome,
         two_key_env: Path,
         tmp_path: Path,
@@ -591,7 +596,8 @@ class TestCtrlCAtAdoptionPromptKeepsKeys:
         rewritten. Click turns Ctrl-C (and Ctrl-D) there into ``typer.Abort`` —
         ``except (KeyboardInterrupt, EOFError): raise Abort()`` — a RuntimeError
         the unwind ``except Exception`` would catch, deleting rows the rewritten
-        ``.env`` already needs. Real prompt, real SIGINT while it waits."""
+        ``.env`` already needs — on main, Ctrl-D did exactly that. Real prompt;
+        Ctrl-C is a real SIGINT while it waits, Ctrl-D is end of input."""
         import worthless.cli.commands.lock as lock_mod
 
         pre_sha = _sha256_of(two_key_env)
@@ -603,14 +609,14 @@ class TestCtrlCAtAdoptionPromptKeepsKeys:
             lock_mod._openclaw_integration, "preview_unrecognized", lambda *_a, **_k: ["openai"]
         )
 
-        def _user_presses_ctrl_c_while_prompted(_prompt: str) -> str:
+        def _user_presses_key_while_prompted(_prompt: str) -> str:
+            if key == "ctrl-d":
+                raise EOFError  # what input() raises on end of input
             os.kill(os.getpid(), signal.SIGINT)
             time.sleep(_BLOCK_S)  # still waiting for an answer
             return "n"
 
-        monkeypatch.setattr(
-            click_termui, "visible_prompt_func", _user_presses_ctrl_c_while_prompted
-        )
+        monkeypatch.setattr(click_termui, "visible_prompt_func", _user_presses_key_while_prompted)
 
         with pytest.raises(typer.Exit) as exc:
             lock_mod._lock_keys(two_key_env, home_dir)
