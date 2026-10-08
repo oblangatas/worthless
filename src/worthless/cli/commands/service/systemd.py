@@ -218,9 +218,17 @@ def install(home: WorthlessHome, *, port: int | None = None) -> None:
             # NOT_INSTALLED. Tear the manager state down too, best-effort.
             # Best-effort, and deliberately not allowed to skip the unlink:
             # if systemctl itself is what blew up, the file must still go.
-            with contextlib.suppress(Exception):
-                _systemctl("disable", "--now", SYSTEMD_UNIT, check=False)
-            path.unlink(missing_ok=True)
+            # try/finally, not just suppress(Exception): the outer handler
+            # catches BaseException, so a Ctrl-C during activation lands here,
+            # and a second one inside this subprocess is a KeyboardInterrupt
+            # that suppress(Exception) does not catch. Once rollback starts the
+            # unlink is unconditional — a leftover unit file would make every
+            # later lock treat the service as installed and never offer again.
+            try:
+                with contextlib.suppress(Exception):
+                    _systemctl("disable", "--now", SYSTEMD_UNIT, check=False)
+            finally:
+                path.unlink(missing_ok=True)
             with contextlib.suppress(Exception):
                 _systemctl("daemon-reload", check=False)
         raise

@@ -154,9 +154,17 @@ def install(home: WorthlessHome, *, port: int | None = None) -> None:
             # with nothing behind it, while detect_status reports NOT_INSTALLED.
             # Best-effort, and deliberately not allowed to skip the unlink:
             # if launchctl itself is what blew up, the plist must still go.
-            with contextlib.suppress(Exception):
-                run_cmd(["launchctl", "bootout", _launchctl_domain(), str(path)], check=False)
-            path.unlink(missing_ok=True)
+            # try/finally, not just suppress(Exception): the outer handler
+            # catches BaseException, so a Ctrl-C during activation lands here,
+            # and a second one inside this subprocess is a KeyboardInterrupt
+            # that suppress(Exception) does not catch. Once rollback starts the
+            # unlink is unconditional — a leftover plist would make every later
+            # lock treat the service as installed and never offer again.
+            try:
+                with contextlib.suppress(Exception):
+                    run_cmd(["launchctl", "bootout", _launchctl_domain(), str(path)], check=False)
+            finally:
+                path.unlink(missing_ok=True)
         raise
     report_proxy_health(actual_port)
 
