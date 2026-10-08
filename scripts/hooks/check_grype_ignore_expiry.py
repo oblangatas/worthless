@@ -97,6 +97,26 @@ def check(config: Path, today: dt.date, warnings: list[str] | None = None) -> li
                     f"Use a literal name, or split into one entry per package."
                 )
 
+        # The mirror image of the no-CVE case above, and the wider mistake of
+        # the two. A rule naming a CVE but no package is read by
+        # check_grype_unmapped_findings._is_argued as covering EVERY package in
+        # every ecosystem ("rule named no package: covers everything"), so one
+        # argument measured about a base-image C++ runtime would also excuse the
+        # same CVE id in a first-party wheel nobody looked at. Two such entries
+        # reached main before this check existed.
+        #
+        # `type` alone counts: a package whose name contains a regex activator
+        # (`libstdc++6`) cannot be named at all — the check above rejects it and
+        # escaping adds `\`, also an activator — so type plus an exact version
+        # is the narrowest form available for those. Requiring `name` would
+        # leave no legal way to argue such a finding.
+        if not (isinstance(pkg, dict) and (pkg.get("name") or pkg.get("type"))):
+            problems.append(
+                f"{vuln}: no `package` scope — this ignore would silence the CVE on "
+                f"EVERY package, including ones nobody measured. Add `package.name`, "
+                f"or `package.type` (plus a `version`) when the name is regex-unsafe."
+            )
+
         raw = rule.get("expiry")
 
         if raw is None:
