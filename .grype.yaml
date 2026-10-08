@@ -17,8 +17,10 @@
 # That hook is the ONLY thing stopping a suppression from living forever.
 #
 # ARCHITECTURE: every reachability argument below was measured on **amd64**.
-# These rules match on `package.name` + `type` with no version pin, so they
-# apply to the arm64 image too — but the evidence behind them does not. arm64
+# Most rules match on `package.name` + `type`; the libstdc++ pair below also
+# pins an exact `version`. Either way they apply to the arm64 image too — a
+# name and type are arch-independent, and Debian ships one version string
+# across arches — but the evidence behind them does not. arm64
 # was scanned once (2026-08-06) and carried the identical findings; nothing
 # keeps that true. WOR-873 added a weekly arm64 scan so divergence surfaces on
 # a Monday rather than at a release tag. Re-MEASURE per-arch before extending.
@@ -708,11 +710,12 @@ ignore:
   # carries and compares `version` (see the libstdc++ pair above), so adding a
   # pin would genuinely bound this waiver to the affected OpenSSL build.
   #
-  # Deliberately NOT added in the same breath: this entry is scoped by name
-  # already, which is the narrowest form available and strictly better than
-  # type+version. A version pin on top would only buy auto-expiry when Debian
-  # bumps the package — worth doing, but it is a behaviour change to a waiver
-  # this PR is not otherwise touching, and it wants its own measurement.
+  # Deliberately NOT added in the same breath. A name already pins this to one
+  # package, which is what `type: deb` + version is a substitute for when the
+  # name is regex-unsafe. Adding a version on top would buy one further thing —
+  # auto-expiry the moment Debian bumps the package — which is worth having, but
+  # it is a behaviour change to a waiver this PR is not otherwise touching and
+  # it wants its own measurement.
   #
   # Measured on BOTH architectures: the arm64 resolution of this digest also
   # reports 3.0.20 with zero QUIC symbols, and grype emits the same package
