@@ -1969,6 +1969,8 @@ def _exit_openclaw_failed(console, code: int) -> NoReturn:  # noqa: ANN001
 def _openclaw_steps(
     planned: list[_PlannedUpdate],
     *,
+    gate: _oc_audit.AuditGateHandle | None,
+    proxy_base_url: str,
     signals: list[int],
     managed_aliases: set[str] | None,
     adopt: bool,
@@ -1976,15 +1978,20 @@ def _openclaw_steps(
     quiet: bool,
     home: WorthlessHome,
 ) -> int:
-    """Adoption prompt + OpenClaw wiring, answering Ctrl-C. Returns the exit code.
+    """Post-flight re-audit + adoption prompt + OpenClaw wiring, answering Ctrl-C.
 
-    Runs after the keys are committed, and all of it is synchronous: the
-    adoption prompt, OpenClaw's config-file lock (unbounded), and a reload wait
-    of up to 15s. Ctrl-C here stops the OpenClaw steps, keeps the lock and exits
-    130 — never an unwind, because the rewritten ``.env`` needs those rows.
+    Returns the exit code. Runs after the keys are committed, and all of it is
+    synchronous: the re-audit (a subprocess, retried once), the adoption prompt,
+    OpenClaw's config-file lock (unbounded) and a reload wait of up to 15s.
+    Ctrl-C here stops the OpenClaw steps, keeps the lock and exits 130 — never
+    an unwind, because the rewritten ``.env`` needs those rows. A real
+    post-flight failure (``typer.Exit(87)``) is not an interrupt and still
+    takes the caller's documented recovery path.
     """
     try:
         with _ctrl_c_raises(signals):
+            if gate is not None:
+                _openclaw_audit_postflight(gate, managed_aliases, proxy_base_url)
             adoption_policy = _resolve_adoption_policy(
                 planned,
                 managed_aliases=managed_aliases,
@@ -2904,8 +2911,6 @@ def _lock_keys(
                         oauth_skipped=bool(oauth_skipped),
                     )
                 _batch_rewrite(env_path, planned, keys_only, existing_env_keys)
-                if _oc_gate is not None:
-                    _openclaw_audit_postflight(_oc_gate, managed_aliases, oc_proxy_base_url)
                 # Phase 2.b: OpenClaw magic. Per L1 in
                 # engineering/research/openclaw/WOR-431-phase-2-spec.md, this
                 # NEVER rolls back lock-core success. Per L2 (revised 2026-05-08
@@ -2914,6 +2919,8 @@ def _lock_keys(
                 # AFTER lock-core's .env/DB writes are fully committed.
                 openclaw_exit = _openclaw_steps(
                     planned,
+                    gate=_oc_gate,
+                    proxy_base_url=oc_proxy_base_url,
                     signals=installed_signals,
                     managed_aliases=managed_aliases,
                     adopt=adopt,
