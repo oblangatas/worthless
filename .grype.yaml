@@ -181,11 +181,15 @@ ignore:
   #     `version` as well (added alongside this entry); without that it read
   #     the scope as "any deb" and the pin bought nothing on the gate that
   #     actually blocks.
-  # Residual breadth: `type: deb` at that exact version covers any Debian
-  # package built from gcc-14 at 14.2.0-19 — today exactly the three reported
-  # ones, but a future gcc-14-sourced addition (libgomp1 via numpy, say) would
-  # be silently covered for these two CVE ids. Narrower than a name would be
-  # is not available here; narrower than "everything" it certainly is.
+  # Residual breadth, stated without flattering it: `type: deb` at that exact
+  # version covers ANY Debian package whose version string is 14.2.0-19. Not
+  # "any package built from gcc-14" — covers() compares type and version and
+  # enforces no provenance whatsoever, so a wholly unrelated deb that happened
+  # to carry that version string would match. In this image only the three
+  # reported gcc-14 binaries do, and a future gcc-14-sourced addition
+  # (libgomp1 via numpy, say) would be silently covered for these two CVE ids.
+  # Narrower than a name would be is not available here; narrower than
+  # "everything" it certainly is.
   #
   # To close: drop this when Debian ships a fixed gcc, or when the base image
   # stops shipping the gcc runtime at all.
