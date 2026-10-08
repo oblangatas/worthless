@@ -172,14 +172,16 @@ class TestServiceInstall:
 
     def test_start_banner_states_persistence_guarantee(self, home_dir: Path) -> None:
         """WOR-726: the banner must tell the user the proxy now survives crashes
-        and reboot — the thing that distinguishes it from `worthless up`. It must
-        also show the port the INSTALLED unit binds, not the ambient WORTHLESS_PORT
-        of this shell (CodeRabbit)."""
+        — the thing that distinguishes it from `worthless up`. It must also show
+        the port the INSTALLED unit binds, not the ambient WORTHLESS_PORT of this
+        shell (CodeRabbit). It must NOT claim "survives reboot": WOR-725 has
+        never verified that."""
         mock_backend = MagicMock()
         mock_backend.installed_port.return_value = 9191
         with (
             patch("worthless.cli.commands.service._backend", return_value=mock_backend),
             patch("worthless.cli.commands.service.get_home") as mock_home,
+            patch("worthless.cli.commands.service.is_wsl", return_value=False),
         ):
             mock_home.return_value.base_dir = home_dir
             result = runner.invoke(
@@ -195,9 +197,26 @@ class TestServiceInstall:
         # closes (proven on real WSL2, run 35055982192). A test that pins an
         # unverified promise is a test that keeps it shipping.
         assert "survives reboot" not in result.output
+        assert "wslconfig" not in result.output.lower(), "no WSL advice off WSL"
         # Installed port (9191) wins over the shell's WORTHLESS_PORT (8787).
         assert "9191" in result.output
         assert "8787" not in result.output
+
+    def test_banner_on_wsl_warns_the_proxy_stops_with_the_terminal(self, home_dir: Path) -> None:
+        """WOR-853: on real WSL the distro, and the service, stop ~15 s after the
+        last terminal closes unless .wslconfig sets instanceIdleTimeout=-1. The
+        banner must not let a WSL user believe otherwise."""
+        mock_backend = MagicMock()
+        mock_backend.installed_port.return_value = 8787
+        with (
+            patch("worthless.cli.commands.service._backend", return_value=mock_backend),
+            patch("worthless.cli.commands.service.get_home") as mock_home,
+            patch("worthless.cli.commands.service.is_wsl", return_value=True),
+        ):
+            mock_home.return_value.base_dir = home_dir
+            result = runner.invoke(app, ["service", "start"], env={"WORTHLESS_HOME": str(home_dir)})
+        assert result.exit_code == 0, result.output
+        assert "instanceIdleTimeout=-1" in result.output
 
     def test_restart_invokes_backend(self, home_dir: Path) -> None:
         mock_backend = MagicMock()
@@ -261,3 +280,93 @@ class TestServiceInstall:
         assert result.exit_code == 0, result.output
         # Console renders to stderr; `output` is the mixed stream (typer >=0.26).
         assert "running" in result.output.lower()
+
+
+class TestLingerIsDisclosed:
+    """We switch on account-level state and never switch it off. Say so.
+
+    `_ensure_linger` runs `loginctl enable-linger` during a systemd install, so
+    the service survives logout. `worthless service uninstall` does not reverse
+    it, and deliberately so: linger is account-wide, other user services may
+    depend on it, and turning off state we may not have created is exactly the
+    mistake the install rollback's `created_here` guard exists to avoid.
+
+    Review (karen, 2026-10-08) called the silence the unfixed half of the
+    consent defect. Disclosure is the fix; a precise undo is worthless-fzas.
+    """
+
+    def test_start_does_not_claim_it_enabled_linger(self, home_dir: Path) -> None:
+        """`service start` never calls _ensure_linger, so it must not take credit.
+
+        Review (Cursor Bugbot, 2026-10-08): the banner is shared, and the first
+        version of this hint fired on start too.
+        """
+        mock_backend = MagicMock()
+        mock_backend.installed_port.return_value = 8787
+        with (
+            patch("worthless.cli.commands.service._backend", return_value=mock_backend),
+            patch(
+                "worthless.cli.commands.service.current_platform_backend_name",
+                return_value="systemd",
+            ),
+            patch("worthless.cli.commands.service.is_wsl", return_value=False),
+            patch("worthless.cli.commands.service.get_home") as mock_home,
+        ):
+            mock_home.return_value.base_dir = home_dir
+            result = runner.invoke(app, ["service", "start"], env={"WORTHLESS_HOME": str(home_dir)})
+
+        assert result.exit_code == 0, result.output
+        assert "Lingering is now on" not in result.output
+
+    def test_wsl_is_not_told_the_service_survives_logout(self, home_dir: Path) -> None:
+        """WSL runs the systemd backend but the proxy dies with the terminal.
+
+        Review (Cursor Bugbot, 2026-10-08): putting "survives logout" directly
+        under the 15-second warning contradicts it. Linger does not outlive
+        WSL's idle shutdown.
+        """
+        with (
+            patch("worthless.cli.commands.service.is_wsl", return_value=True),
+        ):
+            from worthless.cli.commands.service import _print_service_banner
+
+            console = MagicMock()
+            console.json_mode = False
+            _print_service_banner(console, platform="systemd", port=8787, after_install=True)
+
+        said = " ".join(str(c) for c in console.print_hint.call_args_list)
+        assert "Lingering is now on" not in said
+        warned = " ".join(str(c) for c in console.print_warning.call_args_list)
+        assert "15 seconds" in warned, "the WSL warning itself must still appear"
+
+    def test_systemd_install_says_uninstall_leaves_linger_on(self) -> None:
+        """The install path IS where _ensure_linger runs, so it must disclose."""
+        with patch("worthless.cli.commands.service.is_wsl", return_value=False):
+            from worthless.cli.commands.service import _print_service_banner
+
+            console = MagicMock()
+            console.json_mode = False
+            _print_service_banner(console, platform="systemd", port=8787, after_install=True)
+
+        said = " ".join(str(c) for c in console.print_hint.call_args_list)
+        assert "Lingering is now on" in said
+        assert "leaves it on" in said
+        assert "disable-linger" in said
+
+    def test_launchd_does_not_mention_linger(self, home_dir: Path) -> None:
+        """launchd has no such concept; the hint must not leak to macOS."""
+        mock_backend = MagicMock()
+        mock_backend.installed_port.return_value = 8787
+        with (
+            patch("worthless.cli.commands.service._backend", return_value=mock_backend),
+            patch(
+                "worthless.cli.commands.service.current_platform_backend_name",
+                return_value="launchd",
+            ),
+            patch("worthless.cli.commands.service.get_home") as mock_home,
+        ):
+            mock_home.return_value.base_dir = home_dir
+            result = runner.invoke(app, ["service", "start"], env={"WORTHLESS_HOME": str(home_dir)})
+
+        assert result.exit_code == 0, result.output
+        assert "linger" not in result.output.lower()

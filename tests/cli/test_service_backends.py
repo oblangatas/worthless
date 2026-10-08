@@ -994,3 +994,148 @@ class TestWslIdleShutdownCaveat:
             _print_service_banner(console, platform="systemd", port=8787)
         captured = capsys.readouterr()
         assert "wslconfig" not in (captured.out + captured.err).lower()
+
+
+class TestFailedActivationLeavesNothingBehind:
+    """A refused install must not leave a unit that loads at next login.
+
+    Both backends write the unit file BEFORE activating it. When activation
+    failed, the file stayed: the user was told the install failed, while a unit
+    sat on disk ready to start at next login, and `detect_status` reported
+    STOPPED rather than NOT_INSTALLED. #599 fixed the sibling case (systemd
+    absent) by ordering the preflight first; this is the one that remained.
+
+    The rollback removes the file ONLY when this call created it, so a failed
+    re-install never deletes a unit that was already working.
+    """
+
+    @staticmethod
+    def _boom(*_args, **_kwargs):
+        raise subprocess.CalledProcessError(1, ["activate"])
+
+    def test_launchd_removes_the_plist_it_just_wrote(
+        self, home: WorthlessHome, tmp_path: Path
+    ) -> None:
+        binary = tmp_path / "worthless"
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+        plist = tmp_path / "sh.worthless.proxy.plist"
+
+        with (
+            patch.object(launchd, "plist_path", return_value=plist),
+            patch.object(launchd, "resolve_worthless_binary", return_value=binary),
+            patch.object(launchd, "run_cmd", side_effect=self._boom),
+            patch.object(launchd, "_is_loaded", return_value=False),
+            patch.object(launchd, "report_proxy_health"),
+            patch.object(launchd.os, "getuid", return_value=501),
+            pytest.raises(subprocess.CalledProcessError),
+        ):
+            launchd.install(home)
+
+        assert not plist.exists(), "a failed install left a plist that loads at next login"
+
+    def test_systemd_removes_the_unit_it_just_wrote(
+        self, home: WorthlessHome, tmp_path: Path
+    ) -> None:
+        binary = tmp_path / "worthless"
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+        unit = tmp_path / "worthless-proxy.service"
+
+        with (
+            patch.object(systemd, "unit_path", return_value=unit),
+            patch.object(systemd, "resolve_worthless_binary", return_value=binary),
+            patch.object(systemd, "_preflight_systemd_available"),
+            patch.object(systemd, "_ensure_linger", side_effect=self._boom),
+            patch.object(systemd, "run_cmd", side_effect=self._boom),
+            patch.object(systemd, "report_proxy_health"),
+            pytest.raises(subprocess.CalledProcessError),
+        ):
+            systemd.install(home)
+
+        assert not unit.exists(), "a failed install left a unit behind"
+
+    def test_a_failed_reinstall_keeps_the_unit_that_already_worked(
+        self, home: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """Rollback must not punish someone whose service was fine before."""
+        binary = tmp_path / "worthless"
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+        unit = tmp_path / "worthless-proxy.service"
+        unit.write_text("[Service]\nEnvironment=WORTHLESS_SERVICE_MANAGED=1\n")
+
+        with (
+            patch.object(systemd, "unit_path", return_value=unit),
+            patch.object(systemd, "resolve_worthless_binary", return_value=binary),
+            patch.object(systemd, "_preflight_systemd_available"),
+            patch.object(systemd, "refuse_foreign_unit"),
+            patch.object(systemd, "_ensure_linger", side_effect=self._boom),
+            patch.object(systemd, "run_cmd", side_effect=self._boom),
+            patch.object(systemd, "report_proxy_health"),
+            pytest.raises(subprocess.CalledProcessError),
+        ):
+            systemd.install(home)
+
+        assert unit.exists(), "rollback deleted a unit this call did not create"
+
+
+class TestRollbackSurvivesAnInterrupt:
+    """Ctrl-C during activation must not leave the unit file behind.
+
+    Review (Cursor Bugbot, 2026-10-08): the outer handler catches
+    BaseException, so KeyboardInterrupt reaches the rollback — but the teardown
+    was wrapped in `contextlib.suppress(Exception)`, which does NOT suppress
+    KeyboardInterrupt. A second interrupt landing inside that subprocess
+    skipped the unlink.
+
+    That interacts badly with the offer gate added in the same PR: a leftover
+    unit file makes every later lock treat the service as installed and never
+    offer again. So the unlink is now unconditional once rollback starts.
+    """
+
+    @staticmethod
+    def _interrupt(*_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    def test_launchd_unlinks_even_when_teardown_is_interrupted(
+        self, home: WorthlessHome, tmp_path: Path
+    ) -> None:
+        binary = tmp_path / "worthless"
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+        plist = tmp_path / "sh.worthless.proxy.plist"
+
+        with (
+            patch.object(launchd, "plist_path", return_value=plist),
+            patch.object(launchd, "resolve_worthless_binary", return_value=binary),
+            patch.object(launchd, "run_cmd", side_effect=self._interrupt),
+            patch.object(launchd, "_is_loaded", return_value=False),
+            patch.object(launchd, "report_proxy_health"),
+            patch.object(launchd.os, "getuid", return_value=501),
+            pytest.raises(KeyboardInterrupt),
+        ):
+            launchd.install(home)
+
+        assert not plist.exists(), "an interrupted rollback left the plist behind"
+
+    def test_systemd_unlinks_even_when_teardown_is_interrupted(
+        self, home: WorthlessHome, tmp_path: Path
+    ) -> None:
+        binary = tmp_path / "worthless"
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+        unit = tmp_path / "worthless-proxy.service"
+
+        with (
+            patch.object(systemd, "unit_path", return_value=unit),
+            patch.object(systemd, "resolve_worthless_binary", return_value=binary),
+            patch.object(systemd, "_preflight_systemd_available"),
+            patch.object(systemd, "_ensure_linger", side_effect=self._interrupt),
+            patch.object(systemd, "run_cmd", side_effect=self._interrupt),
+            patch.object(systemd, "report_proxy_health"),
+            pytest.raises(KeyboardInterrupt),
+        ):
+            systemd.install(home)
+
+        assert not unit.exists(), "an interrupted rollback left the unit behind"

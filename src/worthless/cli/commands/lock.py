@@ -27,6 +27,12 @@ import typer
 from worthless.cli._repo_factory import open_repo
 from worthless.cli.bootstrap import WorthlessHome, acquire_lock, get_home
 from worthless.cli.code_scanner import scan_for_hardcoded_provider_urls
+from worthless.cli.commands.service import _backend, _print_service_banner
+from worthless.cli.commands.service._common import (
+    ServiceState,
+    current_platform_backend_name,
+    preflight_service_install,
+)
 from worthless.cli.commands.scan import (
     SCAN_TIME_BUDGET_S,
     _format_code_findings_human,
@@ -39,6 +45,7 @@ from worthless.cli.process import (
     resolve_port,
 )
 from worthless.cli.console import WorthlessConsole, get_console
+from worthless.cli.platform import is_wsl
 from worthless.cli.scanner import SkippedFile, scan_source_for_hardcoded_provider_urls
 from worthless.cli.dotenv_rewriter import (
     rewrite_env_keys,
@@ -2858,6 +2865,16 @@ def _lock_keys(
             openclaw_failed=bool(result.openclaw_exit),
             oauth_skipped=result.oauth_skipped,
         )
+        # WOR-853: same guard as the "Next:" hint above — only offer when the
+        # lock actually succeeded. A partial failure has no business installing
+        # anything.
+        #
+        # The post-lock Fernet sync runs FIRST, just below, and the order is
+        # load-bearing: the offer is an optional extra, and anything it raised
+        # used to skip WOR-748's sync entirely on a lock that had committed.
+        if result.fresh_count and not result.openclaw_exit:
+            _sync_fernet_after_lock(home)
+            _offer_service_after_lock(console, home=home, port=resolve_port(None))
 
     # Trust-fix (2026-05-08 verification gauntlet): when OpenClaw was
     # detected on this host AND the integration stage failed, the user is
@@ -2877,6 +2894,10 @@ def _lock_keys(
         )
         raise typer.Exit(code=result.openclaw_exit)
 
+    # Also here, for the paths the branch above does not cover: a quiet lock, a
+    # re-lock with no fresh keys, or an OpenClaw partial failure. Syncing twice
+    # is harmless — it copies the same canonical key and no-ops when the bytes
+    # already match.
     _sync_fernet_after_lock(home)
     return result.fresh_count + relock_count
 
@@ -2947,6 +2968,139 @@ def _enroll_single(
 
     console = get_console()
     console.print_success(f"Enrolled {alias} ({provider}).")
+
+
+def install_service_for_offer(home: WorthlessHome, *, port: int) -> None:
+    """Install the background service. Separate so the offer can stub it in tests."""
+    preflight_service_install(home)
+    _backend().install(home, port=port)
+
+
+def _offer_declined_hint() -> str:
+    """What to print when the offer is declined, or never asked.
+
+    WSL gets different words for the same reason `_offer_question()` does: the
+    plain version promises the proxy keeps running after the terminal closes,
+    and WSL does not honour that. It matters more here than in the question —
+    on a piped lock this hint is the ONLY thing printed, and on a declined
+    prompt it lands one line under the honest question and contradicts it.
+    (Review, defect 11, 2026-10-08.)
+    """
+    if is_wsl():
+        return (
+            "Want a background service? `worthless service install` — on WSL it also "
+            "needs instanceIdleTimeout=-1 in %USERPROFILE%\\.wslconfig to outlive "
+            "your last terminal."
+        )
+    return "Want it to keep running after you close this terminal? `worthless service install`"
+
+
+def _offer_question(port: int) -> str:
+    """The question to ask, which must be true on the platform asking it.
+
+    On WSL the plain version is a promise WSL does not keep: measured on real
+    WSL2 (WOR-853), the default config stops the distro — and the proxy with it
+    — about 15 s after the last WSL terminal closes. The fix text used to print
+    only AFTER the unit was written and linger enabled, and consent collected
+    after the irreversible step is not consent. So WSL gets told in the
+    question, before answering it.
+    """
+    if is_wsl():
+        return (
+            f"\nInstall the background service on port {port}? On WSL it still stops about "
+            "15 seconds after your last WSL terminal closes, unless you also set "
+            "instanceIdleTimeout=-1 in %USERPROFILE%\\.wslconfig — shown next if you say yes"
+        )
+    return (
+        "\nKeep the proxy running after this terminal closes? "
+        f"(installs a user service on port {port})"
+    )
+
+
+def _offer_service_after_lock(console, *, home: WorthlessHome, port: int) -> bool:
+    """Offer to keep the proxy alive after this terminal closes (WOR-853).
+
+    ``lock`` is the first moment a Fernet key exists, so it is the earliest
+    point the service CAN be installed — ``install.sh`` cannot, because
+    ``preflight_service_install`` refuses without a key.
+
+    Returns True only if a service was actually installed.
+    """
+    if console.json_mode:
+        return False
+
+    # The terminal gate comes BEFORE --yes, and the order is the point.
+    # Installing the service also runs `loginctl enable-linger`, which
+    # `worthless service uninstall` does not reverse — account-level state. A
+    # blanket --yes in someone's Dockerfile or CI job previously created it with
+    # no prompt at all (confirmed live, 2026-10-05). --yes auto-approves
+    # PROMPTS; where nobody can see a prompt there is nothing to approve.
+    if not _scan_prompt_is_tty():
+        console.print_hint(_offer_declined_hint())
+        return False
+
+    # Nothing to offer if one is already installed. install() rewrites the unit
+    # and on launchd boots out the running agent first, so re-running it over a
+    # working service risks stopping it — and rollback would not restore it,
+    # because the file it would delete is not one this call created. A second
+    # lock with new keys used to ask again and do exactly that.
+    # (Cursor Bugbot, 2026-10-08.)
+    try:
+        if _backend().detect_status(home, port).state is not ServiceState.NOT_INSTALLED:
+            return False
+    except (WorthlessError, subprocess.CalledProcessError, OSError):
+        # Cannot tell. Saying nothing beats crashing a lock that worked, and
+        # beats installing over something we failed to inspect.
+        return False
+
+    if console.assume_yes:
+        accepted = True
+    else:
+        try:
+            accepted = typer.confirm(_offer_question(port), default=False)
+        except (typer.Abort, EOFError):
+            # Ctrl-C or Ctrl-D at a real terminal. The gate above already excluded
+            # the captured-stdin case, which raises OSError rather than EOFError.
+            console.print_hint(_offer_declined_hint())
+            return False
+
+    if not accepted:
+        console.print_hint(_offer_declined_hint())
+        return False
+
+    try:
+        install_service_for_offer(home, port=port)
+    except (WorthlessError, subprocess.CalledProcessError, OSError) as exc:
+        # The keys are already protected by the time we ask, so a service that
+        # will not install is NOT a reason to report that lock failed.
+        # WorthlessError alone was not enough: run_cmd uses check=True, so a
+        # failing `launchctl bootstrap` or `systemctl enable` raises
+        # CalledProcessError, which escaped to @error_boundary and printed
+        # WRTLS-199 "internal error" on a lock that had already succeeded.
+        console.print_warning(f"Could not install the service: {exc}")
+        console.print_hint("Your keys are still protected. Try `worthless service install`.")
+        return False
+    except BaseException:
+        # Ctrl-C during the install, most likely inside report_proxy_health's
+        # 45 s wait — the one place _common.py documents operators interrupting.
+        # KeyboardInterrupt is not an Exception, so it used to escape this
+        # handler entirely and exit 130 on a lock that had fully committed,
+        # which is precisely what the comment above says must never happen.
+        # Absorbed deliberately. The message does not claim the install failed,
+        # because activation may well have finished before the wait began.
+        console.print_warning("Service install interrupted.")
+        console.print_hint(
+            "Your keys are still protected. The service may be installed — "
+            "check with `worthless service status`."
+        )
+        return False
+
+    # Same banner as `worthless service install`, so WSL users get the
+    # idle-shutdown warning here too.
+    _print_service_banner(
+        console, platform=current_platform_backend_name(), port=port, after_install=True
+    )
+    return True
 
 
 def register_lock_commands(app: typer.Typer) -> None:

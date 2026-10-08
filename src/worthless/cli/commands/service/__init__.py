@@ -29,7 +29,9 @@ def _backend():
     return systemd
 
 
-def _print_service_banner(console, *, platform: str, port: int) -> None:
+def _print_service_banner(
+    console, *, platform: str, port: int, after_install: bool = False
+) -> None:
     """Confirm the persistence guarantee a first-run service user needs.
 
     ``worthless up`` dies on Ctrl+C; a service-managed proxy does not. Say so
@@ -39,15 +41,40 @@ def _print_service_banner(console, *, platform: str, port: int) -> None:
     if console.json_mode:
         return
     console.print_success(f"Worthless proxy running as a {platform} service on 127.0.0.1:{port}.")
+    # No "survives reboot": WOR-725 has never verified it on any platform.
     console.print_hint("Auto-restarts on crash — no `worthless up` needed.")
     if is_wsl():
-        # Measured on real WSL2: with default settings WSL stops the distro ~15 s
-        # after the last WSL window closes, and the proxy stops with it. Promising
-        # survival here without saying that would be false on the default setup.
+        # Proven on real WSL (WOR-853, .github/workflows/wsl.yml idle legs):
+        # with the default config the distro, and this service, stop ~15 s
+        # after the last WSL terminal closes. Same fix text as systemd.py.
+        console.print_warning(
+            "On WSL the proxy stops about 15 seconds after your last WSL terminal "
+            "closes, because WSL shuts the distro down. To keep it running, add "
+            "this to %USERPROFILE%\\.wslconfig on Windows (WSL 2.5.4 or newer):\n"
+            "  [general]\n"
+            "  instanceIdleTimeout=-1\n"
+            "It takes effect once WSL fully restarts: restart Windows, or run "
+            "`wsl --shutdown` (this also stops Docker Desktop and other distros)."
+        )
+    if after_install and platform == "systemd" and not is_wsl():
+        # Only after an INSTALL, the one path that calls _ensure_linger.
+        # `service start` shares this banner and enables nothing, so claiming
+        # "lingering is now on" there credits this command with something it
+        # did not do.
+        #
+        # And never on WSL. WSL runs the systemd backend, so those users would
+        # read "survives logout" directly beneath the warning that the proxy
+        # dies ~15 s after their last terminal closes. Linger does not outlive
+        # WSL's idle shutdown; the warning above is the true story for them.
+        #
+        # `worthless service uninstall` does NOT turn lingering back off.
+        # Deliberately: linger is account-wide, other user services may rely on
+        # it, and switching off state we may not have created is the mistake the
+        # install rollback exists to avoid. Say so instead. (worthless-fzas)
         console.print_hint(
-            "On WSL it stops ~15 s after your last WSL terminal closes. To keep it "
-            "running, add `[general]` / `instanceIdleTimeout=-1` to "
-            "%USERPROFILE%\\.wslconfig on Windows (WSL 2.5.4 or newer)."
+            "Lingering is now on for this account, so the service survives logout. "
+            "`worthless service uninstall` leaves it on — turn it off yourself with "
+            "`loginctl disable-linger` if nothing else needs it."
         )
     console.print_hint("Status: `worthless service status` · Stop: `worthless service stop`")
 
@@ -124,6 +151,7 @@ def register_service_commands(app: typer.Typer) -> None:
                 console,
                 platform=current_platform_backend_name(),
                 port=actual_port,
+                after_install=True,
             )
 
     @service_group.command("uninstall")

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+
 import os
 import subprocess
 from pathlib import Path
@@ -196,10 +198,40 @@ def install(home: WorthlessHome, *, port: int | None = None) -> None:
         worthless_home=worthless_home,
         port=actual_port if port is not None or os.environ.get("WORTHLESS_PORT") else None,
     )
+    created_here = not path.is_file()
     atomic_write_text(path, content, mode=0o600)
-    _ensure_linger()
-    _systemctl("daemon-reload")
-    _systemctl("enable", "--now", SYSTEMD_UNIT)
+
+    # Activation can fail after the file is on disk. Leaving it there means the
+    # user is told the install failed while a unit waits to start at next
+    # login, and detect_status reports STOPPED instead of NOT_INSTALLED.
+    # Removed only when THIS call created it, so a failed re-install never
+    # deletes a unit that was already working.
+    try:
+        _ensure_linger()
+        _systemctl("daemon-reload")
+        _systemctl("enable", "--now", SYSTEMD_UNIT)
+    except BaseException:
+        if created_here:
+            # `enable --now` can enable the unit and THEN fail to start it, so
+            # removing only the file would leave a wants-symlink behind and a
+            # unit the manager still knows about, while detect_status reports
+            # NOT_INSTALLED. Tear the manager state down too, best-effort.
+            # Best-effort, and deliberately not allowed to skip the unlink:
+            # if systemctl itself is what blew up, the file must still go.
+            # try/finally, not just suppress(Exception): the outer handler
+            # catches BaseException, so a Ctrl-C during activation lands here,
+            # and a second one inside this subprocess is a KeyboardInterrupt
+            # that suppress(Exception) does not catch. Once rollback starts the
+            # unlink is unconditional — a leftover unit file would make every
+            # later lock treat the service as installed and never offer again.
+            try:
+                with contextlib.suppress(Exception):
+                    _systemctl("disable", "--now", SYSTEMD_UNIT, check=False)
+            finally:
+                path.unlink(missing_ok=True)
+            with contextlib.suppress(Exception):
+                _systemctl("daemon-reload", check=False)
+        raise
     report_proxy_health(actual_port)
 
 
