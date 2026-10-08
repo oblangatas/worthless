@@ -107,6 +107,102 @@ ignore:
     reason: "Upstream fix only in Python 3.15.0rc2 (pre-release). Measured 2026-09-10: python:3.13-slim-trixie 3.13.15 and python:3.14-slim-trixie 3.14.7 are both still affected, so there is nowhere stable to upgrade to. Base-image interpreter only. Tracking worthless-kzfq."
     expiry: "2026-12-08"
 
+  # ── tempfile.TemporaryDirectory cleanup race (worthless-11ix) ───────
+  # A race in TemporaryDirectory's cleanup: an attacker who can modify the
+  # tree mid-cleanup swaps a directory for a symlink, so files OUTSIDE the
+  # temp dir get deleted, or their permissions and flags reset.
+  #
+  # Grype lists the fix as 3.15.0. That is not a stable release, and the
+  # advisory records no 3.13 backport, so there is nowhere to upgrade — the
+  # base image already runs 3.13.16, the newest 3.13 there is.
+  #
+  # MEASURED 2026-10-05 against the built image, not asserted:
+  #   1. `tempfile.TemporaryDirectory` — the vulnerable class — appears
+  #      ZERO times in src/. Worthless uses mkdtemp and mkstemp, which have
+  #      no auto-cleanup and so never reach the racing finalizer.
+  #   2. We do call shutil.rmtree on mkdtemp dirs (openclaw/skill.py,
+  #      cli/sidecar_lifecycle.py), which is the same underlying path the
+  #      advisory names. In this image that path is the SAFE one:
+  #      shutil.rmtree.avoids_symlink_attacks is True on Linux 3.13.16,
+  #      read from inside the container. The advisory's own caveat applies
+  #      only where that flag is False.
+  #   3. The residual on all platforms is file-flag reset, a BSD/macOS
+  #      chflags concern that does not exist on this Linux image.
+  #
+  # The attacker also needs concurrent write access inside the container's
+  # temp tree — they are already executing there.
+  #
+  # To close: drop this when CPython backports to 3.13.x, or when 3.15 is
+  # stable and worthless-jsx6 moves the base image.
+  - vulnerability: CVE-2026-12345
+    package: {name: python, type: binary}
+    reason: "Race in tempfile.TemporaryDirectory cleanup: a directory swapped for a symlink mid-cleanup deletes or re-permissions files outside the temp tree. Fix listed as 3.15.0, which is not stable, and no 3.13 backport exists — the image already runs 3.13.16, the newest 3.13. Measured 2026-10-05 on the built image: TemporaryDirectory appears zero times in src/ (worthless uses mkdtemp/mkstemp, which have no auto-cleanup finalizer), and where we do call shutil.rmtree on those dirs, shutil.rmtree.avoids_symlink_attacks reads True inside the container, which is the condition the advisory says removes the deletion attack. Remaining file-flag reset is a BSD/macOS chflags concern, absent on Linux. Tracking worthless-11ix."
+    expiry: "2026-12-31"
+
+  # ── libstdc++ erase_if, nothing here links it (worthless-11ix) ──────
+  # A use-after-free in libstdc++: erase_if on a binary heap priority queue
+  # reallocates storage without updating the internal entry pointer. Debian
+  # has no fix in ANY release — gcc-12, 14, 15 and 16 are all marked
+  # vulnerable, unfixed, on the security tracker (read 2026-10-05), so
+  # fix=not-fixed is the real upstream state, not a stale grype record.
+  #
+  # MEASURED 2026-10-05, not assumed. Installed requirements.txt into
+  # python:3.13-slim-trixie (amd64, Python 3.13.15) and read every compiled
+  # extension's dynamic section:
+  #   44 packages, 11 .so files, 0 linking libstdc++
+  # The interpreter does not link it either. libstdc++ is present only
+  # because the base image ships the gcc runtime; no Worthless code path
+  # reaches a C++ priority queue, so erase_if is never called.
+  #
+  # NO `package` key on purpose, and the expiry hook is why. It rejects any
+  # package name holding a regex activator, because grype turns such a name
+  # into a full-match regex and the ignore then silences packages it never
+  # named. `libstdc++6` carries two `+`, and escaping them adds `\` — also an
+  # activator — so there is no spelling of that name the hook will accept.
+  #
+  # BE CLEAR ABOUT THE COST: dropping `package` makes these entries WIDER, not
+  # narrower. Each one now suppresses its CVE for EVERY package in the image,
+  # not just the gcc runtime. That is tolerable only because both are gcc
+  # advisories that match nothing else here — verified against grype output
+  # with ignores disabled — and not because omitting the key is tidy.
+  #
+  # The expiry hook does not catch this: it guards package names for regex
+  # activators (check_grype_ignore_expiry.py:88-97) but says nothing about a
+  # rule with no package at all. These two entries are the first through that
+  # gap. Closing it — a literal-match flag, so `libstdc++6` can be named —
+  # is worthless-11ix follow-up work, not a reason to keep the wider form.
+  #
+  # To close: drop this when Debian ships a fixed gcc, or when the base image
+  # stops shipping the gcc runtime at all.
+  - vulnerability: CVE-2026-102010
+    reason: "Use-after-free in libstdc++ erase_if on a binary heap priority queue; hits gcc-14-base, libgcc-s1 and libstdc++6. Debian has no fix in any release (gcc-12/14/15/16 all vulnerable, unfixed — tracker read 2026-10-05), so there is nowhere to upgrade. Measured 2026-10-05 on the built image: 11 compiled extensions, none linking libstdc++, and the interpreter does not link it either. Base-image gcc runtime only; no Worthless code path reaches a C++ priority queue. Tracking worthless-11ix."
+    expiry: "2027-01-31"
+
+  # Second advisory, same libstdc++, same measurement. An integer overflow in
+  # the aligned `operator new`: a large enough request wraps and under-allocates,
+  # so the caller writes past the block. `operator new` is the C++ allocation
+  # operator — only C++ code calls it, and nothing here is C++. Debian is again
+  # unfixed across gcc-12/14/15/16 (tracker read 2026-10-05).
+  #
+  # RE-MEASURED 2026-10-05 on the REPINNED image (Python 3.13.16), not carried
+  # over from the entry above: 11 compiled extensions, 0 linking libstdc++,
+  # interpreter 0.
+  - vulnerability: CVE-2026-95619
+    reason: "Integer overflow in libstdc++'s aligned operator new: a large request wraps to an undersized allocation, so the caller writes past the block. Hits gcc-14-base, libgcc-s1 and libstdc++6. Debian has no fix in any release (gcc-12/14/15/16 all vulnerable, unfixed — tracker read 2026-10-05). Re-measured 2026-10-05 inside the repinned image (Python 3.13.16): 11 compiled extensions, none linking libstdc++, and the interpreter does not link it either. operator new is the C++ allocation operator and no Worthless code is C++; the gcc runtime is present only because the base image ships it. Tracking worthless-11ix."
+    expiry: "2027-01-31"
+
+  # CVE-2026-82049 (CPython tarfile extraction filters) was suppressed here
+  # and is now DELETED rather than extended. Repinning the base image to
+  # Python 3.13.16 retired it: measured 2026-10-06 against the built image
+  # with ignores disabled, the finding is absent entirely. This file's rule
+  # is to delete a suppression once its finding is gone, not to leave it
+  # sitting there silencing nothing. The reachability argument it carried
+  # (nothing EXTRACTS archives; tarfile is imported via keyring ->
+  # jaraco.context but jaraco.context.tarball has no callers) is preserved
+  # in tests/test_archive_reachability.py, which still guards the three
+  # older tarfile CVEs below.
+
+
   - vulnerability: CVE-2026-15806
     package:
       name: python
