@@ -701,11 +701,18 @@ ignore:
   # waited on (Debian marking bookworm not-affected) is outside our control, so
   # the likely December outcome is "nothing changed, re-measure and extend".
   #
-  # Narrowing by version is NOT possible here yet. grype's IgnoreRule schema
-  # accepts package.version, but the check that actually fired on this finding,
-  # scripts/hooks/check_grype_unmapped_findings.py, builds its scope from name
-  # and type only and silently discards a version key — so a pin would buy
-  # nothing until that hook is taught to carry it. Tracked separately.
+  # Narrowing by version IS possible now, and this entry could use it. It was
+  # not when this note was first written: check_grype_unmapped_findings built
+  # its scope from name and type only and silently discarded a version key, so
+  # a pin bought nothing on the check that actually fires here. That hook now
+  # carries and compares `version` (see the libstdc++ pair above), so adding a
+  # pin would genuinely bound this waiver to the affected OpenSSL build.
+  #
+  # Deliberately NOT added in the same breath: this entry is scoped by name
+  # already, which is the narrowest form available and strictly better than
+  # type+version. A version pin on top would only buy auto-expiry when Debian
+  # bumps the package — worth doing, but it is a behaviour change to a waiver
+  # this PR is not otherwise touching, and it wants its own measurement.
   #
   # Measured on BOTH architectures: the arm64 resolution of this digest also
   # reports 3.0.20 with zero QUIC symbols, and grype emits the same package
