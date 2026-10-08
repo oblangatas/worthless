@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import signal
 import sqlite3
@@ -488,6 +489,13 @@ def _assert_still_locked(
     assert _sha256_of(env_file) != pre_sha, f".env was not left locked:\n{output}"
 
 
+def _assert_interrupt_recorded(home_dir: WorthlessHome) -> None:
+    """``worthless status`` reads this file; it must say OpenClaw is unfinished."""
+    sentinel = json.loads((home_dir.base_dir / "last-lock-status.json").read_text())
+    assert sentinel["status"] == "partial" and sentinel["openclaw"] == "failed", sentinel
+    assert [e["code"] for e in sentinel["events"]] == ["openclaw.interrupted"], sentinel
+
+
 class TestCtrlCAfterCommitIsAnswered:
     def test_ctrl_c_during_openclaw_step_stops_it_and_keeps_keys_locked(
         self,
@@ -496,8 +504,12 @@ class TestCtrlCAfterCommitIsAnswered:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        import worthless.cli.commands.lock as lock_mod
+
         pre_sha = _sha256_of(two_key_env)
         pressed_at = _openclaw_step_blocks_then_ctrl_c(monkeypatch)
+        synced: list[object] = []
+        monkeypatch.setattr(lock_mod, "_sync_fernet_after_lock", synced.append)
 
         result = _invoke_lock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
 
@@ -509,7 +521,36 @@ class TestCtrlCAfterCommitIsAnswered:
         )
         assert result.exit_code == 130, result.output
         assert "interrupted" in result.output.lower(), result.output
+        # The OpenClaw steps may not have scrubbed the plaintext key yet: never
+        # let the message read as "all safe".
+        assert "may still be using your real key" in " ".join(result.output.split()), result.output
         _assert_still_locked(home_dir, two_key_env, pre_sha, result.output)
+        _assert_interrupt_recorded(home_dir)
+        # Before this fix the press was ignored and the lock ran on to its Fernet
+        # sync. Interrupting must not newly skip it: the keys ARE locked.
+        assert len(synced) == 1, "interrupted lock skipped the post-lock Fernet sync"
+
+    def test_quiet_lock_still_answers_ctrl_c(
+        self,
+        home_dir: WorthlessHome,
+        two_key_env: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``-q`` hides chatter, not the answer to a key the user just pressed."""
+        _openclaw_step_blocks_then_ctrl_c(monkeypatch)
+        monkeypatch.chdir(tmp_path)
+
+        result = runner.invoke(
+            app,
+            ["-q", "lock", "--env", str(two_key_env)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir), "HOME": str(tmp_path)},
+        )
+
+        assert result.exit_code == 130, result.output
+        assert "interrupted" in result.output.lower(), (
+            f"quiet mode swallowed the answer to Ctrl-C:\n{result.output!r}"
+        )
 
 
 class TestCtrlCDuringPostflightAuditIsAnswered:
@@ -540,6 +581,35 @@ class TestCtrlCDuringPostflightAuditIsAnswered:
         _assert_still_locked(home_dir, two_key_env, pre_sha, result.output)
 
 
+class TestCtrlCAtAdoptionPromptKeepsKeys:
+    def test_abort_at_adoption_prompt_never_unwinds_committed_keys(
+        self,
+        home_dir: WorthlessHome,
+        two_key_env: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The "Route them through Worthless?" prompt runs after ``.env`` is
+        rewritten. Click turns Ctrl-C and Ctrl-D there into ``typer.Abort``
+        (typer/_click/termui.py: ``except (KeyboardInterrupt, EOFError): raise
+        Abort()``), a RuntimeError — which the unwind ``except Exception`` would
+        catch, deleting rows the rewritten ``.env`` already needs."""
+        import worthless.cli.commands.lock as lock_mod
+
+        pre_sha = _sha256_of(two_key_env)
+
+        def _user_pressed_ctrl_c_at_prompt(*_a: object, **_k: object) -> object:
+            raise typer.Abort()
+
+        monkeypatch.setattr(lock_mod, "_resolve_adoption_policy", _user_pressed_ctrl_c_at_prompt)
+
+        result = _invoke_lock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
+
+        assert result.exit_code == 130, result.output
+        _assert_still_locked(home_dir, two_key_env, pre_sha, result.output)
+        _assert_interrupt_recorded(home_dir)
+
+
 class TestMashedCtrlCAfterCommitIsAnswered:
     def test_mashed_ctrl_c_during_openclaw_step_never_unwinds(
         self,
@@ -557,6 +627,41 @@ class TestMashedCtrlCAfterCommitIsAnswered:
         assert time.monotonic() - pressed_at[0] < _ANSWER_WITHIN_S, result.output
         assert result.exit_code == 130, result.output
         _assert_still_locked(home_dir, two_key_env, pre_sha, result.output)
+
+
+class TestExtraCtrlCBeforeAnyKeyIsTouched:
+    def test_extra_press_before_first_write_does_not_claim_a_rollback(
+        self,
+        home_dir: WorthlessHome,
+        two_key_env: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """User ruling (2026-10-08): before any key is touched, Ctrl-C just exits.
+        A second press there has nothing to roll back, so it must not say it is
+        rolling back."""
+        import worthless.cli.commands.lock as lock_mod
+
+        pre_sha = _sha256_of(two_key_env)
+        real_pass1 = lock_mod._pass1_db_writes
+
+        async def _two_presses_before_any_write(*args: object, **kwargs: object) -> None:
+            os.kill(os.getpid(), signal.SIGINT)
+            os.kill(os.getpid(), signal.SIGINT)
+            await asyncio.sleep(0.5)  # both presses are handled here, before any write
+            await real_pass1(*args, **kwargs)
+
+        monkeypatch.setattr(lock_mod, "_pass1_db_writes", _two_presses_before_any_write)
+
+        result = runner.invoke(
+            app,
+            ["lock", "--env", str(two_key_env)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+        )
+
+        assert result.exit_code != 0, result.output
+        assert "still rolling back" not in result.output.lower(), result.output
+        assert _shard_rows(home_dir) == [], result.output
+        assert _sha256_of(two_key_env) == pre_sha, result.output
 
 
 class TestSecondCtrlCDuringRollbackIsNeverSilent:

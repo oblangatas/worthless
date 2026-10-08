@@ -801,3 +801,68 @@ def test_fxs47_home_mismatch_emits_warn_event_and_still_writes(
     # Write must still proceed despite the mismatch.
     data = json.loads(openclaw_present["config_path"].read_text(encoding="utf-8"))
     assert "openai" in data["models"]["providers"], "HOME_MISMATCH should warn, not block the write"
+
+
+def _ctrl_c_on_write(monkeypatch: pytest.MonkeyPatch, nth: int) -> None:
+    """Make the *nth* ``set_provider`` write raise KeyboardInterrupt (worthless-3clz).
+
+    ``worthless lock`` now lets Ctrl-C raise inside the OpenClaw steps, so a press
+    can land between two provider writes, e.g. while the second one waits for
+    OpenClaw's config-file lock.
+    """
+    from worthless.openclaw import config as config_mod
+
+    real_set_provider = config_mod.set_provider
+    calls = {"n": 0}
+
+    def _set_provider(*args: object, **kwargs: object) -> None:
+        calls["n"] += 1
+        if calls["n"] == nth:
+            raise KeyboardInterrupt
+        real_set_provider(*args, **kwargs)
+
+    monkeypatch.setattr(config_mod, "set_provider", _set_provider)
+
+
+_TWO_PROVIDERS = [
+    ("openai", "openai-aaaa1111", "sk-shard-a-openai"),
+    ("anthropic", "anthropic-bbbb2222", "sk-shard-a-anthropic"),
+]
+
+
+def test_ctrl_c_between_provider_writes_restores_openclaw_json(
+    openclaw_present: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Half-wired openclaw.json is the worst outcome: provider 1 on the proxy,
+    provider 2 untouched. A Ctrl-C between the writes must put it back."""
+    from worthless.openclaw import integration
+
+    config_path = openclaw_present["config_path"]
+    before = json.loads(config_path.read_text(encoding="utf-8"))
+    monkeypatch.chdir(openclaw_present["home"])
+    _ctrl_c_on_write(monkeypatch, nth=2)
+
+    with pytest.raises(KeyboardInterrupt):
+        integration.apply_lock(planned_updates=_TWO_PROVIDERS)
+
+    assert json.loads(config_path.read_text(encoding="utf-8")) == before
+
+
+def test_ctrl_c_before_any_write_leaves_openclaw_json_untouched(
+    openclaw_present: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing written yet means nothing to restore. Rewriting the file anyway
+    could clobber whoever holds OpenClaw's config lock."""
+    from worthless.openclaw import integration
+
+    config_path = openclaw_present["config_path"]
+    before = config_path.read_bytes()
+    mtime = config_path.stat().st_mtime_ns
+    monkeypatch.chdir(openclaw_present["home"])
+    _ctrl_c_on_write(monkeypatch, nth=1)
+
+    with pytest.raises(KeyboardInterrupt):
+        integration.apply_lock(planned_updates=_TWO_PROVIDERS)
+
+    assert config_path.read_bytes() == before
+    assert config_path.stat().st_mtime_ns == mtime
