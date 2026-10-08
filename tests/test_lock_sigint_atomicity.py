@@ -29,6 +29,7 @@ import os
 import signal
 import sqlite3
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -416,3 +417,145 @@ class TestUnwindFailureWarnsToReconcile:
             "after a failed rollback the user was NOT shown the single recovery "
             f"instruction; output was:\n{result.output}"
         )
+
+
+# ---------------------------------------------------------------------------
+# 7. worthless-3clz: Ctrl-C after the keys are committed must be answered
+# ---------------------------------------------------------------------------
+#
+# Once Pass-1 commits and ``.env`` is rewritten, the OpenClaw steps run
+# synchronously: a lock on OpenClaw's config file (``openclaw/config.py``
+# ``flock``, unbounded) and a reload wait of up to 15s (``lock.py``
+# ``time.sleep`` poll). asyncio's handler only queues a press for the event
+# loop, which that stretch never yields to — so Ctrl-C was dropped and the lock
+# carried on. The stand-in below has the same shape: child-free, blocking, with
+# a real SIGINT landing mid-call. Keys are already locked there, so the answer
+# is to stop, keep the lock, and say so — never unwind rows ``.env`` now needs.
+
+_BLOCK_S = 5.0  # how long the stand-in OpenClaw step blocks
+_ANSWER_WITHIN_S = 3.0  # a pressed Ctrl-C must end the lock well before that
+
+
+def _openclaw_step_blocks_then_ctrl_c(
+    monkeypatch: pytest.MonkeyPatch, *, presses: int = 1
+) -> list[float]:
+    """Swap the OpenClaw step for a child-free block; Ctrl-C lands mid-block.
+
+    Returns a list that receives the monotonic time of the first press.
+    """
+    import worthless.cli.commands.lock as lock_mod
+
+    pressed_at: list[float] = []
+
+    def _press() -> None:
+        pressed_at.append(time.monotonic())
+        for _ in range(presses):
+            os.kill(os.getpid(), signal.SIGINT)
+
+    def _blocking_openclaw_step(*_args: object, **_kwargs: object) -> int:
+        threading.Timer(0.2, _press).start()
+        time.sleep(_BLOCK_S)
+        return 0
+
+    monkeypatch.setattr(lock_mod, "_apply_openclaw", _blocking_openclaw_step)
+    return pressed_at
+
+
+def _invoke_lock_sandboxed(
+    home_dir: WorthlessHome, env_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):  # noqa: ANN202 — click's Result
+    # A real ~/.openclaw on the dev box would trip the proxy-health gate first.
+    monkeypatch.chdir(tmp_path)
+    return runner.invoke(
+        app,
+        ["lock", "--env", str(env_file)],
+        env={"WORTHLESS_HOME": str(home_dir.base_dir), "HOME": str(tmp_path)},
+    )
+
+
+def _assert_still_locked(
+    home_dir: WorthlessHome, env_file: Path, pre_sha: str, output: str
+) -> None:
+    enrollments = asyncio.run(_repo(home_dir).list_enrollments())
+    assert len(enrollments) == 2 and len(_shard_rows(home_dir)) == 2, (
+        "Ctrl-C after the commit unwound the DB rows that the rewritten .env "
+        f"now depends on — keys are unrecoverable. enrollments={enrollments!r}\n{output}"
+    )
+    assert _sha256_of(env_file) != pre_sha, f".env was not left locked:\n{output}"
+
+
+class TestCtrlCAfterCommitIsAnswered:
+    def test_ctrl_c_during_openclaw_step_stops_it_and_keeps_keys_locked(
+        self,
+        home_dir: WorthlessHome,
+        two_key_env: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        pre_sha = _sha256_of(two_key_env)
+        pressed_at = _openclaw_step_blocks_then_ctrl_c(monkeypatch)
+
+        result = _invoke_lock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
+
+        assert pressed_at, f"the OpenClaw step never ran:\n{result.output}"
+        answered_in = time.monotonic() - pressed_at[0]
+        assert answered_in < _ANSWER_WITHIN_S, (
+            f"Ctrl-C was ignored for {answered_in:.1f}s while an OpenClaw step blocked "
+            f"(exit {result.exit_code}) — worthless-3clz.\n{result.output}"
+        )
+        assert result.exit_code == 130, result.output
+        assert "interrupted" in result.output.lower(), result.output
+        _assert_still_locked(home_dir, two_key_env, pre_sha, result.output)
+
+
+class TestMashedCtrlCAfterCommitIsAnswered:
+    def test_mashed_ctrl_c_during_openclaw_step_never_unwinds(
+        self,
+        home_dir: WorthlessHome,
+        two_key_env: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        pre_sha = _sha256_of(two_key_env)
+        pressed_at = _openclaw_step_blocks_then_ctrl_c(monkeypatch, presses=3)
+
+        result = _invoke_lock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
+
+        assert pressed_at, f"the OpenClaw step never ran:\n{result.output}"
+        assert time.monotonic() - pressed_at[0] < _ANSWER_WITHIN_S, result.output
+        assert result.exit_code == 130, result.output
+        _assert_still_locked(home_dir, two_key_env, pre_sha, result.output)
+
+
+class TestSecondCtrlCDuringRollbackIsNeverSilent:
+    def test_second_ctrl_c_mid_rollback_explains_and_rollback_finishes(
+        self,
+        home_dir: WorthlessHome,
+        two_key_env: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """User ruling (2026-10-08): once a key is touched, a second Ctrl-C does
+        not cut the rollback short — but it must say why it is not stopping."""
+        import worthless.cli.commands.lock as lock_mod
+
+        _inject_signal_after_pass1(monkeypatch, signal.SIGINT)
+        real_unwind = lock_mod._compensating_unwind
+
+        async def _unwind_with_second_signal(repo: object, planned: object) -> list:
+            os.kill(os.getpid(), signal.SIGINT)
+            await asyncio.sleep(0)
+            return await real_unwind(repo, planned)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(lock_mod, "_compensating_unwind", _unwind_with_second_signal)
+
+        result = runner.invoke(
+            app,
+            ["lock", "--env", str(two_key_env)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+        )
+
+        assert "still rolling back" in result.output.lower(), (
+            f"a second Ctrl-C during the rollback was silently swallowed:\n{result.output}"
+        )
+        assert asyncio.run(_repo(home_dir).list_enrollments()) == [], result.output
+        assert _shard_rows(home_dir) == [], result.output

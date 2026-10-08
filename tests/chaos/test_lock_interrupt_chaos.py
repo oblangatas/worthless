@@ -41,12 +41,17 @@ atomic-Pass-1 saves it. Per the WOR-646 honesty rule, known gaps are marked
 from __future__ import annotations
 
 import contextlib
+import fcntl
+import http.server
+import json
 import os
 import signal
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
@@ -634,26 +639,32 @@ def _stderr_path(te: TrialEnv) -> Path:
 
 def _stderr_tail(te: TrialEnv) -> str:
     try:
-        tail = _stderr_path(te).read_bytes()[-2000:].decode("utf-8", errors="replace")
+        text = _stderr_path(te).read_bytes().decode("utf-8", errors="replace")
     except OSError:
         return "  stderr: (unreadable)"
+    # A faulthandler dump lists the innermost frame FIRST. On the real CLI's deep
+    # stack a plain tail cuts exactly the line that names where the lock is stuck.
+    start = text.find("(most recent call first)")
+    tail = text[start:][:2000] if start != -1 else text[-2000:]
     return f"  stderr tail:\n{tail}" if tail.strip() else "  stderr: (empty)"
 
 
-def _spawn_lock(te: TrialEnv) -> subprocess.Popen:
+def _spawn_lock(te: TrialEnv, env: dict[str, str] | None = None) -> subprocess.Popen:
     """Start the real CLI in its own process group.
 
     stderr goes to a FILE, never an unread PIPE: a chatty child that fills the
     ~64KB pipe buffer blocks forever, and the harness would report that
     self-inflicted wedge as a product hang. A file also keeps the tail after a
     SIGKILL, so a rare real PARTIAL or hang arrives with the lock's own words.
+    stdin is closed so an interactive prompt can never pose as a hang.
     """
     with _stderr_path(te).open("wb") as err:
         return subprocess.Popen(
             [*_cli(), "lock", "--env", str(te.env_file)],
-            env=_child_env(te),
+            env=env if env is not None else _child_env(te),
             cwd=str(te.repo),
             start_new_session=True,  # own process group -> killpg hits the whole tree
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=err,
         )
@@ -1277,3 +1288,167 @@ class TestSigkillAtomicity:
                 f"({rate:.0%} orphan/partial rate) for N={n_keys}.\n"
                 + "\n".join(f"  - {p}" for p in partials[:8])
             )
+
+
+# ---------------------------------------------------------------------------
+# Ctrl-C after the keys are committed, on the real CLI (worthless-3clz)
+# ---------------------------------------------------------------------------
+#
+# The two real places the lock went deaf to Ctrl-C, driven end to end: the
+# up-to-15s wait for OpenClaw's gateway to reload, and the unbounded wait for
+# OpenClaw's config-file lock. Both come after the keys are committed, so the
+# contract is: answer within TAIL_DEADLINE, exit 130, keys stay LOCKED.
+#
+# No ``seam``: a fake ``openclaw`` (reached only via WORTHLESS_OPENCLAW_BIN,
+# never PATH) logs each call, so the test signals once the lock has provably
+# reached the step under test. Fast in-process twins live in
+# tests/test_lock_sigint_atomicity.py.
+
+TAIL_DEADLINE = 3.0  # strictly under WAIT_TIMEOUT, so this fires before the hang guard
+TAIL_TRIALS = 3
+_CLEAN_AUDIT = json.dumps(
+    {
+        "version": 1,
+        "status": "ok",
+        "filesScanned": [],
+        "summary": {"plaintextCount": 0},
+        "findings": [],
+    }
+)
+
+
+class _HealthzStub(http.server.BaseHTTPRequestHandler):
+    """Just enough of a running proxy for lock's proxy-health gate."""
+
+    def do_GET(self) -> None:  # noqa: N802 — stdlib hook name
+        body = b'{"mode": "up", "requests_proxied": 0}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_args: object) -> None:  # keep test output clean
+        pass
+
+
+@pytest.fixture
+def proxy_port() -> Iterator[int]:
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _HealthzStub)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield server.server_address[1]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def _with_openclaw(te: TrialEnv, port: int) -> tuple[dict[str, str], Path]:
+    """Stage OpenClaw in the trial HOME + a fake ``openclaw``; return (env, call log).
+
+    The fake answers ``secrets audit`` clean and ``logs`` with no reload event,
+    ever — so a lock that reaches the reload wait sits in it for the full 15s.
+    Each call appends its subcommand to the call log.
+    """
+    oc = te.home / ".openclaw"
+    (oc / "workspace").mkdir(parents=True)
+    (oc / "openclaw.json").write_text('{"models": {"providers": {}}}\n')
+    calls = te.home.parent / "openclaw-calls.log"
+    fake = te.home.parent / "openclaw"
+    fake.write_text(
+        "#!/bin/sh\n"
+        f"echo \"$1\" >> '{calls}'\n"
+        f"if [ \"$1\" = secrets ]; then echo '{_CLEAN_AUDIT}'; fi\n"
+    )
+    fake.chmod(0o755)
+    env = {**_child_env(te), "WORTHLESS_OPENCLAW_BIN": str(fake), "WORTHLESS_PORT": str(port)}
+    return env, calls
+
+
+def _call_count(calls: Path, subcommand: str) -> int:
+    try:
+        return calls.read_text().split().count(subcommand)
+    except FileNotFoundError:
+        return 0
+
+
+def _ctrl_c_once(te: TrialEnv, env: dict[str, str], reached: Callable[[], bool], where: str) -> int:
+    """Run the real lock; Ctrl-C it once ``reached()`` says it is at the step under test.
+
+    Returns the exit code. Fails if the press is not answered within TAIL_DEADLINE.
+    """
+    proc = _spawn_lock(te, env)
+    try:
+        deadline = time.monotonic() + WAIT_TIMEOUT
+        while not reached():
+            if proc.poll() is not None:
+                pytest.fail(f"lock exited rc={proc.returncode} before {where}\n{_stderr_tail(te)}")
+            if time.monotonic() > deadline:
+                _dump_wedged_stack(proc)  # it is stuck somewhere earlier — say where
+                pytest.fail(
+                    f"lock never reached the step under test ({where}) within "
+                    f"{WAIT_TIMEOUT}s\n{_stderr_tail(te)}"
+                )
+            time.sleep(0.01)
+        time.sleep(0.3)  # settle INTO the blocking call, not merely past the marker
+        _kill_group(proc, signal.SIGINT)
+        try:
+            rc = proc.wait(timeout=TAIL_DEADLINE)
+        except subprocess.TimeoutExpired:
+            _dump_wedged_stack(proc)
+            pytest.fail(
+                f"Ctrl-C ignored for over {TAIL_DEADLINE}s {where} (worthless-3clz).\n"
+                f"{_stderr_tail(te)}"
+            )
+    finally:
+        survived = _reap(proc)
+    if survived:
+        _fail_unkillable(proc)
+    return rc
+
+
+def _assert_answered_and_kept(te: TrialEnv, rc: int) -> None:
+    state = classify(te)
+    assert rc == 130, f"Ctrl-C should exit 130 (interrupted), got {rc}\n{_stderr_tail(te)}"
+    assert state.classification == "locked", (
+        "the keys were already committed, so Ctrl-C must leave them LOCKED — never "
+        f"unwind rows the rewritten .env needs.\n  {state.detail}\n{_stderr_tail(te)}"
+    )
+
+
+class TestCtrlCDuringOpenclawReloadWait:
+    def test_ctrl_c_during_reload_wait_is_answered(self, tmp_path: Path, proxy_port: int) -> None:
+        for trial in range(TAIL_TRIALS):
+            te = _make_trial_env(tmp_path, trial, n_keys=1)
+            env, calls = _with_openclaw(te, proxy_port)
+            rc = _ctrl_c_once(
+                te,
+                env,
+                lambda c=calls: _call_count(c, "logs") >= 1,  # polled for a reload once
+                "during the OpenClaw reload wait",
+            )
+            _assert_answered_and_kept(te, rc)
+
+
+class TestCtrlCWhileOpenclawConfigIsLocked:
+    def test_ctrl_c_while_config_lock_is_held_is_answered(
+        self, tmp_path: Path, proxy_port: int
+    ) -> None:
+        for trial in range(TAIL_TRIALS):
+            te = _make_trial_env(tmp_path, trial, n_keys=1)
+            env, _calls = _with_openclaw(te, proxy_port)
+            # Another process (an OpenClaw write, a second lock) holds the config lock.
+            lock_file = te.home / ".openclaw" / ".openclaw.json.lock"
+            fd = os.open(lock_file, os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                rc = _ctrl_c_once(
+                    te,
+                    env,
+                    # keys committed; the next step is the OpenClaw config write
+                    lambda t=te: _env_state(t) == "locked",
+                    "while waiting for OpenClaw's config lock",
+                )
+            finally:
+                os.close(fd)
+            _assert_answered_and_kept(te, rc)
