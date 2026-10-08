@@ -1242,6 +1242,26 @@ class TestScanAgreesWithLockOnOAuthTokens:
         assert finding.is_login_token is True
         assert finding.is_unshardable is False
 
+    def test_git_is_asked_once_per_file_not_once_per_token(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The pre-commit hook runs under a time budget; one git call per token
+        # (each with its own timeout) could blow it on a .env full of tokens.
+        env = self._env(tmp_path, *(self._oauth(f"p55g-many-{i}") for i in range(3)))
+        calls: list[Path] = []
+
+        def counting(path: Path) -> bool:
+            calls.append(path)
+            return False
+
+        monkeypatch.setattr(scanner_mod, "_is_git_tracked", counting)
+
+        findings = scan_files([env])
+
+        assert len(findings) == 3
+        assert all(f.is_unshardable for f in findings)
+        assert len(calls) == 1, calls
+
     def test_a_symlinked_env_still_fails(self, tmp_path: Path) -> None:
         # Lock refuses symlinks outright, so "a .env file lock manages" is false
         # for a .env that points at some other (possibly committed) file.

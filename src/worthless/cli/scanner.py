@@ -24,10 +24,6 @@ from worthless.cli.key_patterns import (
 from worthless.cli.redaction import mask_secret
 from worthless.cli.safe_rewrite import _BASENAME_ALLOWLIST
 
-# scan --deep dumps the process environment to a temp file with this prefix.
-# Findings in it came from the environment, not from a file anyone wrote.
-ENV_DUMP_PREFIX = "worthless-env-"
-
 _VAR_NAME_RE = re.compile(r"(\w+)\s*$")
 
 # Cap bytes read per file. A file larger than this is scanned up to the cap
@@ -242,6 +238,9 @@ class ScanFinding:
     # will, so scan must not fail the build over it. Anywhere else (in git, a
     # non-.env file, a symlink, the environment) the token is plain exposed.
     is_unshardable: bool = False
+    # Found in the scan --deep dump of the process environment, not in a file
+    # anyone wrote. A CI secret belongs there, so the advice differs.
+    from_environment: bool = False
 
 
 def _is_git_tracked(path: Path) -> bool:
@@ -284,15 +283,41 @@ def stays_local(path: Path) -> bool:
     return path.name in _BASENAME_ALLOWLIST and not path.is_symlink() and not _is_git_tracked(path)
 
 
+def _stays_local_cached(path: Path, cache: dict[Path, bool]) -> bool:
+    """stays_local, asked once per file: a .env with several tokens gets one git
+    call, which keeps the pre-commit hook inside its time budget."""
+    if path not in cache:
+        cache[path] = stays_local(path)
+    return cache[path]
+
+
 def remediation_for(f: ScanFinding) -> str | None:
     """The fix that exists for a login token — never "run worthless lock"."""
     if f.is_protected or not f.is_login_token:
         return None
     if f.is_unshardable:
         return UNSHARDABLE_REMEDY
-    if Path(f.file).name.startswith(ENV_DUMP_PREFIX):
+    if f.from_environment:
         return ENV_LOGIN_REMEDY
     return LEAKED_LOGIN_REMEDY
+
+
+def finding_to_dict(f: ScanFinding) -> dict[str, object]:
+    """One finding as JSON — shared by `scan --json` and the MCP scan tool."""
+    item: dict[str, object] = {
+        "file": f.file,
+        "line": f.line,
+        "var_name": f.var_name,
+        "provider": f.provider,
+        "is_protected": f.is_protected,
+        # worthless-p55g: additive (no schema bump). Lets a consumer tell
+        # "lock can't fix this" from "not protected yet".
+        "is_unshardable": f.is_unshardable,
+        "value_preview": f.value_preview,
+    }
+    if remedy := remediation_for(f):
+        item["remediation"] = remedy
+    return item
 
 
 def scan_files(
@@ -302,8 +327,12 @@ def scan_files(
     max_file_bytes: int | None = None,
     deadline: float | None = None,
     skipped: list[SkippedFile] | None = None,
+    env_dump: Path | None = None,
 ) -> list[ScanFinding]:
     """Scan files for API key patterns.
+
+    *env_dump*: the temp file holding the `--deep` dump of the process
+    environment, so its findings are marked ``from_environment``.
 
     Each file is read (up to ``max_file_bytes``) line-by-line. Matches with
     entropy below the threshold are skipped (likely placeholders). If
@@ -319,6 +348,7 @@ def scan_files(
     """
     cap = MAX_SCAN_FILE_BYTES if max_file_bytes is None else max_file_bytes
     findings: list[ScanFinding] = []
+    local_cache: dict[Path, bool] = {}  # git is asked at most once per file
 
     # Deadline is checked BETWEEN files, not mid-file. A single file inside
     # ``cap`` bytes is bounded by the size cap + linear regex — slow but never
@@ -348,6 +378,7 @@ def scan_files(
         if truncated and skipped is not None:
             skipped.append(SkippedFile(file=str(path), reason="truncated"))
         file_str = str(path.resolve())
+        from_env = path == env_dump  # a None dump never equals a real path
         for line_no, line in enumerate(text.splitlines(), start=1):
             for match in KEY_PATTERN.finditer(line):
                 value = match.group(0)
@@ -378,7 +409,8 @@ def scan_files(
                         value_preview=_mask(value),
                         column=match.start(),
                         is_login_token=token,
-                        is_unshardable=token and stays_local(path),
+                        is_unshardable=token and _stays_local_cached(path, local_cache),
+                        from_environment=from_env,
                     )
                 )
     return findings
@@ -416,18 +448,17 @@ def format_sarif(findings: list[ScanFinding], tool_version: str) -> dict:
     results = []
     for f in findings:
         in_var = f" in variable {f.var_name}" if f.var_name else ""
-        if f.is_unshardable and not f.is_protected:
-            # worthless-p55g: GitHub code scanning reads the level, not scan's
-            # exit code — "error" here would keep the gate red over a token lock
-            # refuses. "note" keeps it visible without blocking.
-            rule_id, level = UNSHARDABLE_RULE_ID, "note"
-            text = (
-                f"Claude Code login token{in_var} — worthless can't protect it. "
-                + UNSHARDABLE_REMEDY
-            )
-        elif f.is_login_token and not f.is_protected:
-            rule_id, level = EXPOSED_RULE_ID, "error"
-            text = f"Exposed Claude Code login token{in_var}. " + (remediation_for(f) or "")
+        if remedy := remediation_for(f):
+            if f.is_unshardable:
+                # worthless-p55g: GitHub code scanning reads the level, not
+                # scan's exit code — "error" here would keep the gate red over a
+                # token lock refuses. "note" keeps it visible without blocking.
+                rule_id, level = UNSHARDABLE_RULE_ID, "note"
+                lead = f"Claude Code login token{in_var} — worthless can't protect it."
+            else:
+                rule_id, level = EXPOSED_RULE_ID, "error"
+                lead = f"Exposed Claude Code login token{in_var}."
+            text = f"{lead} {remedy}"
         else:
             rule_id, level = EXPOSED_RULE_ID, "warning" if f.is_protected else "error"
             text = f"Exposed {f.provider} API key{in_var}" + (

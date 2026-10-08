@@ -255,7 +255,7 @@ async def worthless_scan(
         _collect_fast_paths,
         _load_db_state_async,
     )
-    from worthless.cli.scanner import SkippedFile, remediation_for, scan_files
+    from worthless.cli.scanner import SkippedFile, finding_to_dict, scan_files
 
     explicit = [Path(p) for p in (paths or [])]
 
@@ -290,24 +290,11 @@ async def worthless_scan(
             enrolled_locations=enrolled,
             deadline=deadline,
             skipped=skipped,
+            env_dump=tmp_file,
         )
 
-        items = [
-            {
-                "file": f.file,
-                "line": f.line,
-                "var_name": f.var_name,
-                "provider": f.provider,
-                "is_protected": f.is_protected,
-                # worthless-p55g: a key lock refuses (Claude Code OAuth token).
-                # Counted apart from "unprotected" so an agent doesn't loop on
-                # `worthless lock` for it.
-                "is_unshardable": f.is_unshardable,
-                **({"remediation": remediation_for(f)} if remediation_for(f) else {}),
-                "value_preview": f.value_preview,
-            }
-            for f in findings
-        ]
+        # Same per-finding shape as `scan --json`, so the two can't drift.
+        items = [finding_to_dict(f) for f in findings]
 
         protected = sum(1 for f in findings if f.is_protected)
         unshardable = sum(1 for f in findings if f.is_unshardable and not f.is_protected)

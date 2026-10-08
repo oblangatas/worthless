@@ -34,8 +34,8 @@ from worthless.cli.process import disable_core_dumps
 from worthless.cli.scanner import (
     HardcodedUrlFinding,
     ScanFinding,
-    ENV_DUMP_PREFIX,
     SkippedFile,
+    finding_to_dict,
     format_sarif,
     remediation_for,
     scan_files,
@@ -192,7 +192,7 @@ def _collect_deep_paths(explicit_paths: list[Path]) -> tuple[list[Path], Path | 
 
     env_lines = [f"{k}={v}" for k, v in os.environ.items()]
     if env_lines:
-        fd, tmp = tempfile.mkstemp(prefix=ENV_DUMP_PREFIX, suffix=".env")
+        fd, tmp = tempfile.mkstemp(prefix="worthless-env-", suffix=".env")
         try:
             os.write(fd, "\n".join(env_lines).encode())
             os.close(fd)
@@ -276,16 +276,10 @@ def _unshardable_lines(findings: Sequence[ScanFinding], committing: bool = False
     ``committing``: the pre-commit hook still blocks on these (see scan), so it
     says why the commit stopped and how to get unblocked.
     """
-    names = [
-        sanitise_for_message(f.var_name or f.provider)
-        for f in findings
-        if f.is_unshardable and not f.is_protected
-    ]
+    names, s = _token_names([f for f in findings if f.is_unshardable and not f.is_protected])
     if not names:
         return []
-    s = "s" if len(names) != 1 else ""
     lines = [
-        "",
         f"Can't protect {len(names)} key{s}: {', '.join(names)} (Claude Code login token{s}).",
         "`worthless lock` skips this kind of token on purpose: splitting it breaks "
         "the marker Claude Code looks for.",
@@ -306,18 +300,22 @@ def _leaked_token_lines(findings: Sequence[ScanFinding]) -> list[str]:
     lock", which refuses it wherever it sits.
     """
     tokens = [f for f in findings if f.is_login_token and _is_exposed(f)]
-    if not tokens:
+    names, s = _token_names(tokens)
+    if not names:
         return []
-    names = [sanitise_for_message(f.var_name or f.provider) for f in tokens]
-    s = "s" if len(names) != 1 else ""
     remedies = dict.fromkeys(remediation_for(f) for f in tokens)
     return [
-        "",
         f"Exposed {len(names)} Claude Code login token{s}: {', '.join(names)}.",
         "`worthless lock` refuses this kind of token, and this one can leave "
         "the machine (git, a non-.env file, a symlink, or the environment).",
         *(r for r in remedies if r),
     ]
+
+
+def _token_names(findings: Sequence[ScanFinding]) -> tuple[list[str], str]:
+    """Display names for these findings (sanitised), and the plural suffix."""
+    names = [sanitise_for_message(f.var_name or f.provider) for f in findings]
+    return names, "s" if len(names) != 1 else ""
 
 
 def _orphan_lines(orphans: Sequence[EnrollmentRecord]) -> list[str]:
@@ -441,8 +439,8 @@ def _format_human(
 
     total = len(findings)
     protected_count = sum(1 for f in findings if f.is_protected)
-    unprotected_count = sum(1 for f in findings if _is_exposed(f))
-    unshardable_count = total - protected_count - unprotected_count
+    exposed = [f for f in findings if _is_exposed(f)]  # what fails the build
+    unshardable_count = total - protected_count - len(exposed)
 
     lines.extend(_orphan_lines(orphans))
 
@@ -457,15 +455,15 @@ def _format_human(
     # refuses anything outside the .env family, so this line is unfollowable
     # for a key in app.py. The verdict line above already carries the
     # move-it-first remedy in that case.
-    if unprotected_count > 0 and _has_lockable_exposure(findings):
+    if exposed and _has_lockable_exposure(findings):
         if is_tty:
             lines.append("Run: worthless lock")
         else:
             lines.append("See: docs.worthless.dev/ci-setup")
 
-    lines.extend(_unshardable_lines(findings, committing))
-    lines.extend(_leaked_token_lines(findings))
-    exposed = [f for f in findings if _is_exposed(f)]
+    for block in (_unshardable_lines(findings, committing), _leaked_token_lines(findings)):
+        if block:
+            lines += ["", *block]
 
     # WOR-779: lead with a plain verdict ("am I safe?") before the per-finding
     # detail. scan is the only surface that sees plaintext-in-.env, so the
@@ -475,7 +473,7 @@ def _format_human(
         0,
         _scan_verdict_line(
             protected_count,
-            unprotected_count,
+            len(exposed),
             total,
             len(orphans),
             files=[f.file for f in exposed],
@@ -494,23 +492,7 @@ def _format_json_findings(findings: list[ScanFinding], orphans: list | None = No
     findings need to switch from ``for f in result`` to
     ``for f in result["findings"]`` — documented in SKILL.md.
     """
-    items = []
-    for f in findings:
-        item = {
-            "file": f.file,
-            "line": f.line,
-            "var_name": f.var_name,
-            "provider": f.provider,
-            "is_protected": f.is_protected,
-            # worthless-p55g: additive (no schema bump). Lets a consumer tell
-            # "lock can't fix this" from "not protected yet".
-            "is_unshardable": f.is_unshardable,
-            "value_preview": f.value_preview,
-        }
-        remedy = remediation_for(f)
-        if remedy:
-            item["remediation"] = remedy
-        items.append(item)
+    items = [finding_to_dict(f) for f in findings]
     orphan_items = [
         {
             "alias": o.key_alias,
@@ -1019,6 +1001,7 @@ def register_scan_commands(app: typer.Typer) -> None:
                 enrolled_locations=enrolled,
                 deadline=deadline,
                 skipped=skipped,
+                env_dump=tmp_file,
             )
 
             # Staged content was materialised under a temp root; report the
@@ -1117,9 +1100,7 @@ def register_scan_commands(app: typer.Typer) -> None:
                     # the whole story: if a fixable key also failed, the note
                     # alone would send the reader to delete the wrong line.
                     sys.stderr.write(
-                        "".join(
-                            f"{line}\n" for line in _unshardable_lines(findings, pre_commit)[1:]
-                        )
+                        "".join(f"{line}\n" for line in _unshardable_lines(findings, pre_commit))
                     )
                     sys.stderr.flush()
 
