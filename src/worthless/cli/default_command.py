@@ -228,6 +228,13 @@ def run_default(
         and the pipeline only reports state.
     yes:
         Auto-approve lock + proxy start (but never service install).
+
+        That last clause is true of THIS path only, and the distinction is
+        worth keeping straight: plain ``worthless`` locks quietly, so the
+        service offer never fires here at all. ``worthless --yes lock`` is a
+        different path, and there --yes DOES accept the offer — but only at a
+        real terminal, because the offer checks for one before it checks
+        --yes. A piped or CI run is never asked and never installed into.
     json_mode:
         Print structured JSON state and exit.  Never triggers writes.
     """

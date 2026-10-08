@@ -54,6 +54,17 @@ def _print_service_banner(console, *, platform: str, port: int) -> None:
             "It takes effect once WSL fully restarts: restart Windows, or run "
             "`wsl --shutdown` (this also stops Docker Desktop and other distros)."
         )
+    if platform == "systemd":
+        # Installing enables lingering for this account so the service survives
+        # logout, and `worthless service uninstall` does NOT turn it back off.
+        # Deliberately: linger is account-wide, other user services may rely on
+        # it, and switching off state we may not have created is the mistake the
+        # install rollback exists to avoid. Say so instead. (worthless-11ix)
+        console.print_hint(
+            "Lingering is now on for this account, so the service survives logout. "
+            "`worthless service uninstall` leaves it on — turn it off yourself with "
+            "`loginctl disable-linger` if nothing else needs it."
+        )
     console.print_hint("Status: `worthless service status` · Stop: `worthless service stop`")
 
 

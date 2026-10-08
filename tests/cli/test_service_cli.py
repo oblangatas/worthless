@@ -280,3 +280,55 @@ class TestServiceInstall:
         assert result.exit_code == 0, result.output
         # Console renders to stderr; `output` is the mixed stream (typer >=0.26).
         assert "running" in result.output.lower()
+
+
+class TestLingerIsDisclosed:
+    """We switch on account-level state and never switch it off. Say so.
+
+    `_ensure_linger` runs `loginctl enable-linger` during a systemd install, so
+    the service survives logout. `worthless service uninstall` does not reverse
+    it, and deliberately so: linger is account-wide, other user services may
+    depend on it, and turning off state we may not have created is exactly the
+    mistake the install rollback's `created_here` guard exists to avoid.
+
+    Review (karen, 2026-10-08) called the silence the unfixed half of the
+    consent defect. Disclosure is the fix; a precise undo is worthless-ag1n.
+    """
+
+    def test_systemd_install_says_uninstall_leaves_linger_on(self, home_dir: Path) -> None:
+        mock_backend = MagicMock()
+        mock_backend.installed_port.return_value = 8787
+        with (
+            patch("worthless.cli.commands.service._backend", return_value=mock_backend),
+            patch(
+                "worthless.cli.commands.service.current_platform_backend_name",
+                return_value="systemd",
+            ),
+            patch("worthless.cli.commands.service.get_home") as mock_home,
+        ):
+            mock_home.return_value.base_dir = home_dir
+            result = runner.invoke(app, ["service", "start"], env={"WORTHLESS_HOME": str(home_dir)})
+
+        assert result.exit_code == 0, result.output
+        flat = " ".join(result.output.split())
+        assert "Lingering is now on" in flat
+        assert "leaves it on" in flat
+        assert "disable-linger" in flat
+
+    def test_launchd_does_not_mention_linger(self, home_dir: Path) -> None:
+        """launchd has no such concept; the hint must not leak to macOS."""
+        mock_backend = MagicMock()
+        mock_backend.installed_port.return_value = 8787
+        with (
+            patch("worthless.cli.commands.service._backend", return_value=mock_backend),
+            patch(
+                "worthless.cli.commands.service.current_platform_backend_name",
+                return_value="launchd",
+            ),
+            patch("worthless.cli.commands.service.get_home") as mock_home,
+        ):
+            mock_home.return_value.base_dir = home_dir
+            result = runner.invoke(app, ["service", "start"], env={"WORTHLESS_HOME": str(home_dir)})
+
+        assert result.exit_code == 0, result.output
+        assert "linger" not in result.output.lower()

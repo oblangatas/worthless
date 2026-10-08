@@ -15,11 +15,14 @@ from __future__ import annotations
 
 import re
 import subprocess
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 import typer
+from typer.testing import CliRunner
 
+from worthless.cli.app import app
 from worthless.cli.commands.lock import _offer_service_after_lock
 from worthless.cli.console import WorthlessConsole
 from worthless.cli.commands.service._common import ServiceState
@@ -361,3 +364,113 @@ class TestNoOfferWhenAlreadyInstalled:
             assert _offer_service_after_lock(console, home=_home(), port=8787) is False
         confirm.assert_not_called()
         install.assert_not_called()
+
+
+class TestYesFlagThroughTheRealCli:
+    """Cover the wiring, not just the helper.
+
+    Review (Jenny, then karen, 2026-10-08): every other test here constructs
+    `WorthlessConsole(assume_yes=True)` directly, so `app.py`'s `assume_yes=yes`
+    — the single line that carries `--yes` to the offer, and the line defect 1
+    lived on — was asserted nowhere. Deleting it broke no test.
+
+    CliRunner's stdin is not a terminal, which is exactly the shape that
+    installed a service with no prompt before the gate was reordered.
+    """
+
+    def _project(self, tmp_path: Path) -> Path:
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        # A fixed literal, not generated: the scanner skips repeated-character
+        # placeholders, and `random` is banned here (CRYP-04).
+        body = "T3mP9kQw2ZxA7bNf4YrL6hJd8VsG1cUeM5oPi0ElRtXnKaBz"
+        (proj / ".env").write_text(f"OPENAI_API_KEY=sk-proj-{body}\n")
+        return proj / ".env"
+
+    def test_yes_lock_installs_nothing_without_a_terminal(self, tmp_path: Path) -> None:
+        env_file = self._project(tmp_path)
+        with patch("worthless.cli.commands.lock.install_service_for_offer") as install:
+            result = CliRunner().invoke(
+                app,
+                ["--yes", "lock", "--env", str(env_file)],
+                env={
+                    "WORTHLESS_HOME": str(tmp_path / ".worthless"),
+                    "WORTHLESS_KEYRING_BACKEND": "null",
+                    "HOME": str(tmp_path),
+                },
+            )
+
+        assert result.exit_code == 0, result.output
+        install.assert_not_called(), "--yes installed a service with nobody watching"
+
+    def test_the_flag_actually_reaches_the_console(self, tmp_path: Path) -> None:
+        """Pin app.py's wiring itself, so deleting it fails something."""
+        env_file = self._project(tmp_path)
+        seen: list[bool] = []
+        real_offer = _offer_service_after_lock
+
+        def spy(console, **kwargs):
+            seen.append(console.assume_yes)
+            return real_offer(console, **kwargs)
+
+        with (
+            patch("worthless.cli.commands.lock._offer_service_after_lock", side_effect=spy),
+            patch("worthless.cli.commands.lock._scan_prompt_is_tty", return_value=False),
+        ):
+            CliRunner().invoke(
+                app,
+                ["--yes", "lock", "--env", str(env_file)],
+                env={
+                    "WORTHLESS_HOME": str(tmp_path / ".worthless"),
+                    "WORTHLESS_KEYRING_BACKEND": "null",
+                    "HOME": str(tmp_path),
+                },
+            )
+
+        assert seen == [True], f"--yes did not reach the offer's console: {seen}"
+
+
+class TestTheOfferCannotAbortACommittedLock:
+    """The lock is finished before we ask. An optional extra must not undo it.
+
+    Review (task-completion-validator, 2026-10-08), defect 8 — the same shape
+    as defect 7, fixed in the backends and left in the caller. `install()` ends
+    with `report_proxy_health()`, which prints "Waiting up to 45s..." and
+    blocks; the code itself documents that operators interrupt exactly that
+    wait. KeyboardInterrupt is not in (WorthlessError, CalledProcessError,
+    OSError), so it escaped the offer, propagated out of `_lock_keys`, and
+    became exit 130 — on a lock that had fully succeeded and a service that was
+    fully installed. `_sync_fernet_after_lock` was ordered AFTER the offer, so
+    it was skipped too.
+    """
+
+    @pytest.mark.parametrize(
+        "boom", [KeyboardInterrupt(), SystemExit(1)], ids=["ctrl-c", "systemexit"]
+    )
+    def test_an_interrupt_during_install_does_not_escape(
+        self, console: WorthlessConsole, capsys: pytest.CaptureFixture[str], boom: BaseException
+    ) -> None:
+        backend = MagicMock()
+        backend.detect_status.return_value = MagicMock(state=ServiceState.NOT_INSTALLED)
+        with (
+            patch("worthless.cli.commands.lock._backend", return_value=backend),
+            patch("worthless.cli.commands.lock._scan_prompt_is_tty", return_value=True),
+            patch("worthless.cli.commands.lock.typer.confirm", return_value=True),
+            patch("worthless.cli.commands.lock.install_service_for_offer", side_effect=boom),
+        ):
+            accepted = _offer_service_after_lock(console, home=_home(), port=8787)
+
+        assert accepted is False
+        out = _flat(capsys.readouterr())
+        assert "still protected" in out
+        assert "worthless service status" in out, "an interrupt may leave it installed; say so"
+
+    def test_the_fernet_sync_happens_before_the_offer(self) -> None:
+        """Ordering, pinned. The offer must not be able to skip post-lock work."""
+        source = Path("src/worthless/cli/commands/lock.py").read_text()
+        sync_at = source.index("_sync_fernet_after_lock(home)")
+        offer_at = source.index("_offer_service_after_lock(console, home=home")
+        assert sync_at < offer_at, (
+            "_sync_fernet_after_lock must run BEFORE the service offer: anything "
+            "raised by the offer would otherwise skip it on a committed lock"
+        )

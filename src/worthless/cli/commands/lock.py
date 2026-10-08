@@ -2868,7 +2868,12 @@ def _lock_keys(
         # WOR-853: same guard as the "Next:" hint above — only offer when the
         # lock actually succeeded. A partial failure has no business installing
         # anything.
+        #
+        # The post-lock Fernet sync runs FIRST, just below, and the order is
+        # load-bearing: the offer is an optional extra, and anything it raised
+        # used to skip WOR-748's sync entirely on a lock that had committed.
         if result.fresh_count and not result.openclaw_exit:
+            _sync_fernet_after_lock(home)
             _offer_service_after_lock(console, home=home, port=resolve_port(None))
 
     # Trust-fix (2026-05-08 verification gauntlet): when OpenClaw was
@@ -2889,6 +2894,10 @@ def _lock_keys(
         )
         raise typer.Exit(code=result.openclaw_exit)
 
+    # Also here, for the paths the branch above does not cover: a quiet lock, a
+    # re-lock with no fresh keys, or an OpenClaw partial failure. Syncing twice
+    # is harmless — it copies the same canonical key and no-ops when the bytes
+    # already match.
     _sync_fernet_after_lock(home)
     return result.fresh_count + relock_count
 
@@ -3056,6 +3065,20 @@ def _offer_service_after_lock(console, *, home: WorthlessHome, port: int) -> boo
         # WRTLS-199 "internal error" on a lock that had already succeeded.
         console.print_warning(f"Could not install the service: {exc}")
         console.print_hint("Your keys are still protected. Try `worthless service install`.")
+        return False
+    except BaseException:
+        # Ctrl-C during the install, most likely inside report_proxy_health's
+        # 45 s wait — the one place _common.py documents operators interrupting.
+        # KeyboardInterrupt is not an Exception, so it used to escape this
+        # handler entirely and exit 130 on a lock that had fully committed,
+        # which is precisely what the comment above says must never happen.
+        # Absorbed deliberately. The message does not claim the install failed,
+        # because activation may well have finished before the wait began.
+        console.print_warning("Service install interrupted.")
+        console.print_hint(
+            "Your keys are still protected. The service may be installed — "
+            "check with `worthless service status`."
+        )
         return False
 
     # Same banner as `worthless service install`, so WSL users get the
