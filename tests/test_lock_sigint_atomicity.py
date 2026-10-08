@@ -483,7 +483,7 @@ def _assert_still_locked(
 ) -> None:
     enrollments = asyncio.run(_repo(home_dir).list_enrollments())
     assert len(enrollments) == 2 and len(_shard_rows(home_dir)) == 2, (
-        "Ctrl-C after the commit unwound the DB rows that the rewritten .env "
+        "something after the commit unwound the DB rows that the rewritten .env "
         f"now depends on — keys are unrecoverable. enrollments={enrollments!r}\n{output}"
     )
     assert _sha256_of(env_file) != pre_sha, f".env was not left locked:\n{output}"
@@ -696,3 +696,52 @@ class TestSecondCtrlCDuringRollbackIsNeverSilent:
         )
         assert asyncio.run(_repo(home_dir).list_enrollments()) == [], result.output
         assert _shard_rows(home_dir) == [], result.output
+
+
+class TestNothingRollsBackAfterTheCommit:
+    """Defence in depth (worthless-3clz review): once ``.env`` is rewritten, its
+    DB rows are load-bearing. Only post-flight's documented ``typer.Exit(87)``
+    may still roll them back; nothing else — not a queued press, not a crash."""
+
+    def test_handler_never_cancels_once_committed(self) -> None:
+        import worthless.cli.commands.lock as lock_mod
+
+        cancels: list[int] = []
+
+        class _Task:
+            def cancel(self) -> None:
+                cancels.append(1)
+
+        before = lock_mod._LockInterrupts(_Task(), planned=[])  # type: ignore[arg-type]
+        before()
+        assert cancels == [1], "first press before the commit must cancel"
+
+        cancels.clear()
+        after = lock_mod._LockInterrupts(_Task(), planned=[])  # type: ignore[arg-type]
+        after.committed = True
+        after()
+        assert cancels == [], "a press queued for the loop cancelled AFTER the commit"
+        assert not after.may_unwind(RuntimeError("boom"))
+        assert after.may_unwind(typer.Exit(code=87))  # post-flight's documented path
+        assert before.may_unwind(RuntimeError("boom"))
+
+    def test_crash_after_commit_keeps_the_keys(
+        self,
+        home_dir: WorthlessHome,
+        two_key_env: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import worthless.cli.commands.lock as lock_mod
+
+        pre_sha = _sha256_of(two_key_env)
+
+        def _openclaw_step_crashes(*_a: object, **_k: object) -> int:
+            raise RuntimeError("unexpected OpenClaw-side crash after the commit")
+
+        monkeypatch.setattr(lock_mod, "_openclaw_steps", _openclaw_step_crashes)
+
+        result = _invoke_lock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
+
+        assert result.exit_code != 0, result.output
+        _assert_still_locked(home_dir, two_key_env, pre_sha, result.output)
