@@ -34,7 +34,7 @@ _INVOCATION = re.compile(
     r"(?:^\s*(?:\$\s+|-\s+)?[\"']?|(?:&&|\|\||[|;(]|\$\()\s*|:\s+[\"']?)"
     r"(?:[A-Z_][A-Z0-9_]*=\S*\s+)*"
     r"(?:uvx\s+)?worthless(?:\[[\w,]+\])?(?:==\S+)?(?![\w.:\[=-])"
-    r"((?:\s+[^\s|;&`\"'<>#]+)*)"
+    r"((?:\s+[^\s|;&`\"'<>#()]+)*)"
 )
 _COMMENT = re.compile(r"\s#.*$")
 _VERSION = re.compile(r"^v?\d")  # `worthless 0.3.8` is --version output, not input
