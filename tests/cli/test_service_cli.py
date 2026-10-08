@@ -292,7 +292,7 @@ class TestLingerIsDisclosed:
     mistake the install rollback's `created_here` guard exists to avoid.
 
     Review (karen, 2026-10-08) called the silence the unfixed half of the
-    consent defect. Disclosure is the fix; a precise undo is worthless-ag1n.
+    consent defect. Disclosure is the fix; a precise undo is worthless-fzas.
     """
 
     def test_systemd_install_says_uninstall_leaves_linger_on(self, home_dir: Path) -> None:
