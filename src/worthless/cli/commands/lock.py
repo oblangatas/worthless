@@ -44,6 +44,7 @@ from worthless.cli.process import (
     resolve_port,
 )
 from worthless.cli.console import WorthlessConsole, get_console
+from worthless.cli.platform import is_wsl
 from worthless.cli.scanner import SkippedFile, scan_source_for_hardcoded_provider_urls
 from worthless.cli.dotenv_rewriter import (
     rewrite_env_keys,
@@ -2965,6 +2966,33 @@ def install_service_for_offer(home: WorthlessHome, *, port: int) -> None:
     _backend().install(home, port=port)
 
 
+_OFFER_DECLINED_HINT = (
+    "Want it to keep running after you close this terminal? `worthless service install`"
+)
+
+
+def _offer_question(port: int) -> str:
+    """The question to ask, which must be true on the platform asking it.
+
+    On WSL the plain version is a promise WSL does not keep: measured on real
+    WSL2 (WOR-853), the default config stops the distro — and the proxy with it
+    — about 15 s after the last WSL terminal closes. The fix text used to print
+    only AFTER the unit was written and linger enabled, and consent collected
+    after the irreversible step is not consent. So WSL gets told in the
+    question, before answering it.
+    """
+    if is_wsl():
+        return (
+            f"\nInstall the background service on port {port}? On WSL it still stops about "
+            "15 seconds after your last WSL terminal closes, unless you also set "
+            "instanceIdleTimeout=-1 in %USERPROFILE%\\.wslconfig — shown next if you say yes"
+        )
+    return (
+        "\nKeep the proxy running after this terminal closes? "
+        f"(installs a user service on port {port})"
+    )
+
+
 def _offer_service_after_lock(console, *, home: WorthlessHome, port: int) -> bool:
     """Offer to keep the proxy alive after this terminal closes (WOR-853).
 
@@ -2977,46 +3005,40 @@ def _offer_service_after_lock(console, *, home: WorthlessHome, port: int) -> boo
     if console.json_mode:
         return False
 
+    # The terminal gate comes BEFORE --yes, and the order is the point.
+    # Installing the service also runs `loginctl enable-linger`, which
+    # `worthless service uninstall` does not reverse — account-level state. A
+    # blanket --yes in someone's Dockerfile or CI job previously created it with
+    # no prompt at all (confirmed live, 2026-10-05). --yes auto-approves
+    # PROMPTS; where nobody can see a prompt there is nothing to approve.
+    if not _scan_prompt_is_tty():
+        console.print_hint(_OFFER_DECLINED_HINT)
+        return False
+
     if console.assume_yes:
         accepted = True
-    elif not _scan_prompt_is_tty():
-        # Nobody is watching: piped, CI, or a captured stdin. Ask nothing.
-        # Reuses the existing prompt gate, which also suppresses under CI env
-        # vars where a pseudo-TTY would otherwise look interactive. Checking up
-        # front beats catching the failure — a captured stdin raises OSError,
-        # not EOFError, and a question nobody can answer must never be asked.
-        console.print_hint(
-            "Want it to keep running after you close this terminal? `worthless service install`"
-        )
-        return False
     else:
         try:
-            accepted = typer.confirm(
-                "\nKeep the proxy running after this terminal closes? "
-                f"(installs a user service on port {port})",
-                default=False,
-            )
-        except (typer.Abort, EOFError, OSError):
-            # Belt and braces for a stdin that claims to be a tty and then
-            # fails anyway. Declining is the only safe answer — the keys are
-            # already protected, and hanging a script is the worse outcome.
-            console.print_hint(
-                "Not a terminal — skipped. Run `worthless service install` when you want it."
-            )
+            accepted = typer.confirm(_offer_question(port), default=False)
+        except (typer.Abort, EOFError):
+            # Ctrl-C or Ctrl-D at a real terminal. The gate above already excluded
+            # the captured-stdin case, which raises OSError rather than EOFError.
+            console.print_hint(_OFFER_DECLINED_HINT)
             return False
 
     if not accepted:
-        console.print_hint(
-            "Want it to keep running after you close this terminal? `worthless service install`"
-        )
+        console.print_hint(_OFFER_DECLINED_HINT)
         return False
 
     try:
         install_service_for_offer(home, port=port)
-    except WorthlessError as exc:
-        # The keys are already protected by the time we ask. A service that
-        # will not install is worse than no service, but it is NOT a reason to
-        # report that lock failed.
+    except (WorthlessError, subprocess.CalledProcessError, OSError) as exc:
+        # The keys are already protected by the time we ask, so a service that
+        # will not install is NOT a reason to report that lock failed.
+        # WorthlessError alone was not enough: run_cmd uses check=True, so a
+        # failing `launchctl bootstrap` or `systemctl enable` raises
+        # CalledProcessError, which escaped to @error_boundary and printed
+        # WRTLS-199 "internal error" on a lock that had already succeeded.
         console.print_warning(f"Could not install the service: {exc}")
         console.print_hint("Your keys are still protected. Try `worthless service install`.")
         return False

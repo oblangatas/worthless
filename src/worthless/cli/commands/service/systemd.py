@@ -196,10 +196,22 @@ def install(home: WorthlessHome, *, port: int | None = None) -> None:
         worthless_home=worthless_home,
         port=actual_port if port is not None or os.environ.get("WORTHLESS_PORT") else None,
     )
+    created_here = not path.is_file()
     atomic_write_text(path, content, mode=0o600)
-    _ensure_linger()
-    _systemctl("daemon-reload")
-    _systemctl("enable", "--now", SYSTEMD_UNIT)
+
+    # Activation can fail after the file is on disk. Leaving it there means the
+    # user is told the install failed while a unit waits to start at next
+    # login, and detect_status reports STOPPED instead of NOT_INSTALLED.
+    # Removed only when THIS call created it, so a failed re-install never
+    # deletes a unit that was already working.
+    try:
+        _ensure_linger()
+        _systemctl("daemon-reload")
+        _systemctl("enable", "--now", SYSTEMD_UNIT)
+    except BaseException:
+        if created_here:
+            path.unlink(missing_ok=True)
+        raise
     report_proxy_health(actual_port)
 
 
