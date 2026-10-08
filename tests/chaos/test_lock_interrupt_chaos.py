@@ -201,6 +201,12 @@ def _child_env(te: TrialEnv) -> dict[str, str]:
         "WORTHLESS_KEYRING_BACKEND": "null",
         "HOME": str(te.home),
         "XDG_DATA_HOME": str(root / "xdg"),
+        # A wedged child must be able to say WHERE it is wedged. With this set,
+        # SIGABRT makes CPython dump every thread's Python stack to stderr —
+        # which _spawn_lock captures to a file and the hang guard already
+        # prints. worthless-3clz cost hours precisely because the one CI
+        # sighting left no stack behind; this costs nothing until a hang.
+        "PYTHONFAULTHANDLER": "1",
     }
 
 
@@ -684,6 +690,24 @@ def _evidence(proc: subprocess.Popen) -> str:
     return f"{load} descendants={members}"
 
 
+def _dump_wedged_stack(proc: subprocess.Popen) -> None:
+    """Ask a wedged child to print its own Python stack, then give it a moment.
+
+    ``_child_env`` sets ``PYTHONFAULTHANDLER=1``, so SIGABRT makes CPython
+    write every thread's stack to stderr — the file ``_spawn_lock`` captures
+    and the hang message already tails. Called only on a hang, immediately
+    before the kill, so a timing-dependent wedge names its own blocking line
+    instead of leaving the next reader to guess (worthless-3clz).
+
+    Best effort: a child that ignores or outruns SIGABRT just gets SIGKILLed
+    as before, and the tail says "(empty)".
+    """
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(proc.pid, signal.SIGABRT)
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        proc.wait(timeout=2)  # let faulthandler finish writing before SIGKILL
+
+
 def _reap(proc: subprocess.Popen) -> bool:
     """SIGKILL the whole group and wait for it, bounded. True if the leader survived.
 
@@ -721,6 +745,7 @@ def _await_exit(proc: subprocess.Popen, te: TrialEnv, what: str) -> None:
         proc.wait(timeout=WAIT_TIMEOUT)
     except subprocess.TimeoutExpired:
         evidence = _evidence(proc)  # before the kill, while the group is alive
+        _dump_wedged_stack(proc)  # ...and before it dies, ask it where it is stuck
         if _reap(proc):
             evidence += "  (and it survived SIGKILL for 5s: stuck in the kernel, e.g. slow I/O)"
         pytest.fail(
