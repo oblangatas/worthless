@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import ipaddress
 import json
@@ -15,6 +16,7 @@ import stat
 import subprocess  # nosec B404
 import sys
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import NamedTuple, NoReturn
@@ -1885,6 +1887,117 @@ def _resolve_adoption_policy(
     return AdoptionPolicy(managed_aliases=managed_aliases, adopt_unrecognized=decision)
 
 
+_EXIT_INTERRUPTED = 130  # 128 + SIGINT: the shell's code for "stopped by Ctrl-C"
+_STILL_ROLLING_BACK = "Still rolling back so nothing is left half-locked. One moment."
+
+
+@contextlib.contextmanager
+def _ctrl_c_raises(signals: list[int]) -> Iterator[None]:
+    """Make *signals* raise ``KeyboardInterrupt`` in synchronous code (worthless-3clz).
+
+    asyncio's handler only queues a press for the event loop, and a synchronous
+    stretch never yields to it: the press waited in the queue until the handler
+    was removed, then vanished. Where nothing is left to unwind, plain Python's
+    answer (raise right here) is the right one. ``signal.signal`` also makes
+    blocking calls (``flock``, ``sleep``, ``input``) return EINTR instead of
+    restarting, so the raise lands mid-call, not after it.
+
+    Pass only the signals asyncio actually armed: that list is empty off the
+    main thread (MCP), where ``signal.signal`` would raise and no signal arrives.
+    """
+
+    def _raise(_signum: int, _frame: object) -> None:
+        raise KeyboardInterrupt
+
+    previous = {sig: signal.signal(sig, _raise) for sig in signals}
+    try:
+        yield
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+            signal.siginterrupt(sig, False)  # what asyncio set for its own handlers
+
+
+def _emit_openclaw_interrupted(
+    console,  # noqa: ANN001
+    home: WorthlessHome,
+    alias_count: int,
+) -> None:
+    """Ctrl-C landed in the OpenClaw steps, after the keys were committed.
+
+    The lock stands. OpenClaw may be half-wired (written but not confirmed, or
+    not written yet), so record the same partial/failed sentinel as any other
+    OpenClaw failure: ``worthless status`` reports DEGRADED until it is fixed.
+    Printed even with ``quiet``: it answers a key the user just pressed.
+    """
+    console.print_warning(
+        "Interrupted. Your .env keys are locked, but OpenClaw setup was cut short."
+    )
+    console.print_warning("   Check it:  worthless doctor")
+    console.print_warning("   Roll back: worthless unlock")
+    _write_lock_sentinel(
+        home,
+        status="partial",
+        openclaw="failed",
+        alias_count=alias_count,
+        events=(
+            {
+                "code": "openclaw.interrupted",
+                "level": "error",
+                "detail": "interrupted before OpenClaw setup finished",
+            },
+        ),
+    )
+
+
+def _exit_openclaw_failed(console, code: int) -> NoReturn:  # noqa: ANN001
+    """Final word on a lock whose OpenClaw stage did not finish; exits *code*.
+
+    Ctrl-C (130) already explained itself in :func:`_emit_openclaw_interrupted`
+    — and "NOT gated" may be false there (the config can be written, only
+    unconfirmed) — so the LOCK FAILED banner is for the other failures.
+    """
+    if code != _EXIT_INTERRUPTED:
+        console.print_failure(
+            "LOCK FAILED — .env key is split but OpenClaw integration did not complete.\n"
+            "Your agent traffic is NOT gated through the Worthless proxy.\n"
+            "Run `worthless doctor` to diagnose, `worthless unlock` to roll back."
+        )
+    raise typer.Exit(code=code)
+
+
+def _openclaw_steps(
+    planned: list[_PlannedUpdate],
+    *,
+    signals: list[int],
+    managed_aliases: set[str] | None,
+    adopt: bool,
+    console,  # noqa: ANN001 — Console type is opaque from this layer
+    quiet: bool,
+    home: WorthlessHome,
+) -> int:
+    """Adoption prompt + OpenClaw wiring, answering Ctrl-C. Returns the exit code.
+
+    Runs after the keys are committed, and all of it is synchronous: the
+    adoption prompt, OpenClaw's config-file lock (unbounded), and a reload wait
+    of up to 15s. Ctrl-C here stops the OpenClaw steps, keeps the lock and exits
+    130 — never an unwind, because the rewritten ``.env`` needs those rows.
+    """
+    try:
+        with _ctrl_c_raises(signals):
+            adoption_policy = _resolve_adoption_policy(
+                planned,
+                managed_aliases=managed_aliases,
+                adopt=adopt,
+                console=console,
+                quiet=quiet,
+            )
+            return _apply_openclaw(planned, console, quiet, home, adoption_policy)
+    except KeyboardInterrupt:
+        _emit_openclaw_interrupted(console, home, len(planned))
+        return _EXIT_INTERRUPTED
+
+
 def _apply_openclaw(
     planned: list[_PlannedUpdate],
     console,  # noqa: ANN001 — Console type is opaque from this layer
@@ -2723,15 +2836,19 @@ def _lock_keys(
             interrupted = False
 
             def _request_unwind() -> None:
-                # One-shot: cancel on the FIRST signal only. The handler stays
-                # installed (but inert) through the rollback below, so a mashed
-                # Ctrl-C lands here as a no-op instead of re-cancelling the task
-                # — or, worse, hitting the default SIGINT disposition that
-                # ``remove_signal_handler`` would restore and raising
-                # KeyboardInterrupt mid-unwind, orphaning the rows we're
-                # deleting. Disarm happens only in ``finally``.
+                # Cancel on the FIRST signal only. The handler stays installed
+                # through the rollback below, so a mashed Ctrl-C lands here
+                # instead of re-cancelling the task — or, worse, hitting the
+                # default SIGINT disposition that ``remove_signal_handler``
+                # would restore and raising KeyboardInterrupt mid-unwind,
+                # orphaning the rows we're deleting. Later presses don't cut
+                # the rollback short, but they are answered, never silently
+                # swallowed (worthless-3clz). Disarm happens only in ``finally``.
                 nonlocal interrupted
-                if interrupted or this_task is None:
+                if this_task is None:
+                    return
+                if interrupted:
+                    console.print_warning(_STILL_ROLLING_BACK)
                     return
                 interrupted = True
                 this_task.cancel()
@@ -2795,14 +2912,15 @@ def _lock_keys(
                 # by the verification gauntlet): detected+failed returns non-zero
                 # openclaw_exit so the caller can raise typer.Exit(openclaw_exit)
                 # AFTER lock-core's .env/DB writes are fully committed.
-                adoption_policy = _resolve_adoption_policy(
+                openclaw_exit = _openclaw_steps(
                     planned,
+                    signals=installed_signals,
                     managed_aliases=managed_aliases,
                     adopt=adopt,
                     console=console,
                     quiet=quiet,
+                    home=home,
                 )
-                openclaw_exit = _apply_openclaw(planned, console, quiet, home, adoption_policy)
                 fresh_count = sum(1 for p in planned if p.was_fresh_enroll)
                 return _LockResult(
                     total=len(planned),
@@ -2887,12 +3005,7 @@ def _lock_keys(
     # LOCK FAILED line disambiguates the mixed [FAIL]+[OK] output so the
     # user cannot mistake a partial failure for overall success (WOR-551).
     if result.openclaw_exit:
-        console.print_failure(
-            "LOCK FAILED — .env key is split but OpenClaw integration did not complete.\n"
-            "Your agent traffic is NOT gated through the Worthless proxy.\n"
-            "Run `worthless doctor` to diagnose, `worthless unlock` to roll back."
-        )
-        raise typer.Exit(code=result.openclaw_exit)
+        _exit_openclaw_failed(console, result.openclaw_exit)
 
     # Also here, for the paths the branch above does not cover: a quiet lock, a
     # re-lock with no fresh keys, or an OpenClaw partial failure. Syncing twice
