@@ -1301,3 +1301,36 @@ def test_a_type_scope_without_a_version_is_rejected(tmp_path: Path) -> None:
 
     assert problems, "a type-only scope with no version was accepted"
     assert any("no `version`" in p for p in problems), problems
+
+
+def test_a_waiver_using_a_qualifier_this_gate_cannot_evaluate_is_rejected(tmp_path: Path) -> None:
+    """Grype honours more package qualifiers than our matcher reads.
+
+    grype 0.114.0 also constrains `package.language`, `package.location` and
+    `package.upstream-name`. scope_of reads name/type/version only, so a waiver
+    written with one of the others would be read MORE LOOSELY here than by
+    grype: a rule meant to excuse one npm package at one location would, to
+    this gate, excuse that package anywhere. That is the fail-open direction,
+    and it is the same drift — a waiver able to say more than the gate reads —
+    that this whole module exists to prevent.
+
+    Rejecting is the honest option. Implementing location/language matching
+    would mean inventing an answer for artifacts whose SARIF records carry no
+    such field, and a gate that guesses is worse than one that refuses.
+    """
+    config = tmp_path / ".grype.yaml"
+    config.write_text(
+        "ignore:\n"
+        "  - vulnerability: CVE-2026-99999\n"
+        "    package:\n"
+        "      name: lodash\n"
+        "      type: npm\n"
+        "      location: /app/node_modules/lodash\n"
+        '    reason: "argued for one copy at one path"\n'
+        '    expiry: "2099-01-01"\n'
+    )
+
+    problems = _load().check(config, TODAY)
+
+    assert problems, "a waiver using an unevaluable qualifier was accepted"
+    assert any("location" in p for p in problems), problems

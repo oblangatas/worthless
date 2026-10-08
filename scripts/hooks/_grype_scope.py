@@ -24,6 +24,20 @@ from __future__ import annotations
 # which is the entire point of this module.
 SCOPE_KEYS = ("name", "type", "version")
 
+# Qualifiers grype itself honours that this gate does NOT evaluate. Grype 0.114.0
+# also constrains `language`, `location` and `upstream-name`. Dropping them
+# silently would make a waiver LOOSER here than in grype — a rule meant to excuse
+# one npm package at one path would, to this gate, excuse that package anywhere,
+# so we would wave through findings grype still reports. That is the fail-open
+# direction, and it is the same drift this module exists to prevent, one level up.
+#
+# They are refused rather than implemented on purpose: matching a location or a
+# language means inventing an answer for artifacts whose records carry no such
+# field, and a gate that guesses is worse than one that says it cannot tell.
+# Teaching it to evaluate them is a real option later — then move the key from
+# here into SCOPE_KEYS and the refusal disappears on its own.
+UNEVALUABLE_KEYS = ("language", "location", "upstream-name")
+
 
 def scope_of(rule: dict) -> dict[str, str]:
     """The scope a rule constrains, as a plain dict. Empty dict = unscoped.
@@ -37,6 +51,20 @@ def scope_of(rule: dict) -> dict[str, str]:
     if not isinstance(pkg, dict):
         return {}
     return {k: str(pkg[k]) for k in SCOPE_KEYS if pkg.get(k)}
+
+
+def unevaluable_qualifiers(rule: dict) -> list[str]:
+    """Qualifiers this rule uses that the matcher cannot honour, sorted.
+
+    Empty list = every constraint the rule expresses is one `covers()` actually
+    enforces. Anything returned here means the rule promises grype a narrowing
+    this gate would ignore, so the caller must refuse it rather than quietly
+    matching wider than the author asked for.
+    """
+    pkg = rule.get("package")
+    if not isinstance(pkg, dict):
+        return []
+    return sorted(k for k in UNEVALUABLE_KEYS if pkg.get(k))
 
 
 def is_bounded(scope: dict[str, str]) -> bool:

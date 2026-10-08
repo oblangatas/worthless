@@ -32,7 +32,7 @@ import yaml
 # Adding our own directory explicitly makes the import resolve under both.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from _grype_scope import is_bounded, scope_of
+from _grype_scope import is_bounded, scope_of, unevaluable_qualifiers
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -127,6 +127,18 @@ def check(config: Path, today: dt.date, warnings: list[str] | None = None) -> li
         # _grype_scope and shared with check_grype_unmapped_findings. It has to
         # be: when the two drifted, the validator blessed a `version` the matcher
         # ignored, and the pin bound nothing on the gate that blocks.
+        # Grype honours qualifiers our matcher does not. Silently dropping one
+        # makes the waiver WIDER here than in grype — it would excuse findings
+        # grype still reports — so refuse the rule instead of guessing.
+        unevaluable = unevaluable_qualifiers(rule)
+        if unevaluable:
+            problems.append(
+                f"{vuln}: uses `package.{'`, `package.'.join(unevaluable)}`, which grype "
+                f"honours but this repo's unmapped-findings gate does not read. The waiver "
+                f"would be narrower in grype than here, so this gate would excuse findings "
+                f"grype still reports. Scope by `name`, `type` and `version` only."
+            )
+
         scope = scope_of(rule)
         if not scope:
             problems.append(
