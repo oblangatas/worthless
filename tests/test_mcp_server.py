@@ -343,6 +343,20 @@ class TestWorthlessScan:
         assert summary["total"] == summary["protected"] + summary["unprotected"], summary
 
     @pytest.mark.asyncio
+    async def test_scan_token_outside_env_is_told_to_revoke(self, tmp_path: Path) -> None:
+        """A login token outside a local .env is exposed; the agent is told to
+        revoke it, never to run lock."""
+        src = tmp_path / "settings.py"
+        src.write_text(f'ANTHROPIC_API_KEY = "{fake_key("sk-ant-oat01-", "p55g-mcp-src")}"\n')
+
+        result = json.loads(await worthless_scan(paths=[str(src)]))
+
+        [finding] = result["findings"]
+        assert finding["is_unshardable"] is False, finding
+        assert "revoke" in finding["remediation"].lower(), finding
+        assert result["summary"]["unshardable"] == 0, result["summary"]
+
+    @pytest.mark.asyncio
     async def test_scan_no_paths_defaults(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

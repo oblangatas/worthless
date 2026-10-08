@@ -27,7 +27,8 @@ from worthless.cli.process import poll_health, resolve_port
 from worthless.cli.console import get_console
 from worthless.cli.dotenv_rewriter import build_enrolled_locations, scan_env_keys
 from worthless.cli.errors import ErrorCode, WorthlessError
-from worthless.cli.key_patterns import UNSHARDABLE_REMEDY, is_oauth_token
+from worthless.cli.key_patterns import LEAKED_LOGIN_REMEDY, UNSHARDABLE_REMEDY, is_oauth_token
+from worthless.cli.scanner import stays_local
 from worthless.openclaw.audit import sanitise_for_message
 from worthless.cli.commands.service._common import ServiceState
 from worthless.cli.commands.service.proxy_state import ProxyRuntimeState, detect_proxy_runtime
@@ -165,9 +166,10 @@ def _run_enrollment_if_needed(
     keys = [k for k in keys if not is_oauth_token(k[1])]
     if oauth:
         names = ", ".join(sanitise_for_message(var_name) for var_name, _, _ in oauth)
+        # Same rule as scan: a .env in git (or a symlink) has left the machine.
+        remedy = UNSHARDABLE_REMEDY if stays_local(env_path) else LEAKED_LOGIN_REMEDY
         console.print_warning(
-            f"Can't protect {names}: a Claude Code login token, still in plain text. "
-            + UNSHARDABLE_REMEDY
+            f"Can't protect {names}: a Claude Code login token, still in plain text. " + remedy
         )
 
     if not keys:

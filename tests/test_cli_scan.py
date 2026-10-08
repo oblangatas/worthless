@@ -1159,6 +1159,63 @@ class TestScanAgreesWithLockOnOAuthTokens:
         data = json.loads(runner.invoke(app, ["scan", str(env), "--json"]).stdout)
         assert data["findings"][0]["is_unshardable"] is False, data
         assert "revoke" in data["findings"][0]["remediation"].lower(), data
+        sarif = json.loads(runner.invoke(app, ["scan", str(env), "--format", "sarif"]).stdout)
+        [res] = sarif["runs"][0]["results"]
+        assert res["level"] == "error", res
+        assert "revoke" in res["message"]["text"].lower(), res
+
+    def test_an_inherited_git_dir_cannot_fool_the_check(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Git sets GIT_DIR for hooks run in a linked worktree. Inherited, it
+        # makes `git -C proj ls-files` ask some OTHER repo, which answers "not
+        # tracked" for a .env this repo has committed — and the token passes.
+        env = self._env(tmp_path, self._oauth("p55g-git-dir"))
+        subprocess.run(["git", "init", "-q", str(env.parent)], check=True)  # noqa: S607
+        subprocess.run(["git", "-C", str(env.parent), "add", ".env"], check=True)  # noqa: S607
+        other = tmp_path / "other"
+        subprocess.run(["git", "init", "-q", str(other)], check=True)  # noqa: S607
+        monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+
+        [finding] = scan_files([env])
+
+        assert finding.is_unshardable is False
+
+    def test_a_token_in_the_environment_is_not_told_to_revoke(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # --deep scans the environment through a temp dump file. A CI secret
+        # held there is where it belongs, not leaked: "revoke it" would kill a
+        # working token and the next run would be red again. It still fails, as
+        # every environment key does under --deep (worthless-07st), but the
+        # advice must fit — and never say lock.
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", fake_key("sk-ant-oat01-", "p55g-env"))
+
+        result = runner.invoke(app, ["scan", "--deep", "--json"])
+
+        findings = [
+            f
+            for f in json.loads(result.stdout)["findings"]
+            if f["var_name"] == "CLAUDE_CODE_OAUTH_TOKEN"
+        ]
+        assert len(findings) == 1, findings
+        assert findings[0]["is_unshardable"] is False, findings
+        remedy = findings[0]["remediation"].lower()
+        assert "environment" in remedy, findings
+        assert "revoke" not in remedy, findings
+        assert "worthless lock" not in remedy, findings
+
+    def test_a_token_in_a_committed_template_still_fails(self, tmp_path: Path) -> None:
+        # .env.example and friends are templates meant to be committed, so they
+        # are not in lock's .env family: a real token there is exposed.
+        example = tmp_path / "proj" / ".env.example"
+        example.parent.mkdir()
+        example.write_text(f"{self._oauth('p55g-example')}\n")
+
+        result = runner.invoke(app, ["scan", str(example)])
+
+        assert result.exit_code == 1, self._flat(result)
+        assert "revoke" in self._flat(result).lower(), self._flat(result)
 
     @pytest.mark.parametrize("git_answer", ["no-git", "timeout", "dubious-ownership"])
     def test_an_unknown_git_answer_fails_closed(

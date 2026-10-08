@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess  # nosec B404
 import time
@@ -14,6 +15,7 @@ from worthless.cli.dotenv_rewriter import shannon_entropy
 from worthless.cli.key_patterns import (
     ENTROPY_THRESHOLD,
     KEY_PATTERN,
+    ENV_LOGIN_REMEDY,
     LEAKED_LOGIN_REMEDY,
     UNSHARDABLE_REMEDY,
     detect_provider,
@@ -21,6 +23,10 @@ from worthless.cli.key_patterns import (
 )
 from worthless.cli.redaction import mask_secret
 from worthless.cli.safe_rewrite import _BASENAME_ALLOWLIST
+
+# scan --deep dumps the process environment to a temp file with this prefix.
+# Findings in it came from the environment, not from a file anyone wrote.
+ENV_DUMP_PREFIX = "worthless-env-"
 
 _VAR_NAME_RE = re.compile(r"(\w+)\s*$")
 
@@ -260,6 +266,9 @@ def _is_git_tracked(path: Path) -> bool:
             capture_output=True,
             check=False,
             timeout=10,
+            # Ask the repo that holds *path*. Git sets GIT_DIR for hooks run in a
+            # linked worktree; inherited, it points this probe at another repo.
+            env={k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return True
@@ -270,7 +279,7 @@ def _is_git_tracked(path: Path) -> bool:
     return True
 
 
-def _stays_local(path: Path) -> bool:
+def stays_local(path: Path) -> bool:
     """A .env-family file lock manages, that isn't a symlink and isn't in git."""
     return path.name in _BASENAME_ALLOWLIST and not path.is_symlink() and not _is_git_tracked(path)
 
@@ -279,7 +288,11 @@ def remediation_for(f: ScanFinding) -> str | None:
     """The fix that exists for a login token — never "run worthless lock"."""
     if f.is_protected or not f.is_login_token:
         return None
-    return UNSHARDABLE_REMEDY if f.is_unshardable else LEAKED_LOGIN_REMEDY
+    if f.is_unshardable:
+        return UNSHARDABLE_REMEDY
+    if Path(f.file).name.startswith(ENV_DUMP_PREFIX):
+        return ENV_LOGIN_REMEDY
+    return LEAKED_LOGIN_REMEDY
 
 
 def scan_files(
@@ -365,7 +378,7 @@ def scan_files(
                         value_preview=_mask(value),
                         column=match.start(),
                         is_login_token=token,
-                        is_unshardable=token and _stays_local(path),
+                        is_unshardable=token and stays_local(path),
                     )
                 )
     return findings
@@ -414,7 +427,7 @@ def format_sarif(findings: list[ScanFinding], tool_version: str) -> dict:
             )
         elif f.is_login_token and not f.is_protected:
             rule_id, level = EXPOSED_RULE_ID, "error"
-            text = f"Exposed Claude Code login token{in_var}. " + LEAKED_LOGIN_REMEDY
+            text = f"Exposed Claude Code login token{in_var}. " + (remediation_for(f) or "")
         else:
             rule_id, level = EXPOSED_RULE_ID, "warning" if f.is_protected else "error"
             text = f"Exposed {f.provider} API key{in_var}" + (

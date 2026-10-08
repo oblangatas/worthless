@@ -24,7 +24,7 @@ from worthless.cli.safe_rewrite import _BASENAME_ALLOWLIST
 from worthless.cli.code_scanner import CodeFinding, scan_for_hardcoded_provider_urls
 from worthless.cli.console import get_console
 from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary
-from worthless.cli.key_patterns import KEY_PATTERN, LEAKED_LOGIN_REMEDY, UNSHARDABLE_REMEDY
+from worthless.cli.key_patterns import KEY_PATTERN, UNSHARDABLE_REMEDY
 from worthless.cli.platform import is_wsl
 from worthless.cli.redaction import key_fingerprint
 from worthless.cli.dotenv_rewriter import build_enrolled_locations
@@ -34,6 +34,7 @@ from worthless.cli.process import disable_core_dumps
 from worthless.cli.scanner import (
     HardcodedUrlFinding,
     ScanFinding,
+    ENV_DUMP_PREFIX,
     SkippedFile,
     format_sarif,
     remediation_for,
@@ -191,7 +192,7 @@ def _collect_deep_paths(explicit_paths: list[Path]) -> tuple[list[Path], Path | 
 
     env_lines = [f"{k}={v}" for k, v in os.environ.items()]
     if env_lines:
-        fd, tmp = tempfile.mkstemp(prefix="worthless-env-", suffix=".env")
+        fd, tmp = tempfile.mkstemp(prefix=ENV_DUMP_PREFIX, suffix=".env")
         try:
             os.write(fd, "\n".join(env_lines).encode())
             os.close(fd)
@@ -300,23 +301,22 @@ def _unshardable_lines(findings: Sequence[ScanFinding], committing: bool = False
 
 def _leaked_token_lines(findings: Sequence[ScanFinding]) -> list[str]:
     """A login token outside an untracked .env file: in git, a non-.env file, a
-    symlink, or the environment. It fails the build, and the fix is to revoke
-    it — never "run worthless lock", which refuses it wherever it sits.
+    symlink, or the environment. It fails the build. The fix depends on where
+    it sits (revoke a leaked one; scope a CI secret) — never "run worthless
+    lock", which refuses it wherever it sits.
     """
-    names = [
-        sanitise_for_message(f.var_name or f.provider)
-        for f in findings
-        if f.is_login_token and _is_exposed(f)
-    ]
-    if not names:
+    tokens = [f for f in findings if f.is_login_token and _is_exposed(f)]
+    if not tokens:
         return []
+    names = [sanitise_for_message(f.var_name or f.provider) for f in tokens]
     s = "s" if len(names) != 1 else ""
+    remedies = dict.fromkeys(remediation_for(f) for f in tokens)
     return [
         "",
         f"Exposed {len(names)} Claude Code login token{s}: {', '.join(names)}.",
         "`worthless lock` refuses this kind of token, and this one can leave "
         "the machine (git, a non-.env file, a symlink, or the environment).",
-        LEAKED_LOGIN_REMEDY,
+        *(r for r in remedies if r),
     ]
 
 

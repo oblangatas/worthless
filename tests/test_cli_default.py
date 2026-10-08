@@ -13,6 +13,7 @@ Pipeline phases:
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -802,6 +803,45 @@ class TestDefaultCommandOAuthOnlyEnv:
         # Named, honestly, with a fix that exists.
         assert "can't protect" in low, low
         assert "sk-ant-api03" in low, low
+
+    def test_quiet_stays_silent_on_an_oauth_only_env(
+        self,
+        home_dir: WorthlessHome,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Documented in the PR: bare `worthless --quiet` is the user's explicit
+        # choice for silence, and nothing fails — exit 0, nothing printed.
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".env").write_text(
+            f"ANTHROPIC_API_KEY={fake_key('sk-ant-oat01-', 'p55g-default-quiet')}\n"
+        )
+
+        result = _invoke_default({"WORTHLESS_HOME": str(home_dir.base_dir)}, args=["--quiet"])
+
+        assert result.exit_code == 0, result.stdout + result.stderr
+        assert "can't protect" not in (result.stdout + result.stderr).lower()
+
+    def test_committed_env_token_is_told_to_revoke(
+        self,
+        home_dir: WorthlessHome,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Same rule as scan: a .env in git has already left the machine, so
+        # "swap it" is not enough — the token has to be revoked.
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".env").write_text(
+            f"ANTHROPIC_API_KEY={fake_key('sk-ant-oat01-', 'p55g-default-committed')}\n"
+        )
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)  # noqa: S607
+        subprocess.run(["git", "-C", str(tmp_path), "add", ".env"], check=True)  # noqa: S607
+
+        result = _invoke_default({"WORTHLESS_HOME": str(home_dir.base_dir)})
+        low = " ".join((result.stdout + result.stderr).split()).lower()
+
+        assert result.exit_code == 0, low
+        assert "revoke" in low, low
 
     def test_mixed_env_locks_the_real_key_and_reports_done(
         self,

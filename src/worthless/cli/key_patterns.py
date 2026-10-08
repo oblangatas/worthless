@@ -90,6 +90,14 @@ UNSHARDABLE_REMEDY = (
 
 # The same token anywhere it can leave the machine — a file git tracks, a
 # non-.env file, a symlink, the environment. Still never "run worthless lock".
+# From the process environment (scan --deep). A CI secret belongs there, so
+# "revoke it" would kill a working token and the next run would be red again.
+ENV_LOGIN_REMEDY = (
+    "It comes from the environment, not a file. If it is a CI secret, that is "
+    "where it belongs: give it only to the step that needs it, or run scan without "
+    "--deep in that job."
+)
+
 LEAKED_LOGIN_REMEDY = (
     "Treat it as leaked: revoke it, then take it out of the file "
     "(and out of git with `git rm --cached`, if it was committed)."
