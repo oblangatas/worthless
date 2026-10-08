@@ -27,9 +27,14 @@ _INLINE = re.compile(r"`([^`\n]+)`")
 # list dash or quote), after a shell separator, or as a YAML value. That rules
 # out `worthless` used as a name — `pip install worthless`, `docker exec -i
 # worthless`, `secret-tool clear service worthless`.
+# Also accepted before `worthless`: env assignments (`WORTHLESS_X=1 worthless up`)
+# and `uvx` with a package spec (`uvx worthless[mcp]==1.2 mcp`). `worthless` must
+# be a whole word, so `worthless-data:` or a YAML `worthless:` key never match.
 _INVOCATION = re.compile(
     r"(?:^\s*(?:\$\s+|-\s+)?[\"']?|(?:&&|\|\||[|;(]|\$\()\s*|:\s+[\"']?)"
-    r"worthless((?:\s+[^\s|;&`\"'<>#]+)*)"
+    r"(?:[A-Z_][A-Z0-9_]*=\S*\s+)*"
+    r"(?:uvx\s+)?worthless(?:\[[\w,]+\])?(?:==\S+)?(?![\w.:\[=-])"
+    r"((?:\s+[^\s|;&`\"'<>#]+)*)"
 )
 _COMMENT = re.compile(r"\s#.*$")
 _VERSION = re.compile(r"^v?\d")  # `worthless 0.3.8` is --version output, not input
@@ -38,7 +43,10 @@ _VERSION = re.compile(r"^v?\d")  # `worthless 0.3.8` is --version output, not in
 def _code_snippets(text: str) -> list[str]:
     fenced = _FENCE.findall(text)
     rest = _FENCE.sub("", text)
-    return fenced + _INLINE.findall(rest)
+    # Backticked commands inside fenced blocks too: YAML schemas in the install
+    # guides quote commands mid-line (`command: "run `worthless up` first"`).
+    inline_in_fences = [m for block in fenced for m in _INLINE.findall(block)]
+    return fenced + inline_in_fences + _INLINE.findall(rest)
 
 
 def _invocations() -> list[tuple[str, list[str]]]:
@@ -93,8 +101,13 @@ INVOCATIONS = _invocations()
 
 
 def test_docs_have_command_examples() -> None:
-    """Guard the guard: if parsing breaks, the parametrised test would vacuously pass."""
-    assert len(INVOCATIONS) >= 10, f"only {len(INVOCATIONS)} `worthless` invocations found in docs/"
+    """Guard the guard: if parsing breaks, the parametrised test would vacuously pass.
+
+    Counts distinct commands that carry arguments — bare `worthless` matches
+    trivially and would hide a parser that finds nothing else.
+    """
+    distinct = {tuple(t) for _, t in INVOCATIONS if t}
+    assert len(distinct) >= 30, f"only {len(distinct)} distinct `worthless ...` commands in docs/"
 
 
 @pytest.mark.parametrize(("where", "tokens"), INVOCATIONS, ids=[w for w, _ in INVOCATIONS])
