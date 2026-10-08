@@ -269,7 +269,7 @@ def _is_git_tracked(path: Path) -> bool:
             # linked worktree; inherited, it points this probe at another repo.
             env={k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+    except (subprocess.TimeoutExpired, OSError):  # OSError covers no-git
         return True
     if result.returncode == 1:
         return False
@@ -440,6 +440,27 @@ EXPOSED_RULE_ID = "worthless/exposed-api-key"
 UNSHARDABLE_RULE_ID = "worthless/unshardable-oauth-token"
 
 
+def _sarif_verdict(f: ScanFinding) -> tuple[str, str, str]:
+    """(ruleId, level, message) for one finding."""
+    in_var = f" in variable {f.var_name}" if f.var_name else ""
+    remedy = remediation_for(f)
+    if remedy and f.is_unshardable:
+        # worthless-p55g: GitHub code scanning reads the level, not scan's exit
+        # code — "error" here would keep the gate red over a token lock refuses.
+        # "note" keeps it visible without blocking.
+        lead = f"Claude Code login token{in_var} — worthless can't protect it."
+        return UNSHARDABLE_RULE_ID, "note", f"{lead} {remedy}"
+    if remedy:
+        return EXPOSED_RULE_ID, "error", f"Exposed Claude Code login token{in_var}. {remedy}"
+    if f.is_protected:
+        return (
+            EXPOSED_RULE_ID,
+            "warning",
+            f"Exposed {f.provider} API key{in_var} (protected by worthless)",
+        )
+    return EXPOSED_RULE_ID, "error", f"Exposed {f.provider} API key{in_var}"
+
+
 def format_sarif(findings: list[ScanFinding], tool_version: str) -> dict:
     """Format findings as SARIF v2.1.0.
 
@@ -447,23 +468,7 @@ def format_sarif(findings: list[ScanFinding], tool_version: str) -> dict:
     """
     results = []
     for f in findings:
-        in_var = f" in variable {f.var_name}" if f.var_name else ""
-        if remedy := remediation_for(f):
-            if f.is_unshardable:
-                # worthless-p55g: GitHub code scanning reads the level, not
-                # scan's exit code — "error" here would keep the gate red over a
-                # token lock refuses. "note" keeps it visible without blocking.
-                rule_id, level = UNSHARDABLE_RULE_ID, "note"
-                lead = f"Claude Code login token{in_var} — worthless can't protect it."
-            else:
-                rule_id, level = EXPOSED_RULE_ID, "error"
-                lead = f"Exposed Claude Code login token{in_var}."
-            text = f"{lead} {remedy}"
-        else:
-            rule_id, level = EXPOSED_RULE_ID, "warning" if f.is_protected else "error"
-            text = f"Exposed {f.provider} API key{in_var}" + (
-                " (protected by worthless)" if f.is_protected else ""
-            )
+        rule_id, level, text = _sarif_verdict(f)
         result: dict = {
             "ruleId": rule_id,
             "level": level,
