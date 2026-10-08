@@ -1018,7 +1018,8 @@ class TestScanAgreesWithLockOnOAuthTokens:
         # "UNPROTECTED ... run worthless lock" cannot be followed.
         assert "UNPROTECTED" not in out, out
         assert "still exposed" not in low, out
-        assert "run `worthless lock`" not in low and "run worthless lock" not in low, out
+        assert "run `worthless lock`" not in low, out
+        assert "run worthless lock" not in low, out
         # The positive spec: name the category, stay honest that the token is
         # still sitting there, and name a fix that exists.
         assert "can't protect" in low, out
