@@ -803,8 +803,10 @@ def test_fxs47_home_mismatch_emits_warn_event_and_still_writes(
     assert "openai" in data["models"]["providers"], "HOME_MISMATCH should warn, not block the write"
 
 
-def _ctrl_c_on_write(monkeypatch: pytest.MonkeyPatch, nth: int) -> None:
-    """Make the *nth* ``set_provider`` write raise KeyboardInterrupt (worthless-3clz).
+def _ctrl_c_on_write(
+    monkeypatch: pytest.MonkeyPatch, nth: int, exc: type[BaseException] = KeyboardInterrupt
+) -> None:
+    """Make the *nth* ``set_provider`` write raise *exc* (worthless-3clz).
 
     ``worthless lock`` now lets Ctrl-C raise inside the OpenClaw steps, so a press
     can land between two provider writes, e.g. while the second one waits for
@@ -818,7 +820,7 @@ def _ctrl_c_on_write(monkeypatch: pytest.MonkeyPatch, nth: int) -> None:
     def _set_provider(*args: object, **kwargs: object) -> None:
         calls["n"] += 1
         if calls["n"] == nth:
-            raise KeyboardInterrupt
+            raise exc
         real_set_provider(*args, **kwargs)
 
     monkeypatch.setattr(config_mod, "set_provider", _set_provider)
@@ -830,19 +832,21 @@ _TWO_PROVIDERS = [
 ]
 
 
-def test_ctrl_c_between_provider_writes_restores_openclaw_json(
-    openclaw_present: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("exc", [KeyboardInterrupt, RuntimeError], ids=["ctrl-c", "crash"])
+def test_failure_between_provider_writes_restores_openclaw_json(
+    exc: type[BaseException], openclaw_present: dict[str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Half-wired openclaw.json is the worst outcome: provider 1 on the proxy,
-    provider 2 untouched. A Ctrl-C between the writes must put it back."""
+    provider 2 untouched. A Ctrl-C (or any crash) between the writes must put
+    it back."""
     from worthless.openclaw import integration
 
     config_path = openclaw_present["config_path"]
     before = json.loads(config_path.read_text(encoding="utf-8"))
     monkeypatch.chdir(openclaw_present["home"])
-    _ctrl_c_on_write(monkeypatch, nth=2)
+    _ctrl_c_on_write(monkeypatch, nth=2, exc=exc)
 
-    with pytest.raises(KeyboardInterrupt):
+    with pytest.raises(exc):
         integration.apply_lock(planned_updates=_TWO_PROVIDERS)
 
     assert json.loads(config_path.read_text(encoding="utf-8")) == before

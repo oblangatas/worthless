@@ -41,15 +41,12 @@ atomic-Pass-1 saves it. Per the WOR-646 honesty rule, known gaps are marked
 from __future__ import annotations
 
 import contextlib
-import fcntl
-import http.server
 import json
 import os
 import signal
 import sqlite3
 import subprocess
 import sys
-import threading
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -60,6 +57,8 @@ import psutil
 import pytest
 
 from tests.helpers import fake_anthropic_key, fake_key
+from tests.openclaw.install_incident.reproduce import fake_proxy_health
+from worthless.openclaw.config import _file_lock
 
 # POSIX-only: the product targets macOS + Linux, and os.killpg / start_new_session
 # / SIGKILL semantics are POSIX. Mirrors tests/e2e/conftest.py's platform policy.
@@ -210,12 +209,7 @@ def _child_env(te: TrialEnv) -> dict[str, str]:
         "WORTHLESS_KEYRING_BACKEND": "null",
         "HOME": str(te.home),
         "XDG_DATA_HOME": str(root / "xdg"),
-        # A wedged child must be able to say WHERE it is wedged. With this set,
-        # SIGABRT makes CPython dump every thread's Python stack to stderr —
-        # which _spawn_lock captures to a file and the hang guard already
-        # prints. worthless-3clz cost hours precisely because the one CI
-        # sighting left no stack behind; this costs nothing until a hang.
-        "PYTHONFAULTHANDLER": "1",
+        "PYTHONFAULTHANDLER": "1",  # SIGABRT dumps the stuck stack: _dump_wedged_stack
     }
 
 
@@ -754,21 +748,35 @@ def _fail_unkillable(proc: subprocess.Popen) -> None:
     pytest.fail(f"pid {proc.pid} survived SIGKILL for 5s (stuck in the kernel?)")
 
 
-def _await_exit(proc: subprocess.Popen, te: TrialEnv, what: str) -> None:
-    """The hang guard: fail with evidence if the signalled lock outlives WAIT_TIMEOUT."""
+def _await_exit(
+    proc: subprocess.Popen, te: TrialEnv, what: str, timeout: float = WAIT_TIMEOUT
+) -> None:
+    """The hang guard: fail with evidence if the signalled lock outlives *timeout*."""
     try:
-        proc.wait(timeout=WAIT_TIMEOUT)
+        proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         evidence = _evidence(proc)  # before the kill, while the group is alive
         _dump_wedged_stack(proc)  # ...and before it dies, ask it where it is stuck
         if _reap(proc):
             evidence += "  (and it survived SIGKILL for 5s: stuck in the kernel, e.g. slow I/O)"
         pytest.fail(
-            f"{what} — the lock did not exit within {WAIT_TIMEOUT}s of the signal. Treat it "
+            f"{what} — the lock did not exit within {timeout}s of the signal. Treat it "
             "as a hang regression unless the evidence shows a drowning host (high "
             "load/cores) or a process stuck in the kernel.\n"
             f"  evidence: {evidence}\n{_stderr_tail(te)}"
         )
+
+
+def _wait_until(proc: subprocess.Popen, te: TrialEnv, ready: Callable[[], bool], what: str) -> None:
+    """Poll *ready*; if the lock never gets there, fail with its own stack."""
+    deadline = time.monotonic() + WAIT_TIMEOUT
+    while not ready():
+        if proc.poll() is not None:
+            pytest.fail(f"lock exited (rc={proc.returncode}) before {what}\n{_stderr_tail(te)}")
+        if time.monotonic() > deadline:
+            _dump_wedged_stack(proc)  # stuck somewhere earlier: say where
+            pytest.fail(f"lock never reached {what} within {WAIT_TIMEOUT}s\n{_stderr_tail(te)}")
+        time.sleep(0.01)
 
 
 def _run_trial(te: TrialEnv, sig: int, delay: float, *, ready: Path | None = None) -> DiskState:
@@ -788,13 +796,7 @@ def _run_trial(te: TrialEnv, sig: int, delay: float, *, ready: Path | None = Non
         if ready is None:
             time.sleep(delay)
         else:
-            deadline = time.monotonic() + WAIT_TIMEOUT
-            while not ready.exists():
-                if proc.poll() is not None:
-                    pytest.fail(f"wedge child exited before arming (rc={proc.returncode})")
-                if time.monotonic() > deadline:
-                    pytest.fail(f"wedge child never signalled ready within {WAIT_TIMEOUT}s")
-                time.sleep(0.01)
+            _wait_until(proc, te, ready.exists, "the armed wedge")
         _kill_group(proc, sig)
         _await_exit(proc, te, f"lock hung after sig={sig} delay={delay:.3f}s")
     finally:
@@ -1321,30 +1323,10 @@ _CLEAN_AUDIT = json.dumps(
 )
 
 
-class _HealthzStub(http.server.BaseHTTPRequestHandler):
-    """Just enough of a running proxy for lock's proxy-health gate."""
-
-    def do_GET(self) -> None:  # noqa: N802 — stdlib hook name
-        body = b'{"mode": "up", "requests_proxied": 0}'
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, *_args: object) -> None:  # keep test output clean
-        pass
-
-
 @pytest.fixture
 def proxy_port() -> Iterator[int]:
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _HealthzStub)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    try:
-        yield server.server_address[1]
-    finally:
-        server.shutdown()
-        server.server_close()
+    with fake_proxy_health() as port:
+        yield port
 
 
 def _with_openclaw(te: TrialEnv, port: int) -> tuple[dict[str, str], Path]:
@@ -1377,38 +1359,21 @@ def _call_count(calls: Path, subcommand: str) -> int:
 
 
 def _ctrl_c_once(te: TrialEnv, env: dict[str, str], reached: Callable[[], bool], where: str) -> int:
-    """Run the real lock; Ctrl-C it once ``reached()`` says it is at the step under test.
+    """Run the real lock; Ctrl-C it once ``reached()`` says it is in *where*.
 
     Returns the exit code. Fails if the press is not answered within TAIL_DEADLINE.
     """
     proc = _spawn_lock(te, env)
     try:
-        deadline = time.monotonic() + WAIT_TIMEOUT
-        while not reached():
-            if proc.poll() is not None:
-                pytest.fail(f"lock exited rc={proc.returncode} before {where}\n{_stderr_tail(te)}")
-            if time.monotonic() > deadline:
-                _dump_wedged_stack(proc)  # it is stuck somewhere earlier — say where
-                pytest.fail(
-                    f"lock never reached the step under test ({where}) within "
-                    f"{WAIT_TIMEOUT}s\n{_stderr_tail(te)}"
-                )
-            time.sleep(0.01)
+        _wait_until(proc, te, reached, where)
         time.sleep(0.3)  # settle INTO the blocking call, not merely past the marker
         _kill_group(proc, signal.SIGINT)
-        try:
-            rc = proc.wait(timeout=TAIL_DEADLINE)
-        except subprocess.TimeoutExpired:
-            _dump_wedged_stack(proc)
-            pytest.fail(
-                f"Ctrl-C ignored for over {TAIL_DEADLINE}s {where} (worthless-3clz).\n"
-                f"{_stderr_tail(te)}"
-            )
+        _await_exit(proc, te, f"Ctrl-C ignored in {where} (worthless-3clz)", TAIL_DEADLINE)
     finally:
         survived = _reap(proc)
     if survived:
         _fail_unkillable(proc)
-    return rc
+    return proc.returncode
 
 
 def _assert_answered_and_kept(te: TrialEnv, rc: int) -> None:
@@ -1429,7 +1394,7 @@ class TestCtrlCDuringOpenclawReloadWait:
                 te,
                 env,
                 lambda c=calls: _call_count(c, "logs") >= 1,  # polled for a reload once
-                "during the OpenClaw reload wait",
+                "the OpenClaw reload wait",
             )
             _assert_answered_and_kept(te, rc)
 
@@ -1442,17 +1407,12 @@ class TestCtrlCWhileOpenclawConfigIsLocked:
             te = _make_trial_env(tmp_path, trial, n_keys=1)
             env, _calls = _with_openclaw(te, proxy_port)
             # Another process (an OpenClaw write, a second lock) holds the config lock.
-            lock_file = te.home / ".openclaw" / ".openclaw.json.lock"
-            fd = os.open(lock_file, os.O_RDWR | os.O_CREAT, 0o600)
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX)
+            with _file_lock(te.home / ".openclaw" / "openclaw.json"):
                 rc = _ctrl_c_once(
                     te,
                     env,
                     # keys committed; the next step is the OpenClaw config write
                     lambda t=te: _env_state(t) == "locked",
-                    "while waiting for OpenClaw's config lock",
+                    "the OpenClaw config-lock wait",
                 )
-            finally:
-                os.close(fd)
             _assert_answered_and_kept(te, rc)

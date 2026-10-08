@@ -1243,12 +1243,12 @@ def _apply_lock_write_providers(
 
 
 def _config_changed_since(config_path: Path, original_config: dict | None) -> bool:
-    """Has ``openclaw.json`` moved off *original_config*? Read without the lock."""
+    """Has ``openclaw.json`` moved off *original_config*? Same reader, no lock."""
+    if original_config is None:  # absent before this lock
+        return config_path.exists()
     try:
-        return json.loads(config_path.read_text(encoding="utf-8")) != original_config
-    except FileNotFoundError:
-        return original_config is not None
-    except (OSError, ValueError):
+        return _config_mod.read_config(config_path) != original_config
+    except OpenclawConfigError:
         return True
 
 
@@ -1264,11 +1264,11 @@ def _apply_lock_stages_a(
 ) -> bool:
     """Stage A(pre) + Stage A writes; returns ``rollback_needed``.
 
-    ``worthless lock`` lets Ctrl-C raise here (worthless-3clz), so a press can
-    land between two writes: a decoy repoint and its unset, or provider 1 and
-    provider 2 while 2 waits for OpenClaw's config-file lock. Put the file back
-    if this run changed it, then let the interrupt through. Unchanged means
-    hands off: rewriting anyway could clobber whoever holds that lock.
+    Anything escaping mid-way puts the file back if this run changed it, then
+    goes on up: since worthless-3clz that includes Ctrl-C, which can land between
+    two writes (a decoy repoint and its unset; provider 1 and provider 2 while 2
+    waits for OpenClaw's config-file lock). Unchanged means hands off: rewriting
+    anyway could clobber whoever holds that lock.
     """
     try:
         if _apply_lock_migrate_legacy_decoy(
@@ -1284,7 +1284,7 @@ def _apply_lock_stages_a(
             providers_skipped,
             adoption_policy,
         )
-    except KeyboardInterrupt:
+    except BaseException:
         if _config_changed_since(config_path, original_config):
             _apply_lock_rollback(
                 config_path, original_config, events, providers_set, providers_skipped
@@ -2162,17 +2162,12 @@ def apply_lock(
             events=tuple(events),
         )
 
-    # ---- Stage A(pre): heal legacy decoy layout (WOR-656 F6) -------------
-    # Old installs wrote a separate ``worthless-<p>`` decoy beside the
-    # untouched original ``<p>``. Delete our stale decoy (and repoint a
-    # decoy-pointing default model) BEFORE Stage A rewrites the original in
-    # place. Runs under apply_lock's existing ``original_config`` rollback
-    # umbrella, so a mid-migration write failure restores byte-identically and
-    # Stage A is skipped.
-    #
-    # ---- Stage A: write providers ----------------------------------------
-    # F-CFG-13 / DV-01/DV-02 handling is inside _apply_lock_write_providers.
-    # Extracted to keep apply_lock within xenon's complexity budget (rank C).
+    # ---- Stage A(pre) + A: heal the legacy decoy layout, write providers --
+    # Stage A(pre), WOR-656 F6: old installs wrote a separate ``worthless-<p>``
+    # decoy beside the untouched original ``<p>``; delete it (and repoint a
+    # decoy-pointing default model) BEFORE Stage A rewrites the original in place.
+    # Both run under the ``original_config`` rollback umbrella, so a failure or
+    # interrupt mid-way restores the file and the rest of Stage A is skipped.
     rollback_needed = _apply_lock_stages_a(
         config_path,
         original_config,
