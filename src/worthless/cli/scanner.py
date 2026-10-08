@@ -10,8 +10,15 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from worthless.cli.dotenv_rewriter import shannon_entropy
-from worthless.cli.key_patterns import ENTROPY_THRESHOLD, KEY_PATTERN, detect_provider
+from worthless.cli.key_patterns import (
+    ENTROPY_THRESHOLD,
+    KEY_PATTERN,
+    OAUTH_LOGIN_REMEDY,
+    detect_provider,
+    is_oauth_token,
+)
 from worthless.cli.redaction import mask_secret
+from worthless.cli.safe_rewrite import _BASENAME_ALLOWLIST
 
 _VAR_NAME_RE = re.compile(r"(\w+)\s*$")
 
@@ -218,6 +225,12 @@ class ScanFinding:
     # fingerprint THIS finding's key rather than the line's first match, which
     # would show one shared fingerprint for every key on a minified JSON line.
     column: int | None = None
+    # worthless-p55g: a key `lock` refuses by design (a Claude Code OAuth
+    # token) sitting in a .env-family file lock manages. Decided here, while the
+    # raw value is still in hand — after this only the masked preview exists.
+    # Not "unprotected": lock can't fix it, so scan must not fail the build or
+    # send the user to lock over it. A token in any other file is plain exposed.
+    is_unshardable: bool = False
 
 
 def scan_files(
@@ -285,7 +298,11 @@ def scan_files(
                 # Try to extract var_name from KEY=VALUE or KEY = "VALUE"
                 var_name = _extract_var_name(line, match.start())
 
-                is_protected = bool(
+                # worthless-p55g: lock never shards a Claude Code OAuth token, so
+                # one can't be a worthless shard — even under a variable name
+                # that was locked before and later pasted over.
+                token = is_oauth_token(value)
+                is_protected = not token and bool(
                     enrolled_locations and var_name and (var_name, file_str) in enrolled_locations
                 )
 
@@ -298,6 +315,10 @@ def scan_files(
                         is_protected=is_protected,
                         value_preview=_mask(value),
                         column=match.start(),
+                        # Only where lock genuinely can't help: the .env family it
+                        # manages. Anywhere else a fix exists (move it out of the
+                        # file, rotate it if committed), so it stays exposed.
+                        is_unshardable=token and path.name in _BASENAME_ALLOWLIST,
                     )
                 )
     return findings
@@ -323,6 +344,10 @@ def _mask(value: str) -> str:
     return mask_secret(value)
 
 
+EXPOSED_RULE_ID = "worthless/exposed-api-key"
+UNSHARDABLE_RULE_ID = "worthless/unshardable-oauth-token"
+
+
 def format_sarif(findings: list[ScanFinding], tool_version: str) -> dict:
     """Format findings as SARIF v2.1.0.
 
@@ -330,14 +355,25 @@ def format_sarif(findings: list[ScanFinding], tool_version: str) -> dict:
     """
     results = []
     for f in findings:
+        in_var = f" in variable {f.var_name}" if f.var_name else ""
+        if f.is_unshardable and not f.is_protected:
+            # worthless-p55g: GitHub code scanning reads the level, not scan's
+            # exit code — "error" here would keep the gate red over a token lock
+            # refuses. "note" keeps it visible without blocking.
+            rule_id, level = UNSHARDABLE_RULE_ID, "note"
+            text = (
+                f"Claude Code login token{in_var} — worthless can't protect it. "
+                + OAUTH_LOGIN_REMEDY
+            )
+        else:
+            rule_id, level = EXPOSED_RULE_ID, "warning" if f.is_protected else "error"
+            text = f"Exposed {f.provider} API key{in_var}" + (
+                " (protected by worthless)" if f.is_protected else ""
+            )
         result: dict = {
-            "ruleId": "worthless/exposed-api-key",
-            "level": "warning" if f.is_protected else "error",
-            "message": {
-                "text": f"Exposed {f.provider} API key"
-                + (f" in variable {f.var_name}" if f.var_name else "")
-                + (" (protected by worthless)" if f.is_protected else ""),
-            },
+            "ruleId": rule_id,
+            "level": level,
+            "message": {"text": text},
             "locations": [
                 {
                     "physicalLocation": {
@@ -360,9 +396,14 @@ def format_sarif(findings: list[ScanFinding], tool_version: str) -> dict:
                         "version": tool_version,
                         "rules": [
                             {
-                                "id": "worthless/exposed-api-key",
+                                "id": EXPOSED_RULE_ID,
                                 "shortDescription": {"text": "Exposed API key detected"},
-                            }
+                            },
+                            {
+                                "id": UNSHARDABLE_RULE_ID,
+                                "shortDescription": {"text": "API key worthless can't protect"},
+                                "defaultConfiguration": {"level": "note"},
+                            },
                         ],
                     }
                 },

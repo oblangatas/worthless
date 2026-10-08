@@ -13,7 +13,9 @@ from typer.testing import CliRunner
 
 from worthless.cli.app import app
 from worthless.cli.bootstrap import WorthlessHome
+from worthless.cli.commands.scan import _format_human
 from worthless.cli.key_patterns import KEY_PATTERN
+from worthless.cli.scanner import ScanFinding, scan_files
 
 from tests.helpers import fake_key
 from tests.helpers import fake_openai_key as _fake_openai_key
@@ -752,8 +754,6 @@ class TestFormatHumanBranches:
         assert result.exit_code == 1
         # Now delete the file and scan with a mocked finding
 
-        from worthless.cli.scanner import ScanFinding
-
         fake_finding = ScanFinding(
             file=str(tmp_path / "gone.py"),
             line=1,
@@ -768,8 +768,6 @@ class TestFormatHumanBranches:
 
     def test_protected_finding_count(self, tmp_path: Path) -> None:
         """Protected findings should be counted and displayed."""
-
-        from worthless.cli.scanner import ScanFinding
 
         findings = [
             ScanFinding(
@@ -797,8 +795,6 @@ class TestFormatHumanBranches:
 
     def test_tty_output_suggests_lock_command(self) -> None:
         """In TTY context, unprotected findings should suggest 'worthless lock'."""
-        from worthless.cli.commands.scan import _format_human
-        from worthless.cli.scanner import ScanFinding
 
         finding = ScanFinding(
             file="/tmp/.env",  # noqa: S108 — must be a real .env basename: lock's
@@ -815,8 +811,6 @@ class TestFormatHumanBranches:
 
     def test_non_tty_output_suggests_docs(self) -> None:
         """In non-TTY context, should suggest docs URL."""
-        from worthless.cli.commands.scan import _format_human
-        from worthless.cli.scanner import ScanFinding
 
         finding = ScanFinding(
             file="/tmp/.env",  # noqa: S108 — must be a real .env basename: lock's
@@ -978,39 +972,220 @@ class TestScanAgreesWithLockOnOAuthTokens:
     had no matching filter, so it reported the token UNPROTECTED and told the
     user to run ``lock``; ``lock`` declined and reported nothing was locked.
     CI stayed red permanently with no remediation available.
+
+    The fix gives these tokens their own verdict — "can't protect" — in text,
+    JSON and SARIF together, so no format contradicts another. Files live in a
+    subdirectory: this module's autouse fixture chdirs into tmp_path and scan
+    always adds ./.env, so a tmp_path/.env would be counted twice
+    (worthless-vab1).
     """
 
-    def test_oauth_only_file_does_not_fail_the_scan(self, tmp_path: Path) -> None:
-        env = tmp_path / ".env"
-        env.write_text(f"ANTHROPIC_API_KEY={fake_key('sk-ant-oat01-', 'p55g-exit')}\n")
+    @staticmethod
+    def _env(tmp_path: Path, *lines: str) -> Path:
+        env = tmp_path / "proj" / ".env"
+        env.parent.mkdir()
+        env.write_text("".join(f"{line}\n" for line in lines))
+        return env
+
+    @staticmethod
+    def _oauth(seed: str) -> str:
+        return f"ANTHROPIC_API_KEY={fake_key('sk-ant-oat01-', seed)}"
+
+    @staticmethod
+    def _flat(result) -> str:  # noqa: ANN001 - click Result
+        return " ".join((result.stdout + result.stderr).split())
+
+    def test_oauth_only_file_passes_the_scan(self, tmp_path: Path) -> None:
+        env = self._env(tmp_path, self._oauth("p55g-exit"))
 
         result = runner.invoke(app, ["scan", str(env)])
-        out = " ".join((result.stdout + result.stderr).split())
 
-        # Exit 1 is the "you have leaks, go run lock" signal. lock cannot help
-        # here, so this exit code strands CI with no available remediation.
-        assert result.exit_code != 1, (
-            f"scan failed the build over a token lock refuses to shard, "
-            f"leaving no way to go green; output:\n{out}"
-        )
+        # Exit 1 means "you have leaks, go run lock". lock refuses this token,
+        # so 1 strands CI with no way to go green. Exactly 0, not merely "not
+        # 1": exit 2 means the scan itself broke or was incomplete.
+        assert result.exit_code == 0, self._flat(result)
 
-    def test_oauth_only_file_is_not_called_unprotected(self, tmp_path: Path) -> None:
-        env = tmp_path / ".env"
-        env.write_text(f"ANTHROPIC_API_KEY={fake_key('sk-ant-oat01-', 'p55g-verdict')}\n")
+    def test_oauth_only_file_says_cant_protect_and_names_a_real_fix(self, tmp_path: Path) -> None:
+        env = self._env(tmp_path, self._oauth("p55g-verdict"))
 
         result = runner.invoke(app, ["scan", str(env)])
-        out = " ".join((result.stdout + result.stderr).split())
+        out = self._flat(result)
         low = out.lower()
 
         # Not vacuous: scan really did see the token.
-        assert "anthropic_api_key" in low, f"scan must report the token it found:\n{out}"
+        assert "anthropic_api_key" in low, out
+        # The false instruction: lock refuses this token by design, so
+        # "UNPROTECTED ... run worthless lock" cannot be followed.
+        assert "UNPROTECTED" not in out, out
+        assert "still exposed" not in low, out
+        assert "run `worthless lock`" not in low and "run worthless lock" not in low, out
+        # The positive spec: name the category, stay honest that the token is
+        # still sitting there, and name a fix that exists.
+        assert "can't protect" in low, out
+        assert "plain text" in low, out
+        assert "sk-ant-api03" in low, out
 
-        # "UNPROTECTED ... run worthless lock" is the false instruction — lock
-        # refuses this token by design, so the advice cannot be followed.
-        assert "unprotected" not in low, (
-            f"scan called an OAuth token unprotected; lock refuses to shard it, "
-            f"so the implied remediation does not exist; output:\n{out}"
+    def test_a_file_with_an_unprotectable_token_never_reads_as_clean(self) -> None:
+        findings = [
+            ScanFinding(
+                file="/p/.env",
+                line=1,
+                var_name="OPENAI_API_KEY",
+                provider="openai",
+                is_protected=True,
+                value_preview="****",
+            ),
+            ScanFinding(
+                file="/p/.env",
+                line=2,
+                var_name="ANTHROPIC_API_KEY",
+                provider="anthropic",
+                is_protected=False,
+                value_preview="****",
+                is_unshardable=True,
+            ),
+        ]
+
+        low = " ".join(_format_human(findings, is_tty=False).split()).lower()
+
+        # Everything lock CAN act on is protected — but a live token is still
+        # in the file, so "a leaked .env is worthless" would be false comfort.
+        assert "worthless to an attacker" not in low, low
+        assert "1 of 2 keys protected" in low, low
+        assert "can't protect" in low, low
+
+    def test_json_agrees_with_the_text(self, tmp_path: Path) -> None:
+        env = self._env(tmp_path, self._oauth("p55g-json"))
+
+        result = runner.invoke(app, ["scan", str(env), "--json"])
+
+        assert result.exit_code == 0, self._flat(result)
+        data = json.loads(result.stdout)
+        # Additive field, so no bump (docs/install/agent-schema.md).
+        assert data["schema_version"] == 2
+        [finding] = data["findings"]
+        assert finding["is_protected"] is False
+        assert finding["is_unshardable"] is True, finding
+        assert "sk-ant-api03" in finding["remediation"], finding
+
+    def test_sarif_is_a_note_under_its_own_rule(self, tmp_path: Path) -> None:
+        env = self._env(tmp_path, self._oauth("p55g-sarif"))
+
+        result = runner.invoke(app, ["scan", str(env), "--format", "sarif"])
+
+        assert result.exit_code == 0, self._flat(result)
+        run = json.loads(result.stdout)["runs"][0]
+        [res] = run["results"]
+        # GitHub code scanning reads the level, not the exit code: "error"
+        # keeps the gate red even when scan exits 0.
+        assert res["level"] == "note", res
+        assert res["ruleId"] == "worthless/unshardable-oauth-token", res
+        assert "sk-ant-api03" in res["message"]["text"], res
+        assert res["ruleId"] in {r["id"] for r in run["tool"]["driver"]["rules"]}
+
+    def test_quiet_still_says_why(self, tmp_path: Path) -> None:
+        env = self._env(tmp_path, self._oauth("p55g-quiet"))
+
+        result = runner.invoke(app, ["--quiet", "scan", str(env)])
+        low = self._flat(result).lower()
+
+        assert result.exit_code == 0, low
+        # --quiet hides chatter, not the one thing the user cannot learn any
+        # other way. Today it prints nothing at all.
+        assert "can't protect" in low, low
+        assert "sk-ant-api03" in low, low
+
+    def test_mixed_file_fails_only_for_the_key_lock_can_fix(self, tmp_path: Path) -> None:
+        env = self._env(tmp_path, self._oauth("p55g-mixed"), f"OPENAI_API_KEY={_fake_openai_key()}")
+
+        result = runner.invoke(app, ["scan", str(env)])
+        low = self._flat(result).lower()
+
+        # The OpenAI key IS fixable, so the build still fails — counted once.
+        assert result.exit_code == 1, low
+        assert "1 still exposed" in low, low
+        assert "1 can't protect" in low, low
+
+        sarif = runner.invoke(app, ["scan", str(env), "--format", "sarif"])
+        levels = sorted(r["level"] for r in json.loads(sarif.stdout)["runs"][0]["results"])
+        assert levels == ["error", "note"], levels
+
+        data = json.loads(runner.invoke(app, ["scan", str(env), "--json"]).stdout)
+        flags = sorted((f["var_name"], f["is_unshardable"]) for f in data["findings"])
+        assert flags == [("ANTHROPIC_API_KEY", True), ("OPENAI_API_KEY", False)], flags
+
+    def test_a_token_outside_the_env_family_still_fails(self, tmp_path: Path) -> None:
+        # The pass exists because lock can't fix a token in a .env file and
+        # failing forever there has no way out. In any other file a fix does
+        # exist — take it out of the file (and rotate it if it was committed) —
+        # so it fails like any other key. A refresh token in source is the worst
+        # case: long-lived, and in CI already in git history.
+        leak = tmp_path / "proj" / "settings.py"
+        leak.parent.mkdir()
+        leak.write_text(f'REFRESH = "{fake_key("sk-ant-ort01-", "p55g-source")}"\n')
+
+        result = runner.invoke(app, ["scan", str(leak)])
+        out = self._flat(result)
+
+        assert result.exit_code == 1, out
+        assert "UNPROTECTED" in out, out
+        assert "can't protect" not in out.lower(), out
+        sarif = json.loads(runner.invoke(app, ["scan", str(leak), "--format", "sarif"]).stdout)
+        assert [r["level"] for r in sarif["runs"][0]["results"]] == ["error"], sarif
+
+    def test_a_login_token_is_never_counted_as_protected(self, tmp_path: Path) -> None:
+        # Protection is looked up by variable name and file. If ANTHROPIC_API_KEY
+        # was locked earlier and a login token was then pasted over it, the name
+        # still matches. But lock never shards these tokens, so this value cannot
+        # be a worthless shard — calling it protected printed the all-clear.
+        env = self._env(tmp_path, self._oauth("p55g-overwrite"))
+
+        [finding] = scan_files(
+            [env], enrolled_locations={("ANTHROPIC_API_KEY", str(env.resolve()))}
         )
-        assert "run `worthless lock`" not in low and "run worthless lock" not in low, (
-            f"scan told the user to run lock on a token lock will skip; output:\n{out}"
+
+        assert finding.is_protected is False
+        assert finding.is_unshardable is True
+        low = " ".join(_format_human([finding], is_tty=False).split()).lower()
+        assert "worthless to an attacker" not in low, low
+
+    def test_quiet_never_points_at_the_wrong_key(self, tmp_path: Path) -> None:
+        # Mixed file under --quiet: the build fails because of the OpenAI key.
+        # Printing only the token's note would send a CI reader to delete the
+        # wrong line and stay red. Quiet stays silent on a failing scan, as it
+        # always has.
+        env = self._env(
+            tmp_path, self._oauth("p55g-quiet-mixed"), f"OPENAI_API_KEY={_fake_openai_key()}"
         )
+
+        result = runner.invoke(app, ["--quiet", "scan", str(env)])
+
+        assert result.exit_code == 1, self._flat(result)
+        assert "can't protect" not in self._flat(result).lower(), self._flat(result)
+
+    def test_following_scans_advice_ends_in_a_green_build(
+        self, tmp_path: Path, home_dir: WorthlessHome
+    ) -> None:
+        """The loop itself: scan says run lock, lock runs, scan goes green.
+
+        Before the fix the last step failed forever: lock protected the OpenAI
+        key and skipped the token, and scan still failed the build over it.
+        """
+        env = self._env(
+            tmp_path, self._oauth("p55g-journey"), f"OPENAI_API_KEY={_fake_openai_key()}"
+        )
+        home = {"WORTHLESS_HOME": str(home_dir.base_dir)}
+
+        before = runner.invoke(app, ["scan", str(env)], env=home)
+        assert before.exit_code == 1, self._flat(before)
+        assert "run `worthless lock`" in self._flat(before).lower()
+
+        locked = runner.invoke(app, ["lock", "--env", str(env)], env=home)
+        assert locked.exit_code == 0, locked.output
+
+        after = runner.invoke(app, ["scan", str(env)], env=home)
+        low = self._flat(after).lower()
+        assert after.exit_code == 0, low
+        # Green, but not falsely clean: the token is still named.
+        assert "can't protect" in low, low
+        assert "worthless to an attacker" not in low, low

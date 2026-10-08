@@ -21,6 +21,7 @@ from worthless.cli.bootstrap import (
     resolve_home,
 )
 from worthless.cli.errors import ErrorCode, WorthlessError
+from worthless.cli.key_patterns import OAUTH_LOGIN_REMEDY
 from worthless.cli.process import check_proxy_health, resolve_port
 from worthless.storage.sqlite import connect as sqlite_connect
 
@@ -236,6 +237,11 @@ async def worthless_scan(
     Detects unprotected API keys in .env files and config files.
     Returns structured findings with provider, location, and protection status.
 
+    ``summary.unprotected`` counts keys ``worthless lock`` can fix. A Claude
+    Code login token in a .env file is counted in ``summary.unshardable``
+    instead: lock can't protect it, so don't run lock for it — follow the
+    finding's ``remediation``. ``unshardable > 0`` means the file is NOT clean.
+
     Args:
         paths: Files to scan. If empty, scans .env and .env.local in cwd.
         deep: Extended scan — also checks *.yml, *.yaml, *.toml, *.json,
@@ -293,13 +299,23 @@ async def worthless_scan(
                 "var_name": f.var_name,
                 "provider": f.provider,
                 "is_protected": f.is_protected,
+                # worthless-p55g: a key lock refuses (Claude Code OAuth token).
+                # Counted apart from "unprotected" so an agent doesn't loop on
+                # `worthless lock` for it.
+                "is_unshardable": f.is_unshardable,
+                **(
+                    {"remediation": OAUTH_LOGIN_REMEDY}
+                    if f.is_unshardable and not f.is_protected
+                    else {}
+                ),
                 "value_preview": f.value_preview,
             }
             for f in findings
         ]
 
         protected = sum(1 for f in findings if f.is_protected)
-        unprotected = sum(1 for f in findings if not f.is_protected)
+        unshardable = sum(1 for f in findings if f.is_unshardable and not f.is_protected)
+        unprotected = len(findings) - protected - unshardable
 
         return json.dumps(
             {
@@ -308,6 +324,7 @@ async def worthless_scan(
                     "total": len(findings),
                     "protected": protected,
                     "unprotected": unprotected,
+                    "unshardable": unshardable,
                 },
                 "enrollment_checker_available": enrollment_checker_available,
                 # Additive fields (c5kc): tell the calling agent which files

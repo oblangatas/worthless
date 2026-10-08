@@ -22,6 +22,8 @@ from worthless.mcp.server import (  # noqa: E402
     worthless_status,
 )
 
+from tests.helpers import fake_key  # noqa: E402
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -318,6 +320,22 @@ class TestWorthlessScan:
         result = json.loads(await worthless_scan(paths=[str(env_file)]))
         assert result["summary"]["total"] >= 1
         assert result["summary"]["unprotected"] >= 1
+
+    @pytest.mark.asyncio
+    async def test_scan_oauth_token_is_unshardable_not_unprotected(self, tmp_path: Path) -> None:
+        """worthless-p55g: lock refuses a Claude Code OAuth token by design, so
+        counting it as unprotected sends an agent to run lock in a loop."""
+        token = fake_key("sk-ant-oat01-", "p55g-mcp")
+        env_file = _make_env_file(tmp_path, f"ANTHROPIC_API_KEY={token}\n")
+
+        result = json.loads(await worthless_scan(paths=[str(env_file)]))
+
+        [finding] = result["findings"]
+        assert finding["is_protected"] is False
+        assert finding["is_unshardable"] is True, finding
+        assert "sk-ant-api03" in finding["remediation"], finding
+        assert result["summary"]["unprotected"] == 0, result["summary"]
+        assert result["summary"]["unshardable"] == 1, result["summary"]
 
     @pytest.mark.asyncio
     async def test_scan_no_paths_defaults(

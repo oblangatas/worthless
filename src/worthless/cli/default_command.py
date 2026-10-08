@@ -27,6 +27,8 @@ from worthless.cli.process import poll_health, resolve_port
 from worthless.cli.console import get_console
 from worthless.cli.dotenv_rewriter import build_enrolled_locations, scan_env_keys
 from worthless.cli.errors import ErrorCode, WorthlessError
+from worthless.cli.key_patterns import OAUTH_LOGIN_REMEDY, is_oauth_token
+from worthless.openclaw.audit import sanitise_for_message
 from worthless.cli.commands.service._common import ServiceState
 from worthless.cli.commands.service.proxy_state import ProxyRuntimeState, detect_proxy_runtime
 
@@ -156,8 +158,21 @@ def _run_enrollment_if_needed(
 
     keys = asyncio.run(_scan_with_enrollments())
 
+    # worthless-p55g: lock skips a Claude Code OAuth token by design. Offering
+    # it here ended in "0 of 1 keys protected. Re-run to retry" — a retry that
+    # can never work. Name it once, honestly, and only offer what lock can fix.
+    oauth = [k for k in keys if is_oauth_token(k[1])]
+    keys = [k for k in keys if not is_oauth_token(k[1])]
+    if oauth:
+        names = ", ".join(sanitise_for_message(var_name) for var_name, _, _ in oauth)
+        console.print_warning(
+            f"Can't protect {names}: a Claude Code login token, still in plain text. "
+            + OAUTH_LOGIN_REMEDY
+        )
+
     if not keys:
-        console.print_warning("No API keys found in .env.")
+        if not oauth:
+            console.print_warning("No API keys found in .env.")
         raise typer.Exit()
 
     console.print_hint(f"\n  Found {len(keys)} API key{'s' if len(keys) != 1 else ''}:")

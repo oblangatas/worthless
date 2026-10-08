@@ -78,6 +78,16 @@ def is_oauth_token(value: str) -> bool:
     return value.startswith(_OAUTH_TOKEN_PREFIXES)
 
 
+# worthless-p55g: the one fix that exists for a token lock refuses. Shared by
+# scan (text/JSON/SARIF), bare `worthless`, and the MCP scan tool so they can't
+# drift apart. It deliberately does not say "run worthless lock" — lock skips
+# this token, and that advice is the dead end the user was stuck in.
+OAUTH_LOGIN_REMEDY = (
+    "worthless can only protect a static API key (sk-ant-api03-...). "
+    "Swap the token for one, or delete the line if nothing reads it."
+)
+
+
 ENTROPY_THRESHOLD: float = 3.9
 # Lowered 4.5 → 3.9 so legitimate OpenRouter keys (entropy ~4.118) clear the
 # scan, while common placeholders ("sk-your-key-here" 3.03, "sk-aaaa" 0.88,
