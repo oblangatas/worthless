@@ -1211,6 +1211,7 @@ class TestScanAgreesWithLockOnOAuthTokens:
 
         result = runner.invoke(app, ["scan", "--deep", "--json"])
 
+        assert result.exit_code == 1, result.stdout  # still fails, as on main
         findings = [
             f
             for f in json.loads(result.stdout)["findings"]
