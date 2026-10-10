@@ -13,14 +13,16 @@
 #      them — you must rotate those keys at your provider.
 #
 # Exit codes (UX contract):
-#   0   removed cleanly
+#   0   Worthless was removed. NOT a statement about the keys: they may have
+#       been restored, already gone, or unknowable — the message says which
 #   1   refused (no --yes in a non-interactive shell, or the user declined)
 #   20  unsupported platform (Windows native)
 #   40  wipe failed (something could not be removed; manual cleanup needed)
 #   41  `worthless uninstall` refused; NOTHING was deleted and your keys are
 #       still restorable. Fix what it reported and re-run, or pass --force.
-#   73  the tool was removed, but it could not restore every locked .env
-#       (passed through from `worthless uninstall`)
+#   73  every key was restored and the tool removed, but undoing the OpenClaw
+#       provider config did not fully finish (passed through from
+#       `worthless uninstall`, which raises it only AFTER a complete restore)
 
 set -eu
 
@@ -177,37 +179,94 @@ keyring_account() {
     [ -n "$digest" ] && printf 'fernet-key-%s' "$digest"
 }
 
-# Read-only: is the Fernet key still in the keystore? This is the only thing
-# that distinguishes "the program restored everything and removed its home"
-# from "someone ran rm -rf ~/.worthless by hand". `worthless uninstall` deletes
-# this entry as part of putting the keys back; rm cannot reach it. So a
-# surviving entry with no home means shard-B and the key are gone and the .env
-# halves are permanently inert — that user must rotate, and is the one case
-# where silence would be a false negative.
+# Read-only: what does the keystore say about the Fernet key? Prints exactly
+# one of `present`, `absent`, `unknown`. Three answers, not two, because the
+# honest answer is sometimes "this script cannot tell" — and every earlier
+# attempt to force a yes/no here told some user something false.
 #
-# Unknown (no tool, unsupported OS) deliberately answers "yes, assume stranded":
-# over-warning costs a needless rotation, under-warning costs keys the user
-# never learns are dead.
+# Why it matters: once ~/.worthless is gone, "the program restored every key
+# and removed its own home" and "someone ran rm -rf by hand" can look the same.
+# `worthless uninstall` deletes the keystore entry as part of restoring; `rm`
+# cannot reach it. So where the keystore is readable, a surviving entry means
+# the keys are stranded and a missing one means they came back.
+#
+#   present  the entry survives -> keys stranded. Reliable on both platforms.
+#   absent   the entry is gone  -> keys came back. Reliable on macOS ONLY: the
+#            Keychain always exists there and the CLI always uses it.
+#   unknown  everything else, including Linux "not found". worthless falls back
+#            to a fernet.key FILE inside ~/.worthless when there is no keyring
+#            (WSL, servers, no D-Bus) — so there was never an entry, and "not
+#            found" cannot separate a restore from an rm -rf. secret-tool
+#            missing, no sha256 tool, and unrecognised OSes land here too.
+#
+# A previous revision collapsed `unknown` into "assume stranded". On WSL — the
+# primary target platform — that told every user who followed this script's own
+# advice to rotate live credentials they had just recovered.
 #
 # KNOWN GAP, not fixed here: the account name is derived from WORTHLESS_HOME.
-# Someone who locked keys with WORTHLESS_HOME set and then uninstalls without
-# it hashes a different path, so this probe answers "gone" and that user stays
-# un-warned — the same false negative, reached a different way. Fixing it means
-# finding entries by service rather than by exact account, which changes what
-# delete_keychain_entry would be allowed to remove. Tracked separately.
-keychain_entry_exists() {
+# Locking with WORTHLESS_HOME set and uninstalling without it hashes a different
+# path, so `present` can be missed and a stranded user gets `absent` on macOS.
+# Fixing it means matching by service rather than exact account, which widens
+# what delete_keychain_entry may remove. Tracked separately.
+keystore_state() {
     acct="$(keyring_account || true)"
-    [ -n "${acct:-}" ] || return 0
+    if [ -z "${acct:-}" ]; then
+        printf 'unknown'
+        return 0
+    fi
     case "${OS:-}" in
         macos)
-            command -v security >/dev/null 2>&1 || return 0
-            security find-generic-password -s worthless -a "$acct" >/dev/null 2>&1
+            if ! command -v security >/dev/null 2>&1; then
+                printf 'unknown'
+            elif security find-generic-password -s worthless -a "$acct" >/dev/null 2>&1; then
+                printf 'present'
+            else
+                printf 'absent'
+            fi
             ;;
         linux)
-            command -v secret-tool >/dev/null 2>&1 || return 0
-            secret-tool lookup service worthless username "$acct" >/dev/null 2>&1
+            # Only a found entry is evidence. "Not found" here is ambiguous: the
+            # key may have lived in a file all along. See `unknown` above.
+            if command -v secret-tool >/dev/null 2>&1 &&
+                secret-tool lookup service worthless username "$acct" >/dev/null 2>&1; then
+                printf 'present'
+            else
+                printf 'unknown'
+            fi
             ;;
-        *) return 0 ;;
+        *) printf 'unknown' ;;
+    esac
+}
+
+# What we actually KNOW about the user's keys once ~/.worthless is gone:
+# `stranded`, `clean` or `unknown`. See keystore_state for why `unknown` exists.
+# Must be sampled BEFORE anything deletes the keystore entry.
+key_state_without_home() {
+    case "$(keystore_state)" in
+        present) printf 'stranded' ;;
+        absent) printf 'clean' ;;
+        *) printf 'unknown' ;;
+    esac
+}
+
+# The one place that tells the user what happened to their keys after a wipe.
+# Tier 1 and tier 2 both reach this, and they used to say it in different words
+# from different assumptions — which is how one of them came to report a restore
+# that never happened. One function, so they cannot drift apart again.
+say_key_verdict() {
+    case "$1" in
+        stranded)
+            warn "Your real API keys could NOT be restored automatically — rotate them at your provider."
+            ;;
+        unknown)
+            warn "This script can't tell whether your keys were already restored."
+            warn "If you ran 'worthless uninstall' first, they're back in your .env files — you're done."
+            # Fixed wording, not ${WORTHLESS_HOME_DIR}: that value comes from the
+            # environment, this script has no display sanitizer, and printing an
+            # env-controlled path raw is the terminal-injection surface WOR-597
+            # removed from install.sh.
+            warn "If you deleted your Worthless folder by hand instead, those keys can't be recovered: rotate them."
+            ;;
     esac
 }
 
@@ -333,24 +392,49 @@ tier1_delegate() {
     # LC_ALL=C so BSD tr does not abort on a byte that is not valid UTF-8; a
     # path is shown, never run, and control bytes could rewrite the line above.
     info "  $(printf '%s' "$_tier1_bin" | LC_ALL=C tr -d '\001-\037\177')"
+    # Was there anything for the CLI to restore? Sampled BEFORE it runs, because
+    # it removes the home and the keystore entry on the way out. With no home it
+    # prints "Nothing to uninstall" and exits 0 — and that 0 is not a restore.
+    # Reading it as one told a user who had run `rm -rf ~/.worthless` by hand,
+    # and whose keys were therefore dead, that their keys had been restored.
+    # Found by running the real CLI in a container; no stubbed test could see it.
+    if [ -d "$WORTHLESS_HOME_DIR" ]; then
+        _tier1_keys=restorable
+    else
+        _tier1_keys="$(key_state_without_home)"
+    fi
+
     _tier1_status=0
     "$_tier1_bin" uninstall --yes || _tier1_status=$?
 
     if [ "$_tier1_status" -eq 0 ]; then
         remove_tool
         printf "\n"
-        ok "Done. Worthless removed; your real keys were restored to your .env files."
+        if [ "$_tier1_keys" = "restorable" ]; then
+            ok "Done. Worthless removed; your real keys were restored to your .env files."
+        else
+            ok "Done. Worthless removed."
+            [ "$_tier1_keys" = "clean" ] && info "There was nothing left here to restore."
+            say_key_verdict "$_tier1_keys"
+        fi
         exit 0
     fi
 
-    # 73: it finished and already wiped its own state, but could not restore
-    # every locked .env. The tool still has to go, and the user has to be told
-    # which keys are now stranded — "nothing was deleted" would be false here.
+    # 73: every key came back; only the OpenClaw undo fell short. The CLI wipes
+    # ONLY after every .env restore succeeds — a failed restore aborts with exit
+    # 1 and wipes nothing — so it raises 73 after a complete restore, when
+    # reverting the OpenClaw provider config did not fully finish.
+    #
+    # An earlier version of this branch read 73 as "could not restore every
+    # .env" and told the user to rotate. That is WOR-597's own failure class:
+    # telling someone to rotate keys that were just put back. The tool still
+    # has to go, and "nothing was deleted" would be false — the wipe happened.
     if [ "$_tier1_status" -eq "$EXIT_TOOL_PARTIAL" ]; then
         remove_tool
         printf "\n"
-        warn "Worthless is removed, but it could not restore every locked .env — see above."
-        warn "Rotate the keys for any .env it named."
+        ok "Worthless is removed, and your keys were restored to your .env files."
+        warn "Undoing the OpenClaw provider config did not fully finish — see above."
+        warn "Check your OpenClaw config for providers that still point at Worthless."
         printf "\n  Docs: %s\n" "$UNINSTALL_DOCS_URL" >&2
         exit "$EXIT_TOOL_PARTIAL"
     fi
@@ -409,21 +493,27 @@ refuse_unverified_copy() {
 # Tier 2: no working binary → wipe what a script safely can, and be honest that
 # the keys cannot be restored.
 tier2_wipe() {
-    # Is there anything left to lose? If the home is already gone there are no
-    # locked keys here — either `worthless uninstall` put them all back (the
-    # exact path refuse_unverified_copy sends people down) or nothing was ever
-    # locked. Both make every "your keys are stranded, go rotate them" line
-    # below a lie, and that is WOR-597's own failure class inverted: the script
-    # misreporting key state. Telling someone to rotate live credentials they
-    # already recovered costs them real money and real trust.
-    _t2_had_state=0
-    [ -d "$WORTHLESS_HOME_DIR" ] && _t2_had_state=1
-    # A missing home is not proof the keys came back. Only the program removes
-    # the keystore entry, so if it survives with no home, someone deleted the
-    # home by hand and the keys really are stranded. Checking this BEFORE
-    # delete_keychain_entry runs, or the answer is always "gone".
-    if [ "$_t2_had_state" = "0" ] && keychain_entry_exists; then
-        _t2_had_state=1
+    # What do we actually KNOW about the user's keys? Three answers:
+    #
+    #   stranded  locked state is here and this script cannot unscramble it, or
+    #             the keystore entry survives a missing home (an rm -rf). The
+    #             keys are lost; say so and say rotate.
+    #   clean     the home is gone AND the keystore confirms the entry went with
+    #             it, so `worthless uninstall` already put every key back.
+    #   unknown   the home is gone and the keystore cannot tell us why — notably
+    #             Linux without a keyring, where the key lived in a file inside
+    #             the home. Asserting either of the other two would be false for
+    #             half of these users, so we say we cannot tell.
+    #
+    # This is WOR-597's own failure class from both sides: telling someone to
+    # rotate keys they just recovered costs money and trust; staying quiet over
+    # keys that are dead costs them the keys. Only claim what we know.
+    #
+    # Sampled BEFORE delete_keychain_entry runs, or the answer is always "gone".
+    if [ -d "$WORTHLESS_HOME_DIR" ]; then
+        _t2_keys=stranded
+    else
+        _t2_keys="$(key_state_without_home)"
     fi
 
     # Three ways in, and they are not the same sentence. Saying "none found"
@@ -436,12 +526,18 @@ tier2_wipe() {
         warn "No working 'worthless' binary found."
     fi
 
-    if [ "$_t2_had_state" = "1" ]; then
-        warn "A plain script can't unscramble your split keys — only the program can — so"
-        warn "your real keys can't be restored here. Wiping the leftovers anyway."
-    else
-        warn "Nothing left here to restore — clearing the leftovers."
-    fi
+    case "$_t2_keys" in
+        stranded)
+            warn "A plain script can't unscramble your split keys — only the program can — so"
+            warn "your real keys can't be restored here. Wiping the leftovers anyway."
+            ;;
+        clean)
+            warn "Nothing left here to restore — clearing the leftovers."
+            ;;
+        *)
+            warn "Clearing the leftovers."
+            ;;
+    esac
     printf "\n"
 
     envs="$(list_affected_envs || true)"
@@ -459,12 +555,8 @@ tier2_wipe() {
 
     ok "Worthless removed from this machine."
     printf "\n"
-    # Only a wipe that destroyed locked state stranded anything. See the
-    # _t2_had_state comment above: with no home there were no keys here to
-    # strand, so demanding a rotation would be a false alarm.
-    if [ "$_t2_had_state" = "1" ]; then
-        warn "Your real API keys could NOT be restored automatically — rotate them at your provider."
-    fi
+    # Only claim what _t2_keys says we know — see its comment at the top.
+    say_key_verdict "$_t2_keys"
     if [ -n "${envs:-}" ]; then
         printf "\n  These .env files still hold an inert key half (rotate the keys they used):\n" >&2
         printf '%s\n' "$envs" | sed 's/^/    /' >&2

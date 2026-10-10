@@ -336,14 +336,24 @@ def test_a_refusal_from_the_program_does_not_become_a_wipe(tmp_path: Path) -> No
     )
 
 
-def test_a_partial_restore_removes_the_tool_and_says_which_keys_are_stranded(
+def test_exit_73_removes_the_tool_and_does_not_claim_keys_were_lost(
     tmp_path: Path,
 ) -> None:
-    """Exit 73 means the CLI finished and wiped, but could not restore every .env.
+    """Exit 73 means every key came back; only the OpenClaw undo fell short.
 
-    It is not a refusal: claiming "nothing was deleted" there would be false,
-    and leaving the tool installed would contradict the CLI's own state. The
-    tool goes, and the user is told to rotate what could not be restored.
+    The CLI wipes ONLY after every .env restore succeeds (its module docstring:
+    "the restore-ALL-then-wipe key-shredder guard"). A failed restore aborts
+    with exit 1 and wipes nothing. So 73 is raised after a successful restore,
+    when undoing the OpenClaw provider config did not fully finish.
+
+    This test previously stubbed the CLI printing "could not restore
+    /proj/a/.env" and exiting 73 — a state the CLI never produces — and
+    asserted the user was told to rotate. It was encoding the shell's
+    misreading of the contract, not the contract. Telling a user to rotate
+    keys that were just restored is WOR-597's own failure class.
+
+    Still not a refusal: the wipe happened, so "nothing was deleted" is false
+    and the tool has to go.
     """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -356,7 +366,7 @@ def test_a_partial_restore_removes_the_tool_and_says_which_keys_are_stranded(
         "worthless",
         'case "$1" in\n'
         '  --version) echo "worthless 0.3.12" ;;\n'
-        '  uninstall) echo "could not restore /proj/a/.env"; exit 73 ;;\n'
+        '  uninstall) echo "restored 1 file"; echo "OpenClaw undo incomplete" >&2; exit 73 ;;\n'
         "esac",
     )
     _write_uv_stub(bin_dir, real_bin_dir)
@@ -366,7 +376,11 @@ def test_a_partial_restore_removes_the_tool_and_says_which_keys_are_stranded(
 
     assert result.returncode == 73, f"the CLI's partial-restore code must survive:\n{out}"
     assert "nothing was deleted" not in out, "the wipe already happened; that claim is false"
-    assert "rotate" in out, "the user must be told to rotate what could not be restored"
+    assert "rotate" not in out, (
+        "exit 73 told the user to rotate keys the CLI had just restored:\n" + out
+    )
+    assert "were restored" in out, f"the user must be told their keys came back:\n{out}"
+    assert "openclaw" in out, f"the user must be told what did not finish:\n{out}"
     uv_log = tmp_path / "uv.log"
     assert uv_log.exists() and "tool uninstall worthless" in uv_log.read_text(), (
         "the tool must still be removed after a partial restore"
@@ -522,9 +536,12 @@ def test_the_custom_bin_dir_user_can_actually_finish(tmp_path: Path) -> None:
     # a hand-deleted home, and a test that asks the developer's real keychain
     # is neither hermetic nor safe to run unattended.
     # Both keystore tools: run_uninstall does not stub `uname`, so the script
-    # picks its macos/linux branch from the real host. A macOS-only stub leaves
-    # Linux CI on the `secret-tool` path, where the tool is absent and
-    # keychain_entry_exists takes its "unknown -> assume stranded" default.
+    # picks its macos/linux branch from the real host. On macOS a missing entry
+    # reads as `absent` (keys came back -> "Nothing left here to restore"). On
+    # Linux "not found" is genuinely ambiguous — the key may have been a file —
+    # so keystore_state answers `unknown` and the user gets the conditional
+    # "can't tell" message. Either is honest for this user; neither may claim
+    # the keys were lost, which is what the assertions below pin.
     write_stub(bin_dir, "security", "exit 1")
     write_stub(bin_dir, "secret-tool", "exit 1")
 
@@ -679,16 +696,29 @@ def test_the_wipe_actually_deletes_the_keystore_entry(tmp_path: Path) -> None:
     home = tmp_path / "wless-home"
     _seed_home(home, ["/proj/a/.env"])
 
-    security_log = tmp_path / "security-calls.log"
+    # Both keystore tools log to ONE file. run_uninstall does not stub `uname`,
+    # so the script picks macos or linux from the real host. An earlier version
+    # stubbed only macOS `security`: on Linux CI the script called `secret-tool`,
+    # the log was never written, and this test failed — after passing locally.
+    keystore_log = tmp_path / "keystore-calls.log"
     write_stub(
         bin_dir,
         "security",
-        f'echo "$*" >> "{security_log}"\n'
+        f'echo "security $*" >> "{keystore_log}"\n'
         'case "$1" in\n'
         # One entry exists, then it is gone — otherwise the capped drain loop
         # would spin to its limit against an always-succeeding stub.
         f'  delete-generic-password) [ -f "{tmp_path}/.gone" ] && exit 1\n'
         f'    : > "{tmp_path}/.gone"; exit 0 ;;\n'
+        "  *) exit 1 ;;\n"
+        "esac",
+    )
+    write_stub(
+        bin_dir,
+        "secret-tool",
+        f'echo "secret-tool $*" >> "{keystore_log}"\n'
+        'case "$1" in\n'
+        "  clear) exit 0 ;;\n"
         "  *) exit 1 ;;\n"
         "esac",
     )
@@ -698,10 +728,147 @@ def test_the_wipe_actually_deletes_the_keystore_entry(tmp_path: Path) -> None:
 
     assert result.returncode == 0, out
     assert not home.exists(), "the wipe must remove the home"
-    assert security_log.exists(), (
+    assert keystore_log.exists(), (
         "the wipe never touched the keystore — the Fernet key would survive a "
         f"'Worthless removed from this machine':\n{out}"
     )
-    calls = security_log.read_text()
-    assert "delete-generic-password" in calls, f"no delete was attempted:\n{calls}"
+    calls = keystore_log.read_text()
+    # Whichever platform branch ran, a DELETE must have targeted the key entry:
+    # `security delete-generic-password` on macOS, `secret-tool clear` on Linux.
+    assert "delete-generic-password" in calls or "secret-tool clear" in calls, (
+        f"no keystore delete was attempted:\n{calls}"
+    )
     assert "fernet-key-" in calls, f"the delete did not target the key entry:\n{calls}"
+
+
+def test_a_keystore_it_cannot_read_gets_an_honest_answer_not_a_guess(
+    tmp_path: Path,
+) -> None:
+    """When the script cannot tell whether keys were restored, it must say so.
+
+    On Linux with no keyring (WSL, servers, no D-Bus) worthless keeps its
+    Fernet key as a FILE inside ~/.worthless, so there is never a keystore
+    entry. Once the home is gone, "the program restored everything" and
+    "someone ran rm -rf by hand" leave identical traces. The script cannot tell
+    them apart, and either flat answer is wrong for half of those users:
+
+      "your keys could NOT be restored, rotate"  -> false alarm after a restore
+      "nothing left to restore"                  -> silence over dead keys
+
+    A previous revision answered "assume stranded" here, which told every WSL
+    user who followed the script's own advice to rotate live credentials. The
+    honest answer is conditional: say the script cannot tell, and give the
+    user the one fact that decides it.
+
+    Driven through an unrecognised OS so the "cannot read the keystore" branch
+    is reached deterministically on any host — a real Linux runner may or may
+    not have secret-tool installed.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    home = tmp_path / "wless-home"  # gone; the script cannot tell why
+    write_stub(bin_dir, "uname", "echo Haiku")
+
+    result = run_uninstall(bin_dir, worthless_home=home)
+    out = (result.stdout + result.stderr).lower()
+
+    assert result.returncode == 0, f"the wipe should still complete:\n{out}"
+    assert "can't tell whether your keys were already restored" in out, (
+        f"the user was not told the script cannot tell:\n{out}"
+    )
+    assert "could not be restored automatically" not in out, (
+        "asserted the keys were lost when the script cannot know that:\n" + out
+    )
+    assert "nothing left here to restore" not in out, (
+        "asserted nothing was lost when the script cannot know that:\n" + out
+    )
+
+
+def _tier1_with_nothing_to_restore(tmp_path: Path) -> Path:
+    """A real (uv-reported) install whose CLI finds no state and exits 0.
+
+    This is what `worthless uninstall --yes` does when ~/.worthless is already
+    gone: prints "Nothing to uninstall" and exits 0. Reproduced live on Debian
+    trixie with no keyring before this test existed.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    real_bin_dir = tmp_path / "uv-tools" / "bin"
+    real_bin_dir.mkdir(parents=True)
+    write_stub(
+        real_bin_dir,
+        "worthless",
+        'case "$1" in\n'
+        '  --version) echo "worthless 0.3.12" ;;\n'
+        '  uninstall) echo "Nothing to uninstall — Worthless is not installed here."; exit 0 ;;\n'
+        "esac",
+    )
+    _write_uv_stub(bin_dir, real_bin_dir)
+    return bin_dir
+
+
+def test_a_cli_with_nothing_to_restore_is_not_reported_as_a_restore(
+    tmp_path: Path,
+) -> None:
+    """Exit 0 from the CLI is not proof the keys came back.
+
+    A user runs `rm -rf ~/.worthless` by hand — shard-B and the Fernet key are
+    gone, every .env half is permanently inert — then runs this script. Tier 1
+    finds the real install, hands it `uninstall --yes`, and the CLI, seeing no
+    home, says "Nothing to uninstall" and exits 0. The script read that 0 as
+    success and printed "your real keys were restored to your .env files".
+
+    That is WOR-597's own lie, the dangerous way round: reassurance over dead
+    keys. Found by running the real thing in a container, not by any test —
+    every test here stubbed the CLI as either succeeding at a restore or not.
+
+    On macOS the hand-deleted home leaves the Keychain entry behind, which is
+    proof the keys are stranded, so the user must be told to rotate.
+    """
+    bin_dir = _tier1_with_nothing_to_restore(tmp_path)
+    home = tmp_path / "wless-home"  # deleted by hand before uninstall runs
+    write_stub(
+        bin_dir,
+        "security",
+        'case "$1" in\n  find-generic-password) exit 0 ;;\n  *) exit 1 ;;\nesac',
+    )
+    write_stub(
+        bin_dir,
+        "secret-tool",
+        'case "$1" in\n  lookup) exit 0 ;;\n  *) exit 1 ;;\nesac',
+    )
+
+    result = run_uninstall(bin_dir, worthless_home=home)
+    out = (result.stdout + result.stderr).lower()
+
+    assert result.returncode == 0, out
+    assert "your real keys were restored" not in out, (
+        "told a user whose keys are dead that they were restored:\n" + out
+    )
+    assert "could not be restored automatically" in out, (
+        "the keystore proves the keys are stranded and the user was not told:\n" + out
+    )
+
+
+def test_a_cli_with_nothing_to_restore_and_an_unreadable_keystore_says_so(
+    tmp_path: Path,
+) -> None:
+    """Same flow on a box with no readable keystore — the WSL case.
+
+    Here the script genuinely cannot tell a hand-deleted home from a restore
+    that already happened, so neither "restored" nor "rotate" may be asserted.
+    """
+    bin_dir = _tier1_with_nothing_to_restore(tmp_path)
+    home = tmp_path / "wless-home"
+    write_stub(bin_dir, "uname", "echo Haiku")
+
+    result = run_uninstall(bin_dir, worthless_home=home)
+    out = (result.stdout + result.stderr).lower()
+
+    assert result.returncode == 0, out
+    assert "your real keys were restored" not in out, (
+        "claimed a restore the script cannot know happened:\n" + out
+    )
+    assert "can't tell whether your keys were already restored" in out, (
+        f"the user was not told the script cannot tell:\n{out}"
+    )
