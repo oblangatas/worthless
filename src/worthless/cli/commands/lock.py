@@ -1930,6 +1930,7 @@ class _LockInterrupts:
         planned: list[_PlannedUpdate],
         console: WorthlessConsole,
     ) -> None:
+        """Start un-pressed and uncommitted; *planned* is the live list Pass-1 fills."""
         self.task = task
         self.planned = planned
         self.console = console
@@ -1937,6 +1938,7 @@ class _LockInterrupts:
         self.committed = False
 
     def __call__(self) -> None:
+        """Handle one SIGINT/SIGTERM as asyncio dispatches it (see the class docstring)."""
         if self.task is None:
             return
         if self.pressed or self.committed:
@@ -1949,6 +1951,7 @@ class _LockInterrupts:
         self.task.cancel()
 
     def may_unwind(self, exc: BaseException) -> bool:
+        """May the rollback run for *exc*? Never after the commit, except post-flight's exit 87."""
         return not self.committed or isinstance(exc, _PostflightRefused)
 
 
@@ -1973,6 +1976,7 @@ def _ctrl_c_raises(signals: list[int]) -> Iterator[None]:
     armed = True
 
     def _raise(_signum: int, _frame: object) -> None:
+        """Raise KeyboardInterrupt for the first press only; later presses are ignored."""
         nonlocal armed
         if armed:
             armed = False
@@ -2738,6 +2742,7 @@ def _lock_keys(
         oauth_skipped: bool = False
 
     async def _lock_async() -> _LockResult:
+        """Pass-1, the .env rewrite, then the OpenClaw steps, with Ctrl-C armed throughout."""
         from dotenv import dotenv_values  # noqa: PLC0415 — local import keeps test surface tight
 
         async with open_repo(home) as repo:

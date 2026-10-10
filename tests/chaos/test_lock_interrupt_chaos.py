@@ -641,6 +641,7 @@ def _stderr_path(te: TrialEnv) -> Path:
 
 
 def _stderr_tail(te: TrialEnv) -> str:
+    """The child's stderr for a failure message, starting at the stuck thread's stack if dumped."""
     try:
         text = _stderr_path(te).read_bytes().decode("utf-8", errors="replace")
     except OSError:
@@ -1336,6 +1337,7 @@ _CLEAN_AUDIT = json.dumps(
 
 @pytest.fixture
 def proxy_port() -> Iterator[int]:
+    """A stub ``/healthz`` that satisfies lock's proxy gate; yields its port."""
     with fake_proxy_health() as port:
         yield port
 
@@ -1363,6 +1365,7 @@ def _with_openclaw(te: TrialEnv, port: int) -> tuple[dict[str, str], Path]:
 
 
 def _call_count(calls: Path, subcommand: str) -> int:
+    """How many times the fake ``openclaw`` was called with *subcommand*."""
     try:
         return calls.read_text().split().count(subcommand)
     except FileNotFoundError:
@@ -1388,6 +1391,7 @@ def _ctrl_c_once(te: TrialEnv, env: dict[str, str], reached: Callable[[], bool],
 
 
 def _assert_answered_and_kept(te: TrialEnv, rc: int) -> None:
+    """The lock exited 130 and left the keys fully LOCKED, never partial."""
     state = classify(te)
     assert rc == 130, f"Ctrl-C should exit 130 (interrupted), got {rc}\n{_stderr_tail(te)}"
     assert state.classification == "locked", (
@@ -1398,6 +1402,7 @@ def _assert_answered_and_kept(te: TrialEnv, rc: int) -> None:
 
 class TestCtrlCDuringOpenclawReloadWait:
     def test_ctrl_c_during_reload_wait_is_answered(self, tmp_path: Path, proxy_port: int) -> None:
+        """Ctrl-C during the up-to-15s OpenClaw reload wait is answered within TAIL_DEADLINE."""
         for trial in range(TAIL_TRIALS):
             te = _make_trial_env(tmp_path, trial, n_keys=1)
             env, calls = _with_openclaw(te, proxy_port)
@@ -1414,6 +1419,7 @@ class TestCtrlCWhileOpenclawConfigIsLocked:
     def test_ctrl_c_while_config_lock_is_held_is_answered(
         self, tmp_path: Path, proxy_port: int
     ) -> None:
+        """Ctrl-C while another process holds OpenClaw's config lock is answered."""
         for trial in range(TAIL_TRIALS):
             te = _make_trial_env(tmp_path, trial, n_keys=1)
             env, _calls = _with_openclaw(te, proxy_port)

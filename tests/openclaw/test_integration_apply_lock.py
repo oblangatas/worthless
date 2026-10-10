@@ -819,6 +819,7 @@ def _ctrl_c_on_write(
     calls = {"n": 0}
 
     def _set_provider(*args: object, **kwargs: object) -> None:
+        """Raise *exc* on the *nth* write; otherwise write for real."""
         calls["n"] += 1
         if calls["n"] == nth:
             raise exc

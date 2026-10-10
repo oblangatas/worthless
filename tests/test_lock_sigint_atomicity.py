@@ -479,6 +479,7 @@ def _invoke_lock_sandboxed(
 ):  # noqa: ANN202 — click's Result
     # A real ~/.openclaw on the dev box would trip the proxy-health gate first;
     # OpenClaw env vars from the developer's shell would point lock at it too.
+    """Run ``worthless [flags] lock`` in-process with HOME and OpenClaw env sandboxed."""
     monkeypatch.chdir(tmp_path)
     for var in [v for v in os.environ if v.startswith("OPENCLAW_")] + ["PI_CODING_AGENT_DIR"]:
         monkeypatch.delenv(var, raising=False)
@@ -492,11 +493,15 @@ def _invoke_lock_sandboxed(
 def _assert_still_locked(
     home_dir: WorthlessHome, env_file: Path, pre_sha: str, output: str
 ) -> None:
-    enrollments = asyncio.run(_repo(home_dir).list_enrollments())
-    assert len(enrollments) == 2 and len(_shard_rows(home_dir)) == 2, (
+    """Keys stay committed: 2 enrollments, 2 shard rows, and ``.env`` rewritten."""
+    unwound = (
         "something after the commit unwound the DB rows that the rewritten .env "
-        f"now depends on — keys are unrecoverable. enrollments={enrollments!r}\n{output}"
+        "now depends on — keys are unrecoverable."
     )
+    enrollments = asyncio.run(_repo(home_dir).list_enrollments())
+    assert len(enrollments) == 2, f"{unwound} enrollments={enrollments!r}\n{output}"
+    shards = _shard_rows(home_dir)
+    assert len(shards) == 2, f"{unwound} shard rows={shards!r}\n{output}"
     assert _sha256_of(env_file) != pre_sha, f".env was not left locked:\n{output}"
 
 
@@ -528,6 +533,7 @@ class TestCtrlCAfterCommitIsAnswered:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Ctrl-C in an OpenClaw step after the commit: answered, exit 130, keys kept."""
         import worthless.cli.commands.lock as lock_mod
 
         pre_sha = _sha256_of(two_key_env)
@@ -701,6 +707,7 @@ class TestNothingRollsBackAfterTheCommit:
     may still roll them back; nothing else — not a queued press, not a crash."""
 
     def test_handler_never_cancels_once_committed(self) -> None:
+        """Cancels once before the commit, never after; only post-flight 87 may unwind."""
         import worthless.cli.commands.lock as lock_mod
 
         cancels: list[int] = []
@@ -731,6 +738,7 @@ class TestNothingRollsBackAfterTheCommit:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """An unexpected crash after the commit fails the lock but keeps the keys."""
         import worthless.cli.commands.lock as lock_mod
 
         pre_sha = _sha256_of(two_key_env)
