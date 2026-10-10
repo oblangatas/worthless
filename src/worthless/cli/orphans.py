@@ -42,6 +42,21 @@ def is_orphan(enrollment: EnrollmentRecord) -> bool:
     return enrollment.var_name not in dotenv_values(env_path)
 
 
+def env_file_missing(enrollment: EnrollmentRecord) -> bool:
+    """True when the enrollment's ``.env`` file no longer exists at its path.
+
+    A missing *file* is not a dead key. It usually means the project moved
+    — a removed git worktree, a renamed folder — and Shard A is still on
+    disk somewhere. Such a key is recoverable and must never be purged.
+    Only a deleted *line* in a file that still exists is a dead key.
+
+    Detection is unchanged: ``is_orphan`` still flags a missing file, so
+    ``status`` and ``scan`` keep warning about it. This only separates
+    "warn about it" from "safe to destroy".
+    """
+    return bool(enrollment.env_path) and not Path(enrollment.env_path).exists()
+
+
 def find_orphans(enrollments: list[EnrollmentRecord]) -> list[EnrollmentRecord]:
     """Filter a list of enrollments to the orphans, parsing each unique
     ``env_path`` only once. With N orphans sharing one ``.env`` (common —

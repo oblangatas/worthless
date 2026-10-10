@@ -60,7 +60,13 @@ from worthless.cli.console import WorthlessConsole, get_console
 from worthless._flags import ipc_mode_active
 from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary
 from worthless.cli.keystore import _SERVICE
-from worthless.cli.orphans import FIX_PHRASE, PROBLEM_PHRASE, find_orphans, is_orphan
+from worthless.cli.orphans import (
+    FIX_PHRASE,
+    PROBLEM_PHRASE,
+    env_file_missing,
+    find_orphans,
+    is_orphan,
+)
 from worthless.openclaw import integration as _oc_integration
 from worthless.openclaw import skill as _oc_skill
 from worthless.openclaw.errors import OpenclawIntegrationError
@@ -159,9 +165,17 @@ async def _purge_all(
     Re-validates the orphan set against the live DB after acquiring the
     lock so stale entries (state shifted between diagnose + confirm) don't
     delete healthy rows.
+
+    Never purges an entry whose ``.env`` file is missing (WOR-935). A moved
+    project or removed worktree takes Shard A with it intact; purging here
+    would destroy Shard B, the half that was still safe. Enforced in this
+    function, not in its callers, so every purge path — ``doctor --fix`` and
+    ``doctor --json --fix`` — gets it.
     """
     current = await repo.list_enrollments()
-    still_orphan_keys = {(e.key_alias, e.env_path) for e in find_orphans(current)}
+    still_orphan_keys = {
+        (e.key_alias, e.env_path) for e in find_orphans(current) if not env_file_missing(e)
+    }
 
     purged = 0
     aliases_touched: set[str] = set()
