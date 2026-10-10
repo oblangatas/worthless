@@ -1,0 +1,75 @@
+name: macOS service
+
+# Does the launchd accept path work? (worthless-tg4q)
+#
+# Until this job, `launchctl` had never run in CI. Every launchd test patches
+# `run_cmd`, so a macOS user could say yes to the service offer and nothing had
+# ever watched that install and serve. macOS is the primary platform; the WSL
+# equivalent has been proven since #613, and this closes the gap.
+#
+# WHAT A RED RUN MIGHT MEAN, and why it is still worth knowing: `launchd.py`
+# registers in `gui/$UID`, which needs a graphical login session. A CI runner,
+# an SSH-only Mac or a build box may have none. If that is why this fails, the
+# finding is that worthless's background service cannot install on a headless
+# Mac — a real limitation nobody has written down, not a broken test. Step 1 of
+# the script reports which domains exist so a red run says which it is.
+#
+# WHAT A GREEN RUN DOES NOT PROVE: that it survives a reboot (WOR-725 owns
+# that, and it is unverified on every platform), and that a user's own Mac
+# behaves like a GitHub VM. Cite those limits wherever this result is cited.
+#
+# NOT a required check. macOS runner minutes bill at ~10x Linux, and a
+# path-filtered required check that is skipped never reports, so branch
+# protection would leave unrelated PRs Pending forever (WOR-874). Promote only
+# after dropping the filter and a couple of weeks of stable runs.
+
+on:
+  schedule:
+    - cron: "23 6 * * 2"  # Tuesdays, offset from the WSL job so they do not collide
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/macos-service.yml"
+      - "engineering/testing/scripts/macos-live-lifecycle.sh"
+      # The code whose macOS behaviour this job exercises.
+      - "src/worthless/cli/commands/service/**"
+      - "src/worthless/cli/commands/lock.py"
+      - "pyproject.toml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-service-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  accept-path:
+    name: macOS (launchd accept path)
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up uv + Python
+        uses: ./.github/actions/setup-uv-python
+        with:
+          python-version: "3.13"
+
+      # The script redirects HOME to a throwaway directory before installing
+      # anything, so the runner's own account is never enrolled and the Fernet
+      # key never lands outside that directory.
+      - name: Install the service for real, serve, then remove it
+        run: bash engineering/testing/scripts/macos-live-lifecycle.sh
+
+      # Runs even on failure. A job left registered with launchd would outlive
+      # the step and poison a reused runner.
+      - name: Make sure no agent survives this job
+        if: always()
+        run: |
+          launchctl bootout "gui/$(id -u)/sh.worthless.proxy" 2>/dev/null || true
+          launchctl print "gui/$(id -u)/sh.worthless.proxy" >/dev/null 2>&1 \
+            && { echo "FAIL  an agent is still registered"; exit 1; } \
+            || echo "clean: no worthless agent registered"
