@@ -250,9 +250,12 @@ def _orphan_lines(orphans: Sequence[EnrollmentRecord]) -> list[str]:
     """
     if not orphans:
         return []
-    out = ["", f"{PROBLEM_PHRASE.capitalize()} these keys (.env line deleted):"]
+    out = ["", f"{PROBLEM_PHRASE.capitalize()} these keys (.env line or file missing):"]
     out.extend(f"  {o.key_alias}  BROKEN  ({o.var_name} -> {o.env_path})" for o in orphans)
-    out.append(f"  Run `{FIX_PHRASE}` to clean up.")
+    out.append(
+        f"  Run `{FIX_PHRASE}` to clean up deleted lines; a moved project is kept —"
+        " put it back, then run `worthless unlock`."
+    )
     return out
 
 

@@ -278,6 +278,7 @@ class TestDoctorKeepsMovedEnv:
         result = cli_invoke(["unlock", "--env", str(env_file)], home_dir)
         out = self._flat(result.output)
 
+        assert result.exit_code != 0, "unlock must refuse a key whose .env is gone"
         assert not looks_like_traceback(result.output)
         assert "line was deleted" not in out and "line deleted" not in out, (
             "unlock blames a deleted .env line when the whole file moved:\n" + result.output
@@ -306,6 +307,62 @@ class TestDoctorKeepsMovedEnv:
         remaining = {e.env_path for e in list_enrollments(home_dir)}
         assert str(moved_env) in remaining, "the moved key was purged"
         assert str(dead_env) not in remaining, "the dead key was not purged"
+
+    def test_json_marks_moved_key_safe_not_gone(
+        self, home_dir: WorthlessHome, env_file: Path, tmp_path: Path
+    ) -> None:
+        """An agent must not be told a recoverable key is gone — that advice ends in
+        `uninstall`, which deletes it."""
+        lock_env(env_file, home_dir)
+        self._move_project(env_file, tmp_path)
+
+        result = cli_invoke(["doctor", "--json"], home_dir)
+        assert result.exit_code == 0, result.output
+        check = next(c for c in json.loads(result.stdout)["checks"] if c["check_id"] == "orphan_db")
+        (finding,) = check["findings"]
+
+        assert finding["reason"] == "env_file_missing", check
+        assert "this key is gone" not in finding["remediation"].lower(), finding
+        assert "worthless unlock" in finding["remediation"], finding
+        assert check["fixable"] is False, "--fix has nothing to do for a moved key"
+
+    def test_fix_prompt_never_asks_to_delete_a_moved_key(
+        self, home_dir: WorthlessHome, env_file: Path, tmp_path: Path
+    ) -> None:
+        lock_env(env_file, home_dir)
+        self._move_project(env_file, tmp_path)
+
+        result = cli_invoke(["doctor", "--fix"], home_dir, input="n\n")
+        out = self._flat(result.output)
+
+        assert "delete" not in out, (
+            "asked to approve a delete that will not happen:\n" + result.output
+        )
+        assert "kept 1 key" in out, result.output
+        assert len(list_enrollments(home_dir)) == 1
+
+    def test_dry_run_shows_how_to_recover_a_moved_key(
+        self, home_dir: WorthlessHome, env_file: Path, tmp_path: Path
+    ) -> None:
+        lock_env(env_file, home_dir)
+        self._move_project(env_file, tmp_path)
+
+        result = cli_invoke(["doctor", "--fix", "--dry-run"], home_dir)
+
+        assert "put the project back" in self._flat(result.output), result.output
+
+    def test_env_path_replaced_by_a_directory_is_kept(
+        self, home_dir: WorthlessHome, env_file: Path
+    ) -> None:
+        """Docker creates a directory for a missing bind-mount. dotenv reads it as
+        empty, which used to look like a deleted line and get the key purged."""
+        lock_env(env_file, home_dir)
+        env_file.unlink()
+        env_file.mkdir()
+
+        cli_invoke(["doctor", "--fix", "--yes"], home_dir)
+
+        assert len(list_enrollments(home_dir)) == 1, "a key behind a directory was purged"
 
 
 # ---------------------------------------------------------------------------

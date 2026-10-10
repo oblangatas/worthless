@@ -2,7 +2,9 @@
 
 Currently handles TWO known shapes:
 
-1. Orphan DB enrollments whose ``.env`` line was deleted by the user (HF7).
+1. Orphan DB enrollments whose ``.env`` line was deleted by the user (HF7),
+   or whose ``.env`` is missing (a moved project — reported, never purged:
+   WOR-935).
    The dogfood-discovered stuck state from 2026-04-30:
 
      worthless unlock -> "No enrolled keys found." (silently skips orphan)
@@ -216,13 +218,12 @@ def _print_orphan_lines(
         typer.echo(
             f"  • {PROBLEM_PHRASE} {e.key_alias}: {reason} ({e.var_name} -> {e.env_path}){suffix}"
         )
-    if show_fix_hint:
-        if any(not env_file_missing(e) for e in orphans):
-            typer.echo(f"    fix: run `{FIX_PHRASE}`")
-        if any(env_file_missing(e) for e in orphans):
-            typer.echo(
-                "    moved: put the project back at the path shown, then run `worthless unlock`"
-            )
+    if show_fix_hint and any(not env_file_missing(e) for e in orphans):
+        typer.echo(f"    fix: run `{FIX_PHRASE}`")
+    # Always shown, --fix and --dry-run included: it isn't "run what you just ran",
+    # it's the only way to get a moved key back, and --fix won't touch it.
+    if any(env_file_missing(e) for e in orphans):
+        typer.echo("    moved: put the project back at the path shown, then run `worthless unlock`")
 
 
 _VERSION_LINE = re.compile(r"^Version:\s*(\S+)\s*$", re.MULTILINE)
@@ -842,8 +843,9 @@ def _doctor_confirm(
     if yes:
         return True
     prompt_lines = []
-    if orphans:
-        prompt_lines.append(f"Delete {len(orphans)} orphan DB row(s) and their shard files.")
+    purgeable = sum(1 for e in orphans if not env_file_missing(e))
+    if purgeable:
+        prompt_lines.append(f"Delete {purgeable} orphan DB row(s) and their shard files.")
     if synced:
         n = len(synced)
         prompt_lines.append(
@@ -851,6 +853,8 @@ def _doctor_confirm(
         )
         prompt_lines.append("")
         prompt_lines.append(_MULTI_DEVICE_WARNING)
+    if not prompt_lines:
+        return True  # nothing destructive to confirm — moved keys are only reported
     prompt = "\n".join(prompt_lines) + "\nProceed?"
     proceed = typer.confirm(prompt, default=False)
     if not proceed:

@@ -17,8 +17,8 @@ broke every healthy key (shipped v0.3.7). Their failure modes (a deleted
   * (Future) Shard B is present but commitment validation fails — not
     detectable without the user's recovery flow, so deferred.
 
-Repair: surgical delete of the enrollment row(s) for the broken alias
-plus the dangling DB shard row. Safe: the underlying secret is already
+Repair: surgical delete of the enrollment row(s) for the broken alias.
+The shard row itself is left in place. Safe: the underlying secret is already
 unrecoverable; we're just removing the dead reference so ``worthless
 status`` stops surfacing it.
 """
@@ -118,7 +118,7 @@ def run(ctx: CheckContext) -> CheckResult:
             status="error",
             findings=[],
             summary=f"shard read failed: {type(exc).__name__}",
-            fixable=True,
+            fixable=False,
             fixed=[],
             skipped_reason=None,
         )

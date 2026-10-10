@@ -1,8 +1,9 @@
 """Orphan-state predicate + plain-English wording (HF7 / worthless-3907).
 
 An *orphan* enrollment is a DB row whose ``env_path`` points to a file
-where the matching ``var_name`` line is absent — usually because the
-user manually deleted it from ``.env`` between locking and unlocking.
+where the matching ``var_name`` line is absent — the user deleted the
+line — or whose ``.env`` is no longer there at all, usually because the
+project moved. Only the first is a dead key (see ``env_file_missing``).
 
 User-facing phrases live here, not the technical term: a real user does
 NOT think "I have an orphan", they think "my key is broken". The shared
@@ -43,7 +44,11 @@ def is_orphan(enrollment: EnrollmentRecord) -> bool:
 
 
 def env_file_missing(enrollment: EnrollmentRecord) -> bool:
-    """True when the enrollment's ``.env`` file no longer exists at its path.
+    """True when the enrollment's ``.env`` is not a regular file at its path.
+
+    Missing, a dangling symlink, or a directory in its place (Docker creates
+    one for a missing bind-mount) all count: python-dotenv reads any of them
+    as empty, which would otherwise look like a deleted line.
 
     A missing *file* is not a dead key. It usually means the project moved
     — a removed git worktree, a renamed folder — and Shard A is still on
@@ -54,7 +59,7 @@ def env_file_missing(enrollment: EnrollmentRecord) -> bool:
     ``status`` and ``scan`` keep warning about it. This only separates
     "warn about it" from "safe to destroy".
     """
-    return bool(enrollment.env_path) and not Path(enrollment.env_path).exists()
+    return bool(enrollment.env_path) and not Path(enrollment.env_path).is_file()
 
 
 def find_orphans(enrollments: list[EnrollmentRecord]) -> list[EnrollmentRecord]:

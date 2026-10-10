@@ -16,6 +16,17 @@ from worthless.cli.orphans import env_file_missing
 
 check_id = "orphan_db"
 
+# Per-finding advice for a key whose .env is missing. Set on the finding so
+# the runner's generic orphan playbook ("This key is gone") never reaches it:
+# that advice is false for a moved project, and following it destroys the key.
+MOVED_REMEDIATION = (
+    "This key is safe — only its `.env` is missing from where it was locked, "
+    "usually because the project moved. Put the project back at that path, then "
+    "run `worthless unlock`. `worthless doctor --fix` leaves it alone. If the "
+    "project is gone for good, `worthless uninstall --force` removes Worthless "
+    "and deletes this key with it."
+)
+
 
 def _repair_orphans(ctx: CheckContext, orphans: list) -> list[dict]:
     """Purge, then report exactly the records that are gone.
@@ -63,9 +74,11 @@ def run(ctx: CheckContext) -> CheckResult:
             "var_name": e.var_name,
             "env_path": e.env_path,
             "reason": "env_file_missing" if env_file_missing(e) else "env_line_missing",
+            **({"remediation": MOVED_REMEDIATION} if env_file_missing(e) else {}),
         }
         for e in orphans
     ]
+    moved = sum(1 for f in findings if f["reason"] == "env_file_missing")
     fixed: list[dict] = []
     status = "ok" if not orphans else "warn"
 
@@ -89,23 +102,28 @@ def run(ctx: CheckContext) -> CheckResult:
         summary = "No orphan enrollments found."
     else:
         plural = "s" if n != 1 else ""
-        summary = (
-            f"{n} broken record{plural} (.env file or key line gone) — run "
-            "'worthless doctor --fix' to purge, or 'worthless uninstall --force' "
-            "for a clean removal."
-        )
-        moved = sum(1 for e in orphans if env_file_missing(e))
-        if moved:
-            summary += (
-                f" {moved} whose .env was not found {'is' if moved == 1 else 'are'} "
-                "kept, never purged: put the project back, then run 'worthless unlock'."
+        dead = n - moved
+        parts = [f"{n} broken record{plural} (.env line or file missing)."]
+        if dead:
+            parts.append(
+                f"{dead} with the .env line deleted: run 'worthless doctor --fix' to purge, "
+                "or 'worthless uninstall --force' for a clean removal."
             )
+        if moved:
+            parts.append(
+                f"{moved} whose .env was not found {'is' if moved == 1 else 'are'} kept, "
+                "never purged: if the project moved, put it back and run "
+                "'worthless unlock'; if it is gone for good, 'worthless uninstall --force' "
+                "removes Worthless and deletes these keys."
+            )
+        summary = " ".join(parts)
     return CheckResult(
         check_id=check_id,
         status=status,
         findings=findings,
         summary=summary,
-        fixable=True,
+        # Nothing for --fix to do when every orphan is a moved key it must keep.
+        fixable=n == 0 or moved < n,
         fixed=fixed,
         skipped_reason=None,
     )
