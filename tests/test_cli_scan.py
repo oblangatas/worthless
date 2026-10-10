@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -13,8 +14,12 @@ from typer.testing import CliRunner
 
 from worthless.cli.app import app
 from worthless.cli.bootstrap import WorthlessHome
+from worthless.cli.commands.scan import _format_human
 from worthless.cli.key_patterns import KEY_PATTERN
+from worthless.cli import scanner as scanner_mod
+from worthless.cli.scanner import ScanFinding, format_sarif, scan_files
 
+from tests.helpers import fake_key
 from tests.helpers import fake_openai_key as _fake_openai_key
 from tests.helpers import fake_anthropic_key as _fake_anthropic_key
 
@@ -32,6 +37,18 @@ def _strip_env_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 runner = CliRunner()
+
+
+def _git_commit(repo: Path, name: str) -> None:
+    """Init *repo* and really commit *name* — hermetic: no signing, no hooks,
+    no reliance on the machine's git identity."""
+    git = ["git", "-C", str(repo)]
+    cfg = ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"]
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)  # noqa: S607
+    subprocess.run([*git, "add", name], check=True)  # noqa: S607
+    subprocess.run(  # noqa: S607
+        [*git, *cfg, "-c", "core.hooksPath=/dev/null", "commit", "-q", "-m", "x"], check=True
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -751,8 +768,6 @@ class TestFormatHumanBranches:
         assert result.exit_code == 1
         # Now delete the file and scan with a mocked finding
 
-        from worthless.cli.scanner import ScanFinding
-
         fake_finding = ScanFinding(
             file=str(tmp_path / "gone.py"),
             line=1,
@@ -767,8 +782,6 @@ class TestFormatHumanBranches:
 
     def test_protected_finding_count(self, tmp_path: Path) -> None:
         """Protected findings should be counted and displayed."""
-
-        from worthless.cli.scanner import ScanFinding
 
         findings = [
             ScanFinding(
@@ -796,8 +809,6 @@ class TestFormatHumanBranches:
 
     def test_tty_output_suggests_lock_command(self) -> None:
         """In TTY context, unprotected findings should suggest 'worthless lock'."""
-        from worthless.cli.commands.scan import _format_human
-        from worthless.cli.scanner import ScanFinding
 
         finding = ScanFinding(
             file="/tmp/.env",  # noqa: S108 — must be a real .env basename: lock's
@@ -814,8 +825,6 @@ class TestFormatHumanBranches:
 
     def test_non_tty_output_suggests_docs(self) -> None:
         """In non-TTY context, should suggest docs URL."""
-        from worthless.cli.commands.scan import _format_human
-        from worthless.cli.scanner import ScanFinding
 
         finding = ScanFinding(
             file="/tmp/.env",  # noqa: S108 — must be a real .env basename: lock's
@@ -967,3 +976,653 @@ class TestInstallHookIntoExistingExecHook:
                 "installer neither placed the line reachably nor told the user "
                 f"how to wire it up; output:\n{result.stdout}{result.stderr}"
             )
+
+
+class TestScanAgreesWithLockOnOAuthTokens:
+    """worthless-p55g: scan and lock must not send the user in a circle.
+
+    ``lock`` deliberately refuses to shard a Claude Code OAuth token — sharding
+    rewrites the ``sk-ant-oat`` marker Claude Code is recognised by. ``scan``
+    had no matching filter, so it reported the token UNPROTECTED and told the
+    user to run ``lock``; ``lock`` declined and reported nothing was locked.
+    CI stayed red permanently with no remediation available.
+
+    The fix gives these tokens their own verdict — "can't protect" — in text,
+    JSON and SARIF together, so no format contradicts another. Files live in a
+    subdirectory: this module's autouse fixture chdirs into tmp_path and scan
+    always adds ./.env, so a tmp_path/.env would be counted twice
+    (worthless-vab1).
+    """
+
+    @staticmethod
+    def _env(tmp_path: Path, *lines: str) -> Path:
+        env = tmp_path / "proj" / ".env"
+        env.parent.mkdir()
+        env.write_text("".join(f"{line}\n" for line in lines))
+        return env
+
+    @staticmethod
+    def _oauth(seed: str) -> str:
+        return f"ANTHROPIC_API_KEY={fake_key('sk-ant-oat01-', seed)}"
+
+    @staticmethod
+    def _flat(result) -> str:  # noqa: ANN001 - click Result
+        return " ".join((result.stdout + result.stderr).split())
+
+    def test_oauth_only_file_passes_the_scan(self, tmp_path: Path) -> None:
+        env = self._env(tmp_path, self._oauth("p55g-exit"))
+
+        result = runner.invoke(app, ["scan", str(env)])
+
+        # Exit 1 means "you have leaks, go run lock". lock refuses this token,
+        # so 1 strands CI with no way to go green. Exactly 0, not merely "not
+        # 1": exit 2 means the scan itself broke or was incomplete.
+        assert result.exit_code == 0, self._flat(result)
+
+    def test_oauth_only_file_says_cant_protect_and_names_a_real_fix(self, tmp_path: Path) -> None:
+        env = self._env(tmp_path, self._oauth("p55g-verdict"))
+
+        result = runner.invoke(app, ["scan", str(env)])
+        out = self._flat(result)
+        low = out.lower()
+
+        # Not vacuous: scan really did see the token.
+        assert "anthropic_api_key" in low, out
+        # The false instruction: lock refuses this token by design, so
+        # "UNPROTECTED ... run worthless lock" cannot be followed.
+        assert "UNPROTECTED" not in out, out
+        assert "still exposed" not in low, out
+        assert "run `worthless lock`" not in low, out
+        assert "run worthless lock" not in low, out
+        # The positive spec: name the category, stay honest that the token is
+        # still sitting there, and name a fix that exists.
+        assert "can't protect" in low, out
+        assert "plain text" in low, out
+        assert "sk-ant-api03" in low, out
+        # Never "0 unprotected" next to a live plaintext token.
+        assert "0 unprotected" not in low, out
+
+    def test_sarif_keeps_a_protected_key_as_a_warning(self) -> None:
+        # Pre-existing behaviour, moved into _sarif_verdict by this PR: a key
+        # worthless protects is reported at "warning", never as a login token.
+        protected = ScanFinding(
+            file="/p/.env",
+            line=1,
+            var_name="OPENAI_API_KEY",
+            provider="openai",
+            is_protected=True,
+            value_preview="****",
+        )
+
+        [res] = format_sarif([protected], "0")["runs"][0]["results"]
+
+        assert res["level"] == "warning", res
+        assert res["ruleId"] == "worthless/exposed-api-key", res
+        assert "(protected by worthless)" in res["message"]["text"], res
+
+    def test_a_file_with_an_unprotectable_token_never_reads_as_clean(self) -> None:
+        findings = [
+            ScanFinding(
+                file="/p/.env",
+                line=1,
+                var_name="OPENAI_API_KEY",
+                provider="openai",
+                is_protected=True,
+                value_preview="****",
+            ),
+            ScanFinding(
+                file="/p/.env",
+                line=2,
+                var_name="ANTHROPIC_API_KEY",
+                provider="anthropic",
+                is_protected=False,
+                value_preview="****",
+                is_login_token=True,
+            ),
+        ]
+
+        low = " ".join(_format_human(findings, is_tty=False).split()).lower()
+
+        # Everything lock CAN act on is protected — but a live token is still
+        # in the file, so "a leaked .env is worthless" would be false comfort.
+        assert "worthless to an attacker" not in low, low
+        assert "1 of 2 keys protected" in low, low
+        assert "can't protect" in low, low
+
+    def test_json_agrees_with_the_text(self, tmp_path: Path) -> None:
+        env = self._env(tmp_path, self._oauth("p55g-json"))
+
+        result = runner.invoke(app, ["scan", str(env), "--json"])
+
+        assert result.exit_code == 0, self._flat(result)
+        data = json.loads(result.stdout)
+        # Additive field, so no bump (docs/install/agent-schema.md).
+        assert data["schema_version"] == 2
+        [finding] = data["findings"]
+        assert finding["is_protected"] is False
+        assert finding["is_unshardable"] is True, finding
+        assert "sk-ant-api03" in finding["remediation"], finding
+        assert finding["exposure"] == "local", finding
+
+    def test_sarif_is_a_note_under_its_own_rule(self, tmp_path: Path) -> None:
+        env = self._env(tmp_path, self._oauth("p55g-sarif"))
+
+        result = runner.invoke(app, ["scan", str(env), "--format", "sarif"])
+
+        assert result.exit_code == 0, self._flat(result)
+        run = json.loads(result.stdout)["runs"][0]
+        [res] = run["results"]
+        # GitHub code scanning reads the level, not the exit code: "error"
+        # keeps the gate red even when scan exits 0.
+        assert res["level"] == "note", res
+        assert res["ruleId"] == "worthless/unshardable-oauth-token", res
+        assert "sk-ant-api03" in res["message"]["text"], res
+        assert res["ruleId"] in {r["id"] for r in run["tool"]["driver"]["rules"]}
+
+    def test_quiet_still_says_why(self, tmp_path: Path) -> None:
+        env = self._env(tmp_path, self._oauth("p55g-quiet"))
+
+        result = runner.invoke(app, ["--quiet", "scan", str(env)])
+        low = self._flat(result).lower()
+
+        assert result.exit_code == 0, low
+        # --quiet hides chatter, not the one thing the user cannot learn any
+        # other way. Today it prints nothing at all.
+        assert "can't protect" in low, low
+        assert "sk-ant-api03" in low, low
+
+    def test_mixed_file_fails_only_for_the_key_lock_can_fix(self, tmp_path: Path) -> None:
+        env = self._env(tmp_path, self._oauth("p55g-mixed"), f"OPENAI_API_KEY={_fake_openai_key()}")
+
+        result = runner.invoke(app, ["scan", str(env)])
+        low = self._flat(result).lower()
+
+        # The OpenAI key IS fixable, so the build still fails — counted once.
+        assert result.exit_code == 1, low
+        assert "1 still exposed" in low, low
+        assert "1 can't protect" in low, low
+
+        sarif = runner.invoke(app, ["scan", str(env), "--format", "sarif"])
+        levels = sorted(r["level"] for r in json.loads(sarif.stdout)["runs"][0]["results"])
+        assert levels == ["error", "note"], levels
+
+        data = json.loads(runner.invoke(app, ["scan", str(env), "--json"]).stdout)
+        flags = sorted((f["var_name"], f["is_unshardable"]) for f in data["findings"])
+        assert flags == [("ANTHROPIC_API_KEY", True), ("OPENAI_API_KEY", False)], flags
+
+    def test_a_token_outside_the_env_family_still_fails(self, tmp_path: Path) -> None:
+        # The pass exists because lock can't fix a token in a .env file and
+        # failing forever there has no way out. In any other file a fix does
+        # exist — take it out of the file (and rotate it if it was committed) —
+        # so it fails like any other key. A refresh token in source is the worst
+        # case: long-lived, and in CI already in git history.
+        leak = tmp_path / "proj" / "settings.py"
+        leak.parent.mkdir()
+        leak.write_text(f'REFRESH = "{fake_key("sk-ant-ort01-", "p55g-source")}"\n')
+
+        result = runner.invoke(app, ["scan", str(leak)])
+        out = self._flat(result)
+
+        assert result.exit_code == 1, out
+        assert "UNPROTECTED" in out, out
+        assert "can't protect" not in out.lower(), out
+        sarif = json.loads(runner.invoke(app, ["scan", str(leak), "--format", "sarif"]).stdout)
+        assert [r["level"] for r in sarif["runs"][0]["results"]] == ["error"], sarif
+        # Still the p55g dead end if it says "run lock": lock refuses this
+        # token wherever it sits. The fix that exists is to revoke it.
+        assert "run `worthless lock`" not in out.lower(), out
+        assert "revoke" in out.lower(), out
+        # Says exactly why, not a list of guesses.
+        assert "isn't a .env file" in out.lower(), out
+
+    def test_a_token_in_a_committed_env_still_fails(self, tmp_path: Path) -> None:
+        # A .env in git is a leak, and in CI the scan is the backstop for
+        # people who never installed the hook. Main failed it; the pass must
+        # not cover it. The fix that exists: revoke it, take it out of git.
+        env = self._env(tmp_path, self._oauth("p55g-committed"))
+        _git_commit(env.parent, ".env")
+
+        result = runner.invoke(app, ["scan", str(env)])
+        low = self._flat(result).lower()
+
+        assert result.exit_code == 1, low
+        assert "revoke" in low, low
+        assert "run `worthless lock`" not in low, low
+        # The exact problem, in plain words — not "it can leave the machine".
+        assert "this .env file is committed to git" in low, low
+        assert f"git rm --cached {str(env).lower()}" in low, low
+        data = json.loads(runner.invoke(app, ["scan", str(env), "--json"]).stdout)
+        [finding] = data["findings"]
+        assert finding["is_unshardable"] is False, data
+        assert finding["exposure"] == "committed", data
+        assert "committed to git" in finding["remediation"].lower(), data
+        sarif = json.loads(runner.invoke(app, ["scan", str(env), "--format", "sarif"]).stdout)
+        [res] = sarif["runs"][0]["results"]
+        assert res["level"] == "error", res
+        assert "committed to git" in res["message"]["text"].lower(), res
+
+    def test_a_staged_env_is_not_called_committed(self, tmp_path: Path) -> None:
+        # `git add` alone puts the file in git's index, not in its history.
+        # Saying "already in your git history" would be false, and this is
+        # exactly what the pre-commit-framework hook sees.
+        env = self._env(tmp_path, self._oauth("p55g-staged"))
+        subprocess.run(["git", "init", "-q", str(env.parent)], check=True)  # noqa: S607
+        subprocess.run(["git", "-C", str(env.parent), "add", ".env"], check=True)  # noqa: S607
+
+        result = runner.invoke(app, ["scan", str(env)])
+        low = self._flat(result).lower()
+
+        assert result.exit_code == 1, low
+        assert "staged in git but not committed yet" in low, low
+        assert "already in your git history" not in low, low
+        assert "committed to git" not in low, low
+        data = json.loads(runner.invoke(app, ["scan", str(env), "--json"]).stdout)
+        assert data["findings"][0]["exposure"] == "staged", data
+
+    def test_untracking_a_committed_env_without_committing_still_fails(
+        self, tmp_path: Path
+    ) -> None:
+        # `git rm --cached` takes the file out of git's index, so git calls it
+        # untracked — but until that is committed, the token is still in the
+        # latest commit. Doing half of the committed advice must not go green.
+        env = self._env(tmp_path, self._oauth("p55g-untracked-in-head"))
+        _git_commit(env.parent, ".env")
+        subprocess.run(
+            ["git", "-C", str(env.parent), "rm", "-q", "--cached", ".env"],  # noqa: S607
+            check=True,
+        )
+
+        result = runner.invoke(app, ["scan", str(env)])
+        low = self._flat(result).lower()
+
+        assert result.exit_code == 1, low
+        assert "this .env file is committed to git" in low, low
+        sarif = json.loads(runner.invoke(app, ["scan", str(env), "--format", "sarif"]).stdout)
+        [res] = sarif["runs"][0]["results"]
+        assert res["level"] == "error", res
+
+    def test_a_mixed_committed_env_headline_doesnt_send_the_token_to_lock(
+        self, tmp_path: Path
+    ) -> None:
+        # The OpenAI key is fixable by lock; the login token is not. The
+        # headline must not lump the token in with "Run `worthless lock`".
+        env = self._env(
+            tmp_path, self._oauth("p55g-mixed-committed"), f"OPENAI_API_KEY={_fake_openai_key()}"
+        )
+        _git_commit(env.parent, ".env")
+
+        result = runner.invoke(app, ["scan", str(env)])
+        headline = (result.stdout + result.stderr).splitlines()[0].lower()
+
+        assert result.exit_code == 1, headline
+        assert "login token" in headline, headline
+        assert "see below" in headline, headline
+
+    def test_tokens_in_one_file_get_one_explanation(self, tmp_path: Path) -> None:
+        # Two tokens, same file, same reason: one paragraph, not two. A token
+        # with no variable name is labelled by its line, not the provider name.
+        cfg = tmp_path / "proj" / "config.yaml"
+        cfg.parent.mkdir()
+        cfg.write_text(
+            f"a: {fake_key('sk-ant-oat01-', 'p55g-one')}\n"
+            f"b: {fake_key('sk-ant-oat01-', 'p55g-two')}\n"
+        )
+
+        result = runner.invoke(app, ["scan", str(cfg)])
+        low = self._flat(result).lower()
+
+        assert result.exit_code == 1, low
+        assert low.count("isn't a .env file") == 1, low
+        assert "line 1" in low, low
+        assert "line 2" in low, low
+
+    def test_git_is_asked_in_english(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The "not a git repository" check reads git's English message; a
+        # translated git (e.g. LANG=de_DE) would otherwise fail a plain .env.
+        env = self._env(tmp_path, self._oauth("p55g-lang"))
+        envs: list[dict] = []
+
+        def fake_git(cmd, **kwargs):  # noqa: ANN001, ANN202
+            envs.append(kwargs.get("env") or {})
+            return subprocess.CompletedProcess(cmd, 128, b"", b"fatal: not a git repository")
+
+        monkeypatch.setenv("LC_ALL", "de_DE.UTF-8")
+        monkeypatch.setattr(scanner_mod.subprocess, "run", fake_git)
+        monkeypatch.setattr(scanner_mod, "_has_git_above", lambda _path: False)
+
+        [finding] = scan_files([env])
+
+        assert finding.is_unshardable is True
+        assert envs, envs
+        assert all(e.get("LC_ALL") == "C" for e in envs), envs
+
+    def test_the_cli_says_when_git_couldnt_answer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        env = self._env(tmp_path, self._oauth("p55g-unknown-cli"))
+
+        def refusing_git(cmd, **_kwargs):  # noqa: ANN001, ANN202
+            return subprocess.CompletedProcess(cmd, 128, b"", b"fatal: detected dubious ownership")
+
+        monkeypatch.setattr(scanner_mod.subprocess, "run", refusing_git)
+
+        result = runner.invoke(app, ["scan", str(env)])
+        low = self._flat(result).lower()
+
+        assert result.exit_code == 1, low
+        assert "couldn't ask git" in low, low
+        assert "committed to git" not in low, low
+
+    def test_an_inherited_git_dir_cannot_fool_the_check(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Git sets GIT_DIR for hooks run in a linked worktree. Inherited, it
+        # makes `git -C proj ls-files` ask some OTHER repo, which answers "not
+        # tracked" for a .env this repo has committed — and the token passes.
+        env = self._env(tmp_path, self._oauth("p55g-git-dir"))
+        subprocess.run(["git", "init", "-q", str(env.parent)], check=True)  # noqa: S607
+        subprocess.run(["git", "-C", str(env.parent), "add", ".env"], check=True)  # noqa: S607
+        other = tmp_path / "other"
+        subprocess.run(["git", "init", "-q", str(other)], check=True)  # noqa: S607
+        monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+
+        [finding] = scan_files([env])
+
+        assert finding.is_unshardable is False
+
+    def test_a_token_in_the_environment_is_not_told_to_revoke(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # --deep scans the environment through a temp dump file. A CI secret
+        # held there is where it belongs, not leaked: "revoke it" would kill a
+        # working token and the next run would be red again. It still fails, as
+        # every environment key does under --deep (worthless-07st), but the
+        # advice must fit — and never say lock.
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", fake_key("sk-ant-oat01-", "p55g-env"))
+
+        result = runner.invoke(app, ["scan", "--deep", "--json"])
+
+        assert result.exit_code == 1, result.stdout  # still fails, as on main
+        findings = [
+            f
+            for f in json.loads(result.stdout)["findings"]
+            if f["var_name"] == "CLAUDE_CODE_OAUTH_TOKEN"
+        ]
+        assert len(findings) == 1, findings
+        assert findings[0]["is_unshardable"] is False, findings
+        assert findings[0]["exposure"] == "environment", findings
+        remedy = findings[0]["remediation"].lower()
+        assert "environment" in remedy, findings
+        assert "revoke" not in remedy, findings
+        assert "worthless lock" not in remedy, findings
+
+    def test_a_token_in_a_committed_template_still_fails(self, tmp_path: Path) -> None:
+        # .env.example and friends are templates meant to be committed, so they
+        # are not in lock's .env family: a real token there is exposed.
+        example = tmp_path / "proj" / ".env.example"
+        example.parent.mkdir()
+        example.write_text(f"{self._oauth('p55g-example')}\n")
+
+        result = runner.invoke(app, ["scan", str(example)])
+
+        assert result.exit_code == 1, self._flat(result)
+        assert "revoke" in self._flat(result).lower(), self._flat(result)
+        assert "isn't a .env file" in self._flat(result).lower(), self._flat(result)
+
+    @pytest.mark.parametrize("git_answer", ["no-git", "timeout", "dubious-ownership"])
+    def test_an_unknown_git_answer_fails_closed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, git_answer: str
+    ) -> None:
+        # The pass needs git to say "not tracked". If git can't answer — not
+        # installed, hung, or refusing a checkout it doesn't own (common in CI
+        # containers) — the token must not pass because the check couldn't run.
+        env = self._env(tmp_path, self._oauth(f"p55g-{git_answer}"))
+
+        def fake_git(cmd, **_kwargs):  # noqa: ANN001, ANN202
+            if git_answer == "no-git":
+                raise FileNotFoundError("git")
+            if git_answer == "timeout":
+                raise subprocess.TimeoutExpired(cmd, 10)
+            return subprocess.CompletedProcess(
+                cmd, 128, b"", b"fatal: detected dubious ownership in repository at '/x'"
+            )
+
+        monkeypatch.setattr(scanner_mod.subprocess, "run", fake_git)
+
+        [finding] = scan_files([env])
+
+        assert finding.is_login_token is True
+        assert finding.is_unshardable is False
+        # Honest about why: it didn't see the file in git, it couldn't ask.
+        remedy = scanner_mod.remediation_for(finding) or ""
+        assert "couldn't ask git" in remedy, remedy
+        assert "is in git" not in remedy, remedy
+
+    def test_a_timeout_on_the_commit_check_says_git_couldnt_answer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # It fails closed either way, but the reason must be the real one: git
+        # didn't answer, not "it is in your latest commit".
+        env = self._env(tmp_path, self._oauth("p55g-head-timeout"))
+
+        def fake_git(cmd, **_kwargs):  # noqa: ANN001, ANN202
+            if "rev-parse" in cmd:
+                raise subprocess.TimeoutExpired(cmd, 10)
+            return subprocess.CompletedProcess(cmd, 1, b"", b"error: pathspec '.env' did not match")
+
+        monkeypatch.setattr(scanner_mod.subprocess, "run", fake_git)
+
+        [finding] = scan_files([env])
+
+        assert finding.exposure == "git_unknown", finding
+
+    def test_a_broken_repo_is_not_mistaken_for_no_repo(self, tmp_path: Path) -> None:
+        # A committed .env in a repo git can no longer open (HEAD lost to a
+        # sync conflict, a moved worktree) makes git say "not a git repository".
+        # The .git is still there, so that is git failing, not "not in git":
+        # the committed token must not go green.
+        env = self._env(tmp_path, self._oauth("p55g-broken-repo"))
+        _git_commit(env.parent, ".env")
+        (env.parent / ".git" / "HEAD").rename(env.parent / ".git" / "HEAD 2")
+
+        result = runner.invoke(app, ["scan", str(env)])
+
+        assert result.exit_code == 1, self._flat(result)
+        data = json.loads(runner.invoke(app, ["scan", str(env), "--json"]).stdout)
+        assert data["findings"][0]["exposure"] == "git_unknown", data
+
+    def test_scanning_a_folder_never_runs_its_git_fsmonitor(self, tmp_path: Path) -> None:
+        # A folder's own .git/config can name a command for git to run
+        # (core.fsmonitor), e.g. in an extracted tarball. Scanning it must not
+        # run that command: plain scan ran no git at all before this change.
+        env = self._env(tmp_path, self._oauth("p55g-fsmonitor"))
+        subprocess.run(["git", "init", "-q", str(env.parent)], check=True)  # noqa: S607
+        marker = tmp_path / "fsmonitor-ran"
+        hook = tmp_path / "fsmonitor.sh"
+        hook.write_text(f"#!/bin/sh\ntouch '{marker}'\nexit 1\n")
+        hook.chmod(0o755)
+        subprocess.run(
+            ["git", "-C", str(env.parent), "config", "core.fsmonitor", str(hook)],  # noqa: S607
+            check=True,
+        )
+
+        scan_files([env])
+
+        assert not marker.exists()
+
+    def test_a_symlinked_folder_cannot_hide_a_broken_repo(self, tmp_path: Path) -> None:
+        # git follows a symlinked folder to the real repo; the .git check must
+        # follow it too, or a committed token in a repo git can't open passes
+        # when it is scanned through the link.
+        repo = tmp_path / "repo"
+        env = repo / "app" / ".env"
+        env.parent.mkdir(parents=True)
+        env.write_text(f"{self._oauth('p55g-linked-dir')}\n")
+        _git_commit(repo, "app/.env")
+        (repo / ".git" / "HEAD").rename(repo / ".git" / "HEAD 2")
+        link = tmp_path / "elsewhere" / "link"
+        link.parent.mkdir()
+        link.symlink_to(env.parent, target_is_directory=True)
+
+        [finding] = scan_files([link / ".env"])
+
+        assert finding.exposure == "git_unknown", finding
+
+    def test_scan_never_fetches_from_a_partial_clones_remote(self, tmp_path: Path) -> None:
+        # In a partial clone, asking about HEAD can make git fetch the missing
+        # objects, and a fetch runs what the folder's config names (e.g.
+        # core.sshCommand). Scan must never fetch, on old git too.
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / ".env").write_text(f"{self._oauth('p55g-partial-src')}\n")
+        _git_commit(src, ".env")
+        subprocess.run(
+            ["git", "-C", str(src), "config", "uploadpack.allowFilter", "true"],  # noqa: S607
+            check=True,
+        )
+        clone = tmp_path / "clone"
+        subprocess.run(
+            ["git", "clone", "-q", "--no-checkout", "--filter=tree:0", f"file://{src}", str(clone)],  # noqa: S607
+            check=True,
+        )
+        env = clone / ".env"
+        env.write_text(f"{self._oauth('p55g-partial')}\n")
+
+        scan_files([env])
+
+        no_fetch = {**os.environ, "GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": ""}
+        tree = subprocess.run(
+            ["git", "-C", str(clone), "cat-file", "-e", "HEAD^{tree}"],  # noqa: S607
+            env=no_fetch,
+            capture_output=True,
+            check=False,
+        )
+        assert tree.returncode != 0, "scan fetched HEAD's tree from the clone's remote"
+
+    def test_a_gitignored_env_in_a_repo_passes(self, tmp_path: Path) -> None:
+        # The everyday local setup: a project repo whose .env is gitignored.
+        env = self._env(tmp_path, self._oauth("p55g-gitignored"))
+        subprocess.run(["git", "init", "-q", str(env.parent)], check=True)  # noqa: S607
+        (env.parent / ".gitignore").write_text(".env\n")
+
+        [finding] = scan_files([env])
+
+        assert finding.is_unshardable is True
+
+    @pytest.mark.parametrize(
+        ("returncode", "stderr"),
+        [(1, b"error: pathspec '.env' did not match"), (128, b"fatal: not a git repository")],
+        ids=["untracked-in-repo", "not-a-repo"],
+    )
+    def test_a_clear_untracked_answer_lets_the_token_pass(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        returncode: int,
+        stderr: bytes,
+    ) -> None:
+        # Only these two answers mean "not in git". Pinned with a simulated git,
+        # so the test doesn't depend on whether TMPDIR sits inside a repo.
+        env = self._env(tmp_path, self._oauth(f"p55g-clear-{returncode}"))
+
+        def fake_git(cmd, **_kwargs):  # noqa: ANN001, ANN202
+            return subprocess.CompletedProcess(cmd, returncode, b"", stderr)
+
+        monkeypatch.setattr(scanner_mod.subprocess, "run", fake_git)
+        monkeypatch.setattr(scanner_mod, "_has_git_above", lambda _path: False)
+
+        [finding] = scan_files([env])
+
+        assert finding.is_unshardable is True
+
+    def test_git_is_asked_once_per_file_not_once_per_token(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The pre-commit hook runs under a time budget; one git call per token
+        # (each with its own timeout) could blow it on a .env full of tokens.
+        env = self._env(tmp_path, *(self._oauth(f"p55g-many-{i}") for i in range(3)))
+        calls: list[Path] = []
+
+        def counting(path: Path) -> str:
+            calls.append(path)
+            return "no_repo"
+
+        monkeypatch.setattr(scanner_mod, "_git_state", counting)
+
+        findings = scan_files([env])
+
+        assert len(findings) == 3
+        assert all(f.is_unshardable for f in findings)
+        assert len(calls) == 1, calls
+
+    def test_a_symlinked_env_still_fails(self, tmp_path: Path) -> None:
+        # Lock refuses symlinks outright, so "a .env file lock manages" is false
+        # for a .env that points at some other (possibly committed) file.
+        target = tmp_path / "proj" / "prod.secrets"
+        target.parent.mkdir()
+        target.write_text(f"{self._oauth('p55g-symlink')}\n")
+        link = tmp_path / "proj" / ".env"
+        link.symlink_to(target)
+
+        result = runner.invoke(app, ["scan", str(link)])
+
+        assert result.exit_code == 1, self._flat(result)
+        assert "can't protect" not in self._flat(result).lower(), self._flat(result)
+        assert "this .env file is a symlink" in self._flat(result).lower(), self._flat(result)
+
+    def test_a_login_token_is_never_counted_as_protected(self, tmp_path: Path) -> None:
+        # Protection is looked up by variable name and file. If ANTHROPIC_API_KEY
+        # was locked earlier and a login token was then pasted over it, the name
+        # still matches. But lock never shards these tokens, so this value cannot
+        # be a worthless shard — calling it protected printed the all-clear.
+        env = self._env(tmp_path, self._oauth("p55g-overwrite"))
+
+        [finding] = scan_files(
+            [env], enrolled_locations={("ANTHROPIC_API_KEY", str(env.resolve()))}
+        )
+
+        assert finding.is_protected is False
+        assert finding.is_unshardable is True
+        low = " ".join(_format_human([finding], is_tty=False).split()).lower()
+        assert "worthless to an attacker" not in low, low
+
+    def test_quiet_never_points_at_the_wrong_key(self, tmp_path: Path) -> None:
+        # Mixed file under --quiet: the build fails because of the OpenAI key.
+        # Printing only the token's note would send a CI reader to delete the
+        # wrong line and stay red. Quiet stays silent on a failing scan, as it
+        # always has.
+        env = self._env(
+            tmp_path, self._oauth("p55g-quiet-mixed"), f"OPENAI_API_KEY={_fake_openai_key()}"
+        )
+
+        result = runner.invoke(app, ["--quiet", "scan", str(env)])
+
+        assert result.exit_code == 1, self._flat(result)
+        assert "can't protect" not in self._flat(result).lower(), self._flat(result)
+
+    def test_following_scans_advice_ends_in_a_green_build(
+        self, tmp_path: Path, home_dir: WorthlessHome
+    ) -> None:
+        """The loop itself: scan says run lock, lock runs, scan goes green.
+
+        Before the fix the last step failed forever: lock protected the OpenAI
+        key and skipped the token, and scan still failed the build over it.
+        """
+        env = self._env(
+            tmp_path, self._oauth("p55g-journey"), f"OPENAI_API_KEY={_fake_openai_key()}"
+        )
+        home = {"WORTHLESS_HOME": str(home_dir.base_dir)}
+
+        before = runner.invoke(app, ["scan", str(env)], env=home)
+        assert before.exit_code == 1, self._flat(before)
+        assert "run `worthless lock`" in self._flat(before).lower()
+
+        locked = runner.invoke(app, ["lock", "--env", str(env)], env=home)
+        assert locked.exit_code == 0, locked.output
+
+        after = runner.invoke(app, ["scan", str(env)], env=home)
+        low = self._flat(after).lower()
+        assert after.exit_code == 0, low
+        # Green, but not falsely clean: the token is still named.
+        assert "can't protect" in low, low
+        assert "worthless to an attacker" not in low, low

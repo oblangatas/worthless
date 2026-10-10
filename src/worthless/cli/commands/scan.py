@@ -24,7 +24,7 @@ from worthless.cli.safe_rewrite import _BASENAME_ALLOWLIST
 from worthless.cli.code_scanner import CodeFinding, scan_for_hardcoded_provider_urls
 from worthless.cli.console import get_console
 from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary
-from worthless.cli.key_patterns import KEY_PATTERN
+from worthless.cli.key_patterns import KEY_PATTERN, UNSHARDABLE_REMEDY
 from worthless.cli.platform import is_wsl
 from worthless.cli.redaction import key_fingerprint
 from worthless.cli.dotenv_rewriter import build_enrolled_locations
@@ -35,7 +35,9 @@ from worthless.cli.scanner import (
     HardcodedUrlFinding,
     ScanFinding,
     SkippedFile,
+    finding_to_dict,
     format_sarif,
+    remedy_for_exposure,
     scan_files,
 )
 from worthless.cli.confusables import (
@@ -236,10 +238,87 @@ def _exposure_noun(files: Sequence[str]) -> tuple[str, str]:
     return f"{len(names)} files", " Move them to a .env file, then run `worthless lock`."
 
 
-def _summary_line(total: int, protected: int, unprotected: int, broken: int) -> str:
-    """Trailing count line; the broken segment only appears when there are orphans."""
+def _summary_line(
+    total: int, protected: int, unprotected: int, broken: int, unshardable: int = 0
+) -> str:
+    """Trailing count line; the broken and can't-protect segments only appear when non-zero.
+
+    ``unprotected`` counts every key that isn't protected; ``unshardable`` is
+    the subset lock can't fix — never "0 unprotected" beside a live token.
+    """
     line = f"Found {total} keys: {protected} protected, {unprotected} unprotected"
+    if unshardable:
+        line += f" ({unshardable} can't protect)"
     return f"{line}, {broken} broken" if broken else line
+
+
+def _is_exposed(f: ScanFinding) -> bool:
+    """Not protected, AND something `lock` can fix (worthless-p55g).
+
+    A Claude Code OAuth token is neither: lock refuses it by design, so it must
+    not fail the build or be called exposed-run-lock.
+    """
+    return not f.is_protected and not f.is_unshardable
+
+
+def _status_label(f: ScanFinding) -> str:
+    if f.is_protected:
+        return "PROTECTED"
+    return "CAN'T PROTECT" if f.is_unshardable else "UNPROTECTED"
+
+
+def _unshardable_lines(findings: Sequence[ScanFinding], committing: bool = False) -> list[str]:
+    """worthless-p55g: name the keys lock refuses, say why, and give the one fix
+    that exists. Never "run worthless lock" here — that is the dead end the user
+    was stuck in. Also printed under --quiet: it is the one thing they can't
+    learn any other way.
+
+    ``committing``: the pre-commit hook still blocks on these (see scan), so it
+    says why the commit stopped and how to get unblocked.
+    """
+    names = [
+        sanitise_for_message(f.var_name or f.provider)
+        for f in findings
+        if f.is_unshardable and not f.is_protected
+    ]
+    if not names:
+        return []
+    s = "s" if len(names) != 1 else ""
+    lines = [
+        f"Can't protect {len(names)} key{s}: {', '.join(names)} (Claude Code login token{s}).",
+        "`worthless lock` skips this kind of token on purpose: splitting it breaks "
+        "the marker Claude Code looks for.",
+        f"Still in plain text. {UNSHARDABLE_REMEDY}",
+    ]
+    if committing:
+        lines.append(
+            "Commit blocked: a live login token is staged. Unstage it, or remove the token."
+        )
+    return lines
+
+
+def _leaked_token_lines(findings: Sequence[ScanFinding]) -> list[str]:
+    """A login token outside an untracked .env file: in git, a non-.env file, a
+    symlink, or the environment. It fails the build. The fix depends on where
+    it sits (revoke a leaked one; scope a CI secret) — never "run worthless
+    lock", which refuses it wherever it sits.
+    """
+    tokens = [f for f in findings if f.is_login_token and _is_exposed(f)]
+    if not tokens:
+        return []
+    # One paragraph per (file, reason): the exact reason, never a list of
+    # guesses — committed, staged, git couldn't answer, symlink, not a .env,
+    # or the environment.
+    groups: dict[tuple[str, str], list[str]] = {}
+    for f in tokens:
+        where = "the environment" if f.exposure == "environment" else sanitise_for_message(f.file)
+        label = sanitise_for_message(f.var_name) if f.var_name else f"line {f.line}"
+        groups.setdefault((where, remedy_for_exposure(f.exposure, f.file)), []).append(label)
+    lines = ["`worthless lock` can't fix these login tokens (it refuses them):"]
+    for (where, remedy), labels in groups.items():
+        s = "s" if len(labels) != 1 else ""
+        lines += [f"Exposed login token{s} in {where}: {', '.join(labels)}.", remedy]
+    return lines
 
 
 def _orphan_lines(orphans: Sequence[EnrollmentRecord]) -> list[str]:
@@ -262,7 +341,11 @@ def _has_lockable_exposure(findings: Sequence[ScanFinding]) -> bool:
     lock rewrites in place and refuses any basename outside the .env family, so
     "Run: worthless lock" is only followable advice when one of these exists.
     """
-    return any(Path(f.file).name in _BASENAME_ALLOWLIST for f in findings if not f.is_protected)
+    return any(
+        Path(f.file).name in _BASENAME_ALLOWLIST
+        for f in findings
+        if _is_exposed(f) and not f.is_login_token
+    )
 
 
 def _scan_verdict_line(
@@ -271,10 +354,21 @@ def _scan_verdict_line(
     total: int,
     broken: int,
     files: Sequence[str] = (),
+    unshardable: int = 0,
+    tokens: int = 0,
 ) -> str:
-    """WOR-779: the one-line verdict scan leads with (verdict-first)."""
+    """WOR-779: the one-line verdict scan leads with (verdict-first).
+
+    ``tokens``: how many exposed keys are login tokens. lock refuses those, so
+    "run worthless lock" must never read as covering them (the p55g dead end):
+    the fix for them is spelled out below.
+    """
     if unprotected > 0:
         where, remedy = _exposure_noun(files)
+        if tokens == unprotected:
+            remedy = " See below."
+        elif tokens:
+            remedy += " Login tokens: see below."
         location = f" in {where}" if where else ""
         return (
             f"{protected} of {total} keys protected — "
@@ -285,7 +379,41 @@ def _scan_verdict_line(
             f"{protected} of {total} keys are protected — "
             f"but {broken} can't be restored (see below)."
         )
+    if unshardable:
+        # Never the all-clear below: the token is still live in the file.
+        return (
+            f"{protected} of {total} keys protected — "
+            f"{unshardable} can't be protected by worthless (see below)."
+        )
     return f"All {total} keys are protected — a leaked .env is worthless to an attacker."
+
+
+def _finding_preview(f: ScanFinding, show_suffix: bool, file_cache: dict[str, str]) -> str:
+    """The masked value, plus a non-secret fingerprint under --show-suffix."""
+    if not show_suffix or f.is_protected:
+        return f.value_preview
+    try:
+        if f.file not in file_cache:
+            file_cache[f.file] = Path(f.file).read_text(errors="replace")
+        text = file_cache[f.file]
+        # SR-04 (WOR-655): --show-suffix used to append the real last
+        # 4 chars of the key. Instead, locate the key on the finding's
+        # own 1-indexed line and append a NON-secret sha256[:8]
+        # fingerprint, so a human can still tell two keys apart:
+        # "**** (3f9a2b1c)".
+        lines_text = text.splitlines()
+        if 1 <= f.line <= len(lines_text):
+            line_text = lines_text[f.line - 1]
+            # Fingerprint THIS finding's key: start at its recorded
+            # column so a second key on the same line gets its own
+            # fingerprint, not the line's first match. Fall back to the
+            # first match if column is unknown (e.g. legacy findings).
+            match = KEY_PATTERN.search(line_text, f.column if f.column is not None else 0)
+            if match:
+                return f"{f.value_preview} ({key_fingerprint(match.group(0))})"
+    except Exception:  # noqa: S110 — best-effort preview; display failure is non-critical  # nosec B110
+        pass
+    return f.value_preview
 
 
 def _format_human(
@@ -293,70 +421,55 @@ def _format_human(
     orphans: list[EnrollmentRecord] | None = None,
     show_suffix: bool = False,
     is_tty: bool = True,
+    committing: bool = False,
 ) -> str:
     """Format findings as human-readable text. HF5: ``orphans`` (broken DB
     rows whose ``.env`` line was deleted) get a dedicated ``Can't be
     restored:`` section + a ``, N broken`` segment in the trailing total.
+    ``committing``: running as the pre-commit hook (see _unshardable_lines).
     """
     orphans = orphans or []
     if not findings and not orphans:
         return "No API keys found.\n"
 
     lines: list[str] = []
-    unprotected_count = 0
-    protected_count = 0
     file_cache: dict[str, str] = {}
 
     for f in findings:
-        status = "PROTECTED" if f.is_protected else "UNPROTECTED"
-        preview = f.value_preview
-        if show_suffix and not f.is_protected:
-            try:
-                if f.file not in file_cache:
-                    file_cache[f.file] = Path(f.file).read_text(errors="replace")
-                text = file_cache[f.file]
-                # SR-04 (WOR-655): --show-suffix used to append the real last
-                # 4 chars of the key. Instead, locate the key on the finding's
-                # own 1-indexed line and append a NON-secret sha256[:8]
-                # fingerprint, so a human can still tell two keys apart:
-                # "**** (3f9a2b1c)".
-                lines_text = text.splitlines()
-                if 1 <= f.line <= len(lines_text):
-                    line_text = lines_text[f.line - 1]
-                    # Fingerprint THIS finding's key: start at its recorded
-                    # column so a second key on the same line gets its own
-                    # fingerprint, not the line's first match. Fall back to the
-                    # first match if column is unknown (e.g. legacy findings).
-                    match = KEY_PATTERN.search(line_text, f.column if f.column is not None else 0)
-                    if match:
-                        preview = f"{f.value_preview} ({key_fingerprint(match.group(0))})"
-            except Exception:  # noqa: S110 — best-effort preview; display failure is non-critical  # nosec B110
-                pass
-
+        preview = _finding_preview(f, show_suffix, file_cache)
         var_part = f" ({f.var_name})" if f.var_name else ""
         safe_file = sanitise_for_message(f.file)
-        lines.append(f"  {safe_file}:{f.line}  {f.provider}{var_part}  {status}  {preview}")
+        lines.append(
+            f"  {safe_file}:{f.line}  {f.provider}{var_part}  {_status_label(f)}  {preview}"
+        )
 
-        if f.is_protected:
-            protected_count += 1
-        else:
-            unprotected_count += 1
+    total = len(findings)
+    protected_count = sum(1 for f in findings if f.is_protected)
+    exposed = [f for f in findings if _is_exposed(f)]  # what fails the build
+    unshardable_count = total - protected_count - len(exposed)
 
     lines.extend(_orphan_lines(orphans))
 
-    total = len(findings)
     lines.append("")
-    lines.append(_summary_line(total, protected_count, unprotected_count, len(orphans)))
+    lines.append(
+        _summary_line(
+            total, protected_count, total - protected_count, len(orphans), unshardable_count
+        )
+    )
 
     # Only point at lock when lock can actually act: its basename allowlist
     # refuses anything outside the .env family, so this line is unfollowable
     # for a key in app.py. The verdict line above already carries the
     # move-it-first remedy in that case.
-    if unprotected_count > 0 and _has_lockable_exposure(findings):
+    if exposed and _has_lockable_exposure(findings):
         if is_tty:
             lines.append("Run: worthless lock")
         else:
             lines.append("See: docs.worthless.dev/ci-setup")
+
+    for block in (_unshardable_lines(findings, committing), _leaked_token_lines(findings)):
+        if block:
+            lines += ["", *block]
 
     # WOR-779: lead with a plain verdict ("am I safe?") before the per-finding
     # detail. scan is the only surface that sees plaintext-in-.env, so the
@@ -366,10 +479,12 @@ def _format_human(
         0,
         _scan_verdict_line(
             protected_count,
-            unprotected_count,
+            len(exposed),
             total,
             len(orphans),
-            files=[f.file for f in findings if not f.is_protected],
+            files=[f.file for f in exposed],
+            unshardable=unshardable_count,
+            tokens=sum(1 for f in exposed if f.is_login_token),
         ),
     )
 
@@ -383,18 +498,7 @@ def _format_json_findings(findings: list[ScanFinding], orphans: list | None = No
     findings need to switch from ``for f in result`` to
     ``for f in result["findings"]`` — documented in SKILL.md.
     """
-    items = []
-    for f in findings:
-        items.append(
-            {
-                "file": f.file,
-                "line": f.line,
-                "var_name": f.var_name,
-                "provider": f.provider,
-                "is_protected": f.is_protected,
-                "value_preview": f.value_preview,
-            }
-        )
+    items = [finding_to_dict(f) for f in findings]
     orphan_items = [
         {
             "alias": o.key_alias,
@@ -903,6 +1007,7 @@ def register_scan_commands(app: typer.Typer) -> None:
                 enrolled_locations=enrolled,
                 deadline=deadline,
                 skipped=skipped,
+                env_dump=tmp_file,
             )
 
             # Staged content was materialised under a temp root; report the
@@ -916,8 +1021,13 @@ def register_scan_commands(app: typer.Typer) -> None:
                     for f in findings
                 ]
 
-            # Count unprotected
-            unprotected = [f for f in findings if not f.is_protected]
+            # Count what fails the build: unprotected keys lock can fix. A key
+            # lock refuses (worthless-p55g) is reported, not failed on — except
+            # by the pre-commit hook: a commit writes it into history for good,
+            # and "don't commit it" is a fix that exists.
+            unprotected = [
+                f for f in findings if not f.is_protected and (pre_commit or _is_exposed(f))
+            ]
 
             # Run --code scan if requested (worthless-7sl9). Always
             # warn-only — never modifies exit code. Independent of the
@@ -975,7 +1085,11 @@ def register_scan_commands(app: typer.Typer) -> None:
                 # Human-readable to stderr
                 is_tty = hasattr(sys.stderr, "isatty") and sys.stderr.isatty()
                 text = _format_human(
-                    findings, orphans=orphans, show_suffix=show_suffix, is_tty=is_tty
+                    findings,
+                    orphans=orphans,
+                    show_suffix=show_suffix,
+                    is_tty=is_tty,
+                    committing=pre_commit,
                 )
                 if not console.quiet:
                     sys.stderr.write(text)
@@ -985,6 +1099,15 @@ def register_scan_commands(app: typer.Typer) -> None:
                             sys.stderr.write(_format_ai_prompt_block(code_findings))
                     if skipped:
                         sys.stderr.write(_format_skipped_human(skipped))
+                    sys.stderr.flush()
+                elif not any(_is_exposed(f) for f in findings):
+                    # worthless-p55g: --quiet hides chatter, not the one fact
+                    # the user can't learn any other way. Only when the token is
+                    # the whole story: if a fixable key also failed, the note
+                    # alone would send the reader to delete the wrong line.
+                    sys.stderr.write(
+                        "".join(f"{line}\n" for line in _unshardable_lines(findings, pre_commit))
+                    )
                     sys.stderr.flush()
 
             # Exit code:

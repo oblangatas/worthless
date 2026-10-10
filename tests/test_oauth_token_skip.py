@@ -23,6 +23,7 @@ from typer.testing import CliRunner
 
 from worthless.cli.app import app
 from worthless.cli.bootstrap import WorthlessHome
+from worthless.cli.commands import lock as lock_mod
 from worthless.cli.key_patterns import KEY_PATTERN, is_oauth_token
 
 from tests.conftest import make_repo as _repo
@@ -118,6 +119,18 @@ def _flat(output: str) -> str:
     return " ".join(output.split())
 
 
+# The SHAPE of a false "the rest is fine" claim, not one sentence that carried
+# it — a reworded relapse ("the rest of your keys locked fine") is the same lie.
+_FALSE_SAFETY_CLAIMS = (
+    r"\b(other|remaining|rest of (?:your|the))\b[^.]*\block",
+    r"\block(?:ed)?\s+(?:normally|fine|as usual|successfully|without issue)\b",
+    # The house register for this comfort is "Your other keys are safe."
+    # (_remediation.py:25,51; uninstall.py:660) — no "lock" word at all,
+    # so the patterns above would miss a relapse phrased that way.
+    r"\b(?:other|remaining|rest of (?:your|the))\b[^.]*\b(?:safe|protected|secure)\b",
+)
+
+
 class TestOAuthSkipSuppressesProtectionVerdict:
     """worthless-7jn2: a skipped OAuth token is still a live secret in the file.
 
@@ -211,18 +224,9 @@ class TestOAuthSkipSuppressesProtectionVerdict:
         # Not vacuous: the skip really was reported.
         assert "oauth" in low, f"lock must report the skip; output:\n{result.output}"
 
-        # Match the SHAPE of the false claim, not the one sentence that carried
-        # it — a reworded relapse ("the rest of your keys locked fine") is the
-        # same lie. Nothing was locked here, so any claim that some *other* key
-        # was, or that locking went fine, is false however it is phrased.
-        for pattern in (
-            r"\b(other|remaining|rest of (?:your|the))\b[^.]*\block",
-            r"\block(?:ed)?\s+(?:normally|fine|as usual|successfully|without issue)\b",
-            # The house register for this comfort is "Your other keys are safe."
-            # (_remediation.py:25,51; uninstall.py:660) — no "lock" word at all,
-            # so the patterns above would miss a relapse phrased that way.
-            r"\b(?:other|remaining|rest of (?:your|the))\b[^.]*\b(?:safe|protected|secure)\b",
-        ):
+        # Nothing was locked here, so any claim that some *other* key was, or
+        # that locking went fine, is false however it is phrased.
+        for pattern in _FALSE_SAFETY_CLAIMS:
             assert re.search(pattern, low) is None, (
                 f"lock claimed keys were locked on an OAuth-only .env where "
                 f"nothing was locked (matched {pattern!r}); output:\n{result.output}"
@@ -232,3 +236,41 @@ class TestOAuthSkipSuppressesProtectionVerdict:
         assert "nothing was locked" in low, (
             f"the summary must state nothing was locked; output:\n{result.output}"
         )
+
+
+class _RecordingConsole:
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+
+    def print_warning(self, message: str) -> None:
+        self.lines.append(message)
+
+    def print_hint(self, message: str) -> None:
+        self.lines.append(message)
+
+
+class TestUnshardableCredentialsWarningStaysHonest:
+    """worthless-rjjx: lock's warning about OAuth/token credentials it CANNOT
+    protect had no test at all. Its wording is honest today. This pins it, so a
+    rewording into comfort ("your other keys are safe") fails here first.
+    """
+
+    def test_warning_names_the_gap_and_the_fix_without_false_comfort(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            lock_mod, "detect_unshardable_credentials", lambda _caveats: [object(), object()]
+        )
+        monkeypatch.setattr(lock_mod, "detection_caveats", lambda: [])
+        console = _RecordingConsole()
+
+        lock_mod._print_unshardable_credentials_warning(console)
+
+        low = _flat(" ".join(console.lines)).lower()
+        # Not vacuous: the warning fired, with the count and the fix.
+        assert "2 oauth/token credentials" in low, console.lines
+        assert "cannot protect" in low, console.lines
+        assert "worthless doctor --fix" in low, console.lines
+        for pattern in _FALSE_SAFETY_CLAIMS:
+            assert re.search(pattern, low) is None, (
+                f"the unshardable-credentials warning offers false comfort "
+                f"(matched {pattern!r}): {console.lines}"
+            )

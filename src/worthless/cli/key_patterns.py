@@ -78,6 +78,59 @@ def is_oauth_token(value: str) -> bool:
     return value.startswith(_OAUTH_TOKEN_PREFIXES)
 
 
+# worthless-p55g: the one fix that exists for a token lock refuses. Shared by
+# scan (text/JSON/SARIF), bare `worthless`, and the MCP scan tool so they can't
+# drift apart. It deliberately does not say "run worthless lock" — lock skips
+# this token, and that advice is the dead end the user was stuck in.
+UNSHARDABLE_REMEDY = (
+    "worthless can only protect a static API key (sk-ant-api03-..., billed per token, "
+    "not by subscription). "
+    "Swap the token for one, or delete the line if nothing reads it."
+)
+
+# The same token where it can leave the machine. Each entry names the exact
+# reason first, in plain words, then the fix for that reason. Never "run
+# worthless lock" — lock refuses these tokens wherever they sit. {file} is the
+# scanned path, already sanitised for the terminal.
+EXPOSED_LOGIN_REMEDIES: dict[str, str] = {
+    "committed": (
+        "This .env file is committed to git (it is in your latest commit), so the "
+        "token is in your git history. Treat it as leaked: revoke it, then untrack the "
+        "file (`git rm --cached {file}`), add it to .gitignore, and commit that. Older "
+        "commits still hold the token, so revoking it is what makes it safe."
+    ),
+    "staged": (
+        "This .env file is staged in git but not committed yet. Unstage it "
+        "(`git rm --cached {file}`) and add it to .gitignore before you commit. If it "
+        "was in an earlier commit or was pushed, revoke the token."
+    ),
+    "git_unknown": (
+        "worthless couldn't ask git about this file (git is missing, timed out, or "
+        "refused), so it treats it as committed. Run `git ls-files {file}` in this "
+        "folder. No output means it isn't in git: fix git access (in CI, often "
+        '`git config --global --add safe.directory "$PWD"`) and scan again. If it '
+        "prints the file, revoke the token."
+    ),
+    "symlink": (
+        "This .env file is a symlink, and lock refuses symlinks. Replace it with a real "
+        ".env file that isn't committed. If the file it points to is committed or "
+        "shared, revoke the token."
+    ),
+    "other_file": (
+        "This isn't a .env file, so worthless can't keep the token local. Move the "
+        "token into an uncommitted .env file and delete it here. If this file was ever "
+        "committed or shared, revoke the token."
+    ),
+    # scan --deep: a CI secret belongs in the environment, so "revoke it" would
+    # kill a working token and the next run would be red again.
+    "environment": (
+        "It comes from the environment, not a file. If it is a CI secret, that is "
+        "where it belongs: give it only to the step that needs it, or run scan without "
+        "--deep in that job."
+    ),
+}
+
+
 ENTROPY_THRESHOLD: float = 3.9
 # Lowered 4.5 → 3.9 so legitimate OpenRouter keys (entropy ~4.118) clear the
 # scan, while common placeholders ("sk-your-key-here" 3.03, "sk-aaaa" 0.88,
