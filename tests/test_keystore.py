@@ -1053,3 +1053,92 @@ class TestDoctorAdviceForRefusedKey:
 
         assert "uninstall --force" not in out, "a chmod-able key must not advise uninstall"
         assert "chmod" in out, f"the advice must name the repair; got:\n{out}"
+
+
+class TestRefusedKeyJsonAndFallback:
+    """The machine-facing path and the genuinely-broken path (worthless-6hu7)."""
+
+    @staticmethod
+    def _refused_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        base = tmp_path / ".worthless"
+        base.mkdir(mode=0o700)
+        key = base / "fernet.key"
+        key.write_bytes(b"ORIGINAL")
+        key.chmod(0o644)
+        monkeypatch.setenv("WORTHLESS_HOME", str(base))
+        monkeypatch.setenv("WORTHLESS_KEYRING_BACKEND", "null")
+        return base
+
+    def test_json_mode_reports_refusal_not_uninstall(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        import json as _json
+
+        from worthless.cli.commands.doctor.runner import _doctor_run_json
+
+        self._refused_home(tmp_path, monkeypatch)
+
+        with contextlib.suppress(SystemExit, WorthlessError):
+            _doctor_run_json(fix=False, dry_run=False)
+        payload = _json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+
+        ids = [c.get("check_id") for c in payload.get("checks", [])]
+        assert "fernet_key_refused" in ids, payload
+        assert "uninstall --force" not in _json.dumps(payload)
+
+    def test_unreadable_install_still_gets_the_unrecoverable_advice(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """Regression direction: a genuinely broken install keeps its old advice."""
+        from worthless.cli.commands.doctor import _report_unopenable_install
+        from worthless.cli.console import get_console
+
+        exc = WorthlessError(ErrorCode.SHARD_STORAGE_FAILED, "db is toast")
+
+        _report_unopenable_install(exc, get_console())
+
+        captured = capsys.readouterr()
+        assert "uninstall --force" in captured.out + captured.err
+
+    def test_foreign_owned_key_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A key owned by someone else is refused, not replaced."""
+        base = self._refused_home(tmp_path, monkeypatch)
+        key = base / "fernet.key"
+        key.chmod(0o600)  # mode is fine; ownership is not
+        not_me = os.geteuid() + 1  # resolve BEFORE patching, or the lambda recurses
+        monkeypatch.setattr("worthless.cli.keystore.os.geteuid", lambda: not_me)
+
+        with pytest.raises(WorthlessError) as excinfo:
+            read_fernet_key(home_dir=base)
+
+        assert excinfo.value.code is ErrorCode.KEY_REFUSED
+        assert key.read_bytes() == b"ORIGINAL"
+
+    def test_json_mode_refusal_after_home_opens(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """The home opens, then the key read is refused — same honest report.
+
+        Two independent sites can surface the refusal in JSON mode (home
+        resolution and the key read); both must avoid the destructive advice.
+        """
+        import json as _json
+
+        from worthless.cli.commands.doctor import runner as _runner
+
+        base = tmp_path / ".worthless"
+        monkeypatch.setenv("WORTHLESS_HOME", str(base))
+        monkeypatch.setenv("WORTHLESS_KEYRING_BACKEND", "null")
+
+        def _refuse(*_a: object, **_k: object) -> bytearray:
+            raise WorthlessError(ErrorCode.KEY_REFUSED, "refused: chmod 0600 the key")
+
+        monkeypatch.setattr(_runner, "read_fernet_key", _refuse)
+        with contextlib.suppress(SystemExit, WorthlessError):
+            _runner._doctor_run_json(fix=False, dry_run=False)
+        payload = _json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+
+        assert "fernet_key_refused" in [c.get("check_id") for c in payload.get("checks", [])]
+        assert "uninstall --force" not in _json.dumps(payload)
