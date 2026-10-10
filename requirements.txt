@@ -35,7 +35,7 @@ cryptography==50.0.1
     #   worthless
 exceptiongroup==1.2.2 ; python_full_version < '3.11'
     # via anyio
-fastapi==0.141.1
+fastapi==0.142.2
     # via worthless
 h11==0.16.0
     # via
@@ -75,6 +75,8 @@ more-itertools==11.0.2
     #   jaraco-functools
 msgpack==1.2.2
     # via worthless
+opentelemetry-api==1.44.0
+    # via fastapi
 psutil==7.2.2
     # via worthless
 pycparser==3.0 ; implementation_name != 'PyPy' and platform_python_implementation != 'PyPy'
@@ -112,6 +114,7 @@ typing-extensions==4.15.0
     #   anyio
     #   cryptography
     #   fastapi
+    #   opentelemetry-api
     #   pydantic
     #   pydantic-core
     #   starlette
