@@ -7,8 +7,11 @@ exporter, distro or auto-instrumentation package is installed alongside it —
 then request metadata can be shipped to whatever ``OTEL_EXPORTER_*`` points at,
 which breaks the logging denylist (no prompt content, no raw IPs). worthless-3jjl.
 
-This pins the locked install tree (runtime plus every extra, i.e. everything a
-user can get) so a transitive dependency can't pull one in silently.
+This is the SECOND layer. The first is the proxy switching fastapi telemetry
+off itself (tests/test_proxy_emits_no_telemetry.py), which holds whatever is
+installed. This one pins the locked tree (runtime plus every extra) — what CI
+and ``uv sync`` install. The Docker image (``pip install .``) and ``uv tool
+install`` resolve without the lock, so they rely on the first layer.
 """
 
 from __future__ import annotations
@@ -20,9 +23,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 # Packages that turn the no-op API into something that records or sends data.
+# ddtrace ships its own OpenTelemetry TracerProvider without opentelemetry-sdk.
 _EXPORTING = re.compile(
     r"^(opentelemetry-(sdk|distro|exporter-[\w-]+|instrumentation[\w-]*)"
-    r"|opentelemetry_(sdk|distro))$"
+    r"|opentelemetry_(sdk|distro)|ddtrace)$"
 )
 
 

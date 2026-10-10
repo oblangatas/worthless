@@ -375,6 +375,17 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
         redoc_url=None,
         openapi_url=None,
         lifespan=_lifespan,
+        # worthless-3jjl: fastapi >= 0.142 instruments every request through the
+        # global OpenTelemetry providers, so any SDK in the environment would
+        # record (and could export) request metadata. Off, regardless of what is
+        # installed. fastapi < 0.142 has no telemetry and ignores the key.
+        telemetry={
+            "tracing": False,
+            "metrics": False,
+            "logs": False,
+            "operation_spans": False,
+            "auto_configure": False,
+        },
     )
     app.state.settings = settings
     # proxy_auth_token is no longer used — kept for tests that set it to None
