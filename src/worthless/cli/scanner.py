@@ -247,12 +247,13 @@ class ScanFinding:
 
 
 def _git_state(path: Path) -> str:
-    """ "tracked", "untracked", or "unknown" — git's answer for *path*.
+    """ "tracked", "untracked", "no_repo" or "unknown" — git's answer for *path*.
 
-    Only git's own "not tracked" (exit 1) or "not a git repository" counts as
-    untracked. No git, a timeout, or any other refusal (e.g. "dubious
-    ownership" in a CI container) is "unknown", which callers treat as
-    tracked: a token can't pass because the check couldn't run.
+    Only git's own "not tracked" (exit 1), or "not a git repository" with no
+    .git in any parent folder, means not in git. No git, a timeout, or any
+    other refusal (e.g. "dubious ownership" in a CI container) is "unknown",
+    which callers treat as in git: a token can't pass because the check
+    couldn't run.
     """
     try:
         result = _git(path, "ls-files", "--error-unmatch", "--", path.name)
@@ -262,32 +263,49 @@ def _git_state(path: Path) -> str:
         return "tracked"
     if result.returncode == 1:
         return "untracked"
-    if result.returncode == 128 and b"not a git repository" in result.stderr:
-        return "untracked"
-    return "unknown"
+    no_repo = result.returncode == 128 and b"not a git repository" in result.stderr
+    return "no_repo" if no_repo and not _has_git_above(path) else "unknown"
+
+
+def _has_git_above(path: Path) -> bool:
+    """A .git file or folder in a parent of *path*. There, "not a git
+    repository" means a repo git can't open (a moved worktree, a lost HEAD),
+    not that there is none."""
+    # ponytail: walks to /, past git's filesystem-boundary stop, so a .git above
+    # a mount point fails closed (git_unknown), never open.
+    return any((d / ".git").exists() for d in path.absolute().parents)
 
 
 def _git(path: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
     """Run a read-only git query in the folder holding *path*."""
     return subprocess.run(  # nosec B603,B607
-        ["git", "-C", str(path.parent), *args],  # noqa: S607
+        # The scanned folder's own .git/config can name a command for git to
+        # run (core.fsmonitor); plain scan must never run it.
+        ["git", "-c", "core.fsmonitor=false", "-C", str(path.parent), *args],  # noqa: S607
         capture_output=True,
         check=False,
         timeout=10,
         # Ask the repo that holds *path*: git sets GIT_DIR for hooks run in a
-        # linked worktree, and inherited it points this at another repo. And
-        # ask in English: the "not a git repository" check reads git's message.
-        env={**{k: v for k, v in os.environ.items() if not k.startswith("GIT_")}, "LC_ALL": "C"},
+        # linked worktree, and inherited it points this at another repo. Ask in
+        # English: the "not a git repository" check reads git's message. Never
+        # fetch: a partial clone would otherwise contact its remote (git 2.44+).
+        env={
+            **{k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
+            "LC_ALL": "C",
+            "GIT_NO_LAZY_FETCH": "1",
+        },
     )
 
 
 def _in_last_commit(path: Path) -> bool | None:
-    """True if *path* is in HEAD — committed, not just staged. None if git
-    didn't answer (timeout, gone): the caller fails closed and says so."""
+    """True if *path* is in HEAD — committed, not just staged. False if not, or
+    no commit yet. None if git didn't answer: the caller fails closed."""
     try:
-        return _git(path, "cat-file", "-e", f"HEAD:./{path.name}").returncode == 0
+        rc = _git(path, "rev-parse", "--verify", "--quiet", f"HEAD:./{path.name}").returncode
     except (subprocess.TimeoutExpired, OSError):
         return None
+    # Exit 1 is "no such path in HEAD"; anything else is an error, not a no.
+    return rc == 0 if rc in (0, 1) else None
 
 
 def token_exposure(path: Path) -> str | None:
@@ -298,6 +316,8 @@ def token_exposure(path: Path) -> str | None:
     if path.is_symlink():
         return "symlink"
     state = _git_state(path)
+    if state == "no_repo":
+        return None
     # Asked even when untracked: `git rm --cached` without a commit leaves the
     # file, token included, in the latest commit.
     in_head = _in_last_commit(path) if state != "unknown" else None

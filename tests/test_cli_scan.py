@@ -1288,6 +1288,7 @@ class TestScanAgreesWithLockOnOAuthTokens:
 
         monkeypatch.setenv("LC_ALL", "de_DE.UTF-8")
         monkeypatch.setattr(scanner_mod.subprocess, "run", fake_git)
+        monkeypatch.setattr(scanner_mod, "_has_git_above", lambda _path: False)
 
         [finding] = scan_files([env])
 
@@ -1405,7 +1406,7 @@ class TestScanAgreesWithLockOnOAuthTokens:
         env = self._env(tmp_path, self._oauth("p55g-head-timeout"))
 
         def fake_git(cmd, **_kwargs):  # noqa: ANN001, ANN202
-            if "cat-file" in cmd:
+            if "rev-parse" in cmd:
                 raise subprocess.TimeoutExpired(cmd, 10)
             return subprocess.CompletedProcess(cmd, 1, b"", b"error: pathspec '.env' did not match")
 
@@ -1414,6 +1415,40 @@ class TestScanAgreesWithLockOnOAuthTokens:
         [finding] = scan_files([env])
 
         assert finding.exposure == "git_unknown", finding
+
+    def test_a_broken_repo_is_not_mistaken_for_no_repo(self, tmp_path: Path) -> None:
+        # A committed .env in a repo git can no longer open (HEAD lost to a
+        # sync conflict, a moved worktree) makes git say "not a git repository".
+        # The .git is still there, so that is git failing, not "not in git":
+        # the committed token must not go green.
+        env = self._env(tmp_path, self._oauth("p55g-broken-repo"))
+        _git_commit(env.parent, ".env")
+        (env.parent / ".git" / "HEAD").rename(env.parent / ".git" / "HEAD 2")
+
+        result = runner.invoke(app, ["scan", str(env)])
+
+        assert result.exit_code == 1, self._flat(result)
+        data = json.loads(runner.invoke(app, ["scan", str(env), "--json"]).stdout)
+        assert data["findings"][0]["exposure"] == "git_unknown", data
+
+    def test_scanning_a_folder_never_runs_its_git_fsmonitor(self, tmp_path: Path) -> None:
+        # A folder's own .git/config can name a command for git to run
+        # (core.fsmonitor), e.g. in an extracted tarball. Scanning it must not
+        # run that command: plain scan ran no git at all before this change.
+        env = self._env(tmp_path, self._oauth("p55g-fsmonitor"))
+        subprocess.run(["git", "init", "-q", str(env.parent)], check=True)  # noqa: S607
+        marker = tmp_path / "fsmonitor-ran"
+        hook = tmp_path / "fsmonitor.sh"
+        hook.write_text(f"#!/bin/sh\ntouch '{marker}'\nexit 1\n")
+        hook.chmod(0o755)
+        subprocess.run(
+            ["git", "-C", str(env.parent), "config", "core.fsmonitor", str(hook)],  # noqa: S607
+            check=True,
+        )
+
+        scan_files([env])
+
+        assert not marker.exists()
 
     def test_a_gitignored_env_in_a_repo_passes(self, tmp_path: Path) -> None:
         # The everyday local setup: a project repo whose .env is gitignored.
@@ -1445,6 +1480,7 @@ class TestScanAgreesWithLockOnOAuthTokens:
             return subprocess.CompletedProcess(cmd, returncode, b"", stderr)
 
         monkeypatch.setattr(scanner_mod.subprocess, "run", fake_git)
+        monkeypatch.setattr(scanner_mod, "_has_git_above", lambda _path: False)
 
         [finding] = scan_files([env])
 
@@ -1460,7 +1496,7 @@ class TestScanAgreesWithLockOnOAuthTokens:
 
         def counting(path: Path) -> str:
             calls.append(path)
-            return "untracked"
+            return "no_repo"
 
         monkeypatch.setattr(scanner_mod, "_git_state", counting)
 
