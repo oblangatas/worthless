@@ -97,6 +97,10 @@ def test_each_playbook_leads_with_its_correct_verdict() -> None:
         "bind_confirmation": ("locked",),
         "service_health": ("degraded",),
         "unshardable_credentials": ("aren't api keys",),
+        # worthless-6hu7: the key is present and intact — we just refuse to read
+        # or replace it. Reassurance is the CORRECT verdict here; the old path
+        # treated this state as unrecoverable and advised uninstall --force.
+        "fernet_key_refused": ("nothing is lost",),
     }
     assert set(expected) == set(PLAYBOOKS), "verdict map and PLAYBOOKS drifted — add the new check"
     for cid, oks in expected.items():

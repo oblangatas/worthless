@@ -169,6 +169,14 @@ def migrate_file_to_keyring(home_dir: Path | None = None) -> bool:
         # store_fernet_key deletes the file on keyring success and re-creates
         # it on fallback. If the file still exists afterward, keyring write
         # failed and the migration did not actually happen.
+        # worthless-6hu7: validate BEFORE reading. Without this the migration
+        # is a second route past the refusal: a wrong-mode key got promoted to
+        # the keyring and the file deleted as "stale", and a symlink here was
+        # followed — the target's contents went into the keyring and the
+        # symlink was unlinked. _validate_fernet_file raises KEY_REFUSED, which
+        # the except-branch below turns into "migration skipped", leaving the
+        # file exactly as it was.
+        _validate_fernet_file(fernet_path)
         key_bytes = fernet_path.read_bytes().strip()
         store_fernet_key(key_bytes, home_dir)
         if fernet_path.exists():
