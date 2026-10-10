@@ -269,6 +269,11 @@ esac""",
   *) echo "uv: unhandled: $*" >&2; exit 1 ;;
 esac""",
             )
+            # Like real uv, the upgraded entry point lives in uv's tool bin dir;
+            # smoke_test runs it from there, never from PATH (worthless-alx3).
+            entry_point = bin_dir.parent / ".local" / "bin"
+            entry_point.mkdir(parents=True, exist_ok=True)
+            write_stub(entry_point, "worthless", 'echo "worthless 0.3.0"')
             result = run_install(bin_dir)
             command = ["sh", "./install.sh"]
         elif name == "manual uninstall current limitation":
