@@ -13,6 +13,7 @@ embeds the test name and ``"orphan"`` matched any path-echoing error.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 
@@ -242,3 +243,47 @@ class TestDoctorKeepsMovedEnv:
             "key not recoverable after moving the project back:\n" + unlocked.output
         )
         assert dotenv_value(env_file, "OPENAI_API_KEY") == TEST_OPENAI_KEY
+
+
+# ---------------------------------------------------------------------------
+# The agent repair path must not destroy healthy keys
+# ---------------------------------------------------------------------------
+
+
+class TestAgentFixKeepsHealthyKeys:
+    """``doctor --fix --json`` is the command agents run. Its ``broken_status``
+    check called a key BROKEN when ``~/.worthless/shard_a/<alias>`` was
+    missing — but that is the *legacy* Shard A location. Current keys keep
+    Shard A in the ``.env``, so the file is never there, every healthy key
+    looked broken, and ``--fix`` deleted its enrollment. ``unlock`` then
+    failed with WRTLS-102. Shipped since v0.3.7.
+    """
+
+    def test_agent_fix_keeps_healthy_key_unlockable(
+        self, home_dir: WorthlessHome, env_file: Path
+    ) -> None:
+        lock_env(env_file, home_dir)
+
+        result = cli_invoke(["doctor", "--fix", "--yes", "--json"], home_dir)
+        payload = json.loads(result.stdout)
+        broken = next(c for c in payload["checks"] if c["check_id"] == "broken_status")
+
+        assert broken["findings"] == [], f"a healthy key was reported BROKEN: {broken}"
+        assert len(list_enrollments(home_dir)) == 1, "doctor --fix --json deleted a healthy key"
+
+        unlocked = cli_invoke(["unlock", "--env", str(env_file)], home_dir)
+        assert unlocked.exit_code == 0, f"healthy key not unlockable:\n{unlocked.output}"
+        assert dotenv_value(env_file, "OPENAI_API_KEY") == TEST_OPENAI_KEY
+
+    def test_agent_diagnose_does_not_call_healthy_key_broken(
+        self, home_dir: WorthlessHome, env_file: Path
+    ) -> None:
+        lock_env(env_file, home_dir)
+
+        result = cli_invoke(["doctor", "--json"], home_dir)
+        broken = next(
+            c for c in json.loads(result.stdout)["checks"] if c["check_id"] == "broken_status"
+        )
+        assert broken["findings"] == [], (
+            f"diagnose told the agent a healthy key is BROKEN: {broken}"
+        )
