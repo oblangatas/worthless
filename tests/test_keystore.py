@@ -750,6 +750,8 @@ class TestMigrateFileToKeyring:
         """File exists, keyring available and empty -> migrate and return True."""
         fernet_path = tmp_path / "fernet.key"
         fernet_path.write_bytes(b"my-secret-fernet-key")
+        # 0600 like the product writes; 0644 is refused (worthless-6hu7)
+        fernet_path.chmod(0o600)
 
         with (
             patch("worthless.cli.keystore.keyring_available", return_value=True),
@@ -821,6 +823,8 @@ class TestMigrateFileToKeyring:
         migrate must return False — the key is NOT in keyring."""
         fernet_path = tmp_path / "fernet.key"
         fernet_path.write_bytes(b"my-secret-fernet-key")
+        # 0600 like the product writes; 0644 is refused (worthless-6hu7)
+        fernet_path.chmod(0o600)
 
         with (
             patch("worthless.cli.keystore.keyring_available", return_value=True),
@@ -840,6 +844,8 @@ class TestMigrateFileToKeyring:
         """After successful migration, the fernet.key file must be deleted."""
         fernet_path = tmp_path / "fernet.key"
         fernet_path.write_bytes(b"migrate-me")
+        # 0600 like the product writes; 0644 is refused (worthless-6hu7)
+        fernet_path.chmod(0o600)
 
         with (
             patch("worthless.cli.keystore.keyring_available", return_value=True),
@@ -1142,3 +1148,48 @@ class TestRefusedKeyJsonAndFallback:
 
         assert "fernet_key_refused" in [c.get("check_id") for c in payload.get("checks", [])]
         assert "uninstall --force" not in _json.dumps(payload)
+
+
+class TestWriteNeverFollowsSymlink:
+    """worthless-6hu7: pin O_NOFOLLOW directly, not through an upstream guard.
+
+    The end-to-end symlink test passes because KEY_REFUSED stops the mint
+    earlier — so deleting O_NOFOLLOW from _write_key_file would leave it green.
+    This exercises the writer itself.
+    """
+
+    def test_write_key_file_refuses_a_symlink(self, tmp_path: Path) -> None:
+        from worthless.cli.keystore import _write_key_file
+
+        outside = tmp_path / "outside.key"
+        outside.write_bytes(b"NOT-THE-KEY")
+        outside.chmod(0o600)
+        home = tmp_path / ".worthless"
+        home.mkdir(mode=0o700)
+        (home / "fernet.key").symlink_to(outside)
+
+        with pytest.raises(OSError):
+            _write_key_file(b"new-key-bytes", home)
+
+        assert outside.read_bytes() == b"NOT-THE-KEY", "a symlink must not redirect the write"
+
+    def test_migration_does_not_promote_a_refused_key(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The keyring migration must honour the same refusal (second route)."""
+        home = tmp_path / ".worthless"
+        home.mkdir(mode=0o700)
+        key = home / "fernet.key"
+        key.write_bytes(b"ORIGINAL-KEY")
+        key.chmod(0o644)  # refused
+        monkeypatch.setattr("worthless.cli.keystore.keyring_available", lambda: True)
+        monkeypatch.setattr("worthless.cli.keystore.keyring.get_password", lambda *_a, **_k: None)
+        promoted: list[str] = []
+        monkeypatch.setattr(
+            "worthless.cli.keystore.keyring.set_password",
+            lambda _s, _u, v: promoted.append(v),
+        )
+
+        assert migrate_file_to_keyring(home_dir=home) is False
+        assert promoted == [], "a refused key must never reach the keyring"
+        assert key.exists() and key.read_bytes() == b"ORIGINAL-KEY"

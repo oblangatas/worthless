@@ -84,6 +84,9 @@ say "5b. an unreadable key is refused, never replaced (worthless-6hu7)"
 # restores all land at 0644. A key we refuse to READ must never be WRITTEN
 # over — before the fix this was read as "no key" and a replacement was minted.
 KEYFILE="$HOME_DIR/.worthless/fernet.key"
+# A missing key here means step 5 did not leave one behind — that is a FAILURE,
+# not a reason to skip. A conditional check reports green whether or not it ran.
+check "a key exists to test against" "[ -f $KEYFILE ]"
 if [ -f "$KEYFILE" ]; then
   BEFORE_SUM=$(md5sum "$KEYFILE" | cut -d" " -f1)
   runuser -l "$USER_NAME" -c "chmod 0644 $KEYFILE"
@@ -93,8 +96,6 @@ if [ -f "$KEYFILE" ]; then
   check "the key is byte-identical afterwards" "[ \"$BEFORE_SUM\" = \"$AFTER_SUM\" ]"
   check "the refusal names the chmod fix" "grep -q 'chmod 0600' /tmp/refused.log"
   runuser -l "$USER_NAME" -c "chmod 0600 $KEYFILE"
-else
-  fact "key file" "absent — skipped"
 fi
 
 say "6. service install — the WSL-specific behaviour"
