@@ -1255,7 +1255,8 @@ class TestScanAgreesWithLockOnOAuthTokens:
         headline = (result.stdout + result.stderr).splitlines()[0].lower()
 
         assert result.exit_code == 1, headline
-        assert "login token" in headline and "see below" in headline, headline
+        assert "login token" in headline, headline
+        assert "see below" in headline, headline
 
     def test_tokens_in_one_file_get_one_explanation(self, tmp_path: Path) -> None:
         # Two tokens, same file, same reason: one paragraph, not two. A token
@@ -1272,7 +1273,8 @@ class TestScanAgreesWithLockOnOAuthTokens:
 
         assert result.exit_code == 1, low
         assert low.count("isn't a .env file") == 1, low
-        assert "line 1" in low and "line 2" in low, low
+        assert "line 1" in low, low
+        assert "line 2" in low, low
 
     def test_git_is_asked_in_english(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         # The "not a git repository" check reads git's English message; a
@@ -1290,7 +1292,8 @@ class TestScanAgreesWithLockOnOAuthTokens:
         [finding] = scan_files([env])
 
         assert finding.is_unshardable is True
-        assert envs and all(e.get("LC_ALL") == "C" for e in envs), envs
+        assert envs, envs
+        assert all(e.get("LC_ALL") == "C" for e in envs), envs
 
     def test_the_cli_says_when_git_couldnt_answer(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
