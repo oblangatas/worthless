@@ -540,6 +540,8 @@ class TestCtrlCAfterCommitIsAnswered:
         pressed_at = _openclaw_step_blocks_then_ctrl_c(monkeypatch, step=step, presses=presses)
         synced: list[object] = []
         monkeypatch.setattr(lock_mod, "_sync_fernet_after_lock", synced.append)
+        scans: list[object] = []
+        monkeypatch.setattr(lock_mod, "_maybe_prompt_code_scan", scans.append)
 
         result = _invoke_lock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
 
@@ -559,6 +561,8 @@ class TestCtrlCAfterCommitIsAnswered:
         # Before this fix the press was ignored and the lock ran on to its Fernet
         # sync. Interrupting must not newly skip it: the keys ARE locked.
         assert len(synced) == 1, "interrupted lock skipped the post-lock Fernet sync"
+        # The user asked to stop: no 30s source scan, no "Scan now?" prompt after it.
+        assert scans == [], "an interrupted lock still started the post-lock code scan"
 
     def test_quiet_lock_still_answers_ctrl_c(
         self,
