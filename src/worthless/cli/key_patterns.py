@@ -88,20 +88,38 @@ UNSHARDABLE_REMEDY = (
     "Swap the token for one, or delete the line if nothing reads it."
 )
 
-# The same token anywhere it can leave the machine — a file git tracks, a
-# non-.env file, a symlink, the environment. Still never "run worthless lock".
-# From the process environment (scan --deep). A CI secret belongs there, so
-# "revoke it" would kill a working token and the next run would be red again.
-ENV_LOGIN_REMEDY = (
-    "It comes from the environment, not a file. If it is a CI secret, that is "
-    "where it belongs: give it only to the step that needs it, or run scan without "
-    "--deep in that job."
-)
-
-LEAKED_LOGIN_REMEDY = (
-    "Treat it as leaked: revoke it, then take it out of the file "
-    "(and out of git with `git rm --cached`, if it was committed)."
-)
+# The same token where it can leave the machine. Each entry names the exact
+# reason first, in plain words, then the fix for that reason. Never "run
+# worthless lock" — lock refuses these tokens wherever they sit.
+EXPOSED_LOGIN_REMEDIES: dict[str, str] = {
+    "committed": (
+        "This .env file is committed to git, so the token is already in your git "
+        "history. Treat it as leaked: revoke it, then untrack the file "
+        "(`git rm --cached`) and add it to .gitignore."
+    ),
+    "git_unknown": (
+        "worthless couldn't confirm with git that this .env file is uncommitted, so "
+        "it treats it as committed. Run `git status` here; if the file is committed, "
+        "revoke the token."
+    ),
+    "symlink": (
+        "This .env file is a symlink to another file, which may be shared or "
+        "committed. If it is, revoke the token, and keep login tokens only in a real, "
+        "uncommitted .env file."
+    ),
+    "other_file": (
+        "This file isn't a local .env (lock only manages .env, .env.local and similar), "
+        "so it is likely committed or shared. Treat the token as leaked: revoke it, "
+        "then take it out of this file."
+    ),
+    # scan --deep: a CI secret belongs in the environment, so "revoke it" would
+    # kill a working token and the next run would be red again.
+    "environment": (
+        "It comes from the environment, not a file. If it is a CI secret, that is "
+        "where it belongs: give it only to the step that needs it, or run scan without "
+        "--deep in that job."
+    ),
+}
 
 
 ENTROPY_THRESHOLD: float = 3.9

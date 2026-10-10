@@ -1159,6 +1159,8 @@ class TestScanAgreesWithLockOnOAuthTokens:
         # token wherever it sits. The fix that exists is to revoke it.
         assert "run `worthless lock`" not in out.lower(), out
         assert "revoke" in out.lower(), out
+        # Says exactly why, not a list of guesses.
+        assert "isn't a local .env" in out.lower(), out
 
     def test_a_token_in_a_committed_env_still_fails(self, tmp_path: Path) -> None:
         # A .env in git is a leak, and in CI the scan is the backstop for
@@ -1174,13 +1176,15 @@ class TestScanAgreesWithLockOnOAuthTokens:
         assert result.exit_code == 1, low
         assert "revoke" in low, low
         assert "run `worthless lock`" not in low, low
+        # The exact problem, in plain words — not "it can leave the machine".
+        assert "this .env file is committed to git" in low, low
         data = json.loads(runner.invoke(app, ["scan", str(env), "--json"]).stdout)
         assert data["findings"][0]["is_unshardable"] is False, data
-        assert "revoke" in data["findings"][0]["remediation"].lower(), data
+        assert "committed to git" in data["findings"][0]["remediation"].lower(), data
         sarif = json.loads(runner.invoke(app, ["scan", str(env), "--format", "sarif"]).stdout)
         [res] = sarif["runs"][0]["results"]
         assert res["level"] == "error", res
-        assert "revoke" in res["message"]["text"].lower(), res
+        assert "committed to git" in res["message"]["text"].lower(), res
 
     def test_an_inherited_git_dir_cannot_fool_the_check(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1235,6 +1239,7 @@ class TestScanAgreesWithLockOnOAuthTokens:
 
         assert result.exit_code == 1, self._flat(result)
         assert "revoke" in self._flat(result).lower(), self._flat(result)
+        assert "isn't a local .env" in self._flat(result).lower(), self._flat(result)
 
     @pytest.mark.parametrize("git_answer", ["no-git", "timeout", "dubious-ownership"])
     def test_an_unknown_git_answer_fails_closed(
@@ -1260,6 +1265,10 @@ class TestScanAgreesWithLockOnOAuthTokens:
 
         assert finding.is_login_token is True
         assert finding.is_unshardable is False
+        # Honest about why: it didn't see the file in git, it couldn't ask.
+        remedy = scanner_mod.remediation_for(finding) or ""
+        assert "couldn't confirm" in remedy, remedy
+        assert "is committed to git" not in remedy, remedy
 
     def test_a_gitignored_env_in_a_repo_passes(self, tmp_path: Path) -> None:
         # The everyday local setup: a project repo whose .env is gitignored.
@@ -1304,11 +1313,11 @@ class TestScanAgreesWithLockOnOAuthTokens:
         env = self._env(tmp_path, *(self._oauth(f"p55g-many-{i}") for i in range(3)))
         calls: list[Path] = []
 
-        def counting(path: Path) -> bool:
+        def counting(path: Path) -> str:
             calls.append(path)
-            return False
+            return "untracked"
 
-        monkeypatch.setattr(scanner_mod, "_is_git_tracked", counting)
+        monkeypatch.setattr(scanner_mod, "_git_state", counting)
 
         findings = scan_files([env])
 
@@ -1329,6 +1338,7 @@ class TestScanAgreesWithLockOnOAuthTokens:
 
         assert result.exit_code == 1, self._flat(result)
         assert "can't protect" not in self._flat(result).lower(), self._flat(result)
+        assert "this .env file is a symlink" in self._flat(result).lower(), self._flat(result)
 
     def test_a_login_token_is_never_counted_as_protected(self, tmp_path: Path) -> None:
         # Protection is looked up by variable name and file. If ANTHROPIC_API_KEY

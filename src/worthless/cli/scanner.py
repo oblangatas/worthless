@@ -15,8 +15,7 @@ from worthless.cli.dotenv_rewriter import shannon_entropy
 from worthless.cli.key_patterns import (
     ENTROPY_THRESHOLD,
     KEY_PATTERN,
-    ENV_LOGIN_REMEDY,
-    LEAKED_LOGIN_REMEDY,
+    EXPOSED_LOGIN_REMEDIES,
     UNSHARDABLE_REMEDY,
     detect_provider,
     is_oauth_token,
@@ -238,18 +237,19 @@ class ScanFinding:
     # will, so scan must not fail the build over it. Anywhere else (in git, a
     # non-.env file, a symlink, the environment) the token is plain exposed.
     is_unshardable: bool = False
-    # Found in the scan --deep dump of the process environment, not in a file
-    # anyone wrote. A CI secret belongs there, so the advice differs.
-    from_environment: bool = False
+    # Why an exposed login token can leave the machine — one key of
+    # EXPOSED_LOGIN_REMEDIES ("committed", "git_unknown", "symlink",
+    # "other_file", "environment"). None when it stays local or isn't a token.
+    exposure: str | None = None
 
 
-def _is_git_tracked(path: Path) -> bool:
-    """True if git tracks *path* — or if git can't say.
+def _git_state(path: Path) -> str:
+    """ "tracked", "untracked", or "unknown" — git's answer for *path*.
 
-    Fails closed: only git's own "not tracked" (exit 1) or "not a git
-    repository" counts as untracked. No git, a timeout, or any other refusal
-    (e.g. "dubious ownership" in a CI container) is treated as tracked, so a
-    token can't pass because the check couldn't run.
+    Only git's own "not tracked" (exit 1) or "not a git repository" counts as
+    untracked. No git, a timeout, or any other refusal (e.g. "dubious
+    ownership" in a CI container) is "unknown", which callers treat as
+    tracked: a token can't pass because the check couldn't run.
     """
     try:
         result = subprocess.run(  # nosec B603,B607
@@ -270,36 +270,50 @@ def _is_git_tracked(path: Path) -> bool:
             env={k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
         )
     except (subprocess.TimeoutExpired, OSError):  # OSError covers no-git
-        return True
+        return "unknown"
+    if result.returncode == 0:
+        return "tracked"
     if result.returncode == 1:
-        return False
+        return "untracked"
     if result.returncode == 128 and b"not a git repository" in result.stderr:
-        return False
-    return True
+        return "untracked"
+    return "unknown"
 
 
-def stays_local(path: Path) -> bool:
-    """A .env-family file lock manages, that isn't a symlink and isn't in git."""
-    return path.name in _BASENAME_ALLOWLIST and not path.is_symlink() and not _is_git_tracked(path)
+_GIT_STATE_EXPOSURE = {"tracked": "committed", "unknown": "git_unknown", "untracked": None}
 
 
-def _stays_local_cached(path: Path, cache: dict[Path, bool]) -> bool:
-    """stays_local, asked once per file: a .env with several tokens gets one git
-    call, which keeps the pre-commit hook inside its time budget."""
+def token_exposure(path: Path) -> str | None:
+    """Why a login token in *path* can leave the machine, or None if it stays
+    local: a .env-family file lock manages, not a symlink, not in git."""
+    if path.name not in _BASENAME_ALLOWLIST:
+        return "other_file"
+    if path.is_symlink():
+        return "symlink"
+    return _GIT_STATE_EXPOSURE[_git_state(path)]
+
+
+def _exposure_for(path: Path, from_env: bool, cache: dict[Path, str | None]) -> str | None:
+    """token_exposure for a login token found in *path*, asked once per file —
+    a .env with several tokens gets one git call, which keeps the pre-commit
+    hook inside its time budget. The --deep environment dump is "environment"."""
+    if from_env:
+        return "environment"
     if path not in cache:
-        cache[path] = stays_local(path)
+        cache[path] = token_exposure(path)
     return cache[path]
+
+
+def remedy_for_exposure(exposure: str | None) -> str:
+    """The fix text for a login token: local (None) or one exposure reason."""
+    return UNSHARDABLE_REMEDY if exposure is None else EXPOSED_LOGIN_REMEDIES[exposure]
 
 
 def remediation_for(f: ScanFinding) -> str | None:
     """The fix that exists for a login token — never "run worthless lock"."""
     if f.is_protected or not f.is_login_token:
         return None
-    if f.is_unshardable:
-        return UNSHARDABLE_REMEDY
-    if f.from_environment:
-        return ENV_LOGIN_REMEDY
-    return LEAKED_LOGIN_REMEDY
+    return remedy_for_exposure(f.exposure)
 
 
 def finding_to_dict(f: ScanFinding) -> dict[str, object]:
@@ -332,7 +346,7 @@ def scan_files(
     """Scan files for API key patterns.
 
     *env_dump*: the temp file holding the `--deep` dump of the process
-    environment, so its findings are marked ``from_environment``.
+    environment, so its login tokens get the "environment" exposure.
 
     Each file is read (up to ``max_file_bytes``) line-by-line. Matches with
     entropy below the threshold are skipped (likely placeholders). If
@@ -348,7 +362,7 @@ def scan_files(
     """
     cap = MAX_SCAN_FILE_BYTES if max_file_bytes is None else max_file_bytes
     findings: list[ScanFinding] = []
-    local_cache: dict[Path, bool] = {}  # git is asked at most once per file
+    exposure_cache: dict[Path, str | None] = {}  # git is asked at most once per file
 
     # Deadline is checked BETWEEN files, not mid-file. A single file inside
     # ``cap`` bytes is bounded by the size cap + linear regex — slow but never
@@ -398,6 +412,7 @@ def scan_files(
                 is_protected = not token and bool(
                     enrolled_locations and var_name and (var_name, file_str) in enrolled_locations
                 )
+                exposure = _exposure_for(path, from_env, exposure_cache) if token else None
 
                 findings.append(
                     ScanFinding(
@@ -409,8 +424,8 @@ def scan_files(
                         value_preview=_mask(value),
                         column=match.start(),
                         is_login_token=token,
-                        is_unshardable=token and _stays_local_cached(path, local_cache),
-                        from_environment=from_env,
+                        is_unshardable=token and exposure is None,
+                        exposure=exposure,
                     )
                 )
     return findings

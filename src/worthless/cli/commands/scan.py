@@ -300,16 +300,15 @@ def _leaked_token_lines(findings: Sequence[ScanFinding]) -> list[str]:
     lock", which refuses it wherever it sits.
     """
     tokens = [f for f in findings if f.is_login_token and _is_exposed(f)]
-    names, s = _token_names(tokens)
-    if not names:
+    if not tokens:
         return []
-    remedies = dict.fromkeys(remediation_for(f) for f in tokens)
-    return [
-        f"Exposed {len(names)} Claude Code login token{s}: {', '.join(names)}.",
-        "`worthless lock` refuses this kind of token, and this one can leave "
-        "the machine (git, a non-.env file, a symlink, or the environment).",
-        *(r for r in remedies if r),
-    ]
+    lines = ["`worthless lock` won't help here: it refuses Claude Code login tokens."]
+    for f, name in zip(tokens, _token_names(tokens)[0], strict=True):
+        where = "the environment" if f.exposure == "environment" else sanitise_for_message(f.file)
+        # The exact reason, never a list of guesses: committed to git, a
+        # symlink, not a local .env, git couldn't answer, or the environment.
+        lines += [f"Exposed login token: {name} in {where}.", remediation_for(f) or ""]
+    return lines
 
 
 def _token_names(findings: Sequence[ScanFinding]) -> tuple[list[str], str]:
