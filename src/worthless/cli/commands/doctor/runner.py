@@ -25,7 +25,7 @@ from worthless.cli.commands.doctor.registry import (
     ensure_registered,
 )
 from worthless.cli.commands.doctor.schema import SCHEMA_VERSION
-from worthless.cli.errors import WorthlessError
+from worthless.cli.errors import ErrorCode, WorthlessError
 from worthless.cli.keystore import read_fernet_key
 from worthless.crypto.types import zero_buf
 from worthless.storage.repository import ShardRepository
@@ -45,6 +45,30 @@ def _count_enrollments(home) -> int:  # noqa: ANN001 — WorthlessHome opaque he
             con.close()
     except Exception:  # noqa: BLE001 — diagnosis must never crash
         return -1  # count unavailable (e.g. corrupt DB) — distinct from a real "none"
+
+
+def _key_refused_result(message: str) -> CheckResult:
+    """The key is present but unusable — recoverable, NOT a broken install.
+
+    worthless-6hu7: wrong mode, a foreign owner or a symlink makes us refuse to
+    read the key. The install is intact and the fix is a chmod, so this must not
+    be reported as the unrecoverable ``uninstall --force`` case.
+    """
+    return CheckResult(
+        check_id="fernet_key_refused",
+        status="error",
+        findings=[
+            {
+                "issue": "fernet_key_refused",
+                "message": message,
+                "recommendation": "fix the key file's permissions/owner, then re-run doctor",
+            }
+        ],
+        summary="Fernet key present but refused; install intact and recoverable.",
+        fixable=False,
+        fixed=[],
+        skipped_reason=None,
+    )
 
 
 def _fernet_missing_result(home) -> CheckResult:  # noqa: ANN001
@@ -197,7 +221,10 @@ def _doctor_run_json(*, fix: bool, dry_run: bool) -> None:
     """
     try:
         home = get_home()
-    except WorthlessError:
+    except WorthlessError as exc:
+        if exc.code is ErrorCode.KEY_REFUSED:
+            typer.echo(json.dumps(_aggregate([_key_refused_result(exc.message)])))
+            return
         # BUG-1: the install itself can't be opened (corrupt DB / unreadable
         # bootstrap) — get_home() runs DB init and raises WRTLS-103 before any
         # check can run. Mirror the text path: emit valid JSON pointing at the
@@ -206,7 +233,10 @@ def _doctor_run_json(*, fix: bool, dry_run: bool) -> None:
         return
     try:
         fernet_key = bytearray(read_fernet_key(home.base_dir))  # SR-01: mutable for zeroing
-    except WorthlessError:
+    except WorthlessError as exc:
+        if exc.code is ErrorCode.KEY_REFUSED:
+            typer.echo(json.dumps(_aggregate([_key_refused_result(exc.message)])))
+            return
         # BUG-1: the fernet key is unreadable (missing / corrupt) — a broken
         # install whose locked keys can't be reconstructed. Don't crash the
         # diagnostic; emit a single finding that points at the fix.
