@@ -60,6 +60,8 @@ async def test_editor_lock_with_dead_proxy_is_flagged_and_env_really_points_at_i
     home.mkdir(mode=0o700)
     (home / "shard_a").mkdir(mode=0o700)
     (home / "fernet.key").write_bytes(Fernet.generate_key())
+    # Match the mode the product writes; 0644 is refused (worthless-6hu7).
+    (home / "fernet.key").chmod(0o600)
 
     port = _free_port()  # dead — no proxy bound here
     monkeypatch.setenv("WORTHLESS_KEYRING_BACKEND", "null")

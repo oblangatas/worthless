@@ -46,6 +46,10 @@ on:
       - "engineering/testing/scripts/wsl-idle-survival.sh"
       # The code whose WSL behaviour this job exercises.
       - "src/worthless/cli/commands/service/**"
+      # worthless-6hu7: key-file mode handling — WSL mounts are where
+      # 0644 keys come from, so this job is the one that sees it.
+      - "src/worthless/cli/keystore.py"
+      - "src/worthless/cli/bootstrap.py"
       - "src/worthless/cli/platform.py"
       - "src/worthless/cli/commands/lock.py"
       - "pyproject.toml"

@@ -27,7 +27,11 @@ def home_dir(tmp_path: Path) -> Path:
     """Minimal WORTHLESS_HOME for CLI invocations that otherwise need one."""
     base = tmp_path / ".worthless"
     base.mkdir()
-    (base / "fernet.key").write_bytes(b"dummykey")
+    key = base / "fernet.key"
+    key.write_bytes(b"dummykey")
+    # 0600 is what the product writes; a key at the default 0644 is REFUSED
+    # (worthless-6hu7), which would fail these tests for setup reasons.
+    key.chmod(0o600)
     return base
 
 
