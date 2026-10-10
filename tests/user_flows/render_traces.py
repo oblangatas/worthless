@@ -274,6 +274,10 @@ esac""",
             entry_point = bin_dir.parent / ".local" / "bin"
             entry_point.mkdir(parents=True, exist_ok=True)
             write_stub(entry_point, "worthless", 'echo "worthless 0.3.0"')
+            # A healthy upgrade: the `worthless` on PATH IS that entry point,
+            # not a second copy (which install.sh would report as a shadow).
+            (bin_dir / "worthless").unlink()
+            (bin_dir / "worthless").symlink_to(entry_point / "worthless")
             result = run_install(bin_dir)
             command = ["sh", "./install.sh"]
         elif name == "manual uninstall current limitation":

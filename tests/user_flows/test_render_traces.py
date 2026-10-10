@@ -68,6 +68,10 @@ def test_install_lifecycle_trace_documents_current_install_contract(
     # load-bearing rather than incidental (WOR-597).
     assert len(journey.traces) == 8
     assert [trace.exit_code for trace in journey.traces] == [0, 0, 0, 0, 0, 30, 10, 0]
+    # A healthy upgrade is not a shadowed install (Cursor on PR #671).
+    upgrade = report[report.lower().index("upgrade older") :]
+    upgrade = upgrade[: upgrade.lower().index("pipx conflict")]
+    assert "another copy" not in upgrade and "is on your PATH" in upgrade, upgrade
     assert "Install, Reinstall, Manual Uninstall Guidance" in report
     assert "fresh install" in report.lower()
     assert "stale worthless on PATH" in report, (
