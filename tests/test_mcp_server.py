@@ -43,6 +43,9 @@ def _make_home(tmp_path: Path) -> Path:
     (home / "shard_a").mkdir(mode=0o700)
     key = Fernet.generate_key()
     (home / "fernet.key").write_bytes(key)
+    # 0600 is what the product writes; the default 0644 is REFUSED
+    # (worthless-6hu7), which would fail these tests for setup reasons.
+    (home / "fernet.key").chmod(0o600)
     return home
 
 
