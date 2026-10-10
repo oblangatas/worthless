@@ -208,12 +208,21 @@ def _print_orphan_lines(
     """
     suffix = " (dry-run: no changes)" if dry_run else ""
     for e in orphans:
+        reason = (
+            ".env not found — the project may have moved"
+            if env_file_missing(e)
+            else ".env line deleted"
+        )
         typer.echo(
-            f"  • {PROBLEM_PHRASE} {e.key_alias}: .env line deleted "
-            f"({e.var_name} -> {e.env_path}){suffix}"
+            f"  • {PROBLEM_PHRASE} {e.key_alias}: {reason} ({e.var_name} -> {e.env_path}){suffix}"
         )
     if show_fix_hint:
-        typer.echo(f"    fix: run `{FIX_PHRASE}`")
+        if any(not env_file_missing(e) for e in orphans):
+            typer.echo(f"    fix: run `{FIX_PHRASE}`")
+        if any(env_file_missing(e) for e in orphans):
+            typer.echo(
+                "    moved: put the project back at the path shown, then run `worthless unlock`"
+            )
 
 
 _VERSION_LINE = re.compile(r"^Version:\s*(\S+)\s*$", re.MULTILINE)
@@ -859,7 +868,14 @@ def _doctor_apply(
     """Execute the fix actions (purge orphans + migrate synced keys)."""
     if orphans:
         purged = _run_async(_purge_all(orphans, repo, home.shard_a_dir))
-        console.print_success(f"Cleaned up {purged} broken record(s).")
+        kept = sum(1 for e in orphans if env_file_missing(e))
+        if purged or not kept:
+            console.print_success(f"Cleaned up {purged} broken record(s).")
+        if kept:
+            console.print_hint(
+                f"Kept {kept} key(s) whose .env was not found — the project may have "
+                "moved. Put it back at the path shown, then run `worthless unlock`."
+            )
 
     if synced:
         migrated = _migrate_synced_keys(synced, home)
@@ -956,7 +972,7 @@ def _doctor_run(*, fix: bool, yes: bool, dry_run: bool) -> None:
 
         if orphans:
             plural = "s" if len(orphans) != 1 else ""
-            console.print_warning(f"{len(orphans)} broken record{plural} (.env line deleted):")
+            console.print_warning(f"{len(orphans)} broken record{plural}:")
             _print_orphan_lines(
                 orphans,
                 dry_run=fix and dry_run,

@@ -244,6 +244,69 @@ class TestDoctorKeepsMovedEnv:
         )
         assert dotenv_value(env_file, "OPENAI_API_KEY") == TEST_OPENAI_KEY
 
+    def _move_project(self, env_file: Path, tmp_path: Path) -> Path:
+        moved = tmp_path / "moved-project" / ".env"
+        moved.parent.mkdir()
+        env_file.rename(moved)
+        return moved
+
+    @staticmethod
+    def _flat(output: str) -> str:
+        """Collapse Rich's 80-column wrap so a phrase can't be split by a newline."""
+        return " ".join(output.split()).lower()
+
+    def test_doctor_says_env_not_found_not_line_deleted_when_moved(
+        self, home_dir: WorthlessHome, env_file: Path, tmp_path: Path
+    ) -> None:
+        lock_env(env_file, home_dir)
+        self._move_project(env_file, tmp_path)
+
+        result = cli_invoke(["doctor"], home_dir)
+        out = self._flat(result.output)
+
+        assert "line deleted" not in out, (
+            "doctor blames a deleted .env line when the whole file moved:\n" + result.output
+        )
+        assert "not found" in out, "doctor must say the .env was not found:\n" + result.output
+
+    def test_unlock_says_env_not_found_not_line_deleted_when_moved(
+        self, home_dir: WorthlessHome, env_file: Path, tmp_path: Path
+    ) -> None:
+        lock_env(env_file, home_dir)
+        self._move_project(env_file, tmp_path)
+
+        result = cli_invoke(["unlock", "--env", str(env_file)], home_dir)
+        out = self._flat(result.output)
+
+        assert not looks_like_traceback(result.output)
+        assert "line was deleted" not in out and "line deleted" not in out, (
+            "unlock blames a deleted .env line when the whole file moved:\n" + result.output
+        )
+
+    def test_json_fix_reports_only_the_key_it_actually_purged(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """Agents read ``fixed`` to learn what was deleted. It must name the
+        purged key, never the moved key that was deliberately kept."""
+        moved_env = tmp_path / "moved" / ".env"
+        dead_env = tmp_path / "dead" / ".env"
+        for env in (moved_env, dead_env):
+            env.parent.mkdir()
+            env.write_text(f"OPENAI_API_KEY={TEST_OPENAI_KEY}\n")
+            lock_env(env, home_dir)
+
+        moved_env.rename(tmp_path / "elsewhere.env")  # project moved
+        dead_env.write_text("")  # line deleted: a genuinely dead key
+
+        result = cli_invoke(["doctor", "--fix", "--yes", "--json"], home_dir)
+        payload = json.loads(result.stdout)
+        check = next(c for c in payload["checks"] if c["check_id"] == "orphan_db")
+
+        assert {f["env_path"] for f in check["fixed"]} == {str(dead_env)}, check
+        remaining = {e.env_path for e in list_enrollments(home_dir)}
+        assert str(moved_env) in remaining, "the moved key was purged"
+        assert str(dead_env) not in remaining, "the dead key was not purged"
+
 
 # ---------------------------------------------------------------------------
 # The agent repair path must not destroy healthy keys

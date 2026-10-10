@@ -10,20 +10,31 @@ both modes share the same purge path.
 from __future__ import annotations
 
 import asyncio
-import itertools
 
 from worthless.cli.commands.doctor.registry import CheckContext, CheckResult
+from worthless.cli.orphans import env_file_missing
 
 check_id = "orphan_db"
 
 
 def _repair_orphans(ctx: CheckContext, orphans: list) -> list[dict]:
+    """Purge, then report exactly the records that are gone.
+
+    Not a positional slice of the input: ``_purge_all`` skips moved ``.env``
+    files (WOR-935) and state drift, so "the first N" would name keys that
+    were deliberately kept — and an agent would act on that.
+    """
     from worthless.cli.commands.doctor import _purge_all
 
-    purged = asyncio.run(_purge_all(orphans, ctx.repo, ctx.home.shard_a_dir))
+    async def _purge_then_survivors() -> set[tuple[str, str | None]]:
+        await _purge_all(orphans, ctx.repo, ctx.home.shard_a_dir)
+        return {(e.key_alias, e.env_path) for e in await ctx.repo.list_enrollments()}
+
+    survivors = asyncio.run(_purge_then_survivors())
     return [
         {"key_alias": e.key_alias, "env_path": e.env_path}
-        for e in itertools.islice(orphans, purged)
+        for e in orphans
+        if (e.key_alias, e.env_path) not in survivors
     ]
 
 
@@ -51,6 +62,7 @@ def run(ctx: CheckContext) -> CheckResult:
             "key_alias": e.key_alias,
             "var_name": e.var_name,
             "env_path": e.env_path,
+            "reason": "env_file_missing" if env_file_missing(e) else "env_line_missing",
         }
         for e in orphans
     ]
@@ -82,6 +94,12 @@ def run(ctx: CheckContext) -> CheckResult:
             "'worthless doctor --fix' to purge, or 'worthless uninstall --force' "
             "for a clean removal."
         )
+        moved = sum(1 for e in orphans if env_file_missing(e))
+        if moved:
+            summary += (
+                f" {moved} whose .env was not found {'is' if moved == 1 else 'are'} "
+                "kept, never purged: put the project back, then run 'worthless unlock'."
+            )
     return CheckResult(
         check_id=check_id,
         status=status,
