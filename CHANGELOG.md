@@ -33,8 +33,8 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 
   **What this does NOT do.**
   - The pass covers a `.env`-family file that is in neither git's index nor its latest commit. If git can't answer (not installed, timed out, "dubious ownership"), scan assumes it is in git and the token fails.
-  - Older history isn't checked. Once you commit the untracking, scan passes, though older commits still hold the token. A green scan doesn't mean you revoked it.
-  - A `.env` tracked only through an exported `GIT_DIR`/`GIT_WORK_TREE` (the bare-repo dotfiles pattern) reads as untracked, because scan ignores `GIT_*` variables. A `.env` hardlinked to a committed file isn't detected either.
+  - Only the current branch's latest commit is checked. Older commits and other branches, even pushed ones, aren't: once you commit the untracking, scan passes though history still holds the token. A green scan doesn't mean you revoked it.
+  - A `.env` tracked only through an exported `GIT_DIR`/`GIT_WORK_TREE` (the bare-repo dotfiles pattern) reads as untracked, because scan ignores `GIT_*` variables. A `.env` hardlinked to a committed file isn't detected either, nor, on a case-insensitive disk (the macOS default), one committed as `.ENV` but scanned as `.env`: git matches names exactly.
   - It does not check `.gitignore`. An untracked `.env` that isn't ignored still passes, and one `git add .` stages it. The `--pre-commit` hook blocks it from there, if the hook is installed.
   - A CI job that keeps the token as a secret and runs `scan --deep` still fails, as it does today for any provider key held as a CI secret.
   - The token is still a live secret in plain text. A plain scan now passes with it present. It is named every time, but nothing stops it.

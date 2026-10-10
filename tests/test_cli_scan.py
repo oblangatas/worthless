@@ -1397,6 +1397,24 @@ class TestScanAgreesWithLockOnOAuthTokens:
         assert "couldn't ask git" in remedy, remedy
         assert "is in git" not in remedy, remedy
 
+    def test_a_timeout_on_the_commit_check_says_git_couldnt_answer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # It fails closed either way, but the reason must be the real one: git
+        # didn't answer, not "it is in your latest commit".
+        env = self._env(tmp_path, self._oauth("p55g-head-timeout"))
+
+        def fake_git(cmd, **_kwargs):  # noqa: ANN001, ANN202
+            if "cat-file" in cmd:
+                raise subprocess.TimeoutExpired(cmd, 10)
+            return subprocess.CompletedProcess(cmd, 1, b"", b"error: pathspec '.env' did not match")
+
+        monkeypatch.setattr(scanner_mod.subprocess, "run", fake_git)
+
+        [finding] = scan_files([env])
+
+        assert finding.exposure == "git_unknown", finding
+
     def test_a_gitignored_env_in_a_repo_passes(self, tmp_path: Path) -> None:
         # The everyday local setup: a project repo whose .env is gitignored.
         env = self._env(tmp_path, self._oauth("p55g-gitignored"))

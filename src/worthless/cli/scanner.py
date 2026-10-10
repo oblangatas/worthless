@@ -281,13 +281,13 @@ def _git(path: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
     )
 
 
-def _in_last_commit(path: Path) -> bool:
-    """True if *path* is in HEAD — committed, not just staged. Any doubt is
-    True: the cautious advice (revoke) is the one that can't leave a leak."""
+def _in_last_commit(path: Path) -> bool | None:
+    """True if *path* is in HEAD — committed, not just staged. None if git
+    didn't answer (timeout, gone): the caller fails closed and says so."""
     try:
         return _git(path, "cat-file", "-e", f"HEAD:./{path.name}").returncode == 0
     except (subprocess.TimeoutExpired, OSError):
-        return True
+        return None
 
 
 def token_exposure(path: Path) -> str | None:
@@ -298,11 +298,12 @@ def token_exposure(path: Path) -> str | None:
     if path.is_symlink():
         return "symlink"
     state = _git_state(path)
-    if state == "unknown":
-        return "git_unknown"
     # Asked even when untracked: `git rm --cached` without a commit leaves the
     # file, token included, in the latest commit.
-    if _in_last_commit(path):
+    in_head = _in_last_commit(path) if state != "unknown" else None
+    if in_head is None:
+        return "git_unknown"
+    if in_head:
         return "committed"
     return "staged" if state == "tracked" else None
 
