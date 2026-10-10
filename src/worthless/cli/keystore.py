@@ -243,27 +243,31 @@ def _validate_fernet_file(path: Path) -> None:
         ) from exc
     if not stat.S_ISREG(st.st_mode):
         raise WorthlessError(
-            ErrorCode.KEY_NOT_FOUND,
-            "fernet.key is not a regular file — refusing to read.",
+            ErrorCode.KEY_REFUSED,
+            f"{path} is not a regular file (symlink or special file) — refusing to "
+            "read or replace it. Move it aside and restore the real key in its place.",
         )
     mode = stat.S_IMODE(st.st_mode)
     if fernet_ipc_only_enabled():
         if mode != 0o400:
             raise WorthlessError(
-                ErrorCode.KEY_NOT_FOUND,
+                ErrorCode.KEY_REFUSED,
                 f"fernet.key must be mode 0o400 under WORTHLESS_FERNET_IPC_ONLY "
-                f"(found {mode:#o}) — refusing to read.",
+                f"(found {mode:#o}) — refusing to read. Fix it with: "
+                f"chmod 0400 {path}",
             )
         return
     if st.st_uid != os.geteuid():
         raise WorthlessError(
-            ErrorCode.KEY_NOT_FOUND,
-            "fernet.key is not owned by the current user — refusing to read.",
+            ErrorCode.KEY_REFUSED,
+            f"{path} is not owned by the current user — refusing to read or replace "
+            "it. Fix the ownership, or move the file aside if it is not your key.",
         )
     if mode != 0o600:
         raise WorthlessError(
-            ErrorCode.KEY_NOT_FOUND,
-            f"fernet.key must be mode 0o600 (found {mode:#o}) — refusing to read.",
+            ErrorCode.KEY_REFUSED,
+            f"fernet.key must be mode 0o600 (found {mode:#o}) — refusing to read. "
+            f"Fix it with: chmod 0600 {path}",
         )
 
 
@@ -274,9 +278,18 @@ def _read_fernet_file(path: Path, *, validate: bool) -> bytearray:
 
 
 def _write_key_file(key: bytes | bytearray, home_dir: Path | None) -> None:
-    """Write key to file with 0o600 permissions."""
+    """Write key to file with 0o600 permissions.
+
+    ``O_NOFOLLOW`` (worthless-6hu7): a symlink at ``fernet.key`` must never turn
+    a key write into a write to whatever it points at — as root in the container
+    that was an arbitrary-path overwrite. Not ``O_EXCL``: rotation, the
+    keyring-write fallback and the launchd sync all legitimately rewrite this
+    file. Replacing an existing key we could not read is blocked upstream by
+    ``KEY_REFUSED``, which is where that decision belongs.
+    """
     fernet_path = _fernet_file_path(home_dir)
-    fd = os.open(str(fernet_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(str(fernet_path), flags, 0o600)
     try:
         os.write(fd, key)
     finally:

@@ -6,6 +6,7 @@ All tests should fail with ImportError until the module is implemented.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import stat
@@ -15,6 +16,7 @@ from unittest.mock import patch
 
 import pytest
 
+from worthless.cli.bootstrap import ensure_home
 from worthless.cli.errors import ErrorCode, WorthlessError
 
 # Import the module under test — will fail until implemented (RED phase).
@@ -386,7 +388,9 @@ class TestReadFernetKeyCascade:
         with pytest.raises(WorthlessError) as exc_info:
             read_fernet_key(home_dir=tmp_path)
 
-        assert exc_info.value.code == ErrorCode.KEY_NOT_FOUND
+        assert (
+            exc_info.value.code == ErrorCode.KEY_REFUSED
+        )  # worthless-6hu7: a key present-but-unusable is REFUSED, never 'not found'
         assert "0o600" in exc_info.value.message
 
 
@@ -453,7 +457,9 @@ class TestIpcOnlyFernetStatGate:
         ):
             read_fernet_key(home_dir=tmp_path)
 
-        assert exc_info.value.code == ErrorCode.KEY_NOT_FOUND
+        assert (
+            exc_info.value.code == ErrorCode.KEY_REFUSED
+        )  # worthless-6hu7: a key present-but-unusable is REFUSED, never 'not found'
         assert "0o400" in exc_info.value.message
 
 
@@ -938,3 +944,112 @@ class TestKeyringBackendEnvOverride:
             for rec in caplog.records
             if rec.levelno >= logging.INFO
         ), "Expected INFO log when env var forces null backend"
+
+
+class TestExistingKeyIsNeverDestroyed:
+    """worthless-6hu7: a key file we refuse to READ must never be WRITTEN over.
+
+    Reproduced on main: with a fresh home (no marker, no shard rows), a
+    fernet.key at the wrong mode made ``_validate_fernet_file`` raise
+    KEY_NOT_FOUND, ``_first_run_keystore`` read that as "no key here", and the
+    mint destroyed the original — overwritten without a keyring, deleted as
+    "stale" with one, and followed through a symlink to a file outside the home.
+    """
+
+    @staticmethod
+    def _fresh_home(tmp_path: Path, *, symlink: bool) -> tuple[Path, Path, bytes]:
+        original = b"ORIGINAL-KEY-BYTES-do-not-destroy-0123456789ab"
+        base = tmp_path / ".worthless"
+        base.mkdir(mode=0o700)
+        key = base / "fernet.key"
+        if symlink:
+            victim = tmp_path / "outside.key"
+            victim.write_bytes(original)
+            victim.chmod(0o600)
+            key.symlink_to(victim)
+            return base, victim, original
+        key.write_bytes(original)
+        key.chmod(0o644)  # wrong mode -> refused for reading
+        return base, key, original
+
+    def test_wrong_mode_key_survives_bootstrap(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No keyring (container-like): the file must not be overwritten."""
+        monkeypatch.setenv("WORTHLESS_KEYRING_BACKEND", "null")
+        base, target, original = self._fresh_home(tmp_path, symlink=False)
+
+        with contextlib.suppress(WorthlessError):
+            ensure_home(base_dir=base)
+
+        assert target.read_bytes() == original, "an unreadable key must never be replaced"
+
+    def test_wrong_mode_key_survives_bootstrap_with_keyring(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With a keyring: the file must not be deleted as 'stale' either."""
+        monkeypatch.delenv("WORTHLESS_KEYRING_BACKEND", raising=False)
+        base, target, original = self._fresh_home(tmp_path, symlink=False)
+
+        with (
+            patch("worthless.cli.keystore.keyring_available", return_value=True),
+            patch("worthless.cli.keystore.keyring.set_password"),
+            contextlib.suppress(WorthlessError),
+        ):
+            ensure_home(base_dir=base)
+
+        assert target.exists(), "an unreadable key must never be deleted as stale"
+        assert target.read_bytes() == original
+
+    def test_symlinked_key_does_not_write_through(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A symlink at fernet.key must not become a write to its target."""
+        monkeypatch.setenv("WORTHLESS_KEYRING_BACKEND", "null")
+        base, victim, original = self._fresh_home(tmp_path, symlink=True)
+
+        with contextlib.suppress(WorthlessError):
+            ensure_home(base_dir=base)
+
+        assert victim.read_bytes() == original, "must not write through a symlink"
+
+    def test_genuinely_absent_key_still_mints(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression direction: a real first run must still create a key."""
+        monkeypatch.setenv("WORTHLESS_KEYRING_BACKEND", "null")
+        base = tmp_path / ".worthless"
+
+        home = ensure_home(base_dir=base)
+
+        assert home.fernet_key_path.exists(), "first run must still mint a key"
+
+
+class TestDoctorAdviceForRefusedKey:
+    """worthless-6hu7: refusing the key must not route users to a destructive fix.
+
+    doctor's broken-install path recommends ``worthless uninstall --force``,
+    which is correct for an unrecoverable install and catastrophic for a key
+    that merely has the wrong mode — the install is intact and a chmod fixes it.
+    """
+
+    def test_doctor_text_mode_does_not_recommend_uninstall(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        from worthless.cli.commands.doctor import _doctor_run
+
+        base = tmp_path / ".worthless"
+        base.mkdir(mode=0o700)
+        key = base / "fernet.key"
+        key.write_bytes(b"ORIGINAL")
+        key.chmod(0o644)
+        monkeypatch.setenv("WORTHLESS_HOME", str(base))
+        monkeypatch.setenv("WORTHLESS_KEYRING_BACKEND", "null")
+
+        with contextlib.suppress(SystemExit, WorthlessError):
+            _doctor_run(fix=False, yes=True, dry_run=False)
+        captured = capsys.readouterr()
+        out = captured.out + captured.err
+
+        assert "uninstall --force" not in out, "a chmod-able key must not advise uninstall"
+        assert "chmod" in out, f"the advice must name the repair; got:\n{out}"
