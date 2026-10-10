@@ -1219,6 +1219,28 @@ class TestScanAgreesWithLockOnOAuthTokens:
         data = json.loads(runner.invoke(app, ["scan", str(env), "--json"]).stdout)
         assert data["findings"][0]["exposure"] == "staged", data
 
+    def test_untracking_a_committed_env_without_committing_still_fails(
+        self, tmp_path: Path
+    ) -> None:
+        # `git rm --cached` takes the file out of git's index, so git calls it
+        # untracked — but until that is committed, the token is still in the
+        # latest commit. Doing half of the committed advice must not go green.
+        env = self._env(tmp_path, self._oauth("p55g-untracked-in-head"))
+        _git_commit(env.parent, ".env")
+        subprocess.run(
+            ["git", "-C", str(env.parent), "rm", "-q", "--cached", ".env"],  # noqa: S607
+            check=True,
+        )
+
+        result = runner.invoke(app, ["scan", str(env)])
+        low = self._flat(result).lower()
+
+        assert result.exit_code == 1, low
+        assert "this .env file is committed to git" in low, low
+        sarif = json.loads(runner.invoke(app, ["scan", str(env), "--format", "sarif"]).stdout)
+        [res] = sarif["runs"][0]["results"]
+        assert res["level"] == "error", res
+
     def test_a_mixed_committed_env_headline_doesnt_send_the_token_to_lock(
         self, tmp_path: Path
     ) -> None:

@@ -96,7 +96,8 @@ EXPOSED_LOGIN_REMEDIES: dict[str, str] = {
     "committed": (
         "This .env file is committed to git (it is in your latest commit), so the "
         "token is in your git history. Treat it as leaked: revoke it, then untrack the "
-        "file (`git rm --cached {file}`) and add it to .gitignore."
+        "file (`git rm --cached {file}`), add it to .gitignore, and commit that. Older "
+        "commits still hold the token, so revoking it is what makes it safe."
     ),
     "staged": (
         "This .env file is staged in git but not committed yet. Unstage it "

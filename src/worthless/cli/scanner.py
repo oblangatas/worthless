@@ -298,9 +298,13 @@ def token_exposure(path: Path) -> str | None:
     if path.is_symlink():
         return "symlink"
     state = _git_state(path)
-    if state == "tracked":
-        return "committed" if _in_last_commit(path) else "staged"
-    return "git_unknown" if state == "unknown" else None
+    if state == "unknown":
+        return "git_unknown"
+    # Asked even when untracked: `git rm --cached` without a commit leaves the
+    # file, token included, in the latest commit.
+    if _in_last_commit(path):
+        return "committed"
+    return "staged" if state == "tracked" else None
 
 
 def _exposure_for(path: Path, from_env: bool, cache: dict[Path, str | None]) -> str | None:
