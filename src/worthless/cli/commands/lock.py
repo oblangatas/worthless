@@ -1994,17 +1994,14 @@ def _ctrl_c_raises(signals: list[int]) -> Iterator[None]:
             signal.siginterrupt(sig, False)  # what asyncio set for its own handlers
 
 
-def _exit_openclaw_failed(console, home: WorthlessHome, code: int) -> NoReturn:  # noqa: ANN001
+def _exit_openclaw_failed(console, code: int) -> NoReturn:  # noqa: ANN001
     """Final word on a lock whose OpenClaw stage did not finish; exits *code*.
 
-    Ctrl-C (130) already explained itself in :func:`_openclaw_steps`. Its keys
-    ARE locked, so it still gets the post-lock Fernet sync: before worthless-3clz
-    that press was ignored and the lock ran on to the sync. (The other codes skip
-    it — pre-existing, tracked as worthless-vhew.)
+    Ctrl-C (130) already explained itself and synced the Fernet key in
+    :func:`_openclaw_steps`. The other codes skip that sync (pre-existing,
+    tracked as worthless-vhew).
     """
-    if code == _EXIT_INTERRUPTED:
-        _sync_fernet_after_lock(home)
-    else:
+    if code != _EXIT_INTERRUPTED:
         console.print_failure(
             "LOCK FAILED — .env key is split but OpenClaw integration did not complete.\n"
             "Your agent traffic is NOT gated through the Worthless proxy.\n"
@@ -2062,6 +2059,10 @@ def _openclaw_steps(
                 },
             ),
         )
+        # The keys ARE locked, so keep them usable by a service-run proxy. Done
+        # here, while a further press is still inert, so it cannot be skipped
+        # (before worthless-3clz the press was ignored and the lock ran on to it).
+        _sync_fernet_after_lock(home)
         return _EXIT_INTERRUPTED
 
 
@@ -2369,8 +2370,12 @@ def _print_lock_result(
     home_base_dir: Path,
     openclaw_failed: bool = False,
     oauth_skipped: bool = False,
+    interrupted: bool = False,
 ) -> None:
     """Emit the post-lock user-facing summary (called only when quiet=False).
+
+    ``interrupted`` (worthless-3clz): the user pressed Ctrl-C, so skip the
+    optional source scan — it can run 30s and end in a "Scan now?" prompt.
 
     ``openclaw_failed`` (WOR-779 honesty): on a partial OpenClaw failure the
     ``.env`` IS split, but agent traffic is NOT gated — so the derived verdict
@@ -2437,7 +2442,8 @@ def _print_lock_result(
         # worthless-7jn2: same for a skipped OAuth token still in the file.
         if verdict_earned:
             console.print_hint("Check anytime with `worthless status`.")
-        _maybe_prompt_code_scan(Path.cwd())
+        if not interrupted:
+            _maybe_prompt_code_scan(Path.cwd())
     elif oauth_skipped:
         # worthless-7jn2: keys WERE found here. They were classified as Claude
         # Code OAuth tokens and deliberately skipped above — the file is not
@@ -3030,6 +3036,7 @@ def _lock_keys(
             home.base_dir,
             openclaw_failed=bool(result.openclaw_exit),
             oauth_skipped=result.oauth_skipped,
+            interrupted=result.openclaw_exit == _EXIT_INTERRUPTED,
         )
         # WOR-853: same guard as the "Next:" hint above — only offer when the
         # lock actually succeeded. A partial failure has no business installing
@@ -3053,7 +3060,7 @@ def _lock_keys(
     # LOCK FAILED line disambiguates the mixed [FAIL]+[OK] output so the
     # user cannot mistake a partial failure for overall success (WOR-551).
     if result.openclaw_exit:
-        _exit_openclaw_failed(console, home, result.openclaw_exit)
+        _exit_openclaw_failed(console, result.openclaw_exit)
 
     # Also here, for the paths the branch above does not cover: a quiet lock, a
     # re-lock with no fresh keys, or an OpenClaw partial failure. Syncing twice
