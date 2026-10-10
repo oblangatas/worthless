@@ -467,14 +467,15 @@ smoke_test() {
     # and guessing ~/.local/bin misses when UV_TOOL_BIN_DIR/XDG_BIN_HOME move it
     # (unscrubbed), killing a good install. Also beats a shadowing worthless on
     # PATH. worthless-dc26.
-    worthless_bin="$("$UV" tool dir --bin 2>/dev/null)/worthless"
+    worthless_bin="$("$UV" tool dir --bin 2>/dev/null || true)/worthless"
     # The shadow check needs this from `uv tool dir --bin`: the fallback is
     # itself a PATH lookup, so PATH-to-PATH would answer "no shadow" for every
     # shadowed user. Fail closed.
     worthless_bin_authoritative=1
     if [ ! -x "$worthless_bin" ]; then
         worthless_bin_authoritative=0
-        worthless_bin="$(command -v worthless 2>/dev/null || true)"
+        # worthless-alx3: uv's default dir, never PATH (a planted copy would run).
+        worthless_bin="${UV_TOOL_BIN_DIR:-${XDG_BIN_HOME:-${HOME:-/root}/.local/bin}}/worthless"
     fi
     if ! version_output="$("$worthless_bin" --version 2>/dev/null)"; then
         die "$EXIT_INTERNAL" "worthless installed but failed to run." \
