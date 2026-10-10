@@ -468,9 +468,8 @@ smoke_test() {
     # (unscrubbed), killing a good install. Also beats a shadowing worthless on
     # PATH. worthless-dc26.
     worthless_bin="$("$UV" tool dir --bin 2>/dev/null || true)/worthless"
-    # The shadow check needs this from `uv tool dir --bin`: the fallback is
-    # itself a PATH lookup, so PATH-to-PATH would answer "no shadow" for every
-    # shadowed user. Fail closed.
+    # The shadow check needs this from `uv tool dir --bin`: the fallback below is
+    # a guess, and a guessed path must never be named in a shadow warning.
     worthless_bin_authoritative=1
     if [ ! -x "$worthless_bin" ]; then
         worthless_bin_authoritative=0
@@ -480,6 +479,7 @@ smoke_test() {
     if ! version_output="$("$worthless_bin" --version 2>/dev/null)"; then
         die "$EXIT_INTERNAL" "worthless installed but failed to run." \
             "Try: worthless --version" \
+            "Or:  uv tool dir --bin" \
             "Or:  worthless doctor"
     fi
     actual_ver="$(printf '%s' "$version_output" | awk '{print $2}' | head -1)"
