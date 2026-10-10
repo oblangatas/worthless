@@ -39,6 +39,18 @@ def _strip_env_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
 runner = CliRunner()
 
 
+def _git_commit(repo: Path, name: str) -> None:
+    """Init *repo* and really commit *name* — hermetic: no signing, no hooks,
+    no reliance on the machine's git identity."""
+    git = ["git", "-C", str(repo)]
+    cfg = ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"]
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)  # noqa: S607
+    subprocess.run([*git, "add", name], check=True)  # noqa: S607
+    subprocess.run(  # noqa: S607
+        [*git, *cfg, "-c", "core.hooksPath=/dev/null", "commit", "-q", "-m", "x"], check=True
+    )
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -1090,6 +1102,7 @@ class TestScanAgreesWithLockOnOAuthTokens:
         assert finding["is_protected"] is False
         assert finding["is_unshardable"] is True, finding
         assert "sk-ant-api03" in finding["remediation"], finding
+        assert finding["exposure"] == "local", finding
 
     def test_sarif_is_a_note_under_its_own_rule(self, tmp_path: Path) -> None:
         env = self._env(tmp_path, self._oauth("p55g-sarif"))
@@ -1160,15 +1173,14 @@ class TestScanAgreesWithLockOnOAuthTokens:
         assert "run `worthless lock`" not in out.lower(), out
         assert "revoke" in out.lower(), out
         # Says exactly why, not a list of guesses.
-        assert "isn't a local .env" in out.lower(), out
+        assert "isn't a .env file" in out.lower(), out
 
     def test_a_token_in_a_committed_env_still_fails(self, tmp_path: Path) -> None:
         # A .env in git is a leak, and in CI the scan is the backstop for
         # people who never installed the hook. Main failed it; the pass must
         # not cover it. The fix that exists: revoke it, take it out of git.
         env = self._env(tmp_path, self._oauth("p55g-committed"))
-        subprocess.run(["git", "init", "-q", str(env.parent)], check=True)  # noqa: S607
-        subprocess.run(["git", "-C", str(env.parent), "add", ".env"], check=True)  # noqa: S607
+        _git_commit(env.parent, ".env")
 
         result = runner.invoke(app, ["scan", str(env)])
         low = self._flat(result).lower()
@@ -1178,13 +1190,102 @@ class TestScanAgreesWithLockOnOAuthTokens:
         assert "run `worthless lock`" not in low, low
         # The exact problem, in plain words — not "it can leave the machine".
         assert "this .env file is committed to git" in low, low
+        assert f"git rm --cached {str(env).lower()}" in low, low
         data = json.loads(runner.invoke(app, ["scan", str(env), "--json"]).stdout)
-        assert data["findings"][0]["is_unshardable"] is False, data
-        assert "committed to git" in data["findings"][0]["remediation"].lower(), data
+        [finding] = data["findings"]
+        assert finding["is_unshardable"] is False, data
+        assert finding["exposure"] == "committed", data
+        assert "committed to git" in finding["remediation"].lower(), data
         sarif = json.loads(runner.invoke(app, ["scan", str(env), "--format", "sarif"]).stdout)
         [res] = sarif["runs"][0]["results"]
         assert res["level"] == "error", res
         assert "committed to git" in res["message"]["text"].lower(), res
+
+    def test_a_staged_env_is_not_called_committed(self, tmp_path: Path) -> None:
+        # `git add` alone puts the file in git's index, not in its history.
+        # Saying "already in your git history" would be false, and this is
+        # exactly what the pre-commit-framework hook sees.
+        env = self._env(tmp_path, self._oauth("p55g-staged"))
+        subprocess.run(["git", "init", "-q", str(env.parent)], check=True)  # noqa: S607
+        subprocess.run(["git", "-C", str(env.parent), "add", ".env"], check=True)  # noqa: S607
+
+        result = runner.invoke(app, ["scan", str(env)])
+        low = self._flat(result).lower()
+
+        assert result.exit_code == 1, low
+        assert "staged in git but not committed yet" in low, low
+        assert "already in your git history" not in low, low
+        assert "committed to git" not in low, low
+        data = json.loads(runner.invoke(app, ["scan", str(env), "--json"]).stdout)
+        assert data["findings"][0]["exposure"] == "staged", data
+
+    def test_a_mixed_committed_env_headline_doesnt_send_the_token_to_lock(
+        self, tmp_path: Path
+    ) -> None:
+        # The OpenAI key is fixable by lock; the login token is not. The
+        # headline must not lump the token in with "Run `worthless lock`".
+        env = self._env(
+            tmp_path, self._oauth("p55g-mixed-committed"), f"OPENAI_API_KEY={_fake_openai_key()}"
+        )
+        _git_commit(env.parent, ".env")
+
+        result = runner.invoke(app, ["scan", str(env)])
+        headline = (result.stdout + result.stderr).splitlines()[0].lower()
+
+        assert result.exit_code == 1, headline
+        assert "login token" in headline and "see below" in headline, headline
+
+    def test_tokens_in_one_file_get_one_explanation(self, tmp_path: Path) -> None:
+        # Two tokens, same file, same reason: one paragraph, not two. A token
+        # with no variable name is labelled by its line, not the provider name.
+        cfg = tmp_path / "proj" / "config.yaml"
+        cfg.parent.mkdir()
+        cfg.write_text(
+            f"a: {fake_key('sk-ant-oat01-', 'p55g-one')}\n"
+            f"b: {fake_key('sk-ant-oat01-', 'p55g-two')}\n"
+        )
+
+        result = runner.invoke(app, ["scan", str(cfg)])
+        low = self._flat(result).lower()
+
+        assert result.exit_code == 1, low
+        assert low.count("isn't a .env file") == 1, low
+        assert "line 1" in low and "line 2" in low, low
+
+    def test_git_is_asked_in_english(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The "not a git repository" check reads git's English message; a
+        # translated git (e.g. LANG=de_DE) would otherwise fail a plain .env.
+        env = self._env(tmp_path, self._oauth("p55g-lang"))
+        envs: list[dict] = []
+
+        def fake_git(cmd, **kwargs):  # noqa: ANN001, ANN202
+            envs.append(kwargs.get("env") or {})
+            return subprocess.CompletedProcess(cmd, 128, b"", b"fatal: not a git repository")
+
+        monkeypatch.setenv("LC_ALL", "de_DE.UTF-8")
+        monkeypatch.setattr(scanner_mod.subprocess, "run", fake_git)
+
+        [finding] = scan_files([env])
+
+        assert finding.is_unshardable is True
+        assert envs and all(e.get("LC_ALL") == "C" for e in envs), envs
+
+    def test_the_cli_says_when_git_couldnt_answer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        env = self._env(tmp_path, self._oauth("p55g-unknown-cli"))
+
+        def refusing_git(cmd, **_kwargs):  # noqa: ANN001, ANN202
+            return subprocess.CompletedProcess(cmd, 128, b"", b"fatal: detected dubious ownership")
+
+        monkeypatch.setattr(scanner_mod.subprocess, "run", refusing_git)
+
+        result = runner.invoke(app, ["scan", str(env)])
+        low = self._flat(result).lower()
+
+        assert result.exit_code == 1, low
+        assert "couldn't ask git" in low, low
+        assert "committed to git" not in low, low
 
     def test_an_inherited_git_dir_cannot_fool_the_check(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1223,6 +1324,7 @@ class TestScanAgreesWithLockOnOAuthTokens:
         ]
         assert len(findings) == 1, findings
         assert findings[0]["is_unshardable"] is False, findings
+        assert findings[0]["exposure"] == "environment", findings
         remedy = findings[0]["remediation"].lower()
         assert "environment" in remedy, findings
         assert "revoke" not in remedy, findings
@@ -1239,7 +1341,7 @@ class TestScanAgreesWithLockOnOAuthTokens:
 
         assert result.exit_code == 1, self._flat(result)
         assert "revoke" in self._flat(result).lower(), self._flat(result)
-        assert "isn't a local .env" in self._flat(result).lower(), self._flat(result)
+        assert "isn't a .env file" in self._flat(result).lower(), self._flat(result)
 
     @pytest.mark.parametrize("git_answer", ["no-git", "timeout", "dubious-ownership"])
     def test_an_unknown_git_answer_fails_closed(
@@ -1267,8 +1369,8 @@ class TestScanAgreesWithLockOnOAuthTokens:
         assert finding.is_unshardable is False
         # Honest about why: it didn't see the file in git, it couldn't ask.
         remedy = scanner_mod.remediation_for(finding) or ""
-        assert "couldn't confirm" in remedy, remedy
-        assert "is committed to git" not in remedy, remedy
+        assert "couldn't ask git" in remedy, remedy
+        assert "is in git" not in remedy, remedy
 
     def test_a_gitignored_env_in_a_repo_passes(self, tmp_path: Path) -> None:
         # The everyday local setup: a project repo whose .env is gitignored.

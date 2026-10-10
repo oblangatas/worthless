@@ -22,6 +22,7 @@ from worthless.cli.key_patterns import (
 )
 from worthless.cli.redaction import mask_secret
 from worthless.cli.safe_rewrite import _BASENAME_ALLOWLIST
+from worthless.openclaw.audit import sanitise_for_message
 
 _VAR_NAME_RE = re.compile(r"(\w+)\s*$")
 
@@ -252,23 +253,7 @@ def _git_state(path: Path) -> str:
     tracked: a token can't pass because the check couldn't run.
     """
     try:
-        result = subprocess.run(  # nosec B603,B607
-            [  # noqa: S607
-                "git",
-                "-C",
-                str(path.parent),
-                "ls-files",
-                "--error-unmatch",
-                "--",
-                path.name,
-            ],
-            capture_output=True,
-            check=False,
-            timeout=10,
-            # Ask the repo that holds *path*. Git sets GIT_DIR for hooks run in a
-            # linked worktree; inherited, it points this probe at another repo.
-            env={k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
-        )
+        result = _git(path, "ls-files", "--error-unmatch", "--", path.name)
     except (subprocess.TimeoutExpired, OSError):  # OSError covers no-git
         return "unknown"
     if result.returncode == 0:
@@ -280,7 +265,27 @@ def _git_state(path: Path) -> str:
     return "unknown"
 
 
-_GIT_STATE_EXPOSURE = {"tracked": "committed", "unknown": "git_unknown", "untracked": None}
+def _git(path: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
+    """Run a read-only git query in the folder holding *path*."""
+    return subprocess.run(  # nosec B603,B607
+        ["git", "-C", str(path.parent), *args],  # noqa: S607
+        capture_output=True,
+        check=False,
+        timeout=10,
+        # Ask the repo that holds *path*: git sets GIT_DIR for hooks run in a
+        # linked worktree, and inherited it points this at another repo. And
+        # ask in English: the "not a git repository" check reads git's message.
+        env={**{k: v for k, v in os.environ.items() if not k.startswith("GIT_")}, "LC_ALL": "C"},
+    )
+
+
+def _in_last_commit(path: Path) -> bool:
+    """True if *path* is in HEAD — committed, not just staged. Any doubt is
+    True: the cautious advice (revoke) is the one that can't leave a leak."""
+    try:
+        return _git(path, "cat-file", "-e", f"HEAD:./{path.name}").returncode == 0
+    except (subprocess.TimeoutExpired, OSError):
+        return True
 
 
 def token_exposure(path: Path) -> str | None:
@@ -290,7 +295,10 @@ def token_exposure(path: Path) -> str | None:
         return "other_file"
     if path.is_symlink():
         return "symlink"
-    return _GIT_STATE_EXPOSURE[_git_state(path)]
+    state = _git_state(path)
+    if state == "tracked":
+        return "committed" if _in_last_commit(path) else "staged"
+    return "git_unknown" if state == "unknown" else None
 
 
 def _exposure_for(path: Path, from_env: bool, cache: dict[Path, str | None]) -> str | None:
@@ -304,16 +312,20 @@ def _exposure_for(path: Path, from_env: bool, cache: dict[Path, str | None]) -> 
     return cache[path]
 
 
-def remedy_for_exposure(exposure: str | None) -> str:
-    """The fix text for a login token: local (None) or one exposure reason."""
-    return UNSHARDABLE_REMEDY if exposure is None else EXPOSED_LOGIN_REMEDIES[exposure]
+def remedy_for_exposure(exposure: str | None, file: str = "the file") -> str:
+    """The fix text for a login token: local (None) or one exposure reason.
+    *file* lands in commands like `git rm --cached <file>`; it is sanitised
+    here because a filename is attacker-controlled and this reaches a terminal."""
+    if exposure is None:
+        return UNSHARDABLE_REMEDY
+    return EXPOSED_LOGIN_REMEDIES[exposure].format(file=sanitise_for_message(file))
 
 
 def remediation_for(f: ScanFinding) -> str | None:
     """The fix that exists for a login token — never "run worthless lock"."""
     if f.is_protected or not f.is_login_token:
         return None
-    return remedy_for_exposure(f.exposure)
+    return remedy_for_exposure(f.exposure, f.file)
 
 
 def finding_to_dict(f: ScanFinding) -> dict[str, object]:
@@ -330,6 +342,8 @@ def finding_to_dict(f: ScanFinding) -> dict[str, object]:
         "value_preview": f.value_preview,
     }
     if remedy := remediation_for(f):
+        # Why, as data: "local" (passes) or the reason it can leave the machine.
+        item["exposure"] = f.exposure or "local"
         item["remediation"] = remedy
     return item
 

@@ -836,11 +836,32 @@ class TestDefaultCommandOAuthOnlyEnv:
         )
         subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)  # noqa: S607
         subprocess.run(["git", "-C", str(tmp_path), "add", ".env"], check=True)  # noqa: S607
+        subprocess.run(  # noqa: S607
+            [  # noqa: S607
+                "git",
+                "-C",
+                str(tmp_path),
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "commit",
+                "-q",
+                "-m",
+                "x",
+            ],
+            check=True,
+        )
 
         result = _invoke_default({"WORTHLESS_HOME": str(home_dir.base_dir)})
         low = " ".join((result.stdout + result.stderr).split()).lower()
 
         assert result.exit_code == 0, low
+        assert "committed to git" in low, low
         assert "revoke" in low, low
 
     def test_mixed_env_locks_the_real_key_and_reports_done(

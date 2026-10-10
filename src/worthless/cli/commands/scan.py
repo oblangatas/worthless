@@ -287,8 +287,7 @@ def _unshardable_lines(findings: Sequence[ScanFinding], committing: bool = False
     ]
     if committing:
         lines.append(
-            "Commit blocked: this would put a live login token into git history for good. "
-            "Unstage it, or remove the token."
+            "Commit blocked: a live login token is staged. Unstage it, or remove the token."
         )
     return lines
 
@@ -302,12 +301,18 @@ def _leaked_token_lines(findings: Sequence[ScanFinding]) -> list[str]:
     tokens = [f for f in findings if f.is_login_token and _is_exposed(f)]
     if not tokens:
         return []
-    lines = ["`worthless lock` won't help here: it refuses Claude Code login tokens."]
-    for f, name in zip(tokens, _token_names(tokens)[0], strict=True):
+    # One paragraph per (file, reason): the exact reason, never a list of
+    # guesses — committed, staged, git couldn't answer, symlink, not a .env,
+    # or the environment.
+    groups: dict[tuple[str, str], list[str]] = {}
+    for f in tokens:
         where = "the environment" if f.exposure == "environment" else sanitise_for_message(f.file)
-        # The exact reason, never a list of guesses: committed to git, a
-        # symlink, not a local .env, git couldn't answer, or the environment.
-        lines += [f"Exposed login token: {name} in {where}.", remediation_for(f) or ""]
+        label = sanitise_for_message(f.var_name) if f.var_name else f"line {f.line}"
+        groups.setdefault((where, remediation_for(f) or ""), []).append(label)
+    lines = ["`worthless lock` can't fix these login tokens (it refuses them):"]
+    for (where, remedy), labels in groups.items():
+        s = "s" if len(labels) != 1 else ""
+        lines += [f"Exposed login token{s} in {where}: {', '.join(labels)}.", remedy]
     return lines
 
 
@@ -351,17 +356,20 @@ def _scan_verdict_line(
     broken: int,
     files: Sequence[str] = (),
     unshardable: int = 0,
-    tokens_only: bool = False,
+    tokens: int = 0,
 ) -> str:
     """WOR-779: the one-line verdict scan leads with (verdict-first).
 
-    ``tokens_only``: every exposed key is a login token, so "run worthless
-    lock" would be the p55g dead end — the fix is spelled out below instead.
+    ``tokens``: how many exposed keys are login tokens. lock refuses those, so
+    "run worthless lock" must never read as covering them (the p55g dead end):
+    the fix for them is spelled out below.
     """
     if unprotected > 0:
         where, remedy = _exposure_noun(files)
-        if tokens_only:
+        if tokens == unprotected:
             remedy = " See below."
+        elif tokens:
+            remedy += " Login tokens: see below."
         location = f" in {where}" if where else ""
         return (
             f"{protected} of {total} keys protected — "
@@ -477,7 +485,7 @@ def _format_human(
             len(orphans),
             files=[f.file for f in exposed],
             unshardable=unshardable_count,
-            tokens_only=bool(exposed) and all(f.is_login_token for f in exposed),
+            tokens=sum(1 for f in exposed if f.is_login_token),
         ),
     )
 

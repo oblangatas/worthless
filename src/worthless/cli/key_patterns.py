@@ -90,27 +90,35 @@ UNSHARDABLE_REMEDY = (
 
 # The same token where it can leave the machine. Each entry names the exact
 # reason first, in plain words, then the fix for that reason. Never "run
-# worthless lock" — lock refuses these tokens wherever they sit.
+# worthless lock" — lock refuses these tokens wherever they sit. {file} is the
+# scanned path, already sanitised for the terminal.
 EXPOSED_LOGIN_REMEDIES: dict[str, str] = {
     "committed": (
-        "This .env file is committed to git, so the token is already in your git "
-        "history. Treat it as leaked: revoke it, then untrack the file "
-        "(`git rm --cached`) and add it to .gitignore."
+        "This .env file is committed to git (it is in your latest commit), so the "
+        "token is in your git history. Treat it as leaked: revoke it, then untrack the "
+        "file (`git rm --cached {file}`) and add it to .gitignore."
+    ),
+    "staged": (
+        "This .env file is staged in git but not committed yet. Unstage it "
+        "(`git rm --cached {file}`) and add it to .gitignore before you commit. If it "
+        "was in an earlier commit or was pushed, revoke the token."
     ),
     "git_unknown": (
-        "worthless couldn't confirm with git that this .env file is uncommitted, so "
-        "it treats it as committed. Run `git status` here; if the file is committed, "
-        "revoke the token."
+        "worthless couldn't ask git about this file (git is missing, timed out, or "
+        "refused), so it treats it as committed. Run `git ls-files {file}` in this "
+        "folder. No output means it isn't in git: fix git access (in CI, often "
+        '`git config --global --add safe.directory "$PWD"`) and scan again. If it '
+        "prints the file, revoke the token."
     ),
     "symlink": (
-        "This .env file is a symlink to another file, which may be shared or "
-        "committed. If it is, revoke the token, and keep login tokens only in a real, "
-        "uncommitted .env file."
+        "This .env file is a symlink, and lock refuses symlinks. Replace it with a real "
+        ".env file that isn't committed. If the file it points to is committed or "
+        "shared, revoke the token."
     ),
     "other_file": (
-        "This file isn't a local .env (lock only manages .env, .env.local and similar), "
-        "so it is likely committed or shared. Treat the token as leaked: revoke it, "
-        "then take it out of this file."
+        "This isn't a .env file, so worthless can't keep the token local. Move the "
+        "token into an uncommitted .env file and delete it here. If this file was ever "
+        "committed or shared, revoke the token."
     ),
     # scan --deep: a CI secret belongs in the environment, so "revoke it" would
     # kill a working token and the next run would be red again.

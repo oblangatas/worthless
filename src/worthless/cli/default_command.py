@@ -167,7 +167,7 @@ def _run_enrollment_if_needed(
     if oauth:
         names = ", ".join(sanitise_for_message(var_name) for var_name, _, _ in oauth)
         # Same rule as scan: a .env in git (or a symlink) has left the machine.
-        remedy = remedy_for_exposure(token_exposure(env_path))
+        remedy = remedy_for_exposure(token_exposure(env_path), env_path.name)
         console.print_warning(
             f"Can't protect {names}: a Claude Code login token, still in plain text. " + remedy
         )
