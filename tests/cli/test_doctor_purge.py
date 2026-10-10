@@ -21,6 +21,7 @@ from worthless.cli.bootstrap import WorthlessHome
 from tests.cli.conftest import (
     TEST_OPENAI_KEY,
     cli_invoke,
+    dotenv_value,
     has_all_tokens,
     list_enrollments,
     lock_env,
@@ -201,3 +202,43 @@ class TestDoctorOrphanPurge:
         assert len(after) == 1, (
             f"expected exactly 1 row remaining (env_b's), got {len(after)}:\n{after}"
         )
+
+
+# ---------------------------------------------------------------------------
+# A moved .env is not a dead key
+# ---------------------------------------------------------------------------
+
+
+class TestDoctorKeepsMovedEnv:
+    """A missing ``.env`` *file* is not the same as a deleted ``.env`` *line*.
+
+    Removing a git worktree or moving a project folder leaves the ``.env`` —
+    and Shard A inside it — intact, just somewhere else. ``doctor --fix`` used
+    to treat a missing file exactly like a deleted line and purge the key,
+    destroying Shard B: the half that was still safe. Only a deleted line in a
+    file that still exists is a dead key.
+    """
+
+    def test_doctor_fix_yes_keeps_key_when_env_file_moved(
+        self, home_dir: WorthlessHome, env_file: Path, tmp_path: Path
+    ) -> None:
+        lock_env(env_file, home_dir)
+        assert len(list_enrollments(home_dir)) == 1, "precondition: key enrolled"
+
+        moved = tmp_path / "moved-project" / ".env"
+        moved.parent.mkdir()
+        env_file.rename(moved)
+
+        result = cli_invoke(["doctor", "--fix", "--yes"], home_dir)
+        assert not looks_like_traceback(result.output)
+        assert len(list_enrollments(home_dir)) == 1, (
+            "doctor --fix --yes purged a key whose .env had only moved:\n" + result.output
+        )
+
+        # The real proof: put the project back and the original key comes back.
+        moved.rename(env_file)
+        unlocked = cli_invoke(["unlock", "--env", str(env_file)], home_dir)
+        assert unlocked.exit_code == 0, (
+            "key not recoverable after moving the project back:\n" + unlocked.output
+        )
+        assert dotenv_value(env_file, "OPENAI_API_KEY") == TEST_OPENAI_KEY
