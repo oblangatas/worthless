@@ -233,15 +233,17 @@ class ScanFinding:
     # design, wherever they sit. Decided here, while the raw value is still in
     # hand — after this only the masked preview exists.
     is_login_token: bool = False
-    # A login token that stays on this machine: an untracked, non-symlink
-    # .env-family file. Not "unprotected" — lock can't fix it and nothing else
-    # will, so scan must not fail the build over it. Anywhere else (in git, a
-    # non-.env file, a symlink, the environment) the token is plain exposed.
-    is_unshardable: bool = False
     # Why an exposed login token can leave the machine — one key of
-    # EXPOSED_LOGIN_REMEDIES ("committed", "git_unknown", "symlink",
-    # "other_file", "environment"). None when it stays local or isn't a token.
+    # EXPOSED_LOGIN_REMEDIES. None when it stays local or isn't a token.
     exposure: str | None = None
+
+    @property
+    def is_unshardable(self) -> bool:
+        """A login token that stays on this machine: an untracked, non-symlink
+        .env-family file. Not "unprotected" — lock can't fix it and nothing else
+        will, so scan must not fail the build over it. Anywhere else (in git, a
+        non-.env file, a symlink, the environment) the token is plain exposed."""
+        return self.is_login_token and self.exposure is None
 
 
 def _git_state(path: Path) -> str:
@@ -312,7 +314,7 @@ def _exposure_for(path: Path, from_env: bool, cache: dict[Path, str | None]) -> 
     return cache[path]
 
 
-def remedy_for_exposure(exposure: str | None, file: str = "the file") -> str:
+def remedy_for_exposure(exposure: str | None, file: str) -> str:
     """The fix text for a login token: local (None) or one exposure reason.
     *file* lands in commands like `git rm --cached <file>`; it is sanitised
     here because a filename is attacker-controlled and this reaches a terminal."""
@@ -438,7 +440,6 @@ def scan_files(
                         value_preview=_mask(value),
                         column=match.start(),
                         is_login_token=token,
-                        is_unshardable=token and exposure is None,
                         exposure=exposure,
                     )
                 )

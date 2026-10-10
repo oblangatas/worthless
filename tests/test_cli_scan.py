@@ -1077,7 +1077,7 @@ class TestScanAgreesWithLockOnOAuthTokens:
                 provider="anthropic",
                 is_protected=False,
                 value_preview="****",
-                is_unshardable=True,
+                is_login_token=True,
             ),
         ]
 

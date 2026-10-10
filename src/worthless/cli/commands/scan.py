@@ -37,7 +37,7 @@ from worthless.cli.scanner import (
     SkippedFile,
     finding_to_dict,
     format_sarif,
-    remediation_for,
+    remedy_for_exposure,
     scan_files,
 )
 from worthless.cli.confusables import (
@@ -276,9 +276,14 @@ def _unshardable_lines(findings: Sequence[ScanFinding], committing: bool = False
     ``committing``: the pre-commit hook still blocks on these (see scan), so it
     says why the commit stopped and how to get unblocked.
     """
-    names, s = _token_names([f for f in findings if f.is_unshardable and not f.is_protected])
+    names = [
+        sanitise_for_message(f.var_name or f.provider)
+        for f in findings
+        if f.is_unshardable and not f.is_protected
+    ]
     if not names:
         return []
+    s = "s" if len(names) != 1 else ""
     lines = [
         f"Can't protect {len(names)} key{s}: {', '.join(names)} (Claude Code login token{s}).",
         "`worthless lock` skips this kind of token on purpose: splitting it breaks "
@@ -308,18 +313,12 @@ def _leaked_token_lines(findings: Sequence[ScanFinding]) -> list[str]:
     for f in tokens:
         where = "the environment" if f.exposure == "environment" else sanitise_for_message(f.file)
         label = sanitise_for_message(f.var_name) if f.var_name else f"line {f.line}"
-        groups.setdefault((where, remediation_for(f) or ""), []).append(label)
+        groups.setdefault((where, remedy_for_exposure(f.exposure, f.file)), []).append(label)
     lines = ["`worthless lock` can't fix these login tokens (it refuses them):"]
     for (where, remedy), labels in groups.items():
         s = "s" if len(labels) != 1 else ""
         lines += [f"Exposed login token{s} in {where}: {', '.join(labels)}.", remedy]
     return lines
-
-
-def _token_names(findings: Sequence[ScanFinding]) -> tuple[list[str], str]:
-    """Display names for these findings (sanitised), and the plural suffix."""
-    names = [sanitise_for_message(f.var_name or f.provider) for f in findings]
-    return names, "s" if len(names) != 1 else ""
 
 
 def _orphan_lines(orphans: Sequence[EnrollmentRecord]) -> list[str]:
