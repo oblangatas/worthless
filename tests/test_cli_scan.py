@@ -1450,6 +1450,55 @@ class TestScanAgreesWithLockOnOAuthTokens:
 
         assert not marker.exists()
 
+    def test_a_symlinked_folder_cannot_hide_a_broken_repo(self, tmp_path: Path) -> None:
+        # git follows a symlinked folder to the real repo; the .git check must
+        # follow it too, or a committed token in a repo git can't open passes
+        # when it is scanned through the link.
+        repo = tmp_path / "repo"
+        env = repo / "app" / ".env"
+        env.parent.mkdir(parents=True)
+        env.write_text(f"{self._oauth('p55g-linked-dir')}\n")
+        _git_commit(repo, "app/.env")
+        (repo / ".git" / "HEAD").rename(repo / ".git" / "HEAD 2")
+        link = tmp_path / "elsewhere" / "link"
+        link.parent.mkdir()
+        link.symlink_to(env.parent, target_is_directory=True)
+
+        [finding] = scan_files([link / ".env"])
+
+        assert finding.exposure == "git_unknown", finding
+
+    def test_scan_never_fetches_from_a_partial_clones_remote(self, tmp_path: Path) -> None:
+        # In a partial clone, asking about HEAD can make git fetch the missing
+        # objects, and a fetch runs what the folder's config names (e.g.
+        # core.sshCommand). Scan must never fetch, on old git too.
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / ".env").write_text(f"{self._oauth('p55g-partial-src')}\n")
+        _git_commit(src, ".env")
+        subprocess.run(
+            ["git", "-C", str(src), "config", "uploadpack.allowFilter", "true"],  # noqa: S607
+            check=True,
+        )
+        clone = tmp_path / "clone"
+        subprocess.run(
+            ["git", "clone", "-q", "--no-checkout", "--filter=tree:0", f"file://{src}", str(clone)],  # noqa: S607
+            check=True,
+        )
+        env = clone / ".env"
+        env.write_text(f"{self._oauth('p55g-partial')}\n")
+
+        scan_files([env])
+
+        no_fetch = {**os.environ, "GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": ""}
+        tree = subprocess.run(
+            ["git", "-C", str(clone), "cat-file", "-e", "HEAD^{tree}"],  # noqa: S607
+            env=no_fetch,
+            capture_output=True,
+            check=False,
+        )
+        assert tree.returncode != 0, "scan fetched HEAD's tree from the clone's remote"
+
     def test_a_gitignored_env_in_a_repo_passes(self, tmp_path: Path) -> None:
         # The everyday local setup: a project repo whose .env is gitignored.
         env = self._env(tmp_path, self._oauth("p55g-gitignored"))

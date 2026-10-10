@@ -271,9 +271,10 @@ def _has_git_above(path: Path) -> bool:
     """A .git file or folder in a parent of *path*. There, "not a git
     repository" means a repo git can't open (a moved worktree, a lost HEAD),
     not that there is none."""
-    # ponytail: walks to /, past git's filesystem-boundary stop, so a .git above
-    # a mount point fails closed (git_unknown), never open.
-    return any((d / ".git").exists() for d in path.absolute().parents)
+    # Resolved: `git -C` follows a symlinked folder to the real repo, so this
+    # must walk the same path. ponytail: walks to /, past git's
+    # filesystem-boundary stop, so a .git above a mount point fails closed.
+    return any((d / ".git").exists() for d in path.resolve().parents)
 
 
 def _git(path: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
@@ -288,11 +289,14 @@ def _git(path: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
         # Ask the repo that holds *path*: git sets GIT_DIR for hooks run in a
         # linked worktree, and inherited it points this at another repo. Ask in
         # English: the "not a git repository" check reads git's message. Never
-        # fetch: a partial clone would otherwise contact its remote (git 2.44+).
+        # fetch: a partial clone would contact its remote, running whatever its
+        # config names. GIT_NO_LAZY_FETCH needs git 2.39.4+/2.45.1+; an empty
+        # GIT_ALLOW_PROTOCOL blocks every transport on any git since 2.6.
         env={
             **{k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
             "LC_ALL": "C",
             "GIT_NO_LAZY_FETCH": "1",
+            "GIT_ALLOW_PROTOCOL": "",
         },
     )
 
