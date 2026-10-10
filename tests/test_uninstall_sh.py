@@ -516,6 +516,13 @@ def test_the_custom_bin_dir_user_can_actually_finish(tmp_path: Path) -> None:
         "esac",
     )
 
+    # `worthless uninstall` removes the keystore entry as it restores each key,
+    # so by run 2 there is nothing to find. Stubbed rather than left to the
+    # host: tier2_wipe now reads the keystore to tell a successful restore from
+    # a hand-deleted home, and a test that asks the developer's real keychain
+    # is neither hermetic nor safe to run unattended.
+    write_stub(bin_dir, "security", "exit 1")
+
     first = run_uninstall(bin_dir, worthless_home=home)
     assert first.returncode == 41, "run 1 must refuse while keys are still locked"
     assert home.exists(), "run 1 must not delete the state the user still needs"
@@ -601,3 +608,88 @@ def test_keychain_account_matches_the_python_keystore(tmp_path: Path) -> None:
     assert result.stdout.strip() == expected, (
         f"shell account {result.stdout.strip()!r} != python {expected!r}"
     )
+
+
+def test_a_hand_deleted_home_still_warns_that_keys_are_stranded(tmp_path: Path) -> None:
+    """A missing home does NOT always mean the keys came back safely.
+
+    tier2_wipe suppresses the stranded-keys warning when ~/.worthless is already
+    gone, because the advised flow (`worthless uninstall --yes`, then re-run)
+    removes it only AFTER putting every key back. But a user who simply ran
+    `rm -rf ~/.worthless` by hand destroyed shard-B and the Fernet key: their
+    .env halves are permanently inert and they genuinely must rotate. Using
+    home-dir presence alone conflates the two and leaves that user un-warned —
+    a false negative, which is worse than the false alarm it replaced.
+
+    The keychain tells them apart. `worthless uninstall` deletes the Fernet key
+    entry as part of restoring; `rm -rf` cannot. So a surviving entry with no
+    home means the keys are stranded.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    home = tmp_path / "wless-home"  # deliberately never created: hand-deleted
+
+    # The entry survives, because only the program removes it.
+    write_stub(
+        bin_dir,
+        "security",
+        'case "$1" in\n'
+        "  find-generic-password) exit 0 ;;\n"
+        "  delete-generic-password) exit 1 ;;\n"
+        "esac",
+    )
+
+    result = run_uninstall(bin_dir, worthless_home=home)
+    out = (result.stdout + result.stderr).lower()
+
+    assert result.returncode == 0, f"the wipe should still complete:\n{out}"
+    assert "could not be restored automatically" in out, (
+        "a user who hand-deleted their home has stranded keys and was NOT told "
+        f"to rotate them:\n{out}"
+    )
+
+
+def test_the_wipe_actually_deletes_the_keystore_entry(tmp_path: Path) -> None:
+    """A wipe must take the Fernet key with it, and something must prove it.
+
+    Every other test here asserts on MESSAGES. Measured: deleting the
+    `delete_keychain_entry` call from tier2_wipe outright left all 17 tests
+    green — the destructive half of the wipe was unpinned. That matters more
+    than the wording it sits next to: a wipe that removes ~/.worthless but
+    leaves the key in the keystore strands the user's .env halves AND leaves
+    live key material on a machine they have been told is clean.
+
+    Asserts the delete was attempted with the exact account the Python keystore
+    uses, so a drift in either half of that contract fails here too.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    home = tmp_path / "wless-home"
+    _seed_home(home, ["/proj/a/.env"])
+
+    security_log = tmp_path / "security-calls.log"
+    write_stub(
+        bin_dir,
+        "security",
+        f'echo "$*" >> "{security_log}"\n'
+        'case "$1" in\n'
+        # One entry exists, then it is gone — otherwise the capped drain loop
+        # would spin to its limit against an always-succeeding stub.
+        f'  delete-generic-password) [ -f "{tmp_path}/.gone" ] && exit 1\n'
+        f'    : > "{tmp_path}/.gone"; exit 0 ;;\n'
+        "  *) exit 1 ;;\n"
+        "esac",
+    )
+
+    result = run_uninstall(bin_dir, worthless_home=home)
+    out = result.stdout + result.stderr
+
+    assert result.returncode == 0, out
+    assert not home.exists(), "the wipe must remove the home"
+    assert security_log.exists(), (
+        "the wipe never touched the keystore — the Fernet key would survive a "
+        f"'Worthless removed from this machine':\n{out}"
+    )
+    calls = security_log.read_text()
+    assert "delete-generic-password" in calls, f"no delete was attempted:\n{calls}"
+    assert "fernet-key-" in calls, f"the delete did not target the key entry:\n{calls}"

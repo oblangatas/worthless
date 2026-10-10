@@ -177,6 +177,40 @@ keyring_account() {
     [ -n "$digest" ] && printf 'fernet-key-%s' "$digest"
 }
 
+# Read-only: is the Fernet key still in the keystore? This is the only thing
+# that distinguishes "the program restored everything and removed its home"
+# from "someone ran rm -rf ~/.worthless by hand". `worthless uninstall` deletes
+# this entry as part of putting the keys back; rm cannot reach it. So a
+# surviving entry with no home means shard-B and the key are gone and the .env
+# halves are permanently inert — that user must rotate, and is the one case
+# where silence would be a false negative.
+#
+# Unknown (no tool, unsupported OS) deliberately answers "yes, assume stranded":
+# over-warning costs a needless rotation, under-warning costs keys the user
+# never learns are dead.
+#
+# KNOWN GAP, not fixed here: the account name is derived from WORTHLESS_HOME.
+# Someone who locked keys with WORTHLESS_HOME set and then uninstalls without
+# it hashes a different path, so this probe answers "gone" and that user stays
+# un-warned — the same false negative, reached a different way. Fixing it means
+# finding entries by service rather than by exact account, which changes what
+# delete_keychain_entry would be allowed to remove. Tracked separately.
+keychain_entry_exists() {
+    acct="$(keyring_account || true)"
+    [ -n "${acct:-}" ] || return 0
+    case "${OS:-}" in
+        macos)
+            command -v security >/dev/null 2>&1 || return 0
+            security find-generic-password -s worthless -a "$acct" >/dev/null 2>&1
+            ;;
+        linux)
+            command -v secret-tool >/dev/null 2>&1 || return 0
+            secret-tool lookup service worthless username "$acct" >/dev/null 2>&1
+            ;;
+        *) return 0 ;;
+    esac
+}
+
 delete_keychain_entry() {
     acct="$(keyring_account || true)"
     [ -n "${acct:-}" ] || { warn "Could not compute the keychain entry name (no sha256 tool); skipping."; return 0; }
@@ -384,6 +418,13 @@ tier2_wipe() {
     # already recovered costs them real money and real trust.
     _t2_had_state=0
     [ -d "$WORTHLESS_HOME_DIR" ] && _t2_had_state=1
+    # A missing home is not proof the keys came back. Only the program removes
+    # the keystore entry, so if it survives with no home, someone deleted the
+    # home by hand and the keys really are stranded. Checking this BEFORE
+    # delete_keychain_entry runs, or the answer is always "gone".
+    if [ "$_t2_had_state" = "0" ] && keychain_entry_exists; then
+        _t2_had_state=1
+    fi
 
     # Three ways in, and they are not the same sentence. Saying "none found"
     # when a copy answers on PATH — we simply refused to trust it — is untrue.
