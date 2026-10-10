@@ -521,7 +521,12 @@ def test_the_custom_bin_dir_user_can_actually_finish(tmp_path: Path) -> None:
     # host: tier2_wipe now reads the keystore to tell a successful restore from
     # a hand-deleted home, and a test that asks the developer's real keychain
     # is neither hermetic nor safe to run unattended.
+    # Both keystore tools: run_uninstall does not stub `uname`, so the script
+    # picks its macos/linux branch from the real host. A macOS-only stub leaves
+    # Linux CI on the `secret-tool` path, where the tool is absent and
+    # keychain_entry_exists takes its "unknown -> assume stranded" default.
     write_stub(bin_dir, "security", "exit 1")
+    write_stub(bin_dir, "secret-tool", "exit 1")
 
     first = run_uninstall(bin_dir, worthless_home=home)
     assert first.returncode == 41, "run 1 must refuse while keys are still locked"
@@ -637,6 +642,13 @@ def test_a_hand_deleted_home_still_warns_that_keys_are_stranded(tmp_path: Path) 
         "  find-generic-password) exit 0 ;;\n"
         "  delete-generic-password) exit 1 ;;\n"
         "esac",
+    )
+    # Linux equivalent: `lookup` finds the surviving entry, `clear` reports
+    # nothing left so the capped drain loop terminates.
+    write_stub(
+        bin_dir,
+        "secret-tool",
+        'case "$1" in\n  lookup) exit 0 ;;\n  *) exit 1 ;;\nesac',
     )
 
     result = run_uninstall(bin_dir, worthless_home=home)
