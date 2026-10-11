@@ -83,7 +83,14 @@ def write_happy_path_stubs(bin_dir: Path, *, with_worthless: bool = True) -> Non
 case "$1" in
   --version) echo "uv {_UV_VERSION}" ;;
   tool) shift; case "$1" in
-    install|upgrade) echo "ok" ;;
+    install|upgrade)
+      # Like real uv: the entry point lands in uv's tool bin dir, which is
+      # where install.sh's smoke test runs it from (worthless-alx3).
+      _d="${{UV_TOOL_BIN_DIR:-${{XDG_BIN_HOME:-$HOME/.local/bin}}}}"
+      mkdir -p "$_d"
+      [ -e "$_d/worthless" ] || printf '#!/bin/sh\necho "worthless 0.3.0"\n' > "$_d/worthless"
+      chmod +x "$_d/worthless"
+      echo "ok" ;;
     list) ;;  # empty: no worthless line → fast-path miss → real install runs
     # `uv tool dir --bin` is uv's own answer for where it puts entry points.
     # It honours UV_TOOL_BIN_DIR / XDG_BIN_HOME, which install.sh does NOT

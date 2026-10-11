@@ -313,6 +313,10 @@ def test_uv_tool_dir_failure_does_not_warn(tmp_path: Path) -> None:
 esac""",
     )
     write_stub(bin_dir, "worthless", f'echo "worthless {REAL_VERSION}"')
+    # uv put the entry point in its default dir; smoke_test finds it there
+    # (never via PATH, worthless-alx3).
+    (tmp_path / ".local" / "bin").mkdir(parents=True)
+    write_stub(tmp_path / ".local" / "bin", "worthless", f'echo "worthless {REAL_VERSION}"')
 
     result = run_install(bin_dir)
     combined = _combined(result)

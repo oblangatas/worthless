@@ -401,10 +401,10 @@ def test_env_scrub_strips_poisoned_uv_pip_vars(tmp_path: Path) -> None:
         '  tool) shift; case "$1" in\n'
         '    install|upgrade) echo "ok" ;;\n'
         "    list) ;;\n"
-        # smoke_test asks uv where it installed the entry point rather than
-        # guessing ~/.local/bin (worthless-dc26). Echo a path that does not
-        # exist so the fallback to `command -v` runs — this test is about env
-        # scrubbing, not about which binary answers.
+        # smoke_test asks uv where it installed the entry point (worthless-dc26).
+        # Echo a path that does not exist so it falls back to uv's default dir
+        # (worthless-alx3) — this test is about env scrubbing, not about which
+        # binary answers.
         '    dir) echo "$HOME/nonexistent-uv-bin" ;;\n'
         '    *) echo "UNHANDLED_UV_CALL (test stub gap): uv tool $*" >&2; exit 99 ;;\n'
         "  esac ;;\n"
@@ -413,6 +413,8 @@ def test_env_scrub_strips_poisoned_uv_pip_vars(tmp_path: Path) -> None:
         "esac",
     )
     write_stub(bin_dir, "worthless", 'echo "worthless 0.3.7"')
+    (tmp_path / ".local" / "bin").mkdir(parents=True)
+    write_stub(tmp_path / ".local" / "bin", "worthless", 'echo "worthless 0.3.7"')
 
     poisoned = "http://evil.example/index"
     result = run_install(
@@ -650,8 +652,15 @@ def test_success_with_persistent_rc_shows_clean_done_message(tmp_path: Path) -> 
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     write_happy_path_stubs(bin_dir)
-    # Simulate a zsh user whose .zshrc already adds ~/.local/bin to PATH.
+    # Simulate a zsh user whose .zshrc already adds ~/.local/bin to PATH: the
+    # `worthless` their shell finds IS the one uv installs there, not a second
+    # copy (which install.sh would rightly report as a shadow).
     (tmp_path / ".zshrc").write_text('export PATH="$HOME/.local/bin:$PATH"\n')
+    local_bin = tmp_path / ".local" / "bin"
+    local_bin.mkdir(parents=True)
+    write_stub(local_bin, "worthless", 'echo "worthless 0.3.0"')
+    (bin_dir / "worthless").unlink()
+    (bin_dir / "worthless").symlink_to(local_bin / "worthless")
 
     result = run_install(bin_dir)
 
@@ -1544,3 +1553,54 @@ def test_an_unknown_shell_still_gets_usable_advice(tmp_path: Path) -> None:
         assert guess not in out, (
             f"invented rc-file advice ({guess}) for an unrecognised shell.\n{out[-500:]}"
         )
+
+
+@pytest.mark.parametrize(
+    ("uv_dir", "installed"),
+    [("fails", True), ("fails", False), ("wrong", True), ("wrong", False)],
+    ids=[
+        "uv-fails-installed",
+        "uv-fails-missing",
+        "uv-wrong-dir-installed",
+        "uv-wrong-dir-missing",
+    ],
+)
+def test_the_smoke_test_never_runs_a_worthless_found_on_path(
+    tmp_path: Path, uv_dir: str, installed: bool
+) -> None:
+    """worthless-alx3: when uv can't say where it put the entry point, smoke_test
+    used to fall back to `command -v worthless` — the caller's PATH — and execute
+    whatever it found. A planted `worthless` earlier on PATH then ran inside the
+    installer.
+
+    Two ways uv can't say: `uv tool dir --bin` fails (which under `set -eu` also
+    killed the installer silently, exit 1, no message), or it answers a dir with
+    no entry point in it. Either way smoke_test must look only where uv installs
+    entry points (UV_TOOL_BIN_DIR, XDG_BIN_HOME, ~/.local/bin): use the real one
+    if present, fail closed with a message if not.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_happy_path_stubs(bin_dir)
+    log = tmp_path / "planted.log"
+    uv = (bin_dir / "uv").read_text()
+    answer = "exit 1" if uv_dir == "fails" else f'echo "{tmp_path / "elsewhere"}"; exit 0'
+    uv = uv.replace('dir) echo "${', f'dir) {answer}; echo "${{', 1)
+    if not installed:
+        uv = uv.replace('[ -e "$_d/worthless" ] ||', "true ||", 1)
+    (bin_dir / "uv").write_text(uv)
+    write_stub(bin_dir, "worthless", f'echo PLANTED >> {log}; echo "worthless 9.9.9"')
+
+    result = run_install(bin_dir)
+    ran = log.read_text() if log.exists() else ""
+
+    assert "PLANTED" not in ran, (
+        "the installer executed a `worthless` found on the caller's PATH.\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    if installed:
+        assert result.returncode == 0, result.stderr
+        assert "worthless 0.3.0" in result.stdout, result.stdout
+    else:
+        assert result.returncode == EXIT_INTERNAL, (result.returncode, result.stderr)
+        assert "failed to run" in result.stderr, result.stderr
