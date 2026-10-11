@@ -45,6 +45,13 @@ jobs:
           BODY_SHA=$(sha256sum "$BODY_TMP" | awk '{print $1}')
           REPO_SHA=$(git show "${LATEST_TAG}:install.sh" | sha256sum | awk '{print $1}')
           if [ "$BODY_SHA" != "$REPO_SHA" ]; then
+            # A fresh tag is served only once its deploy finishes; don't page
+            # during that window. Older than an hour, a mismatch is real drift.
+            TAG_AGE=$(( $(date +%s) - $(git for-each-ref --format='%(creatordate:unix)' "refs/tags/$LATEST_TAG") ))
+            if [ "$TAG_AGE" -lt 3600 ]; then
+              echo "::warning title=Release in progress::${LATEST_TAG} is ${TAG_AGE}s old; not yet served"
+              exit 0
+            fi
             echo "::error title=Served installer drift::worthless.sh sha256 ${BODY_SHA} != install.sh@${LATEST_TAG} ${REPO_SHA}"
             exit 1
           fi
