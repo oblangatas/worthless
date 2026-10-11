@@ -51,6 +51,17 @@ def _git_commit(repo: Path, name: str) -> None:
     )
 
 
+def _git_in(repo: Path, *args: str) -> str:
+    """Run one hermetic git command in *repo*; return its stdout."""
+    cfg = ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"]
+    return subprocess.run(
+        ["git", "-C", str(repo), *cfg, "-c", "core.hooksPath=/dev/null", *args],  # noqa: S607
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -1240,6 +1251,115 @@ class TestScanAgreesWithLockOnOAuthTokens:
         sarif = json.loads(runner.invoke(app, ["scan", str(env), "--format", "sarif"]).stdout)
         [res] = sarif["runs"][0]["results"]
         assert res["level"] == "error", res
+
+    def test_a_token_only_older_commits_hold_passes_with_a_history_warning(
+        self, tmp_path: Path
+    ) -> None:
+        # worthless-87rb. Untracked, and the untracking committed: the index
+        # and the latest commit are clean, but an older commit still holds the
+        # token. It passes (failing on history would stay red forever after a
+        # revoke), but it must say so and name the commit.
+        env = self._env(tmp_path, self._oauth("87rb-history"))
+        _git_commit(env.parent, ".env")
+        leaked = _git_in(env.parent, "rev-parse", "--short", "HEAD")
+        _git_in(env.parent, "rm", "-q", "--cached", ".env")
+        _git_in(env.parent, "commit", "-q", "-m", "untrack")
+
+        result = runner.invoke(app, ["scan", str(env)])
+        low = self._flat(result).lower()
+
+        assert result.exit_code == 0, low
+        assert "is in your git history" in low, low
+        assert f"commit {leaked}" in low, low
+        assert "revoke" in low, low
+        data = json.loads(runner.invoke(app, ["scan", str(env), "--json"]).stdout)
+        [finding] = data["findings"]
+        assert finding["exposure"] == "local", finding
+        assert finding["committed_before"] == leaked, finding
+        assert leaked in finding["remediation"], finding
+        sarif = json.loads(runner.invoke(app, ["scan", str(env), "--format", "sarif"]).stdout)
+        [res] = sarif["runs"][0]["results"]
+        assert res["level"] == "note", res
+        assert leaked in res["message"]["text"], res
+
+    def test_a_copy_on_another_branch_is_warned_about(self, tmp_path: Path) -> None:
+        # Committed on another branch (maybe pushed) while this branch never
+        # tracked it: every branch's history counts, not just this one's.
+        repo = tmp_path / "proj"
+        repo.mkdir()
+        (repo / "README").write_text("x\n")
+        _git_commit(repo, "README")
+        _git_in(repo, "checkout", "-q", "-b", "leak")
+        env = repo / ".env"
+        env.write_text(f"{self._oauth('87rb-branch')}\n")
+        _git_in(repo, "add", ".env")
+        _git_in(repo, "commit", "-q", "-m", "leak")
+        leaked = _git_in(repo, "rev-parse", "--short", "HEAD")
+        _git_in(repo, "checkout", "-q", "-")
+        env.write_text(f"{self._oauth('87rb-branch')}\n")  # the checkout removed it
+
+        [finding] = scan_files([env])
+
+        assert finding.is_unshardable is True
+        assert finding.committed_before == leaked
+
+    def test_an_env_never_committed_gets_no_history_warning(self, tmp_path: Path) -> None:
+        repo = tmp_path / "proj"
+        repo.mkdir()
+        (repo / "README").write_text("x\n")
+        _git_commit(repo, "README")
+        env = repo / ".env"
+        env.write_text(f"{self._oauth('87rb-clean')}\n")
+
+        result = runner.invoke(app, ["scan", str(env)])
+        low = self._flat(result).lower()
+
+        assert result.exit_code == 0, low
+        assert "git history" not in low, low
+        data = json.loads(runner.invoke(app, ["scan", str(env), "--json"]).stdout)
+        assert "committed_before" not in data["findings"][0], data
+
+    def test_the_history_check_never_runs_a_folders_gpg_program(self, tmp_path: Path) -> None:
+        # `git log` checks commit signatures when the repo's config says
+        # log.showSignature=true, by running its gpg.program. A scanned
+        # folder's own config must not get to run one.
+        env = self._env(tmp_path, self._oauth("87rb-gpg"))
+        repo = env.parent
+        signer = tmp_path / "sign.sh"
+        signer.write_text(
+            "#!/bin/sh\ncat >/dev/null\n"
+            "printf -- '-----BEGIN PGP SIGNATURE-----\\nZmFrZQ==\\n"
+            "-----END PGP SIGNATURE-----\\n'\n"
+            "printf '\\n[GNUPG:] SIG_CREATED D 1 8 00 0 0\\n' >&2\n"
+        )
+        signer.chmod(0o755)
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)  # noqa: S607
+        _git_in(repo, "add", ".env")
+        _git_in(
+            repo,
+            "-c",
+            f"gpg.program={signer}",
+            "-c",
+            "user.signingkey=x",
+            "commit",
+            "-q",
+            "-S",
+            "-m",
+            "s",
+        )
+        _git_in(repo, "rm", "-q", "--cached", ".env")
+        _git_in(repo, "commit", "-q", "-m", "untrack")
+        marker = tmp_path / "gpg-ran"
+        verifier = tmp_path / "verify.sh"
+        verifier.write_text(f"#!/bin/sh\ntouch '{marker}'\nexit 1\n")
+        verifier.chmod(0o755)
+        _git_in(repo, "config", "log.showSignature", "true")
+        _git_in(repo, "config", "gpg.program", str(verifier))
+
+        [finding] = scan_files([env])
+
+        assert finding.committed_before, finding  # the history check did run
+        assert not marker.exists()
 
     def test_a_mixed_committed_env_headline_doesnt_send_the_token_to_lock(
         self, tmp_path: Path

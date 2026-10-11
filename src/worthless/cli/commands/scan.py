@@ -35,6 +35,7 @@ from worthless.cli.scanner import (
     HardcodedUrlFinding,
     ScanFinding,
     SkippedFile,
+    committed_before_note,
     finding_to_dict,
     format_sarif,
     remedy_for_exposure,
@@ -290,6 +291,12 @@ def _unshardable_lines(findings: Sequence[ScanFinding], committing: bool = False
         "the marker Claude Code looks for.",
         f"Still in plain text. {UNSHARDABLE_REMEDY}",
     ]
+    # worthless-87rb: one line per .env an older commit still holds.
+    lines += dict.fromkeys(
+        committed_before_note(f.file, f.committed_before)
+        for f in findings
+        if f.is_unshardable and not f.is_protected and f.committed_before
+    )
     if committing:
         lines.append(
             "Commit blocked: a live login token is staged. Unstage it, or remove the token."

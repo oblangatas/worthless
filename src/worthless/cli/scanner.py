@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 
 from worthless.cli.dotenv_rewriter import shannon_entropy
 from worthless.cli.key_patterns import (
+    COMMITTED_BEFORE_NOTE,
     ENTROPY_THRESHOLD,
     KEY_PATTERN,
     EXPOSED_LOGIN_REMEDIES,
@@ -236,6 +237,9 @@ class ScanFinding:
     # Why an exposed login token can leave the machine — one key of
     # EXPOSED_LOGIN_REMEDIES. None when it stays local or isn't a token.
     exposure: str | None = None
+    # worthless-87rb: for a token that stays local, the newest commit on any
+    # branch that still holds a copy of this .env. A warning, never a failure.
+    committed_before: str | None = None
 
     @property
     def is_unshardable(self) -> bool:
@@ -332,22 +336,64 @@ def token_exposure(path: Path) -> str | None:
     return "staged" if state == "tracked" else None
 
 
-def _exposure_for(path: Path, from_env: bool, cache: dict[Path, str | None]) -> str | None:
-    """token_exposure for a login token found in *path*, asked once per file —
-    a .env with several tokens gets one git call, which keeps the pre-commit
-    hook inside its time budget. The --deep environment dump is "environment"."""
+def _committed_before(path: Path) -> str | None:
+    """Short hash of the newest commit, on any branch, that holds a copy of
+    *path*, or None. It only adds a warning, so if git can't say, it says
+    nothing."""
+    try:
+        # --no-show-signature: the repo's own log.showSignature would make git
+        # run its gpg.program on a signed commit.
+        result = _git(
+            path, "log", "--all", "-1", "--diff-filter=AM", "--format=%h",
+            "--no-show-signature", "--", path.name,
+        )  # fmt: skip
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.decode(errors="replace").strip() or None
+
+
+def token_facts(path: Path) -> tuple[str | None, str | None]:
+    """(exposure, committed_before) for a login token in *path*: why it can
+    leave the machine, and, when it stays local, the newest commit that still
+    holds a copy anyway."""
+    exposure = token_exposure(path)
+    return exposure, (_committed_before(path) if exposure is None else None)
+
+
+def _exposure_for(
+    path: Path, from_env: bool, cache: dict[Path, tuple[str | None, str | None]]
+) -> tuple[str | None, str | None]:
+    """token_facts for a login token found in *path*, asked once per file —
+    a .env with several tokens gets one round of git calls, which keeps the
+    pre-commit hook inside its time budget. The --deep environment dump is
+    "environment"."""
     if from_env:
-        return "environment"
+        return "environment", None
     if path not in cache:
-        cache[path] = token_exposure(path)
+        cache[path] = token_facts(path)
     return cache[path]
 
 
-def remedy_for_exposure(exposure: str | None, file: str) -> str:
+def committed_before_note(file: str, commit: str) -> str:
+    """The history warning, with the attacker-controllable file name (and the
+    commit, for symmetry) sanitised for the terminal."""
+    return COMMITTED_BEFORE_NOTE.format(
+        file=sanitise_for_message(file), commit=sanitise_for_message(commit)
+    )
+
+
+def remedy_for_exposure(
+    exposure: str | None, file: str, committed_before: str | None = None
+) -> str:
     """The fix text for a login token: local (None) or one exposure reason.
     *file* lands in commands like `git rm --cached <file>`; it is sanitised
-    here because a filename is attacker-controlled and this reaches a terminal."""
+    here because a filename is attacker-controlled and this reaches a terminal.
+    A local token whose .env an older commit holds also gets the history note."""
     if exposure is None:
+        if committed_before:
+            return f"{UNSHARDABLE_REMEDY} {committed_before_note(file, committed_before)}"
         return UNSHARDABLE_REMEDY
     return EXPOSED_LOGIN_REMEDIES[exposure].format(file=sanitise_for_message(file))
 
@@ -356,7 +402,7 @@ def remediation_for(f: ScanFinding) -> str | None:
     """The fix that exists for a login token — never "run worthless lock"."""
     if f.is_protected or not f.is_login_token:
         return None
-    return remedy_for_exposure(f.exposure, f.file)
+    return remedy_for_exposure(f.exposure, f.file, f.committed_before)
 
 
 def finding_to_dict(f: ScanFinding) -> dict[str, object]:
@@ -376,6 +422,8 @@ def finding_to_dict(f: ScanFinding) -> dict[str, object]:
         # Why, as data: "local" (passes) or the reason it can leave the machine.
         item["exposure"] = f.exposure or "local"
         item["remediation"] = remedy
+        if f.committed_before:
+            item["committed_before"] = f.committed_before
     return item
 
 
@@ -407,7 +455,8 @@ def scan_files(
     """
     cap = MAX_SCAN_FILE_BYTES if max_file_bytes is None else max_file_bytes
     findings: list[ScanFinding] = []
-    exposure_cache: dict[Path, str | None] = {}  # git is asked at most once per file
+    # git is asked at most once per file: (exposure, committed_before)
+    exposure_cache: dict[Path, tuple[str | None, str | None]] = {}
 
     # Deadline is checked BETWEEN files, not mid-file. A single file inside
     # ``cap`` bytes is bounded by the size cap + linear regex — slow but never
@@ -457,7 +506,9 @@ def scan_files(
                 is_protected = not token and bool(
                     enrolled_locations and var_name and (var_name, file_str) in enrolled_locations
                 )
-                exposure = _exposure_for(path, from_env, exposure_cache) if token else None
+                exposure, committed_before = (
+                    _exposure_for(path, from_env, exposure_cache) if token else (None, None)
+                )
 
                 findings.append(
                     ScanFinding(
@@ -470,6 +521,7 @@ def scan_files(
                         column=match.start(),
                         is_login_token=token,
                         exposure=exposure,
+                        committed_before=committed_before,
                     )
                 )
     return findings
