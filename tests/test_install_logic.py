@@ -1630,3 +1630,20 @@ def test_an_installed_worthless_at_the_wrong_version_stops_the_install(
     assert result.returncode == EXIT_INTERNAL, (result.returncode, result.stdout, result.stderr)
     assert f"6.6.6, not {read_install_pin()}" in result.stderr, result.stderr
     assert "Done!" not in result.stdout, result.stdout
+
+
+@pytest.mark.parametrize("spelling", ["v{pin}", "V{pin}"])
+def test_a_v_prefixed_version_pin_still_installs(tmp_path: Path, spelling: str) -> None:
+    """karen on PR #674: `WORTHLESS_VERSION=v0.3.12` installs 0.3.12 (uv normalises
+    per PEP 440) and `worthless --version` reports 0.3.12. Comparing that against
+    the raw "v0.3.12" failed a correct install with exit 40.
+    """
+    pin = read_install_pin()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_happy_path_stubs(bin_dir)
+
+    result = run_install(bin_dir, env_extra={"WORTHLESS_VERSION": spelling.format(pin=pin)})
+
+    assert result.returncode == 0, (result.returncode, result.stderr)
+    assert f"worthless {pin}" in result.stdout, result.stdout

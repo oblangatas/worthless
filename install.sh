@@ -384,7 +384,8 @@ install_or_upgrade_worthless() {
 
     # Strip whitespace a mangled checkout or env could smuggle past a bare
     # `-n` test (e.g. a stray CR from a CRLF edit, or "  ").
-    effective_version="$(printf '%s' "$effective_version" | tr -d '[:space:]')"
+    effective_version="$(printf '%s' "$effective_version" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+    effective_version="${effective_version#v}" # as uv installs it
 
     if [ -z "$effective_version" ]; then
         die "$EXIT_INTERNAL" \
