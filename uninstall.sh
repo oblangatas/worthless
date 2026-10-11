@@ -233,15 +233,18 @@ keystore_state() {
     esac
 }
 
-# How many keys are locked in a .env file the program could put them back in?
-# A number, or `unknown` when sqlite3 is missing or the database cannot be
-# read. No database means none. Enroll-only keys (no env_path) are not
-# counted: there is nothing to restore them to, and the CLI deletes them.
+# How many keys are locked in the home? A number, or `unknown` when sqlite3 is
+# missing or the database cannot be read. No database means none.
+# `locked_key_count env` counts only keys with a .env to go back to: enroll-only
+# keys are still keys a wipe destroys, but the CLI deletes rather than restores
+# them, so they never earn a "restored" line.
 locked_key_count() {
     db="$WORTHLESS_HOME_DIR/worthless.db"
     [ -f "$db" ] || { printf '0'; return 0; }
     command -v sqlite3 >/dev/null 2>&1 || { printf 'unknown'; return 0; }
-    _lk="$(sqlite3 "$db" "SELECT COUNT(*) FROM enrollments WHERE env_path IS NOT NULL;" 2>/dev/null || true)"
+    _lk_where=""
+    [ "${1:-}" = env ] && _lk_where=" WHERE env_path IS NOT NULL"
+    _lk="$(sqlite3 "$db" "SELECT COUNT(*) FROM enrollments${_lk_where};" 2>/dev/null || true)"
     case "$_lk" in
         '' | *[!0-9]*) printf 'unknown' ;;
         *) printf '%s' "$_lk" ;;
@@ -470,6 +473,9 @@ tier1_delegate() {
     # Found by running the real CLI in a container; no stubbed test could see it.
     _tier1_keys="$(key_state)"
     [ "$_tier1_keys" = "unreadable" ] && _tier1_keys=unknown
+    # Locked, but none in a .env: enroll-only keys, which the CLI deletes and
+    # tells the user to rotate. Agree with it rather than claim a restore.
+    [ "$_tier1_keys" = "locked" ] && [ "$(locked_key_count env)" = 0 ] && _tier1_keys=stranded
 
     _tier1_status=0
     "$_tier1_bin" uninstall --yes || _tier1_status=$?

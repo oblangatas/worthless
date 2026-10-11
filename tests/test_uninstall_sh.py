@@ -1141,3 +1141,25 @@ def test_enroll_only_keys_are_not_reported_as_restored(tmp_path: Path) -> None:
 
     assert result.returncode == 0, out
     assert KEYS_RESTORED not in out, f"claimed a .env restore that had nothing to restore:\n{out}"
+    # The CLI deleted those keys and said rotate; the script must agree with it.
+    assert "could not be restored automatically" in out, (
+        f"enroll-only keys were deleted and the user was not told to rotate:\n{out}"
+    )
+
+
+@needs_sqlite3
+def test_a_wipe_of_enroll_only_keys_says_rotate(tmp_path: Path) -> None:
+    """An enroll-only key has no .env to restore to, but it is still a key the
+    wipe destroys. The CLI's own advice for those is "rotate"; tier 2 must not
+    downgrade that to "can't tell, you may be done"."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    home = tmp_path / "wless-home"
+    _seed_home(home, [None])
+
+    result = run_uninstall(bin_dir, worthless_home=home)
+    out = (result.stdout + result.stderr).lower()
+
+    assert result.returncode == 0, out
+    assert "you're done" not in out, f"reassured over enroll-only keys it just destroyed:\n{out}"
+    assert "could not be restored automatically" in out, f"the user was not told to rotate:\n{out}"
