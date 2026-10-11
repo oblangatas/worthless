@@ -80,7 +80,8 @@ def test_install_succeeds_when_uv_installs_outside_home_local_bin(tmp_path: Path
     # uv installs here, and this directory is deliberately NOT on PATH.
     custom_bin = tmp_path / "uv-tools" / "bin"
     custom_bin.mkdir(parents=True)
-    write_stub(custom_bin, "worthless", 'echo "worthless 9.9.9"')
+    pin = read_install_pin()
+    write_stub(custom_bin, "worthless", f'echo "worthless {pin}"')
 
     result = run_install(bin_dir, env_extra={"UV_TOOL_BIN_DIR": str(custom_bin)})
 
@@ -89,7 +90,7 @@ def test_install_succeeds_when_uv_installs_outside_home_local_bin(tmp_path: Path
         "a successful install must not fail just because uv's bin dir is customised.\n"
         f"exit={result.returncode}\n{combined}"
     )
-    assert "9.9.9" in combined, f"must report the version of the binary uv installed.\n{combined}"
+    assert pin in combined, f"must report the version of the binary uv installed.\n{combined}"
 
 
 def test_banner_reports_the_installed_binary_not_a_stale_uv_run(tmp_path: Path) -> None:
@@ -120,7 +121,7 @@ def test_banner_reports_the_installed_binary_not_a_stale_uv_run(tmp_path: Path) 
     uv_stub = bin_dir / "uv"
     uv_stub.write_text(
         uv_stub.read_text(encoding="utf-8").replace(
-            'run) echo "worthless 0.3.0"', 'run) echo "worthless 0.3.9"'
+            f'run) echo "worthless {read_install_pin()}"', 'run) echo "worthless 0.3.9"'
         ),
         encoding="utf-8",
     )
@@ -131,7 +132,8 @@ def test_banner_reports_the_installed_binary_not_a_stale_uv_run(tmp_path: Path) 
     #    reports. This is what the user runs, so this is what must be reported.
     tool_bin = tmp_path / ".local" / "bin"
     tool_bin.mkdir(parents=True, exist_ok=True)
-    write_stub(tool_bin, "worthless", 'echo "worthless 0.3.10"')
+    pin = read_install_pin()  # smoke_test refuses anything else (worthless-yeff)
+    write_stub(tool_bin, "worthless", f'echo "worthless {pin}"')
 
     result = run_install(bin_dir)
     assert result.returncode == 0, f"stderr: {result.stderr}"
@@ -145,9 +147,7 @@ def test_banner_reports_the_installed_binary_not_a_stale_uv_run(tmp_path: Path) 
         "the banner reported a `worthless` shadowing us on PATH instead of the one "
         f"uv installed — the same wrong-version bug by another route.\n{combined}"
     )
-    assert "0.3.10" in combined, (
-        f"the banner must report the version uv actually installed.\n{combined}"
-    )
+    assert pin in combined, f"the banner must report the version uv actually installed.\n{combined}"
 
 
 def test_user_override_beats_pin(tmp_path: Path) -> None:
@@ -155,6 +155,9 @@ def test_user_override_beats_pin(tmp_path: Path) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     write_happy_path_stubs(bin_dir)
+    # The installed copy reports the overridden version (smoke_test checks it).
+    (tmp_path / ".local" / "bin").mkdir(parents=True)
+    write_stub(tmp_path / ".local" / "bin", "worthless", 'echo "worthless 9.9.9"')
 
     result = run_install(bin_dir, env_extra={"WORTHLESS_VERSION": "9.9.9"})
     assert result.returncode == 0, f"stderr: {result.stderr}"
@@ -414,7 +417,7 @@ def test_env_scrub_strips_poisoned_uv_pip_vars(tmp_path: Path) -> None:
     )
     write_stub(bin_dir, "worthless", 'echo "worthless 0.3.7"')
     (tmp_path / ".local" / "bin").mkdir(parents=True)
-    write_stub(tmp_path / ".local" / "bin", "worthless", 'echo "worthless 0.3.7"')
+    write_stub(tmp_path / ".local" / "bin", "worthless", f'echo "worthless {read_install_pin()}"')
 
     poisoned = "http://evil.example/index"
     result = run_install(
@@ -658,7 +661,7 @@ def test_success_with_persistent_rc_shows_clean_done_message(tmp_path: Path) -> 
     (tmp_path / ".zshrc").write_text('export PATH="$HOME/.local/bin:$PATH"\n')
     local_bin = tmp_path / ".local" / "bin"
     local_bin.mkdir(parents=True)
-    write_stub(local_bin, "worthless", 'echo "worthless 0.3.0"')
+    write_stub(local_bin, "worthless", f'echo "worthless {read_install_pin()}"')
     (bin_dir / "worthless").unlink()
     (bin_dir / "worthless").symlink_to(local_bin / "worthless")
 
@@ -1600,7 +1603,77 @@ def test_the_smoke_test_never_runs_a_worthless_found_on_path(
     )
     if installed:
         assert result.returncode == 0, result.stderr
-        assert "worthless 0.3.0" in result.stdout, result.stdout
+        assert f"worthless {read_install_pin()}" in result.stdout, result.stdout
     else:
         assert result.returncode == EXIT_INTERNAL, (result.returncode, result.stderr)
         assert "failed to run" in result.stderr, result.stderr
+
+
+def test_an_installed_worthless_at_the_wrong_version_stops_the_install(
+    tmp_path: Path,
+) -> None:
+    """worthless-yeff: smoke_test ran the installed entry point and printed its
+    version, but never compared it with the version it meant to install. A stale
+    or planted `worthless` in uv's tool bin dir (UV_TOOL_BIN_DIR / XDG_BIN_HOME
+    are not scrubbed) reporting 6.6.6 passed silently and the user was told the
+    install succeeded (brutus on PR #671).
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_happy_path_stubs(bin_dir, with_worthless=False)
+    planted = tmp_path / "planted"
+    planted.mkdir()
+    write_stub(planted, "worthless", 'echo "worthless 6.6.6"')
+
+    result = run_install(bin_dir, env_extra={"UV_TOOL_BIN_DIR": str(planted)})
+
+    assert result.returncode == EXIT_INTERNAL, (result.returncode, result.stdout, result.stderr)
+    assert f"6.6.6, not {read_install_pin()}" in result.stderr, result.stderr
+    assert "Done!" not in result.stdout, result.stdout
+
+
+@pytest.mark.parametrize("spelling", ["v{pin}", "V{pin}"])
+def test_a_v_prefixed_version_pin_still_installs(tmp_path: Path, spelling: str) -> None:
+    """karen on PR #674: `WORTHLESS_VERSION=v0.3.12` installs 0.3.12 (uv normalises
+    per PEP 440) and `worthless --version` reports 0.3.12. Comparing that against
+    the raw "v0.3.12" failed a correct install with exit 40.
+    """
+    pin = read_install_pin()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_happy_path_stubs(bin_dir)
+
+    result = run_install(bin_dir, env_extra={"WORTHLESS_VERSION": spelling.format(pin=pin)})
+
+    assert result.returncode == 0, (result.returncode, result.stderr)
+    assert f"worthless {pin}" in result.stdout, result.stdout
+
+
+def test_a_wrong_version_copy_is_repaired_not_refused_forever(tmp_path: Path) -> None:
+    """Cursor on PR #674: uv's records say the pin is installed, but the entry
+    point on disk runs and reports another version. The idempotency fast-path
+    only checked that it RUNS, so it skipped the `--force` reinstall; the new
+    smoke-test version check then refused it — on every re-run, forever.
+
+    The fast-path must also require the version to match, so this case is
+    reinstalled and the install succeeds.
+    """
+    pin = read_install_pin()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_happy_path_stubs(bin_dir, with_worthless=False)
+    local_bin = tmp_path / ".local" / "bin"
+    local_bin.mkdir(parents=True, exist_ok=True)
+    write_stub(local_bin, "worthless", 'echo "worthless 0.3.1"')
+    uv = (bin_dir / "uv").read_text()
+    # uv claims the pin is installed, and a real reinstall overwrites the entry point.
+    uv = uv.replace("list) ;;", f'list) echo "worthless v{pin}" ;;', 1)
+    uv = uv.replace('[ -e "$_d/worthless" ] ||', "", 1)
+    (bin_dir / "uv").write_text(uv)
+
+    result = run_install(bin_dir)
+    log = (tmp_path / "uv-invocations.log").read_text()
+
+    assert "tool install --force" in log, f"the wrong-version copy was not reinstalled.\n{log}"
+    assert result.returncode == 0, (result.returncode, result.stderr)
+    assert f"worthless {pin}" in result.stdout, result.stdout
