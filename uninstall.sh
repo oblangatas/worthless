@@ -45,6 +45,9 @@ PRINT_ACCT=0
 # --force: wipe even when `worthless uninstall` refused. It refuses to protect
 # keys it can still restore, so this is opt-in and loses them.
 FORCE=0
+# Set when uv/pipx named our binary but it would not start: tier 2 must not
+# then call it an unverified stranger's copy.
+BROKEN_BIN=0
 [ "${WORTHLESS_UNINSTALL_YES:-}" = "1" ] && ASSUME_YES=1
 for arg in "$@"; do
     case "$arg" in
@@ -419,6 +422,7 @@ tier1_delegate() {
     # that the keys could not be restored. A wrong "restored" claim is worse.
     _tier1_bin="$(installed_worthless)" || return 1
     if ! "$_tier1_bin" --version >/dev/null 2>&1; then
+        BROKEN_BIN=1
         # Our own install, but it does not run (a Python upgrade, a half-done
         # upgrade). Reinstalling it can still restore the keys; a wipe cannot.
         # So with keys possibly locked, stop — and don't call it a stranger's copy.
@@ -559,6 +563,8 @@ tier2_wipe() {
     # when a copy answers on PATH — we simply refused to trust it — is untrue.
     if [ "$FORCE" = "1" ]; then
         warn "Wiping without restoring your keys (--force)."
+    elif [ "$BROKEN_BIN" = "1" ]; then
+        warn "Your installed 'worthless' does not run, so it could not restore anything."
     elif command -v worthless >/dev/null 2>&1; then
         warn "The 'worthless' on your PATH could not be verified, so it was not run."
     else

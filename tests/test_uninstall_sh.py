@@ -1068,3 +1068,31 @@ def test_a_broken_official_install_is_not_wiped_or_called_a_stranger(tmp_path: P
     assert not uv_log.exists() or "tool uninstall" not in uv_log.read_text(), (
         "removed the tool whose reinstall is the way back"
     )
+
+
+def test_a_broken_official_install_with_nothing_locked_is_named_correctly(
+    tmp_path: Path,
+) -> None:
+    """Nothing locked, so the wipe goes ahead — but the reason must be true.
+
+    The script found this binary through uv and ran it; it did not start.
+    "Could not be verified, so it was not run" is false on both counts.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    real_bin_dir = tmp_path / "uv-tools" / "bin"
+    real_bin_dir.mkdir(parents=True)
+    home = tmp_path / "wless-home"
+    _seed_home(home, [])
+    write_stub(real_bin_dir, "worthless", 'echo "ImportError: broken venv" >&2; exit 1')
+    _write_uv_stub(bin_dir, real_bin_dir)
+    # It is on PATH too, as it would be for a default uv install.
+    write_stub(bin_dir, "worthless", f'exec "{real_bin_dir / "worthless"}" "$@"')
+
+    result = run_uninstall(bin_dir, worthless_home=home)
+    out = (result.stdout + result.stderr).lower()
+
+    assert result.returncode == 0, out
+    assert not home.exists(), "nothing was locked, so the leftovers should go"
+    assert "could not be verified" not in out, "called our own broken install unverified"
+    assert "does not run" in out, f"the real reason was not given:\n{out}"
