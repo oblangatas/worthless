@@ -1,0 +1,51 @@
+name: Served installer integrity
+
+# Hourly: the bytes worthless.sh serves to `curl | sh` must equal install.sh at
+# the latest release tag. deploy-worker.yml checks this at every CI deploy and
+# release-sync-check.yml re-checks it daily; this narrows the gap for anything
+# that changes production OUTSIDE CI (a leaked deploy token, a manual
+# `wrangler deploy`) from up to 24 hours to about one. Same comparison as
+# release-sync-check.yml A2a, nothing else, so a failure here means one thing.
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  served-equals-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v6
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: worthless.sh body equals install.sh @ latest release tag
+        run: |
+          set -euo pipefail
+          # Same tag filter as release-sync-check.yml: ruleset-gated, clean vX.Y.Z only.
+          LATEST_TAG=$(git tag --sort=-version:refname --list 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)
+          if [ -z "$LATEST_TAG" ]; then
+            echo "::error title=No release tag::no clean vMAJOR.MINOR.PATCH tag found"
+            exit 1
+          fi
+          BODY_TMP=$(mktemp)
+          curl -fsSL --retry 3 --retry-all-errors -A "curl/8.0" https://worthless.sh -o "$BODY_TMP"
+          BODY_SHA=$(sha256sum "$BODY_TMP" | awk '{print $1}')
+          REPO_SHA=$(git show "${LATEST_TAG}:install.sh" | sha256sum | awk '{print $1}')
+          if [ "$BODY_SHA" != "$REPO_SHA" ]; then
+            echo "::error title=Served installer drift::worthless.sh sha256 ${BODY_SHA} != install.sh@${LATEST_TAG} ${REPO_SHA}"
+            exit 1
+          fi
+          echo "OK: worthless.sh sha256 ${BODY_SHA} == install.sh@${LATEST_TAG}"
