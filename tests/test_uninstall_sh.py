@@ -22,6 +22,17 @@ import pytest
 
 from tests._install_helpers import run_uninstall, write_stub
 
+# The only sentence that claims keys came back. Asserted present where the
+# script KNOWS that, and absent everywhere it does not.
+KEYS_RESTORED = "every key it had locked in a .env file is restored"
+CANT_TELL = "can't tell whether your keys were restored"
+# The script counts locked keys with the sqlite3 CLI. Without it the count is
+# unknown and the answer is the conditional one, so tests that need a definite
+# answer from a seeded database need the tool.
+needs_sqlite3 = pytest.mark.skipif(
+    shutil.which("sqlite3") is None, reason="sqlite3 CLI needed to count locked keys"
+)
+
 
 def _seed_home(home: Path, env_paths: list[str]) -> None:
     """Create a fake ~/.worthless with a key file + a DB of locked .env paths."""
@@ -40,6 +51,7 @@ def _seed_home(home: Path, env_paths: list[str]) -> None:
         con.close()
 
 
+@needs_sqlite3
 def test_tier2_wipes_a_broken_install(tmp_path: Path) -> None:
     """No `worthless` on PATH → the home is wiped and the user is told to rotate."""
     bin_dir = tmp_path / "bin"
@@ -98,6 +110,7 @@ def test_tier2_lists_affected_env_files(tmp_path: Path) -> None:
     assert "/proj/b/.env" in combined
 
 
+@needs_sqlite3
 def test_tier1_delegates_to_a_working_binary_then_removes_the_tool(tmp_path: Path) -> None:
     """A working installed `worthless` → the script delegates to
     `worthless uninstall` (which restores keys) and then removes the tool via uv.
@@ -127,6 +140,9 @@ def test_tier1_delegates_to_a_working_binary_then_removes_the_tool(tmp_path: Pat
     assert result.returncode == 0, result.stderr
     out = result.stdout + result.stderr
     assert "STUB_RESTORED_KEYS" in out, "Tier 1 must delegate to the working binary"
+    assert KEYS_RESTORED in out.lower(), (
+        f"keys were locked here and the program put them back; say so:\n{out}"
+    )
     assert str(real_bin_dir / "worthless") in out, (
         "the binary being handed `uninstall --yes` must be named, so a redirected "
         "lookup is visible rather than silent"
@@ -334,6 +350,17 @@ def test_a_refusal_from_the_program_does_not_become_a_wipe(tmp_path: Path) -> No
     assert "nothing was deleted" in out.lower(), (
         f"the user must be told the state is intact:\n{out}"
     )
+    # The CLI also refuses when the keys are already dead (a lost Fernet key)
+    # and says so above. Promising "still restorable" here contradicts it.
+    assert "still restorable" not in out.lower(), (
+        f"promised the keys are restorable without knowing it:\n{out}"
+    )
+    # The title's promise on this path: the program that can restore the keys
+    # must survive a refusal. Removing it is the one irreversible step here.
+    uv_log = tmp_path / "uv.log"
+    assert not uv_log.exists() or "tool uninstall" not in uv_log.read_text(), (
+        f"a refusal removed the only tool that can restore the keys:\n{out}"
+    )
 
 
 def test_exit_73_removes_the_tool_and_does_not_claim_keys_were_lost(
@@ -379,7 +406,7 @@ def test_exit_73_removes_the_tool_and_does_not_claim_keys_were_lost(
     assert "rotate" not in out, (
         "exit 73 told the user to rotate keys the CLI had just restored:\n" + out
     )
-    assert "were restored" in out, f"the user must be told their keys came back:\n{out}"
+    assert KEYS_RESTORED in out, f"the user must be told their keys came back:\n{out}"
     assert "openclaw" in out, f"the user must be told what did not finish:\n{out}"
     uv_log = tmp_path / "uv.log"
     assert uv_log.exists() and "tool uninstall worthless" in uv_log.read_text(), (
@@ -496,6 +523,9 @@ def test_an_unverifiable_copy_stops_the_script_instead_of_wiping(tmp_path: Path)
     out = (result.stdout + result.stderr).lower()
 
     assert not sentinel.exists(), "a PATH-resolved copy was executed with no way to verify it"
+    # The advice is "restore with it yourself" — only safe if the user can see
+    # WHICH copy that is and check it is theirs.
+    assert str(bin_dir / "worthless").lower() in out, f"the unverified copy was not named:\n{out}"
     assert "restored to your .env files" not in out, "claimed a restoration that never happened"
     assert home.exists(), "the home a recoverable copy needs was wiped"
     assert (home / "fernet.key").exists(), "the key that unscrambles the shards was deleted"
@@ -536,12 +566,10 @@ def test_the_custom_bin_dir_user_can_actually_finish(tmp_path: Path) -> None:
     # a hand-deleted home, and a test that asks the developer's real keychain
     # is neither hermetic nor safe to run unattended.
     # Both keystore tools: run_uninstall does not stub `uname`, so the script
-    # picks its macos/linux branch from the real host. On macOS a missing entry
-    # reads as `absent` (keys came back -> "Nothing left here to restore"). On
-    # Linux "not found" is genuinely ambiguous — the key may have been a file —
-    # so keystore_state answers `unknown` and the user gets the conditional
-    # "can't tell" message. Either is honest for this user; neither may claim
-    # the keys were lost, which is what the assertions below pin.
+    # picks its macos/linux branch from the real host. On either, a missing
+    # entry is not proof of anything (the key may have been a file), so the
+    # user gets the conditional "can't tell" message. It may not claim the
+    # keys were lost, which is what the assertions below pin.
     write_stub(bin_dir, "security", "exit 1")
     write_stub(bin_dir, "secret-tool", "exit 1")
 
@@ -593,6 +621,13 @@ def test_force_wipes_when_the_copy_cannot_be_verified(tmp_path: Path) -> None:
 
     assert not home.exists(), "--force must wipe"
     assert "rotate" in out, "a forced wipe must tell the user to rotate their keys"
+    # This script only removes what uv or pipx installed. The copy it refused
+    # to trust is still on PATH, so "removed from this machine" is false.
+    assert "removed from this machine" not in out, (
+        f"claimed a full removal while a copy still answers on PATH:\n{out}"
+    )
+    assert "still answers on your path" in out, f"the leftover copy was not named:\n{out}"
+    assert str(bin_dir / "worthless").lower() in out, f"the leftover path was not shown:\n{out}"
     assert result.returncode == 0, result.stderr
 
 
@@ -635,9 +670,9 @@ def test_keychain_account_matches_the_python_keystore(tmp_path: Path) -> None:
 def test_a_hand_deleted_home_still_warns_that_keys_are_stranded(tmp_path: Path) -> None:
     """A missing home does NOT always mean the keys came back safely.
 
-    tier2_wipe suppresses the stranded-keys warning when ~/.worthless is already
-    gone, because the advised flow (`worthless uninstall --yes`, then re-run)
-    removes it only AFTER putting every key back. But a user who simply ran
+    A missing ~/.worthless is often benign: the advised flow (`worthless
+    uninstall --yes`, then re-run) removes it only AFTER putting every key
+    back. But a user who simply ran
     `rm -rf ~/.worthless` by hand destroyed shard-B and the Fernet key: their
     .env halves are permanently inert and they genuinely must rotate. Using
     home-dir presence alone conflates the two and leaves that user un-warned —
@@ -773,9 +808,7 @@ def test_a_keystore_it_cannot_read_gets_an_honest_answer_not_a_guess(
     out = (result.stdout + result.stderr).lower()
 
     assert result.returncode == 0, f"the wipe should still complete:\n{out}"
-    assert "can't tell whether your keys were already restored" in out, (
-        f"the user was not told the script cannot tell:\n{out}"
-    )
+    assert CANT_TELL in out, f"the user was not told the script cannot tell:\n{out}"
     assert "could not be restored automatically" not in out, (
         "asserted the keys were lost when the script cannot know that:\n" + out
     )
@@ -842,7 +875,7 @@ def test_a_cli_with_nothing_to_restore_is_not_reported_as_a_restore(
     out = (result.stdout + result.stderr).lower()
 
     assert result.returncode == 0, out
-    assert "your real keys were restored" not in out, (
+    assert KEYS_RESTORED not in out, (
         "told a user whose keys are dead that they were restored:\n" + out
     )
     assert "could not be restored automatically" in out, (
@@ -866,9 +899,136 @@ def test_a_cli_with_nothing_to_restore_and_an_unreadable_keystore_says_so(
     out = (result.stdout + result.stderr).lower()
 
     assert result.returncode == 0, out
-    assert "your real keys were restored" not in out, (
-        "claimed a restore the script cannot know happened:\n" + out
+    assert KEYS_RESTORED not in out, "claimed a restore the script cannot know happened:\n" + out
+    assert CANT_TELL in out, f"the user was not told the script cannot tell:\n{out}"
+
+
+def _keystore_entry_exists(bin_dir: Path) -> None:
+    """Both keystore tools report an entry, whichever OS branch runs."""
+    write_stub(
+        bin_dir,
+        "security",
+        'case "$1" in\n  find-generic-password) exit 0 ;;\n  *) exit 1 ;;\nesac',
     )
-    assert "can't tell whether your keys were already restored" in out, (
-        f"the user was not told the script cannot tell:\n{out}"
+    write_stub(bin_dir, "secret-tool", 'case "$1" in\n  lookup) exit 0 ;;\n  *) exit 1 ;;\nesac')
+
+
+def test_a_recreated_empty_home_is_not_reported_as_a_restore(tmp_path: Path) -> None:
+    """An existing ~/.worthless is not evidence that any key is locked in it.
+
+    `worthless scan` (the pre-commit hook), `up`, `wrap`, `lock` and the MCP
+    server all create a fresh, empty home on start. So a user who ran
+    `rm -rf ~/.worthless` and then committed once has a home again, with an
+    empty database, while every key it used to hold is dead. Tier 1 used to
+    read "the home exists" as "keys are restorable", let the CLI print
+    "0 .env file(s) restored", then announce the keys were restored.
+
+    A recreated home also gets a fresh keystore entry, so the keystore cannot
+    break the tie either. The honest answer is the conditional one.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    real_bin_dir = tmp_path / "uv-tools" / "bin"
+    real_bin_dir.mkdir(parents=True)
+    home = tmp_path / "wless-home"
+    _seed_home(home, [])  # recreated: schema present, nothing locked
+    write_stub(
+        real_bin_dir,
+        "worthless",
+        'case "$1" in\n'
+        '  --version) echo "worthless 0.3.12" ;;\n'
+        '  uninstall) echo "0 .env file(s) restored"; exit 0 ;;\n'
+        "esac",
     )
+    _write_uv_stub(bin_dir, real_bin_dir)
+    _keystore_entry_exists(bin_dir)  # the recreated home made a fresh one
+
+    result = run_uninstall(bin_dir, worthless_home=home)
+    out = (result.stdout + result.stderr).lower()
+
+    assert result.returncode == 0, out
+    assert "your real keys were restored" not in out and KEYS_RESTORED not in out, (
+        "announced a restore over an empty database:\n" + out
+    )
+    assert "could not be restored automatically" not in out, (
+        "asserted the keys were lost when the script cannot know that:\n" + out
+    )
+    assert CANT_TELL in out, f"the user was not told the script cannot tell:\n{out}"
+
+
+def test_a_broken_install_over_an_empty_home_does_not_demand_a_rotation(
+    tmp_path: Path,
+) -> None:
+    """Tier 2's half of the same proxy: an empty home holds no stranded keys.
+
+    A user who ran `worthless uninstall` (every key back), then let a later
+    `worthless scan` recreate the home, then broke or removed the binary, used
+    to be told to rotate live keys — because a home existed.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    home = tmp_path / "wless-home"
+    _seed_home(home, [])
+    _keystore_entry_exists(bin_dir)
+
+    result = run_uninstall(bin_dir, worthless_home=home)
+    out = (result.stdout + result.stderr).lower()
+
+    assert result.returncode == 0, out
+    assert not home.exists(), "the leftovers must still be wiped"
+    assert "could not be restored automatically" not in out, (
+        "demanded a rotation over an empty database:\n" + out
+    )
+    assert CANT_TELL in out, f"the user was not told the script cannot tell:\n{out}"
+
+
+def test_an_unverified_copy_over_an_empty_home_is_not_a_reason_to_refuse(
+    tmp_path: Path,
+) -> None:
+    """Refusing protects locked keys. With none locked, refusing just strands
+    the user with no way forward but --force."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    home = tmp_path / "wless-home"
+    _seed_home(home, [])
+    write_stub(bin_dir, "worthless", 'echo "worthless 0.0.1-shadow"')
+
+    result = run_uninstall(bin_dir, worthless_home=home)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not home.exists(), "nothing was locked, so the cleanup should finish"
+
+
+@pytest.mark.parametrize(
+    ("uname", "tool", "not_found"),
+    [
+        # macOS: exit 44 is the Keychain's "item not found". It used to be read
+        # as "the program removed it, keys came back" — but a key kept in a file
+        # (WORTHLESS_KEYRING_BACKEND=null, or a failed Keychain write) never had
+        # an entry, so a hand-deleted home looked like a clean restore.
+        ("Darwin", "security", "exit 44"),
+        # Linux/WSL: no keyring at all is the common case. This is the branch
+        # WSL users actually take; the unrecognised-OS test does not reach it.
+        ("Linux", "secret-tool", "exit 1"),
+    ],
+)
+def test_a_missing_keystore_entry_is_not_proof_the_keys_came_back(
+    tmp_path: Path, uname: str, tool: str, not_found: str
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    home = tmp_path / "wless-home"  # gone; the script cannot tell why
+    write_stub(bin_dir, "uname", f"echo {uname}")
+    write_stub(bin_dir, tool, not_found)
+
+    result = run_uninstall(bin_dir, worthless_home=home)
+    out = (result.stdout + result.stderr).lower()
+
+    assert result.returncode == 0, out
+    assert "nothing left here to restore" not in out, (
+        "reassured a user whose keys may be dead:\n" + out
+    )
+    assert "could not be restored automatically" not in out, (
+        "asserted the keys were lost when the script cannot know that:\n" + out
+    )
+    assert CANT_TELL in out, f"the user was not told the script cannot tell:\n{out}"
