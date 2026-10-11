@@ -284,7 +284,7 @@ say_key_verdict() {
             ;;
         unreadable)
             # Tier 2 only: the wipe just destroyed a database nobody read.
-            warn "This script couldn't read which keys were locked here (it needs sqlite3)."
+            warn "This script couldn't read which keys were locked here (sqlite3 is missing, or the database couldn't be read)."
             warn "If any were, the wipe made them unrecoverable: rotate them at your provider."
             ;;
         unknown)
