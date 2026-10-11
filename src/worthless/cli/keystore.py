@@ -409,8 +409,13 @@ def read_fernet_key(home_dir: Path | None = None) -> bytearray:
     # 4. File (interactive fallback, or service-managed when sync not run yet)
     if fernet_path.exists():
         if keyring_read_failed and not _service_managed():
+            # worthless-6hu7: KEY_REFUSED, not KEY_NOT_FOUND — the file is RIGHT
+            # THERE. A cancelled keychain prompt or a locked keyring used to make
+            # a present key look absent, and the first-run mint then replaced or
+            # unlinked it. "We won't use this key" must never read as "there is
+            # no key".
             raise WorthlessError(
-                ErrorCode.KEY_NOT_FOUND,
+                ErrorCode.KEY_REFUSED,
                 "Keyring read failed and a fernet.key file also exists — refusing "
                 "silent file fallback in an interactive session (stale file causes "
                 "401 under launchd). Run `worthless doctor` and resolve fernet_drift, "

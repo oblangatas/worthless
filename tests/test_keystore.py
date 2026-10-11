@@ -329,7 +329,9 @@ class TestReadFernetKeyCascade:
             with pytest.raises(WorthlessError) as exc_info:
                 read_fernet_key(home_dir=tmp_path)
 
-        assert exc_info.value.code == ErrorCode.KEY_NOT_FOUND
+        # worthless-6hu7: the file EXISTS, so this is a refusal, not an absence.
+        # As KEY_NOT_FOUND the first-run mint replaced the very key it names.
+        assert exc_info.value.code == ErrorCode.KEY_REFUSED
         assert "refusing" in str(exc_info.value).lower()
 
     def test_keyring_error_with_file_allowed_under_service_managed(
@@ -1193,3 +1195,78 @@ class TestWriteNeverFollowsSymlink:
         assert migrate_file_to_keyring(home_dir=home) is False
         assert promoted == [], "a refused key must never reach the keyring"
         assert key.exists() and key.read_bytes() == b"ORIGINAL-KEY"
+
+
+class TestKeyringFailureNeverMintsOverPresentKey:
+    """worthless-6hu7 / Bugbot: a locked keychain must not make a present key absent.
+
+    read_fernet_key raised KEY_NOT_FOUND when the keyring probe threw and a
+    fernet.key existed — and the first-run mint reads KEY_NOT_FOUND as
+    "nothing to lose", so a cancelled keychain prompt was enough to replace or
+    unlink a key that was sitting right there.
+    """
+
+    def test_keyring_failure_with_a_file_present_is_refused_not_absent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        home = tmp_path / ".worthless"
+        home.mkdir(mode=0o700)
+        key = home / "fernet.key"
+        key.write_bytes(b"PRESENT-KEY")
+        key.chmod(0o600)
+        monkeypatch.delenv("WORTHLESS_SERVICE_MANAGED", raising=False)
+        monkeypatch.delenv("WORTHLESS_FERNET_KEY", raising=False)
+        monkeypatch.setattr("worthless.cli.keystore.keyring_available", lambda: True)
+
+        def _locked(*_a: object, **_k: object) -> str:
+            raise RuntimeError("keychain locked / prompt cancelled")
+
+        monkeypatch.setattr("worthless.cli.keystore.keyring.get_password", _locked)
+
+        with pytest.raises(WorthlessError) as excinfo:
+            read_fernet_key(home_dir=home)
+
+        assert excinfo.value.code is ErrorCode.KEY_REFUSED, (
+            "a present key behind a locked keyring must be REFUSED, never 'not found' — "
+            "KEY_NOT_FOUND is what the first-run mint treats as 'nothing to lose'"
+        )
+        assert key.read_bytes() == b"PRESENT-KEY"
+
+
+class TestUninstallDoesNotWipeARefusedKey:
+    """worthless-6hu7 / Bugbot: uninstall must not offer --force for a chmod-able key."""
+
+    def test_refused_key_is_not_reported_as_unrecoverable(
+        self, capsys: pytest.CaptureFixture
+    ) -> None:
+        import typer
+
+        from worthless.cli.commands.uninstall import _handle_broken_repo
+        from worthless.cli.console import get_console
+
+        exc = WorthlessError(ErrorCode.KEY_REFUSED, "chmod 0600 /home/you/.worthless/fernet.key")
+
+        with pytest.raises(typer.Exit):
+            _handle_broken_repo(get_console(), exc, force=False)
+
+        out = capsys.readouterr()
+        text = out.out + out.err
+        assert "--force" not in text, "never offer a wipe for a key a chmod would save"
+        assert "chmod 0600" in text, f"the repair must be shown; got:\n{text}"
+
+    def test_genuinely_broken_install_still_offers_force(
+        self, capsys: pytest.CaptureFixture
+    ) -> None:
+        """Regression direction: the unrecoverable path keeps its advice."""
+        import typer
+
+        from worthless.cli.commands.uninstall import _handle_broken_repo
+        from worthless.cli.console import get_console
+
+        exc = WorthlessError(ErrorCode.SHARD_STORAGE_FAILED, "db is toast")
+
+        with pytest.raises(typer.Exit):
+            _handle_broken_repo(get_console(), exc, force=False)
+
+        out = capsys.readouterr()
+        assert "--force" in out.out + out.err
