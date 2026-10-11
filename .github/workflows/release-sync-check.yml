@@ -22,6 +22,7 @@ on:
 permissions:
   contents: read
   deployments: read
+  pages: read
 
 concurrency:
   # Don't drop a scheduled run if a manual one fires — both are useful.
@@ -420,3 +421,40 @@ jobs:
             exit 1
           fi
           echo "OK: no docs.worthless.sh references in install.sh or manual smoke fixture"
+
+      # ===== Assertion 7: the live site's own prerequisites =================
+      - name: A7 — HTTPS certificate renews in time and security.txt is served
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          MIN_DAYS: "21"
+        run: |
+          set -euo pipefail
+          # 1) Pages renews a custom-domain certificate on its own — unless the
+          # domain is proxied, which is how wless.io is served. That renewal
+          # already failed once (June, "bad_authz"). An expired origin cert can
+          # take the whole site down, so alarm while there is still time to act.
+          expires=$(gh api "repos/${REPO}/pages" --jq '.https_certificate.expires_at // empty' 2>/dev/null || true)
+          case "$expires" in
+            ????-??-??T*)
+              days=$(( ( $(date -d "$expires" +%s) - $(date +%s) ) / 86400 ))
+              if [ "$days" -lt "$MIN_DAYS" ]; then
+                echo "::error title=Pages certificate::wless.io certificate expires in ${days}d (< ${MIN_DAYS}d): $expires"
+                exit 1
+              fi
+              echo "OK: Pages certificate valid for ${days} more days ($expires)"
+              ;;
+            *)
+              echo "::warning title=Pages certificate::no expiry readable from the Pages API — skipping this half."
+              ;;
+          esac
+          # 2) security.txt lives under a dotted directory. upload-pages-artifact
+          # v4+ excludes dotfiles by default, so a routine action bump could drop
+          # the disclosure contact from production with no test noticing.
+          code=$(curl -o /dev/null -sw '%{http_code}' --max-time 20 https://wless.io/.well-known/security.txt)
+          if [ "$code" != "200" ]; then
+            echo "::error title=security.txt missing::https://wless.io/.well-known/security.txt returned HTTP $code"
+            exit 1
+          fi
+          echo "OK: security.txt served (HTTP 200)"
