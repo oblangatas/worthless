@@ -34,7 +34,7 @@ needs_sqlite3 = pytest.mark.skipif(
 )
 
 
-def _seed_home(home: Path, env_paths: list[str]) -> None:
+def _seed_home(home: Path, env_paths: list[str | None]) -> None:
     """Create a fake ~/.worthless with a key file + a DB of locked .env paths."""
     home.mkdir(parents=True, exist_ok=True)
     (home / "fernet.key").write_text("fake-fernet-key\n")
@@ -1089,3 +1089,55 @@ def test_a_broken_official_install_with_nothing_locked_is_named_correctly(
     assert not home.exists(), "nothing was locked, so the leftovers should go"
     assert "could not be verified" not in out, "called our own broken install unverified"
     assert "does not run" in out, f"the real reason was not given:\n{out}"
+
+
+def test_a_wipe_of_a_database_it_could_not_read_does_not_reassure(tmp_path: Path) -> None:
+    """No working sqlite3: the script cannot count what is locked, then wipes it.
+
+    Whatever was locked in that database is unrecoverable once the wipe runs,
+    so "if worthless uninstall restored them, you're done" is the wrong thing
+    to say. The script doesn't know there were keys — so it must not say
+    "could NOT be restored" either — but it must say rotate-if-any.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    home = tmp_path / "wless-home"
+    _seed_home(home, ["/proj/a/.env"])
+    write_stub(bin_dir, "sqlite3", "exit 1")  # present but unusable
+
+    result = run_uninstall(bin_dir, worthless_home=home)
+    out = (result.stdout + result.stderr).lower()
+
+    assert result.returncode == 0, out
+    assert not home.exists(), "the wipe should still run"
+    assert "you're done" not in out, f"reassured over a database it never read:\n{out}"
+    assert "couldn't read which keys were locked" in out, f"the user was not told why:\n{out}"
+    assert "rotate" in out, f"the user was not told what to do if keys were there:\n{out}"
+
+
+def test_enroll_only_keys_are_not_reported_as_restored(tmp_path: Path) -> None:
+    """An enroll-only key has no .env to go back to; the CLI deletes it and
+    tells the user to rotate. A home holding only those has nothing to restore,
+    so "every key it had locked in a .env file is restored" must not print."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    real_bin_dir = tmp_path / "uv-tools" / "bin"
+    real_bin_dir.mkdir(parents=True)
+    home = tmp_path / "wless-home"
+    _seed_home(home, [None])  # enroll-only: no env_path
+    write_stub(
+        real_bin_dir,
+        "worthless",
+        'case "$1" in\n'
+        '  --version) echo "worthless 0.3.12" ;;\n'
+        "  uninstall) echo \"enroll-only key 'a' has no .env to restore\"; exit 0 ;;\n"
+        "esac",
+    )
+    _write_uv_stub(bin_dir, real_bin_dir)
+    _keystore_entry_exists(bin_dir)
+
+    result = run_uninstall(bin_dir, worthless_home=home)
+    out = (result.stdout + result.stderr).lower()
+
+    assert result.returncode == 0, out
+    assert KEYS_RESTORED not in out, f"claimed a .env restore that had nothing to restore:\n{out}"

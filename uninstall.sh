@@ -233,13 +233,15 @@ keystore_state() {
     esac
 }
 
-# How many keys are locked in the home right now? A number, or `unknown` when
-# sqlite3 is missing or the database cannot be read. No database means none.
+# How many keys are locked in a .env file the program could put them back in?
+# A number, or `unknown` when sqlite3 is missing or the database cannot be
+# read. No database means none. Enroll-only keys (no env_path) are not
+# counted: there is nothing to restore them to, and the CLI deletes them.
 locked_key_count() {
     db="$WORTHLESS_HOME_DIR/worthless.db"
     [ -f "$db" ] || { printf '0'; return 0; }
     command -v sqlite3 >/dev/null 2>&1 || { printf 'unknown'; return 0; }
-    _lk="$(sqlite3 "$db" "SELECT COUNT(*) FROM enrollments;" 2>/dev/null || true)"
+    _lk="$(sqlite3 "$db" "SELECT COUNT(*) FROM enrollments WHERE env_path IS NOT NULL;" 2>/dev/null || true)"
     case "$_lk" in
         '' | *[!0-9]*) printf 'unknown' ;;
         *) printf '%s' "$_lk" ;;
@@ -249,6 +251,7 @@ locked_key_count() {
 # What we actually KNOW about the user's keys, before anything runs:
 #   locked    keys are locked in the home now; only the program can restore them
 #   stranded  no home, but its keystore entry survives: an rm -rf. Keys are dead
+#   unreadable  a home exists but its locked keys could not be counted
 #   unknown   anything else — and say so rather than guess
 #
 # "The home exists" is NOT evidence of locked keys: `scan` (the pre-commit
@@ -259,7 +262,8 @@ locked_key_count() {
 key_state() {
     if [ -d "$WORTHLESS_HOME_DIR" ]; then
         case "$(locked_key_count)" in
-            0 | unknown) printf 'unknown' ;;
+            0) printf 'unknown' ;;
+            unknown) printf 'unreadable' ;;
             *) printf 'locked' ;;
         esac
     elif [ "$(keystore_state)" = present ]; then
@@ -277,6 +281,11 @@ say_key_verdict() {
     case "$1" in
         stranded)
             warn "Your real API keys could NOT be restored automatically — rotate them at your provider."
+            ;;
+        unreadable)
+            # Tier 2 only: the wipe just destroyed a database nobody read.
+            warn "This script couldn't read which keys were locked here (it needs sqlite3)."
+            warn "If any were, the wipe made them unrecoverable: rotate them at your provider."
             ;;
         unknown)
             warn "This script can't tell whether your keys were restored."
@@ -460,6 +469,7 @@ tier1_delegate() {
     # a restore — reading it as one told users with dead keys they were fine.
     # Found by running the real CLI in a container; no stubbed test could see it.
     _tier1_keys="$(key_state)"
+    [ "$_tier1_keys" = "unreadable" ] && _tier1_keys=unknown
 
     _tier1_status=0
     "$_tier1_bin" uninstall --yes || _tier1_status=$?
@@ -547,14 +557,16 @@ refuse_unverified_copy() {
 # Tier 2: no working binary → wipe what a script safely can, and be honest that
 # the keys cannot be restored.
 tier2_wipe() {
-    # What do we actually KNOW about the user's keys? Two answers:
+    # What do we actually KNOW about the user's keys? Three answers:
     #
-    #   stranded  keys are locked here and this script cannot unscramble them,
-    #             or the keystore entry survives a missing home (an rm -rf).
-    #             The keys are lost; say so and say rotate.
-    #   unknown   anything else (see key_state). Asserting either "lost" or
-    #             "fine" would be false for some of these users, so we say we
-    #             cannot tell.
+    #   stranded    keys are locked here and this script cannot unscramble them,
+    #               or the keystore entry survives a missing home (an rm -rf).
+    #               The keys are lost; say so and say rotate.
+    #   unreadable  a home we are about to wipe, whose locked keys we could not
+    #               count. Say rotate-if-any, not "you're done".
+    #   unknown     anything else (see key_state). Asserting either "lost" or
+    #               "fine" would be false for some of these users, so we say
+    #               we cannot tell.
     #
     # This is WOR-597's own failure class from both sides: telling someone to
     # rotate keys they just recovered costs money and trust; staying quiet over
