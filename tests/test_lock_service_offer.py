@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -22,6 +23,7 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
+from worthless.cli import default_command
 from worthless.cli.app import app
 from worthless.cli.commands.lock import _offer_service_after_lock
 from worthless.cli.console import WorthlessConsole
@@ -32,6 +34,13 @@ from worthless.cli.errors import ErrorCode, WorthlessError
 @pytest.fixture
 def console() -> WorthlessConsole:
     return WorthlessConsole()
+
+
+@pytest.fixture(autouse=True)
+def _not_in_a_container():
+    """The suite itself may run inside Docker; the container skip is tested explicitly."""
+    with patch("worthless.cli.commands.lock._in_container", return_value=False):
+        yield
 
 
 def _flat(captured) -> str:
@@ -515,3 +524,144 @@ class TestTheDeclineHintIsHonestOnWsl:
     ) -> None:
         hint = self._hint(console, capsys, on_wsl=False, tty=tty).lower()
         assert "keep running after you close this terminal" in hint
+
+
+class TestTheQuestionIsExplicit:
+    """WOR-859 ruling: off by default, asked explicitly.
+
+    A one-line "installs a user service" let people agree to a login item and a
+    master-key file without knowing either existed. Reverting `_offer_question`
+    to that one line turns every assertion here red.
+    """
+
+    def _ask(self, console: WorthlessConsole, *, backend: str, on_wsl: bool = False) -> str:
+        with (
+            patch(
+                "worthless.cli.commands.lock.current_platform_backend_name", return_value=backend
+            ),
+            patch("worthless.cli.commands.lock.is_wsl", return_value=on_wsl),
+            patch("worthless.cli.commands.lock._scan_prompt_is_tty", return_value=True),
+            patch("worthless.cli.commands.lock._backend") as b,
+            patch("worthless.cli.commands.lock.typer.confirm", return_value=False) as confirm,
+            patch("worthless.cli.commands.lock.install_service_for_offer"),
+        ):
+            b.return_value.detect_status.return_value = MagicMock(state=ServiceState.NOT_INSTALLED)
+            home = _home()
+            home.base_dir = Path.home() / ".worthless"
+            _offer_service_after_lock(console, home=home, port=8787)
+        return confirm.call_args.args[0]
+
+    @pytest.mark.parametrize(
+        ("backend", "unit_name"),
+        [("launchd", "sh.worthless.proxy.plist"), ("systemd", "worthless-proxy.service")],
+    )
+    def test_names_what_it_adds_the_trade_off_and_the_undo(
+        self, console: WorthlessConsole, backend: str, unit_name: str
+    ) -> None:
+        question = self._ask(console, backend=backend)
+        assert unit_name in question, "the user must see the file being added"
+        assert "starts Worthless when you log in" in question
+        assert "fernet.key" in question, "the master-key file is the trade-off"
+        assert "worthless service uninstall" in question
+        assert "Say no" in question
+
+    def test_mac_wording_says_login_item(self, console: WorthlessConsole) -> None:
+        assert "macOS login item" in self._ask(console, backend="launchd")
+
+    def test_never_claims_restart_survival(self, console: WorthlessConsole) -> None:
+        """Reboot survival is unproven (WOR-725); say what the unit does, not more."""
+        question = self._ask(console, backend="launchd").lower()
+        assert "reboot" not in question
+        assert "restart" not in question
+
+    def test_wsl_keeps_its_warning_and_gets_the_details(self, console: WorthlessConsole) -> None:
+        question = self._ask(console, backend="systemd", on_wsl=True)
+        assert "instanceIdleTimeout" in question
+        assert "fernet.key" in question
+
+
+class TestContainersAreNotAsked:
+    """Docker Desktop and Codespaces terminals are real TTYs, so the tty gate
+    lets them through, and the install can only fail. Delete the container
+    check in `_offer_service_after_lock` and these turn red."""
+
+    def test_no_question_and_no_install_in_a_container(
+        self, console: WorthlessConsole, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with (
+            patch("worthless.cli.commands.lock._in_container", return_value=True),
+            patch("worthless.cli.commands.lock._scan_prompt_is_tty", return_value=True),
+            patch("worthless.cli.commands.lock.typer.confirm") as confirm,
+            patch("worthless.cli.commands.lock.install_service_for_offer") as install,
+        ):
+            assert _offer_service_after_lock(console, home=_home(), port=8787) is False
+        confirm.assert_not_called()
+        install.assert_not_called()
+
+    def test_the_hint_does_not_send_them_in_a_circle(
+        self, console: WorthlessConsole, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with (
+            patch("worthless.cli.commands.lock._in_container", return_value=True),
+            patch("worthless.cli.commands.lock._scan_prompt_is_tty", return_value=True),
+        ):
+            _offer_service_after_lock(console, home=_home(), port=8787)
+        out = _flat(capsys.readouterr())
+        assert "service install" not in out
+        assert "worthless up" in out
+
+
+class TestPlainWorthlessAsks:
+    """WOR-859: the command the docs send new users to must ask too.
+
+    Before this, plain `worthless` locked with quiet=True and the offer never
+    fired. Delete the offer call in `_run_enrollment_if_needed` and
+    `test_asks_after_locking` turns red.
+    """
+
+    def _enroll(self, *, yes: bool, locked: int = 1, found: int = 1) -> MagicMock:
+        home = MagicMock(name="WorthlessHome")
+        home.db_path.exists.return_value = False
+        with (
+            patch.object(default_command, "_has_enrolled_keys", return_value=False),
+            patch.object(default_command, "find_env_file", return_value=Path(".env")),
+            patch.object(default_command, "scan_env_keys", return_value=[MagicMock()] * found),
+            patch.object(default_command, "show_detected_keys"),
+            patch.object(default_command.typer, "confirm", return_value=True),
+            patch.object(default_command, "acquire_lock", return_value=nullcontext()),
+            patch.object(default_command, "_lock_keys", return_value=locked),
+            patch.object(default_command, "_offer_service_after_lock") as offer,
+        ):
+            default_command._run_enrollment_if_needed(
+                home, WorthlessConsole(), interactive=True, yes=yes
+            )
+        return offer
+
+    def test_asks_after_locking(self) -> None:
+        self._enroll(yes=False).assert_called_once()
+
+    def test_yes_never_installs_a_service_on_this_path(self) -> None:
+        """`worthless --yes` is documented as 'never service install'."""
+        self._enroll(yes=True).assert_not_called()
+
+    def test_a_partial_lock_gets_no_offer(self) -> None:
+        self._enroll(yes=False, locked=1, found=2).assert_not_called()
+
+    def test_asks_before_the_proxy_starts(self) -> None:
+        """Asking after the detached proxy starts would race it for the port."""
+        order: list[str] = []
+        with (
+            patch.object(default_command, "get_home", return_value=MagicMock()),
+            patch.object(
+                default_command,
+                "_run_enrollment_if_needed",
+                side_effect=lambda *a, **k: order.append("enroll+offer"),
+            ),
+            patch.object(
+                default_command,
+                "_ensure_proxy_running",
+                side_effect=lambda *a, **k: order.append("proxy") or (True, None, 8787),
+            ),
+        ):
+            default_command.run_default(interactive=True, yes=False)
+        assert order == ["enroll+offer", "proxy"]

@@ -29,7 +29,7 @@ import typer
 from worthless.cli._repo_factory import open_repo
 from worthless.cli.bootstrap import WorthlessHome, acquire_lock, get_home
 from worthless.cli.code_scanner import scan_for_hardcoded_provider_urls
-from worthless.cli.commands.service import _backend, _print_service_banner
+from worthless.cli.commands.service import _backend, _print_service_banner, launchd, systemd
 from worthless.cli.commands.service._common import (
     ServiceState,
     current_platform_backend_name,
@@ -47,7 +47,7 @@ from worthless.cli.process import (
     resolve_port,
 )
 from worthless.cli.console import WorthlessConsole, get_console
-from worthless.cli.platform import is_wsl
+from worthless.cli.platform import _in_container, is_wsl
 from worthless.cli.scanner import SkippedFile, scan_source_for_hardcoded_provider_urls
 from worthless.cli.dotenv_rewriter import (
     rewrite_env_keys,
@@ -3163,25 +3163,56 @@ def _offer_declined_hint() -> str:
     return "Want it to keep running after you close this terminal? `worthless service install`"
 
 
-def _offer_question(port: int) -> str:
+def _tilde(path: Path) -> str:
+    """Show a path the way the user would type it."""
+    home = str(Path.home())
+    text = str(path)
+    return "~" + text[len(home) :] if text.startswith(home + "/") else text
+
+
+def _offer_question(port: int, home: WorthlessHome) -> str:
     """The question to ask, which must be true on the platform asking it.
 
-    On WSL the plain version is a promise WSL does not keep: measured on real
-    WSL2 (WOR-853), the default config stops the distro — and the proxy with it
-    — about 15 s after the last WSL terminal closes. The fix text used to print
-    only AFTER the unit was written and linger enabled, and consent collected
-    after the irreversible step is not consent. So WSL gets told in the
+    WOR-859 ruling (2026-10-10): off by default, asked explicitly. A one-line
+    "installs a user service" let people agree to a login item and a key file
+    without knowing either existed. So the question names what it adds, the
+    trade-off, and the undo — and tells anyone unsure to say no.
+
+    On WSL the plain promise is one WSL does not keep: measured on real WSL2
+    (WOR-853), the default config stops the distro — and the proxy with it —
+    about 15 s after the last WSL terminal closes. So WSL is told in the
     question, before answering it.
+
+    "Starts when you log in", never "survives a restart": that is what the
+    unit is configured to do, while reboot survival is still unproven (WOR-725).
     """
+    if current_platform_backend_name() == "launchd":
+        adds = "a macOS login item that starts Worthless when you log in"
+        unit = launchd.plist_path()
+    else:
+        adds = "a systemd user service that starts Worthless when you log in"
+        unit = systemd.unit_path()
     if is_wsl():
-        return (
-            f"\nInstall the background service on port {port}? On WSL it still stops about "
+        headline = (
+            "\nInstall a background service for Worthless? On WSL it still stops about "
             "15 seconds after your last WSL terminal closes, unless you also set "
-            "instanceIdleTimeout=-1 in %USERPROFILE%\\.wslconfig — shown next if you say yes"
+            "instanceIdleTimeout=-1 in %USERPROFILE%\\.wslconfig — shown next if you say yes."
+        )
+    else:
+        headline = (
+            "\nInstall a background service so Worthless keeps protecting your keys "
+            "after this terminal closes?"
         )
     return (
-        "\nKeep the proxy running after this terminal closes? "
-        f"(installs a user service on port {port})"
+        f"{headline}\n"
+        f"  What it adds:  {adds}\n"
+        f"                 {_tilde(unit)}\n"
+        "  Trade-off:     your master key is kept in a file only you can read\n"
+        f"                 ({_tilde(home.base_dir / 'fernet.key')}), so it can start without you\n"
+        "  Undo anytime:  worthless service uninstall\n"
+        "  Not sure what a background service is? Say no. Your keys stay locked\n"
+        "  either way; you just run `worthless up` when you need the proxy.\n"
+        f"Install the background service on port {port}?"
     )
 
 
@@ -3195,6 +3226,17 @@ def _offer_service_after_lock(console, *, home: WorthlessHome, port: int) -> boo
     Returns True only if a service was actually installed.
     """
     if console.json_mode:
+        return False
+
+    # Containers first: no systemd and no login session, so the install can only
+    # fail — and the generic hint would send the user to `service install`,
+    # which fails the same way. Docker Desktop and Codespaces terminals are real
+    # TTYs, so the gate below does not catch them (WOR-859 premortem).
+    if _in_container():
+        console.print_hint(
+            "Inside a container, run the proxy as the container's main process, "
+            "or start it with `worthless up`."
+        )
         return False
 
     # The terminal gate comes BEFORE --yes, and the order is the point.
@@ -3225,7 +3267,7 @@ def _offer_service_after_lock(console, *, home: WorthlessHome, port: int) -> boo
         accepted = True
     else:
         try:
-            accepted = typer.confirm(_offer_question(port), default=False)
+            accepted = typer.confirm(_offer_question(port, home), default=False)
         except (typer.Abort, EOFError):
             # Ctrl-C or Ctrl-D at a real terminal. The gate above already excluded
             # the captured-stdin case, which raises OSError rather than EOFError.

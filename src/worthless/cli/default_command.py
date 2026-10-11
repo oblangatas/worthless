@@ -20,7 +20,7 @@ from pathlib import Path
 import typer
 
 from worthless.cli.bootstrap import WorthlessHome, acquire_lock, get_home
-from worthless.cli.commands.lock import _lock_keys
+from worthless.cli.commands.lock import _lock_keys, _offer_service_after_lock
 from worthless.cli._repo_factory import open_repo
 from worthless.cli.commands.up import start_supervised_proxy
 from worthless.cli.process import poll_health, resolve_port
@@ -201,6 +201,14 @@ def _run_enrollment_if_needed(
     elif count > 0:
         console.print_hint(f"\n  {count} key{'s' if count != 1 else ''} protected.")
 
+    # WOR-859: the command the docs send new users to must ask too, or almost
+    # nobody ever sees the choice. Here, before _ensure_proxy_running: asking
+    # after it would race the detached proxy for the port. --yes never installs
+    # a service on this path (see run_default). A partial lock gets no offer,
+    # the same rule `worthless lock` applies.
+    if count > 0 and count == total and not yes:
+        _offer_service_after_lock(console, home=home, port=resolve_port(None))
+
 
 def _ensure_proxy_running(home: WorthlessHome, console) -> tuple[bool, int | None, int]:
     """Phase 2: start sidecar-supervised proxy if needed; return (running, pid, port)."""
@@ -249,11 +257,12 @@ def run_default(
         Auto-approve lock + proxy start (but never service install).
 
         That last clause is true of THIS path only, and the distinction is
-        worth keeping straight: plain ``worthless`` locks quietly, so the
-        service offer never fires here at all. ``worthless --yes lock`` is a
-        different path, and there --yes DOES accept the offer — but only at a
-        real terminal, because the offer checks for one before it checks
-        --yes. A piped or CI run is never asked and never installed into.
+        worth keeping straight: without --yes, plain ``worthless`` asks the
+        explicit service question after locking (WOR-859); with --yes it never
+        asks and never installs. ``worthless --yes lock`` is a different path,
+        and there --yes DOES accept the offer — but only at a real terminal,
+        because the offer checks for one before it checks --yes. A piped or CI
+        run is never asked and never installed into.
     json_mode:
         Print structured JSON state and exit.  Never triggers writes.
     """
