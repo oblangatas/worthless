@@ -1647,3 +1647,33 @@ def test_a_v_prefixed_version_pin_still_installs(tmp_path: Path, spelling: str) 
 
     assert result.returncode == 0, (result.returncode, result.stderr)
     assert f"worthless {pin}" in result.stdout, result.stdout
+
+
+def test_a_wrong_version_copy_is_repaired_not_refused_forever(tmp_path: Path) -> None:
+    """Cursor on PR #674: uv's records say the pin is installed, but the entry
+    point on disk runs and reports another version. The idempotency fast-path
+    only checked that it RUNS, so it skipped the `--force` reinstall; the new
+    smoke-test version check then refused it — on every re-run, forever.
+
+    The fast-path must also require the version to match, so this case is
+    reinstalled and the install succeeds.
+    """
+    pin = read_install_pin()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_happy_path_stubs(bin_dir, with_worthless=False)
+    local_bin = tmp_path / ".local" / "bin"
+    local_bin.mkdir(parents=True, exist_ok=True)
+    write_stub(local_bin, "worthless", 'echo "worthless 0.3.1"')
+    uv = (bin_dir / "uv").read_text()
+    # uv claims the pin is installed, and a real reinstall overwrites the entry point.
+    uv = uv.replace("list) ;;", f'list) echo "worthless v{pin}" ;;', 1)
+    uv = uv.replace('[ -e "$_d/worthless" ] ||', "", 1)
+    (bin_dir / "uv").write_text(uv)
+
+    result = run_install(bin_dir)
+    log = (tmp_path / "uv-invocations.log").read_text()
+
+    assert "tool install --force" in log, f"the wrong-version copy was not reinstalled.\n{log}"
+    assert result.returncode == 0, (result.returncode, result.stderr)
+    assert f"worthless {pin}" in result.stdout, result.stdout

@@ -385,7 +385,7 @@ install_or_upgrade_worthless() {
     # Strip whitespace a mangled checkout or env could smuggle past a bare
     # `-n` test (e.g. a stray CR from a CRLF edit, or "  ").
     effective_version="$(printf '%s' "$effective_version" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
-    effective_version="${effective_version#v}" # as uv installs it
+    effective_version="${effective_version#v}"
 
     if [ -z "$effective_version" ]; then
         die "$EXIT_INTERNAL" \
@@ -425,7 +425,8 @@ install_or_upgrade_worthless() {
     # leaves an executable shim that cannot import. `-x` passes; the tool is
     # broken; the fast-path would skip the --force repair forever.
     if [ -n "$installed_ver" ] && [ "$installed_ver" = "$effective_version" ] \
-       && "$("$UV" tool dir --bin 2>/dev/null)/worthless" --version >/dev/null 2>&1; then
+       && [ "$("$("$UV" tool dir --bin 2>/dev/null)/worthless" --version 2>/dev/null \
+       | awk '{print $2}')" = "$effective_version" ]; then
         ok "  worthless ${installed_ver} already installed"
         return 0
     fi
@@ -474,7 +475,7 @@ smoke_test() {
     worthless_bin_authoritative=1
     if [ ! -x "$worthless_bin" ]; then
         worthless_bin_authoritative=0
-        # worthless-alx3: uv's default dir, never PATH (a planted copy would run).
+        # alx3: uv's default dir, never PATH.
         worthless_bin="${UV_TOOL_BIN_DIR:-${XDG_BIN_HOME:-${HOME:-/root}/.local/bin}}/worthless"
     fi
     if ! version_output="$("$worthless_bin" --version 2>/dev/null)"; then
