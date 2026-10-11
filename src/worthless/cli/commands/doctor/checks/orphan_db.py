@@ -49,6 +49,40 @@ def _repair_orphans(ctx: CheckContext, orphans: list) -> list[dict]:
     ]
 
 
+def _finding(e) -> dict:
+    """One orphan as an agent sees it. Checks the filesystem once."""
+    moved = env_file_missing(e)
+    finding = {
+        "key_alias": e.key_alias,
+        "var_name": e.var_name,
+        "env_path": e.env_path,
+        "reason": "env_file_missing" if moved else "env_line_missing",
+    }
+    if moved:
+        finding["remediation"] = MOVED_REMEDIATION
+    return finding
+
+
+def _build_summary(n: int, moved: int) -> str:
+    if n == 0:
+        return "No orphan enrollments found."
+    dead = n - moved
+    parts = [f"{n} broken record{'s' if n != 1 else ''} (.env line or file missing)."]
+    if dead:
+        parts.append(
+            f"{dead} with the .env line deleted: run 'worthless doctor --fix' to purge, "
+            "or 'worthless uninstall --force' for a clean removal."
+        )
+    if moved:
+        parts.append(
+            f"{moved} whose .env was not found {'is' if moved == 1 else 'are'} kept, "
+            "never purged: if the project moved, put it back and run "
+            "'worthless unlock'; if it is gone for good, 'worthless uninstall --force' "
+            "removes Worthless and deletes these keys."
+        )
+    return " ".join(parts)
+
+
 def run(ctx: CheckContext) -> CheckResult:
     # Late import to avoid the package's __init__.py loading the registry
     # before legacy symbols (_list_orphans, etc.) are defined.
@@ -68,16 +102,7 @@ def run(ctx: CheckContext) -> CheckResult:
         )
 
     n = len(orphans)
-    findings = [
-        {
-            "key_alias": e.key_alias,
-            "var_name": e.var_name,
-            "env_path": e.env_path,
-            "reason": "env_file_missing" if env_file_missing(e) else "env_line_missing",
-            **({"remediation": MOVED_REMEDIATION} if env_file_missing(e) else {}),
-        }
-        for e in orphans
-    ]
+    findings = [_finding(e) for e in orphans]
     moved = sum(1 for f in findings if f["reason"] == "env_file_missing")
     fixed: list[dict] = []
     status = "ok" if not orphans else "warn"
@@ -98,30 +123,11 @@ def run(ctx: CheckContext) -> CheckResult:
                 skipped_reason=None,
             )
 
-    if n == 0:
-        summary = "No orphan enrollments found."
-    else:
-        plural = "s" if n != 1 else ""
-        dead = n - moved
-        parts = [f"{n} broken record{plural} (.env line or file missing)."]
-        if dead:
-            parts.append(
-                f"{dead} with the .env line deleted: run 'worthless doctor --fix' to purge, "
-                "or 'worthless uninstall --force' for a clean removal."
-            )
-        if moved:
-            parts.append(
-                f"{moved} whose .env was not found {'is' if moved == 1 else 'are'} kept, "
-                "never purged: if the project moved, put it back and run "
-                "'worthless unlock'; if it is gone for good, 'worthless uninstall --force' "
-                "removes Worthless and deletes these keys."
-            )
-        summary = " ".join(parts)
     return CheckResult(
         check_id=check_id,
         status=status,
         findings=findings,
-        summary=summary,
+        summary=_build_summary(n, moved),
         # Nothing for --fix to do when every orphan is a moved key it must keep.
         fixable=n == 0 or moved < n,
         fixed=fixed,
