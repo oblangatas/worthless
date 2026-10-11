@@ -1303,6 +1303,88 @@ class TestScanAgreesWithLockOnOAuthTokens:
         assert finding.is_unshardable is True
         assert finding.committed_before == leaked
 
+    def test_a_copy_on_a_merged_then_deleted_branch_is_warned_about(self, tmp_path: Path) -> None:
+        # A branch committed the .env, untracked it, was merged with a merge
+        # commit and deleted. Git's default history simplification follows
+        # only the first parent there, so it would never look at that branch.
+        repo = tmp_path / "proj"
+        repo.mkdir()
+        (repo / "README").write_text("x\n")
+        _git_commit(repo, "README")
+        _git_in(repo, "checkout", "-q", "-b", "feat")
+        env = repo / ".env"
+        env.write_text(f"{self._oauth('87rb-merged')}\n")
+        _git_in(repo, "add", ".env")
+        _git_in(repo, "commit", "-q", "-m", "leak")
+        leaked = _git_in(repo, "rev-parse", "--short", "HEAD")
+        _git_in(repo, "rm", "-q", "--cached", ".env")
+        _git_in(repo, "commit", "-q", "-m", "untrack")
+        _git_in(repo, "checkout", "-q", "-")
+        _git_in(repo, "merge", "-q", "--no-ff", "-m", "merge", "feat")
+        _git_in(repo, "branch", "-q", "-D", "feat")
+
+        [finding] = scan_files([env])
+
+        assert finding.is_unshardable is True
+        assert finding.committed_before == leaked
+
+    def test_a_copy_only_a_merge_commit_added_is_warned_about(self, tmp_path: Path) -> None:
+        # The .env arrived in the merge commit itself (added while resolving),
+        # so no ordinary commit ever added it.
+        repo = tmp_path / "proj"
+        repo.mkdir()
+        (repo / "README").write_text("x\n")
+        _git_commit(repo, "README")
+        _git_in(repo, "checkout", "-q", "-b", "side")
+        (repo / "other").write_text("y\n")
+        _git_in(repo, "add", "other")
+        _git_in(repo, "commit", "-q", "-m", "side")
+        _git_in(repo, "checkout", "-q", "-")
+        _git_in(repo, "merge", "-q", "--no-ff", "--no-commit", "side")
+        env = repo / ".env"
+        env.write_text(f"{self._oauth('87rb-in-merge')}\n")
+        _git_in(repo, "add", ".env")
+        _git_in(repo, "commit", "-q", "-m", "merge")
+        merged = _git_in(repo, "rev-parse", "--short", "HEAD")
+        _git_in(repo, "rm", "-q", "--cached", ".env")
+        _git_in(repo, "commit", "-q", "-m", "untrack")
+
+        [finding] = scan_files([env])
+
+        assert finding.committed_before == merged
+
+    def test_a_root_commit_copy_is_warned_about_whatever_the_config(self, tmp_path: Path) -> None:
+        # The classic leak is `git add .` in the very first commit. A user's
+        # (or repo's) log.showRoot=false would hide that commit's diff, and
+        # with it the warning.
+        env = self._env(tmp_path, self._oauth("87rb-root"))
+        _git_commit(env.parent, ".env")
+        leaked = _git_in(env.parent, "rev-parse", "--short", "HEAD")
+        _git_in(env.parent, "rm", "-q", "--cached", ".env")
+        _git_in(env.parent, "commit", "-q", "-m", "untrack")
+        _git_in(env.parent, "config", "log.showRoot", "false")
+
+        [finding] = scan_files([env])
+
+        assert finding.committed_before == leaked
+
+    def test_a_stash_only_copy_is_not_called_history(self, tmp_path: Path) -> None:
+        # `git stash -u` keeps the .env in a local stash, which is never pushed.
+        # Calling that "your git history" and saying revoke would be noise.
+        repo = tmp_path / "proj"
+        repo.mkdir()
+        (repo / "README").write_text("x\n")
+        _git_commit(repo, "README")
+        env = repo / ".env"
+        env.write_text(f"{self._oauth('87rb-stash')}\n")
+        _git_in(repo, "stash", "push", "-q", "-u")
+        env.write_text(f"{self._oauth('87rb-stash')}\n")
+
+        [finding] = scan_files([env])
+
+        assert finding.is_unshardable is True
+        assert finding.committed_before is None, finding
+
     def test_an_env_never_committed_gets_no_history_warning(self, tmp_path: Path) -> None:
         repo = tmp_path / "proj"
         repo.mkdir()

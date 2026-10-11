@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -341,6 +342,34 @@ class TestWorthlessScan:
         assert summary["unprotected"] == 1, summary
         assert summary["unshardable"] == 1, summary
         assert summary["total"] == summary["protected"] + summary["unprotected"], summary
+
+    @pytest.mark.asyncio
+    async def test_scan_tells_the_agent_which_older_commit_holds_the_env(
+        self, tmp_path: Path
+    ) -> None:
+        """worthless-87rb: a passing token whose .env an older commit holds
+        reaches the agent as data, not only as prose."""
+        env_file = _make_env_file(
+            tmp_path, f"ANTHROPIC_API_KEY={fake_key('sk-ant-oat01-', '87rb-mcp')}\n"
+        )
+        git = ["git", "-C", str(tmp_path), "-c", "user.email=t@t", "-c", "user.name=t"]
+        git += ["-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"]
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)  # noqa: S607
+        subprocess.run([*git, "add", ".env"], check=True)  # noqa: S603
+        subprocess.run([*git, "commit", "-q", "-m", "x"], check=True)  # noqa: S603
+        leaked = subprocess.run(  # noqa: S603
+            [*git, "rev-parse", "--short", "HEAD"], check=True, capture_output=True, text=True
+        ).stdout.strip()
+        subprocess.run([*git, "rm", "-q", "--cached", ".env"], check=True)  # noqa: S603
+        subprocess.run([*git, "commit", "-q", "-m", "untrack"], check=True)  # noqa: S603
+
+        result = json.loads(await worthless_scan(paths=[str(env_file)]))
+
+        [finding] = result["findings"]
+        assert finding["is_unshardable"] is True, finding
+        assert finding["committed_before"] == leaked, finding
+        assert leaked in finding["remediation"], finding
+        assert result["summary"]["unshardable"] == 1, result["summary"]
 
     @pytest.mark.asyncio
     async def test_scan_token_outside_env_is_told_to_revoke(self, tmp_path: Path) -> None:

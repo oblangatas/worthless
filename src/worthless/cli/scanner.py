@@ -337,21 +337,31 @@ def token_exposure(path: Path) -> str | None:
 
 
 def _committed_before(path: Path) -> str | None:
-    """Short hash of the newest commit, on any branch, that holds a copy of
-    *path*, or None. It only adds a warning, so if git can't say, it says
-    nothing."""
+    """Short hash of the newest commit, on any branch or tag, that added or
+    changed *path*, or None. It only adds a warning, so if git can't say, it
+    says nothing."""
     try:
+        # -m: without it git skips merge commits and the side of a merge (a
+        # merged, deleted branch). --full-history is git's documented switch
+        # for that side walk; -m happens to do it too today. showRoot:
+        # a user's log.showRoot=false would hide a .env added in the first
+        # commit. --exclude=refs/stash: a stash is local, never pushed.
         # --no-show-signature: the repo's own log.showSignature would make git
         # run its gpg.program on a signed commit.
+        # ponytail: when the .env was never committed this walks all history
+        # (~1 s at 72k commits); past the 10 s git timeout there's no warning.
         result = _git(
-            path, "log", "--all", "-1", "--diff-filter=AM", "--format=%h",
-            "--no-show-signature", "--", path.name,
+            path, "-c", "log.showRoot=true", "log", "--full-history", "-m",
+            "--exclude=refs/stash", "--all", "-1", "--diff-filter=AM",
+            "--format=%h", "--no-show-signature", "--", path.name,
         )  # fmt: skip
     except (subprocess.TimeoutExpired, OSError):
         return None
     if result.returncode != 0:
         return None
-    return result.stdout.decode(errors="replace").strip() or None
+    # -m prints a merge commit once per parent; the first line is the answer.
+    first = result.stdout.decode(errors="replace").strip().splitlines()[:1]
+    return first[0] if first else None
 
 
 def token_facts(path: Path) -> tuple[str | None, str | None]:

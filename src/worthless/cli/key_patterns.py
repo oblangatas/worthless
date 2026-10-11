@@ -92,7 +92,7 @@ UNSHARDABLE_REMEDY = (
 # branch) still holds a copy of the .env. A warning, never a failure: history
 # keeps the old .env forever, even after the token is revoked and rotated.
 COMMITTED_BEFORE_NOTE = (
-    "{file} is in your git history (newest copy: commit {commit}). "
+    "{file} is in your git history (last added or changed in commit {commit}). "
     "If this token was ever in it, revoke it: those commits still hold it."
 )
 
