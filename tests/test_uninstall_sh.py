@@ -1115,6 +1115,7 @@ def test_a_wipe_of_a_database_it_could_not_read_does_not_reassure(tmp_path: Path
     assert "rotate" in out, f"the user was not told what to do if keys were there:\n{out}"
 
 
+@needs_sqlite3
 def test_enroll_only_keys_are_not_reported_as_restored(tmp_path: Path) -> None:
     """An enroll-only key has no .env to go back to; the CLI deletes it and
     tells the user to rotate. A home holding only those has nothing to restore,
