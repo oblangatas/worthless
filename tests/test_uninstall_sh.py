@@ -864,16 +864,7 @@ def test_a_cli_with_nothing_to_restore_is_not_reported_as_a_restore(
     """
     bin_dir = _tier1_with_nothing_to_restore(tmp_path)
     home = tmp_path / "wless-home"  # deleted by hand before uninstall runs
-    write_stub(
-        bin_dir,
-        "security",
-        'case "$1" in\n  find-generic-password) exit 0 ;;\n  *) exit 1 ;;\nesac',
-    )
-    write_stub(
-        bin_dir,
-        "secret-tool",
-        'case "$1" in\n  lookup) exit 0 ;;\n  *) exit 1 ;;\nesac',
-    )
+    _keystore_entry_exists(bin_dir)
 
     result = run_uninstall(bin_dir, worthless_home=home)
     out = (result.stdout + result.stderr).lower()
@@ -986,6 +977,7 @@ def test_a_broken_install_over_an_empty_home_does_not_demand_a_rotation(
     assert CANT_TELL in out, f"the user was not told the script cannot tell:\n{out}"
 
 
+@needs_sqlite3
 def test_an_unverified_copy_over_an_empty_home_is_not_a_reason_to_refuse(
     tmp_path: Path,
 ) -> None:
@@ -1070,6 +1062,7 @@ def test_a_broken_official_install_is_not_wiped_or_called_a_stranger(tmp_path: P
     )
 
 
+@needs_sqlite3
 def test_a_broken_official_install_with_nothing_locked_is_named_correctly(
     tmp_path: Path,
 ) -> None:

@@ -295,6 +295,20 @@ show_path() {
     printf '%s' "$1" | LC_ALL=C tr -d '\001-\037\177'
 }
 
+# Refusing protects locked keys, so only refuse while there may be some. A count
+# we cannot read refuses too — the safe side. Without this the advice would
+# loop forever: restore by hand, re-run, get refused again.
+keys_may_be_locked() {
+    [ -d "$WORTHLESS_HOME_DIR" ] && [ "$(locked_key_count)" != 0 ]
+}
+
+# Every refusal ends the same way: the --force escape hatch, the docs, exit 41.
+refuse_exit() {
+    printf "    curl -sSL https://worthless.sh/uninstall | sh -s -- --yes --force\n" >&2
+    printf "\n  Docs: %s\n" "$UNINSTALL_DOCS_URL" >&2
+    exit "$EXIT_TOOL_REFUSED"
+}
+
 # remove_tool removes only what uv or pipx installed. Say "removed" only if
 # nothing else still answers to `worthless`; otherwise name what is left.
 say_removed() {
@@ -427,15 +441,13 @@ tier1_delegate() {
         # upgrade). Reinstalling it can still restore the keys; a wipe cannot.
         # So with keys possibly locked, stop — and don't call it a stranger's copy.
         [ "$FORCE" = "1" ] && return 1
-        [ -d "$WORTHLESS_HOME_DIR" ] && [ "$(locked_key_count)" != 0 ] || return 1
+        keys_may_be_locked || return 1
         printf "\n" >&2
         warn "Your installed 'worthless' does not run:"
         warn "  $(show_path "$_tier1_bin")"
         warn "Nothing was deleted; any locked keys are still locked. Reinstall it, then run"
-        warn "this again — it will restore your keys first. Or wipe now and lose them:"
-        printf "    curl -sSL https://worthless.sh/uninstall | sh -s -- --yes --force\n" >&2
-        printf "\n  Docs: %s\n" "$UNINSTALL_DOCS_URL" >&2
-        exit "$EXIT_TOOL_REFUSED"
+        warn "this again — it will try to restore your keys first. Or wipe now and lose them:"
+        refuse_exit
     fi
     # Name the file we are about to hand `uninstall --yes` to. Nothing should
     # be able to redirect this now that the location vars are scrubbed, so the
@@ -506,9 +518,7 @@ tier1_delegate() {
     # dead (a lost Fernet key), and says so above. Don't contradict it.
     warn "Nothing was deleted here. Its reason is printed above."
     warn "Fix that and run this again, or wipe anyway (any key still locked is then lost for good):"
-    printf "    curl -sSL https://worthless.sh/uninstall | sh -s -- --yes --force\n" >&2
-    printf "\n  Docs: %s\n" "$UNINSTALL_DOCS_URL" >&2
-    exit "$EXIT_TOOL_REFUSED"
+    refuse_exit
 }
 
 # Between the tiers: neither uv nor pipx admits to installing worthless, yet
@@ -521,10 +531,7 @@ tier1_delegate() {
 refuse_unverified_copy() {
     [ "$FORCE" = "1" ] && return 1
     _ruc="$(command -v worthless 2>/dev/null)" || return 1
-    # Only worth refusing while there may still be keys to lose. Without this
-    # the advice would loop forever: restore by hand, re-run, get refused again.
-    # A count we cannot read refuses too — the safe side.
-    [ -d "$WORTHLESS_HOME_DIR" ] && [ "$(locked_key_count)" != 0 ] || return 1
+    keys_may_be_locked || return 1
     printf "\n" >&2
     warn "A 'worthless' answers on your PATH, but neither uv nor pipx installed it,"
     warn "so this script cannot tell your install from a leftover copy — and it will"
@@ -534,15 +541,13 @@ refuse_unverified_copy() {
     warn "If that is the one you installed, restore your keys with it, then run this again:"
     printf "    worthless uninstall --yes\n" >&2
     warn "Or wipe now and leave the keys locked (you would have to rotate them):"
-    printf "    curl -sSL https://worthless.sh/uninstall | sh -s -- --yes --force\n" >&2
-    printf "\n  Docs: %s\n" "$UNINSTALL_DOCS_URL" >&2
-    exit "$EXIT_TOOL_REFUSED"
+    refuse_exit
 }
 
 # Tier 2: no working binary → wipe what a script safely can, and be honest that
 # the keys cannot be restored.
 tier2_wipe() {
-    # What do we actually KNOW about the user's keys? Three answers:
+    # What do we actually KNOW about the user's keys? Two answers:
     #
     #   stranded  keys are locked here and this script cannot unscramble them,
     #             or the keystore entry survives a missing home (an rm -rf).
