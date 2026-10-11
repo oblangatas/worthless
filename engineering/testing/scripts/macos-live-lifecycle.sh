@@ -66,7 +66,12 @@ mkdir -p "$PROJ"
 # Generated, not a literal. A realistic-looking key committed to the repo trips
 # gitleaks (correctly), and a repeated-character placeholder is skipped by
 # worthless's own scanner — so it has to be built at runtime to be both.
-FAKE_BODY=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 48)
+#
+# Python, not `tr -dc ... < /dev/urandom | head -c`. That pipe hung for the
+# full 20-minute job timeout on a macOS runner (orphaned `tr`, run 2026-10-10)
+# while working fine on a laptop — `tr` does not reliably take SIGPIPE when
+# `head` closes. `secrets` is also what this repo mandates over `random`.
+FAKE_BODY=$(python3 -c "import secrets, string; print(''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(48)))")
 printf 'OPENAI_API_KEY=%s-%s\n' "sk-proj" "$FAKE_BODY" > "$PROJ/.env"
 "$WORTHLESS" lock --env "$PROJ/.env" > "$HOME_DIR/lock.log" 2>&1
 LOCK_RC=$?

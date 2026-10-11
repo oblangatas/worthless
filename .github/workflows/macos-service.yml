@@ -47,7 +47,10 @@ jobs:
   accept-path:
     name: macOS (launchd accept path)
     runs-on: macos-15
-    timeout-minutes: 20
+    # 12, not 20. A hung step burned the full 20 once (run 2026-10-10) before
+    # anyone saw it. The real run is ~2 minutes of script plus runner setup, so
+    # anything past 12 is stuck, and a cheap cap keeps macOS minutes honest.
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v6
         with:
