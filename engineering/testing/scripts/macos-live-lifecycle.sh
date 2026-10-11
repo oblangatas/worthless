@@ -60,6 +60,19 @@ WORTHLESS="$HOME_DIR/venv/bin/worthless"
 check "worthless is installed" "[ -x '$WORTHLESS' ]"
 fact "version" "$("$WORTHLESS" --version 2>&1 | head -1)"
 
+# PATH, not just the absolute path, and this is load-bearing twice over.
+# `resolve_worthless_binary` (service/_common.py) does shutil.which("worthless")
+# to decide what goes in the plist's ExecStart. Without the venv on PATH the
+# install fails outright on a clean runner (WRTLS-100, run 2026-10-10) — and
+# WORSE, on a machine that already has worthless installed it silently
+# succeeds against THAT binary. The first local run of this script did exactly
+# that: it proved the released 0.3.12 works, not the checkout.
+export PATH="$HOME_DIR/venv/bin:$PATH"
+RESOLVED=$(command -v worthless || echo "<none>")
+fact "resolves to" "$RESOLVED"
+check "PATH resolves to the checkout build, not an installed one" \
+  "[ '$RESOLVED' = '$WORTHLESS' ]"
+
 say "3. a key exists, so the service preflight can pass"
 PROJ="$HOME_DIR/proj"
 mkdir -p "$PROJ"
