@@ -18,9 +18,9 @@
 #   1   refused (no --yes in a non-interactive shell, or the user declined)
 #   20  unsupported platform (Windows native)
 #   40  wipe failed (something could not be removed; manual cleanup needed)
-#   41  refused; NOTHING was deleted. Either `worthless uninstall` declined
-#       (its reason is printed above) or the copy on PATH could not be
-#       verified. Fix what it reported and re-run, or pass --force.
+#   41  refused; NOTHING was deleted. `worthless uninstall` declined (its
+#       reason is printed above), your installed copy does not run, or the
+#       copy on PATH could not be verified. Fix that and re-run, or --force.
 #   73  every key was restored and the tool removed, but undoing the OpenClaw
 #       provider config did not fully finish (passed through from
 #       `worthless uninstall`, which raises it only AFTER a complete restore)
@@ -418,7 +418,21 @@ tier1_delegate() {
     # No authoritative answer means no delegation: tier 2 wipes and says plainly
     # that the keys could not be restored. A wrong "restored" claim is worse.
     _tier1_bin="$(installed_worthless)" || return 1
-    "$_tier1_bin" --version >/dev/null 2>&1 || return 1
+    if ! "$_tier1_bin" --version >/dev/null 2>&1; then
+        # Our own install, but it does not run (a Python upgrade, a half-done
+        # upgrade). Reinstalling it can still restore the keys; a wipe cannot.
+        # So with keys possibly locked, stop — and don't call it a stranger's copy.
+        [ "$FORCE" = "1" ] && return 1
+        [ -d "$WORTHLESS_HOME_DIR" ] && [ "$(locked_key_count)" != 0 ] || return 1
+        printf "\n" >&2
+        warn "Your installed 'worthless' does not run:"
+        warn "  $(show_path "$_tier1_bin")"
+        warn "Nothing was deleted; any locked keys are still locked. Reinstall it, then run"
+        warn "this again — it will restore your keys first. Or wipe now and lose them:"
+        printf "    curl -sSL https://worthless.sh/uninstall | sh -s -- --yes --force\n" >&2
+        printf "\n  Docs: %s\n" "$UNINSTALL_DOCS_URL" >&2
+        exit "$EXIT_TOOL_REFUSED"
+    fi
     # Name the file we are about to hand `uninstall --yes` to. Nothing should
     # be able to redirect this now that the location vars are scrubbed, so the
     # line is a check on that claim rather than a caveat about it.

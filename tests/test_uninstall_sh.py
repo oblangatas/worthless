@@ -434,6 +434,10 @@ def test_force_wipes_after_a_refusal(tmp_path: Path) -> None:
 
     assert not home.exists(), "--force must still wipe"
     assert "rotate" in out, "a forced wipe must tell the user to rotate their keys"
+    # The binary was found and ran; it refused. "None found" is a false reason.
+    assert "no working 'worthless' binary found" not in out, (
+        f"a forced wipe after a refusal blamed a missing binary:\n{out}"
+    )
     uv_log = tmp_path / "uv.log"
     assert uv_log.exists() and "tool uninstall worthless" in uv_log.read_text(), (
         "a forced wipe must still remove the installed tool"
@@ -1032,3 +1036,35 @@ def test_a_missing_keystore_entry_is_not_proof_the_keys_came_back(
         "asserted the keys were lost when the script cannot know that:\n" + out
     )
     assert CANT_TELL in out, f"the user was not told the script cannot tell:\n{out}"
+
+
+def test_a_broken_official_install_is_not_wiped_or_called_a_stranger(tmp_path: Path) -> None:
+    """uv says the binary is ours, but it no longer runs (say, a Python upgrade).
+
+    It used to fall through either to "neither uv nor pipx installed it" (false,
+    exit 41) when its dir was on PATH, or to the tier 2 wipe when it was not —
+    deleting keys that reinstalling the tool would have restored. Locked keys
+    plus our own broken binary means: stop, keep everything, say reinstall.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    real_bin_dir = tmp_path / "uv-tools" / "bin"
+    real_bin_dir.mkdir(parents=True)
+    home = tmp_path / "wless-home"
+    _seed_home(home, ["/proj/a/.env"])
+    write_stub(real_bin_dir, "worthless", 'echo "ImportError: broken venv" >&2; exit 1')
+    _write_uv_stub(bin_dir, real_bin_dir)
+
+    result = run_uninstall(bin_dir, worthless_home=home)
+    out = (result.stdout + result.stderr).lower()
+
+    assert result.returncode == 41, f"a broken official install was not a refusal:\n{out}"
+    assert home.exists() and (home / "fernet.key").exists(), (
+        "keys a reinstall could restore were wiped"
+    )
+    assert "neither uv nor pipx installed it" not in out, "called our own install a stranger's copy"
+    assert "reinstall" in out, f"the user was not told how to get their keys back:\n{out}"
+    uv_log = tmp_path / "uv.log"
+    assert not uv_log.exists() or "tool uninstall" not in uv_log.read_text(), (
+        "removed the tool whose reinstall is the way back"
+    )
