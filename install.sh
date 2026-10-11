@@ -483,6 +483,8 @@ smoke_test() {
             "Or:  worthless doctor"
     fi
     actual_ver="$(printf '%s' "$version_output" | awk '{print $2}' | head -1)"
+    [ "$actual_ver" = "$effective_version" ] || die "$EXIT_INTERNAL" \
+        "${worthless_bin} is ${actual_ver:-unknown}, not ${effective_version}."
     ok "  worthless ${actual_ver:-installed}"
 }
 

@@ -42,10 +42,12 @@ from tests._install_helpers import (
     write_stub,
 )
 
-# The installed-entry-point version. Deliberately not 0.3.7/0.3.9: those two
-# strings are forbidden anywhere in installer output by
+# The installed-entry-point version: the baked pin, because smoke_test now
+# refuses an installed copy that reports anything else (worthless-yeff). Never
+# 0.3.7/0.3.9 — those strings are forbidden in installer output by
 # test_install_logic.py::test_banner_reports_the_installed_binary_not_a_stale_uv_run.
-REAL_VERSION = "0.3.10"
+REAL_VERSION = read_install_pin()
+assert REAL_VERSION not in {"0.3.7", "0.3.9"}
 SHADOW_VERSION = "0.3.7"
 
 # Substrings that indicate the warning fired. Matching on several keeps the

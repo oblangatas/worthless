@@ -74,6 +74,8 @@ def write_happy_path_stubs(bin_dir: Path, *, with_worthless: bool = True) -> Non
     but ~/.local/bin isn't on the test's synthetic PATH — we still hit the
     "not yet on your PATH" branch.
     """
+    # The installed copy reports the baked pin: smoke_test checks it (worthless-yeff).
+    pin = read_install_pin()
     write_stub(bin_dir, "uname", "echo Darwin")
     write_stub(bin_dir, "sw_vers", 'echo "14.5"')
     write_stub(
@@ -88,7 +90,7 @@ case "$1" in
       # where install.sh's smoke test runs it from (worthless-alx3).
       _d="${{UV_TOOL_BIN_DIR:-${{XDG_BIN_HOME:-$HOME/.local/bin}}}}"
       mkdir -p "$_d"
-      [ -e "$_d/worthless" ] || printf '#!/bin/sh\necho "worthless 0.3.0"\n' > "$_d/worthless"
+      [ -e "$_d/worthless" ] || printf '#!/bin/sh\necho "worthless {pin}"\n' > "$_d/worthless"
       chmod +x "$_d/worthless"
       echo "ok" ;;
     list) ;;  # empty: no worthless line → fast-path miss → real install runs
@@ -99,12 +101,12 @@ case "$1" in
     dir) echo "${{UV_TOOL_BIN_DIR:-${{XDG_BIN_HOME:-$HOME/.local/bin}}}}" ;;
     *) echo "uv tool: unhandled: $*" >&2; exit 1 ;;
   esac ;;
-  run) echo "worthless 0.3.0" ;;
+  run) echo "worthless {pin}" ;;
   *) echo "uv: unhandled: $*" >&2; exit 1 ;;
 esac""",
     )
     if with_worthless:
-        write_stub(bin_dir, "worthless", 'echo "worthless 0.3.0"')
+        write_stub(bin_dir, "worthless", f'echo "worthless {pin}"')
     else:
         # `uv tool install` really does place the entry point in ~/.local/bin even
         # when that directory is not on the caller's PATH — install.sh only
@@ -116,7 +118,7 @@ esac""",
         # still fails here, so the "not yet on your PATH" branch is unaffected.
         local_bin = bin_dir.parent / ".local" / "bin"
         local_bin.mkdir(parents=True, exist_ok=True)
-        write_stub(local_bin, "worthless", 'echo "worthless 0.3.0"')
+        write_stub(local_bin, "worthless", f'echo "worthless {pin}"')
 
 
 def run_install(

@@ -24,7 +24,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from tests._install_helpers import run_install, write_happy_path_stubs, write_stub  # noqa: E402
+from tests._install_helpers import (  # noqa: E402
+    read_install_pin,
+    run_install,
+    write_happy_path_stubs,
+    write_stub,
+)
 
 
 TRACE_ROOT = Path(tempfile.gettempdir()) / "worthless-terminal-traces"
@@ -244,7 +249,7 @@ esac""",
             write_stub(bin_dir, "worthless", 'echo "worthless 0.1.0"')
             entry_point = bin_dir.parent / ".local" / "bin"
             entry_point.mkdir(parents=True, exist_ok=True)
-            write_stub(entry_point, "worthless", 'echo "worthless 0.3.0"')
+            write_stub(entry_point, "worthless", f'echo "worthless {read_install_pin()}"')
             result = run_install(bin_dir)
             command = ["sh", "./install.sh"]
         elif name == "upgrade older uv tool install":
@@ -273,7 +278,7 @@ esac""",
             # smoke_test runs it from there, never from PATH (worthless-alx3).
             entry_point = bin_dir.parent / ".local" / "bin"
             entry_point.mkdir(parents=True, exist_ok=True)
-            write_stub(entry_point, "worthless", 'echo "worthless 0.3.0"')
+            write_stub(entry_point, "worthless", f'echo "worthless {read_install_pin()}"')
             # A healthy upgrade: the `worthless` on PATH IS that entry point,
             # not a second copy (which install.sh would report as a shadow).
             (bin_dir / "worthless").unlink()
