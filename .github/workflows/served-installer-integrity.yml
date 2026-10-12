@@ -35,15 +35,14 @@ jobs:
       - name: Served scripts equal the latest release, for every client
         run: |
           set -euo pipefail
-          # Reference: the latest clean vX.Y.Z tag on main. Production deploys on
-          # the tag push, and ruleset v-tags-signed makes v* tags signed and
-          # immovable. (A GitHub Release is not a safe anchor: ungated, and
-          # published after the deploy.) A writer with a verified key can still
-          # push a NEW tag; that is the trust root, as for every release check.
+          # Reference: the latest clean vX.Y.Z tag -- exactly what production
+          # serves, since deploy-worker.yml deploys on any v* tag push (on main
+          # or not). Ruleset v-tags-signed makes v* tags signed and immovable. (A
+          # GitHub Release is not a safe anchor: ungated, and published after the
+          # deploy.) A writer with a verified key can still push a NEW tag; that
+          # is the trust root, as for every release check.
           TAG=$(git tag --sort=-version:refname --list 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)
           [ -n "$TAG" ] || { echo "::error title=No release tag::no clean vX.Y.Z tag"; exit 1; }
-          git merge-base --is-ancestor "$TAG" origin/main \
-            || { echo "::error title=Release not on main::$TAG"; exit 1; }
           AGE=$(( $(date +%s) - $(git for-each-ref --format='%(creatordate:unix)' "refs/tags/$TAG") ))
           # Real curl's own User-Agent plus Wget: no fixed UA a tampered Worker
           # could single out to serve this check the genuine script.
