@@ -94,7 +94,7 @@ UNSHARDABLE_REMEDY = (
 COMMITTED_BEFORE_NOTE = (
     "Older commits hold a copy of {file} (newest change: commit {commit}, on some "
     "branch or tag). Revoke any login token that was ever in it: those commits keep "
-    "it. To check, run `git log --all -p -- {file}`."
+    "it. To check, run `git -C {folder} log --all -p -- {name}`."
 )
 
 # The same token where it can leave the machine. Each entry names the exact

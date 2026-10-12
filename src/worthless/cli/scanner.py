@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import subprocess  # nosec B404
 import time
 from collections.abc import Iterator
@@ -26,6 +27,7 @@ from worthless.cli.safe_rewrite import _BASENAME_ALLOWLIST
 from worthless.openclaw.audit import sanitise_for_message
 
 _VAR_NAME_RE = re.compile(r"(\w+)\s*$")
+_COMMIT_HASH = re.compile(r"[0-9a-f]{4,64}")  # what %h prints, and nothing else
 
 # Cap bytes read per file. A file larger than this is scanned up to the cap
 # (its prefix) and flagged ``truncated`` — never silently skipped. Fail-closed:
@@ -341,14 +343,17 @@ def _committed_before(path: Path) -> str | None:
     changed *path*, or None. It only adds a warning, so if git can't say, it
     says nothing."""
     if not _has_git_above(path):
-        return None  # no repo, so no history; saves a git process per hook run
+        # No repo, so no history. Saves a git process when scanning outside a
+        # repo, e.g. the pre-commit hook's staged copies in a temp folder.
+        return None
     try:
         # -m: without it git skips merge commits and the side of a merge (a
         # merged, deleted branch). --full-history is git's documented switch
-        # for that side walk; -m happens to do it too today. showRoot:
-        # a user's log.showRoot=false would hide a .env added in the first
-        # commit. log.follow=false: a user's log.follow=true would follow a
-        # `git mv x .env` back to x and name x's commit, not .env's.
+        # for that side walk; -m happens to do it too today. The -c pins undo
+        # user config that changes the answer: log.showRoot=false hides a .env
+        # added in the first commit; log.follow=true follows `git mv x .env`
+        # back to x's commit; log.diffMerges=off cancels -m; a non-UTF-8
+        # i18n.logOutputEncoding garbles the hash.
         # --exclude=refs/stash: a stash is local, never pushed.
         # --no-show-signature: the repo's own log.showSignature would make git
         # run its gpg.program on a signed commit.
@@ -356,6 +361,7 @@ def _committed_before(path: Path) -> str | None:
         # (~1 s at 72k commits); past the 10 s git timeout there's no warning.
         result = _git(
             path, "-c", "log.showRoot=true", "-c", "log.follow=false",
+            "-c", "log.diffMerges=separate", "-c", "i18n.logOutputEncoding=UTF-8",
             "log", "--full-history", "-m",
             "--exclude=refs/stash", "--all", "-1", "--diff-filter=AM",
             "--format=%h", "--no-show-signature", "--", path.name,
@@ -364,9 +370,11 @@ def _committed_before(path: Path) -> str | None:
         return None
     if result.returncode != 0:
         return None
-    # -m prints a merge commit once per parent; the first line is the answer.
-    first = result.stdout.decode(errors="replace").strip().splitlines()[:1]
-    return first[0] if first else None
+    # -m prints a merge commit once per parent; the first word is the answer,
+    # and only a plain hex hash is trusted to reach the terminal.
+    out = result.stdout.split()
+    commit = out[0].decode("ascii", errors="replace") if out else ""
+    return commit if _COMMIT_HASH.fullmatch(commit) else None
 
 
 def token_facts(path: Path) -> tuple[str | None, str | None]:
@@ -392,10 +400,15 @@ def _exposure_for(
 
 
 def committed_before_note(file: str, commit: str) -> str:
-    """The history warning, with the attacker-controllable file name (and the
-    commit, for symmetry) sanitised for the terminal."""
+    """The history warning. The file name is attacker-controllable: sanitised
+    for the terminal, and shell-quoted where it lands in the command to paste.
+    *commit* is already a plain hex hash."""
+    path = Path(file)
     return COMMITTED_BEFORE_NOTE.format(
-        file=sanitise_for_message(file), commit=sanitise_for_message(commit)
+        file=sanitise_for_message(file),
+        commit=commit,
+        folder=shlex.quote(sanitise_for_message(str(path.parent))),
+        name=shlex.quote(sanitise_for_message(path.name)),
     )
 
 
@@ -403,14 +416,15 @@ def remedy_for_exposure(
     exposure: str | None, file: str, committed_before: str | None = None
 ) -> str:
     """The fix text for a login token: local (None) or one exposure reason.
-    *file* lands in commands like `git rm --cached <file>`; it is sanitised
-    here because a filename is attacker-controlled and this reaches a terminal.
+    *file* lands only in commands like `git rm --cached <file>`; a filename is
+    attacker-controlled, so it is sanitised for the terminal and shell-quoted
+    so pasting the command can't run anything else.
     A local token whose .env an older commit holds also gets the history note."""
     if exposure is None:
         if committed_before:
             return f"{UNSHARDABLE_REMEDY} {committed_before_note(file, committed_before)}"
         return UNSHARDABLE_REMEDY
-    return EXPOSED_LOGIN_REMEDIES[exposure].format(file=sanitise_for_message(file))
+    return EXPOSED_LOGIN_REMEDIES[exposure].format(file=shlex.quote(sanitise_for_message(file)))
 
 
 def remediation_for(f: ScanFinding) -> str | None:

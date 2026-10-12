@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -1388,6 +1389,103 @@ class TestScanAgreesWithLockOnOAuthTokens:
         [finding] = scan_files([repo / ".env"])
 
         assert finding.committed_before == renamed
+
+    @staticmethod
+    def _committed_then_untracked(repo: Path, line: str) -> str:
+        """A .env committed, then untracked and that committed; returns the
+        short hash of the commit that added it."""
+        repo.mkdir(parents=True)
+        (repo / ".env").write_text(f"{line}\n")
+        _git_commit(repo, ".env")
+        leaked = _git_in(repo, "rev-parse", "--short", "HEAD")
+        _git_in(repo, "rm", "-q", "--cached", ".env")
+        _git_in(repo, "commit", "-q", "-m", "untrack")
+        return leaked
+
+    @pytest.mark.parametrize(
+        "folder",
+        ["My Project", "a;touch PWNED;b", "$(touch PWNED)"],
+        ids=["space", "semi", "subst"],
+    )
+    def test_the_printed_history_check_is_safe_to_paste(self, tmp_path: Path, folder: str) -> None:
+        # The note prints a shell command built from the scanned path, and the
+        # folder name is whatever the repo says. Pasted as printed, it must
+        # show the history and run nothing else.
+        leaked = self._committed_then_untracked(tmp_path / folder, self._oauth("87rb-paste"))
+
+        [finding] = scan_files([tmp_path / folder / ".env"])
+        cmd = re.search(r"To check, run `([^`]+)`", scanner_mod.remediation_for(finding) or "")
+
+        assert cmd, finding
+        pasted = subprocess.run(  # noqa: S603
+            ["sh", "-c", cmd.group(1)],  # noqa: S607
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert not (tmp_path / "PWNED").exists(), cmd.group(1)
+        assert pasted.returncode == 0, pasted.stderr
+        assert leaked in pasted.stdout, pasted.stdout
+
+    def test_the_printed_untrack_command_is_safe_to_paste(self, tmp_path: Path) -> None:
+        # Same for PR 667's committed advice: `git rm --cached <file>`.
+        repo = tmp_path / "a;touch PWNED;b"
+        repo.mkdir()
+        env = repo / ".env"
+        env.write_text(f"{self._oauth('87rb-paste-rm')}\n")
+        _git_commit(repo, ".env")
+
+        [finding] = scan_files([env])
+        cmd = re.search(
+            r"\(`(git rm --cached [^`]+)`\)", scanner_mod.remediation_for(finding) or ""
+        )
+
+        assert cmd, finding
+        pasted = subprocess.run(  # noqa: S603
+            ["sh", "-c", cmd.group(1)],  # noqa: S607
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert not (repo / "PWNED").exists(), cmd.group(1)
+        assert pasted.returncode == 0, pasted.stderr
+        assert _git_in(repo, "ls-files", ".env") == "", "the pasted command didn't untrack it"
+
+    def test_a_merge_commit_copy_is_found_whatever_diff_merges_says(self, tmp_path: Path) -> None:
+        # A user's log.diffMerges=off quietly cancels `-m`.
+        repo = tmp_path / "proj"
+        repo.mkdir()
+        (repo / "README").write_text("x\n")
+        _git_commit(repo, "README")
+        _git_in(repo, "checkout", "-q", "-b", "side")
+        (repo / "other").write_text("y\n")
+        _git_in(repo, "add", "other")
+        _git_in(repo, "commit", "-q", "-m", "side")
+        _git_in(repo, "checkout", "-q", "-")
+        _git_in(repo, "merge", "-q", "--no-ff", "--no-commit", "side")
+        (repo / ".env").write_text(f"{self._oauth('87rb-diffmerges')}\n")
+        _git_in(repo, "add", ".env")
+        _git_in(repo, "commit", "-q", "-m", "merge")
+        merged = _git_in(repo, "rev-parse", "--short", "HEAD")
+        _git_in(repo, "rm", "-q", "--cached", ".env")
+        _git_in(repo, "commit", "-q", "-m", "untrack")
+        _git_in(repo, "config", "log.diffMerges", "off")
+
+        [finding] = scan_files([repo / ".env"])
+
+        assert finding.committed_before == merged
+
+    def test_the_hash_survives_an_odd_log_encoding(self, tmp_path: Path) -> None:
+        # i18n.logOutputEncoding re-encodes git log's output; the hash must
+        # still come out as plain hex.
+        leaked = self._committed_then_untracked(tmp_path / "proj", self._oauth("87rb-utf16"))
+        _git_in(tmp_path / "proj", "config", "i18n.logOutputEncoding", "UTF-16")
+
+        [finding] = scan_files([tmp_path / "proj" / ".env"])
+
+        assert finding.committed_before == leaked
 
     def test_a_git_timeout_on_the_history_check_just_skips_the_warning(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
