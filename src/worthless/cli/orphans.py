@@ -34,16 +34,15 @@ FIX_PHRASE = "worthless doctor --fix"
 # the user to ``uninstall``: it wipes every key it can't restore, not just this
 # one. And ``revoke --alias`` is not "just this one" either: the same key locked
 # in two projects (a worktree's copy of the main repo's ``.env``) shares one
-# alias, and revoke deletes it in both. Offer it only when no other copy lives.
+# alias, and revoke deletes it in both. See ``removed_project_advice``.
 MOVED_FIX_PHRASE = "Moved it? Put the project back at the path shown, then run `worthless unlock`"
 DELETED_FIX_PHRASE = (
-    "Removed it (`git worktree remove` takes its `.env` with it)? Then that copy is "
-    "gone. If no other project uses the same key, `worthless revoke --alias {alias}` "
-    "removes it — revoke removes a key everywhere it is locked"
+    "Removed it (`git worktree remove` takes its `.env` with it)? Then that key is "
+    "gone, and `worthless revoke --alias {alias}` removes it"
 )
 SHARED_KEY_PHRASE = (
-    "Removed it? Leave this record: the same key is still locked at {other} and "
-    "works there, and removing the key by its alias would break that copy too"
+    "Removed it? Leave this record: the same key is also locked at {other}, and "
+    "removing the key by its alias would break that copy too"
 )
 
 
@@ -84,6 +83,30 @@ def env_file_missing(enrollment: EnrollmentRecord) -> bool:
     "warn about it" from "safe to destroy".
     """
     return bool(enrollment.env_path) and not Path(enrollment.env_path).is_file()
+
+
+def removed_project_advice(
+    orphan: EnrollmentRecord, all_enrollments: list[EnrollmentRecord]
+) -> str:
+    """What to do if *orphan*'s project was deleted rather than moved.
+
+    ``revoke --alias`` removes the key from every place it is locked, so it is
+    offered only when *orphan* is the key's only record. Any other record —
+    live, moved, another variable, or a direct enrollment — may be a working or
+    recoverable copy, so the advice names it instead.
+    """
+    other = next(
+        (
+            e
+            for e in all_enrollments
+            if e.key_alias == orphan.key_alias
+            and (e.var_name, e.env_path) != (orphan.var_name, orphan.env_path)
+        ),
+        None,
+    )
+    if other is None:
+        return DELETED_FIX_PHRASE.format(alias=orphan.key_alias)
+    return SHARED_KEY_PHRASE.format(other=other.env_path or "a direct enrollment with no .env")
 
 
 def find_orphans(enrollments: list[EnrollmentRecord]) -> list[EnrollmentRecord]:

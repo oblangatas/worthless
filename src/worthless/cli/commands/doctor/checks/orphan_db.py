@@ -12,30 +12,18 @@ from __future__ import annotations
 import asyncio
 
 from worthless.cli.commands.doctor.registry import CheckContext, CheckResult
-from worthless.cli.orphans import (
-    DELETED_FIX_PHRASE,
-    MOVED_FIX_PHRASE,
-    SHARED_KEY_PHRASE,
-    env_file_missing,
-)
+from worthless.cli.orphans import MOVED_FIX_PHRASE, env_file_missing, removed_project_advice
 
 check_id = "orphan_db"
 
 
-def _missing_env_remediation(alias: str, live_copy: str | None) -> str:
+def _missing_env_remediation(removed: str) -> str:
     """Per-finding advice for a key whose .env is missing.
 
     Set on the finding so the runner's generic orphan playbook ("This key is
     gone") never reaches it: that is wrong for a moved project, and following
-    it can destroy a recoverable key. ``live_copy`` is another ``.env`` that
-    still holds the same key: then revoke would delete a working key, so it is
-    never offered.
+    it can destroy a recoverable key. *removed* is ``removed_project_advice``.
     """
-    removed = (
-        SHARED_KEY_PHRASE.format(other=live_copy)
-        if live_copy
-        else DELETED_FIX_PHRASE.format(alias=alias)
-    )
     return (
         "This key may still be recoverable: its `.env` is missing from where it "
         f"was locked, and `worthless doctor --fix` leaves it alone. {MOVED_FIX_PHRASE}. "
@@ -60,17 +48,7 @@ def _repair_orphans(ctx: CheckContext, orphans: list) -> list[dict]:
     ]
 
 
-def _live_copies(all_enrollments: list, orphans: list) -> dict[str, str]:
-    """alias -> one ``.env`` that still holds that key (not an orphan)."""
-    dead = {(o.key_alias, o.env_path) for o in orphans}
-    return {
-        e.key_alias: e.env_path
-        for e in all_enrollments
-        if e.env_path and (e.key_alias, e.env_path) not in dead
-    }
-
-
-def _finding(e, live: dict[str, str]) -> dict:
+def _finding(e, all_enrollments: list) -> dict:
     """One orphan as an agent sees it. Checks the filesystem once."""
     moved = env_file_missing(e)
     finding = {
@@ -80,7 +58,9 @@ def _finding(e, live: dict[str, str]) -> dict:
         "reason": "env_file_missing" if moved else "env_line_missing",
     }
     if moved:
-        finding["remediation"] = _missing_env_remediation(e.key_alias, live.get(e.key_alias))
+        finding["remediation"] = _missing_env_remediation(
+            removed_project_advice(e, all_enrollments)
+        )
     return finding
 
 
@@ -124,8 +104,7 @@ def run(ctx: CheckContext) -> CheckResult:
         )
 
     n = len(orphans)
-    live = _live_copies(all_enrollments, orphans)
-    findings = [_finding(e, live) for e in orphans]
+    findings = [_finding(e, all_enrollments) for e in orphans]
     moved = sum(1 for f in findings if f["reason"] == "env_file_missing")
     fixed: list[dict] = []
     status = "ok" if not orphans else "warn"

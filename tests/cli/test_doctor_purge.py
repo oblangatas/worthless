@@ -357,12 +357,33 @@ class TestDoctorKeepsMovedEnv:
         assert "revoke" not in finding["remediation"], finding
         assert str(main_env) in finding["remediation"], finding
 
-        text = self._flat(cli_invoke(["doctor"], home_dir).output)
-        assert "no other project" in text, text
+        for args in (["doctor"], ["doctor", "--fix", "--yes"]):
+            text = self._flat(cli_invoke(args, home_dir).output)
+            assert "revoke" not in text, (args, text)
+            assert str(main_env).lower() in text, (args, text)
 
         unlocked = cli_invoke(["unlock", "--env", str(main_env)], home_dir)
         assert unlocked.exit_code == 0, unlocked.output
         assert dotenv_value(main_env, "OPENAI_API_KEY") == TEST_OPENAI_KEY
+
+    def test_two_moved_copies_of_one_key_never_offer_revoke(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """Both copies missing: each may only have moved, and revoking either one
+        removes the key from both."""
+        envs = [tmp_path / name / ".env" for name in ("main", "wt")]
+        for env in envs:
+            env.parent.mkdir()
+            env.write_text(f"OPENAI_API_KEY={TEST_OPENAI_KEY}\n")
+            lock_env(env, home_dir)
+            shutil.rmtree(env.parent)
+
+        doc = json.loads(cli_invoke(["doctor", "--json"], home_dir).stdout)
+        check = next(c for c in doc["checks"] if c["check_id"] == "orphan_db")
+        assert len(check["findings"]) == 2, check
+        for finding in check["findings"]:
+            assert "revoke" not in finding["remediation"], finding
+        assert "revoke" not in self._flat(cli_invoke(["doctor"], home_dir).output)
 
     def test_text_advice_for_missing_env_points_to_revoke_not_uninstall(
         self, home_dir: WorthlessHome, env_file: Path, tmp_path: Path

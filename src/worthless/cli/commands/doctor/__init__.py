@@ -63,13 +63,13 @@ from worthless._flags import ipc_mode_active
 from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary
 from worthless.cli.keystore import _SERVICE
 from worthless.cli.orphans import (
-    DELETED_FIX_PHRASE,
     FIX_PHRASE,
     MOVED_FIX_PHRASE,
     PROBLEM_PHRASE,
     env_file_missing,
     find_orphans,
     is_orphan,
+    removed_project_advice,
 )
 from worthless.openclaw import integration as _oc_integration
 from worthless.openclaw import skill as _oc_skill
@@ -203,7 +203,11 @@ async def _purge_all(
 
 
 def _print_orphan_lines(
-    orphans: list[EnrollmentRecord], *, dry_run: bool, show_fix_hint: bool = True
+    orphans: list[EnrollmentRecord],
+    all_enrollments: list[EnrollmentRecord],
+    *,
+    dry_run: bool,
+    show_fix_hint: bool = True,
 ) -> None:
     """One line per orphan, plain English. Phrase tokens come from
     ``worthless.cli.orphans``. ``typer.echo`` because ``WorthlessConsole``
@@ -227,7 +231,9 @@ def _print_orphan_lines(
     # --fix never touches these keys, so this is the only way forward for them.
     if any(missing):
         typer.echo(f"    {MOVED_FIX_PHRASE}.")
-        typer.echo(f"    {DELETED_FIX_PHRASE.format(alias='<alias>')}.")
+        for e, gone in zip(orphans, missing, strict=True):
+            if gone:
+                typer.echo(f"    {e.key_alias}: {removed_project_advice(e, all_enrollments)}.")
 
 
 _VERSION_LINE = re.compile(r"^Version:\s*(\S+)\s*$", re.MULTILINE)
@@ -882,7 +888,7 @@ def _doctor_apply(
         if kept:
             console.print_hint(
                 f"Kept {kept} key(s) whose .env was not found. {MOVED_FIX_PHRASE}. "
-                f"{DELETED_FIX_PHRASE.format(alias='<alias>')}."
+                "Removed instead? See the advice above for each key."
             )
 
     if synced:
@@ -983,6 +989,7 @@ def _doctor_run(*, fix: bool, yes: bool, dry_run: bool) -> None:
             console.print_warning(f"{len(orphans)} broken record{plural}:")
             _print_orphan_lines(
                 orphans,
+                all_enrollments,
                 dry_run=fix and dry_run,
                 show_fix_hint=not fix,
             )
