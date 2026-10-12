@@ -33,20 +33,24 @@ jobs:
           persist-credentials: false
 
       - name: Served scripts equal the latest release, for every client
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # Reference: the latest GitHub Release, not the highest git tag. A pushed
-          # tag (v9.9.9) can't become the reference, and published_at is set by
-          # GitHub, so a forged tag/commit date can't hold the grace window open.
-          TAG=$(gh release view --json tagName --jq .tagName)
-          PUBLISHED=$(gh release view --json publishedAt --jq .publishedAt)
+          # Reference: the latest clean vX.Y.Z tag on main. Production deploys on
+          # the tag push, and ruleset v-tags-signed makes v* tags signed and
+          # immovable. (A GitHub Release is not a safe anchor: ungated, and
+          # published after the deploy.) A writer with a verified key can still
+          # push a NEW tag; that is the trust root, as for every release check.
+          TAG=$(git tag --sort=-version:refname --list 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)
+          [ -n "$TAG" ] || { echo "::error title=No release tag::no clean vX.Y.Z tag"; exit 1; }
           git merge-base --is-ancestor "$TAG" origin/main \
             || { echo "::error title=Release not on main::$TAG"; exit 1; }
-          AGE=$(( $(date +%s) - $(date -d "$PUBLISHED" +%s) ))
+          AGE=$(( $(date +%s) - $(git for-each-ref --format='%(creatordate:unix)' "refs/tags/$TAG") ))
           # Real curl's own User-Agent plus Wget: no fixed UA a tampered Worker
           # could single out to serve this check the genuine script.
+          # Grace only for a tag 0-60 min old: its deploy may still be running. A
+          # future-dated tag (negative age) gets none, so it can't mute the alarm.
+          level=error
+          if [ "$AGE" -ge 0 ] && [ "$AGE" -lt 3600 ]; then level=warning; fi
           drift=0
           for pair in "/ install.sh" "/uninstall uninstall.sh"; do
             url_path=${pair%% *}; file=${pair#* }
@@ -58,13 +62,13 @@ jobs:
               if [ "$got" = "$want" ]; then
                 echo "OK: ${url_path} as ${ua} == ${file}@${TAG}"
               else
-                echo "::error title=Served script drift::${url_path} as ${ua}: ${got} != ${file}@${TAG} ${want}"
+                echo "::${level} title=Served script drift::${url_path} as ${ua}: ${got} != ${file}@${TAG} ${want}"
                 drift=1
               fi
             done
           done
-          if [ "$drift" = 1 ] && [ "$AGE" -ge 0 ] && [ "$AGE" -lt 3600 ]; then
-            echo "::warning title=Release in progress::${TAG} published ${AGE}s ago; deploy may still be running"
+          if [ "$drift" = 1 ] && [ "$level" = warning ]; then
+            echo "::warning title=Release in progress::${TAG} is ${AGE}s old; deploy may still be running"
             exit 0
           fi
           exit "$drift"
