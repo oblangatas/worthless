@@ -436,8 +436,12 @@ jobs:
           # already failed once (June, "bad_authz"). An expired origin cert can
           # take the whole site down, so alarm while there is still time to act.
           expires=$(gh api "repos/${REPO}/pages" --jq '.https_certificate.expires_at // empty' 2>/dev/null || true)
+          # Both shapes are accepted on purpose. The API returns a bare calendar
+          # date today ("2026-11-16"); an earlier version of this step demanded a
+          # "T" time separator, so every real expiry fell through to the skip
+          # branch and the alarm could never fire. Found by review on PR #678.
           case "$expires" in
-            ????-??-??T*)
+            ????-??-??|????-??-??T*)
               days=$(( ( $(date -d "$expires" +%s) - $(date +%s) ) / 86400 ))
               if [ "$days" -lt "$MIN_DAYS" ]; then
                 echo "::error title=Pages certificate::wless.io certificate expires in ${days}d (< ${MIN_DAYS}d): $expires"
