@@ -377,7 +377,8 @@ class TestDeterministicCommitRecordSeam:
 # ---------------------------------------------------------------------------
 # 6. Adversarial surface: when the ROLLBACK ITSELF fails, the user must be told
 #    how to recover (surface-test-audit gap — the only path that prints the
-#    "run `worthless unlock --all`" recovery instruction).
+#    "run `worthless lock` again" recovery instruction; it used to name a
+#    non-existent `unlock --all`, worthless-qvvs).
 # ---------------------------------------------------------------------------
 
 
@@ -417,7 +418,10 @@ class TestUnwindFailureWarnsToReconcile:
         # require the CONTIGUOUS recovery phrase so a future refactor can't satisfy
         # the check by scattering the two tokens across unrelated messages.
         normalized = " ".join(result.output.split())
-        assert "stale row(s); run `worthless unlock --all` to reconcile" in normalized, (
+        assert (
+            "stale row(s); run `worthless lock` again to finish, or `worthless unlock` to undo"
+            in normalized
+        ), (
             "after a failed rollback the user was NOT shown the single recovery "
             f"instruction; output was:\n{result.output}"
         )

@@ -848,7 +848,8 @@ async def _pass1_db_writes(
                 raise WorthlessError(
                     ErrorCode.SHARD_STORAGE_FAILED,
                     f"Alias {alias!r} predates format-preserving split. "
-                    "Run `worthless unlock --all` then re-lock this .env.",
+                    "Run `worthless unlock` (it restores every key), then `worthless lock` "
+                    "again.",
                 )
             stored_decrypted = await repo.decrypt_shard(db_shard)
             verify_payload = bytearray(value.encode("utf-8"))
@@ -3000,7 +3001,8 @@ def _lock_keys(
                     if unwind_errors:
                         console.print_warning(
                             f"Database may contain {len(unwind_errors)} stale row(s); "
-                            "run `worthless unlock --all` to reconcile."
+                            "run `worthless lock` again to finish, or `worthless unlock` "
+                            "to undo."
                         )
                 if isinstance(exc, asyncio.CancelledError):
                     # Surface the signal-driven cancellation as a conventional
