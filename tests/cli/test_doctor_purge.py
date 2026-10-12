@@ -308,11 +308,15 @@ class TestDoctorKeepsMovedEnv:
         assert str(moved_env) in remaining, "the moved key was purged"
         assert str(dead_env) not in remaining, "the dead key was not purged"
 
-    def test_json_marks_moved_key_safe_not_gone(
+    def test_json_advice_for_missing_env_is_honest(
         self, home_dir: WorthlessHome, env_file: Path, tmp_path: Path
     ) -> None:
-        """An agent must not be told a recoverable key is gone — that advice ends in
-        `uninstall`, which deletes it."""
+        """A missing .env means moved OR deleted — `git worktree remove` deletes it.
+        So the agent is never told the key is gone (it may have moved) nor that it
+        is safe (it may be deleted). Its fix is never `uninstall`, which wipes every
+        key it can't restore — `revoke --alias` removes exactly this one. The summary
+        may still name `uninstall --force`, but only as removing Worthless entirely
+        (tests/test_doctor_uninstall_diagnosis.py pins that route)."""
         lock_env(env_file, home_dir)
         self._move_project(env_file, tmp_path)
 
@@ -320,11 +324,29 @@ class TestDoctorKeepsMovedEnv:
         assert result.exit_code == 0, result.output
         check = next(c for c in json.loads(result.stdout)["checks"] if c["check_id"] == "orphan_db")
         (finding,) = check["findings"]
+        advice = finding["remediation"]
 
         assert finding["reason"] == "env_file_missing", check
-        assert "this key is gone" not in finding["remediation"].lower(), finding
-        assert "worthless unlock" in finding["remediation"], finding
+        assert "this key is gone" not in advice.lower(), finding
+        assert "is safe" not in advice.lower(), finding
+        assert "worthless unlock" in advice, finding
+        assert f"worthless revoke --alias {finding['key_alias']}" in advice, finding
+        assert "uninstall" not in advice, finding
+        summary = check["summary"]
+        assert "uninstall" not in summary or "remove worthless entirely" in summary.lower(), check
         assert check["fixable"] is False, "--fix has nothing to do for a moved key"
+
+    def test_text_advice_for_missing_env_points_to_revoke_not_uninstall(
+        self, home_dir: WorthlessHome, env_file: Path, tmp_path: Path
+    ) -> None:
+        lock_env(env_file, home_dir)
+        self._move_project(env_file, tmp_path)
+
+        for args in (["doctor"], ["doctor", "--fix", "--yes"]):
+            out = self._flat(cli_invoke(args, home_dir).output)
+            assert "worthless unlock" in out, (args, out)
+            assert "worthless revoke --alias" in out, (args, out)
+            assert "uninstall" not in out and "is safe" not in out, (args, out)
 
     def test_fix_prompt_never_asks_to_delete_a_moved_key(
         self, home_dir: WorthlessHome, env_file: Path, tmp_path: Path

@@ -2,8 +2,9 @@
 
 An *orphan* enrollment is a DB row whose ``env_path`` points to a file
 where the matching ``var_name`` line is absent — the user deleted the
-line — or whose ``.env`` is no longer there at all, usually because the
-project moved. Only the first is a dead key (see ``env_file_missing``).
+line — or whose ``.env`` is no longer there at all, because the project
+moved or was deleted. Doctor only ever destroys the first (see
+``env_file_missing``).
 
 User-facing phrases live here, not the technical term: a real user does
 NOT think "I have an orphan", they think "my key is broken". The shared
@@ -28,6 +29,16 @@ from worthless.storage.repository import EnrollmentRecord
 PROBLEM_PHRASE = "can't restore"
 FIX_PHRASE = "worthless doctor --fix"
 
+# Advice for a key whose ``.env`` is missing. Never call it "safe": removing a
+# git worktree deletes its gitignored ``.env``, and Shard A with it. Never send
+# the user to ``uninstall``: it wipes every key it can't restore, not just this
+# one. ``revoke --alias`` removes exactly one key.
+MOVED_FIX_PHRASE = "Moved it? Put the project back at the path shown, then run `worthless unlock`"
+DELETED_FIX_PHRASE = (
+    "Removed it (`git worktree remove` takes its `.env` with it)? Then that key "
+    "is gone, and `worthless revoke --alias {alias}` removes it"
+)
+
 
 def is_orphan(enrollment: EnrollmentRecord) -> bool:
     """An enrollment is orphan iff its ``env_path`` is set but the matching
@@ -50,10 +61,16 @@ def env_file_missing(enrollment: EnrollmentRecord) -> bool:
     one for a missing bind-mount) all count: python-dotenv reads any of them
     as empty, which would otherwise look like a deleted line.
 
-    A missing *file* is not a dead key. It usually means the project moved
-    — a removed git worktree, a renamed folder — and Shard A is still on
-    disk somewhere. Such a key is recoverable and must never be purged.
-    Only a deleted *line* in a file that still exists is a dead key.
+    A missing *file* is not proof of a dead key. A moved or renamed folder, or
+    an unmounted drive, leaves Shard A intact somewhere else, so the key may be
+    recoverable and is never purged. A deleted project — ``git worktree
+    remove`` included, since it deletes the gitignored ``.env`` — took Shard A
+    with it. Doctor can't tell the two apart, so it keeps the record and says
+    how to remove it (``revoke``).
+
+    A deleted *line* in a file that still exists is treated as a dead key. That
+    is still a guess: a renamed variable or a commented-out line looks the same
+    (WOR-938).
 
     Detection is unchanged: ``is_orphan`` still flags a missing file, so
     ``status`` and ``scan`` keep warning about it. This only separates

@@ -3,8 +3,8 @@
 Currently handles TWO known shapes:
 
 1. Orphan DB enrollments whose ``.env`` line was deleted by the user (HF7),
-   or whose ``.env`` is missing (a moved project — reported, never purged:
-   WOR-935).
+   or whose ``.env`` is missing (the project moved or was deleted — reported,
+   never purged: WOR-935).
    The dogfood-discovered stuck state from 2026-04-30:
 
      worthless unlock -> "No enrolled keys found." (silently skips orphan)
@@ -63,7 +63,9 @@ from worthless._flags import ipc_mode_active
 from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary
 from worthless.cli.keystore import _SERVICE
 from worthless.cli.orphans import (
+    DELETED_FIX_PHRASE,
     FIX_PHRASE,
+    MOVED_FIX_PHRASE,
     PROBLEM_PHRASE,
     env_file_missing,
     find_orphans,
@@ -153,8 +155,9 @@ async def _purge_all(
     orphans: list[EnrollmentRecord],
     repo: ShardRepository,
     shard_a_dir: Path,
-) -> int:
-    """Delete each orphan's enrollment row surgically. If an alias has no
+) -> set[tuple[str, str | None]]:
+    """Delete each orphan's enrollment row surgically and return the
+    ``(key_alias, env_path)`` of every row actually deleted. If an alias has no
     enrollments left after the delete, also tear down its shard + spend_log
     + config + shard_a file (the full ``_revoke_async`` path).
 
@@ -169,8 +172,9 @@ async def _purge_all(
     delete healthy rows.
 
     Never purges an entry whose ``.env`` file is missing (WOR-935). A moved
-    project or removed worktree takes Shard A with it intact; purging here
-    would destroy Shard B, the half that was still safe. Enforced in this
+    project takes Shard A with it intact, and purging here would destroy
+    Shard B, the half that was still safe. A deleted project can't be told
+    apart from a moved one, so it is kept too (``revoke`` removes it). Enforced in this
     function, not in its callers, so every purge path — ``doctor --fix`` and
     ``doctor --json --fix`` — gets it.
     """
@@ -179,13 +183,13 @@ async def _purge_all(
         (e.key_alias, e.env_path) for e in find_orphans(current) if not env_file_missing(e)
     }
 
-    purged = 0
+    purged: set[tuple[str, str | None]] = set()
     aliases_touched: set[str] = set()
     for orphan in orphans:
         if (orphan.key_alias, orphan.env_path) not in still_orphan_keys:
             continue  # state drifted — skip
         if await repo.delete_enrollment(orphan.key_alias, orphan.env_path):
-            purged += 1
+            purged.add((orphan.key_alias, orphan.env_path))
             aliases_touched.add(orphan.key_alias)
 
     # For each touched alias: if zero enrollments remain, tear down the
@@ -209,21 +213,21 @@ def _print_orphan_lines(
     point telling the user to run the command they just ran.
     """
     suffix = " (dry-run: no changes)" if dry_run else ""
-    for e in orphans:
+    missing = [env_file_missing(e) for e in orphans]  # one stat per orphan
+    for e, gone in zip(orphans, missing, strict=True):
         reason = (
-            ".env not found — the project may have moved"
-            if env_file_missing(e)
-            else ".env line deleted"
+            ".env not found — the project moved or was removed" if gone else ".env line deleted"
         )
         typer.echo(
             f"  • {PROBLEM_PHRASE} {e.key_alias}: {reason} ({e.var_name} -> {e.env_path}){suffix}"
         )
-    if show_fix_hint and any(not env_file_missing(e) for e in orphans):
+    if show_fix_hint and not all(missing):
         typer.echo(f"    fix: run `{FIX_PHRASE}`")
     # Always shown, --fix and --dry-run included: it isn't "run what you just ran",
-    # it's the only way to get a moved key back, and --fix won't touch it.
-    if any(env_file_missing(e) for e in orphans):
-        typer.echo("    moved: put the project back at the path shown, then run `worthless unlock`")
+    # --fix never touches these keys, so this is the only way forward for them.
+    if any(missing):
+        typer.echo(f"    {MOVED_FIX_PHRASE}.")
+        typer.echo(f"    {DELETED_FIX_PHRASE.format(alias='<alias>')}.")
 
 
 _VERSION_LINE = re.compile(r"^Version:\s*(\S+)\s*$", re.MULTILINE)
@@ -871,14 +875,14 @@ def _doctor_apply(
 ) -> None:
     """Execute the fix actions (purge orphans + migrate synced keys)."""
     if orphans:
-        purged = _run_async(_purge_all(orphans, repo, home.shard_a_dir))
+        purged = len(_run_async(_purge_all(orphans, repo, home.shard_a_dir)))
         kept = sum(1 for e in orphans if env_file_missing(e))
         if purged or not kept:
             console.print_success(f"Cleaned up {purged} broken record(s).")
         if kept:
             console.print_hint(
-                f"Kept {kept} key(s) whose .env was not found — the project may have "
-                "moved. Put it back at the path shown, then run `worthless unlock`."
+                f"Kept {kept} key(s) whose .env was not found. {MOVED_FIX_PHRASE}. "
+                f"{DELETED_FIX_PHRASE.format(alias='<alias>')}."
             )
 
     if synced:

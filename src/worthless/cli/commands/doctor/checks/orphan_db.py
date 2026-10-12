@@ -12,20 +12,23 @@ from __future__ import annotations
 import asyncio
 
 from worthless.cli.commands.doctor.registry import CheckContext, CheckResult
-from worthless.cli.orphans import env_file_missing
+from worthless.cli.orphans import DELETED_FIX_PHRASE, MOVED_FIX_PHRASE, env_file_missing
 
 check_id = "orphan_db"
 
-# Per-finding advice for a key whose .env is missing. Set on the finding so
-# the runner's generic orphan playbook ("This key is gone") never reaches it:
-# that advice is false for a moved project, and following it destroys the key.
-MOVED_REMEDIATION = (
-    "This key is safe — only its `.env` is missing from where it was locked, "
-    "usually because the project moved. Put the project back at that path, then "
-    "run `worthless unlock`. `worthless doctor --fix` leaves it alone. If the "
-    "project is gone for good, `worthless uninstall --force` removes Worthless "
-    "and deletes this key with it."
-)
+
+def _missing_env_remediation(alias: str) -> str:
+    """Per-finding advice for a key whose .env is missing.
+
+    Set on the finding so the runner's generic orphan playbook ("This key is
+    gone") never reaches it: that is wrong for a moved project, and following
+    it can destroy a recoverable key.
+    """
+    return (
+        "This key may still be recoverable: its `.env` is missing from where it "
+        "was locked, and `worthless doctor --fix` leaves it alone. "
+        f"{MOVED_FIX_PHRASE}. {DELETED_FIX_PHRASE.format(alias=alias)}."
+    )
 
 
 def _repair_orphans(ctx: CheckContext, orphans: list) -> list[dict]:
@@ -37,15 +40,11 @@ def _repair_orphans(ctx: CheckContext, orphans: list) -> list[dict]:
     """
     from worthless.cli.commands.doctor import _purge_all
 
-    async def _purge_then_survivors() -> set[tuple[str, str | None]]:
-        await _purge_all(orphans, ctx.repo, ctx.home.shard_a_dir)
-        return {(e.key_alias, e.env_path) for e in await ctx.repo.list_enrollments()}
-
-    survivors = asyncio.run(_purge_then_survivors())
+    purged = asyncio.run(_purge_all(orphans, ctx.repo, ctx.home.shard_a_dir))
     return [
         {"key_alias": e.key_alias, "env_path": e.env_path}
         for e in orphans
-        if (e.key_alias, e.env_path) not in survivors
+        if (e.key_alias, e.env_path) in purged
     ]
 
 
@@ -59,7 +58,7 @@ def _finding(e) -> dict:
         "reason": "env_file_missing" if moved else "env_line_missing",
     }
     if moved:
-        finding["remediation"] = MOVED_REMEDIATION
+        finding["remediation"] = _missing_env_remediation(e.key_alias)
     return finding
 
 
@@ -77,8 +76,9 @@ def _build_summary(n: int, moved: int) -> str:
         parts.append(
             f"{moved} whose .env was not found {'is' if moved == 1 else 'are'} kept, "
             "never purged: if the project moved, put it back and run "
-            "'worthless unlock'; if it is gone for good, 'worthless uninstall --force' "
-            "removes Worthless and deletes these keys."
+            "'worthless unlock'; if it was deleted, 'worthless revoke --alias <alias>' "
+            "removes that key. To remove Worthless entirely, 'worthless uninstall "
+            "--force' — it also deletes every key it can't restore."
         )
     return " ".join(parts)
 

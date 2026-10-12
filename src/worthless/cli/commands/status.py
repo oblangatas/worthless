@@ -318,7 +318,8 @@ def register_status_commands(app: typer.Typer) -> None:
                     sys.stderr.write(
                         f"Can't restore the keys marked BROKEN — their .env "
                         f"line or file is missing. Run `worthless doctor` to see which: "
-                        f"`{FIX_PHRASE}` purges deleted lines and keeps moved projects.\n\n"
+                        f"`{FIX_PHRASE}` purges deleted lines and keeps keys whose .env "
+                        "is missing.\n\n"
                     )
 
             if proxy_info["healthy"] and not identified:
