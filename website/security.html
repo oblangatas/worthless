@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Worthless: Security</title>
+  <meta name="description" content="How to report a security vulnerability in Worthless, and the best-effort, no-SLA response posture." />
+  <link rel="canonical" href="https://wless.io/security.html" />
+  <meta name="robots" content="index, follow" />
+  <meta name="theme-color" content="#d5f4fb" />
+  <meta property="og:title" content="Worthless: Security" />
+  <meta property="og:description" content="How to report a security vulnerability in Worthless, and the best-effort, no-SLA response posture." />
+  <meta property="og:image" content="https://wless.io/og-image.png" />
+  <meta property="og:url" content="https://wless.io/security.html" />
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="Worthless" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="Worthless: Security" />
+  <meta name="twitter:description" content="How to report a security vulnerability in Worthless, and the best-effort, no-SLA response posture." />
+  <meta name="twitter:image" content="https://wless.io/og-image.png" />
+  <link rel="icon" type="image/x-icon" href="favicon.ico" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="legal.css" />
+</head>
+<body>
+  <header class="legal-top">
+    <a class="legal-home" href="index.html">
+      <img src="logo-transparent.png" alt="" aria-hidden="true" />
+      worthless
+    </a>
+    <nav class="legal-top-links" aria-label="Site">
+      <a href="https://docs.wless.io/security/" target="_blank" rel="noopener">Security model</a>
+      <a href="index.html">Home</a>
+    </nav>
+  </header>
+
+  <main class="legal-doc">
+    <h1>Security</h1>
+    <p class="legal-meta">Vulnerability reporting for Worthless</p>
+    <p class="lead">Worthless is open-source software provided AS IS under AGPL-3.0. This page tells you where to send security reports. It creates no obligation, no warranty, and no service-level commitment.</p>
+
+    <h2>Reporting a vulnerability</h2>
+    <p>If you found a security issue, please do not open a public GitHub issue. Use one of these private channels:</p>
+    <ul>
+      <li>GitHub private vulnerability reporting: <a href="https://github.com/oblangatas/worthless/security/advisories/new" target="_blank" rel="noopener">github.com/oblangatas/worthless/security/advisories/new</a></li>
+      <li>Email: <a href="mailto:security@wless.io">security@wless.io</a></li>
+    </ul>
+    <p>Useful things to include if you can: the Worthless version or commit SHA, your operating system, and a reproduction case (steps, code, or proof-of-concept). Encrypted email is welcome; mention it in your first message.</p>
+
+    <h2>No commitments</h2>
+    <p>Worthless is maintained by a single person as unpaid open-source work. Response to security reports is best effort only.</p>
+    <ul>
+      <li>No guaranteed response time, and no SLA.</li>
+      <li>No obligation to triage, fix, or respond to any report.</li>
+      <li>The maintainer may be unavailable for arbitrary periods (travel, day job, vacation, illness, life). That is normal and expected for solo open-source.</li>
+    </ul>
+    <p>AGPL-3.0 sections 15 and 16 disclaim all warranties and limit liability. Nothing on this page modifies that, and nothing here grants you any rights you would not otherwise have. If you need guaranteed response times, security warranties, or indemnification, a commercial license is what that is for: <a href="mailto:legal@wless.io">legal@wless.io</a>.</p>
+
+    <h2>Coordinated disclosure, a request</h2>
+    <p>We prefer that researchers give the project a chance to fix issues before public disclosure. We cannot require this. You may disclose on whatever timeline you choose. A common-sense window is appreciated where the issue is not actively exploited.</p>
+
+    <h2>Good-faith research</h2>
+    <p>The maintainer does not intend to pursue legal action against good-faith research that tests only against your own installation, does not access data that does not belong to you, and does not run scanners against shared infrastructure without coordination. This is a statement of intent. It is not a legal safe-harbor agreement.</p>
+
+    <h2>See also</h2>
+    <ul>
+      <li><a href="https://github.com/oblangatas/worthless/blob/main/SECURITY.md" target="_blank" rel="noopener">Full security policy (SECURITY.md)</a></li>
+      <li><a href=".well-known/security.txt">security.txt (RFC 9116)</a></li>
+      <li><a href="https://docs.wless.io/security/" target="_blank" rel="noopener">Security model</a></li>
+      <li><a href="license.html">License (AGPL-3.0, sections 15 and 16)</a></li>
+    </ul>
+  </main>
+
+  <footer class="legal-footer">
+    <div class="legal-footer-inner">
+      <nav class="footer-legal" aria-label="Legal">
+        <a href="privacy.html">Privacy Policy</a>
+        <a href="terms.html">Terms of Service</a>
+        <a href="security.html">Security</a>
+        <a href="license.html">License</a>
+      </nav>
+      <span class="legal-footer-note">Worthless is open source.</span>
+    </div>
+  </footer>
+</body>
+</html>
