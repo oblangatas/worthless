@@ -19,7 +19,7 @@ from typer.testing import CliRunner
 
 from worthless.cli.app import app
 
-from tests.helpers import fake_openai_key
+from tests.helpers import fake_key, fake_openai_key
 
 runner = CliRunner()
 
@@ -194,6 +194,25 @@ class TestPreCommitScansStagedFiles:
             f"a staged file holding a real key must block the commit; output:\n{out}"
         )
         assert "leak.txt" in out, f"scan must name the offending file; output:\n{out}"
+
+    def test_staged_login_token_still_blocks_the_commit(self, tmp_path: Path, monkeypatch) -> None:
+        # worthless-p55g lets a plain scan pass on a Claude Code login token,
+        # because lock can't protect it and failing forever has no way out. A
+        # commit is different: it writes the token into git history for good,
+        # and "don't commit it" is a fix that exists. The hook must still block —
+        # also under --quiet, where it is the only thing printed.
+        _git_repo(tmp_path)
+        _stage(tmp_path, ".env", f"ANTHROPIC_API_KEY={fake_key('sk-ant-oat01-', 'p55g-hook')}\n")
+        monkeypatch.chdir(tmp_path)
+
+        for args in (["scan", "--pre-commit"], ["--quiet", "scan", "--pre-commit"]):
+            result = runner.invoke(app, args)
+            low = " ".join((result.stdout + result.stderr).split()).lower()
+
+            assert result.exit_code == 1, f"{args}: a staged login token must block:\n{low}"
+            assert "unstage" in low, f"{args}: the hook must say how to get unblocked:\n{low}"
+            # lock still can't protect it, so pointing at lock is still a dead end.
+            assert "run `worthless lock`" not in low, low
 
     def test_staged_clean_file_passes(self, tmp_path: Path, monkeypatch) -> None:
         _git_repo(tmp_path)

@@ -384,7 +384,8 @@ install_or_upgrade_worthless() {
 
     # Strip whitespace a mangled checkout or env could smuggle past a bare
     # `-n` test (e.g. a stray CR from a CRLF edit, or "  ").
-    effective_version="$(printf '%s' "$effective_version" | tr -d '[:space:]')"
+    effective_version="$(printf '%s' "$effective_version" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+    effective_version="${effective_version#v}"
 
     if [ -z "$effective_version" ]; then
         die "$EXIT_INTERNAL" \
@@ -424,7 +425,8 @@ install_or_upgrade_worthless() {
     # leaves an executable shim that cannot import. `-x` passes; the tool is
     # broken; the fast-path would skip the --force repair forever.
     if [ -n "$installed_ver" ] && [ "$installed_ver" = "$effective_version" ] \
-       && "$("$UV" tool dir --bin 2>/dev/null)/worthless" --version >/dev/null 2>&1; then
+       && [ "$("$("$UV" tool dir --bin 2>/dev/null)/worthless" --version 2>/dev/null \
+       | awk '{print $2}')" = "$effective_version" ]; then
         ok "  worthless ${installed_ver} already installed"
         return 0
     fi
@@ -467,21 +469,24 @@ smoke_test() {
     # and guessing ~/.local/bin misses when UV_TOOL_BIN_DIR/XDG_BIN_HOME move it
     # (unscrubbed), killing a good install. Also beats a shadowing worthless on
     # PATH. worthless-dc26.
-    worthless_bin="$("$UV" tool dir --bin 2>/dev/null)/worthless"
-    # The shadow check needs this from `uv tool dir --bin`: the fallback is
-    # itself a PATH lookup, so PATH-to-PATH would answer "no shadow" for every
-    # shadowed user. Fail closed.
+    worthless_bin="$("$UV" tool dir --bin 2>/dev/null || true)/worthless"
+    # The shadow check needs this from `uv tool dir --bin`: the fallback below is
+    # a guess, and a guessed path must never be named in a shadow warning.
     worthless_bin_authoritative=1
     if [ ! -x "$worthless_bin" ]; then
         worthless_bin_authoritative=0
-        worthless_bin="$(command -v worthless 2>/dev/null || true)"
+        # alx3: uv's default dir, never PATH.
+        worthless_bin="${UV_TOOL_BIN_DIR:-${XDG_BIN_HOME:-${HOME:-/root}/.local/bin}}/worthless"
     fi
     if ! version_output="$("$worthless_bin" --version 2>/dev/null)"; then
         die "$EXIT_INTERNAL" "worthless installed but failed to run." \
             "Try: worthless --version" \
+            "Or:  uv tool dir --bin" \
             "Or:  worthless doctor"
     fi
     actual_ver="$(printf '%s' "$version_output" | awk '{print $2}' | head -1)"
+    [ "$actual_ver" = "$effective_version" ] || die "$EXIT_INTERNAL" \
+        "${worthless_bin} is ${actual_ver:-unknown}, not ${effective_version}."
     ok "  worthless ${actual_ver:-installed}"
 }
 

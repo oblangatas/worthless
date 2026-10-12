@@ -36,7 +36,7 @@ from typing import Any
 import aiosqlite
 import httpx
 import pytest
-from hypothesis import HealthCheck, given, settings as h_settings, strategies as st
+from hypothesis import HealthCheck, example, given, settings as h_settings, strategies as st
 
 from worthless.proxy.app import create_app
 from worthless.proxy.config import ProxySettings
@@ -309,6 +309,8 @@ async def test_request_path_returns_503_when_ipc_open_raises_unavailable(
         max_size=64,
     ).map(lambda s: s.encode("ascii"))
 )
+# Found by CI: a candidate can match the fixed body's own wording.
+@example(shard_a_bytes=b"gateway_")
 async def test_no_plaintext_in_503_body_property(
     tmp_db_path: str, fernet_key: bytes, repo, tmp_path: Path, shard_a_bytes: bytes
 ) -> None:
@@ -344,7 +346,19 @@ async def test_no_plaintext_in_503_body_property(
         await db.close()
 
     # The shard may not pass auth (unenrolled), but if any response is
-    # produced its body must not echo the candidate plaintext bytes.
-    assert shard_a_bytes not in response.content, (
-        f"shard candidate echoed in body: status={response.status_code}"
-    )
+    # produced its body must not echo the candidate plaintext bytes. A 503
+    # body identical for every input can't echo one; check it exactly, not by
+    # substring, which a candidate can match by chance (b"gateway_").
+    if response.status_code == 503:
+        assert response.json() == {
+            "error": {
+                "message": "sidecar unavailable",
+                "type": "gateway_error",
+                "param": None,
+                "code": None,
+            }
+        }, response.text
+    else:
+        assert shard_a_bytes not in response.content, (
+            f"shard candidate echoed in body: status={response.status_code}"
+        )

@@ -42,10 +42,12 @@ from tests._install_helpers import (
     write_stub,
 )
 
-# The installed-entry-point version. Deliberately not 0.3.7/0.3.9: those two
-# strings are forbidden anywhere in installer output by
+# The installed-entry-point version: the baked pin, because smoke_test now
+# refuses an installed copy that reports anything else (worthless-yeff). Never
+# 0.3.7/0.3.9 — those strings are forbidden in installer output by
 # test_install_logic.py::test_banner_reports_the_installed_binary_not_a_stale_uv_run.
-REAL_VERSION = "0.3.10"
+REAL_VERSION = read_install_pin()
+assert REAL_VERSION not in {"0.3.7", "0.3.9"}
 SHADOW_VERSION = "0.3.7"
 
 # Substrings that indicate the warning fired. Matching on several keeps the
@@ -313,6 +315,10 @@ def test_uv_tool_dir_failure_does_not_warn(tmp_path: Path) -> None:
 esac""",
     )
     write_stub(bin_dir, "worthless", f'echo "worthless {REAL_VERSION}"')
+    # uv put the entry point in its default dir; smoke_test finds it there
+    # (never via PATH, worthless-alx3).
+    (tmp_path / ".local" / "bin").mkdir(parents=True)
+    write_stub(tmp_path / ".local" / "bin", "worthless", f'echo "worthless {REAL_VERSION}"')
 
     result = run_install(bin_dir)
     combined = _combined(result)

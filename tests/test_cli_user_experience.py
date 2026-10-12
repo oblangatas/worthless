@@ -664,7 +664,12 @@ class TestQuietMode:
         assert "Protected" not in result.stderr
 
     def test_quiet_scan_suppresses_output(self, env_with_openai: Path) -> None:
-        """--quiet scan produces no stderr output (exit code only)."""
+        """--quiet scan produces no stderr output (exit code only).
+
+        One exception (worthless-p55g): a Claude Code login token in a local
+        .env is the only finding and the scan passes — then quiet prints why,
+        since an exit 0 alone would hide a live plaintext token.
+        """
         result = runner.invoke(app, ["-q", "scan", str(env_with_openai)])
         assert result.exit_code == 1
         assert result.stderr.strip() == ""
