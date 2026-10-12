@@ -355,6 +355,7 @@ class TestDoctorKeepsMovedEnv:
         check = next(c for c in doc["checks"] if c["check_id"] == "orphan_db")
         (finding,) = check["findings"]
         assert "revoke" not in finding["remediation"], finding
+        assert "revoke --alias" not in check["summary"], check
         assert str(main_env) in finding["remediation"], finding
 
         for args in (["doctor"], ["doctor", "--fix", "--yes"]):

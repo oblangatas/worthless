@@ -78,8 +78,9 @@ def _build_summary(n: int, moved: int) -> str:
         parts.append(
             f"{moved} whose .env was not found {'is' if moved == 1 else 'are'} kept, "
             "never purged: if the project moved, put it back and run "
-            "'worthless unlock'; if it was deleted, 'worthless revoke --alias <alias>' "
-            "removes that key. To remove Worthless entirely, 'worthless uninstall "
+            "'worthless unlock'; if it was deleted, follow each finding's remediation "
+            "(revoke is only safe for a key no other project has locked). To remove "
+            "Worthless entirely, 'worthless uninstall "
             "--force' — it also deletes every key it can't restore."
         )
     return " ".join(parts)
