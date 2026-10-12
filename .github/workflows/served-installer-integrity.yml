@@ -1,11 +1,12 @@
 name: Served installer integrity
 
-# Hourly: the bytes worthless.sh serves to `curl | sh` must equal install.sh at
-# the latest release tag. deploy-worker.yml checks this at every CI deploy and
-# release-sync-check.yml re-checks it daily; this narrows the gap for anything
+# Hourly: the bytes worthless.sh serves to `curl | sh` (install.sh and
+# /uninstall's uninstall.sh) must equal the latest GitHub Release.
+# deploy-worker.yml checks this at every CI deploy and release-sync-check.yml
+# re-checks it daily; this narrows the gap for anything
 # that changes production OUTSIDE CI (a leaked deploy token, a manual
-# `wrangler deploy`) from up to 24 hours to about one. Same comparison as
-# release-sync-check.yml A2a, nothing else, so a failure here means one thing.
+# `wrangler deploy`) from up to 24 hours to about one. A failure here means
+# one thing: what users download is not what was released.
 
 on:
   schedule:
@@ -31,28 +32,39 @@ jobs:
           fetch-tags: true
           persist-credentials: false
 
-      - name: worthless.sh body equals install.sh @ latest release tag
+      - name: Served scripts equal the latest release, for every client
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # Same tag filter as release-sync-check.yml: ruleset-gated, clean vX.Y.Z only.
-          LATEST_TAG=$(git tag --sort=-version:refname --list 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)
-          if [ -z "$LATEST_TAG" ]; then
-            echo "::error title=No release tag::no clean vMAJOR.MINOR.PATCH tag found"
-            exit 1
+          # Reference: the latest GitHub Release, not the highest git tag. A pushed
+          # tag (v9.9.9) can't become the reference, and published_at is set by
+          # GitHub, so a forged tag/commit date can't hold the grace window open.
+          TAG=$(gh release view --json tagName --jq .tagName)
+          PUBLISHED=$(gh release view --json publishedAt --jq .publishedAt)
+          git merge-base --is-ancestor "$TAG" origin/main \
+            || { echo "::error title=Release not on main::$TAG"; exit 1; }
+          AGE=$(( $(date +%s) - $(date -d "$PUBLISHED" +%s) ))
+          # Real curl's own User-Agent plus Wget: no fixed UA a tampered Worker
+          # could single out to serve this check the genuine script.
+          drift=0
+          for pair in "/ install.sh" "/uninstall uninstall.sh"; do
+            url_path=${pair%% *}; file=${pair#* }
+            want=$(git show "$TAG:$file" | sha256sum | cut -d' ' -f1)
+            for ua in curl "Wget/1.21.4"; do
+              opts=(-fsSL --retry 3 --retry-all-errors)
+              [ "$ua" = curl ] || opts+=(-A "$ua")
+              got=$(curl "${opts[@]}" "https://worthless.sh${url_path}" | sha256sum | cut -d' ' -f1)
+              if [ "$got" = "$want" ]; then
+                echo "OK: ${url_path} as ${ua} == ${file}@${TAG}"
+              else
+                echo "::error title=Served script drift::${url_path} as ${ua}: ${got} != ${file}@${TAG} ${want}"
+                drift=1
+              fi
+            done
+          done
+          if [ "$drift" = 1 ] && [ "$AGE" -ge 0 ] && [ "$AGE" -lt 3600 ]; then
+            echo "::warning title=Release in progress::${TAG} published ${AGE}s ago; deploy may still be running"
+            exit 0
           fi
-          BODY_TMP=$(mktemp)
-          curl -fsSL --retry 3 --retry-all-errors -A "curl/8.0" https://worthless.sh -o "$BODY_TMP"
-          BODY_SHA=$(sha256sum "$BODY_TMP" | awk '{print $1}')
-          REPO_SHA=$(git show "${LATEST_TAG}:install.sh" | sha256sum | awk '{print $1}')
-          if [ "$BODY_SHA" != "$REPO_SHA" ]; then
-            # A fresh tag is served only once its deploy finishes; don't page
-            # during that window. Older than an hour, a mismatch is real drift.
-            TAG_AGE=$(( $(date +%s) - $(git for-each-ref --format='%(creatordate:unix)' "refs/tags/$LATEST_TAG") ))
-            if [ "$TAG_AGE" -lt 3600 ]; then
-              echo "::warning title=Release in progress::${LATEST_TAG} is ${TAG_AGE}s old; not yet served"
-              exit 0
-            fi
-            echo "::error title=Served installer drift::worthless.sh sha256 ${BODY_SHA} != install.sh@${LATEST_TAG} ${REPO_SHA}"
-            exit 1
-          fi
-          echo "OK: worthless.sh sha256 ${BODY_SHA} == install.sh@${LATEST_TAG}"
+          exit "$drift"
