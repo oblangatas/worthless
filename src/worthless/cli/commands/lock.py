@@ -3192,21 +3192,25 @@ def _offer_question(port: int, home: WorthlessHome) -> str:
     consent given before the irreversible step, not in a banner after it.
 
     typer.confirm prints plain text, so the terminal does the wrapping. Every
-    line is kept under ~80 columns by hand (PR #673 review).
+    line is kept under 80 columns by hand.
     """
+    pad = " " * 17  # aligns continuation lines under the column after the labels
+    on_wsl = is_wsl()
     systemd_extra = ""
     if current_platform_backend_name() == "launchd":
         adds = "a macOS login item that starts Worthless when you log in"
         unit = launchd.plist_path()
     else:
         unit = systemd.unit_path()
-        if is_wsl():
+        if on_wsl:
             adds = "a systemd user service that starts with this WSL distro"
         else:
-            adds = "a systemd user service that starts Worthless when this computer\n"
-            adds += "                 starts (it turns on lingering for your account)"
-        systemd_extra = "                 then `loginctl disable-linger` if nothing else needs it\n"
-    if is_wsl():
+            adds = (
+                "a systemd user service set to start when this computer starts\n"
+                f"{pad}(it turns on lingering for your account)"
+            )
+        systemd_extra = f"{pad}then `loginctl disable-linger` if nothing else needs it\n"
+    if on_wsl:
         headline = (
             "\nInstall a background service for Worthless?\n"
             "On WSL it still stops about 15 seconds after your last WSL terminal\n"
@@ -3221,9 +3225,9 @@ def _offer_question(port: int, home: WorthlessHome) -> str:
     return (
         f"{headline}\n"
         f"  What it adds:  {adds}\n"
-        f"                 {_tilde(unit)}\n"
+        f"{pad}{_tilde(unit)}\n"
         "  Trade-off:     your master key is kept in a file only you can read\n"
-        f"                 ({_tilde(home.fernet_key_path)}), so it can start without you\n"
+        f"{pad}({_tilde(home.fernet_key_path)}), so it can start without you\n"
         "  Undo anytime:  worthless service uninstall (the key file stays)\n"
         f"{systemd_extra}"
         "  Not sure what a background service is? Say no. Your keys stay locked\n"

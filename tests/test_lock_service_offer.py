@@ -567,7 +567,7 @@ class TestTheQuestionIsExplicit:
     ) -> None:
         question = self._ask(console, backend=backend)
         assert unit_name in question, "the user must see the file being added"
-        assert "starts Worthless" in question
+        assert "What it adds:" in question
         assert "fernet.key" in question, "the master-key file is the trade-off"
         assert "worthless service uninstall (the key file stays)" in question
         assert "Say no" in question
@@ -583,8 +583,8 @@ class TestTheQuestionIsExplicit:
     ) -> None:
         """Lingering starts it at boot and outlives uninstall (worthless-fzas).
 
-        It used to be said only in the banner AFTER install. Saying "when you
-        log in" here was false on systemd (PR #673 review).
+        It used to be said only in the banner AFTER install, and "when you
+        log in" was false on systemd.
         """
         question = self._ask(console, backend="systemd")
         assert "when this computer" in question
@@ -689,7 +689,7 @@ class TestPlainWorthlessAsks:
     def test_a_lock_that_skipped_an_oauth_token_still_asks(self) -> None:
         """`found` counts OAuth tokens lock skips on purpose; 1 of 2 is a success.
 
-        A `count == total` guard here never asked these users (Cursor Bugbot, PR #673).
+        A `count == total` guard here never asked these users.
         """
         self._enroll(yes=False, locked=1, found=2).assert_called_once()
 

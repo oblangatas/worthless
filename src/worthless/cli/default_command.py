@@ -207,8 +207,7 @@ def _run_enrollment_if_needed(
     # a service on this path (see run_default). Same rule as `worthless lock`:
     # offer once anything was locked. NOT `count == total` — `total` counts
     # OAuth tokens that lock skips on purpose, so a fully successful lock can
-    # still be "1 of 2" (Cursor Bugbot, PR #673). Real lock failures raise
-    # before reaching here.
+    # still be "1 of 2". Real lock failures raise before reaching here.
     if count > 0 and not yes:
         _offer_service_after_lock(console, home=home, port=resolve_port(None))
 
