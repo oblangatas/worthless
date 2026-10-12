@@ -238,7 +238,10 @@ async def worthless_scan(
 
     ``summary.unprotected`` counts every key that isn't protected.
     ``summary.unshardable`` is the subset ``worthless lock`` can't fix: a
-    Claude Code login token in a local, uncommitted .env file. Don't run lock
+    Claude Code login token in a local, uncommitted .env file. Such a finding
+    may carry ``committed_before``: the newest commit, on any branch or tag,
+    that added or changed that .env. It still passes; tell the user to revoke
+    any login token that was ever in it. Don't run lock
     for those — follow the finding's ``remediation``. Any finding with a
     ``remediation`` is a login token lock refuses, wherever it sits.
 
