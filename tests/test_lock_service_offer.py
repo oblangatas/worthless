@@ -644,8 +644,15 @@ class TestPlainWorthlessAsks:
         """`worthless --yes` is documented as 'never service install'."""
         self._enroll(yes=True).assert_not_called()
 
-    def test_a_partial_lock_gets_no_offer(self) -> None:
-        self._enroll(yes=False, locked=1, found=2).assert_not_called()
+    def test_a_lock_that_skipped_an_oauth_token_still_asks(self) -> None:
+        """`found` counts OAuth tokens lock skips on purpose; 1 of 2 is a success.
+
+        A `count == total` guard here never asked these users (Cursor Bugbot, PR #673).
+        """
+        self._enroll(yes=False, locked=1, found=2).assert_called_once()
+
+    def test_nothing_locked_gets_no_offer(self) -> None:
+        self._enroll(yes=False, locked=0, found=1).assert_not_called()
 
     def test_asks_before_the_proxy_starts(self) -> None:
         """Asking after the detached proxy starts would race it for the port."""
