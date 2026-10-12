@@ -13,16 +13,25 @@
 #      them — you must rotate those keys at your provider.
 #
 # Exit codes (UX contract):
-#   0   removed cleanly
+#   0   Worthless was removed. NOT a statement about the keys: they may have
+#       been restored, already gone, or unknowable — the message says which
 #   1   refused (no --yes in a non-interactive shell, or the user declined)
 #   20  unsupported platform (Windows native)
 #   40  wipe failed (something could not be removed; manual cleanup needed)
+#   41  refused; NOTHING was deleted. `worthless uninstall` declined (its
+#       reason is printed above), your installed copy does not run, or the
+#       copy on PATH could not be verified. Fix that and re-run, or --force.
+#   73  every key was restored and the tool removed, but undoing the OpenClaw
+#       provider config did not fully finish (passed through from
+#       `worthless uninstall`, which raises it only AFTER a complete restore)
 
 set -eu
 
 EXIT_REFUSED=1
 EXIT_PLATFORM=20
 EXIT_INTERNAL=40
+EXIT_TOOL_REFUSED=41
+EXIT_TOOL_PARTIAL=73
 
 UNINSTALL_DOCS_URL="https://docs.wless.io/uninstall"
 
@@ -33,10 +42,17 @@ WORTHLESS_HOME_DIR="${WORTHLESS_HOME:-$HOME/.worthless}"
 # --yes / -y (or WORTHLESS_UNINSTALL_YES=1) skips the confirmation prompt.
 ASSUME_YES=0
 PRINT_ACCT=0
+# --force: wipe even when `worthless uninstall` refused. It refuses to protect
+# keys it can still restore, so this is opt-in and loses them.
+FORCE=0
+# Set when uv/pipx named our binary but it would not start: tier 2 must not
+# then call it an unverified stranger's copy.
+BROKEN_BIN=0
 [ "${WORTHLESS_UNINSTALL_YES:-}" = "1" ] && ASSUME_YES=1
 for arg in "$@"; do
     case "$arg" in
         -y|--yes) ASSUME_YES=1 ;;
+        -f|--force) FORCE=1 ;;
         # Read-only introspection: print the OS-keychain entry this would remove,
         # then exit. Lets you (or a test) confirm it targets the right entry
         # before running for real. Removes nothing.
@@ -60,6 +76,8 @@ unset \
     UV_PYTHON_INSTALL_MIRROR UV_PYTHON_PREFERENCE \
     UV_KEYRING_PROVIDER PIP_KEYRING_PROVIDER \
     UV_INSTALL_DIR UV_UNMANAGED_INSTALL INSTALLER_DOWNLOAD_URL \
+    UV_TOOL_BIN_DIR UV_TOOL_DIR XDG_BIN_HOME XDG_DATA_HOME \
+    PIPX_HOME PIPX_BIN_DIR \
     PYTHONPATH PYTHONSTARTUP \
     BASH_ENV ENV CDPATH GLOBIGNORE \
     LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH \
@@ -76,6 +94,16 @@ if [ "${WORTHLESS_TRUST_PATH:-}" != "1" ]; then
     [ "$home_for_path" = "/" ] && home_for_path="/root"
     PATH="/usr/bin:/bin:/usr/local/bin:${home_for_path}/.local/bin:${PATH:-}"
     export PATH
+    # The PATH above still ENDS with the caller's, which is fine for us — we
+    # resolve every binary we run from absolute paths. It is not fine for the
+    # package managers we invoke: pipx probes `uv --version` through PATH
+    # (measured, not assumed), so a planted uv would execute as the user
+    # through pipx even though it can no longer tell us what to run. Managers
+    # therefore get a PATH with no caller-controlled tail.
+    MANAGER_PATH="${home_for_path}/.local/bin:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"
+else
+    # Sandbox mode: the harness's stub directory IS the point.
+    MANAGER_PATH="${PATH:-}"
 fi
 
 # --- Output helpers (same vocabulary as install.sh) --------------------------
@@ -155,14 +183,172 @@ keyring_account() {
     [ -n "$digest" ] && printf 'fernet-key-%s' "$digest"
 }
 
+# Read-only: does the keystore still hold the Fernet key? Prints `present` or
+# `unknown` — never "absent", because a missing entry proves nothing.
+#
+# Why it matters: once ~/.worthless is gone, "the program restored every key
+# and removed its own home" and "someone ran rm -rf by hand" can look the same.
+# `worthless uninstall` deletes the keystore entry as part of restoring; `rm`
+# cannot reach it. So a surviving entry means the keys are stranded.
+#
+# A missing one does NOT mean they came back. worthless keeps the key in a
+# fernet.key FILE inside ~/.worthless whenever the keyring is unavailable:
+# Linux without one (WSL, servers, no D-Bus), WORTHLESS_KEYRING_BACKEND=null,
+# or any failed Keychain write on macOS. That key never had an entry. A locked
+# Keychain over SSH also reads as "not found". An earlier revision trusted
+# macOS "not found" as proof of a restore and reassured users whose keys were
+# dead; a revision before that assumed "stranded" and told every WSL user who
+# had followed the advice to rotate keys they had just recovered.
+#
+# KNOWN GAP, not fixed here: the account name is derived from WORTHLESS_HOME.
+# Locking with WORTHLESS_HOME set and uninstalling without it hashes a different
+# path, so `present` can be missed and a stranded user gets the conditional
+# "can't tell" answer instead of a firm "rotate".
+# Fixing it means matching by service rather than exact account, which widens
+# what delete_keychain_entry may remove. Tracked separately.
+keystore_state() {
+    acct="$(keyring_account || true)"
+    if [ -z "${acct:-}" ]; then
+        printf 'unknown'
+        return 0
+    fi
+    case "${OS:-}" in
+        macos)
+            if command -v security >/dev/null 2>&1 &&
+                security find-generic-password -s worthless -a "$acct" >/dev/null 2>&1; then
+                printf 'present'
+            else
+                printf 'unknown'
+            fi
+            ;;
+        linux)
+            if command -v secret-tool >/dev/null 2>&1 &&
+                secret-tool lookup service worthless username "$acct" >/dev/null 2>&1; then
+                printf 'present'
+            else
+                printf 'unknown'
+            fi
+            ;;
+        *) printf 'unknown' ;;
+    esac
+}
+
+# How many keys are locked in the home? A number, or `unknown` when sqlite3 is
+# missing or the database cannot be read. No database means none.
+# `locked_key_count env` counts only keys with a .env to go back to: enroll-only
+# keys are still keys a wipe destroys, but the CLI deletes rather than restores
+# them, so they never earn a "restored" line.
+locked_key_count() {
+    db="$WORTHLESS_HOME_DIR/worthless.db"
+    [ -f "$db" ] || { printf '0'; return 0; }
+    command -v sqlite3 >/dev/null 2>&1 || { printf 'unknown'; return 0; }
+    _lk_where=""
+    [ "${1:-}" = env ] && _lk_where=" WHERE env_path IS NOT NULL"
+    _lk="$(sqlite3 "$db" "SELECT COUNT(*) FROM enrollments${_lk_where};" 2>/dev/null || true)"
+    case "$_lk" in
+        '' | *[!0-9]*) printf 'unknown' ;;
+        *) printf '%s' "$_lk" ;;
+    esac
+}
+
+# What we actually KNOW about the user's keys, before anything runs:
+#   locked    keys are locked in the home now; only the program can restore them
+#   stranded  no home, but its keystore entry survives: an rm -rf. Keys are dead
+#   unreadable  a home exists but its locked keys could not be counted
+#   unknown   anything else — and say so rather than guess
+#
+# "The home exists" is NOT evidence of locked keys: `scan` (the pre-commit
+# hook), `up`, `wrap`, `lock` and the MCP server all recreate an empty home,
+# with a fresh keystore entry, on start. An earlier revision treated the folder
+# as the answer and told a user whose keys were dead that they were restored.
+# Must be sampled BEFORE anything deletes the home or the keystore entry.
+key_state() {
+    if [ -d "$WORTHLESS_HOME_DIR" ]; then
+        case "$(locked_key_count)" in
+            0) printf 'unknown' ;;
+            unknown) printf 'unreadable' ;;
+            *) printf 'locked' ;;
+        esac
+    elif [ "$(keystore_state)" = present ]; then
+        printf 'stranded'
+    else
+        printf 'unknown'
+    fi
+}
+
+# The one place that tells the user what happened to their keys after a wipe.
+# Tier 1 and tier 2 both reach this, and they used to say it in different words
+# from different assumptions — which is how one of them came to report a restore
+# that never happened. One function, so they cannot drift apart again.
+say_key_verdict() {
+    case "$1" in
+        stranded)
+            warn "Your real API keys could NOT be restored automatically — rotate them at your provider."
+            ;;
+        unreadable)
+            # Tier 2 only: the wipe just destroyed a database nobody read.
+            warn "This script couldn't read which keys were locked here (sqlite3 is missing, or the database couldn't be read)."
+            warn "If any were, the wipe made them unrecoverable: rotate them at your provider."
+            ;;
+        unknown)
+            warn "This script can't tell whether your keys were restored."
+            warn "If 'worthless uninstall' restored them, now or earlier, they're back in your .env files — you're done."
+            # Fixed wording, not ${WORTHLESS_HOME_DIR}: that value comes from the
+            # environment and printing it raw is the terminal-injection surface
+            # WOR-597 removed from install.sh.
+            warn "If not (say, you deleted your Worthless folder by hand), they can't be recovered: rotate them."
+            ;;
+    esac
+}
+
+# A path for display only: control bytes could rewrite the lines around it.
+# LC_ALL=C so BSD tr does not abort on a byte that is not valid UTF-8.
+show_path() {
+    printf '%s' "$1" | LC_ALL=C tr -d '\001-\037\177'
+}
+
+# Refusing protects locked keys, so only refuse while there may be some. A count
+# we cannot read refuses too — the safe side. Without this the advice would
+# loop forever: restore by hand, re-run, get refused again.
+keys_may_be_locked() {
+    [ -d "$WORTHLESS_HOME_DIR" ] && [ "$(locked_key_count)" != 0 ]
+}
+
+# Every refusal ends the same way: the --force escape hatch, the docs, exit 41.
+refuse_exit() {
+    printf "    curl -sSL https://worthless.sh/uninstall | sh -s -- --yes --force\n" >&2
+    printf "\n  Docs: %s\n" "$UNINSTALL_DOCS_URL" >&2
+    exit "$EXIT_TOOL_REFUSED"
+}
+
+# remove_tool removes only what uv or pipx installed. Say "removed" only if
+# nothing else still answers to `worthless`; otherwise name what is left.
+say_removed() {
+    if _left="$(command -v worthless 2>/dev/null)" && [ -n "$_left" ]; then
+        ok "Worthless's data was removed."
+        warn "A 'worthless' still answers on your PATH — this script did not install it, so it was left alone:"
+        warn "  $(show_path "$_left")"
+    else
+        ok "Worthless removed from this machine."
+    fi
+}
+
 delete_keychain_entry() {
     acct="$(keyring_account || true)"
     [ -n "${acct:-}" ] || { warn "Could not compute the keychain entry name (no sha256 tool); skipping."; return 0; }
     case "${OS:-}" in
         macos)
             # Delete every matching item (there can be duplicates). Non-zero just
-            # means "no more entries" — never an error for us.
-            while security delete-generic-password -s worthless -a "$acct" >/dev/null 2>&1; do : ; done
+            # means "no more entries" — never an error for us. Capped because
+            # the only exit was `security` failing: one that keeps exiting 0
+            # (wedged, shimmed, stubbed) hung this loop for as long as it was
+            # watched. Thirty is far past any real duplicate count.
+            _kc_tries=0
+            while [ "$_kc_tries" -lt 30 ] &&
+                security delete-generic-password -s worthless -a "$acct" >/dev/null 2>&1; do
+                _kc_tries=$((_kc_tries + 1))
+            done
+            [ "$_kc_tries" -lt 30 ] || warn "Stopped after 30 keychain deletions; some entries may remain."
             ;;
         linux)
             if command -v secret-tool >/dev/null 2>&1; then
@@ -185,13 +371,16 @@ list_affected_envs() {
 }
 
 remove_tool() {
-    if command -v uv >/dev/null 2>&1; then
-        uv tool uninstall worthless >/dev/null 2>&1 || true
+    # Same bounded resolution as installed_worthless: a planted manager here
+    # runs as the user too, and `uninstall worthless` is not an argv you want
+    # an attacker choosing the binary for.
+    if _rt_uv="$(resolve_manager uv)"; then
+        PATH="$MANAGER_PATH" "$_rt_uv" tool uninstall worthless >/dev/null 2>&1 || true
     fi
     # Legacy: a pipx-installed worthless (install.sh refuses to coexist, but an
     # older box may have one). Best-effort.
-    if command -v pipx >/dev/null 2>&1; then
-        pipx uninstall worthless >/dev/null 2>&1 || true
+    if _rt_pipx="$(resolve_manager pipx)"; then
+        PATH="$MANAGER_PATH" "$_rt_pipx" uninstall worthless >/dev/null 2>&1 || true
     fi
 }
 
@@ -199,26 +388,221 @@ remove_tool() {
 
 # Tier 1: the binary runs → let it do the real work (restore keys, then wipe),
 # and we just remove the installed tool afterwards.
+# Ask each installer where IT put the tool. PATH is not an answer: an older
+# Homebrew or pip copy earlier on PATH knows nothing about this install, so
+# delegating to it restores no keys, exits 0, and costs the user the only
+# program that could have unscrambled their shards (WOR-597). pipx is asked as
+# well as uv — `pipx install worthless` is a documented path, and sending those
+# users to the tier 2 wipe would delete ~/.worthless and the keychain entry
+# while a program that could have restored their keys sat on disk.
+_usable_worthless() {
+    [ -n "${1:-}" ] && [ -f "${1}/worthless" ] && [ -x "${1}/worthless" ]
+}
+
+# Resolve a package manager from bounded absolute paths, the way install.sh
+# resolves uv — never by name. The lockdown above appends the caller's PATH
+# after our own directories, so `command -v uv` still selects a planted uv on a
+# box that has no real one. And a manager we trust to say WHERE our binary
+# lives is a manager we trust to name a binary we then run with
+# `uninstall --yes`: the same substitution as a shadowing `worthless`, one
+# level up. WORTHLESS_TRUST_PATH=1 is the test harness's sandbox escape, same
+# contract as install.sh's resolve_uv.
+resolve_manager() {
+    if [ "${WORTHLESS_TRUST_PATH:-}" = "1" ]; then
+        command -v "$1" 2>/dev/null && return 0
+        return 1
+    fi
+    _rm_home="${HOME:-/root}"
+    [ "$_rm_home" = "/" ] && _rm_home=/root
+    for _rm_d in "$_rm_home/.local/bin" "$_rm_home/.cargo/bin" /usr/bin /bin /usr/local/bin /opt/homebrew/bin; do
+        [ -x "${_rm_d}/$1" ] && { printf '%s' "${_rm_d}/$1"; return 0; }
+    done
+    return 1
+}
+
+installed_worthless() {
+    # UV_TOOL_BIN_DIR, XDG_BIN_HOME and PIPX_BIN_DIR are scrubbed at the top of
+    # this script, so these answers come from the installers' own defaults. An
+    # earlier version consulted those variables when the default turned up
+    # nothing — which is precisely when an attacker-set value would have been
+    # obeyed, so the guard only held where it was not needed.
+    if _iw_uv="$(resolve_manager uv)"; then
+        _iw_dir="$(PATH="$MANAGER_PATH" "$_iw_uv" tool dir --bin 2>/dev/null || true)"
+        if _usable_worthless "${_iw_dir:-}"; then
+            printf '%s' "${_iw_dir}/worthless"
+            return 0
+        fi
+    fi
+    if _iw_pipx="$(resolve_manager pipx)"; then
+        _iw_dir="$(PATH="$MANAGER_PATH" "$_iw_pipx" environment --value PIPX_BIN_DIR 2>/dev/null || true)"
+        if _usable_worthless "${_iw_dir:-}"; then
+            printf '%s' "${_iw_dir}/worthless"
+            return 0
+        fi
+    fi
+    return 1
+}
+
 tier1_delegate() {
-    command -v worthless >/dev/null 2>&1 || return 1
-    worthless --version >/dev/null 2>&1 || return 1
-    info "Found a working 'worthless' — using it to restore your keys first."
-    if worthless uninstall --yes; then
+    # No authoritative answer means no delegation: tier 2 wipes and says plainly
+    # that the keys could not be restored. A wrong "restored" claim is worse.
+    _tier1_bin="$(installed_worthless)" || return 1
+    if ! "$_tier1_bin" --version >/dev/null 2>&1; then
+        BROKEN_BIN=1
+        # Our own install, but it does not run (a Python upgrade, a half-done
+        # upgrade). Reinstalling it can still restore the keys; a wipe cannot.
+        # So with keys possibly locked, stop — and don't call it a stranger's copy.
+        [ "$FORCE" = "1" ] && return 1
+        keys_may_be_locked || return 1
+        printf "\n" >&2
+        warn "Your installed 'worthless' does not run:"
+        warn "  $(show_path "$_tier1_bin")"
+        warn "Nothing was deleted; any locked keys are still locked. Reinstall it, then run"
+        warn "this again — it will try to restore your keys first. Or wipe now and lose them:"
+        refuse_exit
+    fi
+    # Name the file we are about to hand `uninstall --yes` to. Nothing should
+    # be able to redirect this now that the location vars are scrubbed, so the
+    # line is a check on that claim rather than a caveat about it.
+    info "Restoring your keys with the installed 'worthless' first:"
+    info "  $(show_path "$_tier1_bin")"
+    # Was there anything for the CLI to restore? Sampled BEFORE it runs, because
+    # it removes the home and the keystore entry on the way out. Exit 0 with
+    # nothing locked ("Nothing to uninstall", "0 .env file(s) restored") is not
+    # a restore — reading it as one told users with dead keys they were fine.
+    # Found by running the real CLI in a container; no stubbed test could see it.
+    _tier1_keys="$(key_state)"
+    [ "$_tier1_keys" = "unreadable" ] && _tier1_keys=unknown
+    # Locked, but none in a .env: enroll-only keys, which the CLI deletes and
+    # tells the user to rotate. Agree with it rather than claim a restore.
+    [ "$_tier1_keys" = "locked" ] && [ "$(locked_key_count env)" = 0 ] && _tier1_keys=stranded
+
+    _tier1_status=0
+    "$_tier1_bin" uninstall --yes || _tier1_status=$?
+
+    if [ "$_tier1_status" -eq 0 ]; then
         remove_tool
         printf "\n"
-        ok "Done. Worthless removed; your real keys were restored to your .env files."
+        say_removed
+        # Exit 0 means every .env restore succeeded. Enroll-only keys (no .env)
+        # are deleted instead, and the CLI says so above — hence "in a .env file".
+        if [ "$_tier1_keys" = "locked" ]; then
+            ok "Every key it had locked in a .env file is restored."
+        else
+            say_key_verdict "$_tier1_keys"
+        fi
         exit 0
     fi
-    warn "'worthless uninstall' did not finish cleanly — falling back to a best-effort wipe."
-    return 1
+
+    # 73: every key came back; only the OpenClaw undo fell short. The CLI wipes
+    # ONLY after every .env restore succeeds — a failed restore aborts with exit
+    # 1 and wipes nothing — so it raises 73 after a complete restore, when
+    # reverting the OpenClaw provider config did not fully finish.
+    #
+    # An earlier version of this branch read 73 as "could not restore every
+    # .env" and told the user to rotate. That is WOR-597's own failure class:
+    # telling someone to rotate keys that were just put back. The tool still
+    # has to go, and "nothing was deleted" would be false — the wipe happened.
+    if [ "$_tier1_status" -eq "$EXIT_TOOL_PARTIAL" ]; then
+        remove_tool
+        printf "\n"
+        say_removed
+        ok "Every key it had locked in a .env file is restored."
+        warn "Undoing the OpenClaw provider config did not fully finish — see above."
+        warn "Check your OpenClaw config for providers that still point at Worthless."
+        printf "\n  Docs: %s\n" "$UNINSTALL_DOCS_URL" >&2
+        exit "$EXIT_TOOL_PARTIAL"
+    fi
+
+    # Anything else: it ran and declined. The program is the only thing that can
+    # tell a recoverable install from a broken one, and it refuses rather than
+    # destroy shards it could still unscramble (a busy database, an IPC blip, or
+    # a Ctrl+C). Wiping here would delete the key and the database the restore
+    # needs, turning a recoverable install into an unrecoverable one — the exact
+    # outcome it refused to cause. Leave it alone unless the user insists.
+    if [ "$FORCE" = "1" ]; then
+        warn "'worthless uninstall' exited ${_tier1_status} — --force given, wiping anyway."
+        return 1
+    fi
+    printf "\n" >&2
+    if [ "$_tier1_status" -eq 130 ]; then
+        warn "'worthless uninstall' was interrupted, so it stopped rather than destroy anything."
+    else
+        warn "'worthless uninstall' declined (exit ${_tier1_status}), so this script stopped too."
+    fi
+    # Not "still restorable": the CLI also declines when the keys are already
+    # dead (a lost Fernet key), and says so above. Don't contradict it.
+    warn "Nothing was deleted here. Its reason is printed above."
+    warn "Fix that and run this again, or wipe anyway (any key still locked is then lost for good):"
+    refuse_exit
+}
+
+# Between the tiers: neither uv nor pipx admits to installing worthless, yet
+# some `worthless` answers PATH. It may well be the user's install in a custom
+# bin dir (install.sh honours UV_TOOL_BIN_DIR; this script scrubs it, so we
+# cannot see it), or it may be a stale copy of unknown provenance. We will not
+# execute it to find out, and wiping would destroy keys it could still restore.
+# So: stop, and hand the decision to the person who can tell the difference.
+# Returns 1 when there is nothing on PATH, letting tier 2 wipe as before.
+refuse_unverified_copy() {
+    [ "$FORCE" = "1" ] && return 1
+    _ruc="$(command -v worthless 2>/dev/null)" || return 1
+    keys_may_be_locked || return 1
+    printf "\n" >&2
+    warn "A 'worthless' answers on your PATH, but neither uv nor pipx installed it,"
+    warn "so this script cannot tell your install from a leftover copy — and it will"
+    warn "not run an unknown one. Nothing was deleted; any locked keys are still locked."
+    warn "The copy on your PATH is:"
+    warn "  $(show_path "$_ruc")"
+    warn "If that is the one you installed, restore your keys with it, then run this again:"
+    printf "    worthless uninstall --yes\n" >&2
+    warn "Or wipe now and leave the keys locked (you would have to rotate them):"
+    refuse_exit
 }
 
 # Tier 2: no working binary → wipe what a script safely can, and be honest that
 # the keys cannot be restored.
 tier2_wipe() {
-    warn "No working 'worthless' binary found."
-    warn "A plain script can't unscramble your split keys — only the program can — so"
-    warn "your real keys can't be restored here. Wiping the leftovers anyway."
+    # What do we actually KNOW about the user's keys? Three answers:
+    #
+    #   stranded    keys are locked here and this script cannot unscramble them,
+    #               or the keystore entry survives a missing home (an rm -rf).
+    #               The keys are lost; say so and say rotate.
+    #   unreadable  a home we are about to wipe, whose locked keys we could not
+    #               count. Say rotate-if-any, not "you're done".
+    #   unknown     anything else (see key_state). Asserting either "lost" or
+    #               "fine" would be false for some of these users, so we say
+    #               we cannot tell.
+    #
+    # This is WOR-597's own failure class from both sides: telling someone to
+    # rotate keys they just recovered costs money and trust; staying quiet over
+    # keys that are dead costs them the keys. Only claim what we know.
+    #
+    # Sampled BEFORE delete_keychain_entry runs, or the answer is always "gone".
+    _t2_keys="$(key_state)"
+    [ "$_t2_keys" = "locked" ] && _t2_keys=stranded
+
+    # Three ways in, and they are not the same sentence. Saying "none found"
+    # when a copy answers on PATH — we simply refused to trust it — is untrue.
+    if [ "$FORCE" = "1" ]; then
+        warn "Wiping without restoring your keys (--force)."
+    elif [ "$BROKEN_BIN" = "1" ]; then
+        warn "Your installed 'worthless' does not run, so it could not restore anything."
+    elif command -v worthless >/dev/null 2>&1; then
+        warn "The 'worthless' on your PATH could not be verified, so it was not run."
+    else
+        warn "No working 'worthless' binary found."
+    fi
+
+    case "$_t2_keys" in
+        stranded)
+            warn "A plain script can't unscramble your split keys — only the program can — so"
+            warn "your real keys can't be restored here. Wiping the leftovers anyway."
+            ;;
+        *)
+            warn "Clearing the leftovers."
+            ;;
+    esac
     printf "\n"
 
     envs="$(list_affected_envs || true)"
@@ -234,9 +618,10 @@ tier2_wipe() {
             "Delete it manually:  rm -rf ${WORTHLESS_HOME_DIR}"
     fi
 
-    ok "Worthless removed from this machine."
+    say_removed
     printf "\n"
-    warn "Your real API keys could NOT be restored automatically — rotate them at your provider."
+    # Only claim what _t2_keys says we know — see its comment at the top.
+    say_key_verdict "$_t2_keys"
     if [ -n "${envs:-}" ]; then
         printf "\n  These .env files still hold an inert key half (rotate the keys they used):\n" >&2
         printf '%s\n' "$envs" | sed 's/^/    /' >&2
@@ -258,7 +643,7 @@ main() {
     printf "\n"
     detect_os
     confirm
-    tier1_delegate || tier2_wipe
+    tier1_delegate || refuse_unverified_copy || tier2_wipe
 }
 
 OS=""
