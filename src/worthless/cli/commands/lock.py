@@ -3183,24 +3183,39 @@ def _offer_question(port: int, home: WorthlessHome) -> str:
     about 15 s after the last WSL terminal closes. So WSL is told in the
     question, before answering it.
 
-    "Starts when you log in", never "survives a restart": that is what the
-    unit is configured to do, while reboot survival is still unproven (WOR-725).
+    Say when it starts, never "survives a restart": that is what the unit is
+    configured to do, while reboot survival is still unproven (WOR-725).
+
+    systemd enables lingering, which starts the user manager at BOOT, not at
+    login, and `service uninstall` deliberately leaves it on (worthless-fzas).
+    Uninstall also leaves the key file. The question says both up front:
+    consent given before the irreversible step, not in a banner after it.
+
+    typer.confirm prints plain text, so the terminal does the wrapping. Every
+    line is kept under ~80 columns by hand (PR #673 review).
     """
+    systemd_extra = ""
     if current_platform_backend_name() == "launchd":
         adds = "a macOS login item that starts Worthless when you log in"
         unit = launchd.plist_path()
     else:
-        adds = "a systemd user service that starts Worthless when you log in"
         unit = systemd.unit_path()
+        if is_wsl():
+            adds = "a systemd user service that starts with this WSL distro"
+        else:
+            adds = "a systemd user service that starts Worthless when this computer\n"
+            adds += "                 starts (it turns on lingering for your account)"
+        systemd_extra = "                 then `loginctl disable-linger` if nothing else needs it\n"
     if is_wsl():
         headline = (
-            "\nInstall a background service for Worthless? On WSL it still stops about "
-            "15 seconds after your last WSL terminal closes, unless you also set "
-            "instanceIdleTimeout=-1 in %USERPROFILE%\\.wslconfig — shown next if you say yes."
+            "\nInstall a background service for Worthless?\n"
+            "On WSL it still stops about 15 seconds after your last WSL terminal\n"
+            "closes, unless you also set instanceIdleTimeout=-1 in\n"
+            "%USERPROFILE%\\.wslconfig (shown next if you say yes)."
         )
     else:
         headline = (
-            "\nInstall a background service so Worthless keeps protecting your keys "
+            "\nInstall a background service so Worthless keeps protecting your keys\n"
             "after this terminal closes?"
         )
     return (
@@ -3208,8 +3223,9 @@ def _offer_question(port: int, home: WorthlessHome) -> str:
         f"  What it adds:  {adds}\n"
         f"                 {_tilde(unit)}\n"
         "  Trade-off:     your master key is kept in a file only you can read\n"
-        f"                 ({_tilde(home.base_dir / 'fernet.key')}), so it can start without you\n"
-        "  Undo anytime:  worthless service uninstall\n"
+        f"                 ({_tilde(home.fernet_key_path)}), so it can start without you\n"
+        "  Undo anytime:  worthless service uninstall (the key file stays)\n"
+        f"{systemd_extra}"
         "  Not sure what a background service is? Say no. Your keys stay locked\n"
         "  either way; you just run `worthless up` when you need the proxy.\n"
         f"Install the background service on port {port}?"

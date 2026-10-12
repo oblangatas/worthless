@@ -123,7 +123,7 @@ def test_plain_worthless_asks_explicitly_and_no_installs_nothing(tmp_path: Path)
             f"plain `worthless` never asked about the background service:\n{text}"
         )
         assert "What it adds:" in text
-        assert "starts Worthless when you log in" in text
+        assert "starts Worthless" in text
         assert "fernet.key" in text, "the master-key trade-off must be in the question"
         assert "worthless service uninstall" in text, "the undo must be in the question"
         assert "Say no" in text

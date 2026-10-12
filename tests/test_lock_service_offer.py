@@ -534,7 +534,14 @@ class TestTheQuestionIsExplicit:
     to that one line turns every assertion here red.
     """
 
-    def _ask(self, console: WorthlessConsole, *, backend: str, on_wsl: bool = False) -> str:
+    def _ask(
+        self,
+        console: WorthlessConsole,
+        *,
+        backend: str,
+        on_wsl: bool = False,
+        key_path: Path | None = None,
+    ) -> str:
         with (
             patch(
                 "worthless.cli.commands.lock.current_platform_backend_name", return_value=backend
@@ -547,7 +554,7 @@ class TestTheQuestionIsExplicit:
         ):
             b.return_value.detect_status.return_value = MagicMock(state=ServiceState.NOT_INSTALLED)
             home = _home()
-            home.base_dir = Path.home() / ".worthless"
+            home.fernet_key_path = key_path or Path.home() / ".worthless" / "fernet.key"
             _offer_service_after_lock(console, home=home, port=8787)
         return confirm.call_args.args[0]
 
@@ -560,13 +567,48 @@ class TestTheQuestionIsExplicit:
     ) -> None:
         question = self._ask(console, backend=backend)
         assert unit_name in question, "the user must see the file being added"
-        assert "starts Worthless when you log in" in question
+        assert "starts Worthless" in question
         assert "fernet.key" in question, "the master-key file is the trade-off"
-        assert "worthless service uninstall" in question
+        assert "worthless service uninstall (the key file stays)" in question
         assert "Say no" in question
 
     def test_mac_wording_says_login_item(self, console: WorthlessConsole) -> None:
-        assert "macOS login item" in self._ask(console, backend="launchd")
+        question = self._ask(console, backend="launchd")
+        assert "macOS login item" in question
+        assert "when you log in" in question
+        assert "linger" not in question, "launchd has no lingering"
+
+    def test_linux_is_told_about_lingering_before_answering(
+        self, console: WorthlessConsole
+    ) -> None:
+        """Lingering starts it at boot and outlives uninstall (worthless-fzas).
+
+        It used to be said only in the banner AFTER install. Saying "when you
+        log in" here was false on systemd (PR #673 review).
+        """
+        question = self._ask(console, backend="systemd")
+        assert "when this computer" in question
+        assert "lingering" in question
+        assert "loginctl disable-linger" in question
+        assert "when you log in" not in question
+
+    def test_a_moved_key_file_is_shown_where_it_really_is(
+        self, console: WorthlessConsole, tmp_path: Path
+    ) -> None:
+        """WORTHLESS_FERNET_KEY_PATH moves the file; the question must follow it."""
+        moved = tmp_path / "elsewhere" / "my.key"
+        assert str(moved) in self._ask(console, backend="launchd", key_path=moved)
+
+    @pytest.mark.parametrize(
+        ("backend", "on_wsl"), [("launchd", False), ("systemd", False), ("systemd", True)]
+    )
+    def test_every_line_fits_an_80_column_terminal(
+        self, console: WorthlessConsole, backend: str, on_wsl: bool
+    ) -> None:
+        """typer.confirm prints plain text; the terminal wraps it mid-word otherwise."""
+        question = self._ask(console, backend=backend, on_wsl=on_wsl)
+        too_long = [line for line in question.splitlines() if len(line) > 80]
+        assert not too_long, too_long
 
     def test_never_claims_restart_survival(self, console: WorthlessConsole) -> None:
         """Reboot survival is unproven (WOR-725); say what the unit does, not more."""
