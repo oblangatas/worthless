@@ -1269,7 +1269,7 @@ class TestScanAgreesWithLockOnOAuthTokens:
         low = self._flat(result).lower()
 
         assert result.exit_code == 0, low
-        assert "is in your git history" in low, low
+        assert "older commits hold a copy of" in low, low
         assert f"commit {leaked}" in low, low
         assert "revoke" in low, low
         data = json.loads(runner.invoke(app, ["scan", str(env), "--json"]).stdout)
@@ -1389,6 +1389,45 @@ class TestScanAgreesWithLockOnOAuthTokens:
 
         assert finding.committed_before == renamed
 
+    def test_a_git_timeout_on_the_history_check_just_skips_the_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The history check only adds a warning. If git hangs there, the
+        # verdict must stay "local" (exit 0), with no warning and no error.
+        env = self._env(tmp_path, self._oauth("87rb-timeout"))
+        real_run = subprocess.run
+
+        def slow_log(cmd, **kwargs):  # noqa: ANN001, ANN202
+            if "log" in cmd:
+                raise subprocess.TimeoutExpired(cmd, 10)
+            return real_run(cmd, **kwargs)
+
+        _git_commit(env.parent, ".env")
+        _git_in(env.parent, "rm", "-q", "--cached", ".env")
+        _git_in(env.parent, "commit", "-q", "-m", "untrack")
+        monkeypatch.setattr(scanner_mod.subprocess, "run", slow_log)
+
+        [finding] = scan_files([env])
+
+        assert finding.exposure is None, finding
+        assert finding.committed_before is None, finding
+
+    def test_quiet_still_prints_the_history_warning(self, tmp_path: Path) -> None:
+        # --quiet keeps the passing note (it is the one thing the user can't
+        # learn otherwise), and the history line is part of it.
+        env = self._env(tmp_path, self._oauth("87rb-quiet"))
+        _git_commit(env.parent, ".env")
+        leaked = _git_in(env.parent, "rev-parse", "--short", "HEAD")
+        _git_in(env.parent, "rm", "-q", "--cached", ".env")
+        _git_in(env.parent, "commit", "-q", "-m", "untrack")
+
+        result = runner.invoke(app, ["--quiet", "scan", str(env)])
+        low = self._flat(result).lower()
+
+        assert result.exit_code == 0, low
+        assert f"older commits hold a copy of {str(env).lower()}" in low, low
+        assert f"commit {leaked}" in low, low
+
     def test_a_stash_only_copy_is_not_called_history(self, tmp_path: Path) -> None:
         # `git stash -u` keeps the .env in a local stash, which is never pushed.
         # Calling that "your git history" and saying revoke would be noise.
@@ -1418,7 +1457,7 @@ class TestScanAgreesWithLockOnOAuthTokens:
         low = self._flat(result).lower()
 
         assert result.exit_code == 0, low
-        assert "git history" not in low, low
+        assert "older commits hold a copy" not in low, low
         data = json.loads(runner.invoke(app, ["scan", str(env), "--json"]).stdout)
         assert "committed_before" not in data["findings"][0], data
 

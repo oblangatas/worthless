@@ -879,19 +879,20 @@ class TestDefaultCommandOAuthOnlyEnv:
         git = ["git", "-C", str(tmp_path), "-c", "user.email=t@t", "-c", "user.name=t"]
         git += ["-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"]
         subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)  # noqa: S607
-        for step in (
-            ["add", ".env"],
-            ["commit", "-q", "-m", "x"],
-            ["rm", "-q", "--cached", ".env"],
-        ):
-            subprocess.run([*git, *step], check=True)  # noqa: S603
+        subprocess.run([*git, "add", ".env"], check=True)  # noqa: S603
+        subprocess.run([*git, "commit", "-q", "-m", "x"], check=True)  # noqa: S603
+        leaked = subprocess.run(  # noqa: S603
+            [*git, "rev-parse", "--short", "HEAD"], check=True, capture_output=True, text=True
+        ).stdout.strip()
+        subprocess.run([*git, "rm", "-q", "--cached", ".env"], check=True)  # noqa: S603
         subprocess.run([*git, "commit", "-q", "-m", "untrack"], check=True)  # noqa: S603
 
         result = _invoke_default({"WORTHLESS_HOME": str(home_dir.base_dir)})
         low = " ".join((result.stdout + result.stderr).split()).lower()
 
         assert result.exit_code == 0, low
-        assert "is in your git history" in low, low
+        assert "older commits hold a copy of" in low, low
+        assert f"commit {leaked}" in low, low
         assert "committed to git" not in low, low
 
     def test_mixed_env_locks_the_real_key_and_reports_done(

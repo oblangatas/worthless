@@ -340,6 +340,8 @@ def _committed_before(path: Path) -> str | None:
     """Short hash of the newest commit, on any branch or tag, that added or
     changed *path*, or None. It only adds a warning, so if git can't say, it
     says nothing."""
+    if not _has_git_above(path):
+        return None  # no repo, so no history; saves a git process per hook run
     try:
         # -m: without it git skips merge commits and the side of a merge (a
         # merged, deleted branch). --full-history is git's documented switch
