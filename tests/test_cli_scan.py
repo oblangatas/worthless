@@ -1428,6 +1428,39 @@ class TestScanAgreesWithLockOnOAuthTokens:
         assert pasted.returncode == 0, pasted.stderr
         assert leaked in pasted.stdout, pasted.stdout
 
+    def test_the_printed_check_shows_a_merged_then_deleted_branch_copy(
+        self, tmp_path: Path
+    ) -> None:
+        # The lookup walks merges; the command it tells the user to run must
+        # too, or following the hint shows nothing for the commit just named.
+        repo = tmp_path / "proj"
+        repo.mkdir()
+        (repo / "README").write_text("x\n")
+        _git_commit(repo, "README")
+        _git_in(repo, "checkout", "-q", "-b", "feat")
+        (repo / ".env").write_text(f"{self._oauth('87rb-hint-merge')}\n")
+        _git_in(repo, "add", ".env")
+        _git_in(repo, "commit", "-q", "-m", "leak")
+        _git_in(repo, "rm", "-q", "--cached", ".env")
+        _git_in(repo, "commit", "-q", "-m", "untrack")
+        _git_in(repo, "checkout", "-q", "-")
+        _git_in(repo, "merge", "-q", "--no-ff", "-m", "merge", "feat")
+        _git_in(repo, "branch", "-q", "-D", "feat")
+
+        [finding] = scan_files([repo / ".env"])
+        cmd = re.search(r"To check, run `([^`]+)`", scanner_mod.remediation_for(finding) or "")
+
+        assert cmd, finding
+        assert finding.committed_before
+        shown = subprocess.run(  # noqa: S603
+            ["sh", "-c", cmd.group(1)],  # noqa: S607
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert finding.committed_before in shown.stdout, shown.stdout
+
     def test_the_printed_untrack_command_is_safe_to_paste(self, tmp_path: Path) -> None:
         # Same for PR 667's committed advice: `git rm --cached <file>`.
         repo = tmp_path / "a;touch PWNED;b"
