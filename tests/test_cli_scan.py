@@ -1368,6 +1368,27 @@ class TestScanAgreesWithLockOnOAuthTokens:
 
         assert finding.committed_before == leaked
 
+    @pytest.mark.parametrize("follow", ["false", "true"], ids=["plain", "log-follow"])
+    def test_a_copy_that_arrived_by_rename_is_warned_about(
+        self, tmp_path: Path, follow: str
+    ) -> None:
+        # `git mv secrets.txt .env`: the .env came into being by a rename, and
+        # log.follow=true (a user's config) makes git report it as one.
+        repo = tmp_path / "proj"
+        repo.mkdir()
+        (repo / "secrets.txt").write_text(f"{self._oauth('87rb-rename')}\n")
+        _git_commit(repo, "secrets.txt")
+        _git_in(repo, "mv", "secrets.txt", ".env")
+        _git_in(repo, "commit", "-q", "-m", "rename")
+        renamed = _git_in(repo, "rev-parse", "--short", "HEAD")
+        _git_in(repo, "rm", "-q", "--cached", ".env")
+        _git_in(repo, "commit", "-q", "-m", "untrack")
+        _git_in(repo, "config", "log.follow", follow)
+
+        [finding] = scan_files([repo / ".env"])
+
+        assert finding.committed_before == renamed
+
     def test_a_stash_only_copy_is_not_called_history(self, tmp_path: Path) -> None:
         # `git stash -u` keeps the .env in a local stash, which is never pushed.
         # Calling that "your git history" and saying revoke would be noise.

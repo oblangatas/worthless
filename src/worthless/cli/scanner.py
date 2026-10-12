@@ -345,13 +345,16 @@ def _committed_before(path: Path) -> str | None:
         # merged, deleted branch). --full-history is git's documented switch
         # for that side walk; -m happens to do it too today. showRoot:
         # a user's log.showRoot=false would hide a .env added in the first
-        # commit. --exclude=refs/stash: a stash is local, never pushed.
+        # commit. log.follow=false: a user's log.follow=true would follow a
+        # `git mv x .env` back to x and name x's commit, not .env's.
+        # --exclude=refs/stash: a stash is local, never pushed.
         # --no-show-signature: the repo's own log.showSignature would make git
         # run its gpg.program on a signed commit.
         # ponytail: when the .env was never committed this walks all history
         # (~1 s at 72k commits); past the 10 s git timeout there's no warning.
         result = _git(
-            path, "-c", "log.showRoot=true", "log", "--full-history", "-m",
+            path, "-c", "log.showRoot=true", "-c", "log.follow=false",
+            "log", "--full-history", "-m",
             "--exclude=refs/stash", "--all", "-1", "--diff-filter=AM",
             "--format=%h", "--no-show-signature", "--", path.name,
         )  # fmt: skip
