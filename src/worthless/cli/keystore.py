@@ -299,6 +299,11 @@ def _write_key_file(key: bytes | bytearray, home_dir: Path | None) -> None:
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(str(fernet_path), flags, 0o600)
     try:
+        # O_CREAT's mode only applies to a NEW file — truncating an existing
+        # 0644 file kept it world-readable with the live key inside (the
+        # launchd sync did exactly that). Pin 0600 on every write.
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)
         os.write(fd, key)
     finally:
         os.close(fd)

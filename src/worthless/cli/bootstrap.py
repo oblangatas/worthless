@@ -559,6 +559,17 @@ def _seed_cache_from_advisory_source(home: WorthlessHome) -> None:
     try:
         key = read_fernet_key_from_file(home.base_dir)
     except WorthlessError as exc:
+        if exc.code is ErrorCode.KEY_REFUSED and keyring_available():
+            # worthless-6hu7: a stale, wrong-mode fernet.key next to a working
+            # keychain key must not lock out every command. The refusal exists
+            # to stop the file being REPLACED, not to block an install whose
+            # real key is in the keychain. Leave the file alone and let the
+            # lazy fetch use the keychain; if the keychain is empty, that read
+            # refuses on its own, so nothing is minted over the file.
+            logger.warning(
+                "ignoring a fernet.key we refuse to read; using the keychain. %s", exc.message
+            )
+            return
         if exc.code != ErrorCode.KEY_NOT_FOUND:
             raise
         logger.debug(

@@ -1270,3 +1270,86 @@ class TestUninstallDoesNotWipeARefusedKey:
 
         out = capsys.readouterr()
         assert "--force" in out.out + out.err
+
+
+class TestStrictContainerModeEndToEnd:
+    """worthless-6hu7, the bead's own scenario: WORTHLESS_FERNET_IPC_ONLY=1.
+
+    Under the container's strict mode only 0o400 is accepted, so a key at
+    0o600 — perfectly normal anywhere else — is refused. Before the fix that
+    refusal read as "no key" and ensure_home minted over it. This drives the
+    real bootstrap, not the validator alone.
+    """
+
+    @pytest.mark.parametrize("mode", [0o600, 0o644, 0o440])
+    def test_fresh_home_never_replaces_a_refused_key(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: int
+    ) -> None:
+        monkeypatch.setenv("WORTHLESS_FERNET_IPC_ONLY", "1")
+        monkeypatch.setenv("WORTHLESS_KEYRING_BACKEND", "null")
+        monkeypatch.delenv("WORTHLESS_SIDECAR_SOCKET", raising=False)
+        base = tmp_path / ".worthless"
+        base.mkdir(mode=0o700)
+        key = base / "fernet.key"
+        key.write_bytes(b"ORIGINAL-STRICT-MODE-KEY")
+        key.chmod(mode)
+
+        with pytest.raises(WorthlessError) as excinfo:
+            ensure_home(base_dir=base)
+
+        assert excinfo.value.code is ErrorCode.KEY_REFUSED
+        assert "chmod 0400" in excinfo.value.message
+        assert key.read_bytes() == b"ORIGINAL-STRICT-MODE-KEY", "must not mint over it"
+
+
+class TestStaleFileDoesNotLockOutAWorkingKeychain:
+    """worthless-6hu7 / brutus: the refusal must stop REPLACEMENT, not lock users out.
+
+    A stale fernet.key at the wrong mode next to a healthy keychain key used to
+    fall through to the keychain. KEY_REFUSED made it escape ensure_home, so
+    every command — lock, up, scan, uninstall --force — failed with WRTLS-121
+    for an install whose real key was fine.
+    """
+
+    def test_keychain_key_wins_and_the_stale_file_is_left_alone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        good = b"GOOD-KEYCHAIN-KEY-good-keychain-key-0123456789="
+        base = tmp_path / ".worthless"
+        base.mkdir(mode=0o700)
+        (base / ".bootstrapped").write_text("")
+        stale = base / "fernet.key"
+        stale.write_bytes(b"STALE-FILE")
+        stale.chmod(0o644)  # refused
+        monkeypatch.delenv("WORTHLESS_KEYRING_BACKEND", raising=False)
+        monkeypatch.delenv("WORTHLESS_FERNET_KEY", raising=False)
+        monkeypatch.delenv("WORTHLESS_SERVICE_MANAGED", raising=False)
+        for target in ("worthless.cli.keystore", "worthless.cli.bootstrap"):
+            monkeypatch.setattr(f"{target}.keyring_available", lambda: True)
+        monkeypatch.setattr(
+            "worthless.cli.keystore.keyring.get_password", lambda *_a, **_k: good.decode()
+        )
+
+        home = ensure_home(base_dir=base)
+
+        assert bytes(home.fernet_key) == good, "the working keychain key must be used"
+        assert stale.read_bytes() == b"STALE-FILE", "the stale file is left exactly as it was"
+
+
+class TestKeyWritesAreAlwaysOwnerOnly:
+    """brutus: O_CREAT's mode only applies to new files; truncation kept 0644."""
+
+    def test_rewriting_a_loose_file_ends_at_0600(self, tmp_path: Path) -> None:
+        from worthless.cli.keystore import _write_key_file
+
+        home = tmp_path / ".worthless"
+        home.mkdir(mode=0o700)
+        key = home / "fernet.key"
+        key.write_bytes(b"old")
+        key.chmod(0o644)
+
+        _write_key_file(b"new-key", home)
+
+        assert stat.S_IMODE(key.stat().st_mode) == 0o600, (
+            "a written key must never stay world-readable"
+        )
