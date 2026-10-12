@@ -32,11 +32,18 @@ FIX_PHRASE = "worthless doctor --fix"
 # Advice for a key whose ``.env`` is missing. Never call it "safe": removing a
 # git worktree deletes its gitignored ``.env``, and Shard A with it. Never send
 # the user to ``uninstall``: it wipes every key it can't restore, not just this
-# one. ``revoke --alias`` removes exactly one key.
+# one. And ``revoke --alias`` is not "just this one" either: the same key locked
+# in two projects (a worktree's copy of the main repo's ``.env``) shares one
+# alias, and revoke deletes it in both. Offer it only when no other copy lives.
 MOVED_FIX_PHRASE = "Moved it? Put the project back at the path shown, then run `worthless unlock`"
 DELETED_FIX_PHRASE = (
-    "Removed it (`git worktree remove` takes its `.env` with it)? Then that key "
-    "is gone, and `worthless revoke --alias {alias}` removes it"
+    "Removed it (`git worktree remove` takes its `.env` with it)? Then that copy is "
+    "gone. If no other project uses the same key, `worthless revoke --alias {alias}` "
+    "removes it — revoke removes a key everywhere it is locked"
+)
+SHARED_KEY_PHRASE = (
+    "Removed it? Leave this record: the same key is still locked at {other} and "
+    "works there, and removing the key by its alias would break that copy too"
 )
 
 

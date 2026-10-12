@@ -14,6 +14,7 @@ embeds the test name and ``"orphan"`` matched any path-echoing error.
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 
@@ -335,6 +336,33 @@ class TestDoctorKeepsMovedEnv:
         summary = check["summary"]
         assert "uninstall" not in summary or "remove worthless entirely" in summary.lower(), check
         assert check["fixable"] is False, "--fix has nothing to do for a moved key"
+
+    def test_shared_key_advice_never_offers_revoke(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """A worktree usually holds a copy of the main repo's .env, so one key is
+        locked twice under one alias. `revoke --alias` deletes the key in BOTH
+        places. With the other copy still alive, doctor must never offer it."""
+        main_env = tmp_path / "main" / ".env"
+        wt_env = tmp_path / "wt" / ".env"
+        for env in (main_env, wt_env):
+            env.parent.mkdir()
+            env.write_text(f"OPENAI_API_KEY={TEST_OPENAI_KEY}\n")
+            lock_env(env, home_dir)
+        shutil.rmtree(wt_env.parent)  # what `git worktree remove` does
+
+        doc = json.loads(cli_invoke(["doctor", "--json"], home_dir).stdout)
+        check = next(c for c in doc["checks"] if c["check_id"] == "orphan_db")
+        (finding,) = check["findings"]
+        assert "revoke" not in finding["remediation"], finding
+        assert str(main_env) in finding["remediation"], finding
+
+        text = self._flat(cli_invoke(["doctor"], home_dir).output)
+        assert "no other project" in text, text
+
+        unlocked = cli_invoke(["unlock", "--env", str(main_env)], home_dir)
+        assert unlocked.exit_code == 0, unlocked.output
+        assert dotenv_value(main_env, "OPENAI_API_KEY") == TEST_OPENAI_KEY
 
     def test_text_advice_for_missing_env_points_to_revoke_not_uninstall(
         self, home_dir: WorthlessHome, env_file: Path, tmp_path: Path
