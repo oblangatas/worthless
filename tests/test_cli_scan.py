@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -49,6 +50,17 @@ def _git_commit(repo: Path, name: str) -> None:
     subprocess.run(  # noqa: S607
         [*git, *cfg, "-c", "core.hooksPath=/dev/null", "commit", "-q", "-m", "x"], check=True
     )
+
+
+def _git_in(repo: Path, *args: str) -> str:
+    """Run one hermetic git command in *repo*; return its stdout."""
+    cfg = ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"]
+    return subprocess.run(
+        ["git", "-C", str(repo), *cfg, "-c", "core.hooksPath=/dev/null", *args],  # noqa: S607
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -1240,6 +1252,387 @@ class TestScanAgreesWithLockOnOAuthTokens:
         sarif = json.loads(runner.invoke(app, ["scan", str(env), "--format", "sarif"]).stdout)
         [res] = sarif["runs"][0]["results"]
         assert res["level"] == "error", res
+
+    def test_a_token_only_older_commits_hold_passes_with_a_history_warning(
+        self, tmp_path: Path
+    ) -> None:
+        # worthless-87rb. Untracked, and the untracking committed: the index
+        # and the latest commit are clean, but an older commit still holds the
+        # token. It passes (failing on history would stay red forever after a
+        # revoke), but it must say so and name the commit.
+        env = self._env(tmp_path, self._oauth("87rb-history"))
+        _git_commit(env.parent, ".env")
+        leaked = _git_in(env.parent, "rev-parse", "--short", "HEAD")
+        _git_in(env.parent, "rm", "-q", "--cached", ".env")
+        _git_in(env.parent, "commit", "-q", "-m", "untrack")
+
+        result = runner.invoke(app, ["scan", str(env)])
+        low = self._flat(result).lower()
+
+        assert result.exit_code == 0, low
+        assert "older commits hold a copy of" in low, low
+        assert f"commit {leaked}" in low, low
+        assert "revoke" in low, low
+        data = json.loads(runner.invoke(app, ["scan", str(env), "--json"]).stdout)
+        [finding] = data["findings"]
+        assert finding["exposure"] == "local", finding
+        assert finding["committed_before"] == leaked, finding
+        assert leaked in finding["remediation"], finding
+        sarif = json.loads(runner.invoke(app, ["scan", str(env), "--format", "sarif"]).stdout)
+        [res] = sarif["runs"][0]["results"]
+        assert res["level"] == "note", res
+        assert leaked in res["message"]["text"], res
+
+    def test_a_copy_on_another_branch_is_warned_about(self, tmp_path: Path) -> None:
+        # Committed on another branch (maybe pushed) while this branch never
+        # tracked it: every branch's history counts, not just this one's.
+        repo = tmp_path / "proj"
+        repo.mkdir()
+        (repo / "README").write_text("x\n")
+        _git_commit(repo, "README")
+        _git_in(repo, "checkout", "-q", "-b", "leak")
+        env = repo / ".env"
+        env.write_text(f"{self._oauth('87rb-branch')}\n")
+        _git_in(repo, "add", ".env")
+        _git_in(repo, "commit", "-q", "-m", "leak")
+        leaked = _git_in(repo, "rev-parse", "--short", "HEAD")
+        _git_in(repo, "checkout", "-q", "-")
+        env.write_text(f"{self._oauth('87rb-branch')}\n")  # the checkout removed it
+
+        [finding] = scan_files([env])
+
+        assert finding.is_unshardable is True
+        assert finding.committed_before == leaked
+
+    def test_a_copy_on_a_merged_then_deleted_branch_is_warned_about(self, tmp_path: Path) -> None:
+        # A branch committed the .env, untracked it, was merged with a merge
+        # commit and deleted. Git's default history simplification follows
+        # only the first parent there, so it would never look at that branch.
+        repo = tmp_path / "proj"
+        repo.mkdir()
+        (repo / "README").write_text("x\n")
+        _git_commit(repo, "README")
+        _git_in(repo, "checkout", "-q", "-b", "feat")
+        env = repo / ".env"
+        env.write_text(f"{self._oauth('87rb-merged')}\n")
+        _git_in(repo, "add", ".env")
+        _git_in(repo, "commit", "-q", "-m", "leak")
+        leaked = _git_in(repo, "rev-parse", "--short", "HEAD")
+        _git_in(repo, "rm", "-q", "--cached", ".env")
+        _git_in(repo, "commit", "-q", "-m", "untrack")
+        _git_in(repo, "checkout", "-q", "-")
+        _git_in(repo, "merge", "-q", "--no-ff", "-m", "merge", "feat")
+        _git_in(repo, "branch", "-q", "-D", "feat")
+
+        [finding] = scan_files([env])
+
+        assert finding.is_unshardable is True
+        assert finding.committed_before == leaked
+
+    def test_a_copy_only_a_merge_commit_added_is_warned_about(self, tmp_path: Path) -> None:
+        # The .env arrived in the merge commit itself (added while resolving),
+        # so no ordinary commit ever added it.
+        repo = tmp_path / "proj"
+        repo.mkdir()
+        (repo / "README").write_text("x\n")
+        _git_commit(repo, "README")
+        _git_in(repo, "checkout", "-q", "-b", "side")
+        (repo / "other").write_text("y\n")
+        _git_in(repo, "add", "other")
+        _git_in(repo, "commit", "-q", "-m", "side")
+        _git_in(repo, "checkout", "-q", "-")
+        _git_in(repo, "merge", "-q", "--no-ff", "--no-commit", "side")
+        env = repo / ".env"
+        env.write_text(f"{self._oauth('87rb-in-merge')}\n")
+        _git_in(repo, "add", ".env")
+        _git_in(repo, "commit", "-q", "-m", "merge")
+        merged = _git_in(repo, "rev-parse", "--short", "HEAD")
+        _git_in(repo, "rm", "-q", "--cached", ".env")
+        _git_in(repo, "commit", "-q", "-m", "untrack")
+
+        [finding] = scan_files([env])
+
+        assert finding.committed_before == merged
+
+    def test_a_root_commit_copy_is_warned_about_whatever_the_config(self, tmp_path: Path) -> None:
+        # The classic leak is `git add .` in the very first commit. A user's
+        # (or repo's) log.showRoot=false would hide that commit's diff, and
+        # with it the warning.
+        env = self._env(tmp_path, self._oauth("87rb-root"))
+        _git_commit(env.parent, ".env")
+        leaked = _git_in(env.parent, "rev-parse", "--short", "HEAD")
+        _git_in(env.parent, "rm", "-q", "--cached", ".env")
+        _git_in(env.parent, "commit", "-q", "-m", "untrack")
+        _git_in(env.parent, "config", "log.showRoot", "false")
+
+        [finding] = scan_files([env])
+
+        assert finding.committed_before == leaked
+
+    @pytest.mark.parametrize("follow", ["false", "true"], ids=["plain", "log-follow"])
+    def test_a_copy_that_arrived_by_rename_is_warned_about(
+        self, tmp_path: Path, follow: str
+    ) -> None:
+        # `git mv secrets.txt .env`: the .env came into being by a rename, and
+        # log.follow=true (a user's config) makes git report it as one.
+        repo = tmp_path / "proj"
+        repo.mkdir()
+        (repo / "secrets.txt").write_text(f"{self._oauth('87rb-rename')}\n")
+        _git_commit(repo, "secrets.txt")
+        _git_in(repo, "mv", "secrets.txt", ".env")
+        _git_in(repo, "commit", "-q", "-m", "rename")
+        renamed = _git_in(repo, "rev-parse", "--short", "HEAD")
+        _git_in(repo, "rm", "-q", "--cached", ".env")
+        _git_in(repo, "commit", "-q", "-m", "untrack")
+        _git_in(repo, "config", "log.follow", follow)
+
+        [finding] = scan_files([repo / ".env"])
+
+        assert finding.committed_before == renamed
+
+    @staticmethod
+    def _committed_then_untracked(repo: Path, line: str) -> str:
+        """A .env committed, then untracked and that committed; returns the
+        short hash of the commit that added it."""
+        repo.mkdir(parents=True)
+        (repo / ".env").write_text(f"{line}\n")
+        _git_commit(repo, ".env")
+        leaked = _git_in(repo, "rev-parse", "--short", "HEAD")
+        _git_in(repo, "rm", "-q", "--cached", ".env")
+        _git_in(repo, "commit", "-q", "-m", "untrack")
+        return leaked
+
+    @pytest.mark.parametrize(
+        "folder",
+        ["My Project", "a;touch PWNED;b", "$(touch PWNED)"],
+        ids=["space", "semi", "subst"],
+    )
+    def test_the_printed_history_check_is_safe_to_paste(self, tmp_path: Path, folder: str) -> None:
+        # The note prints a shell command built from the scanned path, and the
+        # folder name is whatever the repo says. Pasted as printed, it must
+        # show the history and run nothing else.
+        leaked = self._committed_then_untracked(tmp_path / folder, self._oauth("87rb-paste"))
+
+        [finding] = scan_files([tmp_path / folder / ".env"])
+        cmd = re.search(r"To check, run `([^`]+)`", scanner_mod.remediation_for(finding) or "")
+
+        assert cmd, finding
+        pasted = subprocess.run(  # noqa: S603
+            ["sh", "-c", cmd.group(1)],  # noqa: S607
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert not (tmp_path / "PWNED").exists(), cmd.group(1)
+        assert pasted.returncode == 0, pasted.stderr
+        assert leaked in pasted.stdout, pasted.stdout
+
+    def test_the_printed_check_shows_a_merged_then_deleted_branch_copy(
+        self, tmp_path: Path
+    ) -> None:
+        # The lookup walks merges; the command it tells the user to run must
+        # too, or following the hint shows nothing for the commit just named.
+        repo = tmp_path / "proj"
+        repo.mkdir()
+        (repo / "README").write_text("x\n")
+        _git_commit(repo, "README")
+        _git_in(repo, "checkout", "-q", "-b", "feat")
+        (repo / ".env").write_text(f"{self._oauth('87rb-hint-merge')}\n")
+        _git_in(repo, "add", ".env")
+        _git_in(repo, "commit", "-q", "-m", "leak")
+        _git_in(repo, "rm", "-q", "--cached", ".env")
+        _git_in(repo, "commit", "-q", "-m", "untrack")
+        _git_in(repo, "checkout", "-q", "-")
+        _git_in(repo, "merge", "-q", "--no-ff", "-m", "merge", "feat")
+        _git_in(repo, "branch", "-q", "-D", "feat")
+
+        [finding] = scan_files([repo / ".env"])
+        cmd = re.search(r"To check, run `([^`]+)`", scanner_mod.remediation_for(finding) or "")
+
+        assert cmd, finding
+        assert finding.committed_before
+        shown = subprocess.run(  # noqa: S603
+            ["sh", "-c", cmd.group(1)],  # noqa: S607
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert finding.committed_before in shown.stdout, shown.stdout
+
+    def test_the_printed_untrack_command_is_safe_to_paste(self, tmp_path: Path) -> None:
+        # Same for PR 667's committed advice: `git rm --cached <file>`.
+        repo = tmp_path / "a;touch PWNED;b"
+        repo.mkdir()
+        env = repo / ".env"
+        env.write_text(f"{self._oauth('87rb-paste-rm')}\n")
+        _git_commit(repo, ".env")
+
+        [finding] = scan_files([env])
+        cmd = re.search(
+            r"\(`(git rm --cached [^`]+)`\)", scanner_mod.remediation_for(finding) or ""
+        )
+
+        assert cmd, finding
+        pasted = subprocess.run(  # noqa: S603
+            ["sh", "-c", cmd.group(1)],  # noqa: S607
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert not (repo / "PWNED").exists(), cmd.group(1)
+        assert pasted.returncode == 0, pasted.stderr
+        assert _git_in(repo, "ls-files", ".env") == "", "the pasted command didn't untrack it"
+
+    def test_a_merge_commit_copy_is_found_whatever_diff_merges_says(self, tmp_path: Path) -> None:
+        # A user's log.diffMerges=off quietly cancels `-m`.
+        repo = tmp_path / "proj"
+        repo.mkdir()
+        (repo / "README").write_text("x\n")
+        _git_commit(repo, "README")
+        _git_in(repo, "checkout", "-q", "-b", "side")
+        (repo / "other").write_text("y\n")
+        _git_in(repo, "add", "other")
+        _git_in(repo, "commit", "-q", "-m", "side")
+        _git_in(repo, "checkout", "-q", "-")
+        _git_in(repo, "merge", "-q", "--no-ff", "--no-commit", "side")
+        (repo / ".env").write_text(f"{self._oauth('87rb-diffmerges')}\n")
+        _git_in(repo, "add", ".env")
+        _git_in(repo, "commit", "-q", "-m", "merge")
+        merged = _git_in(repo, "rev-parse", "--short", "HEAD")
+        _git_in(repo, "rm", "-q", "--cached", ".env")
+        _git_in(repo, "commit", "-q", "-m", "untrack")
+        _git_in(repo, "config", "log.diffMerges", "off")
+
+        [finding] = scan_files([repo / ".env"])
+
+        assert finding.committed_before == merged
+
+    def test_the_hash_survives_an_odd_log_encoding(self, tmp_path: Path) -> None:
+        # i18n.logOutputEncoding re-encodes git log's output; the hash must
+        # still come out as plain hex.
+        leaked = self._committed_then_untracked(tmp_path / "proj", self._oauth("87rb-utf16"))
+        _git_in(tmp_path / "proj", "config", "i18n.logOutputEncoding", "UTF-16")
+
+        [finding] = scan_files([tmp_path / "proj" / ".env"])
+
+        assert finding.committed_before == leaked
+
+    def test_a_git_timeout_on_the_history_check_just_skips_the_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The history check only adds a warning. If git hangs there, the
+        # verdict must stay "local" (exit 0), with no warning and no error.
+        env = self._env(tmp_path, self._oauth("87rb-timeout"))
+        real_run = subprocess.run
+
+        def slow_log(cmd, **kwargs):  # noqa: ANN001, ANN202
+            if "log" in cmd:
+                raise subprocess.TimeoutExpired(cmd, 10)
+            return real_run(cmd, **kwargs)
+
+        _git_commit(env.parent, ".env")
+        _git_in(env.parent, "rm", "-q", "--cached", ".env")
+        _git_in(env.parent, "commit", "-q", "-m", "untrack")
+        monkeypatch.setattr(scanner_mod.subprocess, "run", slow_log)
+
+        [finding] = scan_files([env])
+
+        assert finding.exposure is None, finding
+        assert finding.committed_before is None, finding
+
+    def test_quiet_still_prints_the_history_warning(self, tmp_path: Path) -> None:
+        # --quiet keeps the passing note (it is the one thing the user can't
+        # learn otherwise), and the history line is part of it.
+        env = self._env(tmp_path, self._oauth("87rb-quiet"))
+        _git_commit(env.parent, ".env")
+        leaked = _git_in(env.parent, "rev-parse", "--short", "HEAD")
+        _git_in(env.parent, "rm", "-q", "--cached", ".env")
+        _git_in(env.parent, "commit", "-q", "-m", "untrack")
+
+        result = runner.invoke(app, ["--quiet", "scan", str(env)])
+        low = self._flat(result).lower()
+
+        assert result.exit_code == 0, low
+        assert f"older commits hold a copy of {str(env).lower()}" in low, low
+        assert f"commit {leaked}" in low, low
+
+    def test_a_stash_only_copy_is_not_called_history(self, tmp_path: Path) -> None:
+        # `git stash -u` keeps the .env in a local stash, which is never pushed.
+        # Calling that "your git history" and saying revoke would be noise.
+        repo = tmp_path / "proj"
+        repo.mkdir()
+        (repo / "README").write_text("x\n")
+        _git_commit(repo, "README")
+        env = repo / ".env"
+        env.write_text(f"{self._oauth('87rb-stash')}\n")
+        _git_in(repo, "stash", "push", "-q", "-u")
+        env.write_text(f"{self._oauth('87rb-stash')}\n")
+
+        [finding] = scan_files([env])
+
+        assert finding.is_unshardable is True
+        assert finding.committed_before is None, finding
+
+    def test_an_env_never_committed_gets_no_history_warning(self, tmp_path: Path) -> None:
+        repo = tmp_path / "proj"
+        repo.mkdir()
+        (repo / "README").write_text("x\n")
+        _git_commit(repo, "README")
+        env = repo / ".env"
+        env.write_text(f"{self._oauth('87rb-clean')}\n")
+
+        result = runner.invoke(app, ["scan", str(env)])
+        low = self._flat(result).lower()
+
+        assert result.exit_code == 0, low
+        assert "older commits hold a copy" not in low, low
+        data = json.loads(runner.invoke(app, ["scan", str(env), "--json"]).stdout)
+        assert "committed_before" not in data["findings"][0], data
+
+    def test_the_history_check_never_runs_a_folders_gpg_program(self, tmp_path: Path) -> None:
+        # `git log` checks commit signatures when the repo's config says
+        # log.showSignature=true, by running its gpg.program. A scanned
+        # folder's own config must not get to run one.
+        env = self._env(tmp_path, self._oauth("87rb-gpg"))
+        repo = env.parent
+        signer = tmp_path / "sign.sh"
+        signer.write_text(
+            "#!/bin/sh\ncat >/dev/null\n"
+            "printf -- '-----BEGIN PGP SIGNATURE-----\\nZmFrZQ==\\n"
+            "-----END PGP SIGNATURE-----\\n'\n"
+            "printf '\\n[GNUPG:] SIG_CREATED D 1 8 00 0 0\\n' >&2\n"
+        )
+        signer.chmod(0o755)
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)  # noqa: S607
+        _git_in(repo, "add", ".env")
+        _git_in(
+            repo,
+            "-c",
+            f"gpg.program={signer}",
+            "-c",
+            "user.signingkey=x",
+            "commit",
+            "-q",
+            "-S",
+            "-m",
+            "s",
+        )
+        _git_in(repo, "rm", "-q", "--cached", ".env")
+        _git_in(repo, "commit", "-q", "-m", "untrack")
+        marker = tmp_path / "gpg-ran"
+        verifier = tmp_path / "verify.sh"
+        verifier.write_text(f"#!/bin/sh\ntouch '{marker}'\nexit 1\n")
+        verifier.chmod(0o755)
+        _git_in(repo, "config", "log.showSignature", "true")
+        _git_in(repo, "config", "gpg.program", str(verifier))
+
+        [finding] = scan_files([env])
+
+        assert finding.committed_before, finding  # the history check did run
+        assert not marker.exists()
 
     def test_a_mixed_committed_env_headline_doesnt_send_the_token_to_lock(
         self, tmp_path: Path

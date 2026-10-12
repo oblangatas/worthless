@@ -88,6 +88,15 @@ UNSHARDABLE_REMEDY = (
     "Swap the token for one, or delete the line if nothing reads it."
 )
 
+# worthless-87rb: added to the passing verdict when an older commit (any
+# branch) still holds a copy of the .env. A warning, never a failure: history
+# keeps the old .env forever, even after the token is revoked and rotated.
+COMMITTED_BEFORE_NOTE = (
+    "Older commits hold a copy of {file} (newest change: commit {commit}, on some "
+    "branch or tag). Revoke any login token that was ever in it: those commits keep "
+    "it. To check, run `git -C {folder} log --all --full-history -m -p -- {name}`."
+)
+
 # The same token where it can leave the machine. Each entry names the exact
 # reason first, in plain words, then the fix for that reason. Never "run
 # worthless lock" — lock refuses these tokens wherever they sit. {file} is the

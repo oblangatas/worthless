@@ -28,7 +28,7 @@ from worthless.cli.console import get_console
 from worthless.cli.dotenv_rewriter import build_enrolled_locations, scan_env_keys
 from worthless.cli.errors import ErrorCode, WorthlessError
 from worthless.cli.key_patterns import is_oauth_token
-from worthless.cli.scanner import remedy_for_exposure, token_exposure
+from worthless.cli.scanner import remedy_for_exposure, token_facts
 from worthless.openclaw.audit import sanitise_for_message
 from worthless.cli.commands.service._common import ServiceState
 from worthless.cli.commands.service.proxy_state import ProxyRuntimeState, detect_proxy_runtime
@@ -166,8 +166,10 @@ def _run_enrollment_if_needed(
     keys = [k for k in keys if not is_oauth_token(k[1])]
     if oauth:
         names = ", ".join(sanitise_for_message(var_name) for var_name, _, _ in oauth)
-        # Same rule as scan: a .env in git (or a symlink) has left the machine.
-        remedy = remedy_for_exposure(token_exposure(env_path), env_path.name)
+        # Same rule as scan: a .env in git (or a symlink) has left the machine,
+        # and a local one an older commit still holds gets the history note.
+        exposure, committed_before = token_facts(env_path)
+        remedy = remedy_for_exposure(exposure, env_path.name, committed_before)
         console.print_warning(
             f"Can't protect {names}: a Claude Code login token, still in plain text. " + remedy
         )

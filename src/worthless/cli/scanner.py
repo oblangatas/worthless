@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import subprocess  # nosec B404
 import time
 from collections.abc import Iterator
@@ -13,6 +14,7 @@ from urllib.parse import urlparse
 
 from worthless.cli.dotenv_rewriter import shannon_entropy
 from worthless.cli.key_patterns import (
+    COMMITTED_BEFORE_NOTE,
     ENTROPY_THRESHOLD,
     KEY_PATTERN,
     EXPOSED_LOGIN_REMEDIES,
@@ -25,6 +27,7 @@ from worthless.cli.safe_rewrite import _BASENAME_ALLOWLIST
 from worthless.openclaw.audit import sanitise_for_message
 
 _VAR_NAME_RE = re.compile(r"(\w+)\s*$")
+_COMMIT_HASH = re.compile(r"[0-9a-f]{4,64}")  # what %h prints, and nothing else
 
 # Cap bytes read per file. A file larger than this is scanned up to the cap
 # (its prefix) and flagged ``truncated`` — never silently skipped. Fail-closed:
@@ -236,6 +239,9 @@ class ScanFinding:
     # Why an exposed login token can leave the machine — one key of
     # EXPOSED_LOGIN_REMEDIES. None when it stays local or isn't a token.
     exposure: str | None = None
+    # worthless-87rb: for a token that stays local, the newest commit on any
+    # branch that still holds a copy of this .env. A warning, never a failure.
+    committed_before: str | None = None
 
     @property
     def is_unshardable(self) -> bool:
@@ -332,31 +338,100 @@ def token_exposure(path: Path) -> str | None:
     return "staged" if state == "tracked" else None
 
 
-def _exposure_for(path: Path, from_env: bool, cache: dict[Path, str | None]) -> str | None:
-    """token_exposure for a login token found in *path*, asked once per file —
-    a .env with several tokens gets one git call, which keeps the pre-commit
-    hook inside its time budget. The --deep environment dump is "environment"."""
+def _committed_before(path: Path) -> str | None:
+    """Short hash of the newest commit, on any branch or tag, that added or
+    changed *path*, or None. It only adds a warning, so if git can't say, it
+    says nothing."""
+    if not _has_git_above(path):
+        # No repo, so no history. Saves a git process when scanning outside a
+        # repo, e.g. the pre-commit hook's staged copies in a temp folder.
+        return None
+    try:
+        # -m: without it git skips merge commits and the side of a merge (a
+        # merged, deleted branch). --full-history is git's documented switch
+        # for that side walk; -m happens to do it too today. The -c pins undo
+        # user config that changes the answer: log.showRoot=false hides a .env
+        # added in the first commit; log.follow=true follows `git mv x .env`
+        # back to x's commit; log.diffMerges=off cancels -m; a non-UTF-8
+        # i18n.logOutputEncoding garbles the hash.
+        # --exclude=refs/stash: a stash is local, never pushed.
+        # --no-show-signature: the repo's own log.showSignature would make git
+        # run its gpg.program on a signed commit.
+        # ponytail: when the .env was never committed this walks all history
+        # (~1 s at 72k commits); past the 10 s git timeout there's no warning.
+        result = _git(
+            path, "-c", "log.showRoot=true", "-c", "log.follow=false",
+            "-c", "log.diffMerges=separate", "-c", "i18n.logOutputEncoding=UTF-8",
+            "log", "--full-history", "-m",
+            "--exclude=refs/stash", "--all", "-1", "--diff-filter=AM",
+            "--format=%h", "--no-show-signature", "--", path.name,
+        )  # fmt: skip
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    # -m prints a merge commit once per parent; the first word is the answer,
+    # and only a plain hex hash is trusted to reach the terminal.
+    out = result.stdout.split()
+    commit = out[0].decode("ascii", errors="replace") if out else ""
+    return commit if _COMMIT_HASH.fullmatch(commit) else None
+
+
+def token_facts(path: Path) -> tuple[str | None, str | None]:
+    """(exposure, committed_before) for a login token in *path*: why it can
+    leave the machine, and, when it stays local, the newest commit that still
+    holds a copy anyway."""
+    exposure = token_exposure(path)
+    return exposure, (_committed_before(path) if exposure is None else None)
+
+
+def _exposure_for(
+    path: Path, from_env: bool, cache: dict[Path, tuple[str | None, str | None]]
+) -> tuple[str | None, str | None]:
+    """token_facts for a login token found in *path*, asked once per file —
+    a .env with several tokens gets one round of git calls, which keeps the
+    pre-commit hook inside its time budget. The --deep environment dump is
+    "environment"."""
     if from_env:
-        return "environment"
+        return "environment", None
     if path not in cache:
-        cache[path] = token_exposure(path)
+        cache[path] = token_facts(path)
     return cache[path]
 
 
-def remedy_for_exposure(exposure: str | None, file: str) -> str:
+def committed_before_note(file: str, commit: str) -> str:
+    """The history warning. The file name is attacker-controllable: sanitised
+    for the terminal, and shell-quoted where it lands in the command to paste.
+    *commit* is already a plain hex hash."""
+    path = Path(file)
+    return COMMITTED_BEFORE_NOTE.format(
+        file=sanitise_for_message(file),
+        commit=commit,
+        folder=shlex.quote(sanitise_for_message(str(path.parent))),
+        name=shlex.quote(sanitise_for_message(path.name)),
+    )
+
+
+def remedy_for_exposure(
+    exposure: str | None, file: str, committed_before: str | None = None
+) -> str:
     """The fix text for a login token: local (None) or one exposure reason.
-    *file* lands in commands like `git rm --cached <file>`; it is sanitised
-    here because a filename is attacker-controlled and this reaches a terminal."""
+    *file* lands only in commands like `git rm --cached <file>`; a filename is
+    attacker-controlled, so it is sanitised for the terminal and shell-quoted
+    so pasting the command can't run anything else.
+    A local token whose .env an older commit holds also gets the history note."""
     if exposure is None:
+        if committed_before:
+            return f"{UNSHARDABLE_REMEDY} {committed_before_note(file, committed_before)}"
         return UNSHARDABLE_REMEDY
-    return EXPOSED_LOGIN_REMEDIES[exposure].format(file=sanitise_for_message(file))
+    return EXPOSED_LOGIN_REMEDIES[exposure].format(file=shlex.quote(sanitise_for_message(file)))
 
 
 def remediation_for(f: ScanFinding) -> str | None:
     """The fix that exists for a login token — never "run worthless lock"."""
     if f.is_protected or not f.is_login_token:
         return None
-    return remedy_for_exposure(f.exposure, f.file)
+    return remedy_for_exposure(f.exposure, f.file, f.committed_before)
 
 
 def finding_to_dict(f: ScanFinding) -> dict[str, object]:
@@ -376,6 +451,8 @@ def finding_to_dict(f: ScanFinding) -> dict[str, object]:
         # Why, as data: "local" (passes) or the reason it can leave the machine.
         item["exposure"] = f.exposure or "local"
         item["remediation"] = remedy
+        if f.committed_before:
+            item["committed_before"] = f.committed_before
     return item
 
 
@@ -407,7 +484,8 @@ def scan_files(
     """
     cap = MAX_SCAN_FILE_BYTES if max_file_bytes is None else max_file_bytes
     findings: list[ScanFinding] = []
-    exposure_cache: dict[Path, str | None] = {}  # git is asked at most once per file
+    # git is asked at most once per file: (exposure, committed_before)
+    exposure_cache: dict[Path, tuple[str | None, str | None]] = {}
 
     # Deadline is checked BETWEEN files, not mid-file. A single file inside
     # ``cap`` bytes is bounded by the size cap + linear regex — slow but never
@@ -457,7 +535,9 @@ def scan_files(
                 is_protected = not token and bool(
                     enrolled_locations and var_name and (var_name, file_str) in enrolled_locations
                 )
-                exposure = _exposure_for(path, from_env, exposure_cache) if token else None
+                exposure, committed_before = (
+                    _exposure_for(path, from_env, exposure_cache) if token else (None, None)
+                )
 
                 findings.append(
                     ScanFinding(
@@ -470,6 +550,7 @@ def scan_files(
                         column=match.start(),
                         is_login_token=token,
                         exposure=exposure,
+                        committed_before=committed_before,
                     )
                 )
     return findings
