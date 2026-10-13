@@ -2016,6 +2016,14 @@ def _record_openclaw_unfinished(
     )
 
 
+def _openclaw_left_unfinished(home: WorthlessHome) -> bool:
+    """Did the last lock stop before OpenClaw setup finished? Codes: _UNFINISHED_DETAIL."""
+    sentinel = read_sentinel(home.base_dir)
+    if sentinel is None or not is_partial(sentinel):
+        return False
+    return any(e.get("code") in _UNFINISHED_DETAIL for e in sentinel.get("events") or [])
+
+
 def _openclaw_steps(
     planned: list[_PlannedUpdate],
     *,
@@ -2808,10 +2816,11 @@ def _lock_keys(
                 env_str,
             )
             if not scanned:
-                # Every key is already locked. If the last lock left OpenClaw
-                # unfinished (refused, interrupted, failed), it still is: never
-                # call that "protected" (worthless-im3x).
-                unfinished = is_partial(read_sentinel(home.base_dir))
+                # Every key is already locked. If the last lock never finished
+                # OpenClaw setup (refused or interrupted), it still hasn't: never
+                # call that "protected" (worthless-im3x). Not any partial status:
+                # a finished lock that left an entry un-adopted is partial too.
+                unfinished = _openclaw_left_unfinished(home)
                 return _LockResult(
                     total=len(raw_scanned),
                     fresh_count=0,
