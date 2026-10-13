@@ -43,6 +43,8 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import pty
+import select
 import signal
 import sqlite3
 import subprocess
@@ -1490,6 +1492,57 @@ class TestCtrlCDuringOpenclawReloadWait:
                 sig,
             )
             _assert_answered_and_kept(te, rc, sig)
+
+
+class TestTerminalClosedMidLock:
+    def test_closing_the_real_terminal_is_answered_with_129(
+        self, tmp_path: Path, proxy_port: int
+    ) -> None:
+        """worthless-v9gg, real pty: closing the terminal (the kernel's SIGHUP) mid-lock.
+
+        The lock runs on a pseudo-terminal and the terminal's master side is
+        closed in the reload wait, as when a window is closed. Every later write
+        to the dead terminal fails; Python exited 120 flushing stdout.
+        """
+        te = _make_trial_env(tmp_path, 0, n_keys=1)
+        env, calls = _with_openclaw(te, proxy_port)
+        pid, fd = pty.fork()
+        if pid == 0:  # pragma: no cover — the child execs the real CLI
+            os.chdir(str(te.repo))
+            argv = [*_cli(), "lock", "--env", str(te.env_file)]
+            os.execve(argv[0], argv, env)  # noqa: S606 — exec the real CLI, no shell
+        status = None
+        closed = False
+        deadline = time.monotonic() + WAIT_TIMEOUT
+        try:
+            while time.monotonic() < deadline:
+                if not closed:
+                    with contextlib.suppress(OSError):
+                        if select.select([fd], [], [], 0.05)[0]:
+                            os.read(fd, 65536)  # drain, or the child blocks writing
+                    if _call_count(calls, "logs") >= 1:
+                        time.sleep(0.3)
+                        os.close(fd)  # the window closes: the kernel sends SIGHUP
+                        closed = True
+                else:
+                    time.sleep(0.05)
+                wpid, st = os.waitpid(pid, os.WNOHANG)
+                if wpid == pid:
+                    status = st
+                    break
+        finally:
+            if status is None:
+                os.kill(pid, signal.SIGKILL)
+                os.waitpid(pid, 0)
+            if not closed:
+                os.close(fd)
+        assert closed, "the lock never reached the reload wait"
+        assert status is not None, "the lock outlived its closed terminal"
+        assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 129, (
+            f"status={status!r} exit={os.WEXITSTATUS(status) if os.WIFEXITED(status) else None}"
+        )
+        state = classify(te)
+        assert state.classification == "locked", state.detail
 
 
 class TestSignalDuringPreflightAudit:
