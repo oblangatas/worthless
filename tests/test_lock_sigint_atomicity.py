@@ -41,7 +41,7 @@ from typer.testing import CliRunner
 from worthless.cli.app import app
 from worthless.cli.bootstrap import WorthlessHome
 from worthless.cli.console import WorthlessConsole
-from worthless.cli.sentinel import is_partial, read_sentinel
+from worthless.cli.sentinel import is_partial, read_sentinel, write_sentinel
 
 from tests.conftest import make_repo as _repo
 from tests.helpers import fake_anthropic_key, fake_key
@@ -282,6 +282,38 @@ class TestPostflightRefusalKeepsKeys:
 
         assert again.exit_code != 0, again.output
         assert "protected" not in again.output.lower(), again.output
+
+    def test_rerun_after_declined_adoption_still_succeeds(
+        self,
+        home_dir: WorthlessHome,
+        two_key_env: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A finished lock that left an entry un-adopted is partial too, but not unfinished.
+
+        Its first run exited 0; a re-run must not turn into LOCK FAILED / 73.
+        """
+        first = _invoke_lock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
+        assert first.exit_code == 0, first.output
+        # What _apply_openclaw records when the user declines adoption.
+        write_sentinel(
+            home_dir.base_dir,
+            status="partial",
+            openclaw="failed",
+            alias_count=2,
+            events=[
+                {
+                    "code": "openclaw.provider_skipped",
+                    "level": "warn",
+                    "detail": "unrecognized_not_adopted",
+                }
+            ],
+        )
+
+        again = _invoke_lock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
+
+        assert again.exit_code == 0, again.output
 
 
 class TestDbWriteBeforeEnvRewriteOrdering:
