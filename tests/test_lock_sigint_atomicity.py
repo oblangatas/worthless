@@ -888,6 +888,26 @@ class TestNothingRollsBackAfterTheCommit:
         after()
         assert cancels == [], "a press queued for the loop cancelled AFTER the commit"
 
+    def test_press_after_commit_never_claims_a_rollback(self) -> None:
+        """Nothing rolls back after the commit any more, so a press may not say it does."""
+        import worthless.cli.commands.lock as lock_mod
+
+        notices: list[str] = []
+
+        class _Console:
+            def print_notice(self, msg: str) -> None:
+                notices.append(msg)
+
+        class _Task:
+            def cancel(self) -> None:
+                pass
+
+        after = lock_mod._LockInterrupts(_Task(), [object()], _Console())  # type: ignore[arg-type]
+        after.committed = True
+        after()
+
+        assert notices == [], f"a press after the commit claimed a rollback: {notices}"
+
     def test_crash_after_commit_keeps_the_keys(
         self,
         home_dir: WorthlessHome,
