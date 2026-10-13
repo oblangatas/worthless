@@ -1312,8 +1312,9 @@ class TestSigkillAtomicity:
 #
 # The two real places the lock went deaf to Ctrl-C, driven end to end: the
 # up-to-15s wait for OpenClaw's gateway to reload, and the unbounded wait for
-# OpenClaw's config-file lock. Both come after the keys are committed, so the
-# contract is: answer within TAIL_DEADLINE, exit 130, keys stay LOCKED.
+# worthless's own lock on openclaw.json (another worthless process holding it).
+# Both come after the keys are committed, so the contract is: answer within
+# TAIL_DEADLINE, exit 130, keys stay LOCKED.
 #
 # No ``seam``: a fake ``openclaw`` (reached only via WORTHLESS_OPENCLAW_BIN,
 # never PATH) logs each call, so the test signals once the lock has provably
@@ -1581,7 +1582,7 @@ class TestCtrlCWhileOpenclawConfigIsLocked:
     def test_ctrl_c_while_config_lock_is_held_is_answered(
         self, tmp_path: Path, proxy_port: int
     ) -> None:
-        """Ctrl-C while another process holds OpenClaw's config lock is answered."""
+        """Ctrl-C while another worthless process holds the openclaw.json lock is answered."""
         for trial in range(TAIL_TRIALS):
             te = _make_trial_env(tmp_path, trial, n_keys=1)
             env, _calls = _with_openclaw(te, proxy_port)

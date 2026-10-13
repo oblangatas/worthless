@@ -811,7 +811,7 @@ def _ctrl_c_on_write(
 
     ``worthless lock`` now lets Ctrl-C raise inside the OpenClaw steps, so a press
     can land between two provider writes, e.g. while the second one waits for
-    OpenClaw's config-file lock.
+    worthless's own lock on openclaw.json (OpenClaw itself never takes it).
     """
     from worthless.openclaw import config as config_mod
 
@@ -837,8 +837,9 @@ _TWO_PROVIDERS = [
 def test_ctrl_c_mid_write_never_overwrites_another_writers_change(
     openclaw_present: dict[str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The case this exists for: Ctrl-C while lock waits for OpenClaw's config
-    lock, held by another process that then writes. Whatever lock does on the
+    """The case this exists for: Ctrl-C while lock waits for the openclaw.json
+    lock, held by another worthless process that then writes (OpenClaw itself
+    writes without it). Whatever lock does on the
     way out, that process's change must survive. (A "restore our snapshot" here
     would erase it, and on a JSON5 file we cannot parse, write ``{}`` over it.)"""
     from worthless.openclaw import config as config_mod
