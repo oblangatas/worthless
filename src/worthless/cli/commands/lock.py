@@ -3001,9 +3001,8 @@ def _lock_keys(
             except (Exception, KeyboardInterrupt, asyncio.CancelledError) as exc:
                 # Never roll back after the commit: the rewritten .env needs these
                 # rows (worthless-im3x). _LockInterrupts' handler stays installed so
-                # a mashed Ctrl-C cannot cut the rollback short; its
-                # handler stays installed so a mashed Ctrl-C cannot cut the rollback
-                # short, and ``finally`` disarms it. The interrupt types are caught
+                # a mashed Ctrl-C cannot cut the rollback short, and ``finally``
+                # disarms it. The interrupt types are caught
                 # EXPLICITLY (not a bare ``except BaseException``) so ``SystemExit``
                 # keeps propagating. The ``isinstance`` guard below converts ONLY a
                 # genuine signal cancellation to ``KeyboardInterrupt``, leaving other

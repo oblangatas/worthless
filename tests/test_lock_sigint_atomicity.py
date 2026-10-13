@@ -280,7 +280,8 @@ class TestPostflightRefusalKeepsKeys:
 
         again = _invoke_lock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
 
-        assert again.exit_code != 0, again.output
+        assert again.exit_code == 73, again.output
+        assert "LOCK FAILED" in again.output, again.output
         assert "protected" not in again.output.lower(), again.output
 
     def test_rerun_after_declined_adoption_still_succeeds(
