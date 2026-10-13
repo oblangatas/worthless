@@ -893,7 +893,8 @@ class TestEveryInterruptIsAnswered:
 
         assert result.exit_code == 130, result.output
         assert "interrupted" in result.output.lower(), result.output
-        assert "openclaw" not in result.output.lower(), result.output
+        # Case-sensitive: the product writes "OpenClaw"; the tmp path holds this test's name.
+        assert "OpenClaw" not in result.output, result.output
         _assert_still_locked(home_dir, two_key_env, pre_sha, result.output)
         sentinel = read_sentinel(home_dir.base_dir)
         assert not is_partial(sentinel), sentinel
@@ -1116,11 +1117,13 @@ class TestNothingRollsBackAfterTheCommit:
 
         console = WorthlessConsole()
         before = lock_mod._LockInterrupts(_Task(), [], console)  # type: ignore[arg-type]
+        before.phase = lock_mod._CANCEL  # Pass-1's awaited writes
         before()
         assert cancels == [1], "first press before the commit must cancel"
 
         cancels.clear()
         after = lock_mod._LockInterrupts(_Task(), [], console)  # type: ignore[arg-type]
+        after.phase = lock_mod._CANCEL
         after.committed = True
         after()
         assert cancels == [], "a press queued for the loop cancelled AFTER the commit"

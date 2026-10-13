@@ -56,6 +56,7 @@ from worthless.cli.dotenv_rewriter import (
 )
 from worthless.cli.errors import (
     ErrorCode,
+    SignalInterrupt,
     UnsafeReason,
     UnsafeRewriteRefused,
     WorthlessError,
@@ -1889,6 +1890,8 @@ def _resolve_adoption_policy(
 
 
 _EXIT_INTERRUPTED = 130  # 128 + SIGINT: the shell's code for "stopped by Ctrl-C"
+# 128 + the signal: Ctrl-C 130, SIGTERM (docker stop) 143, closed terminal 129.
+_INTERRUPTED_EXITS = frozenset({130, 143, 129})
 _EXIT_OPENCLAW_UNFINISHED = 73  # EX_CANTCREAT, as for any partial OpenClaw failure
 _STILL_ROLLING_BACK = "Still rolling back so nothing is left half-locked. One moment."
 _INTERRUPTED = (
@@ -1897,24 +1900,33 @@ _INTERRUPTED = (
     "   Repair it:  worthless doctor\n"
     "   Roll back:  worthless unlock"
 )
+_INTERRUPTED_NO_OPENCLAW = "Interrupted. Your .env keys are locked."
+# What a signal does at each point of the lock (see _LockInterrupts).
+_RAISE, _CANCEL, _DEFER, _OFF = "raise", "cancel", "defer", "off"
 
 
 class _LockInterrupts:
-    """What SIGINT/SIGTERM do while ``_lock_keys`` is armed (WOR-646, worthless-3clz).
+    """What SIGINT, SIGTERM and SIGHUP do while ``_lock_keys`` runs (WOR-646, 3clz).
 
-    Before the commit (the ``.env`` rewrite) the first press cancels the task, so
-    the CancelledError surfaces at the next ``await`` and routes through
-    ``_compensating_unwind``. The handler stays installed through that rollback
-    (``remove_signal_handler`` would restore the default disposition, and a
-    KeyboardInterrupt mid-unwind would orphan the rows being deleted), so later
-    presses never cut it short — user ruling 2026-10-08 — but they are answered,
-    unless nothing was written yet and the lock is already on its way out.
+    Armed once, before the pre-flight audit, and moved through phases:
 
-    After the commit the rewritten ``.env`` needs those rows, so nothing may roll
-    them back: not a press (raised by :func:`_ctrl_c_raises`; this only drops the
-    copy asyncio queued), not a crash, not a refused post-flight (worthless-im3x).
-    Answers use the console's ``--quiet``-proof channels: quiet hides chatter,
-    not the answer to a key the user just pressed.
+    * ``RAISE`` — synchronous stretches with nothing to unwind or nothing that
+      may be unwound: the pre-flight audit and proxy probe (nothing written yet,
+      worthless-595v), and the OpenClaw steps after the commit. A signal raises
+      ``KeyboardInterrupt`` right there; ``signal.signal`` also makes blocking
+      calls (``flock``, ``sleep``, ``input``) return EINTR so it lands mid-call.
+    * ``CANCEL`` — Pass-1's awaited DB writes: the first signal cancels the task
+      and the rows unwind. Later presses never cut that rollback short (user
+      ruling 2026-10-08); they are answered instead.
+    * ``DEFER`` — the ``.env`` rewrite: the signal is only recorded, and answered
+      once the atomic rename is done (worthless-f1xx). A press recorded in
+      Pass-1's last synchronous stretch is answered entering this phase, while
+      the rows can still unwind.
+    * ``OFF`` — disarmed.
+
+    The exit code is ``128 + signum`` (worthless-dnp9). After the commit the
+    rewritten ``.env`` needs the rows, so nothing rolls them back (worthless-im3x).
+    Answers use the console's ``--quiet``-proof channels.
     """
 
     def __init__(
@@ -1923,65 +1935,93 @@ class _LockInterrupts:
         planned: list[_PlannedUpdate],
         console: WorthlessConsole,
     ) -> None:
-        """Start un-pressed and uncommitted; *planned* is the live list Pass-1 fills."""
+        """Start disarmed; *planned* is the live list Pass-1 fills."""
         self.task = task
         self.planned = planned
         self.console = console
-        self.pressed = False
+        self.phase = _OFF
+        self.signum: int | None = None  # the first signal received decides the exit code
+        self.answered = False
         self.committed = False
+        self.signals: list[int] = []
 
-    def __call__(self) -> None:
-        """Handle one SIGINT/SIGTERM as asyncio dispatches it (see the class docstring)."""
-        if self.task is None:
+    def arm(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Install for SIGINT, SIGTERM and SIGHUP (unless nohup ignores it).
+
+        A no-op off the main thread (the MCP tool's worker), where no signal is
+        delivered and ``add_signal_handler`` refuses (worthless-dqzj).
+        """
+        wanted = [signal.SIGINT, signal.SIGTERM]
+        if hasattr(signal, "SIGHUP") and signal.getsignal(signal.SIGHUP) is not signal.SIG_IGN:
+            wanted.append(signal.SIGHUP)
+        for sig in wanted:
+            try:
+                loop.add_signal_handler(sig, self, sig)
+            except (NotImplementedError, RuntimeError, ValueError):
+                continue  # Windows loop, or not the main thread
+            # asyncio installed a no-op Python handler; the C handler still wakes
+            # the loop, so CANCEL keeps working while this one can raise and record.
+            signal.signal(sig, self._on_raw)
+            self.signals.append(sig)
+        self.phase = _RAISE
+
+    def disarm(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Restore the default dispositions. Idempotent."""
+        self.phase = _OFF
+        while self.signals:
+            with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
+                loop.remove_signal_handler(self.signals.pop())
+
+    def _on_raw(self, signum: int, _frame: object) -> None:
+        """Python-level handler: record every signal; raise one in RAISE."""
+        if self.phase == _OFF:
             return
-        if self.pressed or self.committed:
-            # Never cancel twice, never after the commit. Before it, this runs
-            # during the rollback a first press started: answer that too. After
-            # it nothing rolls back (worthless-im3x), so say nothing.
-            if self.planned and not self.committed:
-                self.console.print_notice(_STILL_ROLLING_BACK)
-            return
-        self.pressed = True
-        self.task.cancel()
-
-
-@contextlib.contextmanager
-def _ctrl_c_raises(signals: list[int]) -> Iterator[None]:
-    """Make *signals* raise ``KeyboardInterrupt`` in synchronous code (worthless-3clz).
-
-    asyncio's handler only queues a press for the event loop, and a synchronous
-    stretch never yields to it: the press waited in the queue until the handler
-    was removed, then vanished. Where nothing is left to unwind, plain Python's
-    answer (raise right here) is the right one. ``signal.signal`` also makes
-    blocking calls (``flock``, ``sleep``, ``input``) return EINTR instead of
-    restarting, so the raise lands mid-call, not after it.
-
-    Pass only the signals asyncio actually armed: that list is empty off the
-    main thread (MCP), where ``signal.signal`` would raise and no signal arrives.
-
-    Raises at most once, so a second press cannot cut short the recovery that
-    follows the first (restoring ``openclaw.json``, writing the sentinel). It is
-    disarmed before the restore: ``signal.signal`` runs a pending handler first.
-    """
-    armed = True
-
-    def _raise(_signum: int, _frame: object) -> None:
-        """Raise KeyboardInterrupt for the first press only; later presses are ignored."""
-        nonlocal armed
-        if armed:
-            armed = False
+        if self.signum is None:
+            self.signum = signum
+        # Raise only inside the lock's own task: a KeyboardInterrupt in the event
+        # loop's internals would escape the unwind and orphan rows (WOR-646).
+        if self.phase == _RAISE and not self.answered and asyncio.current_task() is self.task:
+            self.answered = True
             raise KeyboardInterrupt
 
-    previous = {sig: signal.getsignal(sig) for sig in signals}
-    try:
-        for sig in signals:
-            signal.signal(sig, _raise)
-        yield
-    finally:
-        armed = False
-        for sig, handler in previous.items():
-            signal.signal(sig, handler)
-            signal.siginterrupt(sig, False)  # what asyncio set for its own handlers
+    def __call__(self, _signum: int = signal.SIGINT) -> None:
+        """Loop-dispatched handler: cancels during CANCEL, explains during a rollback."""
+        if self.task is None or self.phase != _CANCEL:
+            return
+        if self.answered or self.committed:  # never cancel twice, never after the commit
+            if self.planned and not self.committed:
+                with contextlib.suppress(OSError):
+                    self.console.print_notice(_STILL_ROLLING_BACK)
+            return
+        self.answered = True
+        self.task.cancel()
+
+    def enter(self, phase: str) -> None:
+        """Move to *phase*; entering RAISE or DEFER answers a signal still pending."""
+        pending = self.signum is not None and not self.answered
+        self.phase = phase
+        if pending and phase in (_RAISE, _DEFER):
+            self.answered = True
+            raise KeyboardInterrupt
+
+    def rolling_back(self) -> None:
+        """A rollback started: a press now explains instead of cancelling it (3em7)."""
+        self.answered = True
+        self.phase = _CANCEL
+
+    @contextlib.contextmanager
+    def raising(self) -> Iterator[None]:
+        """RAISE for the duration (the OpenClaw steps), then back to recording."""
+        self.enter(_RAISE)
+        try:
+            yield
+        finally:
+            self.phase = _DEFER
+
+    @property
+    def exit_code(self) -> int:
+        """``128 + signum`` of the signal that stopped the lock."""
+        return 128 + (self.signum or signal.SIGINT)
 
 
 def _exit_openclaw_failed(console, code: int) -> NoReturn:  # noqa: ANN001
@@ -1991,7 +2031,7 @@ def _exit_openclaw_failed(console, code: int) -> NoReturn:  # noqa: ANN001
     refused post-flight (87 from :func:`_openclaw_audit_postflight`) synced the
     Fernet key there; :func:`_apply_openclaw`'s failures still skip that sync.
     """
-    if code != _EXIT_INTERRUPTED:
+    if code not in _INTERRUPTED_EXITS:
         console.print_failure(
             "LOCK FAILED — .env key is split but OpenClaw integration did not complete.\n"
             "Your agent traffic is NOT gated through the Worthless proxy.\n"
@@ -2032,7 +2072,8 @@ def _openclaw_steps(
     *,
     gate: _oc_audit.AuditGateHandle | None,
     proxy_base_url: str,
-    signals: list[int],
+    interrupts: _LockInterrupts,
+    openclaw_present: bool,
     managed_aliases: set[str] | None,
     adopt: bool,
     console,  # noqa: ANN001 — Console type is opaque from this layer
@@ -2045,10 +2086,11 @@ def _openclaw_steps(
     (a subprocess, retried once), the adoption prompt, OpenClaw's config-file
     lock (unbounded) and a reload wait of up to 15s. Ctrl-C stops them, keeps
     the keys (see :class:`_LockInterrupts`), records the same partial/failed
-    sentinel as any OpenClaw failure, and exits 130.
+    sentinel as any OpenClaw failure, and exits ``128 + signum``. Without
+    OpenClaw there is nothing unfinished to report (worthless-y4fn).
     """
     try:
-        with _ctrl_c_raises(signals):
+        with interrupts.raising():
             if gate is not None:
                 try:
                     _openclaw_audit_postflight(gate, managed_aliases, proxy_base_url)
@@ -2069,13 +2111,18 @@ def _openclaw_steps(
     except (KeyboardInterrupt, typer.Abort):
         # click's confirm (the adoption prompt) turns Ctrl-C and Ctrl-D into
         # typer.Abort, a RuntimeError the caller's rollback would otherwise catch.
-        console.print_failure(_INTERRUPTED)
-        _record_openclaw_unfinished(home, planned, "openclaw.interrupted")
+        # Record first, print last: after a closed terminal (SIGHUP) the print
+        # fails, and the record and Fernet sync must not depend on it (v9gg).
+        if openclaw_present:
+            _record_openclaw_unfinished(home, planned, "openclaw.interrupted")
+        else:
+            _write_lock_sentinel(home, status="ok", openclaw="absent", alias_count=0, events=())
         # The keys ARE locked, so keep them usable by a service-run proxy. Done
-        # here, while a further press is still inert, so it cannot be skipped
-        # (before worthless-3clz the press was ignored and the lock ran on to it).
+        # here, while a further press is still inert, so it cannot be skipped.
         _sync_fernet_after_lock(home)
-        return _EXIT_INTERRUPTED
+        with contextlib.suppress(OSError):
+            console.print_failure(_INTERRUPTED if openclaw_present else _INTERRUPTED_NO_OPENCLAW)
+        return interrupts.exit_code
 
 
 def _apply_openclaw(
@@ -2873,98 +2920,57 @@ def _lock_keys(
             ]
             existing_env_keys = set(env_values.keys())
 
-            # #210 OpenClaw secrets-audit gate: pre-flight runs BEFORE any
-            # DB/.env write so blocking plaintext findings abort the lock with
-            # zero side effects (gate-before-write). Orthogonal to the
-            # sidecar-IPC repo above — placement here is load-bearing.
-            _oc_gate = _openclaw_audit_preflight(managed_aliases, oc_proxy_base_url)
-
-            # F7 (WOR-648 / WOR-621 AC5): proxy health gate, alongside the
-            # audit gate above — BEFORE any DB or .env write. Gated on
-            # ``_openclaw_integration.detect().present`` because non-OpenClaw
-            # users follow a documented ``worthless lock`` → ``worthless wrap``
-            # flow: lock writes ``*_BASE_URL`` pointing at the chosen port,
-            # then ``wrap`` binds that same port and forwards (the v0.3.4
-            # magic-moment contract, pinned by
-            # tests/user_flows/test_wrap_magic_moment.py). Requiring the proxy
-            # up at lock time would break that journey. For OpenClaw users
-            # the gate IS load-bearing: if the proxy is down, the lock
-            # would write the OpenClaw provider's baseUrl at a dead proxy
-            # and OpenClaw would route there permanently — a half-locked
-            # state that strands the key. Aborting here keeps .env, DB, and
-            # ~/.openclaw/openclaw.json byte-for-byte unchanged.
-            #
-            # KNOWN LIMITATION: ``detect()`` can false-negative on hosts
-            # that actually do have OpenClaw (foreign-owned ~/.openclaw in
-            # Docker shared-vol mode, non-standard home, container off at
-            # lock time). Tracked separately — harden detect() or add a
-            # raw-fs fallback so the gate fires even when detect() misses.
-            if _openclaw_integration.detect().present:
-                _probe_port = resolve_port(None)
-                if not check_proxy_health(_probe_port)["healthy"]:
-                    raise WorthlessError(
-                        ErrorCode.PROXY_NOT_RUNNING,
-                        f"Worthless proxy is not responding on port {_probe_port}. "
-                        "Nothing was changed — your .env, database, and "
-                        "~/.openclaw/openclaw.json are untouched. Start the proxy "
-                        "(`worthless up`) and re-run `worthless lock`.",
-                    )
-
             planned: list[_PlannedUpdate] = []
 
-            # WOR-646: arm SIGINT/SIGTERM BEFORE Pass-1's first DB write so an
-            # interrupt mid-lock unwinds the rows it already created instead of
-            # orphaning them. We use the asyncio-native ``add_signal_handler``
-            # (NOT ``signal.signal``) because we're inside ``asyncio.run``: a
-            # C-level handler would race the loop's wakeup fd and the
-            # cancellation wouldn't be seen until an unrelated wakeup — the same
-            # reason ``sidecar/__main__.py`` uses ``add_signal_handler``. The
-            # handler cancels THIS task, so a ``CancelledError`` surfaces at the
-            # next ``await`` inside the try below and is caught alongside
-            # ordinary failures, routing through ``_compensating_unwind``.
-            #
-            # On 3.11+ ``asyncio.Runner`` installs its own SIGINT handler; our
-            # ``add_signal_handler`` cleanly overrides it for the lock window
-            # and never touches SIGTERM (which the Runner ignores) — so this is
-            # the only uniform SIGINT+SIGTERM path across 3.10–3.13.
+            # WOR-646 / worthless-595v: arm SIGINT, SIGTERM and SIGHUP before the
+            # pre-flight audit, so a press there is answered (it is synchronous:
+            # on 3.11+ asyncio.Runner's own handler only cancelled the task, the
+            # audit child died and was retried, and the lock exited 87). The
+            # phases are documented on _LockInterrupts. ``finally`` disarms.
             loop = asyncio.get_running_loop()
-            this_task = asyncio.current_task()
-            installed_signals: list[int] = []
-            # Disarm happens only in ``finally``; see _LockInterrupts for why.
-            on_signal = _LockInterrupts(this_task, planned, console)
-
-            def _disarm_signals() -> None:
-                # Idempotent: pop so calling from both the except clause AND the
-                # finally (or a partial install) is a safe no-op the second time.
-                while installed_signals:
-                    sig = installed_signals.pop()
-                    try:
-                        loop.remove_signal_handler(sig)
-                    except (NotImplementedError, RuntimeError, ValueError):
-                        pass
-
-            for _sig in (signal.SIGINT, signal.SIGTERM):
-                try:
-                    loop.add_signal_handler(_sig, on_signal)
-                except (NotImplementedError, RuntimeError):
-                    # Signal-driven cancellation is unavailable here:
-                    #   * Windows ProactorEventLoop (NotImplementedError), or
-                    #   * a non-main-thread event loop (RuntimeError) — e.g. the
-                    #     MCP ``worthless_lock`` tool runs ``_lock_keys`` via
-                    #     ``run_in_executor`` (mcp/server.py).
-                    # Python delivers SIGINT/SIGTERM ONLY to the process main
-                    # thread, so a worker-thread lock receives NO interrupt at all
-                    # — it is NOT true that "default SIGINT → KeyboardInterrupt
-                    # still applies" off the main thread. On these paths
-                    # crash-safety rests on the atomic Pass-1 transaction
-                    # (WOR-646 Part 2), not the signal handler. Real mid-lock
-                    # interrupt safety for the MCP path is tracked in worthless-dqzj.
-                    # Record only the signals that actually installed so cleanup
-                    # can't leak a handler when one of the two raises.
-                    continue
-                installed_signals.append(_sig)
+            on_signal = _LockInterrupts(asyncio.current_task(), planned, console)
+            on_signal.arm(loop)
 
             try:
+                # #210 OpenClaw secrets-audit gate: pre-flight runs BEFORE any
+                # DB/.env write so blocking plaintext findings abort the lock with
+                # zero side effects (gate-before-write). Orthogonal to the
+                # sidecar-IPC repo above — placement here is load-bearing.
+                _oc_gate = _openclaw_audit_preflight(managed_aliases, oc_proxy_base_url)
+
+                # F7 (WOR-648 / WOR-621 AC5): proxy health gate, alongside the
+                # audit gate above — BEFORE any DB or .env write. Gated on
+                # ``_openclaw_integration.detect().present`` because non-OpenClaw
+                # users follow a documented ``worthless lock`` → ``worthless wrap``
+                # flow: lock writes ``*_BASE_URL`` pointing at the chosen port,
+                # then ``wrap`` binds that same port and forwards (the v0.3.4
+                # magic-moment contract, pinned by
+                # tests/user_flows/test_wrap_magic_moment.py). Requiring the proxy
+                # up at lock time would break that journey. For OpenClaw users
+                # the gate IS load-bearing: if the proxy is down, the lock
+                # would write the OpenClaw provider's baseUrl at a dead proxy
+                # and OpenClaw would route there permanently — a half-locked
+                # state that strands the key. Aborting here keeps .env, DB, and
+                # ~/.openclaw/openclaw.json byte-for-byte unchanged.
+                #
+                # KNOWN LIMITATION: ``detect()`` can false-negative on hosts
+                # that actually do have OpenClaw (foreign-owned ~/.openclaw in
+                # Docker shared-vol mode, non-standard home, container off at
+                # lock time). Tracked separately — harden detect() or add a
+                # raw-fs fallback so the gate fires even when detect() misses.
+                oc_present = _openclaw_integration.detect().present
+                if oc_present:
+                    _probe_port = resolve_port(None)
+                    if not check_proxy_health(_probe_port)["healthy"]:
+                        raise WorthlessError(
+                            ErrorCode.PROXY_NOT_RUNNING,
+                            f"Worthless proxy is not responding on port {_probe_port}. "
+                            "Nothing was changed — your .env, database, and "
+                            "~/.openclaw/openclaw.json are untouched. Start the proxy "
+                            "(`worthless up`) and re-run `worthless lock`.",
+                        )
+
+                on_signal.enter(_CANCEL)  # Pass-1 awaits: a press cancels and unwinds
                 if not quiet:
                     # HF2 UX: name the keys so the user knows exactly which env
                     # vars are being touched — prior "Protecting N key(s)..."
@@ -2976,6 +2982,10 @@ def _lock_keys(
                 await _pass1_db_writes(
                     repo, candidates, env_str, token_budget_daily, planned, env_values
                 )
+                # A press after Pass-1's last await was never dispatched: answer it
+                # now, while the rows can still unwind. Then record-only until the
+                # rename is done (worthless-f1xx).
+                on_signal.enter(_DEFER)
                 if not planned:
                     return _LockResult(
                         total=0,
@@ -2995,7 +3005,8 @@ def _lock_keys(
                     planned,
                     gate=_oc_gate,
                     proxy_base_url=oc_proxy_base_url,
-                    signals=installed_signals,
+                    interrupts=on_signal,
+                    openclaw_present=oc_present,
                     managed_aliases=managed_aliases,
                     adopt=adopt,
                     console=console,
@@ -3019,23 +3030,23 @@ def _lock_keys(
                 # genuine signal cancellation to ``KeyboardInterrupt``, leaving other
                 # exit codes (``typer.Exit`` 73/87, ``WorthlessError``) intact.
                 if planned and not on_signal.committed:
+                    on_signal.rolling_back()  # a press now explains, never cancels (3em7)
                     unwind_errors = await _compensating_unwind(repo, planned)
                     if unwind_errors:
                         console.print_warning(
                             f"Database may contain {len(unwind_errors)} stale row(s); "
                             "run `worthless unlock --all` to reconcile."
                         )
-                if isinstance(exc, asyncio.CancelledError):
-                    # Surface the signal-driven cancellation as a conventional
-                    # interrupt so the CLI exits cleanly instead of dumping an
-                    # asyncio ``CancelledError`` traceback — ``error_boundary``
-                    # handles ``Exception`` but not ``BaseException``.
-                    raise KeyboardInterrupt from None
+                if isinstance(exc, asyncio.CancelledError | KeyboardInterrupt):
+                    # Surface a signal as a conventional interrupt carrying its
+                    # number, so error_boundary exits 128 + signum (dnp9) instead
+                    # of dumping an asyncio ``CancelledError`` traceback.
+                    raise SignalInterrupt(on_signal.signum or signal.SIGINT) from None
                 raise
             finally:
                 # Idempotent backstop: removes handlers on the paths the except
                 # clause never runs (success, or an uncaught ``typer.Exit``).
-                _disarm_signals()
+                on_signal.disarm(loop)
                 for p in planned:
                     p.zero()
 
@@ -3059,7 +3070,7 @@ def _lock_keys(
             home.base_dir,
             openclaw_failed=bool(result.openclaw_exit),
             oauth_skipped=result.oauth_skipped,
-            interrupted=result.openclaw_exit == _EXIT_INTERRUPTED,
+            interrupted=result.openclaw_exit in _INTERRUPTED_EXITS,
         )
         # WOR-853: same guard as the "Next:" hint above — only offer when the
         # lock actually succeeded. A partial failure has no business installing
