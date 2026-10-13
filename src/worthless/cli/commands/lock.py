@@ -1889,7 +1889,6 @@ def _resolve_adoption_policy(
     return AdoptionPolicy(managed_aliases=managed_aliases, adopt_unrecognized=decision)
 
 
-_EXIT_INTERRUPTED = 130  # 128 + SIGINT: the shell's code for "stopped by Ctrl-C"
 # 128 + the signal: Ctrl-C 130, SIGTERM (docker stop) 143, closed terminal 129.
 _INTERRUPTED_EXITS = frozenset({130, 143, 129})
 _EXIT_OPENCLAW_UNFINISHED = 73  # EX_CANTCREAT, as for any partial OpenClaw failure
@@ -1903,6 +1902,24 @@ _INTERRUPTED = (
 _INTERRUPTED_NO_OPENCLAW = "Interrupted. Your .env keys are locked."
 # What a signal does at each point of the lock (see _LockInterrupts).
 _RAISE, _CANCEL, _DEFER, _OFF = "raise", "cancel", "defer", "off"
+
+
+def _leave_dead_terminal() -> None:
+    """The terminal hung up: send output to /dev/null instead (worthless-v9gg).
+
+    Every later write to a closed terminal fails with EIO, down to Python's own
+    stdout flush at exit, which turned the 129 into 120. Only real terminals are
+    swapped, so captured or redirected output is left alone.
+    """
+    ttys = [fd for fd in (1, 2) if os.isatty(fd)]
+    if not ttys:
+        return
+    null = os.open(os.devnull, os.O_WRONLY)
+    try:
+        for fd in ttys:
+            os.dup2(null, fd)
+    finally:
+        os.close(null)
 
 
 class _LockInterrupts:
@@ -1978,6 +1995,8 @@ class _LockInterrupts:
         """Python-level handler: record every signal; raise one in RAISE."""
         if self.phase == _OFF:
             return
+        if signum == getattr(signal, "SIGHUP", None):
+            _leave_dead_terminal()
         if self.signum is None:
             self.signum = signum
         # Raise only inside the lock's own task: a KeyboardInterrupt in the event
@@ -3033,9 +3052,9 @@ def _lock_keys(
                 # a mashed Ctrl-C cannot cut the rollback short, and ``finally``
                 # disarms it. The interrupt types are caught
                 # EXPLICITLY (not a bare ``except BaseException``) so ``SystemExit``
-                # keeps propagating. The ``isinstance`` guard below converts ONLY a
-                # genuine signal cancellation to ``KeyboardInterrupt``, leaving other
-                # exit codes (``typer.Exit`` 73/87, ``WorthlessError``) intact.
+                # keeps propagating. A signal (a cancel or a raise) leaves as
+                # ``SignalInterrupt(signum)``; other exit codes (``typer.Exit``
+                # 73/87, ``WorthlessError``) pass through intact.
                 if planned and not on_signal.committed:
                     on_signal.rolling_back()  # a press now explains, never cancels (3em7)
                     unwind_errors = await _compensating_unwind(repo, planned)
@@ -3051,8 +3070,7 @@ def _lock_keys(
                     raise SignalInterrupt(on_signal.signum or signal.SIGINT) from None
                 raise
             finally:
-                # Idempotent backstop: removes handlers on the paths the except
-                # clause never runs (success, or an uncaught ``typer.Exit``).
+                # The only disarm, and it comes after the wipe.
                 for p in planned:
                     p.zero()  # before disarming: a late press cannot skip the wipe
                 on_signal.disarm(loop)
