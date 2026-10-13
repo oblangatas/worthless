@@ -4,6 +4,14 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Fixed
+- **An interrupted `worthless lock` never leaves OpenClaw half-switched, and never erases your OpenClaw config** (`worthless-2nta`, `worthless-1jfr`). A Ctrl-C between two OpenClaw provider writes left one provider on the Worthless proxy and the next one not; now this lock's own entries are put back to what they were before the lock. Only entries that still point at this lock's proxy are touched, so a change someone else made in the meantime is kept, and a re-lock keeps its new key. Separately, when `openclaw.json` could not be read before the lock and a later write failed, the rollback wrote `{}` over the whole file, erasing every provider you had; now an unreadable file is left as it is and `worthless doctor` is suggested. And a Ctrl-C or failed rename while the OpenClaw skill was being reinstalled deleted the installed skill until the next lock; the old skill now stays in place until the new one has moved in.
+
+  **What this does NOT fix.**
+  - The legacy-layout clean-up that runs before the provider writes (removing an old `worthless-<provider>` entry) is not undone on Ctrl-C.
+  - `kill -9` or a power cut mid-write is not undone.
+  - OpenClaw writes its own config without any lock, so a write by OpenClaw in the same instant can still race any worthless read-modify-write.
+
 ## [0.3.14] — 2026-10-13
 
 ### Fixed
@@ -88,7 +96,7 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - The `--pre-commit` hook still blocks a staged token, because a commit writes it into history for good. In that mode `--format sarif` and `--json` still mark the token as a `note` while the hook exits 1.
   - Only Claude Code tokens in the files scan reads. OpenClaw's other unshardable credential stores are `worthless doctor`'s job, not scan's.
 
-- **Ctrl-C stops `worthless lock`'s OpenClaw setup at once, and never costs you your keys** (found while chasing `worthless-3clz`, [#668](https://github.com/oblangatas/worthless/pull/668)). Once the keys were committed, the rest of the lock was synchronous OpenClaw work, so Ctrl-C was dropped: for 15s during the reload wait, and forever while another process held OpenClaw's config file. Now Ctrl-C stops there in under a second and keeps the keys locked. It warns that OpenClaw may still be using the real key, `worthless status` flags OpenClaw as broken, and the CLI exits 130, even with `--quiet`. Ctrl-D at the "Route them through Worthless?" prompt no longer rolls back the database under a rewritten `.env`, as it did on earlier releases, and Ctrl-C there is now answered. A second Ctrl-C during a rollback now says why it is not stopping.
+- **Ctrl-C stops `worthless lock`'s OpenClaw setup at once, and never costs you your keys** (found while chasing `worthless-3clz`, [#668](https://github.com/oblangatas/worthless/pull/668)). Once the keys were committed, the rest of the lock was synchronous OpenClaw work, so Ctrl-C was dropped: for 15s during the reload wait, and forever while another worthless process held its lock on OpenClaw's config file (OpenClaw itself never takes that lock). Now Ctrl-C stops there in under a second and keeps the keys locked. It warns that OpenClaw may still be using the real key, `worthless status` flags OpenClaw as broken, and the CLI exits 130, even with `--quiet`. Ctrl-D at the "Route them through Worthless?" prompt no longer rolls back the database under a rewritten `.env`, as it did on earlier releases, and Ctrl-C there is now answered. A second Ctrl-C during a rollback now says why it is not stopping.
 
   **What this does NOT fix.**
   - The CI sighting that opened worthless-3clz came from a chaos trial with no OpenClaw, and its cause is still unknown. The chaos hang guard now records the stuck stack.

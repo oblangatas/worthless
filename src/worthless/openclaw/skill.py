@@ -16,6 +16,7 @@ F30, F31, F33, F34, F35.
 
 from __future__ import annotations
 
+import contextlib
 import errno as _errno_mod
 import functools
 import os
@@ -98,6 +99,22 @@ def _refuse_if_symlink(path: Path) -> None:
         )
 
 
+def _cleanup_install(staging: Path | None, final: Path, retired: Path | None) -> None:
+    """Remove the staging dir; put the previous install back if the new one is missing.
+
+    On success *final* exists, so this only drops the moved-aside previous
+    install. On a failure or Ctrl-C it restores it (worthless-1jfr).
+    """
+    if staging is not None:
+        shutil.rmtree(staging, ignore_errors=True)
+    if retired is None:
+        return
+    if not final.exists():
+        with contextlib.suppress(OSError):
+            os.rename(retired, final)  # noqa: PTH104 — put the previous install back
+    shutil.rmtree(retired, ignore_errors=True)
+
+
 def install(target_dir: Path) -> Path:
     """Install the embedded skill folder at ``target_dir/worthless/``.
 
@@ -121,6 +138,7 @@ def install(target_dir: Path) -> Path:
     # (target_dir not writable, ENOSPC) wraps cleanly as
     # SKILL_INSTALL_FAILED instead of leaking a raw OSError to callers.
     staging: Path | None = None
+    retired: Path | None = None  # the previous install, moved aside until the new one is in
     try:
         staging = Path(
             tempfile.mkdtemp(
@@ -146,9 +164,15 @@ def install(target_dir: Path) -> Path:
                 continue
             (staging / name).write_text(entry.read_text(encoding="utf-8"), encoding="utf-8")
 
-        # ``rmtree(ignore_errors=True)`` skips the prior ``exists()`` stat:
-        # we own ``final`` per L3 and we're about to overwrite it anyway.
-        shutil.rmtree(final, ignore_errors=True)
+        # Move the previous install aside (never delete it first): a Ctrl-C or
+        # a failed rename between delete and rename left no skill at all
+        # (worthless-1jfr). The ``.worthless.tmp.`` prefix keeps it under the
+        # existing leftover checks.
+        retired = staging.with_name(staging.name + ".old")
+        try:
+            os.rename(final, retired)  # noqa: PTH104
+        except FileNotFoundError:
+            retired = None  # first install
 
         # ``os.replace`` (not ``Path.replace``) is patchable at the module
         # level so failure-injection tests can simulate disk-full / EACCES.
@@ -176,16 +200,17 @@ def install(target_dir: Path) -> Path:
             else:
                 raise
         staging = None  # replace consumed it (or we cleaned it above)
-    except Exception as exc:
+        _cleanup_install(None, final, retired)  # drops the previous install
+        retired = None
+    except BaseException as exc:
         # Any failure (mkdtemp failure, EACCES, ENOSPC, simulated rename
         # failures) is wrapped as SKILL_INSTALL_FAILED so callers in
         # apply_lock() can surface it as a structured event without
         # leaking raw OSError types into --json output. Always clean up
         # the staging dir (F33) — guarded since mkdtemp may not have run.
-        if staging is not None and staging.exists():
-            shutil.rmtree(staging, ignore_errors=True)
-        if isinstance(exc, OpenclawIntegrationError):
-            raise
+        _cleanup_install(staging, final, retired)
+        if not isinstance(exc, Exception) or isinstance(exc, OpenclawIntegrationError):
+            raise  # a Ctrl-C stays a Ctrl-C
         raise OpenclawIntegrationError(
             OpenclawErrorCode.SKILL_INSTALL_FAILED,
             f"failed to install skill into {final}: {exc}",
