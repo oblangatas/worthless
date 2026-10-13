@@ -1,0 +1,28 @@
+<!DOCTYPE html><html><head><meta charset=utf-8><title>PASS banner + launchd install + first HTTP 200</title><style>body{margin:0;background:#1e1e1e;color:#d4d4d4;font:14px/1.5 Menlo,Monaco,monospace}
+header{background:#0b2e16;border-bottom:3px solid #3ddc84;padding:16px 24px}
+h1{margin:0;color:#3ddc84;font-size:18px} p{margin:6px 0 0;color:#888;font-size:12px}
+pre{margin:0;padding:24px;white-space:pre-wrap}</style></head>
+<body><header><h1>PASS banner + launchd install + first HTTP 200</h1><p>macOS live pack · 2026-06-30 08:39 · exit 0 · verbatim log excerpt</p></header>
+<pre>── [8] Launchd service install
+────────────────────────────────────────────────────────────────
+  → ensure :8787 free (orphan /healthz → sidecar-less 401)
+  ✓ port 8787 free
+  → worthless service install --yes
+Service installed (launchd). Proxy healthy on 127.0.0.1:8787.
+  ✓ plist installed, launchd job started
+  ✓ GET /healthz on 127.0.0.1:8787
+
+── [9] Sidecar IPC decrypt preflight
+────────────────────────────────────────────────────────────────
+  → alias openai-02f67577 — find socket that can open shard_b_enc
+sidecar decrypt ok via /Users/shachar/.worthless/run/32644/sidecar.sock
+sidecar decrypt ok via /Users/shachar/.worthless/run/32644/sidecar.sock
+  ✓ sidecar IPC decrypt preflight passed
+
+── [10] Proxied request roundtrip
+────────────────────────────────────────────────────────────────
+  → clear mock-upstream capture buffer (initial install)
+  → POST /openai-02f67577/v1/chat/completions via launchd proxy :8787 (initial install)
+  ✓ proxy returned HTTP 200 (initial install)
+  → verify mock-upstream received real API key (initial install)
+  ✓ mock-upstream Authorization matches enrolled key (initial install)</pre></body></html>

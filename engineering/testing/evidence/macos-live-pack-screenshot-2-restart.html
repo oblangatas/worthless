@@ -1,0 +1,24 @@
+<!DOCTYPE html><html><head><meta charset=utf-8><title>Post-restart roundtrip (WOR-749)</title><style>body{margin:0;background:#1e1e1e;color:#d4d4d4;font:14px/1.5 Menlo,Monaco,monospace}
+header{background:#0b2e16;border-bottom:3px solid #3ddc84;padding:16px 24px}
+h1{margin:0;color:#3ddc84;font-size:18px} p{margin:6px 0 0;color:#888;font-size:12px}
+pre{margin:0;padding:24px;white-space:pre-wrap}</style></head>
+<body><header><h1>Post-restart roundtrip (WOR-749)</h1><p>macOS live pack · 2026-06-30 08:39 · exit 0 · verbatim log excerpt</p></header>
+<pre>── [11] Launchd restart → proxied request (WOR-749 post-restart)
+────────────────────────────────────────────────────────────────
+  → worthless service restart (fresh launchd job — reads fernet.key from disk)
+Service restarted.
+  ✓ GET /healthz after service restart
+sidecar decrypt ok via /Users/shachar/.worthless/run/33052/sidecar.sock
+sidecar decrypt ok via /Users/shachar/.worthless/run/33052/sidecar.sock
+  ✓ sidecar IPC decrypt after restart passed
+  → clear mock-upstream capture buffer (after service restart)
+  → POST /openai-02f67577/v1/chat/completions via launchd proxy :8787 (after service restart)
+  ✓ proxy returned HTTP 200 (after service restart)
+  → verify mock-upstream received real API key (after service restart)
+  ✓ mock-upstream Authorization matches enrolled key (after service restart)
+  → worthless service uninstall --yes (cleanup before trap)
+Service uninstalled.
+
+================================================================
+  service lock roundtrip live pack: PASS
+================================================================</pre></body></html>
