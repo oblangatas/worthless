@@ -1946,15 +1946,18 @@ class _LockInterrupts:
         self.signals: list[int] = []
 
     def arm(self, loop: asyncio.AbstractEventLoop) -> None:
-        """Install for SIGINT, SIGTERM and SIGHUP (unless nohup ignores it).
+        """Install for SIGINT, SIGTERM and SIGHUP, except any the caller ignores.
 
         A no-op off the main thread (the MCP tool's worker), where no signal is
         delivered and ``add_signal_handler`` refuses (worthless-dqzj).
         """
-        wanted = [signal.SIGINT, signal.SIGTERM]
-        if hasattr(signal, "SIGHUP") and signal.getsignal(signal.SIGHUP) is not signal.SIG_IGN:
-            wanted.append(signal.SIGHUP)
-        for sig in wanted:
+        self.phase = _RAISE  # before installing: a signal mid-arm is recorded, not dropped
+        wanted = [signal.SIGINT, signal.SIGTERM, getattr(signal, "SIGHUP", None)]
+        # A signal the caller ignores (nohup, a backgrounded job, a supervisor)
+        # stays ignored: arming would turn it back on for good.
+        for sig in [
+            s for s in wanted if s is not None and signal.getsignal(s) is not signal.SIG_IGN
+        ]:
             try:
                 loop.add_signal_handler(sig, self, sig)
             except (NotImplementedError, RuntimeError, ValueError):
@@ -1963,7 +1966,6 @@ class _LockInterrupts:
             # the loop, so CANCEL keeps working while this one can raise and record.
             signal.signal(sig, self._on_raw)
             self.signals.append(sig)
-        self.phase = _RAISE
 
     def disarm(self, loop: asyncio.AbstractEventLoop) -> None:
         """Restore the default dispositions. Idempotent."""
@@ -2022,6 +2024,11 @@ class _LockInterrupts:
     def exit_code(self) -> int:
         """``128 + signum`` of the signal that stopped the lock."""
         return 128 + (self.signum or signal.SIGINT)
+
+
+def _dead_terminal_ok(interrupted: bool) -> contextlib.AbstractContextManager:
+    """After a closed terminal (SIGHUP) printing fails; keep the 129, not exit 1 (v9gg)."""
+    return contextlib.suppress(OSError) if interrupted else contextlib.nullcontext()
 
 
 def _exit_openclaw_failed(console, code: int) -> NoReturn:  # noqa: ANN001
@@ -2929,9 +2936,9 @@ def _lock_keys(
             # phases are documented on _LockInterrupts. ``finally`` disarms.
             loop = asyncio.get_running_loop()
             on_signal = _LockInterrupts(asyncio.current_task(), planned, console)
-            on_signal.arm(loop)
 
             try:
+                on_signal.arm(loop)  # inside: a signal right after arming still gets 128 + signum
                 # #210 OpenClaw secrets-audit gate: pre-flight runs BEFORE any
                 # DB/.env write so blocking plaintext findings abort the lock with
                 # zero side effects (gate-before-write). Orthogonal to the
@@ -3046,9 +3053,9 @@ def _lock_keys(
             finally:
                 # Idempotent backstop: removes handlers on the paths the except
                 # clause never runs (success, or an uncaught ``typer.Exit``).
-                on_signal.disarm(loop)
                 for p in planned:
-                    p.zero()
+                    p.zero()  # before disarming: a late press cannot skip the wipe
+                on_signal.disarm(loop)
 
     result = asyncio.run(_lock_async())
     relock_count = result.total - result.fresh_count
@@ -3062,16 +3069,17 @@ def _lock_keys(
             env_path.chmod(current & ~(stat.S_IRWXG | stat.S_IRWXO))
 
     if not quiet:
-        _print_lock_result(
-            console,
-            result.fresh_count,
-            relock_count,
-            env_path,
-            home.base_dir,
-            openclaw_failed=bool(result.openclaw_exit),
-            oauth_skipped=result.oauth_skipped,
-            interrupted=result.openclaw_exit in _INTERRUPTED_EXITS,
-        )
+        with _dead_terminal_ok(result.openclaw_exit in _INTERRUPTED_EXITS):
+            _print_lock_result(
+                console,
+                result.fresh_count,
+                relock_count,
+                env_path,
+                home.base_dir,
+                openclaw_failed=bool(result.openclaw_exit),
+                oauth_skipped=result.oauth_skipped,
+                interrupted=result.openclaw_exit in _INTERRUPTED_EXITS,
+            )
         # WOR-853: same guard as the "Next:" hint above — only offer when the
         # lock actually succeeded. A partial failure has no business installing
         # anything.
