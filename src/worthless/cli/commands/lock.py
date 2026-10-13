@@ -1986,7 +1986,9 @@ def _ctrl_c_raises(signals: list[int]) -> Iterator[None]:
 def _exit_openclaw_failed(console, code: int) -> NoReturn:  # noqa: ANN001
     """Final word on a lock whose OpenClaw stage did not finish; exits *code*.
 
-    Ctrl-C (130) already explained itself in :func:`_openclaw_steps`.
+    Ctrl-C (130) already explained itself in :func:`_openclaw_steps`. Ctrl-C and
+    a refused post-flight (87) synced the Fernet key there; the other OpenClaw
+    failures (73/87/91/92 from :func:`_apply_openclaw`) still skip that sync.
     """
     if code != _EXIT_INTERRUPTED:
         console.print_failure(
@@ -2051,6 +2053,7 @@ def _openclaw_steps(
                     _openclaw_audit_postflight(gate, managed_aliases, proxy_base_url)
                 except typer.Exit as refused:
                     _record_openclaw_unfinished(home, planned, "openclaw.postflight_refused")
+                    _sync_fernet_after_lock(home)  # keys stay locked: keep them usable
                     return refused.exit_code
             adoption_policy = _resolve_adoption_policy(
                 planned,

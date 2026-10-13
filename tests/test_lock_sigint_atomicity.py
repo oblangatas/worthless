@@ -266,6 +266,25 @@ class TestPostflightRefusalKeepsKeys:
         for name, value in original.items():
             assert values.get(name) == value, f"{name} not restored by unlock:\n{restored.output}"
 
+    def test_postflight_87_still_syncs_the_fernet_key(
+        self,
+        home_dir: WorthlessHome,
+        two_key_env: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Keys stay locked, so a service-run proxy must decrypt them (as on Ctrl-C)."""
+        import worthless.cli.commands.lock as lock_mod
+
+        synced: list[object] = []
+        monkeypatch.setattr(lock_mod, "_sync_fernet_after_lock", synced.append)
+        _refuse_postflight(monkeypatch, tmp_path, "refused")
+
+        result = _invoke_lock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
+
+        assert result.exit_code == 87, result.output
+        assert len(synced) == 1, f"Fernet sync ran {len(synced)} times:\n{result.output}"
+
     def test_rerun_after_refusal_never_claims_protected(
         self,
         home_dir: WorthlessHome,
