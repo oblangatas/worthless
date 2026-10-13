@@ -41,7 +41,7 @@ UV_VERSION="0.11.7"
 # Default worthless version: the latest release already on PyPI, hand-bumped
 # per release (release-sync-check.yml fails if it falls behind). We install
 # `worthless==<pin>`, never unpinned latest: a release compromised after ours
-# (stolen maintainer token) would otherwise run on every fresh install (F-06/F-49).
+# (stolen maintainer token) would otherwise run on every fresh install (WOR-559, F-06/F-49).
 # HONEST SCOPE: the pin picks WHICH release; it does not verify package bytes
 # (`uv tool install` has no --require-hashes), and does not help if the Worker
 # itself is compromised. Override with `WORTHLESS_VERSION=x.y.z curl … | sh`.
@@ -155,8 +155,11 @@ proxy_hints() {
 # The lockdown only outranks the caller for tools that EXIST in the trusted dirs
 # (the caller's PATH stays as the tail). sha256sum isn't in them on macOS and uv
 # isn't anywhere, so `command -v` could reach an attacker's dir: resolve from an
-# explicit list, never PATH. WORTHLESS_TRUST_PATH="1" (exactly) defers to PATH
-# as the lockdown does; that is how the test harness injects stubs.
+# explicit list, never PATH. uv's list includes user-writable dirs on purpose:
+# an attacker who owns them already owns the uv we would install there.
+# WORTHLESS_TRUST_PATH: only the literal "1" defers to PATH (a typo-tolerant
+# value would be a bypass). It already disables the lockdown, so honouring it
+# here adds no new weakening; it is how the test harness injects stubs.
 trusted_tool() {
     if [ "${WORTHLESS_TRUST_PATH:-}" = "1" ]; then
         command -v "$1" 2>/dev/null && return 0
