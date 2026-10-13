@@ -869,9 +869,9 @@ class TestSigtermStorm:
 
 class TestMashedSigint:
     def test_mashed_sigint(self, tmp_path: Path, seam: float) -> None:
-        """A burst of 5 SIGINTs ~5ms apart must NOT defeat the one-shot handler.
+        """A burst of 5 SIGINTs ~5ms apart must NOT defeat the handler (it never cancels twice).
 
-        Part-1 arms a one-shot handler; a panicked operator mashing Ctrl-C must not
+        The handler cancels once; a panicked operator mashing Ctrl-C must not
         re-enter cleanup or leave a torn state. Invariant still holds.
         """
         n_keys = 2

@@ -390,7 +390,7 @@ class TestSecondSignalDuringUnwind:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A user mashing Ctrl-C: the FIRST signal triggers the unwind, a SECOND
-        arriving mid-rollback must be absorbed (one-shot handler) — never abort
+        arriving mid-rollback must be absorbed (never cancels twice) — never abort
         the DB deletes partway and orphan the very rows being removed.
         """
         import worthless.cli.commands.lock as lock_mod
@@ -401,7 +401,7 @@ class TestSecondSignalDuringUnwind:
 
         async def _unwind_with_second_signal(repo: object, planned: object) -> list:
             # Fire a second interrupt and yield so the loop runs the handler.
-            # With a one-shot handler this is a no-op; without it, task.cancel()
+            # The handler never cancels twice, so this is a no-op; otherwise task.cancel()
             # would re-fire here and abort the real unwind below.
             os.kill(os.getpid(), signal.SIGINT)
             await asyncio.sleep(0)
@@ -596,6 +596,11 @@ def _stage_openclaw(monkeypatch: pytest.MonkeyPatch) -> None:
         lock_mod._openclaw_integration, "detect", lambda *_a, **_k: SimpleNamespace(present=True)
     )
     monkeypatch.setattr(lock_mod, "check_proxy_health", lambda *_a, **_k: {"healthy": True})
+
+
+def _raise_eio(*_a: object, **_k: object) -> None:
+    """What every write to a closed terminal does."""
+    raise OSError(errno.EIO, "Input/output error")
 
 
 @contextlib.contextmanager
@@ -934,10 +939,7 @@ class TestEveryInterruptIsAnswered:
         synced: list[object] = []
         monkeypatch.setattr(lock_mod, "_sync_fernet_after_lock", synced.append)
 
-        def _dead_terminal(*_a: object, **_k: object) -> None:
-            raise OSError(errno.EIO, "Input/output error")
-
-        monkeypatch.setattr(WorthlessConsole, "print_failure", _dead_terminal)
+        monkeypatch.setattr(WorthlessConsole, "print_failure", _raise_eio)
 
         _invoke_lock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
 
@@ -956,10 +958,7 @@ class TestEveryInterruptIsAnswered:
 
         _openclaw_step_blocks_then_ctrl_c(monkeypatch, step="_apply_openclaw", signum=signal.SIGHUP)
 
-        def _dead_terminal(*_a: object, **_k: object) -> None:
-            raise OSError(errno.EIO, "Input/output error")
-
-        monkeypatch.setattr(lock_mod, "_print_lock_result", _dead_terminal)
+        monkeypatch.setattr(lock_mod, "_print_lock_result", _raise_eio)
 
         with _survivable(signal.SIGHUP):
             result = _invoke_lock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
