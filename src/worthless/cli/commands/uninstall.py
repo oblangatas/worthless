@@ -357,6 +357,16 @@ def _handle_broken_repo(console, exc, *, force: bool):  # noqa: ANN001, ANN201
     """BUG-1: the install can't be read (no fernet key / corrupt DB). Without
     --force refuse cleanly; with --force warn and return empty buckets to wipe.
     """
+    if isinstance(exc, WorthlessError) and exc.code is ErrorCode.KEY_REFUSED:
+        # worthless-6hu7: the key is present and intact — we just won't read it
+        # (wrong mode, foreign owner, symlink). Offering --force here would wipe
+        # the install a chmod would have saved, and _scrub_exc would hide the
+        # repair. Show the refusal, which names the fix, and stop.
+        console.print_failure(
+            f"Your encryption key is still here, but worthless won't read it.\n{exc.message}\n"
+            "Fix that first — nothing was removed, and your keys are still recoverable."
+        )
+        raise typer.Exit(code=1) from exc
     if not force:
         console.print_failure(
             f"Can't read this Worthless install ({_scrub_exc(exc)}). It looks broken, so "

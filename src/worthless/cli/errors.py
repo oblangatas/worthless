@@ -50,6 +50,10 @@ class ErrorCode(IntEnum):
     ORPHANED_SHARD_DATA = 118
     SERVICE_INSTALL_FAILED = 119
     CORE_DUMP_PROTECTION_FAILED = 120
+    # worthless-6hu7: "a key is here but we refuse to read it" — distinct from
+    # KEY_NOT_FOUND ("no key here") so first-run mint paths, which treat
+    # KEY_NOT_FOUND as "nothing to lose", can never replace an existing key.
+    KEY_REFUSED = 121
     UNKNOWN = 199
 
 
