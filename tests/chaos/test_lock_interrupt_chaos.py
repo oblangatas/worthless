@@ -1508,9 +1508,14 @@ class TestTerminalClosedMidLock:
         env, calls = _with_openclaw(te, proxy_port)
         pid, fd = pty.fork()
         if pid == 0:  # pragma: no cover — the child execs the real CLI
-            os.chdir(str(te.repo))
-            argv = [*_cli(), "lock", "--env", str(te.env_file)]
-            os.execve(argv[0], argv, env)  # noqa: S606 — exec the real CLI, no shell
+            # Never fall back into pytest: a forked copy of an xdist worker that
+            # returns here would write to the worker's channel and kill the node.
+            try:
+                os.chdir(str(te.repo))
+                argv = [*_cli(), "lock", "--env", str(te.env_file)]
+                os.execve(argv[0], argv, env)  # noqa: S606 — exec the real CLI, no shell
+            finally:
+                os._exit(127)
         status = None
         closed = False
         deadline = time.monotonic() + WAIT_TIMEOUT
