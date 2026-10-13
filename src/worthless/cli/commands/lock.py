@@ -1904,14 +1904,14 @@ _INTERRUPTED_NO_OPENCLAW = "Interrupted. Your .env keys are locked."
 _RAISE, _CANCEL, _DEFER, _OFF = "raise", "cancel", "defer", "off"
 
 
-def _leave_dead_terminal() -> None:
-    """The terminal hung up: send output to /dev/null instead (worthless-v9gg).
+def _leave_dead_terminal(ttys: list[int]) -> None:
+    """The terminal hung up: send its output fds to /dev/null (worthless-v9gg).
 
     Every later write to a closed terminal fails with EIO, down to Python's own
-    stdout flush at exit, which turned the 129 into 120. Only real terminals are
-    swapped, so captured or redirected output is left alone.
+    stdout flush at exit, which turned the 129 into 120. *ttys* was taken when
+    the lock armed: after a hang-up Linux no longer reports the fd as a tty.
+    Captured or redirected output is never in it, so it is left alone.
     """
-    ttys = [fd for fd in (1, 2) if os.isatty(fd)]
     if not ttys:
         return
     null = os.open(os.devnull, os.O_WRONLY)
@@ -1961,6 +1961,7 @@ class _LockInterrupts:
         self.answered = False
         self.committed = False
         self.signals: list[int] = []
+        self.ttys: list[int] = []  # stdout/stderr fds that were a terminal at arm time
 
     def arm(self, loop: asyncio.AbstractEventLoop) -> None:
         """Install for SIGINT, SIGTERM and SIGHUP, except any the caller ignores.
@@ -1969,6 +1970,7 @@ class _LockInterrupts:
         delivered and ``add_signal_handler`` refuses (worthless-dqzj).
         """
         self.phase = _RAISE  # before installing: a signal mid-arm is recorded, not dropped
+        self.ttys = [fd for fd in (1, 2) if os.isatty(fd)]
         wanted = [signal.SIGINT, signal.SIGTERM, getattr(signal, "SIGHUP", None)]
         # A signal the caller ignores (nohup, a backgrounded job, a supervisor)
         # stays ignored: arming would turn it back on for good.
@@ -1996,7 +1998,7 @@ class _LockInterrupts:
         if self.phase == _OFF:
             return
         if signum == getattr(signal, "SIGHUP", None):
-            _leave_dead_terminal()
+            _leave_dead_terminal(self.ttys)
         if self.signum is None:
             self.signum = signum
         # Raise only inside the lock's own task: a KeyboardInterrupt in the event
