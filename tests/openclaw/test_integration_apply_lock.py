@@ -888,3 +888,104 @@ def test_ctrl_c_before_any_write_leaves_openclaw_json_untouched(
 
     assert config_path.read_bytes() == before
     assert config_path.stat().st_mtime_ns == mtime
+
+
+_ORIGINAL_OPENAI = {
+    "baseUrl": "https://api.openai.com/v1",
+    "apiKey": {"source": "env", "id": "OPENAI"},
+}
+
+
+def _seed(config_path: Path, providers: dict) -> None:
+    config_path.write_text(
+        json.dumps({"models": {"providers": providers}}) + "\n", encoding="utf-8"
+    )
+
+
+def _providers(config_path: Path) -> dict:
+    return json.loads(config_path.read_text(encoding="utf-8"))["models"]["providers"]
+
+
+def test_ctrl_c_between_provider_writes_puts_the_first_back(
+    openclaw_present: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """worthless-2nta: Ctrl-C after openai is rewired but before anthropic is.
+
+    The half-done write is undone: openai is back to its pre-lock entry, so
+    OpenClaw is never left with one provider on the proxy and one not.
+    """
+    from worthless.openclaw import integration
+
+    config_path = openclaw_present["config_path"]
+    _seed(config_path, {"openai": _ORIGINAL_OPENAI})
+    monkeypatch.chdir(openclaw_present["home"])
+    _ctrl_c_on_write(monkeypatch, nth=2)
+
+    with pytest.raises(KeyboardInterrupt):
+        integration.apply_lock(planned_updates=_TWO_PROVIDERS)
+
+    assert _providers(config_path) == {"openai": _ORIGINAL_OPENAI}
+
+
+def test_undo_never_reverts_an_entry_someone_else_changed(
+    openclaw_present: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The undo puts back only entries still pointing at this lock's proxy alias."""
+    from worthless.openclaw import config as config_mod
+    from worthless.openclaw import integration
+
+    config_path = openclaw_present["config_path"]
+    _seed(config_path, {"openai": _ORIGINAL_OPENAI})
+    monkeypatch.chdir(openclaw_present["home"])
+    theirs = {"baseUrl": "https://someone-else/v1", "apiKey": "x"}
+    real_set_provider = config_mod.set_provider
+    calls = {"n": 0}
+
+    def _second_write_after_their_edit(*args: object, **kwargs: object) -> None:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            data = json.loads(config_path.read_text(encoding="utf-8"))
+            data["models"]["providers"]["openai"] = theirs
+            config_path.write_text(json.dumps(data) + "\n", encoding="utf-8")
+            raise KeyboardInterrupt
+        real_set_provider(*args, **kwargs)
+
+    monkeypatch.setattr(config_mod, "set_provider", _second_write_after_their_edit)
+
+    with pytest.raises(KeyboardInterrupt):
+        integration.apply_lock(planned_updates=_TWO_PROVIDERS)
+
+    assert _providers(config_path)["openai"] == theirs
+
+
+def test_write_failure_after_unreadable_snapshot_never_writes_empty_config(
+    openclaw_present: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """worthless-2nta: the snapshot could not be read, then a write fails.
+
+    The old rollback restored that "snapshot" — ``{}`` — over the whole file,
+    erasing every entry the user had. Without a snapshot there is nothing safe
+    to restore, so the file must keep everything not ours.
+    """
+    from worthless.openclaw import config as config_mod
+    from worthless.openclaw import integration
+
+    config_path = openclaw_present["config_path"]
+    keep = {"baseUrl": "https://keep-me/v1", "apiKey": "x"}
+    _seed(config_path, {"theirs": keep})
+    monkeypatch.chdir(openclaw_present["home"])
+    real_read = config_mod.read_config
+    reads = {"n": 0}
+
+    def _first_read_fails(*args: object, **kwargs: object) -> dict:
+        reads["n"] += 1
+        if reads["n"] == 1:
+            raise ValueError("unparsable")  # the pre-write snapshot read
+        return real_read(*args, **kwargs)
+
+    monkeypatch.setattr(config_mod, "read_config", _first_read_fails)
+    _ctrl_c_on_write(monkeypatch, nth=2, exc=OSError)
+
+    integration.apply_lock(planned_updates=_TWO_PROVIDERS)
+
+    assert _providers(config_path).get("theirs") == keep, config_path.read_text()

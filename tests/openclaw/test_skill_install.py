@@ -302,6 +302,40 @@ def test_install_cleans_tempdir_on_failure(tmp_path: Path, monkeypatch: pytest.M
     assert leftovers == [], f"staging tempdir not cleaned: {leftovers}"
 
 
+@pytest.mark.parametrize("exc", [KeyboardInterrupt, OSError], ids=["ctrl-c", "rename-failed"])
+def test_interrupted_reinstall_keeps_the_installed_skill(
+    exc: type[BaseException], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """worthless-1jfr: the old skill was deleted BEFORE the new one moved in.
+
+    A Ctrl-C (or a failed rename) between the two left no skill at all, and
+    the ``except Exception`` cleanup never saw a KeyboardInterrupt, so the
+    staging dir leaked. The installed skill must survive either way.
+    """
+    from worthless.openclaw import skill
+
+    target = tmp_path / "skills"
+    target.mkdir()
+    skill.install(target)
+    marker = target / "worthless" / "installed-before.txt"
+    marker.write_text("previous install", encoding="utf-8")
+    real_replace = os.replace
+
+    def _interrupted(src: object, dst: object) -> None:
+        if Path(str(dst)).name == "worthless":
+            raise exc("simulated")
+        real_replace(src, dst)
+
+    monkeypatch.setattr("worthless.openclaw.skill.os.replace", _interrupted)
+
+    with pytest.raises(BaseException):  # noqa: PT011 — KeyboardInterrupt or the wrapped OSError
+        skill.install(target)
+
+    assert marker.read_text(encoding="utf-8") == "previous install", "installed skill was lost"
+    leftovers = [p.name for p in target.iterdir() if p.name.startswith(".worthless.tmp")]
+    assert leftovers == [], f"staging left behind: {leftovers}"
+
+
 # ---------------------------------------------------------------------------
 # uninstall
 # ---------------------------------------------------------------------------
