@@ -990,3 +990,24 @@ def test_write_failure_after_unreadable_snapshot_never_writes_empty_config(
     integration.apply_lock(planned_updates=_TWO_PROVIDERS)
 
     assert _providers(config_path).get("theirs") == keep, config_path.read_text()
+
+
+def test_ctrl_c_on_a_first_lock_leaves_no_provider_half_switched(
+    openclaw_present: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """worthless-2nta, first lock: openclaw.json did not exist before the lock.
+
+    Nothing was there to restore, so every entry this lock wrote is removed.
+    """
+    from worthless.openclaw import integration
+
+    config_path = openclaw_present["config_path"]
+    config_path.unlink()
+    monkeypatch.chdir(openclaw_present["home"])
+    _ctrl_c_on_write(monkeypatch, nth=2)
+
+    with pytest.raises(KeyboardInterrupt):
+        integration.apply_lock(planned_updates=_TWO_PROVIDERS)
+
+    left = _providers(config_path) if config_path.exists() else {}
+    assert "openai" not in left, f"openai left on the proxy: {left}"
