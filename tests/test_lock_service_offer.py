@@ -252,6 +252,22 @@ class TestConsentIsNotBypassable:
         install.assert_not_called()
         confirm.assert_not_called()
 
+    def test_yes_with_a_service_already_running_says_nothing(
+        self, console: WorthlessConsole, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Telling someone with a running service to `service install` again is
+        wrong advice: re-running install can rewrite the unit and stop it."""
+        console.assume_yes = True
+        with (
+            patch("worthless.cli.commands.lock._scan_prompt_is_tty", return_value=True),
+            patch("worthless.cli.commands.lock._backend") as backend,
+            patch("worthless.cli.commands.lock.install_service_for_offer") as install,
+        ):
+            backend.return_value.detect_status.return_value = MagicMock(state=ServiceState.RUNNING)
+            assert _offer_service_after_lock(console, home=_home(), port=8787) is False
+        install.assert_not_called()
+        assert "service install" not in _flat(capsys.readouterr())
+
     @pytest.mark.parametrize("marker", ["CLAUDECODE", "AI_AGENT"])
     def test_an_ai_agent_at_a_terminal_is_not_asked(
         self, console: WorthlessConsole, monkeypatch: pytest.MonkeyPatch, marker: str

@@ -3274,15 +3274,6 @@ def _offer_service_after_lock(console, *, home: WorthlessHome, port: int) -> boo
         console.print_hint(_offer_declined_hint())
         return False
 
-    # WOR-859 ruling: only a typed "y" installs. --yes means "don't stop to
-    # ask", not "agree to what I didn't read", and an AI agent at a pty is not
-    # the person whose account gets a startup item. Both get the hint; typing
-    # `worthless service install` is the explicit way in. Not a security wall
-    # (an agent can drop the markers): it stops a question nobody human sees.
-    if console.assume_yes or any(os.environ.get(v) for v in _AGENT_ENV_VARS):
-        console.print_hint(_offer_declined_hint())
-        return False
-
     # Nothing to offer if one is already installed. install() rewrites the unit
     # and on launchd boots out the running agent first, so re-running it over a
     # working service risks stopping it — and rollback would not restore it,
@@ -3295,6 +3286,15 @@ def _offer_service_after_lock(console, *, home: WorthlessHome, port: int) -> boo
     except (WorthlessError, subprocess.CalledProcessError, OSError):
         # Cannot tell. Saying nothing beats crashing a lock that worked, and
         # beats installing over something we failed to inspect.
+        return False
+
+    # WOR-859 ruling: only a typed "y" installs. --yes means "don't stop to
+    # ask", not "agree to what I didn't read", and an AI agent at a pty is not
+    # the person whose account gets a startup item. Both get the hint; typing
+    # `worthless service install` is the explicit way in. Not a security wall
+    # (an agent can drop the markers): it stops a question nobody human sees.
+    if console.assume_yes or any(os.environ.get(v) for v in _AGENT_ENV_VARS):
+        console.print_hint(_offer_declined_hint())
         return False
 
     try:
