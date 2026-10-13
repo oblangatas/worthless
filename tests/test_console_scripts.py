@@ -20,8 +20,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_every_installed_command_is_a_worthless_command() -> None:
-    scripts = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())["project"]["scripts"]
+    project = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())["project"]
+    # Both tables install commands onto PATH.
+    scripts = {**project.get("scripts", {}), **project.get("gui-scripts", {})}
 
     assert "worthless" in scripts, "the CLI itself must stay installable"
-    strays = sorted(name for name in scripts if not name.startswith("worthless"))
+    strays = sorted(
+        name for name in scripts if name != "worthless" and not name.startswith("worthless-")
+    )
     assert not strays, f"these would land on every user's PATH: {strays}"

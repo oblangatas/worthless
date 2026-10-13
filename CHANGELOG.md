@@ -5,9 +5,9 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 ## [Unreleased]
 
 ### Removed
-- **Installing Worthless puts only `worthless` on your PATH** (`worthless-nd65`). Every install also added six developer-only commands next to it: `test-unit`, `test-docker`, `test-live`, `test-openclaw`, `test-all` and `docs-generate`. They were useless outside a source checkout, and free to collide with another tool's command of the same name. They're gone, along with the modules behind them, and a test now fails if any installed command name doesn't start with `worthless`. Developers run `uv run pytest -m <marker>` and `scripts/codewiki.sh` directly.
+- **Installing Worthless puts only `worthless` on your PATH** (`worthless-nd65`). Every install also added six developer-only commands next to it: `test-unit`, `test-docker`, `test-live`, `test-openclaw`, `test-all` and `docs-generate`. They were useless outside a source checkout, and free to collide with another tool's command of the same name. They're gone, along with the modules behind them, and a test now fails if any installed command name doesn't start with `worthless`. Developers run the exact equivalents listed under "Test lanes" in `engineering/tooling.md`, and `scripts/codewiki.sh` for docs. Re-running the installer removes the old commands: tested in Docker by upgrading a real `curl worthless.sh | sh` install of 0.3.13 with `uv tool install --force`, the command the installer uses.
 
-  **What this does NOT do.** Upgrading with `uv tool upgrade` or `pipx upgrade` should remove the old commands with the old version, but a stale copy from another installer (say, `pip install --user` years ago) is not touched.
+  **What this does NOT do.** An upgrade through `pipx` was not tested. A stale copy left by a different installer (say, an old `pip install --user`) is not touched.
 
 ## [0.3.14] — 2026-10-13
 
