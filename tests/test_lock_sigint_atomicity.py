@@ -14,9 +14,9 @@ rollback never fired and rows leaked.
 The companion regression (:class:`TestNonInterruptExitCodePreserved`) pins the
 inverse: broadening the rollback ``except`` to add the interrupt types must NOT
 change how an ordinary (non-interrupt) exception exits. ``typer.Exit`` is a
-``RuntimeError`` (an ``Exception``), so it was already caught and unwound by the
-pre-WOR-646 ``except Exception:`` — that is the documented post-flight recovery
-contract. What this fix must preserve is its **exit code**: a ``typer.Exit(87)``
+``RuntimeError`` (an ``Exception``), so it was already caught by the
+pre-WOR-646 ``except Exception:``. What this fix must preserve is its
+**exit code**: a ``typer.Exit(87)``
 must still leave the process with code 87, never get swallowed, and never get
 mis-converted into a Ctrl-C abort by the new ``CancelledError`` handling.
 """
@@ -165,8 +165,8 @@ class TestNonInterruptExitCodePreserved:
         ``except (Exception, KeyboardInterrupt, CancelledError)`` catches it via
         the same ``Exception`` arm the pre-WOR-646 code used; the
         ``isinstance(exc, CancelledError)`` guard must leave its exit code
-        untouched. (Whether the DB rows unwind here is pre-existing post-flight
-        behavior, not what this test pins.)
+        untouched. (It no longer unwinds the keys: see
+        :class:`TestPostflightRefusalKeepsKeys`.)
         """
         import worthless.cli.commands.lock as lock_mod
 
@@ -812,11 +812,11 @@ class TestSecondCtrlCDuringRollbackIsNeverSilent:
 
 class TestNothingRollsBackAfterTheCommit:
     """Defence in depth (worthless-3clz review): once ``.env`` is rewritten, its
-    DB rows are load-bearing. Only post-flight's documented ``typer.Exit(87)``
-    may still roll them back; nothing else — not a queued press, not a crash."""
+    DB rows are load-bearing. Nothing may roll them back — not a queued press,
+    not a crash, not a refused post-flight (worthless-im3x)."""
 
     def test_handler_never_cancels_once_committed(self) -> None:
-        """Cancels once before the commit, never after; only post-flight 87 may unwind."""
+        """Cancels once before the commit, never after."""
         import worthless.cli.commands.lock as lock_mod
 
         cancels: list[int] = []
@@ -835,10 +835,6 @@ class TestNothingRollsBackAfterTheCommit:
         after.committed = True
         after()
         assert cancels == [], "a press queued for the loop cancelled AFTER the commit"
-        assert not after.may_unwind(RuntimeError("boom"))
-        assert not after.may_unwind(typer.Exit(code=87)), "any Exit may not unwind keys"
-        assert after.may_unwind(lock_mod._PostflightRefused(code=87))  # documented path
-        assert before.may_unwind(RuntimeError("boom"))
 
     def test_crash_after_commit_keeps_the_keys(
         self,

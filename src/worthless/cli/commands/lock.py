@@ -49,6 +49,7 @@ from worthless.cli.process import (
 from worthless.cli.console import WorthlessConsole, get_console
 from worthless.cli.platform import is_wsl
 from worthless.cli.scanner import SkippedFile, scan_source_for_hardcoded_provider_urls
+from worthless.cli.sentinel import is_partial, read_sentinel
 from worthless.cli.dotenv_rewriter import (
     rewrite_env_keys,
     scan_env_keys,
@@ -1888,6 +1889,7 @@ def _resolve_adoption_policy(
 
 
 _EXIT_INTERRUPTED = 130  # 128 + SIGINT: the shell's code for "stopped by Ctrl-C"
+_EXIT_OPENCLAW_UNFINISHED = 73  # EX_CANTCREAT, as for any partial OpenClaw failure
 _STILL_ROLLING_BACK = "Still rolling back so nothing is left half-locked. One moment."
 _INTERRUPTED = (
     "Interrupted. Your .env keys are locked, but OpenClaw setup was cut short,\n"
@@ -1895,15 +1897,6 @@ _INTERRUPTED = (
     "   Repair it:  worthless doctor\n"
     "   Roll back:  worthless unlock"
 )
-
-
-class _PostflightRefused(typer.Exit):
-    """Post-flight's exit 87: the one failure after the commit that may still roll back.
-
-    Its recovery contract is documented on :func:`_openclaw_audit_postflight`
-    (and questioned in worthless-im3x). A distinct type, so no other
-    ``typer.Exit`` raised after the commit can unwind the keys by accident.
-    """
 
 
 class _LockInterrupts:
@@ -1919,7 +1912,7 @@ class _LockInterrupts:
 
     After the commit the rewritten ``.env`` needs those rows, so nothing may roll
     them back: not a press (raised by :func:`_ctrl_c_raises`; this only drops the
-    copy asyncio queued), not a crash. Only :class:`_PostflightRefused` may.
+    copy asyncio queued), not a crash, not a refused post-flight (worthless-im3x).
     Answers use the console's ``--quiet``-proof channels: quiet hides chatter,
     not the answer to a key the user just pressed.
     """
@@ -1942,17 +1935,13 @@ class _LockInterrupts:
         if self.task is None:
             return
         if self.pressed or self.committed:
-            # Never cancel twice, never after the commit. After it the loop only
-            # runs this during post-flight's exit-87 rollback: answer that too.
+            # Never cancel twice, never after the commit. Before it, this runs
+            # during the rollback a first press started: answer that too.
             if self.planned:
                 self.console.print_notice(_STILL_ROLLING_BACK)
             return
         self.pressed = True
         self.task.cancel()
-
-    def may_unwind(self, exc: BaseException) -> bool:
-        """May the rollback run for *exc*? Never after the commit, except post-flight's exit 87."""
-        return not self.committed or isinstance(exc, _PostflightRefused)
 
 
 @contextlib.contextmanager
@@ -1997,9 +1986,7 @@ def _ctrl_c_raises(signals: list[int]) -> Iterator[None]:
 def _exit_openclaw_failed(console, code: int) -> NoReturn:  # noqa: ANN001
     """Final word on a lock whose OpenClaw stage did not finish; exits *code*.
 
-    Ctrl-C (130) already explained itself and synced the Fernet key in
-    :func:`_openclaw_steps`. The other codes skip that sync (pre-existing,
-    tracked as worthless-vhew).
+    Ctrl-C (130) already explained itself in :func:`_openclaw_steps`.
     """
     if code != _EXIT_INTERRUPTED:
         console.print_failure(
@@ -2008,6 +1995,25 @@ def _exit_openclaw_failed(console, code: int) -> NoReturn:  # noqa: ANN001
             "Run `worthless doctor` to diagnose, `worthless unlock` to roll back."
         )
     raise typer.Exit(code=code)
+
+
+_UNFINISHED_DETAIL = {
+    "openclaw.interrupted": "interrupted before OpenClaw setup finished",
+    "openclaw.postflight_refused": "OpenClaw files changed mid-lock; setup was refused",
+}
+
+
+def _record_openclaw_unfinished(
+    home: WorthlessHome, planned: list[_PlannedUpdate], code: str
+) -> None:
+    """Keys are locked but OpenClaw is not wired: ``worthless status`` must say so."""
+    _write_lock_sentinel(
+        home,
+        status="partial",
+        openclaw="failed",
+        alias_count=len(planned),
+        events=({"code": code, "level": "error", "detail": _UNFINISHED_DETAIL[code]},),
+    )
 
 
 def _openclaw_steps(
@@ -2033,7 +2039,11 @@ def _openclaw_steps(
     try:
         with _ctrl_c_raises(signals):
             if gate is not None:
-                _openclaw_audit_postflight(gate, managed_aliases, proxy_base_url)
+                try:
+                    _openclaw_audit_postflight(gate, managed_aliases, proxy_base_url)
+                except typer.Exit as refused:
+                    _record_openclaw_unfinished(home, planned, "openclaw.postflight_refused")
+                    return refused.exit_code
             adoption_policy = _resolve_adoption_policy(
                 planned,
                 managed_aliases=managed_aliases,
@@ -2046,19 +2056,7 @@ def _openclaw_steps(
         # click's confirm (the adoption prompt) turns Ctrl-C and Ctrl-D into
         # typer.Abort, a RuntimeError the caller's rollback would otherwise catch.
         console.print_failure(_INTERRUPTED)
-        _write_lock_sentinel(
-            home,
-            status="partial",
-            openclaw="failed",
-            alias_count=len(planned),
-            events=(
-                {
-                    "code": "openclaw.interrupted",
-                    "level": "error",
-                    "detail": "interrupted before OpenClaw setup finished",
-                },
-            ),
-        )
+        _record_openclaw_unfinished(home, planned, "openclaw.interrupted")
         # The keys ARE locked, so keep them usable by a service-run proxy. Done
         # here, while a further press is still inert, so it cannot be skipped
         # (before worthless-3clz the press was ignored and the lock ran on to it).
@@ -2422,7 +2420,9 @@ def _print_lock_result(
             )
         if relock_count:
             noun = "key" if relock_count == 1 else "keys"
-            console.print_success(f"[OK] {relock_count} {noun} still protected.")
+            # Locked, yes; "protected" only when the verdict was earned (worthless-im3x).
+            state = "still protected" if verdict_earned else "still locked in .env"
+            console.print_success(f"[OK] {relock_count} {noun} {state}.")
         env_home = os.environ.get("WORTHLESS_HOME")
         if env_home and home_base_dir.resolve() != (Path.home() / ".worthless").resolve():
             typer.echo(
@@ -2537,13 +2537,11 @@ def _openclaw_audit_postflight(
     Raises typer.Exit(87) if new blocking findings appeared since pre-flight,
     indicating the OpenClaw config was modified between the two audit passes.
 
-    Recovery note: if this raises, ``_batch_rewrite`` has already committed
-    shard-A values to the .env, but ``_compensating_unwind`` (in the caller's
-    except block) rewinds the DB rows. The .env may therefore contain shard-A
-    values while DB rows are gone. Re-running ``worthless lock`` recovers: the
-    next pre-flight will see the same shard-A values as a PLAINTEXT_FOUND for
-    ``worthless-openai`` (allowlisted) and proceed normally once the user
-    fixes the OpenClaw plaintext that caused this exit.
+    Runs after ``_batch_rewrite`` committed shard-A to the .env, so the keys
+    stay locked (worthless-im3x: unwinding deleted shard-B and lost the key):
+    :func:`_openclaw_steps` reports the 87 like any OpenClaw failure and
+    OpenClaw is never wired. Recovery: fix the plaintext, then
+    ``worthless unlock`` and ``worthless lock``.
     """
     post_hashes = _oc_audit.snapshot_hashes(gate.pre_hashes.keys())
     if post_hashes == gate.pre_hashes:
@@ -2556,7 +2554,7 @@ def _openclaw_audit_postflight(
         )
     except _oc_audit.AuditGateError as exc:
         typer.echo(f"worthless lock: post-flight audit failed: {exc}", err=True)
-        raise _PostflightRefused(code=87) from exc
+        raise typer.Exit(code=87) from exc
 
     if post_class.unknown_codes:
         typer.echo(
@@ -2564,16 +2562,17 @@ def _openclaw_audit_postflight(
             f"{', '.join(post_class.unknown_codes)} — exit 87",
             err=True,
         )
-        raise _PostflightRefused(code=87)
+        raise typer.Exit(code=87)
 
     if post_class.blocking:
         detail = _oc_audit.format_gate_error_message(post_class.blocking)
         typer.echo(
             f"worthless lock: state changed between pre-flight and post-flight "
-            f"— new plaintext detected, re-run worthless lock.\n{detail}",
+            f"— new plaintext detected. Fix it, then run `worthless unlock` and "
+            f"`worthless lock`.\n{detail}",
             err=True,
         )
-        raise _PostflightRefused(code=87)
+        raise typer.Exit(code=87)
 
 
 def _sync_fernet_after_lock(home: WorthlessHome) -> None:
@@ -2809,10 +2808,14 @@ def _lock_keys(
                 env_str,
             )
             if not scanned:
+                # Every key is already locked. If the last lock left OpenClaw
+                # unfinished (refused, interrupted, failed), it still is: never
+                # call that "protected" (worthless-im3x).
+                unfinished = is_partial(read_sentinel(home.base_dir))
                 return _LockResult(
                     total=len(raw_scanned),
                     fresh_count=0,
-                    openclaw_exit=0,
+                    openclaw_exit=_EXIT_OPENCLAW_UNFINISHED if unfinished else 0,
                     oauth_skipped=bool(oauth_skipped),
                 )
 
@@ -2987,15 +2990,16 @@ def _lock_keys(
                     oauth_skipped=bool(oauth_skipped),
                 )
             except (Exception, KeyboardInterrupt, asyncio.CancelledError) as exc:
-                # Whether to roll back is _LockInterrupts.may_unwind's call (never
-                # after the commit, except post-flight's documented exit 87); its
+                # Never roll back after the commit: the rewritten .env needs these
+                # rows (worthless-im3x). _LockInterrupts' handler stays installed so
+                # a mashed Ctrl-C cannot cut the rollback short; its
                 # handler stays installed so a mashed Ctrl-C cannot cut the rollback
                 # short, and ``finally`` disarms it. The interrupt types are caught
                 # EXPLICITLY (not a bare ``except BaseException``) so ``SystemExit``
                 # keeps propagating. The ``isinstance`` guard below converts ONLY a
                 # genuine signal cancellation to ``KeyboardInterrupt``, leaving other
                 # exit codes (``typer.Exit`` 73/87, ``WorthlessError``) intact.
-                if planned and on_signal.may_unwind(exc):
+                if planned and not on_signal.committed:
                     unwind_errors = await _compensating_unwind(repo, planned)
                     if unwind_errors:
                         console.print_warning(
@@ -3063,7 +3067,7 @@ def _lock_keys(
         _exit_openclaw_failed(console, result.openclaw_exit)
 
     # Also here, for the paths the branch above does not cover: a quiet lock, a
-    # re-lock with no fresh keys, or an OpenClaw partial failure. Syncing twice
+    # re-lock with no fresh keys (a failed OpenClaw stage exited above). Syncing twice
     # is harmless — it copies the same canonical key and no-ops when the bytes
     # already match.
     _sync_fernet_after_lock(home)
