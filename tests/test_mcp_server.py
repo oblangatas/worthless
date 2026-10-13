@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -21,6 +22,8 @@ from worthless.mcp.server import (  # noqa: E402
     worthless_spend,
     worthless_status,
 )
+
+from tests.helpers import fake_key  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -43,6 +46,9 @@ def _make_home(tmp_path: Path) -> Path:
     (home / "shard_a").mkdir(mode=0o700)
     key = Fernet.generate_key()
     (home / "fernet.key").write_bytes(key)
+    # 0600 is what the product writes; the default 0644 is REFUSED
+    # (worthless-6hu7), which would fail these tests for setup reasons.
+    (home / "fernet.key").chmod(0o600)
     return home
 
 
@@ -318,6 +324,69 @@ class TestWorthlessScan:
         result = json.loads(await worthless_scan(paths=[str(env_file)]))
         assert result["summary"]["total"] >= 1
         assert result["summary"]["unprotected"] >= 1
+
+    @pytest.mark.asyncio
+    async def test_scan_oauth_token_is_unshardable_not_unprotected(self, tmp_path: Path) -> None:
+        """worthless-p55g: lock refuses a Claude Code OAuth token by design, so
+        counting it as unprotected sends an agent to run lock in a loop."""
+        token = fake_key("sk-ant-oat01-", "p55g-mcp")
+        env_file = _make_env_file(tmp_path, f"ANTHROPIC_API_KEY={token}\n")
+
+        result = json.loads(await worthless_scan(paths=[str(env_file)]))
+
+        [finding] = result["findings"]
+        assert finding["is_protected"] is False
+        assert finding["is_unshardable"] is True, finding
+        assert "sk-ant-api03" in finding["remediation"], finding
+        # Additive contract: "unprotected" keeps its meaning (not protected), so
+        # an agent checking unprotected == 0 never reads this file as clean.
+        # "unshardable" is the subset lock can't fix.
+        summary = result["summary"]
+        assert summary["unprotected"] == 1, summary
+        assert summary["unshardable"] == 1, summary
+        assert summary["total"] == summary["protected"] + summary["unprotected"], summary
+
+    @pytest.mark.asyncio
+    async def test_scan_tells_the_agent_which_older_commit_holds_the_env(
+        self, tmp_path: Path
+    ) -> None:
+        """worthless-87rb: a passing token whose .env an older commit holds
+        reaches the agent as data, not only as prose."""
+        env_file = _make_env_file(
+            tmp_path, f"ANTHROPIC_API_KEY={fake_key('sk-ant-oat01-', '87rb-mcp')}\n"
+        )
+        git = ["git", "-C", str(tmp_path), "-c", "user.email=t@t", "-c", "user.name=t"]
+        git += ["-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"]
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)  # noqa: S607
+        subprocess.run([*git, "add", ".env"], check=True)  # noqa: S603
+        subprocess.run([*git, "commit", "-q", "-m", "x"], check=True)  # noqa: S603
+        leaked = subprocess.run(  # noqa: S603
+            [*git, "rev-parse", "--short", "HEAD"], check=True, capture_output=True, text=True
+        ).stdout.strip()
+        subprocess.run([*git, "rm", "-q", "--cached", ".env"], check=True)  # noqa: S603
+        subprocess.run([*git, "commit", "-q", "-m", "untrack"], check=True)  # noqa: S603
+
+        result = json.loads(await worthless_scan(paths=[str(env_file)]))
+
+        [finding] = result["findings"]
+        assert finding["is_unshardable"] is True, finding
+        assert finding["committed_before"] == leaked, finding
+        assert leaked in finding["remediation"], finding
+        assert result["summary"]["unshardable"] == 1, result["summary"]
+
+    @pytest.mark.asyncio
+    async def test_scan_token_outside_env_is_told_to_revoke(self, tmp_path: Path) -> None:
+        """A login token outside a local .env is exposed; the agent is told to
+        revoke it, never to run lock."""
+        src = tmp_path / "settings.py"
+        src.write_text(f'ANTHROPIC_API_KEY = "{fake_key("sk-ant-oat01-", "p55g-mcp-src")}"\n')
+
+        result = json.loads(await worthless_scan(paths=[str(src)]))
+
+        [finding] = result["findings"]
+        assert finding["is_unshardable"] is False, finding
+        assert "revoke" in finding["remediation"].lower(), finding
+        assert result["summary"]["unshardable"] == 0, result["summary"]
 
     @pytest.mark.asyncio
     async def test_scan_no_paths_defaults(

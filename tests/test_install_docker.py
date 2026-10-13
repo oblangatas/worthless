@@ -1073,7 +1073,10 @@ chmod +x /usr/local/bin/uv
 mkdir -p /root/.config/uv
 printf '[[index]]\nurl = "http://127.0.0.1:9/simple"\ndefault = true\n' > /root/.config/uv/uv.toml
 set +e
+# WORTHLESS_VERSION survives env -i only when CI set it: on a release PR the
+# baked pin isn't on PyPI yet (see _published_version_run_args).
 env -i HOME=/root NO_COLOR=1 XDG_BIN_HOME=/root/xbin XDG_DATA_HOME=/opt/xdata \
+  ${WORTHLESS_VERSION:+WORTHLESS_VERSION=$WORTHLESS_VERSION} \
   PATH=/usr/local/bin:/usr/bin:/bin sh /work/install.sh
 rc=$?
 echo "INSTALL_RC=$rc"

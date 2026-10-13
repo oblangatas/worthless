@@ -52,11 +52,13 @@ on:  # zizmor: ignore[dangerous-triggers]
     workflows:
       - "Docker Security Scan & E2E"
       - "Flake radar (nightly)"
+      - "macOS service"
       - "Pip-audit canary (weekly)"
       - "Release Sync Check"
       - "Release watchdog"
       - "Scheduled (Hypothesis + Secret Scan)"
       - "Scorecard security analysis"
+      - "Served installer integrity"
       - "Wire-attack canary (scheduled)"
       - "WSL"
 

