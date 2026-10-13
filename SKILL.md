@@ -353,7 +353,7 @@ Runs foreground `worthless up` (sidecar-supervised) under a platform unit — no
 ```bash
 worthless service install              # interactive confirm
 worthless service install --yes        # non-interactive
-worthless service status --json
+worthless service status
 worthless service start
 worthless service logs -f
 ```

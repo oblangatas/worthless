@@ -418,10 +418,7 @@ class TestUnwindFailureWarnsToReconcile:
         # require the CONTIGUOUS recovery phrase so a future refactor can't satisfy
         # the check by scattering the two tokens across unrelated messages.
         normalized = " ".join(result.output.split())
-        assert (
-            "stale row(s); run `worthless lock` again to finish, or `worthless unlock` to undo"
-            in normalized
-        ), (
+        assert "stale row(s); run `worthless lock` again to finish." in normalized, (
             "after a failed rollback the user was NOT shown the single recovery "
             f"instruction; output was:\n{result.output}"
         )
