@@ -1644,7 +1644,13 @@ class TestScanAgreesWithLockOnOAuthTokens:
         )
         _git_commit(env.parent, ".env")
 
-        result = runner.invoke(app, ["scan", str(env)])
+        # Own home, notice already shown: otherwise, when this test is the
+        # first CLI call in its xdist worker, line 0 is the one-time AS-IS
+        # notice and the headline assertion fails (seen on CI, py3.10).
+        home = WorthlessHome(base_dir=tmp_path / "wl-home")
+        home.warranty_notice_marker.parent.mkdir(parents=True, exist_ok=True)
+        home.warranty_notice_marker.touch()
+        result = runner.invoke(app, ["scan", str(env)], env={"WORTHLESS_HOME": str(home.base_dir)})
         headline = (result.stdout + result.stderr).splitlines()[0].lower()
 
         assert result.exit_code == 1, headline
