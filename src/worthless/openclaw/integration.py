@@ -1306,9 +1306,10 @@ def _undo_own_provider_writes(
     Without a readable snapshot nothing is reverted. Best effort: a failure
     here must not mask the interrupt that brought us here.
     """
-    if original_config is None or isinstance(original_config, _UnreadSnapshot):
+    if isinstance(original_config, _UnreadSnapshot):
         return
-    prior = _config_mod._providers_view(original_config, strict=False) or {}
+    # None: no openclaw.json before the lock (a first lock), so nothing was there.
+    prior = _config_mod._providers_view(original_config or {}, strict=False) or {}
     base = resolved_proxy_base_url.rstrip("/")
     for provider, alias, _shard_a in planned_updates:
         ours = f"{base}/{alias}/v1"

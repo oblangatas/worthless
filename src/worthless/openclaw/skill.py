@@ -166,8 +166,9 @@ def install(target_dir: Path) -> Path:
 
         # Move the previous install aside (never delete it first): a Ctrl-C or
         # a failed rename between delete and rename left no skill at all
-        # (worthless-1jfr). The ``.worthless.tmp.`` prefix keeps it under the
-        # existing leftover checks.
+        # (worthless-1jfr). If the process is killed outright in between, the
+        # aside copy is a dot-folder OpenClaw ignores, and the next install
+        # puts the skill back.
         retired = staging.with_name(staging.name + ".old")
         try:
             os.rename(final, retired)  # noqa: PTH104
