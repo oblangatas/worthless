@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import signal
 import socket
 import stat
@@ -848,8 +849,9 @@ async def _pass1_db_writes(
                 raise WorthlessError(
                     ErrorCode.SHARD_STORAGE_FAILED,
                     f"Alias {alias!r} predates format-preserving split. "
-                    f"Run `worthless unlock --alias {alias} --env {env_str}`, then "
-                    f"`worthless lock --env {env_str}` again.",
+                    f"Run `worthless unlock --alias {shlex.quote(alias)} "
+                    f"--env {shlex.quote(env_str)}`, then "
+                    f"`worthless lock --env {shlex.quote(env_str)}` again.",
                 )
             stored_decrypted = await repo.decrypt_shard(db_shard)
             verify_payload = bytearray(value.encode("utf-8"))
