@@ -40,9 +40,9 @@ jobs:
   install-matrix:
     name: install.sh host matrix (distros, lock lifecycle, app container)
     runs-on: ubuntu-24.04
-    # 7 install fixtures + 2 lock-lifecycle fixtures + 3 host/app-container
-    # journeys + 5 site-claim tests (the CLI behaviors wless.io describes in
-    # words) = 17 docker-marked tests.
+    # Two modules: test_install_docker.py (install fixtures, lock lifecycle,
+    # host/app-container journeys) and test_site_claims_match_cli.py (the CLI
+    # behaviors wless.io describes in words). No count here: it went stale once.
     # ubuntu-idempotency runs install.sh TWICE (~2x install fixture time). On
     # the first PR run BuildKit caches are cold, so PBS Python + wheels are
     # fetched per-fixture. 40m gives margin without being absurd.
@@ -118,8 +118,8 @@ jobs:
           # (WOR-320) are not silently stripped by the legacy builder.
           DOCKER_BUILDKIT: "1"
           COMPOSE_DOCKER_CLI_BUILD: "1"
-        # -n 2 --dist load: 9 install + 2 lock-lifecycle + 5 site-claim tests →
-        # `loadscope` would pin each module to one worker. `load` distributes
+        # -n 2 --dist load: `loadscope` would pin each module's tests to one
+        # worker. `load` distributes
         # individual items. Docker daemon serializes layer commits anyway;
         # 2 concurrent builds is the sweet spot — higher counts thrash disk
         # I/O without speedup.
