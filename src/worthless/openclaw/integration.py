@@ -34,6 +34,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1019,8 +1020,8 @@ def rollback_config(config_path: Path | None, original_config: dict | None) -> N
     Raises :class:`OSError` on disk-full or permission failure — the caller
     surfaces both the original write error and the rollback error via events.
     """
-    if config_path is None:
-        return
+    if config_path is None or isinstance(original_config, _UnreadSnapshot):
+        return  # never restore a snapshot we could not read: that wrote {}
     if original_config is None:
         # File was absent before this lock attempt — delete any partial file
         # written before the failure rather than leaving {} on disk.
@@ -1285,9 +1286,12 @@ def _apply_lock_stage_a(
         )
     except BaseException:
         _undo_own_provider_writes(
-            config_path, original_config, resolved_proxy_base_url, planned_updates
+            config_path, original_config, resolved_proxy_base_url, planned_updates, events
         )
         raise
+
+
+_UNDO_BUDGET_S = 2.0  # after a Ctrl-C a second press is ignored: never wait longer
 
 
 def _undo_own_provider_writes(
@@ -1295,6 +1299,7 @@ def _undo_own_provider_writes(
     original_config: dict | None,
     resolved_proxy_base_url: str,
     planned_updates: list[tuple[str, str, str]],
+    events: list[OpenclawIntegrationEvent],
 ) -> None:
     """Put back the entries this lock wrote, and nothing else (worthless-2nta).
 
@@ -1303,27 +1308,42 @@ def _undo_own_provider_writes(
     still points at this lock's proxy alias (a later change by anyone else is
     kept), and only to a pre-lock entry that was not already ours (on a
     re-lock the old entry carries a stale key half: ours is the right one).
-    Without a readable snapshot nothing is reverted. Best effort: a failure
-    here must not mask the interrupt that brought us here.
+    Without a readable snapshot nothing is reverted. Each revert is a
+    compare-and-swap under the flock, all within :data:`_UNDO_BUDGET_S`: a
+    config lock held elsewhere stops the undo instead of hanging it. Best
+    effort: a failure here must not mask the interrupt that brought us here.
     """
     if isinstance(original_config, _UnreadSnapshot):
         return
     # None: no openclaw.json before the lock (a first lock), so nothing was there.
     prior = _config_mod._providers_view(original_config or {}, strict=False) or {}
     base = resolved_proxy_base_url.rstrip("/")
+    deadline = time.monotonic() + _UNDO_BUDGET_S
     for provider, alias, _shard_a in planned_updates:
         ours = f"{base}/{alias}/v1"
         before = prior.get(provider)
         if isinstance(before, dict) and before.get("baseUrl") == ours:
             continue  # it was ours before too: keep the new key half
         with contextlib.suppress(OpenclawConfigError, OSError):
-            current = _config_mod.get_provider(config_path, provider)
-            if not isinstance(current, dict) or current.get("baseUrl") != ours:
-                continue  # not written by us, or changed since: leave it
-            if isinstance(before, dict):
-                _config_mod.replace_provider(config_path, provider, before)
-            else:
-                _config_mod.unset_provider(config_path, provider)
+            if not _config_mod.revert_provider_if_ours(
+                config_path,
+                provider,
+                ours_base_url=ours,
+                prior=before if isinstance(before, dict) else None,
+                deadline=deadline,
+            ):
+                events.append(
+                    OpenclawIntegrationEvent(
+                        code=OpenclawErrorCode.WRITE_FAILED,
+                        level="error",
+                        detail=(
+                            f"could not undo the interrupted write to {config_path}: "
+                            "another process holds its lock — run `worthless doctor`"
+                        ),
+                        extra={"path": str(config_path)},
+                    )
+                )
+                return
 
 
 def _apply_lock_rollback(
