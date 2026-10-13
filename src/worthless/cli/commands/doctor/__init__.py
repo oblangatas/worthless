@@ -866,6 +866,29 @@ def _doctor_apply(
 # ---------------------------------------------------------------------------
 
 
+def _report_unopenable_install(exc: WorthlessError, console) -> None:  # noqa: ANN001
+    """Explain an install whose key or DB can't be opened — without over-advising.
+
+    Two very different states land here. A genuinely unreadable/missing key is
+    unrecoverable and the honest answer is a forced removal plus rotation. A
+    REFUSED key (worthless-6hu7: wrong mode, foreign owner, symlink) is a
+    present, intact install whose fix is a chmod — recommending
+    ``uninstall --force`` for that would destroy recoverable data over a
+    permission bit, so the refusal (which names the fix) is handed back as-is.
+    """
+    if exc.code is ErrorCode.KEY_REFUSED:
+        console.print_warning(
+            f"Worthless won't touch your encryption key until you fix it.\n{exc.message}\n"
+            "Nothing was changed, and your locked keys are still recoverable."
+        )
+        return
+    console.print_warning(
+        "Worthless looks broken — it can't be read (encryption key or database "
+        "missing/unreadable), so your locked keys can't be reconstructed. Remove "
+        "it with 'worthless uninstall --force', then rotate those keys at your provider."
+    )
+
+
 def _doctor_run(*, fix: bool, yes: bool, dry_run: bool) -> None:
     """Diagnose and (optionally) repair stuck states.
 
@@ -886,12 +909,8 @@ def _doctor_run(*, fix: bool, yes: bool, dry_run: bool) -> None:
     try:
         home = get_home()
         _ = home.fernet_key
-    except WorthlessError:
-        console.print_warning(
-            "Worthless looks broken — it can't be read (encryption key or database "
-            "missing/unreadable), so your locked keys can't be reconstructed. Remove "
-            "it with 'worthless uninstall --force', then rotate those keys at your provider."
-        )
+    except WorthlessError as exc:
+        _report_unopenable_install(exc, console)
         return
 
     with _doctor_lock(home), acquire_lock(home):

@@ -1643,12 +1643,13 @@ class TestScanAgreesWithLockOnOAuthTokens:
             tmp_path, self._oauth("p55g-mixed-committed"), f"OPENAI_API_KEY={_fake_openai_key()}"
         )
         _git_commit(env.parent, ".env")
-        # Line 0 must be scan's headline, not the once-per-install AS-IS
-        # notice, which prints first on a home that hasn't shown it yet.
-        home = WorthlessHome(base_dir=tmp_path / "home")
+
+        # Own home, notice already shown: otherwise, when this test is the
+        # first CLI call in its xdist worker, line 0 is the one-time AS-IS
+        # notice and the headline assertion fails (seen on CI, py3.10).
+        home = WorthlessHome(base_dir=tmp_path / "wl-home")
         home.warranty_notice_marker.parent.mkdir(parents=True, exist_ok=True)
         home.warranty_notice_marker.touch()
-
         result = runner.invoke(app, ["scan", str(env)], env={"WORTHLESS_HOME": str(home.base_dir)})
         headline = (result.stdout + result.stderr).splitlines()[0].lower()
 

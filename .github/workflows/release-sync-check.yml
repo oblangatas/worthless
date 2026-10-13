@@ -22,6 +22,7 @@ on:
 permissions:
   contents: read
   deployments: read
+  pages: read
 
 concurrency:
   # Don't drop a scheduled run if a manual one fires — both are useful.
@@ -420,3 +421,96 @@ jobs:
             exit 1
           fi
           echo "OK: no docs.worthless.sh references in install.sh or manual smoke fixture"
+
+      # ===== Assertion 7: the live site's own prerequisites =================
+      - name: A7 — HTTPS certificate renews in time and security.txt is served
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          MIN_DAYS: "21"
+        run: |
+          set -euo pipefail
+          # Both halves always run. Exiting on the first failure means a month of
+          # certificate warnings would hide the day security.txt disappeared.
+          failed=0
+          # 1) Pages renews a custom-domain certificate on its own — unless the
+          # domain is proxied, which is how wless.io is served. That renewal
+          # already failed once (June, "bad_authz"). An expired origin cert can
+          # take the whole site down, so alarm while there is still time to act.
+          # No `|| true` here on purpose: an unreadable API answer is itself the
+          # alarm. Swallowing it makes "the endpoint moved" look identical to
+          # "the certificate is fine", which disarms this check permanently.
+          if ! cert=$(gh api "repos/${REPO}/pages" --jq '[.https_certificate.state // "none", .https_certificate.expires_at // "none"] | @tsv'); then
+            # Say which check went blind, rather than dying on set -e with no
+            # annotation: a token that lost `pages: read`, a renamed endpoint
+            # and an API outage all land here and all disarm the alarm.
+            echo "::error title=Pages certificate::the Pages API could not be read — the certificate alarm cannot run"
+            failed=1
+            cert=""
+          fi
+          state=$(printf '%s' "$cert" | cut -f1)
+          expires=$(printf '%s' "$cert" | cut -f2)
+          # The state is the half that catches a FAILED renewal. An expiry alone
+          # reads "fine" right up to the 21-day window — which is exactly when
+          # there is least time to fix it. June's failure looked like this.
+          if [ -n "$state" ]; then
+            case "$state" in
+              approved|issued) ;;
+              *)
+                echo "::error title=Pages certificate::certificate state is '$state' (expected approved/issued) — renewal is not healthy"
+                failed=1
+                ;;
+            esac
+          fi
+          # Digit classes, not "?": the value comes from an API response and is
+          # echoed into an annotation, where a crafted string could otherwise
+          # forge workflow commands. Both date shapes are accepted because the
+          # API returns a bare calendar date today ("2026-11-16") while an
+          # earlier version of this step demanded a "T" separator — so every
+          # real expiry fell through to the skip branch and the alarm could
+          # never fire. Found by review on PR #678.
+          digits='[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+          if [ -n "$expires" ]; then
+            # shellcheck disable=SC2254  # the glob is the point, not a literal
+            case "$expires" in
+              $digits|$digits"T"*) ;;
+              *)
+                echo "::error title=Pages certificate::unreadable expiry from the Pages API: '$expires'"
+                failed=1
+                expires=""
+                ;;
+            esac
+          fi
+          if [ -n "$expires" ]; then
+            # On its own line: inside $(( )) a failing date silently becomes 0
+            # and prints a confident, wrong number of days.
+            expiry_epoch=$(date -d "$expires" +%s)
+            days=$(( (expiry_epoch - $(date +%s)) / 86400 ))
+            if [ "$days" -lt "$MIN_DAYS" ]; then
+              echo "::error title=Pages certificate::wless.io certificate expires in ${days}d (< ${MIN_DAYS}d): $expires"
+              failed=1
+            else
+              echo "OK: Pages certificate state=$state, valid for ${days} more days ($expires)"
+            fi
+          fi
+          # 2) security.txt lives under a dotted directory. upload-pages-artifact
+          # v4+ excludes dotfiles by default, so a routine action bump could drop
+          # the disclosure contact from production with no test noticing.
+          # Cache-busted and body-checked: wless.io sits behind a CDN, so a 200
+          # can be served from cache (or by a custom error page) long after the
+          # origin stopped serving the file.
+          # One check, not two: a 404, a cached error page, and a DNS or TLS
+          # failure all fail to produce a Contact: line, which is the thing that
+          # has to be there.
+          # Captured, not piped: `grep -q` exits on the first match, and under
+          # pipefail a SIGPIPE'd curl would fail the check for the wrong reason.
+          txt=$(curl -sf --max-time 20 --retry 2 -H 'Cache-Control: no-cache' \
+                  "https://wless.io/.well-known/security.txt?cb=${GITHUB_RUN_ID}" || true)
+          if printf '%s' "$txt" | grep -q '^Contact:'; then
+            echo "OK: security.txt served with a Contact: line"
+          else
+            echo "::error title=security.txt missing::https://wless.io/.well-known/security.txt did not return a Contact: line"
+            failed=1
+          fi
+          exit "$failed"

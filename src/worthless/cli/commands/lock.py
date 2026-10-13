@@ -30,7 +30,7 @@ import typer
 from worthless.cli._repo_factory import open_repo
 from worthless.cli.bootstrap import WorthlessHome, acquire_lock, get_home
 from worthless.cli.code_scanner import scan_for_hardcoded_provider_urls
-from worthless.cli.commands.service import _backend, _print_service_banner
+from worthless.cli.commands.service import _backend, _print_service_banner, launchd, systemd
 from worthless.cli.commands.service._common import (
     ServiceState,
     current_platform_backend_name,
@@ -48,8 +48,9 @@ from worthless.cli.process import (
     resolve_port,
 )
 from worthless.cli.console import WorthlessConsole, get_console
-from worthless.cli.platform import is_wsl
+from worthless.cli.platform import _in_container, is_wsl
 from worthless.cli.scanner import SkippedFile, scan_source_for_hardcoded_provider_urls
+from worthless.cli.sentinel import is_partial, read_sentinel
 from worthless.cli.dotenv_rewriter import (
     rewrite_env_keys,
     scan_env_keys,
@@ -1891,6 +1892,7 @@ def _resolve_adoption_policy(
 
 
 _EXIT_INTERRUPTED = 130  # 128 + SIGINT: the shell's code for "stopped by Ctrl-C"
+_EXIT_OPENCLAW_UNFINISHED = 73  # EX_CANTCREAT, as for any partial OpenClaw failure
 _STILL_ROLLING_BACK = "Still rolling back so nothing is left half-locked. One moment."
 _INTERRUPTED = (
     "Interrupted. Your .env keys are locked, but OpenClaw setup was cut short,\n"
@@ -1898,15 +1900,6 @@ _INTERRUPTED = (
     "   Repair it:  worthless doctor\n"
     "   Roll back:  worthless unlock"
 )
-
-
-class _PostflightRefused(typer.Exit):
-    """Post-flight's exit 87: the one failure after the commit that may still roll back.
-
-    Its recovery contract is documented on :func:`_openclaw_audit_postflight`
-    (and questioned in worthless-im3x). A distinct type, so no other
-    ``typer.Exit`` raised after the commit can unwind the keys by accident.
-    """
 
 
 class _LockInterrupts:
@@ -1922,7 +1915,7 @@ class _LockInterrupts:
 
     After the commit the rewritten ``.env`` needs those rows, so nothing may roll
     them back: not a press (raised by :func:`_ctrl_c_raises`; this only drops the
-    copy asyncio queued), not a crash. Only :class:`_PostflightRefused` may.
+    copy asyncio queued), not a crash, not a refused post-flight (worthless-im3x).
     Answers use the console's ``--quiet``-proof channels: quiet hides chatter,
     not the answer to a key the user just pressed.
     """
@@ -1945,17 +1938,14 @@ class _LockInterrupts:
         if self.task is None:
             return
         if self.pressed or self.committed:
-            # Never cancel twice, never after the commit. After it the loop only
-            # runs this during post-flight's exit-87 rollback: answer that too.
-            if self.planned:
+            # Never cancel twice, never after the commit. Before it, this runs
+            # during the rollback a first press started: answer that too. After
+            # it nothing rolls back (worthless-im3x), so say nothing.
+            if self.planned and not self.committed:
                 self.console.print_notice(_STILL_ROLLING_BACK)
             return
         self.pressed = True
         self.task.cancel()
-
-    def may_unwind(self, exc: BaseException) -> bool:
-        """May the rollback run for *exc*? Never after the commit, except post-flight's exit 87."""
-        return not self.committed or isinstance(exc, _PostflightRefused)
 
 
 @contextlib.contextmanager
@@ -2000,9 +1990,9 @@ def _ctrl_c_raises(signals: list[int]) -> Iterator[None]:
 def _exit_openclaw_failed(console, code: int) -> NoReturn:  # noqa: ANN001
     """Final word on a lock whose OpenClaw stage did not finish; exits *code*.
 
-    Ctrl-C (130) already explained itself and synced the Fernet key in
-    :func:`_openclaw_steps`. The other codes skip that sync (pre-existing,
-    tracked as worthless-vhew).
+    Ctrl-C (130) already explained itself in :func:`_openclaw_steps`. Ctrl-C and a
+    refused post-flight (87 from :func:`_openclaw_audit_postflight`) synced the
+    Fernet key there; :func:`_apply_openclaw`'s failures still skip that sync.
     """
     if code != _EXIT_INTERRUPTED:
         console.print_failure(
@@ -2011,6 +2001,33 @@ def _exit_openclaw_failed(console, code: int) -> NoReturn:  # noqa: ANN001
             "Run `worthless doctor` to diagnose, `worthless unlock` to roll back."
         )
     raise typer.Exit(code=code)
+
+
+_UNFINISHED_DETAIL = {
+    "openclaw.interrupted": "interrupted before OpenClaw setup finished",
+    "openclaw.postflight_refused": "OpenClaw files changed mid-lock; setup was refused",
+}
+
+
+def _record_openclaw_unfinished(
+    home: WorthlessHome, planned: list[_PlannedUpdate], code: str
+) -> None:
+    """Keys are locked but OpenClaw is not wired: ``worthless status`` must say so."""
+    _write_lock_sentinel(
+        home,
+        status="partial",
+        openclaw="failed",
+        alias_count=len(planned),
+        events=({"code": code, "level": "error", "detail": _UNFINISHED_DETAIL[code]},),
+    )
+
+
+def _openclaw_left_unfinished(home: WorthlessHome) -> bool:
+    """Did the last lock stop before OpenClaw setup finished? Codes: _UNFINISHED_DETAIL."""
+    sentinel = read_sentinel(home.base_dir)
+    if sentinel is None or not is_partial(sentinel):
+        return False
+    return any(e.get("code") in _UNFINISHED_DETAIL for e in sentinel.get("events") or [])
 
 
 def _openclaw_steps(
@@ -2036,7 +2053,14 @@ def _openclaw_steps(
     try:
         with _ctrl_c_raises(signals):
             if gate is not None:
-                _openclaw_audit_postflight(gate, managed_aliases, proxy_base_url)
+                try:
+                    _openclaw_audit_postflight(gate, managed_aliases, proxy_base_url)
+                except typer.Exit as refused:
+                    if refused.exit_code != 87:
+                        raise
+                    _record_openclaw_unfinished(home, planned, "openclaw.postflight_refused")
+                    _sync_fernet_after_lock(home)  # keys stay locked: keep them usable
+                    return refused.exit_code
             adoption_policy = _resolve_adoption_policy(
                 planned,
                 managed_aliases=managed_aliases,
@@ -2049,19 +2073,7 @@ def _openclaw_steps(
         # click's confirm (the adoption prompt) turns Ctrl-C and Ctrl-D into
         # typer.Abort, a RuntimeError the caller's rollback would otherwise catch.
         console.print_failure(_INTERRUPTED)
-        _write_lock_sentinel(
-            home,
-            status="partial",
-            openclaw="failed",
-            alias_count=len(planned),
-            events=(
-                {
-                    "code": "openclaw.interrupted",
-                    "level": "error",
-                    "detail": "interrupted before OpenClaw setup finished",
-                },
-            ),
-        )
+        _record_openclaw_unfinished(home, planned, "openclaw.interrupted")
         # The keys ARE locked, so keep them usable by a service-run proxy. Done
         # here, while a further press is still inert, so it cannot be skipped
         # (before worthless-3clz the press was ignored and the lock ran on to it).
@@ -2205,6 +2217,11 @@ _CI_ENV_VARS = (
     "TEAMCITY_VERSION",  # TeamCity (attaches a real PTY — must be checked explicitly)
     "CIRCLECI",  # CircleCI (sets CI=true too, belt-and-suspenders)
 )
+
+
+# Set in the environment of commands an AI coding agent runs (verified for
+# Claude Code: CLAUDECODE=1, AI_AGENT). Used only by the service offer.
+_AGENT_ENV_VARS = ("CLAUDECODE", "AI_AGENT")
 
 
 def _scan_prompt_is_tty() -> bool:
@@ -2425,7 +2442,9 @@ def _print_lock_result(
             )
         if relock_count:
             noun = "key" if relock_count == 1 else "keys"
-            console.print_success(f"[OK] {relock_count} {noun} still protected.")
+            # Locked, yes; "protected" only when the verdict was earned (worthless-im3x).
+            state = "still protected" if verdict_earned else "still locked in .env"
+            console.print_success(f"[OK] {relock_count} {noun} {state}.")
         env_home = os.environ.get("WORTHLESS_HOME")
         if env_home and home_base_dir.resolve() != (Path.home() / ".worthless").resolve():
             typer.echo(
@@ -2540,13 +2559,11 @@ def _openclaw_audit_postflight(
     Raises typer.Exit(87) if new blocking findings appeared since pre-flight,
     indicating the OpenClaw config was modified between the two audit passes.
 
-    Recovery note: if this raises, ``_batch_rewrite`` has already committed
-    shard-A values to the .env, but ``_compensating_unwind`` (in the caller's
-    except block) rewinds the DB rows. The .env may therefore contain shard-A
-    values while DB rows are gone. Re-running ``worthless lock`` recovers: the
-    next pre-flight will see the same shard-A values as a PLAINTEXT_FOUND for
-    ``worthless-openai`` (allowlisted) and proceed normally once the user
-    fixes the OpenClaw plaintext that caused this exit.
+    Runs after ``_batch_rewrite`` committed shard-A to the .env, so the keys
+    stay locked (worthless-im3x: unwinding deleted shard-B and lost the key):
+    :func:`_openclaw_steps` reports the 87 like any OpenClaw failure and
+    OpenClaw is never wired. Recovery: fix the plaintext, then
+    ``worthless unlock`` and ``worthless lock``.
     """
     post_hashes = _oc_audit.snapshot_hashes(gate.pre_hashes.keys())
     if post_hashes == gate.pre_hashes:
@@ -2559,7 +2576,7 @@ def _openclaw_audit_postflight(
         )
     except _oc_audit.AuditGateError as exc:
         typer.echo(f"worthless lock: post-flight audit failed: {exc}", err=True)
-        raise _PostflightRefused(code=87) from exc
+        raise typer.Exit(code=87) from exc
 
     if post_class.unknown_codes:
         typer.echo(
@@ -2567,16 +2584,17 @@ def _openclaw_audit_postflight(
             f"{', '.join(post_class.unknown_codes)} — exit 87",
             err=True,
         )
-        raise _PostflightRefused(code=87)
+        raise typer.Exit(code=87)
 
     if post_class.blocking:
         detail = _oc_audit.format_gate_error_message(post_class.blocking)
         typer.echo(
             f"worthless lock: state changed between pre-flight and post-flight "
-            f"— new plaintext detected, re-run worthless lock.\n{detail}",
+            f"— new plaintext detected. Fix it, then run `worthless unlock` and "
+            f"`worthless lock`.\n{detail}",
             err=True,
         )
-        raise _PostflightRefused(code=87)
+        raise typer.Exit(code=87)
 
 
 def _sync_fernet_after_lock(home: WorthlessHome) -> None:
@@ -2812,10 +2830,15 @@ def _lock_keys(
                 env_str,
             )
             if not scanned:
+                # Every key is already locked. If the last lock never finished
+                # OpenClaw setup (refused or interrupted), it still hasn't: never
+                # call that "protected" (worthless-im3x). Not any partial status:
+                # a finished lock that left an entry un-adopted is partial too.
+                unfinished = _openclaw_left_unfinished(home)
                 return _LockResult(
                     total=len(raw_scanned),
                     fresh_count=0,
-                    openclaw_exit=0,
+                    openclaw_exit=_EXIT_OPENCLAW_UNFINISHED if unfinished else 0,
                     oauth_skipped=bool(oauth_skipped),
                 )
 
@@ -2990,15 +3013,15 @@ def _lock_keys(
                     oauth_skipped=bool(oauth_skipped),
                 )
             except (Exception, KeyboardInterrupt, asyncio.CancelledError) as exc:
-                # Whether to roll back is _LockInterrupts.may_unwind's call (never
-                # after the commit, except post-flight's documented exit 87); its
-                # handler stays installed so a mashed Ctrl-C cannot cut the rollback
-                # short, and ``finally`` disarms it. The interrupt types are caught
+                # Never roll back after the commit: the rewritten .env needs these
+                # rows (worthless-im3x). _LockInterrupts' handler stays installed so
+                # a mashed Ctrl-C cannot cut the rollback short, and ``finally``
+                # disarms it. The interrupt types are caught
                 # EXPLICITLY (not a bare ``except BaseException``) so ``SystemExit``
                 # keeps propagating. The ``isinstance`` guard below converts ONLY a
                 # genuine signal cancellation to ``KeyboardInterrupt``, leaving other
                 # exit codes (``typer.Exit`` 73/87, ``WorthlessError``) intact.
-                if planned and on_signal.may_unwind(exc):
+                if planned and not on_signal.committed:
                     unwind_errors = await _compensating_unwind(repo, planned)
                     if unwind_errors:
                         console.print_warning(
@@ -3066,7 +3089,7 @@ def _lock_keys(
         _exit_openclaw_failed(console, result.openclaw_exit)
 
     # Also here, for the paths the branch above does not cover: a quiet lock, a
-    # re-lock with no fresh keys, or an OpenClaw partial failure. Syncing twice
+    # re-lock with no fresh keys (a failed OpenClaw stage exited above). Syncing twice
     # is harmless — it copies the same canonical key and no-ops when the bytes
     # already match.
     _sync_fernet_after_lock(home)
@@ -3166,25 +3189,76 @@ def _offer_declined_hint() -> str:
     return "Want it to keep running after you close this terminal? `worthless service install`"
 
 
-def _offer_question(port: int) -> str:
+def _tilde(path: Path) -> str:
+    """Show a path the way the user would type it."""
+    home = str(Path.home())
+    text = str(path)
+    return "~" + text[len(home) :] if text.startswith(home + "/") else text
+
+
+def _offer_question(port: int, home: WorthlessHome) -> str:
     """The question to ask, which must be true on the platform asking it.
 
-    On WSL the plain version is a promise WSL does not keep: measured on real
-    WSL2 (WOR-853), the default config stops the distro — and the proxy with it
-    — about 15 s after the last WSL terminal closes. The fix text used to print
-    only AFTER the unit was written and linger enabled, and consent collected
-    after the irreversible step is not consent. So WSL gets told in the
+    WOR-859 ruling (2026-10-10): off by default, asked explicitly. A one-line
+    "installs a user service" let people agree to a login item and a key file
+    without knowing either existed. So the question names what it adds, the
+    trade-off, and the undo — and tells anyone unsure to say no.
+
+    On WSL the plain promise is one WSL does not keep: measured on real WSL2
+    (WOR-853), the default config stops the distro — and the proxy with it —
+    about 15 s after the last WSL terminal closes. So WSL is told in the
     question, before answering it.
+
+    Say when it starts, never "survives a restart": that is what the unit is
+    configured to do, while reboot survival is still unproven (WOR-725).
+
+    systemd enables lingering, which starts the user manager at BOOT, not at
+    login, and `service uninstall` deliberately leaves it on (worthless-fzas).
+    Uninstall also leaves the key file. The question says both up front:
+    consent given before the irreversible step, not in a banner after it.
+
+    typer.confirm prints plain text, so the terminal does the wrapping. Every
+    line is kept under 80 columns by hand.
     """
-    if is_wsl():
-        return (
-            f"\nInstall the background service on port {port}? On WSL it still stops about "
-            "15 seconds after your last WSL terminal closes, unless you also set "
-            "instanceIdleTimeout=-1 in %USERPROFILE%\\.wslconfig — shown next if you say yes"
+    pad = " " * 17  # aligns continuation lines under the column after the labels
+    on_wsl = is_wsl()
+    systemd_extra = ""
+    if current_platform_backend_name() == "launchd":
+        adds = "a macOS login item that starts Worthless when you log in"
+        unit = launchd.plist_path()
+    else:
+        unit = systemd.unit_path()
+        if on_wsl:
+            adds = "a systemd user service that starts with this WSL distro"
+        else:
+            adds = (
+                "a systemd user service set to start when this computer starts\n"
+                f"{pad}(it turns on lingering for your account)"
+            )
+        systemd_extra = f"{pad}then `loginctl disable-linger` if nothing else needs it\n"
+    if on_wsl:
+        headline = (
+            "\nInstall a background service for Worthless?\n"
+            "On WSL it still stops about 15 seconds after your last WSL terminal\n"
+            "closes, unless you also set instanceIdleTimeout=-1 in\n"
+            "%USERPROFILE%\\.wslconfig (shown next if you say yes)."
+        )
+    else:
+        headline = (
+            "\nInstall a background service so Worthless keeps protecting your keys\n"
+            "after this terminal closes?"
         )
     return (
-        "\nKeep the proxy running after this terminal closes? "
-        f"(installs a user service on port {port})"
+        f"{headline}\n"
+        f"  What it adds:  {adds}\n"
+        f"{pad}{_tilde(unit)}\n"
+        "  Trade-off:     your master key is kept in a file only you can read\n"
+        f"{pad}({_tilde(home.fernet_key_path)}), so it can start without you\n"
+        "  Undo anytime:  worthless service uninstall (the key file stays)\n"
+        f"{systemd_extra}"
+        "  Not sure what a background service is? Say no. Your keys stay locked\n"
+        "  either way; you just run `worthless up` when you need the proxy.\n"
+        f"Install the background service on port {port}?"
     )
 
 
@@ -3198,6 +3272,17 @@ def _offer_service_after_lock(console, *, home: WorthlessHome, port: int) -> boo
     Returns True only if a service was actually installed.
     """
     if console.json_mode:
+        return False
+
+    # Containers first: no systemd and no login session, so the install can only
+    # fail — and the generic hint would send the user to `service install`,
+    # which fails the same way. Docker Desktop and Codespaces terminals are real
+    # TTYs, so the gate below does not catch them (WOR-859 premortem).
+    if _in_container():
+        console.print_hint(
+            "Inside a container, run the proxy as the container's main process, "
+            "or start it with `worthless up`."
+        )
         return False
 
     # The terminal gate comes BEFORE --yes, and the order is the point.
@@ -3224,16 +3309,22 @@ def _offer_service_after_lock(console, *, home: WorthlessHome, port: int) -> boo
         # beats installing over something we failed to inspect.
         return False
 
-    if console.assume_yes:
-        accepted = True
-    else:
-        try:
-            accepted = typer.confirm(_offer_question(port), default=False)
-        except (typer.Abort, EOFError):
-            # Ctrl-C or Ctrl-D at a real terminal. The gate above already excluded
-            # the captured-stdin case, which raises OSError rather than EOFError.
-            console.print_hint(_offer_declined_hint())
-            return False
+    # WOR-859 ruling: only a typed "y" installs. --yes means "don't stop to
+    # ask", not "agree to what I didn't read", and an AI agent at a pty is not
+    # the person whose account gets a startup item. Both get the hint; typing
+    # `worthless service install` is the explicit way in. Not a security wall
+    # (an agent can drop the markers): it stops a question nobody human sees.
+    if console.assume_yes or any(os.environ.get(v) for v in _AGENT_ENV_VARS):
+        console.print_hint(_offer_declined_hint())
+        return False
+
+    try:
+        accepted = typer.confirm(_offer_question(port, home), default=False)
+    except (typer.Abort, EOFError):
+        # Ctrl-C or Ctrl-D at a real terminal. The gate above already excluded
+        # the captured-stdin case, which raises OSError rather than EOFError.
+        console.print_hint(_offer_declined_hint())
+        return False
 
     if not accepted:
         console.print_hint(_offer_declined_hint())
