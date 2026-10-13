@@ -653,6 +653,10 @@ class TestContainersAreNotAsked:
         assert "worthless up" in out
 
 
+# The shape scan_env_keys returns: (variable name, value, provider).
+_SCANNED_KEY = ("OPENAI_API_KEY", "sk-proj-" + "x7Kq9mPz2" * 5, "openai")
+
+
 class TestPlainWorthlessAsks:
     """WOR-859: the command the docs send new users to must ask too.
 
@@ -667,7 +671,7 @@ class TestPlainWorthlessAsks:
         with (
             patch.object(default_command, "_has_enrolled_keys", return_value=False),
             patch.object(default_command, "find_env_file", return_value=Path(".env")),
-            patch.object(default_command, "scan_env_keys", return_value=[MagicMock()] * found),
+            patch.object(default_command, "scan_env_keys", return_value=[_SCANNED_KEY] * found),
             patch.object(default_command, "show_detected_keys"),
             patch.object(default_command.typer, "confirm", return_value=True),
             patch.object(default_command, "acquire_lock", return_value=nullcontext()),
@@ -686,10 +690,10 @@ class TestPlainWorthlessAsks:
         """`worthless --yes` is documented as 'never service install'."""
         self._enroll(yes=True).assert_not_called()
 
-    def test_a_lock_that_skipped_an_oauth_token_still_asks(self) -> None:
-        """`found` counts OAuth tokens lock skips on purpose; 1 of 2 is a success.
+    def test_a_lock_that_protected_only_some_keys_still_asks(self) -> None:
+        """Same rule as `worthless lock`: offer once anything was locked.
 
-        A `count == total` guard here never asked these users.
+        A `count == total` guard here used to skip these users.
         """
         self._enroll(yes=False, locked=1, found=2).assert_called_once()
 

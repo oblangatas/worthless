@@ -205,9 +205,7 @@ def _run_enrollment_if_needed(
     # nobody ever sees the choice. Here, before _ensure_proxy_running: asking
     # after it would race the detached proxy for the port. --yes never installs
     # a service on this path (see run_default). Same rule as `worthless lock`:
-    # offer once anything was locked. NOT `count == total` — `total` counts
-    # OAuth tokens that lock skips on purpose, so a fully successful lock can
-    # still be "1 of 2". Real lock failures raise before reaching here.
+    # offer once anything was locked; real lock failures raise before here.
     if count > 0 and not yes:
         _offer_service_after_lock(console, home=home, port=resolve_port(None))
 
