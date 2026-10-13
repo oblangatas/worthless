@@ -14,9 +14,9 @@ rollback never fired and rows leaked.
 The companion regression (:class:`TestNonInterruptExitCodePreserved`) pins the
 inverse: broadening the rollback ``except`` to add the interrupt types must NOT
 change how an ordinary (non-interrupt) exception exits. ``typer.Exit`` is a
-``RuntimeError`` (an ``Exception``), so it was already caught and unwound by the
-pre-WOR-646 ``except Exception:`` — that is the documented post-flight recovery
-contract. What this fix must preserve is its **exit code**: a ``typer.Exit(87)``
+``RuntimeError`` (an ``Exception``), so it was already caught by the
+pre-WOR-646 ``except Exception:``. What this fix must preserve is its
+**exit code**: a ``typer.Exit(87)``
 must still leave the process with code 87, never get swallowed, and never get
 mis-converted into a Ctrl-C abort by the new ``CancelledError`` handling.
 """
@@ -35,13 +35,14 @@ from pathlib import Path
 
 import pytest
 import typer
+from dotenv import dotenv_values
 import typer._click.termui as click_termui
 from typer.testing import CliRunner
 
 from worthless.cli.app import app
 from worthless.cli.bootstrap import WorthlessHome
 from worthless.cli.console import WorthlessConsole
-from worthless.cli.sentinel import is_partial, read_sentinel
+from worthless.cli.sentinel import is_partial, read_sentinel, write_sentinel
 
 from tests.conftest import make_repo as _repo
 from tests.helpers import fake_anthropic_key, fake_key
@@ -165,8 +166,8 @@ class TestNonInterruptExitCodePreserved:
         ``except (Exception, KeyboardInterrupt, CancelledError)`` catches it via
         the same ``Exception`` arm the pre-WOR-646 code used; the
         ``isinstance(exc, CancelledError)`` guard must leave its exit code
-        untouched. (Whether the DB rows unwind here is pre-existing post-flight
-        behavior, not what this test pins.)
+        untouched. (It no longer unwinds the keys: see
+        :class:`TestPostflightRefusalKeepsKeys`.)
         """
         import worthless.cli.commands.lock as lock_mod
 
@@ -189,6 +190,145 @@ class TestNonInterruptExitCodePreserved:
         # 87 proves: not swallowed (would be 0) and not converted to the
         # interrupt's abort exit (would be 1) by the new CancelledError path.
         assert result.exit_code == 87, result.output
+
+
+def _refuse_postflight(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, how: str) -> None:
+    """Drive the REAL post-flight into its exit 87: OpenClaw files changed mid-lock.
+
+    *how* = ``refused`` (new plaintext found) or ``audit-failed`` (the audit
+    subprocess failed or timed out — the same 87 path).
+    """
+    import worthless.cli.commands.lock as lock_mod
+    from worthless.openclaw import audit as oc_audit
+
+    changed = tmp_path / "openclaw-changed-mid-lock.json"
+    changed.write_text("{}")
+    gate = oc_audit.AuditGateHandle(
+        openclaw_bin=tmp_path / "openclaw", pre_hashes={str(changed): "stale"}
+    )
+    monkeypatch.setattr(lock_mod, "_openclaw_audit_preflight", lambda *_a, **_k: gate)
+
+    def _audit(*_a: object, **_k: object):  # noqa: ANN202
+        if how == "audit-failed":
+            raise oc_audit.AuditGateError("timed out")
+        finding = oc_audit.BlockingFinding(
+            file=str(changed),
+            json_path="models.providers.openai.apiKey",
+            provider="openai",
+            message="plaintext",
+            source="audit",
+        )
+        return None, oc_audit.AuditClassification(
+            blocking=(finding,), advisory_count=0, unknown_codes=()
+        )
+
+    monkeypatch.setattr(lock_mod._oc_audit, "run_and_classify", _audit)
+
+
+class TestPostflightRefusalKeepsKeys:
+    """worthless-im3x: a refused or failed post-flight never destroys a key.
+
+    It runs after ``.env`` holds shard-A. Unwinding there deleted shard-B, so a
+    fresh key was unrecoverable: ``unlock`` found nothing, ``lock`` refused.
+    """
+
+    @pytest.mark.parametrize("how", ["refused", "audit-failed"])
+    def test_postflight_87_keeps_keys_recoverable(
+        self,
+        how: str,
+        home_dir: WorthlessHome,
+        two_key_env: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Exit 87 with LOCK FAILED, keys locked, status honest; ``unlock`` restores them."""
+        original = dotenv_values(two_key_env)
+        pre_sha = _sha256_of(two_key_env)
+        _refuse_postflight(monkeypatch, tmp_path, how)
+
+        result = _invoke_lock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
+
+        assert result.exit_code == 87, result.output
+        _assert_still_locked(home_dir, two_key_env, pre_sha, result.output)
+        assert "LOCK FAILED" in result.output, result.output
+        sentinel = read_sentinel(home_dir.base_dir)
+        assert is_partial(sentinel), sentinel
+        assert [e["code"] for e in sentinel["events"]] == ["openclaw.postflight_refused"], sentinel
+
+        restored = _invoke_unlock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
+        assert restored.exit_code == 0, restored.output
+        values = dotenv_values(two_key_env)
+        for name, value in original.items():
+            assert values.get(name) == value, f"{name} not restored by unlock:\n{restored.output}"
+
+    def test_postflight_87_still_syncs_the_fernet_key(
+        self,
+        home_dir: WorthlessHome,
+        two_key_env: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Keys stay locked, so a service-run proxy must decrypt them (as on Ctrl-C)."""
+        import worthless.cli.commands.lock as lock_mod
+
+        synced: list[object] = []
+        monkeypatch.setattr(lock_mod, "_sync_fernet_after_lock", synced.append)
+        _refuse_postflight(monkeypatch, tmp_path, "refused")
+
+        result = _invoke_lock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
+
+        assert result.exit_code == 87, result.output
+        assert len(synced) == 1, f"Fernet sync ran {len(synced)} times:\n{result.output}"
+
+    def test_rerun_after_refusal_never_claims_protected(
+        self,
+        home_dir: WorthlessHome,
+        two_key_env: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """OpenClaw was never wired, so a re-run may not say "protected" or exit 0."""
+        _refuse_postflight(monkeypatch, tmp_path, "refused")
+        first = _invoke_lock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
+        assert first.exit_code == 87, first.output
+
+        again = _invoke_lock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
+
+        assert again.exit_code == 73, again.output
+        assert "LOCK FAILED" in again.output, again.output
+        assert "protected" not in again.output.lower(), again.output
+
+    def test_rerun_after_declined_adoption_still_succeeds(
+        self,
+        home_dir: WorthlessHome,
+        two_key_env: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A finished lock that left an entry un-adopted is partial too, but not unfinished.
+
+        Its first run exited 0; a re-run must not turn into LOCK FAILED / 73.
+        """
+        first = _invoke_lock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
+        assert first.exit_code == 0, first.output
+        # What _apply_openclaw records when the user declines adoption.
+        write_sentinel(
+            home_dir.base_dir,
+            status="partial",
+            openclaw="failed",
+            alias_count=2,
+            events=[
+                {
+                    "code": "openclaw.provider_skipped",
+                    "level": "warn",
+                    "detail": "unrecognized_not_adopted",
+                }
+            ],
+        )
+
+        again = _invoke_lock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
+
+        assert again.exit_code == 0, again.output
 
 
 class TestDbWriteBeforeEnvRewriteOrdering:
@@ -490,6 +630,18 @@ def _invoke_lock_sandboxed(
     )
 
 
+def _invoke_unlock_sandboxed(
+    home_dir: WorthlessHome, env_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):  # noqa: ANN202 — click's Result
+    """Run ``worthless unlock --env`` in-process, sandboxed like the lock."""
+    monkeypatch.chdir(tmp_path)
+    return runner.invoke(
+        app,
+        ["unlock", "--env", str(env_file)],
+        env={"WORTHLESS_HOME": str(home_dir.base_dir), "HOME": str(tmp_path)},
+    )
+
+
 def _assert_still_locked(
     home_dir: WorthlessHome, env_file: Path, pre_sha: str, output: str
 ) -> None:
@@ -707,11 +859,11 @@ class TestSecondCtrlCDuringRollbackIsNeverSilent:
 
 class TestNothingRollsBackAfterTheCommit:
     """Defence in depth (worthless-3clz review): once ``.env`` is rewritten, its
-    DB rows are load-bearing. Only post-flight's documented ``typer.Exit(87)``
-    may still roll them back; nothing else — not a queued press, not a crash."""
+    DB rows are load-bearing. Nothing may roll them back — not a queued press,
+    not a crash, not a refused post-flight (worthless-im3x)."""
 
     def test_handler_never_cancels_once_committed(self) -> None:
-        """Cancels once before the commit, never after; only post-flight 87 may unwind."""
+        """Cancels once before the commit, never after."""
         import worthless.cli.commands.lock as lock_mod
 
         cancels: list[int] = []
@@ -730,10 +882,26 @@ class TestNothingRollsBackAfterTheCommit:
         after.committed = True
         after()
         assert cancels == [], "a press queued for the loop cancelled AFTER the commit"
-        assert not after.may_unwind(RuntimeError("boom"))
-        assert not after.may_unwind(typer.Exit(code=87)), "any Exit may not unwind keys"
-        assert after.may_unwind(lock_mod._PostflightRefused(code=87))  # documented path
-        assert before.may_unwind(RuntimeError("boom"))
+
+    def test_press_after_commit_never_claims_a_rollback(self) -> None:
+        """Nothing rolls back after the commit any more, so a press may not say it does."""
+        import worthless.cli.commands.lock as lock_mod
+
+        notices: list[str] = []
+
+        class _Console:
+            def print_notice(self, msg: str) -> None:
+                notices.append(msg)
+
+        class _Task:
+            def cancel(self) -> None:
+                pass
+
+        after = lock_mod._LockInterrupts(_Task(), [object()], _Console())  # type: ignore[arg-type]
+        after.committed = True
+        after()
+
+        assert notices == [], f"a press after the commit claimed a rollback: {notices}"
 
     def test_crash_after_commit_keeps_the_keys(
         self,

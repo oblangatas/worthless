@@ -1400,6 +1400,67 @@ def _assert_answered_and_kept(te: TrialEnv, rc: int) -> None:
     )
 
 
+class TestRefusedPostflightKeepsKeys:
+    def test_refused_postflight_keeps_the_key_recoverable(
+        self, tmp_path: Path, proxy_port: int
+    ) -> None:
+        """worthless-im3x, real CLI: a refused post-flight leaves a key ``unlock`` restores.
+
+        The fake reports ``.env`` itself as scanned, so the lock's own rewrite
+        always trips the post-flight re-audit (no timing race), and its second
+        audit finds new plaintext. Before the fix the rollback deleted shard-B
+        while ``.env`` held shard-A, and ``unlock`` could not restore the key.
+        """
+        te = _make_trial_env(tmp_path, 0, n_keys=1)
+        env, calls = _with_openclaw(te, proxy_port)
+        clean = json.dumps({**json.loads(_CLEAN_AUDIT), "filesScanned": [str(te.env_file)]})
+        finding = {
+            "code": "PLAINTEXT_FOUND",
+            "severity": "error",
+            "file": str(te.env_file),
+            "jsonPath": "providers.mistral.apiKey",
+            "message": "plaintext",
+            "provider": "mistral",
+        }
+        refused = json.dumps({**json.loads(clean), "findings": [finding]})
+        fake = Path(env["WORTHLESS_OPENCLAW_BIN"])
+        fake.write_text(
+            "#!/bin/sh\n"
+            f"echo \"$1\" >> '{calls}'\n"
+            'if [ "$1" = secrets ]; then\n'
+            f"  if [ \"$(grep -c secrets '{calls}')\" = 1 ]; then echo '{clean}';"
+            f" else echo '{refused}'; fi\n"
+            "fi\n"
+        )
+
+        lock = subprocess.run(
+            [*_cli(), "lock", "--env", str(te.env_file)],
+            env=env,
+            cwd=te.repo,
+            capture_output=True,
+            text=True,
+            timeout=WAIT_TIMEOUT,
+        )
+        out = lock.stdout + lock.stderr
+        assert _call_count(calls, "secrets") == 2, f"post-flight never ran:\n{out}"
+        assert lock.returncode == 87, out
+
+        unlock = subprocess.run(
+            [*_cli(), "unlock", "--env", str(te.env_file)],
+            env=env,
+            cwd=te.repo,
+            capture_output=True,
+            text=True,
+            timeout=WAIT_TIMEOUT,
+        )
+        restored = te.env_file.read_text()
+        assert unlock.returncode == 0, unlock.stdout + unlock.stderr
+        assert all(s in restored for s in te.secrets), (
+            f"unlock did not restore the original key — it was destroyed:\n{unlock.stderr}"
+        )
+        assert "LOCK FAILED" in out, out
+
+
 class TestCtrlCDuringOpenclawReloadWait:
     def test_ctrl_c_during_reload_wait_is_answered(self, tmp_path: Path, proxy_port: int) -> None:
         """Ctrl-C during the up-to-15s OpenClaw reload wait is answered within TAIL_DEADLINE."""
