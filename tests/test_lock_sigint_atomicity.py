@@ -191,6 +191,99 @@ class TestNonInterruptExitCodePreserved:
         assert result.exit_code == 87, result.output
 
 
+def _env_values(path: Path) -> dict[str, str]:
+    """``KEY=value`` pairs of a ``.env``, ignoring blanks and comments."""
+    pairs = (ln.split("=", 1) for ln in path.read_text().splitlines() if "=" in ln)
+    return {k.strip(): v.strip() for k, v in pairs if not k.lstrip().startswith("#")}
+
+
+def _refuse_postflight(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, how: str) -> None:
+    """Drive the REAL post-flight into its exit 87: OpenClaw files changed mid-lock.
+
+    *how* = ``refused`` (new plaintext found) or ``audit-failed`` (the audit
+    subprocess failed or timed out — the same 87 path).
+    """
+    import worthless.cli.commands.lock as lock_mod
+    from worthless.openclaw import audit as oc_audit
+
+    changed = tmp_path / "openclaw-changed-mid-lock.json"
+    changed.write_text("{}")
+    gate = oc_audit.AuditGateHandle(
+        openclaw_bin=tmp_path / "openclaw", pre_hashes={str(changed): "stale"}
+    )
+    monkeypatch.setattr(lock_mod, "_openclaw_audit_preflight", lambda *_a, **_k: gate)
+
+    def _audit(*_a: object, **_k: object):  # noqa: ANN202
+        if how == "audit-failed":
+            raise oc_audit.AuditGateError("timed out")
+        finding = oc_audit.BlockingFinding(
+            file=str(changed),
+            json_path="models.providers.openai.apiKey",
+            provider="openai",
+            message="plaintext",
+            source="audit",
+        )
+        return None, oc_audit.AuditClassification(
+            blocking=(finding,), advisory_count=0, unknown_codes=()
+        )
+
+    monkeypatch.setattr(lock_mod._oc_audit, "run_and_classify", _audit)
+
+
+class TestPostflightRefusalKeepsKeys:
+    """worthless-im3x: a refused or failed post-flight never destroys a key.
+
+    It runs after ``.env`` holds shard-A. Unwinding there deleted shard-B, so a
+    fresh key was unrecoverable: ``unlock`` found nothing, ``lock`` refused.
+    """
+
+    @pytest.mark.parametrize("how", ["refused", "audit-failed"])
+    def test_postflight_87_keeps_keys_recoverable(
+        self,
+        how: str,
+        home_dir: WorthlessHome,
+        two_key_env: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Exit 87 with LOCK FAILED, keys locked, status honest; ``unlock`` restores them."""
+        original = _env_values(two_key_env)
+        pre_sha = _sha256_of(two_key_env)
+        _refuse_postflight(monkeypatch, tmp_path, how)
+
+        result = _invoke_lock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
+
+        assert result.exit_code == 87, result.output
+        _assert_still_locked(home_dir, two_key_env, pre_sha, result.output)
+        assert "LOCK FAILED" in result.output, result.output
+        sentinel = read_sentinel(home_dir.base_dir)
+        assert is_partial(sentinel), sentinel
+        assert [e["code"] for e in sentinel["events"]] == ["openclaw.postflight_refused"], sentinel
+
+        restored = _invoke_unlock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
+        assert restored.exit_code == 0, restored.output
+        values = _env_values(two_key_env)
+        for name, value in original.items():
+            assert values.get(name) == value, f"{name} not restored by unlock:\n{restored.output}"
+
+    def test_rerun_after_refusal_never_claims_protected(
+        self,
+        home_dir: WorthlessHome,
+        two_key_env: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """OpenClaw was never wired, so a re-run may not say "protected" or exit 0."""
+        _refuse_postflight(monkeypatch, tmp_path, "refused")
+        first = _invoke_lock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
+        assert first.exit_code == 87, first.output
+
+        again = _invoke_lock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
+
+        assert again.exit_code != 0, again.output
+        assert "protected" not in again.output.lower(), again.output
+
+
 class TestDbWriteBeforeEnvRewriteOrdering:
     """WOR-277 item 5: shard DB writes (Pass-1) must land BEFORE the .env
     rewrite — so a failure between the two steps leaves the real key still
@@ -486,6 +579,18 @@ def _invoke_lock_sandboxed(
     return runner.invoke(
         app,
         [*flags, "lock", "--env", str(env_file)],
+        env={"WORTHLESS_HOME": str(home_dir.base_dir), "HOME": str(tmp_path)},
+    )
+
+
+def _invoke_unlock_sandboxed(
+    home_dir: WorthlessHome, env_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):  # noqa: ANN202 — click's Result
+    """Run ``worthless unlock --env`` in-process, sandboxed like the lock."""
+    monkeypatch.chdir(tmp_path)
+    return runner.invoke(
+        app,
+        ["unlock", "--env", str(env_file)],
         env={"WORTHLESS_HOME": str(home_dir.base_dir), "HOME": str(tmp_path)},
     )
 
