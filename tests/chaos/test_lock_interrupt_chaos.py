@@ -1372,8 +1372,14 @@ def _call_count(calls: Path, subcommand: str) -> int:
         return 0
 
 
-def _ctrl_c_once(te: TrialEnv, env: dict[str, str], reached: Callable[[], bool], where: str) -> int:
-    """Run the real lock; Ctrl-C it once ``reached()`` says it is in *where*.
+def _ctrl_c_once(
+    te: TrialEnv,
+    env: dict[str, str],
+    reached: Callable[[], bool],
+    where: str,
+    sig: int = signal.SIGINT,
+) -> int:
+    """Run the real lock; send *sig* (default Ctrl-C) once ``reached()`` says it is in *where*.
 
     Returns the exit code. Fails if the press is not answered within TAIL_DEADLINE.
     """
@@ -1381,8 +1387,8 @@ def _ctrl_c_once(te: TrialEnv, env: dict[str, str], reached: Callable[[], bool],
     try:
         _wait_until(proc, te, reached, where)
         time.sleep(0.3)  # settle INTO the blocking call, not merely past the marker
-        _kill_group(proc, signal.SIGINT)
-        _await_exit(proc, te, f"Ctrl-C ignored in {where} (worthless-3clz)", TAIL_DEADLINE)
+        _kill_group(proc, sig)
+        _await_exit(proc, te, f"{signal.Signals(sig).name} ignored in {where}", TAIL_DEADLINE)
     finally:
         survived = _reap(proc)
     if survived:
@@ -1390,10 +1396,10 @@ def _ctrl_c_once(te: TrialEnv, env: dict[str, str], reached: Callable[[], bool],
     return proc.returncode
 
 
-def _assert_answered_and_kept(te: TrialEnv, rc: int) -> None:
-    """The lock exited 130 and left the keys fully LOCKED, never partial."""
+def _assert_answered_and_kept(te: TrialEnv, rc: int, sig: int = signal.SIGINT) -> None:
+    """The lock exited 128 + *sig* and left the keys fully LOCKED, never partial."""
     state = classify(te)
-    assert rc == 130, f"Ctrl-C should exit 130 (interrupted), got {rc}\n{_stderr_tail(te)}"
+    assert rc == 128 + sig, f"expected exit {128 + sig} for {sig!r}, got {rc}\n{_stderr_tail(te)}"
     assert state.classification == "locked", (
         "the keys were already committed, so Ctrl-C must leave them LOCKED — never "
         f"unwind rows the rewritten .env needs.\n  {state.detail}\n{_stderr_tail(te)}"
@@ -1462,8 +1468,17 @@ class TestRefusedPostflightKeepsKeys:
 
 
 class TestCtrlCDuringOpenclawReloadWait:
-    def test_ctrl_c_during_reload_wait_is_answered(self, tmp_path: Path, proxy_port: int) -> None:
-        """Ctrl-C during the up-to-15s OpenClaw reload wait is answered within TAIL_DEADLINE."""
+    @pytest.mark.parametrize(
+        "sig", [signal.SIGINT, signal.SIGTERM, signal.SIGHUP], ids=["SIGINT", "SIGTERM", "SIGHUP"]
+    )
+    def test_ctrl_c_during_reload_wait_is_answered(
+        self, sig: int, tmp_path: Path, proxy_port: int
+    ) -> None:
+        """A signal during the up-to-15s reload wait is answered within TAIL_DEADLINE.
+
+        SIGTERM is ``docker stop`` (exit 143, worthless-dnp9); SIGHUP is a closed
+        terminal (exit 129, worthless-v9gg).
+        """
         for trial in range(TAIL_TRIALS):
             te = _make_trial_env(tmp_path, trial, n_keys=1)
             env, calls = _with_openclaw(te, proxy_port)
@@ -1472,8 +1487,36 @@ class TestCtrlCDuringOpenclawReloadWait:
                 env,
                 lambda c=calls: _call_count(c, "logs") >= 1,  # polled for a reload once
                 "the OpenClaw reload wait",
+                sig,
             )
-            _assert_answered_and_kept(te, rc)
+            _assert_answered_and_kept(te, rc, sig)
+
+
+class TestSignalDuringPreflightAudit:
+    @pytest.mark.parametrize("sig", [signal.SIGINT, signal.SIGTERM], ids=["SIGINT", "SIGTERM"])
+    def test_signal_during_preflight_audit_is_answered(
+        self, sig: int, tmp_path: Path, proxy_port: int
+    ) -> None:
+        """worthless-595v, real CLI: the pre-flight audit is answered, never retried.
+
+        The fake's audit sleeps (self-terminating). Before any write, so the disk
+        must stay clean and the exit is 128 + sig.
+        """
+        te = _make_trial_env(tmp_path, 0, n_keys=1)
+        env, calls = _with_openclaw(te, proxy_port)
+        fake = Path(env["WORTHLESS_OPENCLAW_BIN"])
+        fake.write_text(
+            "#!/bin/sh\n"
+            f"echo \"$1\" >> '{calls}'\n"
+            f"if [ \"$1\" = secrets ]; then sleep 5; echo '{_CLEAN_AUDIT}'; fi\n"
+        )
+        rc = _ctrl_c_once(
+            te, env, lambda: _call_count(calls, "secrets") >= 1, "the pre-flight audit", sig
+        )
+        state = classify(te)
+        assert rc == 128 + sig, f"got {rc}\n{_stderr_tail(te)}"
+        assert _call_count(calls, "secrets") == 1, "the audit was retried after the signal"
+        assert state.classification == "clean", f"{state.detail}\n{_stderr_tail(te)}"
 
 
 class TestCtrlCWhileOpenclawConfigIsLocked:
