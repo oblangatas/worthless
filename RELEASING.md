@@ -85,11 +85,13 @@ silence it; only the automation's **Create the GitHub Release** step succeeding 
 issue silences that commit only; a re-tag that is still unreleased reopens it (WOR-922).
 
 **The watchdog finds a tag's release runs by their title (WOR-922, `worthless-d2q6`).** On v0.3.13
-the title rendered for real as `Create GitHub Release v0.3.13 67eeeabf…`, and no watchdog issue was
-filed. That release's approval wait was under an hour, so it did not exercise the 72-hour "still
-waiting" path. If a run ever shows the bare workflow name instead, disable **Release watchdog** in
-Actions and reopen WOR-922: every tag would read as "the automation never ran" and it would file a
-false alarm a day later.
+the title rendered for real as `Create GitHub Release v0.3.13 67eeeabf…`. The watchdog itself had
+not judged that tag yet when this was written: it skips any tag younger than 24 hours, and its only
+run since then logged "too early to judge". So the title lookup is still unproven end to end, and
+the 72-hour "still waiting" path was not exercised either (the approval wait was 11 minutes). If a
+run ever shows the bare workflow name instead, disable **Release watchdog** in Actions and reopen
+WOR-922: every tag would read as "the automation never ran" and it would file a false alarm a day
+later.
 
 **What the watchdog does NOT catch.** A watchdog that never runs — GitHub starts cron jobs up to
 about a day late and disables them after 60 days without repo activity, and nothing alarms on that.
