@@ -1,0 +1,187 @@
+
+================================================================
+  dev-teardown (macOS)
+================================================================
+
+── [1] Stop launchd + foreground proxy
+────────────────────────────────────────────────────────────────
+  → worthless service uninstall --yes
+  → worthless down
+
+── [2] Clear proxy state
+────────────────────────────────────────────────────────────────
+  → remove ~/.worthless/proxy.pid and run/
+  ✓ pid file + run/ cleared
+  ✓ launchd job removed, proxy stopped
+  ! Fernet key + enrollments preserved (not a full uninstall)
+  → full machine purge → wor-193-live-checklist.md § Dev machine reset
+  → Background Items UI may lag — toggle off in System Settings if shown
+
+================================================================
+  service-lock-roundtrip-live-macos (L7)
+================================================================
+  → repo: /Users/shachar/Projects/worthless/worthless
+  → worthless: /Users/shachar/Projects/worthless/worthless/.venv/bin/worthless
+  → PATH prefers: /Users/shachar/Projects/worthless/worthless/.venv/bin
+
+── [1] Preflight: port + enrollment hygiene
+────────────────────────────────────────────────────────────────
+  → ensure :8787 free (orphan /healthz → sidecar-less 401)
+  ✓ port 8787 free
+  → worthless doctor --fix (orphan enrollments)
+
+OpenClaw:
+  ✗ openclaw.json references alias 'anthropic-97b84e5d' (provider 'worthless-anthropic') which is not enrolled in the DB — re-run `worthless lock` to fix
+  ✗ openclaw.json references alias 'openai-558dd0d8' (provider 'worthless-openai') which is not enrolled in the DB — re-run `worthless lock` to fix
+  ℹ  If openclaw.json is damaged: recover from the OpenClaw backup file ~/.openclaw/openclaw.json.bak (created automatically by the openclaw daemon on each write)
+WARNING: 4 .env BASE_URL alias(es) missing from DB:
+  • alias 'openai-682ea34e' is set in .env BASE_URL but has no shard in the current DB (worthless.db)
+  • alias 'openai-4b308a98' is set in .env BASE_URL but has no shard in the current DB (worthless.db)
+  • alias 'openai-5835d384' is set in .env BASE_URL but has no shard in the current DB (worthless.db)
+  • alias 'openai-3e5e4188' is set in .env BASE_URL but has no shard in the current DB (worthless.db)
+  → purge stale live-pack temp enrollments from DB
+
+── [2] Fernet sync (pre-lock)
+────────────────────────────────────────────────────────────────
+  → sync canonical Fernet → ~/.worthless/fernet.key (for launchd)
+  ✓ fernet.key present
+  → doctor check: fernet_drift (keyring vs fernet.key)
+  ✓ no fernet drift
+
+── [3] Mock upstream (Docker :9999)
+────────────────────────────────────────────────────────────────
+  → docker build worthless-mock-upstream:local
+#0 building with "desktop-linux" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 387B 0.0s done
+#1 DONE 0.1s
+
+#2 [internal] load metadata for docker.io/library/python:3.13-slim
+#2 DONE 1.3s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B 0.1s done
+#3 DONE 0.1s
+
+#4 [internal] load build context
+#4 transferring context: 28B 0.0s done
+#4 DONE 0.1s
+
+#5 [1/4] FROM docker.io/library/python:3.13-slim@sha256:eb43ff125d8d58d7449dcba7d336c23bcac412f526d861db493b9994d8010280
+#5 resolve docker.io/library/python:3.13-slim@sha256:eb43ff125d8d58d7449dcba7d336c23bcac412f526d861db493b9994d8010280 0.1s done
+#5 DONE 0.1s
+
+#6 [3/4] RUN pip install --no-cache-dir fastapi uvicorn
+#6 CACHED
+
+#7 [2/4] WORKDIR /app
+#7 CACHED
+
+#8 [4/4] COPY app.py .
+#8 CACHED
+
+#9 exporting to image
+#9 exporting layers done
+#9 writing image sha256:7a9fa41acac5a3f4b01806b9cacdc3b264a30dd92d62b669400f2b783e3737ac 0.1s done
+#9 naming to docker.io/library/worthless-mock-upstream:local 0.0s done
+#9 DONE 0.2s
+
+View build details: docker-desktop://dashboard/build/desktop-linux/desktop-linux/t22f8fj3sw7kh1jy9ifoizwdw
+  → docker run -p 9999:9999
+  ✓ mock-upstream healthy at http://127.0.0.1:9999
+
+── [4] Foreground proxy for lock (OpenClaw WRTLS-109 gate)
+────────────────────────────────────────────────────────────────
+  → worthless up in background on :8787
+  ✓ proxy healthy for lock gate
+
+── [5] Lock temp project
+────────────────────────────────────────────────────────────────
+  → temp dir: /tmp/worthless-live-project-WUkk31
+  → alias: openai-ad2cf203
+  → worthless lock --env .env (in temp project)
+macOS may ask once to access your Keychain — click 'Always Allow' so we don't
+ask again.
+Scanning .env for API keys...
+  Protecting OPENAI_API_KEY...
+OpenClaw 'openai' entry is already proxy-shaped with no stored rollback record
+(relock_no_prior); leaving rollback columns unset. Run `worthless unlock` first
+if you want the original captured.
+[OK] OpenClaw integration:
+   • ~/.openclaw/openclaw.json — added provider 'openai'
+   • ~/.openclaw/workspace/skills/worthless/ — installed skill
+   • Undo: worthless unlock
+   • re-linking an existing 'openai' entry (alias 'openai-558dd0d8') not in this
+machine's records — likely a synced config, reinstall, or new machine. Routing
+it through Worthless.
+[WARN] Bind-confirmation inconclusive (proxy_unrecognised) — routing wasn't
+proven. Run `worthless doctor` to investigate.
+🔒 You're protected. 1 key locked — a stolen .env is now worthless to an
+attacker.
+[OK] 1 key split between this machine and your system keystore — .env no longer
+contains a usable secret.
+Next: run `worthless wrap <command>` or `worthless up` for daemon mode
+Check anytime with `worthless status`.
+  ✓ lock complete (shard-A in .env)
+  → worthless down — free :8787 for service install
+
+── [6] Fernet sync (post-lock)
+────────────────────────────────────────────────────────────────
+  → sync canonical Fernet → ~/.worthless/fernet.key (for launchd)
+  ✓ fernet.key present
+  → doctor check: fernet_drift (keyring vs fernet.key)
+  ✓ no fernet drift
+
+── [7] Verify lock ciphertext (local Fernet)
+────────────────────────────────────────────────────────────────
+  → decrypt shard_b_enc with fernet.key on disk
+local fernet decrypt ok
+  ✓ local fernet decrypt ok
+
+── [8] Launchd service install
+────────────────────────────────────────────────────────────────
+  → ensure :8787 free (orphan /healthz → sidecar-less 401)
+  ✓ port 8787 free
+  → worthless service install --yes
+WRTLS-104: Service started but /healthz on port 8787 did not respond within 15s.
+  ✗ worthless service install failed
+
+── ~/.worthless/proxy.log (last 30 lines) ──
+Proxy running on 127.0.0.1:8787 (service-managed)
+Proxy running on 127.0.0.1:8787 (service-managed)
+Proxy running on 127.0.0.1:8787 (service-managed)
+Proxy running on 127.0.0.1:8787 (service-managed)
+Proxy running on 127.0.0.1:8787 (service-managed)
+Proxy running on 127.0.0.1:8787 (service-managed)
+Proxy running on 127.0.0.1:8787 (Ctrl+C to stop)
+Proxy stopped.
+Proxy running on 127.0.0.1:8787 (service-managed)
+Proxy running on 127.0.0.1:8787 (service-managed)
+Proxy running on 127.0.0.1:8787 (service-managed)
+WRTLS-104: Proxy failed to become healthy
+WRTLS-104: Proxy failed to become healthy
+WRTLS-104: Proxy failed to become healthy
+WRTLS-104: Proxy failed to become healthy
+WRTLS-104: Proxy failed to become healthy
+WRTLS-104: Proxy failed to become healthy
+WRTLS-104: Proxy failed to become healthy
+WRTLS-107: Proxy already running (PID 18802 on port 8787). Stop it first or use
+a different port.
+Proxy running on 127.0.0.1:8787 (service-managed)
+Proxy running on 127.0.0.1:8787 (service-managed)
+Proxy running on 127.0.0.1:8787 (service-managed)
+Proxy running on 127.0.0.1:8787 (service-managed)
+Proxy running on 127.0.0.1:8787 (service-managed)
+Proxy running on 127.0.0.1:8787 (service-managed)
+Proxy running on 127.0.0.1:8787 (service-managed)
+Proxy running on 127.0.0.1:8787 (service-managed)
+Proxy running on 127.0.0.1:8787 (service-managed)
+Proxy running on 127.0.0.1:8787 (service-managed)
+
+── [9] Cleanup (trap EXIT)
+────────────────────────────────────────────────────────────────
+  → unlock temp project /tmp/worthless-live-project-WUkk31 (WOR-747)
+[OK] Restored OPENAI_API_KEY (openai, alias openai-ad2cf203) →
+/tmp/worthless-live-project-WUkk31/.env
+   • ~/.openclaw/workspace/skills/worthless/ — removed
