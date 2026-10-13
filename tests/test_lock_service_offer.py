@@ -37,8 +37,11 @@ def console() -> WorthlessConsole:
 
 
 @pytest.fixture(autouse=True)
-def _not_in_a_container():
-    """The suite itself may run inside Docker; the container skip is tested explicitly."""
+def _a_person_not_a_container_or_agent(monkeypatch: pytest.MonkeyPatch):
+    """The suite itself may run inside Docker or under an AI agent; both skips
+    are tested explicitly."""
+    for marker in ("CLAUDECODE", "AI_AGENT"):
+        monkeypatch.delenv(marker, raising=False)
     with patch("worthless.cli.commands.lock._in_container", return_value=False):
         yield
 
@@ -110,17 +113,22 @@ class TestConsent:
         install.assert_not_called()
         assert "worthless service install" in _flat(capsys.readouterr())
 
-    def test_assume_yes_skips_the_question(self, capsys) -> None:
-        """`worthless --yes lock` must not stop to ask."""
+    def test_assume_yes_skips_the_question_and_installs_nothing(self, capsys) -> None:
+        """`worthless --yes lock` must not stop to ask, and must not install.
+
+        WOR-859 ruling (2026-10-13): only a typed "y" installs. Before it,
+        --yes at a real terminal installed a startup item nobody read about.
+        """
         console = WorthlessConsole(assume_yes=True)
         with (
             patch("worthless.cli.commands.lock._scan_prompt_is_tty", return_value=True),
             patch("worthless.cli.commands.lock.typer.confirm") as confirm,
             patch("worthless.cli.commands.lock.install_service_for_offer") as install,
         ):
-            assert _offer_service_after_lock(console, home=_home(), port=8787) is True
+            assert _offer_service_after_lock(console, home=_home(), port=8787) is False
         confirm.assert_not_called()
-        install.assert_called_once()
+        install.assert_not_called()
+        assert "worthless service install" in _flat(capsys.readouterr())
 
 
 class TestHonestCopy:
@@ -223,20 +231,41 @@ class TestConsentIsNotBypassable:
         confirm.assert_not_called()
         assert "worthless service install" in _flat(capsys.readouterr())
 
-    def test_yes_flag_still_accepts_at_a_real_terminal(self, console: WorthlessConsole) -> None:
-        """The flag keeps working where a human could have answered."""
+    def test_yes_flag_does_not_install_even_at_a_real_terminal(
+        self, console: WorthlessConsole
+    ) -> None:
+        """WOR-859 ruling (2026-10-13): only a typed "y" installs.
+
+        This test used to pin the opposite ("the flag keeps working where a
+        human could have answered"). The ruling reversed it: a blanket --yes
+        is not consent to a startup item and a moved master key.
+        """
         console.assume_yes = True
         with (
             patch("worthless.cli.commands.lock._scan_prompt_is_tty", return_value=True),
             patch("worthless.cli.commands.lock.typer.confirm") as confirm,
             patch("worthless.cli.commands.lock.install_service_for_offer") as install,
-            patch("worthless.cli.commands.lock._print_service_banner"),
         ):
             accepted = _offer_service_after_lock(console, home=_home(), port=8787)
 
-        assert accepted is True
-        install.assert_called_once()
+        assert accepted is False
+        install.assert_not_called()
         confirm.assert_not_called()
+
+    @pytest.mark.parametrize("marker", ["CLAUDECODE", "AI_AGENT"])
+    def test_an_ai_agent_at_a_terminal_is_not_asked(
+        self, console: WorthlessConsole, monkeypatch: pytest.MonkeyPatch, marker: str
+    ) -> None:
+        """An agent in a pty looks like a person; its environment says otherwise."""
+        monkeypatch.setenv(marker, "1")
+        with (
+            patch("worthless.cli.commands.lock._scan_prompt_is_tty", return_value=True),
+            patch("worthless.cli.commands.lock.typer.confirm") as confirm,
+            patch("worthless.cli.commands.lock.install_service_for_offer") as install,
+        ):
+            assert _offer_service_after_lock(console, home=_home(), port=8787) is False
+        confirm.assert_not_called()
+        install.assert_not_called()
 
     def test_the_question_defaults_to_no(self, console: WorthlessConsole) -> None:
         """Pin the default. Without this, flipping it to True keeps every test green."""

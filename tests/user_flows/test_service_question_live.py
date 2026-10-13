@@ -29,7 +29,7 @@ if sys.platform == "win32":  # pragma: no cover — pty is POSIX-only
 import pty  # noqa: E402 — must follow the platform guard above
 import select  # noqa: E402
 
-from worthless.cli.commands.lock import _CI_ENV_VARS  # noqa: E402
+from worthless.cli.commands.lock import _AGENT_ENV_VARS, _CI_ENV_VARS  # noqa: E402
 from worthless.cli.platform import _in_container  # noqa: E402
 
 pytestmark = [
@@ -59,8 +59,8 @@ def _free_port() -> int:
 
 def _setup(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
     """A throwaway home + project with one real-looking key, and an env with CI
-    markers removed: the offer treats them as 'nobody is watching', and the
-    point here is to be the person who is."""
+    and AI-agent markers removed: the offer treats them as 'nobody is
+    watching', and the point here is to be the person who is."""
     home = tmp_path / "home"
     project = tmp_path / "project"
     home.mkdir()
@@ -69,7 +69,7 @@ def _setup(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
     alphabet = string.ascii_letters + string.digits
     key = "sk-proj-" + "".join(secrets.choice(alphabet) for _ in range(40))
     (project / ".env").write_text(f"OPENAI_API_KEY={key}\n")
-    drop = set(_CI_ENV_VARS)
+    drop = {*_CI_ENV_VARS, *_AGENT_ENV_VARS}
     env = {k: v for k, v in os.environ.items() if not k.startswith("WORTHLESS_") and k not in drop}
     env.update(
         {

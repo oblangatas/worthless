@@ -263,13 +263,10 @@ def run_default(
     yes:
         Auto-approve lock + proxy start (but never service install).
 
-        That last clause is true of THIS path only, and the distinction is
-        worth keeping straight: without --yes, plain ``worthless`` asks the
-        explicit service question after locking (WOR-859); with --yes it never
-        asks and never installs. ``worthless --yes lock`` is a different path,
-        and there --yes DOES accept the offer — but only at a real terminal,
-        because the offer checks for one before it checks --yes. A piped or CI
-        run is never asked and never installed into.
+        Without --yes, plain ``worthless`` asks the explicit service question
+        after locking (WOR-859); with --yes it never asks and never installs.
+        The same holds for ``worthless --yes lock``: only a typed "y" installs
+        a service. A piped, CI or AI-agent run is never asked.
     json_mode:
         Print structured JSON state and exit.  Never triggers writes.
     """

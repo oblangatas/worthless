@@ -2204,6 +2204,11 @@ _CI_ENV_VARS = (
 )
 
 
+# Set in the environment of commands an AI coding agent runs (verified for
+# Claude Code: CLAUDECODE=1, AI_AGENT). Used only by the service offer.
+_AGENT_ENV_VARS = ("CLAUDECODE", "AI_AGENT")
+
+
 def _scan_prompt_is_tty() -> bool:
     """Patchable TTY check — extracted so tests can override without touching sys.stdin.
 
@@ -3269,6 +3274,15 @@ def _offer_service_after_lock(console, *, home: WorthlessHome, port: int) -> boo
         console.print_hint(_offer_declined_hint())
         return False
 
+    # WOR-859 ruling: only a typed "y" installs. --yes means "don't stop to
+    # ask", not "agree to what I didn't read", and an AI agent at a pty is not
+    # the person whose account gets a startup item. Both get the hint; typing
+    # `worthless service install` is the explicit way in. Not a security wall
+    # (an agent can drop the markers): it stops a question nobody human sees.
+    if console.assume_yes or any(os.environ.get(v) for v in _AGENT_ENV_VARS):
+        console.print_hint(_offer_declined_hint())
+        return False
+
     # Nothing to offer if one is already installed. install() rewrites the unit
     # and on launchd boots out the running agent first, so re-running it over a
     # working service risks stopping it — and rollback would not restore it,
@@ -3283,16 +3297,13 @@ def _offer_service_after_lock(console, *, home: WorthlessHome, port: int) -> boo
         # beats installing over something we failed to inspect.
         return False
 
-    if console.assume_yes:
-        accepted = True
-    else:
-        try:
-            accepted = typer.confirm(_offer_question(port, home), default=False)
-        except (typer.Abort, EOFError):
-            # Ctrl-C or Ctrl-D at a real terminal. The gate above already excluded
-            # the captured-stdin case, which raises OSError rather than EOFError.
-            console.print_hint(_offer_declined_hint())
-            return False
+    try:
+        accepted = typer.confirm(_offer_question(port, home), default=False)
+    except (typer.Abort, EOFError):
+        # Ctrl-C or Ctrl-D at a real terminal. The gate above already excluded
+        # the captured-stdin case, which raises OSError rather than EOFError.
+        console.print_hint(_offer_declined_hint())
+        return False
 
     if not accepted:
         console.print_hint(_offer_declined_hint())
