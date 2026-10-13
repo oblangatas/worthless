@@ -20,6 +20,7 @@ on:
     paths:
       - "install.sh"
       - "tests/test_install_*.py"
+      - "tests/test_site_claims_match_cli.py"
       - "tests/_install_helpers.py"
       - "tests/install_fixtures/**"
       - "tests/openclaw/mock-upstream/**"
@@ -40,7 +41,8 @@ jobs:
     name: install.sh host matrix (distros, lock lifecycle, app container)
     runs-on: ubuntu-24.04
     # 7 install fixtures + 2 lock-lifecycle fixtures + 3 host/app-container
-    # journeys = 12 docker-marked tests.
+    # journeys + 5 site-claim tests (the CLI behaviors wless.io describes in
+    # words) = 17 docker-marked tests.
     # ubuntu-idempotency runs install.sh TWICE (~2x install fixture time). On
     # the first PR run BuildKit caches are cold, so PBS Python + wheels are
     # fetched per-fixture. 40m gives margin without being absurd.
@@ -70,6 +72,7 @@ jobs:
               case "$f" in
                 install.sh) relevant=true ;;
                 tests/test_install_*.py|tests/_install_helpers.py) relevant=true ;;
+                tests/test_site_claims_match_cli.py) relevant=true ;;
                 tests/install_fixtures/*|tests/openclaw/mock-upstream/*) relevant=true ;;
                 src/worthless/cli/*|src/worthless/proxy/*) relevant=true ;;
                 .github/workflows/install-docker.yml) relevant=true ;;
@@ -115,11 +118,13 @@ jobs:
           # (WOR-320) are not silently stripped by the legacy builder.
           DOCKER_BUILDKIT: "1"
           COMPOSE_DOCKER_CLI_BUILD: "1"
-        # -n 2 --dist load: 9 install + 2 lock-lifecycle tests, one module →
-        # `loadscope` would pin them all to one worker. `load` distributes
+        # -n 2 --dist load: 9 install + 2 lock-lifecycle + 5 site-claim tests →
+        # `loadscope` would pin each module to one worker. `load` distributes
         # individual items. Docker daemon serializes layer commits anyway;
         # 2 concurrent builds is the sweet spot — higher counts thrash disk
         # I/O without speedup.
         run: |
           uv sync --extra test
-          uv run pytest -m docker -q -n 2 --dist load tests/test_install_docker.py
+          uv run pytest -m docker -q -n 2 --dist load \
+            tests/test_install_docker.py \
+            tests/test_site_claims_match_cli.py
