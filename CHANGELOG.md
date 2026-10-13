@@ -4,11 +4,6 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
-### Removed
-- **Installing Worthless puts only `worthless` on your PATH** (`worthless-nd65`). Every install also added six developer-only commands next to it: `test-unit`, `test-docker`, `test-live`, `test-openclaw`, `test-all` and `docs-generate`. They were useless outside a source checkout, and free to collide with another tool's command of the same name. They're gone, along with the modules behind them, and a test now fails if any installed command name doesn't start with `worthless`. Developers run the exact equivalents listed under "Test lanes" in `engineering/tooling.md`, and `scripts/codewiki.sh` for docs. Re-running the installer removes the old commands: tested in Docker by upgrading a real `curl worthless.sh | sh` install of 0.3.13 with `uv tool install --force`, the command the installer uses.
-
-  **What this does NOT do.** An upgrade through `pipx` was not tested. A stale copy left by a different installer (say, an old `pip install --user`) is not touched.
-
 ## [0.3.14] — 2026-10-13
 
 ### Fixed
@@ -20,8 +15,31 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - A key already replaced by an older version cannot be recovered by this release.
   - If the disk fills up mid-write, the key file can still end up empty. That predates this release and is unchanged.
 
+- **Ctrl-C, closing the terminal, and `docker stop` are answered throughout `worthless lock`, from its first safety check on** (`worthless-595v`, `worthless-f1xx`, `worthless-y4fn`, `worthless-dnp9`, `worthless-v9gg`, `worthless-3em7`). #668 made Ctrl-C work after the keys were saved; the rest of the lock still had gaps. On Python 3.11+, Ctrl-C during the OpenClaw safety check before anything is written was ignored for seconds and the check ran again. A press at the very end of the database writes, or while `.env` was being rewritten, was dropped, and the lock went on. `docker stop` (SIGTERM) exited 130 like Ctrl-C, or killed the lock outright before it was armed, and closing the terminal (SIGHUP) killed it with no rollback and no record. A press during a rollback that an error had started could cancel it and leave stale rows. Now each of these stops the lock at once: before `.env` is rewritten, everything is rolled back; after, the keys stay locked and `worthless status` says OpenClaw setup is unfinished. The exit code names the signal: 130 for Ctrl-C, 143 for SIGTERM, 129 for a closed terminal. The interrupt is recorded even when the terminal is already gone. On a machine without OpenClaw, the message no longer mentions OpenClaw.
+
+  **What this does NOT fix.**
+  - `kill -9` (SIGKILL) cannot be caught: a lock killed that way can still leave rows behind (WOR-646 Part 2).
+  - The MCP `worthless_lock` tool runs off the main thread, where no signal arrives (`worthless-dqzj`).
+  - A signal in the first moments of `worthless lock`, before it reaches the safety check, still ends it the default way: nothing has been written then.
+  - Bare `worthless` still turns an interrupted lock's exit code into 0 (`worthless-nhc0`).
+  - A press during a rollback that an error started exits with the error's code, not 128 + signum; the rollback still finishes.
+  - An interrupted OpenClaw provider write can leave `openclaw.json` partly updated (`worthless-2nta`).
+
+- **A refused safety check after the lock no longer destroys your key** (`worthless-im3x`). After `worthless lock` rewrites `.env`, it re-checks OpenClaw's files if they changed during the lock. When that check refused (new plaintext found), or merely failed or timed out, lock deleted the half of the key it had just stored while `.env` already held the other half. For a freshly locked key that was unrecoverable on this machine: `worthless unlock` found nothing, and re-running `worthless lock` refused. Now the keys stay locked and recoverable, OpenClaw is left untouched, `worthless status` reports OpenClaw as unfinished, and the lock prints LOCK FAILED and exits 87. Fix the plaintext, then run `worthless unlock` and `worthless lock`. Re-running `worthless lock` on its own now exits 73 instead of saying "still protected", after a refused check and also after a lock interrupted during OpenClaw setup.
+
+  **What this does NOT fix.**
+  - A later `worthless unlock` restores each OpenClaw provider entry to its pre-lock value, even if that entry was edited during the refused lock (`worthless-kzpw`).
+  - The "unfinished" record is per Worthless home, not per `.env`: after a refused lock in one project, re-locking another fully locked project also exits 73, and a later successful lock elsewhere hides it (`worthless-seho`).
+  - The only way out of exit 73 is `worthless unlock` then `worthless lock`, which briefly puts the real key back in `.env`; the MCP lock tool reports it as a raw error (`worthless-098h`).
+
 ### Changed
+- **You're asked plainly before anything starts at login** ([#673](https://github.com/oblangatas/worthless/pull/673)).
 - **A website deploy can't be cancelled, overwritten, or silently lose `security.txt`** ([#678](https://github.com/oblangatas/worthless/pull/678)). The site's deploy shared one concurrency lane with every pull-request run, so a newly queued PR run could evict a production deploy still waiting to run — and a cancelled run shows grey, not red. Deploys also trusted their own commit, so re-running an older run republished older content over newer. Deploys now get their own lane, refuse to publish content older than what is live, reject symlinks under `website/`, and nightly alarms watch the site's two published security files.
+
+### Removed
+- **Installing Worthless puts only `worthless` on your PATH** (`worthless-nd65`). Every install also added six developer-only commands next to it: `test-unit`, `test-docker`, `test-live`, `test-openclaw`, `test-all` and `docs-generate`. They were useless outside a source checkout, and free to collide with another tool's command of the same name. They're gone, along with the modules behind them, and a test now fails if any installed command name doesn't start with `worthless`. Developers run the exact equivalents listed under "Test lanes" in `engineering/tooling.md`, and `scripts/codewiki.sh` for docs. Re-running the installer removes the old commands: tested in Docker by upgrading a real `curl worthless.sh | sh` install of 0.3.13 with `uv tool install --force`, the command the installer uses.
+
+  **What this does NOT do.** An upgrade through `pipx` was not tested. A stale copy left by a different installer (say, an old `pip install --user`) is not touched.
 
 ## [0.3.13] — 2026-10-12
 
@@ -61,21 +79,6 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 - **The Snyk CI check stops reporting green on a scan that never ran** (`worthless-tidv`, [#529](https://github.com/oblangatas/worthless/pull/529)). `snyk-security.yml` exported `requirements.txt` but never installed it, and Snyk's pip plugin resolves from installed package metadata — so the step failed with `SNYK-CLI-0000 / Missing required packages` on every run in the retained history (100 runs, oldest 2026-08-15). `continue-on-error: true` rewrote each failure as a job success, so completely that even `gh run view --json jobs` reported the step as `success` alongside exit code 2. The workflow is deleted rather than repaired: it ran `snyk monitor`, which is upload-only and cannot fail a build, and its assumed consumers do not read it — the README badge uses Snyk's server-side on-demand endpoint, and app.snyk.io's GitHub integration monitors the repo independently. `requirements.txt` and its pre-commit exporter are kept. (Correction, WOR-904: the stated reason was wrong — Snyk's badge endpoint returns byte-identical output for this path, for a path that does not exist, and for an organisation that does not exist, so `?targetFile=` does not drive it. The file's real reader is the monitored Snyk PROJECT, imported at the repo root and scanned independently of the badge.)
 
 ### Fixed
-- **Ctrl-C, closing the terminal, and `docker stop` are answered throughout `worthless lock`, from its first safety check on** (`worthless-595v`, `worthless-f1xx`, `worthless-y4fn`, `worthless-dnp9`, `worthless-v9gg`, `worthless-3em7`). #668 made Ctrl-C work after the keys were saved; the rest of the lock still had gaps. On Python 3.11+, Ctrl-C during the OpenClaw safety check before anything is written was ignored for seconds and the check ran again. A press at the very end of the database writes, or while `.env` was being rewritten, was dropped, and the lock went on. `docker stop` (SIGTERM) exited 130 like Ctrl-C, or killed the lock outright before it was armed, and closing the terminal (SIGHUP) killed it with no rollback and no record. A press during a rollback that an error had started could cancel it and leave stale rows. Now each of these stops the lock at once: before `.env` is rewritten, everything is rolled back; after, the keys stay locked and `worthless status` says OpenClaw setup is unfinished. The exit code names the signal: 130 for Ctrl-C, 143 for SIGTERM, 129 for a closed terminal. The interrupt is recorded even when the terminal is already gone. On a machine without OpenClaw, the message no longer mentions OpenClaw.
-
-  **What this does NOT fix.**
-  - `kill -9` (SIGKILL) cannot be caught: a lock killed that way can still leave rows behind (WOR-646 Part 2).
-  - The MCP `worthless_lock` tool runs off the main thread, where no signal arrives (`worthless-dqzj`).
-  - A signal in the first moments of `worthless lock`, before it reaches the safety check, still ends it the default way: nothing has been written then.
-  - Bare `worthless` still turns an interrupted lock's exit code into 0 (`worthless-nhc0`).
-  - A press during a rollback that an error started exits with the error's code, not 128 + signum; the rollback still finishes.
-  - An interrupted OpenClaw provider write can leave `openclaw.json` partly updated (`worthless-2nta`).
-- **A refused safety check after the lock no longer destroys your key** (`worthless-im3x`). After `worthless lock` rewrites `.env`, it re-checks OpenClaw's files if they changed during the lock. When that check refused (new plaintext found), or merely failed or timed out, lock deleted the half of the key it had just stored while `.env` already held the other half. For a freshly locked key that was unrecoverable on this machine: `worthless unlock` found nothing, and re-running `worthless lock` refused. Now the keys stay locked and recoverable, OpenClaw is left untouched, `worthless status` reports OpenClaw as unfinished, and the lock prints LOCK FAILED and exits 87. Fix the plaintext, then run `worthless unlock` and `worthless lock`. Re-running `worthless lock` on its own now exits 73 instead of saying "still protected", after a refused check and also after a lock interrupted during OpenClaw setup.
-
-  **What this does NOT fix.**
-  - A later `worthless unlock` restores each OpenClaw provider entry to its pre-lock value, even if that entry was edited during the refused lock (`worthless-kzpw`).
-  - The "unfinished" record is per Worthless home, not per `.env`: after a refused lock in one project, re-locking another fully locked project also exits 73, and a later successful lock elsewhere hides it (`worthless-seho`).
-  - The only way out of exit 73 is `worthless unlock` then `worthless lock`, which briefly puts the real key back in `.env`; the MCP lock tool reports it as a raw error (`worthless-098h`).
 - **`scan` stops failing the build over a login token `lock` can't protect** (`worthless-p55g`). A `.env` holding a Claude Code login token (`sk-ant-oat01-`) made `scan` exit 1, call it `UNPROTECTED` and say "Run `worthless lock`". `lock` skips that token on purpose, so the build stayed red and there was no way out. Scan now reports it as `CAN'T PROTECT`, names the one fix that exists (swap it for a static `sk-ant-api03-` key, or delete the line), and no longer fails on it. Text, `--json` (`is_unshardable`, `exposure`, `remediation`; `schema_version` stays 2), SARIF (its own rule, `worthless/unshardable-oauth-token`, at level `note`), the MCP `worthless_scan` tool and bare `worthless` all say the same thing. `--quiet` still prints it when nothing else fails the scan. A file that also holds a real exposed key still fails, counting only that key. A token pasted over a variable that was locked earlier is no longer reported as protected.
 
   **Behaviour change.** An OAuth-only `.env` that git does not track now exits 0 where it exited 1, with its SARIF result as a `note` under the new rule. In CI that mostly means a job that writes `.env` from a secret: a fresh checkout holds only tracked files, and those still fail. If the `.env` is in git's index or its latest commit (including one you just ran `git rm --cached` on), is a symlink, or isn't a `.env` file, it still fails, and scan now states the exact reason with its fix — e.g. "This .env file is committed to git ... revoke it", or "staged in git but not committed yet. Unstage it" — instead of "run `worthless lock`". A token in the environment under `--deep` still fails too, but is told to scope the CI secret, not to revoke a working token. To decide, a plain scan now runs read-only git in the token's folder, with `core.fsmonitor` and lazy fetch switched off, so that folder's own `.git/config` can't make scan run its fsmonitor command or fetch from a remote.
@@ -97,6 +100,7 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   **What this does NOT fix.**
   - The CI sighting that opened worthless-3clz came from a chaos trial with no OpenClaw, and its cause is still unknown. The chaos hang guard now records the stuck stack.
   - Ctrl-C before the keys are committed is unchanged. On Python 3.11+, a press during the pre-flight audit can wait out one audit retry (worthless-595v).
+  - A real post-flight failure (exit 87) still runs its documented rollback after the `.env` rewrite (worthless-im3x).
   - A Ctrl-C during OpenClaw setup can leave it partly done, for example `openclaw.json` updated for one provider but not the next. It is reported, not undone (worthless-2nta).
   - Bare `worthless` (no subcommand) still exits 0 after an interrupted lock (worthless-nhc0).
   - `kill -9` mid-lock (WOR-646 Part 2) is unchanged.
