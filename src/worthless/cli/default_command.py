@@ -196,6 +196,13 @@ def _run_enrollment_if_needed(
         total = len(keys)
         count = _lock_keys(env_path, home, quiet=True)
 
+    _report_lock_and_offer_service(home, console, count=count, total=total, yes=yes)
+
+
+def _report_lock_and_offer_service(
+    home: WorthlessHome, console, *, count: int, total: int, yes: bool
+) -> None:
+    """Say how the lock went, then ask about the background service."""
     if count < total:
         console.print_warning(f"  {count} of {total} keys protected. Re-run to retry the rest.")
     elif count > 0:
