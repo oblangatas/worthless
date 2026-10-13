@@ -299,12 +299,20 @@ def _write_key_file(key: bytes | bytearray, home_dir: Path | None) -> None:
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(str(fernet_path), flags, 0o600)
     try:
+        os.write(fd, key)
         # O_CREAT's mode only applies to a NEW file — truncating an existing
         # 0644 file kept it world-readable with the live key inside (the
         # launchd sync did exactly that). Pin 0600 on every write.
+        #
+        # AFTER the write, never before: O_TRUNC already emptied the file, so a
+        # failing fchmod (drvfs / bind-mounts that reject chmod) between open
+        # and write would have left an EMPTY key. A key at a loose mode is
+        # recoverable — the next read refuses it and names the chmod.
         if hasattr(os, "fchmod"):
-            os.fchmod(fd, 0o600)
-        os.write(fd, key)
+            try:
+                os.fchmod(fd, 0o600)
+            except OSError as exc:
+                logger.warning("could not set fernet.key to 0600 (%s); fix with chmod 0600", exc)
     finally:
         os.close(fd)
     logger.info("Fernet key stored in file")

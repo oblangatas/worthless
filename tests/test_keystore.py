@@ -1353,3 +1353,24 @@ class TestKeyWritesAreAlwaysOwnerOnly:
         assert stat.S_IMODE(key.stat().st_mode) == 0o600, (
             "a written key must never stay world-readable"
         )
+
+    def test_failing_chmod_never_leaves_an_empty_key(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Bugbot: O_TRUNC empties the file at open — a chmod that fails BEFORE
+        the write (drvfs, bind-mounts) used to leave a zero-byte key."""
+        from worthless.cli.keystore import _write_key_file
+
+        home = tmp_path / ".worthless"
+        home.mkdir(mode=0o700)
+        key = home / "fernet.key"
+        key.write_bytes(b"old")
+        key.chmod(0o644)
+
+        def _reject(*_a: object, **_k: object) -> None:
+            raise PermissionError(1, "Operation not permitted")
+
+        monkeypatch.setattr("worthless.cli.keystore.os.fchmod", _reject)
+        _write_key_file(b"new-key", home)
+
+        assert key.read_bytes() == b"new-key", "the key must be on disk even if chmod fails"
