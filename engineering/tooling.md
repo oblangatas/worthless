@@ -25,7 +25,7 @@ Planned role:
 Local workflow:
 
 - `scripts/codewiki.sh`: bootstrap and run `CodeWiki` in an isolated tool env
-- `uv run docs-generate`: generate draft docs into `engineering/generated/codewiki-pilot/`
+- `scripts/codewiki.sh generate --output engineering/generated/codewiki-pilot`: generate draft docs there
 - `.venvs/codewiki`: dedicated `CodeWiki` virtualenv, separate from the repo `.venv`
 - `.codewiki-home/`: repo-local `CodeWiki` state/config directory
 
