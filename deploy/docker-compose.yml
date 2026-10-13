@@ -7,7 +7,7 @@ services:
     #
     # Published by .github/workflows/publish-docker.yml on every signed v* tag:
     # multi-arch (amd64 + arm64), cosign-signed, GHCR package flipped public.
-    # Verify it yourself: `cosign verify ghcr.io/oblangatas/worthless-proxy:0.3.13`.
+    # Verify it yourself: `cosign verify ghcr.io/oblangatas/worthless-proxy:0.3.14`.
     #
     # The owner is written out rather than templated because compose has no
     # equivalent of the workflow's ${{ github.repository_owner }} — and GHCR does
@@ -18,7 +18,7 @@ services:
     #   docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
     # (--build matters: the override tags the local build `worthless-proxy:local`,
     #  so a plain `up` happily reuses a stale image from an earlier checkout.)
-    image: ghcr.io/oblangatas/worthless-proxy:0.3.13
+    image: ghcr.io/oblangatas/worthless-proxy:0.3.14
     ports:
       # Bind to localhost only; use a reverse proxy for external access
       - "127.0.0.1:8787:8787"

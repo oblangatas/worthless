@@ -4,6 +4,20 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [0.3.14] — 2026-10-13
+
+### Fixed
+- **A key worthless refuses to read is never replaced, deleted, or written through** (`worthless-6hu7`, [#669](https://github.com/oblangatas/worthless/pull/669)). A `fernet.key` worthless refuses to read — wrong mode, another user's file, or a symlink — was treated as "no key here". On a fresh install, that meant a new key was minted over it: overwritten without a keychain, deleted as "stale" with one, and with a symlink in place the write followed the link and landed on a file outside your home (as root in the container, any path). Review found the same mistake on four more paths: the keychain migration read the file unchecked and could plant the wrong key in your keychain; a locked keychain or a cancelled prompt made a key that was right there look absent; and `uninstall` called a merely-wrong-mode key "unrecoverable" and offered `--force`. All of these now stop with `WRTLS-121` and the exact repair (`chmod 0600 …`, or move a symlink aside), and leave the key untouched. A leftover file with the wrong mode next to a working keychain key is ignored, so it doesn't lock you out. Key writes never follow a symlink, and every write ends at mode 0600.
+
+  **What this does NOT do.**
+  - A *dangling* symlink (pointing at something missing, like an unmounted volume) still reads as "no key" (`worthless-0atz`). The empty-database guard stops this from costing locked keys, but a fresh install can still mint.
+  - It does not repair anything for you. There is no `doctor --fix` for this; the error and `doctor --explain fernet_key_refused` name the command to run.
+  - A key already replaced by an older version cannot be recovered by this release.
+  - If the disk fills up mid-write, the key file can still end up empty. That predates this release and is unchanged.
+
+### Changed
+- **A website deploy can't be cancelled, overwritten, or silently lose `security.txt`** ([#678](https://github.com/oblangatas/worthless/pull/678)). The site's deploy shared one concurrency lane with every pull-request run, so a newly queued PR run could evict a production deploy still waiting to run — and a cancelled run shows grey, not red. Deploys also trusted their own commit, so re-running an older run republished older content over newer. Deploys now get their own lane, refuse to publish content older than what is live, reject symlinks under `website/`, and nightly alarms watch the site's two published security files.
+
 ## [0.3.13] — 2026-10-12
 
 ### Added
@@ -420,6 +434,7 @@ First release published to PyPI. `pip install worthless` now works.
 - Gate evaluation strictly precedes shard reconstruction (SR-03).
 - Published artifacts built via PyPI trusted publishing (OIDC, no long-lived tokens).
 
+[0.3.14]: https://github.com/oblangatas/worthless/releases/tag/v0.3.14
 [0.3.13]: https://github.com/oblangatas/worthless/releases/tag/v0.3.13
 [0.3.12]: https://github.com/oblangatas/worthless/releases/tag/v0.3.12
 [0.3.11]: https://github.com/oblangatas/worthless/releases/tag/v0.3.11
