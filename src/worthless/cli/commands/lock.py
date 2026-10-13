@@ -3026,7 +3026,7 @@ def _lock_keys(
                     if unwind_errors:
                         console.print_warning(
                             f"Database may contain {len(unwind_errors)} stale row(s); "
-                            "run `worthless lock` again to finish."
+                            f"run `worthless lock --env {shlex.quote(env_str)}` again to finish."
                         )
                 if isinstance(exc, asyncio.CancelledError):
                     # Surface the signal-driven cancellation as a conventional
