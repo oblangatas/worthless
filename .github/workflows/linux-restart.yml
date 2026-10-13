@@ -1,0 +1,48 @@
+name: Linux restart
+
+# Does the Linux background service come back after a restart? (WOR-861)
+#
+# The background service exists so the proxy outlives the terminal AND a
+# restart. Until this job, nothing had ever checked the restart half on Linux.
+# The script boots systemd as PID 1 in a privileged container, installs the
+# service, restarts the container, and requires the proxy to come back by
+# itself — then turns lingering off and requires it NOT to come back, so a
+# blind test cannot pass.
+#
+# NOT a required check, for the same reason as wsl.yml: the `paths:` filter is
+# safe only on a non-required job (a skipped required check stays Pending,
+# WOR-874).
+#
+# WHAT A GREEN RUN DOES NOT PROVE: a container restart is not a kernel reboot.
+# It proves systemd's real boot path (lingering included) starts the unit.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/linux-restart.yml"
+      - "engineering/testing/scripts/linux-restart-survival.sh"
+      - "src/worthless/cli/commands/service/**"
+      - "src/worthless/cli/commands/lock.py"
+      - "src/worthless/cli/platform.py"
+      - "pyproject.toml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-restart-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  restart:
+    name: Linux restart survival
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install, restart, and check the proxy comes back by itself
+        run: bash engineering/testing/scripts/linux-restart-survival.sh
