@@ -547,6 +547,8 @@ class TestStaleFernetFileCacheSeed:
         canonical = b"canonical-keyring-value-padded-to-44b!!"
         stale = b"stale-file-key-value-padded-to-44-bytes!!"
         (base / "fernet.key").write_bytes(stale + b"\n")
+        # Match the mode the product writes; 0644 is refused (worthless-6hu7).
+        (base / "fernet.key").chmod(0o600)
 
         with (
             patch("worthless.cli.bootstrap.keyring_available", return_value=True),

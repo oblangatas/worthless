@@ -14,6 +14,12 @@ from worthless.cli.commands.doctor.checks.fernet_drift import _INSTRUCTIONS as _
 PLAYBOOKS: dict[str, str] = {
     # Each playbook LEADS with the plain-language verdict (safe / gone / at risk),
     # glosses any jargon once, then names the one command to run (WOR-778).
+    "fernet_key_refused": (
+        "Nothing is lost — your encryption key is still on disk; worthless just "
+        "won't read (or replace) it while its permissions, owner or file type look "
+        "wrong. The error names the exact fix, usually `chmod 0600` on the key. If "
+        "the path is a symlink, move it aside and put the real key back in its place."
+    ),
     "recovery_import": (
         "No secret at risk — a sibling-Mac recovery file didn't finish importing "
         "(your keys aren't lost). Re-run `worthless doctor` to retry; the import is "
