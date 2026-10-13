@@ -45,13 +45,37 @@ print(int(when.replace(tzinfo=dt.timezone.utc).timestamp()))' "$2"
 """
 
 
-def _step_script(workflow: Path, job: str, name_startswith: str) -> str:
-    """Return the `run:` block of one step, read from the workflow on disk."""
+def _step(workflow: Path, job: str, name_startswith: str) -> tuple[dict, int, list]:
+    """Return one step, its position, and its sibling steps — from disk."""
     spec = yaml.safe_load(workflow.read_text(encoding="utf-8"))
-    for step in spec["jobs"][job]["steps"]:
+    steps = spec["jobs"][job]["steps"]
+    for index, step in enumerate(steps):
         if step.get("name", "").startswith(name_startswith):
-            return step["run"]
+            return step, index, steps
     raise AssertionError(f"{workflow.name}: no step named {name_startswith!r} in job {job!r}")
+
+
+def _step_script(workflow: Path, job: str, name_startswith: str) -> str:
+    """Return a guard's shell, after checking the guard is actually wired in.
+
+    Reading only `run:` is how a guard gets disabled while its test stays green:
+    `if: false`, `continue-on-error: true`, or a condition that excludes the
+    event that matters all leave the script byte-identical. A guard that cannot
+    fail the job is decoration, so those are assertion failures here, not
+    details for a reviewer to notice.
+    """
+    step, _, _ = _step(workflow, job, name_startswith)
+
+    # `!cancelled()` is the one allowed condition: it makes a nightly assertion
+    # run even after an earlier one failed, so it can only ever run MORE often.
+    # Every other condition can make the guard sit out the run that mattered.
+    assert step.get("if") in (None, "${{ !cancelled() }}"), (
+        f"{name_startswith!r} is conditional ({step.get('if')!r}) — it can be skipped silently"
+    )
+    assert not step.get("continue-on-error"), (
+        f"{name_startswith!r} is continue-on-error — it can fail without failing the job"
+    )
+    return step["run"]
 
 
 def _git(cwd: Path, *args: str) -> None:
@@ -83,6 +107,33 @@ def test_a_pull_request_run_cannot_cancel_a_production_deploy() -> None:
         f"pushes and pull requests share one cancellation lane: {group}"
     )
     assert "github-pages" in group, f"pushes must still serialise on the Pages lane: {group}"
+    # The deploy lane must be reachable ONLY by a push. Keying on the event but
+    # routing everything-except-pull-request to "github-pages" leaves a manual
+    # dispatch able to evict a queued deploy — the same bug, one event over.
+    assert "'push'" in group or '"push"' in group, (
+        f"the deploy lane is not restricted to pushes, so a manual run can still evict one: {group}"
+    )
+
+
+def test_the_stale_guard_runs_before_anything_is_published() -> None:
+    """A guard that runs after the upload is a comment, not a guard.
+
+    Moving the step below `upload-pages-artifact` / `deploy-pages` leaves its
+    shell byte-identical, so a text-only test keeps passing while stale content
+    has already gone live.
+    """
+    _, guard_index, steps = _step(DEPLOY_WORKFLOW, "deploy", "Refuse to deploy stale")
+    publishing = [
+        index
+        for index, step in enumerate(steps)
+        if "upload-pages-artifact" in str(step.get("uses", ""))
+        or "deploy-pages" in str(step.get("uses", ""))
+    ]
+
+    assert publishing, "the deploy job no longer uploads or deploys a Pages artifact"
+    assert guard_index < min(publishing), (
+        "the stale-content guard runs after publishing has already started"
+    )
 
 
 def test_the_deploy_refuses_content_main_has_moved_past(tmp_path: Path) -> None:
@@ -177,31 +228,29 @@ def test_a_symlink_cannot_ride_into_the_published_tree(tmp_path: Path) -> None:
     assert run_guard() != 0, "a symlink under website/ passed validation"
 
 
-@pytest.mark.parametrize(
-    ("expires", "min_days", "expect_alarm"),
-    [
-        ("2099-01-01", "21", False),  # the API's real shape: a bare calendar date
-        ("2026-11-16T12:00:00Z", "21", False),  # a timestamp must keep working
-        ("2020-01-01", "21", True),  # already expired
-        ("", "21", False),  # nothing readable: warn and skip, never crash
-    ],
-)
-def test_the_certificate_alarm_accepts_the_shape_the_api_returns(
-    expires: str, min_days: str, expect_alarm: bool
-) -> None:
-    """The Pages API returns ``"expires_at": "2026-11-16"`` — no time part.
-
-    An earlier version of this step matched only ``????-??-??T*``, so every real
-    expiry fell through to the skip branch and the alarm could not fire while
-    the certificate quietly ran out. Both shapes must reach the comparison.
-    """
+def _run_a7(
+    *,
+    gh_body: str = "approved\t2099-01-01",
+    gh_rc: int = 0,
+    http_code: str = "200",
+    body: str = "Contact: mailto:security@wless.io\n",
+    min_days: str = "21",
+) -> subprocess.CompletedProcess[str]:
+    """Run the nightly A7 step with the outside world stubbed."""
     script = _step_script(SYNC_WORKFLOW, "sync-check", "A7")
     stubs = f"""
-    gh() {{ printf '%s\\n' '{expires}'; }}
-    curl() {{ printf '200'; }}
+    gh() {{ printf '%s\\n' '{gh_body}'; return {gh_rc}; }}
+    curl() {{
+        out=""
+        while [ $# -gt 0 ]; do
+            case "$1" in -o) out="$2"; shift 2 ;; *) shift ;; esac
+        done
+        [ -n "$out" ] && printf '%s' '{body}' > "$out"
+        printf '{http_code}'
+    }}
     {_GNU_DATE_SHIM}
     """
-    result = subprocess.run(
+    return subprocess.run(
         ["bash", "-euo", "pipefail", "-c", stubs + script],  # noqa: S607
         capture_output=True,
         text=True,
@@ -210,15 +259,60 @@ def test_the_certificate_alarm_accepts_the_shape_the_api_returns(
             "REPO": "o/r",
             "MIN_DAYS": min_days,
             "GH_TOKEN": "x",
+            "GITHUB_RUN_ID": "1",
         },
     )
 
-    if expect_alarm:
+
+@pytest.mark.parametrize(
+    ("expires", "alarms"),
+    [
+        ("2099-01-01", False),  # the API's real shape: a bare calendar date
+        ("2099-01-01T12:00:00Z", False),  # a timestamp must keep working
+        ("2020-01-01", True),  # already expired
+    ],
+)
+def test_the_certificate_alarm_accepts_the_shape_the_api_returns(
+    expires: str, *, alarms: bool
+) -> None:
+    """The Pages API returns ``"expires_at": "2026-11-16"`` — no time part.
+
+    An earlier version matched only ``????-??-??T*``, so every real expiry fell
+    through to the skip branch: the alarm could not fire while the certificate
+    quietly ran out. Both shapes must reach the comparison.
+    """
+    result = _run_a7(gh_body=f"approved\t{expires}")
+
+    if alarms:
         assert result.returncode != 0, f"an expired certificate did not alarm: {result.stdout}"
         assert "::error title=Pages certificate" in result.stdout
     else:
         assert result.returncode == 0, f"unexpected failure: {result.stdout}{result.stderr}"
-        if expires:
-            assert "Pages certificate valid for" in result.stdout, (
-                f"a valid expiry never reached the comparison: {result.stdout}"
-            )
+        assert "Pages certificate state=approved" in result.stdout, (
+            f"a valid expiry never reached the comparison: {result.stdout}"
+        )
+
+
+@pytest.mark.parametrize(
+    ("case", "kwargs"),
+    [
+        ("the API call fails", {"gh_rc": 1, "gh_body": ""}),
+        ("the API returns no certificate", {"gh_body": "none\tnone"}),
+        ("renewal is not healthy", {"gh_body": "bad_authz\t2099-01-01"}),
+        ("security.txt is gone", {"http_code": "404", "body": ""}),
+        ("a cached page answers 200 without the file", {"body": "<html>not found</html>\n"}),
+    ],
+)
+def test_the_nightly_check_fails_closed(case: str, kwargs: dict) -> None:
+    """Each of these once passed silently — the failure mode this step exists for.
+
+    An unreadable API answer used to warn and exit 0, so a moved endpoint or a
+    token without `pages: read` disarmed the alarm permanently. A failed renewal
+    still reported "OK" until the 21-day window, which is June's bad_authz
+    incident exactly. And a CDN can answer 200 with a cached error page long
+    after the origin stopped serving security.txt.
+    """
+    result = _run_a7(**kwargs)
+
+    assert result.returncode != 0, f"{case}: the nightly check passed anyway: {result.stdout}"
+    assert "::error" in result.stdout, f"{case}: failed without an annotation: {result.stdout}"
