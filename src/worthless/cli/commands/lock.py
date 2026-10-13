@@ -1936,8 +1936,9 @@ class _LockInterrupts:
             return
         if self.pressed or self.committed:
             # Never cancel twice, never after the commit. Before it, this runs
-            # during the rollback a first press started: answer that too.
-            if self.planned:
+            # during the rollback a first press started: answer that too. After
+            # it nothing rolls back (worthless-im3x), so say nothing.
+            if self.planned and not self.committed:
                 self.console.print_notice(_STILL_ROLLING_BACK)
             return
         self.pressed = True
@@ -1986,9 +1987,9 @@ def _ctrl_c_raises(signals: list[int]) -> Iterator[None]:
 def _exit_openclaw_failed(console, code: int) -> NoReturn:  # noqa: ANN001
     """Final word on a lock whose OpenClaw stage did not finish; exits *code*.
 
-    Ctrl-C (130) already explained itself in :func:`_openclaw_steps`. Ctrl-C and
-    a refused post-flight (87) synced the Fernet key there; the other OpenClaw
-    failures (73/87/91/92 from :func:`_apply_openclaw`) still skip that sync.
+    Ctrl-C (130) already explained itself in :func:`_openclaw_steps`. Ctrl-C and a
+    refused post-flight (87 from :func:`_openclaw_audit_postflight`) synced the
+    Fernet key there; :func:`_apply_openclaw`'s failures still skip that sync.
     """
     if code != _EXIT_INTERRUPTED:
         console.print_failure(
@@ -2052,6 +2053,8 @@ def _openclaw_steps(
                 try:
                     _openclaw_audit_postflight(gate, managed_aliases, proxy_base_url)
                 except typer.Exit as refused:
+                    if refused.exit_code != 87:
+                        raise
                     _record_openclaw_unfinished(home, planned, "openclaw.postflight_refused")
                     _sync_fernet_after_lock(home)  # keys stay locked: keep them usable
                     return refused.exit_code

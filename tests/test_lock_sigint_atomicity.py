@@ -35,6 +35,7 @@ from pathlib import Path
 
 import pytest
 import typer
+from dotenv import dotenv_values
 import typer._click.termui as click_termui
 from typer.testing import CliRunner
 
@@ -191,12 +192,6 @@ class TestNonInterruptExitCodePreserved:
         assert result.exit_code == 87, result.output
 
 
-def _env_values(path: Path) -> dict[str, str]:
-    """``KEY=value`` pairs of a ``.env``, ignoring blanks and comments."""
-    pairs = (ln.split("=", 1) for ln in path.read_text().splitlines() if "=" in ln)
-    return {k.strip(): v.strip() for k, v in pairs if not k.lstrip().startswith("#")}
-
-
 def _refuse_postflight(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, how: str) -> None:
     """Drive the REAL post-flight into its exit 87: OpenClaw files changed mid-lock.
 
@@ -247,7 +242,7 @@ class TestPostflightRefusalKeepsKeys:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Exit 87 with LOCK FAILED, keys locked, status honest; ``unlock`` restores them."""
-        original = _env_values(two_key_env)
+        original = dotenv_values(two_key_env)
         pre_sha = _sha256_of(two_key_env)
         _refuse_postflight(monkeypatch, tmp_path, how)
 
@@ -262,7 +257,7 @@ class TestPostflightRefusalKeepsKeys:
 
         restored = _invoke_unlock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
         assert restored.exit_code == 0, restored.output
-        values = _env_values(two_key_env)
+        values = dotenv_values(two_key_env)
         for name, value in original.items():
             assert values.get(name) == value, f"{name} not restored by unlock:\n{restored.output}"
 
