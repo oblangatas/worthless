@@ -24,7 +24,11 @@ concurrency:
   # waiting its turn (GitHub keeps one running + one pending per group, and the
   # newcomer evicts the pending one). Two PR runs were cancelled that way on
   # 2026-06-13; a cancelled deploy is a merge that never reaches wless.io.
-  group: ${{ github.event_name == 'push' && 'github-pages' || format('website-{0}-{1}', github.event_name, github.event.pull_request.number || github.run_id) }}
+  # Everything that can DEPLOY shares one lane, so two deploys never race for
+  # Pages: a push and a manual run both land in "github-pages". Pull requests
+  # never deploy, so they get their own lane — sharing it is how a queued PR run
+  # evicted the pending run on 2026-06-13.
+  group: ${{ github.event_name == 'pull_request' && format('website-pr-{0}', github.event.pull_request.number) || 'github-pages' }}
   cancel-in-progress: false
 
 jobs:

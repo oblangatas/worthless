@@ -111,12 +111,35 @@ def test_a_pull_request_run_cannot_cancel_a_production_deploy() -> None:
     assert "github.event_name" in group, (
         f"pushes and pull requests share one cancellation lane: {group}"
     )
-    assert "github-pages" in group, f"pushes must still serialise on the Pages lane: {group}"
-    # The deploy lane must be reachable ONLY by a push. Keying on the event but
-    # routing everything-except-pull-request to "github-pages" leaves a manual
-    # dispatch able to evict a queued deploy — the same bug, one event over.
-    assert "'push'" in group or '"push"' in group, (
-        f"the deploy lane is not restricted to pushes, so a manual run can still evict one: {group}"
+    assert "pull_request" in group, f"pull requests are not carved out of the deploy lane: {group}"
+    assert "github-pages" in group, f"deploys no longer serialise on the Pages lane: {group}"
+
+
+def test_only_main_can_deploy_and_only_by_push_or_a_deliberate_run() -> None:
+    """The deploy job's trigger surface is a decision, so pin it.
+
+    Dropping the `refs/heads/main` condition would let any branch publish to
+    wless.io, and nothing else in this file reads `jobs.deploy.if`.
+    """
+    spec = yaml.safe_load(DEPLOY_WORKFLOW.read_text(encoding="utf-8"))
+    condition = " ".join(str(spec["jobs"]["deploy"]["if"]).split())
+
+    assert "refs/heads/main" in condition, f"a branch other than main could deploy: {condition}"
+    assert "github.event_name == 'push'" in condition, f"pushes no longer deploy: {condition}"
+    for event in ("pull_request", "schedule", "issue_comment"):
+        assert f"'{event}'" not in condition, f"{event} can reach the deploy job: {condition}"
+
+
+def test_the_certificate_threshold_leaves_time_to_act() -> None:
+    """21 days is the decision: enough runway to involve a human and a DNS change.
+
+    The tests below inject their own threshold, so without this the number in the
+    workflow could drift to 1 and every test would stay green.
+    """
+    step, _, _ = _step(SYNC_WORKFLOW, "sync-check", "A7")
+
+    assert step["env"]["MIN_DAYS"] == "21", (
+        f"certificate warning window changed to {step['env']['MIN_DAYS']} days"
     )
 
 
