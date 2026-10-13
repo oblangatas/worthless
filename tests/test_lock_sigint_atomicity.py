@@ -944,6 +944,47 @@ class TestEveryInterruptIsAnswered:
         _assert_interrupt_recorded(home_dir)
         assert len(synced) == 1, "the Fernet sync was skipped by a failed print"
 
+    def test_closed_terminal_after_commit_keeps_exit_129(
+        self,
+        home_dir: WorthlessHome,
+        two_key_env: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """v9gg: the final summary print fails on a dead terminal; the exit still says 129."""
+        import worthless.cli.commands.lock as lock_mod
+
+        _openclaw_step_blocks_then_ctrl_c(monkeypatch, step="_apply_openclaw", signum=signal.SIGHUP)
+
+        def _dead_terminal(*_a: object, **_k: object) -> None:
+            raise OSError(errno.EIO, "Input/output error")
+
+        monkeypatch.setattr(lock_mod, "_print_lock_result", _dead_terminal)
+
+        with _survivable(signal.SIGHUP):
+            result = _invoke_lock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
+
+        assert result.exit_code == 129, result.output
+
+    def test_signals_the_caller_ignores_stay_ignored(
+        self,
+        home_dir: WorthlessHome,
+        two_key_env: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A backgrounded job or supervisor that ignores SIGINT/SIGTERM keeps ignoring them."""
+        previous = {s: signal.signal(s, signal.SIG_IGN) for s in (signal.SIGINT, signal.SIGTERM)}
+        try:
+            result = _invoke_lock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
+            after = {s: signal.getsignal(s) for s in previous}
+        finally:
+            for s, handler in previous.items():
+                signal.signal(s, handler)
+
+        assert result.exit_code == 0, result.output
+        assert after == {s: signal.SIG_IGN for s in previous}, f"re-enabled: {after}"
+
     def test_ctrl_c_during_an_error_rollback_never_orphans_rows(
         self,
         home_dir: WorthlessHome,
