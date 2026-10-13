@@ -1194,7 +1194,8 @@ class TestWriteNeverFollowsSymlink:
 
         assert migrate_file_to_keyring(home_dir=home) is False
         assert promoted == [], "a refused key must never reach the keyring"
-        assert key.exists() and key.read_bytes() == b"ORIGINAL-KEY"
+        assert key.exists(), "the refused file must not be deleted"
+        assert key.read_bytes() == b"ORIGINAL-KEY"
 
 
 class TestKeyringFailureNeverMintsOverPresentKey:
@@ -1246,8 +1247,10 @@ class TestUninstallDoesNotWipeARefusedKey:
 
         exc = WorthlessError(ErrorCode.KEY_REFUSED, "chmod 0600 /home/you/.worthless/fernet.key")
 
+        console = get_console()  # built outside raises(): only the handler may exit
+
         with pytest.raises(typer.Exit):
-            _handle_broken_repo(get_console(), exc, force=False)
+            _handle_broken_repo(console, exc, force=False)
 
         out = capsys.readouterr()
         text = out.out + out.err
@@ -1265,8 +1268,10 @@ class TestUninstallDoesNotWipeARefusedKey:
 
         exc = WorthlessError(ErrorCode.SHARD_STORAGE_FAILED, "db is toast")
 
+        console = get_console()  # built outside raises(): only the handler may exit
+
         with pytest.raises(typer.Exit):
-            _handle_broken_repo(get_console(), exc, force=False)
+            _handle_broken_repo(console, exc, force=False)
 
         out = capsys.readouterr()
         assert "--force" in out.out + out.err
