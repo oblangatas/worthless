@@ -500,14 +500,15 @@ jobs:
           # Cache-busted and body-checked: wless.io sits behind a CDN, so a 200
           # can be served from cache (or by a custom error page) long after the
           # origin stopped serving the file.
-          body=$(mktemp)
-          code=$(curl -o "$body" -sw '%{http_code}' --max-time 20 --retry 2 \
-                   -H 'Cache-Control: no-cache' \
-                   "https://wless.io/.well-known/security.txt?cb=${GITHUB_RUN_ID}")
-          if [ "$code" != "200" ] || ! grep -q '^Contact:' "$body"; then
-            echo "::error title=security.txt missing::security.txt returned HTTP $code without a Contact: line"
-            failed=1
+          # One check, not two: a 404, a cached error page, and a DNS or TLS
+          # failure all fail to produce a Contact: line, which is the thing that
+          # has to be there.
+          if curl -sf --max-time 20 --retry 2 -H 'Cache-Control: no-cache' \
+               "https://wless.io/.well-known/security.txt?cb=${GITHUB_RUN_ID}" \
+               | grep -q '^Contact:'; then
+            echo "OK: security.txt served with a Contact: line"
           else
-            echo "OK: security.txt served (HTTP 200, Contact: present)"
+            echo "::error title=security.txt missing::https://wless.io/.well-known/security.txt did not return a Contact: line"
+            failed=1
           fi
           exit "$failed"

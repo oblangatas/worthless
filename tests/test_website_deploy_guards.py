@@ -33,6 +33,10 @@ SYNC_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release-sync-check.yml"
 # the expiry test supplies its own `date` rather than skipping on macOS and
 # pretending the guard was exercised.
 _GNU_DATE_SHIM = r"""
+# Only stand in where the shipped `date -d` does not exist (BSD/macOS). On Linux
+# — what CI runs — the real thing must be exercised, or this shim would be
+# testing itself.
+if [ "$(uname)" != "Linux" ]; then
 date() {
     if [ "$1" = "-d" ]; then
         python3 -c 'import datetime as dt, sys
@@ -42,6 +46,7 @@ print(int(when.replace(tzinfo=dt.timezone.utc).timestamp()))' "$2"
         command date "$@"
     fi
 }
+fi
 """
 
 
@@ -208,8 +213,13 @@ def test_a_symlink_cannot_ride_into_the_published_tree(tmp_path: Path) -> None:
     validation has to reject links itself.
     """
     script = _step_script(DEPLOY_WORKFLOW, "validate", "Validate static website files")
-    guard = next((line for line in script.splitlines() if "-type l" in line), None)
-    assert guard, "the validate job no longer rejects symlinks under website/"
+    # Take every line from the find onwards: the guard is an assignment plus the
+    # test of it, and running only the assignment would "pass" unconditionally.
+    lines = script.splitlines()
+    start = next((i for i, line in enumerate(lines) if "-type l" in line), None)
+    assert start is not None, "the validate job no longer rejects symlinks under website/"
+    guard = "\n".join(lines[start : start + 2])
+    assert "test -z" in guard, f"the symlink guard no longer asserts its own result: {guard!r}"
 
     site = tmp_path / "website"
     site.mkdir()
@@ -232,7 +242,7 @@ def _run_a7(
     *,
     gh_body: str = "approved\t2099-01-01",
     gh_rc: int = 0,
-    http_code: str = "200",
+    curl_rc: int = 0,
     body: str = "Contact: mailto:security@wless.io\n",
     min_days: str = "21",
 ) -> subprocess.CompletedProcess[str]:
@@ -240,14 +250,7 @@ def _run_a7(
     script = _step_script(SYNC_WORKFLOW, "sync-check", "A7")
     stubs = f"""
     gh() {{ printf '%s\\n' '{gh_body}'; return {gh_rc}; }}
-    curl() {{
-        out=""
-        while [ $# -gt 0 ]; do
-            case "$1" in -o) out="$2"; shift 2 ;; *) shift ;; esac
-        done
-        [ -n "$out" ] && printf '%s' '{body}' > "$out"
-        printf '{http_code}'
-    }}
+    curl() {{ printf '%s' '{body}'; return {curl_rc}; }}
     {_GNU_DATE_SHIM}
     """
     return subprocess.run(
@@ -299,7 +302,7 @@ def test_the_certificate_alarm_accepts_the_shape_the_api_returns(
         ("the API call fails", {"gh_rc": 1, "gh_body": ""}),
         ("the API returns no certificate", {"gh_body": "none\tnone"}),
         ("renewal is not healthy", {"gh_body": "bad_authz\t2099-01-01"}),
-        ("security.txt is gone", {"http_code": "404", "body": ""}),
+        ("security.txt is gone", {"curl_rc": 22, "body": ""}),
         ("a cached page answers 200 without the file", {"body": "<html>not found</html>\n"}),
     ],
 )

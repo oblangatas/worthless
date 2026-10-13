@@ -14,14 +14,6 @@ on:
       - "tests/test_website_publish_safety.py"
       - ".github/workflows/deploy-website.yml"
   workflow_dispatch:
-    inputs:
-      republish_stale:
-        description: >-
-          Emergency only: publish this ref even if main has newer website/
-          content. The way back when the live site is broken and waiting for a
-          revert to pass every required check is too slow.
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -32,9 +24,6 @@ concurrency:
   # waiting its turn (GitHub keeps one running + one pending per group, and the
   # newcomer evicts the pending one). Two PR runs were cancelled that way on
   # 2026-06-13; a cancelled deploy is a merge that never reaches wless.io.
-  # Only a push to main may hold the deploy lane. Anything else — a pull
-  # request, a manual dispatch — gets its own group, so it can never evict a
-  # production deploy that is still waiting its turn.
   group: ${{ github.event_name == 'push' && 'github-pages' || format('website-{0}-{1}', github.event_name, github.event.pull_request.number || github.run_id) }}
   cancel-in-progress: false
 
@@ -66,8 +55,11 @@ jobs:
           grep -qx 'Sitemap: https://wless.io/sitemap.xml' website/robots.txt
           # No symlinks: upload-pages-artifact tars with --dereference, so a link
           # publishes whatever it points at, while the publish-safety allowlist
-          # walks real files and never sees it.
-          test -z "$(find website -type l -print -quit)"
+          # walks real files and never sees it. Assign first — `test -z "$(find
+          # ...)"` also passes when find itself fails, which is a guard that
+          # disappears exactly when something is wrong.
+          links=$(find website -type l -print -quit)
+          test -z "$links"
 
       - name: Set up uv + Python
         uses: ./.github/actions/setup-uv-python
@@ -88,9 +80,10 @@ jobs:
 
   deploy:
     name: Deploy to GitHub Pages
-    # A manual run may also deploy: without it, the only way back from a bad
-    # publish is a revert commit through every required check, and the stale
-    # guard below (correctly) blocks the old trick of re-running an old run.
+    # A manual run may also deploy, which re-publishes main's CURRENT tip: the
+    # way to recover a failed or cancelled deploy without inventing a commit,
+    # and the only such path once a run is too old to re-run. It cannot
+    # republish older content — the stale guard below still applies.
     if: >-
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
       && github.ref == 'refs/heads/main'
@@ -114,16 +107,10 @@ jobs:
         # website/ content (a later push, or someone re-running an old run —
         # a re-run keeps the ORIGINAL commit), publishing it would silently
         # roll wless.io backwards. Fail loudly instead; the newer run deploys.
-        env:
-          REPUBLISH_STALE: ${{ inputs.republish_stale }}
         run: |
           git fetch --no-tags --depth=1 origin main
           if git diff --quiet "$GITHUB_SHA" FETCH_HEAD -- website; then
             echo "OK: this commit carries main's current website/ content."
-            exit 0
-          fi
-          if [ "$REPUBLISH_STALE" = "true" ]; then
-            echo "::warning::main has newer website/ content than $GITHUB_SHA — republishing older content anyway because republish_stale was requested."
             exit 0
           fi
           echo "::error::main has newer website/ content than $GITHUB_SHA; refusing to deploy stale content."
