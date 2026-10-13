@@ -2,13 +2,28 @@
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import logging
+import signal
 import sys
 import traceback
 from enum import Enum, IntEnum
 
 from worthless.cli.log_redaction import _redact
+
+
+class SignalInterrupt(KeyboardInterrupt):
+    """A KeyboardInterrupt that remembers which signal stopped the command.
+
+    :func:`error_boundary` exits ``128 + signum``: 130 for Ctrl-C, 143 for
+    SIGTERM (``docker stop``), 129 for a closed terminal (worthless-dnp9).
+    """
+
+    def __init__(self, signum: int) -> None:
+        super().__init__(signum)
+        self.signum = signum
+
 
 logger = logging.getLogger(__name__)
 
@@ -210,7 +225,7 @@ def error_boundary(fn=None, *, exit_code: int = 1):  # noqa: ANN001, ANN201
                 return func(*args, **kwargs)
             except typer.Exit:
                 raise
-            except (typer.Abort, KeyboardInterrupt):
+            except (typer.Abort, KeyboardInterrupt) as exc:
                 # Ctrl+C is a cancellation, not a crash. ``typer.confirm`` raises
                 # ``click.Abort`` (a RuntimeError), which the generic ``except
                 # Exception`` below turned into "WRTLS-199: an internal error
@@ -230,8 +245,12 @@ def error_boundary(fn=None, *, exit_code: int = 1):  # noqa: ANN001, ANN201
                 # the command succeeded; a deliberate "n" still exits 0.
                 from worthless.cli.console import get_console
 
-                get_console().print_hint("Cancelled.")
-                raise typer.Exit(code=130) from None
+                # A closed terminal (SIGHUP) cannot take the message; the exit
+                # code still has to say what happened.
+                with contextlib.suppress(OSError):
+                    get_console().print_hint("Cancelled.")
+                signum = getattr(exc, "signum", signal.SIGINT)
+                raise typer.Exit(code=128 + signum) from None
             except WorthlessError as exc:
                 if _debug:
                     _print_redacted_traceback()
