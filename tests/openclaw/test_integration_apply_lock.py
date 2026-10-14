@@ -1101,3 +1101,27 @@ def test_writes_left_in_place_after_unreadable_snapshot_still_count_as_written(
     assert "openai" in result.providers_set, (
         f"a write left in openclaw.json was reported as rolled back: {result.providers_skipped}"
     )
+
+
+def test_ctrl_c_on_a_relock_keeps_the_new_entry(
+    openclaw_present: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A re-lock: openai already pointed at this alias before the lock.
+
+    Putting that pre-lock entry back would leave OpenClaw on the old key half,
+    which no longer matches the database. The new entry stays.
+    """
+    from worthless.openclaw import integration
+
+    proxy = "http://127.0.0.1:8787"
+    old = {"baseUrl": f"{proxy}/openai-aaaa1111/v1", "apiKey": "old-shard-a"}
+    config_path = openclaw_present["config_path"]
+    _seed(config_path, {"openai": old})
+    monkeypatch.chdir(openclaw_present["home"])
+    _ctrl_c_on_write(monkeypatch, nth=2)
+
+    with pytest.raises(KeyboardInterrupt):
+        integration.apply_lock(planned_updates=_TWO_PROVIDERS, proxy_base_url=proxy)
+
+    openai = _providers(config_path)["openai"]
+    assert openai["apiKey"] == "sk-shard-a-openai", f"re-lock rolled back to the old half: {openai}"
