@@ -1519,17 +1519,22 @@ class TestTerminalClosedMidLock:
                 os._exit(127)
         status = None
         closed = False
-        deadline = time.monotonic() + WAIT_TIMEOUT
+        seen = bytearray()  # what the lock printed, for a failure message
+        # Reaching the reload wait is setup, not the contract: a cold start on a
+        # loaded box can take a while. Answering after the close is the
+        # contract, and gets its own strict TAIL_DEADLINE below.
+        deadline = time.monotonic() + 2 * WAIT_TIMEOUT
         try:
             while time.monotonic() < deadline:
                 if not closed:
                     with contextlib.suppress(OSError):
                         if select.select([fd], [], [], 0.05)[0]:
-                            os.read(fd, 65536)  # drain, or the child blocks writing
+                            seen.extend(os.read(fd, 65536))  # drain, or the child blocks
                     if _call_count(calls, "logs") >= 1:
                         time.sleep(0.3)
                         os.close(fd)  # the window closes: the kernel sends SIGHUP
                         closed = True
+                        deadline = time.monotonic() + TAIL_DEADLINE
                 else:
                     time.sleep(0.05)
                 wpid, st = os.waitpid(pid, os.WNOHANG)
@@ -1542,7 +1547,12 @@ class TestTerminalClosedMidLock:
                 os.waitpid(pid, 0)
             if not closed:
                 os.close(fd)
-        assert closed, "the lock never reached the reload wait"
+        calls_seen = calls.read_text() if calls.exists() else "(no calls)"
+        assert closed, (
+            "the lock never reached the reload wait\n"
+            f"openclaw calls: {calls_seen.split()}\n"
+            f"lock output tail: {bytes(seen[-1500:]).decode('utf-8', 'replace')}"
+        )
         assert status is not None, "the lock outlived its closed terminal"
         assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 129, (
             f"status={status!r} exit={os.WEXITSTATUS(status) if os.WIFEXITED(status) else None}"
