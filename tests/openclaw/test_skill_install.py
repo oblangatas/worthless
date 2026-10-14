@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from worthless.openclaw.errors import OpenclawIntegrationError
+
 
 # ---------------------------------------------------------------------------
 # current_version
@@ -303,9 +305,16 @@ def test_install_cleans_tempdir_on_failure(tmp_path: Path, monkeypatch: pytest.M
     assert leftovers == [], f"staging tempdir not cleaned: {leftovers}"
 
 
-@pytest.mark.parametrize("exc", [KeyboardInterrupt, OSError], ids=["ctrl-c", "rename-failed"])
+@pytest.mark.parametrize(
+    ("exc", "expected"),
+    [(KeyboardInterrupt, KeyboardInterrupt), (OSError, OpenclawIntegrationError)],
+    ids=["ctrl-c", "rename-failed"],
+)
 def test_interrupted_reinstall_keeps_the_installed_skill(
-    exc: type[BaseException], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    exc: type[BaseException],
+    expected: type[BaseException],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """worthless-1jfr: the old skill was deleted BEFORE the new one moved in.
 
@@ -329,7 +338,7 @@ def test_interrupted_reinstall_keeps_the_installed_skill(
 
     monkeypatch.setattr("worthless.openclaw.skill.os.replace", _interrupted)
 
-    with pytest.raises(BaseException):  # noqa: PT011 — KeyboardInterrupt or the wrapped OSError
+    with pytest.raises(expected):  # a Ctrl-C stays a Ctrl-C; an OSError is wrapped
         skill.install(target)
 
     assert marker.read_text(encoding="utf-8") == "previous install", "installed skill was lost"

@@ -1066,7 +1066,8 @@ def test_undo_gives_up_quickly_when_the_config_lock_is_held(
 
     assert not hung, "the undo waited on the held config lock: Ctrl-C would be ignored"
     assert elapsed < 5.0, f"the undo took {elapsed:.1f}s"
-    assert outcome and isinstance(outcome[0], KeyboardInterrupt), outcome
+    assert outcome, "apply_lock never finished"
+    assert isinstance(outcome[0], KeyboardInterrupt), outcome
 
 
 def test_writes_left_in_place_after_unreadable_snapshot_still_count_as_written(
