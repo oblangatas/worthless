@@ -41,6 +41,7 @@ from types import ModuleType
 import aiosqlite
 import anthropic
 import httpx
+import httpx2
 import openai
 import pytest
 
@@ -237,7 +238,8 @@ async def test_base_url_request_transits_proxy_to_upstream(
             # The proxy relayed the mock's real response body back to the SDK.
             assert completion.choices[0].message.content == "Hello from mock upstream!"
         else:
-            sdk_http_client = httpx.AsyncClient(transport=httpx.ASGITransport(app=proxy_app))
+            # The anthropic SDK moved to httpx2 and rejects httpx objects.
+            sdk_http_client = httpx2.AsyncClient(transport=httpx2.ASGITransport(app=proxy_app))
             client = anthropic.AsyncAnthropic(
                 api_key=shard_a,
                 base_url=proxy_base,
