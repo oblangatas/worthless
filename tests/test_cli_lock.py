@@ -2148,6 +2148,25 @@ class TestLockRerun:
         assert "[OK]" in result.output, result.output
         assert "still protected" in result.output.lower(), result.output
 
+    def test_lock_rerun_reconciles_rows_a_failed_rollback_left(
+        self, home_dir: WorthlessHome, env_file: Path
+    ) -> None:
+        """worthless-qvvs: when rollback can't delete its rows, lock prints
+        "run `worthless lock` again". That state — DB row kept, .env still
+        holding the real key — must converge on a second lock."""
+        env_vars = {"WORTHLESS_HOME": str(home_dir.base_dir)}
+        plain = env_file.read_text()
+        first = runner.invoke(app, ["lock", "--env", str(env_file)], env=env_vars)
+        assert first.exit_code == 0, first.output
+        count_before = len(asyncio.run(_repo(home_dir).list_keys()))
+        env_file.write_text(plain)  # the .env a failed rollback leaves behind
+
+        again = runner.invoke(app, ["lock", "--env", str(env_file)], env=env_vars)
+
+        assert again.exit_code == 0, again.output
+        assert env_file.read_text() != plain, "the real key is still in .env"
+        assert len(asyncio.run(_repo(home_dir).list_keys())) == count_before
+
     def test_lock_rerun_does_not_create_duplicate_shard_row(
         self, home_dir: WorthlessHome, env_file: Path
     ) -> None:

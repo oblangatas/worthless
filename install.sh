@@ -38,23 +38,13 @@ trap 'trap - EXIT HUP; cleanup; exit 129' HUP
 
 UV_VERSION="0.11.7"
 
-# Default worthless version. Hand-bumped per release like UV_VERSION above,
-# kept at the latest version ALREADY published on PyPI — a CI drift check
-# (release-sync-check.yml) fails if it falls behind the latest release.
-# install.sh installs `worthless==$WORTHLESS_VERSION_PIN`, NOT unpinned `latest`.
-#
-# Why this matters (WOR-559, threat-model F-06/F-49): a `curl|sh` ending in
-# `uv tool install worthless` (unpinned) auto-runs whatever PyPI calls latest.
-# A release compromised AFTER ours (stolen maintainer token) would then get
-# RCE on every fresh install — the highest-impact, previously-undefended hop.
-# Real analogues: ctx (2022), Ultralytics (2024), ua-parser-js (2021).
-#
-# HONEST SCOPE: pinning selects WHICH release; it does NOT verify the package
-# BYTES (`uv tool install` has no --require-hashes). It shrinks the window to
-# "compromise this exact pinned release" instead of "publish any malicious
-# latest", and does NOT defend against a compromised Worker/origin (which
-# would serve a bad script AND a bad pin together). Wheel-hash verification is
-# a tracked follow-up. Override with `WORTHLESS_VERSION=x.y.z curl … | sh`.
+# Default worthless version: the latest release already on PyPI, hand-bumped
+# per release (release-sync-check.yml fails if it falls behind). We install
+# `worthless==<pin>`, never unpinned latest: a release compromised after ours
+# (stolen maintainer token) would otherwise run on every fresh install (WOR-559, F-06/F-49).
+# HONEST SCOPE: the pin picks WHICH release; it does not verify package bytes
+# (`uv tool install` has no --require-hashes), and does not help if the Worker
+# itself is compromised. Override with `WORTHLESS_VERSION=x.y.z curl … | sh`.
 WORTHLESS_VERSION_PIN="0.3.14"
 
 # SHA256 of https://astral.sh/uv/${UV_VERSION}/install.sh — bump with UV_VERSION.
@@ -64,32 +54,14 @@ ASTRAL_INSTALLER_URL="https://astral.sh/uv/${UV_VERSION}/install.sh"
 DOCS_URL="https://docs.wless.io"
 WINDOWS_DOCS_URL="https://docs.wless.io/install/wsl"
 
-# Hermetic install: ignore caller env. uv+pip+Astral honor ~48 redirect/MitM
-# vars across 11 attack classes — same lanes a poisoned rc/.envrc/workspace
-# ENV uses. Pin defaults; scrub env. Closes ENV vector only — repo-local
-# uv.toml / pyproject.toml [tool.uv] is A3's job. (WOR-673 / A2)
-# Index:        UV_INDEX{,_URL}, UV_DEFAULT_INDEX, UV_EXTRA_INDEX_URL, UV_INDEX_STRATEGY,
-#               UV_FIND_LINKS, PIP_{,EXTRA_}INDEX_URL, PIP_FIND_LINKS, PIP_NO_INDEX
-# Config:       UV_CONFIG_FILE, PIP_CONFIG_FILE
-# Cache:        UV_NO_CACHE, UV_OFFLINE
-# Anti-MitM:    PIP_TRUSTED_HOST, UV_INSECURE_HOST, UV_NATIVE_TLS,
-#               SSL_CERT_{FILE,DIR}, REQUESTS_CA_BUNDLE, CURL_CA_BUNDLE,
-#               PIP_CERT, PIP_CLIENT_CERT
-# Python src:   UV_PYTHON_INSTALL_MIRROR, UV_PYTHON_PREFERENCE (re-set below)
-# Auth:         UV_KEYRING_PROVIDER, PIP_KEYRING_PROVIDER
-# Astral install dir: UV_INSTALL_DIR, UV_UNMANAGED_INSTALL, INSTALLER_DOWNLOAD_URL
-# Python hijack: PYTHONPATH, PYTHONSTARTUP
-# Shell init:   BASH_ENV, ENV, CDPATH, GLOBIGNORE
-# Dynamic loader: LD_PRELOAD, LD_AUDIT, LD_LIBRARY_PATH (Linux), DYLD_INSERT_LIBRARIES,
-#               DYLD_LIBRARY_PATH, DYLD_FALLBACK_LIBRARY_PATH, DYLD_FRAMEWORK_PATH,
-#               DYLD_FORCE_FLAT_NAMESPACE (macOS). Classic .so/.dylib injection lane:
-#               attacker's lib loads into curl's process, intercepts open() to serve
-#               one file to sha256sum and a different one to sh — SHA pin bypassed.
-# Proxy aliases: ALL_PROXY, all_proxy, http_proxy, https_proxy (lowercase) — curl
-#               honors these in addition to HTTP{,S}_PROXY; same MitM lane but
-#               undocumented for users. Scrub the aliases; keep documented uppercase.
-# Keep:         HTTP{,S}_PROXY (legit corp egress, documented; user accepts MitM risk
-#               at their corporate gateway by setting them)
+# Hermetic install: a poisoned rc / .envrc / workspace env can redirect uv, pip
+# and the Astral installer through these vars. Classes, in the order below:
+# package index, config file, cache, TLS trust, Python source, keyring auth,
+# Astral install dir, Python startup hijack, shell init, dynamic loader (an
+# injected .so/.dylib can show sha256sum one file and sh another, bypassing the
+# SHA pin), and lowercase proxy aliases curl also honours. Uppercase
+# HTTP{,S}_PROXY stay: documented corporate egress. Env only; repo-local
+# uv.toml / [tool.uv] is handled separately (UV_NO_CONFIG below).
 unset \
     UV_INDEX UV_INDEX_URL UV_DEFAULT_INDEX UV_EXTRA_INDEX_URL UV_INDEX_STRATEGY \
     UV_FIND_LINKS \
@@ -180,16 +152,14 @@ proxy_hints() {
 
 # --- Trusted binary resolution (worthless-rlio / worthless-v0tl) ----------------
 
-# The PATH lockdown outranks the caller only for commands that EXIST in the
-# trusted dirs — it keeps the caller's PATH as the tail by design. sha256sum is
-# in none of them on macOS, and uv is in none of them anywhere, so `command -v`
-# for either reaches an attacker's dir. Resolve inside an explicit list; never
-# fall back to PATH. uv is bounded to where it actually installs, since an
-# attacker owning those dirs already owns the tool being installed there.
-# Both honor WORTHLESS_TRUST_PATH exactly as the lockdown does: only the literal
-# "1" opts out, so a typo-tolerant value cannot bypass. That hatch already means
-# "trust the caller's PATH" and already disables the lockdown, so deferring to it
-# here adds no new weakening — it is what lets the test harness inject stubs.
+# The lockdown only outranks the caller for tools that EXIST in the trusted dirs
+# (the caller's PATH stays as the tail). sha256sum isn't in them on macOS and uv
+# isn't anywhere, so `command -v` could reach an attacker's dir: resolve from an
+# explicit list, never PATH. uv's list includes user-writable dirs on purpose:
+# an attacker who owns them already owns the uv we would install there.
+# WORTHLESS_TRUST_PATH: only the literal "1" defers to PATH (a typo-tolerant
+# value would be a bypass). It already disables the lockdown, so honouring it
+# here adds no new weakening; it is how the test harness injects stubs.
 trusted_tool() {
     if [ "${WORTHLESS_TRUST_PATH:-}" = "1" ]; then
         command -v "$1" 2>/dev/null && return 0
@@ -431,22 +401,10 @@ install_or_upgrade_worthless() {
         return 0
     fi
 
-    # Single PINNED install path. `--force` makes it idempotent whether the
-    # box is fresh OR has a different version (a pin bump) — and crucially
-    # keeps the install pinned to $spec. The previous fallback ran bare
-    # `uv tool upgrade worthless`, which resolves PyPI *latest* and silently
-    # re-opened the F-06/F-49 supply-chain window on every re-run (WOR-559
-    # security review). Never call `uv tool upgrade` with no version.
-    #
-    # Capture stderr to a tempfile so we can SHOW it on failure. Pre-fix this
-    # block did `2>&1 >/dev/null` and the user only ever saw a generic "Failed
-    # to install" + proxy hint banner — masking the actual uv error (bad
-    # version, dep conflict, deleted cwd, disk full, etc.). worthless-nrl1.
-    #
-    # `mktemp -t TEMPLATE` portability: BSD treats the arg as a prefix and appends
-    # random chars; modern GNU coreutils tolerate a bare prefix but emit a stderr
-    # warning. Pass an explicit `.XXXXXX` template so both backends behave
-    # quietly. (CodeRabbit catch on PR #148.)
+    # One PINNED install path: `--force` is idempotent on a fresh box and on a
+    # pin bump. Never bare `uv tool upgrade` — it resolves PyPI latest (F-06/F-49).
+    # uv's stderr goes to a tempfile so a failure shows the real error. Explicit
+    # `.XXXXXX` template: BSD and GNU mktemp -t both accept it quietly.
     uv_install_err="$(mktemp 2>/dev/null || mktemp -t worthless-uv-install-err.XXXXXX)"
 
     if ! "$UV" tool install --force "$spec" >/dev/null 2>"$uv_install_err"; then
