@@ -812,6 +812,22 @@ def _print_synced_lines(usernames: list[str], *, dry_run: bool) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _print_dead_run_lines(
+    dead_runs: list[Path], console: WorthlessConsole, *, show_fix_hint: bool
+) -> None:
+    """worthless-7qb6: name each folder a stopped proxy left holding key shares."""
+    if not dead_runs:
+        return
+    console.print_warning(
+        f"{len(dead_runs)} folder(s) left by a proxy that is no longer running "
+        "still hold both key shares:"
+    )
+    for run_dir in dead_runs:
+        typer.echo(f"    {run_dir}")
+    if show_fix_hint:
+        typer.echo("    fix: run `worthless doctor --fix`")
+
+
 def _doctor_confirm(
     orphans: list[EnrollmentRecord],
     synced: list[str],
@@ -968,14 +984,7 @@ def _doctor_run(*, fix: bool, yes: bool, dry_run: bool) -> None:
         # ----------- check 6: folders left by a stopped proxy (worthless-7qb6) -----------
         dead_runs = find_dead_run_dirs(home)
 
-        if (
-            not orphans
-            and not openclaw_issues
-            and not synced
-            and not had_mismatch
-            and not had_alias_issues
-            and not dead_runs
-        ):
+        if not any((orphans, openclaw_issues, synced, had_mismatch, had_alias_issues, dead_runs)):
             if not imported:
                 console.print_success("No issues found.")
             return
@@ -1000,15 +1009,7 @@ def _doctor_run(*, fix: bool, yes: bool, dry_run: bool) -> None:
             if not fix:
                 typer.echo(f"    fix: run `{ICLOUD_FIX_PHRASE}`")
 
-        if dead_runs:
-            console.print_warning(
-                f"{len(dead_runs)} folder(s) left by a proxy that is no longer running "
-                "still hold both key shares:"
-            )
-            for run_dir in dead_runs:
-                typer.echo(f"    {run_dir}")
-            if not fix:
-                typer.echo("    fix: run `worthless doctor --fix`")
+        _print_dead_run_lines(dead_runs, console, show_fix_hint=not fix)
 
         if not fix:
             return
