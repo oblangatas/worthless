@@ -50,7 +50,7 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 
 ### Changed
 - **Worthless asks you before it installs a background service** ([#673](https://github.com/oblangatas/worthless/pull/673)).
-  Worthless can install a background service that starts automatically: at login on macOS, and at boot on Linux through lingering. Before it installs the service, it now tells you what it adds and when it starts. It also tells you that the master key moves into a file, that Linux turns on lingering, and how to remove all of it. Enter means no. Only a person who types `y` gets the service. `--yes` never installs it. Plain `worthless` now asks the same question. In a container, you get one line that tells you why the service is not available.
+  Worthless can install a background service that starts automatically: at login on macOS, and at boot on Linux through lingering. Before it installs the service, it now tells you what it adds and when it starts. It also tells you that the master key moves into a file, that Linux turns on lingering, and how to remove all of it. Enter means no. Worthless installs the service only after someone types `y`. `--yes` never installs it. Plain `worthless` now asks the same question. In a container, you get one line that tells you to run the proxy as the main process instead.
 
   **Limits.**
   - Worthless finds an AI coding agent only through the `CLAUDECODE` and `AI_AGENT` environment variables. It does not ask the question in that case. An agent that removes these variables gets the question like a person. A person whose terminal inherited them gets a hint, not the question.
