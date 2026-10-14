@@ -55,7 +55,9 @@ The audit is skipped when OpenClaw is not installed, so non-OpenClaw users never
 
 > **Cloud / VPS deployments.** Both the Worthless proxy and OpenClaw run as containers in the same Docker network — nothing installed on the host. If you installed OpenClaw locally, use the [Quick start](#quick-start-local) above instead.
 >
-> Not yet verified end-to-end on a live deployment (WOR-510).
+> **Requires the fix in [#700](https://github.com/oblangatas/worthless/pull/700)** — the `worthless-proxy` image up to 0.3.14 cannot lock in this setup. Verified end-to-end with that fix (WOR-510).
+>
+> **Upgrading an existing deployment?** Re-download `docker-compose.yml` (OpenClaw now needs `group_add`), pull the new image, `docker compose --profile openclaw up -d`, then re-run step 2.
 
 **Before you start:** Lock must run before OpenClaw starts. Once OpenClaw has started it locks down its config directory and a subsequent `worthless lock` cannot write to it. If you need to re-lock (e.g. to rotate a key), stop openclaw first: `docker compose stop openclaw`, then lock, then `docker compose start openclaw`.
 
@@ -101,16 +103,16 @@ docker compose --profile openclaw up -d
 **4. Send a request and confirm it went through the proxy**
 
 ```bash
-docker compose exec openclaw openclaw agent --local --message "hello"
+docker compose exec openclaw openclaw agent --local --agent main --message "hello"
 
 docker compose exec -e WORTHLESS_PORT=8787 proxy worthless status
 ```
 
-`Requests proxied` should be `1` or higher.
+`Requests proxied` should be `1` or higher. To confirm nothing bypasses Worthless, `docker compose stop proxy` and send again — OpenClaw should fail with `network connection error`.
 
 Both services share the `openclaw-config` volume (proxy at `/data/.openclaw`, openclaw at `/home/node/.openclaw`), so the API key is never written to host disk or container layers.
 
-To undo in this setup, run unlock inside the proxy container: `docker compose exec proxy worthless unlock`.
+**Undo isn't supported in this setup yet.** `worthless unlock` needs shard A from the `.env`, which step 2 removes from tmpfs on purpose. To start over, `docker compose --profile openclaw down -v` and lock again from step 1.
 
 ## OpenClaw in Docker, proxy on host
 
@@ -141,7 +143,7 @@ docker run --rm -it \
   --add-host=host.docker.internal:host-gateway \
   -v "$HOME/.openclaw:/home/node/.openclaw" \
   ghcr.io/openclaw/openclaw:2026.5.3-1 \
-  openclaw agent --local --message "hello"
+  openclaw agent --local --agent main --message "hello"
 ```
 
 > `--add-host=host.docker.internal:host-gateway` is the Linux equivalent of Docker Desktop's built-in `host.docker.internal`. On macOS with Docker Desktop, it resolves automatically.
