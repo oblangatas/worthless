@@ -598,7 +598,9 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
         if encrypted.base_url is None:
             logger.warning(
                 "alias %r has NULL base_url (legacy pre-8rqs row); "
-                "operator should run `worthless relock`",
+                "operator should run `worthless unlock --alias %r --env <its .env>` then "
+                "`worthless lock --env <its .env>` (re-locking stores the base_url)",
+                alias,
                 alias,
             )
             return _uniform_401()

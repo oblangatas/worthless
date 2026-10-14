@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import signal
 import socket
 import stat
@@ -850,7 +851,9 @@ async def _pass1_db_writes(
                 raise WorthlessError(
                     ErrorCode.SHARD_STORAGE_FAILED,
                     f"Alias {alias!r} predates format-preserving split. "
-                    "Run `worthless unlock --all` then re-lock this .env.",
+                    f"Run `worthless unlock --alias {shlex.quote(alias)} "
+                    f"--env {shlex.quote(env_str)}`, then "
+                    f"`worthless lock --env {shlex.quote(env_str)}` again.",
                 )
             stored_decrypted = await repo.decrypt_shard(db_shard)
             verify_payload = bytearray(value.encode("utf-8"))
@@ -3063,7 +3066,7 @@ def _lock_keys(
                     if unwind_errors:
                         console.print_warning(
                             f"Database may contain {len(unwind_errors)} stale row(s); "
-                            "run `worthless unlock --all` to reconcile."
+                            f"run `worthless lock --env {shlex.quote(env_str)}` again to finish."
                         )
                 if isinstance(exc, asyncio.CancelledError | KeyboardInterrupt):
                     # Surface a signal as a conventional interrupt carrying its
