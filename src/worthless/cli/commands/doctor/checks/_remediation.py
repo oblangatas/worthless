@@ -51,9 +51,9 @@ PLAYBOOKS: dict[str, str] = {
         "a lone shard is unusable on its own."
     ),
     "dead_proxy_run_dirs": (
-        "A key is at risk on disk — a proxy that stopped without cleaning up left both "
-        "halves of it, readable only by you. Run `worthless doctor --fix` to delete the "
-        "folder; nothing uses it, because its process is gone."
+        "A key is at risk on disk — a `worthless up` or `wrap` that stopped without "
+        "cleaning up left both halves of it, readable only by you. Run `worthless doctor "
+        "--fix` to delete the folder; doctor only deletes it once nothing is using it."
     ),
     "fernet_drift": _FERNET_DRIFT,
     "broken_status": (

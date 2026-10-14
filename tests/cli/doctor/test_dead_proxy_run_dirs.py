@@ -101,6 +101,59 @@ def test_dry_run_deletes_nothing(ctx, fake_home) -> None:
     assert stale.exists()
 
 
+def test_a_folder_whose_sidecar_still_answers_is_left_alone(ctx, fake_home, monkeypatch) -> None:
+    # `worthless up` kill -9'd: its PID is dead, but the sidecar + proxy it
+    # spawned keep serving from this folder (brutus repro on PR 699).
+    stale = _run_dir(fake_home, _dead_pid())
+    monkeypatch.setattr(
+        dead_proxy_run_dirs, "probe_socket", lambda path, **kw: path == stale / "sidecar.sock"
+    )
+
+    ctx.fix = True
+    result = dead_proxy_run_dirs.run(ctx)
+
+    assert result["findings"] == []
+    assert stale.exists()
+
+
+def _record_running_proxy(home) -> None:
+    (home.base_dir / "proxy.pid").write_text(f"{os.getpid()}\n8787\n")
+
+
+def test_nothing_is_deleted_while_a_proxy_is_running(ctx, fake_home) -> None:
+    # A running proxy may use a fallback socket outside run/, so its folder
+    # can't be told apart from a dead one: report, but never delete.
+    stale = _run_dir(fake_home, _dead_pid())
+    _record_running_proxy(fake_home)
+
+    ctx.fix = True
+    result = dead_proxy_run_dirs.run(ctx)
+
+    assert stale.exists()
+    assert result["findings"] == [{"run_dir": str(stale), "pid": int(stale.name)}]
+    assert result["fixed"] == []
+    assert "worthless down" in result["skipped_reason"]
+
+
+def test_plain_doctor_says_stop_the_proxy_first(monkeypatch, fake_home) -> None:
+    _quiet_other_checks(monkeypatch, fake_home)
+    stale = _run_dir(fake_home, _dead_pid())
+    _record_running_proxy(fake_home)
+
+    result = runner.invoke(app, ["doctor", "--fix", "--yes"])
+    flat = "".join(result.output.split())
+
+    assert stale.exists(), result.output
+    assert "worthlessdown" in flat, result.output
+
+
+def test_delete_rechecks_and_skips_a_folder_that_is_alive_again(fake_home) -> None:
+    live = _run_dir(fake_home, os.getpid())
+
+    assert dead_proxy_run_dirs.remove_run_dirs(fake_home, [live]) == []
+    assert live.exists()
+
+
 def _quiet_other_checks(monkeypatch, fake_home) -> None:
     async def _no_orphans(_repo):
         return [], []

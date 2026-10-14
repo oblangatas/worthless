@@ -56,7 +56,9 @@ from worthless.cli.bootstrap import WorthlessHome, acquire_lock, get_home, _DEFA
 from worthless.cli.platform import read_process_env
 from worthless.cli.process import pid_path, read_pid, resolve_port
 from worthless.cli.commands.doctor.checks.dead_proxy_run_dirs import (
+    STOP_PROXY_FIRST,
     find_dead_run_dirs,
+    proxy_running,
     remove_run_dirs,
 )
 from worthless.cli.commands.revoke import _revoke_async
@@ -813,18 +815,20 @@ def _print_synced_lines(usernames: list[str], *, dry_run: bool) -> None:
 
 
 def _print_dead_run_lines(
-    dead_runs: list[Path], console: WorthlessConsole, *, show_fix_hint: bool
+    dead_runs: list[Path], home: WorthlessHome, console: WorthlessConsole, *, show_fix_hint: bool
 ) -> None:
     """worthless-7qb6: name each folder a stopped proxy left holding key shares."""
     if not dead_runs:
         return
     console.print_warning(
-        f"{len(dead_runs)} folder(s) left by a proxy that is no longer running "
+        f"{len(dead_runs)} folder(s) left by a `worthless up` or `wrap` that is no longer running "
         "still hold both key shares:"
     )
     for run_dir in dead_runs:
         typer.echo(f"    {run_dir}")
-    if show_fix_hint:
+    if proxy_running(home):
+        typer.echo(f"    {STOP_PROXY_FIRST}")
+    elif show_fix_hint:
         typer.echo("    fix: run `worthless doctor --fix`")
 
 
@@ -877,8 +881,13 @@ def _doctor_apply(
         console.print_success(f"Cleaned up {purged} broken record(s).")
 
     if dead_runs:
-        removed = remove_run_dirs(dead_runs)
-        console.print_success(f"Deleted {len(removed)} folder(s) left by a stopped proxy.")
+        removed = remove_run_dirs(home, dead_runs)
+        if removed:
+            console.print_success(f"Deleted {len(removed)} folder(s) left by a stopped proxy.")
+        kept = len(dead_runs) - len(removed)
+        if kept:
+            why = STOP_PROXY_FIRST if proxy_running(home) else "In use again or not deletable."
+            console.print_warning(f"Kept {kept} folder(s). {why}")
 
     if synced:
         migrated = _migrate_synced_keys(synced, home)
@@ -1009,7 +1018,7 @@ def _doctor_run(*, fix: bool, yes: bool, dry_run: bool) -> None:
             if not fix:
                 typer.echo(f"    fix: run `{ICLOUD_FIX_PHRASE}`")
 
-        _print_dead_run_lines(dead_runs, console, show_fix_hint=not fix)
+        _print_dead_run_lines(dead_runs, home, console, show_fix_hint=not fix)
 
         if not fix:
             return
