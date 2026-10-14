@@ -1265,6 +1265,9 @@ def _apply_lock_stage_a(
 ) -> bool:
     """Stage A(pre) + A; on an interrupt, undo this run's own provider writes.
 
+    The legacy-decoy migration (Stage A(pre)) is not undone. Extracted to keep
+    :func:`apply_lock` within xenon's complexity budget.
+
     Returns ``True`` when a write failure needs the transactional rollback.
     An interrupt (Ctrl-C between two provider writes, worthless-2nta) would
     otherwise leave openclaw.json half switched. *original_config* is the
@@ -1286,7 +1289,7 @@ def _apply_lock_stage_a(
         )
     except BaseException:
         _undo_own_provider_writes(
-            config_path, original_config, resolved_proxy_base_url, planned_updates, events
+            config_path, original_config, resolved_proxy_base_url, planned_updates
         )
         raise
 
@@ -1299,7 +1302,6 @@ def _undo_own_provider_writes(
     original_config: dict | None,
     resolved_proxy_base_url: str,
     planned_updates: list[tuple[str, str, str]],
-    events: list[OpenclawIntegrationEvent],
 ) -> None:
     """Put back the entries this lock wrote, and nothing else (worthless-2nta).
 
@@ -1310,7 +1312,8 @@ def _undo_own_provider_writes(
     re-lock the old entry carries a stale key half: ours is the right one).
     Without a readable snapshot nothing is reverted. Each revert is a
     compare-and-swap under the flock, all within :data:`_UNDO_BUDGET_S`: a
-    config lock held elsewhere stops the undo instead of hanging it. Best
+    config lock held elsewhere stops the undo instead of hanging it (the
+    entries stay; the lock's interrupt message points at doctor). Best
     effort: a failure here must not mask the interrupt that brought us here.
     """
     if isinstance(original_config, _UnreadSnapshot):
@@ -1332,18 +1335,7 @@ def _undo_own_provider_writes(
                 prior=before if isinstance(before, dict) else None,
                 deadline=deadline,
             ):
-                events.append(
-                    OpenclawIntegrationEvent(
-                        code=OpenclawErrorCode.WRITE_FAILED,
-                        level="error",
-                        detail=(
-                            f"could not undo the interrupted write to {config_path}: "
-                            "another process holds its lock — run `worthless doctor`"
-                        ),
-                        extra={"path": str(config_path)},
-                    )
-                )
-                return
+                return  # lock held elsewhere past the budget: leave the rest
 
 
 def _apply_lock_rollback(
@@ -1375,8 +1367,8 @@ def _apply_lock_rollback(
                 extra={"path": str(config_path)},
             )
         )
-        providers_skipped.extend((p, "rolled_back") for p in providers_set)
-        providers_set.clear()
+        # The writes made so far stay in the file: they still count as written,
+        # so the later stages scrub the real key from OpenClaw's agent caches.
         return
     try:
         rollback_config(config_path, original_config)
@@ -2234,16 +2226,13 @@ def apply_lock(
             events=tuple(events),
         )
 
-    # ---- Stage A(pre): heal legacy decoy layout (WOR-656 F6) -------------
-    # Old installs wrote a separate ``worthless-<p>`` decoy beside the
-    # untouched original ``<p>``. Delete our stale decoy (and repoint a
-    # decoy-pointing default model) BEFORE Stage A rewrites the original in
-    # place. Runs under apply_lock's existing ``original_config`` rollback
-    # umbrella, so a mid-migration write failure restores byte-identically and
-    # Stage A is skipped.
-    # ---- Stage A: write providers ----------------------------------------
+    # ---- Stage A(pre) + A: heal the legacy decoy layout, write providers ---
+    # Old installs wrote a separate ``worthless-<p>`` decoy beside the original
+    # ``<p>``; it is deleted (and a decoy-pointing default model repointed)
+    # before the originals are rewritten in place (WOR-656 F6). A write failure
+    # takes _apply_lock_rollback below; an interrupt undoes this run's provider
+    # writes only, so a migrated decoy stays migrated (it was stale anyway).
     # F-CFG-13 / DV-01/DV-02 handling is inside _apply_lock_write_providers.
-    # Extracted to keep apply_lock within xenon's complexity budget (rank C).
     rollback_needed = _apply_lock_stage_a(
         config_path,
         resolved_proxy_base_url,

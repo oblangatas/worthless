@@ -186,7 +186,7 @@ def _providers_view(data: dict[str, Any], *, strict: bool) -> dict[str, Any] | N
 
 
 @contextlib.contextmanager
-def _file_lock(target: Path) -> Iterator[None]:
+def _file_lock(target: Path, deadline: float | None = None) -> Iterator[None]:
     """Acquire an exclusive ``flock`` for the duration of a read-modify-write.
 
     ``os.replace`` guarantees no torn file but does NOT prevent lost updates
@@ -200,18 +200,37 @@ def _file_lock(target: Path) -> Iterator[None]:
 
     Unix-only: ``worthless`` refuses native Windows (WRTLS-110); WSL works
     because it's Linux to ``fcntl``.
+
+    With a *deadline* (``time.monotonic()``) the lock is tried non-blocking
+    until then, raising :class:`TimeoutError`: for callers that must never
+    wait indefinitely (the undo after a Ctrl-C, worthless-2nta).
     """
     target.parent.mkdir(parents=True, exist_ok=True)
     lock_path = target.parent / f".{target.name}.lock"
     fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o600)
     try:
-        _fcntl.flock(fd, _fcntl.LOCK_EX)  # type: ignore[union-attr]
+        if deadline is None:
+            _fcntl.flock(fd, _fcntl.LOCK_EX)  # type: ignore[union-attr]
+        else:
+            _flock_until(fd, deadline)
         try:
             yield
         finally:
             _fcntl.flock(fd, _fcntl.LOCK_UN)  # type: ignore[union-attr]
     finally:
         os.close(fd)
+
+
+def _flock_until(fd: int, deadline: float) -> None:
+    """Take an exclusive flock on *fd*, retrying until *deadline*; else TimeoutError."""
+    while True:
+        try:
+            _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)  # type: ignore[union-attr]
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("openclaw.json lock held elsewhere") from None
+            time.sleep(0.05)
 
 
 def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
@@ -459,18 +478,8 @@ def revert_provider_if_ours(
     never wait on another process indefinitely. Returns ``False`` when the
     lock could not be had in time (nothing written), ``True`` otherwise.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(path.parent / f".{path.name}.lock"), os.O_RDWR | os.O_CREAT, 0o600)
     try:
-        while True:
-            try:
-                _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)  # type: ignore[union-attr]
-                break
-            except BlockingIOError:
-                if time.monotonic() >= deadline:
-                    return False
-                time.sleep(0.05)
-        try:
+        with _file_lock(path, deadline=deadline):
             _refuse_if_symlink(path)
             data = read_config(path)
             providers = _providers_view(data, strict=False) if data else None
@@ -483,10 +492,8 @@ def revert_provider_if_ours(
                 providers[provider] = prior  # type: ignore[index]
             _atomic_write_json(path, data)
             return True
-        finally:
-            _fcntl.flock(fd, _fcntl.LOCK_UN)  # type: ignore[union-attr]
-    finally:
-        os.close(fd)
+    except TimeoutError:
+        return False
 
 
 def replace_provider(path: Path, provider: str, entry: dict[str, Any]) -> None:

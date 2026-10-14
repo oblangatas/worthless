@@ -99,20 +99,18 @@ def _refuse_if_symlink(path: Path) -> None:
         )
 
 
-def _cleanup_install(staging: Path | None, final: Path, retired: Path | None) -> None:
-    """Remove the staging dir; put the previous install back if the new one is missing.
+def _cleanup_failed_install(staging: Path | None, final: Path, retired: Path | None) -> None:
+    """After a failure or Ctrl-C: drop staging, and never lose the previous install.
 
-    On success *final* exists, so this only drops the moved-aside previous
-    install. On a failure or Ctrl-C it restores it (worthless-1jfr).
+    It is put back when nothing took its place (worthless-1jfr). When something
+    else did (a racing install with different content), it is kept aside
+    rather than deleted: never trade a known-good skill for an unknown one.
     """
     if staging is not None:
         shutil.rmtree(staging, ignore_errors=True)
-    if retired is None:
-        return
-    if not final.exists():
+    if retired is not None and not final.exists():
         with contextlib.suppress(OSError):
             os.rename(retired, final)  # noqa: PTH104 — put the previous install back
-    shutil.rmtree(retired, ignore_errors=True)
 
 
 def install(target_dir: Path) -> Path:
@@ -201,15 +199,16 @@ def install(target_dir: Path) -> Path:
             else:
                 raise
         staging = None  # replace consumed it (or we cleaned it above)
-        _cleanup_install(None, final, retired)  # drops the previous install
-        retired = None
+        if retired is not None:
+            shutil.rmtree(retired, ignore_errors=True)  # the new skill is in: drop the old
+            retired = None
     except BaseException as exc:
         # Any failure (mkdtemp failure, EACCES, ENOSPC, simulated rename
         # failures) is wrapped as SKILL_INSTALL_FAILED so callers in
         # apply_lock() can surface it as a structured event without
         # leaking raw OSError types into --json output. Always clean up
         # the staging dir (F33) — guarded since mkdtemp may not have run.
-        _cleanup_install(staging, final, retired)
+        _cleanup_failed_install(staging, final, retired)
         if not isinstance(exc, Exception) or isinstance(exc, OpenclawIntegrationError):
             raise  # a Ctrl-C stays a Ctrl-C
         raise OpenclawIntegrationError(

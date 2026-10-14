@@ -1593,6 +1593,6 @@ class TestCtrlCWhileOpenclawConfigIsLocked:
                     env,
                     # keys committed; the next step is the OpenClaw config write
                     lambda t=te: _env_state(t) == "locked",
-                    "the OpenClaw config-lock wait",
+                    "the wait for the openclaw.json lock",
                 )
             _assert_answered_and_kept(te, rc)
