@@ -4,6 +4,11 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Removed
+- **Installing Worthless puts only `worthless` on your PATH** (`worthless-nd65`). Every install also added six developer-only commands next to it: `test-unit`, `test-docker`, `test-live`, `test-openclaw`, `test-all` and `docs-generate`. They were useless outside a source checkout, and free to collide with another tool's command of the same name. They're gone, along with the modules behind them, and a test now fails if any installed command name doesn't start with `worthless`. Developers run the exact equivalents listed under "Test lanes" in `engineering/tooling.md`, and `scripts/codewiki.sh` for docs. Re-running the installer removes the old commands: tested in Docker by upgrading a real `curl worthless.sh | sh` install of 0.3.13 with `uv tool install --force`, the command the installer uses.
+
+  **What this does NOT do.** An upgrade through `pipx` was not tested. A stale copy left by a different installer (say, an old `pip install --user`) is not touched.
+
 ## [0.3.14] — 2026-10-13
 
 ### Fixed
@@ -15,7 +20,7 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - A key already replaced by an older version cannot be recovered by this release.
   - If the disk fills up mid-write, the key file can still end up empty. That predates this release and is unchanged.
 
-- **Ctrl-C, closing the terminal, and `docker stop` are answered throughout `worthless lock`, from its first safety check on** (`worthless-595v`, `worthless-f1xx`, `worthless-y4fn`, `worthless-dnp9`, `worthless-v9gg`, `worthless-3em7`). #668 made Ctrl-C work after the keys were saved; the rest of the lock still had gaps. On Python 3.11+, Ctrl-C during the OpenClaw safety check before anything is written was ignored for seconds and the check ran again. A press at the very end of the database writes, or while `.env` was being rewritten, was dropped, and the lock went on. `docker stop` (SIGTERM) exited 130 like Ctrl-C, or killed the lock outright before it was armed, and closing the terminal (SIGHUP) killed it with no rollback and no record. A press during a rollback that an error had started could cancel it and leave stale rows. Now each of these stops the lock at once: before `.env` is rewritten, everything is rolled back; after, the keys stay locked and `worthless status` says OpenClaw setup is unfinished. The exit code names the signal: 130 for Ctrl-C, 143 for SIGTERM, 129 for a closed terminal. The interrupt is recorded even when the terminal is already gone. On a machine without OpenClaw, the message no longer mentions OpenClaw.
+- **Ctrl-C, closing the terminal, and `docker stop` are answered throughout `worthless lock`, from its first safety check on** (`worthless-595v`, `worthless-f1xx`, `worthless-y4fn`, `worthless-dnp9`, `worthless-v9gg`, `worthless-3em7`, [#691](https://github.com/oblangatas/worthless/pull/691)). #668 made Ctrl-C work after the keys were saved; the rest of the lock still had gaps. On Python 3.11+, Ctrl-C during the OpenClaw safety check before anything is written was ignored for seconds and the check ran again. A press at the very end of the database writes, or while `.env` was being rewritten, was dropped, and the lock went on. `docker stop` (SIGTERM) exited 130 like Ctrl-C, or killed the lock outright before it was armed, and closing the terminal (SIGHUP) killed it with no rollback and no record. A press during a rollback that an error had started could cancel it and leave stale rows. Now each of these stops the lock at once: before `.env` is rewritten, everything is rolled back; after, the keys stay locked and `worthless status` says OpenClaw setup is unfinished. The exit code names the signal: 130 for Ctrl-C, 143 for SIGTERM, 129 for a closed terminal. The interrupt is recorded even when the terminal is already gone. On a machine without OpenClaw, the message no longer mentions OpenClaw.
 
   **What this does NOT fix.**
   - `kill -9` (SIGKILL) cannot be caught: a lock killed that way can still leave rows behind (WOR-646 Part 2).
@@ -35,11 +40,6 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 ### Changed
 - **You're asked plainly before anything starts at login** ([#673](https://github.com/oblangatas/worthless/pull/673)).
 - **A website deploy can't be cancelled, overwritten, or silently lose `security.txt`** ([#678](https://github.com/oblangatas/worthless/pull/678)). The site's deploy shared one concurrency lane with every pull-request run, so a newly queued PR run could evict a production deploy still waiting to run — and a cancelled run shows grey, not red. Deploys also trusted their own commit, so re-running an older run republished older content over newer. Deploys now get their own lane, refuse to publish content older than what is live, reject symlinks under `website/`, and nightly alarms watch the site's two published security files.
-
-### Removed
-- **Installing Worthless puts only `worthless` on your PATH** (`worthless-nd65`). Every install also added six developer-only commands next to it: `test-unit`, `test-docker`, `test-live`, `test-openclaw`, `test-all` and `docs-generate`. They were useless outside a source checkout, and free to collide with another tool's command of the same name. They're gone, along with the modules behind them, and a test now fails if any installed command name doesn't start with `worthless`. Developers run the exact equivalents listed under "Test lanes" in `engineering/tooling.md`, and `scripts/codewiki.sh` for docs. Re-running the installer removes the old commands: tested in Docker by upgrading a real `curl worthless.sh | sh` install of 0.3.13 with `uv tool install --force`, the command the installer uses.
-
-  **What this does NOT do.** An upgrade through `pipx` was not tested. A stale copy left by a different installer (say, an old `pip install --user`) is not touched.
 
 ## [0.3.13] — 2026-10-12
 
