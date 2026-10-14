@@ -37,7 +37,15 @@ run() {
     PATH="$D/venv/bin:$PATH" "$@"
 }
 job_pid() { launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | awk '/^\tpid = /{print $3; exit}'; }
-started_epoch() { date -j -f "%a %b %d %T %Y" "$(ps -o lstart= -p "$1" | sed 's/  */ /g')" +%s 2>/dev/null; }
+# LC_ALL=C: ps and date must agree on English day/month names.
+started_epoch() { LC_ALL=C date -j -f "%a %b %d %T %Y" "$(LC_ALL=C ps -o lstart= -p "$1" | sed 's/  */ /g')" +%s 2>/dev/null; }
+# Your most recent console login, from the login records (minute precision).
+# loginwindow alone is not enough: macOS keeps it across a plain log-out.
+console_login_epoch() {
+  local when
+  when=$(LC_ALL=C last "$USER" | awk '$2=="console"{print $3, $4, $5, $6; exit}')
+  [ -n "$when" ] && LC_ALL=C date -j -f "%a %b %d %H:%M:%S %Y" "${when}:00 $(date +%Y)" +%s 2>/dev/null || echo 0
+}
 # curl already prints 000 when nothing listens; `|| echo 000` would make 000000.
 health() { local c; c=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/healthz" 2>/dev/null); echo "${c:-000}"; }
 plist_binary() { /usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$PLIST" 2>/dev/null; }
@@ -65,7 +73,9 @@ roundtrip() {
      -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}' \
      "$LOCALMOCK_BASE_URL/chat/completions")
 }
-provider_saw_real_key() { tail -1 "$D/provider.log" 2>/dev/null | grep -q "key_matches=True"; }
+# Read only lines written after the request; `tail -1` matched an older line.
+provider_mark() { wc -l < "$D/provider.log" 2>/dev/null | tr -d ' ' || echo 0; }
+provider_saw_real_key() { tail -n +"$((${1:-0} + 1))" "$D/provider.log" 2>/dev/null | grep -q "key_matches=True"; }
 
 case "${1:-}" in
   save)
@@ -97,8 +107,8 @@ case "${1:-}" in
     for _ in $(seq 30); do [ "$(health)" = 200 ] && break; sleep 1; done
     PID=$(job_pid)
     [ -n "$PID" ] && [ "$(health)" = 200 ] || { echo "FAIL: service not up after install"; stop_provider; exit 1; }
-    CODE=$(roundtrip)
-    [ "$CODE" = 200 ] && provider_saw_real_key || { echo "FAIL: a real request through the service failed ($CODE)"; stop_provider; exit 1; }
+    MARK=$(provider_mark); CODE=$(roundtrip)
+    [ "$CODE" = 200 ] && provider_saw_real_key "$MARK" || { echo "FAIL: a real request through the service failed ($CODE)"; stop_provider; exit 1; }
     stop_provider
     umask 077
     {
@@ -118,8 +128,12 @@ case "${1:-}" in
     FAILS=0
     ok()  { printf '  PASS  %s\n' "$1"; }
     bad() { printf '  FAIL  %s\n' "$1"; FAILS=$((FAILS + 1)); }
-    LOGIN_PID=$(pgrep -x loginwindow | head -1)
-    LOGIN_AT=$( [ -n "$LOGIN_PID" ] && started_epoch "$LOGIN_PID" || echo 0 )
+    # Latest of: your console login (covers a plain log-out) and your own
+    # loginwindow's start (covers a restart). -u: never another user's session.
+    LOGIN_PID=$(pgrep -x -u "$(id -u)" loginwindow | head -1)
+    LW_AT=$( [ -n "$LOGIN_PID" ] && started_epoch "$LOGIN_PID" || echo 0 )
+    CONSOLE_AT=$(console_login_epoch)
+    LOGIN_AT=$(( LW_AT > CONSOLE_AT ? LW_AT : CONSOLE_AT ))
     for _ in $(seq 30); do [ "$(health)" = 200 ] && break; sleep 1; done
     NOW_PID=$(job_pid)
     echo "saved:   $(date -r "$saved_at" '+%F %T'), pid $pid"
@@ -143,8 +157,8 @@ case "${1:-}" in
     fi
     [ "$(health)" = 200 ] && ok "proxy answers /healthz" || bad "proxy does not answer on $PORT"
     if start_provider; then
-      CODE=$(roundtrip)
-      [ "$CODE" = 200 ] && provider_saw_real_key && ok "a real request works after the restart (the proxy rebuilt the real key)" \
+      MARK=$(provider_mark); CODE=$(roundtrip)
+      [ "$CODE" = 200 ] && provider_saw_real_key "$MARK" && ok "a real request works after the restart (the proxy rebuilt the real key)" \
         || bad "the proxy is up but a real request fails ($CODE): not protected"
       stop_provider
     else

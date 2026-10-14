@@ -26,7 +26,7 @@ set -uo pipefail
 
 REPO="${REPO:-$(pwd)}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
-IMAGE=worthless-systemd-restart
+IMAGE="worthless-systemd-restart-$$"  # per run: a shared tag let one run delete another's image
 C="worthless-restart-$$"
 U=worthless-test
 PORT=8787
@@ -99,7 +99,10 @@ roundtrip() {
     -d "{\"model\":\"gpt-4o-mini\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}" \
     "$LOCALMOCK_BASE_URL/chat/completions"' 2>/dev/null
 }
-provider_saw_real_key() { docker exec "$C" tail -1 /opt/proof/provider.log | grep -q "key_matches=True"; }
+# Lines in the provider log before a request; the check then reads only lines
+# written after it. A plain `tail -1` matched the line from before the restart.
+provider_mark() { docker exec "$C" bash -c "wc -l < /opt/proof/provider.log 2>/dev/null || echo 0" | tr -d ' '; }
+provider_saw_real_key() { docker exec "$C" tail -n +"$(($1 + 1))" /opt/proof/provider.log | grep -q "key_matches=True"; }
 
 say "0. build a Linux image that boots systemd"
 docker build -q -t "$IMAGE" - >/dev/null <<'EOF' || { echo "image build failed"; exit 2; }
@@ -122,7 +125,8 @@ for f in pyproject.toml src README.md; do docker cp "$REPO/$f" "$C:/tmp/src/"; d
 docker exec "$C" mkdir -p /opt/proof
 docker cp "$HERE/fake_provider.py" "$C:/opt/proof/fake_provider.py"
 docker exec "$C" bash -c "rm -rf /tmp/src/src/*.egg-info; chown -R $U:$U /tmp/src"
-as_user bash -c 'python3 -m venv ~/venv && ~/venv/bin/pip install -q --no-input /tmp/src' 2>&1 | tail -2
+as_user bash -c 'python3 -m venv ~/venv && ~/venv/bin/pip install -q --no-input /tmp/src' > /dev/null 2>&1 \
+  && pass "installed worthless from this checkout" || { fail "pip install failed"; exit 1; }
 KEY="sk-live-$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 40)"
 # A user provider entry is the documented way to point lock at a non-default
 # upstream; without it lock refuses an unregistered URL.
@@ -130,7 +134,8 @@ as_user bash -c "mkdir -p ~/.worthless ~/proj && printf '[provider.localmock]\nu
 as_user bash -c "printf 'LOCALMOCK_API_KEY=%s\nLOCALMOCK_BASE_URL=http://127.0.0.1:$PROVIDER_PORT/v1\n' '$KEY' > ~/proj/.env"
 start_provider || fail "fake provider did not start"
 as_user bash -c 'cd ~/proj && worthless lock' >/dev/null 2>&1 && pass "lock" || fail "lock"
-as_user grep -q "$KEY" "/home/$U/proj/.env" && fail "the real key is still in .env" || pass "the real key is gone from .env"
+as_user grep -q "$KEY" "/home/$U/proj/.env"
+case $? in 1) pass "the real key is gone from .env" ;; 0) fail "the real key is still in .env" ;; *) fail "could not read .env" ;; esac
 DIRECT=$(as_user bash -c 'set -a; . ~/proj/.env; set +a; curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $LOCALMOCK_API_KEY" -d "{}" http://127.0.0.1:'"$PROVIDER_PORT"'/v1/chat/completions')
 [ "$DIRECT" = 401 ] && pass "the half-key left in .env is useless on its own (provider says $DIRECT)" || fail "the half-key worked directly against the provider ($DIRECT): the test provider is not checking keys"
 
@@ -147,8 +152,8 @@ BEFORE_INV=$(invocation); BEFORE_PID1=$(pid1_start)
 [ -n "$BEFORE_INV" ] && pass "service running (InvocationID $BEFORE_INV)" || fail "service not running after install"
 [ "$(health)" = 200 ] && pass "proxy answers /healthz" || fail "proxy does not answer"
 docker exec "$C" test -f "/var/lib/systemd/linger/$U" && pass "lingering on" || fail "lingering not enabled"
-CODE=$(roundtrip)
-[ "$CODE" = 200 ] && provider_saw_real_key && pass "a real request works through the service (provider got the real key)" \
+MARK=$(provider_mark); CODE=$(roundtrip)
+[ "$CODE" = 200 ] && provider_saw_real_key "$MARK" && pass "a real request works through the service (provider got the real key)" \
   || fail "a request through the service failed before any restart ($CODE)"
 
 say "3. restart: does protection come back by itself?"
@@ -160,8 +165,8 @@ if wait_back 60; then
   [ "$AFTER_INV" != "$BEFORE_INV" ] && pass "systemd started the service again (new InvocationID $AFTER_INV)" || fail "same InvocationID across a restart: stale state"
   pass "proxy answers /healthz after restart, nobody started it"
   start_provider || fail "fake provider did not restart"
-  CODE=$(roundtrip)
-  [ "$CODE" = 200 ] && provider_saw_real_key && pass "a real request works after restart (the proxy rebuilt the real key)" \
+  MARK=$(provider_mark); CODE=$(roundtrip)
+  [ "$CODE" = 200 ] && provider_saw_real_key "$MARK" && pass "a real request works after restart (the proxy rebuilt the real key)" \
     || fail "after restart the proxy is up but a real request fails ($CODE): not protected"
 else
   fail "restart: the proxy did NOT come back within 60 s"
@@ -172,7 +177,7 @@ docker exec "$C" loginctl disable-linger "$U"
 docker restart "$C" >/dev/null
 if ! wait_running; then
   fail "control: the container did not come back, so this run cannot tell 'stayed down' from 'never booted'"
-elif wait_back 20; then
+elif wait_back 60; then  # as long as step 3 allowed, or a slow comeback reads as "stayed down"
   fail "control: it came back WITHOUT lingering. This test cannot see a failure; pass 3 proves nothing"
 else
   pass "control: without lingering it stays down (the test can see a failure)"
@@ -182,8 +187,13 @@ say "5. teardown: uninstall leaves nothing"
 docker exec "$C" loginctl enable-linger "$U"
 wait_back 30 >/dev/null || true
 as_user worthless service uninstall --yes 2>&1 | sed 's/^/  | /' | tail -2
-as_user test -e "/home/$U/.config/systemd/user/worthless-proxy.service" && fail "unit file still there" || pass "no unit file"
-[ -z "$(invocation)" ] && pass "service not running" || fail "service still running after uninstall"
+# Each check must fail when it cannot run, not pass: a dead container would
+# otherwise read as "no unit, not running, nothing on the port".
+docker exec "$C" true || { fail "container gone before teardown could be checked"; exit 1; }
+as_user test -e "/home/$U/.config/systemd/user/worthless-proxy.service"
+case $? in 1) pass "no unit file" ;; 0) fail "unit file still there" ;; *) fail "could not check for the unit file" ;; esac
+ACTIVE=$(as_user systemctl --user is-active worthless-proxy 2>/dev/null)
+case "$ACTIVE" in inactive|unknown|failed|"") pass "service not running ($ACTIVE)" ;; *) fail "service still $ACTIVE after uninstall" ;; esac
 sleep 2
 if [ "$(health)" = 000 ]; then
   pass "nothing answers on port $PORT"

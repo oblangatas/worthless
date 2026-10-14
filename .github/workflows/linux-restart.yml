@@ -22,9 +22,10 @@ on:
     paths:
       - ".github/workflows/linux-restart.yml"
       - "engineering/testing/scripts/linux-restart-survival.sh"
-      - "src/worthless/cli/commands/service/**"
-      - "src/worthless/cli/commands/lock.py"
-      - "src/worthless/cli/platform.py"
+      - "engineering/testing/scripts/fake_provider.py"
+      # The after-restart request runs the proxy, key and storage code, so a
+      # change anywhere in the package can break it. pyproject for deps.
+      - "src/worthless/**"
       - "pyproject.toml"
 
 permissions:
