@@ -24,6 +24,7 @@ Predicate" and §"Failure modes" rows F01–F04, F36.
 
 from __future__ import annotations
 
+import functools
 import hmac
 import ipaddress
 import json
@@ -830,7 +831,10 @@ def _check_world_writable(config_path: Path, events: list[OpenclawIntegrationEve
         st = config_path.stat()
     except OSError:
         return
-    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+    risky = stat.S_IWGRP | stat.S_IWOTH
+    if os.environ.get("WORTHLESS_OPENCLAW_CONFIG_SHARED"):
+        risky = stat.S_IWOTH  # group write is the shared-volume design (WOR-510)
+    if st.st_mode & risky:
         events.append(
             OpenclawIntegrationEvent(
                 code=OpenclawErrorCode.WRITE_FAILED,
@@ -970,13 +974,17 @@ def _classify_config_state(
     silently returned ``{}`` and ``set_provider`` overwrote the config with a
     blank slate.  We now require a POSITIVE signal to declare "unreadable":
 
-    * ``WORTHLESS_OPENCLAW_CONFIG_SHARED`` set to a non-empty value — explicit
-      operator override for shared Docker volume topologies.
     * UID mismatch — ``os.stat(path).st_uid != os.geteuid()`` — the file is
       owned by a different user, classic Docker two-UID layout.
 
+    ``WORTHLESS_OPENCLAW_CONFIG_SHARED`` set to a non-empty value is the
+    operator declaring that shared layout intentional, so it skips the UID
+    check and returns "present"; the write path widens the file to 0644 and
+    :func:`_share_openclaw_tree` then grants the volume's group rw so the
+    openclaw container can still read and update it.
+
     Returns "missing" when the file does not exist (first lock on a fresh
-    install), "unreadable" for the two Docker signals, "present" otherwise.
+    install), "unreadable" on an undeclared UID mismatch, "present" otherwise.
     """
     try:
         file_exists = path.exists()
@@ -989,7 +997,12 @@ def _classify_config_state(
     if not file_exists:
         return "missing"
     if os.environ.get("WORTHLESS_OPENCLAW_CONFIG_SHARED"):
-        return "unreadable"
+        # Operator declared the shared Docker volume (deploy/docker-compose.yml
+        # sets this): a different owner is expected, not a hazard. An
+        # unreadable file is still never clobbered — read_config surfaces it
+        # as CONFIG_UNREADABLE downstream. Treating the flag as "abort" made
+        # the all-container deployment unable to lock at all (WOR-510).
+        return "present"
     try:
         if os.stat(str(path)).st_uid != os.geteuid():  # noqa: PTH116 — must use os.stat so tests can patch("os.stat")
             return "unreadable"
@@ -1917,6 +1930,92 @@ def _apply_lock_migrate_legacy_decoy(
     return False
 
 
+def _shares_openclaw_tree_on_exit(fn):  # noqa: ANN001, ANN202
+    """Run :func:`_share_openclaw_tree` on EVERY exit of ``fn`` — success,
+    early return, or exception. A lock that raises mid-write must not leave
+    root-owned files that crash-loop the openclaw container (security review)."""
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            if os.environ.get("WORTHLESS_OPENCLAW_CONFIG_SHARED"):
+                try:
+                    state = detect()
+                    if state.present:
+                        root = _resolve_active_config_path(state, state.home_dir).parent
+                        _share_openclaw_tree(root)
+                except Exception:  # noqa: BLE001, S110 — never mask fn's own result/exception
+                    pass
+
+    return wrapper
+
+
+def _share_openclaw_tree(root: Path | None) -> None:
+    """Keep the shared Docker volume usable by the OpenClaw container (WOR-510).
+
+    Only when ``WORTHLESS_OPENCLAW_CONFIG_SHARED`` is set (all-container
+    compose). ``worthless lock`` runs via ``docker compose exec`` — as root by
+    default — so anything it creates under the volume is root-owned 0755/0600,
+    and the openclaw container (``node``, in the volume's group) then crashes
+    with EACCES creating ``agents/main/sessions``. Re-own to the volume dir's
+    uid:gid (root only) and add group rw (+x on dirs). Never adds "other"
+    bits, never raises.
+
+    Symlink-safe by construction: the openclaw container can write this
+    volume, so a path-based lstat-then-chmod could be raced into touching the
+    proxy's own ``/data`` (keys) as root. ``os.fwalk`` never follows links,
+    every entry is opened relative to its parent's fd with ``O_NOFOLLOW``,
+    and ownership/mode change via ``fchown``/``fchmod`` on that fd.
+    """
+    if root is None or not os.environ.get("WORTHLESS_OPENCLAW_CONFIG_SHARED"):
+        return
+    try:
+        root_st = os.lstat(root)
+    except OSError:
+        return
+    if not stat.S_ISDIR(root_st.st_mode):
+        return
+    is_root = os.geteuid() == 0
+    owner = (root_st.st_uid, root_st.st_gid)
+
+    def _share_fd(fd: int) -> None:
+        st = os.fstat(fd)
+        if is_root and (st.st_uid, st.st_gid) != owner:
+            os.fchown(fd, *owner)
+            st = os.fstat(fd)  # chown cleared setuid/setgid; don't restore them
+        if stat.S_ISDIR(st.st_mode):
+            os.fchmod(fd, (st.st_mode & 0o7777) | stat.S_IRWXG)
+        elif stat.S_ISREG(st.st_mode):
+            # Never leave a setuid/setgid file in a volume another container
+            # writes (security review: a planted 4755 would become setuid-10001).
+            mode = st.st_mode & 0o7777 & ~(stat.S_ISUID | stat.S_ISGID)
+            os.fchmod(fd, mode | stat.S_IRGRP | stat.S_IWGRP)
+
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    try:
+        for _dirpath, _dirnames, filenames, dirfd in os.fwalk(root, follow_symlinks=False):
+            try:
+                _share_fd(dirfd)
+            except OSError:
+                pass
+            for name in filenames:
+                try:
+                    fd = os.open(name, flags, dir_fd=dirfd)
+                except OSError:
+                    continue  # symlink (ELOOP), vanished, or unreadable — skip
+                try:
+                    _share_fd(fd)
+                except OSError:
+                    pass
+                finally:
+                    os.close(fd)
+    except OSError:
+        return  # best-effort; OpenClaw reports anything it still can't open
+
+
+@_shares_openclaw_tree_on_exit
 def apply_lock(
     planned_updates: list[tuple[str, str, str]],
     *,
@@ -2447,6 +2546,7 @@ def _restore_agent_auth_stores_after_unlock(
 # ---------------------------------------------------------------------------
 
 
+@_shares_openclaw_tree_on_exit
 def apply_unlock(
     restores: list[OcRestore],
     *,

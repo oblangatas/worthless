@@ -137,6 +137,12 @@ services:
     restart: unless-stopped
     read_only: true
     user: "node"
+    # The shared openclaw-config volume is worthless-proxy:worthless (10001)
+    # mode 0770. node must be in that group or the gateway crash-loops on
+    # EACCES writing its own config/sessions (WOR-510). Grants nothing else:
+    # the proxy's /data (key material) is a separate volume never mounted here.
+    group_add:
+      - "10001"
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
       - /run:noexec,nosuid,size=64m

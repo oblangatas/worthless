@@ -107,21 +107,146 @@ def test_ac2_uid_mismatch_aborts_before_writes(openclaw_config, mock_state):
 
 
 # ---------------------------------------------------------------------------
-# AC3  WORTHLESS_OPENCLAW_CONFIG_SHARED=1 → abort, zero writes
+# AC3-shared  WOR-510 live run: deploy/docker-compose.yml sets
+#   WORTHLESS_OPENCLAW_CONFIG_SHARED=1 and the proxy image always creates
+#   openclaw.json, so refusing on the flag means the all-container
+#   deployment can never lock. A READABLE shared config must be wired with
+#   existing providers preserved; an UNREADABLE one must still abort.
 # ---------------------------------------------------------------------------
 
 
-def test_ac3_shared_env_set_aborts_before_writes(openclaw_config, mock_state):
-    from worthless.openclaw.errors import OpenclawConfigUnreadableError
-
-    original_bytes = openclaw_config.read_bytes()
+def test_ac3_shared_env_readable_config_is_wired(openclaw_config, mock_state):
+    other_uid = openclaw_config.stat().st_uid + 1
 
     with patch.object(_integration, "detect", return_value=mock_state):
         with patch.dict(os.environ, {"WORTHLESS_OPENCLAW_CONFIG_SHARED": "1"}):
-            with pytest.raises(OpenclawConfigUnreadableError):
-                _integration.apply_lock(PLANNED, proxy_base_url=PROXY_URL)
+            with patch("os.geteuid", return_value=other_uid):
+                result = _integration.apply_lock(PLANNED, proxy_base_url=PROXY_URL)
 
-    assert openclaw_config.read_bytes() == original_bytes
+    assert not result.has_failure
+    providers = _config.read_config(openclaw_config)["models"]["providers"]
+    assert "openai" in providers
+    assert (
+        providers["existing-provider"] == MINIMAL_CONFIG["models"]["providers"]["existing-provider"]
+    ), "existing provider must be preserved exactly"
+    assert openclaw_config.stat().st_mode & 0o777 == 0o664, (
+        "shared volume: the other container must be able to read the result"
+    )
+
+
+def test_ac3_shared_env_leaves_tree_group_usable(openclaw_config, mock_state):
+    """WOR-510 live run: lock (run as root via `docker compose exec`) created
+    root-owned 0755 dirs under the shared volume, so the openclaw container
+    (node, in the volume's group) crashed with EACCES on agents/main/sessions."""
+    oc_dir = openclaw_config.parent
+    sub = oc_dir / "agents" / "main" / "agent"
+    sub.mkdir(parents=True, mode=0o755)
+    (sub / "models.json").write_text("{}")
+    (sub / "models.json").chmod(0o600)
+
+    with patch.object(_integration, "detect", return_value=mock_state):
+        with patch.dict(os.environ, {"WORTHLESS_OPENCLAW_CONFIG_SHARED": "1"}):
+            _integration.apply_lock(PLANNED, proxy_base_url=PROXY_URL)
+
+    for p in [oc_dir / "agents", oc_dir / "agents" / "main", sub]:
+        assert p.stat().st_mode & 0o070 == 0o070, f"{p} must be group rwx"
+    assert (sub / "models.json").stat().st_mode & 0o060 == 0o060, "group must read+write"
+    for p in [sub, sub / "models.json", openclaw_config]:
+        assert p.stat().st_mode & 0o002 == 0, f"{p} must never become world-writable"
+
+
+def test_ac3_shared_tree_never_follows_symlinks_out(openclaw_config, mock_state, tmp_path):
+    """The openclaw container can write the shared volume; a planted symlink
+    must not make lock (root in the proxy container) loosen a file outside it
+    — e.g. the proxy's own /data key material."""
+    secret = tmp_path / "outside-secret"
+    secret.write_text("shard-b")
+    secret.chmod(0o600)
+    (openclaw_config.parent / "evil").symlink_to(secret)
+    (openclaw_config.parent / "evil-dir").symlink_to(tmp_path)
+
+    with patch.object(_integration, "detect", return_value=mock_state):
+        with patch.dict(os.environ, {"WORTHLESS_OPENCLAW_CONFIG_SHARED": "1"}):
+            _integration.apply_lock(PLANNED, proxy_base_url=PROXY_URL)
+
+    assert secret.stat().st_mode & 0o777 == 0o600, "symlink target outside must be untouched"
+
+
+def test_ac3_no_shared_env_leaves_tree_permissions_alone(openclaw_config, mock_state):
+    sub = openclaw_config.parent / "agents" / "main"
+    sub.mkdir(parents=True, mode=0o700)
+
+    with patch.object(_integration, "detect", return_value=mock_state):
+        _integration.apply_lock(PLANNED, proxy_base_url=PROXY_URL)
+
+    assert sub.stat().st_mode & 0o777 == 0o700, "host installs keep their own permissions"
+
+
+def test_ac3_shared_unlock_leaves_tree_group_usable(openclaw_config, mock_state):
+    """Unlock runs as root in the proxy container too; OpenClaw must still start after it."""
+    sub = openclaw_config.parent / "agents" / "main"
+    sub.mkdir(parents=True, mode=0o700)
+
+    with patch.object(_integration, "detect", return_value=mock_state):
+        with patch.dict(os.environ, {"WORTHLESS_OPENCLAW_CONFIG_SHARED": "1"}):
+            _integration.apply_unlock([], remove_skill=False)
+
+    assert sub.stat().st_mode & 0o070 == 0o070, "group must keep rwx after unlock"
+
+
+def test_ac3_shared_tree_strips_setuid(openclaw_config, mock_state):
+    """Security review: the walk must never leave a setuid/setgid file in a
+    volume another container writes."""
+    planted = openclaw_config.parent / "planted"
+    planted.write_text("#!/bin/sh\n")
+    planted.chmod(0o6755)
+    if planted.stat().st_mode & 0o6000 != 0o6000:
+        pytest.skip("filesystem refuses setuid bits for this user")
+
+    with patch.object(_integration, "detect", return_value=mock_state):
+        with patch.dict(os.environ, {"WORTHLESS_OPENCLAW_CONFIG_SHARED": "1"}):
+            _integration.apply_lock(PLANNED, proxy_base_url=PROXY_URL)
+
+    assert planted.stat().st_mode & 0o6000 == 0, "setuid/setgid must be stripped"
+
+
+def test_ac3_shared_tree_shared_even_when_lock_raises(openclaw_config, mock_state):
+    """Security review: a lock that raises mid-way must not leave the tree
+    unusable for OpenClaw (crash-loop on EACCES)."""
+    sub = openclaw_config.parent / "agents" / "main"
+    sub.mkdir(parents=True, mode=0o700)
+
+    with patch.object(_integration, "detect", return_value=mock_state):
+        with patch.dict(os.environ, {"WORTHLESS_OPENCLAW_CONFIG_SHARED": "1"}):
+            with patch.object(
+                _integration, "_classify_config_state", side_effect=RuntimeError("boom")
+            ):
+                with pytest.raises(RuntimeError):
+                    _integration.apply_lock(PLANNED, proxy_base_url=PROXY_URL)
+
+    assert sub.stat().st_mode & 0o070 == 0o070, "tree must be shared on the error path too"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read a 000 file")
+@pytest.mark.parametrize("shared", ["1", ""])
+def test_ac3b_unreadable_config_is_never_clobbered(openclaw_config, mock_state, shared):
+    """WOR-516 case (c) protection must survive the shared-flag fix: an
+    unreadable config is never treated as empty and overwritten."""
+    from worthless.openclaw.errors import OpenclawConfigUnreadableError
+
+    openclaw_config.chmod(0o000)
+    try:
+        with patch.object(_integration, "detect", return_value=mock_state):
+            with patch.dict(os.environ, {"WORTHLESS_OPENCLAW_CONFIG_SHARED": shared}):
+                try:
+                    result = _integration.apply_lock(PLANNED, proxy_base_url=PROXY_URL)
+                except OpenclawConfigUnreadableError:
+                    result = None
+    finally:
+        openclaw_config.chmod(0o600)
+
+    assert result is None or result.has_failure, "lock must report the unreadable config"
+    assert json.loads(openclaw_config.read_text()) == MINIMAL_CONFIG, "file must be untouched"
 
 
 # ---------------------------------------------------------------------------

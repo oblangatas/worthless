@@ -1701,7 +1701,6 @@ def _finalise_openclaw_success(
     quiet: bool,
     home: WorthlessHome,
     *,
-    proxy_host: str,
     reload_since_ts: datetime,
 ) -> int:
     """WOR-658: finalise the success branch of ``_apply_openclaw``.
@@ -1770,7 +1769,13 @@ def _finalise_openclaw_success(
     # this checks proxy reachability + per-alias acknowledgment, NOT that
     # OpenClaw's rewrite is a working route (see _classify_bind_per_alias); the
     # live e2e tests prove actual routing.
-    bind_confirmation = _confirm_bind(confirmed_planned, host=proxy_host, port=resolve_port(None))
+    # Probe loopback, not WORTHLESS_PROXY_HOST: /_bind_probe answers loopback
+    # peers only (proxy/app.py), and lock enrolls shard B into the LOCAL DB,
+    # so the only proxy that can serve this alias is the local one. In Docker
+    # the advertised host is e.g. "proxy", which reaches the same proxy over a
+    # non-loopback interface → counter never ticks → false exit 91 on a
+    # working deployment (WOR-510). Same as ``worthless verify``.
+    bind_confirmation = _confirm_bind(confirmed_planned, host="127.0.0.1", port=resolve_port(None))
     # Bind-fail is a partial-success state at the trust layer:
     # lock-core wrote the .env + DB, but the OpenClaw config isn't
     # routing. ``openclaw="failed"`` (paired with ``status="partial"``)
@@ -2195,7 +2200,7 @@ def _apply_openclaw(
     # Also honour WORTHLESS_PROXY_HOST so all-container Docker deployments
     # write the Docker-internal service name (e.g. "proxy") instead of
     # 127.0.0.1, which is unreachable inside the openclaw container.
-    _proxy_host, proxy_base_url = _openclaw_proxy_base_url()
+    _, proxy_base_url = _openclaw_proxy_base_url()
     # WOR-796: the *_API_KEY var name holding shard-A for each alias, so
     # scrub_agent_auth_stores() can point the agent-cache SecretRef at it.
     env_var_by_alias = {p.alias: p.var_name for p in planned}
@@ -2238,7 +2243,6 @@ def _apply_openclaw(
             console,
             quiet,
             home,
-            proxy_host=_proxy_host,
             reload_since_ts=reload_since_ts,
         )
 
