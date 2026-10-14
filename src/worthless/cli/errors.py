@@ -13,7 +13,10 @@ from enum import Enum, IntEnum
 from worthless.cli.log_redaction import _redact
 
 
-class SignalInterrupt(KeyboardInterrupt):
+# NOSONAR(python:S5709): deliberately a KeyboardInterrupt — every existing
+# Ctrl-C handler (error_boundary, Popen.__exit__, the lock's own except) must
+# still catch it; deriving from Exception would let a signal be swallowed.
+class SignalInterrupt(KeyboardInterrupt):  # NOSONAR
     """A KeyboardInterrupt that remembers which signal stopped the command.
 
     :func:`error_boundary` exits ``128 + signum``: 130 for Ctrl-C, 143 for

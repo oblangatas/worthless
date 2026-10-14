@@ -1554,9 +1554,8 @@ class TestTerminalClosedMidLock:
             f"lock output tail: {bytes(seen[-1500:]).decode('utf-8', 'replace')}"
         )
         assert status is not None, "the lock outlived its closed terminal"
-        assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 129, (
-            f"status={status!r} exit={os.WEXITSTATUS(status) if os.WIFEXITED(status) else None}"
-        )
+        assert os.WIFEXITED(status), f"killed by a signal, not exited: status={status!r}"
+        assert os.WEXITSTATUS(status) == 129, f"exit={os.WEXITSTATUS(status)}"
         state = classify(te)
         assert state.classification == "locked", state.detail
 
