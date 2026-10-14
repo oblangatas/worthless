@@ -55,6 +55,10 @@ from dotenv import dotenv_values
 from worthless.cli.bootstrap import WorthlessHome, acquire_lock, get_home, _DEFAULT_BASE
 from worthless.cli.platform import read_process_env
 from worthless.cli.process import pid_path, read_pid, resolve_port
+from worthless.cli.commands.doctor.checks.dead_proxy_run_dirs import (
+    find_dead_run_dirs,
+    remove_run_dirs,
+)
 from worthless.cli.commands.revoke import _revoke_async
 from worthless.cli.console import WorthlessConsole, get_console
 from worthless._flags import ipc_mode_active
@@ -813,6 +817,8 @@ def _doctor_confirm(
     synced: list[str],
     yes: bool,
     console: WorthlessConsole,
+    *,
+    dead_runs: list[Path] | None = None,
 ) -> bool:
     """Build and display the combined confirmation prompt. Returns True if the
     user wants to proceed (or --yes was given). False means abort."""
@@ -821,6 +827,10 @@ def _doctor_confirm(
     prompt_lines = []
     if orphans:
         prompt_lines.append(f"Delete {len(orphans)} orphan DB row(s) and their shard files.")
+    if dead_runs:
+        prompt_lines.append(
+            f"Delete {len(dead_runs)} folder(s) left by a stopped proxy (they hold key shares)."
+        )
     if synced:
         n = len(synced)
         prompt_lines.append(
@@ -841,11 +851,18 @@ def _doctor_apply(
     repo: ShardRepository,
     home: WorthlessHome,
     console: WorthlessConsole,
+    *,
+    dead_runs: list[Path] | None = None,
 ) -> None:
-    """Execute the fix actions (purge orphans + migrate synced keys)."""
+    """Execute the fix actions (purge orphans, delete stopped-proxy folders,
+    migrate synced keys)."""
     if orphans:
         purged = _run_async(_purge_all(orphans, repo, home.shard_a_dir))
         console.print_success(f"Cleaned up {purged} broken record(s).")
+
+    if dead_runs:
+        removed = remove_run_dirs(dead_runs)
+        console.print_success(f"Deleted {len(removed)} folder(s) left by a stopped proxy.")
 
     if synced:
         migrated = _migrate_synced_keys(synced, home)
@@ -948,12 +965,16 @@ def _doctor_run(*, fix: bool, yes: bool, dry_run: bool) -> None:
         # ----------- check 5: alias-not-in-DB -----------
         had_alias_issues = _check_alias_not_in_db(home, all_enrollments)
 
+        # ----------- check 6: folders left by a stopped proxy (worthless-7qb6) -----------
+        dead_runs = find_dead_run_dirs(home)
+
         if (
             not orphans
             and not openclaw_issues
             and not synced
             and not had_mismatch
             and not had_alias_issues
+            and not dead_runs
         ):
             if not imported:
                 console.print_success("No issues found.")
@@ -979,6 +1000,16 @@ def _doctor_run(*, fix: bool, yes: bool, dry_run: bool) -> None:
             if not fix:
                 typer.echo(f"    fix: run `{ICLOUD_FIX_PHRASE}`")
 
+        if dead_runs:
+            console.print_warning(
+                f"{len(dead_runs)} folder(s) left by a proxy that is no longer running "
+                "still hold both key shares:"
+            )
+            for run_dir in dead_runs:
+                typer.echo(f"    {run_dir}")
+            if not fix:
+                typer.echo("    fix: run `worthless doctor --fix`")
+
         if not fix:
             return
 
@@ -988,7 +1019,7 @@ def _doctor_run(*, fix: bool, yes: bool, dry_run: bool) -> None:
             )
             return
 
-        if not _doctor_confirm(orphans, synced, yes, console):
+        if not _doctor_confirm(orphans, synced, yes, console, dead_runs=dead_runs):
             return
 
         # Fresh repo instance: asyncio.run() closes the event loop after
@@ -996,7 +1027,7 @@ def _doctor_run(*, fix: bool, yes: bool, dry_run: bool) -> None:
         # call fails on Linux. A new instance avoids the closed-loop error.
         fix_repo = ShardRepository(str(home.db_path), home.fernet_key)
         try:
-            _doctor_apply(orphans, synced, fix_repo, home, console)
+            _doctor_apply(orphans, synced, fix_repo, home, console, dead_runs=dead_runs)
         finally:
             fix_repo.close()  # worthless-g648
 

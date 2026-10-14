@@ -50,6 +50,11 @@ PLAYBOOKS: dict[str, str] = {
         "row, usually from a crash mid-revoke. Run `worthless doctor --fix` to unlink it; "
         "a lone shard is unusable on its own."
     ),
+    "dead_proxy_run_dirs": (
+        "A key is at risk on disk — a proxy that stopped without cleaning up left both "
+        "halves of it, readable only by you. Run `worthless doctor --fix` to delete the "
+        "folder; nothing uses it, because its process is gone."
+    ),
     "fernet_drift": _FERNET_DRIFT,
     "broken_status": (
         "This key is gone — its shard (its half of the split key) is missing, so it can't "
