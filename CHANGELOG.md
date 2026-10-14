@@ -5,41 +5,51 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 ## [Unreleased]
 
 ### Removed
-- **Installing Worthless puts only `worthless` on your PATH** (`worthless-nd65`). Every install also added six developer-only commands next to it: `test-unit`, `test-docker`, `test-live`, `test-openclaw`, `test-all` and `docs-generate`. They were useless outside a source checkout, and free to collide with another tool's command of the same name. They're gone, along with the modules behind them, and a test now fails if any installed command name doesn't start with `worthless`. Developers run the exact equivalents listed under "Test lanes" in `engineering/tooling.md`, and `scripts/codewiki.sh` for docs. Re-running the installer removes the old commands: tested in Docker by upgrading a real `curl worthless.sh | sh` install of 0.3.13 with `uv tool install --force`, the command the installer uses.
+- **Installing Worthless adds only the `worthless` command** (`worthless-nd65`, [#692](https://github.com/oblangatas/worthless/pull/692)).
+  Before: an install also added six internal commands. They were `test-unit`, `test-docker`, `test-live`, `test-openclaw`, `test-all` and `docs-generate`. They did not work outside the source repository. Their names could conflict with other tools.
+  Now: an install adds only `worthless`. If you run the installer again on an older version, it removes the six commands. A test stops a new non-Worthless command from being added.
 
-  **What this does NOT do.** An upgrade through `pipx` was not tested. A stale copy left by a different installer (say, an old `pip install --user`) is not touched.
+  **Limits.**
+  - We did not test an upgrade with `pipx`.
+  - Worthless does not remove copies that a different installer made, for example an old `pip install --user`.
 
 ## [0.3.14] — 2026-10-13
 
 ### Fixed
-- **A key worthless refuses to read is never replaced, deleted, or written through** (`worthless-6hu7`, [#669](https://github.com/oblangatas/worthless/pull/669)). A `fernet.key` worthless refuses to read — wrong mode, another user's file, or a symlink — was treated as "no key here". On a fresh install, that meant a new key was minted over it: overwritten without a keychain, deleted as "stale" with one, and with a symlink in place the write followed the link and landed on a file outside your home (as root in the container, any path). Review found the same mistake on four more paths: the keychain migration read the file unchecked and could plant the wrong key in your keychain; a locked keychain or a cancelled prompt made a key that was right there look absent; and `uninstall` called a merely-wrong-mode key "unrecoverable" and offered `--force`. All of these now stop with `WRTLS-121` and the exact repair (`chmod 0600 …`, or move a symlink aside), and leave the key untouched. A leftover file with the wrong mode next to a working keychain key is ignored, so it doesn't lock you out. Key writes never follow a symlink, and every write ends at mode 0600.
+- **Worthless does not overwrite a key file that it cannot read safely** (`worthless-6hu7`, [#669](https://github.com/oblangatas/worthless/pull/669)).
+  Before: Worthless treated a `fernet.key` as missing if it had the wrong permissions, had a different owner, or was a symlink. A fresh install then wrote a new key over it. With a symlink, the write followed the link to a file outside your Worthless folder.
+  Now: Worthless stops with `WRTLS-121` and does not change the key. The error shows the repair command, for example `chmod 0600`. The keychain migration, a locked keychain and `uninstall` had the same problem. They now also stop and keep the key. Key writes do not follow symlinks. Each key file gets mode 0600.
 
-  **What this does NOT do.**
-  - A *dangling* symlink (pointing at something missing, like an unmounted volume) still reads as "no key" (`worthless-0atz`). The empty-database guard stops this from costing locked keys, but a fresh install can still mint.
-  - It does not repair anything for you. There is no `doctor --fix` for this; the error and `doctor --explain fernet_key_refused` name the command to run.
-  - A key already replaced by an older version cannot be recovered by this release.
-  - If the disk fills up mid-write, the key file can still end up empty. That predates this release and is unchanged.
+  **Limits.**
+  - A symlink to a missing file still counts as "no key". A fresh install can then write a new key (`worthless-0atz`).
+  - Worthless does not repair the file for you. Run the command that the error shows.
+  - This release cannot recover a key that an older version already replaced.
+  - A full disk during a write can still leave an empty key file.
 
-- **Ctrl-C, closing the terminal, and `docker stop` are answered throughout `worthless lock`, from its first safety check on** (`worthless-595v`, `worthless-f1xx`, `worthless-y4fn`, `worthless-dnp9`, `worthless-v9gg`, `worthless-3em7`, [#691](https://github.com/oblangatas/worthless/pull/691)). #668 made Ctrl-C work after the keys were saved; the rest of the lock still had gaps. On Python 3.11+, Ctrl-C during the OpenClaw safety check before anything is written was ignored for seconds and the check ran again. A press at the very end of the database writes, or while `.env` was being rewritten, was dropped, and the lock went on. `docker stop` (SIGTERM) exited 130 like Ctrl-C, or killed the lock outright before it was armed, and closing the terminal (SIGHUP) killed it with no rollback and no record. A press during a rollback that an error had started could cancel it and leave stale rows. Now each of these stops the lock at once: before `.env` is rewritten, everything is rolled back; after, the keys stay locked and `worthless status` says OpenClaw setup is unfinished. The exit code names the signal: 130 for Ctrl-C, 143 for SIGTERM, 129 for a closed terminal. The interrupt is recorded even when the terminal is already gone. On a machine without OpenClaw, the message no longer mentions OpenClaw.
+- **`worthless lock` stops safely on Ctrl-C, on `docker stop`, and when you close the terminal** (`worthless-595v`, `worthless-f1xx`, `worthless-y4fn`, `worthless-dnp9`, `worthless-v9gg`, `worthless-3em7`, [#691](https://github.com/oblangatas/worthless/pull/691)).
+  Before: lock ignored or delayed some interrupts. Other interrupts killed lock with no rollback and no record.
+  Now: lock stops at once. If lock did not rewrite `.env` yet, it rolls back all changes. If lock already rewrote `.env`, your keys stay locked, and `worthless status` shows that OpenClaw setup is not complete. The exit code shows the signal: 130 for Ctrl-C, 143 for `docker stop` (SIGTERM), 129 for a closed terminal. Worthless records the interrupt, also when the terminal is gone. On a machine without OpenClaw, the message does not mention OpenClaw.
 
-  **What this does NOT fix.**
-  - `kill -9` (SIGKILL) cannot be caught: a lock killed that way can still leave rows behind (WOR-646 Part 2).
-  - The MCP `worthless_lock` tool runs off the main thread, where no signal arrives (`worthless-dqzj`).
-  - A signal in the first moments of `worthless lock`, before it reaches the safety check, still ends it the default way: nothing has been written then.
-  - Bare `worthless` still turns an interrupted lock's exit code into 0 (`worthless-nhc0`).
-  - A press during a rollback that an error started exits with the error's code, not 128 + signum; the rollback still finishes.
-  - An interrupted OpenClaw provider write can leave `openclaw.json` partly updated (`worthless-2nta`).
+  **Limits.**
+  - `kill -9` cannot be stopped. It can leave records behind (WOR-646).
+  - The MCP `worthless_lock` tool does not receive these signals (`worthless-dqzj`).
+  - An interrupt before the first safety check ends lock the normal way. Lock has not written anything at that time.
+  - An interrupt during a rollback that an error started exits with the error's code. The rollback still finishes.
+  - Bare `worthless` still reports exit code 0 after an interrupted lock (`worthless-nhc0`).
+  - An interrupted OpenClaw write can leave `openclaw.json` partly changed (`worthless-2nta`).
 
-- **A refused safety check after the lock no longer destroys your key** (`worthless-im3x`). After `worthless lock` rewrites `.env`, it re-checks OpenClaw's files if they changed during the lock. When that check refused (new plaintext found), or merely failed or timed out, lock deleted the half of the key it had just stored while `.env` already held the other half. For a freshly locked key that was unrecoverable on this machine: `worthless unlock` found nothing, and re-running `worthless lock` refused. Now the keys stay locked and recoverable, OpenClaw is left untouched, `worthless status` reports OpenClaw as unfinished, and the lock prints LOCK FAILED and exits 87. Fix the plaintext, then run `worthless unlock` and `worthless lock`. Re-running `worthless lock` on its own now exits 73 instead of saying "still protected", after a refused check and also after a lock interrupted during OpenClaw setup.
+- **A failed OpenClaw check after lock does not destroy your key** (`worthless-im3x`, [#688](https://github.com/oblangatas/worthless/pull/688)).
+  Before: after lock rewrote `.env`, it checked OpenClaw's files again if they changed. If that check refused, failed or timed out, lock deleted its stored half of the key. Your `.env` then held only the other half. You could not recover that key on this machine.
+  Now: your keys stay locked and you can recover them. Lock does not change OpenClaw. Lock shows LOCK FAILED and exits with code 87. `worthless status` shows that OpenClaw setup is not complete. To recover, remove the plaintext key from OpenClaw. Then run `worthless unlock`, then `worthless lock`. If you only run `worthless lock` again, it exits with code 73.
 
-  **What this does NOT fix.**
-  - A later `worthless unlock` restores each OpenClaw provider entry to its pre-lock value, even if that entry was edited during the refused lock (`worthless-kzpw`).
-  - The "unfinished" record is per Worthless home, not per `.env`: after a refused lock in one project, re-locking another fully locked project also exits 73, and a later successful lock elsewhere hides it (`worthless-seho`).
-  - The only way out of exit 73 is `worthless unlock` then `worthless lock`, which briefly puts the real key back in `.env`; the MCP lock tool reports it as a raw error (`worthless-098h`).
+  **Limits.**
+  - `worthless unlock` restores each OpenClaw provider entry to its value before lock. It does this also if you edited the entry during the failed lock (`worthless-kzpw`).
+  - Worthless records "not complete" for the Worthless folder, not for each `.env`. A lock in a different project can show or hide it (`worthless-seho`).
+  - To clear exit code 73, you must run unlock and then lock. This puts the real key back in `.env` for a short time (`worthless-098h`).
 
 ### Changed
-- **You're asked plainly before anything starts at login** ([#673](https://github.com/oblangatas/worthless/pull/673)).
-- **A website deploy can't be cancelled, overwritten, or silently lose `security.txt`** ([#678](https://github.com/oblangatas/worthless/pull/678)). The site's deploy shared one concurrency lane with every pull-request run, so a newly queued PR run could evict a production deploy still waiting to run — and a cancelled run shows grey, not red. Deploys also trusted their own commit, so re-running an older run republished older content over newer. Deploys now get their own lane, refuse to publish content older than what is live, reject symlinks under `website/`, and nightly alarms watch the site's two published security files.
+- **Worthless asks you before it starts anything at login** ([#673](https://github.com/oblangatas/worthless/pull/673)).
+  Worthless can run a background service at login. Before it installs that service, it tells you what it adds and when it starts. It also tells you that the master key moves into a file, and how to remove all of it. On Linux, it tells you that it turns on lingering. Enter means no. Only a person who types `y` gets the service. `--yes` and AI coding agents never install it. Plain `worthless` now asks the same question. In a container, you get one line that tells you why the service is not available.
 
 ## [0.3.13] — 2026-10-12
 
