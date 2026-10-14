@@ -9,8 +9,10 @@ delete them, while never touching a folder whose process is still alive.
 from __future__ import annotations
 
 import os
+import socket
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -114,6 +116,37 @@ def test_a_folder_whose_sidecar_still_answers_is_left_alone(ctx, fake_home, monk
 
     assert result["findings"] == []
     assert stale.exists()
+
+
+def test_a_pid_1_folder_is_never_treated_as_dead(ctx, fake_home) -> None:
+    # `wrap` as a container's PID 1 writes run/1/; check_pid() says False for
+    # PID <= 1 by design (never signal init), which must not read as "dead".
+    init_dir = _run_dir(fake_home, 1)
+
+    ctx.fix = True
+    result = dead_proxy_run_dirs.run(ctx)
+
+    assert result["findings"] == []
+    assert init_dir.exists()
+
+
+def test_probing_a_crash_leftover_socket_prints_nothing(capsys) -> None:
+    # A crash leaves a sidecar.sock nobody listens on; the health probe
+    # behind the check writes "health: ..." to stderr when it fails.
+    # Short home: AF_UNIX paths are capped at 104 bytes on macOS.
+    with tempfile.TemporaryDirectory(dir="/tmp", prefix="wl") as short:
+        home = ensure_home(Path(short) / "h")
+        stale = _run_dir(home, _dead_pid())
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.bind(str(stale / "sidecar.sock"))
+        sock.close()
+        repo = ShardRepository(str(home.db_path), bytes(home.fernet_key))
+        ctx = CheckContext(home=home, repo=repo, fix=False, dry_run=False)
+
+        result = dead_proxy_run_dirs.run(ctx)
+
+        assert result["findings"] == [{"run_dir": str(stale), "pid": int(stale.name)}]
+        assert "health:" not in capsys.readouterr().err
 
 
 def _record_running_proxy(home) -> None:

@@ -18,6 +18,8 @@ whose socket fell back outside ``run/`` and that wrote no ``proxy.pid``.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import logging
 import os
 import shutil
@@ -38,9 +40,15 @@ STOP_PROXY_FIRST = (
 
 
 def _looks_dead(run_dir: Path) -> bool:
-    return not check_pid(int(run_dir.name)) and not probe_socket(
-        run_dir / "sidecar.sock", timeout=1.0
-    )
+    pid = int(run_dir.name)
+    if pid <= 1:  # check_pid() says False for init by design; `wrap` can be PID 1
+        return False
+    if check_pid(pid):
+        return False
+    # probe_socket is also the Docker HEALTHCHECK and prints "health: ..." on
+    # failure — a crash leftover's dead socket is the normal case here.
+    with contextlib.redirect_stderr(io.StringIO()):
+        return not probe_socket(run_dir / "sidecar.sock", timeout=1.0)
 
 
 def proxy_running(home: WorthlessHome) -> bool:
