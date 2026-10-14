@@ -9,6 +9,7 @@ we have stat-based ownership fixtures.
 
 from __future__ import annotations
 
+import errno
 import os
 import re
 from pathlib import Path
@@ -334,6 +335,40 @@ def test_interrupted_reinstall_keeps_the_installed_skill(
     assert marker.read_text(encoding="utf-8") == "previous install", "installed skill was lost"
     leftovers = [p.name for p in target.iterdir() if p.name.startswith(".worthless.tmp")]
     assert leftovers == [], f"staging left behind: {leftovers}"
+
+
+def test_reinstall_rejected_by_a_racing_install_keeps_the_previous_skill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cursor on #698: another install lands a DIFFERENT skill mid-rename.
+
+    The rename fails with ENOTEMPTY and the content does not match, so the
+    install is rejected; the previous install moved aside must not be deleted.
+    """
+    from worthless.openclaw import skill
+    from worthless.openclaw.errors import OpenclawIntegrationError
+
+    target = tmp_path / "skills"
+    target.mkdir()
+    skill.install(target)
+    (target / "worthless" / "installed-before.txt").write_text("previous", encoding="utf-8")
+    real_replace = os.replace
+
+    def _racing_install(src: object, dst: object) -> None:
+        if Path(str(dst)).name == "worthless":
+            other = target / "worthless"
+            other.mkdir(exist_ok=True)
+            (other / "SKILL.md").write_text("someone else's skill", encoding="utf-8")
+            raise OSError(errno.ENOTEMPTY, "Directory not empty")
+        real_replace(src, dst)
+
+    monkeypatch.setattr("worthless.openclaw.skill.os.replace", _racing_install)
+
+    with pytest.raises(OpenclawIntegrationError):
+        skill.install(target)
+
+    kept = [p for p in target.rglob("installed-before.txt")]
+    assert kept, "the previous install was deleted"
 
 
 # ---------------------------------------------------------------------------

@@ -1067,3 +1067,37 @@ def test_undo_gives_up_quickly_when_the_config_lock_is_held(
     assert not hung, "the undo waited on the held config lock: Ctrl-C would be ignored"
     assert elapsed < 5.0, f"the undo took {elapsed:.1f}s"
     assert outcome and isinstance(outcome[0], KeyboardInterrupt), outcome
+
+
+def test_writes_left_in_place_after_unreadable_snapshot_still_count_as_written(
+    openclaw_present: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cursor on #698: an unreadable snapshot leaves openai's proxy write in place.
+
+    It must still count as written, so the later stages (models.json neutralize,
+    agent-store scrub) clean the real key out of OpenClaw's caches for it.
+    """
+    from worthless.openclaw import config as config_mod
+    from worthless.openclaw import integration
+
+    config_path = openclaw_present["config_path"]
+    _seed(config_path, {"theirs": {"baseUrl": "https://keep-me/v1", "apiKey": "x"}})
+    monkeypatch.chdir(openclaw_present["home"])
+    real_read = config_mod.read_config
+    reads = {"n": 0}
+
+    def _first_read_fails(*args: object, **kwargs: object) -> dict:
+        reads["n"] += 1
+        if reads["n"] == 1:
+            raise ValueError("unparsable")
+        return real_read(*args, **kwargs)
+
+    monkeypatch.setattr(config_mod, "read_config", _first_read_fails)
+    _ctrl_c_on_write(monkeypatch, nth=2, exc=OSError)
+
+    result = integration.apply_lock(planned_updates=_TWO_PROVIDERS)
+
+    assert "openai" in _providers(config_path), "precondition: the write was left in place"
+    assert "openai" in result.providers_set, (
+        f"a write left in openclaw.json was reported as rolled back: {result.providers_skipped}"
+    )
