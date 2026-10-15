@@ -236,7 +236,7 @@ def _cfdata_to_bytes(data_ptr: int | c_void_p) -> bytes:
 
 
 def _cfstr_to_str(s_ptr: int | c_void_p) -> str:
-    """Read a CFStringRef back to a Python str. Falls through CFData for bytes."""
+    """Read a keychain attribute (CFString or CFData) as a Python str; "" otherwise."""
     if s_ptr in (None, 0):
         return ""
     # Check the type first (worthless-7xsa): kSecAttrAccount usually comes back
