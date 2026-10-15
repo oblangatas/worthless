@@ -14,6 +14,10 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - Worthless does not remove copies that a different installer made, for example an old `pip install --user`.
 
 ### Fixed
+- **Bare `worthless` reports a failed or stopped lock with its real exit code** (`worthless-nhc0`).
+  Before: when the lock step of bare `worthless` failed or was stopped, the command exited 0. A script or an agent read success after LOCK FAILED, Ctrl-C or `docker stop`.
+  Now: the exit code is the same as `worthless lock` gives: 73 or 87 for a failed OpenClaw step, 130 for Ctrl-C, 143 for SIGTERM. The proxy does not start. If you say no at a prompt, the exit code is still 0.
+
 - **Stopping `worthless lock` puts OpenClaw's provider entries back, and never erases your OpenClaw config** (`worthless-2nta`, `worthless-1jfr`, [#698](https://github.com/oblangatas/worthless/pull/698)).
   Before: a Ctrl-C between two OpenClaw provider writes left one provider on the Worthless proxy and the next one not. If `openclaw.json` could not be read before the lock and a later write failed, Worthless wrote `{}` over the whole file, and every provider was lost. A Ctrl-C during a skill reinstall deleted the OpenClaw skill.
   Now: a Ctrl-C puts back the provider entries this lock wrote, or removes them if `openclaw.json` did not exist. It changes only entries that still point at this lock's proxy, so a change made by someone else stays. A re-lock keeps its new key. An unreadable `openclaw.json` stays as it is. The old skill stays until the new skill is in place.
