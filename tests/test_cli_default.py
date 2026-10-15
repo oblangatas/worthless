@@ -17,6 +17,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from worthless.cli.bootstrap import WorthlessHome
@@ -378,6 +379,38 @@ class TestEdgeCases:
         )
         # Should still succeed (proxy started) even with partial lock
         assert result.exit_code == 0, result.stdout + result.stderr
+
+    @pytest.mark.parametrize(
+        "code", [73, 87, 130, 143], ids=["openclaw", "refused", "ctrl-c", "sigterm"]
+    )
+    def test_lock_failure_keeps_its_exit_code(
+        self,
+        code: int,
+        home_dir: WorthlessHome,
+        env_with_two_keys: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """worthless-nhc0: a failed or interrupted lock under bare `worthless` keeps its code.
+
+        It was swallowed to exit 0, so scripts and agents read success after
+        Ctrl-C, `docker stop`, or LOCK FAILED. The proxy must not start either.
+        """
+        monkeypatch.chdir(env_with_two_keys.parent)
+
+        def failing_lock(*_a: object, **_k: object) -> int:
+            raise typer.Exit(code=code)
+
+        started: list[object] = []
+        monkeypatch.setattr("worthless.cli.default_command._lock_keys", failing_lock)
+        monkeypatch.setattr(
+            "worthless.cli.default_command.start_supervised_proxy",
+            lambda *a, **kw: started.append(a) or 54321,
+        )
+
+        result = _invoke_default({"WORTHLESS_HOME": str(home_dir.base_dir)}, args=["--yes"])
+
+        assert result.exit_code == code, result.stdout + result.stderr
+        assert started == [], "the proxy started after the lock failed"
 
     def test_many_keys_truncated_display(
         self,
