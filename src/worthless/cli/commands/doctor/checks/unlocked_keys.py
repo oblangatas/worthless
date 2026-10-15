@@ -21,6 +21,8 @@ def run(ctx: CheckContext) -> CheckResult:
     enrollments, err = load_enrollments(ctx, check_id)
     if err is not None:
         return err
+    if enrollments is None:  # pragma: no cover — unreachable: load_enrollments always pairs
+        raise RuntimeError("load_enrollments returned (None, None) — programming error")
     try:
         unlocked = asyncio.run(find_unlocked(ctx.repo, enrollments))
     except Exception as exc:  # noqa: BLE001 - SR-04 scrub
