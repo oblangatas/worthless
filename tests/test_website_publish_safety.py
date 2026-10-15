@@ -123,14 +123,6 @@ LEGAL_LINK_TARGETS = (
 )
 
 
-def _pyproject_version() -> str:
-    pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    match = re.search(r'^version = "([^"]+)"', pyproject, re.MULTILINE)
-    assert match, "pyproject.toml must declare project.version"
-    assert '"Development Status :: 4 - Beta"' in pyproject
-    return match.group(1)
-
-
 def _prohibited_reference_needles() -> tuple[str, ...]:
     needles: list[str] = []
     for path in PROHIBITED_PATHS:
@@ -270,13 +262,23 @@ def test_website_homepage_launch_affordances_survive_promotion() -> None:
     assert "not the open-source tool on this page" in index
 
 
-def test_website_homepage_beta_label_matches_pyproject_version() -> None:
-    version = _pyproject_version()
-    index = (WEBSITE / "index.html").read_text(encoding="utf-8")
+def test_website_never_names_a_cli_version() -> None:
+    """The site must not print a Worthless version number.
 
-    assert f"Beta CLI · v{version} · runs locally" in index
-    assert f"Beta CLI, version {version}, runs locally." in index
-    assert f"Worthless CLI beta · v{version}" in index
+    The CLI ships every couple of weeks and the site is frozen between
+    releases, so any version on it is stale within days: the June copy said
+    v0.3.8 while 0.3.14 was on PyPI. Decision (WOR-946, 2026-10-15): delete the
+    number instead of chasing it. Third-party versions in the Red Blog (e.g.
+    Bitwarden's 2026.4.0) are fine -- they carry no "v" prefix and aren't 0.x.
+    """
+    banned = re.compile(r"\bv\d+\.\d+\.\d+\b|\bversion 0\.\d+|Beta CLI|CLI beta")
+    hits = [
+        f"{path.relative_to(WEBSITE)}: {match.group(0)}"
+        for path in sorted(WEBSITE.rglob("*"))
+        if path.suffix in {".html", ".js", ".txt", ".json", ".xml"}
+        for match in banned.finditer(path.read_text(encoding="utf-8"))
+    ]
+    assert not hits, f"version-style text on the site: {hits}"
 
 
 def test_website_waitlist_processing_is_disclosed_and_scoped() -> None:
