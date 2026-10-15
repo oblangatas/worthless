@@ -34,6 +34,7 @@ EXPECTED_CHECK_IDS = {
     "bind_confirmation",  # WOR-658
     "service_health",  # WOR-726
     "unshardable_credentials",  # WOR-797
+    "dead_proxy_run_dirs",  # worthless-7qb6
 }
 
 
