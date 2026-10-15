@@ -24,9 +24,7 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - OpenClaw writes its config without a lock. A write by OpenClaw at the same moment can still conflict with a Worthless write.
   - If another Worthless process holds the `openclaw.json` lock for more than 2 seconds after a Ctrl-C, the undo stops. `worthless doctor` repairs the remaining entries.
 
-
 ### Security
-
 - **Worthless's own repair command stops destroying healthy keys, and keys whose project moved** (WOR-935, [#676](https://github.com/oblangatas/worthless/pull/676)). Since v0.3.7, doctor's `broken_status` check called every current-format key broken: it looked for Shard A in `~/.worthless/shard_a/`, where only old-format keys keep it. So `worthless doctor --fix --json` — the command agents are told to run — deleted the enrollment of every healthy key, and `unlock` then failed with WRTLS-102 even though both shards survived. The check now judges old-format keys only, and deletes nothing if it can't read the shard rows. Separately, `doctor --fix` (text and JSON) treated a missing `.env` file like a deleted line and purged keys whose project had merely moved. A missing file is now always kept, because doctor can't tell a moved project from a deleted one. Every orphan finding carries `reason` (`env_line_missing` / `env_file_missing`). A key whose `.env` is missing gets honest advice: put a moved project back and run `worthless unlock`, or remove a deleted one with `worthless revoke --alias <alias>`, which doctor offers only when no other project has the same key locked (revoke removes a key everywhere). `--fix --json` reports only the records it actually deleted.
 
   **If you were hit** (`unlock` fails with WRTLS-102 after running `doctor --fix`): do not run `worthless uninstall` or delete `~/.worthless`. Both halves of your key still exist, and getting them back is WOR-937.
