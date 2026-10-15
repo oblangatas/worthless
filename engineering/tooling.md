@@ -25,7 +25,7 @@ Planned role:
 Local workflow:
 
 - `scripts/codewiki.sh`: bootstrap and run `CodeWiki` in an isolated tool env
-- `uv run docs-generate`: generate draft docs into `engineering/generated/codewiki-pilot/`
+- `scripts/codewiki.sh generate --output engineering/generated/codewiki-pilot`: generate draft docs there
 - `.venvs/codewiki`: dedicated `CodeWiki` virtualenv, separate from the repo `.venv`
 - `.codewiki-home/`: repo-local `CodeWiki` state/config directory
 
@@ -58,6 +58,21 @@ Use it for:
 - validating whether generated docs describe the real execution paths
 
 Do not use it as a substitute for canonical repo docs.
+
+## Test lanes
+
+The `test-*` commands were removed in worthless-nd65 (they installed onto every user's PATH).
+These are their exact equivalents. The `-o addopts=...` part matters: it drops the default
+`-n auto --reruns 1` and the 30 s timeout, so the slow lanes run one at a time with their own
+timeout, and the paid live lane never runs in parallel or retries.
+
+| Lane | Command |
+|---|---|
+| unit | `uv run pytest -x -q` |
+| docker | `uv run pytest -x -v -m docker -o "addopts=--strict-markers --timeout=300"` |
+| live (real APIs, costs money) | `uv run pytest -x -v -s -m live -o "addopts=--strict-markers --timeout=120"` |
+| openclaw | `uv run pytest -x -v -m openclaw -o "addopts=--strict-markers --timeout=300"` |
+| everything | `uv run pytest -v -o "addopts=--strict-markers --timeout=300"` |
 
 ## Verification workflow
 

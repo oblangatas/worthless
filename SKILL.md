@@ -89,7 +89,7 @@ Restart your editor. Cold-start install time on a fresh machine with only Node:
 ### Package Info
 - **Package name**: `worthless`
 - **npm wrapper**: `worthless-mcp`
-- **Version**: 0.3.12
+- **Version**: 0.3.14
 - **Entry point**: `worthless` (CLI command)
 - **Python**: 3.10+
 - **License**: AGPL-3.0
@@ -353,7 +353,7 @@ Runs foreground `worthless up` (sidecar-supervised) under a platform unit — no
 ```bash
 worthless service install              # interactive confirm
 worthless service install --yes        # non-interactive
-worthless service status --json
+worthless service status
 worthless service start
 worthless service logs -f
 ```

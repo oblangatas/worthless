@@ -20,7 +20,7 @@ from pathlib import Path
 import typer
 
 from worthless.cli.bootstrap import WorthlessHome, acquire_lock, get_home
-from worthless.cli.commands.lock import _lock_keys
+from worthless.cli.commands.lock import _lock_keys, _offer_service_after_lock
 from worthless.cli._repo_factory import open_repo
 from worthless.cli.commands.up import start_supervised_proxy
 from worthless.cli.process import poll_health, resolve_port
@@ -196,10 +196,25 @@ def _run_enrollment_if_needed(
         total = len(keys)
         count = _lock_keys(env_path, home, quiet=True)
 
+    _report_lock_and_offer_service(home, console, count=count, total=total, yes=yes)
+
+
+def _report_lock_and_offer_service(
+    home: WorthlessHome, console, *, count: int, total: int, yes: bool
+) -> None:
+    """Say how the lock went, then ask about the background service."""
     if count < total:
         console.print_warning(f"  {count} of {total} keys protected. Re-run to retry the rest.")
     elif count > 0:
         console.print_hint(f"\n  {count} key{'s' if count != 1 else ''} protected.")
+
+    # WOR-859: the command the docs send new users to must ask too, or almost
+    # nobody ever sees the choice. Here, before _ensure_proxy_running: asking
+    # after it would race the detached proxy for the port. --yes never installs
+    # a service on this path (see run_default). Same rule as `worthless lock`:
+    # offer once anything was locked; real lock failures raise before here.
+    if count > 0 and not yes:
+        _offer_service_after_lock(console, home=home, port=resolve_port(None))
 
 
 def _ensure_proxy_running(home: WorthlessHome, console) -> tuple[bool, int | None, int]:
@@ -248,12 +263,10 @@ def run_default(
     yes:
         Auto-approve lock + proxy start (but never service install).
 
-        That last clause is true of THIS path only, and the distinction is
-        worth keeping straight: plain ``worthless`` locks quietly, so the
-        service offer never fires here at all. ``worthless --yes lock`` is a
-        different path, and there --yes DOES accept the offer — but only at a
-        real terminal, because the offer checks for one before it checks
-        --yes. A piped or CI run is never asked and never installed into.
+        Without --yes, plain ``worthless`` asks the explicit service question
+        after locking (WOR-859); with --yes it never asks and never installs.
+        The same holds for ``worthless --yes lock``: only a typed "y" installs
+        a service. A piped, CI or AI-agent run is never asked.
     json_mode:
         Print structured JSON state and exit.  Never triggers writes.
     """

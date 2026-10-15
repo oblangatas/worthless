@@ -111,6 +111,7 @@ def _build_all_checks() -> list:
     from worthless.cli.commands.doctor.checks import (
         bind_confirmation,
         broken_status,
+        dead_proxy_run_dirs,
         fernet_drift,
         icloud_keychain,
         openclaw as openclaw_check,
@@ -134,6 +135,7 @@ def _build_all_checks() -> list:
         bind_confirmation,
         service_health,
         unshardable_credentials,
+        dead_proxy_run_dirs,
     ]
 
 

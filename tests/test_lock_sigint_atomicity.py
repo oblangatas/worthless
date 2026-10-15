@@ -14,9 +14,9 @@ rollback never fired and rows leaked.
 The companion regression (:class:`TestNonInterruptExitCodePreserved`) pins the
 inverse: broadening the rollback ``except`` to add the interrupt types must NOT
 change how an ordinary (non-interrupt) exception exits. ``typer.Exit`` is a
-``RuntimeError`` (an ``Exception``), so it was already caught and unwound by the
-pre-WOR-646 ``except Exception:`` — that is the documented post-flight recovery
-contract. What this fix must preserve is its **exit code**: a ``typer.Exit(87)``
+``RuntimeError`` (an ``Exception``), so it was already caught by the
+pre-WOR-646 ``except Exception:``. What this fix must preserve is its
+**exit code**: a ``typer.Exit(87)``
 must still leave the process with code 87, never get swallowed, and never get
 mis-converted into a Ctrl-C abort by the new ``CancelledError`` handling.
 """
@@ -30,18 +30,23 @@ import signal
 import sqlite3
 import sys
 import threading
+import contextlib
+import errno
 import time
+from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import typer
+from dotenv import dotenv_values
 import typer._click.termui as click_termui
 from typer.testing import CliRunner
 
 from worthless.cli.app import app
 from worthless.cli.bootstrap import WorthlessHome
 from worthless.cli.console import WorthlessConsole
-from worthless.cli.sentinel import is_partial, read_sentinel
+from worthless.cli.sentinel import is_partial, read_sentinel, write_sentinel
 
 from tests.conftest import make_repo as _repo
 from tests.helpers import fake_anthropic_key, fake_key
@@ -128,8 +133,8 @@ class TestSignalDuringLockRollsBack:
             env={"WORTHLESS_HOME": str(home_dir.base_dir)},
         )
 
-        # An interrupt is never a clean success.
-        assert result.exit_code != 0, result.output
+        # An interrupt is never a clean success, and says which signal (worthless-dnp9).
+        assert result.exit_code == 128 + signum, result.output
 
         # DB fully rolled back: zero enrollments, zero shard rows.
         enrollments = asyncio.run(_repo(home_dir).list_enrollments())
@@ -165,8 +170,8 @@ class TestNonInterruptExitCodePreserved:
         ``except (Exception, KeyboardInterrupt, CancelledError)`` catches it via
         the same ``Exception`` arm the pre-WOR-646 code used; the
         ``isinstance(exc, CancelledError)`` guard must leave its exit code
-        untouched. (Whether the DB rows unwind here is pre-existing post-flight
-        behavior, not what this test pins.)
+        untouched. (It no longer unwinds the keys: see
+        :class:`TestPostflightRefusalKeepsKeys`.)
         """
         import worthless.cli.commands.lock as lock_mod
 
@@ -189,6 +194,145 @@ class TestNonInterruptExitCodePreserved:
         # 87 proves: not swallowed (would be 0) and not converted to the
         # interrupt's abort exit (would be 1) by the new CancelledError path.
         assert result.exit_code == 87, result.output
+
+
+def _refuse_postflight(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, how: str) -> None:
+    """Drive the REAL post-flight into its exit 87: OpenClaw files changed mid-lock.
+
+    *how* = ``refused`` (new plaintext found) or ``audit-failed`` (the audit
+    subprocess failed or timed out — the same 87 path).
+    """
+    import worthless.cli.commands.lock as lock_mod
+    from worthless.openclaw import audit as oc_audit
+
+    changed = tmp_path / "openclaw-changed-mid-lock.json"
+    changed.write_text("{}")
+    gate = oc_audit.AuditGateHandle(
+        openclaw_bin=tmp_path / "openclaw", pre_hashes={str(changed): "stale"}
+    )
+    monkeypatch.setattr(lock_mod, "_openclaw_audit_preflight", lambda *_a, **_k: gate)
+
+    def _audit(*_a: object, **_k: object):  # noqa: ANN202
+        if how == "audit-failed":
+            raise oc_audit.AuditGateError("timed out")
+        finding = oc_audit.BlockingFinding(
+            file=str(changed),
+            json_path="models.providers.openai.apiKey",
+            provider="openai",
+            message="plaintext",
+            source="audit",
+        )
+        return None, oc_audit.AuditClassification(
+            blocking=(finding,), advisory_count=0, unknown_codes=()
+        )
+
+    monkeypatch.setattr(lock_mod._oc_audit, "run_and_classify", _audit)
+
+
+class TestPostflightRefusalKeepsKeys:
+    """worthless-im3x: a refused or failed post-flight never destroys a key.
+
+    It runs after ``.env`` holds shard-A. Unwinding there deleted shard-B, so a
+    fresh key was unrecoverable: ``unlock`` found nothing, ``lock`` refused.
+    """
+
+    @pytest.mark.parametrize("how", ["refused", "audit-failed"])
+    def test_postflight_87_keeps_keys_recoverable(
+        self,
+        how: str,
+        home_dir: WorthlessHome,
+        two_key_env: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Exit 87 with LOCK FAILED, keys locked, status honest; ``unlock`` restores them."""
+        original = dotenv_values(two_key_env)
+        pre_sha = _sha256_of(two_key_env)
+        _refuse_postflight(monkeypatch, tmp_path, how)
+
+        result = _invoke_lock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
+
+        assert result.exit_code == 87, result.output
+        _assert_still_locked(home_dir, two_key_env, pre_sha, result.output)
+        assert "LOCK FAILED" in result.output, result.output
+        sentinel = read_sentinel(home_dir.base_dir)
+        assert is_partial(sentinel), sentinel
+        assert [e["code"] for e in sentinel["events"]] == ["openclaw.postflight_refused"], sentinel
+
+        restored = _invoke_unlock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
+        assert restored.exit_code == 0, restored.output
+        values = dotenv_values(two_key_env)
+        for name, value in original.items():
+            assert values.get(name) == value, f"{name} not restored by unlock:\n{restored.output}"
+
+    def test_postflight_87_still_syncs_the_fernet_key(
+        self,
+        home_dir: WorthlessHome,
+        two_key_env: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Keys stay locked, so a service-run proxy must decrypt them (as on Ctrl-C)."""
+        import worthless.cli.commands.lock as lock_mod
+
+        synced: list[object] = []
+        monkeypatch.setattr(lock_mod, "_sync_fernet_after_lock", synced.append)
+        _refuse_postflight(monkeypatch, tmp_path, "refused")
+
+        result = _invoke_lock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
+
+        assert result.exit_code == 87, result.output
+        assert len(synced) == 1, f"Fernet sync ran {len(synced)} times:\n{result.output}"
+
+    def test_rerun_after_refusal_never_claims_protected(
+        self,
+        home_dir: WorthlessHome,
+        two_key_env: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """OpenClaw was never wired, so a re-run may not say "protected" or exit 0."""
+        _refuse_postflight(monkeypatch, tmp_path, "refused")
+        first = _invoke_lock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
+        assert first.exit_code == 87, first.output
+
+        again = _invoke_lock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
+
+        assert again.exit_code == 73, again.output
+        assert "LOCK FAILED" in again.output, again.output
+        assert "protected" not in again.output.lower(), again.output
+
+    def test_rerun_after_declined_adoption_still_succeeds(
+        self,
+        home_dir: WorthlessHome,
+        two_key_env: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A finished lock that left an entry un-adopted is partial too, but not unfinished.
+
+        Its first run exited 0; a re-run must not turn into LOCK FAILED / 73.
+        """
+        first = _invoke_lock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
+        assert first.exit_code == 0, first.output
+        # What _apply_openclaw records when the user declines adoption.
+        write_sentinel(
+            home_dir.base_dir,
+            status="partial",
+            openclaw="failed",
+            alias_count=2,
+            events=[
+                {
+                    "code": "openclaw.provider_skipped",
+                    "level": "warn",
+                    "detail": "unrecognized_not_adopted",
+                }
+            ],
+        )
+
+        again = _invoke_lock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
+
+        assert again.exit_code == 0, again.output
 
 
 class TestDbWriteBeforeEnvRewriteOrdering:
@@ -246,7 +390,7 @@ class TestSecondSignalDuringUnwind:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A user mashing Ctrl-C: the FIRST signal triggers the unwind, a SECOND
-        arriving mid-rollback must be absorbed (one-shot handler) — never abort
+        arriving mid-rollback must be absorbed (never cancels twice) — never abort
         the DB deletes partway and orphan the very rows being removed.
         """
         import worthless.cli.commands.lock as lock_mod
@@ -257,7 +401,7 @@ class TestSecondSignalDuringUnwind:
 
         async def _unwind_with_second_signal(repo: object, planned: object) -> list:
             # Fire a second interrupt and yield so the loop runs the handler.
-            # With a one-shot handler this is a no-op; without it, task.cancel()
+            # The handler never cancels twice, so this is a no-op; otherwise task.cancel()
             # would re-fire here and abort the real unwind below.
             os.kill(os.getpid(), signal.SIGINT)
             await asyncio.sleep(0)
@@ -377,7 +521,8 @@ class TestDeterministicCommitRecordSeam:
 # ---------------------------------------------------------------------------
 # 6. Adversarial surface: when the ROLLBACK ITSELF fails, the user must be told
 #    how to recover (surface-test-audit gap — the only path that prints the
-#    "run `worthless unlock --all`" recovery instruction).
+#    "run `worthless lock` again" recovery instruction; it used to name a
+#    non-existent `unlock --all`, worthless-qvvs).
 # ---------------------------------------------------------------------------
 
 
@@ -417,10 +562,13 @@ class TestUnwindFailureWarnsToReconcile:
         # require the CONTIGUOUS recovery phrase so a future refactor can't satisfy
         # the check by scattering the two tokens across unrelated messages.
         normalized = " ".join(result.output.split())
-        assert "stale row(s); run `worthless unlock --all` to reconcile" in normalized, (
+        assert "stale row(s); run `worthless lock --env" in normalized, (
             "after a failed rollback the user was NOT shown the single recovery "
             f"instruction; output was:\n{result.output}"
         )
+        # Plain `worthless lock` would target ./.env, not this file. A long tmp
+        # path can soft-wrap mid-token, so compare with all whitespace removed.
+        assert str(two_key_env.resolve()) in "".join(result.output.split()), result.output
 
 
 # ---------------------------------------------------------------------------
@@ -440,15 +588,52 @@ _BLOCK_S = 5.0  # how long the stand-in OpenClaw step blocks
 _ANSWER_WITHIN_S = 3.0  # a pressed Ctrl-C must end the lock well before that
 
 
+def _stage_openclaw(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OpenClaw is installed and the proxy is up, as far as lock can tell.
+
+    The after-commit Ctrl-C message and sentinel are about OpenClaw; on a
+    machine without it they must not appear (worthless-y4fn).
+    """
+    import worthless.cli.commands.lock as lock_mod
+
+    monkeypatch.setattr(
+        lock_mod._openclaw_integration, "detect", lambda *_a, **_k: SimpleNamespace(present=True)
+    )
+    monkeypatch.setattr(lock_mod, "check_proxy_health", lambda *_a, **_k: {"healthy": True})
+
+
+def _raise_eio(*_a: object, **_k: object) -> None:
+    """What every write to a closed terminal does."""
+    raise OSError(errno.EIO, "Input/output error")
+
+
+@contextlib.contextmanager
+def _survivable(signum: int) -> Iterator[list[int]]:
+    """Catch *signum* in a recorder so a red run (handler not armed) cannot kill pytest."""
+    seen: list[int] = []
+    previous = signal.signal(signum, lambda sig, _frame: seen.append(sig))
+    try:
+        yield seen
+    finally:
+        signal.signal(signum, previous)
+
+
 def _openclaw_step_blocks_then_ctrl_c(
-    monkeypatch: pytest.MonkeyPatch, *, step: str, presses: int = 1
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    step: str,
+    presses: int = 1,
+    signum: int = signal.SIGINT,
+    openclaw: bool = True,
 ) -> list[float]:
-    """Swap an OpenClaw *step* for a child-free block; Ctrl-C lands mid-block.
+    """Swap an OpenClaw *step* for a child-free block; *signum* lands mid-block.
 
     Returns a list that receives the monotonic time of the first press.
     """
     import worthless.cli.commands.lock as lock_mod
 
+    if openclaw:
+        _stage_openclaw(monkeypatch)
     # A pre-flight gate, so the post-flight re-audit runs; it no-ops unless it
     # is the step under test.
     monkeypatch.setattr(lock_mod, "_openclaw_audit_preflight", lambda *_a, **_k: object())
@@ -459,7 +644,7 @@ def _openclaw_step_blocks_then_ctrl_c(
     def _press() -> None:
         pressed_at.append(time.monotonic())
         for _ in range(presses):
-            os.kill(os.getpid(), signal.SIGINT)
+            os.kill(os.getpid(), signum)
 
     def _blocking_openclaw_step(*_args: object, **_kwargs: object) -> int:
         threading.Timer(0.2, _press).start()
@@ -490,6 +675,18 @@ def _invoke_lock_sandboxed(
     )
 
 
+def _invoke_unlock_sandboxed(
+    home_dir: WorthlessHome, env_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):  # noqa: ANN202 — click's Result
+    """Run ``worthless unlock --env`` in-process, sandboxed like the lock."""
+    monkeypatch.chdir(tmp_path)
+    return runner.invoke(
+        app,
+        ["unlock", "--env", str(env_file)],
+        env={"WORTHLESS_HOME": str(home_dir.base_dir), "HOME": str(tmp_path)},
+    )
+
+
 def _assert_still_locked(
     home_dir: WorthlessHome, env_file: Path, pre_sha: str, output: str
 ) -> None:
@@ -514,20 +711,24 @@ def _assert_interrupt_recorded(home_dir: WorthlessHome) -> None:
 
 class TestCtrlCAfterCommitIsAnswered:
     @pytest.mark.parametrize(
-        ("step", "presses"),
+        ("step", "presses", "signum"),
         [
-            ("_apply_openclaw", 1),
-            ("_apply_openclaw", 3),
+            ("_apply_openclaw", 1, signal.SIGINT),
+            ("_apply_openclaw", 3, signal.SIGINT),
             # Runs after the rewrite too. A press used to kill the audit, trigger
             # its retry (deaf again), then exit 87 down the unwind path.
-            ("_openclaw_audit_postflight", 1),
+            ("_openclaw_audit_postflight", 1, signal.SIGINT),
+            # docker stop / systemd (worthless-dnp9) and a closed terminal (v9gg).
+            ("_apply_openclaw", 1, signal.SIGTERM),
+            ("_apply_openclaw", 1, signal.SIGHUP),
         ],
-        ids=["openclaw-wiring", "mashed", "postflight-reaudit"],
+        ids=["openclaw-wiring", "mashed", "postflight-reaudit", "sigterm", "sighup"],
     )
     def test_ctrl_c_after_commit_stops_and_keeps_keys_locked(
         self,
         step: str,
         presses: int,
+        signum: int,
         home_dir: WorthlessHome,
         two_key_env: Path,
         tmp_path: Path,
@@ -537,13 +738,16 @@ class TestCtrlCAfterCommitIsAnswered:
         import worthless.cli.commands.lock as lock_mod
 
         pre_sha = _sha256_of(two_key_env)
-        pressed_at = _openclaw_step_blocks_then_ctrl_c(monkeypatch, step=step, presses=presses)
+        pressed_at = _openclaw_step_blocks_then_ctrl_c(
+            monkeypatch, step=step, presses=presses, signum=signum
+        )
         synced: list[object] = []
         monkeypatch.setattr(lock_mod, "_sync_fernet_after_lock", synced.append)
         scans: list[object] = []
         monkeypatch.setattr(lock_mod, "_maybe_prompt_code_scan", scans.append)
 
-        result = _invoke_lock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
+        with _survivable(signum):
+            result = _invoke_lock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
 
         assert pressed_at, f"{step} never ran:\n{result.output}"
         answered_in = time.monotonic() - pressed_at[0]
@@ -551,7 +755,7 @@ class TestCtrlCAfterCommitIsAnswered:
             f"Ctrl-C was ignored for {answered_in:.1f}s while {step} blocked "
             f"(exit {result.exit_code}) — worthless-3clz.\n{result.output}"
         )
-        assert result.exit_code == 130, result.output
+        assert result.exit_code == 128 + signum, result.output
         assert "interrupted" in result.output.lower(), result.output
         # The OpenClaw steps may not have scrubbed the plaintext key yet: never
         # let the message read as "all safe".
@@ -580,6 +784,240 @@ class TestCtrlCAfterCommitIsAnswered:
         assert "interrupted" in result.output.lower(), (
             f"quiet mode swallowed the answer to Ctrl-C:\n{result.output!r}"
         )
+
+
+class TestEveryInterruptIsAnswered:
+    """The windows #668 left: before the commit, at its edge, and without OpenClaw."""
+
+    @pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM], ids=["SIGINT", "SIGTERM"])
+    def test_interrupt_during_preflight_audit_is_answered(
+        self,
+        signum: int,
+        home_dir: WorthlessHome,
+        two_key_env: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """worthless-595v: the pre-flight audit blocks before anything is written.
+
+        On Python 3.11+ asyncio's own handler only cancelled the task, the audit
+        child died and was retried, and the lock exited 87 seconds later; SIGTERM
+        was not armed at all.
+        """
+        import worthless.cli.commands.lock as lock_mod
+
+        pre_sha = _sha256_of(two_key_env)
+        audits: list[float] = []
+
+        def _slow_audit(*_a: object, **_k: object) -> None:
+            audits.append(time.monotonic())
+            threading.Timer(0.2, os.kill, (os.getpid(), signum)).start()
+            time.sleep(_BLOCK_S)
+
+        monkeypatch.setattr(lock_mod, "_openclaw_audit_preflight", _slow_audit)
+
+        with _survivable(signum):
+            result = _invoke_lock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
+
+        answered_in = time.monotonic() - audits[0]
+        assert answered_in < _ANSWER_WITHIN_S, f"ignored for {answered_in:.1f}s\n{result.output}"
+        assert result.exit_code == 128 + signum, result.output
+        assert len(audits) == 1, "the audit was retried after the press"
+        assert _shard_rows(home_dir) == [], "rows written by a lock stopped before it began"
+        assert _sha256_of(two_key_env) == pre_sha, ".env changed by a lock stopped before it began"
+
+    def test_press_at_the_end_of_pass1_unwinds_instead_of_committing(
+        self,
+        home_dir: WorthlessHome,
+        two_key_env: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A press after Pass-1's last ``await`` is never dispatched by the loop.
+
+        It used to be dropped and the lock went on to rewrite ``.env``. Nothing
+        is committed yet, so the answer is a full rollback.
+        """
+        import worthless.cli.commands.lock as lock_mod
+
+        pre_sha = _sha256_of(two_key_env)
+        real_pass1 = lock_mod._pass1_db_writes
+
+        async def _pass1_then_press(*args: object, **kwargs: object) -> None:
+            await real_pass1(*args, **kwargs)
+            os.kill(os.getpid(), signal.SIGINT)  # no await follows: the loop never sees it
+
+        monkeypatch.setattr(lock_mod, "_pass1_db_writes", _pass1_then_press)
+
+        result = _invoke_lock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
+
+        assert result.exit_code == 130, result.output
+        assert _shard_rows(home_dir) == [], f"rows orphaned:\n{result.output}"
+        assert _sha256_of(two_key_env) == pre_sha, (
+            f".env rewritten after the press:\n{result.output}"
+        )
+
+    def test_press_during_env_rewrite_is_answered_after_it(
+        self,
+        home_dir: WorthlessHome,
+        two_key_env: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """worthless-f1xx: a press mid-rewrite lets the rename finish, then stops."""
+        import worthless.cli.commands.lock as lock_mod
+
+        pre_sha = _sha256_of(two_key_env)
+        _stage_openclaw(monkeypatch)
+        monkeypatch.setattr(lock_mod, "_openclaw_audit_preflight", lambda *_a, **_k: None)
+        real_rewrite = lock_mod._batch_rewrite
+
+        def _rewrite_with_press(*args: object, **kwargs: object) -> None:
+            os.kill(os.getpid(), signal.SIGINT)
+            real_rewrite(*args, **kwargs)
+
+        monkeypatch.setattr(lock_mod, "_batch_rewrite", _rewrite_with_press)
+        wired: list[object] = []
+        monkeypatch.setattr(lock_mod, "_apply_openclaw", lambda *a, **_k: wired.append(a) or 0)
+
+        result = _invoke_lock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
+
+        assert result.exit_code == 130, result.output
+        _assert_still_locked(home_dir, two_key_env, pre_sha, result.output)
+        _assert_interrupt_recorded(home_dir)
+        assert wired == [], "OpenClaw setup ran after the user pressed Ctrl-C"
+
+    def test_ctrl_c_without_openclaw_never_mentions_it(
+        self,
+        home_dir: WorthlessHome,
+        two_key_env: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """worthless-y4fn: no OpenClaw, so no "OpenClaw setup was cut short" and no "At risk"."""
+        pre_sha = _sha256_of(two_key_env)
+        _openclaw_step_blocks_then_ctrl_c(monkeypatch, step="_apply_openclaw", openclaw=False)
+
+        result = _invoke_lock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
+
+        assert result.exit_code == 130, result.output
+        assert "interrupted" in result.output.lower(), result.output
+        # Case-sensitive: the product writes "OpenClaw"; the tmp path holds this test's name.
+        assert "OpenClaw" not in result.output, result.output
+        _assert_still_locked(home_dir, two_key_env, pre_sha, result.output)
+        sentinel = read_sentinel(home_dir.base_dir)
+        assert not is_partial(sentinel), sentinel
+
+    def test_terminal_closed_after_pass1_unwinds(
+        self,
+        home_dir: WorthlessHome,
+        two_key_env: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """worthless-v9gg: SIGHUP mid-lock rolls back like Ctrl-C and exits 129."""
+        pre_sha = _sha256_of(two_key_env)
+        _inject_signal_after_pass1(monkeypatch, signal.SIGHUP)
+
+        with _survivable(signal.SIGHUP):
+            result = runner.invoke(
+                app,
+                ["lock", "--env", str(two_key_env)],
+                env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+            )
+
+        assert result.exit_code == 129, result.output
+        assert _shard_rows(home_dir) == [], "rows orphaned by a closed terminal"
+        assert _sha256_of(two_key_env) == pre_sha
+
+    def test_interrupt_is_recorded_even_when_the_terminal_is_gone(
+        self,
+        home_dir: WorthlessHome,
+        two_key_env: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """worthless-v9gg: a closed terminal makes printing fail; the record must not."""
+        import worthless.cli.commands.lock as lock_mod
+
+        _openclaw_step_blocks_then_ctrl_c(monkeypatch, step="_apply_openclaw")
+        synced: list[object] = []
+        monkeypatch.setattr(lock_mod, "_sync_fernet_after_lock", synced.append)
+
+        monkeypatch.setattr(WorthlessConsole, "print_failure", _raise_eio)
+
+        _invoke_lock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
+
+        _assert_interrupt_recorded(home_dir)
+        assert len(synced) == 1, "the Fernet sync was skipped by a failed print"
+
+    def test_closed_terminal_after_commit_keeps_exit_129(
+        self,
+        home_dir: WorthlessHome,
+        two_key_env: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """v9gg: the final summary print fails on a dead terminal; the exit still says 129."""
+        import worthless.cli.commands.lock as lock_mod
+
+        _openclaw_step_blocks_then_ctrl_c(monkeypatch, step="_apply_openclaw", signum=signal.SIGHUP)
+
+        monkeypatch.setattr(lock_mod, "_print_lock_result", _raise_eio)
+
+        with _survivable(signal.SIGHUP):
+            result = _invoke_lock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
+
+        assert result.exit_code == 129, result.output
+
+    def test_signals_the_caller_ignores_stay_ignored(
+        self,
+        home_dir: WorthlessHome,
+        two_key_env: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A backgrounded job or supervisor that ignores SIGINT/SIGTERM keeps ignoring them."""
+        previous = {s: signal.signal(s, signal.SIG_IGN) for s in (signal.SIGINT, signal.SIGTERM)}
+        try:
+            result = _invoke_lock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
+            after = {s: signal.getsignal(s) for s in previous}
+        finally:
+            for s, handler in previous.items():
+                signal.signal(s, handler)
+
+        assert result.exit_code == 0, result.output
+        assert after == {s: signal.SIG_IGN for s in previous}, f"re-enabled: {after}"
+
+    def test_ctrl_c_during_an_error_rollback_never_orphans_rows(
+        self,
+        home_dir: WorthlessHome,
+        two_key_env: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """worthless-3em7: an error starts the rollback; the FIRST press must not cancel it."""
+        import worthless.cli.commands.lock as lock_mod
+
+        pre_sha = _sha256_of(two_key_env)
+
+        def _rewrite_fails(*_a: object, **_k: object) -> None:
+            raise RuntimeError("disk full")
+
+        monkeypatch.setattr(lock_mod, "_batch_rewrite", _rewrite_fails)
+        real_unwind = lock_mod._compensating_unwind
+
+        async def _unwind_with_press(*args: object, **kwargs: object):  # noqa: ANN202
+            os.kill(os.getpid(), signal.SIGINT)
+            await asyncio.sleep(0.3)  # the loop dispatches the press here
+            return await real_unwind(*args, **kwargs)
+
+        monkeypatch.setattr(lock_mod, "_compensating_unwind", _unwind_with_press)
+
+        result = _invoke_lock_sandboxed(home_dir, two_key_env, tmp_path, monkeypatch)
+
+        assert result.exit_code != 0, result.output
+        assert _shard_rows(home_dir) == [], f"rows orphaned mid-rollback:\n{result.output}"
+        assert _sha256_of(two_key_env) == pre_sha
 
 
 class _InteractiveStdin:
@@ -615,6 +1053,7 @@ class TestCtrlCAtAdoptionPromptKeepsKeys:
         monkeypatch.setenv("HOME", str(tmp_path))
         # Reach the real typer.confirm: an interactive shell + one foreign entry.
         monkeypatch.setattr(sys, "stdin", _InteractiveStdin())
+        _stage_openclaw(monkeypatch)
         monkeypatch.setattr(
             lock_mod._openclaw_integration, "preview_unrecognized", lambda *_a, **_k: ["openai"]
         )
@@ -707,11 +1146,11 @@ class TestSecondCtrlCDuringRollbackIsNeverSilent:
 
 class TestNothingRollsBackAfterTheCommit:
     """Defence in depth (worthless-3clz review): once ``.env`` is rewritten, its
-    DB rows are load-bearing. Only post-flight's documented ``typer.Exit(87)``
-    may still roll them back; nothing else — not a queued press, not a crash."""
+    DB rows are load-bearing. Nothing may roll them back — not a queued press,
+    not a crash, not a refused post-flight (worthless-im3x)."""
 
     def test_handler_never_cancels_once_committed(self) -> None:
-        """Cancels once before the commit, never after; only post-flight 87 may unwind."""
+        """Cancels once before the commit, never after."""
         import worthless.cli.commands.lock as lock_mod
 
         cancels: list[int] = []
@@ -722,18 +1161,36 @@ class TestNothingRollsBackAfterTheCommit:
 
         console = WorthlessConsole()
         before = lock_mod._LockInterrupts(_Task(), [], console)  # type: ignore[arg-type]
+        before.phase = lock_mod._CANCEL  # Pass-1's awaited writes
         before()
         assert cancels == [1], "first press before the commit must cancel"
 
         cancels.clear()
         after = lock_mod._LockInterrupts(_Task(), [], console)  # type: ignore[arg-type]
+        after.phase = lock_mod._CANCEL
         after.committed = True
         after()
         assert cancels == [], "a press queued for the loop cancelled AFTER the commit"
-        assert not after.may_unwind(RuntimeError("boom"))
-        assert not after.may_unwind(typer.Exit(code=87)), "any Exit may not unwind keys"
-        assert after.may_unwind(lock_mod._PostflightRefused(code=87))  # documented path
-        assert before.may_unwind(RuntimeError("boom"))
+
+    def test_press_after_commit_never_claims_a_rollback(self) -> None:
+        """Nothing rolls back after the commit any more, so a press may not say it does."""
+        import worthless.cli.commands.lock as lock_mod
+
+        notices: list[str] = []
+
+        class _Console:
+            def print_notice(self, msg: str) -> None:
+                notices.append(msg)
+
+        class _Task:
+            def cancel(self) -> None:
+                pass
+
+        after = lock_mod._LockInterrupts(_Task(), [object()], _Console())  # type: ignore[arg-type]
+        after.committed = True
+        after()
+
+        assert notices == [], f"a press after the commit claimed a rollback: {notices}"
 
     def test_crash_after_commit_keeps_the_keys(
         self,

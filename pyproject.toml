@@ -1,6 +1,6 @@
 [project]
 name = "worthless"
-version = "0.3.12"
+version = "0.3.14"
 description = "Split-key reverse proxy that makes leaked API keys worthless"
 readme = "README.md"
 license = { text = "AGPL-3.0-only" }
@@ -42,12 +42,6 @@ dependencies = [
 
 [project.scripts]
 worthless = "worthless.cli.app:app"
-docs-generate = "worthless.dev.docs:generate_docs"
-test-unit = "worthless.testing.runners:unit"
-test-docker = "worthless.testing.runners:docker"
-test-live = "worthless.testing.runners:live"
-test-openclaw = "worthless.testing.runners:openclaw"
-test-all = "worthless.testing.runners:all_tests"
 
 [project.urls]
 Homepage = "https://github.com/oblangatas/worthless"

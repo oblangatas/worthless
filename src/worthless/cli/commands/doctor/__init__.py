@@ -57,6 +57,12 @@ from dotenv import dotenv_values
 from worthless.cli.bootstrap import WorthlessHome, acquire_lock, get_home, _DEFAULT_BASE
 from worthless.cli.platform import read_process_env
 from worthless.cli.process import pid_path, read_pid, resolve_port
+from worthless.cli.commands.doctor.checks.dead_proxy_run_dirs import (
+    STOP_PROXY_FIRST,
+    find_dead_run_dirs,
+    proxy_running,
+    remove_run_dirs,
+)
 from worthless.cli.commands.revoke import _revoke_async
 from worthless.cli.console import WorthlessConsole, get_console
 from worthless._flags import ipc_mode_active
@@ -842,11 +848,31 @@ def _print_synced_lines(usernames: list[str], *, dry_run: bool) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _print_dead_run_lines(
+    dead_runs: list[Path], home: WorthlessHome, console: WorthlessConsole, *, show_fix_hint: bool
+) -> None:
+    """worthless-7qb6: name each folder a stopped proxy left holding key shares."""
+    if not dead_runs:
+        return
+    console.print_warning(
+        f"{len(dead_runs)} folder(s) left by a `worthless up` or `wrap` that is no longer running "
+        "still hold both key shares:"
+    )
+    for run_dir in dead_runs:
+        typer.echo(f"    {run_dir}")
+    if proxy_running(home):
+        typer.echo(f"    {STOP_PROXY_FIRST}")
+    elif show_fix_hint:
+        typer.echo("    fix: run `worthless doctor --fix`")
+
+
 def _doctor_confirm(
     orphans: list[EnrollmentRecord],
     synced: list[str],
     yes: bool,
     console: WorthlessConsole,
+    *,
+    dead_runs: list[Path] | None = None,
 ) -> bool:
     """Build and display the combined confirmation prompt. Returns True if the
     user wants to proceed (or --yes was given). False means abort."""
@@ -856,6 +882,10 @@ def _doctor_confirm(
     purgeable = sum(1 for e in orphans if not env_file_missing(e))
     if purgeable:
         prompt_lines.append(f"Delete {purgeable} orphan DB row(s) and their shard files.")
+    if dead_runs:
+        prompt_lines.append(
+            f"Delete {len(dead_runs)} folder(s) left by a stopped proxy (they hold key shares)."
+        )
     if synced:
         n = len(synced)
         prompt_lines.append(
@@ -878,8 +908,11 @@ def _doctor_apply(
     repo: ShardRepository,
     home: WorthlessHome,
     console: WorthlessConsole,
+    *,
+    dead_runs: list[Path] | None = None,
 ) -> None:
-    """Execute the fix actions (purge orphans + migrate synced keys)."""
+    """Execute the fix actions (purge orphans, delete stopped-proxy folders,
+    migrate synced keys)."""
     if orphans:
         purged = len(_run_async(_purge_all(orphans, repo, home.shard_a_dir)))
         kept = sum(1 for e in orphans if env_file_missing(e))
@@ -890,6 +923,15 @@ def _doctor_apply(
                 f"Kept {kept} key(s) whose .env was not found. {MOVED_FIX_PHRASE}. "
                 "Removed instead? See the advice above for each key."
             )
+
+    if dead_runs:
+        removed = remove_run_dirs(home, dead_runs)
+        if removed:
+            console.print_success(f"Deleted {len(removed)} folder(s) left by a stopped proxy.")
+        kept = len(dead_runs) - len(removed)
+        if kept:
+            why = STOP_PROXY_FIRST if proxy_running(home) else "In use again or not deletable."
+            console.print_warning(f"Kept {kept} folder(s). {why}")
 
     if synced:
         migrated = _migrate_synced_keys(synced, home)
@@ -908,6 +950,29 @@ def _doctor_apply(
 # ---------------------------------------------------------------------------
 # Doctor entrypoint
 # ---------------------------------------------------------------------------
+
+
+def _report_unopenable_install(exc: WorthlessError, console) -> None:  # noqa: ANN001
+    """Explain an install whose key or DB can't be opened — without over-advising.
+
+    Two very different states land here. A genuinely unreadable/missing key is
+    unrecoverable and the honest answer is a forced removal plus rotation. A
+    REFUSED key (worthless-6hu7: wrong mode, foreign owner, symlink) is a
+    present, intact install whose fix is a chmod — recommending
+    ``uninstall --force`` for that would destroy recoverable data over a
+    permission bit, so the refusal (which names the fix) is handed back as-is.
+    """
+    if exc.code is ErrorCode.KEY_REFUSED:
+        console.print_warning(
+            f"Worthless won't touch your encryption key until you fix it.\n{exc.message}\n"
+            "Nothing was changed, and your locked keys are still recoverable."
+        )
+        return
+    console.print_warning(
+        "Worthless looks broken — it can't be read (encryption key or database "
+        "missing/unreadable), so your locked keys can't be reconstructed. Remove "
+        "it with 'worthless uninstall --force', then rotate those keys at your provider."
+    )
 
 
 def _doctor_run(*, fix: bool, yes: bool, dry_run: bool) -> None:
@@ -930,12 +995,8 @@ def _doctor_run(*, fix: bool, yes: bool, dry_run: bool) -> None:
     try:
         home = get_home()
         _ = home.fernet_key
-    except WorthlessError:
-        console.print_warning(
-            "Worthless looks broken — it can't be read (encryption key or database "
-            "missing/unreadable), so your locked keys can't be reconstructed. Remove "
-            "it with 'worthless uninstall --force', then rotate those keys at your provider."
-        )
+    except WorthlessError as exc:
+        _report_unopenable_install(exc, console)
         return
 
     with _doctor_lock(home), acquire_lock(home):
@@ -973,13 +1034,10 @@ def _doctor_run(*, fix: bool, yes: bool, dry_run: bool) -> None:
         # ----------- check 5: alias-not-in-DB -----------
         had_alias_issues = _check_alias_not_in_db(home, all_enrollments)
 
-        if (
-            not orphans
-            and not openclaw_issues
-            and not synced
-            and not had_mismatch
-            and not had_alias_issues
-        ):
+        # ----------- check 6: folders left by a stopped proxy (worthless-7qb6) -----------
+        dead_runs = find_dead_run_dirs(home)
+
+        if not any((orphans, openclaw_issues, synced, had_mismatch, had_alias_issues, dead_runs)):
             if not imported:
                 console.print_success("No issues found.")
             return
@@ -1005,6 +1063,8 @@ def _doctor_run(*, fix: bool, yes: bool, dry_run: bool) -> None:
             if not fix:
                 typer.echo(f"    fix: run `{ICLOUD_FIX_PHRASE}`")
 
+        _print_dead_run_lines(dead_runs, home, console, show_fix_hint=not fix)
+
         if not fix:
             return
 
@@ -1014,7 +1074,7 @@ def _doctor_run(*, fix: bool, yes: bool, dry_run: bool) -> None:
             )
             return
 
-        if not _doctor_confirm(orphans, synced, yes, console):
+        if not _doctor_confirm(orphans, synced, yes, console, dead_runs=dead_runs):
             return
 
         # Fresh repo instance: asyncio.run() closes the event loop after
@@ -1022,7 +1082,7 @@ def _doctor_run(*, fix: bool, yes: bool, dry_run: bool) -> None:
         # call fails on Linux. A new instance avoids the closed-loop error.
         fix_repo = ShardRepository(str(home.db_path), home.fernet_key)
         try:
-            _doctor_apply(orphans, synced, fix_repo, home, console)
+            _doctor_apply(orphans, synced, fix_repo, home, console, dead_runs=dead_runs)
         finally:
             fix_repo.close()  # worthless-g648
 

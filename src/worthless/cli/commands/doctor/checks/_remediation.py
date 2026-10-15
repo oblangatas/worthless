@@ -14,6 +14,12 @@ from worthless.cli.commands.doctor.checks.fernet_drift import _INSTRUCTIONS as _
 PLAYBOOKS: dict[str, str] = {
     # Each playbook LEADS with the plain-language verdict (safe / gone / at risk),
     # glosses any jargon once, then names the one command to run (WOR-778).
+    "fernet_key_refused": (
+        "Nothing is lost — your encryption key is still on disk; worthless just "
+        "won't read (or replace) it while its permissions, owner or file type look "
+        "wrong. The error names the exact fix, usually `chmod 0600` on the key. If "
+        "the path is a symlink, move it aside and put the real key back in its place."
+    ),
     "recovery_import": (
         "No secret at risk — a sibling-Mac recovery file didn't finish importing "
         "(your keys aren't lost). Re-run `worthless doctor` to retry; the import is "
@@ -43,6 +49,11 @@ PLAYBOOKS: dict[str, str] = {
         "Nothing at risk — a shard file (one half of a split key) has no matching database "
         "row, usually from a crash mid-revoke. Run `worthless doctor --fix` to unlink it; "
         "a lone shard is unusable on its own."
+    ),
+    "dead_proxy_run_dirs": (
+        "A key is at risk on disk — a `worthless up` or `wrap` that stopped without "
+        "cleaning up left both halves of it, readable only by you. Run `worthless doctor "
+        "--fix` to delete the folder; doctor only deletes it once nothing is using it."
     ),
     "fernet_drift": _FERNET_DRIFT,
     "broken_status": (

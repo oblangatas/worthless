@@ -1,0 +1,73 @@
+name: Served installer integrity
+
+# Hourly: the bytes worthless.sh serves to `curl | sh` (install.sh and
+# /uninstall's uninstall.sh) must equal the latest GitHub Release.
+# deploy-worker.yml checks this at every CI deploy and release-sync-check.yml
+# re-checks it daily; this narrows the gap for anything
+# that changes production OUTSIDE CI (a leaked deploy token, a manual
+# `wrangler deploy`) from up to 24 hours to about one. A failure here means
+# one thing: what users download is not what was released.
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  served-equals-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v6
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Served scripts equal the latest release, for every client
+        run: |
+          set -euo pipefail
+          # Reference: the latest clean vX.Y.Z tag -- exactly what production
+          # serves, since deploy-worker.yml deploys on any v* tag push (on main
+          # or not). Ruleset v-tags-signed makes v* tags signed and immovable. (A
+          # GitHub Release is not a safe anchor: ungated, and published after the
+          # deploy.) A writer with a verified key can still push a NEW tag; that
+          # is the trust root, as for every release check.
+          TAG=$(git tag --sort=-version:refname --list 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)
+          [ -n "$TAG" ] || { echo "::error title=No release tag::no clean vX.Y.Z tag"; exit 1; }
+          AGE=$(( $(date +%s) - $(git for-each-ref --format='%(creatordate:unix)' "refs/tags/$TAG") ))
+          # Real curl's own User-Agent plus Wget: no fixed UA a tampered Worker
+          # could single out to serve this check the genuine script.
+          # Grace only for a tag 0-60 min old: its deploy may still be running. A
+          # future-dated tag (negative age) gets none, so it can't mute the alarm.
+          level=error
+          if [ "$AGE" -ge 0 ] && [ "$AGE" -lt 3600 ]; then level=warning; fi
+          drift=0
+          for pair in "/ install.sh" "/uninstall uninstall.sh"; do
+            url_path=${pair%% *}; file=${pair#* }
+            want=$(git show "$TAG:$file" | sha256sum | cut -d' ' -f1)
+            for ua in curl "Wget/1.21.4"; do
+              opts=(-fsSL --retry 3 --retry-all-errors)
+              [ "$ua" = curl ] || opts+=(-A "$ua")
+              got=$(curl "${opts[@]}" "https://worthless.sh${url_path}" | sha256sum | cut -d' ' -f1)
+              if [ "$got" = "$want" ]; then
+                echo "OK: ${url_path} as ${ua} == ${file}@${TAG}"
+              else
+                echo "::${level} title=Served script drift::${url_path} as ${ua}: ${got} != ${file}@${TAG} ${want}"
+                drift=1
+              fi
+            done
+          done
+          if [ "$drift" = 1 ] && [ "$level" = warning ]; then
+            echo "::warning title=Release in progress::${TAG} is ${AGE}s old; deploy may still be running"
+            exit 0
+          fi
+          exit "$drift"

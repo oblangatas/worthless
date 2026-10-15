@@ -63,12 +63,22 @@ keyring.set_keyring(keyring.backends.null.Keyring())
 # ``monkeypatch.delenv("WORTHLESS_KEYRING_BACKEND")``.
 os.environ.setdefault("WORTHLESS_KEYRING_BACKEND", "null")
 
+# worthless-h4jf: timing is not a property under test. Hypothesis fails any
+# example over 200 ms by default, so on a busy machine a property that holds
+# fails anyway. Every profile below inherits deadline=None from this one; a
+# test that sets its own deadline keeps it.
+settings.register_profile("worthless", deadline=None)
+settings.load_profile("worthless")
+_base = settings.get_profile("worthless")
+
 # Suppress differing_executors health check ONLY when running under mutmut.
 # Mutmut runs tests from its mutants/ directory with a different rootdir,
 # which triggers this check spuriously.  In normal test runs, the check
 # remains active to catch real working-directory issues.
 if os.environ.get("MUTANT_UNDER_TEST"):
-    settings.register_profile("mutmut", suppress_health_check=[HealthCheck.differing_executors])
+    settings.register_profile(
+        "mutmut", parent=_base, suppress_health_check=[HealthCheck.differing_executors]
+    )
     settings.load_profile("mutmut")
 
 # CI profile: cap Hypothesis examples, derandomize for reproducibility,
@@ -76,6 +86,7 @@ if os.environ.get("MUTANT_UNDER_TEST"):
 # Activate with: HYPOTHESIS_PROFILE=ci
 settings.register_profile(
     "ci",
+    parent=_base,
     max_examples=50,
     derandomize=True,
     database=None,
@@ -85,6 +96,7 @@ settings.register_profile(
 # Activate with: HYPOTHESIS_PROFILE=extended
 settings.register_profile(
     "extended",
+    parent=_base,
     max_examples=500,
     database=None,
 )

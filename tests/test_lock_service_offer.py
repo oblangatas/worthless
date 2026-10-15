@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -22,6 +23,7 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
+from worthless.cli import default_command
 from worthless.cli.app import app
 from worthless.cli.commands.lock import _offer_service_after_lock
 from worthless.cli.console import WorthlessConsole
@@ -32,6 +34,16 @@ from worthless.cli.errors import ErrorCode, WorthlessError
 @pytest.fixture
 def console() -> WorthlessConsole:
     return WorthlessConsole()
+
+
+@pytest.fixture(autouse=True)
+def _a_person_not_a_container_or_agent(monkeypatch: pytest.MonkeyPatch):
+    """The suite itself may run inside Docker or under an AI agent; both skips
+    are tested explicitly."""
+    for marker in ("CLAUDECODE", "AI_AGENT"):
+        monkeypatch.delenv(marker, raising=False)
+    with patch("worthless.cli.commands.lock._in_container", return_value=False):
+        yield
 
 
 def _flat(captured) -> str:
@@ -101,17 +113,22 @@ class TestConsent:
         install.assert_not_called()
         assert "worthless service install" in _flat(capsys.readouterr())
 
-    def test_assume_yes_skips_the_question(self, capsys) -> None:
-        """`worthless --yes lock` must not stop to ask."""
+    def test_assume_yes_skips_the_question_and_installs_nothing(self, capsys) -> None:
+        """`worthless --yes lock` must not stop to ask, and must not install.
+
+        WOR-859 ruling (2026-10-13): only a typed "y" installs. Before it,
+        --yes at a real terminal installed a startup item nobody read about.
+        """
         console = WorthlessConsole(assume_yes=True)
         with (
             patch("worthless.cli.commands.lock._scan_prompt_is_tty", return_value=True),
             patch("worthless.cli.commands.lock.typer.confirm") as confirm,
             patch("worthless.cli.commands.lock.install_service_for_offer") as install,
         ):
-            assert _offer_service_after_lock(console, home=_home(), port=8787) is True
+            assert _offer_service_after_lock(console, home=_home(), port=8787) is False
         confirm.assert_not_called()
-        install.assert_called_once()
+        install.assert_not_called()
+        assert "worthless service install" in _flat(capsys.readouterr())
 
 
 class TestHonestCopy:
@@ -214,20 +231,57 @@ class TestConsentIsNotBypassable:
         confirm.assert_not_called()
         assert "worthless service install" in _flat(capsys.readouterr())
 
-    def test_yes_flag_still_accepts_at_a_real_terminal(self, console: WorthlessConsole) -> None:
-        """The flag keeps working where a human could have answered."""
+    def test_yes_flag_does_not_install_even_at_a_real_terminal(
+        self, console: WorthlessConsole
+    ) -> None:
+        """WOR-859 ruling (2026-10-13): only a typed "y" installs.
+
+        This test used to pin the opposite ("the flag keeps working where a
+        human could have answered"). The ruling reversed it: a blanket --yes
+        is not consent to a startup item and a moved master key.
+        """
         console.assume_yes = True
         with (
             patch("worthless.cli.commands.lock._scan_prompt_is_tty", return_value=True),
             patch("worthless.cli.commands.lock.typer.confirm") as confirm,
             patch("worthless.cli.commands.lock.install_service_for_offer") as install,
-            patch("worthless.cli.commands.lock._print_service_banner"),
         ):
             accepted = _offer_service_after_lock(console, home=_home(), port=8787)
 
-        assert accepted is True
-        install.assert_called_once()
+        assert accepted is False
+        install.assert_not_called()
         confirm.assert_not_called()
+
+    def test_yes_with_a_service_already_running_says_nothing(
+        self, console: WorthlessConsole, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Telling someone with a running service to `service install` again is
+        wrong advice: re-running install can rewrite the unit and stop it."""
+        console.assume_yes = True
+        with (
+            patch("worthless.cli.commands.lock._scan_prompt_is_tty", return_value=True),
+            patch("worthless.cli.commands.lock._backend") as backend,
+            patch("worthless.cli.commands.lock.install_service_for_offer") as install,
+        ):
+            backend.return_value.detect_status.return_value = MagicMock(state=ServiceState.RUNNING)
+            assert _offer_service_after_lock(console, home=_home(), port=8787) is False
+        install.assert_not_called()
+        assert "service install" not in _flat(capsys.readouterr())
+
+    @pytest.mark.parametrize("marker", ["CLAUDECODE", "AI_AGENT"])
+    def test_an_ai_agent_at_a_terminal_is_not_asked(
+        self, console: WorthlessConsole, monkeypatch: pytest.MonkeyPatch, marker: str
+    ) -> None:
+        """An agent in a pty looks like a person; its environment says otherwise."""
+        monkeypatch.setenv(marker, "1")
+        with (
+            patch("worthless.cli.commands.lock._scan_prompt_is_tty", return_value=True),
+            patch("worthless.cli.commands.lock.typer.confirm") as confirm,
+            patch("worthless.cli.commands.lock.install_service_for_offer") as install,
+        ):
+            assert _offer_service_after_lock(console, home=_home(), port=8787) is False
+        confirm.assert_not_called()
+        install.assert_not_called()
 
     def test_the_question_defaults_to_no(self, console: WorthlessConsole) -> None:
         """Pin the default. Without this, flipping it to True keeps every test green."""
@@ -515,3 +569,197 @@ class TestTheDeclineHintIsHonestOnWsl:
     ) -> None:
         hint = self._hint(console, capsys, on_wsl=False, tty=tty).lower()
         assert "keep running after you close this terminal" in hint
+
+
+class TestTheQuestionIsExplicit:
+    """WOR-859 ruling: off by default, asked explicitly.
+
+    A one-line "installs a user service" let people agree to a login item and a
+    master-key file without knowing either existed. Reverting `_offer_question`
+    to that one line turns every assertion here red.
+    """
+
+    def _ask(
+        self,
+        console: WorthlessConsole,
+        *,
+        backend: str,
+        on_wsl: bool = False,
+        key_path: Path | None = None,
+    ) -> str:
+        with (
+            patch(
+                "worthless.cli.commands.lock.current_platform_backend_name", return_value=backend
+            ),
+            patch("worthless.cli.commands.lock.is_wsl", return_value=on_wsl),
+            patch("worthless.cli.commands.lock._scan_prompt_is_tty", return_value=True),
+            patch("worthless.cli.commands.lock._backend") as b,
+            patch("worthless.cli.commands.lock.typer.confirm", return_value=False) as confirm,
+            patch("worthless.cli.commands.lock.install_service_for_offer"),
+        ):
+            b.return_value.detect_status.return_value = MagicMock(state=ServiceState.NOT_INSTALLED)
+            home = _home()
+            home.fernet_key_path = key_path or Path.home() / ".worthless" / "fernet.key"
+            _offer_service_after_lock(console, home=home, port=8787)
+        return confirm.call_args.args[0]
+
+    @pytest.mark.parametrize(
+        ("backend", "unit_name"),
+        [("launchd", "sh.worthless.proxy.plist"), ("systemd", "worthless-proxy.service")],
+    )
+    def test_names_what_it_adds_the_trade_off_and_the_undo(
+        self, console: WorthlessConsole, backend: str, unit_name: str
+    ) -> None:
+        question = self._ask(console, backend=backend)
+        assert unit_name in question, "the user must see the file being added"
+        assert "What it adds:" in question
+        assert "fernet.key" in question, "the master-key file is the trade-off"
+        assert "worthless service uninstall (the key file stays)" in question
+        assert "Say no" in question
+
+    def test_mac_wording_says_login_item(self, console: WorthlessConsole) -> None:
+        question = self._ask(console, backend="launchd")
+        assert "macOS login item" in question
+        assert "when you log in" in question
+        assert "linger" not in question, "launchd has no lingering"
+
+    def test_linux_is_told_about_lingering_before_answering(
+        self, console: WorthlessConsole
+    ) -> None:
+        """Lingering starts it at boot and outlives uninstall (worthless-fzas).
+
+        It used to be said only in the banner AFTER install, and "when you
+        log in" was false on systemd.
+        """
+        question = self._ask(console, backend="systemd")
+        assert "when this computer" in question
+        assert "lingering" in question
+        assert "loginctl disable-linger" in question
+        assert "when you log in" not in question
+
+    def test_a_moved_key_file_is_shown_where_it_really_is(
+        self, console: WorthlessConsole, tmp_path: Path
+    ) -> None:
+        """WORTHLESS_FERNET_KEY_PATH moves the file; the question must follow it."""
+        moved = tmp_path / "elsewhere" / "my.key"
+        assert str(moved) in self._ask(console, backend="launchd", key_path=moved)
+
+    @pytest.mark.parametrize(
+        ("backend", "on_wsl"), [("launchd", False), ("systemd", False), ("systemd", True)]
+    )
+    def test_every_line_fits_an_80_column_terminal(
+        self, console: WorthlessConsole, backend: str, on_wsl: bool
+    ) -> None:
+        """typer.confirm prints plain text; the terminal wraps it mid-word otherwise."""
+        question = self._ask(console, backend=backend, on_wsl=on_wsl)
+        too_long = [line for line in question.splitlines() if len(line) > 80]
+        assert not too_long, too_long
+
+    def test_never_claims_restart_survival(self, console: WorthlessConsole) -> None:
+        """Reboot survival is unproven (WOR-725); say what the unit does, not more."""
+        question = self._ask(console, backend="launchd").lower()
+        assert "reboot" not in question
+        assert "restart" not in question
+
+    def test_wsl_keeps_its_warning_and_gets_the_details(self, console: WorthlessConsole) -> None:
+        question = self._ask(console, backend="systemd", on_wsl=True)
+        assert "instanceIdleTimeout" in question
+        assert "fernet.key" in question
+
+
+class TestContainersAreNotAsked:
+    """Docker Desktop and Codespaces terminals are real TTYs, so the tty gate
+    lets them through, and the install can only fail. Delete the container
+    check in `_offer_service_after_lock` and these turn red."""
+
+    def test_no_question_and_no_install_in_a_container(
+        self, console: WorthlessConsole, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with (
+            patch("worthless.cli.commands.lock._in_container", return_value=True),
+            patch("worthless.cli.commands.lock._scan_prompt_is_tty", return_value=True),
+            patch("worthless.cli.commands.lock.typer.confirm") as confirm,
+            patch("worthless.cli.commands.lock.install_service_for_offer") as install,
+        ):
+            assert _offer_service_after_lock(console, home=_home(), port=8787) is False
+        confirm.assert_not_called()
+        install.assert_not_called()
+
+    def test_the_hint_does_not_send_them_in_a_circle(
+        self, console: WorthlessConsole, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with (
+            patch("worthless.cli.commands.lock._in_container", return_value=True),
+            patch("worthless.cli.commands.lock._scan_prompt_is_tty", return_value=True),
+        ):
+            _offer_service_after_lock(console, home=_home(), port=8787)
+        out = _flat(capsys.readouterr())
+        assert "service install" not in out
+        assert "worthless up" in out
+
+
+# The shape scan_env_keys returns: (variable name, value, provider).
+_SCANNED_KEY = ("OPENAI_API_KEY", "sk-proj-" + "x7Kq9mPz2" * 5, "openai")
+
+
+class TestPlainWorthlessAsks:
+    """WOR-859: the command the docs send new users to must ask too.
+
+    Before this, plain `worthless` locked with quiet=True and the offer never
+    fired. Delete the offer call in `_run_enrollment_if_needed` and
+    `test_asks_after_locking` turns red.
+    """
+
+    def _enroll(self, *, yes: bool, locked: int = 1, found: int = 1) -> MagicMock:
+        home = MagicMock(name="WorthlessHome")
+        home.db_path.exists.return_value = False
+        with (
+            patch.object(default_command, "_has_enrolled_keys", return_value=False),
+            patch.object(default_command, "find_env_file", return_value=Path(".env")),
+            patch.object(default_command, "scan_env_keys", return_value=[_SCANNED_KEY] * found),
+            patch.object(default_command, "show_detected_keys"),
+            patch.object(default_command.typer, "confirm", return_value=True),
+            patch.object(default_command, "acquire_lock", return_value=nullcontext()),
+            patch.object(default_command, "_lock_keys", return_value=locked),
+            patch.object(default_command, "_offer_service_after_lock") as offer,
+        ):
+            default_command._run_enrollment_if_needed(
+                home, WorthlessConsole(), interactive=True, yes=yes
+            )
+        return offer
+
+    def test_asks_after_locking(self) -> None:
+        self._enroll(yes=False).assert_called_once()
+
+    def test_yes_never_installs_a_service_on_this_path(self) -> None:
+        """`worthless --yes` is documented as 'never service install'."""
+        self._enroll(yes=True).assert_not_called()
+
+    def test_a_lock_that_protected_only_some_keys_still_asks(self) -> None:
+        """Same rule as `worthless lock`: offer once anything was locked.
+
+        A `count == total` guard here used to skip these users.
+        """
+        self._enroll(yes=False, locked=1, found=2).assert_called_once()
+
+    def test_nothing_locked_gets_no_offer(self) -> None:
+        self._enroll(yes=False, locked=0, found=1).assert_not_called()
+
+    def test_asks_before_the_proxy_starts(self) -> None:
+        """Asking after the detached proxy starts would race it for the port."""
+        order: list[str] = []
+        with (
+            patch.object(default_command, "get_home", return_value=MagicMock()),
+            patch.object(
+                default_command,
+                "_run_enrollment_if_needed",
+                side_effect=lambda *a, **k: order.append("enroll+offer"),
+            ),
+            patch.object(
+                default_command,
+                "_ensure_proxy_running",
+                side_effect=lambda *a, **k: order.append("proxy") or (True, None, 8787),
+            ),
+        ):
+            default_command.run_default(interactive=True, yes=False)
+        assert order == ["enroll+offer", "proxy"]

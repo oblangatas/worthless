@@ -58,6 +58,7 @@ on:  # zizmor: ignore[dangerous-triggers]
       - "Release watchdog"
       - "Scheduled (Hypothesis + Secret Scan)"
       - "Scorecard security analysis"
+      - "Served installer integrity"
       - "Wire-attack canary (scheduled)"
       - "WSL"
 
