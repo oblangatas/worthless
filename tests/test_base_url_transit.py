@@ -14,7 +14,10 @@ How transit is forced (no real keys, no real network):
   wrapping the existing mock upstream at ``tests/openclaw/mock-upstream/app.py``.
   So the only way bytes reach the mock is *out the far side of the proxy*.
 * The SDKs talk to the proxy through ``http_client=`` (a third ASGITransport
-  client) so the SDK request never leaves the process either.
+  client) so the SDK request never leaves the process either. Both ``openai``
+  and ``anthropic`` are built on ``httpx2`` internally, so that client is an
+  ``httpx2.AsyncClient`` for both. (``anthropic`` rejects a plain ``httpx``
+  client outright; ``openai`` merely tolerates one today.)
 
 Two independent witnesses confirm the request went THROUGH the proxy, not
 around it:
@@ -23,13 +26,17 @@ around it:
    entry, and the auth it saw is the *reconstructed* original key, never the
    shard-A token the SDK actually sent. A request that bypassed the proxy could
    not have turned shard-A into the original key.
-2. **Proxy witness** — the proxy's ``/healthz`` ``requests_proxied`` counter
-   (rows in its ``spend_log``) incremented from 0 to 1. Only the proxy's own
-   metering path writes that row.
+2. **Ledger witness** — ``/healthz`` ``requests_billed`` (the row count of the
+   proxy's ``spend_log``) went from 0 to 1. That row is written by the proxy's
+   post-response spend recorder, a separate path from the forward call.
+
+``requests_proxied`` is also checked to tick 0 -> 1, but it is NOT independent:
+it is an in-memory counter bumped inline right after the same upstream
+``send()`` that feeds witness #1 (worthless-ax9d), so it can't fail on its own.
 
 This runs in the default (non-docker) ``Tests`` job: it is unmarked, uses only
-the in-process ASGITransport, and the ``openai`` / ``anthropic`` / ``respx``
-deps it needs are already in the ``test`` extra that CI installs.
+the in-process ASGITransport, and ``openai`` / ``anthropic`` / ``httpx2`` are
+declared in the ``test`` extra that CI installs.
 """
 
 from __future__ import annotations
@@ -170,11 +177,12 @@ async def _enroll(
     return sr.shard_a.decode("utf-8")
 
 
-async def _requests_proxied(proxy_client: httpx.AsyncClient) -> int:
-    """Read the proxy's own metering counter via its /healthz endpoint."""
+async def _meters(proxy_client: httpx.AsyncClient) -> tuple[int, int]:
+    """Read ``(requests_proxied, requests_billed)`` from the proxy's /healthz."""
     resp = await proxy_client.get("/healthz")
     assert resp.status_code == 200
-    return int(resp.json()["requests_proxied"])
+    body = resp.json()
+    return int(body["requests_proxied"]), int(body["requests_billed"])
 
 
 @pytest.mark.parametrize("sdk_name", ["openai", "anthropic"])
@@ -213,15 +221,16 @@ async def test_base_url_request_transits_proxy_to_upstream(
         proxy_base = f"http://proxy/{alias}{case['sdk_path_suffix']}"
         proxy_transport = httpx.ASGITransport(app=proxy_app)
 
-        # Witness #2 (before): the proxy has proxied nothing yet.
+        # Witness #2 (before): nothing proxied, nothing billed yet.
         async with httpx.AsyncClient(transport=proxy_transport, base_url="http://proxy") as probe:
-            assert await _requests_proxied(probe) == 0
+            assert await _meters(probe) == (0, 0)
 
         # Use the SDKs' ASYNC clients: ASGITransport is async-only, and the
         # async clients let the proxy's post-response spend-recording
         # BackgroundTask settle on this same event loop before we read the meter.
+        # Both SDKs run on httpx2 internally — hand both an httpx2 client.
+        sdk_http_client = httpx2.AsyncClient(transport=httpx2.ASGITransport(app=proxy_app))
         if sdk_name == "openai":
-            sdk_http_client = httpx.AsyncClient(transport=httpx.ASGITransport(app=proxy_app))
             client = openai.AsyncOpenAI(
                 api_key=shard_a,
                 base_url=proxy_base,
@@ -238,8 +247,6 @@ async def test_base_url_request_transits_proxy_to_upstream(
             # The proxy relayed the mock's real response body back to the SDK.
             assert completion.choices[0].message.content == "Hello from mock upstream!"
         else:
-            # The anthropic SDK moved to httpx2 and rejects httpx objects.
-            sdk_http_client = httpx2.AsyncClient(transport=httpx2.ASGITransport(app=proxy_app))
             client = anthropic.AsyncAnthropic(
                 api_key=shard_a,
                 base_url=proxy_base,
@@ -282,12 +289,15 @@ async def test_base_url_request_transits_proxy_to_upstream(
             )
             assert shard_a != upstream_key, "shard-A leaked to the upstream"
 
-        # --- Witness #2: the PROXY's own meter counted the transit. ---
+        # --- Witness #2: the proxy's spend LEDGER recorded the transit. ---
         async with httpx.AsyncClient(transport=proxy_transport, base_url="http://proxy") as probe:
-            assert await _requests_proxied(probe) == 1, (
-                "proxy /healthz requests_proxied did not tick — the request did "
-                "not pass through the proxy's metering path"
-            )
+            proxied, billed = await _meters(probe)
+        assert billed == 1, (
+            f"proxy spend_log has {billed} row(s); expected 1 — the request did "
+            "not reach the proxy's post-response spend recorder"
+        )
+        # Not independent of witness #1 (see module docstring); a sanity tick only.
+        assert proxied == 1, f"requests_proxied={proxied}; expected 1"
     finally:
         await proxy_app.state.httpx_client.aclose()
         await db.close()
