@@ -17,11 +17,12 @@ The predicate is shared with ``unlock``, ``doctor``, and (future HF5)
 
 from __future__ import annotations
 
+import hmac
 from pathlib import Path
 
 from dotenv import dotenv_values
 
-from worthless.storage.repository import EnrollmentRecord
+from worthless.storage.repository import EnrollmentRecord, ShardRepository
 
 # User-facing phrase tokens. Plain English, no engineer jargon. Tests
 # AND-bind via ``_has_all_tokens``. Reword here only — five files
@@ -129,6 +130,44 @@ def find_orphans(enrollments: list[EnrollmentRecord]) -> list[EnrollmentRecord]:
         if e.var_name not in parsed_cache[e.env_path]:
             orphans.append(e)
     return orphans
+
+
+# WOR-958: what lock still has to do for a key left this way.
+UNLOCKED_FIX_PHRASE = "worthless lock"
+
+
+async def find_unlocked(
+    repo: ShardRepository, enrollments: list[EnrollmentRecord]
+) -> list[EnrollmentRecord]:
+    """Enrollments whose ``.env`` still holds the original key (WOR-958).
+
+    ``lock`` commits the DB, then rewrites ``.env``. A ``kill -9`` between
+    the two leaves the DB saying "locked" over a real key. The stored
+    commitment is HMAC(nonce, original key), kept unencrypted, so this needs
+    no decrypt and no keychain. A real shard A matches only by an HMAC
+    collision, so a healthy key is never reported here.
+    """
+    parsed_cache: dict[str, dict[str, str | None]] = {}
+    unlocked: list[EnrollmentRecord] = []
+    for e in enrollments:
+        if not e.env_path or not Path(e.env_path).is_file():
+            continue
+        if e.env_path not in parsed_cache:
+            parsed_cache[e.env_path] = dotenv_values(e.env_path)
+        value = parsed_cache[e.env_path].get(e.var_name)
+        if not value:
+            continue
+        shard = await repo.fetch_encrypted(e.key_alias)
+        if shard is None:
+            continue
+        candidate = bytearray(value.encode("utf-8"))
+        try:
+            digest = hmac.new(shard.nonce, candidate, "sha256").digest()
+        finally:
+            candidate[:] = b"\0" * len(candidate)
+        if hmac.compare_digest(digest, shard.commitment):
+            unlocked.append(e)
+    return unlocked
 
 
 def format_orphan_error(enrollment: EnrollmentRecord) -> str:

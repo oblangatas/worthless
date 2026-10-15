@@ -121,6 +121,7 @@ def _build_all_checks() -> list:
         service_health,
         stranded_shards,
         unshardable_credentials,
+        unlocked_keys,
     )
 
     return [
@@ -136,6 +137,7 @@ def _build_all_checks() -> list:
         service_health,
         unshardable_credentials,
         dead_proxy_run_dirs,
+        unlocked_keys,
     ]
 
 
