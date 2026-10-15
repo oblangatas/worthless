@@ -2,7 +2,9 @@
 
 Currently handles TWO known shapes:
 
-1. Orphan DB enrollments whose ``.env`` line was deleted by the user (HF7).
+1. Orphan DB enrollments whose ``.env`` line was deleted by the user (HF7),
+   or whose ``.env`` is missing (the project moved or was deleted — reported,
+   never purged: WOR-935).
    The dogfood-discovered stuck state from 2026-04-30:
 
      worthless unlock -> "No enrolled keys found." (silently skips orphan)
@@ -55,12 +57,26 @@ from dotenv import dotenv_values
 from worthless.cli.bootstrap import WorthlessHome, acquire_lock, get_home, _DEFAULT_BASE
 from worthless.cli.platform import read_process_env
 from worthless.cli.process import pid_path, read_pid, resolve_port
+from worthless.cli.commands.doctor.checks.dead_proxy_run_dirs import (
+    STOP_PROXY_FIRST,
+    find_dead_run_dirs,
+    proxy_running,
+    remove_run_dirs,
+)
 from worthless.cli.commands.revoke import _revoke_async
 from worthless.cli.console import WorthlessConsole, get_console
 from worthless._flags import ipc_mode_active
 from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary
 from worthless.cli.keystore import _SERVICE
-from worthless.cli.orphans import FIX_PHRASE, PROBLEM_PHRASE, find_orphans, is_orphan
+from worthless.cli.orphans import (
+    FIX_PHRASE,
+    MOVED_FIX_PHRASE,
+    PROBLEM_PHRASE,
+    env_file_missing,
+    find_orphans,
+    is_orphan,
+    removed_project_advice,
+)
 from worthless.openclaw import integration as _oc_integration
 from worthless.openclaw import skill as _oc_skill
 from worthless.openclaw.errors import OpenclawIntegrationError
@@ -145,8 +161,9 @@ async def _purge_all(
     orphans: list[EnrollmentRecord],
     repo: ShardRepository,
     shard_a_dir: Path,
-) -> int:
-    """Delete each orphan's enrollment row surgically. If an alias has no
+) -> set[tuple[str, str | None]]:
+    """Delete each orphan's enrollment row surgically and return the
+    ``(key_alias, env_path)`` of every row actually deleted. If an alias has no
     enrollments left after the delete, also tear down its shard + spend_log
     + config + shard_a file (the full ``_revoke_async`` path).
 
@@ -159,17 +176,26 @@ async def _purge_all(
     Re-validates the orphan set against the live DB after acquiring the
     lock so stale entries (state shifted between diagnose + confirm) don't
     delete healthy rows.
+
+    Never purges an entry whose ``.env`` file is missing (WOR-935). A moved
+    project takes Shard A with it intact, and purging here would destroy
+    Shard B, the half that was still safe. A deleted project can't be told
+    apart from a moved one, so it is kept too (``revoke`` removes it). Enforced in this
+    function, not in its callers, so every purge path — ``doctor --fix`` and
+    ``doctor --json --fix`` — gets it.
     """
     current = await repo.list_enrollments()
-    still_orphan_keys = {(e.key_alias, e.env_path) for e in find_orphans(current)}
+    still_orphan_keys = {
+        (e.key_alias, e.env_path) for e in find_orphans(current) if not env_file_missing(e)
+    }
 
-    purged = 0
+    purged: set[tuple[str, str | None]] = set()
     aliases_touched: set[str] = set()
     for orphan in orphans:
         if (orphan.key_alias, orphan.env_path) not in still_orphan_keys:
             continue  # state drifted — skip
         if await repo.delete_enrollment(orphan.key_alias, orphan.env_path):
-            purged += 1
+            purged.add((orphan.key_alias, orphan.env_path))
             aliases_touched.add(orphan.key_alias)
 
     # For each touched alias: if zero enrollments remain, tear down the
@@ -183,7 +209,11 @@ async def _purge_all(
 
 
 def _print_orphan_lines(
-    orphans: list[EnrollmentRecord], *, dry_run: bool, show_fix_hint: bool = True
+    orphans: list[EnrollmentRecord],
+    all_enrollments: list[EnrollmentRecord],
+    *,
+    dry_run: bool,
+    show_fix_hint: bool = True,
 ) -> None:
     """One line per orphan, plain English. Phrase tokens come from
     ``worthless.cli.orphans``. ``typer.echo`` because ``WorthlessConsole``
@@ -193,13 +223,23 @@ def _print_orphan_lines(
     point telling the user to run the command they just ran.
     """
     suffix = " (dry-run: no changes)" if dry_run else ""
-    for e in orphans:
-        typer.echo(
-            f"  • {PROBLEM_PHRASE} {e.key_alias}: .env line deleted "
-            f"({e.var_name} -> {e.env_path}){suffix}"
+    missing = [env_file_missing(e) for e in orphans]  # one stat per orphan
+    for e, gone in zip(orphans, missing, strict=True):
+        reason = (
+            ".env not found — the project moved or was removed" if gone else ".env line deleted"
         )
-    if show_fix_hint:
+        typer.echo(
+            f"  • {PROBLEM_PHRASE} {e.key_alias}: {reason} ({e.var_name} -> {e.env_path}){suffix}"
+        )
+    if show_fix_hint and not all(missing):
         typer.echo(f"    fix: run `{FIX_PHRASE}`")
+    # Always shown, --fix and --dry-run included: it isn't "run what you just ran",
+    # --fix never touches these keys, so this is the only way forward for them.
+    if any(missing):
+        typer.echo(f"    {MOVED_FIX_PHRASE}.")
+        for e, gone in zip(orphans, missing, strict=True):
+            if gone:
+                typer.echo(f"    {e.key_alias}: {removed_project_advice(e, all_enrollments)}.")
 
 
 _VERSION_LINE = re.compile(r"^Version:\s*(\S+)\s*$", re.MULTILINE)
@@ -808,19 +848,44 @@ def _print_synced_lines(usernames: list[str], *, dry_run: bool) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _print_dead_run_lines(
+    dead_runs: list[Path], home: WorthlessHome, console: WorthlessConsole, *, show_fix_hint: bool
+) -> None:
+    """worthless-7qb6: name each folder a stopped proxy left holding key shares."""
+    if not dead_runs:
+        return
+    console.print_warning(
+        f"{len(dead_runs)} folder(s) left by a `worthless up` or `wrap` that is no longer running "
+        "still hold both key shares:"
+    )
+    for run_dir in dead_runs:
+        typer.echo(f"    {run_dir}")
+    if proxy_running(home):
+        typer.echo(f"    {STOP_PROXY_FIRST}")
+    elif show_fix_hint:
+        typer.echo("    fix: run `worthless doctor --fix`")
+
+
 def _doctor_confirm(
     orphans: list[EnrollmentRecord],
     synced: list[str],
     yes: bool,
     console: WorthlessConsole,
+    *,
+    dead_runs: list[Path] | None = None,
 ) -> bool:
     """Build and display the combined confirmation prompt. Returns True if the
     user wants to proceed (or --yes was given). False means abort."""
     if yes:
         return True
     prompt_lines = []
-    if orphans:
-        prompt_lines.append(f"Delete {len(orphans)} orphan DB row(s) and their shard files.")
+    purgeable = sum(1 for e in orphans if not env_file_missing(e))
+    if purgeable:
+        prompt_lines.append(f"Delete {purgeable} orphan DB row(s) and their shard files.")
+    if dead_runs:
+        prompt_lines.append(
+            f"Delete {len(dead_runs)} folder(s) left by a stopped proxy (they hold key shares)."
+        )
     if synced:
         n = len(synced)
         prompt_lines.append(
@@ -828,6 +893,8 @@ def _doctor_confirm(
         )
         prompt_lines.append("")
         prompt_lines.append(_MULTI_DEVICE_WARNING)
+    if not prompt_lines:
+        return True  # nothing destructive to confirm — moved keys are only reported
     prompt = "\n".join(prompt_lines) + "\nProceed?"
     proceed = typer.confirm(prompt, default=False)
     if not proceed:
@@ -841,11 +908,30 @@ def _doctor_apply(
     repo: ShardRepository,
     home: WorthlessHome,
     console: WorthlessConsole,
+    *,
+    dead_runs: list[Path] | None = None,
 ) -> None:
-    """Execute the fix actions (purge orphans + migrate synced keys)."""
+    """Execute the fix actions (purge orphans, delete stopped-proxy folders,
+    migrate synced keys)."""
     if orphans:
-        purged = _run_async(_purge_all(orphans, repo, home.shard_a_dir))
-        console.print_success(f"Cleaned up {purged} broken record(s).")
+        purged = len(_run_async(_purge_all(orphans, repo, home.shard_a_dir)))
+        kept = sum(1 for e in orphans if env_file_missing(e))
+        if purged or not kept:
+            console.print_success(f"Cleaned up {purged} broken record(s).")
+        if kept:
+            console.print_hint(
+                f"Kept {kept} key(s) whose .env was not found. {MOVED_FIX_PHRASE}. "
+                "Removed instead? See the advice above for each key."
+            )
+
+    if dead_runs:
+        removed = remove_run_dirs(home, dead_runs)
+        if removed:
+            console.print_success(f"Deleted {len(removed)} folder(s) left by a stopped proxy.")
+        kept = len(dead_runs) - len(removed)
+        if kept:
+            why = STOP_PROXY_FIRST if proxy_running(home) else "In use again or not deletable."
+            console.print_warning(f"Kept {kept} folder(s). {why}")
 
     if synced:
         migrated = _migrate_synced_keys(synced, home)
@@ -948,22 +1034,20 @@ def _doctor_run(*, fix: bool, yes: bool, dry_run: bool) -> None:
         # ----------- check 5: alias-not-in-DB -----------
         had_alias_issues = _check_alias_not_in_db(home, all_enrollments)
 
-        if (
-            not orphans
-            and not openclaw_issues
-            and not synced
-            and not had_mismatch
-            and not had_alias_issues
-        ):
+        # ----------- check 6: folders left by a stopped proxy (worthless-7qb6) -----------
+        dead_runs = find_dead_run_dirs(home)
+
+        if not any((orphans, openclaw_issues, synced, had_mismatch, had_alias_issues, dead_runs)):
             if not imported:
                 console.print_success("No issues found.")
             return
 
         if orphans:
             plural = "s" if len(orphans) != 1 else ""
-            console.print_warning(f"{len(orphans)} broken record{plural} (.env line deleted):")
+            console.print_warning(f"{len(orphans)} broken record{plural}:")
             _print_orphan_lines(
                 orphans,
+                all_enrollments,
                 dry_run=fix and dry_run,
                 show_fix_hint=not fix,
             )
@@ -979,6 +1063,8 @@ def _doctor_run(*, fix: bool, yes: bool, dry_run: bool) -> None:
             if not fix:
                 typer.echo(f"    fix: run `{ICLOUD_FIX_PHRASE}`")
 
+        _print_dead_run_lines(dead_runs, home, console, show_fix_hint=not fix)
+
         if not fix:
             return
 
@@ -988,7 +1074,7 @@ def _doctor_run(*, fix: bool, yes: bool, dry_run: bool) -> None:
             )
             return
 
-        if not _doctor_confirm(orphans, synced, yes, console):
+        if not _doctor_confirm(orphans, synced, yes, console, dead_runs=dead_runs):
             return
 
         # Fresh repo instance: asyncio.run() closes the event loop after
@@ -996,7 +1082,7 @@ def _doctor_run(*, fix: bool, yes: bool, dry_run: bool) -> None:
         # call fails on Linux. A new instance avoids the closed-loop error.
         fix_repo = ShardRepository(str(home.db_path), home.fernet_key)
         try:
-            _doctor_apply(orphans, synced, fix_repo, home, console)
+            _doctor_apply(orphans, synced, fix_repo, home, console, dead_runs=dead_runs)
         finally:
             fix_repo.close()  # worthless-g648
 

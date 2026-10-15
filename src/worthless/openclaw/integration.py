@@ -24,6 +24,7 @@ Predicate" and §"Failure modes" rows F01–F04, F36.
 
 from __future__ import annotations
 
+import contextlib
 import hmac
 import ipaddress
 import json
@@ -33,6 +34,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1018,8 +1020,8 @@ def rollback_config(config_path: Path | None, original_config: dict | None) -> N
     Raises :class:`OSError` on disk-full or permission failure — the caller
     surfaces both the original write error and the rollback error via events.
     """
-    if config_path is None:
-        return
+    if config_path is None or isinstance(original_config, _UnreadSnapshot):
+        return  # never restore a snapshot we could not read: that wrote {}
     if original_config is None:
         # File was absent before this lock attempt — delete any partial file
         # written before the failure rather than leaving {} on disk.
@@ -1242,6 +1244,105 @@ def _apply_lock_write_providers(
     return False  # no rollback needed
 
 
+class _UnreadSnapshot(dict):
+    """An openclaw.json that existed but could not be read before the lock.
+
+    Behaves as ``{}`` everywhere, but is never restored over the file: that
+    replaced every entry the user had with ``{}`` (worthless-2nta).
+    """
+
+
+def _apply_lock_stage_a(
+    config_path: Path,
+    resolved_proxy_base_url: str,
+    planned_updates: list[tuple[str, str, str]],
+    events: list[OpenclawIntegrationEvent],
+    providers_set: list[str],
+    providers_skipped: list[tuple[str, str]],
+    policy: AdoptionPolicy | None,
+    *,
+    original_config: dict | None,
+) -> bool:
+    """Stage A(pre) + A; on an interrupt, undo this run's own provider writes.
+
+    The legacy-decoy migration (Stage A(pre)) is not undone. Extracted to keep
+    :func:`apply_lock` within xenon's complexity budget.
+
+    Returns ``True`` when a write failure needs the transactional rollback.
+    An interrupt (Ctrl-C between two provider writes, worthless-2nta) would
+    otherwise leave openclaw.json half switched. *original_config* is the
+    pre-write snapshot (an :class:`_UnreadSnapshot` when it could not be read).
+    """
+    try:
+        if _apply_lock_migrate_legacy_decoy(
+            config_path, resolved_proxy_base_url, planned_updates, events
+        ):
+            return True
+        return _apply_lock_write_providers(
+            config_path,
+            resolved_proxy_base_url,
+            planned_updates,
+            events,
+            providers_set,
+            providers_skipped,
+            policy,
+        )
+    except BaseException:
+        _undo_own_provider_writes(
+            config_path, original_config, resolved_proxy_base_url, planned_updates
+        )
+        raise
+
+
+_UNDO_BUDGET_S = 2.0  # after a Ctrl-C a second press is ignored: never wait longer
+
+
+def _undo_own_provider_writes(
+    config_path: Path,
+    original_config: dict | None,
+    resolved_proxy_base_url: str,
+    planned_updates: list[tuple[str, str, str]],
+) -> None:
+    """Put back the entries this lock wrote, and nothing else (worthless-2nta).
+
+    Never a whole-file restore: that erased other writers' changes and wrote
+    ``{}`` over files we could not parse. An entry is reverted only while it
+    still points at this lock's proxy alias (a later change by anyone else is
+    kept), and only to a pre-lock entry that was not already ours (on a
+    re-lock the old entry carries a stale key half: ours is the right one).
+    Without a readable snapshot nothing is reverted. Each revert is a
+    compare-and-swap under the flock, all within :data:`_UNDO_BUDGET_S`: a
+    config lock held elsewhere stops the undo instead of hanging it (the
+    entries stay; the lock's interrupt message points at doctor). Best
+    effort: a failure here must not mask the interrupt that brought us here.
+    """
+    if isinstance(original_config, _UnreadSnapshot):
+        return
+    # None: no openclaw.json before the lock (a first lock), so nothing was there.
+    prior = _config_mod._providers_view(original_config or {}, strict=False) or {}
+    base = resolved_proxy_base_url.rstrip("/")
+    deadline = time.monotonic() + _UNDO_BUDGET_S
+    for provider, alias, _shard_a in planned_updates:
+        ours = f"{base}/{alias}/v1"
+        before = prior.get(provider)
+        before_url = before.get("baseUrl") if isinstance(before, dict) else None
+        if (
+            isinstance(before_url, str)
+            and _is_proxy_url(before_url, resolved_proxy_base_url)
+            and before_url.rstrip("/").endswith(f"/{alias}/v1")
+        ):
+            continue  # ours before too (any proxy host): keep the new key half
+        with contextlib.suppress(OpenclawConfigError, OSError):
+            if not _config_mod.revert_provider_if_ours(
+                config_path,
+                provider,
+                ours_base_url=ours,
+                prior=before if isinstance(before, dict) else None,
+                deadline=deadline,
+            ):
+                return  # lock held elsewhere past the budget: leave the rest
+
+
 def _apply_lock_rollback(
     config_path: Path,
     original_config: dict | None,
@@ -1255,7 +1356,25 @@ def _apply_lock_rollback(
     rollback itself fails (double-fault). Marks written providers as
     rolled_back in providers_skipped and clears providers_set.
     Extracted to keep :func:`apply_lock` within xenon's complexity budget.
+
+    With no readable snapshot there is nothing safe to restore: restoring the
+    placeholder ``{}`` erased every entry the user had (worthless-2nta).
     """
+    if isinstance(original_config, _UnreadSnapshot):
+        events.append(
+            OpenclawIntegrationEvent(
+                code=OpenclawErrorCode.WRITE_FAILED,
+                level="error",
+                detail=(
+                    f"could not roll back {config_path}: it was unreadable before the "
+                    "lock, so it was left as is — run `worthless doctor`"
+                ),
+                extra={"path": str(config_path)},
+            )
+        )
+        # The writes made so far stay in the file: they still count as written,
+        # so the later stages scrub the real key from OpenClaw's agent caches.
+        return
     try:
         rollback_config(config_path, original_config)
     except OSError as rb_exc:
@@ -2060,10 +2179,10 @@ def apply_lock(
                 except PermissionError:
                     pass  # directory also locked → proceed, write will hit WRITE_FAILED
             # All other read failures: proceed; set_provider surfaces WRITE_FAILED.
-            original_config = {}
+            original_config = _UnreadSnapshot()
         except Exception:
             # Other exceptions (JSON decode error, OS error, etc.): proceed.
-            original_config = {}
+            original_config = _UnreadSnapshot()
 
     _check_world_writable(config_path, events)
 
@@ -2112,33 +2231,23 @@ def apply_lock(
             events=tuple(events),
         )
 
-    # ---- Stage A(pre): heal legacy decoy layout (WOR-656 F6) -------------
-    # Old installs wrote a separate ``worthless-<p>`` decoy beside the
-    # untouched original ``<p>``. Delete our stale decoy (and repoint a
-    # decoy-pointing default model) BEFORE Stage A rewrites the original in
-    # place. Runs under apply_lock's existing ``original_config`` rollback
-    # umbrella, so a mid-migration write failure restores byte-identically and
-    # Stage A is skipped.
-    rollback_needed = _apply_lock_migrate_legacy_decoy(
+    # ---- Stage A(pre) + A: heal the legacy decoy layout, write providers ---
+    # Old installs wrote a separate ``worthless-<p>`` decoy beside the original
+    # ``<p>``; it is deleted (and a decoy-pointing default model repointed)
+    # before the originals are rewritten in place (WOR-656 F6). A write failure
+    # takes _apply_lock_rollback below; an interrupt undoes this run's provider
+    # writes only, so a migrated decoy stays migrated (it was stale anyway).
+    # F-CFG-13 / DV-01/DV-02 handling is inside _apply_lock_write_providers.
+    rollback_needed = _apply_lock_stage_a(
         config_path,
         resolved_proxy_base_url,
         planned_updates,
         events,
+        providers_set,
+        providers_skipped,
+        adoption_policy,
+        original_config=original_config,
     )
-
-    # ---- Stage A: write providers ----------------------------------------
-    # F-CFG-13 / DV-01/DV-02 handling is inside _apply_lock_write_providers.
-    # Extracted to keep apply_lock within xenon's complexity budget (rank C).
-    if not rollback_needed:
-        rollback_needed = _apply_lock_write_providers(
-            config_path,
-            resolved_proxy_base_url,
-            planned_updates,
-            events,
-            providers_set,
-            providers_skipped,
-            adoption_policy,
-        )
 
     # ---- Transactional rollback on write failure -------------------------
     if rollback_needed:

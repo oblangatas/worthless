@@ -43,6 +43,8 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import pty
+import select
 import signal
 import sqlite3
 import subprocess
@@ -867,9 +869,9 @@ class TestSigtermStorm:
 
 class TestMashedSigint:
     def test_mashed_sigint(self, tmp_path: Path, seam: float) -> None:
-        """A burst of 5 SIGINTs ~5ms apart must NOT defeat the one-shot handler.
+        """A burst of 5 SIGINTs ~5ms apart must NOT defeat the handler (it never cancels twice).
 
-        Part-1 arms a one-shot handler; a panicked operator mashing Ctrl-C must not
+        The handler cancels once; a panicked operator mashing Ctrl-C must not
         re-enter cleanup or leave a torn state. Invariant still holds.
         """
         n_keys = 2
@@ -1310,8 +1312,9 @@ class TestSigkillAtomicity:
 #
 # The two real places the lock went deaf to Ctrl-C, driven end to end: the
 # up-to-15s wait for OpenClaw's gateway to reload, and the unbounded wait for
-# OpenClaw's config-file lock. Both come after the keys are committed, so the
-# contract is: answer within TAIL_DEADLINE, exit 130, keys stay LOCKED.
+# worthless's own lock on openclaw.json (another worthless process holding it).
+# Both come after the keys are committed, so the contract is: answer within
+# TAIL_DEADLINE, exit 130, keys stay LOCKED.
 #
 # No ``seam``: a fake ``openclaw`` (reached only via WORTHLESS_OPENCLAW_BIN,
 # never PATH) logs each call, so the test signals once the lock has provably
@@ -1372,8 +1375,14 @@ def _call_count(calls: Path, subcommand: str) -> int:
         return 0
 
 
-def _ctrl_c_once(te: TrialEnv, env: dict[str, str], reached: Callable[[], bool], where: str) -> int:
-    """Run the real lock; Ctrl-C it once ``reached()`` says it is in *where*.
+def _ctrl_c_once(
+    te: TrialEnv,
+    env: dict[str, str],
+    reached: Callable[[], bool],
+    where: str,
+    sig: int = signal.SIGINT,
+) -> int:
+    """Run the real lock; send *sig* (default Ctrl-C) once ``reached()`` says it is in *where*.
 
     Returns the exit code. Fails if the press is not answered within TAIL_DEADLINE.
     """
@@ -1381,8 +1390,8 @@ def _ctrl_c_once(te: TrialEnv, env: dict[str, str], reached: Callable[[], bool],
     try:
         _wait_until(proc, te, reached, where)
         time.sleep(0.3)  # settle INTO the blocking call, not merely past the marker
-        _kill_group(proc, signal.SIGINT)
-        _await_exit(proc, te, f"Ctrl-C ignored in {where} (worthless-3clz)", TAIL_DEADLINE)
+        _kill_group(proc, sig)
+        _await_exit(proc, te, f"{signal.Signals(sig).name} ignored in {where}", TAIL_DEADLINE)
     finally:
         survived = _reap(proc)
     if survived:
@@ -1390,10 +1399,10 @@ def _ctrl_c_once(te: TrialEnv, env: dict[str, str], reached: Callable[[], bool],
     return proc.returncode
 
 
-def _assert_answered_and_kept(te: TrialEnv, rc: int) -> None:
-    """The lock exited 130 and left the keys fully LOCKED, never partial."""
+def _assert_answered_and_kept(te: TrialEnv, rc: int, sig: int = signal.SIGINT) -> None:
+    """The lock exited 128 + *sig* and left the keys fully LOCKED, never partial."""
     state = classify(te)
-    assert rc == 130, f"Ctrl-C should exit 130 (interrupted), got {rc}\n{_stderr_tail(te)}"
+    assert rc == 128 + sig, f"expected exit {128 + sig} for {sig!r}, got {rc}\n{_stderr_tail(te)}"
     assert state.classification == "locked", (
         "the keys were already committed, so Ctrl-C must leave them LOCKED — never "
         f"unwind rows the rewritten .env needs.\n  {state.detail}\n{_stderr_tail(te)}"
@@ -1462,8 +1471,17 @@ class TestRefusedPostflightKeepsKeys:
 
 
 class TestCtrlCDuringOpenclawReloadWait:
-    def test_ctrl_c_during_reload_wait_is_answered(self, tmp_path: Path, proxy_port: int) -> None:
-        """Ctrl-C during the up-to-15s OpenClaw reload wait is answered within TAIL_DEADLINE."""
+    @pytest.mark.parametrize(
+        "sig", [signal.SIGINT, signal.SIGTERM, signal.SIGHUP], ids=["SIGINT", "SIGTERM", "SIGHUP"]
+    )
+    def test_ctrl_c_during_reload_wait_is_answered(
+        self, sig: int, tmp_path: Path, proxy_port: int
+    ) -> None:
+        """A signal during the up-to-15s reload wait is answered within TAIL_DEADLINE.
+
+        SIGTERM is ``docker stop`` (exit 143, worthless-dnp9); SIGHUP is a closed
+        terminal (exit 129, worthless-v9gg).
+        """
         for trial in range(TAIL_TRIALS):
             te = _make_trial_env(tmp_path, trial, n_keys=1)
             env, calls = _with_openclaw(te, proxy_port)
@@ -1472,15 +1490,108 @@ class TestCtrlCDuringOpenclawReloadWait:
                 env,
                 lambda c=calls: _call_count(c, "logs") >= 1,  # polled for a reload once
                 "the OpenClaw reload wait",
+                sig,
             )
-            _assert_answered_and_kept(te, rc)
+            _assert_answered_and_kept(te, rc, sig)
+
+
+class TestTerminalClosedMidLock:
+    def test_closing_the_real_terminal_is_answered_with_129(
+        self, tmp_path: Path, proxy_port: int
+    ) -> None:
+        """worthless-v9gg, real pty: closing the terminal (the kernel's SIGHUP) mid-lock.
+
+        The lock runs on a pseudo-terminal and the terminal's master side is
+        closed in the reload wait, as when a window is closed. Every later write
+        to the dead terminal fails; Python exited 120 flushing stdout.
+        """
+        te = _make_trial_env(tmp_path, 0, n_keys=1)
+        env, calls = _with_openclaw(te, proxy_port)
+        pid, fd = pty.fork()
+        if pid == 0:  # pragma: no cover — the child execs the real CLI
+            # Never fall back into pytest: a forked copy of an xdist worker that
+            # returns here would write to the worker's channel and kill the node.
+            try:
+                os.chdir(str(te.repo))
+                argv = [*_cli(), "lock", "--env", str(te.env_file)]
+                os.execve(argv[0], argv, env)  # noqa: S606 — exec the real CLI, no shell
+            finally:
+                os._exit(127)
+        status = None
+        closed = False
+        seen = bytearray()  # what the lock printed, for a failure message
+        # Reaching the reload wait is setup, not the contract: a cold start on a
+        # loaded box can take a while. Answering after the close is the
+        # contract, and gets its own strict TAIL_DEADLINE below.
+        deadline = time.monotonic() + 2 * WAIT_TIMEOUT
+        try:
+            while time.monotonic() < deadline:
+                if not closed:
+                    with contextlib.suppress(OSError):
+                        if select.select([fd], [], [], 0.05)[0]:
+                            seen.extend(os.read(fd, 65536))  # drain, or the child blocks
+                    if _call_count(calls, "logs") >= 1:
+                        time.sleep(0.3)
+                        os.close(fd)  # the window closes: the kernel sends SIGHUP
+                        closed = True
+                        deadline = time.monotonic() + TAIL_DEADLINE
+                else:
+                    time.sleep(0.05)
+                wpid, st = os.waitpid(pid, os.WNOHANG)
+                if wpid == pid:
+                    status = st
+                    break
+        finally:
+            if status is None:
+                os.kill(pid, signal.SIGKILL)
+                os.waitpid(pid, 0)
+            if not closed:
+                os.close(fd)
+        calls_seen = calls.read_text() if calls.exists() else "(no calls)"
+        assert closed, (
+            "the lock never reached the reload wait\n"
+            f"openclaw calls: {calls_seen.split()}\n"
+            f"lock output tail: {bytes(seen[-1500:]).decode('utf-8', 'replace')}"
+        )
+        assert status is not None, "the lock outlived its closed terminal"
+        assert os.WIFEXITED(status), f"killed by a signal, not exited: status={status!r}"
+        assert os.WEXITSTATUS(status) == 129, f"exit={os.WEXITSTATUS(status)}"
+        state = classify(te)
+        assert state.classification == "locked", state.detail
+
+
+class TestSignalDuringPreflightAudit:
+    @pytest.mark.parametrize("sig", [signal.SIGINT, signal.SIGTERM], ids=["SIGINT", "SIGTERM"])
+    def test_signal_during_preflight_audit_is_answered(
+        self, sig: int, tmp_path: Path, proxy_port: int
+    ) -> None:
+        """worthless-595v, real CLI: the pre-flight audit is answered, never retried.
+
+        The fake's audit sleeps (self-terminating). Before any write, so the disk
+        must stay clean and the exit is 128 + sig.
+        """
+        te = _make_trial_env(tmp_path, 0, n_keys=1)
+        env, calls = _with_openclaw(te, proxy_port)
+        fake = Path(env["WORTHLESS_OPENCLAW_BIN"])
+        fake.write_text(
+            "#!/bin/sh\n"
+            f"echo \"$1\" >> '{calls}'\n"
+            f"if [ \"$1\" = secrets ]; then sleep 5; echo '{_CLEAN_AUDIT}'; fi\n"
+        )
+        rc = _ctrl_c_once(
+            te, env, lambda: _call_count(calls, "secrets") >= 1, "the pre-flight audit", sig
+        )
+        state = classify(te)
+        assert rc == 128 + sig, f"got {rc}\n{_stderr_tail(te)}"
+        assert _call_count(calls, "secrets") == 1, "the audit was retried after the signal"
+        assert state.classification == "clean", f"{state.detail}\n{_stderr_tail(te)}"
 
 
 class TestCtrlCWhileOpenclawConfigIsLocked:
     def test_ctrl_c_while_config_lock_is_held_is_answered(
         self, tmp_path: Path, proxy_port: int
     ) -> None:
-        """Ctrl-C while another process holds OpenClaw's config lock is answered."""
+        """Ctrl-C while another worthless process holds the openclaw.json lock is answered."""
         for trial in range(TAIL_TRIALS):
             te = _make_trial_env(tmp_path, trial, n_keys=1)
             env, _calls = _with_openclaw(te, proxy_port)
@@ -1491,6 +1602,6 @@ class TestCtrlCWhileOpenclawConfigIsLocked:
                     env,
                     # keys committed; the next step is the OpenClaw config write
                     lambda t=te: _env_state(t) == "locked",
-                    "the OpenClaw config-lock wait",
+                    "the wait for the openclaw.json lock",
                 )
             _assert_answered_and_kept(te, rc)

@@ -33,6 +33,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 
 # fcntl is POSIX-only. worthless refuses native Windows (WRTLS-110) but the
 # module must still be *importable* on Windows so the CLI can print the error.
@@ -185,7 +186,7 @@ def _providers_view(data: dict[str, Any], *, strict: bool) -> dict[str, Any] | N
 
 
 @contextlib.contextmanager
-def _file_lock(target: Path) -> Iterator[None]:
+def _file_lock(target: Path, deadline: float | None = None) -> Iterator[None]:
     """Acquire an exclusive ``flock`` for the duration of a read-modify-write.
 
     ``os.replace`` guarantees no torn file but does NOT prevent lost updates
@@ -199,18 +200,37 @@ def _file_lock(target: Path) -> Iterator[None]:
 
     Unix-only: ``worthless`` refuses native Windows (WRTLS-110); WSL works
     because it's Linux to ``fcntl``.
+
+    With a *deadline* (``time.monotonic()``) the lock is tried non-blocking
+    until then, raising :class:`TimeoutError`: for callers that must never
+    wait indefinitely (the undo after a Ctrl-C, worthless-2nta).
     """
     target.parent.mkdir(parents=True, exist_ok=True)
     lock_path = target.parent / f".{target.name}.lock"
     fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o600)
     try:
-        _fcntl.flock(fd, _fcntl.LOCK_EX)  # type: ignore[union-attr]
+        if deadline is None:
+            _fcntl.flock(fd, _fcntl.LOCK_EX)  # type: ignore[union-attr]
+        else:
+            _flock_until(fd, deadline)
         try:
             yield
         finally:
             _fcntl.flock(fd, _fcntl.LOCK_UN)  # type: ignore[union-attr]
     finally:
         os.close(fd)
+
+
+def _flock_until(fd: int, deadline: float) -> None:
+    """Take an exclusive flock on *fd*, retrying until *deadline*; else TimeoutError."""
+    while True:
+        try:
+            _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)  # type: ignore[union-attr]
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("openclaw.json lock held elsewhere") from None
+            time.sleep(0.05)
 
 
 def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
@@ -437,6 +457,43 @@ def unset_models_json_provider(path: Path, provider: str) -> dict[str, Any]:
         removed = providers.pop(provider)
         _atomic_write_json(path, data)
         return removed if isinstance(removed, dict) else {}
+
+
+def revert_provider_if_ours(
+    path: Path,
+    provider: str,
+    *,
+    ours_base_url: str,
+    prior: dict[str, Any] | None,
+    deadline: float,
+) -> bool:
+    """Undo a provider write, but only while the entry is still ours.
+
+    Under the flock, compare-and-swap: if ``models.providers.<provider>``
+    still points at *ours_base_url*, put *prior* back (or remove the entry
+    when *prior* is ``None``); otherwise leave it, since someone changed it.
+
+    The flock is taken non-blocking until *deadline* (``time.monotonic()``):
+    this runs after a Ctrl-C, when a second press is ignored, so it must
+    never wait on another process indefinitely. Returns ``False`` when the
+    lock could not be had in time (nothing written), ``True`` otherwise.
+    """
+    try:
+        with _file_lock(path, deadline=deadline):
+            _refuse_if_symlink(path)
+            data = read_config(path)
+            providers = _providers_view(data, strict=False) if data else None
+            current = providers.get(provider) if providers else None
+            if not isinstance(current, dict) or current.get("baseUrl") != ours_base_url:
+                return True
+            if prior is None:
+                providers.pop(provider)  # type: ignore[union-attr]
+            else:
+                providers[provider] = prior  # type: ignore[index]
+            _atomic_write_json(path, data)
+            return True
+    except TimeoutError:
+        return False
 
 
 def replace_provider(path: Path, provider: str, entry: dict[str, Any]) -> None:
