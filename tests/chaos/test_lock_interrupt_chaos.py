@@ -1312,8 +1312,9 @@ class TestSigkillAtomicity:
 #
 # The two real places the lock went deaf to Ctrl-C, driven end to end: the
 # up-to-15s wait for OpenClaw's gateway to reload, and the unbounded wait for
-# OpenClaw's config-file lock. Both come after the keys are committed, so the
-# contract is: answer within TAIL_DEADLINE, exit 130, keys stay LOCKED.
+# worthless's own lock on openclaw.json (another worthless process holding it).
+# Both come after the keys are committed, so the contract is: answer within
+# TAIL_DEADLINE, exit 130, keys stay LOCKED.
 #
 # No ``seam``: a fake ``openclaw`` (reached only via WORTHLESS_OPENCLAW_BIN,
 # never PATH) logs each call, so the test signals once the lock has provably
@@ -1518,17 +1519,22 @@ class TestTerminalClosedMidLock:
                 os._exit(127)
         status = None
         closed = False
-        deadline = time.monotonic() + WAIT_TIMEOUT
+        seen = bytearray()  # what the lock printed, for a failure message
+        # Reaching the reload wait is setup, not the contract: a cold start on a
+        # loaded box can take a while. Answering after the close is the
+        # contract, and gets its own strict TAIL_DEADLINE below.
+        deadline = time.monotonic() + 2 * WAIT_TIMEOUT
         try:
             while time.monotonic() < deadline:
                 if not closed:
                     with contextlib.suppress(OSError):
                         if select.select([fd], [], [], 0.05)[0]:
-                            os.read(fd, 65536)  # drain, or the child blocks writing
+                            seen.extend(os.read(fd, 65536))  # drain, or the child blocks
                     if _call_count(calls, "logs") >= 1:
                         time.sleep(0.3)
                         os.close(fd)  # the window closes: the kernel sends SIGHUP
                         closed = True
+                        deadline = time.monotonic() + TAIL_DEADLINE
                 else:
                     time.sleep(0.05)
                 wpid, st = os.waitpid(pid, os.WNOHANG)
@@ -1541,11 +1547,15 @@ class TestTerminalClosedMidLock:
                 os.waitpid(pid, 0)
             if not closed:
                 os.close(fd)
-        assert closed, "the lock never reached the reload wait"
-        assert status is not None, "the lock outlived its closed terminal"
-        assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 129, (
-            f"status={status!r} exit={os.WEXITSTATUS(status) if os.WIFEXITED(status) else None}"
+        calls_seen = calls.read_text() if calls.exists() else "(no calls)"
+        assert closed, (
+            "the lock never reached the reload wait\n"
+            f"openclaw calls: {calls_seen.split()}\n"
+            f"lock output tail: {bytes(seen[-1500:]).decode('utf-8', 'replace')}"
         )
+        assert status is not None, "the lock outlived its closed terminal"
+        assert os.WIFEXITED(status), f"killed by a signal, not exited: status={status!r}"
+        assert os.WEXITSTATUS(status) == 129, f"exit={os.WEXITSTATUS(status)}"
         state = classify(te)
         assert state.classification == "locked", state.detail
 
@@ -1581,7 +1591,7 @@ class TestCtrlCWhileOpenclawConfigIsLocked:
     def test_ctrl_c_while_config_lock_is_held_is_answered(
         self, tmp_path: Path, proxy_port: int
     ) -> None:
-        """Ctrl-C while another process holds OpenClaw's config lock is answered."""
+        """Ctrl-C while another worthless process holds the openclaw.json lock is answered."""
         for trial in range(TAIL_TRIALS):
             te = _make_trial_env(tmp_path, trial, n_keys=1)
             env, _calls = _with_openclaw(te, proxy_port)
@@ -1592,6 +1602,6 @@ class TestCtrlCWhileOpenclawConfigIsLocked:
                     env,
                     # keys committed; the next step is the OpenClaw config write
                     lambda t=te: _env_state(t) == "locked",
-                    "the OpenClaw config-lock wait",
+                    "the wait for the openclaw.json lock",
                 )
             _assert_answered_and_kept(te, rc)

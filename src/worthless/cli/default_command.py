@@ -287,10 +287,10 @@ def run_default(
         _report_json(home)
         return
 
-    try:
-        _run_enrollment_if_needed(home, console, interactive=interactive, yes=yes)
-    except typer.Exit:
-        return
+    # Its typer.Exit propagates: a decline exits 0, and a failed or interrupted
+    # lock (73, 87, 129, 130, 143) keeps its code, so scripts never read success
+    # after LOCK FAILED or Ctrl-C (nhc0). Either way the proxy does not start.
+    _run_enrollment_if_needed(home, console, interactive=interactive, yes=yes)
 
     running, _pid, port = _ensure_proxy_running(home, console)
 

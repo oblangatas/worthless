@@ -29,7 +29,7 @@ from worthless.cli.platform import is_wsl
 from worthless.cli.redaction import key_fingerprint
 from worthless.cli.dotenv_rewriter import build_enrolled_locations
 from worthless.cli.keystore import PLACEHOLDER_FERNET_KEY
-from worthless.cli.orphans import FIX_PHRASE, PROBLEM_PHRASE, find_orphans
+from worthless.cli.orphans import FIX_PHRASE, MOVED_FIX_PHRASE, PROBLEM_PHRASE, find_orphans
 from worthless.cli.process import disable_core_dumps
 from worthless.cli.scanner import (
     HardcodedUrlFinding,
@@ -331,9 +331,12 @@ def _orphan_lines(orphans: Sequence[EnrollmentRecord]) -> list[str]:
     """
     if not orphans:
         return []
-    out = ["", f"{PROBLEM_PHRASE.capitalize()} these keys (.env line deleted):"]
+    out = ["", f"{PROBLEM_PHRASE.capitalize()} these keys (.env line or file missing):"]
     out.extend(f"  {o.key_alias}  BROKEN  ({o.var_name} -> {o.env_path})" for o in orphans)
-    out.append(f"  Run `{FIX_PHRASE}` to clean up.")
+    out.append(
+        f"  Run `{FIX_PHRASE}` to clean up deleted lines. A key whose .env is missing"
+        f" is kept. {MOVED_FIX_PHRASE}."
+    )
     return out
 
 
