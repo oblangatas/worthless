@@ -59,7 +59,7 @@ The audit is skipped when OpenClaw is not installed, so non-OpenClaw users never
 >
 > **Upgrading an existing deployment?** Re-download `docker-compose.yml` (OpenClaw now needs `group_add`), pull the new image, `docker compose --profile openclaw up -d`, then re-run step 2.
 
-**Before you start:** Lock must run before OpenClaw starts. Once OpenClaw has started it locks down its config directory and a subsequent `worthless lock` cannot write to it. If you need to re-lock (e.g. to rotate a key), stop openclaw first: `docker compose stop openclaw`, then lock, then `docker compose start openclaw`.
+**Before you start:** Run lock before OpenClaw starts, so OpenClaw reads the rewritten config on its first boot. To re-lock later (e.g. to rotate a key), stop openclaw first: `docker compose stop openclaw`, then lock, then `docker compose start openclaw`.
 
 **1. Start the proxy first (openclaw comes after)**
 
