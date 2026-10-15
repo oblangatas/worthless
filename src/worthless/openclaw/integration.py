@@ -1977,42 +1977,56 @@ def _share_openclaw_tree(root: Path | None) -> None:
         return
     if not stat.S_ISDIR(root_st.st_mode):
         return
-    is_root = os.geteuid() == 0
     owner = (root_st.st_uid, root_st.st_gid)
-
-    def _share_fd(fd: int) -> None:
-        st = os.fstat(fd)
-        if is_root and (st.st_uid, st.st_gid) != owner:
-            os.fchown(fd, *owner)
-            st = os.fstat(fd)  # chown cleared setuid/setgid; don't restore them
-        if stat.S_ISDIR(st.st_mode):
-            os.fchmod(fd, (st.st_mode & 0o7777) | stat.S_IRWXG)
-        elif stat.S_ISREG(st.st_mode):
-            # Never leave a setuid/setgid file in a volume another container
-            # writes (security review: a planted 4755 would become setuid-10001).
-            mode = st.st_mode & 0o7777 & ~(stat.S_ISUID | stat.S_ISGID)
-            os.fchmod(fd, mode | stat.S_IRGRP | stat.S_IWGRP)
-
-    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    is_root = os.geteuid() == 0
     try:
         for _dirpath, _dirnames, filenames, dirfd in os.fwalk(root, follow_symlinks=False):
-            try:
-                _share_fd(dirfd)
-            except OSError:
-                pass
+            _share_fd_quietly(dirfd, owner, is_root)
             for name in filenames:
-                try:
-                    fd = os.open(name, flags, dir_fd=dirfd)
-                except OSError:
-                    continue  # symlink (ELOOP), vanished, or unreadable — skip
-                try:
-                    _share_fd(fd)
-                except OSError:
-                    pass
-                finally:
-                    os.close(fd)
+                _share_entry(name, dirfd, owner, is_root)
     except OSError:
         return  # best-effort; OpenClaw reports anything it still can't open
+
+
+_SHARE_OPEN_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+
+
+def _share_entry(name: str, dirfd: int, owner: tuple[int, int], is_root: bool) -> None:
+    """Open ``name`` relative to its parent fd without following a symlink."""
+    try:
+        fd = os.open(name, _SHARE_OPEN_FLAGS, dir_fd=dirfd)
+    except OSError:
+        return  # symlink (ELOOP), vanished, or unreadable — skip
+    try:
+        _share_fd_quietly(fd, owner, is_root)
+    finally:
+        os.close(fd)
+
+
+def _share_fd_quietly(fd: int, owner: tuple[int, int], is_root: bool) -> None:
+    try:
+        _share_fd(fd, owner, is_root)
+    except OSError:
+        pass
+
+
+def _share_fd(fd: int, owner: tuple[int, int], is_root: bool) -> None:
+    """Re-own (root only) and grant the volume's group access, on an open fd."""
+    st = os.fstat(fd)
+    if is_root and (st.st_uid, st.st_gid) != owner:
+        os.fchown(fd, *owner)
+        st = os.fstat(fd)  # chown cleared setuid/setgid; don't restore them
+    # Group rw IS the design here: the volume's group is exactly the proxy and
+    # the openclaw container (WOR-510). "Other" bits are never added.
+    if stat.S_ISDIR(st.st_mode):
+        # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
+        os.fchmod(fd, (st.st_mode & 0o7777) | stat.S_IRWXG)
+    elif stat.S_ISREG(st.st_mode):
+        # Never leave a setuid/setgid file in a volume another container
+        # writes (security review: a planted 4755 would become setuid-10001).
+        mode = st.st_mode & 0o7777 & ~(stat.S_ISUID | stat.S_ISGID)
+        # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
+        os.fchmod(fd, mode | stat.S_IRGRP | stat.S_IWGRP)
 
 
 @_shares_openclaw_tree_on_exit

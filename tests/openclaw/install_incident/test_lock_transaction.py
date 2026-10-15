@@ -172,6 +172,61 @@ def test_ac3_shared_tree_never_follows_symlinks_out(openclaw_config, mock_state,
     assert secret.stat().st_mode & 0o777 == 0o600, "symlink target outside must be untouched"
 
 
+def test_share_fd_as_root_reowns_to_volume_owner(tmp_path):
+    """Root path (the real compose case): re-own to the volume dir's uid:gid,
+    re-read the mode after chown, then add group rw."""
+    f = tmp_path / "root-created.json"
+    f.write_text("{}")
+    f.chmod(0o600)
+    st = f.stat()
+    volume_owner = (st.st_uid + 1, st.st_gid + 1)
+
+    fd = os.open(f, os.O_RDONLY)
+    try:
+        with patch("os.fchown") as fchown:
+            _integration._share_fd(fd, volume_owner, is_root=True)
+    finally:
+        os.close(fd)
+
+    fchown.assert_called_once()
+    assert fchown.call_args.args[1:] == volume_owner
+    assert f.stat().st_mode & 0o777 == 0o660
+
+
+def test_share_tree_ignores_missing_or_non_dir_root(tmp_path):
+    f = tmp_path / "not-a-dir"
+    f.write_text("x")
+    f.chmod(0o600)
+    with patch.dict(os.environ, {"WORTHLESS_OPENCLAW_CONFIG_SHARED": "1"}):
+        _integration._share_openclaw_tree(tmp_path / "missing")
+        _integration._share_openclaw_tree(f)
+        _integration._share_openclaw_tree(None)
+    assert f.stat().st_mode & 0o777 == 0o600
+
+
+def test_share_tree_is_best_effort(tmp_path):
+    """A walk or per-entry OSError (vanished file, EPERM) must never raise."""
+    (tmp_path / "f").write_text("x")
+    with patch.dict(os.environ, {"WORTHLESS_OPENCLAW_CONFIG_SHARED": "1"}):
+        with patch.object(_integration, "_share_fd", side_effect=PermissionError):
+            _integration._share_openclaw_tree(tmp_path)
+        with patch("os.fwalk", side_effect=OSError("gone")):
+            _integration._share_openclaw_tree(tmp_path)
+
+
+def test_share_on_exit_never_masks_the_result(openclaw_config, mock_state):
+    """The tree normalisation runs in ``finally`` — its own failure must not
+    replace lock's real result."""
+    with patch.object(_integration, "detect", return_value=mock_state):
+        with patch.dict(os.environ, {"WORTHLESS_OPENCLAW_CONFIG_SHARED": "1"}):
+            with patch.object(
+                _integration, "_share_openclaw_tree", side_effect=RuntimeError("walk blew up")
+            ):
+                result = _integration.apply_lock(PLANNED, proxy_base_url=PROXY_URL)
+
+    assert not result.has_failure
+
+
 def test_ac3_no_shared_env_leaves_tree_permissions_alone(openclaw_config, mock_state):
     sub = openclaw_config.parent / "agents" / "main"
     sub.mkdir(parents=True, mode=0o700)
