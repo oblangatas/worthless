@@ -271,14 +271,41 @@ def test_website_never_names_a_cli_version() -> None:
     number instead of chasing it. Third-party versions in the Red Blog (e.g.
     Bitwarden's 2026.4.0) are fine -- they carry no "v" prefix and aren't 0.x.
     """
-    banned = re.compile(r"\bv\d+\.\d+\.\d+\b|\bversion 0\.\d+|Beta CLI|CLI beta")
-    hits = [
+    hits = _site_text_hits(r"\bv\d+\.\d+\.\d+\b|\bversion 0\.\d+|Beta CLI|CLI beta")
+    assert not hits, f"version-style text on the site: {hits}"
+
+
+def test_website_drops_claims_the_cli_does_not_keep() -> None:
+    """Phrases retired because the published CLI contradicts them (WOR-946).
+
+    Proven against the released CLI in containers by
+    tests/test_site_claims_match_cli.py: `unlock` leaves the proxy running, the
+    real key is never stored, a shard keeps the provider prefix and length, and
+    a Gemini key is skipped and left as plaintext. The split is format-preserving
+    modular arithmetic (crypto/splitter.py), not XOR, and the product's word for
+    a key half is "shard".
+    """
+    retired = (
+        r"\bXOR\b|Proxy gone|proxy stopped|stored encrypted locally"
+        r"|reveals nothing|reveals zero bits|wrls_share|Two commands|key\(s\) protected"
+        r"|\bshares?\b"
+    )
+    hits = _site_text_hits(retired)
+    assert not hits, f"retired claims on the site: {hits}"
+
+    index = (WEBSITE / "index.html").read_text(encoding="utf-8")
+    gemini_row = index[index.index("<strong>GEMINI_API_KEY</strong>") :][:200]
+    assert "Not supported yet" in gemini_row, "the homepage must not show Gemini as protected"
+
+
+def _site_text_hits(pattern: str) -> list[str]:
+    banned = re.compile(pattern, re.IGNORECASE)
+    return [
         f"{path.relative_to(WEBSITE)}: {match.group(0)}"
         for path in sorted(WEBSITE.rglob("*"))
         if path.suffix in {".html", ".js", ".txt", ".json", ".xml"}
         for match in banned.finditer(path.read_text(encoding="utf-8"))
     ]
-    assert not hits, f"version-style text on the site: {hits}"
 
 
 def test_website_waitlist_processing_is_disclosed_and_scoped() -> None:

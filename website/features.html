@@ -161,11 +161,11 @@
 <div class="page">
   <div class="eyebrow">Features</div>
   <h1>A copied protected AI key cannot call the provider on its own.</h1>
-  <p class="intro">AI agents can run <code>git add -A</code> and push your .env to GitHub. Worthless replaces supported AI-provider keys with split shares, so the copied value alone is not enough to call the provider. Standard local SDK flows usually need a wrapper command, not application-code changes.</p>
+  <p class="intro">AI agents can run <code>git add -A</code> and push your .env to GitHub. Worthless replaces supported AI-provider keys with split shards, so the copied value alone is not enough to call the provider. Standard local SDK flows usually need a wrapper command, not application-code changes.</p>
 
   <div class="feat-section">
     <h2>The protected value in your .env cannot call the provider alone</h2>
-    <p>Your .env has one half of an XOR split. The other half lives in your local proxy. The stored half reveals nothing about the original key, but this protection depends on the other half and the machine running Worthless staying out of the attacker's control.</p>
+    <p>Your .env holds one shard of a split key. It keeps the provider prefix and length, so it looks like a key, but it can't call the provider. The other shard is stored on your machine, in your system keystore when there is one. This protection depends on that shard and the machine running Worthless staying out of the attacker's control.</p>
   </div>
 
   <div class="feat-section">
@@ -185,7 +185,7 @@
 
   <div class="feat-section">
     <h2>Fully reversible</h2>
-    <p><code>worthless unlock</code>, original .env restored, proxy stopped, shares deleted. Don't like it? One command and it's gone. Zero lock-in.</p>
+    <p><code>worthless unlock</code> puts your real keys back in .env, byte for byte. The proxy keeps running until you stop it; <code>worthless uninstall</code> stops it and deletes Worthless's data. Zero lock-in.</p>
   </div>
 
   <div class="feat-section">
@@ -195,7 +195,7 @@
 
   <div class="feat-section">
     <h2>What Worthless does not protect against</h2>
-    <p>Worthless aims to make a copied <code>.env</code> share useless on its own. It is not a sandbox for a machine that is already compromised, and it is not the only layer you need.</p>
+    <p>Worthless aims to make a copied <code>.env</code> shard useless on its own. It is not a sandbox for a machine that is already compromised, and it is not the only layer you need.</p>
     <ul>
       <li><strong>A compromised machine.</strong> If an attacker controls the computer Worthless runs on, they can reach your key. Same trust boundary as a password manager.</li>
       <li><strong>The provider's side.</strong> A breach or outage at OpenAI, Anthropic, or another upstream is outside what Worthless can affect.</li>

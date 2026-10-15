@@ -1859,8 +1859,8 @@
         <details class="promise-explainer">
           <summary role="button" aria-expanded="false">Worthless makes leaked keys worthless. How?</summary>
           <p class="promise-explainer-copy">
-            Worthless replaces each protected API key in your <code>.env</code> with a share that cannot call the provider alone.
-            Your app still works through a local proxy that holds the other share.
+            Worthless replaces each protected API key in your <code>.env</code> with a shard that cannot call the provider alone.
+            Your app still works: a local proxy combines it with the other shard, which stays on your machine.
             <a href="how-it-works.html">See how it works</a>.
           </p>
           <div class="promise-audit" aria-label="Audit Worthless with AI">
@@ -1998,23 +1998,23 @@
           <div class="env-row">
             <div>
               <strong>OPENAI_API_KEY</strong>
-              <span>wrls_share_a_...</span>
+              <span>sk-proj-… (shard)</span>
             </div>
             <div class="env-badge">Worthless</div>
           </div>
           <div class="env-row">
             <div>
               <strong>ANTHROPIC_API_KEY</strong>
-              <span>wrls_share_a_...</span>
+              <span>sk-ant-api03-… (shard)</span>
             </div>
             <div class="env-badge">Worthless</div>
           </div>
           <div class="env-row">
             <div>
               <strong>GEMINI_API_KEY</strong>
-              <span>wrls_share_a_...</span>
+              <span>AIza… (your real key)</span>
             </div>
-            <div class="env-badge">Worthless</div>
+            <div class="env-badge">Not supported yet</div>
           </div>
         </div>
       </div>
