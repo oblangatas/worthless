@@ -388,4 +388,4 @@ def register_status_commands(app: typer.Typer) -> None:
         # Trust-fix exit: at_risk (degraded sentinel, or an EXPOSED key) = non-zero exit so callers
         # (CI scripts, shell pipelines, agents polling status) get the
         # signal even if they ignored the original lock exit code.
-        raise typer.Exit(code=73 if verdict == "at_risk" else 0)
+        raise typer.Exit(code=73 if degraded or verdict == "at_risk" else 0)
