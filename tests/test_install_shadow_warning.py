@@ -97,8 +97,10 @@ def test_shadowed_worthless_warns_and_names_both_paths(tmp_path: Path) -> None:
     combined = _combined(result)
 
     assert _shadow_warned(combined), f"no shadow warning in:\n{combined}"
-    assert str(real) in combined, "the installed binary's path is not named"
-    assert str(bin_dir / "worthless") in combined, "the shadowing path is not named"
+    shown_real, shown_shadow = _shown_pair(real, bin_dir / "worthless")
+    assert shown_real in combined, "the installed binary's path is not named"
+    # The exact line install.sh prints, so a cut prefix can't match elsewhere.
+    assert f"    {shown_shadow}\n" in combined, "the shadowing path is not named"
     assert _SUCCESS_SENTENCE not in result.stdout, (
         "install.sh still claims 'worthless' is on your PATH while a different "
         "copy is what actually runs"
@@ -437,8 +439,9 @@ esac""",
         "the fast path was not taken, so this test proves nothing about it"
     )
     assert _shadow_warned(combined), f"no shadow warning on the already-installed path:\n{combined}"
-    assert str(real) in combined
-    assert str(bin_dir / "worthless") in combined
+    shown_real, shown_shadow = _shown_pair(real, bin_dir / "worthless")
+    assert shown_real in combined
+    assert f"    {shown_shadow}\n" in combined
     assert _SUCCESS_SENTENCE not in result.stdout
     assert result.returncode == 0
 
@@ -699,6 +702,30 @@ def _sanitize(raw: bytes, locale: str) -> bytes:
         check=False,
     )
     return result.stdout
+
+
+def _shown(path: Path) -> str:
+    """*path* as install.sh prints it: escaped, and cut at 240 chars (et4i).
+
+    A raw ``str(path)`` check failed on any tmp dir deep enough to truncate.
+    """
+    shown = _sanitize(str(path).encode(), "C").decode()
+    # Anti-vacuity: an empty or near-empty display would match anything.
+    assert len(shown) >= min(len(str(path)), 237), f"sanitizer dropped the path: {shown!r}"
+    return shown
+
+
+def _shown_pair(real: Path, shadow: Path) -> tuple[str, str]:
+    """Both paths as displayed, or skip when the cut makes them identical.
+
+    Both are cut at the same length. Past ~239 chars of tmp dir they become the
+    same prefix, and one printed path would satisfy both asserts. Skip loudly
+    rather than pass without proving the shadowing path is named.
+    """
+    pair = _shown(real), _shown(shadow)
+    if pair[0] == pair[1]:
+        pytest.skip("tmp dir too deep: install.sh's 240-char cut hides where the paths differ")
+    return pair
 
 
 _SANITIZE_CASES = {
