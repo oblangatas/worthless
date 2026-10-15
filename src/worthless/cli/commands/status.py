@@ -317,7 +317,9 @@ def register_status_commands(app: typer.Typer) -> None:
                 if any(k["status"] == "BROKEN" for k in keys):
                     sys.stderr.write(
                         f"Can't restore the keys marked BROKEN — their .env "
-                        f"line was deleted. Run `{FIX_PHRASE}` to clean up.\n\n"
+                        f"line or file is missing. Run `worthless doctor` to see which: "
+                        f"`{FIX_PHRASE}` purges deleted lines and keeps keys whose .env "
+                        "is missing.\n\n"
                     )
 
             if proxy_info["healthy"] and not identified:
