@@ -101,3 +101,21 @@ def test_fixable_true(ctx) -> None:
     """broken_status declares fixable=True."""
     result = broken_status.run(ctx)
     assert result["fixable"] is True
+
+
+def test_read_failure_deletes_nothing(ctx, fake_home, repo, monkeypatch) -> None:
+    """If shard rows can't be read, the check must not guess — and must not delete."""
+    _seed_enrollment(repo, "my-key")
+    ctx.fix = True
+
+    async def _boom(alias):
+        raise RuntimeError("db unavailable")
+
+    monkeypatch.setattr(repo, "fetch_encrypted", _boom)
+
+    result = broken_status.run(ctx)
+
+    assert result["status"] == "error"
+    assert result["findings"] == []
+    assert result["fixable"] is False
+    assert any(e.key_alias == "my-key" for e in asyncio.run(repo.list_enrollments()))

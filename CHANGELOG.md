@@ -13,6 +13,22 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - We did not test an upgrade with `pipx`.
   - Worthless does not remove copies that a different installer made, for example an old `pip install --user`.
 
+### Fixed
+- **Bare `worthless` reports a failed or stopped lock with its real exit code** (`worthless-nhc0`).
+  Before: when the lock step of bare `worthless` failed or was stopped, the command exited 0. A script or an agent read success after LOCK FAILED, Ctrl-C or `docker stop`.
+  Now: the exit code is the same as `worthless lock` gives: 73 or 87 for a failed OpenClaw step, 130 for Ctrl-C, 143 for SIGTERM, 129 when the terminal closes. The proxy does not start. If you say no at a prompt, the exit code is still 0.
+
+- **Stopping `worthless lock` puts OpenClaw's provider entries back, and never erases your OpenClaw config** (`worthless-2nta`, `worthless-1jfr`, [#698](https://github.com/oblangatas/worthless/pull/698)).
+  Before: a Ctrl-C between two OpenClaw provider writes left one provider on the Worthless proxy and the next one not. If `openclaw.json` could not be read before the lock and a later write failed, Worthless wrote `{}` over the whole file, and every provider was lost. A Ctrl-C during a skill reinstall deleted the OpenClaw skill.
+  Now: a Ctrl-C puts back the provider entries this lock wrote, or removes them if `openclaw.json` did not exist. It changes only entries that still point at this lock's proxy, so a change made by someone else stays. A re-lock keeps its new key. An unreadable `openclaw.json` stays as it is. The old skill stays until the new skill is in place.
+
+  **Limits.**
+  - A Ctrl-C does not undo the clean-up of an old `worthless-<provider>` entry.
+  - `kill -9` or a power cut during a write is not undone.
+  - OpenClaw writes its config without a lock. A write by OpenClaw at the same moment can still conflict with a Worthless write.
+  - If another Worthless process holds the `openclaw.json` lock for more than 2 seconds after a Ctrl-C, the undo stops. `worthless doctor` repairs the remaining entries.
+
+
 ## [0.3.14] — 2026-10-13
 
 ### Fixed
@@ -111,7 +127,7 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - The `--pre-commit` hook still blocks a staged token, because a commit writes it into history for good. In that mode `--format sarif` and `--json` still mark the token as a `note` while the hook exits 1.
   - Only Claude Code tokens in the files scan reads. OpenClaw's other unshardable credential stores are `worthless doctor`'s job, not scan's.
 
-- **Ctrl-C stops `worthless lock`'s OpenClaw setup at once, and never costs you your keys** (found while chasing `worthless-3clz`, [#668](https://github.com/oblangatas/worthless/pull/668)). Once the keys were committed, the rest of the lock was synchronous OpenClaw work, so Ctrl-C was dropped: for 15s during the reload wait, and forever while another process held OpenClaw's config file. Now Ctrl-C stops there in under a second and keeps the keys locked. It warns that OpenClaw may still be using the real key, `worthless status` flags OpenClaw as broken, and the CLI exits 130, even with `--quiet`. Ctrl-D at the "Route them through Worthless?" prompt no longer rolls back the database under a rewritten `.env`, as it did on earlier releases, and Ctrl-C there is now answered. A second Ctrl-C during a rollback now says why it is not stopping.
+- **Ctrl-C stops `worthless lock`'s OpenClaw setup at once, and never costs you your keys** (found while chasing `worthless-3clz`, [#668](https://github.com/oblangatas/worthless/pull/668)). Once the keys were committed, the rest of the lock was synchronous OpenClaw work, so Ctrl-C was dropped: for 15s during the reload wait, and forever while another worthless process held its lock on OpenClaw's config file (OpenClaw itself never takes that lock). Now Ctrl-C stops there in under a second and keeps the keys locked. It warns that OpenClaw may still be using the real key, `worthless status` flags OpenClaw as broken, and the CLI exits 130, even with `--quiet`. Ctrl-D at the "Route them through Worthless?" prompt no longer rolls back the database under a rewritten `.env`, as it did on earlier releases, and Ctrl-C there is now answered. A second Ctrl-C during a rollback now says why it is not stopping.
 
   **What this does NOT fix.**
   - The CI sighting that opened worthless-3clz came from a chaos trial with no OpenClaw, and its cause is still unknown. The chaos hang guard now records the stuck stack.
@@ -149,6 +165,12 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 - **Docs can no longer tell you to run a worthless command that doesn't exist** ([#666](https://github.com/oblangatas/worthless/pull/666)).
 
 ### Security
+
+- **Worthless's own repair command stops destroying healthy keys, and keys whose project moved** (WOR-935, [#676](https://github.com/oblangatas/worthless/pull/676)). Since v0.3.7, doctor's `broken_status` check called every current-format key broken: it looked for Shard A in `~/.worthless/shard_a/`, where only old-format keys keep it. So `worthless doctor --fix --json` — the command agents are told to run — deleted the enrollment of every healthy key, and `unlock` then failed with WRTLS-102 even though both shards survived. The check now judges old-format keys only, and deletes nothing if it can't read the shard rows. Separately, `doctor --fix` (text and JSON) treated a missing `.env` file like a deleted line and purged keys whose project had merely moved. A missing file is now always kept, because doctor can't tell a moved project from a deleted one. Every orphan finding carries `reason` (`env_line_missing` / `env_file_missing`). A key whose `.env` is missing gets honest advice: put a moved project back and run `worthless unlock`, or remove a deleted one with `worthless revoke --alias <alias>`, which doctor offers only when no other project has the same key locked (revoke removes a key everywhere). `--fix --json` reports only the records it actually deleted.
+
+  **If you were hit** (`unlock` fails with WRTLS-102 after running `doctor --fix`): do not run `worthless uninstall` or delete `~/.worthless`. Both halves of your key still exist, and getting them back is WOR-937.
+
+  **What this does NOT fix.** Keys already unlinked by v0.3.7–v0.3.12 stay unlinked until WOR-937. A deleted project's key — `git worktree remove` deletes the `.env` — is unrecoverable; doctor now keeps its record instead of purging it; remove it with `revoke --alias` only if no other project has the same key locked. Deleting still needs no extra consent and can't be undone (WOR-938). "Line missing" is still a guess: a renamed variable, a commented-out line, a branch whose `.env` lacks the line, or a re-cloned project with a fresh `.env` at the same path all look like a dead key and still get purged, though the key may be recoverable (WOR-938). An old-format key whose line was deleted is purged even though its Shard A file could rebuild it (WOR-940).
 
 - **The container stops shipping on an operating system that no longer gets security fixes** (`worthless-tw1g`, [#604](https://github.com/oblangatas/worthless/pull/604)). Both images pinned `python:3.13-slim-bookworm`, and grype reported Debian 12 as end-of-life on every scan — *"105 packages from EOL distro debian 12 — vulnerability data may be incomplete or outdated."* Behind the failing check sat 35 High/Critical findings marked `fix=not-fixed`, including a Critical in openssl, invisible because an earlier step short-circuited the job before the gate that reports them ever ran. `Dockerfile` and `docker/sidecar/Dockerfile` now build on digest-pinned `python:3.13-slim-trixie` (Debian 13).
 

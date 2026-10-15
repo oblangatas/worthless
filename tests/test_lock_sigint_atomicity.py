@@ -576,7 +576,7 @@ class TestUnwindFailureWarnsToReconcile:
 # ---------------------------------------------------------------------------
 #
 # Once Pass-1 commits and ``.env`` is rewritten, the OpenClaw steps run
-# synchronously: a lock on OpenClaw's config file (``openclaw/config.py``
+# synchronously: worthless's own lock on openclaw.json (``openclaw/config.py``
 # ``flock``, unbounded) and a reload wait of up to 15s (``lock.py``
 # ``time.sleep`` poll). asyncio's handler only queues a press for the event
 # loop, which that stretch never yields to — so Ctrl-C was dropped and the lock

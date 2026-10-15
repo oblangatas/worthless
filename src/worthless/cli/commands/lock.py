@@ -2114,10 +2114,11 @@ def _openclaw_steps(
     """Post-flight re-audit + adoption prompt + OpenClaw wiring, answering Ctrl-C.
 
     Returns the exit code. All synchronous, all after the commit: the re-audit
-    (a subprocess, retried once), the adoption prompt, OpenClaw's config-file
-    lock (unbounded) and a reload wait of up to 15s. Ctrl-C stops them, keeps
-    the keys (see :class:`_LockInterrupts`), records the same partial/failed
-    sentinel as any OpenClaw failure, and exits ``128 + signum``. Without
+    (a subprocess, retried once), the adoption prompt, worthless's own lock on
+    openclaw.json (unbounded; OpenClaw itself never takes it) and a reload
+    wait of up to 15s. Ctrl-C stops them, keeps the keys (see
+    :class:`_LockInterrupts`), records the same partial/failed sentinel as any
+    OpenClaw failure, and exits ``128 + signum``. Without
     OpenClaw there is nothing unfinished to report (worthless-y4fn).
     """
     try:
