@@ -670,7 +670,7 @@ def _collect_alias_issues(env_paths: set[Path], known_aliases: set[str], db_name
     for env_file in env_paths:
         try:
             parsed = dotenv_values(env_file)
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             continue
         for key, value in parsed.items():
             if not key.endswith("_BASE_URL") or not value:

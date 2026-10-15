@@ -141,4 +141,4 @@ def test_one_bad_env_does_not_blind_every_command(
         env_file.chmod(0o600)
 
     assert "openai-" in status.output, f"status lost every key:\n{status.output}"
-    assert not isinstance(doctor.exception, OSError | UnicodeDecodeError), doctor.output
+    assert "WRTLS-199" not in doctor.output, f"doctor crashed:\n{doctor.output}"
