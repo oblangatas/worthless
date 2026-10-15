@@ -13,9 +13,10 @@ from enum import Enum, IntEnum
 from worthless.cli.log_redaction import _redact
 
 
-# NOSONAR(python:S5709): deliberately a KeyboardInterrupt — every existing
-# Ctrl-C handler (error_boundary, Popen.__exit__, the lock's own except) must
-# still catch it; deriving from Exception would let a signal be swallowed.
+# Sonar python:S5709 is suppressed on the class line: deliberately a
+# KeyboardInterrupt. Every existing Ctrl-C handler (error_boundary,
+# Popen.__exit__, the lock's own except) must still catch it; deriving
+# from Exception would let a signal be swallowed.
 class SignalInterrupt(KeyboardInterrupt):  # NOSONAR
     """A KeyboardInterrupt that remembers which signal stopped the command.
 

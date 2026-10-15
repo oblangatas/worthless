@@ -1325,8 +1325,13 @@ def _undo_own_provider_writes(
     for provider, alias, _shard_a in planned_updates:
         ours = f"{base}/{alias}/v1"
         before = prior.get(provider)
-        if isinstance(before, dict) and before.get("baseUrl") == ours:
-            continue  # it was ours before too: keep the new key half
+        before_url = before.get("baseUrl") if isinstance(before, dict) else None
+        if (
+            isinstance(before_url, str)
+            and _is_proxy_url(before_url, resolved_proxy_base_url)
+            and before_url.rstrip("/").endswith(f"/{alias}/v1")
+        ):
+            continue  # ours before too (any proxy host): keep the new key half
         with contextlib.suppress(OpenclawConfigError, OSError):
             if not _config_mod.revert_provider_if_ours(
                 config_path,
