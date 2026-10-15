@@ -6,12 +6,12 @@ Usage:  git diff -U0 <base> <head> -- CHANGELOG.md | check_changelog_placement.p
 The CHANGELOG path is the merged result (the PR's merge commit), so this sees
 where lines actually land after a merge from ``main``, which is how entries
 end up under a released heading when a release is cut while the PR is open
-(WOR-957; it happened in #696 and #703).
+(WOR-957; #688, #691 and #676 all landed this way in one week).
 
 Only *added* lines below the first released ``## [x.y.z]`` heading count.
 Release headings, compare-link lines and blank lines are exempt. A release PR
-adds the newest version heading itself, so the section it creates is open to it. Removals pass:
-moving an entry out of a released section is the fix. A deliberate edit to a
+adds the newest version heading itself, so the section it creates is open to
+it. Removals pass: moving an entry out of a released section is the fix. A deliberate edit to a
 released section uses the ``changelog-released-edit`` label, checked in the
 workflow. Exit 1 with the offending lines; 0 otherwise.
 """
