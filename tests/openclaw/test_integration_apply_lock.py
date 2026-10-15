@@ -1126,3 +1126,28 @@ def test_ctrl_c_on_a_relock_keeps_the_new_entry(
 
     openai = _providers(config_path)["openai"]
     assert openai["apiKey"] == "sk-shard-a-openai", f"re-lock rolled back to the old half: {openai}"
+
+
+def test_ctrl_c_on_a_relock_via_another_proxy_host_keeps_the_new_entry(
+    openclaw_present: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cursor on #698: the earlier lock wrote the same alias through another host.
+
+    127.0.0.1 then, host.docker.internal now (same port, same alias): the
+    entry was still ours, so the new key half stays.
+    """
+    from worthless.openclaw import integration
+
+    old = {"baseUrl": "http://127.0.0.1:8787/openai-aaaa1111/v1", "apiKey": "old-shard-a"}
+    config_path = openclaw_present["config_path"]
+    _seed(config_path, {"openai": old})
+    monkeypatch.chdir(openclaw_present["home"])
+    _ctrl_c_on_write(monkeypatch, nth=2)
+
+    with pytest.raises(KeyboardInterrupt):
+        integration.apply_lock(
+            planned_updates=_TWO_PROVIDERS, proxy_base_url="http://host.docker.internal:8787"
+        )
+
+    openai = _providers(config_path)["openai"]
+    assert openai["apiKey"] == "sk-shard-a-openai", f"re-lock rolled back to the old half: {openai}"
