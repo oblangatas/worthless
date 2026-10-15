@@ -288,7 +288,9 @@ def test_website_drops_claims_the_cli_does_not_keep() -> None:
     retired = (
         r"\bXOR\b|Proxy gone|proxy stopped|stored encrypted locally"
         r"|reveals nothing|reveals zero bits|wrls_share|Two commands|key\(s\) protected"
-        r"|\bshares?\b"
+        # The noun for a key half, not the verb ("share it" is fine).
+        r"|\bshares\b|\b(?:a|the|other|one|stored|each|first|second) share\b"
+        r"|\bshare (?:useless|reveals|that)\b"
     )
     hits = _site_text_hits(retired)
     assert not hits, f"retired claims on the site: {hits}"
@@ -296,6 +298,27 @@ def test_website_drops_claims_the_cli_does_not_keep() -> None:
     index = (WEBSITE / "index.html").read_text(encoding="utf-8")
     gemini_row = index[index.index("<strong>GEMINI_API_KEY</strong>") :][:200]
     assert "Not supported yet" in gemini_row, "the homepage must not show Gemini as protected"
+
+
+def test_website_legal_pages_match_the_owner_decisions() -> None:
+    """Legal-page decisions from the WOR-757 legal panel, applied in WOR-946.
+
+    The Terms cover the website only; the software is AGPL-3.0-only and nobody
+    has to accept the Terms to use it. The commercial-license pitch is cut. The
+    privacy page names every service a visitor's browser contacts.
+    """
+    terms = (WEBSITE / "terms.html").read_text(encoding="utf-8")
+    assert "These Terms cover the wless.io website only." in terms
+    assert "you need not accept these Terms to use, modify or share it" in terms
+
+    hits = _site_text_hits(
+        r"Shard C\b|never leave your control|commercial licen|third-party JavaScript by default"
+    )
+    assert not hits, f"retired legal wording on the site: {hits}"
+
+    privacy = (WEBSITE / "privacy.html").read_text(encoding="utf-8")
+    for service in ("Cloudflare", "Google Fonts", "gist.githubusercontent.com", "Tally"):
+        assert service in privacy, f"privacy.html must name {service}"
 
 
 def _site_text_hits(pattern: str) -> list[str]:
