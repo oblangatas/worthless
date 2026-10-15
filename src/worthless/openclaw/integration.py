@@ -24,6 +24,7 @@ Predicate" and §"Failure modes" rows F01–F04, F36.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import hmac
 import ipaddress
@@ -1941,13 +1942,12 @@ def _shares_openclaw_tree_on_exit(fn):  # noqa: ANN001, ANN202
             return fn(*args, **kwargs)
         finally:
             if os.environ.get("WORTHLESS_OPENCLAW_CONFIG_SHARED"):
-                try:
+                # Never mask fn's own result/exception with a best-effort walk.
+                with contextlib.suppress(Exception):
                     state = detect()
                     if state.present:
                         root = _resolve_active_config_path(state, state.home_dir).parent
                         _share_openclaw_tree(root)
-                except Exception:  # noqa: BLE001, S110 — never mask fn's own result/exception
-                    pass
 
     return wrapper
 
@@ -1971,6 +1971,8 @@ def _share_openclaw_tree(root: Path | None) -> None:
     """
     if root is None or not os.environ.get("WORTHLESS_OPENCLAW_CONFIG_SHARED"):
         return
+    if not hasattr(os, "fwalk"):
+        return  # Windows: the shared Docker volume only exists in Linux containers
     try:
         root_st = os.lstat(root)
     except OSError:
@@ -1988,13 +1990,84 @@ def _share_openclaw_tree(root: Path | None) -> None:
         return  # best-effort; OpenClaw reports anything it still can't open
 
 
-_SHARE_OPEN_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+def _shared_workspace_escape(workspace: Path, config_path: Path | None) -> str | None:
+    """Return why the skill dir must not be touched, or None if it's safe.
+
+    Cursor review (WOR-510): in the shared Docker volume the openclaw
+    container can plant ``workspace`` → ``/data`` (the proxy's keys); detect()
+    resolves the link, so lock (root) would install — and unlock would
+    ``rmtree`` — the skill outside the volume. Shared mode only.
+    """
+    if config_path is None or not os.environ.get("WORTHLESS_OPENCLAW_CONFIG_SHARED"):
+        return None
+    oc_dir = config_path.parent
+    for link in (oc_dir / "workspace", oc_dir / "workspace" / "skills"):
+        if link.is_symlink():
+            return f"{link} is a symlink in the shared volume"
+    try:
+        workspace.resolve().relative_to(oc_dir.resolve())
+    except (OSError, ValueError):
+        return f"workspace {workspace} is outside the shared volume {oc_dir}"
+    return None
+
+
+def _unlock_snapshot(
+    config_path: Path,
+    restores: list[OcRestore],
+    events: list[OpenclawIntegrationEvent],
+    providers_skipped: list[tuple[str, str]],
+) -> tuple[dict | None, bool]:
+    """Read the pre-unlock snapshot. Returns ``(snapshot, skip_stage_a)``.
+
+    Cursor review (WOR-510): with CONFIG_SHARED now classified "present",
+    this read is unlock's only gate — and Stage A's replace_provider reads
+    with permission_as_missing=True, so an unreadable config would be
+    rewritten as near-empty. A permission failure skips Stage A instead.
+    """
+    try:
+        return _config_mod.read_config(config_path), False
+    except (OpenclawConfigError, OSError) as exc:
+        if not (isinstance(exc, PermissionError) or isinstance(exc.__cause__, PermissionError)):
+            return None, False  # e.g. corrupt JSON: unchanged behaviour
+    events.append(
+        OpenclawIntegrationEvent(
+            code=OpenclawErrorCode.CONFIG_UNREADABLE,
+            level="error",
+            detail=f"openclaw.json at {config_path} is unreadable — skipping provider restore",
+            extra={"path": str(config_path)},
+        )
+    )
+    providers_skipped.extend((r.provider, "config_unreadable") for r in restores)
+    return None, True
+
+
+def _guarded_workspace(
+    workspace: Path | None,
+    config_path: Path | None,
+    events: list[OpenclawIntegrationEvent],
+    action: str,
+) -> Path | None:
+    """``workspace``, or None (with an error event) if the shared-volume guard trips."""
+    escape = _shared_workspace_escape(workspace, config_path) if workspace else None
+    if escape is None:
+        return workspace
+    events.append(
+        OpenclawIntegrationEvent(
+            code=OpenclawErrorCode.SKILL_INSTALL_FAILED,
+            level="error",
+            detail=f"refusing to {action} the skill: {escape}",
+        )
+    )
+    return None
 
 
 def _share_entry(name: str, dirfd: int, owner: tuple[int, int], is_root: bool) -> None:
     """Open ``name`` relative to its parent fd without following a symlink."""
+    # getattr: O_NOFOLLOW/O_NONBLOCK don't exist on Windows, and this module
+    # must import there (only reached via fwalk, which is POSIX-only anyway).
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
-        fd = os.open(name, _SHARE_OPEN_FLAGS, dir_fd=dirfd)
+        fd = os.open(name, flags, dir_fd=dirfd)
     except OSError:
         return  # symlink (ELOOP), vanished, or unreadable — skip
     try:
@@ -2004,10 +2077,8 @@ def _share_entry(name: str, dirfd: int, owner: tuple[int, int], is_root: bool) -
 
 
 def _share_fd_quietly(fd: int, owner: tuple[int, int], is_root: bool) -> None:
-    try:
+    with contextlib.suppress(OSError):
         _share_fd(fd, owner, is_root)
-    except OSError:
-        pass
 
 
 def _share_fd(fd: int, owner: tuple[int, int], is_root: bool) -> None:
@@ -2287,7 +2358,7 @@ def apply_lock(
     # ---- Stage B: install skill ------------------------------------------
     skill_installed = False
     skill_path: Path | None = None
-    workspace = state.workspace_path
+    workspace = _guarded_workspace(state.workspace_path, config_path, events, "install")
     if workspace is not None:
         try:
             skill_path = _skill_mod.install(workspace / "skills")
@@ -2696,10 +2767,10 @@ def apply_unlock(
     agent_cache_blocked: set[str] = set()
     rollback_needed = False
     if not config_missing:
-        try:
-            original_config_snapshot = _config_mod.read_config(config_path)
-        except (OpenclawConfigError, OSError):
-            original_config_snapshot = None
+        original_config_snapshot, config_missing = _unlock_snapshot(
+            config_path, restores, events, providers_skipped
+        )
+    if not config_missing:
         rollback_needed = _apply_unlock_stage_a(
             config_path,
             restores,
@@ -2744,8 +2815,12 @@ def apply_unlock(
 
     # ---- Stage B: uninstall skill folder ---------------------------------
     skill_uninstalled = False
-    workspace = state.workspace_path
     skill_path = state.skill_path
+    workspace = (
+        _guarded_workspace(state.workspace_path, config_path, events, "remove")
+        if remove_skill
+        else state.workspace_path
+    )
     if remove_skill and workspace is not None:
         try:
             skill_uninstalled = _skill_mod.uninstall(workspace / "skills")

@@ -204,6 +204,89 @@ def test_share_tree_ignores_missing_or_non_dir_root(tmp_path):
     assert f.stat().st_mode & 0o777 == 0o600
 
 
+def test_integration_imports_without_posix_only_os_attrs():
+    """Windows smoke regression: O_NOFOLLOW / O_NONBLOCK / fwalk don't exist
+    there, so nothing in the module may touch them at import time. Runs in a
+    subprocess so stripping ``os`` can't leak into other tests."""
+    import subprocess
+    import sys
+
+    code = (
+        "import os\n"
+        "for a in ('O_NOFOLLOW', 'O_NONBLOCK', 'fwalk'):\n"
+        "    if hasattr(os, a): delattr(os, a)\n"
+        "os.environ['WORTHLESS_OPENCLAW_CONFIG_SHARED'] = '1'\n"
+        "from pathlib import Path\n"
+        "import worthless.openclaw.integration as m\n"
+        "m._share_openclaw_tree(Path('.'))\n"
+        "print('ok')\n"
+    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
+    assert out.returncode == 0 and out.stdout.strip() == "ok", out.stderr
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read a 000 file")
+def test_shared_unlock_never_clobbers_unreadable_config(openclaw_config, mock_state):
+    """Cursor review: CONFIG_SHARED no longer gates unlock, and Stage A reads
+    with permission_as_missing=True — an unreadable config must be skipped."""
+    restores = [
+        _integration.OcRestore(
+            provider="existing-provider",
+            alias="existing-provider-deadbeef",
+            oc_original_api_key_json=None,
+            plaintext_key=None,
+        )
+    ]
+    openclaw_config.chmod(0o000)
+    try:
+        with patch.object(_integration, "detect", return_value=mock_state):
+            with patch.dict(os.environ, {"WORTHLESS_OPENCLAW_CONFIG_SHARED": "1"}):
+                result = _integration.apply_unlock(restores, remove_skill=False)
+    finally:
+        openclaw_config.chmod(0o600)
+
+    assert json.loads(openclaw_config.read_text()) == MINIMAL_CONFIG, "file must be untouched"
+    assert ("existing-provider", "config_unreadable") in result.providers_skipped
+
+
+def _escaped_workspace_state(openclaw_config, tmp_path):
+    """openclaw container plants workspace -> somewhere outside the volume;
+    detect() resolves it (what the real detect does)."""
+    outside = tmp_path / "proxy-data"
+    (outside / "skills" / "worthless").mkdir(parents=True)
+    (outside / "skills" / "worthless" / "keep").write_text("proxy secret")
+    (openclaw_config.parent / "workspace").symlink_to(outside)
+    state = IntegrationState(
+        present=True,
+        config_path=openclaw_config,
+        workspace_path=outside.resolve(),
+        skill_path=None,
+        home_dir=openclaw_config.parent.parent,
+        notes=(),
+    )
+    return state, outside
+
+
+def test_shared_lock_refuses_skill_install_through_workspace_symlink(openclaw_config, tmp_path):
+    state, outside = _escaped_workspace_state(openclaw_config, tmp_path)
+    with patch.object(_integration, "detect", return_value=state):
+        with patch.dict(os.environ, {"WORTHLESS_OPENCLAW_CONFIG_SHARED": "1"}):
+            result = _integration.apply_lock(PLANNED, proxy_base_url=PROXY_URL)
+
+    assert not result.skill_installed
+    assert (outside / "skills" / "worthless" / "keep").read_text() == "proxy secret"
+    assert not (outside / "skills" / "worthless" / "SKILL.md").exists()
+
+
+def test_shared_unlock_refuses_skill_removal_through_workspace_symlink(openclaw_config, tmp_path):
+    state, outside = _escaped_workspace_state(openclaw_config, tmp_path)
+    with patch.object(_integration, "detect", return_value=state):
+        with patch.dict(os.environ, {"WORTHLESS_OPENCLAW_CONFIG_SHARED": "1"}):
+            _integration.apply_unlock([], remove_skill=True)
+
+    assert (outside / "skills" / "worthless" / "keep").exists(), "rmtree must not escape"
+
+
 def test_share_tree_is_best_effort(tmp_path):
     """A walk or per-entry OSError (vanished file, EPERM) must never raise."""
     (tmp_path / "f").write_text("x")
