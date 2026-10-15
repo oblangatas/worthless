@@ -94,6 +94,7 @@ def test_each_playbook_leads_with_its_correct_verdict() -> None:
         "orphan_keychain": ("safe",),
         "recovery_import": ("no secret",),
         "stranded_shards": ("nothing at risk",),
+        "dead_proxy_run_dirs": ("at risk",),
         "bind_confirmation": ("locked",),
         "service_health": ("degraded",),
         "unshardable_credentials": ("aren't api keys",),
