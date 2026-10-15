@@ -14,6 +14,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from worthless.cli.bootstrap import WorthlessHome
 
 from tests.cli.conftest import (
@@ -45,7 +47,7 @@ def test_scan_reports_the_real_key(home_dir: WorthlessHome, env_file: Path) -> N
 
     # Was: "All 1 keys are protected", exit 0 — a pre-commit hook passed it.
     assert result.exit_code == 1, result.output
-    assert "UNPROTECTED" in result.output, result.output
+    assert "UNPROTECTED" in result.output and "OPENAI_API_KEY" in result.output, result.output
 
 
 def test_status_does_not_call_it_protected(home_dir: WorthlessHome, env_file: Path) -> None:
@@ -53,17 +55,20 @@ def test_status_does_not_call_it_protected(home_dir: WorthlessHome, env_file: Pa
 
     result = cli_invoke(["status"], home_dir)
 
-    assert "PROTECTED" not in result.output, result.output
+    assert "EXPOSED" in result.output and "PROTECTED" not in result.output, result.output
     assert "worthless lock" in result.output, result.output
+    assert result.exit_code == 73, "scripts and agents must see a non-zero exit"
 
 
 def test_doctor_flags_it(home_dir: WorthlessHome, env_file: Path) -> None:
     _crash_partial(env_file, home_dir)
 
     result = cli_invoke(["doctor"], home_dir)
+    said = " ".join(result.output.split())  # Rich wraps long lines
 
-    assert "No issues found" not in result.output, result.output
-    assert "OPENAI_API_KEY" in result.output and "worthless lock" in result.output, result.output
+    assert "No issues found" not in said, result.output
+    assert "OPENAI_API_KEY" in said, result.output
+    assert f"worthless lock --env {env_file}" in said, result.output
 
 
 def test_doctor_json_flags_it(home_dir: WorthlessHome, env_file: Path) -> None:
@@ -75,6 +80,7 @@ def test_doctor_json_flags_it(home_dir: WorthlessHome, env_file: Path) -> None:
     check = next(c for c in report["checks"] if c["check_id"] == "unlocked_keys")
     assert check["status"] == "warn", check
     assert [f["var_name"] for f in check["findings"]] == ["OPENAI_API_KEY"]
+    assert f"worthless lock --env {env_file}" in check["findings"][0]["remediation"]
     assert check["fixable"] is False, "--fix must never purge an unlocked key"
 
 
@@ -116,3 +122,23 @@ def test_healthy_lock_is_left_alone(home_dir: WorthlessHome, env_file: Path) -> 
     assert "PROTECTED" in cli_invoke(["status"], home_dir).output
     assert "No issues found" in cli_invoke(["doctor"], home_dir).output
     _unlocks_to_original(env_file, home_dir)
+
+
+@pytest.mark.parametrize("damage", ["unreadable", "not_utf8"])
+def test_one_bad_env_does_not_blind_every_command(
+    home_dir: WorthlessHome, env_file: Path, damage: str
+) -> None:
+    """The check reads .env contents: a file it can't read is skipped, never fatal."""
+    lock_env(env_file, home_dir)
+    if damage == "unreadable":
+        env_file.chmod(0)
+    else:
+        env_file.write_bytes(b"OPENAI_API_KEY=\xff\xfe\n")
+    try:
+        status = cli_invoke(["status"], home_dir)
+        doctor = cli_invoke(["doctor"], home_dir)
+    finally:
+        env_file.chmod(0o600)
+
+    assert "openai-" in status.output, f"status lost every key:\n{status.output}"
+    assert not isinstance(doctor.exception, OSError | UnicodeDecodeError), doctor.output

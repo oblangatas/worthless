@@ -58,7 +58,11 @@ def is_orphan(enrollment: EnrollmentRecord) -> bool:
     env_path = Path(enrollment.env_path)
     if not env_path.exists():
         return True
-    return enrollment.var_name not in dotenv_values(env_path)
+    try:
+        return enrollment.var_name not in dotenv_values(env_path)
+    except (OSError, UnicodeDecodeError):
+        # Can't read it: never call it an orphan — doctor --fix purges orphans.
+        return False
 
 
 def env_file_missing(enrollment: EnrollmentRecord) -> bool:
@@ -116,7 +120,7 @@ def find_orphans(enrollments: list[EnrollmentRecord]) -> list[EnrollmentRecord]:
     many aliases bound to the same project file), naive per-orphan
     ``dotenv_values`` calls re-parse N times.
     """
-    parsed_cache: dict[str, dict[str, str | None]] = {}
+    parsed_cache: dict[str, dict[str, str | None] | None] = {}
     orphans: list[EnrollmentRecord] = []
     for e in enrollments:
         if not e.env_path:
@@ -126,8 +130,12 @@ def find_orphans(enrollments: list[EnrollmentRecord]) -> list[EnrollmentRecord]:
             orphans.append(e)
             continue
         if e.env_path not in parsed_cache:
-            parsed_cache[e.env_path] = dotenv_values(env_path)
-        if e.var_name not in parsed_cache[e.env_path]:
+            try:
+                parsed_cache[e.env_path] = dotenv_values(env_path)
+            except (OSError, UnicodeDecodeError):
+                parsed_cache[e.env_path] = None  # unreadable: never an orphan
+        parsed = parsed_cache[e.env_path]
+        if parsed is not None and e.var_name not in parsed:
             orphans.append(e)
     return orphans
 
@@ -153,7 +161,12 @@ async def find_unlocked(
         if not e.env_path or not Path(e.env_path).is_file():
             continue
         if e.env_path not in parsed_cache:
-            parsed_cache[e.env_path] = dotenv_values(e.env_path)
+            # Unreadable or not UTF-8: skip it. One bad file must never blind
+            # status, scan and doctor to every other key.
+            try:
+                parsed_cache[e.env_path] = dotenv_values(e.env_path)
+            except (OSError, UnicodeDecodeError):
+                parsed_cache[e.env_path] = {}
         value = parsed_cache[e.env_path].get(e.var_name)
         if not value:
             continue
