@@ -288,7 +288,7 @@ def run_default(
         return
 
     # Its typer.Exit propagates: a decline exits 0, and a failed or interrupted
-    # lock (73, 87, 130, 143...) keeps its code, so scripts never read success
+    # lock (73, 87, 129, 130, 143) keeps its code, so scripts never read success
     # after LOCK FAILED or Ctrl-C (nhc0). Either way the proxy does not start.
     _run_enrollment_if_needed(home, console, interactive=interactive, yes=yes)
 

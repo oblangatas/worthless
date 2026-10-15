@@ -381,7 +381,7 @@ class TestEdgeCases:
         assert result.exit_code == 0, result.stdout + result.stderr
 
     @pytest.mark.parametrize(
-        "code", [73, 87, 130, 143], ids=["openclaw", "refused", "ctrl-c", "sigterm"]
+        "code", [73, 87, 129, 130, 143], ids=["openclaw", "refused", "sighup", "ctrl-c", "sigterm"]
     )
     def test_lock_failure_keeps_its_exit_code(
         self,
