@@ -145,6 +145,20 @@ CFDataGetLength = _found.CFDataGetLength
 CFDataGetLength.restype = c_int32
 CFDataGetLength.argtypes = (c_void_p,)
 
+CFGetTypeID = _found.CFGetTypeID
+CFGetTypeID.restype = ctypes.c_ulong
+CFGetTypeID.argtypes = (c_void_p,)
+
+CFDataGetTypeID = _found.CFDataGetTypeID
+CFDataGetTypeID.restype = ctypes.c_ulong
+
+CFStringGetTypeID = _found.CFStringGetTypeID
+CFStringGetTypeID.restype = ctypes.c_ulong
+
+CFStringGetCString = _found.CFStringGetCString
+CFStringGetCString.restype = ctypes.c_bool
+CFStringGetCString.argtypes = (c_void_p, ctypes.c_char_p, ctypes.c_long, ctypes.c_uint32)
+
 CFArrayGetCount = _found.CFArrayGetCount
 CFArrayGetCount.restype = c_int32
 CFArrayGetCount.argtypes = (c_void_p,)
@@ -225,16 +239,18 @@ def _cfstr_to_str(s_ptr: int | c_void_p) -> str:
     """Read a CFStringRef back to a Python str. Falls through CFData for bytes."""
     if s_ptr in (None, 0):
         return ""
-    # Tolerant path: keychain attribute strings come back as CFData under
-    # kSecReturnAttributes — try CFData first, fall back to CFString.
-    try:
+    # Check the type first (worthless-7xsa): kSecAttrAccount usually comes back
+    # as CFString, and CFData calls on a CFString raise an Objective-C
+    # NSException that aborts the process — no Python except can catch it.
+    type_id = CFGetTypeID(s_ptr)
+    if type_id == CFDataGetTypeID():
         length = CFDataGetLength(s_ptr)
-        if length > 0:
-            ptr = CFDataGetBytePtr(s_ptr)
-            if ptr:
-                return ctypes.string_at(ptr, length).decode("utf-8", errors="replace")
-    except Exception as exc:  # pragma: no cover - defensive ctypes fallback
-        logger.debug("_cfstr_from_ptr: CFData read failed (%s)", type(exc).__name__)
+        ptr = CFDataGetBytePtr(s_ptr) if length > 0 else None
+        return ctypes.string_at(ptr, length).decode("utf-8", errors="replace") if ptr else ""
+    if type_id == CFStringGetTypeID():
+        buf = ctypes.create_string_buffer(1024)
+        if CFStringGetCString(s_ptr, buf, len(buf), _kCFStringEncodingUTF8):
+            return buf.value.decode("utf-8", errors="replace")
     return ""
 
 
