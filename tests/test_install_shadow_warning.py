@@ -97,8 +97,8 @@ def test_shadowed_worthless_warns_and_names_both_paths(tmp_path: Path) -> None:
     combined = _combined(result)
 
     assert _shadow_warned(combined), f"no shadow warning in:\n{combined}"
-    assert str(real) in combined, "the installed binary's path is not named"
-    assert str(bin_dir / "worthless") in combined, "the shadowing path is not named"
+    assert _shown(real) in combined, "the installed binary's path is not named"
+    assert _shown(bin_dir / "worthless") in combined, "the shadowing path is not named"
     assert _SUCCESS_SENTENCE not in result.stdout, (
         "install.sh still claims 'worthless' is on your PATH while a different "
         "copy is what actually runs"
@@ -437,8 +437,8 @@ esac""",
         "the fast path was not taken, so this test proves nothing about it"
     )
     assert _shadow_warned(combined), f"no shadow warning on the already-installed path:\n{combined}"
-    assert str(real) in combined
-    assert str(bin_dir / "worthless") in combined
+    assert _shown(real) in combined
+    assert _shown(bin_dir / "worthless") in combined
     assert _SUCCESS_SENTENCE not in result.stdout
     assert result.returncode == 0
 
@@ -699,6 +699,17 @@ def _sanitize(raw: bytes, locale: str) -> bytes:
         check=False,
     )
     return result.stdout
+
+
+def _shown(path: Path) -> str:
+    """*path* as install.sh prints it: escaped, and cut at 240 chars (et4i).
+
+    A raw ``str(path)`` check failed on any tmp dir deep enough to truncate.
+    """
+    shown = _sanitize(str(path).encode(), "C").decode()
+    # Anti-vacuity: an empty or near-empty display would match anything.
+    assert len(shown) >= min(len(str(path)), 237), f"sanitizer dropped the path: {shown!r}"
+    return shown
 
 
 _SANITIZE_CASES = {
