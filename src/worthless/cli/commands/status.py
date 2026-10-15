@@ -99,10 +99,15 @@ def _list_enrolled_keys(home: WorthlessHome) -> list[dict[str, str]]:
     try:
         repo = ShardRepository(str(home.db_path), bytearray(PLACEHOLDER_FERNET_KEY))
         enrollments = asyncio.run(repo.list_enrollments())
-        # WOR-958: a lock killed between its DB write and its .env rewrite.
-        exposed = {e.key_alias for e in asyncio.run(find_unlocked(repo, enrollments))}
     except Exception:
         return keys
+
+    # WOR-958: a lock killed between its DB write and its .env rewrite. Its
+    # own try: a failure here must never cost the user the key list.
+    try:
+        exposed = {e.key_alias for e in asyncio.run(find_unlocked(repo, enrollments))}
+    except Exception:
+        exposed = set()
 
     # Also enumerate shards so aliases with no enrollment row still appear
     # (edge state: shard exists, enrollment row was deleted out-of-band).

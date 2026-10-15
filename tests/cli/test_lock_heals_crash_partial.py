@@ -142,3 +142,18 @@ def test_one_bad_env_does_not_blind_every_command(
 
     assert "openai-" in status.output, f"status lost every key:\n{status.output}"
     assert "WRTLS-199" not in doctor.output, f"doctor crashed:\n{doctor.output}"
+
+
+def test_status_keeps_its_keys_if_the_check_fails(
+    home_dir: WorthlessHome, env_file: Path, monkeypatch
+) -> None:
+    """Cursor: the check is extra — its failure must not empty the key list."""
+    lock_env(env_file, home_dir)
+
+    async def _boom(*_a, **_k):
+        raise RuntimeError("db hiccup")
+
+    monkeypatch.setattr("worthless.cli.commands.status.find_unlocked", _boom)
+    result = cli_invoke(["status"], home_dir)
+
+    assert "openai-" in result.output and "PROTECTED" in result.output, result.output
