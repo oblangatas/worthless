@@ -88,12 +88,14 @@ if [ "${WORTHLESS_OPENCLAW_CONFIG_SHARED:-}" = "1" ]; then
   SHARED_SKIP="$OPENCLAW_DIR"
   # WOR-510: the openclaw container (node, group_add 10001) can WRITE this
   # volume, so nothing here may follow a path it controls. The dir itself is
-  # the volume mountpoint (not swappable); setgid so files node creates stay
-  # in the shared group. The seed is only written when nothing is there, with
-  # its mode set at creation — never chmod/chown a pre-existing entry.
+  # the volume mountpoint (not swappable). No setgid: under cap_drop ALL root
+  # lacks CAP_FSETID and the kernel silently drops it (verified live, WOR-510);
+  # node's own files stay node-owned and work without it. The seed is only
+  # written when nothing is there, with its mode set at creation — never
+  # chmod/chown a pre-existing entry.
   mkdir -p "$OPENCLAW_DIR" 2>/dev/null || true
   chown worthless-proxy:worthless "$OPENCLAW_DIR" 2>/dev/null || true
-  chmod 2770 "$OPENCLAW_DIR" 2>/dev/null || true
+  chmod 770 "$OPENCLAW_DIR" 2>/dev/null || true
   if [ ! -e "${OPENCLAW_DIR}/openclaw.json" ] && [ ! -L "${OPENCLAW_DIR}/openclaw.json" ]; then
     (umask 007 && printf '{}' > "${OPENCLAW_DIR}/openclaw.json") 2>/dev/null || true
     chown -h worthless-proxy:worthless "${OPENCLAW_DIR}/openclaw.json" 2>/dev/null || true
