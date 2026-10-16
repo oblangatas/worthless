@@ -97,4 +97,37 @@ def test_unlock_says_an_unlinked_key_is_probably_recoverable(
     assert "junk" not in out, result.output
     assert "probably still recoverable" in out, result.output
     assert "don't delete" in out, result.output
-    assert "wrtls-102" in out, result.output
+    assert 'search "wrtls-102"' in out, result.output
+
+
+def test_agent_repair_command_keeps_an_unlinked_key_intact(
+    home_dir: WorthlessHome, env_file: Path
+) -> None:
+    """The real command agents run, twice, on the state the bug left."""
+    lock_env(env_file, home_dir)
+    enrollment = _unlink_like_the_bug(home_dir)
+    half = home_dir.shard_a_dir / enrollment.key_alias
+    half.parent.mkdir(parents=True, exist_ok=True)
+    half.write_bytes(b"\x01" * 32)
+
+    for _ in range(2):
+        cli_invoke(["doctor", "--fix", "--yes", "--json"], home_dir)
+
+    assert half.exists(), "the agent repair command deleted a recoverable key's half"
+    assert asyncio.run(_repo(home_dir).list_keys()) == [enrollment.key_alias]
+
+
+def test_unlock_never_tells_a_raw_key_holder_not_to_lock(
+    home_dir: WorthlessHome, env_file: Path
+) -> None:
+    """After a normal unlock the .env holds the raw key. Unlocking again must not
+    say "don't re-lock": that would leave a plaintext key unprotected."""
+    lock_env(env_file, home_dir)
+    assert cli_invoke(["unlock", "--env", str(env_file)], home_dir).exit_code == 0
+
+    result = cli_invoke(["unlock", "--env", str(env_file)], home_dir)
+    out = " ".join(result.output.split()).lower()
+
+    assert "probably still recoverable" not in out, result.output
+    assert "re-lock, or uninstall" not in out, result.output
+    assert "junk" not in out, result.output

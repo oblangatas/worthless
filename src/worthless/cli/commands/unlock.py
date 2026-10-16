@@ -763,7 +763,7 @@ def register_unlock_commands(app: typer.Typer) -> None:
         if env is None:
             env = Path(".env")
 
-        def _raise_unrecognised_shards() -> None:
+        async def _raise_unrecognised_shards(repo: ShardRepository) -> None:
             # HF4 (worthless-5u6y): if the .env contains values that look
             # like LLM provider keys but have no matching DB row here, the
             # user has unrecoverable shard-A values — fail loudly. Otherwise
@@ -789,16 +789,28 @@ def register_unlock_commands(app: typer.Typer) -> None:
                     f"{', '.join(unrecognised)} with raw key(s) and run "
                     f"`worthless lock --env {env}` again.",
                 )
+            # WOR-959: a stored key with no link left is what the v0.3.7–v0.3.14
+            # doctor bug produced. Only then is "keep these lines" true; for a
+            # raw key (e.g. an already-unlocked .env) it would leave it unprotected.
+            linked = {e.key_alias for e in await repo.list_enrollments()}
+            if set(await repo.list_keys()) - linked:
+                raise WorthlessError(
+                    ErrorCode.KEY_NOT_FOUND,
+                    f"No enrollment found for shard-shape value(s) in {env}: "
+                    f"{', '.join(unrecognised)}. Keep these lines: don't delete "
+                    f"them, re-lock, or uninstall Worthless. If Worthless's doctor "
+                    f"repair ran on this machine (v0.3.7–v0.3.14), the key is "
+                    f"probably still recoverable and an upcoming release re-links "
+                    f'it; search "WRTLS-102" in the Worthless GitHub issues. If '
+                    f"this .env was copied from another machine, re-lock from the "
+                    f"original machine.",
+                )
             raise WorthlessError(
                 ErrorCode.KEY_NOT_FOUND,
-                f"No enrollment found for shard-shape value(s) in {env}: "
-                f"{', '.join(unrecognised)}. Keep these lines: don't delete "
-                f"them, re-lock, or uninstall Worthless. If `worthless doctor "
-                f"--fix` ran on this machine (v0.3.7–v0.3.14), the key is "
-                f"probably still recoverable and an upcoming release re-links "
-                f'it; search "WRTLS-102" in the Worthless GitHub issues. If '
-                f"this .env was copied from another machine, re-lock from the "
-                f"original machine.",
+                f"No enrollment found for key-shaped value(s) in {env}: "
+                f"{', '.join(unrecognised)}. If they are raw keys, run "
+                f"`worthless lock --env {env}` to protect them. If this .env was "
+                f"copied from another machine, re-lock from the original machine.",
             )
 
         # Returns True iff the OpenClaw cleanup stage hit detected+failed
@@ -820,7 +832,7 @@ def register_unlock_commands(app: typer.Typer) -> None:
                     if not planned:
                         # If a typo'd --alias points at a .env full of shard-shape
                         # values, silent success is the worst possible feedback.
-                        _raise_unrecognised_shards()
+                        await _raise_unrecognised_shards(repo)
                         console.print_warning(f"Alias not found or no keys restored: {alias}.")
                         return False
                     console.print_success(_format_restored_line(planned[0]))
@@ -831,7 +843,7 @@ def register_unlock_commands(app: typer.Typer) -> None:
                         {e.key_alias for e in all_enrollments if e.env_path == env_str}
                     )
                     if not aliases:
-                        _raise_unrecognised_shards()
+                        await _raise_unrecognised_shards(repo)
                         console.print_warning("No enrolled keys found.")
                         return False
 
