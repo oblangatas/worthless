@@ -29,7 +29,7 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - If another Worthless process holds the `openclaw.json` lock for more than 2 seconds after a Ctrl-C, the undo stops. `worthless doctor` repairs the remaining entries.
 
 ### Security
-- **A key that the doctor bug unlinked keeps both of its halves until it can be re-linked** (WOR-959, __PR__).
+- **A key that the doctor bug unlinked keeps both of its halves until it can be re-linked** (WOR-959, [#709](https://github.com/oblangatas/worthless/pull/709)).
 
   Before: on an old-format key, a second `worthless doctor --fix` deleted the key's first half from `~/.worthless/shard_a/`. After that, the key could not be recovered. `worthless unlock` told you to remove the locked values "if they are junk".
 
