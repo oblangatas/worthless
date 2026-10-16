@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import subprocess
+import subprocess  # nosec B404 — only to catch SubprocessError from launchctl/systemctl; runs nothing
 from dataclasses import dataclass
 
 from worthless.cli.bootstrap import WorthlessHome
