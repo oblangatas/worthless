@@ -132,9 +132,8 @@
       align-items: center;
       justify-content: center;
       white-space: nowrap;
-      color: oklch(98% 0.01 220);
-      background: oklch(42% 0.135 255);
-      box-shadow: 0 10px 28px oklch(37% 0.12 250 / 0.2);
+      border: 1px solid oklch(83% 0.04 215);
+      background: oklch(98% 0.01 220 / 0.72);
     }
 
     .nav-early-icon {
@@ -282,10 +281,12 @@
       margin: 0;
       max-width: 760px;
       color: oklch(36% 0.105 205);
-      font-size: var(--intro-title-size);
-      line-height: var(--intro-title-leading);
+      /* Sized for a sentence, not the single brand word it used to hold. */
+      font-size: clamp(2.4rem, 3.6vw, 3.6rem);
+      line-height: 1.06;
       letter-spacing: var(--intro-title-tracking);
       font-weight: 800;
+      text-wrap: balance;
     }
 
     h1 span {
@@ -1485,8 +1486,8 @@
       }
 
       h1 {
-        font-size: clamp(3.15rem, 15vw, 4.7rem);
-        line-height: var(--intro-title-leading);
+        font-size: clamp(1.9rem, 7.4vw, 2.5rem);
+        line-height: 1.08;
         letter-spacing: var(--intro-title-tracking);
         max-width: 100%;
         overflow-wrap: break-word;
@@ -1679,9 +1680,8 @@
         height: 2.15rem;
         min-width: 2.15rem;
         padding: 0;
-        color: oklch(98% 0.01 220);
-        background: oklch(42% 0.135 255);
-        box-shadow: 0 10px 28px oklch(37% 0.12 250 / 0.2);
+        border: 1px solid oklch(83% 0.04 215);
+        background: oklch(98% 0.01 220 / 0.72);
       }
 
       .nav-links {
@@ -1851,13 +1851,13 @@
     <section class="hero" aria-label="Worthless promise">
       <img class="hero-mark" src="logo-transparent.png" alt="" aria-hidden="true" />
       <div class="hero-content">
-        <p class="eyebrow">Put a seatbelt on your .env.</p>
+        <p class="eyebrow">macOS · Linux · Windows via WSL</p>
         <h1>
-          <span>Worthless.</span>
+          <span>A copied .env key can't call your AI provider on its own.</span>
         </h1>
-        <p class="subline">Your API key just got leaked. Or stolen.</p>
-        <details class="promise-explainer">
-          <summary role="button" aria-expanded="false">Worthless makes leaked keys worthless. How?</summary>
+        <p class="subline">Worthless is a free, open-source CLI for developers who keep OpenAI, Anthropic or OpenAI-compatible keys in a .env file.</p>
+        <details class="promise-explainer" open>
+          <summary role="button" aria-expanded="true">Worthless makes leaked keys worthless. How?</summary>
           <p class="promise-explainer-copy">
             Worthless replaces each protected API key in your <code>.env</code> with a shard that cannot call the provider alone.
             Your app still works: a local proxy combines it with the other shard, which stays on your machine.
@@ -1982,44 +1982,6 @@
       </div>
     </section>
 
-    <section class="waitlist" id="early-access" aria-label="Hosted Worthless early access, a separate future product">
-      <div class="waitlist-inner">
-        <div>
-          <p class="eyebrow">Early access</p>
-          <h2>Hosted Worthless</h2>
-          <p class="hosted-disclaimer">A separate managed product we're exploring for later, not the open-source tool on this page. The self-hosted CLI runs on your machine and never sends your keys to us.</p>
-          <p>The exploration is scoped to supported AI-provider keys. It does not imply current hosted service, team support, or protection for every secret type.</p>
-          <div class="waitlist-actions">
-            <a class="button waitlist-cta" href="https://tally.so/r/WOpNVL" target="_blank" rel="noopener">Join early access</a>
-          </div>
-        </div>
-        <div class="env-panel" aria-hidden="true">
-          <div class="env-panel-head">.env</div>
-          <div class="env-row">
-            <div>
-              <strong>OPENAI_API_KEY</strong>
-              <span>sk-proj-… (shard)</span>
-            </div>
-            <div class="env-badge">Worthless</div>
-          </div>
-          <div class="env-row">
-            <div>
-              <strong>ANTHROPIC_API_KEY</strong>
-              <span>sk-ant-api03-… (shard)</span>
-            </div>
-            <div class="env-badge">Worthless</div>
-          </div>
-          <div class="env-row">
-            <div>
-              <strong>GEMINI_API_KEY</strong>
-              <span>AIza… (your real key)</span>
-            </div>
-            <div class="env-badge">Not supported yet</div>
-          </div>
-        </div>
-      </div>
-    </section>
-
     <section class="wild" id="in-the-wild" aria-label="In the wild">
       <div class="wild-inner">
         <div>
@@ -2063,6 +2025,44 @@
         <li><strong>Early build limits.</strong></li>
       </ul>
       <p class="foot">Worthless is not a sandbox and not the only layer you need. Use it with a vault, secret scanning, and key rotation. Full threat model: <a href="https://docs.wless.io/security/">security model</a>.</p>
+    </section>
+
+    <section class="waitlist" id="early-access" aria-label="Hosted Worthless early access, a separate future product">
+      <div class="waitlist-inner">
+        <div>
+          <p class="eyebrow">Early access</p>
+          <h2>Hosted Worthless</h2>
+          <p class="hosted-disclaimer">A separate managed product we're exploring for later, not the open-source tool on this page. The self-hosted CLI runs on your machine and never sends your keys to us.</p>
+          <p>The exploration is scoped to supported AI-provider keys. It does not imply current hosted service, team support, or protection for every secret type.</p>
+          <div class="waitlist-actions">
+            <a class="button waitlist-cta" href="https://tally.so/r/WOpNVL" target="_blank" rel="noopener">Join early access</a>
+          </div>
+        </div>
+        <div class="env-panel" aria-hidden="true">
+          <div class="env-panel-head">.env</div>
+          <div class="env-row">
+            <div>
+              <strong>OPENAI_API_KEY</strong>
+              <span>sk-proj-… (shard)</span>
+            </div>
+            <div class="env-badge">Worthless</div>
+          </div>
+          <div class="env-row">
+            <div>
+              <strong>ANTHROPIC_API_KEY</strong>
+              <span>sk-ant-api03-… (shard)</span>
+            </div>
+            <div class="env-badge">Worthless</div>
+          </div>
+          <div class="env-row">
+            <div>
+              <strong>GEMINI_API_KEY</strong>
+              <span>AIza… (your real key)</span>
+            </div>
+            <div class="env-badge">Not supported yet</div>
+          </div>
+        </div>
+      </div>
     </section>
 
     <section class="trust-rail" aria-label="Worthless positioning">
