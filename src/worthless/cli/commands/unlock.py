@@ -792,10 +792,13 @@ def register_unlock_commands(app: typer.Typer) -> None:
             raise WorthlessError(
                 ErrorCode.KEY_NOT_FOUND,
                 f"No enrollment found for shard-shape value(s) in {env}: "
-                f"{', '.join(unrecognised)}. If this .env was copied from "
-                f"another machine, those values are unrecognised shards "
-                f"here — re-lock from the original machine, or remove "
-                f"them manually if they are junk.",
+                f"{', '.join(unrecognised)}. Keep these lines: don't delete "
+                f"them, re-lock, or uninstall Worthless. If `worthless doctor "
+                f"--fix` ran on this machine (v0.3.7–v0.3.14), the key is "
+                f"probably still recoverable and an upcoming release re-links "
+                f'it; search "WRTLS-102" in the Worthless GitHub issues. If '
+                f"this .env was copied from another machine, re-lock from the "
+                f"original machine.",
             )
 
         # Returns True iff the OpenClaw cleanup stage hit detected+failed
