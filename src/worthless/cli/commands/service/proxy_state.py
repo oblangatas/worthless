@@ -11,6 +11,7 @@ from worthless.cli.commands.service._common import (
     current_platform_backend_name,
 )
 from worthless.cli.errors import WorthlessError
+from worthless.cli.platform import is_wsl
 from worthless.cli.process import check_pid, pid_path, poll_health, read_pid, resolve_port
 
 
@@ -100,3 +101,40 @@ def detect_proxy_runtime(home: WorthlessHome, *, port: int | None = None) -> Pro
         port=0,
         source="none",
     )
+
+
+def survives_restart(home: WorthlessHome, port: int) -> bool:
+    """True only when the background service is installed AND running.
+
+    A proxy started by `worthless up` or plain `worthless` is up now but does
+    not come back after a restart (WOR-860). Anything short of a running
+    service, including "can't tell", reads as False: this decides whether we
+    promise survival, so the cautious answer is the default.
+    """
+    status = _detect_service_status(home, port)
+    return status is not None and status.state == ServiceState.RUNNING
+
+
+def restart_note(survives: bool) -> str:
+    """The one sentence `status`, `verify` and the editor all say about restarts.
+
+    WOR-860 option C: one wording, many surfaces, so they cannot drift. It
+    never mentions the terminal: plain `worthless` starts a DETACHED proxy that
+    outlives it; only a restart is certain to end a non-service proxy. When the
+    service runs, say when it is set to start, never "survives a restart"
+    (proven per platform in CI, not promised by this text).
+    """
+    if not survives:
+        return (
+            "Not after a restart: the proxy isn't a background service. "
+            "Keep it running: `worthless service install`"
+        )
+    if current_platform_backend_name() == "launchd":
+        return "Runs as a background service that starts when you log in."
+    if is_wsl():
+        return (
+            "Runs as a background service that starts with this WSL distro. "
+            "WSL stops it about 15 seconds after your last WSL window closes "
+            "unless %USERPROFILE%\\.wslconfig sets instanceIdleTimeout=-1."
+        )
+    return "Runs as a background service that starts when this computer starts."

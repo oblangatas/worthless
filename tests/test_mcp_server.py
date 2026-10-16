@@ -196,6 +196,29 @@ class TestWorthlessStatus:
         assert "isn't worthless" in result["header"]
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("survives", [True, False], ids=["service-running", "no-service"])
+    async def test_editor_says_the_same_thing_about_restarts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, survives: bool
+    ) -> None:
+        """WOR-860: the editor's green header carries the same restart fact as
+        `worthless status`. Drop the survives_restart pass-through in the MCP
+        tool and the service-running case reads "protected now ... not after a
+        restart" — the CLI and editor disagree again."""
+        import worthless.cli.commands.service.proxy_state as proxy_state
+        from worthless.cli.commands.status import _status_verdict
+
+        home = _make_home(tmp_path)
+        keys = [{"alias": "openai", "provider": "openai", "status": "PROTECTED"}]
+        self._stub_status(monkeypatch, keys=keys, healthy=True)
+        monkeypatch.setattr(proxy_state, "survives_restart", lambda *_a: survives)
+        with patch.dict(os.environ, {"WORTHLESS_HOME": str(home)}):
+            result = json.loads(await worthless_status())
+
+        _, expected_header = _status_verdict(keys, True, False, True, survives_restart=survives)
+        assert result["header"] == expected_header
+        assert result["survives_restart"] is survives
+
+    @pytest.mark.asyncio
     async def test_editor_verdict_matches_the_cli_for_identical_inputs(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

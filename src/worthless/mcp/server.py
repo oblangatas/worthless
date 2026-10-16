@@ -176,6 +176,7 @@ async def worthless_status() -> str:
         _resolve_home_for_status,
         _status_verdict,
     )
+    from worthless.cli.commands.service.proxy_state import survives_restart
     from worthless.cli.sentinel import is_partial, read_sentinel
 
     # Resolve the home exactly as the CLI's status does. The general
@@ -211,7 +212,16 @@ async def worthless_status() -> str:
     # so a squatter on the port can't forge a green verdict on this surface
     # either — the whole point of routing both through `_status_verdict`.
     identified = "bind_probe_count" in proxy_info
-    verdict, header = _status_verdict(keys, bool(proxy_info["healthy"]), degraded, identified)
+    # WOR-860: same restart fact the CLI status uses, so the editor's green
+    # header can't promise more than the terminal's.
+    survives = bool(
+        home is not None
+        and proxy_info["healthy"]
+        and await loop.run_in_executor(None, survives_restart, home, proxy_info["port"] or 0)
+    )
+    verdict, header = _status_verdict(
+        keys, bool(proxy_info["healthy"]), degraded, identified, survives_restart=survives
+    )
 
     return json.dumps(
         {
@@ -221,6 +231,7 @@ async def worthless_status() -> str:
             "proxy": proxy_info,
             "sentinel": _safe_sentinel(sentinel),
             "degraded": degraded,
+            "survives_restart": survives,
         },
         default=str,
     )
