@@ -15,6 +15,7 @@ pytest.importorskip("mcp", reason="mcp extra not installed")
 
 from mcp.client import Client  # noqa: E402
 
+from worthless.cli.commands.status import _status_verdict  # noqa: E402
 from worthless.mcp.server import (  # noqa: E402
     mcp,
     worthless_lock,
@@ -204,13 +205,10 @@ class TestWorthlessStatus:
         `worthless status`. Drop the survives_restart pass-through in the MCP
         tool and the service-running case reads "protected now ... not after a
         restart" — the CLI and editor disagree again."""
-        import worthless.cli.commands.service.proxy_state as proxy_state
-        from worthless.cli.commands.status import _status_verdict
-
         home = _make_home(tmp_path)
         keys = [{"alias": "openai", "provider": "openai", "status": "PROTECTED"}]
         self._stub_status(monkeypatch, keys=keys, healthy=True)
-        monkeypatch.setattr(proxy_state, "survives_restart", lambda *_a: survives)
+        monkeypatch.setattr("worthless.cli.commands.status.survives_restart", lambda *_a: survives)
         with patch.dict(os.environ, {"WORTHLESS_HOME": str(home)}):
             result = json.loads(await worthless_status())
 
@@ -228,8 +226,6 @@ class TestWorthlessStatus:
         for the same inputs — so a future change can't quietly reintroduce a
         second, divergent notion of "protected" here.
         """
-        from worthless.cli.commands.status import _status_verdict
-
         home = _make_home(tmp_path)
         keys = [{"alias": "openai", "provider": "openai", "status": "PROTECTED"}]
         self._stub_status(monkeypatch, keys=keys, healthy=False)

@@ -64,6 +64,13 @@ class TestTheNoteItself:
         assert "15 seconds" in note
         assert "instanceIdleTimeout=-1" in note
 
+    def test_wsl_without_a_service_is_told_the_window_matters(self) -> None:
+        """On WSL the distro stops ~15 s after the last WSL window closes, so for
+        a non-service proxy, closing the window does end it."""
+        note = _note(survives=False, backend="systemd", wsl=True)
+        assert "last WSL window closes" in note
+        assert "worthless service install" in note
+
     def test_linux_is_not_told_login(self) -> None:
         """systemd + lingering starts at boot, not at login."""
         assert "log in" not in _note(survives=True, backend="systemd", wsl=False)
@@ -81,11 +88,43 @@ class TestSurvivesRestart:
     )
     def test_only_a_running_service_counts(self, state: ServiceState, expected: bool) -> None:
         st = ServiceStatus(state=state, unit_path=None, binary=None, port=8787, healthy=True)
-        with patch.object(proxy_state, "_detect_service_status", return_value=st):
+        with (
+            patch.object(proxy_state, "_service_port", return_value=8787),
+            patch.object(proxy_state, "_detect_service_status", return_value=st),
+        ):
             assert proxy_state.survives_restart(object(), 8787) is expected
 
     def test_no_service_backend_means_no(self) -> None:
-        with patch.object(proxy_state, "_detect_service_status", return_value=None):
+        with (
+            patch.object(proxy_state, "_service_port", return_value=8787),
+            patch.object(proxy_state, "_detect_service_status", return_value=None),
+        ):
+            assert proxy_state.survives_restart(object(), 8787) is False
+
+    def test_a_proxy_on_another_port_does_not_borrow_the_services_answer(self) -> None:
+        """Service on 8787, user also runs `worthless up --port 9000`: only 8787
+        comes back after a restart, so 9000 must not be promised survival."""
+        running = ServiceStatus(
+            state=ServiceState.RUNNING, unit_path=None, binary=None, port=9000, healthy=True
+        )
+        with (
+            patch.object(proxy_state, "_service_port", return_value=8787),
+            patch.object(proxy_state, "_detect_service_status", return_value=running),
+        ):
+            assert proxy_state.survives_restart(object(), 9000) is False
+
+    @pytest.mark.parametrize(
+        "error",
+        [FileNotFoundError("systemctl"), PermissionError("launchctl"), ValueError("bad plist")],
+        ids=["no-systemctl", "no-permission", "corrupt-unit"],
+    )
+    def test_a_broken_service_tool_means_no_not_a_crash(self, error: Exception) -> None:
+        """status ran no subprocess before; now it asks launchctl/systemctl. A
+        container or WSL without systemd must still get an answer."""
+        backend = MagicMock()
+        backend.installed_port.return_value = None
+        backend.detect_status.side_effect = error
+        with patch.object(proxy_state, "_backend", return_value=backend):
             assert proxy_state.survives_restart(object(), 8787) is False
 
 
@@ -130,10 +169,31 @@ class TestStatusSaysIt:
                 return_value={"healthy": True, "port": 8787, "mode": "up", "bind_probe_count": 0},
             ),
             patch.object(status_mod, "read_sentinel", return_value=None),
-            patch.object(status_mod, "survives_restart", return_value=False),
+            patch.object(status_mod, "survives_restart", return_value=True),
         ):
             result = CliRunner().invoke(app, ["status", "--json"])
-        assert json.loads(result.stdout)["survives_restart"] is False
+        assert json.loads(result.stdout)["survives_restart"] is True
+
+    def test_a_squatter_on_the_port_is_never_promised_survival(self, tmp_path: Path) -> None:
+        """Healthy but not identified as worthless: never `survives_restart: true`."""
+        home = MagicMock(name="WorthlessHome")
+        home.base_dir = tmp_path
+        with (
+            patch.object(status_mod, "_resolve_home_for_status", return_value=home),
+            patch.object(status_mod, "_list_enrolled_keys", return_value=KEYS),
+            patch.object(status_mod, "_discover_proxy_port", return_value=8787),
+            patch.object(
+                status_mod,
+                "_check_proxy_health",
+                return_value={"healthy": True, "port": 8787, "mode": "up"},
+            ),
+            patch.object(status_mod, "read_sentinel", return_value=None),
+            patch.object(status_mod, "survives_restart", return_value=True),
+        ):
+            result = CliRunner().invoke(app, ["status", "--json"])
+        payload = json.loads(result.stdout)
+        assert payload["verdict"] == "proxy_unrecognised"
+        assert payload["survives_restart"] is False
 
 
 class TestVerifySaysTheSameThing:
@@ -148,6 +208,43 @@ class TestVerifySaysTheSameThing:
         }
         verify_mod._print_human(v)
         assert _note(survives=False) in capsys.readouterr().err
+
+    @pytest.mark.parametrize(("survives", "lead"), [(False, "GREEN now —"), (True, "GREEN —")])
+    def test_green_says_now_when_a_restart_ends_it(
+        self, capsys: pytest.CaptureFixture[str], survives: bool, lead: str
+    ) -> None:
+        v = {
+            "verdict": "green",
+            "reason": "routed",
+            "healthy": True,
+            "aliases": [{"alias": "openai-1", "routed": True}],
+            "service_managed": survives,
+            "survives_restart": survives,
+        }
+        verify_mod._print_human(v)
+        assert capsys.readouterr().err.startswith(lead)
+
+    @pytest.mark.parametrize(
+        ("probe", "survives", "expected"),
+        [("pass", True, True), ("pass", False, False), ("fail", True, False)],
+        ids=["routed+service", "routed-no-service", "not-routed"],
+    )
+    def test_evaluate_reports_survival_only_for_a_proxy_that_routed(
+        self, probe: str, survives: bool, expected: bool
+    ) -> None:
+        """Real `_evaluate`: a proxy that failed the routing probe isn't proven
+        ours, so it is never promised survival."""
+        state = proxy_state.ProxyRuntimeState(
+            running=True, pid=None, port=8787, source="service", service_state=None
+        )
+        with (
+            patch.object(verify_mod, "detect_proxy_runtime", return_value=state),
+            patch.object(verify_mod, "_list_enrolled_keys", return_value=KEYS),
+            patch.object(verify_mod, "_confirm_bind_aliases", return_value={"status": probe}),
+            patch.object(verify_mod, "survives_restart", return_value=survives),
+        ):
+            v = verify_mod._evaluate(MagicMock(name="WorthlessHome"))
+        assert v["survives_restart"] is expected
 
     def test_json_carries_the_fact(self) -> None:
         v = {

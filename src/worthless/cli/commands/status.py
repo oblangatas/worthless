@@ -238,6 +238,18 @@ def _status_verdict(
     )
 
 
+def _survives_restart_for(home: WorthlessHome | None, proxy_info: dict[str, Any]) -> bool:
+    """WOR-860: does the proxy status sees come back after a restart?
+
+    Shared by `status` and the editor's `worthless_status` so they cannot
+    disagree. Only OUR proxy (healthy AND identified) can be the service: a
+    squatter on the port must never report ``survives_restart: true``.
+    """
+    if home is None or not proxy_info.get("healthy") or "bind_probe_count" not in proxy_info:
+        return False
+    return survives_restart(home, proxy_info.get("port") or 0)
+
+
 def register_status_commands(app: typer.Typer) -> None:
     """Register the status command on the Typer app."""
 
@@ -291,11 +303,7 @@ def register_status_commands(app: typer.Typer) -> None:
         # `bind_probe_count` is what proves it's ours (WOR-658) — the same
         # marker lock's bind-confirmation gates on.
         identified = "bind_probe_count" in proxy_info
-        survives = bool(
-            home is not None
-            and proxy_info["healthy"]
-            and survives_restart(home, proxy_info["port"] or 0)
-        )
+        survives = _survives_restart_for(home, proxy_info)
         verdict, header = _status_verdict(
             keys, bool(proxy_info["healthy"]), degraded, identified, survives_restart=survives
         )

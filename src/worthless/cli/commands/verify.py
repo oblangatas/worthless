@@ -84,7 +84,6 @@ def _evaluate(home: WorthlessHome | None) -> dict:
             "survives_restart": False,
         }
 
-    survives = survives_restart(home, state.port)
     aliases = [k["alias"] for k in _list_enrolled_keys(home)]
     if not aliases:
         return {
@@ -93,10 +92,14 @@ def _evaluate(home: WorthlessHome | None) -> dict:
             "healthy": True,
             "aliases": [],
             "service_managed": _service_managed(state.service_state),
-            "survives_restart": survives,
+            # Not proven ours (nothing to probe with), so not promised.
+            "survives_restart": False,
         }
 
     confirm = _confirm_bind_aliases(aliases, host=_LOOPBACK, port=state.port)
+    # Asked separately: detect_proxy_runtime returns from the pidfile without
+    # consulting the service, and port must match the service's own port.
+    survives = survives_restart(home, state.port)
     routed = confirm.get("status") == "pass"
     reason = "routed" if routed else (confirm.get("reason") or confirm.get("status") or "unproven")
     return {
@@ -109,7 +112,8 @@ def _evaluate(home: WorthlessHome | None) -> dict:
         # verified independently.
         "aliases": [{"alias": a, "routed": routed} for a in aliases],
         "service_managed": _service_managed(state.service_state),
-        "survives_restart": survives,
+        # Only a proxy that just routed our probe is proven ours.
+        "survives_restart": survives and routed,
     }
 
 
@@ -119,9 +123,14 @@ def _print_human(v: dict) -> None:
 
     if verdict == "green":
         alias = v["aliases"][0]["alias"] if v["aliases"] else "?"
-        write(f"GREEN — proxy is live and a request routed through it just now (alias: {alias}).\n")
-        # WOR-860: same sentence `status` prints, from the same function.
-        write(f"{restart_note(v.get('survives_restart', False))}\n")
+        survives = v.get("survives_restart", False)
+        # WOR-860: "GREEN now" when the next restart ends it, matching status's
+        # "protected now"; then the same sentence status prints.
+        lead = "GREEN" if survives else "GREEN now"
+        write(
+            f"{lead} — proxy is live and a request routed through it just now (alias: {alias}).\n"
+        )
+        write(f"{restart_note(survives)}\n")
         write(f"{_HONESTY}\n")
     elif verdict == "yellow":
         write("YELLOW — gateway is up, but nothing is locked yet.\n")
