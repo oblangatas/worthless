@@ -346,6 +346,15 @@ def test_homepage_first_screen_says_what_it_is() -> None:
     )
 
 
+def test_homepage_connects_the_maintainer_handles() -> None:
+    """WOR-950 (owner decision 2026-10-15): link the GitHub and Ko-fi handles so
+    visitors can tell they're the same maintainer; no real name on the homepage."""
+    footer = (WEBSITE / "index.html").read_text(encoding="utf-8").split('class="footer-bottom"')[1]
+    footer = footer.split("</div>")[0]
+    assert 'href="https://github.com/oblangatas"' in footer
+    assert 'href="https://ko-fi.com/shacharme"' in footer
+
+
 def _site_text_hits(pattern: str) -> list[str]:
     banned = re.compile(pattern, re.IGNORECASE)
     return [
