@@ -22,6 +22,7 @@ from typing import Any
 import typer
 
 from worthless.cli.bootstrap import WorthlessHome, ensure_home
+from worthless.cli.commands.service.proxy_state import restart_note, survives_restart
 from worthless.cli.console import get_console
 from worthless.cli.errors import error_boundary
 from worthless.cli.keystore import PLACEHOLDER_FERNET_KEY
@@ -155,6 +156,8 @@ def _status_verdict(
     proxy_healthy: bool,
     degraded: bool,
     proxy_identified: bool,
+    *,
+    survives_restart: bool = False,
 ) -> tuple[str, str | None]:
     """WOR-779: derive the worst-component verdict. Returns ``(enum, header)``.
 
@@ -194,6 +197,10 @@ def _status_verdict(
     Exit code stays 0 for ``proxy_unrecognised`` (see the command below),
     matching ``protected_at_rest`` — the availability tiers don't flip the
     exit code; machines must read the ``verdict`` enum, not ``$?``.
+
+    WOR-860: 🟢 is only true until the next restart unless the background
+    service is running, so the green header carries ``restart_note``. The
+    default is False: a caller that doesn't know must not promise survival.
     """
     if not keys:
         return "empty", None
@@ -220,12 +227,27 @@ def _status_verdict(
         )
 
     if proxy_healthy:
-        return "protected", f"🟢 You're protected — {n} {noun} locked, proxy up."
+        lead = "🟢 You're protected" if survives_restart else "🟢 You're protected now"
+        return "protected", (
+            f"{lead} — {n} {noun} locked, proxy up.\n   {restart_note(survives_restart)}"
+        )
 
     return "protected_at_rest", (
         f"🟡 Protected at rest — {n} {noun} locked (a stolen .env is worthless), "
         f"but the proxy is down so your apps can't reach them. Run `worthless up`."
     )
+
+
+def _survives_restart_for(home: WorthlessHome | None, proxy_info: dict[str, Any]) -> bool:
+    """WOR-860: does the proxy status sees come back after a restart?
+
+    Shared by `status` and the editor's `worthless_status` so they cannot
+    disagree. Only OUR proxy (healthy AND identified) can be the service: a
+    squatter on the port must never report ``survives_restart: true``.
+    """
+    if home is None or not proxy_info.get("healthy") or "bind_probe_count" not in proxy_info:
+        return False
+    return survives_restart(home, proxy_info.get("port") or 0)
 
 
 def register_status_commands(app: typer.Typer) -> None:
@@ -281,7 +303,10 @@ def register_status_commands(app: typer.Typer) -> None:
         # `bind_probe_count` is what proves it's ours (WOR-658) — the same
         # marker lock's bind-confirmation gates on.
         identified = "bind_probe_count" in proxy_info
-        verdict, header = _status_verdict(keys, bool(proxy_info["healthy"]), degraded, identified)
+        survives = _survives_restart_for(home, proxy_info)
+        verdict, header = _status_verdict(
+            keys, bool(proxy_info["healthy"]), degraded, identified, survives_restart=survives
+        )
 
         # Output. Sub-command --json mirrors scan/wrap; honors top-level --json too.
         if console.json_mode or json_output:
@@ -291,6 +316,7 @@ def register_status_commands(app: typer.Typer) -> None:
                 "proxy": proxy_info,
                 "sentinel": sentinel,
                 "degraded": degraded,
+                "survives_restart": survives,
             }
             sys.stdout.write(json.dumps(result, default=str) + "\n")
             sys.stdout.flush()

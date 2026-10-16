@@ -181,7 +181,17 @@ async def test_real_client_calls_tools_and_sees_results_and_errors(tmp_path: Pat
     assert status.is_error is False
     payload = json.loads(status.content[0].text)  # type: ignore[union-attr]
     assert payload["verdict"] == "empty"
-    assert set(payload) == {"verdict", "header", "keys", "proxy", "sentinel", "degraded"}
+    # survives_restart: WOR-860 — the editor gets the same restart fact as
+    # `worthless status`. Additive; older clients ignore it.
+    assert set(payload) == {
+        "verdict",
+        "header",
+        "keys",
+        "proxy",
+        "sentinel",
+        "degraded",
+        "survives_restart",
+    }
 
     # A tool raising WorthlessError reaches the client as an error result
     # carrying the message — not a protocol error, not a crash.
