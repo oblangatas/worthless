@@ -594,11 +594,16 @@ async def _load_db_state_async():
         repo = ShardRepository(str(home.db_path), placeholder_fernet)
         await repo.initialize()
         enrollments = await repo.list_enrollments()
-        # WOR-958: a crash mid-lock can leave the real key under a DB row.
-        # That location is not protected, so scan must report it.
-        unlocked = await find_unlocked(repo, enrollments)
     except Exception:
         return None, []
+
+    # WOR-958: a crash mid-lock can leave the real key under a DB row. That
+    # location is not protected, so scan must report it. Its own try: a
+    # failure here must never turn every healthy lock into a false alarm.
+    try:
+        unlocked = await find_unlocked(repo, enrollments)
+    except Exception:
+        unlocked = []
 
     if not enrollments:
         return None, []

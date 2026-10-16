@@ -19,6 +19,7 @@ import pytest
 from worthless.cli.bootstrap import WorthlessHome
 
 from tests.cli.conftest import (
+    TEST_ANTHROPIC_KEY,
     TEST_OPENAI_KEY,
     cli_invoke,
     dotenv_value,
@@ -157,3 +158,25 @@ def test_status_keeps_its_keys_if_the_check_fails(
     result = cli_invoke(["status"], home_dir)
 
     assert "openai-" in result.output and "PROTECTED" in result.output, result.output
+
+
+def test_a_key_in_an_unsearchable_folder_blinds_nothing(
+    home_dir: WorthlessHome, env_file: Path, tmp_path: Path
+) -> None:
+    """exists()/is_file() raise when a parent folder can't be searched."""
+    lock_env(env_file, home_dir)
+    other = tmp_path / "proj" / ".env"
+    other.parent.mkdir()
+    other.write_text(f"ANTHROPIC_API_KEY={TEST_ANTHROPIC_KEY}\n")
+    lock_env(other, home_dir)
+    other.parent.chmod(0)
+    try:
+        scan = cli_invoke(["scan", str(env_file)], home_dir)
+        status = cli_invoke(["status"], home_dir)
+        doctor = cli_invoke(["doctor"], home_dir)
+    finally:
+        other.parent.chmod(0o700)
+
+    assert scan.exit_code == 0 and "UNPROTECTED" not in scan.output, scan.output
+    assert "openai-" in status.output, f"status lost every key:\n{status.output}"
+    assert "WRTLS-199" not in doctor.output, f"doctor crashed:\n{doctor.output}"

@@ -56,12 +56,13 @@ def is_orphan(enrollment: EnrollmentRecord) -> bool:
     if not enrollment.env_path:
         return False
     env_path = Path(enrollment.env_path)
-    if not env_path.exists():
-        return True
     try:
+        if not env_path.exists():
+            return True
         return enrollment.var_name not in dotenv_values(env_path)
     except (OSError, UnicodeDecodeError):
-        # Can't read it: never call it an orphan — doctor --fix purges orphans.
+        # Can't look (folder not searchable) or can't read it: never call it
+        # an orphan — doctor --fix purges orphans.
         return False
 
 
@@ -126,7 +127,11 @@ def find_orphans(enrollments: list[EnrollmentRecord]) -> list[EnrollmentRecord]:
         if not e.env_path:
             continue
         env_path = Path(e.env_path)
-        if not env_path.exists():
+        try:
+            missing = not env_path.exists()
+        except OSError:
+            continue  # folder not searchable: never an orphan
+        if missing:
             orphans.append(e)
             continue
         if e.env_path not in parsed_cache:
@@ -158,8 +163,11 @@ async def find_unlocked(
     parsed_cache: dict[str, dict[str, str | None]] = {}
     unlocked: list[EnrollmentRecord] = []
     for e in enrollments:
-        if not e.env_path or not Path(e.env_path).is_file():
-            continue
+        try:
+            if not e.env_path or not Path(e.env_path).is_file():
+                continue
+        except OSError:
+            continue  # folder not searchable: skip, like an unreadable file
         if e.env_path not in parsed_cache:
             # Unreadable or not UTF-8: skip it. One bad file must never blind
             # status, scan and doctor to every other key.
