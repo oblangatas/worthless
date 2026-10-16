@@ -153,10 +153,12 @@ def restart_note(survives: bool) -> str:
     if not survives:
         if is_wsl():
             # On WSL the distro (and every process in it) stops ~15 s after the
-            # last WSL window closes, so here closing the window does end it.
+            # last WSL window closes, so here closing the window does end it —
+            # unless the user already set instanceIdleTimeout=-1, hence "default".
             return (
-                "Not after a restart, or once your last WSL window closes: the proxy "
-                "isn't a background service. Keep it running: `worthless service install`"
+                "Not after a restart, or once your last WSL window closes (WSL's default): "
+                "the proxy isn't a background service. Keep it running: "
+                "`worthless service install`"
             )
         return (
             "Not after a restart: the proxy isn't a background service. "

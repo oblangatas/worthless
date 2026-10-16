@@ -144,6 +144,9 @@ else
     [ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/healthz" 2>/dev/null)" = 200 ] && break
     sleep 1
   done
+  # Say it plainly if `up` never answered, so that reads as "proxy never
+  # started", not as a wording failure.
+  fact "worthless up healthz" "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/healthz" 2>/dev/null)"
   runuser -l "$USER_NAME" -c "$RUN worthless status" > /tmp/status-up.log 2>&1
   sed 's/^/  | /' /tmp/status-up.log | head -3
   check "status says protected now, not after a restart" "grep -q \"You're protected now\" /tmp/status-up.log"
