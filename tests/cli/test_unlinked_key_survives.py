@@ -151,8 +151,27 @@ def test_recoverable_advice_follows_this_env_not_the_whole_machine(
     assert cli_invoke(["unlock", "--env", str(raw_env)], home_dir).exit_code == 0
 
     raw = " ".join(cli_invoke(["unlock", "--env", str(raw_env)], home_dir).output.split())
+    # This file names no key, but the machine holds one that lost its link: it can't
+    # tell, so it must not claim "probably recoverable" nor hand over a lock command.
     assert "probably still recoverable" not in raw.lower(), raw
-    assert "worthless lock --env" in raw, raw
+    assert "don't re-lock yet" in raw.lower(), raw
+    assert "worthless lock --env" not in raw, raw
 
     hit_out = " ".join(cli_invoke(["unlock", "--env", str(hit_env)], home_dir).output.split())
     assert "probably still recoverable" in hit_out.lower(), hit_out
+
+
+def test_keys_only_lock_is_never_told_to_re_lock(home_dir: WorthlessHome, env_file: Path) -> None:
+    """`lock --keys-only` (what agents are taught) writes no proxy URL, so the file
+    can't name its key. Re-locking a bug-hit value re-splits it and destroys the key,
+    so unlock must never hand over a lock command here (Cursor Bugbot on PR #709)."""
+    assert cli_invoke(["lock", "--keys-only", "--env", str(env_file)], home_dir).exit_code == 0
+    assert "BASE_URL" not in env_file.read_text()
+    _unlink_like_the_bug(home_dir)
+
+    result = cli_invoke(["unlock", "--env", str(env_file)], home_dir)
+    out = " ".join(result.output.split())
+
+    assert result.exit_code != 0, result.output
+    assert "worthless lock --env" not in out, result.output
+    assert "don't re-lock yet" in out.lower(), result.output

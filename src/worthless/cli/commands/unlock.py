@@ -809,6 +809,21 @@ def register_unlock_commands(app: typer.Typer) -> None:
                     f"this .env was copied from another machine, re-lock from the "
                     f"original machine.",
                 )
+            if unlinked:
+                # A `lock --keys-only` .env carries no proxy URL, so it can't name
+                # its key. Re-locking a bug-hit value re-splits it and destroys the
+                # key, so with an unlinked key on this machine, no lock command.
+                raise WorthlessError(
+                    ErrorCode.KEY_NOT_FOUND,
+                    f"No enrollment found for key-shaped value(s) in {env}: "
+                    f"{', '.join(unrecognised)}. Don't re-lock yet: this machine "
+                    f"holds a key whose link Worthless's doctor repair removed "
+                    f"(v0.3.7–v0.3.14), and these values may be that key. If so, it "
+                    f"can still be recovered, and re-locking would destroy it. Keep "
+                    f'the lines and search "WRTLS-102" in the Worthless GitHub '
+                    f"issues. Only if you're sure they are raw keys you pasted "
+                    f"yourself, lock them as usual.",
+                )
             raise WorthlessError(
                 ErrorCode.KEY_NOT_FOUND,
                 f"No enrollment found for key-shaped value(s) in {env}: "
