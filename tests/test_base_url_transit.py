@@ -190,10 +190,13 @@ async def test_base_url_request_transits_proxy_to_upstream(
     sdk_name: str,
     proxy_settings: ProxySettings,
     repo: ShardRepository,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A base_url-pointed SDK request must physically transit the proxy.
 
-    Drives the official SDK with ``base_url`` set to the proxy. Proves the
+    Sets ``OPENAI_BASE_URL`` / ``ANTHROPIC_BASE_URL`` exactly as the install
+    docs tell users to, and lets the SDK pick it up from the environment (no
+    ``base_url=`` argument), so the env-var step itself is covered. Proves the
     request went THROUGH the proxy (not around it) via two witnesses: the mock
     upstream captured it AND the proxy's own spend-ledger counter ticked.
     """
@@ -219,6 +222,7 @@ async def test_base_url_request_transits_proxy_to_upstream(
         # a real socket. base_url carries the alias in the path; the proxy reads
         # the alias from the URL (SR-09), reconstructs the key, then forwards.
         proxy_base = f"http://proxy/{alias}{case['sdk_path_suffix']}"
+        monkeypatch.setenv(f"{sdk_name.upper()}_BASE_URL", proxy_base)
         proxy_transport = httpx.ASGITransport(app=proxy_app)
 
         # Witness #2 (before): nothing proxied, nothing billed yet.
@@ -233,7 +237,6 @@ async def test_base_url_request_transits_proxy_to_upstream(
         if sdk_name == "openai":
             client = openai.AsyncOpenAI(
                 api_key=shard_a,
-                base_url=proxy_base,
                 http_client=sdk_http_client,
                 max_retries=0,
             )
@@ -249,7 +252,6 @@ async def test_base_url_request_transits_proxy_to_upstream(
         else:
             client = anthropic.AsyncAnthropic(
                 api_key=shard_a,
-                base_url=proxy_base,
                 http_client=sdk_http_client,
                 max_retries=0,
             )
