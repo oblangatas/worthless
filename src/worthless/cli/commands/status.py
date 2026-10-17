@@ -26,7 +26,7 @@ from worthless.cli.commands.service.proxy_state import restart_note, survives_re
 from worthless.cli.console import get_console
 from worthless.cli.errors import error_boundary
 from worthless.cli.keystore import PLACEHOLDER_FERNET_KEY
-from worthless.cli.orphans import FIX_PHRASE, is_orphan
+from worthless.cli.orphans import FIX_PHRASE, UNLOCKED_FIX_PHRASE, find_unlocked, is_orphan
 from worthless.cli.process import check_proxy_health, read_pid
 from worthless.cli.sentinel import is_partial, read_sentinel
 from worthless.storage.repository import EnrollmentRecord, ShardRepository
@@ -103,6 +103,13 @@ def _list_enrolled_keys(home: WorthlessHome) -> list[dict[str, str]]:
     except Exception:
         return keys
 
+    # WOR-958: a lock killed between its DB write and its .env rewrite. Its
+    # own try: a failure here must never cost the user the key list.
+    try:
+        exposed = {e.key_alias for e in asyncio.run(find_unlocked(repo, enrollments))}
+    except Exception:
+        exposed = set()
+
     # Also enumerate shards so aliases with no enrollment row still appear
     # (edge state: shard exists, enrollment row was deleted out-of-band).
     conn = sqlite3.connect(str(home.db_path))
@@ -122,6 +129,8 @@ def _list_enrolled_keys(home: WorthlessHome) -> list[dict[str, str]]:
         rows = by_alias.get(alias, [])
         if not rows:
             status = "PROTECTED"  # shard-without-enrollment edge — not HF5 scope
+        elif alias in exposed:
+            status = "EXPOSED"
         elif all(is_orphan(e) for e in rows):
             status = "BROKEN"
         else:
@@ -165,10 +174,13 @@ def _status_verdict(
     proxy, NEVER this folder's ``.env``. So it must not claim about plaintext
     (``scan`` owns that). The two axes are kept separate:
 
-      * confidentiality  — is a stolen ``.env`` worthless? (locked / BROKEN)
+      * confidentiality  — is a stolen ``.env`` worthless? (locked / BROKEN /
+        EXPOSED: the DB says locked, but a lock cut off by ``kill -9`` left
+        the real key in that key's own ``.env``, WOR-958)
       * availability      — can apps reach the keys right now? (proxy up/down)
 
-    🔴 ``at_risk`` is reserved for a real failure (degraded routing). A locked
+    🔴 ``at_risk`` is reserved for a real failure (degraded routing, an
+    EXPOSED key). A locked
     key with the proxy down is SAFE AT REST — that's 🟡 ``protected_at_rest``,
     never 🔴: calling an availability outage a security risk trains the user
     to ignore red. A BROKEN enrollment is data-loss (🟡 ``attention``), not a
@@ -210,6 +222,14 @@ def _status_verdict(
 
     if degraded:
         return "at_risk", "🔴 At risk — OpenClaw routing is broken (details below)."
+
+    exposed = sum(1 for k in keys if k["status"] == "EXPOSED")
+    if exposed:
+        e_noun = "key is" if exposed == 1 else "keys are"
+        return "at_risk", (
+            f"🔴 At risk — {exposed} {e_noun} still in plain text in .env "
+            f"(a lock was cut off) — run `{UNLOCKED_FIX_PHRASE}` there."
+        )
 
     broken = sum(1 for k in keys if k["status"] == "BROKEN")
     if broken:
@@ -396,7 +416,7 @@ def register_status_commands(app: typer.Typer) -> None:
                 )
             sys.stderr.flush()
 
-        # Trust-fix exit: degraded sentinel = non-zero exit so callers
+        # Trust-fix exit: at_risk (degraded sentinel, or an EXPOSED key) = non-zero exit so callers
         # (CI scripts, shell pipelines, agents polling status) get the
         # signal even if they ignored the original lock exit code.
-        raise typer.Exit(code=73 if degraded else 0)
+        raise typer.Exit(code=73 if degraded or verdict == "at_risk" else 0)

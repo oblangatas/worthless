@@ -28,8 +28,11 @@ from worthless.cli.console import get_console
 from worthless.cli.dotenv_rewriter import build_enrolled_locations, scan_env_keys
 from worthless.cli.errors import ErrorCode, WorthlessError
 from worthless.cli.key_patterns import is_oauth_token
+from worthless.cli.keystore import PLACEHOLDER_FERNET_KEY
+from worthless.cli.orphans import UNLOCKED_FIX_PHRASE, find_unlocked
 from worthless.cli.scanner import remedy_for_exposure, token_facts
 from worthless.openclaw.audit import sanitise_for_message
+from worthless.storage.repository import ShardRepository
 from worthless.cli.commands.service._common import ServiceState
 from worthless.cli.commands.service.proxy_state import ProxyRuntimeState, detect_proxy_runtime
 
@@ -126,6 +129,36 @@ def _report_json(home: WorthlessHome) -> None:
     sys.stdout.flush()
 
 
+def _warn_if_lock_was_cut_off(home: WorthlessHome, console) -> None:
+    """WOR-958: name a key a ``kill -9`` mid-lock left in this folder's .env.
+
+    Warn only: ``lock`` re-locks it onto the stored shard, and locking here
+    would also take keys the user was never shown. Metadata reads only, so
+    the placeholder Fernet key (as ``status`` and ``scan`` use).
+    """
+    env_path = find_env_file()
+    if env_path is None:
+        return
+    env_str = str(env_path.resolve())
+
+    async def _unlocked_here() -> list:
+        repo = ShardRepository(str(home.db_path), bytearray(PLACEHOLDER_FERNET_KEY))
+        enrollments = await repo.list_enrollments()
+        return [e for e in await find_unlocked(repo, enrollments) if e.env_path == env_str]
+
+    try:
+        unlocked = asyncio.run(_unlocked_here())
+    except Exception:
+        logger.debug("cut-off lock check failed", exc_info=True)
+        return
+    if unlocked:
+        names = ", ".join(sanitise_for_message(e.var_name) for e in unlocked)
+        console.print_warning(
+            f"  {names} still in plain text in {env_path.name}: a lock was cut off. "
+            f"Run `{UNLOCKED_FIX_PHRASE} --env {env_path.name}` to finish it."
+        )
+
+
 def _run_enrollment_if_needed(
     home: WorthlessHome,
     console,
@@ -135,6 +168,7 @@ def _run_enrollment_if_needed(
 ) -> None:
     """Phase 1: scan, show, and optionally lock keys from a local .env."""
     if _has_enrolled_keys(home):
+        _warn_if_lock_was_cut_off(home, console)
         return
 
     env_path = find_env_file()

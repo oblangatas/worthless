@@ -72,8 +72,10 @@ from worthless.cli.orphans import (
     FIX_PHRASE,
     MOVED_FIX_PHRASE,
     PROBLEM_PHRASE,
+    UNLOCKED_FIX_PHRASE,
     env_file_missing,
     find_orphans,
+    find_unlocked,
     is_orphan,
     removed_project_advice,
 )
@@ -141,6 +143,24 @@ def _run_async(coro: Coroutine[Any, Any, Any]) -> Any:
     except RuntimeError:
         # No running loop — safe to call asyncio.run() directly.
         return asyncio.run(coro)
+
+
+def _print_unlocked_lines(unlocked: list[EnrollmentRecord], console) -> None:
+    """WOR-958: keys a cut-off lock left in plain text. Report only.
+
+    ``--fix`` must not purge these: the purge drops sibling enrollments and a
+    fresh split breaks every other copy of shard A. ``lock`` re-locks them
+    onto the shard already stored.
+    """
+    if not unlocked:
+        return
+    n = len(unlocked)
+    console.print_warning(
+        f"{n} key{'s are' if n != 1 else ' is'} still in plain text — a lock was cut off:"
+    )
+    for e in unlocked:
+        typer.echo(f"  {e.var_name} in {e.env_path}")
+        typer.echo(f"    fix: run `{UNLOCKED_FIX_PHRASE} --env {e.env_path}`")
 
 
 async def _list_orphans(
@@ -650,7 +670,7 @@ def _collect_alias_issues(env_paths: set[Path], known_aliases: set[str], db_name
     for env_file in env_paths:
         try:
             parsed = dotenv_values(env_file)
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             continue
         for key, value in parsed.items():
             if not key.endswith("_BASE_URL") or not value:
@@ -1019,6 +1039,7 @@ def _doctor_run(*, fix: bool, yes: bool, dry_run: bool) -> None:
         repo = ShardRepository(str(home.db_path), home.fernet_key)
         try:
             all_enrollments, orphans = _run_async(_list_orphans(repo))
+            unlocked = _run_async(find_unlocked(repo, all_enrollments))
             openclaw_issues = _check_openclaw_section(
                 all_enrollments, repo=repo, fix=fix, dry_run=dry_run
             )
@@ -1037,7 +1058,9 @@ def _doctor_run(*, fix: bool, yes: bool, dry_run: bool) -> None:
         # ----------- check 6: folders left by a stopped proxy (worthless-7qb6) -----------
         dead_runs = find_dead_run_dirs(home)
 
-        if not any((orphans, openclaw_issues, synced, had_mismatch, had_alias_issues, dead_runs)):
+        if not any(
+            (orphans, unlocked, openclaw_issues, synced, had_mismatch, had_alias_issues, dead_runs)
+        ):
             if not imported:
                 console.print_success("No issues found.")
             return
@@ -1064,8 +1087,12 @@ def _doctor_run(*, fix: bool, yes: bool, dry_run: bool) -> None:
                 typer.echo(f"    fix: run `{ICLOUD_FIX_PHRASE}`")
 
         _print_dead_run_lines(dead_runs, home, console, show_fix_hint=not fix)
+        _print_unlocked_lines(unlocked, console)
 
-        if not fix:
+        # Nothing below repairs an unlocked key: `lock` does, reusing its shard.
+        if not fix or not any(
+            (orphans, openclaw_issues, synced, had_mismatch, had_alias_issues, dead_runs)
+        ):
             return
 
         if dry_run:
