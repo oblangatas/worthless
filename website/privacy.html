@@ -37,14 +37,14 @@
 
   <main class="legal-doc">
     <h1>Worthless Privacy Policy</h1>
-    <p class="legal-meta">Version 1.0 &middot; May 2026</p>
+    <p class="legal-meta">Version 1.1 &middot; October 2026</p>
 
     <p>This Privacy Policy describes how the <strong>Operator</strong>, Shachar Mendelowitz, an Israeli sole proprietor based in Herzliya, Israel, handles personal data in connection with the Worthless open-source project, the <strong>wless.io</strong> website, and the Worthless GitHub repository.</p>
 
     <h2>1. The short version</h2>
     <ul>
       <li>Worthless is <strong>self-hosted, open-source software</strong>. The Operator does <strong>not</strong> collect, transmit, store, or process your API keys, prompt content, or response content.</li>
-      <li>The wless.io website is a small static site with no analytics tracking by default.</li>
+      <li>The wless.io website is a small static site. It counts page views with Cloudflare Web Analytics, which sets no cookies, and it loads fonts from Google and a news feed from GitHub.</li>
       <li>The GitHub repository collects whatever GitHub itself collects from visitors and contributors; that is governed by GitHub's privacy policy, not this one.</li>
       <li>If you email an Operator-controlled address (legal@, privacy@, security@), your email is received and may be read.</li>
       <li>If you submit the early-access waitlist form, Tally receives the information you provide and the Operator may read it.</li>
@@ -69,14 +69,15 @@
     <p>If you have not opted in, no usage data is sent to the Operator from the Software.</p>
 
     <h2>3. Website (wless.io)</h2>
-    <p>The wless.io website is a static site published at GitHub Pages or a comparable static host.</p>
-    <p>The Operator does not place analytics scripts, advertising trackers, or third-party JavaScript by default. The hosting provider may collect standard server-log information (IP address, user agent, requested URL, timestamp) for operational and security purposes; that processing is governed by the hosting provider's own policy.</p>
-    <p>The homepage and coming-soon page may link to an optional early-access waitlist hosted by <strong>Tally</strong>. If you open or submit that form, Tally processes the information you provide under <a href="https://tally.so/help/privacy-policy" target="_blank" rel="noopener">Tally's privacy policy</a>. The Operator receives the submitted information and may use it only to evaluate interest in, and contact you about, a separate future Hosted Worthless managed product. Submitting the form is optional.</p>
-    <p>If analytics are added later, they will be:</p>
+    <p>The wless.io website is a static site published through GitHub Pages and delivered by <strong>Cloudflare</strong>, which also serves the <code>worthless.sh</code> installer. When you visit, Cloudflare receives your IP address, browser details, the page you request and the time, and may run automated bot checks. That processing is governed by Cloudflare's own privacy policy.</p>
+    <p>Your browser also contacts two other services while you read the site:</p>
     <ul>
-      <li>Privacy-respecting (e.g., Plausible or equivalent, no cookies, no cross-site tracking)</li>
-      <li>Disclosed in this Policy at the time they are added</li>
+      <li><strong>Google Fonts</strong> (<code>fonts.googleapis.com</code>, <code>fonts.gstatic.com</code>) serves the site's fonts and receives your IP address and browser details.</li>
+      <li><strong>GitHub</strong> (<code>gist.githubusercontent.com</code>) serves the news feed on the homepage.</li>
     </ul>
+    <p>The Operator places no advertising trackers.</p>
+    <p>The homepage and coming-soon page may link to an optional early-access waitlist hosted by <strong>Tally</strong>. If you open or submit that form, Tally processes the information you provide under <a href="https://tally.so/help/privacy-policy" target="_blank" rel="noopener">Tally's privacy policy</a>. The Operator receives the submitted information and may use it only to evaluate interest in, and contact you about, a separate future Hosted Worthless managed product. Submitting the form is optional.</p>
+    <p>Page views are counted with <strong>Cloudflare Web Analytics</strong>: no cookies and no cross-site tracking. The Operator does not sell visitor data or share it for advertising. Any further analytics will be disclosed in this Policy before they are added.</p>
 
     <h2>4. GitHub repository</h2>
     <p>The Worthless source code, issues, pull requests, and discussions are hosted at <a href="https://github.com/oblangatas/worthless" target="_blank" rel="noopener">https://github.com/oblangatas/worthless</a>. When you visit, file issues, open pull requests, comment, or otherwise interact with the repository, <strong>GitHub</strong> collects information about you according to GitHub's own privacy policy. The Operator does not control GitHub's data practices.</p>

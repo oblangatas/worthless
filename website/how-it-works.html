@@ -225,9 +225,9 @@
     <div class="step-rail"><div class="step-num">02</div><div class="step-line"></div></div>
     <div class="step-body">
       <h2>Worthless splits it in half</h2>
-      <p>Run <code>worthless lock</code>. Your key gets split into two random-looking pieces. One stays in your .env. The other goes to a local proxy on your machine. Neither piece works on its own.</p>
-      <p>If someone copies your .env, the protected value alone cannot call the provider. The stored share reveals nothing about the original key while the other share remains out of reach.</p>
-      <details><summary>how does that work?</summary><p>It's called XOR secret sharing. Think of it like tearing a photo in half, each piece looks like random noise. You need both halves to see the picture. One half reveals zero bits about the original. The catch: only true while the other half stays out of reach.</p></details>
+      <p>Run <code>worthless lock</code>. Your key gets split into two shards. One replaces the key in your .env and still looks like a real key. The other is stored on your machine, in your system keystore when there is one. Neither shard works on its own.</p>
+      <p>If someone copies your .env, the protected value alone cannot call the provider. It keeps the provider prefix and the key's length, but the secret part is random until it's combined with the other shard.</p>
+      <details><summary>how does that work?</summary><p>Each character of the secret part is shifted by a random amount within the key's own alphabet. The shifts are the other shard. Without them, the value in your .env is random characters that happen to look like a key. The catch: that only holds while the other shard stays out of reach.</p></details>
     </div>
   </div>
 
@@ -253,8 +253,8 @@
     <div class="step-rail"><div class="step-num">05</div><div class="step-line"></div></div>
     <div class="step-body">
       <h2>Don't like it? One command to undo</h2>
-      <p>Run <code>worthless unlock</code>. Original .env restored. Proxy gone. Shares deleted. Like it was never there.</p>
-      <details><summary>is there really zero lock-in?</summary><p>Zero. Your original key is stored encrypted locally. <code>worthless unlock</code> decrypts it, writes it back to .env, stops the proxy, and deletes the shares. Your app goes back to reading the real key directly. No artifacts, no config files, no dependencies left behind.</p></details>
+      <p>Run <code>worthless unlock</code> and your real keys go back into .env, byte for byte. The proxy keeps running until you stop it. To remove Worthless's data as well, run <code>worthless uninstall</code>.</p>
+      <details><summary>is there really zero lock-in?</summary><p>Zero. Worthless never stores your real key. <code>worthless unlock</code> rebuilds it from the two shards and writes it back to .env, and your app reads the real key directly again. One difference stays: the .env file remains readable only by you. <code>worthless uninstall</code> restores every locked .env, stops the proxy and deletes <code>~/.worthless</code>. The <code>worthless</code> command itself stays installed until you remove it the way you installed it.</p></details>
     </div>
   </div>
 
@@ -269,7 +269,7 @@
   </style>
   <div class="limits-block">
     <h2>What Worthless does not protect against</h2>
-    <p>Worthless aims to make a copied <code>.env</code> share useless on its own. It is not a sandbox for a machine that is already compromised, and it is not the only layer you need.</p>
+    <p>Worthless aims to make a copied <code>.env</code> shard useless on its own. It is not a sandbox for a machine that is already compromised, and it is not the only layer you need.</p>
     <ul>
       <li><strong>A compromised machine.</strong> If an attacker controls the computer Worthless runs on, they can reach your key. Same trust boundary as a password manager.</li>
       <li><strong>The provider's side.</strong> A breach or outage at OpenAI, Anthropic, or another upstream is outside what Worthless can affect.</li>

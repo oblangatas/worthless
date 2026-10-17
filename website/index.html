@@ -1859,8 +1859,8 @@
         <details class="promise-explainer">
           <summary role="button" aria-expanded="false">Worthless makes leaked keys worthless. How?</summary>
           <p class="promise-explainer-copy">
-            Worthless replaces each protected API key in your <code>.env</code> with a share that cannot call the provider alone.
-            Your app still works through a local proxy that holds the other share.
+            Worthless replaces each protected API key in your <code>.env</code> with a shard that cannot call the provider alone.
+            Your app still works: a local proxy combines it with the other shard, which stays on your machine.
             <a href="how-it-works.html">See how it works</a>.
           </p>
           <div class="promise-audit" aria-label="Audit Worthless with AI">
@@ -1900,7 +1900,7 @@
                 </svg>
               </span>
             </button>
-            <p class="release-status" aria-label="Beta CLI, version 0.3.8, runs locally.">Beta CLI · v0.3.8 · runs locally</p>
+            <p class="release-status">Beta CLI · runs locally</p>
             <p class="copy-install-help" id="copy-install-help" hidden>
               Copy unavailable. Use the install guide below.
             </p>
@@ -1998,23 +1998,23 @@
           <div class="env-row">
             <div>
               <strong>OPENAI_API_KEY</strong>
-              <span>wrls_share_a_...</span>
+              <span>sk-proj-… (shard)</span>
             </div>
             <div class="env-badge">Worthless</div>
           </div>
           <div class="env-row">
             <div>
               <strong>ANTHROPIC_API_KEY</strong>
-              <span>wrls_share_a_...</span>
+              <span>sk-ant-api03-… (shard)</span>
             </div>
             <div class="env-badge">Worthless</div>
           </div>
           <div class="env-row">
             <div>
               <strong>GEMINI_API_KEY</strong>
-              <span>wrls_share_a_...</span>
+              <span>AIza… (your real key)</span>
             </div>
-            <div class="env-badge">Worthless</div>
+            <div class="env-badge">Not supported yet</div>
           </div>
         </div>
       </div>
@@ -2131,12 +2131,13 @@
       </div>
     </div>
     <div class="footer-bottom">
-      <span>Worthless is open source.</span>
-      <span>Worthless CLI beta · v0.3.8</span>
+      <span>Worthless is free and open source.</span>
+      <span>Built by one maintainer: <a href="https://github.com/oblangatas" target="_blank" rel="noopener">oblangatas</a> on GitHub, <a href="https://ko-fi.com/shacharme" target="_blank" rel="noopener">shacharme</a> on Ko-fi.</span>
+      <span>Licensed AGPL-3.0</span>
     </div>
   </footer>
 
-  <script src="news-feed.js" defer></script>
+  <script src="news-feed.js?v=2" defer></script>
   <script src="homepage.js" defer></script>
 </body>
 </html>
