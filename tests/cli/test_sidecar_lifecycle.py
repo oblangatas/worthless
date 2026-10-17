@@ -452,6 +452,24 @@ def test_spawn_sidecar_passes_drain_timeout_and_log_level(home: Path, key: bytea
     assert env["WORTHLESS_LOG_LEVEL"] == "WARNING"
 
 
+def test_spawn_sidecar_passes_parent_pid_for_orphan_watch(home: Path, key: bytearray) -> None:
+    """worthless-dhfn: the sidecar exits when this pid dies, so it must be ours."""
+    shares = split_to_tmpfs(key, home)
+    captured: dict[str, dict[str, str]] = {}
+
+    with (
+        patch(
+            "worthless.cli.sidecar_lifecycle.subprocess.Popen",
+            _capturing_popen(captured, pid=67890),
+        ),
+        patch("worthless.cli.sidecar_lifecycle._wait_for_ready", return_value=True),
+        patch("worthless.cli.sidecar_lifecycle._verify_socket_inode", return_value=None),
+    ):
+        spawn_sidecar(_short_socket_path(), shares, allowed_uid=os.getuid())
+
+    assert captured["env"]["WORTHLESS_SIDECAR_PARENT_PID"] == str(os.getpid())
+
+
 # ---------------------------------------------------------------------------
 # Phase C: shutdown_sidecar tests
 # ---------------------------------------------------------------------------
