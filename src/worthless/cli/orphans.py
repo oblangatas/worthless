@@ -149,6 +149,20 @@ def find_orphans(enrollments: list[EnrollmentRecord]) -> list[EnrollmentRecord]:
 UNLOCKED_FIX_PHRASE = "worthless lock"
 
 
+def _parsed_env(env_path: str) -> dict[str, str | None]:
+    """The .env as a dict, or empty when it can't be looked at or read.
+
+    Folder not searchable, file unreadable or not UTF-8: one bad file must
+    never blind status, scan and doctor to every other key.
+    """
+    try:
+        if not Path(env_path).is_file():
+            return {}
+        return dotenv_values(env_path)
+    except (OSError, UnicodeDecodeError):
+        return {}
+
+
 async def find_unlocked(
     repo: ShardRepository, enrollments: list[EnrollmentRecord]
 ) -> list[EnrollmentRecord]:
@@ -163,18 +177,10 @@ async def find_unlocked(
     parsed_cache: dict[str, dict[str, str | None]] = {}
     unlocked: list[EnrollmentRecord] = []
     for e in enrollments:
-        try:
-            if not e.env_path or not Path(e.env_path).is_file():
-                continue
-        except OSError:
-            continue  # folder not searchable: skip, like an unreadable file
+        if not e.env_path:
+            continue
         if e.env_path not in parsed_cache:
-            # Unreadable or not UTF-8: skip it. One bad file must never blind
-            # status, scan and doctor to every other key.
-            try:
-                parsed_cache[e.env_path] = dotenv_values(e.env_path)
-            except (OSError, UnicodeDecodeError):
-                parsed_cache[e.env_path] = {}
+            parsed_cache[e.env_path] = _parsed_env(e.env_path)
         value = parsed_cache[e.env_path].get(e.var_name)
         if not value:
             continue
