@@ -16,6 +16,7 @@ import sqlite3
 from pathlib import Path
 
 from tests.cli.conftest import cli_invoke, list_enrollments, lock_env
+from tests.helpers import fake_key
 from worthless.cli.bootstrap import WorthlessHome
 from worthless.cli.commands.doctor.checks import stranded_shards
 from worthless.cli.commands.doctor.registry import CheckContext
@@ -131,3 +132,27 @@ def test_unlock_never_tells_a_raw_key_holder_not_to_lock(
     assert "probably still recoverable" not in out, result.output
     assert "re-lock, or uninstall" not in out, result.output
     assert "junk" not in out, result.output
+
+
+def test_recoverable_advice_follows_this_env_not_the_whole_machine(
+    home_dir: WorthlessHome, tmp_path: Path
+) -> None:
+    """One bug-hit key elsewhere on the machine must not make every other project's
+    raw keys hear "don't re-lock" (Cursor Bugbot on PR #709)."""
+    hit_env = tmp_path / "hit" / ".env"
+    raw_env = tmp_path / "raw" / ".env"
+    hit_key, raw_key = (fake_key("sk-proj-", seed=s) for s in ("hit-project", "raw-project"))
+    for env, key in ((hit_env, hit_key), (raw_env, raw_key)):
+        env.parent.mkdir()
+        env.write_text(f"OPENAI_API_KEY={key}\n")
+        lock_env(env, home_dir)
+    hit = next(e for e in list_enrollments(home_dir) if e.env_path == str(hit_env.resolve()))
+    asyncio.run(_repo(home_dir).delete_enrollment(hit.key_alias, hit.env_path))
+    assert cli_invoke(["unlock", "--env", str(raw_env)], home_dir).exit_code == 0
+
+    raw = " ".join(cli_invoke(["unlock", "--env", str(raw_env)], home_dir).output.split())
+    assert "probably still recoverable" not in raw.lower(), raw
+    assert "worthless lock --env" in raw, raw
+
+    hit_out = " ".join(cli_invoke(["unlock", "--env", str(hit_env)], home_dir).output.split())
+    assert "probably still recoverable" in hit_out.lower(), hit_out

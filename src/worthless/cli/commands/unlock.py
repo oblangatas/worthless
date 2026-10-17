@@ -790,10 +790,14 @@ def register_unlock_commands(app: typer.Typer) -> None:
                     f"`worthless lock --env {env}` again.",
                 )
             # WOR-959: a stored key with no link left is what the v0.3.7–v0.3.14
-            # doctor bug produced. Only then is "keep these lines" true; for a
-            # raw key (e.g. an already-unlocked .env) it would leave it unprotected.
+            # doctor bug produced. Only then is "keep these lines" true, and only
+            # for the .env that names that key (its proxy URL carries the alias).
+            # For raw keys (e.g. an already-unlocked .env) it would leave them
+            # unprotected, even if another project on this machine was hit.
             linked = {e.key_alias for e in await repo.list_enrollments()}
-            if set(await repo.list_keys()) - linked:
+            unlinked = set(await repo.list_keys()) - linked
+            env_text = env.read_text(encoding="utf-8", errors="replace")
+            if any(f"/{a}/" in env_text for a in unlinked):
                 raise WorthlessError(
                     ErrorCode.KEY_NOT_FOUND,
                     f"No enrollment found for shard-shape value(s) in {env}: "
