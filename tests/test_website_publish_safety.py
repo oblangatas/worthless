@@ -291,6 +291,8 @@ def test_website_drops_claims_the_cli_does_not_keep() -> None:
         # The noun for a key half, not the verb ("share it" is fine).
         r"|\bshares\b|\b(?:a|the|other|one|stored|each|first|second) share\b"
         r"|\bshare (?:useless|reveals|that)\b"
+        # Pointers to the repo were labelled as proof; they're "How to check" now.
+        r"|Proof hook"
     )
     hits = _site_text_hits(retired)
     assert not hits, f"retired claims on the site: {hits}"
@@ -353,6 +355,20 @@ def test_homepage_connects_the_maintainer_handles() -> None:
     footer = footer.split("</div>")[0]
     assert 'href="https://github.com/oblangatas"' in footer
     assert 'href="https://ko-fi.com/shacharme"' in footer
+
+
+def test_website_ships_no_drafts_and_busts_the_old_feed_script() -> None:
+    """WOR-946 publish hygiene.
+
+    Unpublished Red Blog drafts were hidden with `published: false` but still
+    readable in page source. And the live site already serves a different
+    news-feed.js with max-age=14400, so the new page must request it under a new
+    URL or returning visitors run the old script for up to four hours.
+    """
+    red_posts = (WEBSITE / "red" / "red-posts.js").read_text(encoding="utf-8")
+    assert "published: false" not in red_posts, "draft posts must not ship in page source"
+    index = (WEBSITE / "index.html").read_text(encoding="utf-8")
+    assert '<script src="news-feed.js?v=' in index, "news-feed.js needs a cache-busting query"
 
 
 def _site_text_hits(pattern: str) -> list[str]:
