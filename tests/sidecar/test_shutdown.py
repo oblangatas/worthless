@@ -22,6 +22,7 @@ import os
 import secrets
 import select
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -33,6 +34,7 @@ import pytest
 import pytest_asyncio
 
 from worthless.ipc.client import IPCClient
+from worthless.sidecar import __main__ as sidecar_main
 from worthless.sidecar.__main__ import _drain_server
 from worthless.sidecar.backends.base import Backend
 from worthless.sidecar.backends.fernet import FernetBackend
@@ -424,3 +426,130 @@ async def test_drain_cancels_stalled_handler_after_timeout(
                 await drain
             except (asyncio.CancelledError, Exception):
                 pass
+
+
+# ---------------------------------------------------------------------------
+# Parent-death watch (worthless-dhfn): kill -9 on ``worthless up`` must not
+# leave an orphaned sidecar holding both key shares on disk.
+# ---------------------------------------------------------------------------
+
+# A stand-in for ``worthless up``: spawns the sidecar with its own pid as
+# WORTHLESS_SIDECAR_PARENT_PID, prints the sidecar pid, then idles until killed.
+_FAKE_SUPERVISOR = """
+import os, subprocess, sys, time
+env = dict(os.environ, WORTHLESS_SIDECAR_PARENT_PID=str(os.getpid()))
+p = subprocess.Popen([sys.executable, "-m", "worthless.sidecar"], env=env,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+print(p.pid, flush=True)
+time.sleep(60)
+"""
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _wait_until(pred, timeout: float) -> bool:  # type: ignore[no-untyped-def]
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pred():
+            return True
+        time.sleep(0.05)
+    return pred()
+
+
+def test_sidecar_exits_and_removes_shares_when_parent_is_killed(
+    sidecar_env: tuple[Path, dict[str, str]],
+) -> None:
+    sock, env = sidecar_env
+    base = sock.parent
+    sup = subprocess.Popen(
+        [sys.executable, "-c", _FAKE_SUPERVISOR], env=env, stdout=subprocess.PIPE, text=True
+    )
+    sidecar_pid = 0
+    idle = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        assert sup.stdout is not None
+        sidecar_pid = int(sup.stdout.readline())
+        assert _wait_until(sock.exists, _READY_TIMEOUT_S), "sidecar never bound its socket"
+        # An idle connection, like the still-running proxy's, holds the drain
+        # open for the full 5s drain timeout; the shares must go before that.
+        idle.connect(str(sock))
+
+        sup.kill()
+        sup.wait(timeout=5)
+
+        assert _wait_until(lambda: not base.exists(), 2.0), (
+            f"orphaned sidecar left key material behind: {sorted(base.iterdir())}"
+        )
+        # Reparented, so not our child: poll with kill(0) instead of wait().
+        assert _wait_until(lambda: not _pid_alive(sidecar_pid), 10.0)
+    finally:
+        idle.close()
+        if sup.poll() is None:
+            sup.kill()
+            sup.wait(timeout=2)
+        if sidecar_pid and _pid_alive(sidecar_pid):
+            os.kill(sidecar_pid, signal.SIGKILL)
+
+
+def test_sidecar_keeps_serving_while_parent_is_alive(
+    sidecar_env: tuple[Path, dict[str, str]],
+) -> None:
+    sock, env = sidecar_env
+    proc = _spawn_sidecar({**env, "WORTHLESS_SIDECAR_PARENT_PID": str(os.getpid())})
+    try:
+        _wait_for_ready(proc)
+        time.sleep(2.0)  # four watcher polls
+        assert proc.poll() is None, "sidecar quit although its parent is alive"
+        assert sock.exists()
+    finally:
+        _terminate(proc)
+
+
+def test_sidecar_refuses_to_start_when_parent_already_gone(
+    sidecar_env: tuple[Path, dict[str, str]],
+) -> None:
+    """Parent died during spawn: the sidecar must not bind, and must wipe the shares."""
+    sock, env = sidecar_env
+    proc = _spawn_sidecar({**env, "WORTHLESS_SIDECAR_PARENT_PID": str(os.getpid() + 999_999)})
+    rc, out, err = _terminate_after_exit(proc)
+    assert rc == 0, f"rc={rc}\nstdout:{out}\nstderr:{err}"
+    assert "sidecar: ready" not in out
+    assert not sock.parent.exists(), sorted(sock.parent.iterdir())
+
+
+def _terminate_after_exit(proc: subprocess.Popen[str]) -> tuple[int, str, str]:
+    try:
+        out, err = proc.communicate(timeout=_READY_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        out, err = proc.communicate(timeout=2)
+        pytest.fail(f"sidecar did not exit after detecting a dead parent\nstderr:{err}")
+    return proc.returncode, out, err
+
+
+async def test_watch_parent_sets_stop_when_ppid_changes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sidecar_main.os, "getppid", lambda: 1)
+    stop = asyncio.Event()
+    orphaned = await asyncio.wait_for(
+        sidecar_main._watch_parent(4242, stop, interval=0.01), timeout=1.0
+    )
+    assert orphaned is True
+    assert stop.is_set()
+
+
+async def test_watch_parent_returns_quietly_on_normal_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sidecar_main.os, "getppid", lambda: 4242)
+    stop = asyncio.Event()
+    task = asyncio.create_task(sidecar_main._watch_parent(4242, stop, interval=0.01))
+    await asyncio.sleep(0.05)
+    assert not task.done(), "watcher fired although the parent is unchanged"
+    stop.set()
+    assert await asyncio.wait_for(task, timeout=1.0) is False
