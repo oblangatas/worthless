@@ -48,7 +48,8 @@ def test_scan_reports_the_real_key(home_dir: WorthlessHome, env_file: Path) -> N
 
     # Was: "All 1 keys are protected", exit 0 — a pre-commit hook passed it.
     assert result.exit_code == 1, result.output
-    assert "UNPROTECTED" in result.output and "OPENAI_API_KEY" in result.output, result.output
+    assert "UNPROTECTED" in result.output, result.output
+    assert "OPENAI_API_KEY" in result.output, result.output
 
 
 def test_status_does_not_call_it_protected(home_dir: WorthlessHome, env_file: Path) -> None:
@@ -56,7 +57,8 @@ def test_status_does_not_call_it_protected(home_dir: WorthlessHome, env_file: Pa
 
     result = cli_invoke(["status"], home_dir)
 
-    assert "EXPOSED" in result.output and "PROTECTED" not in result.output, result.output
+    assert "EXPOSED" in result.output, result.output
+    assert "PROTECTED" not in result.output, result.output
     assert "worthless lock" in result.output, result.output
     assert result.exit_code == 73, "scripts and agents must see a non-zero exit"
 
@@ -96,7 +98,8 @@ def test_bare_worthless_warns_and_leaves_env_alone(
     result = cli_invoke(["--yes"], home_dir)
     said = " ".join(result.output.split())  # Rich wraps long lines
 
-    assert "OPENAI_API_KEY" in said and "worthless lock --env .env" in said, result.output
+    assert "OPENAI_API_KEY" in said, result.output
+    assert "worthless lock --env .env" in said, result.output
     assert env_file.read_bytes() == before
 
 
@@ -157,7 +160,8 @@ def test_status_keeps_its_keys_if_the_check_fails(
     monkeypatch.setattr("worthless.cli.commands.status.find_unlocked", _boom)
     result = cli_invoke(["status"], home_dir)
 
-    assert "openai-" in result.output and "PROTECTED" in result.output, result.output
+    assert "openai-" in result.output, result.output
+    assert "PROTECTED" in result.output, result.output
 
 
 def test_a_key_in_an_unsearchable_folder_blinds_nothing(
@@ -177,6 +181,7 @@ def test_a_key_in_an_unsearchable_folder_blinds_nothing(
     finally:
         other.parent.chmod(0o700)
 
-    assert scan.exit_code == 0 and "UNPROTECTED" not in scan.output, scan.output
+    assert scan.exit_code == 0, scan.output
+    assert "UNPROTECTED" not in scan.output, scan.output
     assert "openai-" in status.output, f"status lost every key:\n{status.output}"
     assert "WRTLS-199" not in doctor.output, f"doctor crashed:\n{doctor.output}"

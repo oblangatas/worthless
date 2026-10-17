@@ -46,16 +46,18 @@ def run(ctx: CheckContext) -> CheckResult:
         for e in unlocked
     ]
     n = len(findings)
+    summary = "No keys left in plain text by a cut-off lock."
+    if findings:
+        noun = "keys" if n != 1 else "key"
+        summary = (
+            f"{n} {noun} still in plain text (a lock was cut off); "
+            f"run `{UNLOCKED_FIX_PHRASE}` on each .env."
+        )
     return CheckResult(
         check_id=check_id,
         status="warn" if findings else "ok",
         findings=findings,
-        summary=(
-            f"{n} key{'s' if n != 1 else ''} still in plain text (a lock was cut off); "
-            f"run `{UNLOCKED_FIX_PHRASE}` on each .env."
-            if findings
-            else "No keys left in plain text by a cut-off lock."
-        ),
+        summary=summary,
         fixable=False,
         fixed=[],
         skipped_reason=None,
