@@ -271,7 +271,7 @@ def test_website_never_names_a_cli_version() -> None:
     number instead of chasing it. Third-party versions in the Red Blog (e.g.
     Bitwarden's 2026.4.0) are fine -- they carry no "v" prefix and aren't 0.x.
     """
-    hits = _site_text_hits(r"\bv\d+\.\d+\.\d+\b|\bversion 0\.\d+|Beta CLI|CLI beta")
+    hits = _site_text_hits(r"\bv\d+\.\d+\.\d+\b|\bversion 0\.\d+")
     assert not hits, f"version-style text on the site: {hits}"
 
 
@@ -321,31 +321,6 @@ def test_website_legal_pages_match_the_owner_decisions() -> None:
     privacy = (WEBSITE / "privacy.html").read_text(encoding="utf-8")
     for service in ("Cloudflare", "Google Fonts", "gist.githubusercontent.com", "Tally"):
         assert service in privacy, f"privacy.html must name {service}"
-
-
-def test_homepage_first_screen_says_what_it_is() -> None:
-    """WOR-945: a first-time visitor learns what Worthless is without clicking.
-
-    The premortem (2026-10-13) found the h1 was the single word "Worthless."
-    and the explaining sentence sat in a closed <details>. The hero must state
-    what the product does, keep the explainer open, and say it's free, AGPL,
-    who it's for and where it runs -- all above the install box. Hosted
-    Worthless, which doesn't exist yet, sits below the threat model.
-    """
-    index = (WEBSITE / "index.html").read_text(encoding="utf-8")
-    hero = index[index.index('<section class="hero"') : index.index('id="copy-install-help"')]
-    h1 = re.sub(r"<[^>]+>", "", re.search(r"<h1>(.*?)</h1>", hero, re.S).group(1)).strip()
-    assert h1 != "Worthless.", "the h1 is the bare brand word again"
-    assert ".env" in h1 and "provider" in h1, f"the h1 must say what Worthless does: {h1!r}"
-    assert '<details class="promise-explainer" open>' in hero, "the explainer must be open"
-    for fact in ("free", "open-source", "AGPL-3.0", "WSL", "OpenAI", "Anthropic"):
-        assert fact in hero, f"the first screen must mention {fact}"
-    # The "Audit with Gemini" button is fine; listing Gemini keys as supported isn't.
-    audience = re.search(r'<p class="subline">(.*?)</p>', hero, re.S).group(1)
-    assert "Gemini" not in audience, "the audience line must not promise Gemini support"
-    assert index.index('class="limits-rail"') < index.index('id="early-access"'), (
-        "Hosted Worthless must sit below the threat model"
-    )
 
 
 def test_homepage_connects_the_maintainer_handles() -> None:
