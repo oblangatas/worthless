@@ -46,9 +46,10 @@ PLAYBOOKS: dict[str, str] = {
         "key is allowlisted and never touched."
     ),
     "stranded_shards": (
-        "Nothing at risk — a shard file (one half of a split key) has no matching database "
-        "row, usually from a crash mid-revoke. Run `worthless doctor --fix` to unlink it; "
-        "a lone shard is unusable on its own."
+        "Nothing at risk — a shard file (one half of a split key) has no link in the "
+        "database. Doctor's fix removes it only when the key's other half is gone too, so "
+        "it can never be used; a file whose key is still stored is kept, because that key "
+        "is probably recoverable."
     ),
     "dead_proxy_run_dirs": (
         "A key is at risk on disk — a `worthless up` or `wrap` that stopped without "
