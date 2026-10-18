@@ -160,3 +160,19 @@ def test_a_filesystem_without_flock_keeps_working(tmp_path: Path, monkeypatch) -
                 pass  # pragma: no cover
         assert exc.value.code.value == 105
     assert not home.lock_file.exists()
+
+
+def test_no_flock_still_reclaims_an_old_lock(tmp_path: Path, monkeypatch) -> None:
+    """The fallback is the full 5-minute rule: old files go, not only fresh ones block."""
+    home = ensure_home(base_dir=tmp_path / ".worthless")
+
+    def _no_flock(*_a: object) -> None:
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    monkeypatch.setattr(bootstrap._fcntl, "flock", _no_flock)
+    home.lock_file.touch()
+    old = time.time() - 400
+    os.utime(home.lock_file, (old, old))
+
+    with acquire_lock(home):
+        pass
