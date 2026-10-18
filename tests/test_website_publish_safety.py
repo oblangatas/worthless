@@ -123,14 +123,6 @@ LEGAL_LINK_TARGETS = (
 )
 
 
-def _pyproject_version() -> str:
-    pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    match = re.search(r'^version = "([^"]+)"', pyproject, re.MULTILINE)
-    assert match, "pyproject.toml must declare project.version"
-    assert '"Development Status :: 4 - Beta"' in pyproject
-    return match.group(1)
-
-
 def _prohibited_reference_needles() -> tuple[str, ...]:
     needles: list[str] = []
     for path in PROHIBITED_PATHS:
@@ -270,13 +262,112 @@ def test_website_homepage_launch_affordances_survive_promotion() -> None:
     assert "not the open-source tool on this page" in index
 
 
-def test_website_homepage_beta_label_matches_pyproject_version() -> None:
-    version = _pyproject_version()
-    index = (WEBSITE / "index.html").read_text(encoding="utf-8")
+def test_website_never_names_a_cli_version() -> None:
+    """The site must not print a Worthless version number.
 
-    assert f"Beta CLI · v{version} · runs locally" in index
-    assert f"Beta CLI, version {version}, runs locally." in index
-    assert f"Worthless CLI beta · v{version}" in index
+    The CLI ships every couple of weeks and the site is frozen between
+    releases, so any version on it is stale within days: the June copy said
+    v0.3.8 while 0.3.14 was on PyPI. Decision (WOR-946, 2026-10-15): delete the
+    number instead of chasing it. Third-party versions in the Red Blog (e.g.
+    Bitwarden's 2026.4.0) are fine -- they carry no "v" prefix and aren't 0.x.
+    """
+    # The one allowed tag: the audit prompt's link to the released installer.
+    hits = _site_text_hits(r"(?<!worthless/)\bv\d+\.\d+\.\d+\b|\bversion 0\.\d+")
+    assert not hits, f"version-style text on the site: {hits}"
+
+
+def test_ai_audit_reads_the_installer_that_actually_runs() -> None:
+    """`curl worthless.sh` runs the released installer; browsers and AI fetchers
+    get an HTML page from that host, and `main` can differ from the release.
+    So the "Audit the installer with AI" prompt must point at a release tag,
+    never at main (checked 2026-10-18: the v0.3.14 tag file is byte-identical
+    to what curl receives)."""
+    js = (WEBSITE / "homepage.js").read_text(encoding="utf-8")
+    assert "/main/install.sh" not in js, "the audit prompt must not read main"
+    assert re.search(
+        r"raw\.githubusercontent\.com/oblangatas/worthless/v\d+\.\d+\.\d+/install\.sh", js
+    )
+
+
+def test_website_drops_claims_the_cli_does_not_keep() -> None:
+    """Phrases retired because the published CLI contradicts them (WOR-946).
+
+    Proven against the released CLI in containers by
+    tests/test_site_claims_match_cli.py: `unlock` leaves the proxy running, the
+    real key is never stored, a shard keeps the provider prefix and length, and
+    a Gemini key is skipped and left as plaintext. The split is format-preserving
+    modular arithmetic (crypto/splitter.py), not XOR, and the product's word for
+    a key half is "shard".
+    """
+    retired = (
+        r"\bXOR\b|Proxy gone|proxy stopped|stored encrypted locally"
+        r"|reveals nothing|reveals zero bits|wrls_share|Two commands|key\(s\) protected"
+        # The noun for a key half, not the verb ("share it" is fine).
+        r"|\bshares\b|\b(?:a|the|other|one|stored|each|first|second) share\b"
+        r"|\bshare (?:useless|reveals|that)\b"
+        # Pointers to the repo were labelled as proof; they're "How to check" now.
+        r"|Proof hook"
+    )
+    hits = _site_text_hits(retired)
+    assert not hits, f"retired claims on the site: {hits}"
+
+    index = (WEBSITE / "index.html").read_text(encoding="utf-8")
+    gemini_row = index[index.index("<strong>GEMINI_API_KEY</strong>") :][:200]
+    assert "Not supported yet" in gemini_row, "the homepage must not show Gemini as protected"
+
+
+def test_website_legal_pages_match_the_owner_decisions() -> None:
+    """Legal-page decisions from the WOR-757 legal panel, applied in WOR-946.
+
+    The Terms cover the website only; the software is AGPL-3.0-only and nobody
+    has to accept the Terms to use it. The commercial-license pitch is cut. The
+    privacy page names every service a visitor's browser contacts.
+    """
+    terms = (WEBSITE / "terms.html").read_text(encoding="utf-8")
+    assert "These Terms cover the wless.io website only." in terms
+    assert "you need not accept these Terms to use, modify or share it" in terms
+
+    hits = _site_text_hits(
+        r"Shard C\b|never leave your control|commercial licen|third-party JavaScript by default"
+    )
+    assert not hits, f"retired legal wording on the site: {hits}"
+
+    privacy = (WEBSITE / "privacy.html").read_text(encoding="utf-8")
+    for service in ("Cloudflare", "Google Fonts", "gist.githubusercontent.com", "Tally"):
+        assert service in privacy, f"privacy.html must name {service}"
+
+
+def test_homepage_connects_the_maintainer_handles() -> None:
+    """WOR-950 (owner decision 2026-10-15): link the GitHub and Ko-fi handles so
+    visitors can tell they're the same maintainer; no real name on the homepage."""
+    footer = (WEBSITE / "index.html").read_text(encoding="utf-8").split('class="footer-bottom"')[1]
+    footer = footer.split("</div>")[0]
+    assert 'href="https://github.com/oblangatas"' in footer
+    assert 'href="https://ko-fi.com/shacharme"' in footer
+
+
+def test_website_ships_no_drafts_and_busts_the_old_feed_script() -> None:
+    """WOR-946 publish hygiene.
+
+    Unpublished Red Blog drafts were hidden with `published: false` but still
+    readable in page source. And the live site already serves a different
+    news-feed.js with max-age=14400, so the new page must request it under a new
+    URL or returning visitors run the old script for up to four hours.
+    """
+    red_posts = (WEBSITE / "red" / "red-posts.js").read_text(encoding="utf-8")
+    assert "published: false" not in red_posts, "draft posts must not ship in page source"
+    index = (WEBSITE / "index.html").read_text(encoding="utf-8")
+    assert '<script src="news-feed.js?v=' in index, "news-feed.js needs a cache-busting query"
+
+
+def _site_text_hits(pattern: str) -> list[str]:
+    banned = re.compile(pattern, re.IGNORECASE)
+    return [
+        f"{path.relative_to(WEBSITE)}: {match.group(0)}"
+        for path in sorted(WEBSITE.rglob("*"))
+        if path.suffix in {".html", ".js", ".txt", ".json", ".xml"}
+        for match in banned.finditer(path.read_text(encoding="utf-8"))
+    ]
 
 
 def test_website_waitlist_processing_is_disclosed_and_scoped() -> None:
