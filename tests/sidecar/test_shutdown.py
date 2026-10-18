@@ -553,3 +553,69 @@ async def test_watch_parent_returns_quietly_on_normal_stop(
     assert not task.done(), "watcher fired although the parent is unchanged"
     stop.set()
     assert await asyncio.wait_for(task, timeout=1.0) is False
+
+
+# In-process twins of the subprocess tests above, so coverage sees _run.
+
+
+def _use_env(monkeypatch: pytest.MonkeyPatch, env: dict[str, str], parent: str) -> None:
+    for k, v in env.items():
+        if k.startswith("WORTHLESS_SIDECAR_"):
+            monkeypatch.setenv(k, v)
+    monkeypatch.setenv("WORTHLESS_SIDECAR_PARENT_PID", parent)
+
+
+async def test_run_rejects_non_numeric_parent_pid(
+    sidecar_env: tuple[Path, dict[str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sock, env = sidecar_env
+    _use_env(monkeypatch, env, "not-a-pid")
+    assert await sidecar_main._run() == 1
+    assert any(sock.parent.iterdir()), "a config error must not wipe the shares"
+
+
+async def test_run_wipes_without_binding_when_parent_already_gone(
+    sidecar_env: tuple[Path, dict[str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sock, env = sidecar_env
+    _use_env(monkeypatch, env, str(os.getppid() + 999_999))
+    assert await sidecar_main._run() == 0
+    assert not sock.parent.exists()
+
+
+async def test_run_wipes_and_exits_when_parent_dies_while_serving(
+    sidecar_env: tuple[Path, dict[str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sock, env = sidecar_env
+    real_ppid = os.getppid()
+    _use_env(monkeypatch, env, str(real_ppid))
+    monkeypatch.setattr(sidecar_main, "_PARENT_POLL_S", 0.01)
+    monkeypatch.setattr(sidecar_main, "_DEFAULT_DRAIN_TIMEOUT_S", 0.1)
+    monkeypatch.delenv("WORTHLESS_SIDECAR_DRAIN_TIMEOUT", raising=False)
+    run = asyncio.create_task(sidecar_main._run())
+    try:
+        for _ in range(200):
+            if sock.exists():
+                break
+            await asyncio.sleep(0.01)
+        assert sock.exists(), "in-process sidecar never bound"
+        monkeypatch.setattr(sidecar_main.os, "getppid", lambda: real_ppid + 1)
+        assert await asyncio.wait_for(run, timeout=5.0) == 0
+        assert not sock.parent.exists()
+    finally:
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.remove_signal_handler(sig)
+        if not run.done():
+            run.cancel()
+
+
+def test_remove_key_material_keeps_a_dir_that_holds_other_files(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    a, b, s = run_dir / "a", run_dir / "b", run_dir / "s.sock"
+    for p in (a, b, s):
+        p.write_bytes(b"x")
+    (run_dir / "unrelated").write_text("keep")
+    sidecar_main._remove_key_material(a, b, s)
+    assert sorted(p.name for p in run_dir.iterdir()) == ["unrelated"]
