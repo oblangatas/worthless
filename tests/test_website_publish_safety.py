@@ -271,8 +271,22 @@ def test_website_never_names_a_cli_version() -> None:
     number instead of chasing it. Third-party versions in the Red Blog (e.g.
     Bitwarden's 2026.4.0) are fine -- they carry no "v" prefix and aren't 0.x.
     """
-    hits = _site_text_hits(r"\bv\d+\.\d+\.\d+\b|\bversion 0\.\d+")
+    # The one allowed tag: the audit prompt's link to the released installer.
+    hits = _site_text_hits(r"(?<!worthless/)\bv\d+\.\d+\.\d+\b|\bversion 0\.\d+")
     assert not hits, f"version-style text on the site: {hits}"
+
+
+def test_ai_audit_reads_the_installer_that_actually_runs() -> None:
+    """`curl worthless.sh` runs the released installer; browsers and AI fetchers
+    get an HTML page from that host, and `main` can differ from the release.
+    So the "Audit the installer with AI" prompt must point at a release tag,
+    never at main (checked 2026-10-18: the v0.3.14 tag file is byte-identical
+    to what curl receives)."""
+    js = (WEBSITE / "homepage.js").read_text(encoding="utf-8")
+    assert "/main/install.sh" not in js, "the audit prompt must not read main"
+    assert re.search(
+        r"raw\.githubusercontent\.com/oblangatas/worthless/v\d+\.\d+\.\d+/install\.sh", js
+    )
 
 
 def test_website_drops_claims_the_cli_does_not_keep() -> None:
