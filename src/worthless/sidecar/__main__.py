@@ -165,6 +165,15 @@ async def _drain_server(
         _LOG.debug("wait_closed timed out during final cleanup; continuing")
 
 
+def _parse_parent_pid(raw: str | None) -> int | None:
+    """``WORTHLESS_SIDECAR_PARENT_PID`` as an int; unset means no watch. Raises ValueError."""
+    return int(raw) if raw else None
+
+
+def _parent_gone(expected: int | None) -> bool:
+    return expected is not None and os.getppid() != expected
+
+
 async def _watch_parent(
     expected: int, stop: asyncio.Event, interval: float = _PARENT_POLL_S
 ) -> bool:
@@ -175,7 +184,7 @@ async def _watch_parent(
     ``stop`` was set by someone else (normal signal shutdown).
     """
     while not stop.is_set():
-        if os.getppid() != expected:
+        if _parent_gone(expected):
             _LOG.warning("parent pid %d is gone; shutting down", expected)
             stop.set()
             return True
@@ -197,6 +206,17 @@ def _remove_key_material(share_a: Path, share_b: Path, socket_path: Path) -> Non
     for directory in {share_a.parent, share_b.parent, socket_path.parent}:
         with contextlib.suppress(OSError):
             directory.rmdir()
+
+
+async def _wipe_when_orphaned(
+    expected: int | None, stop: asyncio.Event, share_a: Path, share_b: Path, socket_path: Path
+) -> None:
+    """Wipe the files as soon as the parent is gone, not after the drain.
+
+    A live proxy connection can hold the drain open for ``drain_timeout``.
+    """
+    if expected is not None and await _watch_parent(expected, stop):
+        _remove_key_material(share_a, share_b, socket_path)
 
 
 def _check_socket_path_available(path: Path) -> bool:
@@ -274,11 +294,10 @@ async def _run() -> int:
         _LOG.error("bad WORTHLESS_SIDECAR_DRAIN_TIMEOUT: %s", exc)
         return 1
 
-    raw_parent = os.environ.get("WORTHLESS_SIDECAR_PARENT_PID")
     try:
-        parent_pid = int(raw_parent) if raw_parent else None
-    except ValueError:
-        _LOG.error("bad WORTHLESS_SIDECAR_PARENT_PID: %r", raw_parent)
+        parent_pid = _parse_parent_pid(os.environ.get("WORTHLESS_SIDECAR_PARENT_PID"))
+    except ValueError as exc:
+        _LOG.error("bad WORTHLESS_SIDECAR_PARENT_PID: %s", exc)
         return 1
 
     try:
@@ -299,7 +318,7 @@ async def _run() -> int:
     del shares
 
     # The parent may have died while we were starting; don't bind for nobody.
-    if parent_pid is not None and os.getppid() != parent_pid:
+    if _parent_gone(parent_pid):
         _LOG.warning("parent pid %d died before bind; removing shares", parent_pid)
         _remove_key_material(share_a, share_b, socket_path)
         return 0
@@ -339,21 +358,14 @@ async def _run() -> int:
     # Print a stable, machine-parseable ready line for supervisors.
     print(f"sidecar: ready socket={socket_path}", flush=True)
 
-    async def _exit_when_orphaned(expected: int) -> None:
-        # Wipe the files as soon as the parent is gone, not after the drain:
-        # a live proxy connection can hold the drain open for drain_timeout.
-        if await _watch_parent(expected, stop):
-            _remove_key_material(share_a, share_b, socket_path)
-
-    watcher = (
-        asyncio.create_task(_exit_when_orphaned(parent_pid)) if parent_pid is not None else None
+    watcher = asyncio.create_task(
+        _wipe_when_orphaned(parent_pid, stop, share_a, share_b, socket_path)
     )
     try:
         await _drain_server(server, stop, drain_timeout=drain_timeout)
     except Exception as exc:  # noqa: BLE001 — best-effort drain
         _LOG.warning("drain raised during shutdown: %s", exc)
-    if watcher is not None:
-        await watcher
+    await watcher
     _LOG.info("sidecar shut down cleanly")
     return 0
 
