@@ -39,8 +39,10 @@ from worthless.cli.platform import IS_WINDOWS
 # grp is POSIX-only; the module must stay importable on Windows so the CLI can
 # print its refusal (mirrors worthless/openclaw/integration.py).
 if sys.platform != "win32":
+    import fcntl as _fcntl
     import grp as _grp
 else:
+    _fcntl = None  # type: ignore[assignment]
     _grp = None  # type: ignore[assignment]
 from worthless.crypto.types import zero_buf
 from worthless.ipc.client import IPCClient, IPCError
@@ -736,7 +738,13 @@ def _init_db(home: WorthlessHome) -> None:
 
 @contextmanager
 def acquire_lock(home: WorthlessHome) -> Generator[None, None, None]:
-    """Acquire an exclusive lock file using O_CREAT|O_EXCL."""
+    """Acquire an exclusive lock file using O_CREAT|O_EXCL, held under flock.
+
+    WOR-962: the kernel drops a flock the moment its holder dies, so a lock
+    file left by ``kill -9`` is reclaimed at once (``check_stale_lock``)
+    instead of blocking every command for 5 minutes. The PID written after
+    the flock marks "this file is flock-held"; it is never trusted on its own.
+    """
     check_stale_lock(home)
     try:
         fd = os.open(
@@ -744,7 +752,6 @@ def acquire_lock(home: WorthlessHome) -> Generator[None, None, None]:
             os.O_WRONLY | os.O_CREAT | os.O_EXCL,
             0o600,
         )
-        os.close(fd)
     except FileExistsError:
         raise WorthlessError(
             ErrorCode.LOCK_IN_PROGRESS,
@@ -752,12 +759,18 @@ def acquire_lock(home: WorthlessHome) -> Generator[None, None, None]:
             "Remove ~/.worthless/.lock-in-progress if stale.",
         ) from None  # FileExistsError context is not useful to callers
     try:
+        if _fcntl is not None:
+            # Blocking is safe: on a file we just created, a reclaimer can
+            # only hold the flock for an instant (it sees it empty, gives up).
+            _fcntl.flock(fd, _fcntl.LOCK_EX)
+            os.write(fd, f"{os.getpid()}\n".encode())
         yield
     finally:
         try:
             home.lock_file.unlink()
         except FileNotFoundError:
             pass
+        os.close(fd)  # after the unlink: no window where the flock is free
 
 
 def get_home() -> WorthlessHome:
@@ -805,15 +818,51 @@ def resolve_home() -> WorthlessHome | None:
 
 
 def check_stale_lock(home: WorthlessHome) -> None:
-    """Remove stale lock files (> 5 min old), raise on fresh locks."""
-    if not home.lock_file.exists():
+    """Reclaim a lock file whose holder is gone; raise while one is alive.
+
+    WOR-962. A file with content was written under a flock by
+    ``acquire_lock``: if that flock is busy, the holder is alive (never
+    stolen, however old); if we can take it, the holder died, so it goes now.
+    An empty file is a holder between create and flock, an older worthless,
+    or Windows (no flock): those keep the 5-minute rule.
+    """
+    try:
+        fd = os.open(str(home.lock_file), os.O_RDONLY)
+    except FileNotFoundError:
         return
-    age = time.time() - home.lock_file.stat().st_mtime
-    if age > _STALE_LOCK_SECONDS:
-        home.lock_file.unlink(missing_ok=True)
-    else:
-        raise WorthlessError(
-            ErrorCode.LOCK_IN_PROGRESS,
-            f"Lock file is {int(age)}s old (< {_STALE_LOCK_SECONDS}s). "
-            "Another operation may be running.",
-        )
+    try:
+        if _fcntl is not None:
+            try:
+                _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise WorthlessError(
+                    ErrorCode.LOCK_IN_PROGRESS,
+                    "Another worthless operation is running. Wait for it to finish.",
+                ) from None
+            if os.fstat(fd).st_size > 0:
+                _unlink_if_same_file(home.lock_file, fd)
+                return
+        age = time.time() - os.fstat(fd).st_mtime
+        if age > _STALE_LOCK_SECONDS:
+            _unlink_if_same_file(home.lock_file, fd)
+        else:
+            raise WorthlessError(
+                ErrorCode.LOCK_IN_PROGRESS,
+                f"Lock file is {int(age)}s old (< {_STALE_LOCK_SECONDS}s). "
+                "Another operation may be running.",
+            )
+    finally:
+        os.close(fd)
+
+
+def _unlink_if_same_file(path: Path, fd: int) -> None:
+    """Unlink *path* only if it is still the file *fd* has open.
+
+    Two reclaimers can open the same dead file; once the first replaces it
+    with its own live lock, the second must not delete that one.
+    """
+    try:
+        if path.stat().st_ino == os.fstat(fd).st_ino:
+            path.unlink(missing_ok=True)
+    except FileNotFoundError:
+        pass
