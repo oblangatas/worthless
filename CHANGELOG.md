@@ -26,6 +26,16 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - Worthless does not remove copies that a different installer made, for example an old `pip install --user`.
 
 ### Fixed
+- **A crashed `worthless up` no longer leaves your key shares on disk** (`worthless-dhfn`, [#713](https://github.com/oblangatas/worthless/pull/713)).
+  Before: if `worthless up` was killed with `kill -9` or crashed, its helper process kept running. Both key share files stayed in `~/.worthless/run/<pid>/` until you restarted the computer. `worthless doctor` reported "No issues found" because the helper still answered.
+  Now: the helper checks every 0.5 seconds that `worthless up` is still running. When `worthless up` is gone, the helper deletes both share files and its socket, then stops in 5 seconds or less. `worthless down` and `worthless doctor` then see a clean state.
+
+  **Limits.**
+  - The key stays in the helper's memory for up to 5 seconds after `worthless up` stops.
+  - If the helper is killed at the same time as `worthless up` (for example `pkill -9 -f worthless`), the share files stay. `worthless doctor` reports them.
+  - A helper left running by an older version of Worthless does not stop. Restart the computer or stop it by hand.
+  - The share files are deleted, not securely erased.
+
 - **Bare `worthless` reports a failed or stopped lock with its real exit code** (`worthless-nhc0`).
   Before: when the lock step of bare `worthless` failed or was stopped, the command exited 0. A script or an agent read success after LOCK FAILED, Ctrl-C or `docker stop`.
   Now: the exit code is the same as `worthless lock` gives: 73 or 87 for a failed OpenClaw step, 130 for Ctrl-C, 143 for SIGTERM, 129 when the terminal closes. The proxy does not start. If you say no at a prompt, the exit code is still 0.
