@@ -12,6 +12,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -118,3 +119,21 @@ def test_a_late_reclaimer_never_deletes_the_new_live_lock(tmp_path: Path) -> Non
             assert home.lock_file.exists(), "B deleted A's live lock"
     finally:
         os.close(stale_fd)
+
+
+def test_a_live_holder_is_never_stolen_however_old(tmp_path: Path) -> None:
+    """Before: any lock older than 5 minutes was taken, even from a running command."""
+    home = ensure_home(base_dir=tmp_path / ".worthless")
+    child = _hold_lock(home.base_dir)
+    os.kill(child.pid, signal.SIGSTOP)
+    old = time.time() - 400
+    os.utime(home.lock_file, (old, old))
+    try:
+        with pytest.raises(WorthlessError) as exc:
+            with acquire_lock(home):
+                pass  # pragma: no cover
+        assert exc.value.code.value == 105
+        assert home.lock_file.exists(), "the live holder's lock was deleted"
+    finally:
+        os.kill(child.pid, signal.SIGKILL)
+        child.wait(timeout=10)
