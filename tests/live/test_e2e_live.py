@@ -642,7 +642,7 @@ def test_kill_9_on_up_takes_the_sidecar_and_its_shares_with_it() -> None:
         sup.send_signal(signal.SIGKILL)
         sup.wait(timeout=5)
 
-        deadline = time.monotonic() + 3.0
+        deadline = time.monotonic() + 2.0  # one 0.5s poll + slack; the drain is 5s
         while run_dir.exists() and time.monotonic() < deadline:
             time.sleep(0.05)
         assert not run_dir.exists(), f"shares left behind: {sorted(run_dir.iterdir())}"
