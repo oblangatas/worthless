@@ -619,3 +619,34 @@ def test_remove_key_material_keeps_a_dir_that_holds_other_files(tmp_path: Path) 
     (run_dir / "unrelated").write_text("keep")
     sidecar_main._remove_key_material(a, b, s)
     assert sorted(p.name for p in run_dir.iterdir()) == ["unrelated"]
+
+
+async def test_run_wipes_when_parent_dies_after_a_signal_won_the_race(
+    sidecar_env: tuple[Path, dict[str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ctrl+C / shutdown_sidecar sets stop first, then the supervisor dies mid-drain.
+
+    The watcher returns on stop without seeing the dead parent; nobody else
+    is left to unlink the shares (PR 713 review, Cursor Bugbot).
+    """
+    sock, env = sidecar_env
+    real_ppid = os.getppid()
+    _use_env(monkeypatch, env, str(real_ppid))
+    monkeypatch.setattr(sidecar_main, "_PARENT_POLL_S", 60.0)  # watcher never re-polls
+    run = asyncio.create_task(sidecar_main._run())
+    try:
+        for _ in range(200):
+            if sock.exists():
+                break
+            await asyncio.sleep(0.01)
+        assert sock.exists(), "in-process sidecar never bound"
+        monkeypatch.setattr(sidecar_main.os, "getppid", lambda: real_ppid + 1)
+        os.kill(os.getpid(), signal.SIGTERM)  # caught by _run's loop handler
+        assert await asyncio.wait_for(run, timeout=10.0) == 0
+        assert not sock.parent.exists(), sorted(sock.parent.iterdir())
+    finally:
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.remove_signal_handler(sig)
+        if not run.done():
+            run.cancel()

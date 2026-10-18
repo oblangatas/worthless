@@ -366,6 +366,10 @@ async def _run() -> int:
     except Exception as exc:  # noqa: BLE001 — best-effort drain
         _LOG.warning("drain raised during shutdown: %s", exc)
     await watcher
+    # A signal can win the race and stop the watcher before it sees the
+    # parent die (e.g. mid-drain); re-check so the shares never outlive both.
+    if _parent_gone(parent_pid):
+        _remove_key_material(share_a, share_b, socket_path)
     _LOG.info("sidecar shut down cleanly")
     return 0
 
