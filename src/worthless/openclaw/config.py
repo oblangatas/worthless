@@ -269,8 +269,9 @@ def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
         # ``os.replace`` the destination inherits that mode, making it
         # unreadable by the other container.  Widen to 0644 (world-readable,
         # no world-write) so openclaw can read the provider entry the proxy
-        # just wrote.  The ``_check_world_writable`` guard in integration.py
-        # checks only S_IWGRP | S_IWOTH — 0644 does not trigger it.
+        # just wrote.  integration._share_openclaw_tree then adds group rw for
+        # the openclaw container; ``_check_world_writable`` only flags
+        # world-write in shared mode, so neither 0644 nor 0664 triggers it.
         if os.environ.get("WORTHLESS_OPENCLAW_CONFIG_SHARED"):
             try:
                 path.chmod(0o644)
