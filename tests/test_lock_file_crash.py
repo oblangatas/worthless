@@ -8,6 +8,7 @@ These tests use a real child process and a real SIGKILL.
 
 from __future__ import annotations
 
+import errno
 import os
 import signal
 import subprocess
@@ -17,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from worthless.cli import bootstrap
 from worthless.cli.bootstrap import _unlink_if_same_file, acquire_lock, ensure_home
 from worthless.cli.errors import WorthlessError
 
@@ -76,7 +78,7 @@ from worthless.cli.errors import WorthlessError
 try:
     with acquire_lock(WorthlessHome(base_dir=Path(sys.argv[1]))):
         print("won", flush=True)
-        time.sleep(2)
+        time.sleep(60)  # held until the test kills it: no timing window
 except WorthlessError:
     print("busy", flush=True)
 """
@@ -97,7 +99,12 @@ def test_racers_on_a_dead_holders_lock_get_one_winner(tmp_path: Path) -> None:
         )
         for _ in range(6)
     ]
-    results = [r.communicate(timeout=30)[0].strip() for r in racers]
+    try:
+        results = [r.stdout.readline().strip() for r in racers]  # type: ignore[union-attr]
+    finally:
+        for r in racers:
+            r.kill()
+            r.wait(timeout=10)
 
     assert results.count("won") == 1, results
 
@@ -137,3 +144,19 @@ def test_a_live_holder_is_never_stolen_however_old(tmp_path: Path) -> None:
     finally:
         os.kill(child.pid, signal.SIGKILL)
         child.wait(timeout=10)
+
+
+def test_a_filesystem_without_flock_keeps_working(tmp_path: Path, monkeypatch) -> None:
+    """NFS/SMB/FUSE can refuse flock (ENOLCK): fall back to the 5-minute rule."""
+    home = ensure_home(base_dir=tmp_path / ".worthless")
+
+    def _no_flock(*_a: object) -> None:
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    monkeypatch.setattr(bootstrap._fcntl, "flock", _no_flock)
+    with acquire_lock(home):
+        with pytest.raises(WorthlessError) as exc:
+            with acquire_lock(home):
+                pass  # pragma: no cover
+        assert exc.value.code.value == 105
+    assert not home.lock_file.exists()

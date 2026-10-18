@@ -762,8 +762,12 @@ def acquire_lock(home: WorthlessHome) -> Generator[None, None, None]:
         if _fcntl is not None:
             # Blocking is safe: on a file we just created, a reclaimer can
             # only hold the flock for an instant (it sees it empty, gives up).
-            _fcntl.flock(fd, _fcntl.LOCK_EX)
-            os.write(fd, f"{os.getpid()}\n".encode())
+            try:
+                _fcntl.flock(fd, _fcntl.LOCK_EX)
+            except OSError:
+                pass  # no flock here (NFS/SMB): the file stays empty, 5-minute rule
+            else:
+                os.write(fd, f"{os.getpid()}\n".encode())
         yield
     finally:
         try:
@@ -831,17 +835,9 @@ def check_stale_lock(home: WorthlessHome) -> None:
     except FileNotFoundError:
         return
     try:
-        if _fcntl is not None:
-            try:
-                _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
-            except BlockingIOError:
-                raise WorthlessError(
-                    ErrorCode.LOCK_IN_PROGRESS,
-                    "Another worthless operation is running. Wait for it to finish.",
-                ) from None
-            if os.fstat(fd).st_size > 0:
-                _unlink_if_same_file(home.lock_file, fd)
-                return
+        if _fcntl is not None and _holder_is_dead(fd):
+            _unlink_if_same_file(home.lock_file, fd)
+            return
         age = time.time() - os.fstat(fd).st_mtime
         if age > _STALE_LOCK_SECONDS:
             _unlink_if_same_file(home.lock_file, fd)
@@ -853,6 +849,24 @@ def check_stale_lock(home: WorthlessHome) -> None:
             )
     finally:
         os.close(fd)
+
+
+def _holder_is_dead(fd: int) -> bool:
+    """True when the lock file's flock is free and the holder had written to it.
+
+    Raises 105 while a live process holds the flock. A filesystem without
+    flock (NFS/SMB) answers False, so the caller keeps the 5-minute rule.
+    """
+    try:
+        _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)  # type: ignore[union-attr]
+    except BlockingIOError:
+        raise WorthlessError(
+            ErrorCode.LOCK_IN_PROGRESS,
+            "Another worthless operation is running. Wait for it to finish.",
+        ) from None
+    except OSError:
+        return False
+    return os.fstat(fd).st_size > 0
 
 
 def _unlink_if_same_file(path: Path, fd: int) -> None:
