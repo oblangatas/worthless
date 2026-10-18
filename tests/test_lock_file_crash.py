@@ -16,6 +16,7 @@ import sys
 import time
 from pathlib import Path
 
+import psutil
 import pytest
 
 from worthless.cli import bootstrap
@@ -176,3 +177,37 @@ def test_no_flock_still_reclaims_an_old_lock(tmp_path: Path, monkeypatch) -> Non
 
     with acquire_lock(home):
         pass
+
+
+def _open_paths() -> set[str]:
+    return {os.path.realpath(f.path) for f in psutil.Process().open_files()}
+
+
+def test_windows_never_deletes_the_lock_while_it_is_open(tmp_path: Path, monkeypatch) -> None:
+    """Cursor: Windows can't unlink an open file. No fcntl means no fd held."""
+    home = ensure_home(base_dir=tmp_path / ".worthless")
+    monkeypatch.setattr(bootstrap, "_fcntl", None)
+
+    with acquire_lock(home):
+        assert os.path.realpath(home.lock_file) not in _open_paths()
+    assert not home.lock_file.exists()
+
+
+def test_windows_reclaims_an_old_lock_without_opening_it(tmp_path: Path, monkeypatch) -> None:
+    home = ensure_home(base_dir=tmp_path / ".worthless")
+    monkeypatch.setattr(bootstrap, "_fcntl", None)
+    home.lock_file.touch()
+    old = time.time() - 400
+    os.utime(home.lock_file, (old, old))
+    real_open = os.open
+    opened: list[str] = []
+
+    def _spy(path, *a, **k):  # noqa: ANN001, ANN002, ANN003
+        opened.append(os.path.realpath(path))
+        return real_open(path, *a, **k)
+
+    monkeypatch.setattr(bootstrap.os, "open", _spy)
+    bootstrap.check_stale_lock(home)
+
+    assert not home.lock_file.exists()
+    assert os.path.realpath(home.lock_file) not in opened, "opened before unlink"

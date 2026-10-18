@@ -758,6 +758,10 @@ def acquire_lock(home: WorthlessHome) -> Generator[None, None, None]:
             "Another worthless operation is in progress. "
             "Remove ~/.worthless/.lock-in-progress if stale.",
         ) from None  # FileExistsError context is not useful to callers
+    if _fcntl is None:
+        # Windows: no flock, and an open file can't be unlinked there.
+        os.close(fd)
+        fd = -1
     try:
         if _fcntl is not None:
             # Blocking is safe: on a file we just created, a reclaimer can
@@ -774,7 +778,8 @@ def acquire_lock(home: WorthlessHome) -> Generator[None, None, None]:
             home.lock_file.unlink()
         except FileNotFoundError:
             pass
-        os.close(fd)  # after the unlink: no window where the flock is free
+        if fd >= 0:
+            os.close(fd)  # after the unlink: no window where the flock is free
 
 
 def get_home() -> WorthlessHome:
@@ -830,25 +835,44 @@ def check_stale_lock(home: WorthlessHome) -> None:
     An empty file is a holder between create and flock, an older worthless,
     or Windows (no flock): those keep the 5-minute rule.
     """
+    if _fcntl is None:
+        _check_stale_lock_by_age(home)  # Windows: never unlink an open file
+        return
     try:
         fd = os.open(str(home.lock_file), os.O_RDONLY)
     except FileNotFoundError:
         return
     try:
-        if _fcntl is not None and _holder_is_dead(fd):
+        if _holder_is_dead(fd):
             _unlink_if_same_file(home.lock_file, fd)
             return
         age = time.time() - os.fstat(fd).st_mtime
         if age > _STALE_LOCK_SECONDS:
             _unlink_if_same_file(home.lock_file, fd)
         else:
-            raise WorthlessError(
-                ErrorCode.LOCK_IN_PROGRESS,
-                f"Lock file is {int(age)}s old (< {_STALE_LOCK_SECONDS}s). "
-                "Another operation may be running.",
-            )
+            raise _fresh_lock_error(age)
     finally:
         os.close(fd)
+
+
+def _fresh_lock_error(age: float) -> WorthlessError:
+    return WorthlessError(
+        ErrorCode.LOCK_IN_PROGRESS,
+        f"Lock file is {int(age)}s old (< {_STALE_LOCK_SECONDS}s). "
+        "Another operation may be running.",
+    )
+
+
+def _check_stale_lock_by_age(home: WorthlessHome) -> None:
+    """The original rule, path-only: remove a lock over 5 minutes old."""
+    try:
+        age = time.time() - home.lock_file.stat().st_mtime
+    except FileNotFoundError:
+        return
+    if age > _STALE_LOCK_SECONDS:
+        home.lock_file.unlink(missing_ok=True)
+    else:
+        raise _fresh_lock_error(age)
 
 
 def _holder_is_dead(fd: int) -> bool:
