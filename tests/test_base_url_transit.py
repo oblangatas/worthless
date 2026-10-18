@@ -177,6 +177,25 @@ async def _enroll(
     return sr.shard_a.decode("utf-8")
 
 
+class _ProxyOnlyTransport(httpx2.AsyncBaseTransport):
+    """Deliver to the in-process proxy, but only if the SDK actually addressed it.
+
+    A bare ASGITransport routes every request to the proxy whatever host the URL
+    names, so a ``*_BASE_URL`` pointing at the real provider would still pass.
+    This guard makes a wrong host fail the test instead.
+    """
+
+    def __init__(self, app: object) -> None:
+        self._inner = httpx2.ASGITransport(app=app)
+
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+        url = request.url
+        assert url.host == "proxy" and url.port is None, (
+            f"SDK sent the request to {url}, not to the proxy"
+        )
+        return await self._inner.handle_async_request(request)
+
+
 async def _meters(proxy_client: httpx.AsyncClient) -> tuple[int, int]:
     """Read ``(requests_proxied, requests_billed)`` from the proxy's /healthz."""
     resp = await proxy_client.get("/healthz")
@@ -233,7 +252,7 @@ async def test_base_url_request_transits_proxy_to_upstream(
         # async clients let the proxy's post-response spend-recording
         # BackgroundTask settle on this same event loop before we read the meter.
         # Both SDKs run on httpx2 internally — hand both an httpx2 client.
-        sdk_http_client = httpx2.AsyncClient(transport=httpx2.ASGITransport(app=proxy_app))
+        sdk_http_client = httpx2.AsyncClient(transport=_ProxyOnlyTransport(proxy_app))
         if sdk_name == "openai":
             client = openai.AsyncOpenAI(
                 api_key=shard_a,
