@@ -56,6 +56,12 @@ PLAYBOOKS: dict[str, str] = {
         "cleaning up left both halves of it, readable only by you. Run `worthless doctor "
         "--fix` to delete the folder; doctor only deletes it once nothing is using it."
     ),
+    "unlocked_keys": (
+        "A key is exposed — a lock was cut off (kill -9, crash, power loss) before it "
+        "rewrote the `.env`, so the real key is still there in plain text. Run "
+        "`worthless lock --env <that .env>` to finish it. Don't use `doctor --fix` or "
+        "`uninstall`: lock reuses the stored half, so other copies of the key keep working."
+    ),
     "fernet_drift": _FERNET_DRIFT,
     "broken_status": (
         "This key is gone — its shard (its half of the split key) is missing, so it can't "

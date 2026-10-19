@@ -175,6 +175,7 @@ async def worthless_status() -> str:
         _list_enrolled_keys,
         _resolve_home_for_status,
         _status_verdict,
+        _survives_restart_for,
     )
     from worthless.cli.sentinel import is_partial, read_sentinel
 
@@ -190,11 +191,11 @@ async def worthless_status() -> str:
     keys: list[dict[str, str]] = []
     proxy_info: dict[str, Any] = {"healthy": False, "port": None, "mode": None}
     sentinel: dict[str, Any] | None = None
+    # _list_enrolled_keys calls asyncio.run() internally, raising RuntimeError
+    # inside MCPServer's running event loop. Run in a thread executor — the
+    # same pattern used by worthless_lock in this file.
+    loop = asyncio.get_running_loop()
     if home is not None:
-        # _list_enrolled_keys calls asyncio.run() internally, raising
-        # RuntimeError inside MCPServer's running event loop. Run in a thread
-        # executor — the same pattern used by worthless_lock in this file.
-        loop = asyncio.get_running_loop()
         keys = await loop.run_in_executor(None, _list_enrolled_keys, home)
         port = _discover_proxy_port(home)
         if port is not None:
@@ -211,7 +212,12 @@ async def worthless_status() -> str:
     # so a squatter on the port can't forge a green verdict on this surface
     # either — the whole point of routing both through `_status_verdict`.
     identified = "bind_probe_count" in proxy_info
-    verdict, header = _status_verdict(keys, bool(proxy_info["healthy"]), degraded, identified)
+    # WOR-860: same restart fact the CLI status uses, so the editor's green
+    # header can't promise more than the terminal's.
+    survives = await loop.run_in_executor(None, _survives_restart_for, home, proxy_info)
+    verdict, header = _status_verdict(
+        keys, bool(proxy_info["healthy"]), degraded, identified, survives_restart=survives
+    )
 
     return json.dumps(
         {
@@ -221,6 +227,7 @@ async def worthless_status() -> str:
             "proxy": proxy_info,
             "sentinel": _safe_sentinel(sentinel),
             "degraded": degraded,
+            "survives_restart": survives,
         },
         default=str,
     )

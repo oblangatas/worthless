@@ -1,6 +1,6 @@
 {
   "name": "worthless-mcp",
-  "version": "0.3.14",
+  "version": "0.3.15",
   "description": "MCP server for Worthless split-key API proxy — wraps `uvx worthless mcp`",
   "keywords": [
     "mcp",
