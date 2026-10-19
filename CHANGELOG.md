@@ -12,6 +12,7 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   **Limits.**
   - On native Windows, and on file systems that do not support file locks (some NFS, SMB and FUSE mounts), the old 5-minute rule still applies. These paths are tested with simulated failures, not on real NFS or SMB.
   - A lock written on a different host or container, for example through a shared mount, also keeps the 5-minute rule.
+  - Two machines with the same hostname that share one `~/.worthless` on a mount whose file locks are local to each machine (for example NFSv3 with `local_lock`) are not protected: each can take over the other's live lock. Do not share `~/.worthless` between machines.
   - A command killed in the first instant, before it takes the file lock, leaves an empty lock file. That file also keeps the 5-minute rule.
   - `worthless doctor --fix` has its own lock, with a similar race. It is not changed here (WOR-963).
 
