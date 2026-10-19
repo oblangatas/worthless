@@ -13,6 +13,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -46,11 +47,25 @@ def _hold_lock(base: Path) -> subprocess.Popen:
     return child
 
 
+def _kill(child: subprocess.Popen) -> None:
+    os.kill(child.pid, signal.SIGKILL)
+    child.wait(timeout=10)
+
+
+@pytest.fixture()
+def no_flock(monkeypatch):
+    """A filesystem that refuses flock (NFS/SMB/FUSE): ENOLCK."""
+
+    def _refuse(*_a: object) -> None:
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    monkeypatch.setattr(bootstrap._fcntl, "flock", _refuse)
+
+
 def test_lock_left_by_a_killed_holder_is_taken_at_once(tmp_path: Path) -> None:
     home = ensure_home(base_dir=tmp_path / ".worthless")
     child = _hold_lock(home.base_dir)
-    os.kill(child.pid, signal.SIGKILL)
-    child.wait(timeout=10)
+    _kill(child)
     assert home.lock_file.exists(), "precondition: the kill left the lock file"
 
     with acquire_lock(home):  # was: WRTLS-105 for 5 minutes
@@ -67,8 +82,7 @@ def test_a_live_holder_is_still_respected(tmp_path: Path) -> None:
                 pass  # pragma: no cover
         assert exc.value.code.value == 105
     finally:
-        os.kill(child.pid, signal.SIGKILL)
-        child.wait(timeout=10)
+        _kill(child)
 
 
 _CONTENDER = """
@@ -89,8 +103,7 @@ def test_racers_on_a_dead_holders_lock_get_one_winner(tmp_path: Path) -> None:
     """Two processes reclaiming the same dead lock must never both win."""
     home = ensure_home(base_dir=tmp_path / ".worthless")
     child = _hold_lock(home.base_dir)
-    os.kill(child.pid, signal.SIGKILL)
-    child.wait(timeout=10)
+    _kill(child)
 
     racers = [
         subprocess.Popen(
@@ -118,8 +131,7 @@ def test_a_late_reclaimer_never_deletes_the_new_live_lock(tmp_path: Path) -> Non
     """
     home = ensure_home(base_dir=tmp_path / ".worthless")
     child = _hold_lock(home.base_dir)
-    os.kill(child.pid, signal.SIGKILL)
-    child.wait(timeout=10)
+    _kill(child)
     stale_fd = os.open(home.lock_file, os.O_RDONLY)  # B, before A acts
     try:
         with acquire_lock(home):  # A reclaims and holds a new lock file
@@ -143,18 +155,12 @@ def test_a_live_holder_is_never_stolen_however_old(tmp_path: Path) -> None:
         assert exc.value.code.value == 105
         assert home.lock_file.exists(), "the live holder's lock was deleted"
     finally:
-        os.kill(child.pid, signal.SIGKILL)
-        child.wait(timeout=10)
+        _kill(child)
 
 
-def test_a_filesystem_without_flock_keeps_working(tmp_path: Path, monkeypatch) -> None:
+def test_a_filesystem_without_flock_keeps_working(tmp_path: Path, no_flock) -> None:
     """NFS/SMB/FUSE can refuse flock (ENOLCK): fall back to the 5-minute rule."""
     home = ensure_home(base_dir=tmp_path / ".worthless")
-
-    def _no_flock(*_a: object) -> None:
-        raise OSError(errno.ENOLCK, "No locks available")
-
-    monkeypatch.setattr(bootstrap._fcntl, "flock", _no_flock)
     with acquire_lock(home):
         with pytest.raises(WorthlessError) as exc:
             with acquire_lock(home):
@@ -163,14 +169,9 @@ def test_a_filesystem_without_flock_keeps_working(tmp_path: Path, monkeypatch) -
     assert not home.lock_file.exists()
 
 
-def test_no_flock_still_reclaims_an_old_lock(tmp_path: Path, monkeypatch) -> None:
+def test_no_flock_still_reclaims_an_old_lock(tmp_path: Path, no_flock) -> None:
     """The fallback is the full 5-minute rule: old files go, not only fresh ones block."""
     home = ensure_home(base_dir=tmp_path / ".worthless")
-
-    def _no_flock(*_a: object) -> None:
-        raise OSError(errno.ENOLCK, "No locks available")
-
-    monkeypatch.setattr(bootstrap._fcntl, "flock", _no_flock)
     home.lock_file.touch()
     old = time.time() - 400
     os.utime(home.lock_file, (old, old))
@@ -211,3 +212,120 @@ def test_windows_reclaims_an_old_lock_without_opening_it(tmp_path: Path, monkeyp
 
     assert not home.lock_file.exists()
     assert os.path.realpath(home.lock_file) not in opened, "opened before unlink"
+
+
+def _age(path: Path, seconds: float) -> None:
+    old = time.time() - seconds
+    os.utime(path, (old, old))
+
+
+def test_another_users_lock_file_never_crashes(tmp_path: Path, monkeypatch) -> None:
+    """Security: root's lock in a proxy-owned Docker volume can't be opened by us."""
+    home = ensure_home(base_dir=tmp_path / ".worthless")
+    home.lock_file.write_text("otherhost 1\n")
+    real_open = os.open
+
+    def _denied(path, flags, *a, **k):  # noqa: ANN001, ANN002, ANN003
+        if Path(path) == home.lock_file and not flags & os.O_CREAT:
+            raise PermissionError(errno.EACCES, "Permission denied")
+        return real_open(path, flags, *a, **k)
+
+    monkeypatch.setattr(bootstrap.os, "open", _denied)
+    with pytest.raises(WorthlessError) as exc:
+        bootstrap.check_stale_lock(home)
+    assert exc.value.code.value == 105  # was: a raw PermissionError, forever
+    _age(home.lock_file, 400)
+    bootstrap.check_stale_lock(home)  # old: the 5-minute rule still heals it
+    assert not home.lock_file.exists()
+
+
+def test_a_lock_from_another_host_keeps_the_5_minute_rule(tmp_path: Path) -> None:
+    """Chaos: a shared mount whose flock is local-only must never look 'dead'."""
+    home = ensure_home(base_dir=tmp_path / ".worthless")
+    child = _hold_lock(home.base_dir)
+    _kill(child)
+    home.lock_file.write_text("some-other-host 4242\n")  # written over there
+
+    with pytest.raises(WorthlessError) as exc:
+        with acquire_lock(home):
+            pass  # pragma: no cover
+    assert exc.value.code.value == 105
+    _age(home.lock_file, 400)
+    with acquire_lock(home):
+        pass
+
+
+def _finishes(fn, seconds: float = 8) -> BaseException | None:  # noqa: ANN001
+    """Run *fn* in a thread; fail the test if it is still running after *seconds*."""
+    box: list[BaseException | None] = [None]
+
+    def _run() -> None:
+        try:
+            fn()
+        except BaseException as exc:  # noqa: BLE001
+            box[0] = exc
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(seconds)
+    assert not t.is_alive(), f"{fn.__name__} hung"
+    return box[0]
+
+
+def test_a_fifo_at_the_lock_path_never_hangs(tmp_path: Path) -> None:
+    home = ensure_home(base_dir=tmp_path / ".worthless")
+    os.mkfifo(home.lock_file)
+
+    def check() -> None:
+        bootstrap.check_stale_lock(home)
+
+    exc = _finishes(check)
+    assert isinstance(exc, WorthlessError)
+    assert exc.code.value == 105
+
+
+def test_the_holder_never_waits_forever_for_its_own_flock(tmp_path: Path, monkeypatch) -> None:
+    """A reclaimer stopped while holding the new file's flock must not hang us."""
+    home = ensure_home(base_dir=tmp_path / ".worthless")
+    real_flock = bootstrap._fcntl.flock
+
+    def _always_busy(fd, op):  # noqa: ANN001
+        if op & bootstrap._fcntl.LOCK_NB:
+            raise BlockingIOError(errno.EWOULDBLOCK, "busy")
+        time.sleep(60)  # a blocking call never returns
+        return real_flock(fd, op)
+
+    monkeypatch.setattr(bootstrap._fcntl, "flock", _always_busy)
+
+    def take() -> None:
+        with acquire_lock(home):
+            pass
+
+    assert _finishes(take) is None
+
+
+def test_worthless_doctor_runs_right_after_a_killed_holder(tmp_path: Path) -> None:
+    """The user-visible promise, through the real CLI binary."""
+    home = ensure_home(base_dir=tmp_path / ".worthless")
+    _kill(_hold_lock(home.base_dir))
+    assert home.lock_file.exists()
+
+    env = {k: v for k, v in os.environ.items() if not k.startswith("WORTHLESS_")}
+    env.update(
+        HOME=str(tmp_path),
+        WORTHLESS_HOME=str(home.base_dir),
+        XDG_DATA_HOME=str(tmp_path / "xdg"),
+        WORTHLESS_KEYRING_BACKEND="null",
+    )
+    result = subprocess.run(
+        [str(Path(sys.executable).parent / "worthless"), "doctor"],
+        env=env,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    out = result.stdout + result.stderr
+    assert "WRTLS-105" not in out, out
+    assert result.returncode == 0, out

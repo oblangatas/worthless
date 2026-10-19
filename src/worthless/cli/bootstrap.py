@@ -8,6 +8,7 @@ import hmac
 import logging
 import os
 import secrets
+import socket
 import sqlite3
 import stat
 import sys
@@ -742,8 +743,9 @@ def acquire_lock(home: WorthlessHome) -> Generator[None, None, None]:
 
     WOR-962: the kernel drops a flock the moment its holder dies, so a lock
     file left by ``kill -9`` is reclaimed at once (``check_stale_lock``)
-    instead of blocking every command for 5 minutes. The PID written after
-    the flock marks "this file is flock-held"; it is never trusted on its own.
+    instead of blocking every command for 5 minutes. "<hostname> <pid>",
+    written once the flock is held, marks "this file is flock-held here"; the
+    PID is never trusted on its own.
     """
     check_stale_lock(home)
     try:
@@ -763,15 +765,8 @@ def acquire_lock(home: WorthlessHome) -> Generator[None, None, None]:
         os.close(fd)
         fd = -1
     try:
-        if _fcntl is not None:
-            # Blocking is safe: on a file we just created, a reclaimer can
-            # only hold the flock for an instant (it sees it empty, gives up).
-            try:
-                _fcntl.flock(fd, _fcntl.LOCK_EX)
-            except OSError:
-                pass  # no flock here (NFS/SMB): the file stays empty, 5-minute rule
-            else:
-                os.write(fd, f"{os.getpid()}\n".encode())
+        if _fcntl is not None and _take_own_flock(fd):
+            os.write(fd, f"{socket.gethostname()} {os.getpid()}\n".encode())
         yield
     finally:
         try:
@@ -839,8 +834,17 @@ def check_stale_lock(home: WorthlessHome) -> None:
         _check_stale_lock_by_age(home)  # Windows: never unlink an open file
         return
     try:
-        fd = os.open(str(home.lock_file), os.O_RDONLY)
+        fd = os.open(str(home.lock_file), os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
     except FileNotFoundError:
+        return
+    except OSError:
+        # Another user's file (root in a proxy-owned volume) or a symlink: we
+        # can't look inside, so the path-only 5-minute rule decides.
+        _check_stale_lock_by_age(home)
+        return
+    if not stat.S_ISREG(os.fstat(fd).st_mode):  # a FIFO or a directory
+        os.close(fd)
+        _check_stale_lock_by_age(home)
         return
     try:
         if _holder_is_dead(fd):
@@ -875,11 +879,36 @@ def _check_stale_lock_by_age(home: WorthlessHome) -> None:
         raise _fresh_lock_error(age)
 
 
+_OWN_FLOCK_WAIT_SECONDS = 2.0
+
+
+def _take_own_flock(fd: int) -> bool:
+    """flock the lock file we just created, giving up after 2 seconds.
+
+    A reclaimer can hold it only for an instant (it sees an empty file and
+    gives up), unless it was stopped right then. False leaves the file empty,
+    which the 5-minute rule then covers — as does a filesystem without flock.
+    """
+    deadline = time.monotonic() + _OWN_FLOCK_WAIT_SECONDS
+    while True:
+        try:
+            _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)  # type: ignore[union-attr]
+            return True
+        except BlockingIOError:
+            if time.monotonic() > deadline:
+                return False
+            time.sleep(0.01)
+        except OSError:
+            return False
+
+
 def _holder_is_dead(fd: int) -> bool:
-    """True when the lock file's flock is free and the holder had written to it.
+    """True when the flock is free and the holder wrote this host's name.
 
     Raises 105 while a live process holds the flock. A filesystem without
-    flock (NFS/SMB) answers False, so the caller keeps the 5-minute rule.
+    flock (NFS/SMB) answers False, so the caller keeps the 5-minute rule. So
+    does a lock written on another host: a shared mount's flock may be local
+    to one machine, so "free" there proves nothing.
     """
     try:
         _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)  # type: ignore[union-attr]
@@ -890,7 +919,8 @@ def _holder_is_dead(fd: int) -> bool:
         ) from None
     except OSError:
         return False
-    return os.fstat(fd).st_size > 0
+    writer = os.read(fd, 256).split(maxsplit=1)
+    return writer[:1] == [socket.gethostname().encode()]
 
 
 def _unlink_if_same_file(path: Path, fd: int) -> None:
