@@ -4,6 +4,17 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Security
+- **A key that the doctor bug unlinked keeps both of its halves until it can be re-linked** (WOR-959, [#709](https://github.com/oblangatas/worthless/pull/709)).
+
+  Before: on an old-format key, a second `worthless doctor --fix` deleted the key's first half from `~/.worthless/shard_a/`. After that, the key could not be recovered. `worthless unlock` told you to remove the locked values "if they are junk".
+
+  Now: `doctor --fix` keeps that file when the key's other half is still stored, and reports the key as probably recoverable. If doctor cannot read the stored halves, it deletes nothing. When the `.env` names a key that lost its link, `unlock` tells you to keep the locked lines, and not to re-lock or uninstall. If the file can't say which key it holds (a `--keys-only` lock) and this machine has such a key, it tells you not to re-lock yet. Otherwise, for raw keys, it tells you to lock them.
+
+  **Limits.**
+  - This release does not re-link the key. WOR-937 does that.
+  - A file whose key has no stored half left is still removed. Nothing can use that file.
+
 ## [0.3.15] — 2026-10-18
 
 ### Changed
@@ -65,15 +76,6 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - The test does not check commands printed without backticks, or commands built while the program runs.
 
 ### Security
-- **A key that the doctor bug unlinked keeps both of its halves until it can be re-linked** (WOR-959, [#709](https://github.com/oblangatas/worthless/pull/709)).
-
-  Before: on an old-format key, a second `worthless doctor --fix` deleted the key's first half from `~/.worthless/shard_a/`. After that, the key could not be recovered. `worthless unlock` told you to remove the locked values "if they are junk".
-
-  Now: `doctor --fix` keeps that file when the key's other half is still stored, and reports the key as probably recoverable. If doctor cannot read the stored halves, it deletes nothing. When the `.env` names a key that lost its link, `unlock` tells you to keep the locked lines, and not to re-lock or uninstall. If the file can't say which key it holds (a `--keys-only` lock) and this machine has such a key, it tells you not to re-lock yet. Otherwise, for raw keys, it tells you to lock them.
-
-  **Limits.**
-  - This release does not re-link the key. WOR-937 does that.
-  - A file whose key has no stored half left is still removed. Nothing can use that file.
 - **Worthless's own repair command stops destroying healthy keys, and keys whose project moved** (WOR-935, [#676](https://github.com/oblangatas/worthless/pull/676)). Since v0.3.7, doctor's `broken_status` check called every current-format key broken: it looked for Shard A in `~/.worthless/shard_a/`, where only old-format keys keep it. So `worthless doctor --fix --json` — the command agents are told to run — deleted the enrollment of every healthy key, and `unlock` then failed with WRTLS-102 even though both shards survived. The check now judges old-format keys only, and deletes nothing if it can't read the shard rows. Separately, `doctor --fix` (text and JSON) treated a missing `.env` file like a deleted line and purged keys whose project had merely moved. A missing file is now always kept, because doctor can't tell a moved project from a deleted one. Every orphan finding carries `reason` (`env_line_missing` / `env_file_missing`). A key whose `.env` is missing gets honest advice: put a moved project back and run `worthless unlock`, or remove a deleted one with `worthless revoke --alias <alias>`, which doctor offers only when no other project has the same key locked (revoke removes a key everywhere). `--fix --json` reports only the records it actually deleted.
 
   **If you were hit** (`unlock` fails with WRTLS-102 after running `doctor --fix`): do not run `worthless uninstall` or delete `~/.worthless`. Both halves of your key still exist, and getting them back is WOR-937.
