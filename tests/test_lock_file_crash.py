@@ -52,7 +52,7 @@ def _kill(child: subprocess.Popen) -> None:
     child.wait(timeout=10)
 
 
-@pytest.fixture()
+@pytest.fixture
 def no_flock(monkeypatch):
     """A filesystem that refuses flock (NFS/SMB/FUSE): ENOLCK."""
 
