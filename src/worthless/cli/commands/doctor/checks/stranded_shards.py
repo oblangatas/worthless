@@ -4,12 +4,19 @@ A file in ``~/.worthless/shard_a/`` named ``<key_alias>`` with no
 corresponding enrollment row in the DB. Common cause: a crash mid-revoke
 that deleted the DB row before unlinking shard_a, or a manual DB edit.
 
-Repair: unlink the stranded file. Safe — shard_a alone is unusable
-without the matching shard_b row in the DB.
+Repair: unlink the file only when its key has no shard row left either, so
+the file can never be used again.
+
+A file whose key still has its shard row is NOT stranded: it is half of a
+recoverable key. The v0.3.7–v0.3.14 doctor bug deleted enrollment rows of
+healthy keys, and on an old-format key the next ``--fix`` then deleted this
+file, the last copy of its first half (WOR-959). Such files are reported and
+kept. If the shard rows can't be read, nothing is deleted.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from worthless.cli.commands.doctor.checks._helpers import load_enrollments, maybe_fix
@@ -17,6 +24,13 @@ from worthless.cli.commands.doctor.registry import CheckContext, CheckResult
 
 logger = logging.getLogger(__name__)
 check_id = "stranded_shards"
+
+# No destructive command in here: agents run whatever a remediation names.
+KEPT_REMEDIATION = (
+    "This key is probably still recoverable: its link was removed, but both halves "
+    "are still on this machine. Keep this file and don't uninstall Worthless. An "
+    'upcoming release re-links it; search "WRTLS-102" in the Worthless GitHub issues.'
+)
 
 
 def _repair_stranded(ctx: CheckContext, stranded: list, on_disk: dict) -> list[dict]:
@@ -62,10 +76,27 @@ def _list_shard_a_files(ctx: CheckContext) -> tuple[dict | None, CheckResult | N
         )
 
 
-def _build_summary(n: int) -> str:
-    if n == 0:
+def _build_summary(n: int, kept: int) -> str:
+    if n == 0 and kept == 0:
         return "No stranded shard files."
-    return f"{n} stranded shard file{'s' if n != 1 else ''} with no DB enrollment"
+    parts = []
+    if n:
+        parts.append(f"{n} stranded shard file{'s' if n != 1 else ''} with no key left")
+    if kept:
+        parts.append(f"{kept} kept: the key is probably still recoverable")
+    return "; ".join(parts)
+
+
+def _unreadable(exc: Exception) -> CheckResult:
+    return CheckResult(
+        check_id=check_id,
+        status="error",
+        findings=[],
+        summary=f"Could not read shard rows, so nothing was deleted: {type(exc).__name__}",
+        fixable=False,
+        fixed=[],
+        skipped_reason=None,
+    )
 
 
 def run(ctx: CheckContext) -> CheckResult:
@@ -81,21 +112,39 @@ def run(ctx: CheckContext) -> CheckResult:
     if enrollments is None:  # pragma: no cover — unreachable: load_enrollments always pairs
         raise RuntimeError("load_enrollments returned (None, None) — programming error")
 
-    known_aliases = {e.key_alias for e in enrollments}
-    stranded = sorted(name for name in on_disk if name not in known_aliases)
+    try:
+        with_shard_row = set(asyncio.run(ctx.repo.list_keys()))
+    except Exception as exc:  # noqa: BLE001 - a failed read must never turn into a delete
+        return _unreadable(exc)
 
-    findings = [{"shard_path": str(on_disk[name])} for name in stranded]
-    status = "ok" if not stranded else "warn"
+    known_aliases = {e.key_alias for e in enrollments}
+    unlinked = sorted(name for name in on_disk if name not in known_aliases)
+    stranded = [name for name in unlinked if name not in with_shard_row]
+    kept = [name for name in unlinked if name in with_shard_row]
+
+    findings = [{"shard_path": str(on_disk[n]), "reason": "no_key_left"} for n in stranded]
+    findings += [
+        {
+            "shard_path": str(on_disk[n]),
+            "reason": "key_still_recoverable",
+            "remediation": KEPT_REMEDIATION,
+        }
+        for n in kept
+    ]
+    status = "ok" if not unlinked else "warn"
     fixed, status = maybe_fix(
         ctx, stranded, lambda items: _repair_stranded(ctx, items, on_disk), status
     )
+    if kept:
+        status = "warn"
 
     return CheckResult(
         check_id=check_id,
         status=status,
         findings=findings,
-        summary=_build_summary(len(stranded)),
-        fixable=True,
+        summary=_build_summary(len(stranded), len(kept)),
+        # Nothing for --fix to do when every finding is a key it must keep.
+        fixable=bool(stranded) or not kept,
         fixed=fixed,
         skipped_reason=None,
     )

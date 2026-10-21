@@ -4,6 +4,17 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Security
+- **A key that the doctor bug unlinked keeps both of its halves until it can be re-linked** (WOR-959, [#709](https://github.com/oblangatas/worthless/pull/709)).
+
+  Before: on an old-format key, a second `worthless doctor --fix` deleted the key's first half from `~/.worthless/shard_a/`. After that, the key could not be recovered. `worthless unlock` told you to remove the locked values "if they are junk".
+
+  Now: `doctor --fix` keeps that file when the key's other half is still stored, and reports the key as probably recoverable. If doctor cannot read the stored halves, it deletes nothing. When the `.env` names a key that lost its link, `unlock` tells you to keep the locked lines, and not to re-lock or uninstall. If the file can't say which key it holds (a `--keys-only` lock) and this machine has such a key, it tells you not to re-lock yet. Otherwise, for raw keys, it tells you to lock them.
+
+  **Limits.**
+  - This release does not re-link the key. WOR-937 does that.
+  - A file whose key has no stored half left is still removed. Nothing can use that file.
+
 ### Fixed
 - **After a crash, the next worthless command runs at once** (WOR-962, [#714](https://github.com/oblangatas/worthless/pull/714)).
   Before: if a worthless command was killed (`kill -9`, out of memory, power loss), every write command failed for 5 minutes with "WRTLS-105: Lock file is 1s old (< 300s). Another operation may be running." This included the `worthless lock` that `status` tells you to run after a cut-off lock. Also, a command that ran longer than 5 minutes could have its lock taken by a second command.
@@ -81,7 +92,7 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 
   **If you were hit** (`unlock` fails with WRTLS-102 after running `doctor --fix`): do not run `worthless uninstall` or delete `~/.worthless`. Both halves of your key still exist, and getting them back is WOR-937.
 
-  **What this does NOT fix.** Keys already unlinked by v0.3.7–v0.3.12 stay unlinked until WOR-937. A deleted project's key — `git worktree remove` deletes the `.env` — is unrecoverable; doctor now keeps its record instead of purging it; remove it with `revoke --alias` only if no other project has the same key locked. Deleting still needs no extra consent and can't be undone (WOR-938). "Line missing" is still a guess: a renamed variable, a commented-out line, a branch whose `.env` lacks the line, or a re-cloned project with a fresh `.env` at the same path all look like a dead key and still get purged, though the key may be recoverable (WOR-938). An old-format key whose line was deleted is purged even though its Shard A file could rebuild it (WOR-940).
+  **What this does NOT fix.** Keys already unlinked by v0.3.7–v0.3.14 stay unlinked until WOR-937. A deleted project's key — `git worktree remove` deletes the `.env` — is unrecoverable; doctor now keeps its record instead of purging it; remove it with `revoke --alias` only if no other project has the same key locked. Deleting still needs no extra consent and can't be undone (WOR-938). "Line missing" is still a guess: a renamed variable, a commented-out line, a branch whose `.env` lacks the line, or a re-cloned project with a fresh `.env` at the same path all look like a dead key and still get purged, though the key may be recoverable (WOR-938). An old-format key whose line was deleted is purged even though its Shard A file could rebuild it (WOR-940).
 
 - **After a crash in the middle of `worthless lock`, Worthless stops calling your plaintext key safe** (WOR-958, [#707](https://github.com/oblangatas/worthless/pull/707)).
   Before: lock saves to its database, then rewrites `.env`. A `kill -9`, an out-of-memory kill or a power cut between the two left the real key in `.env`. `scan` still said "All 1 keys are protected" and passed the pre-commit hook. `status` said `PROTECTED`. `doctor` said "No issues found." Bare `worthless` said nothing.
