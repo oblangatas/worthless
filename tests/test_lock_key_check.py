@@ -96,6 +96,14 @@ class TestTheGuardItself:
     def test_nothing_locked_yet_is_allowed(self, home_dir: WorthlessHome) -> None:
         key_check.refuse_a_key_that_opens_no_locked_key(home_dir)
 
+    def test_a_key_that_still_opens_some_projects_may_keep_locking(
+        self, home_dir: WorthlessHome
+    ) -> None:
+        """Only "opens none" is refused: a key that opens some is the right one,
+        and the others were sealed elsewhere (doctor names them)."""
+        with patch.object(key_check, "aliases_key_cannot_open", return_value=(2, ["x"])):
+            key_check.refuse_a_key_that_opens_no_locked_key(home_dir)
+
     def test_docker_ipc_mode_is_skipped(
         self, home_dir: WorthlessHome, monkeypatch: pytest.MonkeyPatch
     ) -> None:
