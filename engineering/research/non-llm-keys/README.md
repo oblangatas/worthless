@@ -1,0 +1,161 @@
+# Non-LLM bearer keys (Slack, Linear, PostHog): research
+
+*Input to [ADR-002](../../adr/002-non-llm-bearer-credentials.md) and the tool-keys epic
+([WOR-968](https://linear.app/plumbusai/issue/WOR-968)). Planning: [wor-968-tool-keys.md](../../planning/wor-968-tool-keys.md).*
+
+> "A leaked `.env` that holds our agent's Slack token is as dead as one that holds its OpenAI key."
+
+Code claims were checked against `main` at `03c6518` on 2026-10-22. Each claim is tagged:
+
+- **[F]** fact, checked against the source or the vendor's own docs.
+- **[I]** inference: reasoned from facts, not observed.
+- **[GB]** expected from SDK source or vendor docs, still to be confirmed on the wire by Gate B ([WOR-970](https://linear.app/plumbusai/issue/WOR-970)).
+
+## 1. The spike, reviewed
+
+An outside spike (`worthless-passthrough-spike-v2.zip`) proposed a `PassthroughAdapter` so worthless could
+protect non-LLM keys. It is a 7-file patch (+203/−6) against `03c6518`, with 10 unit tests. It was never run
+live. Its own handoff says so.
+
+### What it got right: the three LLM-specific spots
+
+| # | LLM-specific spot | Where on `main` | Spike's change | Verdict |
+|---|---|---|---|---|
+| 1 | Adapter dispatch is keyed by request **path** | `_ADAPTERS` in `adapters/registry.py` maps only `/v1/chat/completions` and `/v1/messages`; called at `app.py:690` **[F]** | Key by the row's stored `provider`, path map as fallback | Right idea, wrong key (gap 9 below). We dispatch by protocol; LLM aliases keep path dispatch. |
+| 2 | Every upstream `>= 400` body is rewritten into an LLM error envelope | `_sanitize_upstream_error` (`app.py:135`) keeps only `type`/`code`/`param` and replaces `message` with a constant; applied at `app.py:867-869` **[F]** | Passthrough opts out | Keep. Slack's `channel_not_found` and a Linear validation error become byte-identical otherwise. The LLM sanitizer stays as it is. |
+| 3 | The inbound credential header is forwarded upstream | `strip_internal_headers` drops only `x-worthless-*` and hop-by-hop headers. `authorization` is not hop-by-hop **[F]** | `PassthroughAdapter` pops `authorization` and `x-api-key` | Keep. The same bug exists in the LLM adapters: `OpenAIAdapter` sets `authorization` but keeps any inbound `x-api-key`, and `AnthropicAdapter` does the reverse (`adapters/openai.py:62-63`, `adapters/anthropic.py:28-29`) **[F]**. That is PR0a ([WOR-979](https://linear.app/plumbusai/issue/WOR-979)). |
+
+The spike also got the threat model right: worthless protects a **leaked file**, not a machine the attacker
+already controls (non-goal #1 in `docs/security.md`).
+
+### What it missed
+
+Each gap below would have stopped the spike before or during its first live request.
+
+| # | Gap | Evidence on `03c6518` | What breaks | Fixed by |
+|---|---|---|---|---|
+| 1 | `enroll` never outputs shard-A | `_enroll_single` (`cli/commands/lock.py:3143-3205`) splits the key, stores shard-B and drops `sr.shard_a` **[F]** | The user never gets the half that goes in `.env`, so nothing can call the proxy | v1 uses `lock`. `enroll` fix is [WOR-992](https://linear.app/plumbusai/issue/WOR-992) |
+| 2 | `base_url` is NULL | `_enroll_single` takes the URL from `lookup_by_name(provider)` (`lock.py:3183-3184`). `providers.toml` has no slack/linear/posthog entry. The proxy refuses NULL rows with the uniform 401 (`app.py:598-606`) **[F]** | Every request 401s | PR3 adds the three upstream URLs to the bundled registry |
+| 3 | Query string dropped | The catch-all route's `{path:path}` excludes the query; the handler also does `path.split("?")[0]` (`app.py:564`); nothing reads `request.url.query`. The spike built `base_url + clean_path` **[F]** | Slack read methods send their arguments in the query **[F]**, so `conversations.history?channel=C1` arrives with no channel | PR1a (`build_upstream_url(base, raw_path, query)`) |
+| 4 | Trailing slash stripped | `_extract_alias_and_path` does `raw_path.strip("/")` and rebuilds `"/" + parts[1]` (`app.py:115-127`) **[F]** | PostHog's REST paths end in `/` **[F]**. Without it the request hits a different route or a redirect **[I]** | PR1a |
+| 5 | httpx collapses `..` | `httpx.URL("https://slack.com/api/../oauth.v2.access")` becomes `https://slack.com/oauth.v2.access` (httpx 0.28.1, run locally). `%2e%2e`, `%2f` and `//` are left alone **[F]** | A crafted path escapes the base path on the same host after the key is rebuilt. httpx's test client also collapses `..` before it reaches the app, so a test needs a raw ASGI scope | PR1a: reject dot segments with the uniform 401 before decrypt |
+| 6 | Linear sends the key raw | `_extract_shard_a` (`app.py:96-111`) accepts only `Authorization: Bearer <x>` or `x-api-key` **[F]**. Linear personal keys go in `Authorization: <key>` with no scheme **[F]** | Every Linear call 401s at the proxy. The spike fixed the outbound header (`auth_template="{key}"`) but not inbound extraction | PR1a: mirrored auth |
+| 7 | Phantom LLM metering: 402 after about 7,800 calls | The spike says metering is opt-in. It is not for new rows: `store_enrolled` applies `DEFAULT_SPEND_CAP_TOKENS = 1_000_000_000` (`storage/repository.py:554-561`, `defaults.py:10`). A Slack response has no `usage`, so a 2xx settles at estimate (`app.py:825-831`), and the ledger floors that at `GLOBAL_CEILING_TOKENS = 128_000` (`storage/spend_ledger.py:173`, `defaults.py:28`) **[F]** | 1e9 / 128,000 ≈ 7,812. Call ~7,813 gets a 402. Every call also logs "Usage extraction failed" (`app.py:802`) | PR2 ([WOR-984](https://linear.app/plumbusai/issue/WOR-984)) |
+| 8 | `lock` can't see tool keys | `PROVIDER_PREFIXES` (`cli/key_patterns.py:8-14`) has no `xoxb-`, `xoxp-`, `lin_api_` or `phx_`. `lock` prints "No unprotected API keys found." (`lock.py:2558`) **[F]** | A live Slack token sits in `.env` under a false all-clear. Via `enroll`, the split has no known prefix, so shard-A loses the `xoxb-` marker (the spike observed `zc-…`) | PR3 |
+| 9 | The stored `provider` is the protocol, not the vendor | `lock` resolves the registry name to its wire protocol and stores that: `provider = protocol` (`lock.py:747-759`), then `StoredShard(provider=provider)` (`lock.py:949-954`) **[F]**. The spike keyed `_PASSTHROUGH` by `"slack"`/`"linear"`/`"posthog"` | Any `lock`-made row would store the protocol, so the vendor-keyed dict never matches. Only free-form `enroll --provider slack` would, and that path dead-ends at gaps 1 and 2 **[I]** | PR1a: one `passthrough` protocol; vendor lives in the alias and registry |
+
+Gap 9 also explains a live bug. `unlock` looks up `_PROVIDER_ENV_MAP` by the stored protocol (`unlock.py:273`),
+so unlocking an OpenRouter key (stored as `openai`) removes `OPENAI_BASE_URL` instead of `OPENROUTER_BASE_URL`
+**[F]**. That is PR0c ([WOR-981](https://linear.app/plumbusai/issue/WOR-981)).
+
+### Other gaps found on the way
+
+- **No protocol check on `*_BASE_URL`.** `_resolve_upstream_base_url` (`lock.py:399-443`) accepts any
+  *registered* URL, whatever its protocol **[F]**. Today an Anthropic key with `ANTHROPIC_BASE_URL` set to
+  `https://api.openai.com/v1` is accepted and routed to OpenAI **[I]**. Once tool keys exist, the same hole
+  sends a Slack token to OpenAI. PR3 adds the protocol-class match.
+- **Non-dict `usage` crashes spend recording.** `extract_usage_openai` calls `parsed["usage"].get(...)`
+  (`proxy/metering.py:32`). A string `usage` raises `AttributeError`, which the `except` doesn't catch **[F]**.
+  PR0b ([WOR-980](https://linear.app/plumbusai/issue/WOR-980)).
+- **Response relay.** `relay_response` (`adapters/types.py:117`) buffers the whole non-streaming body with no
+  size cap. It strips only `content-encoding`/`content-length`, so `set-cookie` is relayed **[F]**. The upstream
+  client has `follow_redirects=False` (`app.py:274`), so a 3xx and its `Location` go straight back to the client
+  **[F]**. An SDK that follows that `Location` would send shard-A to the vendor directly **[I]**. PR1b turns
+  3xx into 502 and strips `set-cookie`.
+
+> **Correction to the plan:** the plan says PR1b "raises the cap from 64 KiB". There is no response-body cap on
+> `03c6518`; the only 64 KiB constant in the proxy is the SSE partial-line buffer (`metering.py:151`). PR1b
+> *adds* a cap for relayed bodies. The success-body cap is tracked separately in
+> [WOR-996](https://linear.app/plumbusai/issue/WOR-996).
+
+## 2. Code inventory (`03c6518`)
+
+What a passthrough protocol touches, and what it must leave alone.
+
+| Concern | Where | Today | Tool-key implication |
+|---|---|---|---|
+| Alias + path parse | `proxy/app.py:115-127`, `:564` | Strips slashes; drops query | Passthrough parses `scope["raw_path"]` itself. LLM aliases keep `_extract_alias_and_path` |
+| Credential extraction | `proxy/app.py:96-111` | Bearer or `x-api-key` | Passthrough mirrors raw or Bearer, and remembers which |
+| Gate order | `rules_engine.evaluate` `app.py:661-668` → `get_adapter` `:690` → `ipc.open` `:700` → reconstruct `:713-731` | One `ipc.open` call site, after the gate | Keep exactly one `ipc.open`. The static check at `tests/test_security_properties.py:348-420` becomes an AST check |
+| Retired-key tripwire | `proxy/app.py:617-633` | MACs shard-A against `retired_decoys` | Unchanged; covers passthrough too |
+| Rate limit | `RateLimitRule` `proxy/rules.py:452`; `default_rate_limit_rps` 100.0 (`proxy/config.py:181-182`); `enrollment_config.rate_limit_rps REAL NOT NULL DEFAULT 100.0` (`storage/schema.py:91`) | Per alias, provider-agnostic | The only brake on tool keys until request budgets (F8a) |
+| Spend cap + token budget | `SpendCapRule` `rules.py:201`; `TokenBudgetRule` `rules.py:249`; settle `app.py:776-861` | Default cap 1B tokens; 128k floor on unreadable usage | Must not run for passthrough (gap 7) |
+| Error sanitizer | `proxy/app.py:135`, applied `:867-869` | Every `>= 400` rewritten | Passthrough relays verbatim; LLM path unchanged |
+| Upstream client | `proxy/app.py:274` | `follow_redirects=False` | Keep; also refuse 3xx (PR1b) |
+| LLM adapters | `adapters/openai.py:54-70` (injects `stream_options.include_usage`); `adapters/anthropic.py:20-35` | Fixed upstream path | Unchanged apart from PR0a |
+| Prefix table | `cli/key_patterns.py:8-23` (`PROVIDER_PREFIXES`, `KEY_PATTERN`) | LLM prefixes only | PR3 adds tool prefixes; `KEY_PATTERN` also drives log redaction (`cli/log_redaction.py`) |
+| Lock protocols | `lock.py:113-118` (`_PROVIDER_ENV_MAP`, `_SUPPORTED_PROTOCOLS`) | `openai`, `anthropic` | Passthrough is added from the prefix table, never from TOML |
+| Proxy URL written to `.env` | `_proxy_base_url` `lock.py:133-141` | Always ends in `/v1` | No `/v1` for passthrough |
+| `*_BASE_URL` naming | `_derive_base_url_var` `lock.py:189-198` | `X_API_KEY` → `X_BASE_URL`, else the protocol default (`OPENAI_BASE_URL`) | Tool vars (`SLACK_BOT_TOKEN`) don't end in `_API_KEY`, so today they'd get `OPENAI_BASE_URL`. Needs the `<STEM>_BASE_URL` rule |
+| Upstream URL checks | `_validate_upstream_base_url` `lock.py:287`; `_resolve_upstream_base_url` `lock.py:399` | https-only, SSRF denylist; registry membership but not protocol | Move the validator to a neutral module the proxy may import (the proxy may not import `cli.commands`, WOR-309). Add the protocol match |
+| Registry | `src/worthless/providers.toml`; `lookup_by_name` `cli/providers.py:177` | 6 LLM entries, `protocol = openai\|anthropic` | Add slack, linear, posthog URLs. Validate protocol strings on parse |
+| Storage | `shards.provider/prefix/charset/base_url` (`schema.py:43-52`); `enrollments.decoy_hash` (`schema.py:105`) | No migration needed. `decoy_hash` is never written by the repository | `decoy_hash` is the hook for the pre-gate MAC check ([WOR-991](https://linear.app/plumbusai/issue/WOR-991)) |
+| False all-clear precedent | `lock.py:2549-2558` (`worthless-7jn2`) | A skipped OAuth token suppresses "No unprotected API keys found." and the closing verdict | Same mechanism for refused tool tokens (`xapp-`, `xoxe-`) |
+| Import guard | `tests/architecture/test_proxy_imports.py` | Bans the splitter from the proxy | Also ban `worthless.cli.commands` |
+
+## 3. Prior art
+
+Every product here protects the **stored** secret: the client never holds the real value. **None stops a
+compromised client from *using* the credential** through the broker for whatever the broker allows. That is
+the same line worthless draws (F7/F8 are tickets, not v1).
+
+| Product | Mechanism | Real key out of the client? | Stops a compromised client using it? | Source |
+|---|---|---|---|---|
+| CyberArk Secretless Broker | Local sidecar. The app connects through it without credentials; the broker fetches them from a vault and injects them per connector | Yes **[F]** | No. Any request the app makes is authenticated **[F]** | github.com/cyberark/secretless-broker |
+| Infisical Agent Vault | Open-source forward proxy (`HTTPS_PROXY`, TLS interception). The agent holds a placeholder; the proxy swaps in the real token on the wire. Sessions are scoped to allowed services and can expire or be revoked. In preview, "not recommended for production" | Yes **[F]** | Partly. It limits *which services*, not which operations **[I]** | infisical.com/docs/documentation/platform/agent-vault/overview |
+| Claude Managed Agents vaults | Per-end-user vault, hosted. MCP credentials (`mcp_oauth`, `static_bearer`) are injected per server URL. Environment-variable credentials are placeholders swapped on outbound requests | Yes **[F]** | No **[I]** | platform.claude.com/docs/en/managed-agents/vaults |
+| LangSmith LLM auth proxy | Self-hosted Envoy proxy (Enterprise). Checks a short-lived LangSmith-signed token, attaches provider credentials, forwards. LLM providers only. Separate sandbox proxies sign AWS requests and inject GCP tokens | Yes **[F]** | Per-request attribution, not operation limits **[I]** | docs.langchain.com/langsmith/llm-auth-proxy-self-hosted |
+| Aembit | Workload IAM. Aembit Edge (proxy or in-process SDK) attests the workload's identity, checks access conditions, then injects the credential, usually as an HTTP header | Yes **[F]** | Identity-gated, not operation-gated **[I]** | docs.aembit.io (How Aembit works; Credential Providers) |
+| Docker MCP Gateway | Runs MCP servers in containers and injects secrets from the host's secret store at call time. Optional `--block-secrets` scans payloads | Yes **[F]** | No **[I]** | docker.com/blog/docker-mcp-gateway-secure-infrastructure-for-agentic-ai |
+| 1Password `op run` | Resolves secret references into the child process's environment at exec | At rest only. At runtime the real key is in the env, `/proc/<pid>/environ` and anything that dumps env **[F]** | No **[F]** | 1Password CLI docs |
+| Slack token rotation | 12-hour access tokens (`xoxe.xoxb-…`) plus a refresh token (`xoxe-…`) | No, but a leaked access token expires within 12h **[F]** | No **[F]** | api.slack.com/authentication/rotation |
+| Scoped tokens | Minimum scopes per token (Slack scopes, read-only Linear keys, scoped PostHog personal keys) | No **[F]** | Limits blast radius, not use **[F]** | vendor docs |
+
+**Where worthless sits.** What leaves the box holds only shard-A: token-shaped, vendor-rejected. A placeholder
+in Agent Vault or Managed Agents gives roughly the same leaked-file guarantee **[I]**. Worthless's edge is
+reuse: the split, the sidecar, the gate, the tripwire and `lock`/`unlock` already exist, and it runs locally
+with no hosted service. Its handicap: unlike `HTTPS_PROXY` brokers, the client must be pointed at a base URL,
+so it needs one line of code per vendor.
+
+## 4. Client wire facts
+
+| | Slack Web API | Linear GraphQL | PostHog private API |
+|---|---|---|---|
+| Upstream | `https://slack.com/api/<method>` **[F]** | `POST https://api.linear.app/graphql` **[F]** | `https://us.posthog.com` or `https://eu.posthog.com`, paths like `/api/projects/<id>/…/` **[F]** |
+| Credential | `Authorization: Bearer xoxb-…` (or `xoxp-…`) **[F]** | Personal API key raw: `Authorization: lin_api_…`. OAuth tokens use `Bearer` **[F]** | `Authorization: Bearer phx_…` **[F]** |
+| Request shape | `slack_sdk` 3.45.0 sends 78 methods (e.g. `conversations.history`) as GET with arguments in the query; the rest POST form or JSON **[F]** | One endpoint; query vs mutation is in the body **[F]** | REST; trailing slashes are part of the route **[F]** |
+| Logical errors | HTTP **200** with `{"ok": false, "error": "…"}` **[F]** | `errors[]` with `extensions.code` **[F]**; some can come with HTTP 200 **[I]** | 4xx with a JSON `detail` **[I]** |
+| Rate limit | HTTP 429 + `Retry-After` (seconds) **[F]**. `slack_sdk` backs off on it only if the app enables `RateLimitErrorRetryHandler`; the default handlers retry connection errors only **[F]** | HTTP **400** with `extensions.code: "RATELIMITED"`, plus `X-RateLimit-Requests-Limit/-Remaining/-Reset` headers **[F]** | HTTP 429 **[I]** |
+| Base-URL override | `WebClient(base_url=…)`, default `https://slack.com/api/` **[F]**. No env var (3.45.0 source) **[F]** | `@linear/sdk` client option for the API URL **[GB]** | `posthog-python` `host=` **[F]** |
+| Gotchas | `files_upload_v2` uploads to a URL returned by `files.getUploadURLExternal`, a second host **[F]**. Does that hop carry the token or bypass the proxy? **[GB]**, [WOR-995](https://linear.app/plumbusai/issue/WOR-995) | Batched operations in one request **[F]** (matters for F7, not v1) | `phc_` is the **public** project key, meant to ship in frontends for ingestion. Only `phx_` is a secret **[F]** |
+
+Gate B answers five questions before PR1a: (1) is the credential **only** in `Authorization`, raw or Bearer?
+(2) do path, query and trailing slash survive? (3) does any SDK reject a scrambled shard-A? (4) does any SDK
+expect or follow redirects? (5) does any SDK read a base-URL env var?
+
+## 5. Token types and what v1 does with them
+
+| Prefix | What it is | v1 | Why |
+|---|---|---|---|
+| `xoxb-` | Slack bot token | **Lock** | Static bearer over HTTPS |
+| `xoxp-` | Slack user token | **Lock** (the Mappy rollout does not use it) | Same wire shape; acts as a human, so higher blast radius |
+| `xapp-` | Slack app-level token (Socket Mode) | **Refuse with a reason** | Opens a WebSocket via `apps.connections.open`. Not a request/response call **[I]** |
+| `xoxe-`, `xoxe.xoxb-`, `xoxe.xoxp-` | Slack refresh / rotating access tokens | **Refuse with a reason** | Expire every 12h and get refreshed in place. A locked copy goes stale **[F]**, and the refresh rewrites the value lock split **[I]** |
+| Slack signing secret | HMAC key for verifying inbound requests | **Refuse with a reason** | Not a bearer credential; it never goes upstream |
+| `lin_api_` | Linear personal API key | **Lock** | Raw `Authorization` |
+| `phx_` | PostHog personal API key | **Lock** | Bearer |
+| `phc_` | PostHog project key | **Refuse, but don't suppress the verdict** | Public by design |
+| `AIza` | Google API key | Out of scope | Commonly sent as a `?key=` query parameter |
+
+Refused secrets that stay in `.env` suppress the "You're protected" verdict, the same way a skipped OAuth token
+does today (`lock.py:2549`).
+
+## Sources
+
+- Code: `oblangatas/worthless` at `03c6518`.
+- Spike: `worthless-passthrough-spike-v2.zip` (patch, spec, handoff). Not in the repo.
+- Slack: rate limits (api.slack.com/apis/rate-limits), token types (api.slack.com/authentication/token-types),
+  token rotation (api.slack.com/authentication/rotation), `slack_sdk` source.
+- Linear: rate limiting (linear.app/developers/rate-limiting), API authentication docs.
+- PostHog: API overview and personal API keys (posthog.com/docs/api).
+- Prior art: the URLs in the table above.
