@@ -16,6 +16,7 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   **Limits.**
   - This release does not re-link the key. WOR-937 does that.
   - A file whose key has no stored half left is still removed. Nothing can use that file.
+  - `worthless uninstall` still removes a key that lost its link, without a warning. If the doctor bug hit this machine, do not run `uninstall` until the re-link release (WOR-937) ships.
 
 ## [0.3.15] — 2026-10-18
 

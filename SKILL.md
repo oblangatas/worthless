@@ -186,6 +186,7 @@ Walks every `.env` Worthless locked on this machine, reconstructs each real key 
 
 **Behavior:**
 - Restore-all-then-wipe: if ANY `.env` can't be restored, nothing is wiped (Shard B is kept for a retry)
+- Exception: a key with no link (unlock reports WRTLS-102) is not checked and IS wiped. Never run `uninstall` while unlock reports WRTLS-102
 - Enroll-only keys (no `.env`) warn and are removed, but never block the uninstall
 - OpenClaw symmetric undo is best-effort and never blocks the wipe
 
