@@ -3,7 +3,7 @@
   "version": "0.0.1",
   "private": true,
   "license": "AGPL-3.0-only",
-  "description": "Cloudflare Worker at worthless.sh — serves install.sh to curl, redirects browsers to wless.io",
+  "description": "Cloudflare Worker at worthless.sh \u2014 serves install.sh to curl, redirects browsers to wless.io",
   "type": "module",
   "scripts": {
     "embed:assets": "node scripts/embed-assets.mjs",
