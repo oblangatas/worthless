@@ -213,7 +213,7 @@ def test_a_healthy_service_serves_real_requests(world: _World, tmp_path: Path) -
     assert world.chat(proj) == 200
 
 
-def test_a_restored_stale_key_is_refused_loudly_not_served_as_healthy(
+def test_a_restored_stale_key_is_refused_loudly_then_heals_when_fixed(
     world: _World, tmp_path: Path
 ) -> None:
     proj = world.project("proj1")
@@ -221,7 +221,9 @@ def test_a_restored_stale_key_is_refused_loudly_not_served_as_healthy(
     assert _real_key("proj1") not in proj.read_text(), "lock must actually have locked the key"
     # The restored backup: a fernet.key that didn't seal these keys.
     key_file = world.wl / "fernet.key"
-    key_file.write_bytes(Fernet.generate_key())
+    good_key = key_file.read_bytes()
+    stale_key = Fernet.generate_key()
+    key_file.write_bytes(stale_key)
     key_file.chmod(0o600)
 
     log = tmp_path / "up.log"
@@ -233,14 +235,16 @@ def test_a_restored_stale_key_is_refused_loudly_not_served_as_healthy(
     assert service.poll() is None, "it must wait, not exit — or launchd/systemd restart-loop it"
     assert said.count("can't unlock any") == 1, "logged once, not on a loop"
 
-    service.send_signal(signal.SIGTERM)
-    service.wait(timeout=15)
-
     doctor = world.run("doctor", "--json")
     drift = next(c for c in json.loads(doctor.stdout)["checks"] if c["check_id"] == "fernet_drift")
     assert drift["status"] == "error"
     assert len(drift["findings"][0]["cannot_unlock"]) == 1
 
+    # Fix the key: the waiting service exits on its own so its manager restarts it.
+    key_file.write_bytes(good_key)
+    assert service.wait(timeout=25) == 75, "75 = restart me on the new key"
+
+    key_file.write_bytes(stale_key)
     you = world.run("up", "--port", str(world.port))
     assert you.returncode != 0
     assert "can't unlock any" in _said(you.stdout + you.stderr)

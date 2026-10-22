@@ -131,13 +131,32 @@ class TestPostLockSync:
     def test_a_shell_key_is_never_written_to_the_service_key_file(
         self, home_dir: WorthlessHome, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """No file yet (Docker, CI): stay quiet, and never create one from a shell key."""
         home_dir.fernet_key_path.unlink(missing_ok=True)
         shell_key = Fernet.generate_key()
         monkeypatch.setenv("WORTHLESS_FERNET_KEY", shell_key.decode())
         console = self._sync(home_dir, shell_key, monkeypatch)
         assert not home_dir.fernet_key_path.exists()
+        console.print_warning.assert_not_called()
+
+    def test_a_shell_key_unlike_the_service_file_is_said_out_loud(
+        self, home_dir: WorthlessHome, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        before = _sha(home_dir.fernet_key_path)
+        shell_key = Fernet.generate_key()
+        monkeypatch.setenv("WORTHLESS_FERNET_KEY", shell_key.decode())
+        console = self._sync(home_dir, shell_key, monkeypatch)
+        assert _sha(home_dir.fernet_key_path) == before
         (message,) = console.print_warning.call_args.args
         assert "WORTHLESS_FERNET_KEY" in message
+
+    def test_a_shell_key_matching_the_service_file_says_nothing(
+        self, home_dir: WorthlessHome, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        same = home_dir.fernet_key_path.read_bytes().strip()
+        monkeypatch.setenv("WORTHLESS_FERNET_KEY", same.decode())
+        console = self._sync(home_dir, same, monkeypatch)
+        console.print_warning.assert_not_called()
 
     def test_a_disagreeing_file_is_said_out_loud_not_only_in_a_debug_log(
         self, home_dir: WorthlessHome, monkeypatch: pytest.MonkeyPatch

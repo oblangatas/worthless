@@ -20,8 +20,18 @@ from worthless.storage.shard_reader import ShardReader
 KEY_FIX = "Run `worthless doctor --explain fernet_drift` to find the right key."
 
 
-async def aliases_key_cannot_open(db_path: Path, key: bytearray) -> tuple[int, list[str]]:
-    """Return (enrolled alias count, enrolled aliases *key* can't open)."""
+def aliases_key_cannot_open(home: WorthlessHome, key: bytes | bytearray) -> tuple[int, list[str]]:
+    """Return (enrolled alias count, enrolled aliases *key* can't open).
+
+    ``(0, [])`` with no database, or under IPC-only: the sidecar owns the key
+    there and this process must never check shards with one (WOR-465).
+    """
+    if fernet_ipc_only_enabled() or not home.db_path.is_file():
+        return 0, []
+    return asyncio.run(_aliases_key_cannot_open(home.db_path, key))
+
+
+async def _aliases_key_cannot_open(db_path: Path, key: bytes | bytearray) -> tuple[int, list[str]]:
     reader = ShardReader(db_path)
     aliases = await reader.list_enrolled_aliases()
     dead = []
@@ -40,10 +50,10 @@ def refuse_a_key_that_opens_no_locked_key(home: WorthlessHome) -> None:
     Skipped under IPC-only, where this process never holds the key.
     """
     if fernet_ipc_only_enabled() or not home.db_path.is_file():
-        return
+        return  # before home.fernet_key: never load the key just to skip
     key = home.fernet_key
     try:
-        total, dead = asyncio.run(aliases_key_cannot_open(home.db_path, key))
+        total, dead = aliases_key_cannot_open(home, key)
     finally:
         zero_buf(key)
     if not total or len(dead) < total:

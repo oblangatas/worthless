@@ -16,17 +16,14 @@ with one source. Each source is checked against every locked key by HMAC
 
 from __future__ import annotations
 
-import asyncio
 import hmac
 import logging
 
 import keyring as _keyring
 
-from worthless._flags import fernet_ipc_only_enabled
 from worthless.cli.commands.doctor.registry import CheckContext, CheckResult
 from worthless.cli.key_check import KEY_FIX, aliases_key_cannot_open
 from worthless.cli.keystore import _SERVICE, _keyring_username, keyring_available
-from worthless.crypto.types import zero_buf
 
 logger = logging.getLogger(__name__)
 check_id = "fernet_drift"
@@ -42,14 +39,6 @@ _INSTRUCTIONS = (
     "     - File:   rm ~/.worthless/fernet.key\n"
     "     - Keyring: see `keyring del worthless <fernet-key-...>`."
 )
-
-
-def _cannot_unlock(ctx: CheckContext, key: bytes) -> tuple[int, list[str]]:
-    buf = bytearray(key)
-    try:
-        return asyncio.run(aliases_key_cannot_open(ctx.home.db_path, buf))
-    finally:
-        zero_buf(buf)
 
 
 def run(ctx: CheckContext) -> CheckResult:
@@ -81,9 +70,11 @@ def run(ctx: CheckContext) -> CheckResult:
         )
 
     sources = {"file": file_value, "keyring": keyring_value}
-    checked: dict[str, tuple[int, list[str]]] = {}
-    if not fernet_ipc_only_enabled() and ctx.home.db_path.is_file():
-        checked = {name: _cannot_unlock(ctx, v) for name, v in sources.items() if v is not None}
+    checked = {
+        name: aliases_key_cannot_open(ctx.home, value)
+        for name, value in sources.items()
+        if value is not None
+    }
 
     if (
         file_value is not None

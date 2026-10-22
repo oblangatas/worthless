@@ -7,17 +7,19 @@ locked secrets unrecoverable.
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from cryptography.fernet import Fernet
 
+from worthless.cli import key_check
 from worthless.cli.bootstrap import ensure_home
 from worthless.cli.commands.doctor.checks import fernet_drift
 from worthless.cli.commands.doctor.registry import CheckContext
-from worthless.storage.repository import ShardRepository, StoredShard
+from worthless.storage.repository import ShardRepository
+
+from tests.helpers import seal_enrolled
 
 
 @pytest.fixture
@@ -111,24 +113,7 @@ OTHER = Fernet.generate_key()
 
 
 def _seal(home, key: bytes, *aliases: str) -> None:
-    async def go() -> None:
-        repo = ShardRepository(str(home.db_path), key)
-        try:
-            await repo.initialize()
-            for alias in aliases:
-                shard = StoredShard(
-                    shard_b=bytearray(b"b" * 32),
-                    commitment=bytearray(b"c" * 32),
-                    nonce=bytearray(b"n" * 32),
-                    provider="openai",
-                )
-                await repo.store_enrolled(
-                    alias, shard, var_name="OPENAI_API_KEY", prefix="sk-", charset="x"
-                )
-        finally:
-            repo.close()
-
-    asyncio.run(go())
+    seal_enrolled(home.db_path, key, *aliases)
 
 
 def _file_key(home) -> bytes:
@@ -176,5 +161,5 @@ def test_docker_ipc_mode_never_checks(ctx, fake_home, monkeypatch) -> None:
     """WOR-465: the proxy uid owns no key there; don't read shards with one."""
     _seal(fake_home, OTHER, "work")
     monkeypatch.setenv("WORTHLESS_FERNET_IPC_ONLY", "1")
-    with patch.object(fernet_drift, "aliases_key_cannot_open", side_effect=AssertionError):
+    with patch.object(key_check, "ShardReader", side_effect=AssertionError("read shards")):
         assert fernet_drift.run(ctx)["status"] == "ok"

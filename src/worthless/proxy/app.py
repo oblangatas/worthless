@@ -705,9 +705,9 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
         except Exception as exc:
             shard_a[:] = b"\x00" * len(shard_a)
             await _release_reservations()
-            # saaz: a stale Fernet key used to be a silent 401 here. Log the class
-            # only — the message could carry token bytes (SR-04). Client sees
-            # the same uniform 401 either way.
+            # saaz: a stale Fernet key lands here; say so server-side. Class only —
+            # the message could carry token bytes (SR-04). The client gets the
+            # same uniform 401 either way.
             logger.warning(
                 "sidecar could not open the stored key for alias %r (%s) — "
                 "run `worthless doctor --explain fernet_drift`",

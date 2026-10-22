@@ -15,6 +15,7 @@ import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Literal
 
 if sys.platform != "win32":
     import fcntl
@@ -23,10 +24,11 @@ else:  # pragma: no cover — fail_if_windows gates before flock is reached
 
 import typer
 
-from worthless._flags import fernet_ipc_only_enabled
 from worthless.cli.bootstrap import WorthlessHome, get_home
 from worthless.cli.console import get_console
 from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary, sanitize_exception
+from worthless.cli.key_check import KEY_FIX, aliases_key_cannot_open
+from worthless.cli.keystore import read_fernet_key_from_file
 from worthless.cli.platform import (
     IS_WINDOWS,
     fail_if_windows,
@@ -64,44 +66,79 @@ from worthless.sidecar.health import (
     list_sidecar_sockets,
     probe_socket,
 )
-from worthless.cli.key_check import KEY_FIX, aliases_key_cannot_open
+
+# A refused service that sees fernet.key fixed (or gone) exits with this so
+# launchd/systemd restart it on the new key. Non-zero: systemd's
+# Restart=on-failure ignores a clean exit. 75 = EX_TEMPFAIL.
+_RESTART_FOR_NEW_KEY = 75
+_KEY_RECHECK_S = 10
 
 
-def _refuse_unless_key_opens_locked_keys(home: WorthlessHome, key: bytearray, console) -> None:
+def _refuse_unless_key_opens_locked_keys(home: WorthlessHome, key: bytearray, console) -> bool:
     """Never serve "healthy" with a key that can't open the locked keys (worthless-saaz).
 
     A restored backup or a ``lock`` under another ``WORTHLESS_FERNET_KEY``
     leaves ``fernet.key`` unable to open some or all shards; ``/healthz`` would
     say 200 while every request 401s. None open → refuse. Some open → start
-    and name the rest. Skipped under IPC-only: the sidecar owns the key there.
+    and name the rest.
+
+    Returns True when a service must wait instead of exiting: exiting would
+    make launchd (KeepAlive) / systemd (Restart=on-failure) relaunch it every
+    5 s and log this forever.
     """
-    if fernet_ipc_only_enabled() or not home.db_path.is_file():
-        return
-    total, dead = asyncio.run(aliases_key_cannot_open(home.db_path, key))
+    total, dead = aliases_key_cannot_open(home, key)
     if not dead:
-        return
+        return False
     if len(dead) < total:
         console.print_warning(
             f"The key this proxy loaded can't unlock: {', '.join(sorted(dead))}. "
             f"Requests for them will fail. {KEY_FIX}"
         )
-        return
+        return False
     refusal = WorthlessError(
         ErrorCode.KEY_REFUSED,
         f"The key this proxy loaded can't unlock any of your {total} locked key(s) — "
-        f"often a restored backup's fernet.key. Not starting. {KEY_FIX}",
+        f"often a restored backup's fernet.key. Not starting; fix fernet.key and the "
+        f"service restarts on its own. {KEY_FIX}",
     )
     if not is_service_managed():
         raise refusal
     console.print_error(refusal)
-    # Exiting would make launchd (KeepAlive) / systemd (Restart=on-failure)
-    # relaunch every 5 s and log this forever. Serve nothing; wait to be stopped.
+    return True
+
+
+def _wait_for_a_key_that_opens(home: WorthlessHome) -> None:
+    """Park a refused service with no key in memory; restart once fernet.key is fixed.
+
+    Reads only the file — the service reads it first, and the keyring could
+    prompt on every pass. A missing file restarts too: a fresh start takes
+    the normal path. Any other read error (say, loose permissions) would be
+    refused again on restart, so it keeps waiting instead of looping.
+    """
     while True:
-        time.sleep(3600)
+        time.sleep(_KEY_RECHECK_S)
+        try:
+            key = read_fernet_key_from_file(home.base_dir)
+        except WorthlessError as exc:
+            if exc.code == ErrorCode.KEY_NOT_FOUND:
+                raise typer.Exit(code=_RESTART_FOR_NEW_KEY) from None
+            continue
+        try:
+            total, dead = aliases_key_cannot_open(home, key)
+        finally:
+            zero_buf(key)
+        if len(dead) < total or not total:
+            raise typer.Exit(code=_RESTART_FOR_NEW_KEY)
 
 
-async def _sidecar_open_probe_material(home: WorthlessHome) -> tuple[bytes, bytes] | None:
-    """Return ciphertext + key_id for the first enrolled alias, or None."""
+async def _sidecar_open_probe_material(
+    home: WorthlessHome,
+) -> tuple[bytes, bytes] | None | Literal[False]:
+    """Return ciphertext + key_id for an alias this key opens.
+
+    None when nothing is locked; False when keys are locked but this key opens
+    none of them — a HELLO-only fallback would call that sidecar healthy.
+    """
     if not home.db_path.is_file():
         return None
     from worthless.cli.keystore import read_fernet_key
@@ -113,11 +150,12 @@ async def _sidecar_open_probe_material(home: WorthlessHome) -> tuple[bytes, byte
         repo = ShardRepository(str(home.db_path), key)
         # saaz: probe with an alias this key opens, or one broken alias in a
         # mixed DB makes a healthy sidecar look stale and `up` keeps reclaiming.
-        for alias in await repo.list_keys():
+        aliases = await repo.list_keys()
+        for alias in aliases:
             enc = await repo.fetch_encrypted(alias)
             if enc is not None and key_fits_token(key, enc.shard_b_enc):
                 return enc.shard_b_enc, alias.encode()
-        return None
+        return False if aliases else None
     finally:
         # zero_buf FIRST: if close() were to raise, the caller's key must still
         # be wiped and the original exception must not be masked (worthless-g648).
@@ -144,6 +182,8 @@ def _managed_sidecar_healthy(home: WorthlessHome) -> bool:
             probe = asyncio.run(_sidecar_open_probe_material(home))
         except Exception:
             probe = None
+    if probe is False:
+        return False
     if probe is not None:
         ciphertext, key_id = probe
         try:
@@ -539,13 +579,18 @@ def _start_foreground_locked(
     # SR-01: ``home.fernet_key`` returns a bytearray; pass through directly
     # so the reconstruct buffer stays zeroable.
     fernet_key = home.fernet_key
+    wait = False
     try:
-        _refuse_unless_key_opens_locked_keys(home, fernet_key, console)
-        shares = split_to_tmpfs(fernet_key, home.base_dir)
+        wait = _refuse_unless_key_opens_locked_keys(home, fernet_key, console)
+        if not wait:
+            shares = split_to_tmpfs(fernet_key, home.base_dir)
     finally:
         # SR-02: wipe the plaintext key now — it's no longer needed in this
         # process and shouldn't sit in heap for the rest of the session.
         fernet_key[:] = bytearray(len(fernet_key))
+    if wait:
+        _wait_for_a_key_that_opens(home)
+        return
 
     handle: SidecarHandle | None = None
     try:

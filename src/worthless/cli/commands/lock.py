@@ -56,7 +56,6 @@ from worthless.cli.dotenv_rewriter import (
     rewrite_env_keys,
     scan_env_keys,
 )
-from worthless.cli.key_check import KEY_FIX, refuse_a_key_that_opens_no_locked_key
 from worthless.cli.errors import (
     ErrorCode,
     SignalInterrupt,
@@ -66,6 +65,7 @@ from worthless.cli.errors import (
     error_boundary,
     sanitize_exception,
 )
+from worthless.cli.key_check import KEY_FIX, refuse_a_key_that_opens_no_locked_key
 from worthless.cli.key_patterns import CANONICAL_KEY_VAR_RE, detect_prefix, is_oauth_token
 from worthless.cli.log_redaction import _redact
 from worthless._flags import fernet_ipc_only_enabled
@@ -2686,8 +2686,7 @@ def _sync_fernet_after_lock(home: WorthlessHome) -> None:
     overwrite) and when on-disk ``fernet.key`` disagrees with the canonical
     key already loaded for this lock (WOR-464 — never auto-pick a side).
     Also skipped when ``WORTHLESS_FERNET_KEY`` is set: a shell's key must never
-    become the service's key, or every older project goes dark (saaz). Not on
-    Windows, which has no background service to feed.
+    become the service's key, or every older project goes dark (saaz).
 
     Uses the ``home.fernet_key`` cache so lock does not fire a second
     keyring read (HF2 contract).
@@ -2696,17 +2695,21 @@ def _sync_fernet_after_lock(home: WorthlessHome) -> None:
         return
     if fernet_ipc_only_enabled():
         return
-    if os.environ.get("WORTHLESS_FERNET_KEY"):
-        get_console().print_warning(
-            "WORTHLESS_FERNET_KEY is set, so the background service's key file was "
-            "left alone. The service can't use keys locked with a shell key."
-        )
+    shell_key = os.environ.get("WORTHLESS_FERNET_KEY", "").strip().encode()
+    if shell_key:
+        # Quiet unless it matters: no file means no service key to diverge from.
+        on_disk = _fernet_file_bytes(home.fernet_key_path)
+        if on_disk is not None and not hmac.compare_digest(on_disk, shell_key):
+            get_console().print_warning(
+                "WORTHLESS_FERNET_KEY differs from the background service's key file, "
+                "so the service can't use keys locked with it. The file was left alone."
+            )
         return
 
     key = home.fernet_key
     try:
         on_disk = _fernet_file_bytes(home.fernet_key_path)
-        if on_disk is not None and not hmac.compare_digest(on_disk, bytes(key)):
+        if on_disk is not None and not hmac.compare_digest(on_disk, key):
             get_console().print_warning(
                 "fernet.key differs from the key this lock used, so the background "
                 f"service may not unlock these keys. {KEY_FIX}"
