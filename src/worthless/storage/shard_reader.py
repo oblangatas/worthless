@@ -53,6 +53,12 @@ class ShardReader:
             rows = await cursor.fetchall()
             return frozenset(row[0] for row in rows)
 
+    async def list_aliases(self) -> list[str]:
+        """Return every locked alias (mirrors ``ShardRepository.list_keys``)."""
+        async with self._connect() as db:
+            cursor = await db.execute("SELECT key_alias FROM shards")
+            return [row[0] for row in await cursor.fetchall()]
+
     async def fetch_encrypted(self, alias: str) -> EncryptedShard | None:
         """Return ciphertext-at-rest for *alias*, or ``None``.
 

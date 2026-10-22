@@ -23,6 +23,7 @@ else:  # pragma: no cover — fail_if_windows gates before flock is reached
 
 import typer
 
+from worthless._flags import fernet_ipc_only_enabled
 from worthless.cli.bootstrap import WorthlessHome, get_home
 from worthless.cli.console import get_console
 from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary, sanitize_exception
@@ -56,12 +57,61 @@ from worthless.cli.sidecar_lifecycle import (
     spawn_sidecar,
     split_to_tmpfs,
 )
+from worthless.crypto.fernet_check import key_fits_token
 from worthless.crypto.types import zero_buf
 from worthless.sidecar.health import (
     find_sidecar_socket_for_open,
     list_sidecar_sockets,
     probe_socket,
 )
+from worthless.storage.shard_reader import ShardReader
+
+_KEY_FIX = "Run `worthless doctor --explain fernet_drift` to find the right key."
+
+
+async def _aliases_key_cannot_open(db_path: Path, key: bytearray) -> tuple[int, list[str]]:
+    """Return (locked alias count, aliases *key* can't open) — no decrypt (saaz)."""
+    reader = ShardReader(db_path)
+    aliases = await reader.list_aliases()
+    dead = []
+    for alias in aliases:
+        enc = await reader.fetch_encrypted(alias)
+        if enc is not None and not key_fits_token(key, enc.shard_b_enc):
+            dead.append(alias)
+    return len(aliases), dead
+
+
+def _refuse_unless_key_opens_locked_keys(home: WorthlessHome, key: bytearray, console) -> None:
+    """Never serve "healthy" with a key that can't open the locked keys (worthless-saaz).
+
+    A restored backup or a ``lock`` under another ``WORTHLESS_FERNET_KEY``
+    leaves ``fernet.key`` unable to open some or all shards; ``/healthz`` would
+    say 200 while every request 401s. None open → refuse. Some open → start
+    and name the rest. Skipped under IPC-only: the sidecar owns the key there.
+    """
+    if fernet_ipc_only_enabled() or not home.db_path.is_file():
+        return
+    total, dead = asyncio.run(_aliases_key_cannot_open(home.db_path, key))
+    if not dead:
+        return
+    if len(dead) < total:
+        console.print_warning(
+            f"The key this proxy loaded can't unlock: {', '.join(sorted(dead))}. "
+            f"Requests for them will fail. {_KEY_FIX}"
+        )
+        return
+    refusal = WorthlessError(
+        ErrorCode.KEY_REFUSED,
+        f"The key this proxy loaded can't unlock any of your {total} locked key(s) — "
+        f"often a restored backup's fernet.key. Not starting. {_KEY_FIX}",
+    )
+    if not is_service_managed():
+        raise refusal
+    console.print_error(refusal)
+    # Exiting would make launchd (KeepAlive) / systemd (Restart=on-failure)
+    # relaunch every 5 s and log this forever. Serve nothing; wait to be stopped.
+    while True:
+        time.sleep(3600)
 
 
 async def _sidecar_open_probe_material(home: WorthlessHome) -> tuple[bytes, bytes] | None:
@@ -75,14 +125,13 @@ async def _sidecar_open_probe_material(home: WorthlessHome) -> tuple[bytes, byte
     repo: ShardRepository | None = None
     try:
         repo = ShardRepository(str(home.db_path), key)
-        aliases = await repo.list_keys()
-        if not aliases:
-            return None
-        alias = aliases[0]
-        enc = await repo.fetch_encrypted(alias)
-        if enc is None:
-            return None
-        return enc.shard_b_enc, alias.encode()
+        # saaz: probe with an alias this key opens, or one broken alias in a
+        # mixed DB makes a healthy sidecar look stale and `up` keeps reclaiming.
+        for alias in await repo.list_keys():
+            enc = await repo.fetch_encrypted(alias)
+            if enc is not None and key_fits_token(key, enc.shard_b_enc):
+                return enc.shard_b_enc, alias.encode()
+        return None
     finally:
         # zero_buf FIRST: if close() were to raise, the caller's key must still
         # be wiped and the original exception must not be masked (worthless-g648).
@@ -505,6 +554,7 @@ def _start_foreground_locked(
     # so the reconstruct buffer stays zeroable.
     fernet_key = home.fernet_key
     try:
+        _refuse_unless_key_opens_locked_keys(home, fernet_key, console)
         shares = split_to_tmpfs(fernet_key, home.base_dir)
     finally:
         # SR-02: wipe the plaintext key now — it's no longer needed in this
