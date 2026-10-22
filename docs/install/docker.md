@@ -122,7 +122,7 @@ add the worthless server as a service:
 # docker-compose.yml
 services:
   worthless:
-    image: ghcr.io/oblangatas/worthless-proxy:0.3.15
+    image: ghcr.io/oblangatas/worthless-proxy:0.3.16
     ports:
       - "8787:8787"   # host:container — exposes for CLI lock-from-host
     environment:
@@ -178,7 +178,7 @@ remote proxy is not in v0.3.8.
 # docker-compose.yml on the team server box
 services:
   worthless:
-    image: ghcr.io/oblangatas/worthless-proxy:0.3.15
+    image: ghcr.io/oblangatas/worthless-proxy:0.3.16
     ports:
       - "8787:8787"
     environment:
@@ -226,7 +226,7 @@ services:
   the publish workflow's Fulcio SAN exactly — workflow path is the
   `LOAD-BEARING` filename `publish-docker.yml`):
   ```bash
-  cosign verify ghcr.io/oblangatas/worthless-proxy:0.3.15 \
+  cosign verify ghcr.io/oblangatas/worthless-proxy:0.3.16 \
     --certificate-identity-regexp 'https://github.com/oblangatas/worthless/\.github/workflows/publish-docker\.yml@refs/tags/v.*' \
     --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
   ```
