@@ -24,7 +24,7 @@ query strings and trailing slashes are dropped, Linear's raw `Authorization` hea
 metering cuts a Slack bot off at about 7,800 calls. The research note lists all nine gaps with line refs.
 
 Gate B has since driven the real Slack, Linear and PostHog SDKs against a local capture server with fake
-tokens. It confirmed D3, D5 and D6 below and raised one open question about PostHog. Nothing has yet run
+tokens. It confirmed D3, D5 and D6 below and narrowed PostHog's v1 scope (see "PostHog in v1"). Nothing has yet run
 against the real vendors with a real token (the "live leg").
 
 Our first design partner is **Mappy**, an AI-agent VM.
@@ -33,7 +33,8 @@ Our first design partner is **Mappy**, an AI-agent VM.
 
 1. Product feature, with Mappy as first design partner.
 2. Build only for the **leaked-file** threat. Prompt injection and runaway use get tickets only (F7, F8).
-3. v1 covers **Slack, Linear and PostHog `phx_`**.
+3. v1 covers **Slack, Linear and PostHog `phx_`**. After Gate B, PostHog is limited to direct API use (revised
+   2026-10-22; see "PostHog in v1").
 4. A separate trust domain (F6) **gates Mappy go-live**.
 5. Ship as **experimental**. "Hard spend cap for LLM keys" stays the headline.
 6. Whether Mappy uses Slack Socket Mode (`xapp-`) is answered by the leak inventory (Gate A).
@@ -139,8 +140,9 @@ bodies is F7's job ([WOR-977](https://linear.app/plumbusai/issue/WOR-977)).
   ```
 
 - Two snippet details from Gate B: the async Slack client ignores `NO_PROXY`, so on a host with `HTTPS_PROXY`
-  its snippet also sets `client.proxy = None`; and `@linear/sdk` allows plain `http://` only for loopback, so
-  the Linear URL must be `127.0.0.1` or `localhost`.
+  its snippet also sets `client.proxy = None`; and `@linear/sdk` allows plain `http://` only for `localhost`,
+  `127.0.0.1` and `[::1]` (its `LOCAL_API_HOSTNAMES`). So the Linear URL must be loopback, and a proxy reached
+  by a container hostname (`WORTHLESS_PROXY_HOST`) breaks Linear unless it serves TLS.
 
 **Why:** the SDKs take a base URL as a constructor argument; Gate B confirmed none of them reads one from the
 environment. So
@@ -188,21 +190,24 @@ The script expects `EACCES` on the store, a failing unlock, and a working proxy 
 **Why:** on a headless VM the Fernet key file sits next to the DB. One snapshot of the agent's home then holds
 both halves, and the v1 promise fails on exactly the machine we are building it for.
 
-## Open decision: PostHog in v1
+## PostHog in v1: direct API use only
 
-Owner decision 3 put PostHog `phx_` in v1. Gate B found something that decision didn't know: `posthog-python`
-sends secret-key calls (`Bearer phx_…`) and **uncredentialed** traffic (event capture, `/flags`, automatic
-`$feature_flag_called` events, all carrying only the public `phc_` key) to the **same** `host`. Point that
-client at the proxy and D3's "no credential → uniform 401" silently drops capture and flags. PostHog's SDK never
-raises, so nobody would notice.
+Owner decision 3 put PostHog `phx_` in v1. Gate B then found that `posthog-python` sends secret-key calls
+(`Bearer phx_…`, e.g. feature-flag definitions) and **keyless** traffic (event capture, `/flags`, automatic
+`$feature_flag_called` events, carrying only the public `phc_` key, no `Authorization`) to the **same** `host`.
+Point that client at the proxy and D3's "no credential → uniform 401" silently drops the keyless events.
+PostHog's SDK never raises, so nobody would notice.
 
-| Option | Cost |
-|---|---|
-| **A. Defer PostHog** to v1.1; ship Slack and Linear | Smallest change. Mappy's rollout already adds PostHog last (week 3) |
-| **B. Per-protocol no-credential path:** forward an allow-list of paths (`/batch/`, `/i/v0/e/`, `/flags/`) without injecting a key | The proxy starts forwarding unauthenticated requests, a new invariant to defend and test |
-| **C. Keep PostHog only for direct API callers:** if Gate A shows Mappy calls PostHog's private API with a plain HTTP client, not through `posthog-python`'s capture/flags, nothing else shares the base URL | No proxy change, but it depends on how Mappy calls PostHog, and the snippet must warn SDK users |
+**Decision (owner, revised 2026-10-22):**
 
-**Recommendation:** A, unless Gate A shows C applies. B is worth doing only once a second vendor needs it.
+- **In v1:** `phx_` for **direct API use**, such as agent analytics queries or a PostHog MCP tool, where every
+  request carries the key in `Authorization: Bearer`. That path needs nothing beyond D1–D8.
+- **Not yet supported:** `posthog-python`'s mixed mode, where feature-flag calls and keyless capture share one
+  host. The tool-keys docs say in one line that feature flags in the PostHog Python library aren't supported yet.
+  Forwarding keyless requests untouched for PostHog aliases only is
+  [WOR-1000](https://linear.app/plumbusai/issue/WOR-1000).
+- **Caveat:** Gate B exercised only the library route. The direct-API path is covered by PR3's end-to-end test
+  and by a real-account host check (`us.` vs `eu.posthog.com`) during the Mappy rollout.
 
 ## When the protection holds
 
@@ -267,6 +272,7 @@ re-encode it. None tests against live Slack. Gate B is the evidence that each of
 | Item | Why |
 |---|---|
 | `phc_` (PostHog project key) | Public by design |
+| `posthog-python` mixed mode (feature flags + keyless capture on one host) | The keyless events would get the uniform 401; [WOR-1000](https://linear.app/plumbusai/issue/WOR-1000) |
 | `xapp-` (Slack app-level / Socket Mode) | Opens a WebSocket, not a request/response call |
 | `xoxe-`, `xoxe.xoxb-`, `xoxe.xoxp-`, `xoxe.xapp-` (Slack refresh and rotating tokens) | The value changes every 12h, and Slack doesn't let an app turn rotation off once it's on |
 | `xwfp-` (Slack workflow "just in time" tokens) | Short-lived by design |
@@ -291,7 +297,6 @@ re-encode it. None tests against live Slack. Gate B is the evidence that each of
   results are in the research note, section 4. **Still to run:** the live leg with test-workspace tokens, to
   confirm the real status of Slack's `ok: false`, Linear's real `RATELIMITED` body, and which PostHog host
   serves what.
-- **PostHog decision** (below).
 - **Wording:** the owner approves "one line per tool" in place of "no code changes" for tool keys.
 
 ## References

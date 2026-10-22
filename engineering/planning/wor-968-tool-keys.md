@@ -64,8 +64,9 @@ PR0a–c and these docs can run now. **Gates A and B both gate PR1a.**
      the Bearer header across hosts.
   5. Does any SDK read a base-URL env var? **No**, so the one-line snippet is required.
 
-  Gate B also found that PostHog shares its host with uncredentialed traffic, which needs an owner decision
-  before PR3 (ADR-002, "Open decision: PostHog in v1").
+  Gate B also found that `posthog-python` sends keyless analytics to the same host as its `phx_` calls. Owner
+  decision (2026-10-22): v1 covers `phx_` for direct API use only; the library's mixed mode is
+  [WOR-1000](https://linear.app/plumbusai/issue/WOR-1000). See ADR-002, "PostHog in v1".
 
 ## TDD slices
 
@@ -206,7 +207,8 @@ green.
 - `unlock` removes the variable;
 - redaction covers the new prefixes and raw `Authorization`;
 - a `KEY_PATTERN`↔registry prefix-coverage test (no `.gitleaks.toml` coupling);
-- the same flow for a Linear raw-auth key and a PostHog `phx_` key.
+- the same flow for a Linear raw-auth key and a PostHog `phx_` key used directly (Bearer on every request).
+  Gate B never exercised PostHog's direct-API path, so this e2e is its first coverage.
 
 **Guard:** the existing openai/anthropic/openrouter lock tests stay unchanged.
 
@@ -220,7 +222,8 @@ on the store, a failing unlock, and a working proxy call.
 ### PR4a / PR4b: docs
 
 - **PR4a (with PR3):** `docs/security.md` gets the "when it holds" table, non-goal #9 ("unbounded until
-  budgets"), and the SR-05/09/11 deltas. A new experimental tool-keys page with per-SDK snippets. Reword
+  budgets"), and the SR-05/09/11 deltas. A new experimental tool-keys page with per-SDK snippets, and one line saying feature flags in the PostHog
+  Python library aren't supported yet. Reword
   `docs/install/mac.md:164` ("Non-LLM secrets…").
 - **PR4b (only after Mappy meets its success criteria):** README Scope gains a secondary "also tool keys"; the
   LLM headline stays. Also the website FAQ, both `SKILL.md` files, and `personas.md` (P8, agent operator).
@@ -239,7 +242,8 @@ on the store, a failing unlock, and a working proxy call.
 | [WOR-992](https://linear.app/plumbusai/issue/WOR-992) | `enroll` outputs shard-A and stores the protocol |
 | [WOR-993](https://linear.app/plumbusai/issue/WOR-993) | `wrap` support for passthrough aliases |
 | [WOR-994](https://linear.app/plumbusai/issue/WOR-994) | Segment-aware format-preserving split for structured Slack tokens (SR-12) |
-| [WOR-995](https://linear.app/plumbusai/issue/WOR-995) | Slack `files_upload_v2` second hop. Gate B: it goes to `files.slack.com` with no credential, so it is an egress-allowlist item for R1, not a token bypass |
+| [WOR-995](https://linear.app/plumbusai/issue/WOR-995) | Slack `files_upload_v2` second hop. **Closed:** Gate B saw it carry no key. If R1's egress allowlist is used, allow `files.slack.com` |
+| [WOR-1000](https://linear.app/plumbusai/issue/WOR-1000) | PostHog Python library mode: forward keyless analytics untouched for PostHog aliases only |
 | [WOR-996](https://linear.app/plumbusai/issue/WOR-996) | Size cap for buffered success bodies |
 | [WOR-997](https://linear.app/plumbusai/issue/WOR-997) | Slack incoming-webhook URLs |
 | [WOR-998](https://linear.app/plumbusai/issue/WOR-998) | User-declared generic bearer protocol |
@@ -256,7 +260,8 @@ on the store, a failing unlock, and a working proxy call.
    single point of failure.
 5. Lock Slack, patch the one line in Mappy's client factory, add a prompt hint. Canary read-only calls first,
    then writes. No shadowing of writes.
-6. Rehearse `unlock` once. Add Linear in week 2, PostHog in week 3.
+6. Rehearse `unlock` once. Add Linear in week 2, PostHog (direct API use only) in week 3, after checking on the
+   real account which host serves it (`us.` vs `eu.posthog.com`).
 
 **Success** (against the week before rollout):
 

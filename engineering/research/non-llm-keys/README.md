@@ -194,7 +194,7 @@ were fetched on 2026-10-22. The live leg, real test-workspace tokens against the
 |---|---|---|
 | Upstream | `POST https://api.linear.app/graphql`. The SDK's `apiUrl` option is used verbatim; query and trailing slash survive | **[F] [W]** |
 | Credential | `apiKey` goes **raw**: `Authorization: lin_api_…`. An OAuth `accessToken` goes as `Bearer` | **[W]** |
-| URL check | The SDK allows plain `http://` only for `localhost`, `127.0.0.1` and `[::1]`. A container hostname needs TLS | **[W]** |
+| URL check | The SDK allows plain `http://` only for `localhost`, `127.0.0.1` and `[::1]` (`LOCAL_API_HOSTNAMES` in `@linear/sdk` 99.0.0 source). A proxy reached by a container hostname needs TLS | **[W] [F]** |
 | Errors | `errors[]` with `extensions.code`. The SDK never retries | **[F] [W]** |
 | Rate limit | Linear's docs: HTTP **400** with `extensions.code: "RATELIMITED"`, plus `X-RateLimit-Requests-Limit/-Remaining/-Reset` (epoch ms) and per-endpoint `X-RateLimit-Endpoint-*`. The SDK raises `RatelimitedLinearError` only if `extensions.type: "ratelimited"` is present (else `UnknownLinearError`) and reads the retry fields from the **headers**. Whether the real body carries `type` | **[F] [W]**; body **[L]** |
 | Base-URL env var | None (`LINEAR_API_URL` is ignored) | **[W]** |
@@ -220,13 +220,17 @@ were fetched on 2026-10-22. The live leg, real test-workspace tokens against the
    and sync `slack_sdk` would carry shard-A to whatever host `Location` names **[W]**.
 4. **"Shard-A in the query → 401" must match this alias's shard-A, not a token pattern.** Every PostHog
    secret-key call carries `phc_` in the query **[W]**.
-5. **PostHog shares its host with uncredentialed traffic.** The uniform 401 for a missing credential would
-   silently drop capture and flags. PostHog in v1 needs a per-protocol no-credential path (forward without
-   injecting a key) or has to wait. That is an owner decision; see ADR-002 **[W] [I]**.
+5. **PostHog shares its host with keyless traffic.** In `posthog-python`, the uniform 401 for a missing
+   credential would silently drop capture and flags **[W]**. Owner decision (2026-10-22): v1 covers `phx_` for
+   direct API use only, where every request carries `Bearer phx_…`; the library's mixed mode waits for
+   [WOR-1000](https://linear.app/plumbusai/issue/WOR-1000). Gate B exercised only the library route, so the
+   direct-API path is still unobserved: PR3's end-to-end test and a real-account host check (`us.` vs `eu.`)
+   during rollout cover it **[L]**.
 6. **Snippets.** The async Slack snippet adds `client.proxy = None` unless Gate A shows Mappy has no egress proxy;
-   the Linear snippet must use a loopback URL **[W]**.
-7. **`files_upload_v2` does not bypass the proxy with the token.** It needs egress to `files.slack.com`, so
-   [WOR-995](https://linear.app/plumbusai/issue/WOR-995) becomes an R1 egress-allowlist item **[W]**.
+   the Linear snippet must use a loopback URL (`localhost`, `127.0.0.1` or `[::1]`) **[W] [F]**.
+7. **`files_upload_v2` carries no key on its second hop**, so it has no impact on the token
+   ([WOR-995](https://linear.app/plumbusai/issue/WOR-995), closed) **[W]**. One practical note: if R1's
+   optional egress allowlist is used, it must allow `files.slack.com`.
 
 ## 5. Token types and what v1 does with them
 
@@ -241,7 +245,7 @@ were fetched on 2026-10-22. The live leg, real test-workspace tokens against the
 | Slack signing secret | HMAC key for verifying inbound requests | **Refuse with a reason** | Not a bearer credential; it never goes upstream |
 | `lin_api_` | Linear personal API key | **Lock** | Raw `Authorization` |
 | `lin_oauth_` | Linear OAuth access token | Out of scope | Bearer on the wire, but refresh-based like Slack rotation **[W] [I]** |
-| `phx_` | PostHog personal API key | **Lock**, if the PostHog decision in ADR-002 keeps it in v1 | Bearer |
+| `phx_` | PostHog personal API key | **Lock**, for direct API use (ADR-002, "PostHog in v1") | Bearer on every request. `posthog-python` mixed mode waits for WOR-1000 |
 | `phs_` | PostHog project secret key | **Open**: decide in PR3 | Accepted by posthog-python 7.x's `secret_key` **[W]** |
 | `phc_` | PostHog project key | **Refuse, but don't suppress the verdict** | Public by design |
 | `AIza` | Google API key | Out of scope | Commonly sent as a `?key=` query parameter |
