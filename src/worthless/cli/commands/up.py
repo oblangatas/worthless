@@ -64,21 +64,7 @@ from worthless.sidecar.health import (
     list_sidecar_sockets,
     probe_socket,
 )
-from worthless.storage.shard_reader import ShardReader
-
-_KEY_FIX = "Run `worthless doctor --explain fernet_drift` to find the right key."
-
-
-async def _aliases_key_cannot_open(db_path: Path, key: bytearray) -> tuple[int, list[str]]:
-    """Return (locked alias count, aliases *key* can't open) — no decrypt (saaz)."""
-    reader = ShardReader(db_path)
-    aliases = await reader.list_aliases()
-    dead = []
-    for alias in aliases:
-        enc = await reader.fetch_encrypted(alias)
-        if enc is not None and not key_fits_token(key, enc.shard_b_enc):
-            dead.append(alias)
-    return len(aliases), dead
+from worthless.cli.key_check import KEY_FIX, aliases_key_cannot_open
 
 
 def _refuse_unless_key_opens_locked_keys(home: WorthlessHome, key: bytearray, console) -> None:
@@ -91,19 +77,19 @@ def _refuse_unless_key_opens_locked_keys(home: WorthlessHome, key: bytearray, co
     """
     if fernet_ipc_only_enabled() or not home.db_path.is_file():
         return
-    total, dead = asyncio.run(_aliases_key_cannot_open(home.db_path, key))
+    total, dead = asyncio.run(aliases_key_cannot_open(home.db_path, key))
     if not dead:
         return
     if len(dead) < total:
         console.print_warning(
             f"The key this proxy loaded can't unlock: {', '.join(sorted(dead))}. "
-            f"Requests for them will fail. {_KEY_FIX}"
+            f"Requests for them will fail. {KEY_FIX}"
         )
         return
     refusal = WorthlessError(
         ErrorCode.KEY_REFUSED,
         f"The key this proxy loaded can't unlock any of your {total} locked key(s) — "
-        f"often a restored backup's fernet.key. Not starting. {_KEY_FIX}",
+        f"often a restored backup's fernet.key. Not starting. {KEY_FIX}",
     )
     if not is_service_managed():
         raise refusal

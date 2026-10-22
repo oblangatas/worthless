@@ -21,6 +21,7 @@ import pytest
 from cryptography.fernet import Fernet
 
 from worthless.cli.bootstrap import WorthlessHome
+from worthless.cli import key_check
 from worthless.cli.commands import up as up_mod
 from worthless.cli.errors import ErrorCode, WorthlessError
 from worthless.storage.repository import ShardRepository, StoredShard
@@ -68,14 +69,14 @@ class TestWhichKeysOpen:
         self, home: WorthlessHome, key: bytes, dead: list[str]
     ) -> None:
         _seal(home.db_path, K1, "work", "side")
-        total, cannot = asyncio.run(up_mod._aliases_key_cannot_open(home.db_path, bytearray(key)))
+        total, cannot = asyncio.run(key_check.aliases_key_cannot_open(home.db_path, bytearray(key)))
         assert (total, sorted(cannot)) == (2, dead)
 
     def test_a_mixed_database_names_only_the_broken_alias(self, home: WorthlessHome) -> None:
         """`lock` with WORTHLESS_FERNET_KEY=<other> sealed one project with another key."""
         _seal(home.db_path, K1, "work")
         _seal(home.db_path, K2, "side")
-        assert asyncio.run(up_mod._aliases_key_cannot_open(home.db_path, bytearray(K1))) == (
+        assert asyncio.run(key_check.aliases_key_cannot_open(home.db_path, bytearray(K1))) == (
             2,
             ["side"],
         )
@@ -150,7 +151,7 @@ class TestWhatUpDoes:
         """WOR-465: under IPC-only the sidecar owns the key; this process must not check it."""
         monkeypatch.setenv("WORTHLESS_FERNET_IPC_ONLY", "1")
         _seal(home.db_path, K1, "work")
-        with patch.object(up_mod, "ShardReader", side_effect=AssertionError("read the db")):
+        with patch.object(key_check, "ShardReader", side_effect=AssertionError("read the db")):
             _check(home, K2, managed=False)
 
 

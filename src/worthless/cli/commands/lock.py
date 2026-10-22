@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import hmac
 import ipaddress
 import json
 import logging
@@ -55,6 +56,7 @@ from worthless.cli.dotenv_rewriter import (
     rewrite_env_keys,
     scan_env_keys,
 )
+from worthless.cli.key_check import KEY_FIX, refuse_a_key_that_opens_no_locked_key
 from worthless.cli.errors import (
     ErrorCode,
     SignalInterrupt,
@@ -2683,6 +2685,9 @@ def _sync_fernet_after_lock(home: WorthlessHome) -> None:
     Skipped under Docker IPC-only (sidecar owns ``fernet.key``; proxy cannot
     overwrite) and when on-disk ``fernet.key`` disagrees with the canonical
     key already loaded for this lock (WOR-464 — never auto-pick a side).
+    Also skipped when ``WORTHLESS_FERNET_KEY`` is set: a shell's key must never
+    become the service's key, or every older project goes dark (saaz). Not on
+    Windows, which has no background service to feed.
 
     Uses the ``home.fernet_key`` cache so lock does not fire a second
     keyring read (HF2 contract).
@@ -2691,13 +2696,20 @@ def _sync_fernet_after_lock(home: WorthlessHome) -> None:
         return
     if fernet_ipc_only_enabled():
         return
+    if os.environ.get("WORTHLESS_FERNET_KEY"):
+        get_console().print_warning(
+            "WORTHLESS_FERNET_KEY is set, so the background service's key file was "
+            "left alone. The service can't use keys locked with a shell key."
+        )
+        return
 
     key = home.fernet_key
     try:
         on_disk = _fernet_file_bytes(home.fernet_key_path)
-        if on_disk is not None and on_disk != key:
-            logger.debug(
-                "Skipping post-lock fernet sync — file bytes differ from canonical key (WOR-464)"
+        if on_disk is not None and not hmac.compare_digest(on_disk, bytes(key)):
+            get_console().print_warning(
+                "fernet.key differs from the key this lock used, so the background "
+                f"service may not unlock these keys. {KEY_FIX}"
             )
             return
         sync_fernet_for_launchd(home.base_dir, key=key)
@@ -2760,6 +2772,8 @@ def _lock_keys(
     # matches the up.py/wrap.py placement (after validation, before key
     # material touches memory).
     disable_core_dumps()
+    # saaz: never seal with a key that opens none of the existing locked keys.
+    refuse_a_key_that_opens_no_locked_key(home)
 
     # c5kc-61tw: same fail-closed contract the CLI scan uses — bounded per-file
     # read + wall-clock deadline so a hostile / oversized source file can't hang
@@ -3153,6 +3167,7 @@ def _enroll_single(
     """
     if not _ALIAS_RE.match(alias):
         raise WorthlessError(ErrorCode.SCAN_ERROR, f"Invalid alias: {alias!r}")
+    refuse_a_key_that_opens_no_locked_key(home)  # saaz
 
     try:
         prefix = detect_prefix(key, provider)
