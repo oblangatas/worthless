@@ -51,15 +51,21 @@ PR0a–c and these docs can run now. **Gates A and B both gate PR1a.**
   rotating `xoxe.` tokens? `xoxp-`? Their scopes. **Stop and rethink** if partial files leaving the box are not
   the main leak path.
 - **Gate B, SDK wire capture** ([WOR-970](https://linear.app/plumbusai/issue/WOR-970), throwaway, scratchpad, not
-  the repo). About 50 lines of Starlette serving canned responses and logging method, `raw_path`, query, where
+  the repo). **Done with fake tokens** on 2026-10-22; results are in the research note, section 4. The live leg
+  (test-workspace tokens against the real vendors) is still open. About 50 lines of Starlette serving canned responses and logging method, `raw_path`, query, where
   the credential sits, body keys and any 3xx. Clients: `slack_sdk` sync and async (including `files_upload_v2`'s
   second hop), `@linear/sdk`, `posthog-python` with `phx_` against `us.posthog.com`. Optional live leg with
   test-workspace tokens. It answers:
-  1. Is the credential **only** in `Authorization`, raw or Bearer?
-  2. Do path, query and trailing slash survive?
-  3. Does any SDK reject a scrambled shard-A?
-  4. Does any SDK expect or follow redirects?
-  5. Does any SDK read a base-URL env var?
+  1. Is the credential **only** in `Authorization`, raw or Bearer? **Yes.**
+  2. Do path, query and trailing slash survive? **Yes, if forwarded as raw bytes.** Async Slack puts a query on
+     POSTs too; sync Slack always POSTs.
+  3. Does any SDK reject a scrambled shard-A? **No.** Linear does reject non-loopback `http://` URLs.
+  4. Does any SDK expect or follow redirects? **None needs one; all follow them**, and sync `slack_sdk` keeps
+     the Bearer header across hosts.
+  5. Does any SDK read a base-URL env var? **No**, so the one-line snippet is required.
+
+  Gate B also found that PostHog shares its host with uncredentialed traffic, which needs an owner decision
+  before PR3 (ADR-002, "Open decision: PostHog in v1").
 
 ## TDD slices
 
@@ -100,9 +106,12 @@ Every bullet under **Red** is a failing test, shown failing before its fix.
 
 **Red** (new `tests/test_proxy_passthrough.py`)
 
-1. **Tracer.** GET `/{alias}/conversations.history?channel=C1&limit=2` with Bearer shard-A. The respx capture
-   shows the exact URL with its query, `Bearer <real>`, no shard-A anywhere, body byte-identical.
-2. A form-encoded POST arrives verbatim, with no `include_usage` injected.
+1. **Tracer.** GET `/{alias}/conversations.history?channel=C1&limit=2` with Bearer shard-A (the async Slack
+   shape). The respx capture shows the exact URL with its query, `Bearer <real>`, no shard-A anywhere, body
+   byte-identical.
+2. A form-encoded POST arrives verbatim, with no `include_usage` injected. So do a POST with a query string
+   (`files.getUploadURLExternal?filename=x.txt&length=5`) and a sync-Slack POST with
+   `Content-Type: application/json` and an empty body.
 3. Trailing slash and `%20` are preserved.
 4. **Dot segments** get a 401, `open_calls == 0`, respx never called. `%2e%2e`, `%2f` and `//` go through the
    normal client. A literal `..` needs a raw-ASGI-scope helper, because httpx collapses it client-side.
@@ -121,12 +130,15 @@ Every bullet under **Red** is a failing test, shown failing before its fix.
 
 **Red**
 
-- An upstream 429 relays `Retry-After`, `X-RateLimit-*` and the body.
+- An upstream 429 relays `Retry-After`, every `X-RateLimit-*` header (Linear's requests, complexity and
+  per-endpoint families) and the body.
 - A 4xx body arrives verbatim; Linear's 400 with `RATELIMITED` arrives intact.
 - `set-cookie` is stripped.
-- Any upstream 3xx becomes a 502. No `Location` rewrite unless Gate B shows a vendor needs it.
+- Any upstream 3xx becomes a 502, with no `Location` rewrite (Gate B: no SDK needs one, and sync `slack_sdk`
+  would follow it with the Bearer header). Also assert the proxy's own httpx client never follows a redirect.
 - A body over the cap becomes a 502, never a truncated body.
-- Shard-A in the raw query string gets a 401 before decrypt. (Body scan deferred.)
+- Shard-A in the raw query string gets a 401 before decrypt. (Body scan deferred.) The match is against
+  **this alias's** shard-A only, never a token pattern: every PostHog secret-key call carries `?token=phc_…`.
 - The access log has no query string: a filter on `uvicorn.access` drops it, and new `KEY_PATTERN` prefixes
   redact any token that remains.
 - The proxy never retries: one inbound request, exactly one upstream call. This backs the duplicate-post kill
@@ -222,14 +234,15 @@ on the store, a failing unlock, and a working proxy call.
 | [WOR-992](https://linear.app/plumbusai/issue/WOR-992) | `enroll` outputs shard-A and stores the protocol |
 | [WOR-993](https://linear.app/plumbusai/issue/WOR-993) | `wrap` support for passthrough aliases |
 | [WOR-994](https://linear.app/plumbusai/issue/WOR-994) | Segment-aware format-preserving split for structured Slack tokens (SR-12) |
-| [WOR-995](https://linear.app/plumbusai/issue/WOR-995) | Slack `files_upload_v2` second hop, if Gate B shows it bypasses the proxy |
+| [WOR-995](https://linear.app/plumbusai/issue/WOR-995) | Slack `files_upload_v2` second hop. Gate B: it goes to `files.slack.com` with no credential, so it is an egress-allowlist item for R1, not a token bypass |
 | [WOR-996](https://linear.app/plumbusai/issue/WOR-996) | Size cap for buffered success bodies |
 | [WOR-997](https://linear.app/plumbusai/issue/WOR-997) | Slack incoming-webhook URLs |
 | [WOR-998](https://linear.app/plumbusai/issue/WOR-998) | User-declared generic bearer protocol |
 
 ## Mappy rollout ([WOR-990](https://linear.app/plumbusai/issue/WOR-990), after PR3 + R1)
 
-1. Complete Gate A. Minimum token scopes. **Do not roll out `xoxp`.**
+1. Complete Gate A. Minimum token scopes. **Do not roll out `xoxp`.** Check whether Mappy's Slack app has
+   token rotation on (Slack can't turn it off once enabled) and whether the VM sets `HTTPS_PROXY`.
 2. **Rotate the tokens first, then lock the fresh ones.** Keep the originals recoverable off the box, in case
    shard-B is lost (#709).
 3. Apply R1 and run its verification script as the agent user. Hard gate.

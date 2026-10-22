@@ -23,6 +23,10 @@ would have failed on its first live request: `enroll` never outputs shard-A, the
 query strings and trailing slashes are dropped, Linear's raw `Authorization` header is rejected, and LLM
 metering cuts a Slack bot off at about 7,800 calls. The research note lists all nine gaps with line refs.
 
+Gate B has since driven the real Slack, Linear and PostHog SDKs against a local capture server with fake
+tokens. It confirmed D3, D5 and D6 below and raised one open question about PostHog. Nothing has yet run
+against the real vendors with a real token (the "live leg").
+
 Our first design partner is **Mappy**, an AI-agent VM.
 
 **Owner decisions (2026-10-22)** this ADR builds on:
@@ -73,8 +77,10 @@ vendor-keyed dict also never matches, because `lock` stores the protocol, not th
 - Basic auth, `x-api-key`, and values containing spaces get the uniform 401 before decrypt.
 - Both inbound credential headers are removed before the real one is set.
 
-**Why:** Slack and PostHog use Bearer; Linear personal keys go raw. Mirroring the SDK's own choice needs no
-per-vendor auth config, and leaves no setting that could aim the real key at a different header.
+**Why:** Slack and PostHog use Bearer; Linear personal keys go raw. Gate B saw no SDK put the secret anywhere
+but `Authorization`. Mirroring the SDK's own choice needs no per-vendor auth config, and leaves no setting that
+could aim the real key at a different header. Slack's docs also allow the token as a POST body `token=` field;
+`slack_sdk` never does that, and a client that does gets the uniform 401, which fails closed.
 
 ### D4. Unmetered gate: rate limit only, until request budgets
 
@@ -101,8 +107,9 @@ alias could drain them. The public docs must say so (PR4a).
 - For passthrough, the upstream status, body, `Retry-After` and `X-RateLimit-*` headers reach the client as sent.
   Slack's `200 {"ok": false}` and Linear's `400 RATELIMITED` arrive intact, so each SDK's own error handling and
   back-off still work.
-- Still enforced: `set-cookie` is stripped; any upstream 3xx becomes a 502 (no `Location` rewrite unless Gate B
-  shows a vendor needs one); a body over the size cap becomes a 502, never a truncated body; the proxy never
+- Still enforced: `set-cookie` is stripped; any upstream 3xx becomes a 502, with no `Location` rewrite. Gate B
+  found no SDK flow that needs a redirect, saw a 302 turn POSTs into body-less GETs, and saw sync `slack_sdk`
+  keep the Bearer header across hosts; a body over the size cap becomes a 502, never a truncated body; the proxy never
   retries, so one inbound request makes exactly one upstream call.
 - The proxy's **own** refusals (auth, routing, validation) stay byte-identical to `_uniform_401`.
 - `_sanitize_upstream_error` keeps doing what it does for LLM aliases. Whether LLM agents should see the
@@ -126,7 +133,12 @@ bodies is F7's job ([WOR-977](https://linear.app/plumbusai/issue/WOR-977)).
   WebClient(token=..., base_url=os.environ.get("SLACK_BOT_BASE_URL", "https://slack.com/api/"))
   ```
 
-**Why:** the SDKs take a base URL as a constructor argument, not from the environment (Gate B confirms). So
+- Two snippet details from Gate B: the async Slack client ignores `NO_PROXY`, so on a host with `HTTPS_PROXY`
+  its snippet also sets `client.proxy = None`; and `@linear/sdk` allows plain `http://` only for loopback, so
+  the Linear URL must be `127.0.0.1` or `localhost`.
+
+**Why:** the SDKs take a base URL as a constructor argument; Gate B confirmed none of them reads one from the
+environment. So
 "no code changes" isn't true for tool keys; "one line per tool" replaces it. Keeping the vendor default in the
 snippet is what makes `unlock` a rollback with no redeploy: unlock removes the variable and the client goes
 straight to the vendor again.
@@ -170,6 +182,22 @@ The script expects `EACCES` on the store, a failing unlock, and a working proxy 
 
 **Why:** on a headless VM the Fernet key file sits next to the DB. One snapshot of the agent's home then holds
 both halves, and the v1 promise fails on exactly the machine we are building it for.
+
+## Open decision: PostHog in v1
+
+Owner decision 3 put PostHog `phx_` in v1. Gate B found something that decision didn't know: `posthog-python`
+sends secret-key calls (`Bearer phx_…`) and **uncredentialed** traffic (event capture, `/flags`, automatic
+`$feature_flag_called` events, all carrying only the public `phc_` key) to the **same** `host`. Point that
+client at the proxy and D3's "no credential → uniform 401" silently drops capture and flags. PostHog's SDK never
+raises, so nobody would notice.
+
+| Option | Cost |
+|---|---|
+| **A. Defer PostHog** to v1.1; ship Slack and Linear | Smallest change. Mappy's rollout already adds PostHog last (week 3) |
+| **B. Per-protocol no-credential path:** forward an allow-list of paths (`/batch/`, `/i/v0/e/`, `/flags/`) without injecting a key | The proxy starts forwarding unauthenticated requests, a new invariant to defend and test |
+| **C. Keep PostHog only for direct API callers:** if Gate A shows Mappy calls PostHog's private API with a plain HTTP client, not through `posthog-python`'s capture/flags, nothing else shares the base URL | No proxy change, but it depends on how Mappy calls PostHog, and the snippet must warn SDK users |
+
+**Recommendation:** A, unless Gate A shows C applies. B is worth doing only once a second vendor needs it.
 
 ## When the protection holds
 
@@ -229,7 +257,9 @@ both halves, and the v1 promise fails on exactly the machine we are building it 
 |---|---|
 | `phc_` (PostHog project key) | Public by design |
 | `xapp-` (Slack app-level / Socket Mode) | Opens a WebSocket, not a request/response call |
-| `xoxe-`, `xoxe.xoxb-`, `xoxe.xoxp-` (Slack refresh and rotating tokens) | The value changes every 12h; conflicts with locking |
+| `xoxe-`, `xoxe.xoxb-`, `xoxe.xoxp-`, `xoxe.xapp-` (Slack refresh and rotating tokens) | The value changes every 12h, and Slack doesn't let an app turn rotation off once it's on |
+| `xwfp-` (Slack workflow "just in time" tokens) | Short-lived by design |
+| `lin_oauth_` (Linear OAuth access tokens) | Refresh-based, like Slack rotation |
 | Other rotating or OAuth tokens, and OAuth flows in general | Same reason; refresh would have to live in the proxy |
 | `AIza` Google keys | Commonly sent as a `?key=` query parameter, not a header |
 | GCP service-account JSON | Not a bearer token; it mints OAuth tokens, often over gRPC |
@@ -243,8 +273,14 @@ both halves, and the v1 promise fails on exactly the machine we are building it 
 - **Gate A** ([WOR-969](https://linear.app/plumbusai/issue/WOR-969)): Mappy's real leak artifacts, sorted by the
   table above, and which Slack/Linear/PostHog tokens and scopes exist. If partial files leaving the box are not
   the main leak path, stop and revisit this ADR.
-- **Gate B** ([WOR-970](https://linear.app/plumbusai/issue/WOR-970)): an SDK wire capture of `slack_sdk` (sync,
-  async, `files_upload_v2`), `@linear/sdk` and `posthog-python`. It fixes the details of D2, D3, D5 and D6.
+  Because Slack rotation can't be turned off once enabled, Gate A must also check whether Mappy's Slack app
+  has rotation on; if it does, v1 cannot protect that token at all.
+- **Gate B** ([WOR-970](https://linear.app/plumbusai/issue/WOR-970)), **done with fake tokens:** a wire capture of
+  `slack_sdk` 3.45.0 (sync, async, `files_upload_v2`), `@linear/sdk` 99.0.0 and `posthog-python` 7.75.4. The
+  results are in the research note, section 4. **Still to run:** the live leg with test-workspace tokens, to
+  confirm the real status of Slack's `ok: false`, Linear's real `RATELIMITED` body, and which PostHog host
+  serves what.
+- **PostHog decision** (below).
 - **Wording:** the owner approves "one line per tool" in place of "no code changes" for tool keys.
 
 ## References

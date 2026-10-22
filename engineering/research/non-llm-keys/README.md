@@ -7,9 +7,12 @@
 
 Code claims were checked against `main` at `03c6518` on 2026-10-22. Each claim is tagged:
 
-- **[F]** fact, checked against the source or the vendor's own docs.
+- **[F]** fact, checked against our source, the SDK source, or the vendor's own docs (fetched 2026-10-22).
+- **[W]** observed on the wire in Gate B ([WOR-970](https://linear.app/plumbusai/issue/WOR-970)): real SDKs
+  (slack_sdk 3.45.0 sync and async, @linear/sdk 99.0.0, posthog 7.75.4) talking to a local capture server with
+  canned responses and **fake tokens**. It shows what the clients send, not how the vendors answer.
+- **[L]** still needs the live leg: a real test-workspace token against the real vendor.
 - **[I]** inference: reasoned from facts, not observed.
-- **[GB]** expected from SDK source or vendor docs, still to be confirmed on the wire by Gate B ([WOR-970](https://linear.app/plumbusai/issue/WOR-970)).
 
 ## 1. The spike, reviewed
 
@@ -36,7 +39,7 @@ Each gap below would have stopped the spike before or during its first live requ
 |---|---|---|---|---|
 | 1 | `enroll` never outputs shard-A | `_enroll_single` (`cli/commands/lock.py:3143-3205`) splits the key, stores shard-B and drops `sr.shard_a` **[F]** | The user never gets the half that goes in `.env`, so nothing can call the proxy | v1 uses `lock`. `enroll` fix is [WOR-992](https://linear.app/plumbusai/issue/WOR-992) |
 | 2 | `base_url` is NULL | `_enroll_single` takes the URL from `lookup_by_name(provider)` (`lock.py:3183-3184`). `providers.toml` has no slack/linear/posthog entry. The proxy refuses NULL rows with the uniform 401 (`app.py:598-606`) **[F]** | Every request 401s | PR3 adds the three upstream URLs to the bundled registry |
-| 3 | Query string dropped | The catch-all route's `{path:path}` excludes the query; the handler also does `path.split("?")[0]` (`app.py:564`); nothing reads `request.url.query`. The spike built `base_url + clean_path` **[F]** | Slack read methods send their arguments in the query **[F]**, so `conversations.history?channel=C1` arrives with no channel | PR1a (`build_upstream_url(base, raw_path, query)`) |
+| 3 | Query string dropped | The catch-all route's `{path:path}` excludes the query; the handler also does `path.split("?")[0]` (`app.py:564`); nothing reads `request.url.query`. The spike built `base_url + clean_path` **[F]** | The async Slack client sends read calls as GET with the arguments in the query, and some POSTs carry a query too **[W]**. `conversations.history?channel=C1` arrives with no channel | PR1a (`build_upstream_url(base, raw_path, query)`) |
 | 4 | Trailing slash stripped | `_extract_alias_and_path` does `raw_path.strip("/")` and rebuilds `"/" + parts[1]` (`app.py:115-127`) **[F]** | PostHog's REST paths end in `/` **[F]**. Without it the request hits a different route or a redirect **[I]** | PR1a |
 | 5 | httpx collapses `..` | `httpx.URL("https://slack.com/api/../oauth.v2.access")` becomes `https://slack.com/oauth.v2.access` (httpx 0.28.1, run locally). `%2e%2e`, `%2f` and `//` are left alone **[F]** | A crafted path escapes the base path on the same host after the key is rebuilt. httpx's test client also collapses `..` before it reaches the app, so a test needs a raw ASGI scope | PR1a: reject dot segments with the uniform 401 before decrypt |
 | 6 | Linear sends the key raw | `_extract_shard_a` (`app.py:96-111`) accepts only `Authorization: Bearer <x>` or `x-api-key` **[F]**. Linear personal keys go in `Authorization: <key>` with no scheme **[F]** | Every Linear call 401s at the proxy. The spike fixed the outbound header (`auth_template="{key}"`) but not inbound extraction | PR1a: mirrored auth |
@@ -60,8 +63,8 @@ so unlocking an OpenRouter key (stored as `openai`) removes `OPENAI_BASE_URL` in
 - **Response relay.** `relay_response` (`adapters/types.py:117`) buffers the whole non-streaming body with no
   size cap. It strips only `content-encoding`/`content-length`, so `set-cookie` is relayed **[F]**. The upstream
   client has `follow_redirects=False` (`app.py:274`), so a 3xx and its `Location` go straight back to the client
-  **[F]**. An SDK that follows that `Location` would send shard-A to the vendor directly **[I]**. PR1b turns
-  3xx into 502 and strips `set-cookie`.
+  **[F]**. Every SDK follows redirects, and sync `slack_sdk` keeps the Bearer header across hosts **[W]**, so a
+  relayed `Location` would carry shard-A wherever it points. PR1b turns 3xx into 502 and strips `set-cookie`.
 
 > **Correction to the plan:** the plan says PR1b "raises the cap from 64 KiB". There is no response-body cap on
 > `03c6518`; the only 64 KiB constant in the proxy is the SSE partial-line buffer (`metering.py:151`). PR1b
@@ -108,7 +111,7 @@ the same line worthless draws (F7/F8 are tickets, not v1).
 | Aembit | Workload IAM. Aembit Edge (proxy or in-process SDK) attests the workload's identity, checks access conditions, then injects the credential, usually as an HTTP header | Yes **[F]** | Identity-gated, not operation-gated **[I]** | docs.aembit.io (How Aembit works; Credential Providers) |
 | Docker MCP Gateway | Runs MCP servers in containers and injects secrets from the host's secret store at call time. Optional `--block-secrets` scans payloads | Yes **[F]** | No **[I]** | docker.com/blog/docker-mcp-gateway-secure-infrastructure-for-agentic-ai |
 | 1Password `op run` | Resolves secret references into the child process's environment at exec | At rest only. At runtime the real key is in the env, `/proc/<pid>/environ` and anything that dumps env **[F]** | No **[F]** | 1Password CLI docs |
-| Slack token rotation | 12-hour access tokens (`xoxe.xoxb-…`) plus a refresh token (`xoxe-…`) | No, but a leaked access token expires within 12h **[F]** | No **[F]** | api.slack.com/authentication/rotation |
+| Slack token rotation | 12-hour access tokens (`xoxe.xoxb-…`) plus a refresh token (`xoxe-1-…`). Can't be turned off once on | No, but a leaked access token expires within 12h **[F]** | No **[F]** | docs.slack.dev/authentication/using-token-rotation |
 | Scoped tokens | Minimum scopes per token (Slack scopes, read-only Linear keys, scoped PostHog personal keys) | No **[F]** | Limits blast radius, not use **[F]** | vendor docs |
 
 **Where worthless sits.** What leaves the box holds only shard-A: token-shaped, vendor-rejected. A placeholder
@@ -119,19 +122,63 @@ so it needs one line of code per vendor.
 
 ## 4. Client wire facts
 
-| | Slack Web API | Linear GraphQL | PostHog private API |
-|---|---|---|---|
-| Upstream | `https://slack.com/api/<method>` **[F]** | `POST https://api.linear.app/graphql` **[F]** | `https://us.posthog.com` or `https://eu.posthog.com`, paths like `/api/projects/<id>/…/` **[F]** |
-| Credential | `Authorization: Bearer xoxb-…` (or `xoxp-…`) **[F]** | Personal API key raw: `Authorization: lin_api_…`. OAuth tokens use `Bearer` **[F]** | `Authorization: Bearer phx_…` **[F]** |
-| Request shape | `slack_sdk` 3.45.0 sends 78 methods (e.g. `conversations.history`) as GET with arguments in the query; the rest POST form or JSON **[F]** | One endpoint; query vs mutation is in the body **[F]** | REST; trailing slashes are part of the route **[F]** |
-| Logical errors | HTTP **200** with `{"ok": false, "error": "…"}` **[F]** | `errors[]` with `extensions.code` **[F]**; some can come with HTTP 200 **[I]** | 4xx with a JSON `detail` **[I]** |
-| Rate limit | HTTP 429 + `Retry-After` (seconds) **[F]**. `slack_sdk` backs off on it only if the app enables `RateLimitErrorRetryHandler`; the default handlers retry connection errors only **[F]** | HTTP **400** with `extensions.code: "RATELIMITED"`, plus `X-RateLimit-Requests-Limit/-Remaining/-Reset` headers **[F]** | HTTP 429 **[I]** |
-| Base-URL override | `WebClient(base_url=…)`, default `https://slack.com/api/` **[F]**. No env var (3.45.0 source) **[F]** | `@linear/sdk` client option for the API URL **[GB]** | `posthog-python` `host=` **[F]** |
-| Gotchas | `files_upload_v2` uploads to a URL returned by `files.getUploadURLExternal`, a second host **[F]**. Does that hop carry the token or bypass the proxy? **[GB]**, [WOR-995](https://linear.app/plumbusai/issue/WOR-995) | Batched operations in one request **[F]** (matters for F7, not v1) | `phc_` is the **public** project key, meant to ship in frontends for ingestion. Only `phx_` is a secret **[F]** |
+Gate B drove real SDKs against a local capture server (91 requests, fake tokens, canned responses). Vendor docs
+were fetched on 2026-10-22. The live leg, real test-workspace tokens against the real vendors, has **not** run.
 
-Gate B answers five questions before PR1a: (1) is the credential **only** in `Authorization`, raw or Bearer?
-(2) do path, query and trailing slash survive? (3) does any SDK reject a scrambled shard-A? (4) does any SDK
-expect or follow redirects? (5) does any SDK read a base-URL env var?
+### Slack Web API
+
+| Topic | What we know | Tag |
+|---|---|---|
+| Upstream | `https://slack.com/api/<method>`. `WebClient(base_url=…)`, default `https://slack.com/api/`; the SDK adds a missing trailing `/` | **[F] [W]** |
+| Where the token goes | Slack's docs prefer the `Authorization` header, also allow a POST body field `token`, and say "Tokens cannot be sent as a query parameter." `slack_sdk` always sends `Authorization: Bearer`, even for a per-call `token=` argument | **[F] [W]** |
+| Request shape | **Sync client: always POST**, even `conversations.history`; a call with no arguments sends `Content-Type: application/json` with an empty body. **Async client:** GET with the query for read methods, and a query on some POSTs too (`files.getUploadURLExternal?filename=…&length=…`). The docs allow query, form or JSON, one per request | **[W] [F]** |
+| Errors | Every response has a top-level `ok`; failures carry a machine-readable `error`. The docs page does not state the HTTP status of an `ok: false`. On a canned 200 the SDK raises `SlackApiError` with `error="channel_not_found"` | **[F] [W]**; real status **[L]** |
+| Rate limit | 429 + `Retry-After` in seconds; limits are per method, per workspace, per app, in tiers 1–4. `slack_sdk` does **not** retry by default; with `RateLimitErrorRetryHandler` it retries once after `Retry-After` | **[F] [W]** |
+| Redirects | Every SDK transport follows them; 301/302 become a GET with no body. Sync `slack_sdk` **keeps the Bearer header across hosts**; aiohttp drops it | **[W]** |
+| Egress proxy env | `slack_sdk` honours `HTTPS_PROXY`. The async client ignores `NO_PROXY`, so with an egress proxy set it sends shard-A to that proxy (502). `client.proxy = None` fixes it | **[W]** |
+| Base-URL env var | None read (`SLACK_API_URL` is ignored) | **[W]** |
+| `files_upload_v2` | The second hop, `POST <upload_url>`, goes straight to `files.slack.com` with **no credential**. Only `files.completeUploadExternal` comes back through the proxy. Uploads need direct egress to `files.slack.com` | **[W]** |
+| Token shape | No client-side check; the token is sent byte-identical, after `strip()` | **[W]** |
+
+### Linear GraphQL
+
+| Topic | What we know | Tag |
+|---|---|---|
+| Upstream | `POST https://api.linear.app/graphql`. The SDK's `apiUrl` option is used verbatim; query and trailing slash survive | **[F] [W]** |
+| Credential | `apiKey` goes **raw**: `Authorization: lin_api_…`. An OAuth `accessToken` goes as `Bearer` | **[W]** |
+| URL check | The SDK allows plain `http://` only for `localhost`, `127.0.0.1` and `[::1]`. A container hostname needs TLS | **[W]** |
+| Errors | `errors[]` with `extensions.code`. The SDK never retries | **[F] [W]** |
+| Rate limit | Linear's docs: HTTP **400** with `extensions.code: "RATELIMITED"`, plus `X-RateLimit-Requests-Limit/-Remaining/-Reset` (epoch ms) and per-endpoint `X-RateLimit-Endpoint-*`. The SDK raises `RatelimitedLinearError` only if `extensions.type: "ratelimited"` is present (else `UnknownLinearError`) and reads the retry fields from the **headers**. Whether the real body carries `type` | **[F] [W]**; body **[L]** |
+| Base-URL env var | None (`LINEAR_API_URL` is ignored) | **[W]** |
+
+### PostHog
+
+| Topic | What we know | Tag |
+|---|---|---|
+| Upstream | `https://us.posthog.com` or `https://eu.posthog.com`, REST paths ending in `/`. `host=` option; the SDK strips one trailing `/` from the host | **[F] [W]** |
+| Credential | `secret_key` / `personal_api_key` → `Authorization: Bearer phx_…`. In 7.x `secret_key` also accepts project secret keys (`phs_`) | **[W]** |
+| Public key on the same host | Every secret-key call also carries `?token=phc_…`. `/batch/` and `/flags/?v=2` carry `api_key` in JSON. Capture, `/flags` and the automatic `$feature_flag_called` events go to the same `host` with **no credential** | **[W]** |
+| Errors | The SDK never raises: it logs and returns `None`. A 401 clears the flags. A 429 isn't retried and `Retry-After` is ignored | **[W]** |
+| Base-URL env var | None (`POSTHOG_HOST` is ignored) | **[W]** |
+| Which upstream serves what | `us.posthog.com` vs `us.i.posthog.com` for ingestion, `/flags/definitions` and `/api/projects/@current/…` | **[L]** |
+
+### What this changes in the design
+
+1. **Mirrored auth covers every SDK.** The only Basic auth seen is Slack's token-rotation refresh, which stays
+   refused **[W]**. A client that sends Slack's token as a POST body `token=` field (allowed by Slack's docs,
+   never done by `slack_sdk`) gets the uniform 401, which fails closed **[F] [I]**.
+2. **Forward the raw query on every method, POST included, and empty bodies as they are.** Never re-encode **[W]**.
+3. **Upstream 3xx → 502 is required, not a nicety.** A 302 turns a POST into a body-less GET, a mangled action,
+   and sync `slack_sdk` would carry shard-A to whatever host `Location` names **[W]**.
+4. **"Shard-A in the query → 401" must match this alias's shard-A, not a token pattern.** Every PostHog
+   secret-key call carries `phc_` in the query **[W]**.
+5. **PostHog shares its host with uncredentialed traffic.** The uniform 401 for a missing credential would
+   silently drop capture and flags. PostHog in v1 needs a per-protocol no-credential path (forward without
+   injecting a key) or has to wait. That is an owner decision; see ADR-002 **[W] [I]**.
+6. **Snippets.** The async Slack snippet adds `client.proxy = None` unless Gate A shows Mappy has no egress proxy;
+   the Linear snippet must use a loopback URL **[W]**.
+7. **`files_upload_v2` does not bypass the proxy with the token.** It needs egress to `files.slack.com`, so
+   [WOR-995](https://linear.app/plumbusai/issue/WOR-995) becomes an R1 egress-allowlist item **[W]**.
 
 ## 5. Token types and what v1 does with them
 
@@ -139,11 +186,15 @@ expect or follow redirects? (5) does any SDK read a base-URL env var?
 |---|---|---|---|
 | `xoxb-` | Slack bot token | **Lock** | Static bearer over HTTPS |
 | `xoxp-` | Slack user token | **Lock** (the Mappy rollout does not use it) | Same wire shape; acts as a human, so higher blast radius |
-| `xapp-` | Slack app-level token (Socket Mode) | **Refuse with a reason** | Opens a WebSocket via `apps.connections.open`. Not a request/response call **[I]** |
-| `xoxe-`, `xoxe.xoxb-`, `xoxe.xoxp-` | Slack refresh / rotating access tokens | **Refuse with a reason** | Expire every 12h and get refreshed in place. A locked copy goes stale **[F]**, and the refresh rewrites the value lock split **[I]** |
+| `xapp-`, `xoxe.xapp-` | Slack app-level token, used for Socket Mode via `apps.connections.open` **[F]** | **Refuse with a reason** | Socket Mode runs over a WebSocket, not request/response **[I]** |
+| `xoxe.xoxb-`, `xoxe.xoxp-` | Slack rotating access tokens | **Refuse with a reason** | Expire every 12 hours, and rotation "may not be turned off once it's turned on" **[F]**. The refresh replaces the value lock split **[I]** |
+| `xoxe-` | Slack refresh token | **Refuse with a reason** | The refresh call uses `client_secret` and Basic auth, not a bearer call **[F] [W]** |
+| `xwfp-` | Slack workflow ("just in time") token, a subset of bot tokens **[F]** | **Refuse with a reason** | Short-lived by design **[I]**; not needed for Mappy |
 | Slack signing secret | HMAC key for verifying inbound requests | **Refuse with a reason** | Not a bearer credential; it never goes upstream |
 | `lin_api_` | Linear personal API key | **Lock** | Raw `Authorization` |
-| `phx_` | PostHog personal API key | **Lock** | Bearer |
+| `lin_oauth_` | Linear OAuth access token | Out of scope | Bearer on the wire, but refresh-based like Slack rotation **[W] [I]** |
+| `phx_` | PostHog personal API key | **Lock**, if the PostHog decision in ADR-002 keeps it in v1 | Bearer |
+| `phs_` | PostHog project secret key | **Open**: decide in PR3 | Accepted by posthog-python 7.x's `secret_key` **[W]** |
 | `phc_` | PostHog project key | **Refuse, but don't suppress the verdict** | Public by design |
 | `AIza` | Google API key | Out of scope | Commonly sent as a `?key=` query parameter |
 
@@ -154,8 +205,11 @@ does today (`lock.py:2549`).
 
 - Code: `oblangatas/worthless` at `03c6518`.
 - Spike: `worthless-passthrough-spike-v2.zip` (patch, spec, handoff). Not in the repo.
-- Slack: rate limits (api.slack.com/apis/rate-limits), token types (api.slack.com/authentication/token-types),
-  token rotation (api.slack.com/authentication/rotation), `slack_sdk` source.
-- Linear: rate limiting (linear.app/developers/rate-limiting), API authentication docs.
+- Gate B wire capture ([WOR-970](https://linear.app/plumbusai/issue/WOR-970)): a throwaway harness outside the
+  repo; findings summarised in section 4.
+- Slack (fetched 2026-10-22): Web API basics (docs.slack.dev/apis/web-api), rate limits
+  (docs.slack.dev/apis/web-api/rate-limits), token types (docs.slack.dev/authentication/tokens), token rotation
+  (docs.slack.dev/authentication/using-token-rotation). `slack_sdk` 3.45.0 source.
+- Linear: rate limiting (linear.app/developers/rate-limiting).
 - PostHog: API overview and personal API keys (posthog.com/docs/api).
 - Prior art: the URLs in the table above.
