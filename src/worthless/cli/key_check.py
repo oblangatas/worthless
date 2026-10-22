@@ -21,9 +21,9 @@ KEY_FIX = "Run `worthless doctor --explain fernet_drift` to find the right key."
 
 
 async def aliases_key_cannot_open(db_path: Path, key: bytearray) -> tuple[int, list[str]]:
-    """Return (locked alias count, aliases *key* can't open)."""
+    """Return (enrolled alias count, enrolled aliases *key* can't open)."""
     reader = ShardReader(db_path)
-    aliases = await reader.list_aliases()
+    aliases = await reader.list_enrolled_aliases()
     dead = []
     for alias in aliases:
         enc = await reader.fetch_encrypted(alias)

@@ -7,15 +7,17 @@ locked secrets unrecoverable.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from cryptography.fernet import Fernet
 
 from worthless.cli.bootstrap import ensure_home
 from worthless.cli.commands.doctor.checks import fernet_drift
 from worthless.cli.commands.doctor.registry import CheckContext
-from worthless.storage.repository import ShardRepository
+from worthless.storage.repository import ShardRepository, StoredShard
 
 
 @pytest.fixture
@@ -98,3 +100,81 @@ def test_no_drift_when_values_match(ctx, fake_home) -> None:
         result = fernet_drift.run(ctx)
 
     assert result["status"] == "ok"
+
+
+# ---------------------------------------------------------------------------
+# worthless-saaz: a key the background service can't use is drift too, even
+# when only one key source exists. Real databases, sealed with real keys.
+# ---------------------------------------------------------------------------
+
+OTHER = Fernet.generate_key()
+
+
+def _seal(home, key: bytes, *aliases: str) -> None:
+    async def go() -> None:
+        repo = ShardRepository(str(home.db_path), key)
+        try:
+            await repo.initialize()
+            for alias in aliases:
+                shard = StoredShard(
+                    shard_b=bytearray(b"b" * 32),
+                    commitment=bytearray(b"c" * 32),
+                    nonce=bytearray(b"n" * 32),
+                    provider="openai",
+                )
+                await repo.store_enrolled(
+                    alias, shard, var_name="OPENAI_API_KEY", prefix="sk-", charset="x"
+                )
+        finally:
+            repo.close()
+
+    asyncio.run(go())
+
+
+def _file_key(home) -> bytes:
+    return home.fernet_key_path.read_bytes().strip()
+
+
+def test_a_stale_only_key_is_an_error_not_ok(ctx, fake_home) -> None:
+    """keyring-null / wiped keychain: the file is the only key and opens nothing."""
+    _seal(fake_home, OTHER, "work", "side")
+    result = fernet_drift.run(ctx)
+    assert result["status"] == "error"
+    assert result["fixable"] is False
+    assert "2" in result["summary"]
+    assert sorted(result["findings"][0]["cannot_unlock"]) == ["side", "work"]
+
+
+def test_the_right_only_key_is_ok(ctx, fake_home) -> None:
+    _seal(fake_home, _file_key(fake_home), "work")
+    assert fernet_drift.run(ctx)["status"] == "ok"
+
+
+def test_one_project_sealed_with_another_key_is_named(ctx, fake_home) -> None:
+    """`lock` under WORTHLESS_FERNET_KEY=<other> — the case doctor called 'ok'."""
+    _seal(fake_home, _file_key(fake_home), "work")
+    _seal(fake_home, OTHER, "side")
+    result = fernet_drift.run(ctx)
+    assert result["status"] == "error"
+    assert result["findings"][0]["cannot_unlock"] == ["side"]
+
+
+def test_drift_says_which_source_opens_your_keys(ctx, fake_home) -> None:
+    """Automates step 1 of the WOR-464 instructions without picking a side."""
+    _seal(fake_home, _file_key(fake_home), "work")
+    with (
+        patch.object(fernet_drift, "keyring_available", return_value=True),
+        patch("worthless.cli.commands.doctor.checks.fernet_drift._keyring") as kr,
+    ):
+        kr.get_password.return_value = OTHER.decode()
+        result = fernet_drift.run(ctx)
+    assert result["status"] == "error"
+    assert result["findings"][0]["unlocks"] == {"file": "1 of 1", "keyring": "0 of 1"}
+
+
+def test_docker_ipc_mode_never_checks(ctx, fake_home, monkeypatch) -> None:
+    """WOR-465: the proxy uid owns no key there; don't read shards with one."""
+    _seal(fake_home, OTHER, "work")
+    monkeypatch.setenv("WORTHLESS_FERNET_IPC_ONLY", "1")
+    with patch.object(fernet_drift, "aliases_key_cannot_open", side_effect=AssertionError):
+        assert fernet_drift.run(ctx)["status"] == "ok"

@@ -14,6 +14,7 @@ real Fernet keys, so "stale" and "mixed" are genuine, not mocked.
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -43,7 +44,9 @@ def _seal(db: Path, key: bytes, *aliases: str) -> None:
                     nonce=bytearray(b"n" * 32),
                     provider="openai",
                 )
-                await repo.store(alias, shard, prefix="sk-", charset="x")
+                await repo.store_enrolled(
+                    alias, shard, var_name="OPENAI_API_KEY", prefix="sk-", charset="x"
+                )
         finally:
             repo.close()
 
@@ -58,9 +61,26 @@ def home(tmp_path: Path) -> WorthlessHome:
 
 
 class TestWhichKeysOpen:
-    def test_reader_lists_every_locked_alias(self, home: WorthlessHome) -> None:
+    def test_reader_lists_every_enrolled_alias(self, home: WorthlessHome) -> None:
         _seal(home.db_path, K1, "work", "side")
-        assert sorted(asyncio.run(ShardReader(home.db_path).list_aliases())) == ["side", "work"]
+        assert sorted(asyncio.run(ShardReader(home.db_path).list_enrolled_aliases())) == [
+            "side",
+            "work",
+        ]
+
+    def test_an_orphan_row_never_counts(self, home: WorthlessHome) -> None:
+        """A crash between the shard and enrollment writes leaves a row nothing
+        can use. It must not block `up` or `lock` (doctor reports orphans)."""
+        _seal(home.db_path, K1, "work")
+        with sqlite3.connect(home.db_path) as db:
+            db.execute(
+                "INSERT INTO shards (key_alias, shard_b_enc, commitment, nonce, provider) "
+                "VALUES ('orphan', x'62', x'63', x'6e', 'openai')"
+            )
+        assert asyncio.run(key_check.aliases_key_cannot_open(home.db_path, bytearray(K1))) == (
+            1,
+            [],
+        )
 
     @pytest.mark.parametrize(
         ("key", "dead"), [(K1, []), (K2, ["side", "work"])], ids=["right-key", "stale-key"]
