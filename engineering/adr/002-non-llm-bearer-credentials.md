@@ -62,8 +62,9 @@ curated vendors have proved the shape ([WOR-998](https://linear.app/plumbusai/is
 - LLM aliases are untouched: they keep path dispatch (`get_adapter(path)`) and `_extract_alias_and_path`.
 - A passthrough request is forwarded as sent: method, raw path from `scope["raw_path"]` (with `root_path`
   dropped), query string, and body bytes. `build_upstream_url(base_url, raw_api_path, query)` runs **before**
-  `rules.evaluate`, so bad paths don't spend rate-limit tokens. Dot segments get the uniform 401 before decrypt,
-  because httpx collapses `..` and would let a path escape the base.
+  `rules.evaluate`, so bad paths don't spend rate-limit tokens. Dot segments (`.` and `..`, in any `%2e`
+  case mix) and backslashes get the uniform 401 before decrypt, because httpx collapses `..` and would let a path
+  escape the base.
 - Decrypt and reconstruct go through one shared helper, so `ipc.open` keeps a single call site after the gate.
 
 **Why one protocol, not one adapter per vendor:** the vendors differ only in auth form and base URL, and both
@@ -111,7 +112,11 @@ alias could drain them. The public docs must say so (PR4a).
   found no SDK flow that needs a redirect, saw a 302 turn POSTs into body-less GETs, and saw sync `slack_sdk`
   keep the Bearer header across hosts; a body over the size cap becomes a 502, never a truncated body; the proxy never
   retries, so one inbound request makes exactly one upstream call.
-- The proxy's **own** refusals (auth, routing, validation) stay byte-identical to `_uniform_401`.
+- The proxy's **own** refusals (auth, routing, validation) stay byte-identical to `_uniform_401`. Its own
+  429/502/503 carry a marker header, so a client or operator can tell our rate limit from the vendor's (we relay
+  the vendor's `Retry-After` and `X-RateLimit-*` verbatim).
+- This alias's shard-A found in the query or the body gets the uniform 401 before decrypt. Node
+  `@slack/web-api` puts a per-call `token` in the form body; forwarding it would leak shard-A to Slack.
 - `_sanitize_upstream_error` keeps doing what it does for LLM aliases. Whether LLM agents should see the
   provider's real error is a separate question, tracked in WOR-729.
 
@@ -211,6 +216,10 @@ raises, so nobody would notice.
 
 ## Alternatives considered
 
+We read the code of four comparable open-source proxies (research note, section 3). None turns an upstream 3xx
+into an error, refuses to retry, rejects dot segments before using the key, or keeps the query byte-for-byte; two
+re-encode it. None tests against live Slack. Gate B is the evidence that each of those rules matters here.
+
 | Alternative | What it gives | How it compares |
 |---|---|---|
 | **`op run`** (or any secret manager that injects env at exec) | Secret at rest in a vault | At runtime the real key is in the process env, `/proc/<pid>/environ`, and any transcript or crash dump that captures env. With worthless those hold shard-A. Complementary: a vault can still hold the original token for recovery. |
@@ -218,6 +227,8 @@ raises, so nobody would notice.
 | **Slack token rotation** (12h `xoxe.xoxb-…` access tokens + refresh) | A leaked token dies within 12h | Conflicts with locking: the refresh replaces the value lock split. So rotating tokens are refused with a reason. Teams already rotating should keep rotating. |
 | **Scoped tokens** | Smaller blast radius | Always do it (rollout step 1). It limits what a leaked token can do, not whether it works. Complementary. |
 | **One adapter per vendor** (the spike) | Vendor-specific behaviour | More code for differences that are data (auth form, URL). Its vendor-keyed dispatch never matches a `lock`-made row. Rejected. |
+| **Pin the auth form per alias** (tokenizer, Agent Vault) | Client can't choose raw vs Bearer | The header name and upstream are fixed either way, so mirroring can't aim the key anywhere new. Kept mirroring; revisit if a vendor gives the two forms different meanings. |
+| **A second factor beyond shard-A** (tokenizer's `Proxy-Authorization` digest) | Shard-A alone isn't enough | On a loopback proxy the second secret sits on the same box as shard-A, so it adds nothing against a leaked file. F6 is the on-box answer. |
 | **User-declared generic protocol now** | Any bearer API | A TOML edit could make an AI key unmetered and unsanitized. Deferred to WOR-998. |
 | **Do nothing** | No new surface | Leaves the false all-clear and live tool tokens in `.env`. Rejected by owner decision 1. |
 

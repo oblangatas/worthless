@@ -104,15 +104,63 @@ the same line worthless draws (F7/F8 are tickets, not v1).
 
 | Product | Mechanism | Real key out of the client? | Stops a compromised client using it? | Source |
 |---|---|---|---|---|
-| CyberArk Secretless Broker | Local sidecar. The app connects through it without credentials; the broker fetches them from a vault and injects them per connector | Yes **[F]** | No. Any request the app makes is authenticated **[F]** | github.com/cyberark/secretless-broker |
-| Infisical Agent Vault | Open-source forward proxy (`HTTPS_PROXY`, TLS interception). The agent holds a placeholder; the proxy swaps in the real token on the wire. Sessions are scoped to allowed services and can expire or be revoked. In preview, "not recommended for production" | Yes **[F]** | Partly. It limits *which services*, not which operations **[I]** | infisical.com/docs/documentation/platform/agent-vault/overview |
+| CyberArk Secretless Broker | Plain `HTTP_PROXY` (refuses CONNECT). First regex that matches the full URL picks a connector; headers come from Go templates. **Re-encodes the query** (sorted keys), relays 3xx and `Set-Cookie` | Yes **[F]** | No. Any request the app makes is authenticated **[F]** | github.com/cyberark/secretless-broker |
+| Infisical Agent Vault | Open-source `HTTPS_PROXY` with its own CA (TLS interception). Matches host, then path glob; the agent holds a placeholder. Auth form fixed per service. Forwards the raw path and query, strips `Set-Cookie`, **relays 3xx**, retries once on a 401 after an OAuth refresh. 20 req/s per actor and vault. In preview | Yes **[F]** | Partly. It limits *which services*, not which operations **[I]** | github.com/Infisical/agent-vault |
 | Claude Managed Agents vaults | Per-end-user vault, hosted. MCP credentials (`mcp_oauth`, `static_bearer`) are injected per server URL. Environment-variable credentials are placeholders swapped on outbound requests | Yes **[F]** | No **[I]** | platform.claude.com/docs/en/managed-agents/vaults |
 | LangSmith LLM auth proxy | Self-hosted Envoy proxy (Enterprise). Checks a short-lived LangSmith-signed token, attaches provider credentials, forwards. LLM providers only. Separate sandbox proxies sign AWS requests and inject GCP tokens | Yes **[F]** | Per-request attribution, not operation limits **[I]** | docs.langchain.com/langsmith/llm-auth-proxy-self-hosted |
 | Aembit | Workload IAM. Aembit Edge (proxy or in-process SDK) attests the workload's identity, checks access conditions, then injects the credential, usually as an HTTP header | Yes **[F]** | Identity-gated, not operation-gated **[I]** | docs.aembit.io (How Aembit works; Credential Providers) |
-| Docker MCP Gateway | Runs MCP servers in containers and injects secrets from the host's secret store at call time. Optional `--block-secrets` scans payloads | Yes **[F]** | No **[I]** | docker.com/blog/docker-mcp-gateway-secure-infrastructure-for-agentic-ai |
+| Docker MCP Gateway | Expands secrets into env vars and `${VAR}` headers held by the **MCP server process** (`pkg/mcp/remote.go`). Not a request-path broker | The agent doesn't hold them; the MCP server does **[F]** | No **[I]** | github.com/docker/mcp-gateway |
+| superfly/tokenizer (Fly.io) | The client holds a NaCl sealed blob with the secret, its allowed hosts and its auth format. The proxy also wants a second factor (a `Proxy-Authorization` digest, a macaroon, or fly-src). Refuses CONNECT, forces TLS, blocks private addresses on dial. **The closest design to split-key** | Yes **[F]** | Bound to hosts and formats, not operations **[I]** | github.com/superfly/tokenizer |
+| OneCLI gateway | Rust TLS-intercepting gateway with per-vendor injection and OAuth refresh. Relays 3xx (e2e-tested). Gateway-made errors carry `x-should-retry: false` | Yes **[F]** | No **[I]** | github.com/onecli/onecli |
 | 1Password `op run` | Resolves secret references into the child process's environment at exec | At rest only. At runtime the real key is in the env, `/proc/<pid>/environ` and anything that dumps env **[F]** | No **[F]** | 1Password CLI docs |
 | Slack token rotation | 12-hour access tokens (`xoxe.xoxb-…`) plus a refresh token (`xoxe-1-…`). Can't be turned off once on | No, but a leaked access token expires within 12h **[F]** | No **[F]** | docs.slack.dev/authentication/using-token-rotation |
 | Scoped tokens | Minimum scopes per token (Slack scopes, read-only Linear keys, scoped PostHog personal keys) | No **[F]** | Limits blast radius, not use **[F]** | vendor docs |
+
+### Read in code: how four comparable proxies handle our rules
+
+A second pass read the source of Agent Vault (`d5836ec`), Secretless Broker (`23b436d`), tokenizer (`12c9cb2`)
+and OneCLI (`6eaf878`). File refs are under Sources; anything not read directly in code is tagged **[I]**.
+
+| Our planned rule | Agent Vault | Secretless | tokenizer | OneCLI |
+|---|---|---|---|---|
+| Forward the raw query | Yes (`RawQuery`) | **No**, re-encoded and sorted | Re-encoded **[I]** | Forwards `path_and_query`; reqwest may normalise it **[I]** |
+| Reject dot segments before using the key | No | No | Not handled | A helper knows `.`, `..`, `%2e` mixes and `\`, but not on the forward path |
+| Auth form | Fixed per service | Template per config | Pinned when the blob is sealed | Fixed per vendor |
+| Upstream 3xx → 502 | No, relayed | No, relayed | Relayed **[I]** | No, relayed |
+| Strip `Set-Cookie` | Yes | No | n/a | No |
+| Never retry | No: once on 401 (GET/HEAD) | Yes | Yes | No: once on 401 (bodyless) |
+| Body cap → 502, abort mid-stream | Unlimited by default; known size over cap → 502, overflow mid-stream aborts | None | None | n/a |
+| Rate limit | Per actor and vault | None | None | Policy 429 |
+| Proxy's own errors marked | Yes, except its own 429, which looks like the vendor's | 503 with Go error text | n/a | `x-should-retry: false` |
+| Slack | Bearer on `slack.com`; xoxb vs xapp chosen by path. Its template warns that Node `@slack/web-api` puts a per-call `token` in the **form body** | Example config; likely always 403 **[I]** | n/a | **Deliberately no Slack** (a test asserts nothing is injected) |
+| Linear | Raw `Authorization` | n/a | n/a | Bearer, with OAuth refresh |
+| PostHog | None | n/a | n/a | Bearer on `us.`/`eu.`/`app.posthog.com`; leaves capture hosts `*.i.posthog.com` alone |
+| Tests against live Slack | None (live tests only for xAI/OpenAI) | None | None | None (black-box e2e against a stub) |
+
+**Validation.** No one else turns 3xx into 502, refuses to retry, rejects dot segments before using the key, or
+keeps the query byte-for-byte. Gate B is the evidence that each of those matters for these SDKs. No project
+tests against live Slack, so our live leg would be ahead of all of them.
+
+**Adopted from them** (folded into the plan):
+
+1. The dot-segment check covers `.` and `..` in any `%2e` case mix, and `\` (OneCLI's list).
+2. The proxy's own 429/502/503 carry a marker header. Because we relay the vendor's `Retry-After` and
+   `X-RateLimit-*`, our 429 would otherwise look like Slack's (Agent Vault has exactly this gap). The uniform 401
+   stays byte-identical.
+3. This alias's shard-A anywhere in the request body gets a 401 before decrypt. Node `@slack/web-api` puts a
+   per-call `token` in the form body; forwarding it would leak shard-A to Slack and fail the call.
+4. A relayed body that overflows the cap mid-stream aborts the connection; never a truncated 200.
+
+**Considered, not adopted:**
+
+- *Check the rebuilt token's prefix* (Secretless `credentialValidations`). Redundant: `reconstruct_key_fp` checks
+  the commitment, so the rebuilt key is exact or the request gets a 401.
+- *Pin the auth form per alias* (tokenizer, Agent Vault). The header name and upstream are fixed either way, so
+  mirroring can't aim the key anywhere new. See ADR-002, alternatives.
+- *A second factor beyond shard-A* (tokenizer). On a loopback proxy it would sit on the same box as shard-A, so
+  it adds nothing against a leaked file. F6 is the on-box answer.
+
+**Signal worth noting:** OneCLI chose to drop Slack. Its code doesn't say why **[I]**.
 
 **Where worthless sits.** What leaves the box holds only shard-A: token-shaped, vendor-rejected. A placeholder
 in Agent Vault or Managed Agents gives roughly the same leaked-file guarantee **[I]**. Worthless's edge is
@@ -212,4 +260,16 @@ does today (`lock.py:2549`).
   (docs.slack.dev/authentication/using-token-rotation). `slack_sdk` 3.45.0 source.
 - Linear: rate limiting (linear.app/developers/rate-limiting).
 - PostHog: API overview and personal API keys (posthog.com/docs/api).
-- Prior art: the URLs in the table above.
+- Prior art: the URLs in the table above. Code refs for the comparison:
+  - Agent Vault `d5836ec`: `internal/mitm/forward.go` (path/query L123-125, L227-233; RoundTrip L337; 401
+    retry L350-373; body cap L377-424), `internal/brokercore/brokercore.go` (header replace L93-120,
+    `Set-Cookie` L152-158), `internal/ratelimit/config.go` L59-65, `internal/catalog/catalog.go` L36, L52,
+    `examples/slack-agent-template/src/slack.ts` L12-36, L57-59.
+  - Secretless `23b436d`: `internal/plugin/connectors/http/proxy_service.go` L145-236, L294-307;
+    `generic/config.go` L128-138; `generic/connector.go` L41-48.
+  - tokenizer `12c9cb2`: `tokenizer.go` L191-229, L376-472; `authorizer.go` L103-121; `processor.go`
+    L1110-1254.
+  - OneCLI `6eaf878`: `apps/gateway/crates/apps/src/lib.rs` (Linear L383-388, PostHog L2060-2092, Slack test
+    L4621-4638), `summary/src/record_links.rs` L70-83, `proxy/src/response.rs` L105-110,
+    `apps/gateway-e2e/tests/forwarding.test.ts` L16-41.
+  - Docker MCP Gateway `2f72d79`: `pkg/mcp/remote.go` L63-117.

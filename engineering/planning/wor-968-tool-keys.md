@@ -113,8 +113,9 @@ Every bullet under **Red** is a failing test, shown failing before its fix.
    (`files.getUploadURLExternal?filename=x.txt&length=5`) and a sync-Slack POST with
    `Content-Type: application/json` and an empty body.
 3. Trailing slash and `%20` are preserved.
-4. **Dot segments** get a 401, `open_calls == 0`, respx never called. `%2e%2e`, `%2f` and `//` go through the
-   normal client. A literal `..` needs a raw-ASGI-scope helper, because httpx collapses it client-side.
+4. **Dot segments** get a 401, `open_calls == 0`, respx never called: `.` and `..` in any `%2e` case mix
+   (`%2e%2e`, `.%2E`, `%2e.`), and any `\`. `%2f` and `//` are forwarded as sent. A literal `..` needs a
+   raw-ASGI-scope helper, because httpx collapses it client-side.
 5. Hypothesis property: `build_upstream_url` never escapes the base.
 6. Raw and Bearer forms are mirrored. Basic auth, `x-api-key`, and values with spaces get a 401 before decrypt.
 7. A row with an unknown protocol gets a 401 before decrypt.
@@ -137,8 +138,12 @@ Every bullet under **Red** is a failing test, shown failing before its fix.
 - Any upstream 3xx becomes a 502, with no `Location` rewrite (Gate B: no SDK needs one, and sync `slack_sdk`
   would follow it with the Bearer header). Also assert the proxy's own httpx client never follows a redirect.
 - A body over the cap becomes a 502, never a truncated body.
-- Shard-A in the raw query string gets a 401 before decrypt. (Body scan deferred.) The match is against
-  **this alias's** shard-A only, never a token pattern: every PostHog secret-key call carries `?token=phc_…`.
+- This alias's shard-A in the raw query string **or the body** gets a 401 before decrypt (Node `@slack/web-api`
+  puts a per-call `token` in the form body). The match is against **this alias's** shard-A bytes only, never a
+  token pattern: every PostHog secret-key call carries `?token=phc_…`.
+- The proxy's own 429/502/503 carry a marker header; an upstream 429 relayed verbatim does not. The uniform 401
+  is unchanged.
+- A streamed body that overflows the cap aborts the connection; it never ends as a truncated 200.
 - The access log has no query string: a filter on `uvicorn.access` drops it, and new `KEY_PATTERN` prefixes
   redact any token that remains.
 - The proxy never retries: one inbound request, exactly one upstream call. This backs the duplicate-post kill
@@ -242,7 +247,8 @@ on the store, a failing unlock, and a working proxy call.
 ## Mappy rollout ([WOR-990](https://linear.app/plumbusai/issue/WOR-990), after PR3 + R1)
 
 1. Complete Gate A. Minimum token scopes. **Do not roll out `xoxp`.** Check whether Mappy's Slack app has
-   token rotation on (Slack can't turn it off once enabled) and whether the VM sets `HTTPS_PROXY`.
+   token rotation on (Slack can't turn it off once enabled), whether the VM sets `HTTPS_PROXY`, and which Slack
+   SDK Mappy uses (Python `slack_sdk` or Node `@slack/web-api`).
 2. **Rotate the tokens first, then lock the fresh ones.** Keep the originals recoverable off the box, in case
    shard-B is lost (#709).
 3. Apply R1 and run its verification script as the agent user. Hard gate.
