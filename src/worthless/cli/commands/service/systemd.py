@@ -5,8 +5,14 @@ from __future__ import annotations
 import contextlib
 
 import os
+import shlex
 import subprocess
 from pathlib import Path
+
+try:
+    import pwd
+except ImportError:  # pragma: no cover — Windows has no pwd; systemd never runs there
+    pwd = None  # type: ignore[assignment]
 
 from worthless.cli.bootstrap import WorthlessHome
 from worthless.cli.commands.service import templates
@@ -29,20 +35,27 @@ SYSTEMD_UNIT = templates.SYSTEMD_UNIT_NAME
 
 
 def _session_user() -> str:
-    """Resolve login name without eager ``os.getlogin()`` (CI has no tty)."""
-    for key in ("USER", "LOGNAME"):
-        value = os.environ.get(key, "").strip()
-        if value:
-            return value
-    try:
-        return os.getlogin()
-    except OSError:
-        import pwd
+    """The real account (euid) — never ``USER``/``LOGNAME``, never ``getlogin()``.
 
-        try:
-            return pwd.getpwuid(os.getuid()).pw_name
-        except KeyError:
-            return str(os.getuid())
+    Linger is checked, turned on and advised for the account that owns the
+    unit; after ``su``, ``sudo -u`` or in a container the env can name someone
+    else (security review + Bugbot, PR #734). ``getlogin()`` needs a tty CI
+    doesn't have.
+    """
+    try:
+        return pwd.getpwuid(os.geteuid()).pw_name if pwd is not None else str(os.geteuid())
+    except KeyError:
+        return str(os.geteuid())
+
+
+def _account_name() -> str:
+    """:func:`_session_user`, shell-quoted, for commands we ask an admin to run."""
+    return shlex.quote(_session_user())
+
+
+def _user_bus() -> Path:
+    """The running user manager's socket; present only when it is up."""
+    return Path(f"/run/user/{os.geteuid()}/bus")
 
 
 def unit_path() -> Path:
@@ -64,17 +77,22 @@ def _linger_enabled() -> bool:
     return "Linger=yes" in (result.stdout or "")
 
 
-def _ensure_linger() -> None:
+def _ensure_linger() -> bool:
+    """Turn lingering on if the system lets us; return whether it is on.
+
+    worthless-8kn5: with no local login session (SSH, a container) polkit
+    refuses, and the old error told the user to run the command that had just
+    been refused. The unit still runs while they are logged in, so install
+    anyway and let the banner say what an administrator must run for boot.
+    ``--no-ask-password``: over SSH nobody is there to answer a polkit prompt.
+    """
     if _linger_enabled():
-        return
+        return True
     try:
-        run_cmd(["loginctl", "enable-linger", _session_user()])
-    except subprocess.CalledProcessError as exc:
-        raise WorthlessError(
-            ErrorCode.SERVICE_INSTALL_FAILED,
-            "Failed to enable systemd linger — the service won't survive logout. "
-            f"Run `loginctl enable-linger {_session_user()}` manually, then retry.",
-        ) from exc
+        run_cmd(["loginctl", "--no-ask-password", "enable-linger", _session_user()])
+    except subprocess.CalledProcessError:
+        return False
+    return True
 
 
 def installed_port() -> int | None:
@@ -186,7 +204,8 @@ def _preflight_systemd_available() -> None:
     )
 
 
-def install(home: WorthlessHome, *, port: int | None = None) -> None:
+def install(home: WorthlessHome, *, port: int | None = None) -> bool:
+    """Install and start the unit. Returns whether lingering is on (see 8kn5)."""
     _preflight_systemd_available()
     path = unit_path()
     refuse_foreign_unit(path, home)
@@ -207,8 +226,36 @@ def install(home: WorthlessHome, *, port: int | None = None) -> None:
     # Removed only when THIS call created it, so a failed re-install never
     # deletes a unit that was already working.
     try:
-        _ensure_linger()
-        _systemctl("daemon-reload")
+        lingering = _ensure_linger()
+        try:
+            _systemctl("daemon-reload")
+        except subprocess.CalledProcessError as exc:
+            if lingering:
+                raise
+            account = _account_name()
+            if _user_bus().exists():
+                # `su - user` / `sudo -u user`: the manager IS running, this
+                # shell just can't reach it — linger would not help.
+                why = (
+                    "This shell can't reach your user services — usually because it "
+                    "came from `su` or `sudo -u`. Log in directly instead (SSH, or "
+                    f"`machinectl shell {account}@`), then run `worthless service "
+                    "install` again. With no login session at all, an administrator "
+                    f"must run `sudo loginctl enable-linger {account}`."
+                )
+            else:
+                # 8kn5: no login session (docker exec, cron) AND linger refused —
+                # there is no user manager to host the unit at all.
+                why = (
+                    "This account has no running user service manager (no login "
+                    "session, and lingering needs an administrator here). Ask one to "
+                    f"run `sudo loginctl enable-linger {account}`, then run "
+                    "`worthless service install` again."
+                )
+            raise WorthlessError(
+                ErrorCode.SERVICE_INSTALL_FAILED,
+                f"{why} Until then, start the proxy yourself with `worthless up`.",
+            ) from exc
         _systemctl("enable", "--now", SYSTEMD_UNIT)
     except BaseException:
         if created_here:
@@ -233,6 +280,7 @@ def install(home: WorthlessHome, *, port: int | None = None) -> None:
                 _systemctl("daemon-reload", check=False)
         raise
     report_proxy_health(actual_port)
+    return lingering
 
 
 def uninstall(home: WorthlessHome) -> None:

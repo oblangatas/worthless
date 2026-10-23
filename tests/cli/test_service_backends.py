@@ -288,15 +288,18 @@ class TestSystemdBackend:
             patch.object(systemd, "resolve_worthless_binary", return_value=binary),
             patch.object(systemd, "run_cmd", side_effect=fake_run),
             patch.object(systemd, "report_proxy_health"),
-            patch.dict("os.environ", {"USER": "testuser"}, clear=False),
+            patch.object(systemd, "_session_user", return_value="testuser"),
         ):
             systemd.install(home)
 
-        assert ["loginctl", "enable-linger", "testuser"] in calls
+        assert ["loginctl", "--no-ask-password", "enable-linger", "testuser"] in calls
 
-    def test_install_raises_clean_error_when_linger_enable_fails(
+    def test_install_still_succeeds_when_linger_enable_fails(
         self, home: WorthlessHome, tmp_path: Path
     ) -> None:
+        """worthless-8kn5 reverses the old decision (raise WRTLS-119): with no local
+        login polkit refuses linger, yet the unit runs while the user is logged in.
+        Install, report lingering off, and let the banner name the admin fix."""
         binary = tmp_path / "worthless"
         binary.write_text("#!/bin/sh\n")
         binary.chmod(0o755)
@@ -308,7 +311,7 @@ class TestSystemdBackend:
                 result.returncode = 0
                 result.stdout = "Linger=no"
                 return result
-            if args[:2] == ["loginctl", "enable-linger"]:
+            if args[0] == "loginctl" and "enable-linger" in args:
                 raise subprocess.CalledProcessError(1, args, stderr="Failed to enable linger.")
             result = MagicMock()
             result.returncode = 0
@@ -322,11 +325,10 @@ class TestSystemdBackend:
             patch.object(systemd, "report_proxy_health"),
             patch.dict("os.environ", {"USER": "testuser"}, clear=False),
         ):
-            with pytest.raises(WorthlessError) as exc_info:
-                systemd.install(home)
+            lingering = systemd.install(home)
 
-        assert exc_info.value.code == ErrorCode.SERVICE_INSTALL_FAILED
-        assert "linger" in str(exc_info.value).lower()
+        assert lingering is False
+        assert unit.is_file()
 
     def test_detect_not_installed(self, home: WorthlessHome, tmp_path: Path) -> None:
         with patch.object(systemd, "unit_path", return_value=tmp_path / "missing.service"):
@@ -848,19 +850,25 @@ class TestReportProxyHealthIntegration:
 
 
 class TestSystemdSessionUser:
-    def test_session_user_prefers_user_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("USER", "testuser")
-        monkeypatch.delenv("LOGNAME", raising=False)
+    def test_session_user_is_the_real_account_not_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Linger is checked, turned on and advised for the account that owns the
+        unit. USER/LOGNAME can name someone else after `su`, `sudo -u` or in a
+        container (security review + Bugbot, PR #734). Still never os.getlogin():
+        CI has no tty."""
+        monkeypatch.setenv("USER", "someone-else")
         getlogin = MagicMock(side_effect=OSError(25, "Inappropriate ioctl for device"))
         monkeypatch.setattr(systemd.os, "getlogin", getlogin)
-        assert systemd._session_user() == "testuser"
+        monkeypatch.setattr(pwd, "getpwuid", lambda uid: type("P", (), {"pw_name": "realuser"})())
+        assert systemd._session_user() == "realuser"
         getlogin.assert_not_called()
 
     def test_session_user_falls_back_to_pw_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("USER", raising=False)
         monkeypatch.delenv("LOGNAME", raising=False)
         monkeypatch.setattr(systemd.os, "getlogin", MagicMock(side_effect=OSError(25)))
-        monkeypatch.setattr(systemd.os, "getuid", lambda: 1000)
+        monkeypatch.setattr(systemd.os, "geteuid", lambda: 1000)
 
         fake_passwd = type("Passwd", (), {"pw_name": "runner"})()
         monkeypatch.setattr(pwd, "getpwuid", lambda uid: fake_passwd)

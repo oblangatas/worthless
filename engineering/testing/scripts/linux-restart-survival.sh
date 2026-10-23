@@ -20,7 +20,8 @@
 # kernel, same Docker VM). The key is file-backed (WORTHLESS_KEYRING_BACKEND=
 # null), which is the real path on headless Linux and WSL but NOT on a desktop
 # with a Secret Service keyring. Lingering is enabled by root here, because a
-# user without a local login cannot enable it (worthless-8kn5).
+# user without a local login cannot enable it — step 2 asserts that install
+# says so plainly instead of pointing at a dead end (worthless-8kn5).
 # Run from the repo root:  bash engineering/testing/scripts/linux-restart-survival.sh
 set -uo pipefail
 
@@ -140,14 +141,30 @@ DIRECT=$(as_user bash -c 'set -a; . ~/proj/.env; set +a; curl -s -o /dev/null -w
 [ "$DIRECT" = 401 ] && pass "the half-key left in .env is useless on its own (provider says $DIRECT)" || fail "the half-key worked directly against the provider ($DIRECT): the test provider is not checking keys"
 
 say "2. install the background service"
+# docker exec has no login session: polkit refuses linger AND there is no user
+# manager. worthless-8kn5: say what an admin must run, never the dead end.
 FIRST=$(as_user worthless service install --yes 2>&1)
-if printf '%s' "$FIRST" | grep -q "enable-linger"; then
-  known "worthless-8kn5: without a local login, install refuses (polkit) and names \`loginctl enable-linger\`; an admin enables it below"
-else
-  echo "  note: install did not need an admin here; worthless-8kn5 may be fixed"
-fi
+printf '%s\n' "$FIRST" | sed 's/^/  | /' | tail -6
+FIRST_FLAT=$(printf '%s' "$FIRST" | tr '\n' ' ' | tr -s ' ')
+case "$FIRST_FLAT" in *"sudo loginctl enable-linger $U"*) pass "no session: install names the admin command" ;; *) fail "no session: install did not name \`sudo loginctl enable-linger $U\`" ;; esac
+case "$FIRST_FLAT" in *"Run \`loginctl enable-linger"*|*"WRTLS-199"*|*"internal error"*) fail "no session: install still gives the dead end or a raw error" ;; *) pass "no session: no dead-end advice, no raw error" ;; esac
+case "$FIRST_FLAT" in *machinectl*) fail "no session: told to log in via machinectl — a container can't" ;; *) pass "no session: not told to log in another way" ;; esac
+as_user test -f "/home/$U/.config/systemd/user/worthless-proxy.service" && fail "no session: a refused install left its unit file behind" || pass "no session: no unit file left behind"
+# The SSH case: a login would start the user's manager; linger is still refused.
+# Root starts user@UID directly — a running manager, no linger, no session.
+UID_U=$(docker exec "$C" id -u "$U")
+docker exec "$C" systemctl start "user@$UID_U.service"
+MID=$(as_user worthless service install --yes 2>&1)
+printf '%s\n' "$MID" | sed 's/^/  | /' | tail -6
+MID_FLAT=$(printf '%s' "$MID" | tr '\n' ' ' | tr -s ' ')
+case "$MID_FLAT" in *"sudo loginctl enable-linger $U"*) pass "manager up, linger refused: install warns with the admin command" ;; *) fail "manager up, linger refused: no admin command in the install output" ;; esac
+case "$MID_FLAT" in *"Lingering is now on"*) fail "manager up, linger refused: banner claims lingering is on" ;; *) pass "manager up, linger refused: banner does not claim lingering" ;; esac
+[ "$(health)" = 200 ] && pass "manager up, linger refused: the service runs and answers" || fail "manager up, linger refused: the service does not answer"
+docker exec "$C" test -f "/var/lib/systemd/linger/$U" && fail "manager up: lingering got enabled without an admin" || pass "manager up: lingering stays off until an admin enables it"
 docker exec "$C" loginctl enable-linger "$U"
-as_user worthless service install --yes 2>&1 | sed 's/^/  | /' | tail -4
+SECOND=$(as_user worthless service install --yes 2>&1)
+printf '%s\n' "$SECOND" | sed 's/^/  | /' | tail -4
+printf '%s' "$SECOND" | tr '\n' ' ' | grep -q "Lingering is now on" && pass "after the admin step: banner says lingering is on" || fail "after the admin step: banner does not say lingering is on"
 BEFORE_INV=$(invocation); BEFORE_PID1=$(pid1_start)
 [ -n "$BEFORE_INV" ] && pass "service running (InvocationID $BEFORE_INV)" || fail "service not running after install"
 [ "$(health)" = 200 ] && pass "proxy answers /healthz" || fail "proxy does not answer"
