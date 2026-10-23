@@ -292,11 +292,14 @@ class TestSystemdBackend:
         ):
             systemd.install(home)
 
-        assert ["loginctl", "enable-linger", "testuser"] in calls
+        assert ["loginctl", "--no-ask-password", "enable-linger", "testuser"] in calls
 
-    def test_install_raises_clean_error_when_linger_enable_fails(
+    def test_install_still_succeeds_when_linger_enable_fails(
         self, home: WorthlessHome, tmp_path: Path
     ) -> None:
+        """worthless-8kn5 reverses the old decision (raise WRTLS-119): with no local
+        login polkit refuses linger, yet the unit runs while the user is logged in.
+        Install, report lingering off, and let the banner name the admin fix."""
         binary = tmp_path / "worthless"
         binary.write_text("#!/bin/sh\n")
         binary.chmod(0o755)
@@ -308,7 +311,7 @@ class TestSystemdBackend:
                 result.returncode = 0
                 result.stdout = "Linger=no"
                 return result
-            if args[:2] == ["loginctl", "enable-linger"]:
+            if args[0] == "loginctl" and "enable-linger" in args:
                 raise subprocess.CalledProcessError(1, args, stderr="Failed to enable linger.")
             result = MagicMock()
             result.returncode = 0
@@ -322,11 +325,10 @@ class TestSystemdBackend:
             patch.object(systemd, "report_proxy_health"),
             patch.dict("os.environ", {"USER": "testuser"}, clear=False),
         ):
-            with pytest.raises(WorthlessError) as exc_info:
-                systemd.install(home)
+            lingering = systemd.install(home)
 
-        assert exc_info.value.code == ErrorCode.SERVICE_INSTALL_FAILED
-        assert "linger" in str(exc_info.value).lower()
+        assert lingering is False
+        assert unit.is_file()
 
     def test_detect_not_installed(self, home: WorthlessHome, tmp_path: Path) -> None:
         with patch.object(systemd, "unit_path", return_value=tmp_path / "missing.service"):
