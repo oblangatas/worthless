@@ -35,34 +35,27 @@ SYSTEMD_UNIT = templates.SYSTEMD_UNIT_NAME
 
 
 def _session_user() -> str:
-    """Resolve login name without eager ``os.getlogin()`` (CI has no tty)."""
-    for key in ("USER", "LOGNAME"):
-        value = os.environ.get(key, "").strip()
-        if value:
-            return value
-    try:
-        return os.getlogin()
-    except OSError:
-        import pwd
+    """The real account (euid) — never ``USER``/``LOGNAME``, never ``getlogin()``.
 
-        try:
-            return pwd.getpwuid(os.getuid()).pw_name
-        except KeyError:
-            return str(os.getuid())
+    Linger is checked, turned on and advised for the account that owns the
+    unit; after ``su``, ``sudo -u`` or in a container the env can name someone
+    else (security review + Bugbot, PR #734). ``getlogin()`` needs a tty CI
+    doesn't have.
+    """
+    try:
+        return pwd.getpwuid(os.geteuid()).pw_name if pwd is not None else str(os.geteuid())
+    except KeyError:
+        return str(os.geteuid())
 
 
 def _account_name() -> str:
-    """The real account, shell-quoted, for commands we ask an admin to run.
+    """:func:`_session_user`, shell-quoted, for commands we ask an admin to run."""
+    return shlex.quote(_session_user())
 
-    Not ``_session_user()``: ``USER``/``LOGNAME`` can name someone else after
-    ``sudo -u`` or in a container, and the unit belongs to the real uid. An
-    admin must never be told to enable lingering for the wrong account.
-    """
-    try:
-        name = pwd.getpwuid(os.geteuid()).pw_name if pwd is not None else str(os.geteuid())
-    except KeyError:
-        name = str(os.geteuid())
-    return shlex.quote(name)
+
+def _user_bus() -> Path:
+    """The running user manager's socket; present only when it is up."""
+    return Path(f"/run/user/{os.geteuid()}/bus")
 
 
 def unit_path() -> Path:
@@ -240,9 +233,9 @@ def install(home: WorthlessHome, *, port: int | None = None) -> bool:
             if lingering:
                 raise
             account = _account_name()
-            if not os.environ.get("XDG_RUNTIME_DIR"):
-                # `su - user` / `sudo -u user`: the manager may well be running,
-                # this shell just can't reach it — linger would not help.
+            if _user_bus().exists():
+                # `su - user` / `sudo -u user`: the manager IS running, this
+                # shell just can't reach it — linger would not help.
                 why = (
                     "This shell can't reach your user services — usually because it "
                     "came from `su` or `sudo -u`. Log in directly instead (SSH, or "
