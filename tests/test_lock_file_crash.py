@@ -384,3 +384,24 @@ def test_two_threads_never_hold_the_lock_at_once(tmp_path: Path) -> None:
     finally:
         release.set()
         t.join(10)
+
+
+def test_the_busy_message_never_says_to_delete_the_lock(tmp_path: Path, monkeypatch) -> None:
+    """WOR-965: deleting a live lock by hand lets two commands write at once.
+
+    A dead holder's lock is reclaimed automatically (WOR-962), so there is
+    never a reason to tell the user to delete it.
+    """
+    home = ensure_home(base_dir=tmp_path / ".worthless")
+    home.lock_file.write_text("this-host 1\n")  # created by a racing command
+    monkeypatch.setattr(bootstrap, "check_stale_lock", lambda _home: None)
+
+    with pytest.raises(WorthlessError) as exc:
+        with acquire_lock(home):
+            pass  # pragma: no cover
+
+    msg = exc.value.message.lower()
+    assert exc.value.code.value == 105
+    assert "lock-in-progress" not in msg, msg
+    assert not any(w in msg for w in ("remove", "delete", "rm ")), msg
+    assert "wait" in msg, msg

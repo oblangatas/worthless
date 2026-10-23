@@ -757,8 +757,10 @@ def acquire_lock(home: WorthlessHome) -> Generator[None, None, None]:
     except FileExistsError:
         raise WorthlessError(
             ErrorCode.LOCK_IN_PROGRESS,
-            "Another worthless operation is in progress. "
-            "Remove ~/.worthless/.lock-in-progress if stale.",
+            # WOR-965: never suggest deleting the lock file. A live holder's
+            # lock deleted by hand lets two commands write at once, and a dead
+            # holder's lock is reclaimed automatically (check_stale_lock).
+            "Another worthless command is running. Wait for it to finish, then try again.",
         ) from None  # FileExistsError context is not useful to callers
     if _fcntl is None:
         # Windows: no flock, and an open file can't be unlinked there.
