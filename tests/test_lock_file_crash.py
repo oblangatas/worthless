@@ -329,3 +329,22 @@ def test_worthless_doctor_runs_right_after_a_killed_holder(tmp_path: Path) -> No
     out = result.stdout + result.stderr
     assert "WRTLS-105" not in out, out
     assert result.returncode == 0, out
+
+
+def test_a_failed_unlink_still_releases_the_lock(tmp_path: Path, monkeypatch) -> None:
+    """Cursor: an unlink error must not skip the close, or the flock stays held."""
+    home = ensure_home(base_dir=tmp_path / ".worthless")
+    lock = os.path.realpath(home.lock_file)
+    real_unlink = Path.unlink
+
+    def _refuse(self, *a, **k):  # noqa: ANN001, ANN002, ANN003
+        if os.path.realpath(self) == lock:
+            raise PermissionError(errno.EACCES, "Permission denied")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", _refuse)
+    with pytest.raises(PermissionError):
+        with acquire_lock(home):
+            pass
+
+    assert lock not in _open_paths(), "the lock's fd (and its flock) leaked"

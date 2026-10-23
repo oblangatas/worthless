@@ -770,11 +770,15 @@ def acquire_lock(home: WorthlessHome) -> Generator[None, None, None]:
         yield
     finally:
         try:
-            home.lock_file.unlink()
-        except FileNotFoundError:
-            pass
-        if fd >= 0:
-            os.close(fd)  # after the unlink: no window where the flock is free
+            try:
+                home.lock_file.unlink()
+            except FileNotFoundError:
+                pass
+        finally:
+            # After the unlink: no window where the flock is free. In its own
+            # finally: an unlink error must never leave the flock held.
+            if fd >= 0:
+                os.close(fd)
 
 
 def get_home() -> WorthlessHome:
