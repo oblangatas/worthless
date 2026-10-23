@@ -420,6 +420,7 @@ def test_the_5_minute_message_says_the_lock_clears_by_itself(tmp_path: Path) -> 
 
     msg = exc.value.message.lower()
     assert exc.value.code.value == 105
-    assert "clears by itself" in msg and "wait" in msg, msg
+    assert "clears by itself" in msg, msg
+    assert "wait" in msg, msg
     assert any(f"{s}s" in msg for s in range(190, 205)), msg  # seconds left
     assert not any(w in msg for w in ("remove", "delete", "rm ")), msg
