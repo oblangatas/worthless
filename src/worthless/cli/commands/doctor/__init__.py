@@ -57,6 +57,8 @@ from dotenv import dotenv_values
 from worthless.cli.bootstrap import WorthlessHome, acquire_lock, get_home, _DEFAULT_BASE
 from worthless.cli.platform import read_process_env
 from worthless.cli.process import pid_path, read_pid, resolve_port
+from worthless.cli.commands.doctor.checks import fernet_drift
+from worthless.cli.commands.doctor.registry import CheckContext, CheckResult
 from worthless.cli.commands.doctor.checks.dead_proxy_run_dirs import (
     STOP_PROXY_FIRST,
     find_dead_run_dirs,
@@ -143,6 +145,22 @@ def _run_async(coro: Coroutine[Any, Any, Any]) -> Any:
     except RuntimeError:
         # No running loop — safe to call asyncio.run() directly.
         return asyncio.run(coro)
+
+
+def _print_key_drift(result: CheckResult, console) -> None:
+    """worthless-saaz: a key the background service can't unlock, in plain text too.
+
+    Report only — WOR-464: never pick a side for the user.
+    """
+    if result.get("status") != "error":
+        return
+    console.print_warning(result.get("summary", "Fernet key drift."))
+    for finding in result.get("findings", []):
+        for alias in finding.get("cannot_unlock", []):
+            typer.echo(f"    can't unlock: {alias}")
+        for source, opened in finding.get("unlocks", {}).items():
+            typer.echo(f"    {source} key unlocks {opened} locked key(s)")
+    typer.echo("    fix: run `worthless doctor --explain fernet_drift`")
 
 
 def _print_unlocked_lines(unlocked: list[EnrollmentRecord], console) -> None:
@@ -1043,6 +1061,10 @@ def _doctor_run(*, fix: bool, yes: bool, dry_run: bool) -> None:
             openclaw_issues = _check_openclaw_section(
                 all_enrollments, repo=repo, fix=fix, dry_run=dry_run
             )
+            # ----------- check 7: a key the service can't unlock (worthless-saaz) -----------
+            key_drift = fernet_drift.run(
+                CheckContext(home=home, repo=repo, fix=False, dry_run=False)
+            )
         finally:
             repo.close()
 
@@ -1058,8 +1080,19 @@ def _doctor_run(*, fix: bool, yes: bool, dry_run: bool) -> None:
         # ----------- check 6: folders left by a stopped proxy (worthless-7qb6) -----------
         dead_runs = find_dead_run_dirs(home)
 
-        if not any(
-            (orphans, unlocked, openclaw_issues, synced, had_mismatch, had_alias_issues, dead_runs)
+        if (
+            not any(
+                (
+                    orphans,
+                    unlocked,
+                    openclaw_issues,
+                    synced,
+                    had_mismatch,
+                    had_alias_issues,
+                    dead_runs,
+                )
+            )
+            and key_drift.get("status") != "error"
         ):
             if not imported:
                 console.print_success("No issues found.")
@@ -1088,6 +1121,7 @@ def _doctor_run(*, fix: bool, yes: bool, dry_run: bool) -> None:
 
         _print_dead_run_lines(dead_runs, home, console, show_fix_hint=not fix)
         _print_unlocked_lines(unlocked, console)
+        _print_key_drift(key_drift, console)
 
         # Nothing below repairs an unlocked key: `lock` does, reusing its shard.
         if not fix or not any(
