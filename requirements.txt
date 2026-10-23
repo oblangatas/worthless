@@ -109,16 +109,7 @@ tomli==2.4.1 ; python_full_version < '3.11'
     # via worthless
 typer==0.27.2
     # via worthless
-typing-extensions==4.15.0 ; python_full_version >= '3.11'
-    # via
-    #   anyio
-    #   fastapi
-    #   opentelemetry-api
-    #   pydantic
-    #   pydantic-core
-    #   starlette
-    #   typing-inspection
-typing-extensions==4.16.0 ; python_full_version < '3.11'
+typing-extensions==4.16.0
     # via
     #   anyio
     #   cryptography
