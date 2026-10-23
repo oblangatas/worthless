@@ -402,6 +402,7 @@ def test_the_busy_message_never_says_to_delete_the_lock(tmp_path: Path, monkeypa
 
     msg = exc.value.message.lower()
     assert exc.value.code.value == 105
+    assert msg.startswith("another worthless command is running"), msg
     assert "lock-in-progress" not in msg, msg
     assert not any(w in msg for w in ("remove", "delete", "rm ")), msg
     assert "wait" in msg, msg
@@ -424,3 +425,19 @@ def test_the_5_minute_message_says_the_lock_clears_by_itself(tmp_path: Path) -> 
     assert "wait" in msg, msg
     assert any(f"{s}s" in msg for s in range(190, 205)), msg  # seconds left
     assert not any(w in msg for w in ("remove", "delete", "rm ")), msg
+
+
+def test_a_live_holder_gets_the_same_wait_message(tmp_path: Path) -> None:
+    """The common busy path (live flock holder) must say what the race path says."""
+    home = ensure_home(base_dir=tmp_path / ".worthless")
+    child = _hold_lock(home.base_dir)
+    try:
+        with pytest.raises(WorthlessError) as exc:
+            with acquire_lock(home):
+                pass  # pragma: no cover
+    finally:
+        _kill(child)
+
+    assert exc.value.message == (
+        "Another worthless command is running. Wait for it to finish, then try again."
+    )

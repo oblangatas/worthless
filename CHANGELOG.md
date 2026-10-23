@@ -18,7 +18,12 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 ### Fixed
 - **A busy-lock error no longer tells you to delete the lock file** (WOR-965).
   Before: when another worthless command held the lock, the error said "Remove ~/.worthless/.lock-in-progress if stale." If that command was still running, deleting the file let two commands write to your keys at once.
-  Now: the error says "Another worthless command is running. Wait for it to finish, then try again." A lock left by a crashed command clears itself (see the entry below), so you never need to delete it by hand.
+  Now: the error says "Another worthless command is running. Wait for it to finish, then try again." When worthless can't prove the lock is dead (a lock from another host, a file system without file locks, an empty lock file from an older version), the error says the lock clears by itself, and in how many seconds. A lock left by a crashed command clears itself (see the entry below), so you never need to delete it by hand.
+
+  **Limits.**
+  - `worthless doctor --fix` has its own lock and still uses its own wording (WOR-1003).
+  - If the lock file's time is in the future (clock skew between hosts), the countdown is long. It is accurate: the lock really clears only then.
+  - If something other than a file sits at the lock path (a symlink or a folder), the message does not say so.
 
 - **After a crash, the next worthless command runs at once** (WOR-962, [#714](https://github.com/oblangatas/worthless/pull/714)).
   Before: if a worthless command was killed (`kill -9`, out of memory, power loss), every write command failed for 5 minutes with "WRTLS-105: Lock file is 1s old (< 300s). Another operation may be running." This included the `worthless lock` that `status` tells you to run after a cut-off lock. Also, a command that ran longer than 5 minutes could have its lock taken by a second command.

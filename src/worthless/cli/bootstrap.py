@@ -53,6 +53,9 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_BASE = Path.home() / ".worthless"
 _STALE_LOCK_SECONDS = 300  # 5 minutes
+# WOR-965: what a live lock holder looks like to the next command. One text for
+# every path, and never "delete the lock file" (that lets two commands write).
+_BUSY_MESSAGE = "Another worthless command is running. Wait for it to finish, then try again."
 
 _BOOTSTRAP_ATTEST_PURPOSE = "bootstrap-validate"
 
@@ -760,7 +763,7 @@ def acquire_lock(home: WorthlessHome) -> Generator[None, None, None]:
             # WOR-965: never suggest deleting the lock file. A live holder's
             # lock deleted by hand lets two commands write at once, and a dead
             # holder's lock is reclaimed automatically (check_stale_lock).
-            "Another worthless command is running. Wait for it to finish, then try again.",
+            _BUSY_MESSAGE,
         ) from None  # FileExistsError context is not useful to callers
     if _fcntl is None:
         # Windows: no flock, and an open file can't be unlinked there.
@@ -922,7 +925,7 @@ def _holder_is_dead(fd: int) -> bool:
     except BlockingIOError:
         raise WorthlessError(
             ErrorCode.LOCK_IN_PROGRESS,
-            "Another worthless operation is running. Wait for it to finish.",
+            _BUSY_MESSAGE,
         ) from None
     except OSError:
         return False
