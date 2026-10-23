@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hmac
 import logging
+import stat
 from typing import Literal
 
 import keyring as _keyring
@@ -93,8 +94,12 @@ def _service_cannot_unlock(service: str, total: int, dead: list[str]) -> CheckRe
 
 def run(ctx: CheckContext) -> CheckResult:
     keyring_value = _read_keyring(ctx.home)
+    path = ctx.home.fernet_key_path
     try:
-        file_value: bytes | None = ctx.home.fernet_key_path.read_bytes().strip()
+        # A FIFO or device here would hang doctor while it holds its lock.
+        if not stat.S_ISREG(path.lstat().st_mode):
+            return _result("error", "fernet.key is not a regular file — refusing to read it.")
+        file_value: bytes | None = path.read_bytes().strip()
     except FileNotFoundError:
         file_value = None  # file absent — only one source, no drift possible
     except OSError as exc:

@@ -99,7 +99,8 @@ def _refuse_unless_key_opens_locked_keys(home: WorthlessHome, key: bytearray, co
         ErrorCode.KEY_REFUSED,
         f"The key this proxy loaded can't unlock any of your {total} locked key(s) — "
         f"often a restored backup's fernet.key. Not starting; fix fernet.key and the "
-        f"service restarts on its own. {KEY_FIX}",
+        f"service restarts on its own (fixed the keychain instead? run "
+        f"`worthless service restart`). {KEY_FIX}",
     )
     if not is_service_managed():
         raise refusal
@@ -111,16 +112,18 @@ def _wait_for_a_key_that_opens(home: WorthlessHome) -> None:
     """Park a refused service with no key in memory; restart once fernet.key is fixed.
 
     Reads only the file — the service reads it first, and the keyring could
-    prompt on every pass. A missing file restarts too: a fresh start takes
-    the normal path. Any other read error (say, loose permissions) would be
-    refused again on restart, so it keeps waiting instead of looping.
+    prompt on every pass. A file that disappears restarts too: a fresh start
+    takes the keyring. No file from the start means the refused key came from
+    the keyring, and a restart would load it again — so that, like any other
+    read error (say, loose permissions), keeps waiting instead of looping.
     """
+    had_file = home.fernet_key_path.exists()
     while True:
         time.sleep(_KEY_RECHECK_S)
         try:
             key = read_fernet_key_from_file(home.base_dir)
         except WorthlessError as exc:
-            if exc.code == ErrorCode.KEY_NOT_FOUND:
+            if exc.code == ErrorCode.KEY_NOT_FOUND and had_file:
                 raise typer.Exit(code=_RESTART_FOR_NEW_KEY) from None
             continue
         try:

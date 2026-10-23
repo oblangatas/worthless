@@ -182,6 +182,30 @@ class TestARefusedServiceWaits:
         exc = self._wait(home, [lambda: home.fernet_key_path.unlink()])
         assert exc.value.exit_code == up_mod._RESTART_FOR_NEW_KEY
 
+    def test_no_key_file_from_the_start_keeps_waiting_not_restart_looping(
+        self, home: WorthlessHome
+    ) -> None:
+        """Keyring-only home with a stale keyring key (Cursor + Brutus, PR #729):
+        a restart would load the same keyring key, be refused, see no file, and
+        exit again every 10-15 s. Nothing changed, so it must keep waiting."""
+        seal_enrolled(home.db_path, K1, "work")
+        assert not home.fernet_key_path.exists()
+
+        class _Stopped(Exception):
+            pass
+
+        with (
+            patch.object(up_mod.time, "sleep", side_effect=[None, None, _Stopped()]),
+            pytest.raises(_Stopped),
+        ):
+            up_mod._wait_for_a_key_that_opens(home)
+
+    def test_the_message_says_how_to_recover_a_keyring_only_key(self, home: WorthlessHome) -> None:
+        seal_enrolled(home.db_path, K1, "work")
+        _, console = _check(home, K2, managed=True)
+        (refusal,) = console.print_error.call_args.args
+        assert "worthless service restart" in str(refusal)
+
     def test_an_unreadable_key_file_keeps_waiting_not_restart_looping(
         self, home: WorthlessHome
     ) -> None:

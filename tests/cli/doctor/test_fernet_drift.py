@@ -7,6 +7,7 @@ locked secrets unrecoverable.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -182,3 +183,12 @@ def test_plain_doctor_stays_quiet_when_the_key_fits(fake_home) -> None:
     _seal(fake_home, _file_key(fake_home), "work")
     result = CliRunner().invoke(app, ["doctor"], env={"WORTHLESS_HOME": str(fake_home.base_dir)})
     assert "can't unlock" not in result.output
+
+
+def test_a_key_file_that_is_not_a_regular_file_is_refused_not_read(ctx, fake_home) -> None:
+    """A FIFO there would hang plain doctor while it holds its lock (Brutus)."""
+    fake_home.fernet_key_path.unlink()
+    os.mkfifo(fake_home.fernet_key_path)
+    result = fernet_drift.run(ctx)
+    assert result["status"] == "error"
+    assert "regular file" in result["summary"]
