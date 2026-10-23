@@ -12,8 +12,10 @@ from unittest.mock import patch
 
 import pytest
 from cryptography.fernet import Fernet
+from typer.testing import CliRunner
 
 from worthless.cli import key_check
+from worthless.cli.app import app
 from worthless.cli.bootstrap import ensure_home
 from worthless.cli.commands.doctor.checks import fernet_drift
 from worthless.cli.commands.doctor.registry import CheckContext
@@ -163,3 +165,20 @@ def test_docker_ipc_mode_never_checks(ctx, fake_home, monkeypatch) -> None:
     monkeypatch.setenv("WORTHLESS_FERNET_IPC_ONLY", "1")
     with patch.object(key_check, "ShardReader", side_effect=AssertionError("read shards")):
         assert fernet_drift.run(ctx)["status"] == "ok"
+
+
+def test_plain_doctor_names_what_the_service_key_cannot_unlock(fake_home) -> None:
+    """Not just --json: plain `worthless doctor` used to say "No issues found."
+    here (validator, PR #729)."""
+    _seal(fake_home, _file_key(fake_home), "work")
+    _seal(fake_home, OTHER, "side")
+    result = CliRunner().invoke(app, ["doctor"], env={"WORTHLESS_HOME": str(fake_home.base_dir)})
+    said = " ".join(result.output.split())
+    assert "No issues found" not in said
+    assert "side" in said and "can't unlock" in said
+
+
+def test_plain_doctor_stays_quiet_when_the_key_fits(fake_home) -> None:
+    _seal(fake_home, _file_key(fake_home), "work")
+    result = CliRunner().invoke(app, ["doctor"], env={"WORTHLESS_HOME": str(fake_home.base_dir)})
+    assert "can't unlock" not in result.output

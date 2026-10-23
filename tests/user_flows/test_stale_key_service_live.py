@@ -30,7 +30,7 @@ from pathlib import Path
 import pytest
 from cryptography.fernet import Fernet
 
-from tests.helpers import fake_key
+from tests.helpers import fake_key, seal_enrolled
 
 _TIMEOUT_BUDGET = 90 if os.environ.get("WORTHLESS_TEST_BIN") else 60
 pytestmark = [
@@ -239,6 +239,8 @@ def test_a_restored_stale_key_is_refused_loudly_then_heals_when_fixed(
     drift = next(c for c in json.loads(doctor.stdout)["checks"] if c["check_id"] == "fernet_drift")
     assert drift["status"] == "error"
     assert len(drift["findings"][0]["cannot_unlock"]) == 1
+    plain = _said(world.run("doctor").stdout)
+    assert "can't unlock" in plain and "No issues found" not in plain
 
     # Fix the key: the waiting service exits on its own so its manager restarts it.
     key_file.write_bytes(good_key)
@@ -267,3 +269,23 @@ def test_a_different_key_in_the_shell_cannot_lock_and_breaks_nothing(
     world.start_service(tmp_path / "up.log")
     assert world.healthz(within=30), (tmp_path / "up.log").read_text()
     assert world.chat(first) == 200
+
+
+def test_a_key_that_opens_only_some_projects_serves_them_and_names_the_rest(
+    world: _World, tmp_path: Path
+) -> None:
+    """`lock` now refuses to build this mix, but a backup merge still can: one
+    project sealed under a key the service doesn't hold."""
+    work = world.project("proj1")
+    assert world.lock(work).returncode == 0
+    seal_enrolled(world.wl / "worthless.db", Fernet.generate_key(), "side-project")
+
+    log = tmp_path / "up.log"
+    world.start_service(log)
+    assert world.healthz(within=30), log.read_text()
+    assert world.chat(work) == 200, "the project the key opens keeps working"
+    said = _said(log.read_text())
+    assert "can't unlock: side-project" in said, said
+
+    plain = _said(world.run("doctor").stdout)
+    assert "side-project" in plain and "can't unlock" in plain
