@@ -148,6 +148,7 @@ printf '%s\n' "$FIRST" | sed 's/^/  | /' | tail -6
 FIRST_FLAT=$(printf '%s' "$FIRST" | tr '\n' ' ' | tr -s ' ')
 case "$FIRST_FLAT" in *"sudo loginctl enable-linger $U"*) pass "no session: install names the admin command" ;; *) fail "no session: install did not name \`sudo loginctl enable-linger $U\`" ;; esac
 case "$FIRST_FLAT" in *"Run \`loginctl enable-linger"*|*"WRTLS-199"*|*"internal error"*) fail "no session: install still gives the dead end or a raw error" ;; *) pass "no session: no dead-end advice, no raw error" ;; esac
+case "$FIRST_FLAT" in *machinectl*) fail "no session: told to log in via machinectl — a container can't" ;; *) pass "no session: not told to log in another way" ;; esac
 as_user test -f "/home/$U/.config/systemd/user/worthless-proxy.service" && fail "no session: a refused install left its unit file behind" || pass "no session: no unit file left behind"
 # The SSH case: a login would start the user's manager; linger is still refused.
 # Root starts user@UID directly — a running manager, no linger, no session.

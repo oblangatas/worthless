@@ -60,7 +60,7 @@ def _install(home: WorthlessHome, tmp_path: Path, fake_run) -> tuple[Path, objec
         patch.object(systemd, "resolve_worthless_binary", return_value=binary),
         patch.object(systemd, "run_cmd", side_effect=fake_run),
         patch.object(systemd, "report_proxy_health"),
-        patch.dict("os.environ", {"USER": "sshuser"}, clear=False),
+        patch.object(systemd.pwd, "getpwuid", return_value=MagicMock(pw_name="sshuser")),
     ):
         lingering = systemd.install(home)
     return unit, lingering
@@ -101,8 +101,7 @@ class TestNoSessionAtAll:
     def test_says_what_an_admin_must_run_and_leaves_no_unit(
         self, home: WorthlessHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/1000")  # a session dir, no manager
-        monkeypatch.setattr(systemd.pwd, "getpwuid", lambda uid: MagicMock(pw_name="sshuser"))
+        monkeypatch.setattr(systemd, "_user_bus", lambda: tmp_path / "no-manager" / "bus")
         calls: list = []
         loginctl = _fake_loginctl(linger=False, refuse=True, calls=calls)
 
@@ -122,6 +121,7 @@ class TestNoSessionAtAll:
         assert exc.value.code == ErrorCode.SERVICE_INSTALL_FAILED
         assert "sudo loginctl enable-linger sshuser" in said
         assert "worthless up" in said
+        assert "machinectl" not in said and "su`" not in said, "containers can't log in"
         assert not (tmp_path / "worthless-proxy.service").exists(), "rollback removes the unit"
 
     def test_a_systemctl_failure_with_linger_on_is_not_blamed_on_linger(
@@ -227,7 +227,10 @@ class TestReviewFixes:
     ) -> None:
         """`su - user` / `sudo -u user` leave XDG_RUNTIME_DIR unset, so systemctl
         --user fails even with the manager running; linger would not help."""
-        monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+        bus = tmp_path / "run" / "bus"
+        bus.parent.mkdir()
+        bus.touch()  # the user's manager IS running; this shell just can't reach it
+        monkeypatch.setattr(systemd, "_user_bus", lambda: bus)
         calls: list = []
         loginctl = _fake_loginctl(linger=False, refuse=True, calls=calls)
 
@@ -263,3 +266,15 @@ class TestReviewFixes:
             result = CliRunner().invoke(app, ["--json", "service", "install", "--yes"])
         assert result.exit_code == 0, result.output
         assert json.loads(result.stdout)["lingering"] is False
+
+    def test_linger_is_checked_and_turned_on_for_the_real_account(
+        self, home: WorthlessHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Bugbot: the advice used the real account but the check used USER, so
+        after an admin enabled linger, a stale USER still read it as off."""
+        monkeypatch.setenv("USER", "stale")
+        calls: list = []
+        _install(home, tmp_path, _fake_loginctl(linger=False, refuse=False, calls=calls))
+        assert ["loginctl", "show-user", "sshuser", "-p", "Linger"] in calls
+        assert ["loginctl", "--no-ask-password", "enable-linger", "sshuser"] in calls
+        assert not any("stale" in arg for call in calls for arg in call)
