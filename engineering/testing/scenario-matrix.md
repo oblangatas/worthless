@@ -11,7 +11,7 @@
 | SQLite DB | `~/.worthless/worthless.db` | shards table (shard_b_enc, commitment, nonce), enrollments table (alias->var_name->env_path) |
 | Fernet key | `~/.worthless/fernet.key` | Encrypts shard_b at rest in SQLite |
 | .env files | project dirs | Rewritten with decoys after lock |
-| Lock file | `~/.worthless/.lock-in-progress` | Mutual exclusion for lock command (5min stale timeout) |
+| Lock file | `~/.worthless/.lock-in-progress` | Mutual exclusion for writing commands. Held under `flock`: a lock left by a killed holder is reclaimed at once; a live holder is never stolen. Empty legacy file: 5min stale timeout (WOR-962) |
 | PID file | `~/.worthless/proxy.pid` | Tracks daemon proxy (pid\nport format) |
 
 ## Consistency Invariants

@@ -8,6 +8,7 @@ import hmac
 import logging
 import os
 import secrets
+import socket
 import sqlite3
 import stat
 import sys
@@ -39,8 +40,10 @@ from worthless.cli.platform import IS_WINDOWS
 # grp is POSIX-only; the module must stay importable on Windows so the CLI can
 # print its refusal (mirrors worthless/openclaw/integration.py).
 if sys.platform != "win32":
+    import fcntl as _fcntl
     import grp as _grp
 else:
+    _fcntl = None  # type: ignore[assignment]
     _grp = None  # type: ignore[assignment]
 from worthless.crypto.types import zero_buf
 from worthless.ipc.client import IPCClient, IPCError
@@ -736,7 +739,14 @@ def _init_db(home: WorthlessHome) -> None:
 
 @contextmanager
 def acquire_lock(home: WorthlessHome) -> Generator[None, None, None]:
-    """Acquire an exclusive lock file using O_CREAT|O_EXCL."""
+    """Acquire an exclusive lock file using O_CREAT|O_EXCL, held under flock.
+
+    WOR-962: the kernel drops a flock the moment its holder dies, so a lock
+    file left by ``kill -9`` is reclaimed at once (``check_stale_lock``)
+    instead of blocking every command for 5 minutes. "<hostname> <pid>",
+    written once the flock is held, marks "this file is flock-held here"; the
+    PID is never trusted on its own.
+    """
     check_stale_lock(home)
     try:
         fd = os.open(
@@ -744,20 +754,31 @@ def acquire_lock(home: WorthlessHome) -> Generator[None, None, None]:
             os.O_WRONLY | os.O_CREAT | os.O_EXCL,
             0o600,
         )
-        os.close(fd)
     except FileExistsError:
         raise WorthlessError(
             ErrorCode.LOCK_IN_PROGRESS,
             "Another worthless operation is in progress. "
             "Remove ~/.worthless/.lock-in-progress if stale.",
         ) from None  # FileExistsError context is not useful to callers
+    if _fcntl is None:
+        # Windows: no flock, and an open file can't be unlinked there.
+        os.close(fd)
+        fd = -1
     try:
+        if _fcntl is not None and _take_own_flock(fd):
+            os.write(fd, f"{socket.gethostname()} {os.getpid()}\n".encode())
         yield
     finally:
         try:
-            home.lock_file.unlink()
-        except FileNotFoundError:
-            pass
+            try:
+                home.lock_file.unlink()
+            except FileNotFoundError:
+                pass
+        finally:
+            # After the unlink: no window where the flock is free. In its own
+            # finally: an unlink error must never leave the flock held.
+            if fd >= 0:
+                os.close(fd)
 
 
 def get_home() -> WorthlessHome:
@@ -805,15 +826,115 @@ def resolve_home() -> WorthlessHome | None:
 
 
 def check_stale_lock(home: WorthlessHome) -> None:
-    """Remove stale lock files (> 5 min old), raise on fresh locks."""
-    if not home.lock_file.exists():
+    """Reclaim a lock file whose holder is gone; raise while one is alive.
+
+    WOR-962. A file with content was written under a flock by
+    ``acquire_lock``: if that flock is busy, the holder is alive (never
+    stolen, however old); if we can take it, the holder died, so it goes now.
+    An empty file is a holder between create and flock, an older worthless,
+    or Windows (no flock): those keep the 5-minute rule.
+    """
+    if _fcntl is None:
+        _check_stale_lock_by_age(home)  # Windows: never unlink an open file
         return
-    age = time.time() - home.lock_file.stat().st_mtime
+    try:
+        fd = os.open(str(home.lock_file), os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return
+    except OSError:
+        # Another user's file (root in a proxy-owned volume) or a symlink: we
+        # can't look inside, so the path-only 5-minute rule decides.
+        _check_stale_lock_by_age(home)
+        return
+    if not stat.S_ISREG(os.fstat(fd).st_mode):  # a FIFO or a directory
+        os.close(fd)
+        _check_stale_lock_by_age(home)
+        return
+    try:
+        if _holder_is_dead(fd):
+            _unlink_if_same_file(home.lock_file, fd)
+            return
+        age = time.time() - os.fstat(fd).st_mtime
+        if age > _STALE_LOCK_SECONDS:
+            _unlink_if_same_file(home.lock_file, fd)
+        else:
+            raise _fresh_lock_error(age)
+    finally:
+        os.close(fd)
+
+
+def _fresh_lock_error(age: float) -> WorthlessError:
+    return WorthlessError(
+        ErrorCode.LOCK_IN_PROGRESS,
+        f"Lock file is {int(age)}s old (< {_STALE_LOCK_SECONDS}s). "
+        "Another operation may be running.",
+    )
+
+
+def _check_stale_lock_by_age(home: WorthlessHome) -> None:
+    """The original rule, path-only: remove a lock over 5 minutes old."""
+    try:
+        age = time.time() - home.lock_file.stat().st_mtime
+    except FileNotFoundError:
+        return
     if age > _STALE_LOCK_SECONDS:
         home.lock_file.unlink(missing_ok=True)
     else:
+        raise _fresh_lock_error(age)
+
+
+_OWN_FLOCK_WAIT_SECONDS = 2.0
+
+
+def _take_own_flock(fd: int) -> bool:
+    """flock the lock file we just created, giving up after 2 seconds.
+
+    A reclaimer can hold it only for an instant (it sees an empty file and
+    gives up), unless it was stopped right then. False leaves the file empty,
+    which the 5-minute rule then covers — as does a filesystem without flock.
+    """
+    deadline = time.monotonic() + _OWN_FLOCK_WAIT_SECONDS
+    while True:
+        try:
+            _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)  # type: ignore[union-attr]
+            return True
+        except BlockingIOError:
+            if time.monotonic() > deadline:
+                return False
+            time.sleep(0.01)
+        except OSError:
+            return False
+
+
+def _holder_is_dead(fd: int) -> bool:
+    """True when the flock is free and the holder wrote this host's name.
+
+    Raises 105 while a live process holds the flock. A filesystem without
+    flock (NFS/SMB) answers False, so the caller keeps the 5-minute rule. So
+    does a lock written on another host: a shared mount's flock may be local
+    to one machine, so "free" there proves nothing.
+    """
+    try:
+        _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)  # type: ignore[union-attr]
+    except BlockingIOError:
         raise WorthlessError(
             ErrorCode.LOCK_IN_PROGRESS,
-            f"Lock file is {int(age)}s old (< {_STALE_LOCK_SECONDS}s). "
-            "Another operation may be running.",
-        )
+            "Another worthless operation is running. Wait for it to finish.",
+        ) from None
+    except OSError:
+        return False
+    writer = os.read(fd, 256).split(maxsplit=1)
+    return writer[:1] == [socket.gethostname().encode()]
+
+
+def _unlink_if_same_file(path: Path, fd: int) -> None:
+    """Unlink *path* only if it is still the file *fd* has open.
+
+    Two reclaimers can open the same dead file; once the first replaces it
+    with its own live lock, the second must not delete that one.
+    """
+    try:
+        if path.stat().st_ino == os.fstat(fd).st_ino:
+            path.unlink(missing_ok=True)
+    except FileNotFoundError:
+        pass
