@@ -30,6 +30,19 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - A command killed in the first instant, before it takes the file lock, leaves an empty lock file. That file also keeps the 5-minute rule.
   - `worthless doctor --fix` has its own lock, with a similar race. It is not changed here (WOR-963).
 
+- **A stale key can't make the background service look healthy any more** ([#729](https://github.com/oblangatas/worthless/pull/729)).
+
+  Before: if `~/.worthless/fernet.key` held a key that can't unlock your locked keys (for example, restored from an old backup), the background service still started. `/healthz` returned 200, and every request failed with 401. `worthless doctor` said "No issues found." `worthless lock` with a different `WORTHLESS_FERNET_KEY` in the shell printed `[OK]` and sealed the new project with a key the service does not have.
+
+  Now: the service prints WRTLS-121 once, serves nothing, and waits. When you fix `fernet.key`, it exits so launchd or systemd restart it. `worthless up` that you run yourself stops with the cause and the fix. `lock` refuses a shell `WORTHLESS_FERNET_KEY` that differs from the stored key, and changes nothing. `worthless doctor` names the projects the service's key can't unlock.
+
+  **Limits.**
+  - Worthless never repairs the key. `doctor` tells you which key source unlocks your keys; you choose.
+  - A key that unlocks only some projects still serves them. `status` stays green; only `doctor` and the service log name the broken ones.
+  - A stale key that is only in the keychain does not heal on its own. Run `worthless service restart` after you fix it.
+  - `worthless down` does not see a service that is waiting. Use `worthless service stop`, or fix the key.
+  - The restart after the exit is done by launchd or systemd. The tests prove the exit, not a real service manager's restart.
+
 ## [0.3.15] — 2026-10-18
 
 ### Changed
