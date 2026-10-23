@@ -868,8 +868,9 @@ def check_stale_lock(home: WorthlessHome) -> None:
 def _fresh_lock_error(age: float) -> WorthlessError:
     return WorthlessError(
         ErrorCode.LOCK_IN_PROGRESS,
-        f"Lock file is {int(age)}s old (< {_STALE_LOCK_SECONDS}s). "
-        "Another operation may be running.",
+        # WOR-965: say it clears by itself, so nobody deletes a live lock.
+        "Another worthless command may be running. If nothing is, this lock clears "
+        f"by itself in {max(1, int(_STALE_LOCK_SECONDS - age))}s. Wait, then try again.",
     )
 
 

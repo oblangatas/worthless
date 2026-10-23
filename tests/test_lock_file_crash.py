@@ -405,3 +405,21 @@ def test_the_busy_message_never_says_to_delete_the_lock(tmp_path: Path, monkeypa
     assert "lock-in-progress" not in msg, msg
     assert not any(w in msg for w in ("remove", "delete", "rm ")), msg
     assert "wait" in msg, msg
+
+
+def test_the_5_minute_message_says_the_lock_clears_by_itself(tmp_path: Path) -> None:
+    """WOR-965: a lock that can't be proven dead (empty, other host, no flock)
+    waits out the 5-minute rule. Say when it clears; never suggest deleting it.
+    """
+    home = ensure_home(base_dir=tmp_path / ".worthless")
+    home.lock_file.touch()
+    _age(home.lock_file, 100)  # ~200s left
+
+    with pytest.raises(WorthlessError) as exc:
+        bootstrap.check_stale_lock(home)
+
+    msg = exc.value.message.lower()
+    assert exc.value.code.value == 105
+    assert "clears by itself" in msg and "wait" in msg, msg
+    assert any(f"{s}s" in msg for s in range(190, 205)), msg  # seconds left
+    assert not any(w in msg for w in ("remove", "delete", "rm ")), msg

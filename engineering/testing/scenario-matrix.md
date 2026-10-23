@@ -488,7 +488,7 @@ These must always hold. Any scenario that breaks them is a bug:
 #### S-10: Two terminals run `lock` simultaneously
 
 - **Precondition**: Two shells, both run `worthless lock`
-- **Expected**: First acquires `.lock-in-progress` via `O_CREAT|O_EXCL`. Second gets `WRTLS-105: Another worthless operation is in progress.`
+- **Expected**: First acquires `.lock-in-progress` via `O_CREAT|O_EXCL`. Second gets `WRTLS-105: Another worthless command is running. Wait for it to finish, then try again.`
 - **Risk**: Low (correctly handled)
 - **Test status**: Tested (`test_bootstrap.py`)
 
