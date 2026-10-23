@@ -89,7 +89,7 @@ Restart your editor. Cold-start install time on a fresh machine with only Node:
 ### Package Info
 - **Package name**: `worthless`
 - **npm wrapper**: `worthless-mcp`
-- **Version**: 0.3.15
+- **Version**: 0.3.16
 - **Entry point**: `worthless` (CLI command)
 - **Python**: 3.10+
 - **License**: AGPL-3.0
@@ -186,6 +186,7 @@ Walks every `.env` Worthless locked on this machine, reconstructs each real key 
 
 **Behavior:**
 - Restore-all-then-wipe: if ANY `.env` can't be restored, nothing is wiped (Shard B is kept for a retry)
+- Exception: a key with no link (unlock reports WRTLS-102) is not checked and IS wiped. Never run `uninstall` while unlock reports WRTLS-102
 - Enroll-only keys (no `.env`) warn and are removed, but never block the uninstall
 - OpenClaw symmetric undo is best-effort and never blocks the wipe
 

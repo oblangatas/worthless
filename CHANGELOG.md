@@ -4,6 +4,8 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [0.3.16] — 2026-10-22
+
 ### Security
 - **A key that the doctor bug unlinked keeps both of its halves until it can be re-linked** (WOR-959, [#709](https://github.com/oblangatas/worthless/pull/709)).
 
@@ -14,6 +16,7 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   **Limits.**
   - This release does not re-link the key. WOR-937 does that.
   - A file whose key has no stored half left is still removed. Nothing can use that file.
+  - `worthless uninstall` still removes a key that lost its link, without a warning. If the doctor bug hit this machine, do not run `uninstall` until the re-link release (WOR-937) ships.
 
 ### Fixed
 - **After a crash, the next worthless command runs at once** (WOR-962, [#714](https://github.com/oblangatas/worthless/pull/714)).
@@ -568,6 +571,7 @@ First release published to PyPI. `pip install worthless` now works.
 - Gate evaluation strictly precedes shard reconstruction (SR-03).
 - Published artifacts built via PyPI trusted publishing (OIDC, no long-lived tokens).
 
+[0.3.16]: https://github.com/oblangatas/worthless/releases/tag/v0.3.16
 [0.3.15]: https://github.com/oblangatas/worthless/releases/tag/v0.3.15
 [0.3.14]: https://github.com/oblangatas/worthless/releases/tag/v0.3.14
 [0.3.13]: https://github.com/oblangatas/worthless/releases/tag/v0.3.13
