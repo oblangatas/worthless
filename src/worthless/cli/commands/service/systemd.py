@@ -5,8 +5,14 @@ from __future__ import annotations
 import contextlib
 
 import os
+import shlex
 import subprocess
 from pathlib import Path
+
+try:
+    import pwd
+except ImportError:  # pragma: no cover — Windows has no pwd; systemd never runs there
+    pwd = None  # type: ignore[assignment]
 
 from worthless.cli.bootstrap import WorthlessHome
 from worthless.cli.commands.service import templates
@@ -43,6 +49,20 @@ def _session_user() -> str:
             return pwd.getpwuid(os.getuid()).pw_name
         except KeyError:
             return str(os.getuid())
+
+
+def _account_name() -> str:
+    """The real account, shell-quoted, for commands we ask an admin to run.
+
+    Not ``_session_user()``: ``USER``/``LOGNAME`` can name someone else after
+    ``sudo -u`` or in a container, and the unit belongs to the real uid. An
+    admin must never be told to enable lingering for the wrong account.
+    """
+    try:
+        name = pwd.getpwuid(os.geteuid()).pw_name if pwd is not None else str(os.geteuid())
+    except KeyError:
+        name = str(os.geteuid())
+    return shlex.quote(name)
 
 
 def unit_path() -> Path:
@@ -219,15 +239,29 @@ def install(home: WorthlessHome, *, port: int | None = None) -> bool:
         except subprocess.CalledProcessError as exc:
             if lingering:
                 raise
-            # 8kn5: no login session (docker exec, cron) AND linger refused —
-            # there is no user manager to host the unit at all.
+            account = _account_name()
+            if not os.environ.get("XDG_RUNTIME_DIR"):
+                # `su - user` / `sudo -u user`: the manager may well be running,
+                # this shell just can't reach it — linger would not help.
+                why = (
+                    "This shell can't reach your user services — usually because it "
+                    "came from `su` or `sudo -u`. Log in directly instead (SSH, or "
+                    f"`machinectl shell {account}@`), then run `worthless service "
+                    "install` again. With no login session at all, an administrator "
+                    f"must run `sudo loginctl enable-linger {account}`."
+                )
+            else:
+                # 8kn5: no login session (docker exec, cron) AND linger refused —
+                # there is no user manager to host the unit at all.
+                why = (
+                    "This account has no running user service manager (no login "
+                    "session, and lingering needs an administrator here). Ask one to "
+                    f"run `sudo loginctl enable-linger {account}`, then run "
+                    "`worthless service install` again."
+                )
             raise WorthlessError(
                 ErrorCode.SERVICE_INSTALL_FAILED,
-                "This account has no running user service manager (no login "
-                "session, and lingering needs an administrator here). Ask one to "
-                f"run `sudo loginctl enable-linger {_session_user()}`, then run "
-                "`worthless service install` again. Until then, start the proxy "
-                "yourself with `worthless up`.",
+                f"{why} Until then, start the proxy yourself with `worthless up`.",
             ) from exc
         _systemctl("enable", "--now", SYSTEMD_UNIT)
     except BaseException:

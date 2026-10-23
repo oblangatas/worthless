@@ -14,12 +14,15 @@ work when systemd isn't running.
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from typer.testing import CliRunner
 
+from worthless.cli.app import app
 from worthless.cli.bootstrap import WorthlessHome
 from worthless.cli.commands.doctor.checks import service_health
 from worthless.cli.commands.service import _print_service_banner, systemd
@@ -96,8 +99,10 @@ class TestNoSessionAtAll:
     """`docker exec` / cron: linger refused AND no user manager to talk to."""
 
     def test_says_what_an_admin_must_run_and_leaves_no_unit(
-        self, home: WorthlessHome, tmp_path: Path
+        self, home: WorthlessHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/1000")  # a session dir, no manager
+        monkeypatch.setattr(systemd.pwd, "getpwuid", lambda uid: MagicMock(pw_name="sshuser"))
         calls: list = []
         loginctl = _fake_loginctl(linger=False, refuse=True, calls=calls)
 
@@ -186,3 +191,75 @@ class TestDoctorAdviceFitsTheMachine:
     def test_linger_off_names_the_admin_fallback(self) -> None:
         finding = service_health._linger_finding(False)
         assert "sudo loginctl enable-linger" in finding["remediation"]
+
+
+class TestReviewFixes:
+    """Security review + brutus on PR #734."""
+
+    def test_the_admin_command_names_the_real_account_not_the_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """USER/LOGNAME can say anything after `sudo -u` or in a container; the
+        unit belongs to the real uid, so that is who lingering must be for."""
+        monkeypatch.setenv("USER", "someone-else")
+        with patch.object(systemd.pwd, "getpwuid", return_value=MagicMock(pw_name="realuser")):
+            assert systemd._account_name() == "realuser"
+
+    def test_an_odd_account_name_is_quoted_for_the_shell(self) -> None:
+        with patch.object(systemd.pwd, "getpwuid", return_value=MagicMock(pw_name="a b;rm")):
+            assert systemd._account_name() == "'a b;rm'"
+
+    def test_doctor_never_says_dollar_user(self) -> None:
+        """An admin's shell expands $USER to the ADMIN's name — lingering for the
+        wrong account, and the user stays unfixed."""
+        with patch.object(systemd.pwd, "getpwuid", return_value=MagicMock(pw_name="realuser")):
+            remediation = service_health._linger_finding(False)["remediation"]
+        assert "$USER" not in remediation
+        assert "sudo loginctl enable-linger realuser" in remediation
+
+    def test_the_banner_does_not_claim_a_cause_it_does_not_know(self) -> None:
+        _, warnings = _banner(lingering=False)
+        assert "usually" in warnings
+        assert "every user service" in warnings, "say once that linger is account-wide"
+
+    def test_su_or_sudo_gets_told_to_log_in_directly(
+        self, home: WorthlessHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`su - user` / `sudo -u user` leave XDG_RUNTIME_DIR unset, so systemctl
+        --user fails even with the manager running; linger would not help."""
+        monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+        calls: list = []
+        loginctl = _fake_loginctl(linger=False, refuse=True, calls=calls)
+
+        def fake_run(args: list[str], **kwargs):
+            if args[:2] == ["systemctl", "--user"] and "daemon-reload" in args:
+                raise subprocess.CalledProcessError(1, args, stderr="Failed to connect to bus")
+            return loginctl(args, **kwargs)
+
+        with pytest.raises(WorthlessError) as exc:
+            _install(home, tmp_path, fake_run)
+        said = " ".join(str(exc.value).split())
+        assert "machinectl shell" in said and "su" in said
+
+    def test_json_says_whether_it_survives_logout(
+        self, home: WorthlessHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Agents read --json: "installed": true alone reads as "protected after logout"."""
+        backend = MagicMock()
+        backend.install.return_value = False
+        with (
+            patch("worthless.cli.commands.service._backend", return_value=backend),
+            patch(
+                "worthless.cli.commands.service.current_platform_backend_name",
+                return_value="systemd",
+            ),
+            patch(
+                "worthless.cli.commands.service.resolve_worthless_binary",
+                return_value=Path("/usr/local/bin/worthless"),
+            ),
+            patch("worthless.cli.commands.service.preflight_service_install"),
+            patch("worthless.cli.commands.service.get_home", return_value=home),
+        ):
+            result = CliRunner().invoke(app, ["--json", "service", "install", "--yes"])
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.stdout)["lingering"] is False

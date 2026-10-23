@@ -80,10 +80,11 @@ def _print_service_banner(
         else:
             # worthless-8kn5: no local login (SSH, a container) — polkit said no.
             console.print_warning(
-                "Lingering couldn't be turned on for this account (no local login "
-                "session), so the service runs while you're logged in but stops when "
-                "you log out and won't start at boot. An administrator can fix that "
-                f"with `sudo loginctl enable-linger {systemd._session_user()}`."
+                "Lingering couldn't be turned on for this account (usually: no local "
+                "login session), so the service runs while you're logged in but stops "
+                "when you log out and won't start at boot. An administrator can fix "
+                f"that with `sudo loginctl enable-linger {systemd._account_name()}` — "
+                "it lets every user service for this account keep running after logout."
             )
     console.print_hint("Status: `worthless service status` · Stop: `worthless service stop`")
 
@@ -151,6 +152,9 @@ def register_service_commands(app: typer.Typer) -> None:
                         "binary": str(binary),
                         "port": actual_port,
                         "unit_path": unit,
+                        # 8kn5: false = stops at logout, won't start at boot.
+                        # null on launchd, which has no such concept.
+                        "lingering": lingering if isinstance(lingering, bool) else None,
                     }
                 )
                 + "\n"

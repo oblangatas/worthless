@@ -149,6 +149,17 @@ FIRST_FLAT=$(printf '%s' "$FIRST" | tr '\n' ' ' | tr -s ' ')
 case "$FIRST_FLAT" in *"sudo loginctl enable-linger $U"*) pass "no session: install names the admin command" ;; *) fail "no session: install did not name \`sudo loginctl enable-linger $U\`" ;; esac
 case "$FIRST_FLAT" in *"Run \`loginctl enable-linger"*|*"WRTLS-199"*|*"internal error"*) fail "no session: install still gives the dead end or a raw error" ;; *) pass "no session: no dead-end advice, no raw error" ;; esac
 as_user test -f "/home/$U/.config/systemd/user/worthless-proxy.service" && fail "no session: a refused install left its unit file behind" || pass "no session: no unit file left behind"
+# The SSH case: a login would start the user's manager; linger is still refused.
+# Root starts user@UID directly — a running manager, no linger, no session.
+UID_U=$(docker exec "$C" id -u "$U")
+docker exec "$C" systemctl start "user@$UID_U.service"
+MID=$(as_user worthless service install --yes 2>&1)
+printf '%s\n' "$MID" | sed 's/^/  | /' | tail -6
+MID_FLAT=$(printf '%s' "$MID" | tr '\n' ' ' | tr -s ' ')
+case "$MID_FLAT" in *"sudo loginctl enable-linger $U"*) pass "manager up, linger refused: install warns with the admin command" ;; *) fail "manager up, linger refused: no admin command in the install output" ;; esac
+case "$MID_FLAT" in *"Lingering is now on"*) fail "manager up, linger refused: banner claims lingering is on" ;; *) pass "manager up, linger refused: banner does not claim lingering" ;; esac
+[ "$(health)" = 200 ] && pass "manager up, linger refused: the service runs and answers" || fail "manager up, linger refused: the service does not answer"
+docker exec "$C" test -f "/var/lib/systemd/linger/$U" && fail "manager up: lingering got enabled without an admin" || pass "manager up: lingering stays off until an admin enables it"
 docker exec "$C" loginctl enable-linger "$U"
 SECOND=$(as_user worthless service install --yes 2>&1)
 printf '%s\n' "$SECOND" | sed 's/^/  | /' | tail -4

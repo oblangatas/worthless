@@ -124,9 +124,9 @@ def _linger_finding(linger_enabled: bool) -> dict | None:
     return {
         "kind": "linger_off",
         "remediation": "systemd linger is off — the proxy stops when you log out "
-        "and won't start at boot. Run `loginctl enable-linger $USER`; if that's "
-        "refused (no local login, e.g. SSH), an administrator must run "
-        "`sudo loginctl enable-linger $USER`.",
+        f"and won't start at boot. Run `loginctl enable-linger {systemd._account_name()}`; "
+        "if that's refused (no local login, e.g. SSH), an administrator must run "
+        f"`sudo loginctl enable-linger {systemd._account_name()}`.",
     }
 
 
