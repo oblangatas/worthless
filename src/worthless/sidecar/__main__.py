@@ -17,13 +17,17 @@ Environment:
 * ``WORTHLESS_SIDECAR_ALLOWED_UID`` CSV of uids permitted to connect.
 * ``WORTHLESS_SIDECAR_DRAIN_TIMEOUT`` (opt) Seconds to wait for in-flight
                                     handlers on shutdown; default ``5.0``.
+* ``WORTHLESS_SIDECAR_PARENT_PID`` (opt) Pid of the spawning supervisor. When
+                                    it stops being our parent (supervisor
+                                    killed), shut down and delete the share
+                                    files, socket and their now-empty dirs.
 * ``WORTHLESS_LOG_LEVEL`` (opt)     One of ``DEBUG|INFO|WARNING|ERROR|CRITICAL``
                                     (case-insensitive); default ``INFO``.
                                     Invalid value → rc=1.
 
 Exit codes:
 
-* ``0``  — graceful shutdown after signal
+* ``0``  — graceful shutdown after signal, or after the parent died
 * ``1``  — config error (missing env, unreadable share, empty allowlist)
 * ``2``  — bind failure
 
@@ -67,6 +71,11 @@ _REQUIRED_ENV = (
 
 _PROBE_TIMEOUT_S = 1.0
 _DEFAULT_DRAIN_TIMEOUT_S = 5.0
+# ponytail: poll getppid instead of PR_SET_PDEATHSIG (Linux-only, needs
+# preexec_fn) or kqueue NOTE_EXIT (macOS-only). Ceiling: share files stay on
+# disk up to one interval after the parent dies; the key stays in memory until
+# the drain ends (up to drain_timeout while the orphaned proxy holds a connection).
+_PARENT_POLL_S = 0.5
 
 # Canonical stdlib level names. Aliases (``WARN``, ``FATAL``) are
 # intentionally excluded — we don't want operator typos to silently
@@ -156,6 +165,60 @@ async def _drain_server(
         _LOG.debug("wait_closed timed out during final cleanup; continuing")
 
 
+def _parse_parent_pid(raw: str | None) -> int | None:
+    """``WORTHLESS_SIDECAR_PARENT_PID`` as an int; unset means no watch. Raises ValueError."""
+    return int(raw) if raw else None
+
+
+def _parent_gone(expected: int | None) -> bool:
+    return expected is not None and os.getppid() != expected
+
+
+async def _watch_parent(
+    expected: int, stop: asyncio.Event, interval: float = _PARENT_POLL_S
+) -> bool:
+    """Set ``stop`` once ``expected`` is no longer our parent; return True if so.
+
+    A dead parent reparents us to init / a subreaper, so ``getppid`` changes
+    at once and a recycled pid cannot fool the check. Returns False when
+    ``stop`` was set by someone else (normal signal shutdown).
+    """
+    while not stop.is_set():
+        if _parent_gone(expected):
+            _LOG.warning("parent pid %d is gone; shutting down", expected)
+            stop.set()
+            return True
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+    return False
+
+
+def _remove_key_material(share_a: Path, share_b: Path, socket_path: Path) -> None:
+    """Best-effort delete of what an orphaned sidecar leaves behind.
+
+    Nobody else will: the supervisor that would have cleaned up is dead, and
+    doctor treats a folder with a live socket as in use. ``rmdir`` is
+    non-recursive, so a dir holding anything else survives.
+    """
+    for path in (share_a, share_b, socket_path):
+        with contextlib.suppress(OSError):
+            path.unlink(missing_ok=True)
+    for directory in {share_a.parent, share_b.parent, socket_path.parent}:
+        with contextlib.suppress(OSError):
+            directory.rmdir()
+
+
+async def _wipe_when_orphaned(
+    expected: int | None, stop: asyncio.Event, share_a: Path, share_b: Path, socket_path: Path
+) -> None:
+    """Wipe the files as soon as the parent is gone, not after the drain.
+
+    A live proxy connection can hold the drain open for ``drain_timeout``.
+    """
+    if expected is not None and await _watch_parent(expected, stop):
+        _remove_key_material(share_a, share_b, socket_path)
+
+
 def _check_socket_path_available(path: Path) -> bool:
     """Probe ``path`` to decide whether we can safely bind there.
 
@@ -232,6 +295,12 @@ async def _run() -> int:
         return 1
 
     try:
+        parent_pid = _parse_parent_pid(os.environ.get("WORTHLESS_SIDECAR_PARENT_PID"))
+    except ValueError as exc:
+        _LOG.error("bad WORTHLESS_SIDECAR_PARENT_PID: %s", exc)
+        return 1
+
+    try:
         shares = _load_shares(share_a, share_b)
     except (OSError, ValueError) as exc:
         _LOG.error("share load failed: %s", exc)
@@ -247,6 +316,12 @@ async def _run() -> int:
     # lives on inside FernetBackend, so this only marginally shrinks residency
     # (WOR-831); true zeroization is a follow-up.
     del shares
+
+    # The parent may have died while we were starting; don't bind for nobody.
+    if _parent_gone(parent_pid):
+        _LOG.warning("parent pid %d died before bind; removing shares", parent_pid)
+        _remove_key_material(share_a, share_b, socket_path)
+        return 0
 
     if not _check_socket_path_available(socket_path):
         return 2
@@ -283,10 +358,18 @@ async def _run() -> int:
     # Print a stable, machine-parseable ready line for supervisors.
     print(f"sidecar: ready socket={socket_path}", flush=True)
 
+    watcher = asyncio.create_task(
+        _wipe_when_orphaned(parent_pid, stop, share_a, share_b, socket_path)
+    )
     try:
         await _drain_server(server, stop, drain_timeout=drain_timeout)
     except Exception as exc:  # noqa: BLE001 — best-effort drain
         _LOG.warning("drain raised during shutdown: %s", exc)
+    await watcher
+    # A signal can win the race and stop the watcher before it sees the
+    # parent die (e.g. mid-drain); re-check so the shares never outlive both.
+    if _parent_gone(parent_pid):
+        _remove_key_material(share_a, share_b, socket_path)
     _LOG.info("sidecar shut down cleanly")
     return 0
 
