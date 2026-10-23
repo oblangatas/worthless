@@ -41,6 +41,7 @@ from worthless.cli.commands.service._common import (
 from worthless.cli.commands.service.templates import LEGACY_LAUNCHD_LABEL
 from worthless.cli.commands.doctor.registry import CheckContext, CheckResult
 from worthless.cli.errors import WorthlessError
+from worthless.cli.platform import is_wsl, systemd_is_running
 
 check_id = "service_health"
 
@@ -122,9 +123,29 @@ def _linger_finding(linger_enabled: bool) -> dict | None:
         return None
     return {
         "kind": "linger_off",
-        "remediation": "systemd linger is off — the proxy will stop when you log "
-        "out. Run `loginctl enable-linger $USER`, or re-run "
-        "`worthless service install`.",
+        "remediation": "systemd linger is off — the proxy stops when you log out "
+        "and won't start at boot. Run `loginctl enable-linger $USER`; if that's "
+        "refused (no local login, e.g. SSH), an administrator must run "
+        "`sudo loginctl enable-linger $USER`.",
+    }
+
+
+def _systemd_off_finding() -> dict:
+    """worthless-tkv1: with systemd down, linger advice is a dead end."""
+    if is_wsl():
+        fix = (
+            "Turn systemd on: in /etc/wsl.conf under [boot] set systemd=true, then "
+            "restart the distro (`wsl --terminate <distro>` from PowerShell). Or "
+            "remove the leftover unit with `worthless service uninstall`."
+        )
+    else:
+        fix = (
+            "Remove the leftover unit with `worthless service uninstall`, and start "
+            "the proxy yourself with `worthless up`."
+        )
+    return {
+        "kind": "systemd_not_running",
+        "remediation": f"systemd isn't running, so the installed service can't run. {fix}",
     }
 
 
@@ -135,6 +156,10 @@ def _installed_unit_path(backend_name: str) -> Path:
     if backend_name == "launchd":
         return launchd.plist_path()
     return systemd.unit_path()
+
+
+def _systemd_down(backend_name: str) -> bool:
+    return backend_name == "systemd" and not systemd_is_running()
 
 
 def _linger_ok_if_systemd(backend_name: str) -> bool:
@@ -214,9 +239,12 @@ def run(ctx: CheckContext) -> CheckResult:
     if legacy_finding:  # computed above; fires when both new + legacy plists exist
         findings.append(legacy_finding)
 
-    linger_finding = _linger_finding(_linger_ok_if_systemd(backend_name))
-    if linger_finding:
-        findings.append(linger_finding)
+    if _systemd_down(backend_name):
+        findings.append(_systemd_off_finding())
+    else:
+        linger_finding = _linger_finding(_linger_ok_if_systemd(backend_name))
+        if linger_finding:
+            findings.append(linger_finding)
 
     status = "warn" if findings else "ok"
     summary = "Service healthy." if not findings else f"{len(findings)} service issue(s) found."
