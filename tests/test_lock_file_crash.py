@@ -348,3 +348,39 @@ def test_a_failed_unlink_still_releases_the_lock(tmp_path: Path, monkeypatch) ->
             pass
 
     assert lock not in _open_paths(), "the lock's fd (and its flock) leaked"
+
+
+def test_a_nested_acquire_in_the_same_process_is_refused(tmp_path: Path) -> None:
+    """Cursor: flock is per open file on macOS too, so a second fd is refused.
+
+    Pinned here because the macOS CI job runs this file, not test_bootstrap.
+    """
+    home = ensure_home(base_dir=tmp_path / ".worthless")
+    with acquire_lock(home):
+        with pytest.raises(WorthlessError) as exc:
+            with acquire_lock(home):
+                pass  # pragma: no cover
+        assert exc.value.code.value == 105
+        assert home.lock_file.exists(), "the live lock was taken over"
+
+
+def test_two_threads_never_hold_the_lock_at_once(tmp_path: Path) -> None:
+    home = ensure_home(base_dir=tmp_path / ".worthless")
+    held, release = threading.Event(), threading.Event()
+
+    def holder() -> None:
+        with acquire_lock(home):
+            held.set()
+            release.wait(10)
+
+    t = threading.Thread(target=holder, daemon=True)
+    t.start()
+    assert held.wait(10)
+    try:
+        with pytest.raises(WorthlessError) as exc:
+            with acquire_lock(home):
+                pass  # pragma: no cover
+        assert exc.value.code.value == 105
+    finally:
+        release.set()
+        t.join(10)
