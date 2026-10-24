@@ -428,20 +428,21 @@ def start_supervised_proxy(
 
     Foreground ``up`` supervises the crypto sidecar; we run it in a new session
     so the default command can return while the child keeps running.
-    """
-    from worthless.cli.commands.service._common import resolve_worthless_binary
 
-    binary = resolve_worthless_binary()
+    ``sys.executable -m worthless``, not a PATH lookup: an older ``worthless``
+    earlier on PATH would otherwise be the one that runs — it answered /healthz
+    on a stale key and turned status green (worthless-l0s1).
+    """
     env = os.environ.copy()
     env["WORTHLESS_HOME"] = str(home.base_dir)
     env["WORTHLESS_PORT"] = str(port)
 
-    cmd = [str(binary), "up", "--port", str(port)]
+    cmd = [sys.executable, "-m", "worthless", "up", "--port", str(port)]
 
     log_fd: int = -1
     try:
         log_fd = os.open(str(log_file), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-        subprocess.Popen(  # nosec B603 — argv from resolved binary + fixed flags
+        subprocess.Popen(  # nosec B603 — argv is this interpreter + fixed flags
             cmd,
             env=env,
             stdout=subprocess.DEVNULL,
