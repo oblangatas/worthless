@@ -30,7 +30,7 @@ def _backend():
 
 
 def _print_service_banner(
-    console, *, platform: str, port: int, after_install: bool = False
+    console, *, platform: str, port: int, after_install: bool = False, lingering: bool = True
 ) -> None:
     """Confirm the persistence guarantee a first-run service user needs.
 
@@ -71,11 +71,21 @@ def _print_service_banner(
         # Deliberately: linger is account-wide, other user services may rely on
         # it, and switching off state we may not have created is the mistake the
         # install rollback exists to avoid. Say so instead. (worthless-fzas)
-        console.print_hint(
-            "Lingering is now on for this account, so the service survives logout. "
-            "`worthless service uninstall` leaves it on — turn it off yourself with "
-            "`loginctl disable-linger` if nothing else needs it."
-        )
+        if lingering:
+            console.print_hint(
+                "Lingering is now on for this account, so the service survives logout. "
+                "`worthless service uninstall` leaves it on — turn it off yourself with "
+                "`loginctl disable-linger` if nothing else needs it."
+            )
+        else:
+            # worthless-8kn5: no local login (SSH, a container) — polkit said no.
+            console.print_warning(
+                "Lingering couldn't be turned on for this account (usually: no local "
+                "login session), so the service runs while you're logged in but stops "
+                "when you log out and won't start at boot. An administrator can fix "
+                f"that with `sudo loginctl enable-linger {systemd._account_name()}` — "
+                "it lets every user service for this account keep running after logout."
+            )
     console.print_hint("Status: `worthless service status` · Stop: `worthless service stop`")
 
 
@@ -128,7 +138,7 @@ def register_service_commands(app: typer.Typer) -> None:
                 raise typer.Exit(code=0)
 
         preflight_service_install(home)
-        backend.install(home, port=port)
+        lingering = backend.install(home, port=port)
         if console.json_mode:
             if backend is launchd:
                 unit = str(launchd.plist_path())
@@ -142,6 +152,9 @@ def register_service_commands(app: typer.Typer) -> None:
                         "binary": str(binary),
                         "port": actual_port,
                         "unit_path": unit,
+                        # 8kn5: false = stops at logout, won't start at boot.
+                        # null on launchd, which has no such concept.
+                        "lingering": lingering if isinstance(lingering, bool) else None,
                     }
                 )
                 + "\n"
@@ -152,6 +165,7 @@ def register_service_commands(app: typer.Typer) -> None:
                 platform=current_platform_backend_name(),
                 port=actual_port,
                 after_install=True,
+                lingering=lingering is not False,  # launchd returns None
             )
 
     @service_group.command("uninstall")

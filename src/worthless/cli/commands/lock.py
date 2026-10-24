@@ -3226,10 +3226,13 @@ def _enroll_single(
     console.print_success(f"Enrolled {alias} ({provider}).")
 
 
-def install_service_for_offer(home: WorthlessHome, *, port: int) -> None:
-    """Install the background service. Separate so the offer can stub it in tests."""
+def install_service_for_offer(home: WorthlessHome, *, port: int) -> bool | None:
+    """Install the background service. Separate so the offer can stub it in tests.
+
+    Returns whether lingering is on (systemd), or None (launchd).
+    """
     preflight_service_install(home)
-    _backend().install(home, port=port)
+    return _backend().install(home, port=port)
 
 
 def _offer_declined_hint() -> str:
@@ -3295,7 +3298,7 @@ def _offer_question(port: int, home: WorthlessHome) -> str:
         else:
             adds = (
                 "a systemd user service set to start when this computer starts\n"
-                f"{pad}(it turns on lingering for your account)"
+                f"{pad}(it tries to turn on lingering for your account)"
             )
         systemd_extra = f"{pad}then `loginctl disable-linger` if nothing else needs it\n"
     if on_wsl:
@@ -3393,7 +3396,7 @@ def _offer_service_after_lock(console, *, home: WorthlessHome, port: int) -> boo
         return False
 
     try:
-        install_service_for_offer(home, port=port)
+        lingering = install_service_for_offer(home, port=port)
     except (WorthlessError, subprocess.CalledProcessError, OSError) as exc:
         # The keys are already protected by the time we ask, so a service that
         # will not install is NOT a reason to report that lock failed.
@@ -3422,7 +3425,11 @@ def _offer_service_after_lock(console, *, home: WorthlessHome, port: int) -> boo
     # Same banner as `worthless service install`, so WSL users get the
     # idle-shutdown warning here too.
     _print_service_banner(
-        console, platform=current_platform_backend_name(), port=port, after_install=True
+        console,
+        platform=current_platform_backend_name(),
+        port=port,
+        after_install=True,
+        lingering=lingering is not False,  # launchd and test stubs return None
     )
     return True
 
