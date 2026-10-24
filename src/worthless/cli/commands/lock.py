@@ -2984,7 +2984,10 @@ def _lock_keys(
                 )
 
             # Snapshot .env so _pass1 can pull *_BASE_URL values into the DB row.
-            env_values = dict(dotenv_values(env_path))
+            # python-dotenv before 1.2.3 keeps a UTF-8 BOM in the first key's
+            # name; unstripped, a user's own first-line *_BASE_URL looks absent,
+            # so lock would append a second line and unlock would delete both.
+            env_values = {k.lstrip("\ufeff"): v for k, v in dotenv_values(env_path).items()}
 
             # worthless-ftmg: refuse to lock an already-locked .env BEFORE any
             # state mutation. The legitimate idempotent re-lock case (same key

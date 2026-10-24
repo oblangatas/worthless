@@ -281,6 +281,13 @@ def _edit_enrollments(home: WorthlessHome, set_clause: str) -> None:
         conn.commit()
 
 
+def _dotenv_values_before_1_2_3(*args, **kwargs) -> dict[str, str | None]:
+    """python-dotenv before 1.2.3 parses a BOM file's first key as '\\ufeffKEY'."""
+    parsed = dotenv_values(*args, **kwargs)
+    first = next(iter(parsed), None)
+    return {(f"\ufeff{k}" if k == first else k): v for k, v in parsed.items()}
+
+
 def _as_enrolled_before_wor_1013(home: WorthlessHome) -> None:
     """Drop lock's BASE_URL record, as on an enrollment an older version made."""
     _edit_enrollments(home, "base_url_restore_json = NULL, base_url_restore_mac = NULL")
@@ -400,13 +407,9 @@ class TestUnlockRemovesTheBaseUrlLockWrote:
             + f"OPENAI_API_KEY={_TEST_KEY}\n".encode()
         )
         _lock(env, home_dir)
+        _as_enrolled_before_wor_1013(home_dir)  # the fallback path, not the record
 
-        def old_dotenv_values(*args, **kwargs):
-            parsed = dotenv_values(*args, **kwargs)
-            first = next(iter(parsed), None)
-            return {(f"﻿{k}" if k == first else k): v for k, v in parsed.items()}
-
-        monkeypatch.setattr(unlock_mod, "dotenv_values", old_dotenv_values)
+        monkeypatch.setattr(unlock_mod, "dotenv_values", _dotenv_values_before_1_2_3)
         _unlock(env, home_dir)
         assert "OPENAI_BASE_URL" not in dotenv_values(env)
         assert dotenv_values(env)["OPENAI_API_KEY"] == _TEST_KEY
@@ -544,6 +547,26 @@ class TestUnlockPutsBackTheBaseUrlYouHad:
             f"OPENAI_API_KEY={_TEST_KEY}\n"
         )
         original = env.read_bytes()
+        _lock(env, home_dir)
+
+        _unlock(env, home_dir)
+        assert env.read_bytes() == original
+
+    def test_your_first_line_comes_back_when_dotenv_keeps_a_bom(
+        self, home_dir: WorthlessHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import dotenv
+
+        import worthless.cli.commands.unlock as unlock_mod
+
+        env = tmp_path / ".env"
+        env.write_bytes(
+            b"\xef\xbb\xbfOPENAI_BASE_URL=https://api.openai.com/v1\n"
+            + f"OPENAI_API_KEY={_TEST_KEY}\n".encode()
+        )
+        original = env.read_bytes()
+        monkeypatch.setattr(dotenv, "dotenv_values", _dotenv_values_before_1_2_3)  # lock
+        monkeypatch.setattr(unlock_mod, "dotenv_values", _dotenv_values_before_1_2_3)
         _lock(env, home_dir)
 
         _unlock(env, home_dir)
