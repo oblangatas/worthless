@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import http.server
 import json
 import os
 import socket
 import subprocess
 import sys
 import textwrap
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -363,3 +365,118 @@ class TestPartialUnlockKeepsOtherKeyRouted:
             extra_env={"HTTPS_PROXY": "http://127.0.0.1:9", "NO_PROXY": "127.0.0.1,localhost"},
         )
         assert "STATUS:502" in proc.stdout, f"stdout: {proc.stdout}\nstderr: {proc.stderr}"
+
+
+# An app that reads its upstream from OPENROUTER_BASE_URL with no default, the
+# WOR-1013 victim. The guard keeps a test key from ever leaving the machine: an
+# unset line makes the SDK fall back to api.openai.com, which is reported, not
+# called.
+_OWN_UPSTREAM_CHILD_SCRIPT = textwrap.dedent("""\
+    import os, sys
+    from urllib.parse import urlsplit
+    import openai
+    from dotenv import load_dotenv
+    load_dotenv(os.environ["WORTHLESS_E2E_ENV_PATH"], override=True)
+    client = openai.OpenAI(
+        api_key=os.environ["OPENROUTER_API_KEY"],
+        base_url=os.getenv("OPENROUTER_BASE_URL"),
+        max_retries=0,
+        timeout=10,
+    )
+    host = urlsplit(str(client.base_url)).hostname
+    if host != "127.0.0.1":
+        print(f"WOULD_SEND_TO:{host}")
+        sys.exit(3)
+    reply = client.chat.completions.create(
+        model="openrouter/auto", messages=[{"role": "user", "content": "hi"}]
+    )
+    print(f"REPLY:{reply.choices[0].message.content}")
+""")
+
+
+class _FakeUpstream(http.server.BaseHTTPRequestHandler):
+    """Stands in for the user's own upstream; records what reached it."""
+
+    received: list[tuple[str, str]] = []
+
+    def do_POST(self) -> None:  # noqa: N802 — http.server's handler name
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        self.received.append((self.path, self.headers.get("Authorization") or ""))
+        body = json.dumps(
+            {
+                "id": "chatcmpl-e2e",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "openrouter/auto",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_args: object) -> None:
+        pass
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(60)
+class TestUnlockedAppReachesYourOwnUpstream:
+    """After lock then unlock, the app sends its real key to the upstream you had set (WOR-1013)."""
+
+    def test_app_sends_the_key_to_your_base_url_not_openai(self, tmp_path: Path) -> None:
+        _FakeUpstream.received = []
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _FakeUpstream)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            upstream = f"http://127.0.0.1:{server.server_address[1]}/api/v1"
+            env_file, _home, _key, cli_env = _make_e2e_env(tmp_path, proxy_port=1)
+            key = fake_openrouter_key()
+            env_file.write_text(f"OPENROUTER_BASE_URL={upstream}\nOPENROUTER_API_KEY={key}\n")
+            registered = runner.invoke(
+                app,
+                [
+                    "providers",
+                    "register",
+                    "--name",
+                    "my-openrouter",
+                    "--url",
+                    upstream,
+                    "--protocol",
+                    "openai",
+                ],
+                env=cli_env,
+            )
+            assert registered.exit_code == 0, registered.output
+            _lock(env_file, cli_env)
+            unlocked = runner.invoke(app, ["unlock", "--env", str(env_file)], env=cli_env)
+            assert unlocked.exit_code == 0, unlocked.output
+
+            child_env = {
+                k: v for k, v in os.environ.items() if not k.startswith(("OPENAI_", "OPENROUTER_"))
+            }
+            proc = subprocess.run(
+                [sys.executable, "-c", _OWN_UPSTREAM_CHILD_SCRIPT],
+                env={**child_env, "WORTHLESS_E2E_ENV_PATH": str(env_file)},
+                timeout=30,
+                capture_output=True,
+                text=True,
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+
+        assert proc.returncode == 0, f"stdout: {proc.stdout}\nstderr: {proc.stderr}"
+        assert "REPLY:ok" in proc.stdout
+        # Compare in place: never print the key.
+        assert [(path, auth == f"Bearer {key}") for path, auth in _FakeUpstream.received] == [
+            ("/api/v1/chat/completions", True)
+        ]
