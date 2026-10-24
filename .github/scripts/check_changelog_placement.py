@@ -8,22 +8,27 @@ where lines actually land after a merge from ``main``, which is how entries
 end up under a released heading when a release is cut while the PR is open
 (WOR-957; #688, #691 and #676 all landed this way in one week).
 
-Only *added* lines below the first released ``## [x.y.z]`` heading count.
-Release headings, compare-link lines and blank lines are exempt. A release PR
-adds the newest version heading itself, so the section it creates is open to
-it. Removals pass: moving an entry out of a released section is the fix. A deliberate edit to a
-released section uses the ``changelog-released-edit`` label, checked in the
-workflow. Exit 1 with the offending lines; 0 otherwise.
+Shipped means the ``v<version>`` git tag exists, not that the heading does.
+Between a release PR merging and its tag, fixes that land on ``main`` ship in
+that tag, so their notes belong in its section (#714, #732 and #733 for
+0.3.16). Only *added* lines inside a tagged version's section count. Release
+headings, compare-link lines and blank lines are exempt. Removals pass: moving
+an entry out of a released section is the fix. A deliberate edit to a released
+section uses the ``changelog-released-edit`` label, checked in the workflow.
+With no tags visible (a checkout without them) it fails rather than guarding
+nothing. Exit 1 with the offending lines; 0 otherwise.
 """
 
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 from pathlib import Path
 
 _HUNK = re.compile(r"^@@ -\S+ \+(\d+)(?:,(\d+))? @@")
 _LINK = re.compile(r"^\[[^\]]+\]: ")
+_HEADING = re.compile(r"^## \[([^\]]+)\]")
 
 
 def _added_lines(diff: str) -> list[int]:
@@ -37,35 +42,34 @@ def _added_lines(diff: str) -> list[int]:
     return added
 
 
-def misplaced(changelog: str, diff: str) -> list[tuple[int, str]]:
-    """(line number, text) of each added line that sits under a released version."""
+def misplaced(changelog: str, diff: str, shipped: set[str]) -> list[tuple[int, str]]:
+    """(line number, text) of each added line inside a version whose tag exists."""
     lines = changelog.splitlines()
-    first_release = next(
-        (
-            i
-            for i, line in enumerate(lines, 1)
-            if line.startswith("## [") and not line.startswith("## [Unreleased]")
-        ),
-        None,
-    )
-    if first_release is None:
-        return []
-    added = _added_lines(diff)
-    # A release PR adds the newest version heading itself; that one section is
-    # being written, not edited after shipping, so its lines are allowed.
-    open_until = first_release
-    if first_release in added:
-        later = range(first_release + 1, len(lines) + 1)
-        open_until = next((i for i in later if lines[i - 1].startswith("## [")), len(lines) + 1)
+    closed: set[int] = set()
+    in_shipped = False
+    for i, line in enumerate(lines, 1):
+        heading = _HEADING.match(line)
+        if heading:
+            in_shipped = heading.group(1) in shipped
+        elif in_shipped:
+            closed.add(i)
     out = []
-    for n in added:
+    for n in _added_lines(diff):
         text = lines[n - 1] if n <= len(lines) else ""
-        if n < open_until or not text.strip():
-            continue
-        if text.startswith("## [") or _LINK.match(text):
-            continue
-        out.append((n, text))
+        if n in closed and text.strip() and not _LINK.match(text):
+            out.append((n, text))
     return out
+
+
+def _shipped() -> set[str]:
+    """Versions with a ``v`` tag in this checkout."""
+    tags = subprocess.run(
+        ["git", "tag", "--list", "v*"],  # noqa: S607 — CI runner's git, fixed args
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    return {t[1:] for t in tags.split()}
 
 
 def main(argv: list[str]) -> int:
@@ -73,7 +77,14 @@ def main(argv: list[str]) -> int:
         print(__doc__, file=sys.stderr)
         return 2
     changelog = Path(argv[1]).read_text(encoding="utf-8")
-    bad = misplaced(changelog, sys.stdin.read())
+    shipped = _shipped()
+    has_releases = any(
+        m and m.group(1) != "Unreleased" for m in map(_HEADING.match, changelog.splitlines())
+    )
+    if has_releases and not shipped:
+        print("CHANGELOG: no release tags visible, so nothing can be checked. Fetch tags.")
+        return 1
+    bad = misplaced(changelog, sys.stdin.read(), shipped)
     if not bad:
         print("CHANGELOG: every added line is under [Unreleased].")
         return 0

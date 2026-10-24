@@ -1,10 +1,11 @@
 name: Changelog placement
 
-# WOR-957: a PR's CHANGELOG lines must land under [Unreleased]. If a release
-# is cut while the PR is open, merging main back in can leave the entry under
-# the version that just shipped: the next release notes miss it and the old
-# version claims it (#691, #688 and #676 all did this in one week). The check
-# reads the PR's merge commit, so it sees where lines land after that merge.
+# WOR-957: a PR's CHANGELOG lines must not land under a version that already
+# shipped (its v<version> tag exists). If a release is cut while the PR is open,
+# merging main back in can leave the entry under that version: the next release
+# notes miss it and the old version claims it (#691, #688 and #676 all did this
+# in one week). The check reads the PR's merge commit, so it sees where lines
+# land after that merge.
 # Deliberate edits to a released section: add the 'changelog-released-edit' label.
 
 on:
@@ -12,13 +13,20 @@ on:
     # No paths filter: the job takes seconds, an unchanged CHANGELOG passes, and a
     # path-filtered check can't be made required without stalling other PRs.
     types: [opened, synchronize, reopened, labeled, unlabeled]
+  # After-merge alarm. A release can land on main after a PR's last push; the PR
+  # check never re-runs, and git still merges the entry cleanly under the new
+  # release. This re-checks every push to main.
+  push:
+    branches: [main]
 
 permissions:
   contents: read
+  pull-requests: read # the push run reads the merged PR's labels
 
 concurrency:
   group: changelog-placement-${{ github.ref }}
-  cancel-in-progress: true
+  # A newer push to a PR supersedes the older run; every push to main is checked.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   placement:
@@ -27,13 +35,32 @@ jobs:
     timeout-minutes: 5
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'changelog-released-edit') }}
     steps:
-      - name: Check out the PR merge commit
+      - name: Check out the PR merge commit (or the pushed commit)
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 2
+          fetch-tags: true # "shipped" means the version's tag exists
           persist-credentials: false
 
+      - name: Skip a deliberate released-section edit (push to main)
+        id: label
+        if: github.event_name == 'push'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          labels=$(gh api "repos/$REPO/commits/$SHA/pulls" --jq '[.[].labels[].name] | join(",")')
+          case ",$labels," in
+            *,changelog-released-edit,*) echo "skip=true" >> "$GITHUB_OUTPUT" ;;
+          esac
+
       - name: Check CHANGELOG placement
+        if: steps.label.outputs.skip != 'true'
+        # Explicit bash gives pipefail: a failing `git diff` must fail the step,
+        # not hand the checker an empty diff that passes.
+        shell: bash
         run: |
           git diff -U0 HEAD^1 HEAD -- CHANGELOG.md \
             | python .github/scripts/check_changelog_placement.py CHANGELOG.md
