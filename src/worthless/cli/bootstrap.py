@@ -53,6 +53,9 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_BASE = Path.home() / ".worthless"
 _STALE_LOCK_SECONDS = 300  # 5 minutes
+# WOR-965: what a live lock holder looks like to the next command. One text for
+# every path, and never "delete the lock file" (that lets two commands write).
+_BUSY_MESSAGE = "Another worthless command is running. Wait for it to finish, then try again."
 
 _BOOTSTRAP_ATTEST_PURPOSE = "bootstrap-validate"
 
@@ -757,8 +760,10 @@ def acquire_lock(home: WorthlessHome) -> Generator[None, None, None]:
     except FileExistsError:
         raise WorthlessError(
             ErrorCode.LOCK_IN_PROGRESS,
-            "Another worthless operation is in progress. "
-            "Remove ~/.worthless/.lock-in-progress if stale.",
+            # WOR-965: never suggest deleting the lock file. A live holder's
+            # lock deleted by hand lets two commands write at once, and a dead
+            # holder's lock is reclaimed automatically (check_stale_lock).
+            _BUSY_MESSAGE,
         ) from None  # FileExistsError context is not useful to callers
     if _fcntl is None:
         # Windows: no flock, and an open file can't be unlinked there.
@@ -866,8 +871,9 @@ def check_stale_lock(home: WorthlessHome) -> None:
 def _fresh_lock_error(age: float) -> WorthlessError:
     return WorthlessError(
         ErrorCode.LOCK_IN_PROGRESS,
-        f"Lock file is {int(age)}s old (< {_STALE_LOCK_SECONDS}s). "
-        "Another operation may be running.",
+        # WOR-965: say it clears by itself, so nobody deletes a live lock.
+        "Another worthless command may be running. If nothing is, this lock clears "
+        f"by itself in {max(1, int(_STALE_LOCK_SECONDS - age))}s. Wait, then try again.",
     )
 
 
@@ -919,7 +925,7 @@ def _holder_is_dead(fd: int) -> bool:
     except BlockingIOError:
         raise WorthlessError(
             ErrorCode.LOCK_IN_PROGRESS,
-            "Another worthless operation is running. Wait for it to finish.",
+            _BUSY_MESSAGE,
         ) from None
     except OSError:
         return False

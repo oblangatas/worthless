@@ -384,3 +384,60 @@ def test_two_threads_never_hold_the_lock_at_once(tmp_path: Path) -> None:
     finally:
         release.set()
         t.join(10)
+
+
+def test_the_busy_message_never_says_to_delete_the_lock(tmp_path: Path, monkeypatch) -> None:
+    """WOR-965: deleting a live lock by hand lets two commands write at once.
+
+    A dead holder's lock is reclaimed automatically (WOR-962), so there is
+    never a reason to tell the user to delete it.
+    """
+    home = ensure_home(base_dir=tmp_path / ".worthless")
+    home.lock_file.write_text("this-host 1\n")  # created by a racing command
+    monkeypatch.setattr(bootstrap, "check_stale_lock", lambda _home: None)
+
+    with pytest.raises(WorthlessError) as exc:
+        with acquire_lock(home):
+            pass  # pragma: no cover
+
+    msg = exc.value.message.lower()
+    assert exc.value.code.value == 105
+    assert msg.startswith("another worthless command is running"), msg
+    assert "lock-in-progress" not in msg, msg
+    assert not any(w in msg for w in ("remove", "delete", "rm ")), msg
+    assert "wait" in msg, msg
+
+
+def test_the_5_minute_message_says_the_lock_clears_by_itself(tmp_path: Path) -> None:
+    """WOR-965: a lock that can't be proven dead (empty, other host, no flock)
+    waits out the 5-minute rule. Say when it clears; never suggest deleting it.
+    """
+    home = ensure_home(base_dir=tmp_path / ".worthless")
+    home.lock_file.touch()
+    _age(home.lock_file, 100)  # ~200s left
+
+    with pytest.raises(WorthlessError) as exc:
+        bootstrap.check_stale_lock(home)
+
+    msg = exc.value.message.lower()
+    assert exc.value.code.value == 105
+    assert "clears by itself" in msg, msg
+    assert "wait" in msg, msg
+    assert any(f"{s}s" in msg for s in range(190, 205)), msg  # seconds left
+    assert not any(w in msg for w in ("remove", "delete", "rm ")), msg
+
+
+def test_a_live_holder_gets_the_same_wait_message(tmp_path: Path) -> None:
+    """The common busy path (live flock holder) must say what the race path says."""
+    home = ensure_home(base_dir=tmp_path / ".worthless")
+    child = _hold_lock(home.base_dir)
+    try:
+        with pytest.raises(WorthlessError) as exc:
+            with acquire_lock(home):
+                pass  # pragma: no cover
+    finally:
+        _kill(child)
+
+    assert exc.value.message == (
+        "Another worthless command is running. Wait for it to finish, then try again."
+    )
