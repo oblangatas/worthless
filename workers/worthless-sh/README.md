@@ -50,6 +50,15 @@ byte-identical either way (244 passed, 9 expected-fail before and after).
 silently reinstates 0.35.2 on the next `npm install`; `tests/test_dependency_audit_gate.py`
 fails offline if that happens, and the `npm audit` job in `dependency-audit.yml` fails in CI.
 
+`undici` and `zod` are overridden for the same reason: miniflare pins undici exactly, and
+`@cloudflare/vitest-pool-workers` pins zod to exactly `4.4.3`, still true of their latest
+releases on 2026-10-24. Each floor is the first fixed version: undici `^7.30.1`
+([GHSA-4qv8-2p9j-2685](https://github.com/advisories/GHSA-4qv8-2p9j-2685),
+[GHSA-f72v-6w45-q472](https://github.com/advisories/GHSA-f72v-6w45-q472),
+[GHSA-xjj6-f33q-929c](https://github.com/advisories/GHSA-xjj6-f33q-929c)) and zod `^4.6.6`
+([GHSA-mrhx-c7xc-m3w5](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5)). Remove each once
+the package that pins it depends on a fixed version; only the `npm audit` job guards these two.
+
 ## Tickets
 
 - WOR-305 — this test suite
