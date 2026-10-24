@@ -25,7 +25,7 @@ from worthless.cli.console import get_console
 # (wrap is now a passthrough; lock owns BASE_URL ownership). HF4 on main
 # pre-dated that move and still imported from wrap.py — that import would
 # fail at module-load post-merge. Importing from the new home, lock.py.
-from worthless.cli.commands.lock import _PROVIDER_ENV_MAP
+from worthless.cli.commands.lock import _PROVIDER_ENV_MAP, _derive_base_url_var
 
 # scan_env_keys is used by HF4's per-key messaging logic (the
 # "no DB row here" hard-error path further down in this module).
@@ -270,9 +270,10 @@ def _batch_restore_env(env_path: Path, planned: list[_PlannedRestore]) -> None:
             f"(planned aliases: {[entry.alias for entry in planned]})"
         )
         updates[p.var_name] = p.key_buf.decode("utf-8")
-        base_url_var = _PROVIDER_ENV_MAP.get(p.provider)
-        if base_url_var:
-            removals.add(base_url_var)
+        # WOR-981: remove the var lock wrote (OPENROUTER_API_KEY -> OPENROUTER_BASE_URL),
+        # not the protocol's canonical one, which may be the user's own setting.
+        if p.provider in _PROVIDER_ENV_MAP:
+            removals.add(_derive_base_url_var(p.var_name, p.provider))
 
     if not updates and not removals:
         return

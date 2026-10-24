@@ -13,7 +13,7 @@ from worthless.cli.bootstrap import WorthlessHome
 from worthless.cli.errors import WorthlessError
 
 from tests.conftest import make_repo as _repo
-from tests.helpers import fake_anthropic_key, fake_openai_key
+from tests.helpers import fake_anthropic_key, fake_openai_key, fake_openrouter_key
 
 runner = CliRunner()
 
@@ -233,6 +233,34 @@ class TestShardAInEnv:
 
         content_after = env_file.read_text()
         assert "OPENAI_BASE_URL=" not in content_after
+
+    def test_unlock_removes_the_base_url_lock_wrote(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """WOR-981: an OpenRouter lock writes OPENROUTER_BASE_URL, so unlock must
+        remove that one — not OPENAI_BASE_URL, which here is the user's own."""
+        env = tmp_path / ".env"
+        env.write_text(
+            f"OPENROUTER_API_KEY={fake_openrouter_key()}\n"
+            "OPENAI_BASE_URL=https://gateway.example/v1\n"
+        )
+        original = env.read_text()
+        _lock(env, home_dir)
+        assert "OPENROUTER_BASE_URL=" in env.read_text()
+
+        result = runner.invoke(
+            app,
+            ["unlock", "--env", str(env)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+        )
+        assert result.exit_code == 0, result.output
+
+        from dotenv import dotenv_values
+
+        parsed = dotenv_values(env)
+        assert "OPENROUTER_BASE_URL" not in parsed
+        assert parsed.get("OPENAI_BASE_URL") == "https://gateway.example/v1"
+        assert env.read_text() == original
 
 
 class TestEnrollUnlockNullEnvPath:
