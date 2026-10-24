@@ -4,14 +4,19 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Security
+- **After `worthless unlock`, put back a `*_BASE_URL` you had set yourself before lock** (WOR-981, [#737](https://github.com/oblangatas/worthless/pull/737)).
+  If your `.env` had the line before a normal lock, for example `OPENROUTER_BASE_URL=https://openrouter.ai/api/v1`, lock replaced it with the proxy URL, and unlock now removes it. An app that reads `OPENROUTER_BASE_URL` with no default then falls back to OpenAI's address and sends your OpenRouter key to OpenAI. Before this release the dead proxy line stayed, and calls failed on your machine instead. Lock does not record the original line yet; WOR-1013 will put it back for you.
+
 ### Fixed
 - **`worthless unlock` removes the proxy line that lock added for an OpenRouter key** (WOR-981, [#737](https://github.com/oblangatas/worthless/pull/737)).
   Before: lock names the proxy line after the key's variable, so `OPENROUTER_API_KEY` gets `OPENROUTER_BASE_URL`. Unlock looked for `OPENAI_BASE_URL` instead. After unlock, `OPENROUTER_BASE_URL` still sent your app to the local proxy, for a key the proxy no longer had, and the `.env` did not match the original. The same happened for any other `<NAME>_API_KEY` variable, such as `GROQ_API_KEY`. If you had your own `OPENAI_BASE_URL` in that file, unlock deleted it, after a normal lock or a `--keys-only` one. If the `.env` also had a locked `OPENAI_API_KEY`, unlocking only the OpenRouter key deleted `OPENAI_BASE_URL`. The OpenAI key stayed locked, so its scrambled value then went straight to OpenAI and failed.
-  Now: unlock removes the line that lock wrote for each key it unlocks, and only while that line still points at that key on the proxy. Other `*_BASE_URL` lines are kept, including your own after a `--keys-only` lock. If lock added the line, lock then unlock gives back the `.env` you started with.
+  Now: unlock removes the line that lock wrote for each key it unlocks, and only while that line still sends that key's alias to the proxy (whatever the host or port). Other `*_BASE_URL` lines are kept, including your own after a `--keys-only` lock. If lock added the line, lock then unlock gives back the `.env` you started with. `worthless uninstall` restores the same way.
 
   **Limits.**
-  - If your `.env` already had the line before a normal lock, for example `OPENROUTER_BASE_URL=https://openrouter.ai/api/v1`, lock replaced it with the proxy URL and unlock now removes it. Put it back by hand. Before this fix the dead proxy line stayed and calls failed on your machine. Now an app that reads `OPENROUTER_BASE_URL` with no default can fall back to OpenAI's address and send your OpenRouter key there. Restoring the line is WOR-1013.
-  - A `.env` you already unlocked with an older version keeps its leftover line. Run `worthless doctor` in that project's folder: it reports the line as a BASE_URL alias missing from the DB. Delete that line by hand.
+  - A `*_BASE_URL` line you had before a normal lock is removed, not put back. See Security above.
+  - A `.env` you already unlocked with an older version keeps its leftover line. Run `worthless doctor` in that project's folder: it checks the file named `.env` there and reports the line as a BASE_URL alias missing from the DB. Delete that line by hand.
+  - If one `*_BASE_URL` name appears twice in the file, unlock decides on the last one, then keeps or removes every line with that name (WOR-1014).
   - When two keys share one line (for example `OPENAI_API_KEY` and `MY_OPENAI_KEY` both use `OPENAI_BASE_URL`, which points at `OPENAI_API_KEY`), unlock both together. Unlocking only `OPENAI_API_KEY` removes the line while `MY_OPENAI_KEY` stays locked. Unlocking only `MY_OPENAI_KEY` keeps the line, so an app that reads it sends `MY_OPENAI_KEY`'s real key to the local proxy, which refuses it (401) and never forwards it, and `lock` refuses that file until the other key is unlocked too.
   - A `.env` whose last line has no newline gets one. This happened before too, for every key.
 
