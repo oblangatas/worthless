@@ -7,6 +7,8 @@ import json
 import pytest
 
 from worthless.proxy.metering import (
+    StreamingUsageCollector,
+    UsageInfo,
     extract_usage_anthropic,
     extract_usage_openai,
     record_spend,
@@ -273,3 +275,113 @@ def test_extraction_failure_is_distinguishable_from_zero_usage():
     assert result is not None
     assert result.total_tokens == 0
     assert result.model == "gpt-4"
+
+
+# ---------------------------------------------------------------------------
+# WOR-1002: a null token count is 0; any other non-int count is unreadable usage
+# ---------------------------------------------------------------------------
+
+_NOT_COUNTS = ["5", 5.0, True]
+_ANTHROPIC_COUNTS = {
+    "input_tokens": 5,
+    "cache_creation_input_tokens": 7,
+    "cache_read_input_tokens": 11,
+    "output_tokens": 3,
+}
+
+
+def _anthropic_stream(start_usage: dict, delta_usage: dict) -> bytes:
+    """Anthropic SSE body: message_start carries *start_usage*, message_delta *delta_usage*."""
+    start = {"type": "message_start", "message": {"model": "m", "usage": start_usage}}
+    delta = {"type": "message_delta", "usage": delta_usage}
+    return (
+        f"event: message_start\ndata: {json.dumps(start)}\n\n"
+        f"event: message_delta\ndata: {json.dumps(delta)}\n\n"
+    ).encode()
+
+
+def _openai_stream(usage: dict) -> bytes:
+    """OpenAI SSE body whose final chunk carries *usage*."""
+    chunk = {"model": "m", "choices": [], "usage": usage}
+    return f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n".encode()
+
+
+def _collect_anthropic(body: bytes) -> UsageInfo | None:
+    collector = StreamingUsageCollector(provider="anthropic")
+    collector.feed(body)
+    return collector.result()
+
+
+def _collect_openai(body: bytes) -> UsageInfo | None:
+    collector = StreamingUsageCollector(provider="openai")
+    collector.feed(body)
+    return collector.result()
+
+
+@pytest.mark.parametrize("field", list(_ANTHROPIC_COUNTS))
+def test_extract_usage_anthropic_json_null_count_is_zero(field):
+    usage = {**_ANTHROPIC_COUNTS, field: None}
+    result = extract_usage_anthropic(json.dumps({"model": "m", "usage": usage}).encode())
+    assert result is not None
+    assert result.total_tokens == sum(_ANTHROPIC_COUNTS.values()) - _ANTHROPIC_COUNTS[field]
+
+
+@pytest.mark.parametrize("bad", _NOT_COUNTS, ids=repr)
+@pytest.mark.parametrize("field", list(_ANTHROPIC_COUNTS))
+def test_extract_usage_anthropic_json_non_int_count_is_no_usage(field, bad):
+    usage = {**_ANTHROPIC_COUNTS, field: bad}
+    assert extract_usage_anthropic(json.dumps({"model": "m", "usage": usage}).encode()) is None
+
+
+_ANTHROPIC_STREAM_PARSERS = pytest.mark.parametrize(
+    "parse", [extract_usage_anthropic, _collect_anthropic], ids=["sse_fallback", "collector"]
+)
+
+
+@_ANTHROPIC_STREAM_PARSERS
+def test_anthropic_stream_null_cache_counts_are_zero(parse):
+    start = {
+        "input_tokens": 5,
+        "cache_creation_input_tokens": None,
+        "cache_read_input_tokens": None,
+    }
+    result = parse(_anthropic_stream(start, {"output_tokens": 3}))
+    assert result is not None
+    assert result.total_tokens == 8
+
+
+@pytest.mark.parametrize("bad", _NOT_COUNTS, ids=repr)
+@_ANTHROPIC_STREAM_PARSERS
+def test_anthropic_stream_non_int_input_count_counts_output_only(parse, bad):
+    """An unreadable message_start usage is treated like a missing message_start."""
+    start = {"input_tokens": 5, "cache_read_input_tokens": bad}
+    result = parse(_anthropic_stream(start, {"output_tokens": 3}))
+    assert result is not None
+    assert result.total_tokens == 3
+
+
+@pytest.mark.parametrize("bad", _NOT_COUNTS, ids=repr)
+@_ANTHROPIC_STREAM_PARSERS
+def test_anthropic_stream_non_int_output_count_is_no_usage(parse, bad):
+    assert parse(_anthropic_stream({"input_tokens": 5}, {"output_tokens": bad})) is None
+
+
+def test_extract_usage_openai_json_null_total_is_zero():
+    body = json.dumps({"model": "m", "usage": {"total_tokens": None}}).encode()
+    result = extract_usage_openai(body)
+    assert result is not None
+    assert result.total_tokens == 0
+
+
+@pytest.mark.parametrize("bad", _NOT_COUNTS, ids=repr)
+def test_extract_usage_openai_json_non_int_total_is_no_usage(bad):
+    body = json.dumps({"model": "m", "usage": {"total_tokens": bad}}).encode()
+    assert extract_usage_openai(body) is None
+
+
+@pytest.mark.parametrize("bad", _NOT_COUNTS, ids=repr)
+@pytest.mark.parametrize(
+    "parse", [extract_usage_openai, _collect_openai], ids=["sse_fallback", "collector"]
+)
+def test_openai_stream_non_int_total_is_no_usage(parse, bad):
+    assert parse(_openai_stream({"total_tokens": bad})) is None

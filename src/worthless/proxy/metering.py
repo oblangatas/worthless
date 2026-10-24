@@ -16,6 +16,32 @@ class UsageInfo:
     model: str | None
 
 
+_ANTHROPIC_INPUT_COUNTS = (
+    "input_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+)
+
+
+def _sum_counts(usage: dict, *keys: str) -> int | None:
+    """Sum the token counts named by *keys* in a provider ``usage`` object.
+
+    An absent or null count is 0 (Anthropic types its cache counts as
+    ``Optional[int]``). Any other non-int value, bool included, returns None:
+    the usage is unreadable, so the caller treats it like a reply without
+    usage rather than crashing or billing a bogus number.
+    """
+    total = 0
+    for key in keys:
+        count = usage.get(key)
+        if count is None:
+            continue
+        if isinstance(count, bool) or not isinstance(count, int):
+            return None
+        total += count
+    return total
+
+
 def extract_usage_openai(data: bytes) -> UsageInfo | None:
     """Extract token usage from an OpenAI response (JSON or SSE).
 
@@ -29,7 +55,9 @@ def extract_usage_openai(data: bytes) -> UsageInfo | None:
     try:
         parsed = json.loads(data)
         if isinstance(parsed, dict) and "usage" in parsed:
-            total = parsed["usage"].get("total_tokens", 0)
+            total = _sum_counts(parsed["usage"], "total_tokens")
+            if total is None:
+                return None
             return UsageInfo(total_tokens=total, model=parsed.get("model"))
     except (json.JSONDecodeError, ValueError):
         pass
@@ -45,7 +73,9 @@ def extract_usage_openai(data: bytes) -> UsageInfo | None:
             try:
                 chunk = json.loads(payload)
                 if isinstance(chunk, dict) and "usage" in chunk:
-                    total = chunk["usage"].get("total_tokens", 0)
+                    total = _sum_counts(chunk["usage"], "total_tokens")
+                    if total is None:
+                        return None
                     return UsageInfo(total_tokens=total, model=chunk.get("model"))
             except (json.JSONDecodeError, ValueError):
                 continue
@@ -88,15 +118,10 @@ def extract_usage_anthropic(data: bytes) -> UsageInfo | None:
     try:
         parsed = json.loads(data)
         if isinstance(parsed, dict) and "usage" in parsed:
-            usage = parsed["usage"]
-            input_tokens = usage.get("input_tokens", 0)
-            cache_creation = usage.get("cache_creation_input_tokens", 0)
-            cache_read = usage.get("cache_read_input_tokens", 0)
-            output_tokens = usage.get("output_tokens", 0)
-            return UsageInfo(
-                total_tokens=input_tokens + cache_creation + cache_read + output_tokens,
-                model=parsed.get("model"),
-            )
+            total = _sum_counts(parsed["usage"], *_ANTHROPIC_INPUT_COUNTS, "output_tokens")
+            if total is None:
+                return None
+            return UsageInfo(total_tokens=total, model=parsed.get("model"))
     except (json.JSONDecodeError, ValueError):
         pass
 
@@ -112,19 +137,17 @@ def extract_usage_anthropic(data: bytes) -> UsageInfo | None:
     start = _find_sse_event_data(lines, "message_start")
     if start:
         msg = start.get("message", {})
-        usage = msg.get("usage", {})
-        input_tokens = (
-            usage.get("input_tokens", 0)
-            + usage.get("cache_creation_input_tokens", 0)
-            + usage.get("cache_read_input_tokens", 0)
-        )
+        # An unreadable message_start usage counts like a missing message_start.
+        input_tokens = _sum_counts(msg.get("usage", {}), *_ANTHROPIC_INPUT_COUNTS) or 0
         model = msg.get("model")
 
     delta = _find_sse_event_data(lines, "message_delta", reverse=True)
     if delta is None or "usage" not in delta:
         return None
 
-    output_tokens = delta["usage"].get("output_tokens", 0)
+    output_tokens = _sum_counts(delta["usage"], "output_tokens")
+    if output_tokens is None:
+        return None
     return UsageInfo(total_tokens=input_tokens + output_tokens, model=model)
 
 
@@ -183,9 +206,11 @@ class StreamingUsageCollector:
         if self.provider == "openai":
             usage = parsed.get("usage")
             if usage and isinstance(usage, dict):
-                self._total_tokens = usage.get("total_tokens", 0)
-                self._model = parsed.get("model", self._model)
-                self._found_usage = True
+                total = _sum_counts(usage, "total_tokens")
+                if total is not None:
+                    self._total_tokens = total
+                    self._model = parsed.get("model", self._model)
+                    self._found_usage = True
         elif self.provider == "anthropic":
             if self._pending_event == "message_start":
                 msg = parsed.get("message")
@@ -193,19 +218,17 @@ class StreamingUsageCollector:
                     return
                 usage = msg.get("usage")
                 if isinstance(usage, dict):
-                    self._input_tokens = (
-                        usage.get("input_tokens", 0)
-                        + usage.get("cache_creation_input_tokens", 0)
-                        + usage.get("cache_read_input_tokens", 0)
-                    )
+                    self._input_tokens = _sum_counts(usage, *_ANTHROPIC_INPUT_COUNTS) or 0
                 self._model = msg.get("model", self._model)
             elif self._pending_event == "message_delta":
                 usage = parsed.get("usage")
                 if not isinstance(usage, dict):
                     return
                 if "output_tokens" in usage:
-                    self._output_tokens = usage["output_tokens"]
-                    self._found_usage = True
+                    output_tokens = _sum_counts(usage, "output_tokens")
+                    if output_tokens is not None:
+                        self._output_tokens = output_tokens
+                        self._found_usage = True
 
         self._pending_event = None
 
