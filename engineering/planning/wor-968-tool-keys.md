@@ -94,7 +94,9 @@ behaviour and must stay green.
   pass every other header through, except those PR1b drops. `ProviderAdapter.prepare_request` takes no method,
   path, query or auth form today: pass them to the passthrough adapter without changing the LLM adapters.
 - `app.py` passthrough branch:
-  - parse the alias once from `scope["raw_path"]` (drop `root_path`), before branching on the protocol;
+  - parse the alias once, with today's parser, before branching on the protocol; a passthrough request then
+    takes its API path from `scope["raw_path"]` after the `/<alias>` prefix (drop `root_path`; the two must
+    agree);
   - unknown protocol → uniform 401;
   - extract the credential in mirrored form **before** the decoy check;
   - run `build_upstream_url(base_url, raw_api_path, query_string)` (plain string join, never `urljoin`) and the
@@ -229,6 +231,8 @@ Needs PR0c merged.
 - `test_lock_slack_end_to_end`: shard-A keeps `xoxb-`; `SLACK_BOT_BASE_URL` has no `/v1`; the row is passthrough
   with a NULL cap and a `slack-` alias; the proxy round trip delivers the real key to respx;
 - `SLACK_BOT_BASE_URL=https://api.linear.app` is refused, as are `https://api.openai.com/v1` and the reverse;
+- a tool key never takes its URL from OpenClaw's `baseUrl`, from a URL stored on an earlier row, or from the
+  `api.openai.com/v1` fallback (one test per route);
 - a user `providers.toml` entry that reuses a tool vendor's URL, or declares `protocol="passthrough"`, is refused;
 - `OPENAI_BASE_URL` is never written for a tool key; a variable collision is refused;
 - `unlock` removes the variable;
@@ -248,11 +252,13 @@ intended (ADR D1).
 - The Fernet key lives off any disk a VM snapshot or backup captures, or Mappy explicitly accepts that a VM
   snapshot holds both halves.
 - The proxy listens on loopback only.
-- **Required:** outbound traffic from the agent's uid to `slack.com`, `api.linear.app` and `*.posthog.com` is
-  blocked and logged. `files.slack.com` is allowed for uploads, which carry no key.
+- **Required:** outbound traffic from the agent's uid to `slack.com`, `api.linear.app`, `uploads.linear.app` and
+  `*.posthog.com` is blocked and logged. `files.slack.com` stays reachable for uploads, which carry no key; Gate A
+  must show Mappy doesn't download vendor files, because such a download would carry shard-A uncounted.
 
-The verification script runs as the agent user and expects `EACCES` on the store, a failing `unlock`, a
-loopback-only listener, a blocked direct vendor call, and a working proxy call.
+The verification script runs as the agent user and expects `EACCES` on the store, a failing `unlock`, the Fernet
+key off the snapshotted disk (or Mappy's written acceptance that it isn't), a loopback-only listener, a blocked
+direct vendor call, and a working proxy call.
 
 ### PR4a / PR4b: docs
 
@@ -327,8 +333,9 @@ own URL.
      channel, and a bad channel to get the native `ok: false`.
   3. Linear: a query, a mutation, a forced validation error.
   4. PostHog `phx_` direct API: one read, Bearer routing confirmed, shard-A absent upstream.
-  5. 1,000 calls, no 402.
-  6. Capture the upstream leg with mitmproxy, **redacting `Authorization` before anything is saved** (or saving
-     only metadata), and confirm 0 hits for shard-A.
+  5. 10,000 calls, no 402 (the old LLM metering would have refused call ~7,813).
+  6. Watch the upstream leg with a mitmproxy addon that compares every header, the query and the body against
+     shard-A **in flight** and records only a yes/no count. Expect 0. Nothing that could hold the real key is
+     saved.
   7. `unlock` restores the `.env`; restart the client and confirm it reaches the vendor directly.
 - **On Mappy:** the R1 verification script, as the agent user.

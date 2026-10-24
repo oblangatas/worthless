@@ -29,8 +29,7 @@ An AI agent's `.env` also holds the keys for the tools it drives: Slack, Linear,
 recognise them and prints "No unprotected API keys found." That is a false all-clear next to a live Slack token.
 
 An outside spike proposed a pass-through adapter and would have failed on its first live request. The research
-note lists its nine gaps. Gate B then ran the real SDKs against a capture server with fake tokens; nothing has
-run against the real vendors yet (the "live leg").
+note lists its nine gaps, and the SDK wire capture (Gate B) behind the decisions below.
 
 **Owner decisions (2026-10-22)** this ADR builds on:
 
@@ -50,8 +49,9 @@ run against the real vendors yet (the "live leg").
   `posthog: [phx_]`. A key is a tool key **only** because its prefix is in that table.
 - Each tool vendor's upstream URL lives **in code next to that table**, not in `providers.toml`. No TOML entry,
   bundled or user, can declare `passthrough`, and a user entry can't shadow a tool vendor's URL.
-- The new prefixes also change what `worthless scan`, the pre-commit hook, the code scanner and the OpenClaw
-  audit report, for every user, flag or not. That is intended: they are secrets.
+- The new prefixes, and the refused secret prefixes in D7, join `KEY_PATTERN`, so `worthless scan`, the
+  pre-commit hook, the code scanner, the OpenClaw audit and log redaction report them for every user, flag or
+  not. That is intended: they are secrets. `phc_` does not join, because it is public.
 
 **Why:** passthrough skips LLM metering and the LLM error sanitizer, so a config edit must never be able to put
 an AI key in that mode. Keeping the vendor URLs in code also removes the conflict with D8. A user-declared
@@ -64,7 +64,9 @@ generic protocol can come later ([WOR-998](https://linear.app/plumbusai/issue/WO
   detection and the `*_BASE_URL` naming need the vendor.
 - The proxy looks up a small protocol table by the stored protocol. An unknown protocol gets the uniform 401
   before decrypt. The alias is parsed once from the raw path, before the branch.
-- LLM aliases are untouched: path dispatch and today's path parsing stay as they are.
+- The alias is parsed once, by today's parser, for every request. After the row is fetched, a passthrough
+  request takes its API path from the ASGI `raw_path` after the `/<alias>` prefix (the two must agree); LLM
+  aliases keep today's path and adapter dispatch unchanged.
 - A passthrough request is forwarded as sent: method, raw path (from the ASGI `raw_path`), query string and
   body bytes. Base URL and path are joined as plain strings, never with `urljoin`, so `//evil.com` after the
   alias stays on the vendor's host.
@@ -150,7 +152,7 @@ Scrubbing other secrets out of responses is F7 ([WOR-977](https://linear.app/plu
   `client.proxy = None` (it ignores `NO_PROXY`). `@linear/sdk` allows plain `http://` only for `localhost`,
   `127.0.0.1` and `[::1]`, so `lock` warns when `WORTHLESS_PROXY_HOST` isn't loopback for a Linear key.
 - **Limit:** one base URL per vendor covers only clients we configure. Slack file downloads
-  (`files.slack.com`) and Linear file uploads (`uploads.linear.app`) send the key to a second host; an MCP server
+  (`files.slack.com`) and Linear file downloads (`uploads.linear.app`) send the key to a second host; an MCP server
   that hard-codes the vendor URL, or a hosted MCP (PostHog's runs on PostHog's servers), can't be pointed at a
   local proxy. Each of those sends shard-A straight to the vendor and fails. Gate A lists every consumer and
   stops if one can't take a base URL.
@@ -222,11 +224,13 @@ verification script passes **as the agent user**:
   remote store), or Mappy accepts that a VM snapshot holds both halves;
 - the proxy listens on loopback only;
 - `worthless unlock` fails as the agent user;
-- outbound traffic from the agent's uid to the vendor hosts is blocked and logged. This is **required**, not
-  optional: it stops bypasses and is the only way to count them.
+- outbound traffic from the agent's uid to the vendor API hosts is blocked and logged. This is **required**,
+  not optional: it stops bypasses and is the only way to count them. `files.slack.com` stays reachable for
+  uploads, which carry no key; a Slack file *download* there would carry shard-A and isn't counted, which is why
+  Gate A must show Mappy doesn't download vendor files.
 
-The script expects `EACCES` on the store, a failing unlock, a loopback-only listener, a blocked direct call, and
-a working proxy call.
+The script expects `EACCES` on the store, a failing unlock, the Fernet key's location matching the snapshot rule
+above, a loopback-only listener, a blocked direct call, and a working proxy call.
 
 **Why:** a separate user stops a hijacked agent from reading the other half. It does not change what a VM-level
 snapshot holds. Without both, the v1 promise fails on exactly the machine we're building it for.
@@ -259,12 +263,13 @@ PostHog's SDK never raises, so nobody would notice.
 | A backup of the agent user's home directory | **Yes, with F6**, because the key store is outside that home. |
 | A VM-level snapshot or disk backup | **No**, unless the Fernet key lives off that disk (D9). One snapshot otherwise holds both halves. |
 | Code running on the box *uses* the key through the proxy | **No.** Limited only by the rate limit until request budgets (F8). Per-operation policy is F7. |
-| A vendor response echoes a secret | The real key's exact bytes → 502. Other secrets in responses: **no**, until F7. |
+| A vendor response echoes a secret | A **buffered** response with the real key's exact bytes → 502; streamed responses aren't checked. Other secrets: **no**, until F7. |
 
 ## Alternatives considered
 
-We read the code of four comparable open-source proxies (research note, section 3). None of them turns an
-upstream 3xx into an error or rejects dot segments before using the key, and none tests against live Slack.
+We read the code of four comparable open-source proxies (research note, section 3). None of the three we could
+read fully turns an upstream 3xx into an error (the fourth, tokenizer, probably doesn't either), none of the four
+rejects dot segments before using the key, and none tests against live Slack.
 Agent Vault and OneCLI retry on a 401; Secretless re-encodes the query. Gate B is the evidence that the 3xx and
 raw-query rules matter for these SDKs.
 
@@ -330,8 +335,7 @@ Besides the refused tokens in D7:
   consumer of each token and the hosts it calls, and which tokens and scopes exist (rotation on? Socket Mode?).
   **Stop and revisit this ADR** if partial files leaving the box are not the main leak path, or if a consumer
   can't take a base URL.
-- **Gate B** ([WOR-970](https://linear.app/plumbusai/issue/WOR-970)) is done with fake tokens. The live leg runs
-  before Mappy go-live; its status lives in the plan.
+- **Gate B** ([WOR-970](https://linear.app/plumbusai/issue/WOR-970)) is done; the plan tracks its live leg.
 - **Wording:** the owner approves "one line per tool" in place of "no code changes" for tool keys.
 
 ## References
