@@ -101,7 +101,9 @@ class TestNoSessionAtAll:
     def test_says_what_an_admin_must_run_and_leaves_no_unit(
         self, home: WorthlessHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(systemd, "_user_bus", lambda: tmp_path / "no-manager" / "bus")
+        monkeypatch.setattr(
+            systemd, "_user_manager_socket", lambda: tmp_path / "no-manager" / "private"
+        )
         calls: list = []
         loginctl = _fake_loginctl(linger=False, refuse=True, calls=calls)
 
@@ -227,10 +229,10 @@ class TestReviewFixes:
     ) -> None:
         """`su - user` / `sudo -u user` leave XDG_RUNTIME_DIR unset, so systemctl
         --user fails even with the manager running; linger would not help."""
-        bus = tmp_path / "run" / "bus"
-        bus.parent.mkdir()
-        bus.touch()  # the user's manager IS running; this shell just can't reach it
-        monkeypatch.setattr(systemd, "_user_bus", lambda: bus)
+        sock = tmp_path / "run" / "systemd" / "private"
+        sock.parent.mkdir(parents=True)
+        sock.touch()  # the user's manager IS running; this shell just can't reach it
+        monkeypatch.setattr(systemd, "_user_manager_socket", lambda: sock)
         calls: list = []
         loginctl = _fake_loginctl(linger=False, refuse=True, calls=calls)
 

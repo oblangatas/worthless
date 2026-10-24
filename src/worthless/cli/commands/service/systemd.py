@@ -53,9 +53,13 @@ def _account_name() -> str:
     return shlex.quote(_session_user())
 
 
-def _user_bus() -> Path:
-    """The running user manager's socket; present only when it is up."""
-    return Path(f"/run/user/{os.geteuid()}/bus")
+def _user_manager_socket() -> Path:
+    """systemd's own socket for this account's user manager; present only when it is up.
+
+    Not the D-Bus ``bus`` socket beside it: a user D-Bus is optional, the
+    manager's private socket is not (Bugbot, PR #734).
+    """
+    return Path(f"/run/user/{os.geteuid()}/systemd/private")
 
 
 def unit_path() -> Path:
@@ -233,7 +237,7 @@ def install(home: WorthlessHome, *, port: int | None = None) -> bool:
             if lingering:
                 raise
             account = _account_name()
-            if _user_bus().exists():
+            if _user_manager_socket().exists():
                 # `su - user` / `sudo -u user`: the manager IS running, this
                 # shell just can't reach it — linger would not help.
                 why = (

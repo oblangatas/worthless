@@ -154,6 +154,8 @@ as_user test -f "/home/$U/.config/systemd/user/worthless-proxy.service" && fail 
 # Root starts user@UID directly — a running manager, no linger, no session.
 UID_U=$(docker exec "$C" id -u "$U")
 docker exec "$C" systemctl start "user@$UID_U.service"
+# install tells su/sudo from "no manager" by this socket (Bugbot, PR #734): prove it's real
+docker exec "$C" test -S "/run/user/$UID_U/systemd/private" && pass "a running user manager has its private socket" || fail "no /run/user/$UID_U/systemd/private with the manager up — install's su/sudo check is blind"
 MID=$(as_user worthless service install --yes 2>&1)
 printf '%s\n' "$MID" | sed 's/^/  | /' | tail -6
 MID_FLAT=$(printf '%s' "$MID" | tr '\n' ' ' | tr -s ' ')
