@@ -255,7 +255,11 @@ def _batch_restore_env(env_path: Path, planned: list[_PlannedRestore]) -> None:
     """One ``rewrite_env_keys`` call: restore plaintext + drop BASE_URLs."""
     updates: dict[str, str] = {}
     removals: set[str] = set()
-    current = dotenv_values(env_path)
+    try:
+        # python-dotenv before 1.2.3 keeps a UTF-8 BOM in the first key's name.
+        current = {k.lstrip("﻿"): v for k, v in dotenv_values(env_path).items()}
+    except UnicodeDecodeError:
+        current = {}  # rewrite_env_keys refuses a non-UTF-8 file with its own error
     for p in planned:
         if p.var_name is None:
             continue

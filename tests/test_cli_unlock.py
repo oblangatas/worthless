@@ -351,6 +351,47 @@ class TestUnlockRemovesTheBaseUrlLockWrote:
         assert after["MY_OPENAI_KEY"] == other_key
         assert after["OPENAI_BASE_URL"] == locked["OPENAI_BASE_URL"]
 
+    def test_line_is_removed_when_dotenv_keeps_a_bom_in_the_first_key(
+        self, home_dir: WorthlessHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """python-dotenv before 1.2.3 parses a BOM file's first key as '\\ufeffKEY'."""
+        import worthless.cli.commands.unlock as unlock_mod
+
+        env = tmp_path / ".env"
+        env.write_bytes(
+            b"\xef\xbb\xbfOPENAI_BASE_URL=https://api.openai.com/v1\n"
+            + f"OPENAI_API_KEY={_TEST_KEY}\n".encode()
+        )
+        _lock(env, home_dir)
+
+        def old_dotenv_values(*args, **kwargs):
+            parsed = dotenv_values(*args, **kwargs)
+            first = next(iter(parsed), None)
+            return {(f"﻿{k}" if k == first else k): v for k, v in parsed.items()}
+
+        monkeypatch.setattr(unlock_mod, "dotenv_values", old_dotenv_values)
+        _unlock(env, home_dir)
+        assert "OPENAI_BASE_URL" not in dotenv_values(env)
+        assert dotenv_values(env)["OPENAI_API_KEY"] == _TEST_KEY
+
+    def test_non_utf8_env_gets_the_rewriters_refusal_not_a_decode_error(
+        self, tmp_path: Path
+    ) -> None:
+        from worthless.cli.commands.unlock import _batch_restore_env, _PlannedRestore
+
+        env = tmp_path / ".env"
+        env.write_bytes(b"OPENAI_API_KEY=sk-\xe9\xe9\xe9\n")
+        planned = _PlannedRestore(
+            alias="openai-deadbeef",
+            provider="openai",
+            enrollment=None,
+            var_name="OPENAI_API_KEY",
+            env_path=env,
+            key_buf=bytearray(_TEST_KEY.encode()),
+        )
+        with pytest.raises(WorthlessError):
+            _batch_restore_env(env, [planned])
+
     @pytest.mark.parametrize(
         ("var_name", "key", "base_url_var", "upstream"),
         [
