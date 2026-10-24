@@ -310,6 +310,14 @@ These must always hold. Any scenario that breaks them is a bug:
 - **Risk**: MEDIUM
 - **Test status**: Partial (provider gating in lock prevents this for lock flow, but direct enroll bypasses)
 
+#### U-37: User unlocks a key whose var is not named after its protocol (`OPENROUTER_API_KEY`, `GROQ_API_KEY`)
+
+- **Precondition**: Lock wrote `OPENROUTER_BASE_URL` for `OPENROUTER_API_KEY`; the DB stores the wire protocol (`openai`)
+- **Expected**: Unlock removes exactly the `*_BASE_URL` line lock wrote for that key; the `.env` is byte-identical to before lock. A still-locked key's line (e.g. `OPENAI_BASE_URL`) and a user's own line under `--keys-only` are kept.
+- **Current behavior**: FIXED -- unlock looked up `OPENAI_BASE_URL` from the protocol, so the OpenRouter proxy line survived and a partial unlock deleted the OpenAI key's line. Unlock now derives the name as lock does and drops a line only while it routes the alias being unlocked.
+- **Risk**: HIGH (was broken, now fixed)
+- **Test status**: Tested (TestUnlockRemovesTheBaseUrlLockWrote)
+
 ---
 
 ## 2. Attacker Scenarios

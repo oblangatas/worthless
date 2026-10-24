@@ -4,6 +4,15 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Fixed
+- **`worthless unlock` removes the proxy line that lock added for an OpenRouter key.**
+  Before: lock names the proxy line after the key's variable, so `OPENROUTER_API_KEY` gets `OPENROUTER_BASE_URL`. Unlock looked for `OPENAI_BASE_URL` instead. After unlock, `OPENROUTER_BASE_URL` still sent your app to the local proxy, for a key the proxy no longer had, and the `.env` did not match the original. The same happened for any key whose variable is not `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`, such as `GROQ_API_KEY`. If the `.env` also had a locked `OPENAI_API_KEY`, unlocking only the OpenRouter key deleted `OPENAI_BASE_URL`. The OpenAI key stayed locked, so its scrambled value then went straight to OpenAI and failed.
+  Now: unlock removes the line that lock wrote for each key it unlocks, and only while that line still points at that key on the proxy. Lock then unlock gives back a byte-identical `.env`. A `*_BASE_URL` you set yourself is kept after a `--keys-only` lock. Unlock used to delete `OPENAI_BASE_URL` in that case.
+
+  **Limits.**
+  - If your `.env` already had a `*_BASE_URL` line before a normal lock, lock replaces it with the proxy URL and unlock removes it. Your original line is not put back.
+  - When two keys share one line (for example `OPENAI_API_KEY` and `MY_OPENAI_KEY` both use `OPENAI_BASE_URL`), unlocking only the key that the line points at still removes it, while the other key stays locked.
+
 ## [0.3.16] — 2026-10-22
 
 ### Security

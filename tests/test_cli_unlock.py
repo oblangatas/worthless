@@ -6,6 +6,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from dotenv import dotenv_values
 from typer.testing import CliRunner
 
 from worthless.cli.app import app
@@ -13,7 +14,7 @@ from worthless.cli.bootstrap import WorthlessHome
 from worthless.cli.errors import WorthlessError
 
 from tests.conftest import make_repo as _repo
-from tests.helpers import fake_anthropic_key, fake_openai_key
+from tests.helpers import fake_anthropic_key, fake_key, fake_openai_key, fake_openrouter_key
 
 runner = CliRunner()
 
@@ -233,6 +234,142 @@ class TestShardAInEnv:
 
         content_after = env_file.read_text()
         assert "OPENAI_BASE_URL=" not in content_after
+
+
+def _unlock(env: Path, home: WorthlessHome, *args: str):
+    return runner.invoke(
+        app,
+        ["unlock", "--env", str(env), *args],
+        env={"WORTHLESS_HOME": str(home.base_dir)},
+    )
+
+
+def _alias_for(home: WorthlessHome, var_name: str) -> str:
+    enrollments = asyncio.run(_repo(home).list_enrollments())
+    return next(e.key_alias for e in enrollments if e.var_name == var_name)
+
+
+class TestUnlockRemovesTheBaseUrlLockWrote:
+    """Unlock drops the ``*_BASE_URL`` line lock wrote for a key, and no other.
+
+    Lock names that line after the key's var (``OPENROUTER_API_KEY`` →
+    ``OPENROUTER_BASE_URL``). Unlock named it after the key's wire protocol
+    (``openai`` → ``OPENAI_BASE_URL``), so an OpenRouter key's proxy line
+    survived unlock, and unlocking that key alone deleted a still-locked
+    OpenAI key's line.
+    """
+
+    @pytest.mark.parametrize(
+        ("var_name", "key"),
+        [
+            ("OPENROUTER_API_KEY", fake_openrouter_key()),
+            # An openai-protocol key under a var not named after the protocol.
+            ("GROQ_API_KEY", fake_key("sk-", seed="unlock-groq-var-name")),
+        ],
+        ids=["openrouter", "groq-var-name"],
+    )
+    def test_round_trip_is_byte_identical(
+        self, home_dir: WorthlessHome, tmp_path: Path, var_name: str, key: str
+    ) -> None:
+        env = tmp_path / ".env"
+        env.write_text(f"{var_name}={key}\n")
+        original = env.read_bytes()
+        _lock(env, home_dir)
+        base_url_var = var_name.removesuffix("_API_KEY") + "_BASE_URL"
+        assert base_url_var in dotenv_values(env)
+
+        result = _unlock(env, home_dir)
+        assert result.exit_code == 0, result.output
+        assert env.read_bytes() == original
+
+    def test_line_named_by_an_older_lock_is_removed(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """Before v0.3.3 lock named the line after the protocol, not the key's var."""
+        env = tmp_path / ".env"
+        env.write_text(f"OPENROUTER_API_KEY={fake_openrouter_key()}\n")
+        original = env.read_bytes()
+        _lock(env, home_dir)
+        env.write_text(env.read_text().replace("OPENROUTER_BASE_URL=", "OPENAI_BASE_URL="))
+
+        result = _unlock(env, home_dir)
+        assert result.exit_code == 0, result.output
+        assert env.read_bytes() == original
+
+    def test_unlocking_one_key_keeps_the_other_keys_base_url(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        env = tmp_path / ".env"
+        env.write_text(f"OPENAI_API_KEY={_TEST_KEY}\nOPENROUTER_API_KEY={fake_openrouter_key()}\n")
+        original = env.read_bytes()
+        _lock(env, home_dir)
+        locked = dotenv_values(env)
+
+        result = _unlock(env, home_dir, "--alias", _alias_for(home_dir, "OPENROUTER_API_KEY"))
+        assert result.exit_code == 0, result.output
+        after = dotenv_values(env)
+        assert "OPENROUTER_BASE_URL" not in after
+        # OPENAI_API_KEY is still locked: its shard-A must keep going to the proxy.
+        assert after["OPENAI_API_KEY"] == locked["OPENAI_API_KEY"]
+        assert after["OPENAI_BASE_URL"] == locked["OPENAI_BASE_URL"]
+
+        result = _unlock(env, home_dir)
+        assert result.exit_code == 0, result.output
+        assert env.read_bytes() == original
+
+    def test_unlocking_a_key_keeps_a_shared_base_url_another_key_owns(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """Both vars map to OPENAI_BASE_URL; lock points it at OPENAI_API_KEY's alias."""
+        env = tmp_path / ".env"
+        other_key = fake_key("sk-proj-", seed="unlock-shared-slot")
+        env.write_text(f"MY_OPENAI_KEY={other_key}\nOPENAI_API_KEY={_TEST_KEY}\n")
+        _lock(env, home_dir)
+        locked = dotenv_values(env)
+
+        result = _unlock(env, home_dir, "--alias", _alias_for(home_dir, "MY_OPENAI_KEY"))
+        assert result.exit_code == 0, result.output
+        after = dotenv_values(env)
+        assert after["MY_OPENAI_KEY"] == other_key
+        assert after["OPENAI_BASE_URL"] == locked["OPENAI_BASE_URL"]
+
+    @pytest.mark.parametrize(
+        ("var_name", "key", "base_url_var", "upstream"),
+        [
+            ("OPENAI_API_KEY", _TEST_KEY, "OPENAI_BASE_URL", "https://api.openai.com/v1"),
+            (
+                "OPENROUTER_API_KEY",
+                fake_openrouter_key(),
+                "OPENROUTER_BASE_URL",
+                "https://openrouter.ai/api/v1",
+            ),
+        ],
+        ids=["openai", "openrouter"],
+    )
+    def test_keys_only_lock_keeps_the_users_own_base_url(
+        self,
+        home_dir: WorthlessHome,
+        tmp_path: Path,
+        var_name: str,
+        key: str,
+        base_url_var: str,
+        upstream: str,
+    ) -> None:
+        """--keys-only never writes the line, so unlock has none of its own to drop."""
+        env = tmp_path / ".env"
+        env.write_text(f"{base_url_var}={upstream}\n{var_name}={key}\n")
+        original = env.read_bytes()
+        result = runner.invoke(
+            app,
+            ["lock", "--env", str(env), "--keys-only"],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+        )
+        assert result.exit_code == 0, result.output
+        assert dotenv_values(env)[base_url_var] == upstream
+
+        result = _unlock(env, home_dir)
+        assert result.exit_code == 0, result.output
+        assert env.read_bytes() == original
 
 
 class TestEnrollUnlockNullEnvPath:
