@@ -548,6 +548,11 @@ class TestUnlockPutsBackTheBaseUrlYouHad:
         )
         original = env.read_bytes()
         _lock(env, home_dir)
+        locked = dotenv_values(env)
+
+        # OPENAI_API_KEY stays locked, so the line keeps routing it to the proxy.
+        _unlock(env, home_dir, "--alias", _alias_for(home_dir, "MY_OPENAI_KEY"))
+        assert dotenv_values(env)["OPENAI_BASE_URL"] == locked["OPENAI_BASE_URL"]
 
         _unlock(env, home_dir)
         assert env.read_bytes() == original
