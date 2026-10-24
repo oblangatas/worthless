@@ -19,6 +19,7 @@ from typer.testing import CliRunner
 
 from worthless.cli.app import app
 from worthless.cli.bootstrap import WorthlessHome
+from worthless.openclaw.integration import _alias_from_base_url
 from worthless.storage.repository import ShardRepository
 
 from tests.helpers import fake_openai_key, fake_openrouter_key
@@ -94,12 +95,7 @@ class TestLockStatusUnlockCycle:
         original_content = env_file.read_text()
 
         # ---- Step 1: lock ------------------------------------------------
-        result = runner.invoke(
-            app,
-            ["lock", "--env", str(env_file)],
-            env=cli_env,
-        )
-        assert result.exit_code == 0, f"lock failed: {result.output}"
+        _lock(env_file, cli_env)
 
         # .env rewritten — original key gone, shard-A preserves prefix
         from dotenv import dotenv_values
@@ -261,7 +257,7 @@ def _run_child_under_wrap(
                 # this subprocess must not leak fernet-key-* into the host
                 # keychain. Defense-in-depth.
                 "WORTHLESS_KEYRING_BACKEND": "null",
-                # Isolate $HOME too, matching the runner.invoke call above —
+                # Isolate $HOME too, matching the CLI env *prepare* ran with —
                 # _resolve_home() (openclaw/integration.py) reads Path.home(),
                 # not WORTHLESS_HOME. cli_env["HOME"]/["USERPROFILE"] are
                 # _make_e2e_env's sandbox dir, already isolated from the real
@@ -352,8 +348,8 @@ class TestPartialUnlockKeepsOtherKeyRouted:
             with env_file.open("a") as f:
                 f.write(f"OPENROUTER_API_KEY={fake_openrouter_key()}\n")
             _lock(env_file, cli_env)
-            openrouter_url = dotenv_values(env_file)["OPENROUTER_BASE_URL"] or ""
-            alias = openrouter_url.rstrip("/").split("/")[-2]
+            alias = _alias_from_base_url(dotenv_values(env_file)["OPENROUTER_BASE_URL"] or "")
+            assert alias, "lock wrote no OPENROUTER_BASE_URL proxy line"
             result = runner.invoke(
                 app, ["unlock", "--env", str(env_file), "--alias", alias], env=cli_env
             )

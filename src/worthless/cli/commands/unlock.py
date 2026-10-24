@@ -21,7 +21,7 @@ from worthless.cli._repo_factory import open_repo
 from worthless.cli.bootstrap import WorthlessHome, acquire_lock, get_home
 from worthless.cli.console import get_console
 
-# Lock owns BASE_URL naming; unlock must name the line exactly as lock did.
+# Lock names the .env BASE_URL lines; unlock must name them exactly as lock did.
 from worthless.cli.commands.lock import _PROVIDER_ENV_MAP, _derive_base_url_var
 
 # scan_env_keys is used by HF4's per-key messaging logic (the
@@ -270,8 +270,6 @@ def _batch_restore_env(env_path: Path, planned: list[_PlannedRestore]) -> None:
         updates[p.var_name] = p.key_buf.decode("utf-8")
         # Lock names the line after the key's var (OPENROUTER_API_KEY ->
         # OPENROUTER_BASE_URL); before v0.3.3 it used the protocol's name.
-        # p.provider is that protocol, so looking up only the protocol's name
-        # missed the line for an OpenRouter key.
         names = {_derive_base_url_var(p.var_name, p.provider)}
         if p.provider in _PROVIDER_ENV_MAP:
             names.add(_PROVIDER_ENV_MAP[p.provider])
@@ -281,7 +279,7 @@ def _batch_restore_env(env_path: Path, planned: list[_PlannedRestore]) -> None:
             # a slot shared by two keys points at the other key's alias.
             # Matching the alias, not the whole URL, survives a port change.
             value = current.get(base_url_var) or ""
-            if value.rstrip("/").endswith(f"/{p.alias}/v1"):
+            if _openclaw_integration._alias_from_base_url(value) == p.alias:
                 removals.add(base_url_var)
 
     if not updates and not removals:
