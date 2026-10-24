@@ -25,6 +25,7 @@ Predicate" and §"Failure modes" rows F01–F04, F36.
 from __future__ import annotations
 
 import contextlib
+import functools
 import hmac
 import ipaddress
 import json
@@ -832,7 +833,10 @@ def _check_world_writable(config_path: Path, events: list[OpenclawIntegrationEve
         st = config_path.stat()
     except OSError:
         return
-    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+    risky = stat.S_IWGRP | stat.S_IWOTH
+    if os.environ.get("WORTHLESS_OPENCLAW_CONFIG_SHARED"):
+        risky = stat.S_IWOTH  # group write is the shared-volume design (WOR-510)
+    if st.st_mode & risky:
         events.append(
             OpenclawIntegrationEvent(
                 code=OpenclawErrorCode.WRITE_FAILED,
@@ -972,13 +976,17 @@ def _classify_config_state(
     silently returned ``{}`` and ``set_provider`` overwrote the config with a
     blank slate.  We now require a POSITIVE signal to declare "unreadable":
 
-    * ``WORTHLESS_OPENCLAW_CONFIG_SHARED`` set to a non-empty value — explicit
-      operator override for shared Docker volume topologies.
     * UID mismatch — ``os.stat(path).st_uid != os.geteuid()`` — the file is
       owned by a different user, classic Docker two-UID layout.
 
+    ``WORTHLESS_OPENCLAW_CONFIG_SHARED`` set to a non-empty value is the
+    operator declaring that shared layout intentional, so it skips the UID
+    check and returns "present"; the write path widens the file to 0644 and
+    :func:`_share_openclaw_tree` then grants the volume's group rw so the
+    openclaw container can still read and update it.
+
     Returns "missing" when the file does not exist (first lock on a fresh
-    install), "unreadable" for the two Docker signals, "present" otherwise.
+    install), "unreadable" on an undeclared UID mismatch, "present" otherwise.
     """
     try:
         file_exists = path.exists()
@@ -991,7 +999,12 @@ def _classify_config_state(
     if not file_exists:
         return "missing"
     if os.environ.get("WORTHLESS_OPENCLAW_CONFIG_SHARED"):
-        return "unreadable"
+        # Operator declared the shared Docker volume (deploy/docker-compose.yml
+        # sets this): a different owner is expected, not a hazard. An
+        # unreadable file is still never clobbered — read_config surfaces it
+        # as CONFIG_UNREADABLE downstream. Treating the flag as "abort" made
+        # the all-container deployment unable to lock at all (WOR-510).
+        return "present"
     try:
         if os.stat(str(path)).st_uid != os.geteuid():  # noqa: PTH116 — must use os.stat so tests can patch("os.stat")
             return "unreadable"
@@ -2036,6 +2049,176 @@ def _apply_lock_migrate_legacy_decoy(
     return False
 
 
+def _shares_openclaw_tree_on_exit(fn):  # noqa: ANN001, ANN202
+    """Run :func:`_share_openclaw_tree` on EVERY exit of ``fn`` — success,
+    early return, or exception. A lock that raises mid-write must not leave
+    root-owned files that crash-loop the openclaw container (security review)."""
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            if os.environ.get("WORTHLESS_OPENCLAW_CONFIG_SHARED"):
+                # Never mask fn's own result/exception with a best-effort walk.
+                with contextlib.suppress(Exception):
+                    state = detect()
+                    if state.present:
+                        root = _resolve_active_config_path(state, state.home_dir).parent
+                        _share_openclaw_tree(root)
+
+    return wrapper
+
+
+def _share_openclaw_tree(root: Path | None) -> None:
+    """Keep the shared Docker volume usable by the OpenClaw container (WOR-510).
+
+    Only when ``WORTHLESS_OPENCLAW_CONFIG_SHARED`` is set (all-container
+    compose). ``worthless lock`` runs via ``docker compose exec`` — as root by
+    default — so anything it creates under the volume is root-owned 0755/0600,
+    and the openclaw container (``node``, in the volume's group) then crashes
+    with EACCES creating ``agents/main/sessions``. Re-own to the volume dir's
+    uid:gid (root only) and add group rw (+x on dirs). Never adds "other"
+    bits, never raises.
+
+    Symlink-safe by construction: the openclaw container can write this
+    volume, so a path-based lstat-then-chmod could be raced into touching the
+    proxy's own ``/data`` (keys) as root. ``os.fwalk`` never follows links,
+    every entry is opened relative to its parent's fd with ``O_NOFOLLOW``,
+    and ownership/mode change via ``fchown``/``fchmod`` on that fd.
+    """
+    if root is None or not os.environ.get("WORTHLESS_OPENCLAW_CONFIG_SHARED"):
+        return
+    if not hasattr(os, "fwalk"):
+        return  # Windows: the shared Docker volume only exists in Linux containers
+    try:
+        root_st = os.lstat(root)
+    except OSError:
+        return
+    if not stat.S_ISDIR(root_st.st_mode):
+        return
+    owner = (root_st.st_uid, root_st.st_gid)
+    is_root = os.geteuid() == 0
+    try:
+        for _dirpath, _dirnames, filenames, dirfd in os.fwalk(root, follow_symlinks=False):
+            _share_fd_quietly(dirfd, owner, is_root)
+            for name in filenames:
+                _share_entry(name, dirfd, owner, is_root)
+    except OSError:
+        return  # best-effort; OpenClaw reports anything it still can't open
+
+
+def _shared_workspace_escape(workspace: Path, config_path: Path | None) -> str | None:
+    """Return why the skill dir must not be touched, or None if it's safe.
+
+    Cursor review (WOR-510): in the shared Docker volume the openclaw
+    container can plant ``workspace`` → ``/data`` (the proxy's keys); detect()
+    resolves the link, so lock (root) would install — and unlock would
+    ``rmtree`` — the skill outside the volume. Shared mode only.
+    """
+    if config_path is None or not os.environ.get("WORTHLESS_OPENCLAW_CONFIG_SHARED"):
+        return None
+    oc_dir = config_path.parent
+    for link in (oc_dir / "workspace", oc_dir / "workspace" / "skills"):
+        if link.is_symlink():
+            return f"{link} is a symlink in the shared volume"
+    try:
+        workspace.resolve().relative_to(oc_dir.resolve())
+    except (OSError, ValueError):
+        return f"workspace {workspace} is outside the shared volume {oc_dir}"
+    return None
+
+
+def _unlock_snapshot(
+    config_path: Path,
+    restores: list[OcRestore],
+    events: list[OpenclawIntegrationEvent],
+    providers_skipped: list[tuple[str, str]],
+) -> tuple[dict | None, bool]:
+    """Read the pre-unlock snapshot. Returns ``(snapshot, skip_stage_a)``.
+
+    Cursor review (WOR-510): with CONFIG_SHARED now classified "present",
+    this read is unlock's only gate — and Stage A's replace_provider reads
+    with permission_as_missing=True, so an unreadable config would be
+    rewritten as near-empty. A permission failure skips Stage A instead.
+    """
+    try:
+        return _config_mod.read_config(config_path), False
+    except (OpenclawConfigError, OSError) as exc:
+        if not (isinstance(exc, PermissionError) or isinstance(exc.__cause__, PermissionError)):
+            return None, False  # e.g. corrupt JSON: unchanged behaviour
+    events.append(
+        OpenclawIntegrationEvent(
+            code=OpenclawErrorCode.CONFIG_UNREADABLE,
+            level="error",
+            detail=f"openclaw.json at {config_path} is unreadable — skipping provider restore",
+            extra={"path": str(config_path)},
+        )
+    )
+    providers_skipped.extend((r.provider, "config_unreadable") for r in restores)
+    return None, True
+
+
+def _guarded_workspace(
+    workspace: Path | None,
+    config_path: Path | None,
+    events: list[OpenclawIntegrationEvent],
+    action: str,
+) -> Path | None:
+    """``workspace``, or None (with an error event) if the shared-volume guard trips."""
+    escape = _shared_workspace_escape(workspace, config_path) if workspace else None
+    if escape is None:
+        return workspace
+    events.append(
+        OpenclawIntegrationEvent(
+            code=OpenclawErrorCode.SKILL_INSTALL_FAILED,
+            level="error",
+            detail=f"refusing to {action} the skill: {escape}",
+        )
+    )
+    return None
+
+
+def _share_entry(name: str, dirfd: int, owner: tuple[int, int], is_root: bool) -> None:
+    """Open ``name`` relative to its parent fd without following a symlink."""
+    # getattr: O_NOFOLLOW/O_NONBLOCK don't exist on Windows, and this module
+    # must import there (only reached via fwalk, which is POSIX-only anyway).
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(name, flags, dir_fd=dirfd)
+    except OSError:
+        return  # symlink (ELOOP), vanished, or unreadable — skip
+    try:
+        _share_fd_quietly(fd, owner, is_root)
+    finally:
+        os.close(fd)
+
+
+def _share_fd_quietly(fd: int, owner: tuple[int, int], is_root: bool) -> None:
+    with contextlib.suppress(OSError):
+        _share_fd(fd, owner, is_root)
+
+
+def _share_fd(fd: int, owner: tuple[int, int], is_root: bool) -> None:
+    """Re-own (root only) and grant the volume's group access, on an open fd."""
+    st = os.fstat(fd)
+    if is_root and (st.st_uid, st.st_gid) != owner:
+        os.fchown(fd, *owner)
+        st = os.fstat(fd)  # chown cleared setuid/setgid; don't restore them
+    # Group rw IS the design here: the volume's group is exactly the proxy and
+    # the openclaw container (WOR-510). "Other" bits are never added.
+    if stat.S_ISDIR(st.st_mode):
+        # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
+        os.fchmod(fd, (st.st_mode & 0o7777) | stat.S_IRWXG)
+    elif stat.S_ISREG(st.st_mode):
+        # Never leave a setuid/setgid file in a volume another container
+        # writes (security review: a planted 4755 would become setuid-10001).
+        mode = st.st_mode & 0o7777 & ~(stat.S_ISUID | stat.S_ISGID)
+        # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
+        os.fchmod(fd, mode | stat.S_IRGRP | stat.S_IWGRP)
+
+
+@_shares_openclaw_tree_on_exit
 def apply_lock(
     planned_updates: list[tuple[str, str, str]],
     *,
@@ -2283,7 +2466,7 @@ def apply_lock(
     # ---- Stage B: install skill ------------------------------------------
     skill_installed = False
     skill_path: Path | None = None
-    workspace = state.workspace_path
+    workspace = _guarded_workspace(state.workspace_path, config_path, events, "install")
     if workspace is not None:
         try:
             skill_path = _skill_mod.install(workspace / "skills")
@@ -2556,6 +2739,7 @@ def _restore_agent_auth_stores_after_unlock(
 # ---------------------------------------------------------------------------
 
 
+@_shares_openclaw_tree_on_exit
 def apply_unlock(
     restores: list[OcRestore],
     *,
@@ -2691,10 +2875,10 @@ def apply_unlock(
     agent_cache_blocked: set[str] = set()
     rollback_needed = False
     if not config_missing:
-        try:
-            original_config_snapshot = _config_mod.read_config(config_path)
-        except (OpenclawConfigError, OSError):
-            original_config_snapshot = None
+        original_config_snapshot, config_missing = _unlock_snapshot(
+            config_path, restores, events, providers_skipped
+        )
+    if not config_missing:
         rollback_needed = _apply_unlock_stage_a(
             config_path,
             restores,
@@ -2739,8 +2923,12 @@ def apply_unlock(
 
     # ---- Stage B: uninstall skill folder ---------------------------------
     skill_uninstalled = False
-    workspace = state.workspace_path
     skill_path = state.skill_path
+    workspace = (
+        _guarded_workspace(state.workspace_path, config_path, events, "remove")
+        if remove_skill
+        else state.workspace_path
+    )
     if remove_skill and workspace is not None:
         try:
             skill_uninstalled = _skill_mod.uninstall(workspace / "skills")

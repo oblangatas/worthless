@@ -173,6 +173,7 @@ jobs:
           uv sync --extra dev --extra test --extra mcp
           uv run pytest -n auto --dist loadscope \
             tests/test_install_shadow_warning.py \
+            tests/test_lock_file_crash.py \
             tests/test_lock_write_invariants.py \
             tests/test_lock_sigint_atomicity.py \
             tests/test_mcp_server.py \

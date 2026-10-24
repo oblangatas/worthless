@@ -19,11 +19,12 @@
     "@cloudflare/vitest-pool-workers": "^0.22.0",
     "@cloudflare/workers-types": "^5.20260906.1",
     "typescript": "^7.0.2",
-    "vitest": "~4.1.11",
+    "vitest": "~4.1.12",
     "wrangler": "^4.147.0"
   },
   "overrides": {
     "sharp": "^0.35.5",
-    "undici": "^7.30.0"
+    "undici": "7.30.1",
+    "zod": "4.6.6"
   }
 }

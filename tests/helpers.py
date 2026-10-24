@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import os
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
+
+from worthless.storage.repository import ShardRepository, StoredShard
 
 
 # ---------------------------------------------------------------------------
@@ -111,3 +115,36 @@ def make_streaming_response(
         headers=_headers,
         stream=stream,
     )
+
+
+# ---------------------------------------------------------------------------
+# Enrolled shards sealed with a chosen Fernet key — worthless-saaz
+# ---------------------------------------------------------------------------
+
+
+def seal_enrolled(db_path: Path, key: bytes, *aliases: str) -> None:
+    """Enroll *aliases* in *db_path* with shard B sealed under *key*.
+
+    Real Fernet tokens, so "this key can't open that shard" is genuine. Call it
+    twice with different keys to build the mixed database a stray
+    ``WORTHLESS_FERNET_KEY`` lock creates.
+    """
+
+    async def go() -> None:
+        repo = ShardRepository(str(db_path), key)
+        try:
+            await repo.initialize()
+            for alias in aliases:
+                shard = StoredShard(
+                    shard_b=bytearray(b"b" * 32),
+                    commitment=bytearray(b"c" * 32),
+                    nonce=bytearray(b"n" * 32),
+                    provider="openai",
+                )
+                await repo.store_enrolled(
+                    alias, shard, var_name="OPENAI_API_KEY", prefix="sk-", charset="x"
+                )
+        finally:
+            repo.close()
+
+    asyncio.run(go())

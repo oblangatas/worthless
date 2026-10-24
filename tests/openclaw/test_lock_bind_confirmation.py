@@ -791,7 +791,6 @@ def test_finalise_warns_and_degrades_when_entry_left_in_place(
         console,
         False,
         SimpleNamespace(base_dir=tmp_path),
-        proxy_host="127.0.0.1",
         reload_since_ts=_dt.datetime.now(_dt.timezone.utc),
     )
 
@@ -813,3 +812,58 @@ def test_finalise_warns_and_degrades_when_entry_left_in_place(
     )
     # 4. Exit code stays 0 — the interactive user chose to decline.
     assert rc == 0
+
+
+# ---------------------------------------------------------------------------
+# WOR-510 live run: in the all-container deployment WORTHLESS_PROXY_HOST=proxy
+# (the Docker name OpenClaw dials). /_bind_probe answers loopback peers only,
+# so probing "proxy" from inside the proxy container is seen as non-loopback,
+# never ticks the counter, and lock exits 91 on a working setup. Lock always
+# runs beside the proxy it enrolled into — probe loopback, like `verify` does.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("advertised", ["proxy", "host.docker.internal", "127.0.0.1"])
+def test_finalise_probes_loopback_not_advertised_host(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, advertised: str
+) -> None:
+    result = OpenclawApplyResult(
+        detected=True,
+        config_path=None,
+        workspace_path=None,
+        skill_path=None,
+        providers_set=("openai",),
+        providers_skipped=(),
+        skill_installed=False,
+        events=(),
+    )
+    planned = [SimpleNamespace(provider="openai", alias="openai-x")]
+    seen: dict[str, object] = {}
+
+    def fake_confirm_bind(planned_arg, *, host, port):  # noqa: ANN001, ANN202
+        seen["host"] = host
+        return {"status": "pass", "reason": "ok", "delta": 1, "aliases": ["openai-x"], "reached": 1}
+
+    monkeypatch.setattr(lock_mod, "_confirm_bind", fake_confirm_bind)
+    monkeypatch.setattr(lock_mod, "_confirm_openclaw_reload", lambda **k: "pass")
+    monkeypatch.setattr(lock_mod, "_write_lock_sentinel", lambda home, **k: tmp_path / "s.json")
+    monkeypatch.setenv("WORTHLESS_PROXY_HOST", advertised)
+
+    console = SimpleNamespace(
+        print_success=lambda m: None,
+        print_hint=lambda m: None,
+        print_warning=lambda m: None,
+        print_failure=lambda m: None,
+    )
+    lock_mod._finalise_openclaw_success(
+        planned,
+        result,
+        console,
+        True,
+        SimpleNamespace(base_dir=tmp_path),
+        reload_since_ts=_dt.datetime.now(_dt.timezone.utc),
+    )
+
+    assert seen["host"] == "127.0.0.1", (
+        f"bind probe must target loopback, not the advertised host {advertised!r}"
+    )

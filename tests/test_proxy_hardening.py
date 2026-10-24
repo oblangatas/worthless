@@ -2364,6 +2364,30 @@ class TestDecoyHashCheck:
         # Best-effort: IPC errors must NOT block legitimate traffic
         assert resp.status_code == 200
 
+    async def test_a_shard_the_sidecar_cannot_open_is_logged_not_silent(
+        self, proxy_client, enrolled_alias, caplog
+    ):
+        """worthless-saaz: a stale key made every request a bare 401 with nothing
+        logged — indistinguishable from a wrong client key. The client still gets
+        the uniform 401 (anti-enumeration); the server log names the alias and
+        the error type, never the error text (it could carry token bytes)."""
+        alias, shard_a_utf8, _ = enrolled_alias
+        app = proxy_client._transport.app  # type: ignore[attr-defined]
+        app.state.ipc_supervisor.fail_open_with(ValueError, "SECRET-token-bytes")
+
+        with caplog.at_level("WARNING", logger="worthless.proxy.app"):
+            resp = await proxy_client.post(
+                f"/{alias}/v1/chat/completions",
+                headers={"Authorization": f"Bearer {shard_a_utf8}"},
+                json={"model": "gpt-4", "messages": []},
+            )
+
+        assert resp.status_code == 401
+        assert resp.content == _AUTH_BODY
+        logged = " ".join(r.getMessage() for r in caplog.records)
+        assert alias in logged and "ValueError" in logged
+        assert "SECRET-token-bytes" not in logged
+
 
 class TestDecoyReload:
     """worthless-ibw1: the decoy tripwire refreshes after startup, so a key

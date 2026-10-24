@@ -89,7 +89,7 @@ Restart your editor. Cold-start install time on a fresh machine with only Node:
 ### Package Info
 - **Package name**: `worthless`
 - **npm wrapper**: `worthless-mcp`
-- **Version**: 0.3.14
+- **Version**: 0.3.16
 - **Entry point**: `worthless` (CLI command)
 - **Python**: 3.10+
 - **License**: AGPL-3.0
@@ -186,6 +186,7 @@ Walks every `.env` Worthless locked on this machine, reconstructs each real key 
 
 **Behavior:**
 - Restore-all-then-wipe: if ANY `.env` can't be restored, nothing is wiped (Shard B is kept for a retry)
+- Exception: a key with no link (unlock reports WRTLS-102) is not checked and IS wiped. Never run `uninstall` while unlock reports WRTLS-102
 - Enroll-only keys (no `.env`) warn and are removed, but never block the uninstall
 - OpenClaw symmetric undo is best-effort and never blocks the wipe
 
@@ -233,14 +234,15 @@ Proxy: http://127.0.0.1:8787 (running)
 #### `worthless verify [OPTIONS]`
 **Confirm the gateway is alive and routing a request right now.**
 
-Fires a live loopback probe through the proxy and reports a GREEN/RED verdict earned by a fresh delta this instant (not the cumulative `requests_proxied` counter, which can't say "now"). GREEN means the proxy is live and routing now — it does NOT prove OpenClaw isn't also bypassing on a cached token. RED (gateway down, or routing unproven) exits non-zero so scripts can gate on it.
+Fires a live loopback probe through the proxy and reports a GREEN/RED verdict earned by a fresh delta this instant (not the cumulative `requests_proxied` counter, which can't say "now"). GREEN means the proxy is live and routing now — it does NOT prove OpenClaw isn't also bypassing on a cached token. RED (gateway down, or routing unproven) exits non-zero so scripts can gate on it. GREEN also says whether protection survives a restart: only a running background service (`worthless service install`) does; a proxy from `worthless up` or plain `worthless` does not. `worthless status` prints the same line.
 
 **Options:**
-- `--json`: emit a machine-readable verdict (`{"verdict", "healthy", "aliases", "reason"}`).
+- `--json`: emit a machine-readable verdict (`{"verdict", "healthy", "aliases", "reason", "survives_restart"}`).
 
 **Output:**
 ```
 GREEN — proxy is live and a request routed through it just now (alias: openai).
+Not after a restart: the proxy isn't a background service. Keep it running: `worthless service install`
         Note: proves the proxy is live and routing now; does NOT prove OpenClaw
         isn't also bypassing on a cached token — see `worthless status`.
 ```

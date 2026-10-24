@@ -48,8 +48,9 @@ def test_teammate_handoff_locked_env_without_db_fails_with_hint(tmp_path: Path) 
     assert unlock.exit_code != 0, unlock_output
     assert "Traceback" not in unlock_output
     assert "OPENAI_API_KEY" in unlock_output
-    assert "no enrollment found" in unlock_output.lower()
-    assert "re-lock from the original machine" in unlock_output.lower()
+    flat = " ".join(unlock_output.split()).lower()  # immune to terminal-width wrapping
+    assert "no enrollment found" in flat
+    assert "re-lock from the original machine" in flat
 
 
 @pytest.mark.user_flow
@@ -99,7 +100,7 @@ def test_unlock_after_local_database_loss_names_lost_worthless_state(tmp_path: P
     assert "Traceback" not in unlock_output
     assert "OPENAI_API_KEY" in unlock_output
     assert "database" in unlock_output.lower()
-    assert "worthless.db" in unlock_output
+    assert "worthless.db" in "".join(unlock_output.split())  # a wrapped path can split mid-word
     assert "restore" in unlock_output.lower()
     assert "replace" in unlock_output.lower()
     assert dotenv_values(env_file)["OPENAI_API_KEY"] == locked_value

@@ -53,6 +53,19 @@ class ShardReader:
             rows = await cursor.fetchall()
             return frozenset(row[0] for row in rows)
 
+    async def list_enrolled_aliases(self) -> list[str]:
+        """Return every locked alias that has an enrollment.
+
+        Orphan ``shards`` rows (a crash between the two writes) are skipped:
+        nothing can use them, and doctor's orphan check reports them.
+        """
+        async with self._connect() as db:
+            cursor = await db.execute(
+                "SELECT DISTINCT s.key_alias FROM shards s "
+                "JOIN enrollments e ON e.key_alias = s.key_alias"
+            )
+            return [row[0] for row in await cursor.fetchall()]
+
     async def fetch_encrypted(self, alias: str) -> EncryptedShard | None:
         """Return ciphertext-at-rest for *alias*, or ``None``.
 

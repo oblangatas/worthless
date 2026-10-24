@@ -46,14 +46,21 @@ PLAYBOOKS: dict[str, str] = {
         "key is allowlisted and never touched."
     ),
     "stranded_shards": (
-        "Nothing at risk — a shard file (one half of a split key) has no matching database "
-        "row, usually from a crash mid-revoke. Run `worthless doctor --fix` to unlink it; "
-        "a lone shard is unusable on its own."
+        "Nothing at risk — a shard file (one half of a split key) has no link in the "
+        "database. Doctor's fix removes it only when the key's other half is gone too, so "
+        "it can never be used; a file whose key is still stored is kept, because that key "
+        "is probably recoverable."
     ),
     "dead_proxy_run_dirs": (
         "A key is at risk on disk — a `worthless up` or `wrap` that stopped without "
         "cleaning up left both halves of it, readable only by you. Run `worthless doctor "
         "--fix` to delete the folder; doctor only deletes it once nothing is using it."
+    ),
+    "unlocked_keys": (
+        "A key is exposed — a lock was cut off (kill -9, crash, power loss) before it "
+        "rewrote the `.env`, so the real key is still there in plain text. Run "
+        "`worthless lock --env <that .env>` to finish it. Don't use `doctor --fix` or "
+        "`uninstall`: lock reuses the stored half, so other copies of the key keep working."
     ),
     "fernet_drift": _FERNET_DRIFT,
     "broken_status": (

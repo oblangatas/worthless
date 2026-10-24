@@ -29,7 +29,13 @@ from worthless.cli.platform import is_wsl
 from worthless.cli.redaction import key_fingerprint
 from worthless.cli.dotenv_rewriter import build_enrolled_locations
 from worthless.cli.keystore import PLACEHOLDER_FERNET_KEY
-from worthless.cli.orphans import FIX_PHRASE, MOVED_FIX_PHRASE, PROBLEM_PHRASE, find_orphans
+from worthless.cli.orphans import (
+    FIX_PHRASE,
+    MOVED_FIX_PHRASE,
+    PROBLEM_PHRASE,
+    find_orphans,
+    find_unlocked,
+)
 from worthless.cli.process import disable_core_dumps
 from worthless.cli.scanner import (
     HardcodedUrlFinding,
@@ -591,10 +597,19 @@ async def _load_db_state_async():
     except Exception:
         return None, []
 
+    # WOR-958: a crash mid-lock can leave the real key under a DB row. That
+    # location is not protected, so scan must report it. Its own try: a
+    # failure here must never turn every healthy lock into a false alarm.
+    try:
+        unlocked = await find_unlocked(repo, enrollments)
+    except Exception:
+        unlocked = []
+
     if not enrollments:
         return None, []
 
-    return build_enrolled_locations(enrollments), find_orphans(enrollments)
+    locked = [e for e in enrollments if e not in unlocked]
+    return build_enrolled_locations(locked), find_orphans(enrollments)
 
 
 def _load_db_state():

@@ -116,6 +116,13 @@ if [ "$SYSTEMD_EXPECTED" = "on" ]; then
   CODE=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/healthz" 2>/dev/null || echo 000)
   fact "healthz" "$CODE"
   check "proxy answers" "[ '$CODE' = '200' ]"
+  # WOR-860: on real WSL `status` must give the WSL wording, not the Linux one.
+  # Run through `runuser -l`, which clears WSL_DISTRO_NAME, so this also proves
+  # the kernel-string WSL detection reaches the message.
+  runuser -l "$USER_NAME" -c "$RUN worthless status" > /tmp/status-svc.log 2>&1
+  sed 's/^/  | /' /tmp/status-svc.log | head -3
+  check "status says it starts with this WSL distro" "grep -q 'starts with this WSL distro' /tmp/status-svc.log"
+  check "status gives the .wslconfig fix" "grep -q 'instanceIdleTimeout=-1' /tmp/status-svc.log"
 else
   # The default WSL user's reality. Must not claim success.
   # Must fail for a REAL reason. Exit 130 is a cancelled prompt, which says
@@ -130,6 +137,21 @@ else
   else
     fact "error names /etc/wsl.conf" "no — pre-#599 message"
   fi
+  # WOR-860: without a service, a proxy from `worthless up` must be reported as
+  # ending at a restart OR when the last WSL window closes (the distro stops).
+  runuser -l "$USER_NAME" -c "$RUN nohup worthless up > /tmp/up.log 2>&1 &"
+  for _ in $(seq 20); do
+    [ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/healthz" 2>/dev/null)" = 200 ] && break
+    sleep 1
+  done
+  # Say it plainly if `up` never answered, so that reads as "proxy never
+  # started", not as a wording failure.
+  fact "worthless up healthz" "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/healthz" 2>/dev/null)"
+  runuser -l "$USER_NAME" -c "$RUN worthless status" > /tmp/status-up.log 2>&1
+  sed 's/^/  | /' /tmp/status-up.log | head -3
+  check "status says protected now, not after a restart" "grep -q \"You're protected now\" /tmp/status-up.log"
+  check "status says the last WSL window ends it" "grep -q 'once your last WSL window closes' /tmp/status-up.log"
+  runuser -l "$USER_NAME" -c "$RUN worthless down" > /dev/null 2>&1
 fi
 
 say "VERDICT (systemd=$SYSTEMD_EXPECTED)"

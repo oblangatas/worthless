@@ -4,6 +4,66 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [0.3.16] — 2026-10-22
+
+### Security
+- **A key that the doctor bug unlinked keeps both of its halves until it can be re-linked** (WOR-959, [#709](https://github.com/oblangatas/worthless/pull/709)).
+
+  Before: on an old-format key, a second `worthless doctor --fix` deleted the key's first half from `~/.worthless/shard_a/`. After that, the key could not be recovered. `worthless unlock` told you to remove the locked values "if they are junk".
+
+  Now: `doctor --fix` keeps that file when the key's other half is still stored, and reports the key as probably recoverable. If doctor cannot read the stored halves, it deletes nothing. When the `.env` names a key that lost its link, `unlock` tells you to keep the locked lines, and not to re-lock or uninstall. If the file can't say which key it holds (a `--keys-only` lock) and this machine has such a key, it tells you not to re-lock yet. Otherwise, for raw keys, it tells you to lock them.
+
+  **Limits.**
+  - This release does not re-link the key. WOR-937 does that.
+  - A file whose key has no stored half left is still removed. Nothing can use that file.
+  - `worthless uninstall` still removes a key that lost its link, without a warning. If the doctor bug hit this machine, do not run `uninstall` until the re-link release (WOR-937) ships.
+
+### Fixed
+- **A busy-lock error no longer tells you to delete the lock file** (WOR-965).
+  Before: when another worthless command held the lock, the error said "Remove ~/.worthless/.lock-in-progress if stale." If that command was still running, deleting the file let two commands write to your keys at once.
+  Now: the error says "Another worthless command is running. Wait for it to finish, then try again." When worthless can't prove the lock is dead (a lock from another host, a file system without file locks, an empty lock file from an older version), the error says the lock clears by itself, and in how many seconds. A lock left by a crashed command clears itself (see the entry below), so you never need to delete it by hand.
+
+  **Limits.**
+  - `worthless doctor --fix` has its own lock and still uses its own wording (WOR-1003).
+  - If the lock file's time is in the future (clock skew between hosts), the countdown is long. It is accurate: the lock really clears only then.
+  - If something other than a file sits at the lock path (a symlink or a folder), the message does not say so.
+
+- **After a crash, the next worthless command runs at once** (WOR-962, [#714](https://github.com/oblangatas/worthless/pull/714)).
+  Before: if a worthless command was killed (`kill -9`, out of memory, power loss), every write command failed for 5 minutes with "WRTLS-105: Lock file is 1s old (< 300s). Another operation may be running." This included the `worthless lock` that `status` tells you to run after a cut-off lock. Also, a command that ran longer than 5 minutes could have its lock taken by a second command.
+  Now: the lock is held with the operating system's file lock, which is released when the process stops. The next command sees that the old holder is gone and runs at once. A command that is still running keeps its lock, however long it runs.
+
+  **Limits.**
+  - On native Windows, and on file systems that do not support file locks (some NFS, SMB and FUSE mounts), the old 5-minute rule still applies. These paths are tested with simulated failures, not on real NFS or SMB.
+  - A lock written on a different host or container, for example through a shared mount, also keeps the 5-minute rule.
+  - Two machines with the same hostname that share one `~/.worthless` on a mount whose file locks are local to each machine (for example NFSv3 with `local_lock`) are not protected: each can take over the other's live lock. Do not share `~/.worthless` between machines.
+  - A command killed in the first instant, before it takes the file lock, leaves an empty lock file. That file also keeps the 5-minute rule.
+  - `worthless doctor --fix` has its own lock, with a similar race. It is not changed here (WOR-963).
+
+- **A stale key can't make the background service look healthy any more** ([#729](https://github.com/oblangatas/worthless/pull/729)).
+
+  Before: if `~/.worthless/fernet.key` held a key that can't unlock your locked keys (for example, restored from an old backup), the background service still started. `/healthz` returned 200, and every request failed with 401. `worthless doctor` said "No issues found." `worthless lock` with a different `WORTHLESS_FERNET_KEY` in the shell printed `[OK]` and sealed the new project with a key the service does not have.
+
+  Now: the service prints WRTLS-121 once, serves nothing, and waits. When you fix `fernet.key`, it exits so launchd or systemd restart it. `worthless up` that you run yourself stops with the cause and the fix. `lock` refuses a shell `WORTHLESS_FERNET_KEY` that differs from the stored key, and changes nothing. `worthless doctor` names the projects the service's key can't unlock.
+
+  **Limits.**
+  - Worthless never repairs the key. `doctor` tells you which key source unlocks your keys; you choose.
+  - A key that unlocks only some projects still serves them. `status` stays green; only `doctor` and the service log name the broken ones.
+  - A stale key that is only in the keychain does not heal on its own. Run `worthless service restart` after you fix it.
+  - `worthless down` does not see a service that is waiting. Use `worthless service stop`, or fix the key.
+  - The restart after the exit is done by launchd or systemd. The tests prove the exit, not a real service manager's restart.
+
+## [0.3.15] — 2026-10-18
+
+### Changed
+- **`worthless status` and `verify` say whether your protection lasts past a restart** (WOR-860, [#708](https://github.com/oblangatas/worthless/pull/708)).
+  Before: `status` said "🟢 You're protected" and `verify` said GREEN for a proxy started with `worthless up` or plain `worthless`. That proxy stops at the next restart, and neither command said so. The AI editor status tool gave the same answer.
+  Now: without the background service, they say "You're protected now" and "GREEN now". They add one shared sentence: "Not after a restart", plus the fix, `worthless service install`. On WSL the sentence also says protection ends once your last WSL window closes. With the service running, they say when it starts on your platform. `status --json`, `verify --json` and the MCP status tool add `survives_restart`. It is true only when the background service is running on its own port and the proxy is proven to be Worthless.
+
+  **Limits.**
+  - `survives_restart` describes the service now. It does not prove that a restart brings it back.
+  - The WSL wording was checked in CI on real WSL, not by a person in an interactive WSL terminal.
+  - `status` now runs one `launchctl` or `systemctl` call when the proxy is up. This adds tens of milliseconds.
+
 ### Removed
 - **Installing Worthless adds only the `worthless` command** (`worthless-nd65`, [#692](https://github.com/oblangatas/worthless/pull/692)).
   Before: an install also added six internal commands. They were `test-unit`, `test-docker`, `test-live`, `test-openclaw`, `test-all` and `docs-generate`. They did not work outside the source repository. Their names could conflict with other tools.
@@ -28,12 +88,55 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - OpenClaw writes its config without a lock. A write by OpenClaw at the same moment can still conflict with a Worthless write.
   - If another Worthless process holds the `openclaw.json` lock for more than 2 seconds after a Ctrl-C, the undo stops. `worthless doctor` repairs the remaining entries.
 
+- **The all-container OpenClaw setup can lock and run again** (WOR-510, [#700](https://github.com/oblangatas/worthless/pull/700), [#695](https://github.com/oblangatas/worthless/pull/695)).
+  Before: running `deploy/docker-compose.yml` as the install page says failed at three points. `worthless lock` refused to set up OpenClaw, because it read `WORTHLESS_OPENCLAW_CONFIG_SHARED` as a reason to stop. On a working setup, lock exited 91 with "do NOT trust this lock", because its check called the `proxy` hostname and the check answers only on loopback. The OpenClaw container restarted again and again with `EACCES`, because it was not in the shared volume's group and could not write its config.
+  Now: lock sets up OpenClaw in the shared volume. An owner mismatch that compose did not declare still stops the lock, and an unreadable config is still never overwritten. Lock checks the proxy on `127.0.0.1`, as `worthless verify` already does. Compose adds the OpenClaw container to group `10001`, and lock and unlock keep the shared files group-writable, even when they fail. Lock does not follow symlinks in the shared volume, and it refuses to install or remove the skill through a link that points outside it. The install page now matches what lock does.
+
+  **Limits.**
+  - Unlock does not work in the all-container setup yet (WOR-953).
+  - We tested on Docker Desktop on macOS, not on native Linux.
+  - Lock still runs as root in the container (WOR-955).
+  - If you already run this setup: download `docker-compose.yml` again for the new `group_add`, pull the new image, then run lock again.
+
+- **`worthless doctor --json` finishes on a Mac instead of crashing** (`worthless-7xsa`, [#701](https://github.com/oblangatas/worthless/pull/701)).
+  Before: on macOS, `doctor --json` crashed with exit 134 when the keychain held a Worthless entry. It printed no JSON. Its lock file stayed behind and blocked every `doctor` for 5 minutes.
+  Now: `doctor --json` reports every check. Findings that the crash hid now show up.
+
+  **Limits.**
+  - A keychain account name longer than 1023 bytes reads as empty. Worthless writes only short names.
+
+- **Every command Worthless tells you, or your agent, to run now exists** (`worthless-qvvs`, [#680](https://github.com/oblangatas/worthless/pull/680)).
+  Before: two `worthless lock` failure messages said to run `worthless unlock --all`, which fails with `No such option: --all`. A proxy log line said to run `worthless relock`, which does not exist. SKILL.md told agents to run `worthless service status --json`, and `service status` has no `--json`.
+  Now: the lock error names the exact `worthless unlock --alias <alias> --env <path>` and `worthless lock --env <path>` to run. After a failed rollback, lock tells you to run `worthless lock --env <path>` again, which finishes the job. The proxy log names the alias to unlock and lock again. SKILL.md says `worthless service status`. A test checks every printed command and every SKILL.md command against the real CLI.
+
+  **Limits.**
+  - The test does not check commands printed without backticks, or commands built while the program runs.
+
 ### Security
 - **Worthless's own repair command stops destroying healthy keys, and keys whose project moved** (WOR-935, [#676](https://github.com/oblangatas/worthless/pull/676)). Since v0.3.7, doctor's `broken_status` check called every current-format key broken: it looked for Shard A in `~/.worthless/shard_a/`, where only old-format keys keep it. So `worthless doctor --fix --json` — the command agents are told to run — deleted the enrollment of every healthy key, and `unlock` then failed with WRTLS-102 even though both shards survived. The check now judges old-format keys only, and deletes nothing if it can't read the shard rows. Separately, `doctor --fix` (text and JSON) treated a missing `.env` file like a deleted line and purged keys whose project had merely moved. A missing file is now always kept, because doctor can't tell a moved project from a deleted one. Every orphan finding carries `reason` (`env_line_missing` / `env_file_missing`). A key whose `.env` is missing gets honest advice: put a moved project back and run `worthless unlock`, or remove a deleted one with `worthless revoke --alias <alias>`, which doctor offers only when no other project has the same key locked (revoke removes a key everywhere). `--fix --json` reports only the records it actually deleted.
 
   **If you were hit** (`unlock` fails with WRTLS-102 after running `doctor --fix`): do not run `worthless uninstall` or delete `~/.worthless`. Both halves of your key still exist, and getting them back is WOR-937.
 
-  **What this does NOT fix.** Keys already unlinked by v0.3.7–v0.3.12 stay unlinked until WOR-937. A deleted project's key — `git worktree remove` deletes the `.env` — is unrecoverable; doctor now keeps its record instead of purging it; remove it with `revoke --alias` only if no other project has the same key locked. Deleting still needs no extra consent and can't be undone (WOR-938). "Line missing" is still a guess: a renamed variable, a commented-out line, a branch whose `.env` lacks the line, or a re-cloned project with a fresh `.env` at the same path all look like a dead key and still get purged, though the key may be recoverable (WOR-938). An old-format key whose line was deleted is purged even though its Shard A file could rebuild it (WOR-940).
+  **What this does NOT fix.** Keys already unlinked by v0.3.7–v0.3.14 stay unlinked until WOR-937. A deleted project's key — `git worktree remove` deletes the `.env` — is unrecoverable; doctor now keeps its record instead of purging it; remove it with `revoke --alias` only if no other project has the same key locked. Deleting still needs no extra consent and can't be undone (WOR-938). "Line missing" is still a guess: a renamed variable, a commented-out line, a branch whose `.env` lacks the line, or a re-cloned project with a fresh `.env` at the same path all look like a dead key and still get purged, though the key may be recoverable (WOR-938). An old-format key whose line was deleted is purged even though its Shard A file could rebuild it (WOR-940).
+
+- **After a crash in the middle of `worthless lock`, Worthless stops calling your plaintext key safe** (WOR-958, [#707](https://github.com/oblangatas/worthless/pull/707)).
+  Before: lock saves to its database, then rewrites `.env`. A `kill -9`, an out-of-memory kill or a power cut between the two left the real key in `.env`. `scan` still said "All 1 keys are protected" and passed the pre-commit hook. `status` said `PROTECTED`. `doctor` said "No issues found." Bare `worthless` said nothing.
+  Now: `scan` shows the key as `UNPROTECTED` and exits 1. `status` and the MCP status tool show the key as `EXPOSED`, a red "At risk" verdict, and exit 73. `doctor` and `doctor --json` name the key and the fix, `worthless lock --env <path>`. Bare `worthless` warns, then starts the proxy. Healthy locked keys read as before.
+
+  **Limits.**
+  - A crash in that moment still leaves the key in plain text. Worthless now tells you. You still need to run `worthless lock` again.
+  - `doctor --fix` does not repair this state.
+
+- **`worthless doctor` finds key shares that a stopped proxy left on disk, and `--fix` deletes them** (`worthless-7qb6`, [#699](https://github.com/oblangatas/worthless/pull/699)).
+  Before: `worthless up` and `wrap` write both key shares to `~/.worthless/run/<pid>/`. A crash or a kill skipped the clean-up, and the folder stayed forever. Together, the two shares rebuild your key. `doctor` said "No issues found."
+  Now: `doctor` names each folder and tells you to run `worthless doctor --fix`. `--fix` asks first (`--yes` skips the question). It deletes a folder only when its process is gone, its sidecar does not answer, and no proxy is recorded as running. `doctor --json` adds a `dead_proxy_run_dirs` check.
+
+  **Limits.**
+  - Worthless deletes the files. It does not securely erase them.
+  - Nothing cleans up by itself. You run `doctor --fix`.
+  - After `kill -9` on `worthless up` and then `worthless down`, the sidecar keeps answering. `doctor` treats the folder as in use and does not report it.
+  - A container and the host that share one Worthless home see different process IDs. `doctor` can miss a folder in that case.
+  - The check does not run on Windows.
 
 ## [0.3.14] — 2026-10-13
 
@@ -490,6 +593,8 @@ First release published to PyPI. `pip install worthless` now works.
 - Gate evaluation strictly precedes shard reconstruction (SR-03).
 - Published artifacts built via PyPI trusted publishing (OIDC, no long-lived tokens).
 
+[0.3.16]: https://github.com/oblangatas/worthless/releases/tag/v0.3.16
+[0.3.15]: https://github.com/oblangatas/worthless/releases/tag/v0.3.15
 [0.3.14]: https://github.com/oblangatas/worthless/releases/tag/v0.3.14
 [0.3.13]: https://github.com/oblangatas/worthless/releases/tag/v0.3.13
 [0.3.12]: https://github.com/oblangatas/worthless/releases/tag/v0.3.12
