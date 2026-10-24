@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -66,6 +67,33 @@ def _hook_pipeline() -> str:
     """
     entry = _hook_entry()
     return re.sub(r"^set -o pipefail\s*;\s*", "", entry).strip()
+
+
+# Every advisory the pip-audit gate ignores, with the ticket that owns it and
+# the day the ignore stops being allowed. An ignore with no end date silently
+# absorbs the next finding for that package (see the uv-audit hook comment), so
+# the test below goes red on the expiry date and forces a re-check.
+KNOWN_IGNORES: dict[str, tuple[str, date]] = {
+    # WOR-1006: filelock has no fixed release for Python 3.10 (every fix needs
+    # 3.11+). Dev-only (pre-commit / virtualenv / pip-audit), never in the wheel;
+    # pip-audit skips the 3.10-only line on 3.11+, so this only matters on 3.10.
+    "CVE-2026-112940": ("WOR-1006", date(2026, 11, 24)),
+    "CVE-2026-112913": ("WOR-1006", date(2026, 11, 24)),
+    "CVE-2026-112907": ("WOR-1006", date(2026, 11, 24)),
+}
+
+
+def test_every_ignored_advisory_is_tracked_and_unexpired() -> None:
+    """The gate may only ignore listed advisories, each with a ticket, until its date."""
+    ignored = set(re.findall(r"--ignore-vuln\s+(\S+)", _hook_entry()))
+    assert ignored == set(KNOWN_IGNORES), (
+        "the uv-audit hook's --ignore-vuln list must match KNOWN_IGNORES exactly"
+    )
+    for vuln, (ticket, expires) in KNOWN_IGNORES.items():
+        assert date.today() <= expires, (
+            f"the ignore for {vuln} expired on {expires}: re-check {ticket} — remove it "
+            "if a fix is reachable, or extend it deliberately"
+        )
 
 
 def test_hook_runs_with_pipefail() -> None:
