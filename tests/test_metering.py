@@ -199,6 +199,48 @@ def test_extract_usage_openai_json_no_model():
 
 
 # ---------------------------------------------------------------------------
+# WOR-980: a "usage" that isn't an object means no usage, never a crash
+# ---------------------------------------------------------------------------
+
+
+def _sse(*events: tuple[str, object]) -> bytes:
+    """Build an Anthropic-style SSE body from (event name, data payload) pairs."""
+    return b"".join(
+        f"event: {name}\ndata: {json.dumps(payload)}\n\n".encode() for name, payload in events
+    )
+
+
+@pytest.mark.parametrize("usage", ["x", None, ["total_tokens"], 5], ids=repr)
+@pytest.mark.parametrize(
+    "extract", [extract_usage_openai, extract_usage_anthropic], ids=["openai", "anthropic"]
+)
+def test_json_non_dict_usage_is_no_usage(extract, usage):
+    body = json.dumps({"model": "m", "choices": [], "usage": usage}).encode()
+    assert extract(body) is None
+
+
+@pytest.mark.parametrize(
+    "delta",
+    [{"type": "message_delta", "usage": "x"}, {"usage": None}, "usage", ["usage"]],
+    ids=repr,
+)
+def test_extract_usage_anthropic_sse_non_dict_delta_is_no_usage(delta):
+    assert extract_usage_anthropic(_sse(("message_delta", delta))) is None
+
+
+@pytest.mark.parametrize(
+    "start",
+    [["x"], {"message": "x"}, {"message": {"model": "m", "usage": "x"}}],
+    ids=repr,
+)
+def test_extract_usage_anthropic_sse_non_dict_start_counts_output_only(start):
+    body = _sse(("message_start", start), ("message_delta", {"usage": {"output_tokens": 7}}))
+    result = extract_usage_anthropic(body)
+    assert result is not None
+    assert result.total_tokens == 7
+
+
+# ---------------------------------------------------------------------------
 # record_spend
 # ---------------------------------------------------------------------------
 
