@@ -34,9 +34,11 @@ Debian 12, Alpine, and macOS. Full table + test invocation:
 
 ## Dependency overrides
 
-`package.json` pins `overrides: { "sharp": "^0.35.4" }`. It answers
+`package.json` pins `overrides: { "sharp": "^0.35.5" }`. It answers
 [GHSA-rgj7-g3m4-5g8c](https://github.com/advisories/GHSA-rgj7-g3m4-5g8c) — a libheif
-heap overflow affecting sharp `<0.35.4`, which reached this tree as
+heap overflow affecting sharp `<0.35.4` — and
+[GHSA-wq5f-xc86-pv6w](https://github.com/advisories/GHSA-wq5f-xc86-pv6w) (librsvg,
+`<0.35.5`), which reached this tree as
 `sharp <- miniflare <- wrangler / @cloudflare/vitest-pool-workers`.
 
 The override is needed because **miniflare pins `sharp` to an exact `0.35.2`**, so npm's
@@ -46,9 +48,18 @@ suite's test runner. `overrides` reaches the published patch instead. Nothing el
 wrangler, miniflare, vitest-pool-workers and vitest are all unchanged, and the suite is
 byte-identical either way (244 passed, 9 expected-fail before and after).
 
-**Remove it** once miniflare itself depends on sharp >= 0.35.4. Dropping it before then
+**Remove it** once miniflare itself depends on sharp >= 0.35.5. Dropping it before then
 silently reinstates 0.35.2 on the next `npm install`; `tests/test_dependency_audit_gate.py`
 fails offline if that happens, and the `npm audit` job in `dependency-audit.yml` fails in CI.
+
+`undici` and `zod` are overridden for the same reason: miniflare pins undici, and
+`@cloudflare/vitest-pool-workers` pins zod, exactly. Both sit at their first fixed version,
+pinned exactly rather than with a caret (sharp's `^0.35.x` already admits only patches), so a
+relock can't float a newer release into a toolchain that deploys with Cloudflare credentials.
+Once a release-age cooldown guards relocks (WOR-1008), carets are safe again; relax the
+exactness check in the test with them. Remove each once the package that pins it depends on a
+fixed version; the same test file fails offline if either is dropped, loosened or resolved
+below its fix.
 
 ## Tickets
 
