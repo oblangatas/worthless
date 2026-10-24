@@ -14,7 +14,12 @@ from cryptography.fernet import Fernet, InvalidToken
 from worthless.crypto.kdf import derive_mac_secret
 from worthless.defaults import DEFAULT_SPEND_CAP_TOKENS
 from worthless.defaults import GLOBAL_CEILING_TOKENS
-from worthless.storage.models import EncryptedShard, EnrollmentRecord, StoredShard
+from worthless.storage.models import (
+    BaseUrlRestore,
+    EncryptedShard,
+    EnrollmentRecord,
+    StoredShard,
+)
 from worthless.storage.schema import init_db, migrate_db
 from worthless.storage.sqlite import connect as sqlite_connect
 
@@ -39,6 +44,16 @@ def _perm_bits(mode: int | None) -> int | None:
     storage boundary so no caller can persist type bits by accident.
     """
     return None if mode is None else mode & 0o777
+
+
+def _base_url_restore_mac_input(alias: str, var_name: str, env_path: str, record_json: str) -> str:
+    """What a WOR-1013 record's MAC covers: the record and the row it belongs to.
+
+    Binding the row stops a DB edit from copying one enrollment's tagged
+    record onto another. The label keeps these tags apart from decoy hashes,
+    which use the same MAC key. NUL can't occur in the first four fields.
+    """
+    return "\x00".join(("worthless-base-url-restore-v1", alias, var_name, env_path, record_json))
 
 
 async def _exec_enrollment_insert(
@@ -792,6 +807,60 @@ class ShardRepository:
             )
             await db.commit()
 
+    async def record_base_url_restores(
+        self, env_path: str, restores: list[tuple[str, str, BaseUrlRestore]]
+    ) -> None:
+        """WOR-1013: tag and store one record per ``(alias, var_name, record)`` at *env_path*.
+
+        Lock calls this after pass-1 and before it rewrites the ``.env``, in
+        one transaction. An UPDATE rather than part of the enrollment INSERT:
+        that INSERT OR IGNORE keeps a re-lock's older row, and the record must
+        describe the line this lock writes.
+        """
+        rows = []
+        for alias, var_name, record in restores:
+            record_json = record.to_json()
+            mac = await self._compute_decoy_hash(
+                _base_url_restore_mac_input(alias, var_name, env_path, record_json)
+            )
+            rows.append((record_json, mac, alias, var_name, env_path))
+        async with self._connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            await db.executemany(
+                "UPDATE enrollments SET base_url_restore_json = ?, base_url_restore_mac = ? "
+                "WHERE key_alias = ? AND var_name = ? AND env_path = ?",
+                rows,
+            )
+            await db.commit()
+
+    async def verified_base_url_restore(
+        self, enrollment: EnrollmentRecord
+    ) -> BaseUrlRestore | None:
+        """The enrollment's WOR-1013 record, or None if it was enrolled before WOR-1013.
+
+        Raises ``ValueError`` if the record is malformed or fails its MAC
+        check, which means the DB was edited without the Fernet key. Unlock
+        writes ``original`` into the ``.env``, so it must never come from an
+        unchecked row.
+        """
+        record_json = enrollment.base_url_restore_json
+        if record_json is None:
+            return None
+        expected_mac = enrollment.base_url_restore_mac
+        if expected_mac is None:
+            raise ValueError("base_url restore record has no MAC")
+        actual_mac = await self._compute_decoy_hash(
+            _base_url_restore_mac_input(
+                enrollment.key_alias,
+                enrollment.var_name,
+                enrollment.env_path or "",
+                record_json,
+            )
+        )
+        if not hmac.compare_digest(actual_mac, expected_mac):
+            raise ValueError("base_url restore record failed its MAC check")
+        return BaseUrlRestore.from_json(record_json)
+
     async def get_enrollment(
         self, alias: str, env_path: str | None = None
     ) -> EnrollmentRecord | None:
@@ -803,14 +872,16 @@ class ShardRepository:
         async with self._connect() as db:
             if env_path is None:
                 cursor = await db.execute(
-                    "SELECT key_alias, var_name, env_path, decoy_hash, original_mode "
+                    "SELECT key_alias, var_name, env_path, decoy_hash, original_mode, "
+                    "base_url_restore_json, base_url_restore_mac "
                     "FROM enrollments "
                     "WHERE key_alias = ? LIMIT 1",
                     (alias,),
                 )
             else:
                 cursor = await db.execute(
-                    "SELECT key_alias, var_name, env_path, decoy_hash, original_mode "
+                    "SELECT key_alias, var_name, env_path, decoy_hash, original_mode, "
+                    "base_url_restore_json, base_url_restore_mac "
                     "FROM enrollments "
                     "WHERE key_alias = ? AND env_path = ?",
                     (alias, env_path),
@@ -824,6 +895,8 @@ class ShardRepository:
                 env_path=row[2],
                 decoy_hash=row[3],
                 original_mode=row[4],
+                base_url_restore_json=row[5],
+                base_url_restore_mac=row[6],
             )
 
     async def find_enrollment_by_location(
@@ -832,7 +905,8 @@ class ShardRepository:
         """Return the enrollment for *var_name* + *env_path*, or ``None``."""
         async with self._connect() as db:
             cursor = await db.execute(
-                "SELECT key_alias, var_name, env_path, decoy_hash, original_mode FROM enrollments "
+                "SELECT key_alias, var_name, env_path, decoy_hash, original_mode, "
+                "base_url_restore_json, base_url_restore_mac FROM enrollments "
                 "WHERE var_name = ? AND env_path = ?",
                 (var_name, env_path),
             )
@@ -845,6 +919,8 @@ class ShardRepository:
                 env_path=row[2],
                 decoy_hash=row[3],
                 original_mode=row[4],
+                base_url_restore_json=row[5],
+                base_url_restore_mac=row[6],
             )
 
     async def list_enrollments(
@@ -861,7 +937,7 @@ class ShardRepository:
             if alias is not None:
                 cursor = await db.execute(
                     "SELECT e.key_alias, e.var_name, e.env_path, e.decoy_hash, s.provider, "
-                    "e.original_mode "
+                    "e.original_mode, e.base_url_restore_json, e.base_url_restore_mac "
                     "FROM enrollments e LEFT JOIN shards s ON e.key_alias = s.key_alias "
                     "WHERE e.key_alias = ?",
                     (alias,),
@@ -869,7 +945,7 @@ class ShardRepository:
             else:
                 cursor = await db.execute(
                     "SELECT e.key_alias, e.var_name, e.env_path, e.decoy_hash, s.provider, "
-                    "e.original_mode "
+                    "e.original_mode, e.base_url_restore_json, e.base_url_restore_mac "
                     "FROM enrollments e LEFT JOIN shards s ON e.key_alias = s.key_alias "
                     "ORDER BY e.key_alias"
                 )
@@ -882,6 +958,8 @@ class ShardRepository:
                     decoy_hash=r[3],
                     provider=r[4],
                     original_mode=r[5],
+                    base_url_restore_json=r[6],
+                    base_url_restore_mac=r[7],
                 )
                 for r in rows
             ]

@@ -1,8 +1,9 @@
 """Unlock command -- reconstruct keys from shards, restore .env, clean up.
 
 Transactional across N keys: either every alias is reconstructed and
-``.env`` is fully rewritten with plaintext + BASE_URLs removed, or
-nothing changes. Mirrors the lock pipeline in ``commands/lock.py``.
+``.env`` is fully rewritten with plaintext + the BASE_URL lines lock wrote
+put back or removed, or nothing changes. Mirrors the lock pipeline in
+``commands/lock.py``.
 """
 
 from __future__ import annotations
@@ -37,6 +38,7 @@ from worthless.exceptions import ShardTamperedError
 from worthless.openclaw import integration as _openclaw_integration
 from worthless.openclaw.errors import OpenclawIntegrationError
 from worthless.storage.repository import (
+    BaseUrlRestore,
     EnrollmentRecord,
     EncryptedShard,
     ShardRepository,
@@ -178,6 +180,9 @@ class _PlannedRestore:
     # is safely restored) so an aborted unlock never retires a still-active
     # value. ponytail: shard-A is the inert half — plaintext in .env by design.
     shard_a_value: str | None = field(default=None, repr=False)
+    # WOR-1013: the *_BASE_URL line lock wrote and what it replaced, MAC-checked
+    # in pass-1. None = enrolled before WOR-1013, or the check failed.
+    base_url_restore: BaseUrlRestore | None = None
 
     def zero(self) -> None:
         # Per CodeRabbit nitpick: reuse the imported `zero_buf` helper
@@ -213,6 +218,7 @@ async def _pass1_reconstruct(
         try:
             enrollment = await _resolve_enrollment(alias, repo, env_path)
             var_name = enrollment.var_name if enrollment else None
+            base_url_restore = await _checked_base_url_restore(repo, enrollment, encrypted.provider)
 
             shard_a = _load_shard_a(encrypted, env_path, var_name, home, alias)
             try:
@@ -243,6 +249,7 @@ async def _pass1_reconstruct(
                     # WOR-640: snapshot the inert shard-A before it is zeroed so
                     # pass-3 can retire it into the decoy tripwire.
                     shard_a_value=shard_a.decode("utf-8"),
+                    base_url_restore=base_url_restore,
                 )
             )
         finally:
@@ -251,8 +258,43 @@ async def _pass1_reconstruct(
             stored.zero()
 
 
+async def _checked_base_url_restore(
+    repo: ShardRepository, enrollment: EnrollmentRecord | None, provider: str
+) -> BaseUrlRestore | None:
+    """The enrollment's WOR-1013 record, or None to fall back to WOR-981's removal."""
+    if enrollment is None:
+        return None
+    try:
+        return await repo.verified_base_url_restore(enrollment)
+    except ValueError:
+        base_url_var = _derive_base_url_var(enrollment.var_name, provider)
+        get_console().print_warning(
+            f"Not writing back the {base_url_var} value saved at lock: its record in "
+            "the Worthless database was changed after lock. Unlock removes the proxy "
+            f"line instead. If you had your own {base_url_var}, set it again by hand."
+        )
+        return None
+
+
+def _base_url_lines_lock_wrote(p: _PlannedRestore, var_name: str) -> dict[str, str | None]:
+    """Each ``*_BASE_URL`` line lock may have written for *p* → the value to put back.
+
+    None means remove the line: lock added it, or nothing says what was there.
+    """
+    restore = p.base_url_restore
+    if restore is not None:
+        return {} if restore.var is None else {restore.var: restore.original}
+    # Enrolled before WOR-1013: lock named the line after the key's var
+    # (OPENROUTER_API_KEY -> OPENROUTER_BASE_URL); before v0.3.3 it used the
+    # protocol's name.
+    names = {_derive_base_url_var(var_name, p.provider)}
+    if p.provider in _PROVIDER_ENV_MAP:
+        names.add(_PROVIDER_ENV_MAP[p.provider])
+    return dict.fromkeys(names)
+
+
 def _batch_restore_env(env_path: Path, planned: list[_PlannedRestore]) -> None:
-    """One ``rewrite_env_keys`` call: restore plaintext + drop BASE_URLs."""
+    """One ``rewrite_env_keys`` call: restore plaintext + the BASE_URL lines lock wrote."""
     updates: dict[str, str] = {}
     removals: set[str] = set()
     try:
@@ -272,19 +314,19 @@ def _batch_restore_env(env_path: Path, planned: list[_PlannedRestore]) -> None:
             f"(planned aliases: {[entry.alias for entry in planned]})"
         )
         updates[p.var_name] = p.key_buf.decode("utf-8")
-        # Lock names the line after the key's var (OPENROUTER_API_KEY ->
-        # OPENROUTER_BASE_URL); before v0.3.3 it used the protocol's name.
-        names = {_derive_base_url_var(p.var_name, p.provider)}
-        if p.provider in _PROVIDER_ENV_MAP:
-            names.add(_PROVIDER_ENV_MAP[p.provider])
-        for base_url_var in names:
-            # Drop a line only while it routes THIS alias to the proxy. A
-            # --keys-only lock never wrote it (the value is the user's own), and
-            # a slot shared by two keys points at the other key's alias.
-            # Matching the alias, not the whole URL, survives a port change.
+        for base_url_var, original in _base_url_lines_lock_wrote(p, p.var_name).items():
+            # Touch a line only while it routes THIS alias to the proxy. A
+            # --keys-only lock never wrote it (the value is the user's own), a
+            # slot shared by two keys points at the other key's alias, and a
+            # line changed after lock is the user's. Matching the alias, not
+            # the whole URL, survives a port change.
             value = current.get(base_url_var) or ""
-            if _openclaw_integration._alias_from_base_url(value) == p.alias:
+            if _openclaw_integration._alias_from_base_url(value) != p.alias:
+                continue
+            if original is None:
                 removals.add(base_url_var)
+            else:
+                updates[base_url_var] = original
 
     if not updates and not removals:
         return

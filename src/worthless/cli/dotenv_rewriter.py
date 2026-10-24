@@ -306,16 +306,14 @@ def _format_assignment(
     return text.encode("utf-8") + eol
 
 
-def _rebuild_assignment_preserving_format(raw: bytes, new_value: str) -> bytes:
-    """Surgically replace only the value bytes of a parsed ``KEY=VALUE`` line.
+def _split_assignment(raw: bytes) -> tuple[str, str, str]:
+    """Split a parsed ``KEY=VALUE`` line into ``(head, value, tail)``.
 
-    Preserves the ``export`` prefix, key, surrounding whitespace, the
-    ``=`` delimiter, the value's quote style (if any), a trailing inline
-    ``# comment``, and the EOL style (LF / CRLF / none). The rest of the
-    line is byte-identical to *raw*.
-
-    Called on the UPDATE path only. The APPEND path (new key) uses the
-    clean :func:`_format_assignment` instead.
+    *value* is the span an update replaces: the text inside the quotes, or
+    an unquoted value up to a trailing inline ``# comment``. *head* is the
+    ``export`` prefix, key, ``=``, leading whitespace and any opening quote.
+    *tail* is the closing quote, anything after it, the comment and the EOL.
+    An unclosed quote gets its closing quote in *tail*.
     """
     try:
         text = raw.decode("utf-8")
@@ -324,7 +322,7 @@ def _rebuild_assignment_preserving_format(raw: bytes, new_value: str) -> bytes:
 
     eq_idx = text.find("=")
     if eq_idx == -1:  # pragma: no cover - only called on parsed KEY=VALUE lines
-        return (text + new_value).encode("utf-8")
+        return text, "", ""
 
     prefix = text[: eq_idx + 1]
     remainder = text[eq_idx + 1 :]
@@ -340,10 +338,10 @@ def _rebuild_assignment_preserving_format(raw: bytes, new_value: str) -> bytes:
         body = remainder
 
     stripped_body = body.lstrip(" \t")
-    leading_ws = body[: len(body) - len(stripped_body)]
+    head = prefix + body[: len(body) - len(stripped_body)]
 
     if not stripped_body:
-        return (prefix + leading_ws + new_value + trailing_eol).encode("utf-8")
+        return head, "", trailing_eol
 
     first = stripped_body[0]
 
@@ -357,11 +355,9 @@ def _rebuild_assignment_preserving_format(raw: bytes, new_value: str) -> bytes:
                 continue
             if ch == quote:
                 after_quote = stripped_body[i + 1 :]
-                return (
-                    prefix + leading_ws + quote + new_value + quote + after_quote + trailing_eol
-                ).encode("utf-8")
+                return head + quote, stripped_body[1:i], quote + after_quote + trailing_eol
             i += 1
-        return (prefix + leading_ws + quote + new_value + quote + trailing_eol).encode("utf-8")
+        return head + quote, stripped_body[1:], quote + trailing_eol
 
     comment_start: int | None = None
     for i, ch in enumerate(stripped_body):
@@ -374,9 +370,24 @@ def _rebuild_assignment_preserving_format(raw: bytes, new_value: str) -> bytes:
 
     if comment_start is not None:
         ws_and_comment = stripped_body[comment_start:]
-        return (prefix + leading_ws + new_value + ws_and_comment + trailing_eol).encode("utf-8")
+        return head, stripped_body[:comment_start], ws_and_comment + trailing_eol
 
-    return (prefix + leading_ws + new_value + trailing_eol).encode("utf-8")
+    return head, stripped_body, trailing_eol
+
+
+def _rebuild_assignment_preserving_format(raw: bytes, new_value: str) -> bytes:
+    """Surgically replace only the value bytes of a parsed ``KEY=VALUE`` line.
+
+    Preserves the ``export`` prefix, key, surrounding whitespace, the
+    ``=`` delimiter, the value's quote style (if any), a trailing inline
+    ``# comment``, and the EOL style (LF / CRLF / none). The rest of the
+    line is byte-identical to *raw*.
+
+    Called on the UPDATE path only. The APPEND path (new key) uses the
+    clean :func:`_format_assignment` instead.
+    """
+    head, _old_value, tail = _split_assignment(raw)
+    return (head + new_value + tail).encode("utf-8")
 
 
 _POSIX_NAME_RE = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*\Z")
@@ -786,6 +797,35 @@ def _append_additions(lines: list[_LogicalLine], additions: dict[str, str], eol:
                 has_export=False,
             )
         )
+
+
+def read_raw_values(env_path: Path, names: Iterable[str]) -> dict[str, str]:
+    """Each named key's value as written in *env_path*, for writing back later.
+
+    Nothing is expanded or unescaped, unlike ``dotenv_values``:
+    ``${GATEWAY}/v1`` stays ``${GATEWAY}/v1``. Writing a returned value back
+    with :func:`rewrite_env_keys` gives back the line byte for byte, except
+    that an unquoted value loses its trailing whitespace. A name the file
+    doesn't set, or whose value :func:`rewrite_env_keys` would refuse, is
+    left out.
+    """
+    wanted = set(names)
+    if not wanted:
+        return {}
+    stripped, _had_bom = _strip_bom(_safe_read_existing_bytes(env_path))
+    values: dict[str, str] = {}
+    for line in _split_logical_lines(stripped):
+        if line.key not in wanted:
+            continue
+        head, value, _tail = _split_assignment(line.raw)
+        if not head.endswith(('"', "'")):
+            value = value.rstrip(" \t")
+        try:
+            _validate_value(value)
+        except ValueError:
+            continue
+        values[line.key] = value
+    return values
 
 
 def rewrite_env_keys(

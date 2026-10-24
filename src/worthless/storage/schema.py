@@ -104,6 +104,12 @@ CREATE TABLE IF NOT EXISTS enrollments (
     env_path   TEXT,
     decoy_hash TEXT,
     original_mode INTEGER,
+    -- WOR-1013: the *_BASE_URL line lock wrote and the value it replaced
+    -- (models.BaseUrlRestore JSON), so unlock can put back a line the user
+    -- already had. HMAC-tagged like shards.oc_rollback_mac: unlock writes
+    -- this value into the .env, so a DB edit must not pick it.
+    base_url_restore_json TEXT,
+    base_url_restore_mac  TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(key_alias, var_name, env_path)
 );
@@ -367,6 +373,27 @@ async def _migrate_original_mode_column(db: aiosqlite.Connection) -> None:
                 raise
 
 
+async def _migrate_base_url_restore_columns(db: aiosqlite.Connection) -> None:
+    """WOR-1013: add the enrollments BASE_URL restore record (nullable, no backfill).
+
+    NULL = enrolled before WOR-1013: nothing recorded what the line held
+    before lock, so unlock keeps removing the proxy line it routes (WOR-981).
+    """
+    cursor = await db.execute("PRAGMA table_info(enrollments)")
+    columns = {row[1] for row in await cursor.fetchall()}
+    await _add_columns_if_missing(
+        db,
+        {
+            "base_url_restore_json": (
+                "ALTER TABLE enrollments ADD COLUMN base_url_restore_json TEXT"
+            ),
+            "base_url_restore_mac": "ALTER TABLE enrollments ADD COLUMN base_url_restore_mac TEXT",
+        },
+        columns,
+    )
+    await db.commit()
+
+
 async def migrate_db(db_path: str) -> None:
     """Apply forward-only migrations for existing databases."""
     async with sqlite_connect(db_path) as db:
@@ -375,6 +402,7 @@ async def migrate_db(db_path: str) -> None:
         await _prune_old_spend_log(db)
         await _migrate_decoy_hash_column(db)
         await _migrate_original_mode_column(db)
+        await _migrate_base_url_restore_columns(db)
 
         cursor = await db.execute("PRAGMA table_info(shards)")
         shard_columns = {row[1] for row in await cursor.fetchall()}

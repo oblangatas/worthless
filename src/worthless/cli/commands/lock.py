@@ -53,6 +53,7 @@ from worthless.cli.platform import _in_container, is_wsl
 from worthless.cli.scanner import SkippedFile, scan_source_for_hardcoded_provider_urls
 from worthless.cli.sentinel import is_partial, read_sentinel
 from worthless.cli.dotenv_rewriter import (
+    read_raw_values,
     rewrite_env_keys,
     scan_env_keys,
 )
@@ -93,7 +94,7 @@ from worthless.openclaw.unshardable_credentials import (
     detect_unshardable_credentials,
     detection_caveats,
 )
-from worthless.storage.repository import ShardRepository, StoredShard
+from worthless.storage.repository import BaseUrlRestore, ShardRepository, StoredShard
 
 logger = logging.getLogger(__name__)
 
@@ -1015,40 +1016,83 @@ async def _pass1_db_writes(
             sr.zero()
 
 
+def _plan_base_url_lines(
+    planned: list[_PlannedUpdate], keys_only: bool, existing_env_keys: set[str]
+) -> dict[str, tuple[_PlannedUpdate, bool]]:
+    """Each ``*_BASE_URL`` line lock writes → (key it routes, whether it already exists)."""
+    if keys_only:
+        return {}
+    # When multiple keys share the same base_url_var slot (e.g. both
+    # OPENAI_API_KEY and API_KEY derive OPENAI_BASE_URL), the canonical
+    # <PREFIX>_API_KEY name wins regardless of file order. Without this,
+    # a non-canonical key's alias can claim the slot and the canonical
+    # key's shard-A gets routed to the wrong alias → 401. (worthless-sb8v)
+    slot_winner: dict[str, _PlannedUpdate] = {}
+    for p in planned:
+        if not p.base_url_var:
+            continue
+        existing = slot_winner.get(p.base_url_var)
+        canonical_var = p.base_url_var[: -len("_BASE_URL")] + "_API_KEY"
+        if existing is None or p.var_name == canonical_var:
+            slot_winner[p.base_url_var] = p
+
+    key_vars = {p.var_name for p in planned}
+    lines: dict[str, tuple[_PlannedUpdate, bool]] = {}
+    for slot, p in slot_winner.items():
+        if slot in existing_env_keys:
+            lines[slot] = (p, True)
+        elif slot not in key_vars:
+            lines[slot] = (p, False)
+    return lines
+
+
+async def _record_base_url_restores(
+    repo: ShardRepository,
+    env_path: Path,
+    env_str: str,
+    planned: list[_PlannedUpdate],
+    base_url_lines: dict[str, tuple[_PlannedUpdate, bool]],
+    env_values: dict[str, str | None],
+) -> None:
+    """WOR-1013: record on each key's enrollment the line lock writes and what it replaces.
+
+    Runs before ``_batch_rewrite``, so a lock that dies after the rewrite still
+    left unlock what it needs to put a user's own line back. The value is read
+    as written (``${GATEWAY}/v1``, not its expansion); the parsed value is the
+    fallback when the rewriter could not write the raw one back.
+    """
+    if not planned:
+        return
+    raw_values = read_raw_values(
+        env_path, [slot for slot, (_, existed) in base_url_lines.items() if existed]
+    )
+    line_of = {p: (slot, existed) for slot, (p, existed) in base_url_lines.items()}
+    restores = []
+    for p in planned:
+        slot, existed = line_of.get(p, (None, False))
+        original = None
+        if slot is not None and existed:
+            original = raw_values.get(slot, env_values.get(slot) or "")
+        restores.append((p.alias, p.var_name, BaseUrlRestore(var=slot, original=original)))
+    await repo.record_base_url_restores(env_str, restores)
+
+
 def _batch_rewrite(
     env_path: Path,
     planned: list[_PlannedUpdate],
-    keys_only: bool,
-    existing_env_keys: set[str],
+    base_url_lines: dict[str, tuple[_PlannedUpdate, bool]],
 ) -> None:
     """One ``safe_rewrite`` call for every planned update + BASE_URL changes."""
     updates: dict[str, str] = {p.var_name: p.shard_a.decode("utf-8") for p in planned}
     additions: dict[str, str] = {}
-    if not keys_only:
-        # When multiple keys share the same base_url_var slot (e.g. both
-        # OPENAI_API_KEY and API_KEY derive OPENAI_BASE_URL), the canonical
-        # <PREFIX>_API_KEY name wins regardless of file order. Without this,
-        # a non-canonical key's alias can claim the slot and the canonical
-        # key's shard-A gets routed to the wrong alias → 401. (worthless-sb8v)
-        slot_winner: dict[str, _PlannedUpdate] = {}
-        for p in planned:
-            if not p.base_url_var:
-                continue
-            existing = slot_winner.get(p.base_url_var)
-            canonical_var = p.base_url_var[: -len("_BASE_URL")] + "_API_KEY"
-            if existing is None or p.var_name == canonical_var:
-                slot_winner[p.base_url_var] = p
-
-        for slot, p in slot_winner.items():
-            local_proxy = _proxy_base_url(p.alias)
-            if slot in existing_env_keys:
-                updates[slot] = local_proxy
-            elif slot not in updates:
-                additions[slot] = local_proxy
-                sys.stderr.write(
-                    f"worthless: added {slot}={local_proxy} to {env_path} (was missing)\n"
-                )
-                sys.stderr.flush()
+    for slot, (p, existed) in base_url_lines.items():
+        local_proxy = _proxy_base_url(p.alias)
+        if existed:
+            updates[slot] = local_proxy
+        else:
+            additions[slot] = local_proxy
+            sys.stderr.write(f"worthless: added {slot}={local_proxy} to {env_path} (was missing)\n")
+            sys.stderr.flush()
 
     rewrite_env_keys(
         env_path,
@@ -3035,6 +3079,10 @@ def _lock_keys(
                 await _pass1_db_writes(
                     repo, candidates, env_str, token_budget_daily, planned, env_values
                 )
+                base_url_lines = _plan_base_url_lines(planned, keys_only, existing_env_keys)
+                await _record_base_url_restores(
+                    repo, env_path, env_str, planned, base_url_lines, env_values
+                )
                 # A press after Pass-1's last await was never dispatched: answer it
                 # now, while the rows can still unwind. Then record-only until the
                 # rename is done (worthless-f1xx).
@@ -3046,7 +3094,7 @@ def _lock_keys(
                         openclaw_exit=0,
                         oauth_skipped=bool(oauth_skipped),
                     )
-                _batch_rewrite(env_path, planned, keys_only, existing_env_keys)
+                _batch_rewrite(env_path, planned, base_url_lines)
                 on_signal.committed = True  # .env now needs these rows: never unwind on a press
                 # Phase 2.b: OpenClaw magic. Per L1 in
                 # engineering/research/openclaw/WOR-431-phase-2-spec.md, this

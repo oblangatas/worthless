@@ -8,6 +8,7 @@ ciphertext-at-rest record.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import NamedTuple
 
@@ -56,6 +57,37 @@ class EncryptedShard(NamedTuple):
         )
 
 
+@dataclass(frozen=True)
+class BaseUrlRestore:
+    """The ``*_BASE_URL`` line lock wrote for one enrollment, and what it replaced (WOR-1013).
+
+    ``var`` is None when lock wrote no line for the key (``--keys-only``, or a
+    line another key in the ``.env`` routes). ``original`` is the value as
+    written before lock, or None when the line did not exist and lock added it.
+    """
+
+    var: str | None
+    original: str | None
+
+    def to_json(self) -> str:
+        return json.dumps({"var": self.var, "original": self.original}, sort_keys=True)
+
+    @classmethod
+    def from_json(cls, record_json: str) -> BaseUrlRestore:
+        """Parse :meth:`to_json` output; ``ValueError`` on any other shape."""
+        parsed = json.loads(record_json)
+        if not isinstance(parsed, dict) or set(parsed) != {"var", "original"}:
+            raise ValueError("base_url restore record has the wrong keys")
+        var, original = parsed["var"], parsed["original"]
+        if not (var is None or isinstance(var, str)):
+            raise ValueError("base_url restore var is not a string")
+        if not (original is None or isinstance(original, str)):
+            raise ValueError("base_url restore original is not a string")
+        if var is None and original is not None:
+            raise ValueError("base_url restore has an original value but no line")
+        return cls(var=var, original=original)
+
+
 @dataclass
 class EnrollmentRecord:
     """A single enrollment binding a key alias to a var name and optional env path.
@@ -75,6 +107,11 @@ class EnrollmentRecord:
     # uninstall can restore the original mode. None = "not captured (pre-715
     # install), leave the file mode as-is".
     original_mode: int | None = None
+    # WOR-1013: BaseUrlRestore JSON and its MAC, written by lock. Read them
+    # through ShardRepository.verified_base_url_restore, never directly. None =
+    # enrolled before WOR-1013.
+    base_url_restore_json: str | None = field(default=None, repr=False)
+    base_url_restore_mac: str | None = field(default=None, repr=False)
 
 
 @dataclass
