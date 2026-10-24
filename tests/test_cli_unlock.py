@@ -296,6 +296,24 @@ class TestUnlockRemovesTheBaseUrlLockWrote:
         assert result.exit_code == 0, result.output
         assert env.read_bytes() == original
 
+    def test_line_is_removed_after_the_proxy_port_changed(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        env = tmp_path / ".env"
+        env.write_text(f"OPENROUTER_API_KEY={fake_openrouter_key()}\n")
+        original = env.read_bytes()
+        result = runner.invoke(
+            app,
+            ["lock", "--env", str(env)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir), "WORTHLESS_PORT": "9911"},
+        )
+        assert result.exit_code == 0, result.output
+        assert ":9911/" in (dotenv_values(env)["OPENROUTER_BASE_URL"] or "")
+
+        result = _unlock(env, home_dir)
+        assert result.exit_code == 0, result.output
+        assert env.read_bytes() == original
+
     def test_unlocking_one_key_keeps_the_other_keys_base_url(
         self, home_dir: WorthlessHome, tmp_path: Path
     ) -> None:

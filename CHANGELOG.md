@@ -10,6 +10,7 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   Now: unlock removes the line that lock wrote for each key it unlocks, and only while that line still points at that key on the proxy. Lock then unlock gives back a byte-identical `.env`. A `*_BASE_URL` you set yourself is kept after a `--keys-only` lock. Unlock used to delete `OPENAI_BASE_URL` in that case.
 
   **Limits.**
+  - A `.env` you already unlocked with an older version keeps its leftover line. Run `worthless doctor` in that project's folder: it reports the line as a BASE_URL alias missing from the DB. Delete that line by hand.
   - If your `.env` already had a `*_BASE_URL` line before a normal lock, lock replaces it with the proxy URL and unlock removes it. Your original line is not put back.
   - When two keys share one line (for example `OPENAI_API_KEY` and `MY_OPENAI_KEY` both use `OPENAI_BASE_URL`), unlocking only the key that the line points at still removes it, while the other key stays locked.
 

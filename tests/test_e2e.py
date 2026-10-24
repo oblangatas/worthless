@@ -10,16 +10,18 @@ import subprocess
 import sys
 import textwrap
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from dotenv import dotenv_values
 from typer.testing import CliRunner
 
 from worthless.cli.app import app
 from worthless.cli.bootstrap import WorthlessHome
 from worthless.storage.repository import ShardRepository
 
-from tests.helpers import fake_openai_key
+from tests.helpers import fake_openai_key, fake_openrouter_key
 
 runner = CliRunner()
 _WRAP_BIND_ATTEMPTS = 5
@@ -215,6 +217,92 @@ _CHILD_SCRIPT = textwrap.dedent("""\
 """)
 
 
+def _run_child_under_wrap(
+    tmp_path: Path,
+    child_script: str,
+    prepare: Callable[[Path, dict[str, str]], None],
+    extra_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run *child_script* under a real ``worthless wrap`` proxy, after *prepare* locks.
+
+    Lock owns OPENAI_BASE_URL and must write the chosen port into .env,
+    so a bind collision needs a full fresh prepare->wrap retry.
+    """
+    attempts: list[str] = []
+    proc: subprocess.CompletedProcess[str] | None = None
+
+    for attempt in range(1, _WRAP_BIND_ATTEMPTS + 1):
+        proxy_port = _free_port()
+        env_file, worthless_home, _original_key, cli_env = _make_e2e_env(
+            tmp_path / f"attempt-{attempt}", proxy_port=proxy_port
+        )
+        prepare(env_file, cli_env)
+
+        _venv_bin = Path(sys.executable).parent
+        _worthless = str(_venv_bin / "worthless")
+        proc = subprocess.run(
+            [
+                _worthless,
+                "wrap",
+                "--",
+                sys.executable,
+                "-c",
+                child_script,
+            ],
+            env={
+                **os.environ,
+                "WORTHLESS_HOME": str(worthless_home),
+                "WORTHLESS_PORT": str(proxy_port),
+                # Pass .env path so the child can pick up the OPENAI_BASE_URL
+                # that lock wrote (post-8rqs wrap doesn't synthesise it).
+                "WORTHLESS_E2E_ENV_PATH": str(env_file),
+                # WOR-463: explicit even though conftest.py setdefault
+                # propagates via **os.environ. Self-documents the contract:
+                # this subprocess must not leak fernet-key-* into the host
+                # keychain. Defense-in-depth.
+                "WORTHLESS_KEYRING_BACKEND": "null",
+                # Isolate $HOME too, matching the runner.invoke call above —
+                # _resolve_home() (openclaw/integration.py) reads Path.home(),
+                # not WORTHLESS_HOME. cli_env["HOME"]/["USERPROFILE"] are
+                # _make_e2e_env's sandbox dir, already isolated from the real
+                # machine. USERPROFILE matters on native Windows, where
+                # Path.home() checks it before $HOME.
+                "HOME": cli_env["HOME"],
+                "USERPROFILE": cli_env["USERPROFILE"],
+                **(extra_env or {}),
+            },
+            timeout=45,
+            capture_output=True,
+            text=True,
+        )
+
+        combined = proc.stdout + proc.stderr
+        if proc.returncode == 0 or not any(
+            marker in combined.lower() for marker in _WRAP_BIND_COLLISION_MARKERS
+        ):
+            break
+
+        attempts.append(
+            f"attempt {attempt} port {proxy_port} bind collision:\n"
+            f"stdout: {proc.stdout}\nstderr: {proc.stderr}"
+        )
+        time.sleep(0.05 * attempt)
+
+    assert proc is not None
+    # Child should have exited 0 (got a response OR connect error)
+    assert proc.returncode == 0, (
+        f"wrap failed after {len(attempts) + 1} attempt(s) "
+        f"(rc={proc.returncode}):\n"
+        f"{chr(10).join(attempts)}\nstdout: {proc.stdout}\nstderr: {proc.stderr}"
+    )
+    return proc
+
+
+def _lock(env_file: Path, cli_env: dict[str, str]) -> None:
+    result = runner.invoke(app, ["lock", "--env", str(env_file)], env=cli_env)
+    assert result.exit_code == 0, f"lock failed: {result.output}"
+
+
 @pytest.mark.integration
 @pytest.mark.real_ipc
 @pytest.mark.timeout(60)
@@ -223,84 +311,59 @@ class TestWrapProxiesRequest:
 
     def test_wrap_real_proxy_transit(self, tmp_path: Path) -> None:
         # Run wrap as a real subprocess: spawns proxy, runs child, cleans up.
-        # Lock owns OPENAI_BASE_URL and must write the chosen port into .env,
-        # so a bind collision needs a full fresh lock->wrap retry.
-        attempts: list[str] = []
-        proc: subprocess.CompletedProcess[str] | None = None
-
-        for attempt in range(1, _WRAP_BIND_ATTEMPTS + 1):
-            proxy_port = _free_port()
-            env_file, worthless_home, _original_key, cli_env = _make_e2e_env(
-                tmp_path / f"attempt-{attempt}", proxy_port=proxy_port
-            )
-
-            result = runner.invoke(
-                app,
-                ["lock", "--env", str(env_file)],
-                env=cli_env,
-            )
-            assert result.exit_code == 0, f"lock failed: {result.output}"
-
-            _venv_bin = Path(sys.executable).parent
-            _worthless = str(_venv_bin / "worthless")
-            proc = subprocess.run(
-                [
-                    _worthless,
-                    "wrap",
-                    "--",
-                    sys.executable,
-                    "-c",
-                    _CHILD_SCRIPT,
-                ],
-                env={
-                    **os.environ,
-                    "WORTHLESS_HOME": str(worthless_home),
-                    "WORTHLESS_PORT": str(proxy_port),
-                    # Pass .env path so the child can pick up the OPENAI_BASE_URL
-                    # that lock wrote (post-8rqs wrap doesn't synthesise it).
-                    "WORTHLESS_E2E_ENV_PATH": str(env_file),
-                    # WOR-463: explicit even though conftest.py setdefault
-                    # propagates via **os.environ. Self-documents the contract:
-                    # this subprocess must not leak fernet-key-* into the host
-                    # keychain. Defense-in-depth.
-                    "WORTHLESS_KEYRING_BACKEND": "null",
-                    # Isolate $HOME too, matching the runner.invoke call above —
-                    # _resolve_home() (openclaw/integration.py) reads Path.home(),
-                    # not WORTHLESS_HOME. cli_env["HOME"]/["USERPROFILE"] are
-                    # _make_e2e_env's sandbox dir, already isolated from the real
-                    # machine. USERPROFILE matters on native Windows, where
-                    # Path.home() checks it before $HOME.
-                    "HOME": cli_env["HOME"],
-                    "USERPROFILE": cli_env["USERPROFILE"],
-                },
-                timeout=45,
-                capture_output=True,
-                text=True,
-            )
-
-            combined = proc.stdout + proc.stderr
-            if proc.returncode == 0 or not any(
-                marker in combined.lower() for marker in _WRAP_BIND_COLLISION_MARKERS
-            ):
-                break
-
-            attempts.append(
-                f"attempt {attempt} port {proxy_port} bind collision:\n"
-                f"stdout: {proc.stdout}\nstderr: {proc.stderr}"
-            )
-            time.sleep(0.05 * attempt)
-
-        assert proc is not None
+        proc = _run_child_under_wrap(tmp_path, _CHILD_SCRIPT, _lock)
         combined = proc.stdout + proc.stderr
-
-        # Child should have exited 0 (got a response OR connect error)
-        assert proc.returncode == 0, (
-            f"wrap failed after {len(attempts) + 1} attempt(s) "
-            f"(rc={proc.returncode}):\n"
-            f"{chr(10).join(attempts)}\nstdout: {proc.stdout}\nstderr: {proc.stderr}"
-        )
 
         # Prove the proxy was involved: child got a status code or reached proxy
         assert "STATUS:" in combined or "PROXY_REACHED" in combined, (
             f"No evidence of proxy transit:\nstdout: {proc.stdout}\nstderr: {proc.stderr}"
         )
+
+
+# Sends the locked key from .env as an app would. Upstream is blocked, so a 502
+# means the proxy found the alias and rebuilt the key before failing to forward
+# it; an alias the proxy doesn't know gets the uniform 401 instead.
+_ROUTED_CHILD_SCRIPT = textwrap.dedent("""\
+    import os, sys, httpx
+    from dotenv import dotenv_values
+    env = dotenv_values(os.environ["WORTHLESS_E2E_ENV_PATH"])
+    base = env.get("OPENAI_BASE_URL")
+    if not base:
+        print("OPENAI_BASE_URL not set", file=sys.stderr)
+        sys.exit(1)
+    r = httpx.post(
+        f"{base}/chat/completions",
+        headers={"Authorization": f"Bearer {env['OPENAI_API_KEY']}"},
+        json={"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}]},
+        timeout=15.0,
+    )
+    print(f"STATUS:{r.status_code}")
+""")
+
+
+@pytest.mark.integration
+@pytest.mark.real_ipc
+@pytest.mark.timeout(60)
+class TestPartialUnlockKeepsOtherKeyRouted:
+    """Unlocking only an OpenRouter key keeps a still-locked OpenAI key on the proxy."""
+
+    def test_locked_openai_key_still_reaches_its_alias(self, tmp_path: Path) -> None:
+        def lock_both_then_unlock_openrouter(env_file: Path, cli_env: dict[str, str]) -> None:
+            with env_file.open("a") as f:
+                f.write(f"OPENROUTER_API_KEY={fake_openrouter_key()}\n")
+            _lock(env_file, cli_env)
+            openrouter_url = dotenv_values(env_file)["OPENROUTER_BASE_URL"] or ""
+            alias = openrouter_url.rstrip("/").split("/")[-2]
+            result = runner.invoke(
+                app, ["unlock", "--env", str(env_file), "--alias", alias], env=cli_env
+            )
+            assert result.exit_code == 0, f"unlock failed: {result.output}"
+
+        proc = _run_child_under_wrap(
+            tmp_path,
+            _ROUTED_CHILD_SCRIPT,
+            lock_both_then_unlock_openrouter,
+            # Nothing leaves the machine: upstream HTTPS goes to a closed port.
+            extra_env={"HTTPS_PROXY": "http://127.0.0.1:9", "NO_PROXY": "127.0.0.1,localhost"},
+        )
+        assert "STATUS:502" in proc.stdout, f"stdout: {proc.stdout}\nstderr: {proc.stderr}"
