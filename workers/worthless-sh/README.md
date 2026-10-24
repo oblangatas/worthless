@@ -34,9 +34,11 @@ Debian 12, Alpine, and macOS. Full table + test invocation:
 
 ## Dependency overrides
 
-`package.json` pins `overrides: { "sharp": "^0.35.4" }`. It answers
+`package.json` pins `overrides: { "sharp": "^0.35.5" }`. It answers
 [GHSA-rgj7-g3m4-5g8c](https://github.com/advisories/GHSA-rgj7-g3m4-5g8c) — a libheif
-heap overflow affecting sharp `<0.35.4`, which reached this tree as
+heap overflow affecting sharp `<0.35.4` — and
+[GHSA-wq5f-xc86-pv6w](https://github.com/advisories/GHSA-wq5f-xc86-pv6w) (librsvg,
+`<0.35.5`), which reached this tree as
 `sharp <- miniflare <- wrangler / @cloudflare/vitest-pool-workers`.
 
 The override is needed because **miniflare pins `sharp` to an exact `0.35.2`**, so npm's
@@ -46,18 +48,20 @@ suite's test runner. `overrides` reaches the published patch instead. Nothing el
 wrangler, miniflare, vitest-pool-workers and vitest are all unchanged, and the suite is
 byte-identical either way (244 passed, 9 expected-fail before and after).
 
-**Remove it** once miniflare itself depends on sharp >= 0.35.4. Dropping it before then
+**Remove it** once miniflare itself depends on sharp >= 0.35.5. Dropping it before then
 silently reinstates 0.35.2 on the next `npm install`; `tests/test_dependency_audit_gate.py`
 fails offline if that happens, and the `npm audit` job in `dependency-audit.yml` fails in CI.
 
 `undici` and `zod` are overridden for the same reason: miniflare pins undici exactly, and
 `@cloudflare/vitest-pool-workers` pins zod to exactly `4.4.3`, still true of their latest
-releases on 2026-10-24. Each floor is the first fixed version: undici `^7.30.1`
+releases on 2026-10-24. Each is pinned exactly to the first fixed version: undici `7.30.1`
 ([GHSA-4qv8-2p9j-2685](https://github.com/advisories/GHSA-4qv8-2p9j-2685),
 [GHSA-f72v-6w45-q472](https://github.com/advisories/GHSA-f72v-6w45-q472),
-[GHSA-xjj6-f33q-929c](https://github.com/advisories/GHSA-xjj6-f33q-929c)) and zod `^4.6.6`
-([GHSA-mrhx-c7xc-m3w5](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5)). Remove each once
-the package that pins it depends on a fixed version; only the `npm audit` job guards these two.
+[GHSA-xjj6-f33q-929c](https://github.com/advisories/GHSA-xjj6-f33q-929c)) and zod `4.6.6`
+([GHSA-mrhx-c7xc-m3w5](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5)). Exact, not a
+caret, so a relock can't float a newer release into a toolchain that deploys with Cloudflare
+credentials; a later advisory means a deliberate bump here. Remove each once the package that
+pins it depends on a fixed version; only the `npm audit` job guards these two.
 
 ## Tickets
 
