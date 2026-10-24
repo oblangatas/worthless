@@ -343,3 +343,51 @@ def test_the_docs_site_sharp_floor_is_also_outside_the_advisory() -> None:
         and _version_tuple(meta["version"]) < SHARP_FIXED
     }
     assert not stale, f"docs lockfile resolves a vulnerable sharp: {stale}"
+
+
+# ── undici and zod overrides (WOR-1007) ────────────────────────────────────
+#
+# Same shape as sharp: miniflare pins undici exactly and
+# @cloudflare/vitest-pool-workers pins zod to exactly 4.4.3, so only an
+# `overrides` entry reaches the fix.
+#   undici  GHSA-4qv8-2p9j-2685, GHSA-f72v-6w45-q472, GHSA-xjj6-f33q-929c  < 7.30.1
+#   zod     GHSA-mrhx-c7xc-m3w5                                            < 4.6.6
+# Unlike sharp these are pinned EXACTLY. A caret lets the next relock float a
+# newer release, compromised or not, into a toolchain that deploys with
+# Cloudflare credentials; on main zod could not move at all.
+
+EXACT_OVERRIDES = {"undici": (7, 30, 1), "zod": (4, 6, 6)}
+
+
+@pytest.mark.parametrize(("name", "fixed"), EXACT_OVERRIDES.items(), ids=list(EXACT_OVERRIDES))
+def test_worker_override_resolves_outside_the_advisory(name: str, fixed: tuple[int, ...]) -> None:
+    """Every resolved copy in the Worker lockfile is at or above the fix."""
+    lock = json.loads((WORKER / "package-lock.json").read_text())
+    found = {
+        path: meta["version"]
+        for path, meta in lock["packages"].items()
+        if path.split("node_modules/")[-1] == name and "version" in meta
+    }
+    assert found, (
+        f"no {name} in the Worker lockfile — if nothing pins it any more, "
+        "delete the override in package.json and this test's entry together"
+    )
+    stale = {p: v for p, v in found.items() if _version_tuple(v) < fixed}
+    assert not stale, f"{name} back inside its advisory range: {stale}"
+
+
+@pytest.mark.parametrize(("name", "fixed"), EXACT_OVERRIDES.items(), ids=list(EXACT_OVERRIDES))
+def test_worker_override_is_declared_exactly(name: str, fixed: tuple[int, ...]) -> None:
+    """package.json pins the fixed version exactly, not a range."""
+    override = json.loads((WORKER / "package.json").read_text()).get("overrides", {}).get(name)
+    assert override, (
+        f"overrides.{name} is gone from workers/worthless-sh/package.json; the "
+        "next `npm install` resolves back to the exact pin upstream ships"
+    )
+    assert re.fullmatch(r"\d+\.\d+\.\d+", override), (
+        f"overrides.{name} is {override!r}; pin an exact version so a relock "
+        "can't float a newer release in"
+    )
+    assert _version_tuple(override) >= fixed, (
+        f"overrides.{name} {override!r} is inside the advisory"
+    )
