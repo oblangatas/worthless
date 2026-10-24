@@ -117,9 +117,9 @@ behaviour and must stay green.
    (`files.getUploadURLExternal?filename=x.txt&length=5`) and a sync-Slack POST with
    `Content-Type: application/json` and an empty body.
 3. Trailing slash and `%20` are preserved; `%2f` and `//` are forwarded as sent.
-4. **Dot segments and backslashes** get a 401 with `open_calls == 0` and respx never called: `.`/`..` in any
-   `%2e` case mix (`%2e%2e`, `.%2E`, `%2e.`), `..%2f..` (caught after one round of percent-decoding), `\` and
-   `%5c`. A literal `..` needs a raw-ASGI-scope helper, because httpx collapses it client-side.
+4. **Dot segments, backslashes and double encoding** get a 401 with `open_calls == 0` and respx never called:
+   `.`/`..` raw or percent-decoded (`%2e%2e`, `.%2E`, `%2e.`, `..%2f..`), `\` and `%5c`, and any `%25`
+   (`%252e%252e%252f`). A literal `..` needs a raw-ASGI-scope helper, because httpx collapses it client-side.
 5. **Host pinning.** `//evil.com/x` right after the alias, on PostHog's path-less base URL, stays on
    `us.posthog.com`. A Hypothesis property: `build_upstream_url` never changes the host or escapes the base path.
 6. Raw and Bearer forms are mirrored. Basic auth, `x-api-key` and values with spaces get a 401 before decrypt.
@@ -147,14 +147,16 @@ behaviour and must stay green.
 - A 4xx body arrives verbatim; Linear's 400 with `RATELIMITED` arrives intact.
 - `Set-Cookie` is stripped from responses; `Cookie`, `Forwarded` and `X-Forwarded-*` are not sent upstream.
 - Any upstream 3xx becomes a 502, with no `Location` rewrite.
-- **Size cap.** PR1b adds a cap of about 10 MiB on every buffered passthrough body, any status (there is no
-  response cap today; the only 64 KiB constant in the proxy is the SSE line buffer). Over the cap before headers
-  are sent → 502. A streamed body that overflows after headers → the connection is aborted, never a truncated
-  200. This also covers WOR-996.
-- This alias's shard-A bytes anywhere else in the request (path, query, any header, body) → 401 before decrypt.
-  Match those exact bytes, never a token pattern (PostHog sends `?token=phc_…` on every call). A request with
-  `Content-Encoding` → 401.
-- A buffered response that contains the real key's exact bytes → 502.
+- **Size cap.** Passthrough reads the whole response before sending anything back, capped at about 10 MiB for
+  any status (there is no response cap today; the only 64 KiB constant in the proxy is the SSE line buffer).
+  Over the cap → 502, so a client never sees a partial response. A `text/event-stream` response → 502. This
+  also covers WOR-996.
+- This alias's shard-A anywhere else in the request (path, query, any header, body) → 401 before decrypt,
+  checked on the raw bytes and on a decoded view: percent-decoded path, query and form values, and
+  JSON-unescaped strings. Tests include a percent-encoded copy in the query and form body and an escaped copy in
+  a JSON body; the forwarded bytes stay raw. Match this alias's shard-A only, never a token pattern (PostHog
+  sends `?token=phc_…` on every call). A request with `Content-Encoding` → 401.
+- The real key in any response header or in the body → 502.
 - The proxy's own 429/502/503/504 carry an `x-worthless-` marker header; a relayed upstream 429 doesn't, and an
   upstream's copy of the marker is stripped.
 - The access log has no query string: a filter on `uvicorn.access` drops it, and the new `KEY_PATTERN` prefixes
@@ -238,7 +240,9 @@ Needs PR0c merged.
 - `unlock` removes the variable;
 - redaction covers the new prefixes and the raw `Authorization` form;
 - a `KEY_PATTERN`↔prefix-table coverage test (no `.gitleaks.toml` coupling);
-- the same flow for a Linear raw-auth key, and for a PostHog `phx_` key used directly (Bearer on every request).
+- the same flow for a Linear raw-auth key, and for a PostHog `phx_` key used directly (Bearer on every request),
+  once against `us.posthog.com` and once against `eu.posthog.com` (the two exact entries in the code table; no
+  `*.posthog.com` match).
   Gate B never exercised PostHog's direct-API path, so this is its first coverage and a required check before
   PostHog's rollout week.
 
@@ -249,23 +253,22 @@ intended (ADR D1).
 ### R1: F6 Mappy trust-domain recipe (docs + verification script; code only if the recipe needs it)
 
 - The agent runs under its own uid or container. `~/.worthless` and the Fernet key are unreadable to it.
-- The Fernet key lives off any disk a VM snapshot or backup captures, or Mappy explicitly accepts that a VM
-  snapshot holds both halves.
+- The Fernet key lives off any disk a VM snapshot or backup captures. If that isn't possible on Mappy, Mappy
+  doesn't go live.
 - The proxy listens on loopback only.
 - **Required:** outbound traffic from the agent's uid to `slack.com`, `api.linear.app`, `uploads.linear.app` and
   `*.posthog.com` is blocked and logged. `files.slack.com` stays reachable for uploads, which carry no key; Gate A
   must show Mappy doesn't download vendor files, because such a download would carry shard-A uncounted.
 
 The verification script runs as the agent user and expects `EACCES` on the store, a failing `unlock`, the Fernet
-key off the snapshotted disk (or Mappy's written acceptance that it isn't), a loopback-only listener, a blocked
-direct vendor call, and a working proxy call.
+key off the snapshotted disk, a loopback-only listener, a blocked direct vendor call, and a working proxy call.
 
 ### PR4a / PR4b: docs
 
 - **PR4a (with PR3):** `docs/security.md` gets the "when it holds" table, non-goal #9 ("limited only by the rate
   limit until budgets"), and the SR-05/09/11 deltas. A new experimental tool-keys page with per-SDK snippets,
-  one line saying feature flags in the PostHog Python library aren't supported yet, and "rollback = `unlock`,
-  then restart the agent". Reword `docs/install/mac.md`'s "Non-LLM secrets" bullet.
+  one line saying feature flags in the PostHog Python library aren't supported yet, and "rollback = lift any
+  outbound block on the vendor, `unlock`, then restart the agent". Reword `docs/install/mac.md`'s "Non-LLM secrets" bullet.
 - **PR4b (only after Mappy meets its success criteria):** README Scope gains a secondary "also tool keys"; the
   LLM headline stays. Also the website FAQ, both `SKILL.md` files, and `personas.md` (P8, agent operator).
 
@@ -302,7 +305,8 @@ direct vendor call, and a working proxy call.
 5. Lock Slack, patch the one line in Mappy's client factory, and add a prompt hint that names the `*_BASE_URL`
    variable and says never to ask for a "working token". Canary read-only calls first, then writes. No shadowing
    of writes.
-6. Rehearse rollback once (`unlock`, then restart the agent) and time the 401 window. Add Linear in week 2.
+6. Rehearse rollback once (lift R1's outbound block for the vendor, `unlock`, restart the agent) and time the
+   401 window. Add Linear in week 2.
    PostHog (direct API use only) in week 3, after PR3's PostHog direct-API test passes and the real account's
    host (`us.` or `eu.posthog.com`) is checked.
 
@@ -312,15 +316,17 @@ direct vendor call, and a working proxy call.
 - re-running the Gate A artifact audit finds none holding both halves;
 - call success at least 99.5% of baseline over 14 days;
 - p50 added latency under 20 ms; p99 reported;
-- at most one code line per provider;
+- at most one code line per provider (the `base_url=` line; the async-Slack `client.proxy = None` line needed
+  only on hosts with `HTTPS_PROXY` doesn't count);
 - at least 90% of the agent's vendor calls go through the proxy over 100+ tasks. Measured as proxy access-log
   calls against R1's blocked direct calls; vendors don't give app owners failed-auth counts.
 
 **Kill:** a mangled or duplicated action; more than one proxy-caused outage a week; more than one code change
-per provider; more than 20% of calls bypassing the proxy; any invariant having to be weakened.
+per provider (counted as above); more than 20% of calls bypassing the proxy; any invariant having to be
+weakened.
 
-**Rollback:** `worthless unlock`, then restart the agent. No code change: the snippet falls back to the vendor's
-own URL.
+**Rollback, in order:** lift R1's outbound block for that vendor, run `worthless unlock`, restart the agent. No
+code change: the snippet falls back to the vendor's own URL, which the block would otherwise stop.
 
 ## Verification
 

