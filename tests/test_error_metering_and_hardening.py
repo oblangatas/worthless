@@ -317,6 +317,40 @@ class TestErrorResponseMetering:
         assert resp.status_code == 200
 
 
+class TestNonDictUsage:
+    """WOR-980: a 200 whose ``usage`` isn't an object must not crash spend recording."""
+
+    @respx.mock
+    async def test_non_dict_usage_records_nothing_and_releases_reservation(
+        self, proxy_client: httpx.AsyncClient, proxy_app, enrolled_alias, proxy_settings
+    ):
+        alias, shard_a_utf8, _ = enrolled_alias
+        respx.post(OPENAI_COMPLETIONS).mock(
+            return_value=httpx.Response(200, json={"choices": [], "usage": "x"})
+        )
+        engine = proxy_app.state.rules_engine
+
+        with patch.object(
+            engine, "release_spend_reservation", wraps=engine.release_spend_reservation
+        ) as release:
+            # ASGITransport re-raises background-task exceptions here, so a
+            # crash in the spend task fails this call, not just a later check.
+            resp = await proxy_client.post(
+                _proxy_url(alias),
+                headers=_proxy_headers(alias, shard_a_utf8),
+                content=PROXY_BODY,
+            )
+
+        assert resp.status_code == 200
+        release.assert_awaited_once()
+        async with aiosqlite.connect(proxy_settings.db_path) as db:
+            async with db.execute(
+                "SELECT COUNT(*) FROM spend_log WHERE key_alias = ?", (alias,)
+            ) as cur:
+                row = await cur.fetchone()
+        assert row == (0,)
+
+
 # ------------------------------------------------------------------
 # worthless-9dz: /readyz must not leak enrollment state
 # ------------------------------------------------------------------

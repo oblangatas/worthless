@@ -28,7 +28,7 @@ def extract_usage_openai(data: bytes) -> UsageInfo | None:
 
     try:
         parsed = json.loads(data)
-        if isinstance(parsed, dict) and "usage" in parsed:
+        if isinstance(parsed, dict) and isinstance(parsed.get("usage"), dict):
             total = parsed["usage"].get("total_tokens", 0)
             return UsageInfo(total_tokens=total, model=parsed.get("model"))
     except (json.JSONDecodeError, ValueError):
@@ -69,9 +69,10 @@ def _find_sse_event_data(
                 data_line = lines[j].strip()
                 if data_line.startswith("data: "):
                     try:
-                        return json.loads(data_line[6:])
+                        parsed = json.loads(data_line[6:])
                     except (json.JSONDecodeError, ValueError):
                         return None
+                    return parsed if isinstance(parsed, dict) else None
     return None
 
 
@@ -87,7 +88,7 @@ def extract_usage_anthropic(data: bytes) -> UsageInfo | None:
 
     try:
         parsed = json.loads(data)
-        if isinstance(parsed, dict) and "usage" in parsed:
+        if isinstance(parsed, dict) and isinstance(parsed.get("usage"), dict):
             usage = parsed["usage"]
             input_tokens = usage.get("input_tokens", 0)
             cache_creation = usage.get("cache_creation_input_tokens", 0)
@@ -110,18 +111,19 @@ def extract_usage_anthropic(data: bytes) -> UsageInfo | None:
     model: str | None = None
 
     start = _find_sse_event_data(lines, "message_start")
-    if start:
-        msg = start.get("message", {})
-        usage = msg.get("usage", {})
-        input_tokens = (
-            usage.get("input_tokens", 0)
-            + usage.get("cache_creation_input_tokens", 0)
-            + usage.get("cache_read_input_tokens", 0)
-        )
+    msg = start.get("message") if start else None
+    if isinstance(msg, dict):
+        usage = msg.get("usage")
+        if isinstance(usage, dict):
+            input_tokens = (
+                usage.get("input_tokens", 0)
+                + usage.get("cache_creation_input_tokens", 0)
+                + usage.get("cache_read_input_tokens", 0)
+            )
         model = msg.get("model")
 
     delta = _find_sse_event_data(lines, "message_delta", reverse=True)
-    if delta is None or "usage" not in delta:
+    if delta is None or not isinstance(delta.get("usage"), dict):
         return None
 
     output_tokens = delta["usage"].get("output_tokens", 0)
