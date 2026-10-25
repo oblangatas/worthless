@@ -777,6 +777,27 @@ class TestUnlockPutsBackTheBaseUrlYouHad:
         assert _said(result, "file changed while worthless was writing it")
         assert "unregistered.example" in env.read_text()  # lock wrote nothing
 
+    def test_lock_stops_when_the_env_changes_before_its_keys_are_scanned(
+        self, home_dir: WorthlessHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The snapshot comes first, so a key edited before the scan can't be locked
+        from one file and rewritten into another (CodeRabbit on #738)."""
+        import worthless.cli.commands.lock as lock_mod
+
+        env = tmp_path / ".env"
+        env.write_text(f"OPENROUTER_API_KEY={fake_openrouter_key()}\n")
+        edited = f"OPENROUTER_API_KEY={fake_key('sk-or-v1-', seed='edited-before-scan')}\n"
+        real_scan = lock_mod.scan_env_keys
+
+        def edit_then_scan(path: Path):  # noqa: ANN202 — mirrors scan_env_keys
+            env.write_text(edited)
+            return real_scan(path)
+
+        monkeypatch.setattr(lock_mod, "scan_env_keys", edit_then_scan)
+        result = _lock(env, home_dir, check=False)
+        assert result.exit_code != 0, result.output
+        assert env.read_text() == edited  # lock wrote nothing over the edit
+
     def test_lock_stops_before_the_env_when_a_record_is_not_saved(
         self, home_dir: WorthlessHome, tmp_path: Path
     ) -> None:

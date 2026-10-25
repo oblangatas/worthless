@@ -2991,6 +2991,11 @@ def _lock_keys(
             env_str = str(env_path.resolve())
             all_enrollments = await repo.list_enrollments()
 
+            # Snapshot .env BEFORE scanning it: pass-1 pulls *_BASE_URL values from
+            # the snapshot, and the rewrite refuses a file that changed since this
+            # read, so an edit after it (even one the scan below sees) is caught
+            # instead of locking a key from a different file than the one rewritten.
+            snapshot = read_env_snapshot(env_path)
             raw_scanned = scan_env_keys(env_path)
 
             # WOR-837: a Claude Code OAuth token (sk-ant-oat/ort) collides with
@@ -3036,9 +3041,6 @@ def _lock_keys(
                     oauth_skipped=bool(oauth_skipped),
                 )
 
-            # Snapshot .env so _pass1 can pull *_BASE_URL values into the DB row.
-            # The rewrite later refuses a file that changed since this read.
-            snapshot = read_env_snapshot(env_path)
             env_values = snapshot.parsed
 
             # worthless-ftmg: refuse to lock an already-locked .env BEFORE any
