@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import errno
 import json
+import os
 import sqlite3
 
 import pytest
@@ -1579,3 +1580,33 @@ class TestQuietUninstallStillSaysWhatYouLose:
         assert sum(key in env.read_text() for key, env in locked) == 1
         assert "broken install" not in result.output.lower()
         assert "stopped partway" in result.output
+        # The files it restored lost their OpenClaw rollback with their rows.
+        assert "openclaw.json may still point at the proxy" in result.output
+
+    @pytest.mark.skipif(
+        hasattr(os, "geteuid") and os.geteuid() == 0, reason="root opens any folder"
+    )
+    @pytest.mark.parametrize("force", [False, True], ids=["no-force", "force"])
+    def test_a_folder_it_cannot_open_is_named_like_a_file_it_could_not_restore(
+        self, home_dir: WorthlessHome, tmp_path, force: bool
+    ) -> None:
+        """A project folder uninstall can't open can't even be checked for its
+        .env. It is named like a .env it couldn't restore, so the refusal says
+        which, and --force can still finish."""
+        _, blocked = self._lock(home_dir, tmp_path / "blocked")
+        key, fine = self._lock(home_dir, tmp_path / "fine")
+        blocked.parent.chmod(0)
+        try:
+            result = self._run(home_dir, *(["--force"] if force else []))
+        finally:
+            blocked.parent.chmod(0o755)
+
+        assert f"could NOT restore {blocked}" in result.output, result.output
+        assert key in fine.read_text()
+        if force:
+            assert result.exit_code == 0, result.output
+            assert not home_dir.base_dir.exists()
+            assert "Rotate those keys at your provider" in result.output
+        else:
+            assert result.exit_code != 0
+            assert home_dir.base_dir.exists()

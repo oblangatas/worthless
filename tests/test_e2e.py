@@ -563,11 +563,13 @@ class TestQuietUninstallStillSaysWhatYouLose:
         return env_file, worthless_home, key, cli_env
 
     @staticmethod
-    def _quiet_force_uninstall(cli_env: dict, **streams: object) -> subprocess.CompletedProcess:
+    def _quiet_force_uninstall(
+        cli_env: dict, *, quiet: bool = True, **streams: object
+    ) -> subprocess.CompletedProcess:
         return subprocess.run(
             [
                 str(Path(sys.executable).parent / "worthless"),
-                "--quiet",
+                *(["--quiet"] if quiet else []),
                 "uninstall",
                 "--yes",
                 "--force",
@@ -593,9 +595,12 @@ class TestQuietUninstallStillSaysWhatYouLose:
         assert "Worthless uninstalled" not in proc.stderr  # still quiet about progress
         assert_not_shown(proc.stderr, key)
 
-    def test_a_folder_name_cannot_send_escape_codes_to_the_terminal(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("quiet", [True, False], ids=["quiet", "not-quiet"])
+    def test_a_folder_name_cannot_send_escape_codes_to_the_terminal(
+        self, tmp_path: Path, quiet: bool
+    ) -> None:
         """The bytes on stderr carry no ESC from the path, so the terminal can't be
-        told to clear the screen."""
+        told to clear the screen. Main sent it in a normal run."""
         env_file, _home, _key, cli_env = _make_e2e_env(tmp_path, proxy_port=1)
         project = env_file.parent.with_name("proj\x1b[2J\x1b[1;1HKeys OK")
         env_file.parent.rename(project)
@@ -606,7 +611,7 @@ class TestQuietUninstallStillSaysWhatYouLose:
         env_file.unlink()
         env_file.symlink_to(target)
 
-        proc = self._quiet_force_uninstall(cli_env, capture_output=True)
+        proc = self._quiet_force_uninstall(cli_env, quiet=quiet, capture_output=True)
 
         assert proc.returncode == 0, f"stdout: {proc.stdout}\nstderr: {proc.stderr}"
         assert "\x1b" not in proc.stderr
