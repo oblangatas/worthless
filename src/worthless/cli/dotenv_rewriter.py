@@ -820,6 +820,15 @@ class EnvSnapshot:
     sha256: bytes
     refs: dict[str, frozenset[str]] = field(default_factory=dict)
 
+    @property
+    def assigned(self) -> set[str]:
+        """The names a ``NAME=...`` line sets, the lines :func:`rewrite_env_keys` can update.
+
+        ``parsed`` also holds a bare ``NAME`` line, as ``None``: it has no
+        ``=`` to update (WOR-1041).
+        """
+        return set(self.refs)
+
     def names_reached(self, value: str) -> set[str]:
         """The variables *value* expands, directly or through the lines it names."""
         reached: set[str] = set()

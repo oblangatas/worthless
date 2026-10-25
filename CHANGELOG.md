@@ -23,6 +23,12 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - If the same key was also locked from another `.env`, the stored address is the last one lock saw for that key, which may be the other file's (WOR-1029).
 
 ### Fixed
+- **`worthless lock` accepts a `*_BASE_URL` line with no value** (WOR-1041, [#740](https://github.com/oblangatas/worthless/pull/740)).
+  Before: a `.env` with a name and no `=`, such as `OPENROUTER_BASE_URL` or `export OPENROUTER_BASE_URL`, on the line lock writes for a key made lock stop with WRTLS-199, an internal error. Nothing changed: your `.env` kept its key, and the Worthless database stayed empty.
+  Now: lock leaves that line as it is, adds its proxy line after it, and says the line "had no value". Your app reads the proxy line, the only one with a value. Unlock removes only the line lock added, so lock then unlock gives back the `.env` you started with.
+
+  **Limits.**
+  - If the same name also has a value on an earlier line, lock rewrites that line as before, and the bare line after it still unsets the name for python-dotenv, so your app doesn't reach the proxy and its calls fail. Delete the bare line.
 - **`worthless unlock` puts back a `*_BASE_URL` line you had before lock** (WOR-1013, [#738](https://github.com/oblangatas/worthless/pull/738)).
   Before: if your `.env` already had the line lock writes for a key, for example `OPENROUTER_BASE_URL=https://openrouter.ai/api/v1` next to `OPENROUTER_API_KEY`, or your own gateway in `OPENAI_BASE_URL`, lock replaced its value with the proxy URL and did not keep yours. Unlock then removed the line. An app that reads `OPENROUTER_BASE_URL` with no default then used OpenAI's address and sent your OpenRouter key to OpenAI.
   Now: lock saves, for each key, which line it writes and the value it replaces. Unlock writes that value back as you wrote it, with its quotes, comment and any `${...}` reference, and removes the line only if lock added it. Lock then unlock gives back the `.env` you started with. `worthless uninstall` does the same.

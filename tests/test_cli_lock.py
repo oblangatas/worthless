@@ -26,6 +26,7 @@ from tests.helpers import (
     fake_anthropic_key,
     fake_key,
     fake_openai_key,
+    fake_openrouter_key,
     verify_upstream_response_openai,
 )
 
@@ -1789,6 +1790,40 @@ class TestLockBaseUrlSlotPriority:
         )
 
         verify_upstream_response_openai(data)
+
+
+class TestLockBareBaseUrlLine:
+    """A ``*_BASE_URL`` line with no ``=`` gets lock's line after it (WOR-1041)."""
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "OPENROUTER_BASE_URL\nOPENROUTER_API_KEY={key}\n",
+            "OPENROUTER_API_KEY={key}\nOPENROUTER_BASE_URL\n",
+            "export OPENROUTER_BASE_URL\nOPENROUTER_API_KEY={key}\n",
+        ],
+        ids=["before-key", "after-key", "export"],
+    )
+    def test_lock_routes_the_key_and_unlock_gives_the_env_back(
+        self, home_dir: WorthlessHome, tmp_path: Path, content: str
+    ) -> None:
+        """Before: lock exited 1 with WRTLS-199, an internal error."""
+        from dotenv import dotenv_values
+
+        env = tmp_path / ".env"
+        env.write_text(content.format(key=fake_openrouter_key()))
+        original = env.read_bytes()
+        cli_env = {"WORTHLESS_HOME": str(home_dir.base_dir)}
+
+        result = runner.invoke(app, ["lock", "--env", str(env)], env=cli_env)
+        assert result.exit_code == 0, result.output
+        assert "(had no value)" in result.output
+        [enrollment] = asyncio.run(_repo(home_dir).list_enrollments())
+        assert f"/{enrollment.key_alias}/v1" in (dotenv_values(env)["OPENROUTER_BASE_URL"] or "")
+
+        result = runner.invoke(app, ["unlock", "--env", str(env)], env=cli_env)
+        assert result.exit_code == 0, result.output
+        assert env.read_bytes() == original
 
 
 # ---------------------------------------------------------------------------

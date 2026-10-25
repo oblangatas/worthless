@@ -326,6 +326,14 @@ These must always hold. Any scenario that breaks them is a bug:
 - **Risk**: HIGH (was broken, now fixed)
 - **Test status**: Tested (TestUnlockPutsBackTheBaseUrlYouHad, `tests/dotenv_rewriter/test_read_env_snapshot.py`, the `base_url_restore` tests in `tests/test_storage.py`)
 
+#### U-39: User locks a `.env` whose `*_BASE_URL` line has no `=`
+
+- **Precondition**: `.env` has a bare `OPENROUTER_BASE_URL` (or `export OPENROUTER_BASE_URL`) line, before or after `OPENROUTER_API_KEY`
+- **Expected**: Lock leaves the bare line, appends its proxy line (stderr says the line "had no value"), and records that it added the line; unlock removes only that line, so the `.env` is byte-identical to before lock. A slot counts as present only with a `NAME=...` line (`EnvSnapshot.assigned`). If the name also has a value on an earlier line, lock rewrites that line and the bare line after it leaves the name unset for python-dotenv.
+- **Current behavior**: FIXED (WOR-1041) -- python-dotenv parsed the bare name as present, so lock asked the rewriter to update a line it couldn't find and exited 1 with WRTLS-199, leaving the `.env` and DB unchanged.
+- **Risk**: LOW (was broken, now fixed)
+- **Test status**: Tested (TestLockBareBaseUrlLine)
+
 ---
 
 ## 2. Attacker Scenarios

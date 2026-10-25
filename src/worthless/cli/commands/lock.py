@@ -1144,12 +1144,12 @@ def _batch_rewrite(
     env_path: Path,
     planned: list[_PlannedUpdate],
     base_url_lines: dict[str, tuple[_PlannedUpdate, bool]],
-    baseline_sha256: bytes,
+    snapshot: EnvSnapshot,
 ) -> None:
     """One ``safe_rewrite`` call for every planned update + BASE_URL changes.
 
-    Refused if the ``.env`` changed since the snapshot whose hash is
-    *baseline_sha256*: pass-1 and the BASE_URL records describe that file.
+    Refused if the ``.env`` changed since *snapshot*: pass-1 and the BASE_URL
+    records describe that file.
     """
     updates: dict[str, str] = {p.var_name: p.shard_a.decode("utf-8") for p in planned}
     additions: dict[str, str] = {}
@@ -1159,14 +1159,15 @@ def _batch_rewrite(
             updates[slot] = local_proxy
         else:
             additions[slot] = local_proxy
-            sys.stderr.write(f"worthless: added {slot}={local_proxy} to {env_path} (was missing)\n")
+            why = "had no value" if slot in snapshot.parsed else "was missing"
+            sys.stderr.write(f"worthless: added {slot}={local_proxy} to {env_path} ({why})\n")
             sys.stderr.flush()
 
     rewrite_env_keys(
         env_path,
         updates,
         additions=additions or None,
-        expected_baseline_sha256=baseline_sha256,
+        expected_baseline_sha256=snapshot.sha256,
         _hook_before_replace=_build_verify_hook(planned),
     )
 
@@ -3086,7 +3087,10 @@ def _lock_keys(
                 (var_name, value, provider_override or detected_provider)
                 for var_name, value, detected_provider in scanned
             ]
-            existing_env_keys = set(env_values.keys())
+            # Only names with a NAME=... line: a bare *_BASE_URL line has no value
+            # to update, so lock adds its line after it, and unlock removes only
+            # that line (WOR-1041).
+            existing_env_keys = snapshot.assigned
 
             planned: list[_PlannedUpdate] = []
 
@@ -3163,7 +3167,7 @@ def _lock_keys(
                         openclaw_exit=0,
                         oauth_skipped=bool(oauth_skipped),
                     )
-                _batch_rewrite(env_path, planned, base_url_lines, snapshot.sha256)
+                _batch_rewrite(env_path, planned, base_url_lines, snapshot)
                 on_signal.committed = True  # .env now needs these rows: never unwind on a press
                 # Phase 2.b: OpenClaw magic. Per L1 in
                 # engineering/research/openclaw/WOR-431-phase-2-spec.md, this
