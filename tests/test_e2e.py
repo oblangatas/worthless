@@ -318,6 +318,9 @@ class TestWrapProxiesRequest:
         )
 
 
+# Nothing leaves the machine: upstream HTTPS goes to a closed port.
+_CLOSED_UPSTREAM = {"HTTPS_PROXY": "http://127.0.0.1:9", "NO_PROXY": "127.0.0.1,localhost"}
+
 # Sends the locked key from .env as an app would. Upstream is blocked, so a 502
 # means the proxy found the alias and rebuilt the key before failing to forward
 # it; an alias the proxy doesn't know gets the uniform 401 instead.
@@ -361,8 +364,7 @@ class TestPartialUnlockKeepsOtherKeyRouted:
             tmp_path,
             _ROUTED_CHILD_SCRIPT,
             lock_both_then_unlock_openrouter,
-            # Nothing leaves the machine: upstream HTTPS goes to a closed port.
-            extra_env={"HTTPS_PROXY": "http://127.0.0.1:9", "NO_PROXY": "127.0.0.1,localhost"},
+            extra_env=_CLOSED_UPSTREAM,
         )
         assert "STATUS:502" in proc.stdout, f"stdout: {proc.stdout}\nstderr: {proc.stderr}"
 
@@ -373,17 +375,19 @@ class TestPartialUnlockKeepsOtherKeyRouted:
 class TestBareBaseUrlLineStillRoutesTheKey:
     """A bare ``OPENAI_BASE_URL`` line (no ``=``) doesn't keep the key off the proxy (WOR-1041)."""
 
-    def test_locked_key_reaches_its_alias(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("bare_after_key", [False, True], ids=["before-key", "after-key"])
+    def test_locked_key_reaches_its_alias(self, tmp_path: Path, bare_after_key: bool) -> None:
         def add_bare_line_then_lock(env_file: Path, cli_env: dict[str, str]) -> None:
-            env_file.write_text("OPENAI_BASE_URL\n" + env_file.read_text())
+            content = env_file.read_text()
+            bare = "OPENAI_BASE_URL\n"
+            env_file.write_text(content + bare if bare_after_key else bare + content)
             _lock(env_file, cli_env)
 
         proc = _run_child_under_wrap(
             tmp_path,
             _ROUTED_CHILD_SCRIPT,
             add_bare_line_then_lock,
-            # Nothing leaves the machine: upstream HTTPS goes to a closed port.
-            extra_env={"HTTPS_PROXY": "http://127.0.0.1:9", "NO_PROXY": "127.0.0.1,localhost"},
+            extra_env=_CLOSED_UPSTREAM,
         )
         assert "STATUS:502" in proc.stdout, f"stdout: {proc.stdout}\nstderr: {proc.stderr}"
 

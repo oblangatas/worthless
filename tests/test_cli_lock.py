@@ -1792,6 +1792,26 @@ class TestLockBaseUrlSlotPriority:
         verify_upstream_response_openai(data)
 
 
+def _lock_then_unlock(home_dir: WorthlessHome, env: Path) -> tuple[str, str, str, str]:
+    """Lock then unlock *env*, which must come back byte for byte.
+
+    Returns lock's output, ``OPENROUTER_BASE_URL`` as python-dotenv read it while
+    the key was locked, the key's alias, and unlock's output.
+    """
+    from dotenv import dotenv_values
+
+    original = env.read_bytes()
+    cli_env = {"WORTHLESS_HOME": str(home_dir.base_dir)}
+    locked = runner.invoke(app, ["lock", "--env", str(env)], env=cli_env)
+    assert locked.exit_code == 0, locked.output
+    read = dotenv_values(env).get("OPENROUTER_BASE_URL") or ""
+    [enrollment] = asyncio.run(_repo(home_dir).list_enrollments())
+    unlocked = runner.invoke(app, ["unlock", "--env", str(env)], env=cli_env)
+    assert unlocked.exit_code == 0, unlocked.output
+    assert env.read_bytes() == original
+    return locked.output, read, enrollment.key_alias, unlocked.output
+
+
 class TestLockBareBaseUrlLine:
     """A ``*_BASE_URL`` line lock can't edit gets lock's line after it (WOR-1041)."""
 
@@ -1813,26 +1833,83 @@ class TestLockBareBaseUrlLine:
         self, home_dir: WorthlessHome, tmp_path: Path, content: str, note: str
     ) -> None:
         """Before: lock exited 1 with WRTLS-199, an internal error."""
-        from dotenv import dotenv_values
+        key = fake_openrouter_key()
+        env = tmp_path / ".env"
+        env.write_text(content.format(key=key))
 
+        locked, read, alias, unlocked = _lock_then_unlock(home_dir, env)
+        assert f"({note})" in locked
+        assert "python-dotenv doesn't read the proxy address" not in locked
+        assert f"/{alias}/v1" in read
+        assert key not in locked
+        assert key not in unlocked
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "OPENROUTER_BASE_URL=https://openrouter.ai/api/v1\nOPENROUTER_BASE_URL\n"
+            "OPENROUTER_API_KEY={key}\n",
+            'APP.CFG="x\nOPENROUTER_BASE_URL=https://openrouter.ai/api/v1\n"\n'
+            "OPENROUTER_API_KEY={key}\n",
+            "OPENROUTER_BASE_URL=https://openrouter.ai/api/v1\n"
+            "'OPENROUTER_BASE_URL'=https://openrouter.ai/api/v1\nOPENROUTER_API_KEY={key}\n",
+        ],
+        ids=["value-then-bare", "inside-another-value", "value-then-quoted"],
+    )
+    def test_lock_warns_when_python_dotenv_reads_another_line(
+        self, home_dir: WorthlessHome, tmp_path: Path, content: str
+    ) -> None:
+        """The documented limit: lock rewrites a line python-dotenv doesn't read, and says so.
+
+        WOR-1045 tracks lock refusing instead; when it lands, this test and the
+        CHANGELOG limit change together.
+        """
         env = tmp_path / ".env"
         env.write_text(content.format(key=fake_openrouter_key()))
+
+        locked, read, alias, _unlocked = _lock_then_unlock(home_dir, env)
+        assert "OPENROUTER_BASE_URL: python-dotenv doesn't read the proxy address" in locked
+        assert f"/{alias}/v1" not in read
+
+
+class TestLockChecksItsLineAfterTheWrite:
+    """Lock's check of the line it wrote only warns (WOR-1041)."""
+
+    def test_a_failed_reread_never_undoes_the_lock(
+        self, home_dir: WorthlessHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The rewritten .env needs its rows: a re-read that fails can't unwind them."""
+        from worthless.cli.commands import lock as lock_mod
+        from worthless.cli.errors import UnsafeReason, UnsafeRewriteRefused
+
+        reads = 0
+        real_read = lock_mod.read_env_snapshot
+
+        def fail_after_the_first(path: Path) -> object:
+            nonlocal reads
+            reads += 1
+            if reads > 1:
+                raise UnsafeRewriteRefused(UnsafeReason.SNIFF)
+            return real_read(path)
+
+        monkeypatch.setattr(lock_mod, "read_env_snapshot", fail_after_the_first)
+        env = tmp_path / ".env"
+        env.write_text(f"OPENROUTER_BASE_URL\nOPENROUTER_API_KEY={fake_openrouter_key()}\n")
         original = env.read_bytes()
         cli_env = {"WORTHLESS_HOME": str(home_dir.base_dir)}
 
         result = runner.invoke(app, ["lock", "--env", str(env)], env=cli_env)
         assert result.exit_code == 0, result.output
-        assert f"({note})" in result.output
-        [enrollment] = asyncio.run(_repo(home_dir).list_enrollments())
-        assert f"/{enrollment.key_alias}/v1" in (dotenv_values(env)["OPENROUTER_BASE_URL"] or "")
-
+        assert reads == 2
+        assert asyncio.run(_repo(home_dir).list_enrollments())
+        monkeypatch.undo()
         result = runner.invoke(app, ["unlock", "--env", str(env)], env=cli_env)
         assert result.exit_code == 0, result.output
         assert env.read_bytes() == original
 
 
 class TestLockSaysWhatItAdded:
-    """Lock's "added" note waits for the rewrite (WOR-1041 review)."""
+    """Lock's "added" note comes only after the write (WOR-1041)."""
 
     def test_a_refused_rewrite_reports_nothing_added(
         self, home_dir: WorthlessHome, tmp_path: Path

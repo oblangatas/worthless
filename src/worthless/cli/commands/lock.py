@@ -1145,28 +1145,22 @@ def _batch_rewrite(
     planned: list[_PlannedUpdate],
     base_url_lines: dict[str, tuple[_PlannedUpdate, bool]],
     snapshot: EnvSnapshot,
-) -> None:
+) -> dict[str, str]:
     """One ``safe_rewrite`` call for every planned update + BASE_URL changes.
 
     Refused if the ``.env`` changed since *snapshot*: pass-1 and the BASE_URL
-    records describe that file.
+    records describe that file. Returns each ``*_BASE_URL`` written, with its
+    proxy URL.
     """
     updates: dict[str, str] = {p.var_name: p.shard_a.decode("utf-8") for p in planned}
     additions: dict[str, str] = {}
-    notes: list[str] = []
+    proxy_urls: dict[str, str] = {}
     for slot, (p, existed) in base_url_lines.items():
-        local_proxy = _proxy_base_url(p.alias)
+        proxy_urls[slot] = _proxy_base_url(p.alias)
         if existed:
-            updates[slot] = local_proxy
+            updates[slot] = proxy_urls[slot]
         else:
-            additions[slot] = local_proxy
-            if slot not in snapshot.parsed:
-                why = "was missing"
-            elif snapshot.parsed[slot] is None:
-                why = "had no value"
-            else:
-                why = "lock can't edit the line you have for it"
-            notes.append(f"worthless: added {slot}={local_proxy} to {env_path} ({why})\n")
+            additions[slot] = proxy_urls[slot]
 
     rewrite_env_keys(
         env_path,
@@ -1175,9 +1169,45 @@ def _batch_rewrite(
         expected_baseline_sha256=snapshot.sha256,
         _hook_before_replace=_build_verify_hook(planned),
     )
-    # Only once the line is there: a refused rewrite added nothing.
-    sys.stderr.writelines(notes)
+    # Only once the lines are there: a refused rewrite added nothing.
+    for slot, url in additions.items():
+        why = _why_lock_added(slot, snapshot)
+        sys.stderr.write(f"worthless: added {slot}={url} to {env_path} ({why})\n")
     sys.stderr.flush()
+    return proxy_urls
+
+
+def _why_lock_added(slot: str, snapshot: EnvSnapshot) -> str:
+    if slot not in snapshot.parsed:
+        return "was missing"
+    if snapshot.parsed[slot] is None:
+        return "had no value"
+    return "lock can't edit the line you have for it"
+
+
+def _warn_unread_base_url_lines(env_path: Path, proxy_urls: dict[str, str]) -> None:
+    """Warn for each line lock wrote that python-dotenv doesn't read as its proxy URL.
+
+    The rewriter and python-dotenv can disagree on which line sets a name: a
+    later bare ``NAME``, a quoted ``'NAME'=...``, or another variable's quoted
+    value can hide the line lock wrote (WOR-1041). WOR-1045 tracks refusing.
+    Runs after the commit and only warns: the rewritten ``.env`` needs its rows.
+    """
+    if not proxy_urls:
+        return
+    try:
+        read = read_env_snapshot(env_path).parsed
+    except (OSError, UnsafeRewriteRefused):
+        return
+    for slot, url in proxy_urls.items():
+        if read.get(slot) != url:
+            name = _oc_audit.sanitise_for_message(slot)
+            get_console().print_warning(
+                f"{name}: python-dotenv doesn't read the proxy address lock wrote there "
+                f"(another {name} line, or another variable's quoted value, hides it), so "
+                "your app's calls won't reach the proxy and will fail. Fix the .env so "
+                "lock's line is the one read."
+            )
 
 
 async def _compensating_unwind(
@@ -3095,10 +3125,6 @@ def _lock_keys(
                 (var_name, value, provider_override or detected_provider)
                 for var_name, value, detected_provider in scanned
             ]
-            # Only names with a NAME=... line the rewriter can update: for a bare
-            # or quoted *_BASE_URL line, lock adds its line after it, and unlock
-            # removes only that line (WOR-1041).
-            existing_env_keys = snapshot.assigned
 
             planned: list[_PlannedUpdate] = []
 
@@ -3162,7 +3188,7 @@ def _lock_keys(
                 await _pass1_db_writes(
                     repo, candidates, env_str, token_budget_daily, planned, env_values
                 )
-                base_url_lines = _plan_base_url_lines(planned, keys_only, existing_env_keys)
+                base_url_lines = _plan_base_url_lines(planned, keys_only, snapshot.assigned)
                 await _record_base_url_restores(repo, env_str, planned, base_url_lines, snapshot)
                 # A press after Pass-1's last await was never dispatched: answer it
                 # now, while the rows can still unwind. Then record-only until the
@@ -3175,8 +3201,9 @@ def _lock_keys(
                         openclaw_exit=0,
                         oauth_skipped=bool(oauth_skipped),
                     )
-                _batch_rewrite(env_path, planned, base_url_lines, snapshot)
+                proxy_urls = _batch_rewrite(env_path, planned, base_url_lines, snapshot)
                 on_signal.committed = True  # .env now needs these rows: never unwind on a press
+                _warn_unread_base_url_lines(env_path, proxy_urls)
                 # Phase 2.b: OpenClaw magic. Per L1 in
                 # engineering/research/openclaw/WOR-431-phase-2-spec.md, this
                 # NEVER rolls back lock-core success. Per L2 (revised 2026-05-08

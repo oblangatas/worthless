@@ -329,10 +329,10 @@ These must always hold. Any scenario that breaks them is a bug:
 #### U-39: User locks a `.env` whose `*_BASE_URL` line has no `=`
 
 - **Precondition**: `.env` has a bare `OPENROUTER_BASE_URL` (or `export OPENROUTER_BASE_URL`) line, before or after `OPENROUTER_API_KEY`, or a quoted `'OPENROUTER_BASE_URL'=...` line
-- **Expected**: Lock leaves that line, appends its proxy line (stderr says the line "had no value", or that lock "can't edit the line you have for it"), and records that it added the line; unlock removes only that line, so the `.env` is byte-identical to before lock. A slot counts as present only with a `NAME=...` line the rewriter parses (`EnvSnapshot.assigned`). If the name also has a value on an earlier line, lock rewrites that line and the bare line after it leaves the name unset for python-dotenv.
+- **Expected**: Lock leaves that line, appends its proxy line (stderr says the line "had no value", or that lock "can't edit the line you have for it"), and records that it added the line; unlock removes only that line, so the `.env` is byte-identical to before lock. A slot counts as present only with a `NAME=...` line the rewriter parses (`EnvSnapshot.assigned`). After the write, lock re-reads the `.env` as python-dotenv does and warns for each line it wrote that doesn't read back as its proxy URL: a value line followed by a bare or quoted line for the same name, or a line inside another variable's multi-line quoted value (lock exits 0; WOR-1045 tracks refusing).
 - **Current behavior**: FIXED (WOR-1041) -- python-dotenv parsed the bare or quoted name as present, so lock asked the rewriter to update a line it couldn't find and exited 1 with WRTLS-199, leaving the `.env` and DB unchanged.
 - **Risk**: LOW (was broken, now fixed)
-- **Test status**: Tested (TestLockBareBaseUrlLine)
+- **Test status**: Tested (TestLockBareBaseUrlLine, including the two documented limits; TestLockSaysWhatItAdded; `tests/test_e2e.py::TestBareBaseUrlLineStillRoutesTheKey`)
 
 ---
 
