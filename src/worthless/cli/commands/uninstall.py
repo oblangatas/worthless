@@ -60,19 +60,6 @@ def _scrub_exc(exc: BaseException) -> str:
     return type(exc).__name__
 
 
-class _RestoreStopped(Exception):
-    """The restore loop stopped for a reason other than one file's restore failing,
-    such as a note that couldn't be written to stderr (WOR-1043).
-
-    Keys may already be back in their .env, so this must never reach the
-    broken-install path, where --force wipes the ones not restored yet.
-    """
-
-    def __init__(self, cause: BaseException) -> None:
-        super().__init__(cause)
-        self.cause = cause
-
-
 def _shown(path: object) -> str:
     """A path as uninstall prints it: no control characters for the terminal."""
     return _oc_audit.sanitise_for_message(str(path))
@@ -173,8 +160,15 @@ def _zero_restore_keys(restores: list) -> None:
             zero_buf(key)
 
 
+async def _read_enrollments(repo) -> list:  # noqa: ANN001
+    """What uninstall reads before it restores any key. Only a failure here can
+    mean a broken install that --force may wipe past (WOR-1043)."""
+    await repo.initialize()
+    return await repo.list_enrollments()
+
+
 async def _restore_all(
-    home, repo, *, assume_yes: bool, console
+    home, repo, enrollments: list, *, assume_yes: bool, console
 ) -> tuple[
     list[tuple[str, int | None]],
     list[tuple[str, str]],
@@ -199,9 +193,6 @@ async def _restore_all(
     the .env with the real key, deletes that file's shard rows), then applies
     :func:`_decide_mode`.
     """
-    await repo.initialize()
-    enrollments = await repo.list_enrollments()
-
     by_path: dict[str, dict] = defaultdict(lambda: {"aliases": [], "mode": None})
     enroll_only: list[str] = []
     for e in enrollments:
@@ -303,12 +294,6 @@ async def _restore_all(
                 target = slot["mode"]
             restored.append((env_path, target))
         completed = True
-    except (WorthlessError, sqlite3.Error, OSError) as exc:
-        # One file's restore failing is caught above, so this is something else,
-        # such as a note that couldn't be written (EAGAIN on a non-blocking pipe).
-        if _is_recoverable_repo_error(exc):
-            raise
-        raise _RestoreStopped(exc) from exc
     finally:
         # SR-02: if the loop exits early — e.g. a Ctrl-C ``click.Abort`` (a
         # RuntimeError, NOT an OSError) from _decide_mode's confirm escapes the
@@ -710,21 +695,19 @@ def _run_uninstall(*, assume_yes: bool, force: bool = False, remove_mcp: bool = 
 
     oc_partial = False
     with acquire_lock(home):
+        read = False  # set once the install has been read: only before that is it "broken"
 
         async def _run():
+            nonlocal read
             async with open_repo(home) as repo:
-                return await _restore_all(home, repo, assume_yes=assume_yes, console=console)
+                enrollments = await _read_enrollments(repo)
+                read = True
+                return await _restore_all(
+                    home, repo, enrollments, assume_yes=assume_yes, console=console
+                )
 
         try:
             restored, failed, missing, unlocked, enroll_only, oc_build_failed = asyncio.run(_run())
-        except _RestoreStopped as stopped:
-            raise WorthlessError(
-                ErrorCode.SHARD_STORAGE_FAILED,
-                f"Uninstall stopped partway ({_scrub_exc(stopped.cause)}), so Worthless "
-                "was not removed. Keys it already restored are back in their .env, but "
-                "openclaw.json may still point at the proxy for them. Re-run "
-                "`worthless uninstall` to restore the rest.",
-            ) from stopped.cause
         except (WorthlessError, sqlite3.Error, OSError) as exc:
             if _is_recoverable_repo_error(exc):
                 # A busy/locked DB (usually the running proxy) is RECOVERABLE —
@@ -738,6 +721,18 @@ def _run_uninstall(*, assume_yes: bool, force: bool = False, remove_mcp: bool = 
                     "changed — your keys are safe. Stop it with `worthless down` "
                     "and re-run. If it's permanently stuck, remove ~/.worthless "
                     "manually and rotate those keys at your provider.",
+                ) from exc
+            if read:
+                # The install was readable, so this isn't one --force may wipe: keys
+                # may already be back in their .env. One file's restore failing is
+                # caught per file, so this is something else, such as a note it
+                # couldn't write (EAGAIN on a non-blocking pipe) (WOR-1043).
+                raise WorthlessError(
+                    ErrorCode.SHARD_STORAGE_FAILED,
+                    f"Uninstall stopped partway ({_scrub_exc(exc)}), so Worthless was not "
+                    "removed. Keys it already restored are back in their .env, but "
+                    "openclaw.json may still point at the proxy for them. Re-run "
+                    "`worthless uninstall` to restore the rest.",
                 ) from exc
             restored, failed, missing, unlocked, enroll_only, oc_build_failed = _handle_broken_repo(
                 console, exc, force=force

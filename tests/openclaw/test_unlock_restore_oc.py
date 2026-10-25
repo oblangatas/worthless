@@ -103,11 +103,12 @@ def _lock(home_dir: WorthlessHome, env_file: Path):
     )
 
 
-def _unlock(home_dir: WorthlessHome, env_file: Path):
+def _unlock(home_dir: WorthlessHome, env_file: Path, *flags: str):
+    # A wide console keeps a long note on one line.
     return runner.invoke(
         app,
-        ["unlock", "--env", str(env_file)],
-        env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+        [*flags, "unlock", "--env", str(env_file)],
+        env={"WORTHLESS_HOME": str(home_dir.base_dir), "COLUMNS": "1000"},
     )
 
 
@@ -372,11 +373,7 @@ def test_quiet_unlock_still_says_a_malformed_record_leaves_the_entry_on_the_prox
 
     asyncio.run(_corrupt())
 
-    result = runner.invoke(
-        app,
-        ["--quiet", "unlock", "--env", str(env_file)],
-        env={"WORTHLESS_HOME": str(home_dir.base_dir), "COLUMNS": "1000"},
-    )
+    result = _unlock(home_dir, env_file, "--quiet")
 
     assert "OpenClaw 'openai' rollback record is malformed" in result.output, result.output
     assert "leaving entry on the proxy" in result.output

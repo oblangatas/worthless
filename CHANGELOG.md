@@ -55,11 +55,13 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - Uninstall prints `.env`, editor-config and `~/.worthless` paths without control characters, so a folder name can't send escape codes to your terminal. Before, it did in a normal run. The `chmod` command it suggests quotes the path for the shell, so one with a space doesn't become two files. The `[FAIL]` block's details are printed the same way.
 
   **Limits.**
-  - `--quiet` still hides that uninstall couldn't remove the service unit or the keychain entry, or couldn't stop the proxy.
-  - If uninstall stops partway, or refuses because a `.env` can't be restored, `openclaw.json` may still point at the proxy for the keys it restored first. A second run doesn't fix that.
-  - When uninstall refuses to read your encryption key (its mode, owner or a symlink), that message prints the key file's path as it is.
-  - Under `--yes`, if setting a `.env` to 0o600 then fails, uninstall first says it set 0o600, then that it couldn't.
-  - Lock's OpenClaw `[FAIL]` block still shows only its first line under `--quiet`.
+  - `--quiet` still hides that uninstall couldn't remove the service unit or the keychain entry, or couldn't stop the proxy (WOR-1055).
+  - If uninstall stops partway, or refuses because a `.env` can't be restored, `openclaw.json` may still point at the proxy for the keys it restored first. A second run doesn't fix that (WOR-1053).
+  - `uninstall --force` with a `.env` it can't restore writes NUL bytes as the `apiKey` in `openclaw.json` for the keys it did restore, and still says `[OK]`. Those keys are back in their `.env` (WOR-1051).
+  - When uninstall refuses to read your encryption key (its mode, owner or a symlink), that message prints the key file's path as it is (WOR-1054).
+  - A suggested `chmod` command can still name another file when the path holds an emoji code such as `:fire:`, or wraps across lines when stderr is a pipe (WOR-1056).
+  - Under `--yes`, if setting a `.env` to 0o600 then fails, uninstall first says it set 0o600, then that it couldn't (WOR-1057).
+  - Lock's OpenClaw `[FAIL]` block still shows only its first line under `--quiet` (WOR-1052).
   - The notes are plain text on stderr. `--json` output doesn't include them.
 - **`worthless unlock` removes the proxy line that lock added for an OpenRouter key** (WOR-981, [#737](https://github.com/oblangatas/worthless/pull/737)).
   Before: lock names the proxy line after the key's variable, so `OPENROUTER_API_KEY` gets `OPENROUTER_BASE_URL`. Unlock looked for `OPENAI_BASE_URL` instead. After unlock, `OPENROUTER_BASE_URL` still sent your app to the local proxy, for a key the proxy no longer had, and the `.env` did not match the original. The same happened for any other `<NAME>_API_KEY` variable, such as `GROQ_API_KEY`. If you had your own `OPENAI_BASE_URL` in that file, unlock deleted it, after a normal lock or a `--keys-only` one. If the `.env` also had a locked `OPENAI_API_KEY`, unlocking only the OpenRouter key deleted `OPENAI_BASE_URL`. The OpenAI key stayed locked, so its scrambled value then went straight to OpenAI and failed.

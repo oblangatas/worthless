@@ -6,6 +6,7 @@ import asyncio
 import base64
 import hashlib
 import os
+import sqlite3
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -65,6 +66,28 @@ def fake_openrouter_key() -> str:
     invisible to the scanner and any test built on one proves nothing.
     """
     return fake_key("sk-" + "or-" + "v1-", seed="openrouter-fixture-seed")
+
+
+def seed_enrollment(db_path: Path, alias: str, var_name: str, env_path: str | None) -> None:
+    """Insert one shard and its enrollment straight into the DB.
+
+    The shard bytes are placeholders, so use it only for rows nothing
+    reconstructs: an enroll-only key (``env_path=None``) or a .env that is gone.
+    """
+    con = sqlite3.connect(str(db_path))
+    try:
+        con.execute(
+            "INSERT INTO shards (key_alias, shard_b_enc, commitment, nonce, provider) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (alias, b"x", b"c", b"n", "openai"),
+        )
+        con.execute(
+            "INSERT INTO enrollments (key_alias, var_name, env_path) VALUES (?, ?, ?)",
+            (alias, var_name, env_path),
+        )
+        con.commit()
+    finally:
+        con.close()
 
 
 def assert_not_shown(output: str, *secrets: str) -> None:

@@ -552,8 +552,12 @@ class TestQuietUninstallStillSaysWhatYouLose:
     stderr the `.env` whose key it couldn't put back and says to rotate it (WOR-1043)."""
 
     @staticmethod
-    def _lock_an_env_uninstall_cannot_restore(tmp_path: Path) -> tuple[Path, Path, str, dict]:
+    def _lock_an_env_uninstall_cannot_restore(
+        tmp_path: Path, project: str | None = None
+    ) -> tuple[Path, Path, str, dict]:
         env_file, worthless_home, key, cli_env = _make_e2e_env(tmp_path, proxy_port=1)
+        if project is not None:
+            env_file = env_file.parent.rename(env_file.parent.with_name(project)) / ".env"
         _lock(env_file, cli_env)
         # A live symlink in its place: uninstall won't write through it (f2ge).
         target = env_file.with_name("elsewhere.env")
@@ -600,16 +604,10 @@ class TestQuietUninstallStillSaysWhatYouLose:
         self, tmp_path: Path, quiet: bool
     ) -> None:
         """The bytes on stderr carry no ESC from the path, so the terminal can't be
-        told to clear the screen. Main sent it in a normal run."""
-        env_file, _home, _key, cli_env = _make_e2e_env(tmp_path, proxy_port=1)
-        project = env_file.parent.with_name("proj\x1b[2J\x1b[1;1HKeys OK")
-        env_file.parent.rename(project)
-        env_file = project / ".env"
-        _lock(env_file, cli_env)
-        target = env_file.with_name("elsewhere.env")
-        target.write_text("OPENAI_API_KEY=whatever\n")
-        env_file.unlink()
-        env_file.symlink_to(target)
+        told to clear the screen."""
+        env_file, _home, _key, cli_env = self._lock_an_env_uninstall_cannot_restore(
+            tmp_path, "proj\x1b[2J\x1b[1;1HKeys OK"
+        )
 
         proc = self._quiet_force_uninstall(cli_env, quiet=quiet, capture_output=True)
 

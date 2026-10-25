@@ -204,27 +204,14 @@ def test_uninstall_enroll_only_key_warns_but_does_not_block(
     """An enroll-only enrollment (env_path IS NULL) must NOT trip the shredder
     guard — it warns and the uninstall still completes (wipe runs).
     """
-    import sqlite3
-
-    from tests.helpers import fake_key
+    from tests.helpers import fake_key, seed_enrollment
 
     env = tmp_path / ".env"
     env.write_text(f"OPENAI_API_KEY={fake_key('sk-')}\n")
     runner.invoke(app, ["lock", "--env", str(env)], env={"WORTHLESS_HOME": str(home_dir.base_dir)})
 
     # Seed a separate enroll-only key (no .env) directly in the DB.
-    con = sqlite3.connect(str(home_dir.db_path))
-    con.execute(
-        "INSERT INTO shards (key_alias, shard_b_enc, commitment, nonce, provider) "
-        "VALUES (?, ?, ?, ?, ?)",
-        ("enroll-only-alias", b"x", b"c", b"n", "openai"),
-    )
-    con.execute(
-        "INSERT INTO enrollments (key_alias, var_name, env_path) VALUES (?, ?, NULL)",
-        ("enroll-only-alias", "ENROLL_ONLY_KEY"),
-    )
-    con.commit()
-    con.close()
+    seed_enrollment(home_dir.db_path, "enroll-only-alias", "ENROLL_ONLY_KEY", None)
 
     result = runner.invoke(
         app, ["uninstall", "--yes"], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
@@ -1235,52 +1222,60 @@ class TestMcpLeftoverReminder:
         assert "MCP server" in result.output, "default run should still name the file"
 
 
-@pytest.mark.parametrize("force", [False, True], ids=["no-force", "force"])
-def test_a_base_url_note_it_cannot_write_is_not_a_failed_restore(
-    home_dir: WorthlessHome, tmp_path, monkeypatch, force: bool
-) -> None:
-    """WOR-1043: unlock's *_BASE_URL note (WOR-1042) comes after that .env is
-    restored. A write that fails there stops uninstall. Read as a failed restore,
-    --force would say to rotate a key it had just put back, and wipe."""
-    from tests.helpers import fake_openai_key
+# --- WOR-1043: --quiet still says what uninstall can't give back --------------
+
+
+def _quiet_uninstall(home_dir: WorthlessHome, *extra: str):  # noqa: ANN201
+    # A wide console keeps a long tmp path on one line.
+    return runner.invoke(
+        app,
+        ["--quiet", "uninstall", "--yes", *extra],
+        env={"WORTHLESS_HOME": str(home_dir.base_dir), "COLUMNS": "1000"},
+    )
+
+
+def _lock_project(home_dir: WorthlessHome, project, *, mode: int | None = None):  # noqa: ANN001, ANN201
+    """Lock a fresh .env with its own key in *project*; return (key, env path)."""
+    from tests.helpers import fake_key
+
+    project.mkdir(parents=True, exist_ok=True)
+    key = fake_key("sk-", seed=str(project))
+    env = project / ".env"
+    env.write_text(f"OPENAI_API_KEY={key}\n")
+    if mode is not None:
+        env.chmod(mode)
+    locked = runner.invoke(
+        app, ["lock", "--env", str(env)], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
+    )
+    assert locked.exit_code == 0, locked.output
+    return key, env
+
+
+def _make_unrestorable(env) -> None:  # noqa: ANN001
+    """A live symlink in place of the locked .env: safe_rewrite refuses it, so
+    uninstall can't put the key back (f2ge)."""
+    target = env.with_name("elsewhere.env")
+    target.write_text("OPENAI_API_KEY=whatever\n")
+    env.unlink()
+    env.symlink_to(target)
+
+
+def _refuse_file_notes(monkeypatch, times: int) -> list[str]:  # noqa: ANN001
+    """The first *times* print_file_note calls raise EAGAIN, as a non-blocking
+    pipe that refuses a write does. Returns every note it was asked to print."""
     from worthless.cli.console import WorthlessConsole
 
-    url = "https://gateway.example.com/v1/o'neil"  # lock can't save a quote (WOR-1027)
-    worthless_env = {"WORTHLESS_HOME": str(home_dir.base_dir)}
-    registered = runner.invoke(
-        app,
-        ["providers", "register", "--name", "quoted-gw", "--url", url, "--protocol", "openai"],
-        env=worthless_env,
-    )
-    assert registered.exit_code == 0, registered.output
-    key = fake_openai_key()
-    env = tmp_path / ".env"
-    env.write_text(f"OPENAI_BASE_URL={url}\nOPENAI_API_KEY={key}\n")
-    locked = runner.invoke(app, ["lock", "--env", str(env)], env=worthless_env)
-    assert locked.exit_code == 0, locked.output
     real = WorthlessConsole.print_file_note
     calls: list[str] = []
 
-    def _refuse_once(console, message: str) -> None:  # noqa: ANN001
+    def _refuse(console, message: str) -> None:  # noqa: ANN001
         calls.append(message)
-        if len(calls) == 1:
+        if len(calls) <= times:
             raise BlockingIOError(errno.EAGAIN, "Resource temporarily unavailable")
         real(console, message)
 
-    monkeypatch.setattr(WorthlessConsole, "print_file_note", _refuse_once)
-
-    result = runner.invoke(
-        app,
-        ["--quiet", "uninstall", "--yes", *(["--force"] if force else [])],
-        env={**worthless_env, "COLUMNS": "1000"},
-    )
-
-    assert "lock couldn't save the value" in calls[0]  # the note that failed
-    assert result.exit_code != 0, result.output
-    assert home_dir.base_dir.exists(), "uninstall wiped after a note it couldn't write"
-    assert env.read_text() == f"OPENAI_API_KEY={key}\n"  # restored all the same
-    assert "could NOT restore" not in result.output
-    assert "stopped partway" in result.output
+    monkeypatch.setattr(WorthlessConsole, "print_file_note", _refuse)
+    return calls
 
 
 @pytest.mark.parametrize("answers", [None, "y\ny\n", "y\nn\n"], ids=["yes", "tty-safe", "tty-keep"])
@@ -1289,9 +1284,7 @@ def test_uninstall_shows_a_path_without_its_control_characters(
 ) -> None:
     """WOR-1043: a folder name can carry a terminal escape. No line uninstall
     prints drops it on the terminal, progress and the mode prompt included."""
-    _, env = TestQuietUninstallStillSaysWhatYouLose._lock(
-        home_dir, tmp_path / "proj\x1b[2Jx", mode=0o644
-    )
+    _, env = _lock_project(home_dir, tmp_path / "proj\x1b[2Jx", mode=0o644)
     args = ["uninstall"]
     if answers is None:
         args.append("--yes")
@@ -1315,49 +1308,15 @@ class TestQuietUninstallStillSaysWhatYouLose:
     a change it made to your files. Each note here can be the only record of one.
     """
 
-    @staticmethod
-    def _run(home_dir: WorthlessHome, *extra: str):  # noqa: ANN205
-        # A wide console keeps a long tmp path on one line.
-        return runner.invoke(
-            app,
-            ["--quiet", "uninstall", "--yes", *extra],
-            env={"WORTHLESS_HOME": str(home_dir.base_dir), "COLUMNS": "1000"},
-        )
-
-    @staticmethod
-    def _lock(home_dir: WorthlessHome, project, *, mode: int | None = None):  # noqa: ANN001, ANN205
-        from tests.helpers import fake_key
-
-        project.mkdir(parents=True, exist_ok=True)
-        key = fake_key("sk-", seed=str(project))
-        env = project / ".env"
-        env.write_text(f"OPENAI_API_KEY={key}\n")
-        if mode is not None:
-            env.chmod(mode)
-        locked = runner.invoke(
-            app, ["lock", "--env", str(env)], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
-        )
-        assert locked.exit_code == 0, locked.output
-        return key, env
-
-    @staticmethod
-    def _make_unrestorable(env) -> None:  # noqa: ANN001
-        """A live symlink in place of the locked .env: safe_rewrite refuses it, so
-        uninstall can't put the key back (f2ge)."""
-        target = env.with_name("elsewhere.env")
-        target.write_text("OPENAI_API_KEY=whatever\n")
-        env.unlink()
-        env.symlink_to(target)
-
     def test_force_names_the_file_it_could_not_restore_and_says_to_rotate(
         self, home_dir: WorthlessHome, tmp_path
     ) -> None:
         from tests.helpers import assert_not_shown
 
-        key, env = self._lock(home_dir, tmp_path)
-        self._make_unrestorable(env)
+        key, env = _lock_project(home_dir, tmp_path)
+        _make_unrestorable(env)
 
-        result = self._run(home_dir, "--force")
+        result = _quiet_uninstall(home_dir, "--force")
 
         assert result.exit_code == 0, result.output
         assert not home_dir.base_dir.exists()
@@ -1370,10 +1329,10 @@ class TestQuietUninstallStillSaysWhatYouLose:
         self, home_dir: WorthlessHome, tmp_path
     ) -> None:
         """The refusal says "fix the above", so the above must be there."""
-        _, env = self._lock(home_dir, tmp_path)
-        self._make_unrestorable(env)
+        _, env = _lock_project(home_dir, tmp_path)
+        _make_unrestorable(env)
 
-        result = self._run(home_dir)
+        result = _quiet_uninstall(home_dir)
 
         assert result.exit_code != 0, result.output
         assert home_dir.base_dir.exists()
@@ -1383,10 +1342,10 @@ class TestQuietUninstallStillSaysWhatYouLose:
     def test_force_on_a_broken_install_says_to_rotate(
         self, home_dir: WorthlessHome, tmp_path
     ) -> None:
-        self._lock(home_dir, tmp_path)
+        _lock_project(home_dir, tmp_path)
         (home_dir.base_dir / "fernet.key").unlink()
 
-        result = self._run(home_dir, "--force")
+        result = _quiet_uninstall(home_dir, "--force")
 
         assert result.exit_code == 0, result.output
         assert not home_dir.base_dir.exists()
@@ -1394,20 +1353,11 @@ class TestQuietUninstallStillSaysWhatYouLose:
         assert "Rotate your keys at the provider" in result.output
 
     def test_an_enroll_only_key_it_removes_is_named(self, home_dir: WorthlessHome) -> None:
-        con = sqlite3.connect(str(home_dir.db_path))
-        con.execute(
-            "INSERT INTO shards (key_alias, shard_b_enc, commitment, nonce, provider) "
-            "VALUES (?, ?, ?, ?, ?)",
-            ("enroll-only-alias", b"x", b"c", b"n", "openai"),
-        )
-        con.execute(
-            "INSERT INTO enrollments (key_alias, var_name, env_path) VALUES (?, ?, NULL)",
-            ("enroll-only-alias", "ENROLL_ONLY_KEY"),
-        )
-        con.commit()
-        con.close()
+        from tests.helpers import seed_enrollment
 
-        result = self._run(home_dir)
+        seed_enrollment(home_dir.db_path, "enroll-only-alias", "ENROLL_ONLY_KEY", None)
+
+        result = _quiet_uninstall(home_dir)
 
         assert result.exit_code == 0, result.output
         assert "enroll-only key 'enroll-only-alias' has no .env to restore" in result.output
@@ -1416,21 +1366,12 @@ class TestQuietUninstallStillSaysWhatYouLose:
     def test_a_record_for_a_deleted_project_is_named(
         self, home_dir: WorthlessHome, tmp_path
     ) -> None:
-        missing = tmp_path / "deleted-project" / ".env"
-        con = sqlite3.connect(str(home_dir.db_path))
-        con.execute(
-            "INSERT INTO shards (key_alias, shard_b_enc, commitment, nonce, provider) "
-            "VALUES (?, ?, ?, ?, ?)",
-            ("ghost-alias", b"x", b"c", b"n", "openai"),
-        )
-        con.execute(
-            "INSERT INTO enrollments (key_alias, var_name, env_path) VALUES (?, ?, ?)",
-            ("ghost-alias", "GHOST_KEY", str(missing)),
-        )
-        con.commit()
-        con.close()
+        from tests.helpers import seed_enrollment
 
-        result = self._run(home_dir)
+        missing = tmp_path / "deleted-project" / ".env"
+        seed_enrollment(home_dir.db_path, "ghost-alias", "GHOST_KEY", str(missing))
+
+        result = _quiet_uninstall(home_dir)
 
         assert result.exit_code == 0, result.output
         assert f"skipping {missing}: the project file is gone" in result.output
@@ -1438,10 +1379,10 @@ class TestQuietUninstallStillSaysWhatYouLose:
         assert "If you moved the project, rotate its key" in result.output
 
     def test_a_partial_wipe_is_said(self, home_dir: WorthlessHome, tmp_path, monkeypatch) -> None:
-        self._lock(home_dir, tmp_path)
+        _lock_project(home_dir, tmp_path)
         monkeypatch.setattr(uninstall_mod.shutil, "rmtree", lambda *a, **k: None)
 
-        result = self._run(home_dir)
+        result = _quiet_uninstall(home_dir)
 
         assert result.exit_code == 0, result.output
         assert "~/.worthless could not be fully removed" in result.output
@@ -1452,10 +1393,10 @@ class TestQuietUninstallStillSaysWhatYouLose:
         from worthless.cli.bootstrap import ensure_home
 
         home = ensure_home(tmp_path / "h\x1b[2Jx" / ".worthless")
-        self._lock(home, tmp_path / "proj")
+        _lock_project(home, tmp_path / "proj")
         monkeypatch.setattr(uninstall_mod.shutil, "rmtree", lambda *a, **k: None)
 
-        result = self._run(home)
+        result = _quiet_uninstall(home)
 
         assert result.exit_code == 0, result.output
         assert "could not be fully removed" in result.output
@@ -1464,9 +1405,9 @@ class TestQuietUninstallStillSaysWhatYouLose:
     def test_tightening_a_loose_mode_is_said(self, home_dir: WorthlessHome, tmp_path) -> None:
         from tests.helpers import assert_not_shown
 
-        key, env = self._lock(home_dir, tmp_path, mode=0o644)
+        key, env = _lock_project(home_dir, tmp_path, mode=0o644)
 
-        result = self._run(home_dir)
+        result = _quiet_uninstall(home_dir)
 
         assert result.exit_code == 0, result.output
         assert (env.stat().st_mode & 0o777) == 0o600
@@ -1479,9 +1420,9 @@ class TestQuietUninstallStillSaysWhatYouLose:
     ) -> None:
         """Unquoted, `chmod 644 /x/My Projects/.env` is two arguments, and the
         second can name another .env under the current directory."""
-        _, env = self._lock(home_dir, tmp_path / "My Projects", mode=0o644)
+        _, env = _lock_project(home_dir, tmp_path / "My Projects", mode=0o644)
 
-        result = self._run(home_dir)
+        result = _quiet_uninstall(home_dir)
 
         assert result.exit_code == 0, result.output
         assert f"Run `chmod 644 '{env}'` to revert" in result.output
@@ -1489,7 +1430,7 @@ class TestQuietUninstallStillSaysWhatYouLose:
     def test_a_mode_it_could_not_tighten_is_said(
         self, home_dir: WorthlessHome, tmp_path, monkeypatch
     ) -> None:
-        _, env = self._lock(home_dir, tmp_path, mode=0o644)
+        _, env = _lock_project(home_dir, tmp_path, mode=0o644)
         real_chmod = uninstall_mod.os.chmod
 
         def _chmod_hostile(path, mode, *a, **k):  # noqa: ANN001, ANN202
@@ -1499,7 +1440,7 @@ class TestQuietUninstallStillSaysWhatYouLose:
 
         monkeypatch.setattr(uninstall_mod.os, "chmod", _chmod_hostile)
 
-        result = self._run(home_dir)
+        result = _quiet_uninstall(home_dir)
 
         assert result.exit_code == 0, result.output
         assert f"{env}: key restored, but the file mode wasn't tightened" in result.output
@@ -1508,14 +1449,14 @@ class TestQuietUninstallStillSaysWhatYouLose:
     def test_an_openclaw_config_it_may_have_left_on_the_proxy_is_said(
         self, home_dir: WorthlessHome, tmp_path, monkeypatch
     ) -> None:
-        _, env = self._lock(home_dir, tmp_path)
+        _, env = _lock_project(home_dir, tmp_path)
 
         async def _build_boom(*_a, **_k):
             raise RuntimeError("openclaw rollback build blew up")
 
         monkeypatch.setattr(uninstall_mod, "_build_oc_restores", _build_boom)
 
-        result = self._run(home_dir)
+        result = _quiet_uninstall(home_dir)
 
         assert result.exit_code == 73, result.output
         assert f"{env}: key restored, but openclaw.json may still point at the proxy" in (
@@ -1529,11 +1470,11 @@ class TestQuietUninstallStillSaysWhatYouLose:
     ) -> None:
         """A directory name can carry a terminal escape. The note prints the path
         without it, as unlock does for its notes (WOR-1042)."""
-        _, env = self._lock(home_dir, tmp_path / "proj\x1b[2Jx", mode=0o644)
+        _, env = _lock_project(home_dir, tmp_path / "proj\x1b[2Jx", mode=0o644)
         if case == "unrestorable":
-            self._make_unrestorable(env)
+            _make_unrestorable(env)
 
-        result = self._run(home_dir, "--force")
+        result = _quiet_uninstall(home_dir, "--force")
 
         assert result.exit_code == 0, result.output
         assert "\x1b" not in result.output
@@ -1552,21 +1493,10 @@ class TestQuietUninstallStillSaysWhatYouLose:
         """A stderr that refuses a write mid-restore (EAGAIN on a non-blocking
         pipe) stops the run. Read as a broken install, --force would wipe the
         keys not yet restored, and no --force would be told to re-run with it."""
-        from worthless.cli.console import WorthlessConsole
+        locked = [_lock_project(home_dir, tmp_path / name, mode=0o644) for name in "ab"]
+        _refuse_file_notes(monkeypatch, times=2)
 
-        locked = [self._lock(home_dir, tmp_path / name, mode=0o644) for name in "abc"]
-        real = WorthlessConsole.print_file_note
-        calls: list[str] = []
-
-        def _refuse_twice(console, message: str) -> None:  # noqa: ANN001
-            calls.append(message)
-            if len(calls) <= 2:
-                raise BlockingIOError(errno.EAGAIN, "Resource temporarily unavailable")
-            real(console, message)
-
-        monkeypatch.setattr(WorthlessConsole, "print_file_note", _refuse_twice)
-
-        result = self._run(home_dir, *(["--force"] if force else []))
+        result = _quiet_uninstall(home_dir, *(["--force"] if force else []))
 
         assert result.exit_code != 0, result.output
         assert home_dir.base_dir.exists(), "uninstall wiped keys it never restored"
@@ -1575,13 +1505,46 @@ class TestQuietUninstallStillSaysWhatYouLose:
             left = con.execute("SELECT COUNT(*) FROM enrollments").fetchone()[0]
         finally:
             con.close()
-        assert left == 2, "the two .env files it never reached must stay locked"
+        assert left == 1, "the .env it never reached must stay locked"
         # The one it restored before the note failed keeps its real key.
         assert sum(key in env.read_text() for key, env in locked) == 1
         assert "broken install" not in result.output.lower()
         assert "stopped partway" in result.output
         # The files it restored lost their OpenClaw rollback with their rows.
         assert "openclaw.json may still point at the proxy" in result.output
+
+    @pytest.mark.parametrize("force", [False, True], ids=["no-force", "force"])
+    def test_a_base_url_note_it_cannot_write_is_not_a_failed_restore(
+        self, home_dir: WorthlessHome, tmp_path, monkeypatch, force: bool
+    ) -> None:
+        """Unlock's *_BASE_URL note (WOR-1042) comes after that .env is restored.
+        Read as a failed restore, a write that fails there would have --force say
+        to rotate a key it had just put back, and wipe."""
+        from tests.helpers import fake_openai_key
+
+        url = "https://gateway.example.com/v1/o'neil"  # lock can't save a quote (WOR-1027)
+        worthless_env = {"WORTHLESS_HOME": str(home_dir.base_dir)}
+        registered = runner.invoke(
+            app,
+            ["providers", "register", "--name", "quoted-gw", "--url", url, "--protocol", "openai"],
+            env=worthless_env,
+        )
+        assert registered.exit_code == 0, registered.output
+        key = fake_openai_key()
+        env = tmp_path / ".env"
+        env.write_text(f"OPENAI_BASE_URL={url}\nOPENAI_API_KEY={key}\n")
+        locked = runner.invoke(app, ["lock", "--env", str(env)], env=worthless_env)
+        assert locked.exit_code == 0, locked.output
+        calls = _refuse_file_notes(monkeypatch, times=1)
+
+        result = _quiet_uninstall(home_dir, *(["--force"] if force else []))
+
+        assert "lock couldn't save the value" in calls[0]  # the note that failed
+        assert result.exit_code != 0, result.output
+        assert home_dir.base_dir.exists(), "uninstall wiped after a note it couldn't write"
+        assert env.read_text() == f"OPENAI_API_KEY={key}\n"  # restored all the same
+        assert "could NOT restore" not in result.output
+        assert "stopped partway" in result.output
 
     @pytest.mark.skipif(
         hasattr(os, "geteuid") and os.geteuid() == 0, reason="root opens any folder"
@@ -1593,11 +1556,11 @@ class TestQuietUninstallStillSaysWhatYouLose:
         """A project folder uninstall can't open can't even be checked for its
         .env. It is named like a .env it couldn't restore, so the refusal says
         which, and --force can still finish."""
-        _, blocked = self._lock(home_dir, tmp_path / "blocked")
-        key, fine = self._lock(home_dir, tmp_path / "fine")
+        _, blocked = _lock_project(home_dir, tmp_path / "blocked")
+        key, fine = _lock_project(home_dir, tmp_path / "fine")
         blocked.parent.chmod(0)
         try:
-            result = self._run(home_dir, *(["--force"] if force else []))
+            result = _quiet_uninstall(home_dir, *(["--force"] if force else []))
         finally:
             blocked.parent.chmod(0o755)
 

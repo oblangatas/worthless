@@ -901,10 +901,8 @@ def _apply_openclaw_unlock(
             )
             return False
 
-        # Detected + failed: trust-failure path. The sentinel comes first, so a
-        # block that can't be printed (a closed stderr) still leaves `status`
-        # reporting it. The whole block shows under --quiet, not just its
-        # header: it says what openclaw.json still holds and how to fix it
+        # Detected + failed: trust-failure path. Sentinel first, so a block that
+        # can't be printed (a closed stderr) still leaves `status` reporting it
         # (WOR-1043).
         _write_unlock_sentinel(
             home,
@@ -947,8 +945,7 @@ def _emit_openclaw_unlock_failure(
     # choke point — redact ``detail`` here for both the console warning and
     # the sentinel event dict below.
     detail = _redact(detail)
-    # Sentinel first, and the whole block under --quiet, as on the
-    # detected+failed path (WOR-1043).
+    # Sentinel first, as on the detected+failed path (WOR-1043).
     _write_unlock_sentinel(
         home,
         status="partial",

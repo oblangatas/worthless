@@ -206,6 +206,35 @@ def test_unlock_with_openclaw_apply_unlock_failure_exits_nonzero(
 # ---------------------------------------------------------------------------
 
 
+def _raise_from_apply_unlock(detail: str):  # noqa: ANN202
+    from worthless.openclaw import errors as openclaw_errors
+
+    def _raise(*_: object, **__: object) -> None:
+        raise openclaw_errors.OpenclawIntegrationError(
+            openclaw_errors.OpenclawErrorCode.SKILL_INSTALL_FAILED, detail
+        )
+
+    return _raise
+
+
+def _failed_apply_result(openclaw_present: dict[str, Path], **fields: object):  # noqa: ANN202
+    """An apply_unlock result for a detected OpenClaw that hit an error."""
+    from worthless.openclaw import integration
+    from worthless.openclaw.errors import OpenclawErrorCode, OpenclawIntegrationEvent
+
+    fields.setdefault(
+        "events",
+        (OpenclawIntegrationEvent(code=OpenclawErrorCode.WRITE_FAILED, level="error", detail="x"),),
+    )
+    return integration.OpenclawApplyResult(
+        detected=True,
+        config_path=openclaw_present["config_path"],
+        workspace_path=openclaw_present["workspace"],
+        skill_path=None,
+        **fields,
+    )
+
+
 def _quiet_unlock(home_dir: WorthlessHome, env_file: Path):  # noqa: ANN202
     lock_result = runner.invoke(
         app,
@@ -226,16 +255,13 @@ def test_quiet_unlock_still_says_how_to_repair_openclaw_after_a_raise(
     openclaw_present: dict[str, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from worthless.openclaw import errors as openclaw_errors
     from worthless.openclaw import integration
 
-    def _raise(*_: object, **__: object) -> None:
-        raise openclaw_errors.OpenclawIntegrationError(
-            openclaw_errors.OpenclawErrorCode.SKILL_INSTALL_FAILED,
-            "simulated unexpected raise from /x\x1b[2J/openclaw.json",
-        )
-
-    monkeypatch.setattr(integration, "apply_unlock", _raise)
+    monkeypatch.setattr(
+        integration,
+        "apply_unlock",
+        _raise_from_apply_unlock("simulated unexpected raise from /x\x1b[2J/openclaw.json"),
+    )
 
     result = _quiet_unlock(home_dir, env_file)
 
@@ -256,11 +282,8 @@ def test_quiet_unlock_still_names_what_openclaw_left_on_the_proxy(
     from worthless.openclaw import integration
     from worthless.openclaw.errors import OpenclawErrorCode, OpenclawIntegrationEvent
 
-    failed = integration.OpenclawApplyResult(
-        detected=True,
-        config_path=openclaw_present["config_path"],
-        workspace_path=openclaw_present["workspace"],
-        skill_path=None,
+    failed = _failed_apply_result(
+        openclaw_present,
         providers_skipped=(("openai", "entry changed since lock"),),
         events=(
             OpenclawIntegrationEvent(
@@ -294,27 +317,13 @@ def test_a_fail_block_it_cannot_print_still_marks_the_status_degraded(
     stderr, and that must not keep `worthless status` from reporting the failure."""
     from worthless.cli.console import WorthlessConsole
     from worthless.cli.sentinel import is_partial, read_sentinel
-    from worthless.openclaw import errors as openclaw_errors
     from worthless.openclaw import integration
 
-    def _raise(*_: object, **__: object) -> None:
-        raise openclaw_errors.OpenclawIntegrationError(
-            openclaw_errors.OpenclawErrorCode.SKILL_INSTALL_FAILED, "simulated raise"
-        )
-
-    failed = integration.OpenclawApplyResult(
-        detected=True,
-        config_path=openclaw_present["config_path"],
-        workspace_path=openclaw_present["workspace"],
-        skill_path=None,
-        events=(
-            openclaw_errors.OpenclawIntegrationEvent(
-                code=openclaw_errors.OpenclawErrorCode.WRITE_FAILED, level="error", detail="x"
-            ),
-        ),
-    )
+    failed = _failed_apply_result(openclaw_present)
     monkeypatch.setattr(
-        integration, "apply_unlock", _raise if path == "raise" else (lambda **_: failed)
+        integration,
+        "apply_unlock",
+        _raise_from_apply_unlock("simulated raise") if path == "raise" else (lambda **_: failed),
     )
 
     def _closed_stderr(console, message: str) -> None:  # noqa: ANN001
