@@ -249,9 +249,10 @@ async def _restore_all(
                 #     UnsafeReason.SYMLINK), shard-A is still live → guard fires.
                 #   - present regular file, unrestorable (transient EACCES, tamper)
                 #     → `failed`, trips the guard.
-                #   - a folder it can't open (EACCES, EIO) → `failed`, so the guard
-                #     names it and --force can still finish. Not exists(): from
-                #     Python 3.14 it returns False for any OSError (WOR-1043).
+                #   - a folder it can't open (EACCES, EIO) or a symlink loop (ELOOP)
+                #     → `failed`, so the guard names it and --force can still finish.
+                #     Not exists(): from Python 3.14 it returns False for any OSError,
+                #     and before that it read ELOOP as gone (WOR-1043).
                 try:
                     Path(env_path).stat()
                     gone = False
