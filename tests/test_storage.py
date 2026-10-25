@@ -431,6 +431,7 @@ async def test_migrate_original_mode_idempotent(tmp_path) -> None:
 _RESTORE_ALIAS = "openai-0123abcd"
 _RESTORE_VAR = "OPENROUTER_API_KEY"
 _RESTORE_ENV = "/home/alice/proj/.env"
+_RESTORE_SHARD_A = "sk-or-v1-shard-a-from-this-lock"
 
 
 @pytest.mark.asyncio
@@ -499,14 +500,16 @@ async def test_base_url_restore_round_trips(
     repo: ShardRepository, sample_split_result, record: BaseUrlRestore
 ) -> None:
     await _enroll_for_restore(repo, sample_split_result)
-    await repo.record_base_url_restores(_RESTORE_ENV, [(_RESTORE_ALIAS, _RESTORE_VAR, record)])
+    await repo.record_base_url_restores(
+        _RESTORE_ENV, [(_RESTORE_ALIAS, _RESTORE_VAR, _RESTORE_SHARD_A, record)]
+    )
 
     by_alias = await repo.get_enrollment(_RESTORE_ALIAS, _RESTORE_ENV)
     by_location = await repo.find_enrollment_by_location(_RESTORE_VAR, _RESTORE_ENV)
     [listed] = await repo.list_enrollments(_RESTORE_ALIAS)
     for enrollment in (by_alias, by_location, listed):
         assert enrollment is not None
-        assert await repo.verified_base_url_restore(enrollment) == record
+        assert await repo.verified_base_url_restore(enrollment, _RESTORE_SHARD_A) == record
 
 
 @pytest.mark.asyncio
@@ -517,7 +520,7 @@ async def test_base_url_restore_from_before_wor_1013_is_none(
 
     enrollment = await repo.get_enrollment(_RESTORE_ALIAS, _RESTORE_ENV)
     assert enrollment is not None
-    assert await repo.verified_base_url_restore(enrollment) is None
+    assert await repo.verified_base_url_restore(enrollment, _RESTORE_SHARD_A) is None
 
 
 @pytest.mark.asyncio
@@ -531,8 +534,19 @@ async def test_base_url_restore_from_before_wor_1013_is_none(
         " WHERE e2.env_path = '/home/alice/other/.env'),"
         " base_url_restore_mac = (SELECT base_url_restore_mac FROM enrollments e2"
         " WHERE e2.env_path = '/home/alice/other/.env')",
+        # Odd types must be refused like any other edit, not crash unlock.
+        "base_url_restore_mac = 'é' || base_url_restore_mac",
+        "base_url_restore_json = CAST(base_url_restore_json AS BLOB)",
+        "base_url_restore_json = base_url_restore_json || printf('%.*c', 20000, ' ')",
     ],
-    ids=["value-edited", "mac-dropped", "copied-from-another-row"],
+    ids=[
+        "value-edited",
+        "mac-dropped",
+        "copied-from-another-row",
+        "non-ascii-mac",
+        "blob-json",
+        "oversized",
+    ],
 )
 async def test_an_edited_base_url_restore_is_refused(
     repo: ShardRepository, tmp_db_path: str, sample_split_result, set_clause: str
@@ -544,7 +558,9 @@ async def test_an_edited_base_url_restore_is_refused(
     )
     record = BaseUrlRestore("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
     for env_path in (_RESTORE_ENV, "/home/alice/other/.env"):
-        await repo.record_base_url_restores(env_path, [(_RESTORE_ALIAS, _RESTORE_VAR, record)])
+        await repo.record_base_url_restores(
+            env_path, [(_RESTORE_ALIAS, _RESTORE_VAR, _RESTORE_SHARD_A, record)]
+        )
     async with aiosqlite.connect(tmp_db_path) as db:
         await db.execute(
             f"UPDATE enrollments SET {set_clause} WHERE env_path = ?",  # noqa: S608 — test literal
@@ -555,7 +571,24 @@ async def test_an_edited_base_url_restore_is_refused(
     enrollment = await repo.get_enrollment(_RESTORE_ALIAS, _RESTORE_ENV)
     assert enrollment is not None
     with pytest.raises(ValueError, match="base_url restore"):
-        await repo.verified_base_url_restore(enrollment)
+        await repo.verified_base_url_restore(enrollment, _RESTORE_SHARD_A)
+
+
+@pytest.mark.asyncio
+async def test_a_base_url_restore_from_an_earlier_lock_is_refused(
+    repo: ShardRepository, sample_split_result
+) -> None:
+    """Each fresh lock draws a new shard-A, so a record saved from an older lock fails."""
+    await _enroll_for_restore(repo, sample_split_result)
+    record = BaseUrlRestore("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+    await repo.record_base_url_restores(
+        _RESTORE_ENV, [(_RESTORE_ALIAS, _RESTORE_VAR, "sk-or-v1-an-earlier-lock", record)]
+    )
+
+    enrollment = await repo.get_enrollment(_RESTORE_ALIAS, _RESTORE_ENV)
+    assert enrollment is not None
+    with pytest.raises(ValueError, match="MAC check"):
+        await repo.verified_base_url_restore(enrollment, _RESTORE_SHARD_A)
 
 
 @pytest.mark.parametrize(

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import io
 import logging
 import math
 import os
@@ -32,6 +33,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from dotenv import dotenv_values
+from dotenv.variables import Variable, parse_variables
 
 from worthless.cli.errors import UnsafeReason, UnsafeRewriteRefused
 from worthless.cli.key_patterns import ENTROPY_THRESHOLD, KEY_PATTERN, detect_provider
@@ -799,33 +801,64 @@ def _append_additions(lines: list[_LogicalLine], additions: dict[str, str], eol:
         )
 
 
-def read_raw_values(env_path: Path, names: Iterable[str]) -> dict[str, str]:
-    """Each named key's value as written in *env_path*, for writing back later.
+@dataclass(frozen=True)
+class EnvSnapshot:
+    """One read of a ``.env``: its parse, its ``*_BASE_URL`` values as written, its hash.
 
-    Nothing is expanded or unescaped, unlike ``dotenv_values``:
-    ``${GATEWAY}/v1`` stays ``${GATEWAY}/v1``. Writing a returned value back
-    with :func:`rewrite_env_keys` gives back the line byte for byte, except
-    that an unquoted value loses its trailing whitespace. A name the file
-    doesn't set, or whose value :func:`rewrite_env_keys` would refuse, is
-    left out.
+    ``raw`` holds each ``*_BASE_URL`` value exactly as the line spells it
+    (``${GATEWAY}/v1`` stays unexpanded, quotes are not part of it), and only
+    when :func:`rewrite_env_keys` can write it back. Writing one back gives
+    the line byte for byte, except that an unquoted value loses its trailing
+    whitespace. Key lines are not copied: nothing needs their raw text.
+    Pass ``sha256`` to :func:`rewrite_env_keys` to refuse the write if the
+    file changed since this read.
     """
-    wanted = set(names)
-    if not wanted:
-        return {}
-    stripped, _had_bom = _strip_bom(_safe_read_existing_bytes(env_path))
-    values: dict[str, str] = {}
+
+    parsed: dict[str, str | None]
+    raw: dict[str, str]
+    sha256: bytes
+
+
+def read_env_snapshot(env_path: Path) -> EnvSnapshot:
+    """Read *env_path* once. A missing file reads as empty.
+
+    The BOM is stripped before parsing: python-dotenv before 1.2.3 keeps it
+    in the first key's name. A file that isn't UTF-8 is refused, as the
+    rewrite would refuse it.
+    """
+    existing = _safe_read_existing_bytes(env_path)
+    stripped, _had_bom = _strip_bom(existing)
+    try:
+        text = stripped.decode("utf-8")
+    except UnicodeDecodeError:
+        raise UnsafeRewriteRefused(UnsafeReason.SNIFF) from None
+    raw: dict[str, str] = {}
     for line in _split_logical_lines(stripped):
-        if line.key not in wanted:
+        if line.key is None or not line.key.endswith("_BASE_URL"):
             continue
         head, value, _tail = _split_assignment(line.raw)
         if not head.endswith(('"', "'")):
             value = value.rstrip(" \t")
-        try:
-            _validate_value(value)
-        except ValueError:
-            continue
-        values[line.key] = value
-    return values
+        if is_writable_value(value):
+            raw[line.key] = value
+        else:
+            raw.pop(line.key, None)  # the last line decides, as python-dotenv's does
+    parsed = dict(dotenv_values(stream=io.StringIO(text)))
+    return EnvSnapshot(parsed=parsed, raw=raw, sha256=hashlib.sha256(existing).digest())
+
+
+def referenced_names(value: str) -> set[str]:
+    """The variables python-dotenv would expand in *value* (``${NAME}``, ``${NAME:-x}``)."""
+    return {atom.name for atom in parse_variables(value) if isinstance(atom, Variable)}
+
+
+def is_writable_value(value: str) -> bool:
+    """Whether :func:`rewrite_env_keys` accepts *value* (see ``_validate_value``)."""
+    try:
+        _validate_value(value)
+    except ValueError:
+        return False
+    return True
 
 
 def rewrite_env_keys(
@@ -834,6 +867,7 @@ def rewrite_env_keys(
     *,
     additions: dict[str, str] | None = None,
     removals: set[str] | None = None,
+    expected_baseline_sha256: bytes | None = None,
     _hook_before_replace: Callable[[], None] | None = None,
 ) -> None:
     """Atomically replace N keys in *env_path* via one ``safe_rewrite`` call.
@@ -852,6 +886,10 @@ def rewrite_env_keys(
     :func:`remove_env_key`. Used by transactional unlock to delete
     proxy ``*_BASE_URL`` lines in the same atomic write that restores
     plaintext keys.
+
+    *expected_baseline_sha256* (an :class:`EnvSnapshot` ``sha256``) makes
+    the rewrite refuse if the file changed since the caller read it. Without
+    it the baseline is this call's own read.
 
     *_hook_before_replace* is forwarded to :func:`safe_rewrite`; the
     lock command binds a closure that runs reconstruct-and-verify for
@@ -880,7 +918,7 @@ def rewrite_env_keys(
         new_content,
         original_user_arg=env_path,
         allow_outside_repo=True,
-        expected_baseline_sha256=hashlib.sha256(existing).digest(),
+        expected_baseline_sha256=expected_baseline_sha256 or hashlib.sha256(existing).digest(),
         _hook_before_replace=_hook_before_replace,
     )
 

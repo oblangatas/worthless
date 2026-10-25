@@ -5,21 +5,30 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 ## [Unreleased]
 
 ### Security
-- **After you unlock a key that an older version locked, put back a `*_BASE_URL` you had set yourself before lock** (WOR-981, [#737](https://github.com/oblangatas/worthless/pull/737)).
-  If your `.env` had the line before a normal lock with v0.3.16 or earlier, for example `OPENROUTER_BASE_URL=https://openrouter.ai/api/v1`, lock replaced it with the proxy URL and kept no copy, so unlock now removes it. An app that reads `OPENROUTER_BASE_URL` with no default then falls back to OpenAI's address and sends your OpenRouter key to OpenAI. Before this release the dead proxy line stayed, and calls failed on your machine instead. Keys you lock with this release get the line back on unlock (WOR-1013, below).
+- **Unlocking a key that v0.3.16 or earlier locked sends it to the upstream it used, not to OpenAI** (WOR-981, [#737](https://github.com/oblangatas/worthless/pull/737); WOR-1013, [#738](https://github.com/oblangatas/worthless/pull/738)).
+  If your `.env` had a `*_BASE_URL` line before a normal lock with v0.3.16 or earlier, for example `OPENROUTER_BASE_URL=https://openrouter.ai/api/v1`, lock replaced it with the proxy URL and kept no copy of your value. Unlock and uninstall now write back the upstream the key used while it was locked, which lock took from your line, and say so. Removing the line instead would let an app that reads `OPENROUTER_BASE_URL` with no default fall back to OpenAI's address and send your OpenRouter key there. Before this release, unlock left the dead proxy line, so calls failed on your machine (an `OPENAI_BASE_URL` or `ANTHROPIC_BASE_URL` line was removed instead).
+
+  **Limits.**
+  - If lock had added the line, unlock leaves it in place with the provider's own address instead of removing it. Delete it if you don't want it.
+  - If lock would refuse that upstream today (it isn't in the provider registry, isn't https, or is a private or loopback address such as a local Ollama), unlock removes the line and tells you to set it again. An app that reads it with no default then uses its SDK's default address.
+  - The written value is the one lock resolved, so a `${...}` reference you had comes back expanded.
 
 ### Fixed
-- **`worthless unlock` puts back a `*_BASE_URL` line you had before lock** (WOR-1013).
+- **`worthless unlock` puts back a `*_BASE_URL` line you had before lock** (WOR-1013, [#738](https://github.com/oblangatas/worthless/pull/738)).
   Before: if your `.env` already had the line lock writes for a key, for example `OPENROUTER_BASE_URL=https://openrouter.ai/api/v1` next to `OPENROUTER_API_KEY`, or your own gateway in `OPENAI_BASE_URL`, lock replaced its value with the proxy URL and did not keep yours. Unlock then removed the line. An app that reads `OPENROUTER_BASE_URL` with no default then used OpenAI's address and sent your OpenRouter key to OpenAI.
   Now: lock saves, for each key, which line it writes and the value it replaces. Unlock writes that value back as you wrote it, with its quotes, comment and any `${...}` reference, and removes the line only if lock added it. Lock then unlock gives back the `.env` you started with. `worthless uninstall` does the same.
 
   **Limits.**
-  - A key locked with an older version has nothing saved, so unlock removes its line. See Security above. Lock it again with this version and the next unlock puts the value back.
-  - Unlock writes your value back only while the line still points at that key on the proxy. If you changed the line after lock, unlock keeps your change.
-  - The saved value is tied to your Worthless encryption key. If it was changed in the Worthless database after lock, unlock does not write it: it warns and removes the line instead.
-  - An unquoted value loses spaces or tabs at the end of the line.
+  - A key locked with an older version has nothing saved, so unlock writes back the upstream the key used while locked instead, and says so. See Security above. Keys you lock with this version get back exactly what you wrote.
+  - Unlock writes your value back only while the line still points at that key on the proxy. If you changed or deleted the line after lock, unlock keeps your change and tells you, without putting your earlier value back (WOR-1024).
+  - The saved value is tied to your Worthless encryption key and to its own row. If someone without that key changes it in the Worthless database, unlock does not write it: it treats the key as an older one (see Security above) and tells you. Someone who can write that database can still delete the saved value, or swap in one saved by an earlier lock of the same key (WOR-1023).
+  - A value that can't be written back unchanged (one with a quote, a space before `#`, or whitespace at one end) is not saved. Lock warns you, and unlock removes the line (WOR-1027).
+  - An unquoted value loses whitespace at its end.
+  - A value that refers to another line lock rewrites, such as `OPENROUTER_BASE_URL=${OPENAI_BASE_URL}`, comes back as the value it had at lock, not as the reference. Restored as written, it would point at the other key's proxy line while that key is still locked. Lock says so (WOR-1026).
   - If the `.env` sets the same `*_BASE_URL` on two lines, both get the last line's value back.
-  - When two keys share one line, unlocking only the key it points at puts your value back while the other key stays locked. Unlock both together.
+  - Older versions don't read the saved value, so going back to one before you unlock loses your value: its unlock removes `OPENAI_BASE_URL` or `ANTHROPIC_BASE_URL`, and leaves any other proxy line, such as `OPENROUTER_BASE_URL`, pointing at the proxy. Unlock with this version first.
+  - When two keys share one line, for example `OPENAI_API_KEY` and `MY_OPENAI_KEY` both use `OPENAI_BASE_URL`, unlocking only `OPENAI_API_KEY` puts your value back while `MY_OPENAI_KEY` stays locked, so `MY_OPENAI_KEY`'s calls go to your URL with a locked value and fail. Unlock both together.
+  - If you replaced a key and kept the old one in the same `.env` under another name, lock now stops with the `.env` unchanged. Before, it left the old key's copy impossible to unlock (WOR-1017).
 - **`worthless unlock` removes the proxy line that lock added for an OpenRouter key** (WOR-981, [#737](https://github.com/oblangatas/worthless/pull/737)).
   Before: lock names the proxy line after the key's variable, so `OPENROUTER_API_KEY` gets `OPENROUTER_BASE_URL`. Unlock looked for `OPENAI_BASE_URL` instead. After unlock, `OPENROUTER_BASE_URL` still sent your app to the local proxy, for a key the proxy no longer had, and the `.env` did not match the original. The same happened for any other `<NAME>_API_KEY` variable, such as `GROQ_API_KEY`. If you had your own `OPENAI_BASE_URL` in that file, unlock deleted it, after a normal lock or a `--keys-only` one. If the `.env` also had a locked `OPENAI_API_KEY`, unlocking only the OpenRouter key deleted `OPENAI_BASE_URL`. The OpenAI key stayed locked, so its scrambled value then went straight to OpenAI and failed.
   Now: unlock removes the line that lock wrote for each key it unlocks, and only while that line still sends that key's alias to the proxy (whatever the host or port). Other `*_BASE_URL` lines are kept, including your own after a `--keys-only` lock. If lock added the line, lock then unlock gives back the `.env` you started with. `worthless uninstall` restores the same way.

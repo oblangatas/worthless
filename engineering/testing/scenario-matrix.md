@@ -321,10 +321,10 @@ These must always hold. Any scenario that breaks them is a bug:
 #### U-38: User locks a `.env` that already sets the `*_BASE_URL` line lock writes
 
 - **Precondition**: `.env` has `OPENROUTER_BASE_URL=https://openrouter.ai/api/v1` next to `OPENROUTER_API_KEY`, or a registered gateway in `OPENAI_BASE_URL` next to `OPENAI_API_KEY`
-- **Expected**: Lock records on each key's enrollment the line it writes and the value it replaces, as written (`${GATEWAY}/v1` is not expanded), MAC-tagged with the Fernet-derived key. Unlock and uninstall put that value back while the line still routes that key's alias; the `.env` is byte-identical to before lock. A line lock added is removed. Enrollments from before WOR-1013 (no record) and records that fail the MAC check fall back to U-37's removal; a failed check also warns.
+- **Expected**: Lock records on each key's enrollment the line it writes and the value it replaces, as written (`${GATEWAY}/v1` is not expanded), MAC-tagged with the Fernet-derived key. Unlock and uninstall put that value back while the line still routes that key's alias; the `.env` is byte-identical to before lock. A line lock added is removed. Enrollments from before WOR-1013 (no record) and records that fail the MAC check (bound to its row and the lock's shard-A: a record from an earlier lock with a fresh split fails, but one from a re-lock that re-derived the same shard-A still verifies, WOR-1023) get `shards.base_url` written back if it passes lock's registry and SSRF checks, else U-37's removal; unlock says which. Every row of the key a line routes carries the record (one key under two vars). A value the rewriter can't write back is not saved (lock warns); a value referring to another rewritten line (`${OPENAI_BASE_URL}`) is saved as its value at lock; lock aborts if the `.env` changed since it validated it, or if a record row vanished (WOR-1017).
 - **Current behavior**: FIXED (WOR-1013) -- lock overwrote the value without keeping it and unlock then deleted the line, so an app reading `OPENROUTER_BASE_URL` with no default sent the OpenRouter key to `api.openai.com`.
 - **Risk**: HIGH (was broken, now fixed)
-- **Test status**: Tested (TestUnlockPutsBackTheBaseUrlYouHad, `tests/dotenv_rewriter/test_read_raw_values.py`, the `base_url_restore` tests in `tests/test_storage.py`)
+- **Test status**: Tested (TestUnlockPutsBackTheBaseUrlYouHad, `tests/dotenv_rewriter/test_read_env_snapshot.py`, the `base_url_restore` tests in `tests/test_storage.py`)
 
 ---
 
