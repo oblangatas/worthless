@@ -591,6 +591,33 @@ async def test_a_base_url_restore_from_an_earlier_lock_is_refused(
         await repo.verified_base_url_restore(enrollment, _RESTORE_SHARD_A)
 
 
+@pytest.mark.asyncio
+async def test_a_value_lock_refused_round_trips_apart_from_a_line_it_added(
+    repo: ShardRepository, sample_split_result
+) -> None:
+    """WOR-1042: both have no value to put back, but unlock tells the user only of a refusal."""
+    await _enroll_for_restore(repo, sample_split_result)
+    refused = BaseUrlRestore(var="OPENROUTER_BASE_URL", original=None, refused=True)
+    await repo.record_base_url_restores(
+        _RESTORE_ENV, [(_RESTORE_ALIAS, _RESTORE_VAR, _RESTORE_SHARD_A, refused)]
+    )
+
+    enrollment = await repo.get_enrollment(_RESTORE_ALIAS, _RESTORE_ENV)
+    assert enrollment is not None
+    restored = await repo.verified_base_url_restore(enrollment, _RESTORE_SHARD_A)
+    assert restored == refused
+    assert restored != BaseUrlRestore(var="OPENROUTER_BASE_URL", original=None)
+
+
+def test_a_base_url_restore_saved_before_wor_1042_reads_as_before() -> None:
+    """A record without ``refused`` keeps its JSON and its meaning, so its MAC still holds."""
+    old_json = '{"original": null, "var": "OPENROUTER_BASE_URL"}'
+    record = BaseUrlRestore.from_json(old_json)
+    assert record == BaseUrlRestore(var="OPENROUTER_BASE_URL", original=None)
+    assert not record.refused
+    assert record.to_json() == old_json
+
+
 @pytest.mark.parametrize(
     "record_json",
     [
@@ -601,6 +628,10 @@ async def test_a_base_url_restore_from_an_earlier_lock_is_refused(
         '{"var": 1, "original": null}',
         '{"var": "OPENROUTER_BASE_URL", "original": 2}',
         '{"var": null, "original": "https://openrouter.ai/api/v1"}',
+        '{"var": "OPENROUTER_BASE_URL", "original": null, "refused": "yes"}',
+        '{"var": null, "original": null, "refused": true}',
+        '{"var": "OPENROUTER_BASE_URL", "original": "https://openrouter.ai/api/v1",'
+        ' "refused": true}',
     ],
 )
 def test_base_url_restore_rejects_other_shapes(record_json: str) -> None:

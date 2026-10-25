@@ -316,6 +316,68 @@ def test_uninstall_puts_back_your_line_for_a_key_an_older_version_locked(
     assert env.read_bytes() == original
 
 
+def test_quiet_uninstall_still_says_what_it_wrote_into_your_line(
+    home_dir: WorthlessHome, tmp_path
+) -> None:
+    """WOR-1042: --quiet hides progress, not a change uninstall made to your .env."""
+    from tests.helpers import fake_openrouter_key
+
+    env = tmp_path / ".env"
+    env.write_text(
+        f"OPENROUTER_BASE_URL=https://openrouter.ai/api/v1\nOPENROUTER_API_KEY={fake_openrouter_key()}\n"
+    )
+    locked = runner.invoke(
+        app, ["lock", "--env", str(env)], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
+    )
+    assert locked.exit_code == 0, locked.output
+    conn = sqlite3.connect(home_dir.db_path)
+    conn.execute("UPDATE enrollments SET base_url_restore_json = NULL, base_url_restore_mac = NULL")
+    conn.commit()
+    conn.close()
+
+    result = runner.invoke(
+        app,
+        ["--quiet", "uninstall", "--yes"],
+        env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+    )
+    assert result.exit_code == 0, result.output
+    said = " ".join(result.output.split())
+    assert "the upstream this key used while locked" in said
+    assert "restored" not in said  # still quiet about progress
+
+
+@pytest.mark.parametrize("quiet", [False, True], ids=["default", "quiet"])
+def test_uninstall_says_lock_could_not_save_the_value_you_had(
+    home_dir: WorthlessHome, tmp_path, quiet: bool
+) -> None:
+    """WOR-1042: lock refused to save this line (a quote, WOR-1027), so uninstall
+    removes it and says so instead of treating it as a line lock added."""
+    from tests.helpers import fake_openai_key
+
+    url = "https://gateway.example.com/v1/o'neil"
+    worthless_env = {"WORTHLESS_HOME": str(home_dir.base_dir)}
+    registered = runner.invoke(
+        app,
+        ["providers", "register", "--name", "quoted-gw", "--url", url, "--protocol", "openai"],
+        env=worthless_env,
+    )
+    assert registered.exit_code == 0, registered.output
+    key = fake_openai_key()
+    env = tmp_path / ".env"
+    env.write_text(f"OPENAI_BASE_URL={url}\nOPENAI_API_KEY={key}\n")
+    locked = runner.invoke(app, ["lock", "--env", str(env)], env=worthless_env)
+    assert locked.exit_code == 0, locked.output
+
+    result = runner.invoke(
+        app, [*(["--quiet"] if quiet else []), "uninstall", "--yes"], env=worthless_env
+    )
+    assert result.exit_code == 0, result.output
+    assert env.read_text() == f"OPENAI_API_KEY={key}\n"
+    assert "lock couldn't save the value you had in OPENAI_BASE_URL" in " ".join(
+        result.output.split()
+    )
+
+
 def test_uninstall_calls_openclaw_undo_with_restored_aliases(
     home_dir: WorthlessHome, tmp_path, monkeypatch
 ) -> None:
