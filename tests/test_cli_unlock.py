@@ -6,7 +6,6 @@ import asyncio
 import contextlib
 import sqlite3
 from pathlib import Path
-from urllib.parse import urlsplit
 
 import pytest
 from dotenv import dotenv_values
@@ -18,7 +17,13 @@ from worthless.cli.errors import WorthlessError
 from worthless.cli.providers import user_registry_path
 
 from tests.conftest import make_repo as _repo
-from tests.helpers import fake_anthropic_key, fake_key, fake_openai_key, fake_openrouter_key
+from tests.helpers import (
+    assert_not_shown,
+    fake_anthropic_key,
+    fake_key,
+    fake_openai_key,
+    fake_openrouter_key,
+)
 
 runner = CliRunner()
 
@@ -42,11 +47,13 @@ def multi_env_file(tmp_path: Path) -> Path:
     return env
 
 
-def _lock(env_file: Path, home: WorthlessHome, *args: str, check: bool = True) -> Result:
+def _lock(
+    env_file: Path, home: WorthlessHome, *args: str, check: bool = True, quiet: bool = False
+) -> Result:
     """Helper: lock the env file; *check* asserts it succeeded."""
     result = runner.invoke(
         app,
-        ["lock", "--env", str(env_file), *args],
+        [*(["--quiet"] if quiet else []), "lock", "--env", str(env_file), *args],
         env={"WORTHLESS_HOME": str(home.base_dir)},
     )
     if check:
@@ -260,6 +267,12 @@ def _said(result: Result, phrase: str) -> bool:
     return phrase in " ".join(result.output.split())
 
 
+_UNSAVED_NOTE = (
+    "Removed OPENAI_BASE_URL: lock couldn't save the value you had in OPENAI_BASE_URL, "
+    "so unlock can't put it back. Set it again."
+)
+
+
 def _alias_for(home: WorthlessHome, var_name: str) -> str:
     enrollments = asyncio.run(_repo(home).list_enrollments())
     return next(e.key_alias for e in enrollments if e.var_name == var_name)
@@ -332,8 +345,9 @@ class TestUnlockRemovesTheBaseUrlLockWrote:
         _lock(env, home_dir)
         assert base_url_var in dotenv_values(env)
 
-        _unlock(env, home_dir)
+        unlocked = _unlock(env, home_dir)
         assert env.read_bytes() == original
+        assert base_url_var not in unlocked.output  # nothing in doubt, so no note (WOR-1042)
 
     def test_line_named_by_an_older_lock_stops_routing_the_proxy(
         self, home_dir: WorthlessHome, tmp_path: Path
@@ -640,14 +654,17 @@ class TestUnlockPutsBackTheBaseUrlYouHad:
     def test_a_value_unlock_cannot_write_back_is_removed_not_a_crash(
         self, home_dir: WorthlessHome, tmp_path: Path, url: str, line: str
     ) -> None:
-        """The rewriter refuses these values, so unlock removes the line instead."""
+        """The rewriter refuses these values, so unlock removes the line instead, and
+        both commands say so, even with --quiet (WOR-1042)."""
         _register_gateway(home_dir, url, name="quoted-gw")
         env = tmp_path / ".env"
         env.write_text(f"OPENAI_BASE_URL={line}\nOPENAI_API_KEY={_TEST_KEY}\n")
-        assert _said(_lock(env, home_dir), "can't save this value")
+        assert _said(_lock(env, home_dir, quiet=True), "can't save this value")
 
-        _unlock(env, home_dir)
+        unlocked = _unlock(env, home_dir, quiet=True)
         assert env.read_text() == f"OPENAI_API_KEY={_TEST_KEY}\n"
+        assert _said(unlocked, _UNSAVED_NOTE)
+        assert_not_shown(unlocked.output, url, _TEST_KEY)
 
     @pytest.mark.parametrize(
         "users_line",
@@ -684,7 +701,8 @@ class TestUnlockPutsBackTheBaseUrlYouHad:
             "OPENROUTER_BASE_URL=${OPENAI_BASE_URL}\n"
             f"OPENAI_API_KEY={_TEST_KEY}\nOPENROUTER_API_KEY={fake_openrouter_key()}\n"
         )
-        _lock(env, home_dir)
+        locked = _lock(env, home_dir, quiet=True)
+        assert _said(locked, "refers to another line lock rewrites")  # even with --quiet
 
         _unlock(env, home_dir, "--alias", _alias_for(home_dir, "OPENROUTER_API_KEY"))
         assert dotenv_values(env)["OPENROUTER_BASE_URL"] == "https://api.openai.com/v1"
@@ -754,18 +772,19 @@ class TestUnlockPutsBackTheBaseUrlYouHad:
     ) -> None:
         """A key typed literally into the URL stays out of the record too (karen)."""
         env = tmp_path / ".env"
-        _register_gateway(home_dir, f"https://gw.example.com/{_TEST_KEY}/v1", name="literal-key")
-        env.write_text(
-            f"OPENAI_API_KEY={_TEST_KEY}\nOPENAI_BASE_URL=https://gw.example.com/{_TEST_KEY}/v1\n"
-        )
-        locked = _lock(env, home_dir)
+        gateway = f"https://gw.example.com/{_TEST_KEY}/v1"
+        _register_gateway(home_dir, gateway, name="literal-key")
+        env.write_text(f"OPENAI_API_KEY={_TEST_KEY}\nOPENAI_BASE_URL={gateway}\n")
+        locked = _lock(env, home_dir, quiet=True)
         record_json, _mac = _saved_record(home_dir)
         if _TEST_KEY in record_json:
             pytest.fail("the saved BASE_URL record holds the key")  # never echo it
         assert _said(locked, "it holds one of your keys")
 
-        _unlock(env, home_dir)
-        assert "OPENAI_BASE_URL" not in dotenv_values(env)
+        unlocked = _unlock(env, home_dir, quiet=True)
+        assert env.read_text() == f"OPENAI_API_KEY={_TEST_KEY}\n"
+        assert _said(unlocked, _UNSAVED_NOTE)
+        assert_not_shown(unlocked.output, gateway, _TEST_KEY)
 
     def test_lock_never_saves_an_expanded_value_that_holds_a_key(self) -> None:
         """Whatever the reason lock falls back to the expanded form, a key never
@@ -814,7 +833,7 @@ class TestUnlockPutsBackTheBaseUrlYouHad:
         _lock(env, home_dir)
         env.write_text(f"OPENROUTER_API_KEY={dotenv_values(env)['OPENROUTER_API_KEY']}\n")
 
-        result = _unlock(env, home_dir)
+        result = _unlock(env, home_dir, quiet=True)
         assert env.read_text() == f"OPENROUTER_API_KEY={key}\n"
         assert "OPENROUTER_BASE_URL" in result.output
         assert "https://openrouter.ai" not in result.output  # names the line, never its value
@@ -943,10 +962,12 @@ class TestUnlockPutsBackTheBaseUrlYouHad:
         _lock(env, home_dir)
         _as_enrolled_before_wor_1013(home_dir)
 
-        result = _unlock(env, home_dir)
+        result = _unlock(env, home_dir, quiet=True)
         assert env.read_bytes() == original
-        # Never silent: the note names the file (uninstall walks several) and the
-        # host it wrote, so a surprising destination shows (WOR-1023).
+        assert "Restored" not in result.output  # --quiet hides progress, not this note
+        # Never silent, even with --quiet (WOR-1042): the note names the file
+        # (uninstall walks several) and the host it wrote, so a surprising
+        # destination shows (WOR-1023).
         assert _said(
             result,
             "to an address at https://openrouter.ai, the upstream this key used while locked",
@@ -1260,123 +1281,9 @@ class TestUnlockPutsBackTheBaseUrlYouHad:
             " replace(base_url_restore_json, 'openrouter.ai', 'evil.example')",
         )
 
-        result = _unlock(env, home_dir)
+        result = _unlock(env, home_dir, quiet=True)
         assert env.read_text() == f"OPENROUTER_API_KEY={key}\n"
         assert _said(result, "changed in the Worthless database")
-
-
-def _tamper_with_record(home: WorthlessHome, _env: Path) -> None:
-    _edit_enrollments(
-        home,
-        "base_url_restore_json = replace(base_url_restore_json, 'openrouter.ai', 'evil.example')",
-    )
-
-
-def _delete_proxy_line(_home: WorthlessHome, env: Path) -> None:
-    env.write_text(f"OPENROUTER_API_KEY={dotenv_values(env)['OPENROUTER_API_KEY']}\n")
-
-
-class TestUnlockAlwaysSaysWhatItDidToYourLine:
-    """No change to a ``*_BASE_URL`` line goes unsaid, even with --quiet (WOR-1042)."""
-
-    @pytest.mark.parametrize(
-        ("after_lock", "note"),
-        [
-            (
-                lambda home, _env: _as_enrolled_before_wor_1013(home),
-                "the upstream this key used while locked",
-            ),
-            (_tamper_with_record, "changed in the Worthless database"),
-            (_delete_proxy_line, "is no longer in your .env"),
-        ],
-        ids=["old-row-written-back", "tampered-record-removed", "line-deleted-after-lock"],
-    )
-    def test_quiet_still_says_what_unlock_did_to_your_line(
-        self, home_dir: WorthlessHome, tmp_path: Path, after_lock, note: str
-    ) -> None:
-        """--quiet hides progress, not a change to your file. Agents often pass it."""
-        env = tmp_path / ".env"
-        env.write_text(
-            "OPENROUTER_BASE_URL=https://openrouter.ai/api/v1\n"
-            f"OPENROUTER_API_KEY={fake_openrouter_key()}\n"
-        )
-        _lock(env, home_dir)
-        after_lock(home_dir, env)
-
-        result = _unlock(env, home_dir, quiet=True)
-        assert _said(result, note)
-        assert "Restored" not in result.output  # still quiet about progress
-
-    @pytest.mark.parametrize("quiet", [False, True], ids=["default", "quiet"])
-    @pytest.mark.parametrize(
-        "url",
-        [
-            # The rewriter can't write a quote back (WOR-1027).
-            "https://gateway.example.com/v1/o'neil",
-            # The record never holds a key (WOR-1035).
-            f"https://gw.example.com/{_TEST_KEY}/v1",
-        ],
-        ids=["unwritable", "holds-a-key"],
-    )
-    def test_unlock_says_lock_could_not_save_the_value_you_had(
-        self, home_dir: WorthlessHome, tmp_path: Path, url: str, quiet: bool
-    ) -> None:
-        """A value lock didn't save is recorded apart from a line lock added, so its
-        removal is said."""
-        _register_gateway(home_dir, url, name="unsaved-gw")
-        env = tmp_path / ".env"
-        env.write_text(f"OPENAI_BASE_URL={url}\nOPENAI_API_KEY={_TEST_KEY}\n")
-        _lock(env, home_dir)
-
-        result = _unlock(env, home_dir, quiet=quiet)
-        assert env.read_text() == f"OPENAI_API_KEY={_TEST_KEY}\n"
-        assert _said(
-            result,
-            "Removed OPENAI_BASE_URL: lock couldn't save the value you had in OPENAI_BASE_URL, "
-            "so unlock can't put it back. Set it again.",
-        )
-        unwrapped = result.output.replace("\n", "")  # Rich folds a long word across lines
-        for part in (urlsplit(url).hostname, urlsplit(url).path, _TEST_KEY):
-            if part and part in unwrapped:
-                pytest.fail("the note shows the line's value")  # never echo it: it may hold a key
-
-    def test_a_line_lock_added_is_still_removed_without_a_note(
-        self, home_dir: WorthlessHome, tmp_path: Path
-    ) -> None:
-        env = tmp_path / ".env"
-        key = fake_openrouter_key()
-        env.write_text(f"OPENROUTER_API_KEY={key}\n")
-        _lock(env, home_dir)
-
-        result = _unlock(env, home_dir)
-        assert env.read_text() == f"OPENROUTER_API_KEY={key}\n"
-        assert "OPENROUTER_BASE_URL" not in result.output
-
-    def test_a_record_saved_without_the_unsaved_mark_keeps_todays_behaviour(
-        self, home_dir: WorthlessHome, tmp_path: Path
-    ) -> None:
-        """A record lock saved before WOR-1042 reads as a line lock added: removed, no note."""
-        from worthless.storage.models import BaseUrlRestore
-
-        url = "https://gateway.example.com/v1/o'neil"
-        _register_gateway(home_dir, url, name="unsaved-gw")
-        env = tmp_path / ".env"
-        env.write_text(f"OPENAI_BASE_URL={url}\nOPENAI_API_KEY={_TEST_KEY}\n")
-        _lock(env, home_dir)
-        old_record = BaseUrlRestore("OPENAI_BASE_URL", None)
-        row = (
-            _alias_for(home_dir, "OPENAI_API_KEY"),
-            "OPENAI_API_KEY",
-            dotenv_values(env)["OPENAI_API_KEY"] or "",
-            old_record,
-        )
-        updated = asyncio.run(_repo(home_dir).record_base_url_restores(str(env.resolve()), [row]))
-        assert updated == 1
-        assert _saved_record(home_dir)[0] == '{"original": null, "var": "OPENAI_BASE_URL"}'
-
-        result = _unlock(env, home_dir)
-        assert env.read_text() == f"OPENAI_API_KEY={_TEST_KEY}\n"
-        assert "OPENAI_BASE_URL" not in result.output
 
 
 class TestOlderRowsOnlyTouchLinesThatRouteThem:

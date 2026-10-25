@@ -67,6 +67,16 @@ def fake_openrouter_key() -> str:
     return fake_key("sk-" + "or-" + "v1-", seed="openrouter-fixture-seed")
 
 
+def assert_not_shown(output: str, *secrets: str) -> None:
+    """Fail if any of *secrets* is in *output*, without echoing it.
+
+    Rich folds a long word across lines, so line breaks are dropped first.
+    """
+    unwrapped = output.replace("\n", "")
+    if any(secret in unwrapped for secret in secrets):
+        pytest.fail("the output shows a value it must never print")
+
+
 class MockAsyncByteStream(httpx.AsyncByteStream):
     """Mock async byte stream that yields chunks one at a time."""
 

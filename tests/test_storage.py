@@ -492,9 +492,11 @@ async def _enroll_for_restore(repo: ShardRepository, sample_split_result) -> Non
         BaseUrlRestore(var="OPENROUTER_BASE_URL", original="https://openrouter.ai/api/v1"),
         BaseUrlRestore(var="OPENROUTER_BASE_URL", original=""),
         BaseUrlRestore(var="OPENROUTER_BASE_URL", original=None),
+        # WOR-1042: no value to put back either, but unlock says so for this one.
+        BaseUrlRestore(var="OPENROUTER_BASE_URL", original=None, unsaved=True),
         BaseUrlRestore(var=None, original=None),
     ],
-    ids=["had-a-value", "had-it-empty", "lock-added-it", "lock-wrote-none"],
+    ids=["had-a-value", "had-it-empty", "lock-added-it", "lock-wont-save-it", "lock-wrote-none"],
 )
 async def test_base_url_restore_round_trips(
     repo: ShardRepository, sample_split_result, record: BaseUrlRestore
@@ -591,30 +593,11 @@ async def test_a_base_url_restore_from_an_earlier_lock_is_refused(
         await repo.verified_base_url_restore(enrollment, _RESTORE_SHARD_A)
 
 
-@pytest.mark.asyncio
-async def test_a_value_lock_did_not_save_round_trips_apart_from_a_line_it_added(
-    repo: ShardRepository, sample_split_result
-) -> None:
-    """WOR-1042: neither has a value to put back, but only an unsaved one gets a note."""
-    await _enroll_for_restore(repo, sample_split_result)
-    unsaved = BaseUrlRestore(var="OPENROUTER_BASE_URL", original=None, unsaved=True)
-    await repo.record_base_url_restores(
-        _RESTORE_ENV, [(_RESTORE_ALIAS, _RESTORE_VAR, _RESTORE_SHARD_A, unsaved)]
-    )
-
-    enrollment = await repo.get_enrollment(_RESTORE_ALIAS, _RESTORE_ENV)
-    assert enrollment is not None
-    restored = await repo.verified_base_url_restore(enrollment, _RESTORE_SHARD_A)
-    assert restored == unsaved
-    assert restored != BaseUrlRestore(var="OPENROUTER_BASE_URL", original=None)
-
-
 def test_a_base_url_restore_saved_before_wor_1042_reads_as_before() -> None:
     """A record without ``unsaved`` keeps its JSON and its meaning, so its MAC still holds."""
     old_json = '{"original": null, "var": "OPENROUTER_BASE_URL"}'
     record = BaseUrlRestore.from_json(old_json)
     assert record == BaseUrlRestore(var="OPENROUTER_BASE_URL", original=None)
-    assert not record.unsaved
     assert record.to_json() == old_json
 
 
