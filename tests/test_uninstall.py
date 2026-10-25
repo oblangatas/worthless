@@ -589,7 +589,8 @@ def test_uninstall_dangling_symlink_env_is_skipped_not_blocked(
         app, ["uninstall", "--yes"], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
     )
     assert result.exit_code == 0, result.output
-    assert "nothing to restore" in result.output.lower(), result.output
+    # Rich wraps at 80 columns, and where depends on the tmp path's length.
+    assert "nothing to restore" in " ".join(result.output.lower().split()), result.output
     assert not home_dir.base_dir.exists(), "a dangling symlink must NOT block the wipe"
 
 
@@ -1202,3 +1203,208 @@ class TestMcpLeftoverReminder:
         assert result.exit_code == 0, result.output
         assert cfg.read_bytes() == before, "default uninstall edited an editor config"
         assert "MCP server" in result.output, "default run should still name the file"
+
+
+class TestQuietUninstallStillSaysWhatYouLose:
+    """WOR-1043: --quiet hides uninstall's progress, not a key it can't give back or
+    a change it made to your files. Each note here can be the only record of one.
+    """
+
+    @staticmethod
+    def _run(home_dir: WorthlessHome, *extra: str):  # noqa: ANN205
+        # A wide console keeps a long tmp path on one line.
+        return runner.invoke(
+            app,
+            ["--quiet", "uninstall", "--yes", *extra],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir), "COLUMNS": "1000"},
+        )
+
+    @staticmethod
+    def _lock(home_dir: WorthlessHome, project, *, mode: int | None = None):  # noqa: ANN001, ANN205
+        from tests.helpers import fake_key
+
+        project.mkdir(exist_ok=True)
+        key = fake_key("sk-")
+        env = project / ".env"
+        env.write_text(f"OPENAI_API_KEY={key}\n")
+        if mode is not None:
+            env.chmod(mode)
+        locked = runner.invoke(
+            app, ["lock", "--env", str(env)], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
+        )
+        assert locked.exit_code == 0, locked.output
+        return key, env
+
+    @staticmethod
+    def _make_unrestorable(env) -> None:  # noqa: ANN001
+        """A live symlink in place of the locked .env: safe_rewrite refuses it, so
+        uninstall can't put the key back (f2ge)."""
+        target = env.with_name("elsewhere.env")
+        target.write_text("OPENAI_API_KEY=whatever\n")
+        env.unlink()
+        env.symlink_to(target)
+
+    def test_force_names_the_file_it_could_not_restore_and_says_to_rotate(
+        self, home_dir: WorthlessHome, tmp_path
+    ) -> None:
+        from tests.helpers import assert_not_shown
+
+        key, env = self._lock(home_dir, tmp_path)
+        self._make_unrestorable(env)
+
+        result = self._run(home_dir, "--force")
+
+        assert result.exit_code == 0, result.output
+        assert not home_dir.base_dir.exists()
+        assert f"could NOT restore {env}" in result.output
+        assert "Rotate those keys at your provider" in result.output
+        assert "Worthless uninstalled" not in result.output  # still quiet about progress
+        assert_not_shown(result.output, key)
+
+    def test_without_force_the_refusal_still_names_the_file(
+        self, home_dir: WorthlessHome, tmp_path
+    ) -> None:
+        """The refusal says "fix the above", so the above must be there."""
+        _, env = self._lock(home_dir, tmp_path)
+        self._make_unrestorable(env)
+
+        result = self._run(home_dir)
+
+        assert result.exit_code != 0, result.output
+        assert home_dir.base_dir.exists()
+        assert "fix the above" in result.output
+        assert f"could NOT restore {env}" in result.output
+
+    def test_force_on_a_broken_install_says_to_rotate(
+        self, home_dir: WorthlessHome, tmp_path
+    ) -> None:
+        self._lock(home_dir, tmp_path)
+        (home_dir.base_dir / "fernet.key").unlink()
+
+        result = self._run(home_dir, "--force")
+
+        assert result.exit_code == 0, result.output
+        assert not home_dir.base_dir.exists()
+        assert "could not restore keys (broken install" in result.output
+        assert "Rotate your keys at the provider" in result.output
+
+    def test_an_enroll_only_key_it_removes_is_named(self, home_dir: WorthlessHome) -> None:
+        con = sqlite3.connect(str(home_dir.db_path))
+        con.execute(
+            "INSERT INTO shards (key_alias, shard_b_enc, commitment, nonce, provider) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("enroll-only-alias", b"x", b"c", b"n", "openai"),
+        )
+        con.execute(
+            "INSERT INTO enrollments (key_alias, var_name, env_path) VALUES (?, ?, NULL)",
+            ("enroll-only-alias", "ENROLL_ONLY_KEY"),
+        )
+        con.commit()
+        con.close()
+
+        result = self._run(home_dir)
+
+        assert result.exit_code == 0, result.output
+        assert "enroll-only key 'enroll-only-alias' has no .env to restore" in result.output
+        assert "Rotate it at your provider" in result.output
+
+    def test_a_record_for_a_deleted_project_is_named(
+        self, home_dir: WorthlessHome, tmp_path
+    ) -> None:
+        missing = tmp_path / "deleted-project" / ".env"
+        con = sqlite3.connect(str(home_dir.db_path))
+        con.execute(
+            "INSERT INTO shards (key_alias, shard_b_enc, commitment, nonce, provider) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("ghost-alias", b"x", b"c", b"n", "openai"),
+        )
+        con.execute(
+            "INSERT INTO enrollments (key_alias, var_name, env_path) VALUES (?, ?, ?)",
+            ("ghost-alias", "GHOST_KEY", str(missing)),
+        )
+        con.commit()
+        con.close()
+
+        result = self._run(home_dir)
+
+        assert result.exit_code == 0, result.output
+        assert f"skipping {missing}: the project file is gone" in result.output
+
+    def test_a_partial_wipe_is_said(self, home_dir: WorthlessHome, tmp_path, monkeypatch) -> None:
+        self._lock(home_dir, tmp_path)
+        monkeypatch.setattr(uninstall_mod.shutil, "rmtree", lambda *a, **k: None)
+
+        result = self._run(home_dir)
+
+        assert result.exit_code == 0, result.output
+        assert "~/.worthless could not be fully removed" in result.output
+
+    def test_tightening_a_loose_mode_is_said(self, home_dir: WorthlessHome, tmp_path) -> None:
+        from tests.helpers import assert_not_shown
+
+        key, env = self._lock(home_dir, tmp_path, mode=0o644)
+
+        result = self._run(home_dir)
+
+        assert result.exit_code == 0, result.output
+        assert (env.stat().st_mode & 0o777) == 0o600
+        assert f"{env}: original 0o644 was readable by other users" in result.output
+        assert f"'chmod 644 {env}' to revert" in result.output
+        assert_not_shown(result.output, key)
+
+    def test_a_mode_it_could_not_tighten_is_said(
+        self, home_dir: WorthlessHome, tmp_path, monkeypatch
+    ) -> None:
+        _, env = self._lock(home_dir, tmp_path, mode=0o644)
+        real_chmod = uninstall_mod.os.chmod
+
+        def _chmod_hostile(path, mode, *a, **k):  # noqa: ANN001, ANN202
+            if str(path).endswith(".env"):
+                raise OSError(errno.EPERM, "Operation not permitted")
+            return real_chmod(path, mode, *a, **k)
+
+        monkeypatch.setattr(uninstall_mod.os, "chmod", _chmod_hostile)
+
+        result = self._run(home_dir)
+
+        assert result.exit_code == 0, result.output
+        assert f"{env}: key restored, but the file mode wasn't tightened" in result.output
+        assert f"run 'chmod 600 {env}' yourself" in result.output
+
+    def test_an_openclaw_config_it_may_have_left_on_the_proxy_is_said(
+        self, home_dir: WorthlessHome, tmp_path, monkeypatch
+    ) -> None:
+        _, env = self._lock(home_dir, tmp_path)
+
+        async def _build_boom(*_a, **_k):
+            raise RuntimeError("openclaw rollback build blew up")
+
+        monkeypatch.setattr(uninstall_mod, "_build_oc_restores", _build_boom)
+
+        result = self._run(home_dir)
+
+        assert result.exit_code == 73, result.output
+        assert f"{env}: key restored, but openclaw.json may still point at the proxy" in (
+            result.output
+        )
+        assert "run `worthless doctor` after uninstall" in result.output
+
+    @pytest.mark.parametrize("case", ["loose mode", "unrestorable"])
+    def test_a_path_is_shown_without_its_control_characters(
+        self, home_dir: WorthlessHome, tmp_path, case: str
+    ) -> None:
+        """A directory name can carry a terminal escape. The note prints the path
+        without it, as unlock does for its notes (WOR-1042)."""
+        _, env = self._lock(home_dir, tmp_path / "proj\x1b[2Jx", mode=0o644)
+        if case == "unrestorable":
+            self._make_unrestorable(env)
+
+        result = self._run(home_dir, "--force")
+
+        assert result.exit_code == 0, result.output
+        assert "\x1b" not in result.output
+        shown = str(env).replace("\x1b", "")
+        if case == "loose mode":
+            assert f"{shown}: original 0o644 was readable by other users" in result.output
+        else:
+            assert f"could NOT restore {shown}" in result.output

@@ -543,3 +543,69 @@ class TestQuietUnlockStillSaysWhatItDidToYourLine:
         assert env_file.read_text() == f"OPENAI_API_KEY={key}\n"
         repo = ShardRepository(str(home.db_path), home.fernet_key)
         assert asyncio.run(repo.list_enrollments()) == [], "unlock stopped before its DB cleanup"
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(60)
+class TestQuietUninstallStillSaysWhatYouLose:
+    """`worthless --quiet uninstall --yes --force`, run as a real process, names on
+    stderr the `.env` whose key it couldn't put back and says to rotate it (WOR-1043)."""
+
+    @staticmethod
+    def _lock_an_env_uninstall_cannot_restore(tmp_path: Path) -> tuple[Path, Path, str, dict]:
+        env_file, worthless_home, key, cli_env = _make_e2e_env(tmp_path, proxy_port=1)
+        _lock(env_file, cli_env)
+        # A live symlink in its place: uninstall won't write through it (f2ge).
+        target = env_file.with_name("elsewhere.env")
+        target.write_text("OPENAI_API_KEY=whatever\n")
+        env_file.unlink()
+        env_file.symlink_to(target)
+        return env_file, worthless_home, key, cli_env
+
+    @staticmethod
+    def _quiet_force_uninstall(cli_env: dict, **streams: object) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [
+                str(Path(sys.executable).parent / "worthless"),
+                "--quiet",
+                "uninstall",
+                "--yes",
+                "--force",
+            ],
+            # A wide console keeps the tmp path on one line.
+            env={**os.environ, **cli_env, "WORTHLESS_KEYRING_BACKEND": "null", "COLUMNS": "1000"},
+            timeout=45,
+            text=True,
+            **streams,
+        )
+
+    def test_it_names_the_file_and_says_to_rotate_the_key(self, tmp_path: Path) -> None:
+        env_file, worthless_home, key, cli_env = self._lock_an_env_uninstall_cannot_restore(
+            tmp_path
+        )
+
+        proc = self._quiet_force_uninstall(cli_env, capture_output=True)
+
+        assert proc.returncode == 0, f"stdout: {proc.stdout}\nstderr: {proc.stderr}"
+        assert not worthless_home.exists()
+        assert f"could NOT restore {env_file}" in proc.stderr, proc.stderr
+        assert "Rotate those keys at your provider" in proc.stderr, proc.stderr
+        assert "Worthless uninstalled" not in proc.stderr  # still quiet about progress
+        assert_not_shown(proc.stderr, key)
+
+    def test_a_closed_stderr_stops_it_before_the_wipe(self, tmp_path: Path) -> None:
+        """If uninstall can't say which key it would destroy, it doesn't destroy it:
+        the note comes before the wipe, and writing it to a closed pipe ends the run."""
+        _env, worthless_home, _key, cli_env = self._lock_an_env_uninstall_cannot_restore(tmp_path)
+        home = WorthlessHome(base_dir=worthless_home)
+        # Seen once already, so the note is the first thing written to the pipe.
+        home.warranty_notice_marker.touch()
+        read_end, write_end = os.pipe()
+        os.close(read_end)
+        try:
+            self._quiet_force_uninstall(cli_env, stdout=subprocess.DEVNULL, stderr=write_end)
+        finally:
+            os.close(write_end)
+
+        repo = ShardRepository(str(home.db_path), home.fernet_key)
+        assert len(asyncio.run(repo.list_enrollments())) == 1, "uninstall wiped the key"
