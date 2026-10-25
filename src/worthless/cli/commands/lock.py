@@ -1060,7 +1060,8 @@ def _value_to_put_back(
     send the real key there, so the value it has now goes back instead
     (WOR-1026: let unlock choose). A reference to a key variable stays as
     written: it expands to shard-A while locked and to the key after unlock,
-    and its expanded form must never reach the record. A line that defaults
+    and neither a key typed into the line nor one expanded from a reference
+    may reach the record. A line that defaults
     to itself, ``${SLOT:-...}``, reads the shell, not a line. None, when
     neither form can be written back, means unlock
     removes the line; a value the rewriter refuses would make every unlock of
@@ -1068,23 +1069,22 @@ def _value_to_put_back(
     """
     name = _oc_audit.sanitise_for_message(slot)
     raw = snapshot.raw.get(slot)
-    if raw is not None:
-        if not referenced_names(raw) & (base_url_slots - {slot}):
-            return raw
+    if raw is not None and referenced_names(raw) & (base_url_slots - {slot}):
         get_console().print_warning(
             f"{name} refers to another line lock rewrites, so unlock will put back "
             "the value it has now, not the reference."
         )
-    value = snapshot.parsed.get(slot) or ""
+        raw = None
+    value = raw if raw is not None else snapshot.parsed.get(slot) or ""
     if any((key := snapshot.parsed.get(var)) and key in value for var in key_vars):
-        # Saved expanded, the record (MAC-tagged, not encrypted) would hold a key.
+        # The record is MAC-tagged, not encrypted, so it never holds a key,
+        # whether typed into the line or expanded from a reference.
         get_console().print_warning(
-            f"{name}: lock won't save this value, because as it expands it holds one "
-            "of your keys, so unlock will remove the line. Set it again by hand after "
-            "you unlock."
+            f"{name}: lock won't save this value, because it holds one of your keys, "
+            "so unlock will remove the line. Set it again by hand after you unlock."
         )
         return None
-    if is_writable_value(value):
+    if raw is not None or is_writable_value(value):
         return value
     get_console().print_warning(
         f"{name}: lock can't save this value for unlock to put back (it has a quote, "

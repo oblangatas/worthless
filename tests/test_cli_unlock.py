@@ -14,6 +14,7 @@ from typer.testing import CliRunner, Result
 from worthless.cli.app import app
 from worthless.cli.bootstrap import WorthlessHome
 from worthless.cli.errors import WorthlessError
+from worthless.cli.providers import user_registry_path
 
 from tests.conftest import make_repo as _repo
 from tests.helpers import fake_anthropic_key, fake_key, fake_openai_key, fake_openrouter_key
@@ -287,13 +288,6 @@ def _saved_record(home: WorthlessHome) -> tuple[str, str]:
         return conn.execute(
             "SELECT base_url_restore_json, base_url_restore_mac FROM enrollments"
         ).fetchone()
-
-
-def _dotenv_values_before_1_2_3(*args, **kwargs) -> dict[str, str | None]:
-    """python-dotenv before 1.2.3 parses a BOM file's first key as '\\ufeffKEY'."""
-    parsed = dotenv_values(*args, **kwargs)
-    first = next(iter(parsed), None)
-    return {(f"\ufeff{k}" if k == first else k): v for k, v in parsed.items()}
 
 
 def _as_enrolled_before_wor_1013(home: WorthlessHome) -> None:
@@ -714,6 +708,20 @@ class TestUnlockPutsBackTheBaseUrlYouHad:
         _unlock(env, home_dir)
         assert env.read_bytes() == original
 
+    def test_lock_never_saves_a_line_that_spells_out_a_key(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """A key typed literally into the URL stays out of the record too (karen)."""
+        env = tmp_path / ".env"
+        _register_gateway(home_dir, f"https://gw.example.com/{_TEST_KEY}/v1", name="literal-key")
+        env.write_text(
+            f"OPENAI_API_KEY={_TEST_KEY}\nOPENAI_BASE_URL=https://gw.example.com/{_TEST_KEY}/v1\n"
+        )
+        _lock(env, home_dir)
+        record_json, _mac = _saved_record(home_dir)
+        if _TEST_KEY in record_json:
+            pytest.fail("the saved BASE_URL record holds the key")  # never echo it
+
     def test_lock_never_saves_an_expanded_value_that_holds_a_key(self) -> None:
         """Whatever the reason lock falls back to the expanded form, a key never
         reaches the record (CodeRabbit on #738)."""
@@ -892,8 +900,9 @@ class TestUnlockPutsBackTheBaseUrlYouHad:
 
         result = _unlock(env, home_dir)
         assert env.read_bytes() == original
-        # Never silent, and the note names the file (uninstall walks several).
-        assert _said(result, "the upstream this key used while locked")
+        # Never silent: the note names the file (uninstall walks several) and the
+        # host it wrote, so a surprising destination shows (WOR-1023).
+        assert _said(result, "to https://openrouter.ai, the upstream this key used while locked")
         assert _said(result, "older version")
         assert str(env) in "".join(result.output.split())
 
@@ -1028,6 +1037,22 @@ class TestUnlockPutsBackTheBaseUrlYouHad:
 
         _unlock(env, home_dir)
         assert "OPENAI_BASE_URL" not in dotenv_values(env)
+
+    def test_an_old_row_never_writes_a_gateway_of_another_protocol_into_its_line(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """A providers.toml edited by hand can give a gateway a protocol whose SDK
+        doesn't read OPENAI_BASE_URL (karen: pins the protocol-line check)."""
+        _register_gateway(home_dir)
+        env = tmp_path / ".env"
+        env.write_text(f"OPENAI_BASE_URL={_GATEWAY_URL}\nOPENAI_API_KEY={_TEST_KEY}\n")
+        _lock(env, home_dir)
+        _as_enrolled_before_wor_1013(home_dir)
+        registry = user_registry_path()
+        registry.write_text(registry.read_text().replace('"openai"', '"gemini"'))
+
+        _unlock(env, home_dir)
+        assert env.read_text() == f"OPENAI_API_KEY={_TEST_KEY}\n"
 
     def test_an_old_row_whose_stored_address_is_another_vendors_loses_the_line(
         self, home_dir: WorthlessHome, tmp_path: Path

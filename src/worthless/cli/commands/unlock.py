@@ -14,6 +14,7 @@ import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import typer
 from dotenv import dotenv_values
@@ -370,7 +371,9 @@ def _fits_line(
     address goes back only when it is the vendor this key's own prefix names,
     and not OpenAI's: sk- also starts DeepSeek and other keys that old locks
     routed to api.openai.com, and an OpenAI line removed costs nothing, since
-    OpenAI's address is the SDK default.
+    OpenAI's address is the SDK default. The protocol-line check matters only
+    for a hand-edited providers.toml: `providers register` takes openai or
+    anthropic, and an Anthropic address is already refused.
     """
     entry = lookup_by_url(upstream)
     if entry is None or entry.protocol == "anthropic" or base_url_var == "ANTHROPIC_BASE_URL":
@@ -397,15 +400,19 @@ def _unknown_line_action(
     why = _why_value_unknown(p)
     upstream = None if p.base_url_record_refused else _usable_stored_upstream(p.stored_upstream)
     if upstream is not None and _fits_line(base_url_var, upstream, key_vendor, other_lines):
+        parts = urlsplit(upstream)
+        origin = _oc_audit.sanitise_for_message(f"{parts.scheme}://{parts.netloc}")
         return _LineAction(
             upstream,
-            f"Set {name} to the upstream this key used while locked: {why}. If you had a "
-            f"different value there before lock, set it again.",
+            f"Set {name} to {origin}, the upstream this key used while locked: {why}. "
+            f"If you had a different value there before lock, set it again. If you "
+            f"didn't have this line before lock, you can delete it.",
         )
     return _LineAction(
         None,
         f"Removed {name}, a proxy line for this key: {why}. If you had your own {name} "
-        "before lock, set it again.",
+        f"before lock, set it again. Until you do, an app that reads {name} uses its "
+        "SDK's default address.",
     )
 
 
