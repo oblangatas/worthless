@@ -1203,13 +1203,17 @@ def _note_added_lines(
     """Say which ``*_BASE_URL`` lines lock added.
 
     Only after the commit mark: a refused rewrite added nothing, and a stderr
-    that fails must not unwind rows the rewritten ``.env`` needs.
+    that fails must not unwind rows the rewritten ``.env`` needs. Best-effort:
+    a broken pipe must not skip the OpenClaw steps that follow either.
     """
-    for slot, (_p, existed) in base_url_lines.items():
-        if not existed:
-            why = _why_lock_added(slot, snapshot)
-            sys.stderr.write(f"worthless: added {slot}={proxy_urls[slot]} to {env_path} ({why})\n")
-    sys.stderr.flush()
+    with contextlib.suppress(OSError):
+        for slot, (_p, existed) in base_url_lines.items():
+            if not existed:
+                why = _why_lock_added(slot, snapshot)
+                sys.stderr.write(
+                    f"worthless: added {slot}={proxy_urls[slot]} to {env_path} ({why})\n"
+                )
+        sys.stderr.flush()
 
 
 def _why_lock_added(slot: str, snapshot: EnvSnapshot) -> str:
@@ -1226,7 +1230,8 @@ def _warn_unread_base_url_lines(env_path: Path, proxy_urls: dict[str, str]) -> N
     The rewriter and python-dotenv can disagree on which line sets a name: a
     later bare ``NAME``, a quoted ``'NAME'=...``, or another variable's quoted
     value can hide the line lock wrote (WOR-1041). WOR-1045 tracks refusing.
-    Runs after the commit and only warns: the rewritten ``.env`` needs its rows.
+    Runs after the commit and only warns: the rewritten ``.env`` needs its rows,
+    and a broken stderr must not skip the OpenClaw steps that follow.
     """
     if not proxy_urls:
         return
@@ -1237,12 +1242,14 @@ def _warn_unread_base_url_lines(env_path: Path, proxy_urls: dict[str, str]) -> N
     for slot, url in proxy_urls.items():
         if read.get(slot) != url:
             name = _oc_audit.sanitise_for_message(slot)
-            get_console().print_file_note(
-                f"{name}: python-dotenv doesn't read the proxy address lock wrote there "
-                f"(another {name} line, or another variable's quoted value, hides it), so "
-                "your app's calls won't reach the proxy and will fail. Fix the .env so "
-                "lock's line is the one read."
-            )
+            # Rich answers a broken pipe with SystemExit(1); this note isn't worth that.
+            with contextlib.suppress(OSError, SystemExit):
+                get_console().print_file_note(
+                    f"{name}: python-dotenv doesn't read the proxy address lock wrote there "
+                    f"(another {name} line, or another variable's quoted value, hides it), "
+                    "so your app's calls won't reach the proxy and will fail. Fix the .env "
+                    "so lock's line is the one read."
+                )
 
 
 async def _compensating_unwind(

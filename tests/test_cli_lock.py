@@ -2030,18 +2030,65 @@ class TestLockSaysWhatItAdded:
                 return getattr(sys, name)
 
         monkeypatch.setattr(lock_mod, "sys", _SysWithBrokenStderr())
+        openclaw_ran = _spy_on_openclaw_steps(monkeypatch)
         env = tmp_path / ".env"
         env.write_text(f"OPENROUTER_BASE_URL\nOPENROUTER_API_KEY={fake_openrouter_key()}\n")
         original = env.read_bytes()
         cli_env = {"WORTHLESS_HOME": str(home_dir.base_dir)}
 
-        runner.invoke(app, ["lock", "--env", str(env)], env=cli_env)
+        locked = runner.invoke(app, ["lock", "--env", str(env)], env=cli_env)
+        # The note is best-effort: the rest of lock, OpenClaw setup included, still runs.
+        assert locked.exit_code == 0, locked.output
+        assert openclaw_ran == [True]
         assert env.read_bytes() != original, "lock should have rewritten the .env"
         assert asyncio.run(_repo(home_dir).list_enrollments())
         monkeypatch.undo()
         result = runner.invoke(app, ["unlock", "--env", str(env)], env=cli_env)
         assert result.exit_code == 0, result.output
         assert env.read_bytes() == original
+
+    def test_a_warning_that_fails_to_print_still_finishes_the_lock(
+        self, home_dir: WorthlessHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Rich turns a broken stderr into SystemExit(1); the hidden-line warning swallows it."""
+        from worthless.cli.console import WorthlessConsole
+
+        real_note = WorthlessConsole.print_file_note
+
+        def _broken_pipe(self: WorthlessConsole, message: str) -> None:
+            if "python-dotenv doesn't read the proxy address" in message:
+                raise SystemExit(1)
+            real_note(self, message)
+
+        monkeypatch.setattr(WorthlessConsole, "print_file_note", _broken_pipe)
+        openclaw_ran = _spy_on_openclaw_steps(monkeypatch)
+        env = tmp_path / ".env"
+        env.write_text(
+            "OPENROUTER_BASE_URL=https://openrouter.ai/api/v1\nOPENROUTER_BASE_URL\n"
+            f"OPENROUTER_API_KEY={fake_openrouter_key()}\n"
+        )
+
+        locked = runner.invoke(
+            app, ["lock", "--env", str(env)], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
+        )
+        assert locked.exit_code == 0, locked.output
+        assert openclaw_ran == [True]
+        assert asyncio.run(_repo(home_dir).list_enrollments())
+
+
+def _spy_on_openclaw_steps(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
+    """Record each call to lock's post-commit OpenClaw steps, then run them."""
+    from worthless.cli.commands import lock as lock_mod
+
+    calls: list[bool] = []
+    real_steps = lock_mod._openclaw_steps
+
+    def _spy(*args: object, **kwargs: object) -> int:
+        calls.append(True)
+        return real_steps(*args, **kwargs)
+
+    monkeypatch.setattr(lock_mod, "_openclaw_steps", _spy)
+    return calls
 
 
 # ---------------------------------------------------------------------------
