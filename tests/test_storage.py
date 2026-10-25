@@ -7,6 +7,7 @@ import pytest
 from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
 
+from worthless.storage.models import BaseUrlRestore
 from worthless.storage.repository import EncryptedShard, ShardRepository, StoredShard
 from worthless.storage.schema import SCHEMA, migrate_db
 
@@ -421,6 +422,190 @@ async def test_migrate_original_mode_idempotent(tmp_path) -> None:
 
     await migrate_db(db_path)
     await migrate_db(db_path)  # second run must not raise
+
+
+# ------------------------------------------------------------------
+# WOR-1013: the *_BASE_URL restore record on enrollments
+# ------------------------------------------------------------------
+
+_RESTORE_ALIAS = "openai-0123abcd"
+_RESTORE_VAR = "OPENROUTER_API_KEY"
+_RESTORE_ENV = "/home/alice/proj/.env"
+_RESTORE_SHARD_A = "sk-or-v1-shard-a-from-this-lock"
+
+
+@pytest.mark.asyncio
+async def test_migrate_adds_base_url_restore_columns(tmp_path) -> None:
+    """A pre-1013 DB gains the columns; its rows read as "enrolled before WOR-1013"."""
+    db_path = str(tmp_path / "pre_wor1013.db")
+    async with aiosqlite.connect(db_path) as db:
+        await db.executescript(
+            """
+            CREATE TABLE shards (
+                key_alias   TEXT PRIMARY KEY,
+                shard_b_enc BLOB NOT NULL,
+                commitment  BLOB NOT NULL,
+                nonce       BLOB NOT NULL,
+                provider    TEXT NOT NULL
+            );
+            CREATE TABLE enrollments (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                key_alias     TEXT NOT NULL,
+                var_name      TEXT NOT NULL,
+                env_path      TEXT,
+                decoy_hash    TEXT,
+                original_mode INTEGER,
+                created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(key_alias, var_name, env_path)
+            );
+            """
+        )
+        await db.execute(
+            "INSERT INTO enrollments (key_alias, var_name, env_path) VALUES (?, ?, ?)",
+            (_RESTORE_ALIAS, _RESTORE_VAR, _RESTORE_ENV),
+        )
+        await db.commit()
+
+    await migrate_db(db_path)
+    await migrate_db(db_path)  # idempotent
+
+    async with aiosqlite.connect(db_path) as db:
+        cursor = await db.execute(
+            "SELECT base_url_restore_json, base_url_restore_mac FROM enrollments"
+        )
+        assert await cursor.fetchall() == [(None, None)]
+
+
+async def _enroll_for_restore(repo: ShardRepository, sample_split_result) -> None:
+    await repo.store_enrolled(
+        _RESTORE_ALIAS,
+        stored_shard_from_split(sample_split_result),
+        var_name=_RESTORE_VAR,
+        env_path=_RESTORE_ENV,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "record",
+    [
+        BaseUrlRestore(var="OPENROUTER_BASE_URL", original="https://openrouter.ai/api/v1"),
+        BaseUrlRestore(var="OPENROUTER_BASE_URL", original=""),
+        BaseUrlRestore(var="OPENROUTER_BASE_URL", original=None),
+        BaseUrlRestore(var=None, original=None),
+    ],
+    ids=["had-a-value", "had-it-empty", "lock-added-it", "lock-wrote-none"],
+)
+async def test_base_url_restore_round_trips(
+    repo: ShardRepository, sample_split_result, record: BaseUrlRestore
+) -> None:
+    await _enroll_for_restore(repo, sample_split_result)
+    await repo.record_base_url_restores(
+        _RESTORE_ENV, [(_RESTORE_ALIAS, _RESTORE_VAR, _RESTORE_SHARD_A, record)]
+    )
+
+    by_alias = await repo.get_enrollment(_RESTORE_ALIAS, _RESTORE_ENV)
+    by_location = await repo.find_enrollment_by_location(_RESTORE_VAR, _RESTORE_ENV)
+    [listed] = await repo.list_enrollments(_RESTORE_ALIAS)
+    for enrollment in (by_alias, by_location, listed):
+        assert enrollment is not None
+        assert await repo.verified_base_url_restore(enrollment, _RESTORE_SHARD_A) == record
+
+
+@pytest.mark.asyncio
+async def test_base_url_restore_from_before_wor_1013_is_none(
+    repo: ShardRepository, sample_split_result
+) -> None:
+    await _enroll_for_restore(repo, sample_split_result)
+
+    enrollment = await repo.get_enrollment(_RESTORE_ALIAS, _RESTORE_ENV)
+    assert enrollment is not None
+    assert await repo.verified_base_url_restore(enrollment, _RESTORE_SHARD_A) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "set_clause",
+    [
+        "base_url_restore_json = replace(base_url_restore_json, 'openrouter.ai', 'evil.example')",
+        "base_url_restore_mac = NULL",
+        # Copied from the row at another .env: the MAC binds the row it was made for.
+        "base_url_restore_json = (SELECT base_url_restore_json FROM enrollments e2"
+        " WHERE e2.env_path = '/home/alice/other/.env'),"
+        " base_url_restore_mac = (SELECT base_url_restore_mac FROM enrollments e2"
+        " WHERE e2.env_path = '/home/alice/other/.env')",
+        # Odd types must be refused like any other edit, not crash unlock.
+        "base_url_restore_mac = 'é' || base_url_restore_mac",
+        "base_url_restore_json = CAST(base_url_restore_json AS BLOB)",
+        "base_url_restore_json = base_url_restore_json || printf('%.*c', 20000, ' ')",
+    ],
+    ids=[
+        "value-edited",
+        "mac-dropped",
+        "copied-from-another-row",
+        "non-ascii-mac",
+        "blob-json",
+        "oversized",
+    ],
+)
+async def test_an_edited_base_url_restore_is_refused(
+    repo: ShardRepository, tmp_db_path: str, sample_split_result, set_clause: str
+) -> None:
+    """A DB edit without the Fernet key must not choose what unlock writes into a .env."""
+    await _enroll_for_restore(repo, sample_split_result)
+    await repo.add_enrollment(
+        _RESTORE_ALIAS, var_name=_RESTORE_VAR, env_path="/home/alice/other/.env"
+    )
+    record = BaseUrlRestore("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+    for env_path in (_RESTORE_ENV, "/home/alice/other/.env"):
+        await repo.record_base_url_restores(
+            env_path, [(_RESTORE_ALIAS, _RESTORE_VAR, _RESTORE_SHARD_A, record)]
+        )
+    async with aiosqlite.connect(tmp_db_path) as db:
+        await db.execute(
+            f"UPDATE enrollments SET {set_clause} WHERE env_path = ?",  # noqa: S608 — test literal
+            (_RESTORE_ENV,),
+        )
+        await db.commit()
+
+    enrollment = await repo.get_enrollment(_RESTORE_ALIAS, _RESTORE_ENV)
+    assert enrollment is not None
+    with pytest.raises(ValueError, match="base_url restore"):
+        await repo.verified_base_url_restore(enrollment, _RESTORE_SHARD_A)
+
+
+@pytest.mark.asyncio
+async def test_a_base_url_restore_from_an_earlier_lock_is_refused(
+    repo: ShardRepository, sample_split_result
+) -> None:
+    """Each fresh lock draws a new shard-A, so a record saved from an older lock fails."""
+    await _enroll_for_restore(repo, sample_split_result)
+    record = BaseUrlRestore("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+    await repo.record_base_url_restores(
+        _RESTORE_ENV, [(_RESTORE_ALIAS, _RESTORE_VAR, "sk-or-v1-an-earlier-lock", record)]
+    )
+
+    enrollment = await repo.get_enrollment(_RESTORE_ALIAS, _RESTORE_ENV)
+    assert enrollment is not None
+    with pytest.raises(ValueError, match="MAC check"):
+        await repo.verified_base_url_restore(enrollment, _RESTORE_SHARD_A)
+
+
+@pytest.mark.parametrize(
+    "record_json",
+    [
+        "not json",
+        "[]",
+        '{"var": "OPENROUTER_BASE_URL"}',
+        '{"var": "OPENROUTER_BASE_URL", "original": null, "extra": 1}',
+        '{"var": 1, "original": null}',
+        '{"var": "OPENROUTER_BASE_URL", "original": 2}',
+        '{"var": null, "original": "https://openrouter.ai/api/v1"}',
+    ],
+)
+def test_base_url_restore_rejects_other_shapes(record_json: str) -> None:
+    with pytest.raises(ValueError):
+        BaseUrlRestore.from_json(record_json)
 
 
 @pytest.mark.asyncio

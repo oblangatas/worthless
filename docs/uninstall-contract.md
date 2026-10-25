@@ -21,7 +21,7 @@ If step 2 finds a recoverable key that didn't restore, uninstall **stops before 
 
 | Artifact | Created by | Removed / restored by uninstall |
 |----------|-----------|----------------------------------|
-| Real API key in your project `.env` | `worthless lock` replaces it with shard A (which looks like a real key) | **Restored** — the real key is written back and the `.env` is returned to its pre-lock state (the proxy `BASE_URL` line is removed) |
+| Real API key in your project `.env` | `worthless lock` replaces it with shard A (which looks like a real key) | **Restored** — the real key is written back. For keys locked with this version the `.env` is returned to its pre-lock state: the proxy `BASE_URL` line is removed, or gets back the value you had before lock. Keys locked with v0.3.16 or earlier kept no copy, so the line gets the vendor's address where that is safe, or is removed, and uninstall says which |
 | Shard B + enrollment rows + spend log | `worthless lock`, stored in `~/.worthless/worthless.db` | **Deleted** — the entire `~/.worthless/` directory is removed |
 | Encryption (Fernet) key in your OS keychain | First `worthless lock` | **Deleted** — removed from the keychain |
 | `~/.worthless/fernet.key` (legacy file, pre-keyring installs only) | Older installs | **Deleted** — removed with `~/.worthless/` |

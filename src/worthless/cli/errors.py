@@ -129,7 +129,10 @@ _UNSAFE_REWRITE_HINTS: dict[UnsafeReason, str] = {
     UnsafeReason.SIZE: ("Target grew beyond the safe-rewrite size cap."),
     UnsafeReason.SNIFF: ("Target bytes look binary; safe rewrite is text-only."),
     UnsafeReason.DELTA: ("Rewrite delta is suspiciously large — refused as a safety measure."),
-    UnsafeReason.TOCTOU: ("Target changed between baseline hash and rewrite — retry."),
+    UnsafeReason.TOCTOU: (
+        "The file changed while worthless was writing it, so nothing was written. Run the "
+        "command again."
+    ),
     UnsafeReason.TMP_COLLISION: ("Could not allocate a unique temp-file name. Retry."),
     UnsafeReason.IO_ERROR: ("Disk I/O error during rewrite. Check disk health and retry."),
 }

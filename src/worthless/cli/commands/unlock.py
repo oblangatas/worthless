@@ -1,8 +1,9 @@
 """Unlock command -- reconstruct keys from shards, restore .env, clean up.
 
 Transactional across N keys: either every alias is reconstructed and
-``.env`` is fully rewritten with plaintext + BASE_URLs removed, or
-nothing changes. Mirrors the lock pipeline in ``commands/lock.py``.
+``.env`` is fully rewritten with plaintext + the BASE_URL lines lock wrote
+put back or removed, or nothing changes. Mirrors the lock pipeline in
+``commands/lock.py``.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import typer
 from dotenv import dotenv_values
@@ -22,21 +24,34 @@ from worthless.cli.bootstrap import WorthlessHome, acquire_lock, get_home
 from worthless.cli.console import get_console
 
 # Lock names the .env BASE_URL lines; unlock must name them exactly as lock did.
-from worthless.cli.commands.lock import _PROVIDER_ENV_MAP, _derive_base_url_var
+from worthless.cli.commands.lock import (
+    _PROVIDER_ENV_MAP,
+    _derive_base_url_var,
+    _validate_upstream_base_url,
+)
 
 # scan_env_keys is used by HF4's per-key messaging logic (the
 # "no DB row here" hard-error path further down in this module).
-from worthless.cli.dotenv_rewriter import rewrite_env_keys, scan_env_keys
+from worthless.cli.dotenv_rewriter import (
+    is_writable_value,
+    read_env_snapshot,
+    rewrite_env_keys,
+    scan_env_keys,
+)
 from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary
+from worthless.cli.key_patterns import detect_provider
 from worthless.cli.log_redaction import _redact
 from worthless.cli.orphans import format_orphan_error
+from worthless.cli.providers import is_bundled_url, lookup_by_name, lookup_by_url
 from worthless.cli.process import disable_core_dumps
 from worthless.crypto.reconstruction import reconstruct_key, reconstruct_key_fp
 from worthless.crypto.types import zero_buf
 from worthless.exceptions import ShardTamperedError
+from worthless.openclaw import audit as _oc_audit
 from worthless.openclaw import integration as _openclaw_integration
 from worthless.openclaw.errors import OpenclawIntegrationError
 from worthless.storage.repository import (
+    BaseUrlRestore,
     EnrollmentRecord,
     EncryptedShard,
     ShardRepository,
@@ -178,6 +193,14 @@ class _PlannedRestore:
     # is safely restored) so an aborted unlock never retires a still-active
     # value. ponytail: shard-A is the inert half — plaintext in .env by design.
     shard_a_value: str | None = field(default=None, repr=False)
+    # WOR-1013: the *_BASE_URL line lock wrote and what it replaced, MAC-checked
+    # in pass-1. None = enrolled before WOR-1013, or (base_url_record_refused)
+    # a record that failed the check.
+    base_url_restore: BaseUrlRestore | None = None
+    base_url_record_refused: bool = False
+    # shards.base_url: the upstream the proxy sent this key to while locked. The
+    # fallback for a line with no usable record, once it passes lock's checks.
+    stored_upstream: str | None = None
 
     def zero(self) -> None:
         # Per CodeRabbit nitpick: reuse the imported `zero_buf` helper
@@ -225,6 +248,11 @@ async def _pass1_reconstruct(
                     "(commitment mismatch). Restore the locked value, re-lock from the "
                     "original raw key, or run `worthless doctor` for recovery guidance.",
                 ) from exc
+            # Only now is the .env value proven to be inert shard-A, safe to MAC.
+            shard_a_text = shard_a.decode("utf-8")
+            base_url_restore, record_refused = await _checked_base_url_restore(
+                repo, enrollment, shard_a_text
+            )
             planned_out.append(
                 _PlannedRestore(
                     alias=alias,
@@ -242,7 +270,10 @@ async def _pass1_reconstruct(
                     oc_rollback_mac=encrypted.oc_rollback_mac,
                     # WOR-640: snapshot the inert shard-A before it is zeroed so
                     # pass-3 can retire it into the decoy tripwire.
-                    shard_a_value=shard_a.decode("utf-8"),
+                    shard_a_value=shard_a_text,
+                    base_url_restore=base_url_restore,
+                    base_url_record_refused=record_refused,
+                    stored_upstream=encrypted.base_url,
                 )
             )
         finally:
@@ -251,15 +282,192 @@ async def _pass1_reconstruct(
             stored.zero()
 
 
+async def _checked_base_url_restore(
+    repo: ShardRepository, enrollment: EnrollmentRecord | None, shard_a: str
+) -> tuple[BaseUrlRestore | None, bool]:
+    """The enrollment's WOR-1013 record, and whether it had one that failed its check."""
+    if enrollment is None:
+        return None, False
+    try:
+        return await repo.verified_base_url_restore(enrollment, shard_a), False
+    except ValueError:
+        return None, True
+
+
+@dataclass(frozen=True)
+class _LineAction:
+    """What unlock does with one ``*_BASE_URL`` line while it routes the key's alias."""
+
+    put_back: str | None  # the value to write back; None removes the line
+    note: str | None = None  # told to the user afterwards; None when nothing is in doubt
+    saved: bool = False  # put_back is the user's own value, as lock saved it
+
+
+def _why_value_unknown(p: _PlannedRestore) -> str:
+    if p.base_url_record_refused:
+        return (
+            "its saved value was changed in the Worthless database after lock, so it "
+            "was not written back"
+        )
+    if p.base_url_restore is None:
+        return "no value was saved for it (keys locked by an older version have none)"
+    return "its saved value can't be written back"
+
+
+def _lines_other_keys_read(p: _PlannedRestore, env_values: dict[str, str | None]) -> set[str]:
+    """The ``*_BASE_URL`` lines an app using another key in this ``.env`` may read.
+
+    Judged on the file, not the DB, so a key that was never locked counts too.
+    A var holding this key's own shard-A is the same key under another name.
+    Each key reads the line lock names after its var and its protocol's own: an
+    OpenAI SDK reads OPENAI_BASE_URL whatever variable holds its key.
+    """
+    lines: set[str] = set()
+    for var, value in env_values.items():
+        if var == p.var_name or not value or value == p.shard_a_value:
+            continue
+        vendor = detect_provider(value)
+        if vendor is None:
+            continue
+        entry = lookup_by_name(vendor)
+        protocol = entry.protocol if entry is not None else vendor
+        lines.add(_derive_base_url_var(var, protocol))
+        if protocol in _PROVIDER_ENV_MAP:
+            lines.add(_PROVIDER_ENV_MAP[protocol])
+    return lines
+
+
+def _usable_stored_upstream(url: str | None) -> str | None:
+    """*url* if it is a registered public https upstream the rewriter can write back.
+
+    ``shards.base_url`` carries no MAC, but the proxy already sends the real key
+    there while it is locked (worthless-rzi1), so writing it back gives a DB
+    writer nothing new. Registry membership, lock's gateway SSRF check, and no
+    ``$`` for python-dotenv or a shell to expand keep a tampered row from
+    pointing the app anywhere else.
+    """
+    if not url or "$" in url or lookup_by_url(url) is None or not is_writable_value(url):
+        return None
+    try:
+        _validate_upstream_base_url(url)
+    except WorthlessError:
+        return None
+    return url
+
+
+# The protocol whose SDK reads each protocol-named line.
+_LINE_PROTOCOL = {line: protocol for protocol, line in _PROVIDER_ENV_MAP.items()}
+
+
+def _fits_line(
+    base_url_var: str, upstream: str, key_vendor: str | None, other_lines: set[str]
+) -> bool:
+    """Whether *upstream* can go into *base_url_var* without misdirecting any key.
+
+    Never ANTHROPIC_BASE_URL, and never an Anthropic address on any line: the
+    registry keeps /v1 for the proxy, and the Anthropic SDK adds its own. Never
+    a line another key in this .env reads. Never across protocols. A gateway
+    the user registered then goes back: it came from their own line. A bundled
+    address goes back only when it is the vendor this key's own prefix names,
+    and not OpenAI's: sk- also starts DeepSeek and other keys that old locks
+    routed to api.openai.com, and an OpenAI line removed costs nothing, since
+    OpenAI's address is the SDK default. The protocol-line check matters only
+    for a hand-edited providers.toml: `providers register` takes openai or
+    anthropic, and an Anthropic address is already refused.
+    """
+    entry = lookup_by_url(upstream)
+    if entry is None or entry.protocol == "anthropic" or base_url_var == "ANTHROPIC_BASE_URL":
+        return False
+    if base_url_var in other_lines:
+        return False
+    line_protocol = _LINE_PROTOCOL.get(base_url_var)
+    if line_protocol is not None and entry.protocol != line_protocol:
+        return False
+    if not is_bundled_url(upstream):
+        return True
+    return key_vendor not in (None, "openai") and entry.name == key_vendor
+
+
+def _unknown_line_action(
+    p: _PlannedRestore, base_url_var: str, key_vendor: str | None, other_lines: set[str]
+) -> _LineAction:
+    """No usable record: write back the upstream the key used while locked, else remove.
+
+    A record that failed its check always removes: falling back to the
+    unsealed stored upstream would let a DB edit choose by deleting the seal.
+    """
+    name = _oc_audit.sanitise_for_message(base_url_var)
+    why = _why_value_unknown(p)
+    upstream = None if p.base_url_record_refused else _usable_stored_upstream(p.stored_upstream)
+    if upstream is not None and _fits_line(base_url_var, upstream, key_vendor, other_lines):
+        parts = urlsplit(upstream)
+        origin = _oc_audit.sanitise_for_message(f"{parts.scheme}://{parts.netloc}")
+        return _LineAction(
+            upstream,
+            f"Set {name} to an address at {origin}, the upstream this key used while "
+            f"locked: {why}. "
+            f"If you had a different value there before lock, set it again. If you "
+            f"didn't have this line before lock, you can delete it.",
+        )
+    return _LineAction(
+        None,
+        f"Removed {name}, a proxy line for this key: {why}. If you had your own {name} "
+        f"before lock, set it again. Until you do, an app that reads {name} uses its "
+        "SDK's default address.",
+    )
+
+
+def _line_actions(
+    p: _PlannedRestore, var_name: str, key_vendor: str | None, other_lines: set[str]
+) -> dict[str, _LineAction]:
+    """What to do with each ``*_BASE_URL`` line lock may have written for *p*.
+
+    Every name lock has used for the key's line is a candidate (after the
+    key's var, OPENROUTER_API_KEY -> OPENROUTER_BASE_URL; before v0.3.3, after
+    its protocol), so a row whose record doesn't name the line still never
+    leaves it routing an alias unlock deletes. The record says what to write
+    back; without one, the upstream the key used while locked goes back.
+    """
+    names = {_derive_base_url_var(var_name, p.provider)}
+    if p.provider in _PROVIDER_ENV_MAP:
+        names.add(_PROVIDER_ENV_MAP[p.provider])
+    actions = {name: _unknown_line_action(p, name, key_vendor, other_lines) for name in names}
+    restore = p.base_url_restore
+    if restore is not None and restore.var is not None:
+        if restore.original is None:
+            actions[restore.var] = _LineAction(None)  # lock added it
+        elif is_writable_value(restore.original):
+            actions[restore.var] = _LineAction(restore.original, saved=True)
+        else:
+            actions[restore.var] = _unknown_line_action(p, restore.var, key_vendor, other_lines)
+    return actions
+
+
+def _not_restored_note(base_url_var: str, *, present: bool) -> str:
+    """The saved value exists, but the line no longer routes this key, so it stays as is."""
+    name = _oc_audit.sanitise_for_message(base_url_var)
+    if present:
+        return (
+            f"Left {name} as you changed it after lock, so unlock did not write back "
+            f"the value you had there before. Check {name} is what you want."
+        )
+    return (
+        f"{name} is no longer in your .env, so unlock did not put back the value you "
+        f"had there before lock. Set it again if your app needs it."
+    )
+
+
 def _batch_restore_env(env_path: Path, planned: list[_PlannedRestore]) -> None:
-    """One ``rewrite_env_keys`` call: restore plaintext + drop BASE_URLs."""
+    """One ``rewrite_env_keys`` call: restore plaintext + the BASE_URL lines lock wrote.
+
+    The lines are judged on one snapshot, and the rewrite refuses a file that
+    changed since.
+    """
     updates: dict[str, str] = {}
     removals: set[str] = set()
-    try:
-        # python-dotenv before 1.2.3 keeps a UTF-8 BOM in the first key's name.
-        current = {k.lstrip("﻿"): v for k, v in dotenv_values(env_path).items()}
-    except UnicodeDecodeError:
-        current = {}  # rewrite_env_keys refuses a non-UTF-8 file with its own error
+    notes: list[str] = []
+    snapshot = read_env_snapshot(env_path)
+    current = snapshot.parsed
     for p in planned:
         if p.var_name is None:
             continue
@@ -271,25 +479,42 @@ def _batch_restore_env(env_path: Path, planned: list[_PlannedRestore]) -> None:
             f"duplicate planned restore for env var {p.var_name} "
             f"(planned aliases: {[entry.alias for entry in planned]})"
         )
-        updates[p.var_name] = p.key_buf.decode("utf-8")
-        # Lock names the line after the key's var (OPENROUTER_API_KEY ->
-        # OPENROUTER_BASE_URL); before v0.3.3 it used the protocol's name.
-        names = {_derive_base_url_var(p.var_name, p.provider)}
-        if p.provider in _PROVIDER_ENV_MAP:
-            names.add(_PROVIDER_ENV_MAP[p.provider])
-        for base_url_var in names:
-            # Drop a line only while it routes THIS alias to the proxy. A
-            # --keys-only lock never wrote it (the value is the user's own), and
-            # a slot shared by two keys points at the other key's alias.
-            # Matching the alias, not the whole URL, survives a port change.
-            value = current.get(base_url_var) or ""
-            if _openclaw_integration._alias_from_base_url(value) == p.alias:
+        key_text = p.key_buf.decode("utf-8")
+        updates[p.var_name] = key_text
+        actions = _line_actions(
+            p, p.var_name, detect_provider(key_text), _lines_other_keys_read(p, current)
+        )
+        for base_url_var, action in actions.items():
+            # Touch a line only while it routes THIS alias to the proxy. A
+            # --keys-only lock never wrote it (the value is the user's own), a
+            # slot shared by two keys points at the other key's alias, and a
+            # line changed after lock is the user's. Matching the alias, not
+            # the whole URL, survives a port change. Judged as written: lock
+            # writes the proxy URL itself, so a ${...} line that expands to it
+            # is the user's (merge-ready brutus).
+            value = snapshot.raw.get(base_url_var) or ""
+            if _openclaw_integration._alias_from_base_url(value) != p.alias:
+                if action.saved:
+                    notes.append(_not_restored_note(base_url_var, present=base_url_var in current))
+                continue
+            if action.put_back is not None:
+                updates[base_url_var] = action.put_back
+            else:
                 removals.add(base_url_var)
+            if action.note is not None:
+                notes.append(action.note)
 
     if not updates and not removals:
         return
 
-    rewrite_env_keys(env_path, updates, removals=removals or None)
+    rewrite_env_keys(
+        env_path,
+        updates,
+        removals=removals or None,
+        expected_baseline_sha256=snapshot.sha256,
+    )
+    for note in notes:
+        get_console().print_warning(f"{env_path}: {note}")
 
 
 async def _pass3_db_cleanup(
@@ -756,7 +981,7 @@ def register_unlock_commands(app: typer.Typer) -> None:
     ) -> None:
         """Restore original API keys from shards.
 
-        Transactional: on any HMAC verification failure, .env is left
+        Transactional: if any key's shards fail verification, .env is left
         byte-identical and DB rows are not deleted.
         """
         console = get_console()

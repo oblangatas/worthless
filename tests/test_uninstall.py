@@ -258,19 +258,56 @@ def test_uninstall_restores_multiple_envs(home_dir: WorthlessHome, tmp_path) -> 
     assert not home_dir.base_dir.exists()
 
 
-def test_uninstall_round_trips_an_openrouter_env(home_dir: WorthlessHome, tmp_path) -> None:
-    """WOR-981: uninstall restores through unlock: it drops the line lock wrote, and only that."""
+@pytest.mark.parametrize(
+    "users_line",
+    [
+        "OPENAI_BASE_URL=https://api.openai.com/v1\n",
+        # WOR-1013: lock overwrote this one; uninstall puts it back.
+        "OPENROUTER_BASE_URL=https://openrouter.ai/api/v1\n",
+    ],
+    ids=["another-keys-line", "the-keys-own-line"],
+)
+def test_uninstall_round_trips_an_openrouter_env(
+    home_dir: WorthlessHome, tmp_path, users_line: str
+) -> None:
+    """Uninstall restores through unlock: it fixes the line lock wrote, and only that."""
+    from tests.helpers import fake_openrouter_key
+
+    env = tmp_path / ".env"
+    env.write_text(f"{users_line}OPENROUTER_API_KEY={fake_openrouter_key()}\n")
+    original = env.read_bytes()
+    locked = runner.invoke(
+        app, ["lock", "--env", str(env)], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
+    )
+    assert locked.exit_code == 0, locked.output
+
+    result = runner.invoke(
+        app, ["uninstall", "--yes"], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
+    )
+    assert result.exit_code == 0, result.output
+    assert env.read_bytes() == original
+
+
+def test_uninstall_puts_back_your_line_for_a_key_an_older_version_locked(
+    home_dir: WorthlessHome, tmp_path
+) -> None:
+    """WOR-1013: no saved value on an old row, so the upstream the key used while
+    locked goes back, which lock took from your own line."""
     from tests.helpers import fake_openrouter_key
 
     env = tmp_path / ".env"
     env.write_text(
-        f"OPENAI_BASE_URL=https://api.openai.com/v1\nOPENROUTER_API_KEY={fake_openrouter_key()}\n"
+        f"OPENROUTER_BASE_URL=https://openrouter.ai/api/v1\nOPENROUTER_API_KEY={fake_openrouter_key()}\n"
     )
     original = env.read_bytes()
     locked = runner.invoke(
         app, ["lock", "--env", str(env)], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
     )
     assert locked.exit_code == 0, locked.output
+    conn = sqlite3.connect(home_dir.db_path)
+    conn.execute("UPDATE enrollments SET base_url_restore_json = NULL, base_url_restore_mac = NULL")
+    conn.commit()
+    conn.close()
 
     result = runner.invoke(
         app, ["uninstall", "--yes"], env={"WORTHLESS_HOME": str(home_dir.base_dir)}

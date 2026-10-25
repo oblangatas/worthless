@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import io
 import logging
 import math
 import os
@@ -27,11 +28,12 @@ import re
 import stat as _stat
 from collections import Counter
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from dotenv import dotenv_values
+from dotenv.variables import Variable, parse_variables
 
 from worthless.cli.errors import UnsafeReason, UnsafeRewriteRefused
 from worthless.cli.key_patterns import ENTROPY_THRESHOLD, KEY_PATTERN, detect_provider
@@ -306,16 +308,14 @@ def _format_assignment(
     return text.encode("utf-8") + eol
 
 
-def _rebuild_assignment_preserving_format(raw: bytes, new_value: str) -> bytes:
-    """Surgically replace only the value bytes of a parsed ``KEY=VALUE`` line.
+def _split_assignment(raw: bytes) -> tuple[str, str, str]:
+    """Split a parsed ``KEY=VALUE`` line into ``(head, value, tail)``.
 
-    Preserves the ``export`` prefix, key, surrounding whitespace, the
-    ``=`` delimiter, the value's quote style (if any), a trailing inline
-    ``# comment``, and the EOL style (LF / CRLF / none). The rest of the
-    line is byte-identical to *raw*.
-
-    Called on the UPDATE path only. The APPEND path (new key) uses the
-    clean :func:`_format_assignment` instead.
+    *value* is the span an update replaces: the text inside the quotes, or
+    an unquoted value up to a trailing inline ``# comment``. *head* is the
+    ``export`` prefix, key, ``=``, leading whitespace and any opening quote.
+    *tail* is the closing quote, anything after it, the comment and the EOL.
+    An unclosed quote gets its closing quote in *tail*.
     """
     try:
         text = raw.decode("utf-8")
@@ -324,7 +324,7 @@ def _rebuild_assignment_preserving_format(raw: bytes, new_value: str) -> bytes:
 
     eq_idx = text.find("=")
     if eq_idx == -1:  # pragma: no cover - only called on parsed KEY=VALUE lines
-        return (text + new_value).encode("utf-8")
+        return text, "", ""
 
     prefix = text[: eq_idx + 1]
     remainder = text[eq_idx + 1 :]
@@ -340,10 +340,10 @@ def _rebuild_assignment_preserving_format(raw: bytes, new_value: str) -> bytes:
         body = remainder
 
     stripped_body = body.lstrip(" \t")
-    leading_ws = body[: len(body) - len(stripped_body)]
+    head = prefix + body[: len(body) - len(stripped_body)]
 
     if not stripped_body:
-        return (prefix + leading_ws + new_value + trailing_eol).encode("utf-8")
+        return head, "", trailing_eol
 
     first = stripped_body[0]
 
@@ -357,11 +357,9 @@ def _rebuild_assignment_preserving_format(raw: bytes, new_value: str) -> bytes:
                 continue
             if ch == quote:
                 after_quote = stripped_body[i + 1 :]
-                return (
-                    prefix + leading_ws + quote + new_value + quote + after_quote + trailing_eol
-                ).encode("utf-8")
+                return head + quote, stripped_body[1:i], quote + after_quote + trailing_eol
             i += 1
-        return (prefix + leading_ws + quote + new_value + quote + trailing_eol).encode("utf-8")
+        return head + quote, stripped_body[1:], quote + trailing_eol
 
     comment_start: int | None = None
     for i, ch in enumerate(stripped_body):
@@ -374,9 +372,24 @@ def _rebuild_assignment_preserving_format(raw: bytes, new_value: str) -> bytes:
 
     if comment_start is not None:
         ws_and_comment = stripped_body[comment_start:]
-        return (prefix + leading_ws + new_value + ws_and_comment + trailing_eol).encode("utf-8")
+        return head, stripped_body[:comment_start], ws_and_comment + trailing_eol
 
-    return (prefix + leading_ws + new_value + trailing_eol).encode("utf-8")
+    return head, stripped_body, trailing_eol
+
+
+def _rebuild_assignment_preserving_format(raw: bytes, new_value: str) -> bytes:
+    """Surgically replace only the value bytes of a parsed ``KEY=VALUE`` line.
+
+    Preserves the ``export`` prefix, key, surrounding whitespace, the
+    ``=`` delimiter, the value's quote style (if any), a trailing inline
+    ``# comment``, and the EOL style (LF / CRLF / none). The rest of the
+    line is byte-identical to *raw*.
+
+    Called on the UPDATE path only. The APPEND path (new key) uses the
+    clean :func:`_format_assignment` instead.
+    """
+    head, _old_value, tail = _split_assignment(raw)
+    return (head + new_value + tail).encode("utf-8")
 
 
 _POSIX_NAME_RE = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*\Z")
@@ -788,12 +801,90 @@ def _append_additions(lines: list[_LogicalLine], additions: dict[str, str], eol:
         )
 
 
+@dataclass(frozen=True)
+class EnvSnapshot:
+    """One read of a ``.env``: its parse, its ``*_BASE_URL`` values as written, its hash.
+
+    ``raw`` holds each ``*_BASE_URL`` value exactly as the line spells it
+    (``${GATEWAY}/v1`` stays unexpanded, quotes are not part of it), and only
+    when :func:`rewrite_env_keys` can write it back. Writing one back gives
+    the line byte for byte, except that an unquoted value loses its trailing
+    whitespace. Key lines are not copied: nothing needs their raw text.
+    ``refs`` holds, for every line, the names its value refers to (names
+    only). Pass ``sha256`` to :func:`rewrite_env_keys` to refuse the write if
+    the file changed since this read.
+    """
+
+    parsed: dict[str, str | None]
+    raw: dict[str, str]
+    sha256: bytes
+    refs: dict[str, frozenset[str]] = field(default_factory=dict)
+
+    def names_reached(self, value: str) -> set[str]:
+        """The variables *value* expands, directly or through the lines it names."""
+        reached: set[str] = set()
+        todo = list(referenced_names(value))
+        while todo:
+            name = todo.pop()
+            if name not in reached:
+                reached.add(name)
+                todo.extend(self.refs.get(name, ()))
+        return reached
+
+
+def read_env_snapshot(env_path: Path) -> EnvSnapshot:
+    """Read *env_path* once. A missing file reads as empty.
+
+    The BOM is stripped before parsing: python-dotenv before 1.2.3 keeps it
+    in the first key's name. A file that isn't UTF-8 is refused, as the
+    rewrite would refuse it.
+    """
+    existing = _safe_read_existing_bytes(env_path)
+    stripped, _had_bom = _strip_bom(existing)
+    try:
+        text = stripped.decode("utf-8")
+    except UnicodeDecodeError:
+        raise UnsafeRewriteRefused(UnsafeReason.SNIFF) from None
+    raw: dict[str, str] = {}
+    refs: dict[str, frozenset[str]] = {}
+    for line in _split_logical_lines(stripped):
+        if line.key is None:
+            continue
+        head, value, _tail = _split_assignment(line.raw)
+        refs[line.key] = frozenset(referenced_names(value))
+        if not line.key.endswith("_BASE_URL"):
+            continue
+        if not head.endswith(('"', "'")):
+            value = value.rstrip(" \t")
+        if is_writable_value(value):
+            raw[line.key] = value
+        else:
+            raw.pop(line.key, None)  # the last line decides, as python-dotenv's does
+    parsed = dict(dotenv_values(stream=io.StringIO(text)))
+    return EnvSnapshot(parsed=parsed, raw=raw, sha256=hashlib.sha256(existing).digest(), refs=refs)
+
+
+def referenced_names(value: str) -> set[str]:
+    """The variables python-dotenv would expand in *value* (``${NAME}``, ``${NAME:-x}``)."""
+    return {atom.name for atom in parse_variables(value) if isinstance(atom, Variable)}
+
+
+def is_writable_value(value: str) -> bool:
+    """Whether :func:`rewrite_env_keys` accepts *value* (see ``_validate_value``)."""
+    try:
+        _validate_value(value)
+    except ValueError:
+        return False
+    return True
+
+
 def rewrite_env_keys(
     env_path: Path,
     updates: dict[str, str],
     *,
     additions: dict[str, str] | None = None,
     removals: set[str] | None = None,
+    expected_baseline_sha256: bytes | None = None,
     _hook_before_replace: Callable[[], None] | None = None,
 ) -> None:
     """Atomically replace N keys in *env_path* via one ``safe_rewrite`` call.
@@ -812,6 +903,10 @@ def rewrite_env_keys(
     :func:`remove_env_key`. Used by transactional unlock to delete
     proxy ``*_BASE_URL`` lines in the same atomic write that restores
     plaintext keys.
+
+    *expected_baseline_sha256* (an :class:`EnvSnapshot` ``sha256``) makes
+    the rewrite refuse if the file changed since the caller read it. Without
+    it the baseline is this call's own read.
 
     *_hook_before_replace* is forwarded to :func:`safe_rewrite`; the
     lock command binds a closure that runs reconstruct-and-verify for
@@ -840,7 +935,7 @@ def rewrite_env_keys(
         new_content,
         original_user_arg=env_path,
         allow_outside_repo=True,
-        expected_baseline_sha256=hashlib.sha256(existing).digest(),
+        expected_baseline_sha256=expected_baseline_sha256 or hashlib.sha256(existing).digest(),
         _hook_before_replace=_hook_before_replace,
     )
 

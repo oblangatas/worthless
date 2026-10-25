@@ -313,10 +313,18 @@ These must always hold. Any scenario that breaks them is a bug:
 #### U-37: User unlocks a key whose var is not named after its protocol (`OPENROUTER_API_KEY`, `GROQ_API_KEY`)
 
 - **Precondition**: Lock wrote `OPENROUTER_BASE_URL` for `OPENROUTER_API_KEY`; the DB stores the wire protocol (`openai`)
-- **Expected**: Unlock removes exactly the `*_BASE_URL` line lock wrote for that key; the `.env` is byte-identical to before lock. A still-locked key's line (e.g. `OPENAI_BASE_URL`) and a user's own line under `--keys-only` are kept.
+- **Expected**: Unlock removes exactly the `*_BASE_URL` line lock wrote for that key; the `.env` is byte-identical to before lock. A still-locked key's line (e.g. `OPENAI_BASE_URL`) and a user's own line under `--keys-only` are kept. A line the user had before lock gets its value back (U-38).
 - **Current behavior**: FIXED -- unlock looked up `OPENAI_BASE_URL` from the protocol, so the OpenRouter proxy line survived and a partial unlock deleted the OpenAI key's line. Unlock now derives the name as lock does and drops a line only while it routes the alias being unlocked.
 - **Risk**: HIGH (was broken, now fixed)
 - **Test status**: Tested (TestUnlockRemovesTheBaseUrlLockWrote)
+
+#### U-38: User locks a `.env` that already sets the `*_BASE_URL` line lock writes
+
+- **Precondition**: `.env` has `OPENROUTER_BASE_URL=https://openrouter.ai/api/v1` next to `OPENROUTER_API_KEY`, or a registered gateway in `OPENAI_BASE_URL` next to `OPENAI_API_KEY`
+- **Expected**: Lock records on each key's enrollment the line it writes and the value it replaces, as written (`${GATEWAY}/v1` is not expanded), MAC-tagged with the Fernet-derived key. Unlock and uninstall put that value back while the line still routes that key's alias; the `.env` is byte-identical to before lock. A line lock added is removed. Enrollments from before WOR-1013 (no record) get `shards.base_url` written back only when it is registered, public https and `$`-free, not an Anthropic-protocol address, the line isn't `ANTHROPIC_BASE_URL`, no other key in the `.env` reads the line, the address's protocol matches a protocol-named line, and (for a bundled address) it is the registry entry of the vendor the key's own prefix names and not OpenAI; a record that fails its MAC check (bound to its row and the lock's shard-A: a record from an earlier lock with a fresh split fails, but one from a re-lock that re-derived the same shard-A still verifies, WOR-1023) always removes; otherwise U-37's removal; unlock says which. Every row of the key a line routes carries the record (one key under two vars). A value the rewriter can't write back, or one holding a key (typed in or expanded), is not saved (lock warns); a value referring to another rewritten line (`${OPENAI_BASE_URL}`, directly or through another variable) is saved as its value at lock; unlock judges a line as written, so a user's `${...}` line that only expands to a proxy URL is never touched; lock aborts if the `.env` changed since it validated it, or if a record row vanished (WOR-1017).
+- **Current behavior**: FIXED (WOR-1013) -- lock overwrote the value without keeping it and unlock then deleted the line, so an app reading `OPENROUTER_BASE_URL` with no default sent the OpenRouter key to `api.openai.com`.
+- **Risk**: HIGH (was broken, now fixed)
+- **Test status**: Tested (TestUnlockPutsBackTheBaseUrlYouHad, `tests/dotenv_rewriter/test_read_env_snapshot.py`, the `base_url_restore` tests in `tests/test_storage.py`)
 
 ---
 

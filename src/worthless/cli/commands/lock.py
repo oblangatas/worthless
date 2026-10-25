@@ -53,6 +53,9 @@ from worthless.cli.platform import _in_container, is_wsl
 from worthless.cli.scanner import SkippedFile, scan_source_for_hardcoded_provider_urls
 from worthless.cli.sentinel import is_partial, read_sentinel
 from worthless.cli.dotenv_rewriter import (
+    EnvSnapshot,
+    is_writable_value,
+    read_env_snapshot,
     rewrite_env_keys,
     scan_env_keys,
 )
@@ -93,7 +96,7 @@ from worthless.openclaw.unshardable_credentials import (
     detect_unshardable_credentials,
     detection_caveats,
 )
-from worthless.storage.repository import ShardRepository, StoredShard
+from worthless.storage.repository import BaseUrlRestore, ShardRepository, StoredShard
 
 logger = logging.getLogger(__name__)
 
@@ -1015,45 +1018,155 @@ async def _pass1_db_writes(
             sr.zero()
 
 
+def _plan_base_url_lines(
+    planned: list[_PlannedUpdate], keys_only: bool, existing_env_keys: set[str]
+) -> dict[str, tuple[_PlannedUpdate, bool]]:
+    """Each ``*_BASE_URL`` line lock writes → (key it routes, whether it already exists)."""
+    if keys_only:
+        return {}
+    # When multiple keys share the same base_url_var slot (e.g. both
+    # OPENAI_API_KEY and API_KEY derive OPENAI_BASE_URL), the canonical
+    # <PREFIX>_API_KEY name wins regardless of file order. Without this,
+    # a non-canonical key's alias can claim the slot and the canonical
+    # key's shard-A gets routed to the wrong alias → 401. (worthless-sb8v)
+    slot_winner: dict[str, _PlannedUpdate] = {}
+    for p in planned:
+        if not p.base_url_var:
+            continue
+        existing = slot_winner.get(p.base_url_var)
+        canonical_var = p.base_url_var[: -len("_BASE_URL")] + "_API_KEY"
+        if existing is None or p.var_name == canonical_var:
+            slot_winner[p.base_url_var] = p
+
+    key_vars = {p.var_name for p in planned}
+    lines: dict[str, tuple[_PlannedUpdate, bool]] = {}
+    for slot, p in slot_winner.items():
+        if slot in existing_env_keys:
+            lines[slot] = (p, True)
+        elif slot not in key_vars:
+            lines[slot] = (p, False)
+    return lines
+
+
+def _value_to_put_back(
+    slot: str, snapshot: EnvSnapshot, base_url_slots: set[str], key_vars: set[str]
+) -> str | None:
+    """The value unlock writes back into *slot*: as written, else as parsed, else none.
+
+    As written keeps ``${GATEWAY}/v1`` unexpanded, unless it refers to another
+    ``*_BASE_URL`` line lock rewrites, directly or through other lines: put
+    back during a partial unlock,
+    ``${OPENAI_BASE_URL}`` would expand to a still-locked key's proxy URL and
+    send the real key there, so the value it has now goes back instead
+    (WOR-1026: let unlock choose). A reference to a key variable stays as
+    written: it expands to shard-A while locked and to the key after unlock,
+    and neither a key typed into the line nor one expanded from a reference
+    may reach the record. A line that defaults
+    to itself, ``${SLOT:-...}``, reads the shell, not a line. None, when
+    neither form can be written back, means unlock
+    removes the line; a value the rewriter refuses would make every unlock of
+    this ``.env`` fail (WOR-1027: validate against the quotes it goes into).
+    """
+    name = _oc_audit.sanitise_for_message(slot)
+    raw = snapshot.raw.get(slot)
+    if raw is not None and snapshot.names_reached(raw) & (base_url_slots - {slot}):
+        get_console().print_warning(
+            f"{name} refers to another line lock rewrites, so unlock will put back "
+            "the value it has now, not the reference."
+        )
+        raw = None
+    value = raw if raw is not None else snapshot.parsed.get(slot) or ""
+    if any((key := snapshot.parsed.get(var)) and key in value for var in key_vars):
+        # The record is MAC-tagged, not encrypted, so it never holds a key,
+        # whether typed into the line or expanded from a reference.
+        get_console().print_warning(
+            f"{name}: lock won't save this value, because it holds one of your keys, "
+            "so unlock will remove the line. Set it again by hand after you unlock."
+        )
+        return None
+    if raw is not None or is_writable_value(value):
+        return value
+    get_console().print_warning(
+        f"{name}: lock can't save this value for unlock to put back (it has a quote, "
+        "a space before #, or whitespace at one end), so unlock will remove the line. "
+        "Set it again by hand after you unlock."
+    )
+    return None
+
+
+async def _record_base_url_restores(
+    repo: ShardRepository,
+    env_str: str,
+    planned: list[_PlannedUpdate],
+    base_url_lines: dict[str, tuple[_PlannedUpdate, bool]],
+    snapshot: EnvSnapshot,
+) -> None:
+    """WOR-1013: record on each key's enrollment the line lock writes and what it replaces.
+
+    Runs before ``_batch_rewrite``, so a lock that dies after the rewrite still
+    left unlock what it needs to put a user's own line back. The values come
+    from the snapshot pass-1 validated, and the rewrite refuses a file that
+    changed since, so they are the values lock overwrites.
+    """
+    if not planned:
+        return
+    key_vars = {p.var_name for p in planned}
+    slots = set(base_url_lines)
+    originals = {
+        slot: _value_to_put_back(slot, snapshot, slots, key_vars)
+        for slot, (_, existed) in base_url_lines.items()
+        if existed
+    }
+    slot_of = {p: slot for slot, (p, _existed) in base_url_lines.items()}
+    # One key under two names has two rows, and unlock reads either one
+    # (WOR-1018), so every row of the key a line routes carries its record.
+    slot_of_alias = {p.alias: slot for p, slot in slot_of.items()}
+    restores = []
+    for p in planned:
+        slot = slot_of.get(p) or slot_of_alias.get(p.alias)
+        # Not in originals: lock adds the line, or writes none for this key.
+        record = BaseUrlRestore(var=slot, original=originals.get(slot) if slot else None)
+        restores.append((p.alias, p.var_name, p.shard_a.decode("utf-8"), record))
+    if await repo.record_base_url_restores(env_str, restores) != len(restores):
+        # A row pass-1 just wrote is gone (known cause: WOR-1017's cleanup).
+        # Rewriting now would leave a shard-A in the .env that no row can
+        # open, so stop while pass-1 can still unwind.
+        raise WorthlessError(
+            ErrorCode.SHARD_STORAGE_FAILED,
+            "Lock lost track of a key it was protecting, so it stopped before changing "
+            "your .env, which is unchanged. One known cause: a key you replaced is still "
+            "in the same .env under another name. Move or delete that copy, then run "
+            "`worthless lock` again.",
+        )
+
+
 def _batch_rewrite(
     env_path: Path,
     planned: list[_PlannedUpdate],
-    keys_only: bool,
-    existing_env_keys: set[str],
+    base_url_lines: dict[str, tuple[_PlannedUpdate, bool]],
+    baseline_sha256: bytes,
 ) -> None:
-    """One ``safe_rewrite`` call for every planned update + BASE_URL changes."""
+    """One ``safe_rewrite`` call for every planned update + BASE_URL changes.
+
+    Refused if the ``.env`` changed since the snapshot whose hash is
+    *baseline_sha256*: pass-1 and the BASE_URL records describe that file.
+    """
     updates: dict[str, str] = {p.var_name: p.shard_a.decode("utf-8") for p in planned}
     additions: dict[str, str] = {}
-    if not keys_only:
-        # When multiple keys share the same base_url_var slot (e.g. both
-        # OPENAI_API_KEY and API_KEY derive OPENAI_BASE_URL), the canonical
-        # <PREFIX>_API_KEY name wins regardless of file order. Without this,
-        # a non-canonical key's alias can claim the slot and the canonical
-        # key's shard-A gets routed to the wrong alias → 401. (worthless-sb8v)
-        slot_winner: dict[str, _PlannedUpdate] = {}
-        for p in planned:
-            if not p.base_url_var:
-                continue
-            existing = slot_winner.get(p.base_url_var)
-            canonical_var = p.base_url_var[: -len("_BASE_URL")] + "_API_KEY"
-            if existing is None or p.var_name == canonical_var:
-                slot_winner[p.base_url_var] = p
-
-        for slot, p in slot_winner.items():
-            local_proxy = _proxy_base_url(p.alias)
-            if slot in existing_env_keys:
-                updates[slot] = local_proxy
-            elif slot not in updates:
-                additions[slot] = local_proxy
-                sys.stderr.write(
-                    f"worthless: added {slot}={local_proxy} to {env_path} (was missing)\n"
-                )
-                sys.stderr.flush()
+    for slot, (p, existed) in base_url_lines.items():
+        local_proxy = _proxy_base_url(p.alias)
+        if existed:
+            updates[slot] = local_proxy
+        else:
+            additions[slot] = local_proxy
+            sys.stderr.write(f"worthless: added {slot}={local_proxy} to {env_path} (was missing)\n")
+            sys.stderr.flush()
 
     rewrite_env_keys(
         env_path,
         updates,
         additions=additions or None,
+        expected_baseline_sha256=baseline_sha256,
         _hook_before_replace=_build_verify_hook(planned),
     )
 
@@ -2867,8 +2980,6 @@ def _lock_keys(
 
     async def _lock_async() -> _LockResult:
         """Pass-1, the .env rewrite, then the OpenClaw steps, with Ctrl-C armed throughout."""
-        from dotenv import dotenv_values  # noqa: PLC0415 — local import keeps test surface tight
-
         async with open_repo(home) as repo:
             await repo.initialize()
 
@@ -2894,6 +3005,11 @@ def _lock_keys(
             env_str = str(env_path.resolve())
             all_enrollments = await repo.list_enrollments()
 
+            # Snapshot .env BEFORE scanning it: pass-1 pulls *_BASE_URL values from
+            # the snapshot, and the rewrite refuses a file that changed since this
+            # read, so an edit after it (even one the scan below sees) is caught
+            # instead of locking a key from a different file than the one rewritten.
+            snapshot = read_env_snapshot(env_path)
             raw_scanned = scan_env_keys(env_path)
 
             # WOR-837: a Claude Code OAuth token (sk-ant-oat/ort) collides with
@@ -2939,8 +3055,7 @@ def _lock_keys(
                     oauth_skipped=bool(oauth_skipped),
                 )
 
-            # Snapshot .env so _pass1 can pull *_BASE_URL values into the DB row.
-            env_values = dict(dotenv_values(env_path))
+            env_values = snapshot.parsed
 
             # worthless-ftmg: refuse to lock an already-locked .env BEFORE any
             # state mutation. The legitimate idempotent re-lock case (same key
@@ -3035,6 +3150,8 @@ def _lock_keys(
                 await _pass1_db_writes(
                     repo, candidates, env_str, token_budget_daily, planned, env_values
                 )
+                base_url_lines = _plan_base_url_lines(planned, keys_only, existing_env_keys)
+                await _record_base_url_restores(repo, env_str, planned, base_url_lines, snapshot)
                 # A press after Pass-1's last await was never dispatched: answer it
                 # now, while the rows can still unwind. Then record-only until the
                 # rename is done (worthless-f1xx).
@@ -3046,7 +3163,7 @@ def _lock_keys(
                         openclaw_exit=0,
                         oauth_skipped=bool(oauth_skipped),
                     )
-                _batch_rewrite(env_path, planned, keys_only, existing_env_keys)
+                _batch_rewrite(env_path, planned, base_url_lines, snapshot.sha256)
                 on_signal.committed = True  # .env now needs these rows: never unwind on a press
                 # Phase 2.b: OpenClaw magic. Per L1 in
                 # engineering/research/openclaw/WOR-431-phase-2-spec.md, this
