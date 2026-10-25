@@ -363,16 +363,17 @@ def _fits_line(
 ) -> bool:
     """Whether *upstream* can go into *base_url_var* without misdirecting any key.
 
-    Never ANTHROPIC_BASE_URL: the registry keeps /v1 for the proxy, and the
-    Anthropic SDK adds its own. Never a line another key in this .env reads.
-    Never across protocols. A gateway the user registered then goes back: it
-    came from their own line. A bundled address goes back only when it is the
-    vendor this key's own prefix names, and not OpenAI's: sk- also starts
-    DeepSeek and other keys that old locks routed to api.openai.com, and an
-    OpenAI line removed costs nothing, since OpenAI's address is the SDK default.
+    Never ANTHROPIC_BASE_URL, and never an Anthropic address on any line: the
+    registry keeps /v1 for the proxy, and the Anthropic SDK adds its own. Never
+    a line another key in this .env reads. Never across protocols. A gateway
+    the user registered then goes back: it came from their own line. A bundled
+    address goes back only when it is the vendor this key's own prefix names,
+    and not OpenAI's: sk- also starts DeepSeek and other keys that old locks
+    routed to api.openai.com, and an OpenAI line removed costs nothing, since
+    OpenAI's address is the SDK default.
     """
     entry = lookup_by_url(upstream)
-    if entry is None or base_url_var == "ANTHROPIC_BASE_URL":
+    if entry is None or entry.protocol == "anthropic" or base_url_var == "ANTHROPIC_BASE_URL":
         return False
     if base_url_var in other_lines:
         return False

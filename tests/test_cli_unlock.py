@@ -999,6 +999,107 @@ class TestUnlockPutsBackTheBaseUrlYouHad:
         _unlock(env, home_dir)
         assert dotenv_values(env)["OPENAI_BASE_URL"] == "https://openrouter.ai/api/v1"
 
+    def test_an_old_row_writes_no_anthropic_address_into_any_line(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """CLAUDE_BASE_URL too: an app passing it to Anthropic(base_url=...) would call
+        /v1/v1/messages (brutus round 5)."""
+        env = tmp_path / ".env"
+        env.write_text(f"CLAUDE_API_KEY={_TEST_KEY_2}\n")
+        original = env.read_bytes()
+        _lock(env, home_dir)
+        _as_enrolled_before_wor_1013(home_dir)
+
+        _unlock(env, home_dir)
+        assert env.read_bytes() == original
+
+    def test_an_old_row_checks_the_protocol_line_of_a_key_under_its_own_name(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """MY_OPENAI_API_KEY's own line is MY_OPENAI_BASE_URL, but its OpenAI SDK reads
+        OPENAI_BASE_URL too, so OpenRouter's address can't go there."""
+        env = tmp_path / ".env"
+        env.write_text(
+            "OPENAI_BASE_URL=https://openrouter.ai/api/v1\n"
+            f"OPENAI_API_KEY={fake_openrouter_key()}\nMY_OPENAI_API_KEY={_TEST_KEY}\n"
+        )
+        _lock(env, home_dir)
+        _as_enrolled_before_wor_1013(home_dir)
+
+        _unlock(env, home_dir)
+        assert "OPENAI_BASE_URL" not in dotenv_values(env)
+
+    def test_an_old_row_whose_stored_address_is_another_vendors_loses_the_line(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """A bundled address goes back only for the vendor the key's own prefix names."""
+        env = tmp_path / ".env"
+        key = fake_openrouter_key()
+        env.write_text(
+            f"OPENROUTER_BASE_URL=https://api.groq.com/openai/v1\nOPENROUTER_API_KEY={key}\n"
+        )
+        _lock(env, home_dir)
+        _as_enrolled_before_wor_1013(home_dir)
+
+        _unlock(env, home_dir)
+        assert env.read_text() == f"OPENROUTER_API_KEY={key}\n"
+
+    def test_an_old_row_gets_your_registered_gateway_back(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """A gateway you registered came from your own line, so it goes back."""
+        _register_gateway(home_dir)
+        env = tmp_path / ".env"
+        env.write_text(
+            f"OPENROUTER_BASE_URL={_GATEWAY_URL}\nOPENROUTER_API_KEY={fake_openrouter_key()}\n"
+        )
+        original = env.read_bytes()
+        _lock(env, home_dir)
+        _as_enrolled_before_wor_1013(home_dir)
+
+        _unlock(env, home_dir)
+        assert env.read_bytes() == original
+
+    def test_an_old_row_never_writes_back_a_private_or_cleartext_gateway(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """Registered or not, a stored http or private address fails lock's SSRF check."""
+        _register_gateway(home_dir, "http://10.0.0.5/v1", name="private-gw")
+        env = tmp_path / ".env"
+        key = fake_openrouter_key()
+        env.write_text(f"OPENROUTER_BASE_URL=http://10.0.0.5/v1\nOPENROUTER_API_KEY={key}\n")
+        _lock(env, home_dir)
+        _as_enrolled_before_wor_1013(home_dir)
+
+        _unlock(env, home_dir)
+        assert env.read_text() == f"OPENROUTER_API_KEY={key}\n"
+
+    def test_unlock_stops_when_the_env_changes_under_it(
+        self, home_dir: WorthlessHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Unlock judges the lines on one snapshot, and its rewrite refuses a newer file."""
+        import worthless.cli.commands.unlock as unlock_mod
+
+        env = tmp_path / ".env"
+        env.write_text(
+            "OPENROUTER_BASE_URL=https://openrouter.ai/api/v1\n"
+            f"OPENROUTER_API_KEY={fake_openrouter_key()}\n"
+        )
+        _lock(env, home_dir)
+        real_snapshot = unlock_mod.read_env_snapshot
+
+        def snapshot_then_edit(path: Path):  # noqa: ANN202 — mirrors read_env_snapshot
+            taken = real_snapshot(path)
+            with env.open("a") as f:
+                f.write("EDITED_DURING_UNLOCK=1\n")
+            return taken
+
+        monkeypatch.setattr(unlock_mod, "read_env_snapshot", snapshot_then_edit)
+        result = _unlock(env, home_dir, check=False)
+        assert result.exit_code != 0, result.output
+        assert "EDITED_DURING_UNLOCK=1" in env.read_text()
+        assert "127.0.0.1" in env.read_text()  # nothing was restored over the edit
+
     def test_an_old_anthropic_row_gets_no_line_its_sdk_would_misread(
         self, home_dir: WorthlessHome, tmp_path: Path
     ) -> None:

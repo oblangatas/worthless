@@ -13,11 +13,11 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - Unlock removes the line instead, and tells you to set it again, when it can't be sure the address is right for every app that reads the line:
     - The key is an OpenAI-style `sk-` key. That prefix also starts DeepSeek and other keys, and OpenAI's address is the SDK default anyway.
     - Another key in the same `.env`, locked or not, reads that line too, for example an OpenAI key next to an OpenRouter key's `OPENAI_BASE_URL`.
-    - The line is `ANTHROPIC_BASE_URL` (the Anthropic SDK adds its own `/v1`), or the address is the other protocol's.
+    - It's an Anthropic address, or the line is `ANTHROPIC_BASE_URL`. The Anthropic SDK adds its own `/v1`. Or the address belongs to the other protocol.
     - The stored address isn't in the provider list, isn't a public https address (a local Ollama, for example), or contains a `$`.
     - The saved value was changed in the Worthless database.
 
-    A gateway you registered yourself still goes back under the same line rules, because it came from your own line. An app that reads a removed line with no default uses its SDK's default address. Unlock only sees keys in this `.env`, not ones your shell exports.
+    A gateway you registered yourself still goes back under the same line rules, because it came from your own line. An app that reads a removed line with no default uses its SDK's default address. Unlock only sees keys in this `.env`. It does not see another `.env` your app also loads (such as `.env.local`) or keys your shell exports, so an OpenAI key kept there can still end up reading an OpenRouter address (WOR-1034).
   - The written value is the one lock resolved, so a `${...}` reference you had comes back expanded.
   - If the same key was also locked from another `.env`, the stored address is the last one lock saw for that key, which may be the other file's (WOR-1029).
 
