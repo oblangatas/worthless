@@ -1574,6 +1574,22 @@ class TestQuietUninstallStillSaysWhatYouLose:
             assert result.exit_code != 0
             assert home_dir.base_dir.exists()
 
+    def test_a_symlink_loop_in_place_of_the_env_is_named_not_dropped(
+        self, home_dir: WorthlessHome, tmp_path
+    ) -> None:
+        """A .env that is a symlink loop can't be read, but it isn't gone: it is
+        named, and the wipe is blocked. exists() read it as a deleted project."""
+        _, env = _lock_project(home_dir, tmp_path / "loop")
+        env.unlink()
+        env.symlink_to(env)  # ELOOP
+
+        result = _quiet_uninstall(home_dir)
+
+        assert f"could NOT restore {env}" in result.output, result.output
+        assert "the project file is gone" not in result.output
+        assert result.exit_code != 0
+        assert home_dir.base_dir.exists()
+
     @pytest.mark.skipif(
         hasattr(os, "geteuid") and os.geteuid() == 0, reason="root opens any folder"
     )
