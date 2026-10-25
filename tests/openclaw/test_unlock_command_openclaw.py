@@ -232,7 +232,7 @@ def test_quiet_unlock_still_says_how_to_repair_openclaw_after_a_raise(
     def _raise(*_: object, **__: object) -> None:
         raise openclaw_errors.OpenclawIntegrationError(
             openclaw_errors.OpenclawErrorCode.SKILL_INSTALL_FAILED,
-            "simulated unexpected raise from apply_unlock",
+            "simulated unexpected raise from /x\x1b[2J/openclaw.json",
         )
 
     monkeypatch.setattr(integration, "apply_unlock", _raise)
@@ -242,7 +242,8 @@ def test_quiet_unlock_still_says_how_to_repair_openclaw_after_a_raise(
     assert result.exit_code == 73, result.output
     assert "[FAIL] OpenClaw cleanup did NOT complete." in result.output
     assert "may not have been restored in ~/.openclaw/openclaw.json" in result.output
-    assert "simulated unexpected raise from apply_unlock" in result.output
+    assert "simulated unexpected raise from /x[2J/openclaw.json" in result.output
+    assert "\x1b" not in result.output  # a path in the detail can't reach the terminal raw
     assert "Fix:    worthless doctor" in result.output
 
 
@@ -263,7 +264,9 @@ def test_quiet_unlock_still_names_what_openclaw_left_on_the_proxy(
         providers_skipped=(("openai", "entry changed since lock"),),
         events=(
             OpenclawIntegrationEvent(
-                code=OpenclawErrorCode.WRITE_FAILED, level="error", detail="disk full"
+                code=OpenclawErrorCode.WRITE_FAILED,
+                level="error",
+                detail="disk full at /x\x1b[2J/openclaw.json",
             ),
         ),
     )
@@ -275,4 +278,52 @@ def test_quiet_unlock_still_names_what_openclaw_left_on_the_proxy(
     assert "[FAIL] OpenClaw cleanup did NOT complete." in result.output
     assert "`worthless unlock` or `worthless doctor` to repair." in result.output
     assert "skipped openai (entry changed since lock)" in result.output
-    assert "openclaw.write_failed — disk full" in result.output
+    assert "openclaw.write_failed — disk full at /x[2J/openclaw.json" in result.output
+    assert "\x1b" not in result.output
+
+
+@pytest.mark.parametrize("path", ["raise", "detected-failed"])
+def test_a_fail_block_it_cannot_print_still_marks_the_status_degraded(
+    home_dir: WorthlessHome,
+    env_file: Path,
+    openclaw_present: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+) -> None:
+    """The sentinel is written before the [FAIL] block. Rich exits on a closed
+    stderr, and that must not keep `worthless status` from reporting the failure."""
+    from worthless.cli.console import WorthlessConsole
+    from worthless.cli.sentinel import is_partial, read_sentinel
+    from worthless.openclaw import errors as openclaw_errors
+    from worthless.openclaw import integration
+
+    def _raise(*_: object, **__: object) -> None:
+        raise openclaw_errors.OpenclawIntegrationError(
+            openclaw_errors.OpenclawErrorCode.SKILL_INSTALL_FAILED, "simulated raise"
+        )
+
+    failed = integration.OpenclawApplyResult(
+        detected=True,
+        config_path=openclaw_present["config_path"],
+        workspace_path=openclaw_present["workspace"],
+        skill_path=None,
+        events=(
+            openclaw_errors.OpenclawIntegrationEvent(
+                code=openclaw_errors.OpenclawErrorCode.WRITE_FAILED, level="error", detail="x"
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        integration, "apply_unlock", _raise if path == "raise" else (lambda **_: failed)
+    )
+
+    def _closed_stderr(console, message: str) -> None:  # noqa: ANN001
+        raise SystemExit(1)  # what Rich does on a broken pipe
+
+    monkeypatch.setattr(WorthlessConsole, "print_failure", _closed_stderr)
+
+    _quiet_unlock(home_dir, env_file)
+
+    sentinel = read_sentinel(home_dir.base_dir)
+    assert sentinel is not None
+    assert is_partial(sentinel)

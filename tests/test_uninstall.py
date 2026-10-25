@@ -1182,6 +1182,35 @@ class TestMcpLeftoverReminder:
         assert after["mcpServers"]["github"] == {"command": "docker"}, "another server was altered"
         assert "removed the Worthless MCP entry" in result.output
 
+    def test_quiet_still_says_which_config_it_could_not_edit(
+        self, home_dir: WorthlessHome, tmp_path, monkeypatch
+    ) -> None:
+        """WOR-1043: you asked for the edit with --remove-mcp. A config it won't
+        edit (a symlink) is said even with --quiet, its path without control
+        characters."""
+        work = tmp_path / "work"
+        work.mkdir()
+        monkeypatch.chdir(work)
+        fake_home = tmp_path / "home\x1b[2Jx"
+        target = self._seed_cursor_cfg(
+            fake_home, {"worthless": {"command": "npx", "args": ["-y", "worthless-mcp"]}}
+        )
+        link = target.with_name("linked.json")
+        target.rename(link)
+        target.symlink_to(link)
+        self._lock_one(home_dir, work, fake_home)
+
+        result = runner.invoke(
+            app,
+            ["--quiet", "uninstall", "--yes", "--remove-mcp"],
+            env=self._uninstall_env(home_dir, fake_home),
+        )
+
+        assert result.exit_code == 0, result.output
+        shown = str(target).replace("\x1b", "")
+        assert f"could not edit {shown}" in result.output
+        assert "\x1b" not in result.output
+
     def test_default_uninstall_never_edits_the_editor_config(
         self, home_dir: WorthlessHome, tmp_path, monkeypatch
     ) -> None:
@@ -1205,6 +1234,33 @@ class TestMcpLeftoverReminder:
         assert "MCP server" in result.output, "default run should still name the file"
 
 
+@pytest.mark.parametrize("answers", [None, "y\ny\n", "y\nn\n"], ids=["yes", "tty-safe", "tty-keep"])
+def test_uninstall_shows_a_path_without_its_control_characters(
+    home_dir: WorthlessHome, tmp_path, monkeypatch, answers: str | None
+) -> None:
+    """WOR-1043: a folder name can carry a terminal escape. No line uninstall
+    prints drops it on the terminal, progress and the mode prompt included."""
+    _, env = TestQuietUninstallStillSaysWhatYouLose._lock(
+        home_dir, tmp_path / "proj\x1b[2Jx", mode=0o644
+    )
+    args = ["uninstall"]
+    if answers is None:
+        args.append("--yes")
+    else:
+        monkeypatch.setattr(uninstall_mod, "_stdin_is_tty", lambda: True)
+
+    result = runner.invoke(
+        app,
+        args,
+        input=answers,
+        env={"WORTHLESS_HOME": str(home_dir.base_dir), "COLUMNS": "1000"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "\x1b" not in result.output
+    assert f"restored {str(env).replace(chr(27), '')}" in result.output
+
+
 class TestQuietUninstallStillSaysWhatYouLose:
     """WOR-1043: --quiet hides uninstall's progress, not a key it can't give back or
     a change it made to your files. Each note here can be the only record of one.
@@ -1223,8 +1279,8 @@ class TestQuietUninstallStillSaysWhatYouLose:
     def _lock(home_dir: WorthlessHome, project, *, mode: int | None = None):  # noqa: ANN001, ANN205
         from tests.helpers import fake_key
 
-        project.mkdir(exist_ok=True)
-        key = fake_key("sk-")
+        project.mkdir(parents=True, exist_ok=True)
+        key = fake_key("sk-", seed=str(project))
         env = project / ".env"
         env.write_text(f"OPENAI_API_KEY={key}\n")
         if mode is not None:
@@ -1329,6 +1385,8 @@ class TestQuietUninstallStillSaysWhatYouLose:
 
         assert result.exit_code == 0, result.output
         assert f"skipping {missing}: the project file is gone" in result.output
+        # A project that was moved, not deleted, still has its shard-A elsewhere.
+        assert "If you moved the project, rotate its key" in result.output
 
     def test_a_partial_wipe_is_said(self, home_dir: WorthlessHome, tmp_path, monkeypatch) -> None:
         self._lock(home_dir, tmp_path)
@@ -1338,6 +1396,21 @@ class TestQuietUninstallStillSaysWhatYouLose:
 
         assert result.exit_code == 0, result.output
         assert "~/.worthless could not be fully removed" in result.output
+
+    def test_a_partial_wipe_names_the_folder_without_control_characters(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from worthless.cli.bootstrap import ensure_home
+
+        home = ensure_home(tmp_path / "h\x1b[2Jx" / ".worthless")
+        self._lock(home, tmp_path / "proj")
+        monkeypatch.setattr(uninstall_mod.shutil, "rmtree", lambda *a, **k: None)
+
+        result = self._run(home)
+
+        assert result.exit_code == 0, result.output
+        assert "could not be fully removed" in result.output
+        assert "\x1b" not in result.output
 
     def test_tightening_a_loose_mode_is_said(self, home_dir: WorthlessHome, tmp_path) -> None:
         from tests.helpers import assert_not_shown
@@ -1349,8 +1422,20 @@ class TestQuietUninstallStillSaysWhatYouLose:
         assert result.exit_code == 0, result.output
         assert (env.stat().st_mode & 0o777) == 0o600
         assert f"{env}: original 0o644 was readable by other users" in result.output
-        assert f"'chmod 644 {env}' to revert" in result.output
+        assert f"Run `chmod 644 {env}` to revert" in result.output
         assert_not_shown(result.output, key)
+
+    def test_the_revert_command_quotes_a_path_with_a_space(
+        self, home_dir: WorthlessHome, tmp_path
+    ) -> None:
+        """Unquoted, `chmod 644 /x/My Projects/.env` is two arguments, and the
+        second can name another .env under the current directory."""
+        _, env = self._lock(home_dir, tmp_path / "My Projects", mode=0o644)
+
+        result = self._run(home_dir)
+
+        assert result.exit_code == 0, result.output
+        assert f"Run `chmod 644 '{env}'` to revert" in result.output
 
     def test_a_mode_it_could_not_tighten_is_said(
         self, home_dir: WorthlessHome, tmp_path, monkeypatch
@@ -1369,7 +1454,7 @@ class TestQuietUninstallStillSaysWhatYouLose:
 
         assert result.exit_code == 0, result.output
         assert f"{env}: key restored, but the file mode wasn't tightened" in result.output
-        assert f"run 'chmod 600 {env}' yourself" in result.output
+        assert f"run `chmod 600 {env}` yourself" in result.output
 
     def test_an_openclaw_config_it_may_have_left_on_the_proxy_is_said(
         self, home_dir: WorthlessHome, tmp_path, monkeypatch
@@ -1406,5 +1491,43 @@ class TestQuietUninstallStillSaysWhatYouLose:
         shown = str(env).replace("\x1b", "")
         if case == "loose mode":
             assert f"{shown}: original 0o644 was readable by other users" in result.output
+            # Pasted, the shown path would name another file.
+            assert "Run chmod 644 on that file to revert" in result.output
         else:
             assert f"could NOT restore {shown}" in result.output
+
+    @pytest.mark.parametrize("force", [False, True], ids=["no-force", "force"])
+    def test_a_note_it_cannot_write_never_reads_as_a_broken_install(
+        self, home_dir: WorthlessHome, tmp_path, monkeypatch, force: bool
+    ) -> None:
+        """A stderr that refuses a write mid-restore (EAGAIN on a non-blocking
+        pipe) stops the run. Read as a broken install, --force would wipe the
+        keys not yet restored, and no --force would be told to re-run with it."""
+        from worthless.cli.console import WorthlessConsole
+
+        locked = [self._lock(home_dir, tmp_path / name, mode=0o644) for name in "abc"]
+        real = WorthlessConsole.print_file_note
+        calls: list[str] = []
+
+        def _refuse_twice(console, message: str) -> None:  # noqa: ANN001
+            calls.append(message)
+            if len(calls) <= 2:
+                raise BlockingIOError(errno.EAGAIN, "Resource temporarily unavailable")
+            real(console, message)
+
+        monkeypatch.setattr(WorthlessConsole, "print_file_note", _refuse_twice)
+
+        result = self._run(home_dir, *(["--force"] if force else []))
+
+        assert result.exit_code != 0, result.output
+        assert home_dir.base_dir.exists(), "uninstall wiped keys it never restored"
+        con = sqlite3.connect(str(home_dir.db_path))
+        try:
+            left = con.execute("SELECT COUNT(*) FROM enrollments").fetchone()[0]
+        finally:
+            con.close()
+        assert left == 2, "the two .env files it never reached must stay locked"
+        first_key, first_env = locked[0]
+        assert first_key in first_env.read_text()  # the one it restored stays restored
+        assert "broken install" not in result.output.lower()
+        assert "stopped partway" in result.output
