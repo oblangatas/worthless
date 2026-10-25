@@ -306,12 +306,12 @@ class _LineAction:
 def _why_value_unknown(p: _PlannedRestore) -> str:
     if p.base_url_record_refused:
         return (
-            "its saved value was changed in the Worthless database after lock, so unlock "
-            "did not write it back"
+            "its saved value was changed in the Worthless database after lock, so it "
+            "was not written back"
         )
     if p.base_url_restore is None:
-        return "unlock found no saved value for it (keys locked by an older version have none)"
-    return "unlock has no saved value it can write back for it"
+        return "no value was saved for it (keys locked by an older version have none)"
+    return "its saved value can't be written back"
 
 
 def _lines_other_keys_read(p: _PlannedRestore, env_values: dict[str, str | None]) -> set[str]:
@@ -404,7 +404,8 @@ def _unknown_line_action(
         origin = _oc_audit.sanitise_for_message(f"{parts.scheme}://{parts.netloc}")
         return _LineAction(
             upstream,
-            f"Set {name} to {origin}, the upstream this key used while locked: {why}. "
+            f"Set {name} to an address at {origin}, the upstream this key used while "
+            f"locked: {why}. "
             f"If you had a different value there before lock, set it again. If you "
             f"didn't have this line before lock, you can delete it.",
         )
@@ -488,8 +489,10 @@ def _batch_restore_env(env_path: Path, planned: list[_PlannedRestore]) -> None:
             # --keys-only lock never wrote it (the value is the user's own), a
             # slot shared by two keys points at the other key's alias, and a
             # line changed after lock is the user's. Matching the alias, not
-            # the whole URL, survives a port change.
-            value = current.get(base_url_var) or ""
+            # the whole URL, survives a port change. Judged as written: lock
+            # writes the proxy URL itself, so a ${...} line that expands to it
+            # is the user's (merge-ready brutus).
+            value = snapshot.raw.get(base_url_var) or ""
             if _openclaw_integration._alias_from_base_url(value) != p.alias:
                 if action.saved:
                     notes.append(_not_restored_note(base_url_var, present=base_url_var in current))

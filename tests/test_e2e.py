@@ -432,8 +432,10 @@ class _FakeUpstream(http.server.BaseHTTPRequestHandler):
 class TestUnlockedAppReachesYourOwnUpstream:
     """After lock then unlock, the app sends its real key to the upstream you had set (WOR-1013)."""
 
-    def test_app_sends_the_key_to_your_base_url_not_openai(self, tmp_path: Path) -> None:
-        _FakeUpstream.received = []
+    def test_app_sends_the_key_to_your_base_url_not_openai(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(_FakeUpstream, "received", [])
         server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _FakeUpstream)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         try:

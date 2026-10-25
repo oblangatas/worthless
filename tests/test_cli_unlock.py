@@ -689,6 +689,44 @@ class TestUnlockPutsBackTheBaseUrlYouHad:
         _unlock(env, home_dir)
         assert dotenv_values(env)["OPENROUTER_BASE_URL"] == "https://api.openai.com/v1"
 
+    def test_a_line_referring_to_another_locked_line_through_a_plain_var_is_put_back_as_its_value(
+        self, home_dir: WorthlessHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """${ROUTER}, where ROUTER=${OPENAI_BASE_URL}, reaches the locked line too
+        (merge-ready security review)."""
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        env = tmp_path / ".env"
+        env.write_text(
+            "OPENAI_BASE_URL=https://api.openai.com/v1\n"
+            "ROUTER=${OPENAI_BASE_URL}\n"
+            "OPENROUTER_BASE_URL=${ROUTER}\n"
+            f"OPENAI_API_KEY={_TEST_KEY}\nOPENROUTER_API_KEY={fake_openrouter_key()}\n"
+        )
+        _lock(env, home_dir)
+
+        _unlock(env, home_dir, "--alias", _alias_for(home_dir, "OPENROUTER_API_KEY"))
+        assert dotenv_values(env)["OPENROUTER_BASE_URL"] == "https://api.openai.com/v1"
+
+    @pytest.mark.parametrize("other_key", [False, True], ids=["alone", "next-to-an-openai-key"])
+    def test_your_line_that_refers_to_a_line_lock_wrote_is_left_alone(
+        self, home_dir: WorthlessHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, other_key
+    ) -> None:
+        """While locked, ${OPENROUTER_BASE_URL} expands to the proxy, but lock never
+        wrote OPENAI_BASE_URL: unlock must not rewrite or remove it (merge-ready brutus)."""
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        env = tmp_path / ".env"
+        env.write_text(
+            "OPENROUTER_BASE_URL=https://openrouter.ai/api/v1\n"
+            "OPENAI_BASE_URL=${OPENROUTER_BASE_URL}\n"
+            f"OPENROUTER_API_KEY={fake_openrouter_key()}\n"
+            + (f"BACKUP_OPENAI_API_KEY={_TEST_KEY}\n" if other_key else "")
+        )
+        original = env.read_bytes()
+        _lock(env, home_dir)
+
+        _unlock(env, home_dir)
+        assert env.read_bytes() == original
+
     def test_a_line_that_refers_to_a_key_is_saved_as_written_never_expanded(
         self, home_dir: WorthlessHome, tmp_path: Path
     ) -> None:
@@ -717,10 +755,14 @@ class TestUnlockPutsBackTheBaseUrlYouHad:
         env.write_text(
             f"OPENAI_API_KEY={_TEST_KEY}\nOPENAI_BASE_URL=https://gw.example.com/{_TEST_KEY}/v1\n"
         )
-        _lock(env, home_dir)
+        locked = _lock(env, home_dir)
         record_json, _mac = _saved_record(home_dir)
         if _TEST_KEY in record_json:
             pytest.fail("the saved BASE_URL record holds the key")  # never echo it
+        assert _said(locked, "it holds one of your keys")
+
+        _unlock(env, home_dir)
+        assert "OPENAI_BASE_URL" not in dotenv_values(env)
 
     def test_lock_never_saves_an_expanded_value_that_holds_a_key(self) -> None:
         """Whatever the reason lock falls back to the expanded form, a key never
@@ -902,7 +944,10 @@ class TestUnlockPutsBackTheBaseUrlYouHad:
         assert env.read_bytes() == original
         # Never silent: the note names the file (uninstall walks several) and the
         # host it wrote, so a surprising destination shows (WOR-1023).
-        assert _said(result, "to https://openrouter.ai, the upstream this key used while locked")
+        assert _said(
+            result,
+            "to an address at https://openrouter.ai, the upstream this key used while locked",
+        )
         assert _said(result, "older version")
         assert str(env) in "".join(result.output.split())
 
@@ -1165,18 +1210,21 @@ class TestUnlockPutsBackTheBaseUrlYouHad:
             # Registered, but python-dotenv (or a shell) would expand another key into it.
             "https://gw.example.com/${OPENAI_API_KEY}/v1",
             "https://gw.example.com/$OPENAI_API_KEY/v1",
+            # Registered, but the rewriter can't write a quote back (WOR-1027).
+            "https://gw.example.com/o'neil/v1",
         ],
         ids=[
             "unregistered",
             "registered-but-loopback",
             "registered-with-reference",
             "registered-with-bare-dollar",
+            "registered-but-unwritable",
         ],
     )
     def test_an_old_row_whose_stored_upstream_lock_would_refuse_loses_the_line(
         self, home_dir: WorthlessHome, tmp_path: Path, stored: str
     ) -> None:
-        if "$" in stored:
+        if "$" in stored or "'" in stored:
             _register_gateway(home_dir, stored, name="reference-gw")
         env = tmp_path / ".env"
         key = fake_openrouter_key()

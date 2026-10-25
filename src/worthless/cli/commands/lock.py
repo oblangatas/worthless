@@ -56,7 +56,6 @@ from worthless.cli.dotenv_rewriter import (
     EnvSnapshot,
     is_writable_value,
     read_env_snapshot,
-    referenced_names,
     rewrite_env_keys,
     scan_env_keys,
 )
@@ -1055,7 +1054,8 @@ def _value_to_put_back(
     """The value unlock writes back into *slot*: as written, else as parsed, else none.
 
     As written keeps ``${GATEWAY}/v1`` unexpanded, unless it refers to another
-    ``*_BASE_URL`` line lock rewrites: put back during a partial unlock,
+    ``*_BASE_URL`` line lock rewrites, directly or through other lines: put
+    back during a partial unlock,
     ``${OPENAI_BASE_URL}`` would expand to a still-locked key's proxy URL and
     send the real key there, so the value it has now goes back instead
     (WOR-1026: let unlock choose). A reference to a key variable stays as
@@ -1069,7 +1069,7 @@ def _value_to_put_back(
     """
     name = _oc_audit.sanitise_for_message(slot)
     raw = snapshot.raw.get(slot)
-    if raw is not None and referenced_names(raw) & (base_url_slots - {slot}):
+    if raw is not None and snapshot.names_reached(raw) & (base_url_slots - {slot}):
         get_console().print_warning(
             f"{name} refers to another line lock rewrites, so unlock will put back "
             "the value it has now, not the reference."
@@ -1111,8 +1111,9 @@ async def _record_base_url_restores(
     if not planned:
         return
     key_vars = {p.var_name for p in planned}
+    slots = set(base_url_lines)
     originals = {
-        slot: _value_to_put_back(slot, snapshot, set(base_url_lines), key_vars)
+        slot: _value_to_put_back(slot, snapshot, slots, key_vars)
         for slot, (_, existed) in base_url_lines.items()
         if existed
     }

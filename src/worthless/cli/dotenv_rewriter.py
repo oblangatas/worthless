@@ -28,7 +28,7 @@ import re
 import stat as _stat
 from collections import Counter
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -810,13 +810,26 @@ class EnvSnapshot:
     when :func:`rewrite_env_keys` can write it back. Writing one back gives
     the line byte for byte, except that an unquoted value loses its trailing
     whitespace. Key lines are not copied: nothing needs their raw text.
-    Pass ``sha256`` to :func:`rewrite_env_keys` to refuse the write if the
-    file changed since this read.
+    ``refs`` holds, for every line, the names its value refers to (names
+    only). Pass ``sha256`` to :func:`rewrite_env_keys` to refuse the write if
+    the file changed since this read.
     """
 
     parsed: dict[str, str | None]
     raw: dict[str, str]
     sha256: bytes
+    refs: dict[str, frozenset[str]] = field(default_factory=dict)
+
+    def names_reached(self, value: str) -> set[str]:
+        """The variables *value* expands, directly or through the lines it names."""
+        reached: set[str] = set()
+        todo = list(referenced_names(value))
+        while todo:
+            name = todo.pop()
+            if name not in reached:
+                reached.add(name)
+                todo.extend(self.refs.get(name, ()))
+        return reached
 
 
 def read_env_snapshot(env_path: Path) -> EnvSnapshot:
@@ -833,10 +846,14 @@ def read_env_snapshot(env_path: Path) -> EnvSnapshot:
     except UnicodeDecodeError:
         raise UnsafeRewriteRefused(UnsafeReason.SNIFF) from None
     raw: dict[str, str] = {}
+    refs: dict[str, frozenset[str]] = {}
     for line in _split_logical_lines(stripped):
-        if line.key is None or not line.key.endswith("_BASE_URL"):
+        if line.key is None:
             continue
         head, value, _tail = _split_assignment(line.raw)
+        refs[line.key] = frozenset(referenced_names(value))
+        if not line.key.endswith("_BASE_URL"):
+            continue
         if not head.endswith(('"', "'")):
             value = value.rstrip(" \t")
         if is_writable_value(value):
@@ -844,7 +861,7 @@ def read_env_snapshot(env_path: Path) -> EnvSnapshot:
         else:
             raw.pop(line.key, None)  # the last line decides, as python-dotenv's does
     parsed = dict(dotenv_values(stream=io.StringIO(text)))
-    return EnvSnapshot(parsed=parsed, raw=raw, sha256=hashlib.sha256(existing).digest())
+    return EnvSnapshot(parsed=parsed, raw=raw, sha256=hashlib.sha256(existing).digest(), refs=refs)
 
 
 def referenced_names(value: str) -> set[str]:

@@ -299,7 +299,7 @@ async def _prune_old_spend_log(db: aiosqlite.Connection) -> None:
         pass
 
 
-async def _migrate_decoy_hash_column(db: aiosqlite.Connection) -> None:
+async def _migrate_decoy_hash_column(db: aiosqlite.Connection, columns: set[str]) -> None:
     """WOR-31: add decoy_hash column to enrollments.
 
     The early-return-on-column-exists guard used to skip BOTH the ALTER
@@ -309,8 +309,6 @@ async def _migrate_decoy_hash_column(db: aiosqlite.Connection) -> None:
     column-conditional (skipped if present), CREATE INDEX is always
     attempted (idempotent via IF NOT EXISTS).
     """
-    cursor = await db.execute("PRAGMA table_info(enrollments)")
-    columns = {row[1] for row in await cursor.fetchall()}
     try:
         if "decoy_hash" not in columns:
             await db.execute("ALTER TABLE enrollments ADD COLUMN decoy_hash TEXT")
@@ -352,7 +350,7 @@ async def _migrate_pending_charges(db: aiosqlite.Connection) -> None:
     await db.commit()
 
 
-async def _migrate_original_mode_column(db: aiosqlite.Connection) -> None:
+async def _migrate_original_mode_column(db: aiosqlite.Connection, columns: set[str]) -> None:
     """WOR-715: add enrollments.original_mode (nullable, no backfill).
 
     Stores the .env's pre-lock POSIX mode so uninstall can restore the
@@ -362,8 +360,6 @@ async def _migrate_original_mode_column(db: aiosqlite.Connection) -> None:
     .env becomes 0o600 on lock. Without this column uninstall would silently
     leave it at 0o600. NULL = "mode unknown (pre-715 install), leave as-is".
     """
-    cursor = await db.execute("PRAGMA table_info(enrollments)")
-    columns = {row[1] for row in await cursor.fetchall()}
     if "original_mode" not in columns:
         try:
             await db.execute("ALTER TABLE enrollments ADD COLUMN original_mode INTEGER")
@@ -373,15 +369,13 @@ async def _migrate_original_mode_column(db: aiosqlite.Connection) -> None:
                 raise
 
 
-async def _migrate_base_url_restore_columns(db: aiosqlite.Connection) -> None:
+async def _migrate_base_url_restore_columns(db: aiosqlite.Connection, columns: set[str]) -> None:
     """WOR-1013: add the enrollments BASE_URL restore record (nullable, no backfill).
 
     NULL = enrolled before WOR-1013: nothing recorded what the line held
     before lock, so unlock writes back the stored upstream where that can't
     misdirect a key, and otherwise removes the proxy line it routes (WOR-981).
     """
-    cursor = await db.execute("PRAGMA table_info(enrollments)")
-    columns = {row[1] for row in await cursor.fetchall()}
     await _add_columns_if_missing(
         db,
         {
@@ -401,9 +395,11 @@ async def migrate_db(db_path: str) -> None:
         await _migrate_pending_charges(db)
 
         await _prune_old_spend_log(db)
-        await _migrate_decoy_hash_column(db)
-        await _migrate_original_mode_column(db)
-        await _migrate_base_url_restore_columns(db)
+        cursor = await db.execute("PRAGMA table_info(enrollments)")
+        enrollment_columns = {row[1] for row in await cursor.fetchall()}
+        await _migrate_decoy_hash_column(db, enrollment_columns)
+        await _migrate_original_mode_column(db, enrollment_columns)
+        await _migrate_base_url_restore_columns(db, enrollment_columns)
 
         cursor = await db.execute("PRAGMA table_info(shards)")
         shard_columns = {row[1] for row in await cursor.fetchall()}
