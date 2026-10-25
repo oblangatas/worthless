@@ -34,13 +34,14 @@ from worthless.cli.commands.lock import (
 from worthless.cli.dotenv_rewriter import (
     is_writable_value,
     read_env_snapshot,
+    referenced_names,
     rewrite_env_keys,
     scan_env_keys,
 )
 from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary
 from worthless.cli.log_redaction import _redact
 from worthless.cli.orphans import format_orphan_error
-from worthless.cli.providers import lookup_by_url
+from worthless.cli.providers import is_bundled_url, lookup_by_url
 from worthless.cli.process import disable_core_dumps
 from worthless.crypto.reconstruction import reconstruct_key, reconstruct_key_fp
 from worthless.crypto.types import zero_buf
@@ -313,14 +314,17 @@ def _why_value_unknown(p: _PlannedRestore) -> str:
 
 
 def _usable_stored_upstream(url: str | None) -> str | None:
-    """*url* if lock would accept it as an upstream today and the rewriter can write it.
+    """*url* if it is a registered public https upstream the rewriter can write back.
 
     ``shards.base_url`` carries no MAC, but the proxy already sends the real key
     there while it is locked (worthless-rzi1), so writing it back gives a DB
-    writer nothing new. The same checks lock runs keep a tampered row from
-    pointing the app anywhere lock itself would refuse.
+    writer nothing new. Registry membership, lock's gateway SSRF check, and no
+    ``${...}`` for python-dotenv to expand keep a tampered row from pointing the
+    app anywhere else.
     """
     if not url or lookup_by_url(url) is None or not is_writable_value(url):
+        return None
+    if referenced_names(url):
         return None
     try:
         _validate_upstream_base_url(url)
@@ -329,12 +333,30 @@ def _usable_stored_upstream(url: str | None) -> str | None:
     return url
 
 
-def _unknown_line_action(p: _PlannedRestore, base_url_var: str) -> _LineAction:
+def _fits_line(p: _PlannedRestore, var_name: str, base_url_var: str, upstream: str) -> bool:
+    """Whether *upstream* can go into *base_url_var* without misdirecting another client.
+
+    A user-registered upstream came from the user's own line, so it goes back.
+    A bundled one may be a default lock chose, so it only goes into the line
+    named after this key's own var: OPENROUTER_KEY reaches OPENAI_BASE_URL only
+    through the protocol's name, and an OpenAI client reading that line would
+    send its key to OpenRouter. Never for Anthropic: the registry keeps /v1 for
+    the proxy, and the Anthropic SDK adds its own.
+    """
+    if not is_bundled_url(upstream):
+        return True
+    named_after_key = var_name.endswith("_API_KEY") and (
+        _derive_base_url_var(var_name, p.provider) == base_url_var
+    )
+    return named_after_key and p.provider != "anthropic"
+
+
+def _unknown_line_action(p: _PlannedRestore, var_name: str, base_url_var: str) -> _LineAction:
     """No saved value: write back the upstream the key used while locked, else remove."""
     name = _oc_audit.sanitise_for_message(base_url_var)
     why = _why_value_unknown(p)
     upstream = _usable_stored_upstream(p.stored_upstream)
-    if upstream is not None:
+    if upstream is not None and _fits_line(p, var_name, base_url_var, upstream):
         return _LineAction(
             upstream,
             f"Set {name} to the upstream this key used while locked: {why}. If you had a "
@@ -359,7 +381,7 @@ def _line_actions(p: _PlannedRestore, var_name: str) -> dict[str, _LineAction]:
     names = {_derive_base_url_var(var_name, p.provider)}
     if p.provider in _PROVIDER_ENV_MAP:
         names.add(_PROVIDER_ENV_MAP[p.provider])
-    actions = {name: _unknown_line_action(p, name) for name in names}
+    actions = {name: _unknown_line_action(p, var_name, name) for name in names}
     restore = p.base_url_restore
     if restore is not None and restore.var is not None:
         if restore.original is None:
@@ -367,7 +389,7 @@ def _line_actions(p: _PlannedRestore, var_name: str) -> dict[str, _LineAction]:
         elif is_writable_value(restore.original):
             actions[restore.var] = _LineAction(restore.original, saved=True)
         else:
-            actions[restore.var] = _unknown_line_action(p, restore.var)
+            actions[restore.var] = _unknown_line_action(p, var_name, restore.var)
     return actions
 
 

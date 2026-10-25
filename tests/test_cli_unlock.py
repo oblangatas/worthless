@@ -338,23 +338,23 @@ class TestUnlockRemovesTheBaseUrlLockWrote:
         _unlock(env, home_dir)
         assert env.read_bytes() == original
 
-    def test_line_named_by_an_older_lock_stops_routing_the_proxy(
+    def test_line_named_by_an_older_lock_is_removed(
         self, home_dir: WorthlessHome, tmp_path: Path
     ) -> None:
         """Before v0.3.3 lock named the line after the protocol, not the key's var.
 
-        No record on such a row, so the line gets the upstream the key used while
-        locked (WOR-1013's old-row decision) instead of being removed.
+        Writing OpenRouter's address into OPENAI_BASE_URL would send an OpenAI
+        client's key there, so this line is removed, not written back.
         """
         env = tmp_path / ".env"
         env.write_text(f"OPENROUTER_API_KEY={fake_openrouter_key()}\n")
+        original = env.read_bytes()
         _lock(env, home_dir)
         _as_enrolled_before_wor_1013(home_dir)
         env.write_text(env.read_text().replace("OPENROUTER_BASE_URL=", "OPENAI_BASE_URL="))
 
         _unlock(env, home_dir)
-        assert "127.0.0.1" not in env.read_text()
-        assert dotenv_values(env)["OPENAI_BASE_URL"] == "https://openrouter.ai/api/v1"
+        assert env.read_bytes() == original
 
     def test_line_is_removed_after_the_proxy_port_changed(
         self, home_dir: WorthlessHome, tmp_path: Path
@@ -875,15 +875,70 @@ class TestUnlockPutsBackTheBaseUrlYouHad:
             "OPENROUTER_BASE_URL": "https://openrouter.ai/api/v1",
         }
 
+    def test_an_old_row_never_points_a_protocol_line_at_another_vendor(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """OPENROUTER_KEY reaches OPENAI_BASE_URL only through the protocol's name, and
+        OPENAI_KEY reads that line too: OpenRouter's address there would send the real
+        OpenAI key to OpenRouter (brutus on #738)."""
+        env = tmp_path / ".env"
+        env.write_text(f"OPENROUTER_KEY={fake_openrouter_key()}\nOPENAI_KEY={_TEST_KEY}\n")
+        _lock(env, home_dir)
+        assert dotenv_values(env)["OPENAI_BASE_URL"].endswith(
+            f"/{_alias_for(home_dir, 'OPENROUTER_KEY')}/v1"
+        )
+        _as_enrolled_before_wor_1013(home_dir)
+
+        _unlock(env, home_dir)
+        assert "OPENAI_BASE_URL" not in dotenv_values(env)
+
+    def test_an_old_anthropic_row_gets_no_line_its_sdk_would_misread(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """The registry keeps /v1 on Anthropic's URL for the proxy; the Anthropic SDK adds
+        its own, so writing it back would turn every call into /v1/v1/messages."""
+        env = tmp_path / ".env"
+        env.write_text(f"ANTHROPIC_API_KEY={_TEST_KEY_2}\n")
+        original = env.read_bytes()
+        _lock(env, home_dir)
+        _as_enrolled_before_wor_1013(home_dir)
+
+        _unlock(env, home_dir)
+        assert env.read_bytes() == original
+
+    def test_an_old_row_gets_openrouter_back_in_openai_base_url_named_after_its_key(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """OpenRouter's documented setup: its key in OPENAI_API_KEY, its address in
+        OPENAI_BASE_URL. The line is named after this key, so it comes back."""
+        env = tmp_path / ".env"
+        env.write_text(
+            "OPENAI_BASE_URL=https://openrouter.ai/api/v1\n"
+            f"OPENAI_API_KEY={fake_openrouter_key()}\n"
+        )
+        original = env.read_bytes()
+        _lock(env, home_dir)
+        _as_enrolled_before_wor_1013(home_dir)
+
+        _unlock(env, home_dir)
+        assert env.read_bytes() == original
+
     @pytest.mark.parametrize(
         "stored",
         # Ollama's bundled URL is registered, but lock's SSRF check refuses loopback.
-        ["https://unregistered.example/v1", "http://localhost:11434/v1"],
-        ids=["unregistered", "registered-but-loopback"],
+        [
+            "https://unregistered.example/v1",
+            "http://localhost:11434/v1",
+            # Registered, but python-dotenv would expand another key into it.
+            "https://gw.example.com/${OPENAI_API_KEY}/v1",
+        ],
+        ids=["unregistered", "registered-but-loopback", "registered-with-reference"],
     )
     def test_an_old_row_whose_stored_upstream_lock_would_refuse_loses_the_line(
         self, home_dir: WorthlessHome, tmp_path: Path, stored: str
     ) -> None:
+        if "${" in stored:
+            _register_gateway(home_dir, stored, name="reference-gw")
         env = tmp_path / ".env"
         key = fake_openrouter_key()
         env.write_text(
