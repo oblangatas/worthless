@@ -1877,6 +1877,41 @@ class TestLockBareBaseUrlLine:
         assert f"/{alias}/v1" not in read
 
 
+class TestLockNeverLeavesAKeyBehind:
+    """Lock refuses, .env unchanged, if a copy of the key would stay readable (WOR-1048)."""
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "OPENROUTER_API_KEY={key}\n'OPENROUTER_API_KEY'={key}\n",
+            "OPENROUTER_BASE_URL\nOPENROUTER_API_KEY={key}\n'OPENROUTER_API_KEY'={key}\n",
+            "'OPENROUTER_BASE_URL'=https://openrouter.ai/api/v1\n"
+            "OPENROUTER_API_KEY={key}\n'OPENROUTER_API_KEY'={key}\n",
+            "# OPENROUTER_API_KEY={key}\nOPENROUTER_API_KEY={key}\n",
+        ],
+        ids=["quoted-copy", "quoted-copy-bare-slot", "quoted-copy-quoted-slot", "commented-copy"],
+    )
+    def test_lock_refuses_instead_of_saying_protected(
+        self, home_dir: WorthlessHome, tmp_path: Path, content: str
+    ) -> None:
+        """Before: lock said "You're protected" with the real key still in the file."""
+        key = fake_openrouter_key()
+        env = tmp_path / ".env"
+        env.write_text(content.format(key=key))
+        original = env.read_bytes()
+
+        result = runner.invoke(
+            app, ["lock", "--env", str(env)], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
+        )
+        assert result.exit_code != 0
+        assert "You're protected" not in result.output
+        assert "WRTLS-112" in result.output
+        assert "OPENROUTER_API_KEY" in result.output
+        assert key not in result.output
+        assert env.read_bytes() == original
+        assert asyncio.run(_repo(home_dir).list_enrollments()) == []
+
+
 class TestLockChecksItsLineAfterTheWrite:
     """Lock's check of the line it wrote only warns (WOR-1041)."""
 

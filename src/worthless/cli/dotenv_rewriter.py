@@ -27,7 +27,7 @@ import os
 import re
 import stat as _stat
 from collections import Counter
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -801,6 +801,17 @@ def _append_additions(lines: list[_LogicalLine], additions: dict[str, str], eol:
         )
 
 
+class KeyWouldSurvive(ValueError):
+    """A value :func:`rewrite_env_keys` must remove would still be in the file.
+
+    Carries the names only, never the values.
+    """
+
+    def __init__(self, names: list[str]) -> None:
+        self.names = names
+        super().__init__(f"value(s) would survive the rewrite: {names!r}")
+
+
 @dataclass(frozen=True)
 class EnvSnapshot:
     """One read of a ``.env``: its parse, its ``*_BASE_URL`` values as written, its hash.
@@ -894,6 +905,7 @@ def rewrite_env_keys(
     additions: dict[str, str] | None = None,
     removals: set[str] | None = None,
     expected_baseline_sha256: bytes | None = None,
+    must_remove: Mapping[str, str] | None = None,
     _hook_before_replace: Callable[[], None] | None = None,
 ) -> None:
     """Atomically replace N keys in *env_path* via one ``safe_rewrite`` call.
@@ -917,6 +929,11 @@ def rewrite_env_keys(
     the rewrite refuse if the file changed since the caller read it. Without
     it the baseline is this call's own read.
 
+    *must_remove* maps names to values (keys lock is replacing) that must not
+    appear anywhere in the rewritten file. A copy on a line the rewriter
+    can't edit, such as a quoted ``'NAME'=...`` or a comment, raises
+    :class:`KeyWouldSurvive` before any write (WOR-1048).
+
     *_hook_before_replace* is forwarded to :func:`safe_rewrite`; the
     lock command binds a closure that runs reconstruct-and-verify for
     every shard under an exclusive SQLite flock before the rename.
@@ -937,6 +954,10 @@ def rewrite_env_keys(
         _append_additions(lines, additions, eol)
 
     new_content = _restore_bom(_serialize_lines(lines), had_bom)
+    if must_remove:
+        survived = [name for name, value in must_remove.items() if value.encode() in new_content]
+        if survived:
+            raise KeyWouldSurvive(sorted(survived))
     if new_content == existing:
         return
     safe_rewrite(

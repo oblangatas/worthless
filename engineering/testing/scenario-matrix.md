@@ -334,6 +334,14 @@ These must always hold. Any scenario that breaks them is a bug:
 - **Risk**: LOW (was broken, now fixed)
 - **Test status**: Tested (TestLockBareBaseUrlLine, including the two documented limits; TestLockSaysWhatItAdded; `tests/test_e2e.py::TestBareBaseUrlLineStillRoutesTheKey`)
 
+#### U-40: User locks a `.env` that holds a second copy of a key on a line lock can't edit
+
+- **Precondition**: `.env` has `OPENROUTER_API_KEY=<key>` and also `'OPENROUTER_API_KEY'=<key>` (quoted name) or `# OPENROUTER_API_KEY=<key>` (comment), with or without a bare/quoted `*_BASE_URL` line
+- **Expected**: Before the write, `rewrite_env_keys(must_remove=...)` finds the planned key's text in the new bytes and raises `KeyWouldSurvive`; lock turns it into WRTLS-112 naming the variable (never the value), before the commit mark, so pass-1 unwinds: `.env` byte-identical, no rows, no "You're protected".
+- **Current behavior**: FIXED (WOR-1048) -- lock said "You're protected" with the real key still readable (python-dotenv reads the later quoted line). With a bare/quoted `*_BASE_URL` line, main stopped with WRTLS-199, and WOR-1041 alone would have turned that into the same false "protected".
+- **Risk**: HIGH (was broken, now fixed)
+- **Test status**: Tested (TestLockNeverLeavesAKeyBehind)
+
 ---
 
 ## 2. Attacker Scenarios

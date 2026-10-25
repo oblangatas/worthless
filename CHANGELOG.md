@@ -5,6 +5,12 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 ## [Unreleased]
 
 ### Security
+- **Lock no longer says "You're protected" while a copy of your key is still in the `.env` as plain text** (WOR-1048, [#740](https://github.com/oblangatas/worthless/pull/740)).
+  Before: if the `.env` held a second copy of a key on a line lock can't edit, such as a quoted name (`'OPENROUTER_API_KEY'=sk-or-…`) or a commented-out line with the same key, lock replaced the line it could edit, said "You're protected", and left the real key readable in the file. python-dotenv reads the last line, so an app, or anyone with a copy of the file, still got the real key. If that file also had a `*_BASE_URL` line with no value, or a quoted one, lock used to stop with WRTLS-199 instead; the WOR-1041 fix below makes such a file lock, so both changes ship together.
+  Now: before writing, lock checks that no copy of a key it is replacing would stay in the file. If one would, it stops with WRTLS-112 and names the variable, never the value. Your `.env` is unchanged and nothing is stored. Delete the copy and run `worthless lock` again.
+
+  **Limits.**
+  - Lock looks for the key's exact text. A copy that was changed, for example split across lines, escaped or encoded, isn't found.
 - **Unlocking a key that v0.3.16 or earlier locked puts back its vendor's address where that is safe, and tells you when it can't** (WOR-981, [#737](https://github.com/oblangatas/worthless/pull/737); WOR-1013, [#738](https://github.com/oblangatas/worthless/pull/738)).
   If your `.env` had a `*_BASE_URL` line before a normal lock with v0.3.16 or earlier, for example `OPENROUTER_BASE_URL=https://openrouter.ai/api/v1`, lock replaced it with the proxy URL and kept no copy of your value. Unlock and uninstall now put back that vendor's address when your key names the vendor (an `sk-or-` key gets OpenRouter's), and say so. Removing the line instead would let an app that reads `OPENROUTER_BASE_URL` with no default send your OpenRouter key to OpenAI. Before this release, unlock left the dead proxy line, so calls failed on your machine (an `OPENAI_BASE_URL` or `ANTHROPIC_BASE_URL` line was removed instead).
 

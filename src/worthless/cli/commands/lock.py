@@ -54,6 +54,7 @@ from worthless.cli.scanner import SkippedFile, scan_source_for_hardcoded_provide
 from worthless.cli.sentinel import is_partial, read_sentinel
 from worthless.cli.dotenv_rewriter import (
     EnvSnapshot,
+    KeyWouldSurvive,
     is_writable_value,
     read_env_snapshot,
     rewrite_env_keys,
@@ -1164,13 +1165,26 @@ def _batch_rewrite(
         else:
             additions[slot] = proxy_urls[slot]
 
-    rewrite_env_keys(
-        env_path,
-        updates,
-        additions=additions or None,
-        expected_baseline_sha256=snapshot.sha256,
-        _hook_before_replace=_build_verify_hook(planned),
-    )
+    try:
+        rewrite_env_keys(
+            env_path,
+            updates,
+            additions=additions or None,
+            expected_baseline_sha256=snapshot.sha256,
+            must_remove={p.var_name: snapshot.parsed.get(p.var_name) or "" for p in planned},
+            _hook_before_replace=_build_verify_hook(planned),
+        )
+    except KeyWouldSurvive as exc:
+        # Before the commit mark, so pass-1 unwinds: never "protected" with a
+        # readable copy of the key left in the file (WOR-1048).
+        names = [_oc_audit.sanitise_for_message(n) for n in exc.names]
+        raise WorthlessError(
+            ErrorCode.INVALID_INPUT,
+            f"Lock stopped before changing your .env: it still holds a copy of "
+            f"{', '.join(names)} as plain text on a line lock can't edit, such as a "
+            f"quoted name ('{names[0]}'=...) or a comment. Delete that copy, then run "
+            "`worthless lock` again. Your .env is unchanged.",
+        ) from None
     return proxy_urls
 
 
