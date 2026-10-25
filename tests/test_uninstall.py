@@ -258,6 +258,27 @@ def test_uninstall_restores_multiple_envs(home_dir: WorthlessHome, tmp_path) -> 
     assert not home_dir.base_dir.exists()
 
 
+def test_uninstall_round_trips_an_openrouter_env(home_dir: WorthlessHome, tmp_path) -> None:
+    """WOR-981: uninstall restores through unlock: it drops the line lock wrote, and only that."""
+    from tests.helpers import fake_openrouter_key
+
+    env = tmp_path / ".env"
+    env.write_text(
+        f"OPENAI_BASE_URL=https://api.openai.com/v1\nOPENROUTER_API_KEY={fake_openrouter_key()}\n"
+    )
+    original = env.read_bytes()
+    locked = runner.invoke(
+        app, ["lock", "--env", str(env)], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
+    )
+    assert locked.exit_code == 0, locked.output
+
+    result = runner.invoke(
+        app, ["uninstall", "--yes"], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
+    )
+    assert result.exit_code == 0, result.output
+    assert env.read_bytes() == original
+
+
 def test_uninstall_calls_openclaw_undo_with_restored_aliases(
     home_dir: WorthlessHome, tmp_path, monkeypatch
 ) -> None:

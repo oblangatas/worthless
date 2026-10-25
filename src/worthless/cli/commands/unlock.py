@@ -21,11 +21,8 @@ from worthless.cli._repo_factory import open_repo
 from worthless.cli.bootstrap import WorthlessHome, acquire_lock, get_home
 from worthless.cli.console import get_console
 
-# 8rqs Phase 8 moved _PROVIDER_ENV_MAP from wrap.py into lock.py
-# (wrap is now a passthrough; lock owns BASE_URL ownership). HF4 on main
-# pre-dated that move and still imported from wrap.py — that import would
-# fail at module-load post-merge. Importing from the new home, lock.py.
-from worthless.cli.commands.lock import _PROVIDER_ENV_MAP
+# Lock names the .env BASE_URL lines; unlock must name them exactly as lock did.
+from worthless.cli.commands.lock import _PROVIDER_ENV_MAP, _derive_base_url_var
 
 # scan_env_keys is used by HF4's per-key messaging logic (the
 # "no DB row here" hard-error path further down in this module).
@@ -258,6 +255,11 @@ def _batch_restore_env(env_path: Path, planned: list[_PlannedRestore]) -> None:
     """One ``rewrite_env_keys`` call: restore plaintext + drop BASE_URLs."""
     updates: dict[str, str] = {}
     removals: set[str] = set()
+    try:
+        # python-dotenv before 1.2.3 keeps a UTF-8 BOM in the first key's name.
+        current = {k.lstrip("﻿"): v for k, v in dotenv_values(env_path).items()}
+    except UnicodeDecodeError:
+        current = {}  # rewrite_env_keys refuses a non-UTF-8 file with its own error
     for p in planned:
         if p.var_name is None:
             continue
@@ -270,9 +272,19 @@ def _batch_restore_env(env_path: Path, planned: list[_PlannedRestore]) -> None:
             f"(planned aliases: {[entry.alias for entry in planned]})"
         )
         updates[p.var_name] = p.key_buf.decode("utf-8")
-        base_url_var = _PROVIDER_ENV_MAP.get(p.provider)
-        if base_url_var:
-            removals.add(base_url_var)
+        # Lock names the line after the key's var (OPENROUTER_API_KEY ->
+        # OPENROUTER_BASE_URL); before v0.3.3 it used the protocol's name.
+        names = {_derive_base_url_var(p.var_name, p.provider)}
+        if p.provider in _PROVIDER_ENV_MAP:
+            names.add(_PROVIDER_ENV_MAP[p.provider])
+        for base_url_var in names:
+            # Drop a line only while it routes THIS alias to the proxy. A
+            # --keys-only lock never wrote it (the value is the user's own), and
+            # a slot shared by two keys points at the other key's alias.
+            # Matching the alias, not the whole URL, survives a port change.
+            value = current.get(base_url_var) or ""
+            if _openclaw_integration._alias_from_base_url(value) == p.alias:
+                removals.add(base_url_var)
 
     if not updates and not removals:
         return
