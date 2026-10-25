@@ -258,7 +258,13 @@ async def _restore_all(
                 #     UnsafeReason.SYMLINK), shard-A is still live → guard fires.
                 #   - present regular file, unrestorable (transient EACCES, tamper)
                 #     → `failed`, trips the guard.
-                if not Path(env_path).exists():
+                try:
+                    gone = not Path(env_path).exists()
+                except OSError:
+                    # Can't even look (a folder it can't open): count the file as
+                    # there, so the guard names it and --force can still finish.
+                    gone = False
+                if gone:
                     missing.append(env_path)
                 else:
                     failed.append((env_path, _scrub_exc(exc)))
@@ -715,8 +721,9 @@ def _run_uninstall(*, assume_yes: bool, force: bool = False, remove_mcp: bool = 
             raise WorthlessError(
                 ErrorCode.SHARD_STORAGE_FAILED,
                 f"Uninstall stopped partway ({_scrub_exc(stopped.cause)}), so Worthless "
-                "was not removed. Keys it already restored are back in their .env. "
-                "Re-run `worthless uninstall` to restore the rest.",
+                "was not removed. Keys it already restored are back in their .env, but "
+                "openclaw.json may still point at the proxy for them. Re-run "
+                "`worthless uninstall` to restore the rest.",
             ) from stopped.cause
         except (WorthlessError, sqlite3.Error, OSError) as exc:
             if _is_recoverable_repo_error(exc):
