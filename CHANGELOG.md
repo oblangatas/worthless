@@ -72,6 +72,7 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - Uninstall prints `.env`, editor-config and `~/.worthless` paths without control characters, so a folder name can't send escape codes to your terminal. Before, it did in a normal run. The `chmod` command it suggests quotes the path for the shell, so one with a space doesn't become two files. The `[FAIL]` block's details are printed the same way.
 
   **Limits.**
+  - A `.env` on a drive or network share that isn't connected reads as a deleted project, the same as before: uninstall drops its key without `--force`. Connect the drive before you uninstall (WOR-1068).
   - `--quiet` still hides that uninstall couldn't remove the service unit or the keychain entry, or couldn't stop the proxy (WOR-1055).
   - If uninstall stops partway, or refuses because a `.env` can't be restored, `openclaw.json` may still point at the proxy for the keys it restored first. A second run doesn't fix that (WOR-1053).
   - `uninstall --force` with a `.env` it can't restore writes NUL bytes as the `apiKey` in `openclaw.json` for the keys it did restore, and still says `[OK]`. Those keys are back in their `.env` (WOR-1051).
