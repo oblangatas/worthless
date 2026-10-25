@@ -109,8 +109,8 @@ def _decide_mode(
     - already owner-only (incl. tighter ``0o400``) → restore it exactly, silently.
     - looser than owner-only → clamp to the safe mode. A human (no ``--yes``)
       is asked whether to keep their original instead; an agent (``--yes`` /
-      piped EOF) gets the safe default plus a plain notice, shown even under
-      ``--quiet`` because it changes the user's file (WOR-1043). Non-judgmental.
+      piped EOF) gets the safe default plus a plain notice. Both notices show
+      even under ``--quiet`` (WOR-1043). Non-judgmental.
     """
     safe = secure_restore_mode(original_mode)
     if original_mode is None or safe == original_mode:
@@ -129,7 +129,9 @@ def _decide_mode(
             default=True,
         )
         if not keep_safe:
-            console.print_warning(
+            # Your choice, but the file still lets others read your key: --quiet
+            # doesn't hide that (WOR-1043).
+            console.print_file_note(
                 f"{shown}: kept original 0o{original_mode:o} at your request "
                 f"(other local users can read this key)."
             )
