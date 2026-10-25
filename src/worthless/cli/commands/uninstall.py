@@ -68,6 +68,10 @@ class _RestoreStopped(Exception):
     broken-install path, where --force wipes the ones not restored yet.
     """
 
+    def __init__(self, cause: BaseException) -> None:
+        super().__init__(cause)
+        self.cause = cause
+
 
 def _shown(path: object) -> str:
     """A path as uninstall prints it: no control characters for the terminal."""
@@ -230,8 +234,11 @@ async def _restore_all(
             # key is genuinely NOT restored, so it routes to missing/failed and may
             # block the wipe. Everything after it is best-effort post-restore work
             # that must never route to `failed` (worthless-ftit).
+            notes: list[str] = []
             try:
-                planned = await _unlock_batch(slot["aliases"], home, repo, Path(env_path))
+                planned = await _unlock_batch(
+                    slot["aliases"], home, repo, Path(env_path), notes_out=notes
+                )
             except Exception as exc:  # noqa: BLE001 — collect every failure, never abort mid-loop
                 # A busy/locked DB (or IPC blip) mid-restore is RECOVERABLE, not an
                 # unrestorable file: re-raise so the outer handler refuses (never
@@ -256,6 +263,11 @@ async def _restore_all(
                 else:
                     failed.append((env_path, _scrub_exc(exc)))
                 continue
+            finally:
+                # Outside the catch above: a note that can't be written is not a
+                # failed restore, and stops the loop instead (WOR-1043).
+                for note in notes:
+                    console.print_file_note(note)
 
             # OpenClaw symmetric undo is FUNCTIONAL, not cosmetic: skipping it
             # leaves openclaw.json pointing at the proxy we're about to delete. A
@@ -290,7 +302,7 @@ async def _restore_all(
         # such as a note that couldn't be written (EAGAIN on a non-blocking pipe).
         if _is_recoverable_repo_error(exc):
             raise
-        raise _RestoreStopped from exc
+        raise _RestoreStopped(exc) from exc
     finally:
         # SR-02: if the loop exits early — e.g. a Ctrl-C ``click.Abort`` (a
         # RuntimeError, NOT an OSError) from _decide_mode's confirm escapes the
@@ -702,10 +714,10 @@ def _run_uninstall(*, assume_yes: bool, force: bool = False, remove_mcp: bool = 
         except _RestoreStopped as stopped:
             raise WorthlessError(
                 ErrorCode.SHARD_STORAGE_FAILED,
-                f"Uninstall stopped partway ({_scrub_exc(stopped.__cause__)}), so Worthless "
+                f"Uninstall stopped partway ({_scrub_exc(stopped.cause)}), so Worthless "
                 "was not removed. Keys it already restored are back in their .env. "
-                "Re-run `worthless uninstall` to finish.",
-            ) from stopped.__cause__
+                "Re-run `worthless uninstall` to restore the rest.",
+            ) from stopped.cause
         except (WorthlessError, sqlite3.Error, OSError) as exc:
             if _is_recoverable_repo_error(exc):
                 # A busy/locked DB (usually the running proxy) is RECOVERABLE —

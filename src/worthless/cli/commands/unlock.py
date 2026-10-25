@@ -597,6 +597,7 @@ async def _unlock_batch(
     env_path: Path | None,
     *,
     print_recovery: bool = False,
+    notes_out: list[str] | None = None,
 ) -> list[_PlannedRestore]:
     """Transactional multi-alias unlock.
 
@@ -604,6 +605,10 @@ async def _unlock_batch(
     (HF4 / worthless-5u6y). The returned objects have ``key_buf`` already
     zeroed by this function's ``finally`` block; only metadata (alias,
     var_name, provider, env_path) is safe to read post-return.
+
+    With ``notes_out``, the notes for the user go there instead of being
+    printed: uninstall prints them itself, so a note it can't write is never
+    taken for a failed restore (WOR-1043).
     """
     console = get_console()
     planned: list[_PlannedRestore] = []
@@ -636,8 +641,11 @@ async def _unlock_batch(
             p.zero()
         # Only after pass-3: a note written into a closed pipe ends the process,
         # which must not land between the .env rewrite and the DB cleanup.
-        for note in notes:
-            console.print_file_note(note)
+        if notes_out is not None:
+            notes_out.extend(notes)
+        else:
+            for note in notes:
+                console.print_file_note(note)
 
 
 def _reread_plaintext_from_env(p: _PlannedRestore) -> bytearray | None:
