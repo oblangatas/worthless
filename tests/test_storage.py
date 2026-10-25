@@ -592,29 +592,29 @@ async def test_a_base_url_restore_from_an_earlier_lock_is_refused(
 
 
 @pytest.mark.asyncio
-async def test_a_value_lock_refused_round_trips_apart_from_a_line_it_added(
+async def test_a_value_lock_did_not_save_round_trips_apart_from_a_line_it_added(
     repo: ShardRepository, sample_split_result
 ) -> None:
-    """WOR-1042: both have no value to put back, but unlock tells the user only of a refusal."""
+    """WOR-1042: neither has a value to put back, but only an unsaved one gets a note."""
     await _enroll_for_restore(repo, sample_split_result)
-    refused = BaseUrlRestore(var="OPENROUTER_BASE_URL", original=None, refused=True)
+    unsaved = BaseUrlRestore(var="OPENROUTER_BASE_URL", original=None, unsaved=True)
     await repo.record_base_url_restores(
-        _RESTORE_ENV, [(_RESTORE_ALIAS, _RESTORE_VAR, _RESTORE_SHARD_A, refused)]
+        _RESTORE_ENV, [(_RESTORE_ALIAS, _RESTORE_VAR, _RESTORE_SHARD_A, unsaved)]
     )
 
     enrollment = await repo.get_enrollment(_RESTORE_ALIAS, _RESTORE_ENV)
     assert enrollment is not None
     restored = await repo.verified_base_url_restore(enrollment, _RESTORE_SHARD_A)
-    assert restored == refused
+    assert restored == unsaved
     assert restored != BaseUrlRestore(var="OPENROUTER_BASE_URL", original=None)
 
 
 def test_a_base_url_restore_saved_before_wor_1042_reads_as_before() -> None:
-    """A record without ``refused`` keeps its JSON and its meaning, so its MAC still holds."""
+    """A record without ``unsaved`` keeps its JSON and its meaning, so its MAC still holds."""
     old_json = '{"original": null, "var": "OPENROUTER_BASE_URL"}'
     record = BaseUrlRestore.from_json(old_json)
     assert record == BaseUrlRestore(var="OPENROUTER_BASE_URL", original=None)
-    assert not record.refused
+    assert not record.unsaved
     assert record.to_json() == old_json
 
 
@@ -628,15 +628,37 @@ def test_a_base_url_restore_saved_before_wor_1042_reads_as_before() -> None:
         '{"var": 1, "original": null}',
         '{"var": "OPENROUTER_BASE_URL", "original": 2}',
         '{"var": null, "original": "https://openrouter.ai/api/v1"}',
-        '{"var": "OPENROUTER_BASE_URL", "original": null, "refused": "yes"}',
-        '{"var": null, "original": null, "refused": true}',
-        '{"var": "OPENROUTER_BASE_URL", "original": "https://openrouter.ai/api/v1",'
-        ' "refused": true}',
+        '{"original": null, "unsaved": "yes", "var": "OPENROUTER_BASE_URL"}',
+        '{"original": null, "unsaved": 1, "var": "OPENROUTER_BASE_URL"}',
+        # Lock leaves the key out when false, so an explicit false isn't its form.
+        '{"original": null, "unsaved": false, "var": "OPENROUTER_BASE_URL"}',
+        '{"original": null, "unsaved": true, "var": null}',
+        '{"original": "https://openrouter.ai/api/v1", "unsaved": true,'
+        ' "var": "OPENROUTER_BASE_URL"}',
+        # Valid JSON, but not the sorted, spaced form lock writes.
+        '{"var": "OPENROUTER_BASE_URL", "original": null}',
+        '{"original":null,"var":"OPENROUTER_BASE_URL"}',
     ],
 )
 def test_base_url_restore_rejects_other_shapes(record_json: str) -> None:
     with pytest.raises(ValueError):
         BaseUrlRestore.from_json(record_json)
+
+
+@pytest.mark.parametrize(
+    ("var", "original", "unsaved"),
+    [
+        (None, "https://openrouter.ai/api/v1", False),
+        (None, None, True),
+        ("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1", True),
+    ],
+)
+def test_lock_cannot_build_a_record_unlock_would_refuse(
+    var: str | None, original: str | None, unsaved: bool
+) -> None:
+    """Refused on write too, or unlock would blame a lock bug on a DB edit."""
+    with pytest.raises(ValueError, match="base_url restore"):
+        BaseUrlRestore(var=var, original=original, unsaved=unsaved)
 
 
 @pytest.mark.asyncio

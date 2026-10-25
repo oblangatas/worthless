@@ -537,4 +537,6 @@ class TestQuietUnlockStillSaysWhatItDidToYourLine:
         said = " ".join(proc.stderr.split())  # however Rich wrapped it (WOR-1022)
         assert "lock couldn't save the value you had in OPENAI_BASE_URL" in said, proc.stderr
         assert "Restored" not in said  # still quiet about progress
-        assert "example.com" not in said  # names the line, never its value
+        unwrapped = proc.stderr.replace("\n", "")
+        if gateway in unwrapped or key in unwrapped:
+            pytest.fail("unlock showed the line's value or the key")

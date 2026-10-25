@@ -1066,6 +1066,8 @@ def _value_to_put_back(
     neither form can be written back, means unlock
     removes the line; a value the rewriter refuses would make every unlock of
     this ``.env`` fail (WOR-1027: validate against the quotes it goes into).
+    Return None only for a value lock won't save: the record marks it unsaved,
+    and unlock tells the user to set it again (WOR-1042).
     """
     name = _oc_audit.sanitise_for_message(slot)
     raw = snapshot.raw.get(slot)
@@ -1128,7 +1130,7 @@ async def _record_base_url_restores(
         # In originals as None: the line had a value lock won't save (WOR-1042).
         original = originals.get(slot) if slot else None
         record = BaseUrlRestore(
-            var=slot, original=original, refused=slot in originals and original is None
+            var=slot, original=original, unsaved=slot in originals and original is None
         )
         restores.append((p.alias, p.var_name, p.shard_a.decode("utf-8"), record))
     if await repo.record_base_url_restores(env_str, restores) != len(restores):

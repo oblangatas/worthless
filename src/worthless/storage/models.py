@@ -64,40 +64,45 @@ class BaseUrlRestore:
     ``var`` is None when lock wrote no line for the key (``--keys-only``, or a
     line another key in the ``.env`` routes). ``original`` is the value as
     written before lock, or None when the line did not exist and lock added it.
-    ``refused`` marks a line that had a value lock would not save (WOR-1027,
+    ``unsaved`` marks a line that had a value lock would not save (WOR-1027,
     WOR-1035), so unlock can tell the user it is gone (WOR-1042). It is left
     out of the JSON when False, so records saved before it keep their meaning.
     """
 
     var: str | None
     original: str | None
-    refused: bool = False
+    unsaved: bool = False
+
+    def __post_init__(self) -> None:
+        # Checked on write too: a record lock MACs but unlock can't parse would
+        # read as tampered with.
+        if self.var is None and (self.original is not None or self.unsaved):
+            raise ValueError("base_url restore has a value but no line")
+        if self.unsaved and self.original is not None:
+            raise ValueError("base_url restore has a value it says lock didn't save")
 
     def to_json(self) -> str:
         fields: dict[str, str | bool | None] = {"var": self.var, "original": self.original}
-        if self.refused:
-            fields["refused"] = True
+        if self.unsaved:
+            fields["unsaved"] = True
         return json.dumps(fields, sort_keys=True)
 
     @classmethod
     def from_json(cls, record_json: str) -> BaseUrlRestore:
         """Parse :meth:`to_json` output; ``ValueError`` on any other shape."""
         parsed = json.loads(record_json)
-        if not isinstance(parsed, dict) or set(parsed) - {"refused"} != {"var", "original"}:
+        if not isinstance(parsed, dict) or set(parsed) - {"unsaved"} != {"var", "original"}:
             raise ValueError("base_url restore record has the wrong keys")
         var, original = parsed["var"], parsed["original"]
-        refused = parsed.get("refused", False)
         if not (var is None or isinstance(var, str)):
             raise ValueError("base_url restore var is not a string")
         if not (original is None or isinstance(original, str)):
             raise ValueError("base_url restore original is not a string")
-        if not isinstance(refused, bool):
-            raise ValueError("base_url restore refused is not a boolean")
-        if var is None and original is not None:
-            raise ValueError("base_url restore has an original value but no line")
-        if refused and (var is None or original is not None):
-            raise ValueError("base_url restore refused a value it has, or on no line")
-        return cls(var=var, original=original, refused=refused)
+        record = cls(var=var, original=original, unsaved=bool(parsed.get("unsaved")))
+        if record.to_json() != record_json:
+            # Lock writes one form; "unsaved": false or 1 is not it.
+            raise ValueError("base_url restore record is not in the form lock writes")
+        return record
 
 
 @dataclass

@@ -376,6 +376,8 @@ def test_uninstall_says_lock_could_not_save_the_value_you_had(
     assert "lock couldn't save the value you had in OPENAI_BASE_URL" in " ".join(
         result.output.split()
     )
+    if url in result.output.replace("\n", "") or key in result.output.replace("\n", ""):
+        pytest.fail("uninstall showed the line's value or the key")
 
 
 def test_uninstall_calls_openclaw_undo_with_restored_aliases(

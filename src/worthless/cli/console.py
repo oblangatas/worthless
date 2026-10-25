@@ -128,11 +128,13 @@ class WorthlessConsole:
             self._err.print(f"[yellow]{_rich_escape(message)}[/yellow]")
 
     def print_file_note(self, message: str) -> None:
-        """Yellow text to stderr about a change made to the user's own file.
+        """Yellow text to stderr about what a command did, or declined to do, to a
+        file the user owns.
 
         NOT suppressed by ``--quiet`` (WOR-1042): quiet hides progress, but a
         note that unlock removed or rewrote a line in the user's ``.env`` is
-        the only record of that change. Agents often pass ``--quiet``.
+        the only record of that change. Agents often pass ``--quiet``. Shown
+        under ``--json`` too: it goes to stderr, so stdout stays machine-readable.
         """
         self._err.print(f"[yellow]{_rich_escape(message)}[/yellow]")
 

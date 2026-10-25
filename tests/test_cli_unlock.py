@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import sqlite3
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 from dotenv import dotenv_values
@@ -1320,17 +1321,24 @@ class TestUnlockAlwaysSaysWhatItDidToYourLine:
     def test_unlock_says_lock_could_not_save_the_value_you_had(
         self, home_dir: WorthlessHome, tmp_path: Path, url: str, quiet: bool
     ) -> None:
-        """A refused value is recorded apart from a line lock added, so its removal is said."""
-        _register_gateway(home_dir, url, name="refused-gw")
+        """A value lock didn't save is recorded apart from a line lock added, so its
+        removal is said."""
+        _register_gateway(home_dir, url, name="unsaved-gw")
         env = tmp_path / ".env"
         env.write_text(f"OPENAI_BASE_URL={url}\nOPENAI_API_KEY={_TEST_KEY}\n")
         _lock(env, home_dir)
 
         result = _unlock(env, home_dir, quiet=quiet)
         assert env.read_text() == f"OPENAI_API_KEY={_TEST_KEY}\n"
-        assert _said(result, "lock couldn't save the value you had in OPENAI_BASE_URL")
-        if "example.com" in result.output:
-            pytest.fail("the note shows the line's value")  # never echo it: it may hold a key
+        assert _said(
+            result,
+            "Removed OPENAI_BASE_URL: lock couldn't save the value you had in OPENAI_BASE_URL, "
+            "so unlock can't put it back. Set it again.",
+        )
+        unwrapped = result.output.replace("\n", "")  # Rich folds a long word across lines
+        for part in (urlsplit(url).hostname, urlsplit(url).path, _TEST_KEY):
+            if part and part in unwrapped:
+                pytest.fail("the note shows the line's value")  # never echo it: it may hold a key
 
     def test_a_line_lock_added_is_still_removed_without_a_note(
         self, home_dir: WorthlessHome, tmp_path: Path
@@ -1344,14 +1352,14 @@ class TestUnlockAlwaysSaysWhatItDidToYourLine:
         assert env.read_text() == f"OPENROUTER_API_KEY={key}\n"
         assert "OPENROUTER_BASE_URL" not in result.output
 
-    def test_a_record_saved_without_the_refusal_keeps_todays_behaviour(
+    def test_a_record_saved_without_the_unsaved_mark_keeps_todays_behaviour(
         self, home_dir: WorthlessHome, tmp_path: Path
     ) -> None:
         """A record lock saved before WOR-1042 reads as a line lock added: removed, no note."""
         from worthless.storage.models import BaseUrlRestore
 
         url = "https://gateway.example.com/v1/o'neil"
-        _register_gateway(home_dir, url, name="refused-gw")
+        _register_gateway(home_dir, url, name="unsaved-gw")
         env = tmp_path / ".env"
         env.write_text(f"OPENAI_BASE_URL={url}\nOPENAI_API_KEY={_TEST_KEY}\n")
         _lock(env, home_dir)

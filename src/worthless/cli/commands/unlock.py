@@ -417,7 +417,7 @@ def _unknown_line_action(
     )
 
 
-def _refused_note(base_url_var: str) -> str:
+def _unsaved_note(base_url_var: str) -> str:
     """Lock had the user's value on this line but would not save it (WOR-1042)."""
     name = _oc_audit.sanitise_for_message(base_url_var)
     return (
@@ -444,8 +444,8 @@ def _line_actions(
     actions = {name: _unknown_line_action(p, name, key_vendor, other_lines) for name in names}
     restore = p.base_url_restore
     if restore is not None and restore.var is not None:
-        if restore.refused:
-            actions[restore.var] = _LineAction(None, _refused_note(restore.var))
+        if restore.unsaved:
+            actions[restore.var] = _LineAction(None, _unsaved_note(restore.var))
         elif restore.original is None:
             actions[restore.var] = _LineAction(None)  # lock added it
         elif is_writable_value(restore.original):
@@ -526,7 +526,8 @@ def _batch_restore_env(env_path: Path, planned: list[_PlannedRestore]) -> None:
         expected_baseline_sha256=snapshot.sha256,
     )
     for note in notes:
-        get_console().print_file_note(f"{env_path}: {note}")
+        where = _oc_audit.sanitise_for_message(str(env_path))
+        get_console().print_file_note(f"{where}: {note}")
 
 
 async def _pass3_db_cleanup(
