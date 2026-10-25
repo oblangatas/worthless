@@ -367,6 +367,27 @@ class TestPartialUnlockKeepsOtherKeyRouted:
         assert "STATUS:502" in proc.stdout, f"stdout: {proc.stdout}\nstderr: {proc.stderr}"
 
 
+@pytest.mark.integration
+@pytest.mark.real_ipc
+@pytest.mark.timeout(60)
+class TestBareBaseUrlLineStillRoutesTheKey:
+    """A bare ``OPENAI_BASE_URL`` line (no ``=``) doesn't keep the key off the proxy (WOR-1041)."""
+
+    def test_locked_key_reaches_its_alias(self, tmp_path: Path) -> None:
+        def add_bare_line_then_lock(env_file: Path, cli_env: dict[str, str]) -> None:
+            env_file.write_text("OPENAI_BASE_URL\n" + env_file.read_text())
+            _lock(env_file, cli_env)
+
+        proc = _run_child_under_wrap(
+            tmp_path,
+            _ROUTED_CHILD_SCRIPT,
+            add_bare_line_then_lock,
+            # Nothing leaves the machine: upstream HTTPS goes to a closed port.
+            extra_env={"HTTPS_PROXY": "http://127.0.0.1:9", "NO_PROXY": "127.0.0.1,localhost"},
+        )
+        assert "STATUS:502" in proc.stdout, f"stdout: {proc.stdout}\nstderr: {proc.stderr}"
+
+
 # An app that reads its upstream from OPENROUTER_BASE_URL with no default, the
 # WOR-1013 victim. The guard keeps a test key from ever leaving the machine: an
 # unset line makes the SDK fall back to api.openai.com, which is reported, not
