@@ -593,6 +593,25 @@ class TestQuietUninstallStillSaysWhatYouLose:
         assert "Worthless uninstalled" not in proc.stderr  # still quiet about progress
         assert_not_shown(proc.stderr, key)
 
+    def test_a_folder_name_cannot_send_escape_codes_to_the_terminal(self, tmp_path: Path) -> None:
+        """The bytes on stderr carry no ESC from the path, so the terminal can't be
+        told to clear the screen."""
+        env_file, _home, _key, cli_env = _make_e2e_env(tmp_path, proxy_port=1)
+        project = env_file.parent.with_name("proj\x1b[2J\x1b[1;1HKeys OK")
+        env_file.parent.rename(project)
+        env_file = project / ".env"
+        _lock(env_file, cli_env)
+        target = env_file.with_name("elsewhere.env")
+        target.write_text("OPENAI_API_KEY=whatever\n")
+        env_file.unlink()
+        env_file.symlink_to(target)
+
+        proc = self._quiet_force_uninstall(cli_env, capture_output=True)
+
+        assert proc.returncode == 0, f"stdout: {proc.stdout}\nstderr: {proc.stderr}"
+        assert "\x1b" not in proc.stderr
+        assert f"could NOT restore {str(env_file).replace(chr(27), '')}" in proc.stderr
+
     def test_a_closed_stderr_stops_it_before_the_wipe(self, tmp_path: Path) -> None:
         """If uninstall can't say which key it would destroy, it doesn't destroy it:
         the note comes before the wipe, and writing it to a closed pipe ends the run."""
