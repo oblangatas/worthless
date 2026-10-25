@@ -40,6 +40,7 @@ from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary
 from worthless.cli.keystore import delete_fernet_key
 from worthless.cli.platform import IS_WINDOWS
 from worthless.crypto.types import zero_buf
+from worthless.openclaw import audit as _oc_audit
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +95,8 @@ def _decide_mode(
     - already owner-only (incl. tighter ``0o400``) → restore it exactly, silently.
     - looser than owner-only → clamp to the safe mode. A human (no ``--yes``)
       is asked whether to keep their original instead; an agent (``--yes`` /
-      piped EOF) gets the safe default plus a plain notice. Non-judgmental.
+      piped EOF) gets the safe default plus a plain notice, shown even under
+      ``--quiet`` because it changes the user's file (WOR-1043). Non-judgmental.
     """
     safe = secure_restore_mode(original_mode)
     if original_mode is None or safe == original_mode:
@@ -120,9 +122,10 @@ def _decide_mode(
         return safe
 
     # Agent / --yes: clamp to safe, tell them plainly how to revert.
-    console.print_warning(
-        f"{env_path}: original 0o{original_mode:o} was readable by other users; "
-        f"set to minimal-safe 0o{safe:o}. Run 'chmod {original_mode:o} {env_path}' to revert."
+    shown = _oc_audit.sanitise_for_message(env_path)
+    console.print_file_note(
+        f"{shown}: original 0o{original_mode:o} was readable by other users; "
+        f"set to minimal-safe 0o{safe:o}. Run 'chmod {original_mode:o} {shown}' to revert."
     )
     return safe
 
@@ -197,6 +200,7 @@ async def _restore_all(
     completed = False
     try:
         for env_path, slot in by_path.items():
+            shown = _oc_audit.sanitise_for_message(env_path)
             # _unlock_batch is the ONLY shred-guarded step: it writes the real key
             # back and deletes shard-B, transactionally. A failure HERE means the
             # key is genuinely NOT restored, so it routes to missing/failed and may
@@ -237,8 +241,8 @@ async def _restore_all(
                 unlocked.extend(await _build_oc_restores(planned, repo, console))
             except Exception as exc:  # noqa: BLE001 — best-effort; surfaced via exit 73
                 oc_build_failed = True
-                console.print_warning(
-                    f"{env_path}: key restored, but openclaw.json may still point at the "
+                console.print_file_note(
+                    f"{shown}: key restored, but openclaw.json may still point at the "
                     f"proxy ({_scrub_exc(exc)}); run `worthless doctor` after uninstall."
                 )
 
@@ -252,9 +256,9 @@ async def _restore_all(
                 if target is not None:
                     os.chmod(env_path, target)  # noqa: PTH101
             except OSError as exc:
-                console.print_warning(
-                    f"{env_path}: key restored, but the file mode wasn't tightened "
-                    f"({_scrub_exc(exc)}); run 'chmod 600 {env_path}' yourself."
+                console.print_file_note(
+                    f"{shown}: key restored, but the file mode wasn't tightened "
+                    f"({_scrub_exc(exc)}); run 'chmod 600 {shown}' yourself."
                 )
                 target = slot["mode"]
             restored.append((env_path, target))
@@ -375,7 +379,7 @@ def _handle_broken_repo(console, exc, *, force: bool):  # noqa: ANN001, ANN201
             "at your provider."
         )
         raise typer.Exit(code=1) from exc
-    console.print_warning(
+    console.print_key_note(
         f"--force: could not restore keys (broken install: {_scrub_exc(exc)}); wiping the "
         "remains anyway. Rotate your keys at the provider."
     )
@@ -383,18 +387,22 @@ def _handle_broken_repo(console, exc, *, force: bool):  # noqa: ANN001, ANN201
 
 
 def _report_outcomes(console, restored, missing, enroll_only) -> None:  # noqa: ANN001
-    """Print per-file results: restored, skipped-because-gone, enroll-only."""
+    """Print per-file results: restored, skipped-because-gone, enroll-only.
+
+    Only "restored" is progress. The other two delete a key for good, so
+    ``--quiet`` doesn't hide them (WOR-1043).
+    """
     for env_path, mode in restored:
         shown = f"0o{mode:o}" if mode is not None else "unchanged"
         console.print_success(f"restored {env_path}  (mode {shown})")
     for env_path in missing:
         # BUG-2: project deleted — nothing to restore, never a block.
-        console.print_warning(
-            f"skipping {env_path}: the project file is gone — nothing to restore "
-            "(removing the dead record)."
+        console.print_key_note(
+            f"skipping {_oc_audit.sanitise_for_message(env_path)}: the project file is "
+            "gone — nothing to restore (removing the dead record)."
         )
     for alias in enroll_only:
-        console.print_warning(
+        console.print_key_note(
             f"enroll-only key {alias!r} has no .env to restore — it will be removed. "
             "Rotate it at your provider if you still need it."
         )
@@ -403,13 +411,16 @@ def _report_outcomes(console, restored, missing, enroll_only) -> None:  # noqa: 
 def _guard_failed_restores(console, failed, unlocked, *, force: bool) -> None:  # noqa: ANN001
     """Key-shredder guard: a .env EXISTS but its key couldn't be reconstructed.
     Zero any built keys (SR-02), then block (no --force) or warn and continue
-    (--force).
+    (--force). The warnings show even under ``--quiet`` (WOR-1043): with
+    --force they are the only record of the keys it destroys.
     """
     if not failed:
         return
     _zero_restore_keys(unlocked)
     for env_path, why in failed:
-        console.print_warning(f"could NOT restore {env_path}: {why}")
+        console.print_key_note(
+            f"could NOT restore {_oc_audit.sanitise_for_message(env_path)}: {why}"
+        )
     if not force:
         console.print_failure(
             f"Aborting uninstall — {len(failed)} file(s) could not be restored. "
@@ -420,7 +431,7 @@ def _guard_failed_restores(console, failed, unlocked, *, force: bool) -> None:  
             ErrorCode.SHARD_STORAGE_FAILED,
             "uninstall aborted: not all .env files restored",
         )
-    console.print_warning(
+    console.print_key_note(
         f"--force: wiping despite {len(failed)} file(s) whose keys could not be "
         "restored. Rotate those keys at your provider."
     )
@@ -432,7 +443,8 @@ def _finalize_wipe(console, home, n_restored: int) -> None:  # noqa: ANN001
     if home.base_dir.exists():
         # Partial wipe (e.g. an immutable/locked file survived rmtree). Tell the
         # truth — do NOT claim "~/.worthless removed" right after warning it wasn't.
-        console.print_warning(
+        # What's left can hold shard-B, so --quiet doesn't hide it (WOR-1043).
+        console.print_key_note(
             f"~/.worthless could not be fully removed ({home.base_dir}); delete it manually."
         )
         console.print_success(

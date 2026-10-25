@@ -891,18 +891,22 @@ def _apply_openclaw_unlock(
             )
             return False
 
-        # Detected + failed: trust-failure path.
+        # Detected + failed: trust-failure path. The whole block shows under
+        # --quiet, not just its header: it says what openclaw.json still holds
+        # and how to fix it (WOR-1043).
         console.print_failure("[FAIL] OpenClaw cleanup did NOT complete.")
-        console.print_warning(
+        console.print_file_note(
             "   Your .env is restored, but the original OpenClaw provider entries"
         )
-        console.print_warning("   may not have been restored in ~/.openclaw/openclaw.json — re-run")
-        console.print_warning("   `worthless unlock` or `worthless doctor` to repair.")
+        console.print_file_note(
+            "   may not have been restored in ~/.openclaw/openclaw.json — re-run"
+        )
+        console.print_file_note("   `worthless unlock` or `worthless doctor` to repair.")
         for name, reason in result.providers_skipped:
-            console.print_warning(f"   skipped {name} ({reason})")
+            console.print_file_note(f"   skipped {name} ({reason})")
         for event in result.events:
             if event.level == "error":
-                console.print_warning(f"   {event.code.value} — {event.detail}")
+                console.print_file_note(f"   {event.code.value} — {event.detail}")
         _write_unlock_sentinel(
             home,
             status="partial",
@@ -930,14 +934,15 @@ def _emit_openclaw_unlock_failure(
     # choke point — redact ``detail`` here for both the console warning and
     # the sentinel event dict below.
     detail = _redact(detail)
+    # Shown in full under --quiet, as on the detected+failed path (WOR-1043).
     console.print_failure("[FAIL] OpenClaw cleanup did NOT complete.")
-    console.print_warning("   Your .env is restored, but the original OpenClaw provider entries")
-    console.print_warning(
+    console.print_file_note("   Your .env is restored, but the original OpenClaw provider entries")
+    console.print_file_note(
         "   may not have been restored in ~/.openclaw/openclaw.json — repair via:"
     )
-    console.print_warning(f"   detail: {detail}")
-    console.print_warning("")
-    console.print_warning("   Fix:    worthless doctor")
+    console.print_file_note(f"   detail: {detail}")
+    console.print_file_note("")
+    console.print_file_note("   Fix:    worthless doctor")
     _write_unlock_sentinel(
         home,
         status="partial",
