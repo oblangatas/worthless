@@ -482,3 +482,59 @@ class TestUnlockedAppReachesYourOwnUpstream:
         assert [(path, auth == f"Bearer {key}") for path, auth in _FakeUpstream.received] == [
             ("/api/v1/chat/completions", True)
         ]
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(60)
+class TestQuietUnlockStillSaysWhatItDidToYourLine:
+    """`worthless --quiet unlock`, run as a real process, says on stderr what it did to a
+    `*_BASE_URL` line, and the `.env` on disk matches (WOR-1042)."""
+
+    def test_a_line_lock_could_not_save_is_removed_and_said(self, tmp_path: Path) -> None:
+        env_file, worthless_home, key, cli_env = _make_e2e_env(tmp_path, proxy_port=1)
+        # The rewriter can't write a quote back, so lock won't save it (WOR-1027).
+        gateway = "https://gateway.example.com/v1/o'neil"
+        env_file.write_text(f"OPENAI_BASE_URL={gateway}\nOPENAI_API_KEY={key}\n")
+        registered = runner.invoke(
+            app,
+            [
+                "providers",
+                "register",
+                "--name",
+                "quoted-gw",
+                "--url",
+                gateway,
+                "--protocol",
+                "openai",
+            ],
+            env=cli_env,
+        )
+        assert registered.exit_code == 0, registered.output
+        _lock(env_file, cli_env)
+
+        proc = subprocess.run(
+            [
+                str(Path(sys.executable).parent / "worthless"),
+                "--quiet",
+                "unlock",
+                "--env",
+                str(env_file),
+            ],
+            env={
+                **os.environ,
+                "WORTHLESS_HOME": str(worthless_home),
+                "WORTHLESS_KEYRING_BACKEND": "null",
+                "HOME": cli_env["HOME"],
+                "USERPROFILE": cli_env["USERPROFILE"],
+            },
+            timeout=45,
+            capture_output=True,
+            text=True,
+        )
+
+        assert proc.returncode == 0, f"stdout: {proc.stdout}\nstderr: {proc.stderr}"
+        assert env_file.read_text() == f"OPENAI_API_KEY={key}\n"
+        said = " ".join(proc.stderr.split())  # however Rich wrapped it (WOR-1022)
+        assert "lock couldn't save the value you had in OPENAI_BASE_URL" in said, proc.stderr
+        assert "Restored" not in said  # still quiet about progress
+        assert "example.com" not in said  # names the line, never its value
