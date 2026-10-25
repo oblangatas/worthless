@@ -377,7 +377,8 @@ async def _migrate_base_url_restore_columns(db: aiosqlite.Connection) -> None:
     """WOR-1013: add the enrollments BASE_URL restore record (nullable, no backfill).
 
     NULL = enrolled before WOR-1013: nothing recorded what the line held
-    before lock, so unlock keeps removing the proxy line it routes (WOR-981).
+    before lock, so unlock writes back the stored upstream where that can't
+    misdirect a key, and otherwise removes the proxy line it routes (WOR-981).
     """
     cursor = await db.execute("PRAGMA table_info(enrollments)")
     columns = {row[1] for row in await cursor.fetchall()}

@@ -34,11 +34,11 @@ from worthless.cli.commands.lock import (
 from worthless.cli.dotenv_rewriter import (
     is_writable_value,
     read_env_snapshot,
-    referenced_names,
     rewrite_env_keys,
     scan_env_keys,
 )
 from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary
+from worthless.cli.key_patterns import detect_provider
 from worthless.cli.log_redaction import _redact
 from worthless.cli.orphans import format_orphan_error
 from worthless.cli.providers import is_bundled_url, lookup_by_url
@@ -200,6 +200,8 @@ class _PlannedRestore:
     # shards.base_url: the upstream the proxy sent this key to while locked. The
     # fallback for a line with no usable record, once it passes lock's checks.
     stored_upstream: str | None = None
+    # *_BASE_URL lines an app using another key in the same .env may read.
+    other_keys_lines: frozenset[str] = frozenset()
 
     def zero(self) -> None:
         # Per CodeRabbit nitpick: reuse the imported `zero_buf` helper
@@ -222,6 +224,7 @@ async def _pass1_reconstruct(
     even if a later alias raises. On any failure the partial buffers
     are zeroed by the caller; nothing is written to disk.
     """
+    all_enrollments = await repo.list_enrollments()
     for alias in aliases:
         encrypted = await repo.fetch_encrypted(alias)
         if encrypted is None:
@@ -273,6 +276,7 @@ async def _pass1_reconstruct(
                     base_url_restore=base_url_restore,
                     base_url_record_refused=record_refused,
                     stored_upstream=encrypted.base_url,
+                    other_keys_lines=_lines_other_keys_read(enrollment, all_enrollments),
                 )
             )
         finally:
@@ -313,18 +317,42 @@ def _why_value_unknown(p: _PlannedRestore) -> str:
     return "unlock has no saved value it can write back for it"
 
 
+def _lines_read_by(enrollment: EnrollmentRecord) -> set[str]:
+    """The ``*_BASE_URL`` lines an app using this key may read.
+
+    The one lock names after its var, and its protocol's own: an OpenAI SDK
+    reads OPENAI_BASE_URL whatever variable holds its key.
+    """
+    lines = {_derive_base_url_var(enrollment.var_name, enrollment.provider or "openai")}
+    if enrollment.provider in _PROVIDER_ENV_MAP:
+        lines.add(_PROVIDER_ENV_MAP[enrollment.provider])
+    return lines
+
+
+def _lines_other_keys_read(
+    enrollment: EnrollmentRecord | None, all_enrollments: list[EnrollmentRecord]
+) -> frozenset[str]:
+    if enrollment is None:
+        return frozenset()
+    return frozenset(
+        line
+        for other in all_enrollments
+        if other.env_path == enrollment.env_path
+        and (other.key_alias, other.var_name) != (enrollment.key_alias, enrollment.var_name)
+        for line in _lines_read_by(other)
+    )
+
+
 def _usable_stored_upstream(url: str | None) -> str | None:
     """*url* if it is a registered public https upstream the rewriter can write back.
 
     ``shards.base_url`` carries no MAC, but the proxy already sends the real key
     there while it is locked (worthless-rzi1), so writing it back gives a DB
     writer nothing new. Registry membership, lock's gateway SSRF check, and no
-    ``${...}`` for python-dotenv to expand keep a tampered row from pointing the
-    app anywhere else.
+    ``$`` for python-dotenv or a shell to expand keep a tampered row from
+    pointing the app anywhere else.
     """
-    if not url or lookup_by_url(url) is None or not is_writable_value(url):
-        return None
-    if referenced_names(url):
+    if not url or "$" in url or lookup_by_url(url) is None or not is_writable_value(url):
         return None
     try:
         _validate_upstream_base_url(url)
@@ -333,30 +361,48 @@ def _usable_stored_upstream(url: str | None) -> str | None:
     return url
 
 
-def _fits_line(p: _PlannedRestore, var_name: str, base_url_var: str, upstream: str) -> bool:
-    """Whether *upstream* can go into *base_url_var* without misdirecting another client.
+# The protocol whose SDK reads each protocol-named line.
+_LINE_PROTOCOL = {line: protocol for protocol, line in _PROVIDER_ENV_MAP.items()}
 
-    A user-registered upstream came from the user's own line, so it goes back.
-    A bundled one may be a default lock chose, so it only goes into the line
-    named after this key's own var: OPENROUTER_KEY reaches OPENAI_BASE_URL only
-    through the protocol's name, and an OpenAI client reading that line would
-    send its key to OpenRouter. Never for Anthropic: the registry keeps /v1 for
-    the proxy, and the Anthropic SDK adds its own.
+
+def _fits_line(
+    p: _PlannedRestore, base_url_var: str, upstream: str, key_vendor: str | None
+) -> bool:
+    """Whether *upstream* can go into *base_url_var* without misdirecting any key.
+
+    Never ANTHROPIC_BASE_URL: the registry keeps /v1 for the proxy, and the
+    Anthropic SDK adds its own. Never a line another key in this .env reads.
+    Never across protocols. A gateway the user registered then goes back: it
+    came from their own line. A bundled address goes back only when it is the
+    vendor this key's own prefix names, and not OpenAI's: sk- also starts
+    DeepSeek and other keys that old locks routed to api.openai.com, and an
+    OpenAI line removed costs nothing, since OpenAI's address is the SDK default.
     """
+    entry = lookup_by_url(upstream)
+    if entry is None or base_url_var == "ANTHROPIC_BASE_URL":
+        return False
+    if base_url_var in p.other_keys_lines:
+        return False
+    line_protocol = _LINE_PROTOCOL.get(base_url_var)
+    if line_protocol is not None and entry.protocol != line_protocol:
+        return False
     if not is_bundled_url(upstream):
         return True
-    named_after_key = var_name.endswith("_API_KEY") and (
-        _derive_base_url_var(var_name, p.provider) == base_url_var
-    )
-    return named_after_key and p.provider != "anthropic"
+    return key_vendor not in (None, "openai") and entry.name == key_vendor
 
 
-def _unknown_line_action(p: _PlannedRestore, var_name: str, base_url_var: str) -> _LineAction:
-    """No saved value: write back the upstream the key used while locked, else remove."""
+def _unknown_line_action(
+    p: _PlannedRestore, base_url_var: str, key_vendor: str | None
+) -> _LineAction:
+    """No usable record: write back the upstream the key used while locked, else remove.
+
+    A record that failed its check always removes: falling back to the
+    unsealed stored upstream would let a DB edit choose by deleting the seal.
+    """
     name = _oc_audit.sanitise_for_message(base_url_var)
     why = _why_value_unknown(p)
-    upstream = _usable_stored_upstream(p.stored_upstream)
-    if upstream is not None and _fits_line(p, var_name, base_url_var, upstream):
+    upstream = None if p.base_url_record_refused else _usable_stored_upstream(p.stored_upstream)
+    if upstream is not None and _fits_line(p, base_url_var, upstream, key_vendor):
         return _LineAction(
             upstream,
             f"Set {name} to the upstream this key used while locked: {why}. If you had a "
@@ -369,7 +415,9 @@ def _unknown_line_action(p: _PlannedRestore, var_name: str, base_url_var: str) -
     )
 
 
-def _line_actions(p: _PlannedRestore, var_name: str) -> dict[str, _LineAction]:
+def _line_actions(
+    p: _PlannedRestore, var_name: str, key_vendor: str | None
+) -> dict[str, _LineAction]:
     """What to do with each ``*_BASE_URL`` line lock may have written for *p*.
 
     Every name lock has used for the key's line is a candidate (after the
@@ -381,7 +429,7 @@ def _line_actions(p: _PlannedRestore, var_name: str) -> dict[str, _LineAction]:
     names = {_derive_base_url_var(var_name, p.provider)}
     if p.provider in _PROVIDER_ENV_MAP:
         names.add(_PROVIDER_ENV_MAP[p.provider])
-    actions = {name: _unknown_line_action(p, var_name, name) for name in names}
+    actions = {name: _unknown_line_action(p, name, key_vendor) for name in names}
     restore = p.base_url_restore
     if restore is not None and restore.var is not None:
         if restore.original is None:
@@ -389,7 +437,7 @@ def _line_actions(p: _PlannedRestore, var_name: str) -> dict[str, _LineAction]:
         elif is_writable_value(restore.original):
             actions[restore.var] = _LineAction(restore.original, saved=True)
         else:
-            actions[restore.var] = _unknown_line_action(p, var_name, restore.var)
+            actions[restore.var] = _unknown_line_action(p, restore.var, key_vendor)
     return actions
 
 
@@ -429,8 +477,9 @@ def _batch_restore_env(env_path: Path, planned: list[_PlannedRestore]) -> None:
             f"duplicate planned restore for env var {p.var_name} "
             f"(planned aliases: {[entry.alias for entry in planned]})"
         )
-        updates[p.var_name] = p.key_buf.decode("utf-8")
-        for base_url_var, action in _line_actions(p, p.var_name).items():
+        key_text = p.key_buf.decode("utf-8")
+        updates[p.var_name] = key_text
+        for base_url_var, action in _line_actions(p, p.var_name, detect_provider(key_text)).items():
             # Touch a line only while it routes THIS alias to the proxy. A
             # --keys-only lock never wrote it (the value is the user's own), a
             # slot shared by two keys points at the other key's alias, and a

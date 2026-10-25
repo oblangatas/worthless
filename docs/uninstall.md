@@ -13,7 +13,7 @@ worthless uninstall
 
 That single command:
 
-1. **Restores every locked `.env`** to its real key, undoing the lock (the proxy `BASE_URL` line Worthless added is removed too, and one you already had gets your value back; for keys locked with v0.3.16 or earlier, which kept no copy, it gets the upstream the key used while locked).
+1. **Restores every locked `.env`** to its real key, undoing the lock (the proxy `BASE_URL` line Worthless added is removed too, and one you already had gets your value back; for keys locked with v0.3.16 or earlier, which kept no copy, it gets the vendor's address where that is safe, or is removed, and uninstall says which).
 2. **Reverts your OpenClaw config** — provider entries are restored to point back at the real provider with the real key.
 3. **Stops the running proxy daemon** (default port `8787`) if one is up.
 4. **Deletes `~/.worthless/`** (the local database and encryption key) and the encryption key held in your OS keychain.
