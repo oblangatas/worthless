@@ -1573,3 +1573,34 @@ class TestQuietUninstallStillSaysWhatYouLose:
         else:
             assert result.exit_code != 0
             assert home_dir.base_dir.exists()
+
+    @pytest.mark.skipif(
+        hasattr(os, "geteuid") and os.geteuid() == 0, reason="root opens any folder"
+    )
+    def test_a_folder_it_cannot_open_is_named_where_exists_hides_the_error(
+        self, home_dir: WorthlessHome, tmp_path, monkeypatch
+    ) -> None:
+        """Python 3.14's Path.exists() returns False for a folder it can't open
+        instead of raising. Read as a deleted project, uninstall would drop that
+        key's record, its shard-B, even without --force (CodeRabbit on #741)."""
+        import pathlib
+
+        def _exists_like_3_14(path, *, follow_symlinks: bool = True) -> bool:  # noqa: ANN001
+            try:
+                path.stat(follow_symlinks=follow_symlinks)
+            except OSError:
+                return False
+            return True
+
+        _, blocked = _lock_project(home_dir, tmp_path / "blocked")
+        monkeypatch.setattr(pathlib.Path, "exists", _exists_like_3_14)
+        blocked.parent.chmod(0)
+        try:
+            result = _quiet_uninstall(home_dir)
+        finally:
+            blocked.parent.chmod(0o755)
+
+        assert f"could NOT restore {blocked}" in result.output, result.output
+        assert "the project file is gone" not in result.output
+        assert result.exit_code != 0
+        assert home_dir.base_dir.exists()
