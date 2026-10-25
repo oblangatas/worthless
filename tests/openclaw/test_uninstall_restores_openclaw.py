@@ -354,6 +354,30 @@ def test_force_zeroes_restored_keys_when_a_note_about_a_lost_key_cant_be_written
     assert_not_shown(uninst.output, openai_key, anthropic_key)
 
 
+def test_refusing_without_force_zeroes_the_keys_it_restored(
+    openclaw_present: dict[str, Path], tmp_path: Path, monkeypatch
+) -> None:
+    """SR-02 (WOR-1051): without ``--force`` an unrestorable ``.env`` makes
+    uninstall refuse before the OpenClaw undo. The key it already restored for
+    the other ``.env`` must still be zeroed.
+    """
+    from tests.helpers import assert_not_shown
+
+    worthless_home, openai_key, anthropic_key, *_ = _lock_restorable_and_unrestorable(
+        openclaw_present, tmp_path
+    )
+    built = _keep_built_restores(monkeypatch)
+
+    uninst = runner.invoke(
+        app, ["uninstall", "--yes"], env={"WORTHLESS_HOME": str(worthless_home.base_dir)}
+    )
+
+    assert uninst.exit_code != 0, uninst.output
+    assert worthless_home.base_dir.exists(), "refused: nothing wiped"
+    _assert_all_zeroed(built)
+    assert_not_shown(uninst.output, openai_key, anthropic_key)
+
+
 @pytest.mark.parametrize("stop", ["restored line", "proxy warning"])
 def test_uninstall_zeroes_a_restored_key_when_it_stops_before_the_openclaw_undo(
     openclaw_present: dict[str, Path], tmp_path: Path, monkeypatch, stop: str

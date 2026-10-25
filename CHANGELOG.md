@@ -83,7 +83,7 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - The notes are plain text on stderr. `--json` output doesn't include them.
 - **`worthless uninstall --force` gives OpenClaw back the real key of each `.env` it restores** (WOR-1051, [#742](https://github.com/oblangatas/worthless/pull/742)).
   Before: when one `.env` couldn't be restored, `uninstall --force` wrote NUL bytes in place of every key it did restore, in `openclaw.json` and in the agent caches (`models.json`, `auth-profiles.json`). It pointed those providers back at the vendor, printed `[OK] OpenClaw: restored`, and exited 0. The keys were back in their `.env`, but OpenClaw couldn't use them, and the record that could fix `openclaw.json` was deleted with `~/.worthless`. If this happened to you, copy each key from its `.env` over the NUL bytes (`\u0000`) in OpenClaw's `openclaw.json` (usually `~/.openclaw/openclaw.json`) and in its agent caches (usually under `~/.openclaw/agents/`).
-  Now: OpenClaw gets the real key back, the same as when every `.env` is restored. Uninstall still wipes each key buffer it reconstructed before it exits, and now also when it stops after restoring them, for example on a line it can't write.
+  Now: OpenClaw gets each restored key back, the same as when every `.env` is restored. Uninstall still wipes from memory the keys it holds for OpenClaw before it exits, now also when it stops after restoring them, for example on a line it can't write. The limits below list the exceptions.
 
   **Limits.**
   - An entry lock added to `openclaw.json`, for example for a key whose `.env` couldn't be restored, still points at the removed proxy, even when uninstall says `[OK]` (WOR-1062).
