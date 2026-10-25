@@ -1911,6 +1911,37 @@ class TestLockNeverLeavesAKeyBehind:
         assert env.read_bytes() == original
         assert asyncio.run(_repo(home_dir).list_enrollments()) == []
 
+    def test_a_refused_relock_keeps_the_existing_lock(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """Refused before any DB write: following its advice still gets the key back.
+
+        Before, the unwind deleted the earlier lock's enrollment, and locking
+        again after deleting the copy split shard-A as if it were the key.
+        """
+        key = fake_openrouter_key()
+        env = tmp_path / ".env"
+        env.write_text(f"OPENROUTER_API_KEY={key}\n")
+        cli_env = {"WORTHLESS_HOME": str(home_dir.base_dir)}
+        locked = runner.invoke(app, ["lock", "--keys-only", "--env", str(env)], env=cli_env)
+        assert locked.exit_code == 0, locked.output
+        locked_line = env.read_text()
+        env.write_text(f"{locked_line}'OPENROUTER_API_KEY'={key}\n")
+        before = env.read_bytes()
+
+        relock = runner.invoke(app, ["lock", "--keys-only", "--env", str(env)], env=cli_env)
+        assert relock.exit_code != 0
+        assert "WRTLS-112" in relock.output
+        assert env.read_bytes() == before
+        assert len(asyncio.run(_repo(home_dir).list_enrollments())) == 1
+
+        env.write_text(locked_line)  # "Delete that copy, then run `worthless lock` again."
+        again = runner.invoke(app, ["lock", "--keys-only", "--env", str(env)], env=cli_env)
+        assert again.exit_code == 0, again.output
+        unlocked = runner.invoke(app, ["unlock", "--env", str(env)], env=cli_env)
+        assert unlocked.exit_code == 0, unlocked.output
+        assert env.read_text() == f"OPENROUTER_API_KEY={key}\n"
+
 
 class TestLockChecksItsLineAfterTheWrite:
     """Lock's check of the line it wrote only warns (WOR-1041)."""

@@ -27,7 +27,7 @@ import os
 import re
 import stat as _stat
 from collections import Counter
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -801,6 +801,20 @@ def _append_additions(lines: list[_LogicalLine], additions: dict[str, str], eol:
         )
 
 
+def copies_left_behind(
+    env_path: Path, values: Mapping[str, str], replaced: Collection[str]
+) -> list[str]:
+    """The names in *values* whose text is in *env_path* off the lines *replaced* names set.
+
+    Those are the lines :func:`rewrite_env_keys` replaces; a copy anywhere
+    else (a quoted ``'NAME'=...``, a comment, another variable's value) would
+    survive it (WOR-1048). Returns names only, never values.
+    """
+    stripped, _had_bom = _strip_bom(_safe_read_existing_bytes(env_path))
+    kept = b"".join(line.raw for line in _split_logical_lines(stripped) if line.key not in replaced)
+    return sorted(name for name, value in values.items() if value and value.encode() in kept)
+
+
 class KeyWouldSurvive(ValueError):
     """A value :func:`rewrite_env_keys` must remove would still be in the file.
 
@@ -955,9 +969,9 @@ def rewrite_env_keys(
 
     new_content = _restore_bom(_serialize_lines(lines), had_bom)
     if must_remove:
-        survived = [name for name, value in must_remove.items() if value.encode() in new_content]
+        survived = sorted(n for n, v in must_remove.items() if v and v.encode() in new_content)
         if survived:
-            raise KeyWouldSurvive(sorted(survived))
+            raise KeyWouldSurvive(survived)
     if new_content == existing:
         return
     safe_rewrite(

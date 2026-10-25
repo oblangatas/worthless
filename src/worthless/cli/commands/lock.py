@@ -55,6 +55,7 @@ from worthless.cli.sentinel import is_partial, read_sentinel
 from worthless.cli.dotenv_rewriter import (
     EnvSnapshot,
     KeyWouldSurvive,
+    copies_left_behind,
     is_writable_value,
     read_env_snapshot,
     rewrite_env_keys,
@@ -1175,17 +1176,22 @@ def _batch_rewrite(
             _hook_before_replace=_build_verify_hook(planned),
         )
     except KeyWouldSurvive as exc:
-        # Before the commit mark, so pass-1 unwinds: never "protected" with a
-        # readable copy of the key left in the file (WOR-1048).
-        names = [_oc_audit.sanitise_for_message(n) for n in exc.names]
-        raise WorthlessError(
-            ErrorCode.INVALID_INPUT,
-            f"Lock stopped before changing your .env: it still holds a copy of "
-            f"{', '.join(names)} as plain text on a line lock can't edit, such as a "
-            f"quoted name ('{names[0]}'=...) or a comment. Delete that copy, then run "
-            "`worthless lock` again. Your .env is unchanged.",
-        ) from None
+        # Backstop for the pre-flight check in _lock_keys, on the exact bytes:
+        # never "protected" with a readable copy of a key left in the file.
+        raise _key_copies_refused(exc.names) from None
     return proxy_urls
+
+
+def _key_copies_refused(names: list[str]) -> WorthlessError:
+    """WRTLS-112: a key lock is replacing would stay readable on another line (WOR-1048)."""
+    shown = [_oc_audit.sanitise_for_message(n) for n in names]
+    return WorthlessError(
+        ErrorCode.INVALID_INPUT,
+        f"Lock stopped before changing your .env: it holds another copy of "
+        f"{', '.join(shown)} as plain text on a line lock won't replace, such as a quoted "
+        f"name ('{shown[0]}'=...), a comment, or another variable's value. Delete that copy, "
+        "then run `worthless lock` again. Your .env is unchanged.",
+    )
 
 
 def _note_added_lines(
@@ -3154,6 +3160,16 @@ def _lock_keys(
                 (var_name, value, provider_override or detected_provider)
                 for var_name, value, detected_provider in scanned
             ]
+            # WOR-1048: refuse before any DB write. After pass-1 the unwind
+            # would delete the rows of a key this .env had already locked.
+            replaced = {var_name for var_name, _value, _provider in candidates}
+            if not keys_only:
+                replaced |= {_derive_base_url_var(v, prov) for v, _value, prov in candidates}
+            left_behind = copies_left_behind(
+                env_path, {var_name: value for var_name, value, _p in candidates}, replaced
+            )
+            if left_behind:
+                raise _key_copies_refused(left_behind)
 
             planned: list[_PlannedUpdate] = []
 
