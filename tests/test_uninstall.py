@@ -1415,6 +1415,29 @@ class TestQuietUninstallStillSaysWhatYouLose:
         assert f"Run `chmod 644 {env}` to revert" in result.output
         assert_not_shown(result.output, key)
 
+    def test_keeping_a_loose_mode_at_the_prompt_is_said(
+        self, home_dir: WorthlessHome, tmp_path, monkeypatch
+    ) -> None:
+        """You chose at the prompt to keep the mode other users can read: the
+        warning that they can read your key still shows under --quiet."""
+        from tests.helpers import assert_not_shown
+
+        key, env = _lock_project(home_dir, tmp_path, mode=0o644)
+        monkeypatch.setattr(uninstall_mod, "_stdin_is_tty", lambda: True)
+
+        result = runner.invoke(
+            app,
+            ["--quiet", "uninstall"],
+            input="y\nn\n",  # yes, uninstall; no, don't tighten the mode
+            env={"WORTHLESS_HOME": str(home_dir.base_dir), "COLUMNS": "1000"},
+        )
+
+        assert result.exit_code == 0, result.output
+        assert (env.stat().st_mode & 0o777) == 0o644
+        assert f"{env}: kept original 0o644 at your request" in result.output
+        assert "other local users can read this key" in result.output
+        assert_not_shown(result.output, key)
+
     def test_the_revert_command_quotes_a_path_with_a_space(
         self, home_dir: WorthlessHome, tmp_path
     ) -> None:
