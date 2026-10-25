@@ -18,6 +18,7 @@ import errno
 import json
 import logging
 import os
+import shlex
 import shutil
 import sqlite3
 import sys
@@ -57,6 +58,28 @@ def _scrub_exc(exc: BaseException) -> str:
     if isinstance(exc, WorthlessError):
         return f"WRTLS-{exc.code.value} ({exc.code.name})"
     return type(exc).__name__
+
+
+class _RestoreStopped(Exception):
+    """The restore loop stopped for a reason other than one file's restore failing,
+    such as a note that couldn't be written to stderr (WOR-1043).
+
+    Keys may already be back in their .env, so this must never reach the
+    broken-install path, where --force wipes the ones not restored yet.
+    """
+
+
+def _shown(path: object) -> str:
+    """A path as uninstall prints it: no control characters for the terminal."""
+    return _oc_audit.sanitise_for_message(str(path))
+
+
+def _chmod_command(mode: int, env_path: str) -> str:
+    """A ``chmod`` the user can paste, the path quoted for the shell. A path the
+    sanitiser changed is left out: pasted, it would name another file."""
+    if _shown(env_path) != env_path:
+        return f"chmod {mode:o} on that file"
+    return f"`chmod {mode:o} {shlex.quote(env_path)}`"
 
 
 # A restored .env holds the real reconstructed key, so clamp its mode to a hard
@@ -102,6 +125,7 @@ def _decide_mode(
     if original_mode is None or safe == original_mode:
         return original_mode  # nothing to clamp
 
+    shown = _shown(env_path)
     if not assume_yes:
         # Human at the keyboard — let them decide, plainly. NOTE: on Ctrl-C or
         # EOF (piped/closed stdin) typer.confirm raises ``click.Abort`` (a
@@ -109,23 +133,23 @@ def _decide_mode(
         # (nothing wiped), and ``_restore_all``'s finally zeros any keys already
         # built into ``unlocked`` before it propagates (SR-02).
         keep_safe = typer.confirm(
-            f"{env_path} was 0o{original_mode:o} — other users on this machine could read "
+            f"{shown} was 0o{original_mode:o} — other users on this machine could read "
             f"this file, which now holds your real key. Set minimal-safe 0o{safe:o}?",
             default=True,
         )
         if not keep_safe:
             console.print_warning(
-                f"{env_path}: kept original 0o{original_mode:o} at your request "
+                f"{shown}: kept original 0o{original_mode:o} at your request "
                 f"(other local users can read this key)."
             )
             return original_mode
         return safe
 
     # Agent / --yes: clamp to safe, tell them plainly how to revert.
-    shown = _oc_audit.sanitise_for_message(env_path)
     console.print_file_note(
         f"{shown}: original 0o{original_mode:o} was readable by other users; "
-        f"set to minimal-safe 0o{safe:o}. Run 'chmod {original_mode:o} {shown}' to revert."
+        f"set to minimal-safe 0o{safe:o}. Run {_chmod_command(original_mode, env_path)} "
+        "to revert."
     )
     return safe
 
@@ -200,7 +224,7 @@ async def _restore_all(
     completed = False
     try:
         for env_path, slot in by_path.items():
-            shown = _oc_audit.sanitise_for_message(env_path)
+            shown = _shown(env_path)
             # _unlock_batch is the ONLY shred-guarded step: it writes the real key
             # back and deletes shard-B, transactionally. A failure HERE means the
             # key is genuinely NOT restored, so it routes to missing/failed and may
@@ -248,21 +272,25 @@ async def _restore_all(
 
             # Mode tightening is COSMETIC: a chmod-hostile filesystem (WSL /mnt/c,
             # FAT, some network mounts) must not abort an uninstall whose key is back.
-            target = slot["mode"]
+            # Only the chmod is caught: a note _decide_mode can't write is not one.
+            target = _decide_mode(env_path, slot["mode"], assume_yes=assume_yes, console=console)
             try:
-                target = _decide_mode(
-                    env_path, slot["mode"], assume_yes=assume_yes, console=console
-                )
                 if target is not None:
                     os.chmod(env_path, target)  # noqa: PTH101
             except OSError as exc:
                 console.print_file_note(
                     f"{shown}: key restored, but the file mode wasn't tightened "
-                    f"({_scrub_exc(exc)}); run 'chmod 600 {shown}' yourself."
+                    f"({_scrub_exc(exc)}); run {_chmod_command(0o600, env_path)} yourself."
                 )
                 target = slot["mode"]
             restored.append((env_path, target))
         completed = True
+    except (WorthlessError, sqlite3.Error, OSError) as exc:
+        # One file's restore failing is caught above, so this is something else,
+        # such as a note that couldn't be written (EAGAIN on a non-blocking pipe).
+        if _is_recoverable_repo_error(exc):
+            raise
+        raise _RestoreStopped from exc
     finally:
         # SR-02: if the loop exits early — e.g. a Ctrl-C ``click.Abort`` (a
         # RuntimeError, NOT an OSError) from _decide_mode's confirm escapes the
@@ -394,12 +422,14 @@ def _report_outcomes(console, restored, missing, enroll_only) -> None:  # noqa: 
     """
     for env_path, mode in restored:
         shown = f"0o{mode:o}" if mode is not None else "unchanged"
-        console.print_success(f"restored {env_path}  (mode {shown})")
+        console.print_success(f"restored {_shown(env_path)}  (mode {shown})")
     for env_path in missing:
-        # BUG-2: project deleted — nothing to restore, never a block.
+        # BUG-2: project deleted — nothing to restore, never a block. A moved
+        # project still has its shard-A, which the wipe makes useless.
         console.print_key_note(
-            f"skipping {_oc_audit.sanitise_for_message(env_path)}: the project file is "
-            "gone — nothing to restore (removing the dead record)."
+            f"skipping {_shown(env_path)}: the project file is gone — nothing to "
+            "restore (removing the dead record). If you moved the project, rotate its "
+            "key: it can't be restored after this."
         )
     for alias in enroll_only:
         console.print_key_note(
@@ -418,9 +448,7 @@ def _guard_failed_restores(console, failed, unlocked, *, force: bool) -> None:  
         return
     _zero_restore_keys(unlocked)
     for env_path, why in failed:
-        console.print_key_note(
-            f"could NOT restore {_oc_audit.sanitise_for_message(env_path)}: {why}"
-        )
+        console.print_key_note(f"could NOT restore {_shown(env_path)}: {why}")
     if not force:
         console.print_failure(
             f"Aborting uninstall — {len(failed)} file(s) could not be restored. "
@@ -445,7 +473,8 @@ def _finalize_wipe(console, home, n_restored: int) -> None:  # noqa: ANN001
         # truth — do NOT claim "~/.worthless removed" right after warning it wasn't.
         # What's left can hold shard-B, so --quiet doesn't hide it (WOR-1043).
         console.print_key_note(
-            f"~/.worthless could not be fully removed ({home.base_dir}); delete it manually."
+            f"~/.worthless could not be fully removed ({_shown(home.base_dir)}); "
+            "delete it manually."
         )
         console.print_success(
             f"Worthless uninstalled. {n_restored} .env file(s) restored to their real keys; "
@@ -593,12 +622,13 @@ def _apply_mcp_removal(console, found: list[Path]) -> None:  # noqa: ANN001
         removed = _remove_worthless_mcp_entries(path)
         if removed:
             console.print_success(
-                f"removed the Worthless MCP entry from {path} "
-                f"(original saved as {path.name}.worthless.bak)"
+                f"removed the Worthless MCP entry from {_shown(path)} "
+                f"(original saved as {_shown(path.name)}.worthless.bak)"
             )
         else:
-            console.print_warning(
-                f"could not edit {path} (unreadable, malformed, or a symlink); "
+            # You asked for this edit: --quiet doesn't hide that it didn't happen.
+            console.print_file_note(
+                f"could not edit {_shown(path)} (unreadable, malformed, or a symlink); "
                 "remove its 'worthless' entry by hand."
             )
 
@@ -635,7 +665,7 @@ def _remind_mcp_leftovers(console, *, remove: bool = False) -> None:  # noqa: AN
     if found:
         console.print_hint(
             "You also set up the Worthless MCP server. Remove its 'worthless' entry "
-            f"from {', '.join(str(p) for p in found)} to fully unwire it — uninstall "
+            f"from {', '.join(_shown(p) for p in found)} to fully unwire it — uninstall "
             "never edits editor configs unless you pass --remove-mcp."
         )
 
@@ -669,6 +699,13 @@ def _run_uninstall(*, assume_yes: bool, force: bool = False, remove_mcp: bool = 
 
         try:
             restored, failed, missing, unlocked, enroll_only, oc_build_failed = asyncio.run(_run())
+        except _RestoreStopped as stopped:
+            raise WorthlessError(
+                ErrorCode.SHARD_STORAGE_FAILED,
+                f"Uninstall stopped partway ({_scrub_exc(stopped.__cause__)}), so Worthless "
+                "was not removed. Keys it already restored are back in their .env. "
+                "Re-run `worthless uninstall` to finish.",
+            ) from stopped.__cause__
         except (WorthlessError, sqlite3.Error, OSError) as exc:
             if _is_recoverable_repo_error(exc):
                 # A busy/locked DB (usually the running proxy) is RECOVERABLE —

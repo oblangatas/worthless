@@ -1527,7 +1527,7 @@ class TestQuietUninstallStillSaysWhatYouLose:
         finally:
             con.close()
         assert left == 2, "the two .env files it never reached must stay locked"
-        first_key, first_env = locked[0]
-        assert first_key in first_env.read_text()  # the one it restored stays restored
+        # The one it restored before the note failed keeps its real key.
+        assert sum(key in env.read_text() for key, env in locked) == 1
         assert "broken install" not in result.output.lower()
         assert "stopped partway" in result.output

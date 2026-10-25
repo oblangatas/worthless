@@ -741,7 +741,9 @@ async def _build_oc_restores(
             try:
                 parsed = _openclaw_integration._parse_oc_rollback_entry_record(record)
             except ValueError as exc:
-                console.print_warning(
+                # Stage A then skips this provider with no [FAIL] block, so this
+                # note is the only sign; --quiet doesn't hide it (WOR-1043).
+                console.print_file_note(
                     f"OpenClaw {p.provider!r} rollback record is malformed "
                     f"({exc}); leaving entry on the proxy."
                 )
@@ -774,7 +776,7 @@ async def _build_oc_restores(
                 # .env is gone (recovery mode / user deleted it) we can't
                 # restore the OC plaintext branch — fall through fail-safe.
                 if plaintext_key is None:
-                    console.print_warning(
+                    console.print_file_note(
                         f"OpenClaw {p.provider!r}: cannot re-read plaintext key "
                         "from restored .env; leaving entry on the proxy."
                     )
@@ -891,9 +893,19 @@ def _apply_openclaw_unlock(
             )
             return False
 
-        # Detected + failed: trust-failure path. The whole block shows under
-        # --quiet, not just its header: it says what openclaw.json still holds
-        # and how to fix it (WOR-1043).
+        # Detected + failed: trust-failure path. The sentinel comes first, so a
+        # block that can't be printed (a closed stderr) still leaves `status`
+        # reporting it. The whole block shows under --quiet, not just its
+        # header: it says what openclaw.json still holds and how to fix it
+        # (WOR-1043).
+        _write_unlock_sentinel(
+            home,
+            status="partial",
+            openclaw="failed",
+            alias_count=len(result.providers_set),
+            events=tuple(e.to_dict() for e in result.events),
+        )
+        shown = _oc_audit.sanitise_for_message
         console.print_failure("[FAIL] OpenClaw cleanup did NOT complete.")
         console.print_file_note(
             "   Your .env is restored, but the original OpenClaw provider entries"
@@ -903,17 +915,10 @@ def _apply_openclaw_unlock(
         )
         console.print_file_note("   `worthless unlock` or `worthless doctor` to repair.")
         for name, reason in result.providers_skipped:
-            console.print_file_note(f"   skipped {name} ({reason})")
+            console.print_file_note(f"   skipped {shown(name)} ({shown(reason)})")
         for event in result.events:
             if event.level == "error":
-                console.print_file_note(f"   {event.code.value} — {event.detail}")
-        _write_unlock_sentinel(
-            home,
-            status="partial",
-            openclaw="failed",
-            alias_count=len(result.providers_set),
-            events=tuple(e.to_dict() for e in result.events),
-        )
+                console.print_file_note(f"   {event.code.value} — {shown(event.detail)}")
         return True
     finally:
         # Idempotent zeroing safety net (SR-02). Stage A already zeros on
@@ -934,15 +939,8 @@ def _emit_openclaw_unlock_failure(
     # choke point — redact ``detail`` here for both the console warning and
     # the sentinel event dict below.
     detail = _redact(detail)
-    # Shown in full under --quiet, as on the detected+failed path (WOR-1043).
-    console.print_failure("[FAIL] OpenClaw cleanup did NOT complete.")
-    console.print_file_note("   Your .env is restored, but the original OpenClaw provider entries")
-    console.print_file_note(
-        "   may not have been restored in ~/.openclaw/openclaw.json — repair via:"
-    )
-    console.print_file_note(f"   detail: {detail}")
-    console.print_file_note("")
-    console.print_file_note("   Fix:    worthless doctor")
+    # Sentinel first, and the whole block under --quiet, as on the
+    # detected+failed path (WOR-1043).
     _write_unlock_sentinel(
         home,
         status="partial",
@@ -950,6 +948,14 @@ def _emit_openclaw_unlock_failure(
         alias_count=alias_count,
         events=({"code": "openclaw.unexpected_raise", "level": "error", "detail": detail},),
     )
+    console.print_failure("[FAIL] OpenClaw cleanup did NOT complete.")
+    console.print_file_note("   Your .env is restored, but the original OpenClaw provider entries")
+    console.print_file_note(
+        "   may not have been restored in ~/.openclaw/openclaw.json — repair via:"
+    )
+    console.print_file_note(f"   detail: {_oc_audit.sanitise_for_message(detail)}")
+    console.print_file_note("")
+    console.print_file_note("   Fix:    worthless doctor")
 
 
 def _write_unlock_sentinel(

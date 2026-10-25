@@ -137,7 +137,7 @@ class WorthlessConsole:
 
     def print_key_note(self, message: str) -> None:
         """Yellow text to stderr about a key the user may lose: one a command
-        couldn't restore or is deleting, or key data it couldn't delete.
+        couldn't restore or is deleting, or what's left of ``~/.worthless``.
 
         NOT suppressed by ``--quiet`` (WOR-1043): it can be the only record that
         the user must rotate a key or delete what's left. Shown under ``--json``
