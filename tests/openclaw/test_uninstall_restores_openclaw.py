@@ -258,7 +258,9 @@ def _keep_built_restores(monkeypatch) -> list:  # noqa: ANN001
 
 
 def _all_zeroed(restores: list) -> bool:
-    return all(not any(r.plaintext_key) for r in restores if r.plaintext_key is not None)
+    """At least one reconstructed key was built, and every one is all zeros."""
+    keys = [r.plaintext_key for r in restores if r.plaintext_key is not None]
+    return bool(keys) and not any(any(key) for key in keys)
 
 
 def test_force_past_an_unrestorable_env_still_restores_openclaw_with_the_real_key(
