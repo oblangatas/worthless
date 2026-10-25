@@ -148,14 +148,9 @@ def _decide_mode(
 
 
 def _zero_restore_keys(restores: list) -> None:
-    """Zero every reconstructed plaintext key held by built ``OcRestore``s.
-
-    ``_apply_openclaw_unlock`` zeros these in its ``finally``, but a refused or
-    stopped uninstall never reaches it, so the reconstructed keys would otherwise
-    linger in heap until GC. Zero them so no uninstall leaves real key material
-    in memory (SR-02). Only once the OpenClaw undo is done or skipped: a zeroed
-    key handed to it is written to openclaw.json as NUL bytes (WOR-1051).
-    ``zero_buf`` is idempotent, so re-zeroing an already-cleared buffer is safe.
+    """Zero every reconstructed plaintext key held by built ``OcRestore``s, so
+    no uninstall leaves real key material in memory (SR-02). ``zero_buf`` is
+    idempotent, so re-zeroing an already-cleared buffer is safe.
     """
     for r in restores:
         key = getattr(r, "plaintext_key", None)
@@ -453,7 +448,7 @@ def _guard_failed_restores(console, failed, *, force: bool) -> None:  # noqa: AN
     """Key-shredder guard: a .env EXISTS but its key couldn't be reconstructed.
     Block (no --force) or warn and continue (--force). The warnings show even
     under ``--quiet`` (WOR-1043): with --force they are the only record of the
-    keys it destroys. The caller zeroes the built keys either way (SR-02).
+    keys it destroys.
     """
     if not failed:
         return
@@ -793,11 +788,10 @@ def _run_uninstall(*, assume_yes: bool, force: bool = False, remove_mcp: bool = 
             # (oc_build_failed) rides the same exit-73 channel (worthless-ftit).
             oc_partial = _apply_openclaw_unlock(unlocked, console, home) or oc_build_failed
         finally:
-            # SR-02: no reconstructed key outlives the command. _apply_openclaw_unlock
-            # zeroes them once it has written them back, but the guard's refusal, or a
-            # note that can't be written, stops before it. Zeroing here, not in the
-            # guard, also keeps --force from handing it zeroed keys, which it would
-            # write to openclaw.json as NUL bytes (WOR-1051).
+            # SR-02: no reconstructed key outlives the command, including when the
+            # guard refuses or a line can't be written before the OpenClaw undo. Zero
+            # only after that undo: it writes these keys to openclaw.json, so a zeroed
+            # one would land there as NUL bytes (WOR-1051).
             _zero_restore_keys(unlocked)
 
         # Cleanup is best-effort so a broken install (key already gone) still wipes.
