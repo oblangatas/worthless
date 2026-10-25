@@ -800,6 +800,7 @@ class TestUnlockPutsBackTheBaseUrlYouHad:
             },
             raw={},  # the line as written could not be saved
             sha256=b"",
+            refs={},
         )
         saved = _restore_record(
             "OPENAI_BASE_URL", snapshot, {"OPENAI_BASE_URL"}, {"OPENAI_API_KEY"}

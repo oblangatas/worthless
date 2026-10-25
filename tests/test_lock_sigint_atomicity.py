@@ -872,9 +872,9 @@ class TestEveryInterruptIsAnswered:
         monkeypatch.setattr(lock_mod, "_openclaw_audit_preflight", lambda *_a, **_k: None)
         real_rewrite = lock_mod._batch_rewrite
 
-        def _rewrite_with_press(*args: object, **kwargs: object) -> None:
+        def _rewrite_with_press(*args: object, **kwargs: object) -> dict[str, str]:
             os.kill(os.getpid(), signal.SIGINT)
-            real_rewrite(*args, **kwargs)
+            return real_rewrite(*args, **kwargs)
 
         monkeypatch.setattr(lock_mod, "_batch_rewrite", _rewrite_with_press)
         wired: list[object] = []
