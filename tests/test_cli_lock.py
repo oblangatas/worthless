@@ -1888,8 +1888,15 @@ class TestLockNeverLeavesAKeyBehind:
             "'OPENROUTER_BASE_URL'=https://openrouter.ai/api/v1\n"
             "OPENROUTER_API_KEY={key}\n'OPENROUTER_API_KEY'={key}\n",
             "# OPENROUTER_API_KEY={key}\nOPENROUTER_API_KEY={key}\n",
+            "OPENROUTER_API_KEY={key}  # {key}\n",
         ],
-        ids=["quoted-copy", "quoted-copy-bare-slot", "quoted-copy-quoted-slot", "commented-copy"],
+        ids=[
+            "quoted-copy",
+            "quoted-copy-bare-slot",
+            "quoted-copy-quoted-slot",
+            "commented-copy",
+            "inline-comment-copy",
+        ],
     )
     def test_lock_refuses_instead_of_saying_protected(
         self, home_dir: WorthlessHome, tmp_path: Path, content: str
@@ -1911,8 +1918,13 @@ class TestLockNeverLeavesAKeyBehind:
         assert env.read_bytes() == original
         assert asyncio.run(_repo(home_dir).list_enrollments()) == []
 
+    @pytest.mark.parametrize(
+        "copy",
+        ["'OPENROUTER_API_KEY'={key}\n", "LLM_KEY={key}  # {key}\n"],
+        ids=["quoted-copy", "inline-comment-on-a-replaced-line"],
+    )
     def test_a_refused_relock_keeps_the_existing_lock(
-        self, home_dir: WorthlessHome, tmp_path: Path
+        self, home_dir: WorthlessHome, tmp_path: Path, copy: str
     ) -> None:
         """Refused before any DB write: following its advice still gets the key back.
 
@@ -1926,7 +1938,7 @@ class TestLockNeverLeavesAKeyBehind:
         locked = runner.invoke(app, ["lock", "--keys-only", "--env", str(env)], env=cli_env)
         assert locked.exit_code == 0, locked.output
         locked_line = env.read_text()
-        env.write_text(f"{locked_line}'OPENROUTER_API_KEY'={key}\n")
+        env.write_text(locked_line + copy.format(key=key))
         before = env.read_bytes()
 
         relock = runner.invoke(app, ["lock", "--keys-only", "--env", str(env)], env=cli_env)

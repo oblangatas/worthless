@@ -804,15 +804,23 @@ def _append_additions(lines: list[_LogicalLine], additions: dict[str, str], eol:
 def copies_left_behind(
     env_path: Path, values: Mapping[str, str], replaced: Collection[str]
 ) -> list[str]:
-    """The names in *values* whose text is in *env_path* off the lines *replaced* names set.
+    """The names in *values* whose text would survive a rewrite of the lines *replaced* names set.
 
-    Those are the lines :func:`rewrite_env_keys` replaces; a copy anywhere
-    else (a quoted ``'NAME'=...``, a comment, another variable's value) would
-    survive it (WOR-1048). Returns names only, never values.
+    :func:`rewrite_env_keys` replaces only the value on those lines and keeps
+    the rest, such as an inline comment, so that is searched along with every
+    other line (a quoted ``'NAME'=...``, a comment, another variable's value)
+    (WOR-1048). Returns names only, never values.
     """
     stripped, _had_bom = _strip_bom(_safe_read_existing_bytes(env_path))
-    kept = b"".join(line.raw for line in _split_logical_lines(stripped) if line.key not in replaced)
-    return sorted(name for name, value in values.items() if value and value.encode() in kept)
+    kept: list[str] = []
+    for line in _split_logical_lines(stripped):
+        if line.key in replaced:
+            head, _value, tail = _split_assignment(line.raw)
+            kept.append(head + tail)
+        else:
+            kept.append(line.raw.decode("utf-8", errors="replace"))
+    text = "".join(kept)
+    return sorted(name for name, value in values.items() if value and value in text)
 
 
 class KeyWouldSurvive(ValueError):
