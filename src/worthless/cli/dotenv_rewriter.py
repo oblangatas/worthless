@@ -27,8 +27,8 @@ import os
 import re
 import stat as _stat
 from collections import Counter
-from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from collections.abc import Callable, Collection, Iterable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -801,6 +801,39 @@ def _append_additions(lines: list[_LogicalLine], additions: dict[str, str], eol:
         )
 
 
+def copies_left_behind(
+    env_path: Path, values: Mapping[str, str], replaced: Collection[str]
+) -> list[str]:
+    """The names in *values* whose text would survive a rewrite of the lines *replaced* names set.
+
+    :func:`rewrite_env_keys` replaces only the value on those lines and keeps
+    the rest, such as an inline comment, so that is searched along with every
+    other line (a quoted ``'NAME'=...``, a comment, another variable's value)
+    (WOR-1048). Returns names only, never values.
+    """
+    stripped, _had_bom = _strip_bom(_safe_read_existing_bytes(env_path))
+    kept: list[str] = []
+    for line in _split_logical_lines(stripped):
+        if line.key in replaced:
+            head, _value, tail = _split_assignment(line.raw)
+            kept.append(head + tail)
+        else:
+            kept.append(line.raw.decode("utf-8", errors="replace"))
+    text = "".join(kept)
+    return sorted(name for name, value in values.items() if value and value in text)
+
+
+class KeyWouldSurvive(ValueError):
+    """A value :func:`rewrite_env_keys` must remove would still be in the file.
+
+    Carries the names only, never the values.
+    """
+
+    def __init__(self, names: list[str]) -> None:
+        self.names = names
+        super().__init__(f"value(s) would survive the rewrite: {names!r}")
+
+
 @dataclass(frozen=True)
 class EnvSnapshot:
     """One read of a ``.env``: its parse, its ``*_BASE_URL`` values as written, its hash.
@@ -818,7 +851,16 @@ class EnvSnapshot:
     parsed: dict[str, str | None]
     raw: dict[str, str]
     sha256: bytes
-    refs: dict[str, frozenset[str]] = field(default_factory=dict)
+    refs: dict[str, frozenset[str]]
+
+    @property
+    def assigned(self) -> set[str]:
+        """The names a ``NAME=...`` line sets, the lines :func:`rewrite_env_keys` can update.
+
+        ``parsed`` also holds names it can't: a bare ``NAME`` line (as ``None``)
+        has no ``=``, and a quoted ``'NAME'=...`` isn't a name to it (WOR-1041).
+        """
+        return set(self.refs)
 
     def names_reached(self, value: str) -> set[str]:
         """The variables *value* expands, directly or through the lines it names."""
@@ -885,6 +927,7 @@ def rewrite_env_keys(
     additions: dict[str, str] | None = None,
     removals: set[str] | None = None,
     expected_baseline_sha256: bytes | None = None,
+    must_remove: Mapping[str, str] | None = None,
     _hook_before_replace: Callable[[], None] | None = None,
 ) -> None:
     """Atomically replace N keys in *env_path* via one ``safe_rewrite`` call.
@@ -908,6 +951,11 @@ def rewrite_env_keys(
     the rewrite refuse if the file changed since the caller read it. Without
     it the baseline is this call's own read.
 
+    *must_remove* maps names to values (keys lock is replacing) that must not
+    appear anywhere in the rewritten file. A copy on a line the rewriter
+    can't edit, such as a quoted ``'NAME'=...`` or a comment, raises
+    :class:`KeyWouldSurvive` before any write (WOR-1048).
+
     *_hook_before_replace* is forwarded to :func:`safe_rewrite`; the
     lock command binds a closure that runs reconstruct-and-verify for
     every shard under an exclusive SQLite flock before the rename.
@@ -928,6 +976,10 @@ def rewrite_env_keys(
         _append_additions(lines, additions, eol)
 
     new_content = _restore_bom(_serialize_lines(lines), had_bom)
+    if must_remove:
+        survived = sorted(n for n, v in must_remove.items() if v and v.encode() in new_content)
+        if survived:
+            raise KeyWouldSurvive(survived)
     if new_content == existing:
         return
     safe_rewrite(

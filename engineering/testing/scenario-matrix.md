@@ -326,6 +326,22 @@ These must always hold. Any scenario that breaks them is a bug:
 - **Risk**: HIGH (was broken, now fixed)
 - **Test status**: Tested (TestUnlockPutsBackTheBaseUrlYouHad, `tests/test_e2e.py::TestQuietUnlockStillSaysWhatItDidToYourLine`, `tests/dotenv_rewriter/test_read_env_snapshot.py`, the `base_url_restore` tests in `tests/test_storage.py`)
 
+#### U-39: User locks a `.env` whose `*_BASE_URL` line has no `=`
+
+- **Precondition**: `.env` has a bare `OPENROUTER_BASE_URL` (or `export OPENROUTER_BASE_URL`) line, before or after `OPENROUTER_API_KEY`, or a quoted `'OPENROUTER_BASE_URL'=...` line
+- **Expected**: Lock leaves that line, appends its proxy line (stderr says the line "had no value", or that lock "can't edit the line you have for it"), and records that it added the line; unlock removes only that line, so the `.env` is byte-identical to before lock. A slot counts as present only with a `NAME=...` line the rewriter parses (`EnvSnapshot.assigned`). After the write, lock re-reads the `.env` as python-dotenv does and warns for each line it wrote that doesn't read back as its proxy URL: a value line followed by a bare or quoted line for the same name, or a line inside another variable's multi-line quoted value (lock exits 0; WOR-1045 tracks refusing).
+- **Current behavior**: FIXED (WOR-1041) -- python-dotenv parsed the bare or quoted name as present, so lock asked the rewriter to update a line it couldn't find and exited 1 with WRTLS-199, leaving the `.env` and DB unchanged.
+- **Risk**: LOW (was broken, now fixed)
+- **Test status**: Tested (TestLockBareBaseUrlLine, including the two documented limits; TestLockSaysWhatItAdded; `tests/test_e2e.py::TestBareBaseUrlLineStillRoutesTheKey`)
+
+#### U-40: User locks a `.env` that holds a second copy of a key on a line lock can't edit
+
+- **Precondition**: `.env` has `OPENROUTER_API_KEY=<key>` and also `'OPENROUTER_API_KEY'=<key>` (quoted name) or `# OPENROUTER_API_KEY=<key>` (comment), with or without a bare/quoted `*_BASE_URL` line
+- **Expected**: Before pass-1 (no DB write), `copies_left_behind` finds the key's text off the lines lock replaces and lock stops with WRTLS-112 naming the variable (never the value): `.env` byte-identical, no new rows, a re-lock keeps its existing enrollment, no "You're protected". `rewrite_env_keys(must_remove=...)` repeats the check on the exact bytes it would write (`KeyWouldSurvive`) as a backstop.
+- **Current behavior**: FIXED (WOR-1048) -- lock said "You're protected" with the real key still readable (python-dotenv reads the later quoted line). With a bare/quoted `*_BASE_URL` line, main stopped with WRTLS-199, and WOR-1041 alone would have turned that into the same false "protected".
+- **Risk**: HIGH (was broken, now fixed)
+- **Test status**: Tested (TestLockNeverLeavesAKeyBehind, including a refused re-lock that keeps the earlier lock)
+
 ---
 
 ## 2. Attacker Scenarios
