@@ -12,7 +12,7 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - If lock had added the line, unlock leaves it in place with the vendor's address. Delete it if you don't want it.
   - Unlock removes the line instead, and tells you to set it again, when it can't be sure the address is right for every app that reads the line:
     - The key is an OpenAI-style `sk-` key. That prefix also starts DeepSeek and other keys, and OpenAI's address is the SDK default anyway.
-    - Another key in the same `.env` reads that line too, for example an OpenAI key next to an OpenRouter key's `OPENAI_BASE_URL`.
+    - Another key in the same `.env`, locked or not, reads that line too, for example an OpenAI key next to an OpenRouter key's `OPENAI_BASE_URL`.
     - The line is `ANTHROPIC_BASE_URL` (the Anthropic SDK adds its own `/v1`), or the address is the other protocol's.
     - The stored address isn't in the provider list, isn't a public https address (a local Ollama, for example), or contains a `$`.
     - The saved value was changed in the Worthless database.

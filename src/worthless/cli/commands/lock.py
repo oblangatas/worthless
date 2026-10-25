@@ -1049,28 +1049,41 @@ def _plan_base_url_lines(
     return lines
 
 
-def _value_to_put_back(slot: str, snapshot: EnvSnapshot, rewritten: set[str]) -> str | None:
+def _value_to_put_back(
+    slot: str, snapshot: EnvSnapshot, base_url_slots: set[str], key_vars: set[str]
+) -> str | None:
     """The value unlock writes back into *slot*: as written, else as parsed, else none.
 
     As written keeps ``${GATEWAY}/v1`` unexpanded, unless it refers to another
-    line lock rewrites: put back during a partial unlock, ``${OPENAI_BASE_URL}``
-    would expand to a still-locked key's proxy URL and send the real key
-    there, so the value it has now goes back instead (WOR-1026: let unlock
-    choose). A line that defaults to itself, ``${SLOT:-...}``, reads the shell,
-    not a line. None, when neither form can be written back, means unlock
+    ``*_BASE_URL`` line lock rewrites: put back during a partial unlock,
+    ``${OPENAI_BASE_URL}`` would expand to a still-locked key's proxy URL and
+    send the real key there, so the value it has now goes back instead
+    (WOR-1026: let unlock choose). A reference to a key variable stays as
+    written: it expands to shard-A while locked and to the key after unlock,
+    and its expanded form must never reach the record. A line that defaults
+    to itself, ``${SLOT:-...}``, reads the shell, not a line. None, when
+    neither form can be written back, means unlock
     removes the line; a value the rewriter refuses would make every unlock of
     this ``.env`` fail (WOR-1027: validate against the quotes it goes into).
     """
     name = _oc_audit.sanitise_for_message(slot)
     raw = snapshot.raw.get(slot)
     if raw is not None:
-        if not referenced_names(raw) & (rewritten - {slot}):
+        if not referenced_names(raw) & (base_url_slots - {slot}):
             return raw
         get_console().print_warning(
             f"{name} refers to another line lock rewrites, so unlock will put back "
             "the value it has now, not the reference."
         )
     value = snapshot.parsed.get(slot) or ""
+    if any((key := snapshot.parsed.get(var)) and key in value for var in key_vars):
+        # Saved expanded, the record (MAC-tagged, not encrypted) would hold a key.
+        get_console().print_warning(
+            f"{name}: lock won't save this value, because as it expands it holds one "
+            "of your keys, so unlock will remove the line. Set it again by hand after "
+            "you unlock."
+        )
+        return None
     if is_writable_value(value):
         return value
     get_console().print_warning(
@@ -1097,9 +1110,9 @@ async def _record_base_url_restores(
     """
     if not planned:
         return
-    rewritten = set(base_url_lines) | {p.var_name for p in planned}
+    key_vars = {p.var_name for p in planned}
     originals = {
-        slot: _value_to_put_back(slot, snapshot, rewritten)
+        slot: _value_to_put_back(slot, snapshot, set(base_url_lines), key_vars)
         for slot, (_, existed) in base_url_lines.items()
         if existed
     }

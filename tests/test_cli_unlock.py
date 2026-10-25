@@ -695,6 +695,44 @@ class TestUnlockPutsBackTheBaseUrlYouHad:
         _unlock(env, home_dir)
         assert dotenv_values(env)["OPENROUTER_BASE_URL"] == "https://api.openai.com/v1"
 
+    def test_a_line_that_refers_to_a_key_is_saved_as_written_never_expanded(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """The expanded form would put the real key into the DB record (CodeRabbit)."""
+        env = tmp_path / ".env"
+        _register_gateway(home_dir, f"https://gw.example.com/{_TEST_KEY}/v1", name="key-in-path")
+        env.write_text(
+            "OPENAI_API_KEY=" + _TEST_KEY + "\n"
+            "OPENAI_BASE_URL=https://gw.example.com/${OPENAI_API_KEY}/v1\n"
+        )
+        original = env.read_bytes()
+        _lock(env, home_dir)
+        record_json, _mac = _saved_record(home_dir)
+        if _TEST_KEY in record_json:
+            pytest.fail("the saved BASE_URL record holds the key")  # never echo it
+
+        _unlock(env, home_dir)
+        assert env.read_bytes() == original
+
+    def test_lock_never_saves_an_expanded_value_that_holds_a_key(self) -> None:
+        """Whatever the reason lock falls back to the expanded form, a key never
+        reaches the record (CodeRabbit on #738)."""
+        from worthless.cli.commands.lock import _value_to_put_back
+        from worthless.cli.dotenv_rewriter import EnvSnapshot
+
+        snapshot = EnvSnapshot(
+            parsed={
+                "OPENAI_API_KEY": _TEST_KEY,
+                "OPENAI_BASE_URL": f"https://gw.example.com/{_TEST_KEY}/v1",
+            },
+            raw={},  # the line as written could not be saved
+            sha256=b"",
+        )
+        saved = _value_to_put_back(
+            "OPENAI_BASE_URL", snapshot, {"OPENAI_BASE_URL"}, {"OPENAI_API_KEY"}
+        )
+        assert saved is None
+
     def test_a_line_that_defaults_to_itself_comes_back_as_written(
         self, home_dir: WorthlessHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -927,6 +965,39 @@ class TestUnlockPutsBackTheBaseUrlYouHad:
 
         _unlock(env, home_dir)
         assert line not in dotenv_values(env)
+
+    def test_an_old_row_writes_no_address_a_key_never_locked_would_follow(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """A plain OpenAI key added after lock also reads OPENAI_BASE_URL (Bugbot)."""
+        env = tmp_path / ".env"
+        env.write_text(
+            "OPENAI_BASE_URL=https://openrouter.ai/api/v1\n"
+            f"OPENAI_API_KEY={fake_openrouter_key()}\n"
+        )
+        _lock(env, home_dir)
+        _as_enrolled_before_wor_1013(home_dir)
+        with env.open("a") as f:
+            f.write(f"OPENAI_KEY={_TEST_KEY}\n")
+
+        _unlock(env, home_dir)
+        assert "OPENAI_BASE_URL" not in dotenv_values(env)
+
+    def test_an_old_row_under_two_names_still_gets_its_line_back(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """Both names hold the same OpenRouter key, so sharing the line is safe (Bugbot)."""
+        env = tmp_path / ".env"
+        key = fake_openrouter_key()
+        env.write_text(
+            "OPENAI_BASE_URL=https://openrouter.ai/api/v1\n"
+            f"OPENAI_API_KEY={key}\nMY_OPENROUTER={key}\n"
+        )
+        _lock(env, home_dir)
+        _as_enrolled_before_wor_1013(home_dir)
+
+        _unlock(env, home_dir)
+        assert dotenv_values(env)["OPENAI_BASE_URL"] == "https://openrouter.ai/api/v1"
 
     def test_an_old_anthropic_row_gets_no_line_its_sdk_would_misread(
         self, home_dir: WorthlessHome, tmp_path: Path
