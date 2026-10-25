@@ -469,11 +469,12 @@ def _not_restored_note(base_url_var: str, *, present: bool) -> str:
     )
 
 
-def _batch_restore_env(env_path: Path, planned: list[_PlannedRestore]) -> None:
+def _batch_restore_env(env_path: Path, planned: list[_PlannedRestore]) -> list[str]:
     """One ``rewrite_env_keys`` call: restore plaintext + the BASE_URL lines lock wrote.
 
     The lines are judged on one snapshot, and the rewrite refuses a file that
-    changed since.
+    changed since. Returns the notes for the user, which the caller prints
+    once unlock has finished.
     """
     updates: dict[str, str] = {}
     removals: set[str] = set()
@@ -517,7 +518,7 @@ def _batch_restore_env(env_path: Path, planned: list[_PlannedRestore]) -> None:
                 notes.append(action.note)
 
     if not updates and not removals:
-        return
+        return []
 
     rewrite_env_keys(
         env_path,
@@ -525,9 +526,8 @@ def _batch_restore_env(env_path: Path, planned: list[_PlannedRestore]) -> None:
         removals=removals or None,
         expected_baseline_sha256=snapshot.sha256,
     )
-    for note in notes:
-        where = _oc_audit.sanitise_for_message(str(env_path))
-        get_console().print_file_note(f"{where}: {note}")
+    where = _oc_audit.sanitise_for_message(str(env_path))
+    return [f"{where}: {note}" for note in notes]
 
 
 async def _pass3_db_cleanup(
@@ -607,6 +607,7 @@ async def _unlock_batch(
     """
     console = get_console()
     planned: list[_PlannedRestore] = []
+    notes: list[str] = []
     try:
         await _pass1_reconstruct(aliases, home, repo, env_path, planned)
         if not planned:
@@ -624,7 +625,7 @@ async def _unlock_batch(
                     f"refusing to delete DB rows. Re-create the file (touch it) "
                     f"or pass --env pointing at the correct path, then re-run.",
                 )
-            _batch_restore_env(env_path, env_writers)
+            notes = _batch_restore_env(env_path, env_writers)
 
         _print_recovery_keys(planned, console, print_recovery=print_recovery)
 
@@ -633,6 +634,10 @@ async def _unlock_batch(
     finally:
         for p in planned:
             p.zero()
+        # Only after pass-3: a note written into a closed pipe ends the process,
+        # which must not land between the .env rewrite and the DB cleanup.
+        for note in notes:
+            console.print_file_note(note)
 
 
 def _reread_plaintext_from_env(p: _PlannedRestore) -> bytearray | None:

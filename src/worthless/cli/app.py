@@ -39,7 +39,12 @@ app = typer.Typer(
 @error_boundary
 def _main(
     ctx: typer.Context,
-    quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress non-error output"),
+    quiet: bool = typer.Option(
+        False,
+        "--quiet",
+        "-q",
+        help="Hide progress output; errors and changes to your files still show",
+    ),
     json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON"),
     debug: bool = typer.Option(False, "--debug", help="Show full tracebacks on error"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Auto-approve prompts"),

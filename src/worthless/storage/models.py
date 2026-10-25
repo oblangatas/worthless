@@ -91,16 +91,16 @@ class BaseUrlRestore:
     def from_json(cls, record_json: str) -> BaseUrlRestore:
         """Parse :meth:`to_json` output; ``ValueError`` on any other shape."""
         parsed = json.loads(record_json)
-        if not isinstance(parsed, dict) or set(parsed) - {"unsaved"} != {"var", "original"}:
-            raise ValueError("base_url restore record has the wrong keys")
-        var, original = parsed["var"], parsed["original"]
+        if not isinstance(parsed, dict):
+            raise ValueError("base_url restore record is not an object")
+        var, original = parsed.get("var"), parsed.get("original")
         if not (var is None or isinstance(var, str)):
             raise ValueError("base_url restore var is not a string")
         if not (original is None or isinstance(original, str)):
             raise ValueError("base_url restore original is not a string")
         record = cls(var=var, original=original, unsaved=bool(parsed.get("unsaved")))
         if record.to_json() != record_json:
-            # Lock writes one form; "unsaved": false or 1 is not it.
+            # Lock writes one form: missing or extra keys, or "unsaved": false, are not it.
             raise ValueError("base_url restore record is not in the form lock writes")
         return record
 

@@ -789,8 +789,9 @@ class TestUnlockPutsBackTheBaseUrlYouHad:
     def test_lock_never_saves_an_expanded_value_that_holds_a_key(self) -> None:
         """Whatever the reason lock falls back to the expanded form, a key never
         reaches the record (CodeRabbit on #738)."""
-        from worthless.cli.commands.lock import _value_to_put_back
+        from worthless.cli.commands.lock import _restore_record
         from worthless.cli.dotenv_rewriter import EnvSnapshot
+        from worthless.storage.models import BaseUrlRestore
 
         snapshot = EnvSnapshot(
             parsed={
@@ -800,10 +801,10 @@ class TestUnlockPutsBackTheBaseUrlYouHad:
             raw={},  # the line as written could not be saved
             sha256=b"",
         )
-        saved = _value_to_put_back(
+        saved = _restore_record(
             "OPENAI_BASE_URL", snapshot, {"OPENAI_BASE_URL"}, {"OPENAI_API_KEY"}
         )
-        assert saved is None
+        assert saved == BaseUrlRestore("OPENAI_BASE_URL", None, unsaved=True)
 
     def test_a_line_that_defaults_to_itself_comes_back_as_written(
         self, home_dir: WorthlessHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
