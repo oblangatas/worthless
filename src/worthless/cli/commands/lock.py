@@ -1169,12 +1169,25 @@ def _batch_rewrite(
         expected_baseline_sha256=snapshot.sha256,
         _hook_before_replace=_build_verify_hook(planned),
     )
-    # Only once the lines are there: a refused rewrite added nothing.
-    for slot, url in additions.items():
-        why = _why_lock_added(slot, snapshot)
-        sys.stderr.write(f"worthless: added {slot}={url} to {env_path} ({why})\n")
-    sys.stderr.flush()
     return proxy_urls
+
+
+def _note_added_lines(
+    env_path: Path,
+    base_url_lines: dict[str, tuple[_PlannedUpdate, bool]],
+    proxy_urls: dict[str, str],
+    snapshot: EnvSnapshot,
+) -> None:
+    """Say which ``*_BASE_URL`` lines lock added.
+
+    Only after the commit mark: a refused rewrite added nothing, and a stderr
+    that fails must not unwind rows the rewritten ``.env`` needs.
+    """
+    for slot, (_p, existed) in base_url_lines.items():
+        if not existed:
+            why = _why_lock_added(slot, snapshot)
+            sys.stderr.write(f"worthless: added {slot}={proxy_urls[slot]} to {env_path} ({why})\n")
+    sys.stderr.flush()
 
 
 def _why_lock_added(slot: str, snapshot: EnvSnapshot) -> str:
@@ -3203,6 +3216,7 @@ def _lock_keys(
                     )
                 proxy_urls = _batch_rewrite(env_path, planned, base_url_lines, snapshot)
                 on_signal.committed = True  # .env now needs these rows: never unwind on a press
+                _note_added_lines(env_path, base_url_lines, proxy_urls, snapshot)
                 _warn_unread_base_url_lines(env_path, proxy_urls)
                 # Phase 2.b: OpenClaw magic. Per L1 in
                 # engineering/research/openclaw/WOR-431-phase-2-spec.md, this

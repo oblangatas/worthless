@@ -1927,6 +1927,39 @@ class TestLockSaysWhatItAdded:
         assert "added OPENROUTER_BASE_URL" not in result.output
         assert env.read_bytes() == original
 
+    def test_a_note_that_fails_to_print_never_undoes_the_lock(
+        self, home_dir: WorthlessHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The rewritten .env needs its rows: a broken stderr can't unwind them."""
+        from worthless.cli.commands import lock as lock_mod
+
+        class _BrokenStderr:
+            def write(self, _text: str) -> int:
+                raise BrokenPipeError
+
+            def flush(self) -> None:
+                raise BrokenPipeError
+
+        class _SysWithBrokenStderr:
+            stderr = _BrokenStderr()
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(sys, name)
+
+        monkeypatch.setattr(lock_mod, "sys", _SysWithBrokenStderr())
+        env = tmp_path / ".env"
+        env.write_text(f"OPENROUTER_BASE_URL\nOPENROUTER_API_KEY={fake_openrouter_key()}\n")
+        original = env.read_bytes()
+        cli_env = {"WORTHLESS_HOME": str(home_dir.base_dir)}
+
+        runner.invoke(app, ["lock", "--env", str(env)], env=cli_env)
+        assert env.read_bytes() != original, "lock should have rewritten the .env"
+        assert asyncio.run(_repo(home_dir).list_enrollments())
+        monkeypatch.undo()
+        result = runner.invoke(app, ["unlock", "--env", str(env)], env=cli_env)
+        assert result.exit_code == 0, result.output
+        assert env.read_bytes() == original
+
 
 # ---------------------------------------------------------------------------
 # worthless-8a5d: lock must refuse when source files bypass the proxy
