@@ -1048,10 +1048,10 @@ def _plan_base_url_lines(
     return lines
 
 
-def _value_to_put_back(
+def _restore_record(
     slot: str, snapshot: EnvSnapshot, base_url_slots: set[str], key_vars: set[str]
-) -> str | None:
-    """The value unlock writes back into *slot*: as written, else as parsed, else none.
+) -> BaseUrlRestore:
+    """What unlock writes back into *slot*: the value as written, else as parsed.
 
     As written keeps ``${GATEWAY}/v1`` unexpanded, unless it refers to another
     ``*_BASE_URL`` line lock rewrites, directly or through other lines: put
@@ -1062,15 +1062,17 @@ def _value_to_put_back(
     written: it expands to shard-A while locked and to the key after unlock,
     and neither a key typed into the line nor one expanded from a reference
     may reach the record. A line that defaults
-    to itself, ``${SLOT:-...}``, reads the shell, not a line. None, when
-    neither form can be written back, means unlock
-    removes the line; a value the rewriter refuses would make every unlock of
-    this ``.env`` fail (WOR-1027: validate against the quotes it goes into).
+    to itself, ``${SLOT:-...}``, reads the shell, not a line. A value that
+    holds a key, or that neither form can write back, is marked unsaved, so
+    unlock removes the line and says so (WOR-1042); a value the rewriter
+    refuses would make every unlock of this ``.env`` fail (WOR-1027: validate
+    against the quotes it goes into). The warnings show even with ``--quiet``:
+    this is the last moment the user still has the value.
     """
     name = _oc_audit.sanitise_for_message(slot)
     raw = snapshot.raw.get(slot)
     if raw is not None and snapshot.names_reached(raw) & (base_url_slots - {slot}):
-        get_console().print_warning(
+        get_console().print_file_note(
             f"{name} refers to another line lock rewrites, so unlock will put back "
             "the value it has now, not the reference."
         )
@@ -1079,19 +1081,19 @@ def _value_to_put_back(
     if any((key := snapshot.parsed.get(var)) and key in value for var in key_vars):
         # The record is MAC-tagged, not encrypted, so it never holds a key,
         # whether typed into the line or expanded from a reference.
-        get_console().print_warning(
+        get_console().print_file_note(
             f"{name}: lock won't save this value, because it holds one of your keys, "
             "so unlock will remove the line. Set it again by hand after you unlock."
         )
-        return None
+        return BaseUrlRestore(var=slot, original=None, unsaved=True)
     if raw is not None or is_writable_value(value):
-        return value
-    get_console().print_warning(
+        return BaseUrlRestore(var=slot, original=value)
+    get_console().print_file_note(
         f"{name}: lock can't save this value for unlock to put back (it has a quote, "
         "a space before #, or whitespace at one end), so unlock will remove the line. "
         "Set it again by hand after you unlock."
     )
-    return None
+    return BaseUrlRestore(var=slot, original=None, unsaved=True)
 
 
 async def _record_base_url_restores(
@@ -1112,8 +1114,8 @@ async def _record_base_url_restores(
         return
     key_vars = {p.var_name for p in planned}
     slots = set(base_url_lines)
-    originals = {
-        slot: _value_to_put_back(slot, snapshot, slots, key_vars)
+    records = {
+        slot: _restore_record(slot, snapshot, slots, key_vars)
         for slot, (_, existed) in base_url_lines.items()
         if existed
     }
@@ -1124,8 +1126,8 @@ async def _record_base_url_restores(
     restores = []
     for p in planned:
         slot = slot_of.get(p) or slot_of_alias.get(p.alias)
-        # Not in originals: lock adds the line, or writes none for this key.
-        record = BaseUrlRestore(var=slot, original=originals.get(slot) if slot else None)
+        # No record: lock adds the line, or writes none for this key.
+        record = (records.get(slot) if slot else None) or BaseUrlRestore(var=slot, original=None)
         restores.append((p.alias, p.var_name, p.shard_a.decode("utf-8"), record))
     if await repo.record_base_url_restores(env_str, restores) != len(restores):
         # A row pass-1 just wrote is gone (known cause: WOR-1017's cleanup).

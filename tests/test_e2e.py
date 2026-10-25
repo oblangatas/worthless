@@ -24,7 +24,7 @@ from worthless.cli.bootstrap import WorthlessHome
 from worthless.openclaw.integration import _alias_from_base_url
 from worthless.storage.repository import ShardRepository
 
-from tests.helpers import fake_openai_key, fake_openrouter_key
+from tests.helpers import assert_not_shown, fake_openai_key, fake_openrouter_key
 
 runner = CliRunner()
 _WRAP_BIND_ATTEMPTS = 5
@@ -301,6 +301,16 @@ def _lock(env_file: Path, cli_env: dict[str, str]) -> None:
     assert result.exit_code == 0, f"lock failed: {result.output}"
 
 
+def _register_gateway(cli_env: dict[str, str], name: str, url: str) -> None:
+    """Lock refuses a user's own upstream until it is registered."""
+    result = runner.invoke(
+        app,
+        ["providers", "register", "--name", name, "--url", url, "--protocol", "openai"],
+        env=cli_env,
+    )
+    assert result.exit_code == 0, result.output
+
+
 @pytest.mark.integration
 @pytest.mark.real_ipc
 @pytest.mark.timeout(60)
@@ -443,21 +453,7 @@ class TestUnlockedAppReachesYourOwnUpstream:
             env_file, _home, _key, cli_env = _make_e2e_env(tmp_path, proxy_port=1)
             key = fake_openrouter_key()
             env_file.write_text(f"OPENROUTER_BASE_URL={upstream}\nOPENROUTER_API_KEY={key}\n")
-            registered = runner.invoke(
-                app,
-                [
-                    "providers",
-                    "register",
-                    "--name",
-                    "my-openrouter",
-                    "--url",
-                    upstream,
-                    "--protocol",
-                    "openai",
-                ],
-                env=cli_env,
-            )
-            assert registered.exit_code == 0, registered.output
+            _register_gateway(cli_env, "my-openrouter", upstream)
             _lock(env_file, cli_env)
             unlocked = runner.invoke(app, ["unlock", "--env", str(env_file)], env=cli_env)
             assert unlocked.exit_code == 0, unlocked.output
@@ -482,3 +478,68 @@ class TestUnlockedAppReachesYourOwnUpstream:
         assert [(path, auth == f"Bearer {key}") for path, auth in _FakeUpstream.received] == [
             ("/api/v1/chat/completions", True)
         ]
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(60)
+class TestQuietUnlockStillSaysWhatItDidToYourLine:
+    """`worthless --quiet unlock`, run as a real process, says on stderr what it did to a
+    `*_BASE_URL` line, and the `.env` on disk matches (WOR-1042)."""
+
+    # The rewriter can't write a quote back, so lock won't save it (WOR-1027).
+    _GATEWAY = "https://gateway.example.com/v1/o'neil"
+
+    def _lock_a_line_lock_cannot_save(self, tmp_path: Path) -> tuple[Path, Path, str, dict]:
+        env_file, worthless_home, key, cli_env = _make_e2e_env(tmp_path, proxy_port=1)
+        env_file.write_text(f"OPENAI_BASE_URL={self._GATEWAY}\nOPENAI_API_KEY={key}\n")
+        _register_gateway(cli_env, "quoted-gw", self._GATEWAY)
+        _lock(env_file, cli_env)
+        return env_file, worthless_home, key, cli_env
+
+    @staticmethod
+    def _quiet_unlock(
+        env_file: Path, cli_env: dict, **streams: object
+    ) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [
+                str(Path(sys.executable).parent / "worthless"),
+                "--quiet",
+                "unlock",
+                "--env",
+                str(env_file),
+            ],
+            env={**os.environ, **cli_env, "WORTHLESS_KEYRING_BACKEND": "null"},
+            timeout=45,
+            text=True,
+            **streams,
+        )
+
+    def test_a_line_lock_could_not_save_is_removed_and_said(self, tmp_path: Path) -> None:
+        env_file, _home, key, cli_env = self._lock_a_line_lock_cannot_save(tmp_path)
+
+        proc = self._quiet_unlock(env_file, cli_env, capture_output=True)
+
+        assert proc.returncode == 0, f"stdout: {proc.stdout}\nstderr: {proc.stderr}"
+        assert env_file.read_text() == f"OPENAI_API_KEY={key}\n"
+        said = " ".join(proc.stderr.split())  # however Rich wrapped it (WOR-1022)
+        assert "lock couldn't save the value you had in OPENAI_BASE_URL" in said, proc.stderr
+        assert "Restored" not in said  # still quiet about progress
+        assert_not_shown(proc.stderr, self._GATEWAY, key)
+
+    def test_a_closed_stderr_never_leaves_unlock_half_done(self, tmp_path: Path) -> None:
+        """A note written into a closed pipe (`2>&1 | head -n 1`) ends the process, so
+        unlock prints notes only once its DB rows are gone too (merge-ready brutus)."""
+        env_file, worthless_home, key, cli_env = self._lock_a_line_lock_cannot_save(tmp_path)
+        home = WorthlessHome(base_dir=worthless_home)
+        # Seen once already, so the note is the first thing written to the pipe.
+        home.warranty_notice_marker.touch()
+        read_end, write_end = os.pipe()
+        os.close(read_end)
+        try:
+            self._quiet_unlock(env_file, cli_env, stdout=subprocess.DEVNULL, stderr=write_end)
+        finally:
+            os.close(write_end)
+
+        assert env_file.read_text() == f"OPENAI_API_KEY={key}\n"
+        repo = ShardRepository(str(home.db_path), home.fernet_key)
+        assert asyncio.run(repo.list_enrollments()) == [], "unlock stopped before its DB cleanup"
