@@ -19,6 +19,14 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - If one `*_BASE_URL` name appears twice in the file, unlock decides on the last one, then keeps or removes every line with that name (WOR-1014).
   - When two keys share one line (for example `OPENAI_API_KEY` and `MY_OPENAI_KEY` both use `OPENAI_BASE_URL`, which points at `OPENAI_API_KEY`), unlock both together. Unlocking only `OPENAI_API_KEY` removes the line while `MY_OPENAI_KEY` stays locked. Unlocking only `MY_OPENAI_KEY` keeps the line, so an app that reads it sends `MY_OPENAI_KEY`'s real key to the local proxy, which refuses it (401) and never forwards it, and `lock` refuses that file until the other key is unlocked too.
   - A `.env` whose last line has no newline gets one. This happened before too, for every key.
+- **A provider reply whose `usage` isn't an object no longer locks a key out of its token budget** (WOR-980, [#727](https://github.com/oblangatas/worthless/pull/727)).
+  Before: a reply such as `{"usage": "x"}` or `{"usage": null}` crashed the step that records spend after the response is sent. That step never released the request's token-budget hold. A key with a daily budget then got `429 token_budget_exceeded` with no tokens spent, and a spend-capped key's hold waited for the sweeper.
+  Now: such a reply counts as "usage unknown". The proxy logs a warning and releases the hold. A spend-capped key is billed right away at the larger of its admission estimate and the 128,000-token ceiling, the same amount the sweeper charged before.
+
+  **Limits.**
+  - A token count inside `usage` that is `null` or not a number still crashes the same step and can lock the key out the same way (WOR-1002, [#730](https://github.com/oblangatas/worthless/pull/730)).
+  - A reply nested thousands of levels deep still crashes the same step, with the same lockout (WOR-1030).
+  - On a key with a token budget but no spend cap, a reply whose usage can't be read is not counted against the budget (WOR-1031).
 
 ## [0.3.16] — 2026-10-22
 

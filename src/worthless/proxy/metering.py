@@ -28,8 +28,8 @@ def extract_usage_openai(data: bytes) -> UsageInfo | None:
 
     try:
         parsed = json.loads(data)
-        if isinstance(parsed, dict) and isinstance(parsed.get("usage"), dict):
-            total = parsed["usage"].get("total_tokens", 0)
+        if isinstance(parsed, dict) and isinstance(usage := parsed.get("usage"), dict):
+            total = usage.get("total_tokens", 0)
             return UsageInfo(total_tokens=total, model=parsed.get("model"))
     except (json.JSONDecodeError, ValueError):
         pass
@@ -88,8 +88,7 @@ def extract_usage_anthropic(data: bytes) -> UsageInfo | None:
 
     try:
         parsed = json.loads(data)
-        if isinstance(parsed, dict) and isinstance(parsed.get("usage"), dict):
-            usage = parsed["usage"]
+        if isinstance(parsed, dict) and isinstance(usage := parsed.get("usage"), dict):
             input_tokens = usage.get("input_tokens", 0)
             cache_creation = usage.get("cache_creation_input_tokens", 0)
             cache_read = usage.get("cache_read_input_tokens", 0)
@@ -123,10 +122,10 @@ def extract_usage_anthropic(data: bytes) -> UsageInfo | None:
         model = msg.get("model")
 
     delta = _find_sse_event_data(lines, "message_delta", reverse=True)
-    if delta is None or not isinstance(delta.get("usage"), dict):
+    if delta is None or not isinstance(delta_usage := delta.get("usage"), dict):
         return None
 
-    output_tokens = delta["usage"].get("output_tokens", 0)
+    output_tokens = delta_usage.get("output_tokens", 0)
     return UsageInfo(total_tokens=input_tokens + output_tokens, model=model)
 
 
