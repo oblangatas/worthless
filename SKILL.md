@@ -134,7 +134,7 @@ worthless --json     # Read-only state report (never writes)
 All commands are available via `worthless <command> [OPTIONS]`.
 
 ### Global Options (apply to all commands)
-- `--quiet`, `-q`: Suppress non-error output
+- `--quiet`, `-q`: Hide progress output; errors and changes to your files (such as a `*_BASE_URL` line unlock removed) still show
 - `--json`: Emit machine-readable JSON output
 - `--debug`: Show full tracebacks on error
 - `--version`, `-V`: Show version and exit

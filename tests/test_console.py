@@ -180,6 +180,17 @@ class TestConsoleWrapper:
         captured = capsys.readouterr()
         assert captured.err == ""
 
+    @pytest.mark.parametrize(("quiet", "json_mode"), [(False, False), (True, False), (True, True)])
+    def test_a_file_note_is_always_shown_on_stderr(self, capsys, quiet, json_mode):
+        """WOR-1042: a change made to the user's .env is said even with --quiet."""
+        from worthless.cli.console import WorthlessConsole
+
+        c = WorthlessConsole(quiet=quiet, json_mode=json_mode)
+        c.print_file_note(".env: Removed OPENAI_BASE_URL [line 2]")
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert ".env: Removed OPENAI_BASE_URL [line 2]" in captured.err
+
     # --- worthless-k82c: bracketed tokens in messages must survive rich rendering ---
 
     def test_print_error_preserves_bracketed_tokens(self, capsys):

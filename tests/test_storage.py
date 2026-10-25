@@ -492,9 +492,11 @@ async def _enroll_for_restore(repo: ShardRepository, sample_split_result) -> Non
         BaseUrlRestore(var="OPENROUTER_BASE_URL", original="https://openrouter.ai/api/v1"),
         BaseUrlRestore(var="OPENROUTER_BASE_URL", original=""),
         BaseUrlRestore(var="OPENROUTER_BASE_URL", original=None),
+        # WOR-1042: no value to put back either, but unlock says so for this one.
+        BaseUrlRestore(var="OPENROUTER_BASE_URL", original=None, unsaved=True),
         BaseUrlRestore(var=None, original=None),
     ],
-    ids=["had-a-value", "had-it-empty", "lock-added-it", "lock-wrote-none"],
+    ids=["had-a-value", "had-it-empty", "lock-added-it", "lock-wont-save-it", "lock-wrote-none"],
 )
 async def test_base_url_restore_round_trips(
     repo: ShardRepository, sample_split_result, record: BaseUrlRestore
@@ -591,6 +593,14 @@ async def test_a_base_url_restore_from_an_earlier_lock_is_refused(
         await repo.verified_base_url_restore(enrollment, _RESTORE_SHARD_A)
 
 
+def test_a_base_url_restore_saved_before_wor_1042_reads_as_before() -> None:
+    """A record without ``unsaved`` keeps its JSON and its meaning, so its MAC still holds."""
+    old_json = '{"original": null, "var": "OPENROUTER_BASE_URL"}'
+    record = BaseUrlRestore.from_json(old_json)
+    assert record == BaseUrlRestore(var="OPENROUTER_BASE_URL", original=None)
+    assert record.to_json() == old_json
+
+
 @pytest.mark.parametrize(
     "record_json",
     [
@@ -601,11 +611,37 @@ async def test_a_base_url_restore_from_an_earlier_lock_is_refused(
         '{"var": 1, "original": null}',
         '{"var": "OPENROUTER_BASE_URL", "original": 2}',
         '{"var": null, "original": "https://openrouter.ai/api/v1"}',
+        '{"original": null, "unsaved": "yes", "var": "OPENROUTER_BASE_URL"}',
+        '{"original": null, "unsaved": 1, "var": "OPENROUTER_BASE_URL"}',
+        # Lock leaves the key out when false, so an explicit false isn't its form.
+        '{"original": null, "unsaved": false, "var": "OPENROUTER_BASE_URL"}',
+        '{"original": null, "unsaved": true, "var": null}',
+        '{"original": "https://openrouter.ai/api/v1", "unsaved": true,'
+        ' "var": "OPENROUTER_BASE_URL"}',
+        # Valid JSON, but not the sorted, spaced form lock writes.
+        '{"var": "OPENROUTER_BASE_URL", "original": null}',
+        '{"original":null,"var":"OPENROUTER_BASE_URL"}',
     ],
 )
 def test_base_url_restore_rejects_other_shapes(record_json: str) -> None:
     with pytest.raises(ValueError):
         BaseUrlRestore.from_json(record_json)
+
+
+@pytest.mark.parametrize(
+    ("var", "original", "unsaved"),
+    [
+        (None, "https://openrouter.ai/api/v1", False),
+        (None, None, True),
+        ("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1", True),
+    ],
+)
+def test_lock_cannot_build_a_record_unlock_would_refuse(
+    var: str | None, original: str | None, unsaved: bool
+) -> None:
+    """Refused on write too, or unlock would blame a lock bug on a DB edit."""
+    with pytest.raises(ValueError, match="base_url restore"):
+        BaseUrlRestore(var=var, original=original, unsaved=unsaved)
 
 
 @pytest.mark.asyncio

@@ -292,7 +292,8 @@ def test_uninstall_puts_back_your_line_for_a_key_an_older_version_locked(
     home_dir: WorthlessHome, tmp_path
 ) -> None:
     """WOR-1013: no saved value on an old row, so the upstream the key used while
-    locked goes back, which lock took from your own line."""
+    locked goes back, which lock took from your own line. WOR-1042: --quiet hides
+    progress, not that note."""
     from tests.helpers import fake_openrouter_key
 
     env = tmp_path / ".env"
@@ -310,10 +311,44 @@ def test_uninstall_puts_back_your_line_for_a_key_an_older_version_locked(
     conn.close()
 
     result = runner.invoke(
-        app, ["uninstall", "--yes"], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
+        app, ["--quiet", "uninstall", "--yes"], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
     )
     assert result.exit_code == 0, result.output
     assert env.read_bytes() == original
+    said = " ".join(result.output.split())
+    assert "the upstream this key used while locked" in said
+    assert "restored" not in said  # still quiet about progress
+
+
+def test_uninstall_says_lock_could_not_save_the_value_you_had(
+    home_dir: WorthlessHome, tmp_path
+) -> None:
+    """WOR-1042: lock wouldn't save this line (a quote, WOR-1027), so uninstall
+    removes it and says so, even with --quiet, instead of treating it as a line
+    lock added."""
+    from tests.helpers import assert_not_shown, fake_openai_key
+
+    url = "https://gateway.example.com/v1/o'neil"
+    worthless_env = {"WORTHLESS_HOME": str(home_dir.base_dir)}
+    registered = runner.invoke(
+        app,
+        ["providers", "register", "--name", "quoted-gw", "--url", url, "--protocol", "openai"],
+        env=worthless_env,
+    )
+    assert registered.exit_code == 0, registered.output
+    key = fake_openai_key()
+    env = tmp_path / ".env"
+    env.write_text(f"OPENAI_BASE_URL={url}\nOPENAI_API_KEY={key}\n")
+    locked = runner.invoke(app, ["lock", "--env", str(env)], env=worthless_env)
+    assert locked.exit_code == 0, locked.output
+
+    result = runner.invoke(app, ["--quiet", "uninstall", "--yes"], env=worthless_env)
+    assert result.exit_code == 0, result.output
+    assert env.read_text() == f"OPENAI_API_KEY={key}\n"
+    assert "lock couldn't save the value you had in OPENAI_BASE_URL" in " ".join(
+        result.output.split()
+    )
+    assert_not_shown(result.output, url, key)
 
 
 def test_uninstall_calls_openclaw_undo_with_restored_aliases(
