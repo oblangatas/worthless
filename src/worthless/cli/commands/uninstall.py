@@ -150,10 +150,11 @@ def _decide_mode(
 def _zero_restore_keys(restores: list) -> None:
     """Zero every reconstructed plaintext key held by built ``OcRestore``s.
 
-    On the happy path ``_apply_openclaw_unlock`` zeros these in its ``finally``.
-    But on the restore-failure path the wipe is aborted BEFORE that call, so the
-    reconstructed keys would otherwise linger in heap until GC. Zero them here so
-    a failed uninstall never leaves real key material in memory (SR-02).
+    ``_apply_openclaw_unlock`` zeros these in its ``finally``, but a refused or
+    stopped uninstall never reaches it, so the reconstructed keys would otherwise
+    linger in heap until GC. Zero them so no uninstall leaves real key material
+    in memory (SR-02). Only once the OpenClaw undo is done or skipped: a zeroed
+    key handed to it is written to openclaw.json as NUL bytes (WOR-1051).
     ``zero_buf`` is idempotent, so re-zeroing an already-cleared buffer is safe.
     """
     for r in restores:
@@ -306,7 +307,7 @@ async def _restore_all(
         # RuntimeError, NOT an OSError) from _decide_mode's confirm escapes the
         # cosmetic catch — zero any reconstructed keys already built into
         # ``unlocked`` before the exception propagates. On the normal-return path
-        # the caller owns that zeroing (via _apply_openclaw_unlock / the guard).
+        # the caller owns that zeroing (its finally around _apply_openclaw_unlock).
         if not completed:
             _zero_restore_keys(unlocked)
 
@@ -448,15 +449,14 @@ def _report_outcomes(console, restored, missing, enroll_only) -> None:  # noqa: 
         )
 
 
-def _guard_failed_restores(console, failed, unlocked, *, force: bool) -> None:  # noqa: ANN001
+def _guard_failed_restores(console, failed, *, force: bool) -> None:  # noqa: ANN001
     """Key-shredder guard: a .env EXISTS but its key couldn't be reconstructed.
-    Zero any built keys (SR-02), then block (no --force) or warn and continue
-    (--force). The warnings show even under ``--quiet`` (WOR-1043): with
-    --force they are the only record of the keys it destroys.
+    Block (no --force) or warn and continue (--force). The warnings show even
+    under ``--quiet`` (WOR-1043): with --force they are the only record of the
+    keys it destroys. The caller zeroes the built keys either way (SR-02).
     """
     if not failed:
         return
-    _zero_restore_keys(unlocked)
     for env_path, why in failed:
         console.print_key_note(f"could NOT restore {_shown(env_path)}: {why}")
     if not force:
@@ -761,36 +761,44 @@ def _run_uninstall(*, assume_yes: bool, force: bool = False, remove_mcp: bool = 
                 console, exc, force=force
             )
 
-        _report_outcomes(console, restored, missing, enroll_only)
-        _guard_failed_restores(console, failed, unlocked, force=force)
+        try:
+            _report_outcomes(console, restored, missing, enroll_only)
+            _guard_failed_restores(console, failed, force=force)
 
-        # WOR-795: tear down the launchd/systemd service unit BEFORE stopping the
-        # daemon and wiping. A KeepAlive/RunAtLoad unit would otherwise relaunch
-        # `worthless up`, which re-creates ~/.worthless within seconds — making the
-        # uninstall silently not stick. Best-effort, *nix-only (no unit on Windows),
-        # a clean no-op when no service was installed; it must never block the wipe.
-        # (Service-unit lifecycle is WOR-193's — we only call its teardown primitive.)
-        if not IS_WINDOWS:
+            # WOR-795: tear down the launchd/systemd service unit BEFORE stopping the
+            # daemon and wiping. A KeepAlive/RunAtLoad unit would otherwise relaunch
+            # `worthless up`, which re-creates ~/.worthless within seconds — making the
+            # uninstall silently not stick. Best-effort, *nix-only (no unit on Windows),
+            # a clean no-op when no service was installed; it must never block the wipe.
+            # (Service-unit lifecycle is WOR-193's — we only call its teardown primitive.)
+            if not IS_WINDOWS:
+                try:
+                    uninstall_service(home)
+                except Exception as exc:  # noqa: BLE001 — best-effort; never block the wipe
+                    console.print_warning(
+                        f"could not remove the service unit ({_scrub_exc(exc)}); continuing."
+                    )
+
+            # fzbi: stop a running proxy daemon before wiping its home. Best-effort —
+            # a daemon we can't stop must never block the teardown.
             try:
-                uninstall_service(home)
+                _stop_daemon(home, console)
             except Exception as exc:  # noqa: BLE001 — best-effort; never block the wipe
                 console.print_warning(
-                    f"could not remove the service unit ({_scrub_exc(exc)}); continuing."
+                    f"could not stop the proxy daemon ({_scrub_exc(exc)}); continuing."
                 )
 
-        # fzbi: stop a running proxy daemon before wiping its home. Best-effort —
-        # a daemon we can't stop must never block the teardown.
-        try:
-            _stop_daemon(home, console)
-        except Exception as exc:  # noqa: BLE001 — best-effort; never block the wipe
-            console.print_warning(
-                f"could not stop the proxy daemon ({_scrub_exc(exc)}); continuing."
-            )
-
-        # OpenClaw symmetric undo — best-effort; a partial failure → exit 73 AFTER
-        # the wipe (jl13), mirroring unlock. An earlier _build_oc_restores failure
-        # (oc_build_failed) rides the same exit-73 channel (worthless-ftit).
-        oc_partial = _apply_openclaw_unlock(unlocked, console, home) or oc_build_failed
+            # OpenClaw symmetric undo — best-effort; a partial failure → exit 73 AFTER
+            # the wipe (jl13), mirroring unlock. An earlier _build_oc_restores failure
+            # (oc_build_failed) rides the same exit-73 channel (worthless-ftit).
+            oc_partial = _apply_openclaw_unlock(unlocked, console, home) or oc_build_failed
+        finally:
+            # SR-02: no reconstructed key outlives the command. _apply_openclaw_unlock
+            # zeroes them once it has written them back, but the guard's refusal, or a
+            # note that can't be written, stops before it. Zeroing here, not in the
+            # guard, also keeps --force from handing it zeroed keys, which it would
+            # write to openclaw.json as NUL bytes (WOR-1051).
+            _zero_restore_keys(unlocked)
 
         # Cleanup is best-effort so a broken install (key already gone) still wipes.
         try:

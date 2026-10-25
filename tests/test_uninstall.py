@@ -539,8 +539,8 @@ def test_uninstall_zeros_keys_when_a_restore_fails(
 
     # Fail _unlock_batch — the SOLE shred-guarded step (worthless-ftit). A
     # transactional restore failure there routes the file to `failed` →
-    # _guard_failed_restores zeroes any keys already built for other files (SR-02)
-    # and aborts the wipe. (Post-ftit, _decide_mode/os.chmod are cosmetic and no
+    # _guard_failed_restores aborts the wipe, and uninstall zeroes any keys already
+    # built for other files (SR-02). (Post-ftit, _decide_mode/os.chmod are cosmetic and no
     # longer abort, so the injection point moved here from _decide_mode.)
     async def _boom(*_a, **_k):
         raise OSError("simulated restore failure")
