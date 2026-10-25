@@ -24,11 +24,13 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 
 ### Fixed
 - **`worthless lock` accepts a `*_BASE_URL` line with no value** (WOR-1041, [#740](https://github.com/oblangatas/worthless/pull/740)).
-  Before: a `.env` with a name and no `=`, such as `OPENROUTER_BASE_URL` or `export OPENROUTER_BASE_URL`, on the line lock writes for a key made lock stop with WRTLS-199, an internal error. Nothing changed: your `.env` kept its key, and the Worthless database stayed empty.
-  Now: lock leaves that line as it is, adds its proxy line after it, and says the line "had no value". Your app reads the proxy line, the only one with a value. Unlock removes only the line lock added, so lock then unlock gives back the `.env` you started with.
+  Before: a `.env` with a name and no `=`, such as `OPENROUTER_BASE_URL` or `export OPENROUTER_BASE_URL`, on the line lock writes for a key made lock stop with WRTLS-199, an internal error. A name in quotes, such as `'OPENROUTER_BASE_URL'=https://openrouter.ai/api/v1`, did the same. Nothing changed: your `.env` kept its key, and the Worthless database stayed empty.
+  Now: lock leaves that line as it is, adds its proxy line after it, and says the line "had no value", or that it "can't edit the line you have for it". Your app reads the proxy line, the last one for that name. Unlock removes only the line lock added, so lock then unlock gives back the `.env` you started with. Lock also prints that it added a line only after the `.env` is written, so a refused write no longer reports a line it never added.
 
   **Limits.**
-  - If the same name also has a value on an earlier line, lock rewrites that line as before, and the bare line after it still unsets the name for python-dotenv, so your app doesn't reach the proxy and its calls fail. Delete the bare line.
+  - If the same name also has a value on an earlier line, lock rewrites that line as before, and the bare line after it still unsets the name for python-dotenv, so your app doesn't reach the proxy and its calls fail. Delete the bare line (WOR-1045).
+  - The same happens when the line lock rewrites sits inside another variable's multi-line quoted value, which python-dotenv reads as part of that value. Before, lock added a line and routed the key, but unlock then deleted the line from inside that value (WOR-1045).
+  - A `.env` whose last line has no newline gets one, as with every lock that adds a line (see the WOR-981 entry below).
 - **`worthless unlock` puts back a `*_BASE_URL` line you had before lock** (WOR-1013, [#738](https://github.com/oblangatas/worthless/pull/738)).
   Before: if your `.env` already had the line lock writes for a key, for example `OPENROUTER_BASE_URL=https://openrouter.ai/api/v1` next to `OPENROUTER_API_KEY`, or your own gateway in `OPENAI_BASE_URL`, lock replaced its value with the proxy URL and did not keep yours. Unlock then removed the line. An app that reads `OPENROUTER_BASE_URL` with no default then used OpenAI's address and sent your OpenRouter key to OpenAI.
   Now: lock saves, for each key, which line it writes and the value it replaces. Unlock writes that value back as you wrote it, with its quotes, comment and any `${...}` reference, and removes the line only if lock added it. Lock then unlock gives back the `.env` you started with. `worthless uninstall` does the same.

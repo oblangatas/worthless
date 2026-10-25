@@ -1153,15 +1153,20 @@ def _batch_rewrite(
     """
     updates: dict[str, str] = {p.var_name: p.shard_a.decode("utf-8") for p in planned}
     additions: dict[str, str] = {}
+    notes: list[str] = []
     for slot, (p, existed) in base_url_lines.items():
         local_proxy = _proxy_base_url(p.alias)
         if existed:
             updates[slot] = local_proxy
         else:
             additions[slot] = local_proxy
-            why = "had no value" if slot in snapshot.parsed else "was missing"
-            sys.stderr.write(f"worthless: added {slot}={local_proxy} to {env_path} ({why})\n")
-            sys.stderr.flush()
+            if slot not in snapshot.parsed:
+                why = "was missing"
+            elif snapshot.parsed[slot] is None:
+                why = "had no value"
+            else:
+                why = "lock can't edit the line you have for it"
+            notes.append(f"worthless: added {slot}={local_proxy} to {env_path} ({why})\n")
 
     rewrite_env_keys(
         env_path,
@@ -1170,6 +1175,9 @@ def _batch_rewrite(
         expected_baseline_sha256=snapshot.sha256,
         _hook_before_replace=_build_verify_hook(planned),
     )
+    # Only once the line is there: a refused rewrite added nothing.
+    sys.stderr.writelines(notes)
+    sys.stderr.flush()
 
 
 async def _compensating_unwind(
@@ -3087,9 +3095,9 @@ def _lock_keys(
                 (var_name, value, provider_override or detected_provider)
                 for var_name, value, detected_provider in scanned
             ]
-            # Only names with a NAME=... line: a bare *_BASE_URL line has no value
-            # to update, so lock adds its line after it, and unlock removes only
-            # that line (WOR-1041).
+            # Only names with a NAME=... line the rewriter can update: for a bare
+            # or quoted *_BASE_URL line, lock adds its line after it, and unlock
+            # removes only that line (WOR-1041).
             existing_env_keys = snapshot.assigned
 
             planned: list[_PlannedUpdate] = []

@@ -777,6 +777,7 @@ class TestUnlockPutsBackTheBaseUrlYouHad:
             },
             raw={},  # the line as written could not be saved
             sha256=b"",
+            refs={},
         )
         saved = _value_to_put_back(
             "OPENAI_BASE_URL", snapshot, {"OPENAI_BASE_URL"}, {"OPENAI_API_KEY"}

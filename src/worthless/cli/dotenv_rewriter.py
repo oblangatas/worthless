@@ -28,7 +28,7 @@ import re
 import stat as _stat
 from collections import Counter
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -818,14 +818,14 @@ class EnvSnapshot:
     parsed: dict[str, str | None]
     raw: dict[str, str]
     sha256: bytes
-    refs: dict[str, frozenset[str]] = field(default_factory=dict)
+    refs: dict[str, frozenset[str]]
 
     @property
     def assigned(self) -> set[str]:
         """The names a ``NAME=...`` line sets, the lines :func:`rewrite_env_keys` can update.
 
-        ``parsed`` also holds a bare ``NAME`` line, as ``None``: it has no
-        ``=`` to update (WOR-1041).
+        ``parsed`` also holds names it can't: a bare ``NAME`` line (as ``None``)
+        has no ``=``, and a quoted ``'NAME'=...`` isn't a name to it (WOR-1041).
         """
         return set(self.refs)
 
