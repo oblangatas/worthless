@@ -1792,7 +1792,9 @@ class TestLockBaseUrlSlotPriority:
         verify_upstream_response_openai(data)
 
 
-def _lock_then_unlock(home_dir: WorthlessHome, env: Path) -> tuple[str, str, str, str]:
+def _lock_then_unlock(
+    home_dir: WorthlessHome, env: Path, *, quiet: bool = False
+) -> tuple[str, str, str, str]:
     """Lock then unlock *env*, which must come back byte for byte.
 
     Returns lock's output, ``OPENROUTER_BASE_URL`` as python-dotenv read it while
@@ -1802,7 +1804,9 @@ def _lock_then_unlock(home_dir: WorthlessHome, env: Path) -> tuple[str, str, str
 
     original = env.read_bytes()
     cli_env = {"WORTHLESS_HOME": str(home_dir.base_dir)}
-    locked = runner.invoke(app, ["lock", "--env", str(env)], env=cli_env)
+    locked = runner.invoke(
+        app, [*(["--quiet"] if quiet else []), "lock", "--env", str(env)], env=cli_env
+    )
     assert locked.exit_code == 0, locked.output
     read = dotenv_values(env).get("OPENROUTER_BASE_URL") or ""
     [enrollment] = asyncio.run(_repo(home_dir).list_enrollments())
@@ -1867,7 +1871,8 @@ class TestLockBareBaseUrlLine:
         env = tmp_path / ".env"
         env.write_text(content.format(key=fake_openrouter_key()))
 
-        locked, read, alias, _unlocked = _lock_then_unlock(home_dir, env)
+        # --quiet hides progress, not what lock did to the .env (WOR-1042).
+        locked, read, alias, _unlocked = _lock_then_unlock(home_dir, env, quiet=True)
         assert "OPENROUTER_BASE_URL: python-dotenv doesn't read the proxy address" in locked
         assert f"/{alias}/v1" not in read
 

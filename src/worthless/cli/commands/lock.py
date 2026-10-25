@@ -1217,7 +1217,7 @@ def _warn_unread_base_url_lines(env_path: Path, proxy_urls: dict[str, str]) -> N
     for slot, url in proxy_urls.items():
         if read.get(slot) != url:
             name = _oc_audit.sanitise_for_message(slot)
-            get_console().print_warning(
+            get_console().print_file_note(
                 f"{name}: python-dotenv doesn't read the proxy address lock wrote there "
                 f"(another {name} line, or another variable's quoted value, hides it), so "
                 "your app's calls won't reach the proxy and will fail. Fix the .env so "
