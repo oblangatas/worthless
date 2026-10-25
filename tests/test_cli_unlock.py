@@ -577,6 +577,32 @@ class TestUnlockPutsBackTheBaseUrlYouHad:
         _unlock(env, home_dir)
         assert env.read_bytes() == original
 
+    def test_lock_stops_before_the_env_when_a_record_is_not_saved(
+        self, home_dir: WorthlessHome, tmp_path: Path
+    ) -> None:
+        """A key rotated in place, the old one kept under another name.
+
+        The superseded-alias cleanup deletes the new MY_OPENAI_KEY row before
+        its record is written; lock must stop instead of leaving a shard-A that
+        no row can open.
+        """
+        old_key = fake_key("sk-proj-", seed="unlock-rotated-old")
+        env = tmp_path / ".env"
+        env.write_text(f"OPENAI_API_KEY={old_key}\n")
+        _lock(env, home_dir, "--keys-only")
+        env.write_text(
+            "OPENAI_BASE_URL=https://api.openai.com/v1\n"
+            f"MY_OPENAI_KEY={old_key}\nOPENAI_API_KEY={_TEST_KEY}\n"
+        )
+        before = env.read_bytes()
+
+        result = runner.invoke(
+            app, ["lock", "--env", str(env)], env={"WORTHLESS_HOME": str(home_dir.base_dir)}
+        )
+        assert result.exit_code != 0, result.output
+        assert "unchanged" in result.output
+        assert env.read_bytes() == before
+
     def test_a_line_you_changed_after_lock_is_kept(
         self, home_dir: WorthlessHome, tmp_path: Path
     ) -> None:

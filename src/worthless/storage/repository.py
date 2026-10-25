@@ -809,13 +809,14 @@ class ShardRepository:
 
     async def record_base_url_restores(
         self, env_path: str, restores: list[tuple[str, str, BaseUrlRestore]]
-    ) -> None:
+    ) -> int:
         """WOR-1013: tag and store one record per ``(alias, var_name, record)`` at *env_path*.
 
         Lock calls this after pass-1 and before it rewrites the ``.env``, in
         one transaction. An UPDATE rather than part of the enrollment INSERT:
         that INSERT OR IGNORE keeps a re-lock's older row, and the record must
-        describe the line this lock writes.
+        describe the line this lock writes. Returns how many rows it updated,
+        so the caller can tell when a row it just wrote has gone.
         """
         rows = []
         for alias, var_name, record in restores:
@@ -826,12 +827,13 @@ class ShardRepository:
             rows.append((record_json, mac, alias, var_name, env_path))
         async with self._connect() as db:
             await db.execute("BEGIN IMMEDIATE")
-            await db.executemany(
+            cursor = await db.executemany(
                 "UPDATE enrollments SET base_url_restore_json = ?, base_url_restore_mac = ? "
                 "WHERE key_alias = ? AND var_name = ? AND env_path = ?",
                 rows,
             )
             await db.commit()
+            return cursor.rowcount
 
     async def verified_base_url_restore(
         self, enrollment: EnrollmentRecord

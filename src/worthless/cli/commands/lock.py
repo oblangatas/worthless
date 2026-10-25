@@ -1074,7 +1074,16 @@ async def _record_base_url_restores(
         if slot is not None and existed:
             original = raw_values.get(slot, env_values.get(slot) or "")
         restores.append((p.alias, p.var_name, BaseUrlRestore(var=slot, original=original)))
-    await repo.record_base_url_restores(env_str, restores)
+    if await repo.record_base_url_restores(env_str, restores) != len(restores):
+        # A row pass-1 just wrote is gone. Rewriting now would leave a shard-A
+        # in the .env that no enrollment can open; stop while pass-1 can unwind.
+        raise WorthlessError(
+            ErrorCode.SHARD_STORAGE_FAILED,
+            "Lock lost track of a key it was protecting, so it stopped before changing "
+            "your .env, which is unchanged. This happens when a key you replaced is still "
+            "in the same .env under another name. Move or delete that copy, then run "
+            "`worthless lock` again.",
+        )
 
 
 def _batch_rewrite(
