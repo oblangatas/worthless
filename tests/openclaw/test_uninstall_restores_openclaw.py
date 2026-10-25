@@ -193,10 +193,15 @@ def test_uninstall_leaves_unrelated_openclaw_provider_untouched(
     }, f"uninstall mutated an unrelated provider entry: {after.get('mistral')}"
 
 
+def _agent_models(openclaw_present: dict[str, Path]) -> Path:
+    return openclaw_present["home"] / ".openclaw" / "agents" / "main" / "agent" / "models.json"
+
+
 def _lock_restorable_and_unrestorable(openclaw_present: dict[str, Path], tmp_path: Path):  # noqa: ANN202
     """Lock an OpenClaw-backed OpenAI key and an Anthropic key in two projects,
     then put a live symlink in place of the Anthropic ``.env``: safe_rewrite
-    refuses it, so uninstall can't put that key back (f2ge).
+    refuses it, so uninstall can't put that key back (f2ge). The OpenAI key is
+    also cached in an agent's ``models.json``, which lock scrubs (WOR-796).
 
     Returns ``(worthless_home, openai_key, anthropic_key, restorable, unrestorable)``.
     """
@@ -205,6 +210,11 @@ def _lock_restorable_and_unrestorable(openclaw_present: dict[str, Path], tmp_pat
     worthless_home = ensure_home(tmp_path / "worthless-home")
     openai_key = fake_key("sk-")
     _seed_original_openai(openclaw_present["config_path"], openai_key)
+    _agent_models(openclaw_present).parent.mkdir(parents=True)
+    _agent_models(openclaw_present).write_text(
+        json.dumps({"providers": {"openai": {"apiKey": openai_key, "baseUrl": _ORIG_BASE_URL}}}),
+        encoding="utf-8",
+    )
     anthropic_key = fake_anthropic_key()
 
     restorable = openclaw_present["home"] / "app" / ".env"
@@ -219,6 +229,10 @@ def _lock_restorable_and_unrestorable(openclaw_present: dict[str, Path], tmp_pat
             app, ["lock", "--env", str(env)], env={"WORTHLESS_HOME": str(worthless_home.base_dir)}
         )
         assert locked.exit_code == 0, locked.output
+
+    assert openai_key not in _agent_models(openclaw_present).read_text(encoding="utf-8"), (
+        "lock should have scrubbed the agent's cached key"
+    )
 
     target = unrestorable.with_name("elsewhere.env")
     target.write_text("ANTHROPIC_API_KEY=whatever\n")
@@ -276,6 +290,10 @@ def test_force_past_an_unrestorable_env_still_restores_openclaw_with_the_real_ke
         "baseUrl": _ORIG_BASE_URL,
         "apiKey": openai_key,
     }, "openclaw.json must get back the key uninstall restored, not NUL bytes"
+    cached = json.loads(_agent_models(openclaw_present).read_text(encoding="utf-8"))
+    assert cached["providers"]["openai"]["apiKey"] == openai_key, (
+        "the agent's cached key must come back too, not NUL bytes"
+    )
     assert built, "the restored .env should have built an OpenClaw restore"
     assert _all_zeroed(built), "SR-02: every reconstructed key must be zeroed by the end"
     assert_not_shown(uninst.output, openai_key, anthropic_key)
