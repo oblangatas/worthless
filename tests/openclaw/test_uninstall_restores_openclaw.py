@@ -28,6 +28,7 @@ Run:  WORTHLESS_KEYRING_BACKEND=null uv run pytest \
 
 from __future__ import annotations
 
+import errno
 import json
 from pathlib import Path
 
@@ -190,3 +191,119 @@ def test_uninstall_leaves_unrelated_openclaw_provider_untouched(
         "baseUrl": "https://api.mistral.ai/v1",
         "apiKey": "user-managed-mistral-key",
     }, f"uninstall mutated an unrelated provider entry: {after.get('mistral')}"
+
+
+def _lock_restorable_and_unrestorable(openclaw_present: dict[str, Path], tmp_path: Path):  # noqa: ANN202
+    """Lock an OpenClaw-backed OpenAI key and an Anthropic key in two projects,
+    then put a live symlink in place of the Anthropic ``.env``: safe_rewrite
+    refuses it, so uninstall can't put that key back (f2ge).
+
+    Returns ``(worthless_home, openai_key, anthropic_key, restorable, unrestorable)``.
+    """
+    from tests.helpers import fake_anthropic_key, fake_key
+
+    worthless_home = ensure_home(tmp_path / "worthless-home")
+    openai_key = fake_key("sk-")
+    _seed_original_openai(openclaw_present["config_path"], openai_key)
+    anthropic_key = fake_anthropic_key()
+
+    restorable = openclaw_present["home"] / "app" / ".env"
+    unrestorable = openclaw_present["home"] / "other" / ".env"
+    for env, line in (
+        (restorable, f"OPENAI_API_KEY={openai_key}\n"),
+        (unrestorable, f"ANTHROPIC_API_KEY={anthropic_key}\n"),
+    ):
+        env.parent.mkdir()
+        env.write_text(line)
+        locked = runner.invoke(
+            app, ["lock", "--env", str(env)], env={"WORTHLESS_HOME": str(worthless_home.base_dir)}
+        )
+        assert locked.exit_code == 0, locked.output
+
+    target = unrestorable.with_name("elsewhere.env")
+    target.write_text("ANTHROPIC_API_KEY=whatever\n")
+    unrestorable.unlink()
+    unrestorable.symlink_to(target)
+    return worthless_home, openai_key, anthropic_key, restorable, unrestorable
+
+
+def _keep_built_restores(monkeypatch) -> list:  # noqa: ANN001
+    """Every ``OcRestore`` uninstall builds, so a test can check its key at the end."""
+    import worthless.cli.commands.uninstall as uninstall_mod
+
+    built: list = []
+    real_build = uninstall_mod._build_oc_restores
+
+    async def _keep(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        restores = await real_build(*args, **kwargs)
+        built.extend(restores)
+        return restores
+
+    monkeypatch.setattr(uninstall_mod, "_build_oc_restores", _keep)
+    return built
+
+
+def _all_zeroed(restores: list) -> bool:
+    return all(not any(r.plaintext_key) for r in restores if r.plaintext_key is not None)
+
+
+def test_force_past_an_unrestorable_env_still_restores_openclaw_with_the_real_key(
+    openclaw_present: dict[str, Path], tmp_path: Path, monkeypatch
+) -> None:
+    """WOR-1051: ``--force`` past one ``.env`` it can't restore must still give
+    OpenClaw the real key of a ``.env`` it did restore, never NUL bytes, and
+    still zero every reconstructed key by the end (SR-02).
+    """
+    from tests.helpers import assert_not_shown
+
+    config_path = openclaw_present["config_path"]
+    worthless_home, openai_key, anthropic_key, restorable, unrestorable = (
+        _lock_restorable_and_unrestorable(openclaw_present, tmp_path)
+    )
+    built = _keep_built_restores(monkeypatch)
+
+    # A wide console keeps a long tmp path on one line.
+    uninst = runner.invoke(
+        app,
+        ["uninstall", "--yes", "--force"],
+        env={"WORTHLESS_HOME": str(worthless_home.base_dir), "COLUMNS": "1000"},
+    )
+
+    assert uninst.exit_code == 0, uninst.output
+    assert f"could NOT restore {unrestorable}" in uninst.output
+    assert restorable.read_text() == f"OPENAI_API_KEY={openai_key}\n"
+    assert _providers(config_path)["openai"] == {
+        "baseUrl": _ORIG_BASE_URL,
+        "apiKey": openai_key,
+    }, "openclaw.json must get back the key uninstall restored, not NUL bytes"
+    assert built, "the restored .env should have built an OpenClaw restore"
+    assert _all_zeroed(built), "SR-02: every reconstructed key must be zeroed by the end"
+    assert_not_shown(uninst.output, openai_key, anthropic_key)
+
+
+def test_force_zeroes_restored_keys_when_a_note_about_a_lost_key_cant_be_written(
+    openclaw_present: dict[str, Path], tmp_path: Path, monkeypatch
+) -> None:
+    """WOR-1051, SR-02: under ``--force`` the notes about a ``.env`` uninstall
+    couldn't restore print before the OpenClaw undo that zeroes the restored
+    keys. A stderr that refuses that write (EAGAIN on a non-blocking pipe) stops
+    the command there, and the keys it already reconstructed must still be zeroed.
+    """
+    from worthless.cli.console import WorthlessConsole
+
+    worthless_home, *_ = _lock_restorable_and_unrestorable(openclaw_present, tmp_path)
+    built = _keep_built_restores(monkeypatch)
+
+    def _refuse(console, message: str) -> None:  # noqa: ANN001
+        raise BlockingIOError(errno.EAGAIN, "Resource temporarily unavailable")
+
+    monkeypatch.setattr(WorthlessConsole, "print_key_note", _refuse)
+
+    uninst = runner.invoke(
+        app, ["uninstall", "--yes", "--force"], env={"WORTHLESS_HOME": str(worthless_home.base_dir)}
+    )
+
+    assert uninst.exit_code != 0, uninst.output
+    assert worthless_home.base_dir.exists(), "stopped before the wipe"
+    assert built, "the restored .env should have built an OpenClaw restore"
+    assert _all_zeroed(built), "SR-02: a key reconstructed before the stop must be zeroed"
