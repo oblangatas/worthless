@@ -238,22 +238,26 @@ async def _restore_all(
                 if _is_recoverable_repo_error(exc):
                     raise
                 # Route by the ACTUAL state, only AFTER attempting the restore —
-                # never pre-classify via exists() (CodeRabbit). ``Path.exists()``
-                # follows symlinks, which is exactly right here (worthless-f2ge):
-                #   - deleted project (.env gone)    → exists()=False → `missing`:
+                # never pre-classify (CodeRabbit). ``stat()`` follows symlinks,
+                # which is exactly right here (worthless-f2ge):
+                #   - deleted project (.env gone)    → FileNotFoundError → `missing`:
                 #     skip+warn, nothing to brick (BUG-2).
-                #   - dangling symlink (target gone) → exists()=False → `missing`:
+                #   - dangling symlink (target gone) → FileNotFoundError → `missing`:
                 #     same — the file that held shard-A is already gone.
-                #   - live symlink (target present)  → exists()=True  → `failed`:
+                #   - live symlink (target present)  → stats fine → `failed`:
                 #     the real key was NOT written (safe_rewrite refuses symlinks,
                 #     UnsafeReason.SYMLINK), shard-A is still live → guard fires.
                 #   - present regular file, unrestorable (transient EACCES, tamper)
                 #     → `failed`, trips the guard.
+                #   - a folder it can't open (EACCES, EIO) → `failed`, so the guard
+                #     names it and --force can still finish. Not exists(): from
+                #     Python 3.14 it returns False for any OSError (WOR-1043).
                 try:
-                    gone = not Path(env_path).exists()
+                    Path(env_path).stat()
+                    gone = False
+                except (FileNotFoundError, NotADirectoryError):
+                    gone = True
                 except OSError:
-                    # Can't even look (a folder it can't open): count the file as
-                    # there, so the guard names it and --force can still finish.
                     gone = False
                 if gone:
                     missing.append(env_path)
