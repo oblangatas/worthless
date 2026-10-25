@@ -21,6 +21,7 @@ import worthless.cli.commands.uninstall as uninstall_mod
 from worthless.cli.app import app
 from worthless.cli.bootstrap import WorthlessHome
 from worthless.cli.errors import ErrorCode, WorthlessError
+from tests.helpers import make_unrestorable, refuse_console_writes
 
 runner = CliRunner()
 
@@ -1398,33 +1399,6 @@ def _lock_project(home_dir: WorthlessHome, project, *, mode: int | None = None):
     return key, env
 
 
-def _make_unrestorable(env) -> None:  # noqa: ANN001
-    """A live symlink in place of the locked .env: safe_rewrite refuses it, so
-    uninstall can't put the key back (f2ge)."""
-    target = env.with_name("elsewhere.env")
-    target.write_text("OPENAI_API_KEY=whatever\n")
-    env.unlink()
-    env.symlink_to(target)
-
-
-def _refuse_file_notes(monkeypatch, times: int) -> list[str]:  # noqa: ANN001
-    """The first *times* print_file_note calls raise EAGAIN, as a non-blocking
-    pipe that refuses a write does. Returns every note it was asked to print."""
-    from worthless.cli.console import WorthlessConsole
-
-    real = WorthlessConsole.print_file_note
-    calls: list[str] = []
-
-    def _refuse(console, message: str) -> None:  # noqa: ANN001
-        calls.append(message)
-        if len(calls) <= times:
-            raise BlockingIOError(errno.EAGAIN, "Resource temporarily unavailable")
-        real(console, message)
-
-    monkeypatch.setattr(WorthlessConsole, "print_file_note", _refuse)
-    return calls
-
-
 @pytest.mark.parametrize("answers", [None, "y\ny\n", "y\nn\n"], ids=["yes", "tty-safe", "tty-keep"])
 def test_uninstall_shows_a_path_without_its_control_characters(
     home_dir: WorthlessHome, tmp_path, monkeypatch, answers: str | None
@@ -1461,7 +1435,7 @@ class TestQuietUninstallStillSaysWhatYouLose:
         from tests.helpers import assert_not_shown
 
         key, env = _lock_project(home_dir, tmp_path)
-        _make_unrestorable(env)
+        make_unrestorable(env)
 
         result = _quiet_uninstall(home_dir, "--force")
 
@@ -1477,7 +1451,7 @@ class TestQuietUninstallStillSaysWhatYouLose:
     ) -> None:
         """The refusal says "fix the above", so the above must be there."""
         _, env = _lock_project(home_dir, tmp_path)
-        _make_unrestorable(env)
+        make_unrestorable(env)
 
         result = _quiet_uninstall(home_dir)
 
@@ -1642,7 +1616,7 @@ class TestQuietUninstallStillSaysWhatYouLose:
         without it, as unlock does for its notes (WOR-1042)."""
         _, env = _lock_project(home_dir, tmp_path / "proj\x1b[2Jx", mode=0o644)
         if case == "unrestorable":
-            _make_unrestorable(env)
+            make_unrestorable(env)
 
         result = _quiet_uninstall(home_dir, "--force")
 
@@ -1664,7 +1638,7 @@ class TestQuietUninstallStillSaysWhatYouLose:
         pipe) stops the run. Read as a broken install, --force would wipe the
         keys not yet restored, and no --force would be told to re-run with it."""
         locked = [_lock_project(home_dir, tmp_path / name, mode=0o644) for name in "ab"]
-        _refuse_file_notes(monkeypatch, times=2)
+        refuse_console_writes(monkeypatch, "print_file_note", times=2)
 
         result = _quiet_uninstall(home_dir, *(["--force"] if force else []))
 
@@ -1732,7 +1706,7 @@ class TestQuietUninstallStillSaysWhatYouLose:
         env.write_text(f"OPENAI_BASE_URL={url}\nOPENAI_API_KEY={key}\n")
         locked = runner.invoke(app, ["lock", "--env", str(env)], env=worthless_env)
         assert locked.exit_code == 0, locked.output
-        calls = _refuse_file_notes(monkeypatch, times=1)
+        calls = refuse_console_writes(monkeypatch, "print_file_note", times=1)
 
         result = _quiet_uninstall(home_dir, *(["--force"] if force else []))
 

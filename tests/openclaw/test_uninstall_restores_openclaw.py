@@ -28,10 +28,10 @@ Run:  WORTHLESS_KEYRING_BACKEND=null uv run pytest \
 
 from __future__ import annotations
 
-import errno
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from worthless.cli.app import app
@@ -193,51 +193,77 @@ def test_uninstall_leaves_unrelated_openclaw_provider_untouched(
     }, f"uninstall mutated an unrelated provider entry: {after.get('mistral')}"
 
 
-def _agent_models(openclaw_present: dict[str, Path]) -> Path:
-    return openclaw_present["home"] / ".openclaw" / "agents" / "main" / "agent" / "models.json"
+def _agent_dir(openclaw_present: dict[str, Path]) -> Path:
+    return openclaw_present["home"] / ".openclaw" / "agents" / "main" / "agent"
+
+
+def _cached_keys(agent_dir: Path) -> tuple[str, str]:
+    """The OpenAI key in the agent's ``models.json`` and ``auth-profiles.json``."""
+    models = json.loads((agent_dir / "models.json").read_text(encoding="utf-8"))
+    profiles = json.loads((agent_dir / "auth-profiles.json").read_text(encoding="utf-8"))
+    return models["providers"]["openai"]["apiKey"], profiles["profiles"]["main-openai"]["key"]
+
+
+def _lock_openclaw_backed_key(
+    openclaw_present: dict[str, Path], worthless_home
+) -> tuple[str, Path]:  # noqa: ANN001
+    """Lock an OpenAI key that openclaw.json and an agent's caches also hold: lock
+    points openclaw.json at the proxy and scrubs the caches (WOR-796).
+
+    Returns ``(key, env path)``.
+    """
+    from tests.helpers import fake_key
+
+    key = fake_key("sk-")
+    _seed_original_openai(openclaw_present["config_path"], key)
+    agent_dir = _agent_dir(openclaw_present)
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "models.json").write_text(
+        json.dumps({"providers": {"openai": {"apiKey": key, "baseUrl": _ORIG_BASE_URL}}}),
+        encoding="utf-8",
+    )
+    (agent_dir / "auth-profiles.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "profiles": {"main-openai": {"type": "api_key", "provider": "openai", "key": key}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    env = openclaw_present["home"] / "app" / ".env"
+    env.parent.mkdir()
+    env.write_text(f"OPENAI_API_KEY={key}\n")
+    locked = runner.invoke(
+        app, ["lock", "--env", str(env)], env={"WORTHLESS_HOME": str(worthless_home.base_dir)}
+    )
+    assert locked.exit_code == 0, locked.output
+    assert key not in _cached_keys(agent_dir), "lock should have scrubbed the agent's caches"
+    return key, env
 
 
 def _lock_restorable_and_unrestorable(openclaw_present: dict[str, Path], tmp_path: Path):  # noqa: ANN202
-    """Lock an OpenClaw-backed OpenAI key and an Anthropic key in two projects,
-    then put a live symlink in place of the Anthropic ``.env``: safe_rewrite
-    refuses it, so uninstall can't put that key back (f2ge). The OpenAI key is
-    also cached in an agent's ``models.json``, which lock scrubs (WOR-796).
+    """An OpenClaw-backed OpenAI key (see above) and an Anthropic key in a second
+    project whose ``.env`` uninstall then can't restore.
 
     Returns ``(worthless_home, openai_key, anthropic_key, restorable, unrestorable)``.
     """
-    from tests.helpers import fake_anthropic_key, fake_key
+    from tests.helpers import fake_anthropic_key, make_unrestorable
 
     worthless_home = ensure_home(tmp_path / "worthless-home")
-    openai_key = fake_key("sk-")
-    _seed_original_openai(openclaw_present["config_path"], openai_key)
-    _agent_models(openclaw_present).parent.mkdir(parents=True)
-    _agent_models(openclaw_present).write_text(
-        json.dumps({"providers": {"openai": {"apiKey": openai_key, "baseUrl": _ORIG_BASE_URL}}}),
-        encoding="utf-8",
-    )
+    openai_key, restorable = _lock_openclaw_backed_key(openclaw_present, worthless_home)
     anthropic_key = fake_anthropic_key()
-
-    restorable = openclaw_present["home"] / "app" / ".env"
     unrestorable = openclaw_present["home"] / "other" / ".env"
-    for env, line in (
-        (restorable, f"OPENAI_API_KEY={openai_key}\n"),
-        (unrestorable, f"ANTHROPIC_API_KEY={anthropic_key}\n"),
-    ):
-        env.parent.mkdir()
-        env.write_text(line)
-        locked = runner.invoke(
-            app, ["lock", "--env", str(env)], env={"WORTHLESS_HOME": str(worthless_home.base_dir)}
-        )
-        assert locked.exit_code == 0, locked.output
-
-    assert openai_key not in _agent_models(openclaw_present).read_text(encoding="utf-8"), (
-        "lock should have scrubbed the agent's cached key"
+    unrestorable.parent.mkdir()
+    unrestorable.write_text(f"ANTHROPIC_API_KEY={anthropic_key}\n")
+    locked = runner.invoke(
+        app,
+        ["lock", "--env", str(unrestorable)],
+        env={"WORTHLESS_HOME": str(worthless_home.base_dir)},
     )
-
-    target = unrestorable.with_name("elsewhere.env")
-    target.write_text("ANTHROPIC_API_KEY=whatever\n")
-    unrestorable.unlink()
-    unrestorable.symlink_to(target)
+    assert locked.exit_code == 0, locked.output
+    make_unrestorable(unrestorable)
     return worthless_home, openai_key, anthropic_key, restorable, unrestorable
 
 
@@ -257,10 +283,13 @@ def _keep_built_restores(monkeypatch) -> list:  # noqa: ANN001
     return built
 
 
-def _all_zeroed(restores: list) -> bool:
-    """At least one reconstructed key was built, and every one is all zeros."""
+def _assert_all_zeroed(restores: list) -> None:
+    """SR-02: uninstall reconstructed at least one key, and every one is zeroed.
+    Counts, never echoes, a key left in memory."""
     keys = [r.plaintext_key for r in restores if r.plaintext_key is not None]
-    return bool(keys) and not any(any(key) for key in keys)
+    assert keys, "uninstall should have reconstructed a key for OpenClaw"
+    left = sum(1 for key in keys if any(key))
+    assert left == 0, f"SR-02: {left} reconstructed key(s) left in memory"
 
 
 def test_force_past_an_unrestorable_env_still_restores_openclaw_with_the_real_key(
@@ -292,12 +321,10 @@ def test_force_past_an_unrestorable_env_still_restores_openclaw_with_the_real_ke
         "baseUrl": _ORIG_BASE_URL,
         "apiKey": openai_key,
     }, "openclaw.json must get back the key uninstall restored, not NUL bytes"
-    cached = json.loads(_agent_models(openclaw_present).read_text(encoding="utf-8"))
-    assert cached["providers"]["openai"]["apiKey"] == openai_key, (
-        "the agent's cached key must come back too, not NUL bytes"
+    assert _cached_keys(_agent_dir(openclaw_present)) == (openai_key, openai_key), (
+        "the agent's caches must get the real key back too, not NUL bytes"
     )
-    assert built, "the restored .env should have built an OpenClaw restore"
-    assert _all_zeroed(built), "SR-02: every reconstructed key must be zeroed by the end"
+    _assert_all_zeroed(built)
     assert_not_shown(uninst.output, openai_key, anthropic_key)
 
 
@@ -309,15 +336,13 @@ def test_force_zeroes_restored_keys_when_a_note_about_a_lost_key_cant_be_written
     keys. A stderr that refuses that write (EAGAIN on a non-blocking pipe) stops
     the command there, and the keys it already reconstructed must still be zeroed.
     """
-    from worthless.cli.console import WorthlessConsole
+    from tests.helpers import assert_not_shown, refuse_console_writes
 
-    worthless_home, *_ = _lock_restorable_and_unrestorable(openclaw_present, tmp_path)
+    worthless_home, openai_key, anthropic_key, *_ = _lock_restorable_and_unrestorable(
+        openclaw_present, tmp_path
+    )
     built = _keep_built_restores(monkeypatch)
-
-    def _refuse(console, message: str) -> None:  # noqa: ANN001
-        raise BlockingIOError(errno.EAGAIN, "Resource temporarily unavailable")
-
-    monkeypatch.setattr(WorthlessConsole, "print_key_note", _refuse)
+    refuse_console_writes(monkeypatch, "print_key_note")
 
     uninst = runner.invoke(
         app, ["uninstall", "--yes", "--force"], env={"WORTHLESS_HOME": str(worthless_home.base_dir)}
@@ -325,5 +350,42 @@ def test_force_zeroes_restored_keys_when_a_note_about_a_lost_key_cant_be_written
 
     assert uninst.exit_code != 0, uninst.output
     assert worthless_home.base_dir.exists(), "stopped before the wipe"
-    assert built, "the restored .env should have built an OpenClaw restore"
-    assert _all_zeroed(built), "SR-02: a key reconstructed before the stop must be zeroed"
+    _assert_all_zeroed(built)
+    assert_not_shown(uninst.output, openai_key, anthropic_key)
+
+
+@pytest.mark.parametrize("stop", ["restored line", "proxy warning"])
+def test_uninstall_zeroes_a_restored_key_when_it_stops_before_the_openclaw_undo(
+    openclaw_present: dict[str, Path], tmp_path: Path, monkeypatch, stop: str
+) -> None:
+    """SR-02 (WOR-1051): after it restores a key, uninstall can still stop before
+    the OpenClaw undo that zeroes it, on a line it can't write (EAGAIN on a
+    non-blocking pipe): the "restored" line, or the warning that it couldn't stop
+    the proxy. The key it reconstructed must still be zeroed.
+    """
+    import worthless.cli.commands.uninstall as uninstall_mod
+    from tests.helpers import assert_not_shown, refuse_console_writes
+
+    worthless_home = ensure_home(tmp_path / "worthless-home")
+    key, env = _lock_openclaw_backed_key(openclaw_present, worthless_home)
+    built = _keep_built_restores(monkeypatch)
+    if stop == "restored line":
+        refuse_console_writes(monkeypatch, "print_success", containing=f"restored {env}")
+    else:
+
+        def _cant_stop(*_a, **_k):  # noqa: ANN002, ANN003, ANN202
+            raise OSError("simulated: proxy won't stop")
+
+        monkeypatch.setattr(uninstall_mod, "_stop_daemon", _cant_stop)
+        refuse_console_writes(
+            monkeypatch, "print_warning", containing="could not stop the proxy daemon"
+        )
+
+    uninst = runner.invoke(
+        app, ["uninstall", "--yes"], env={"WORTHLESS_HOME": str(worthless_home.base_dir)}
+    )
+
+    assert uninst.exit_code != 0, uninst.output
+    assert worthless_home.base_dir.exists(), "stopped before the wipe"
+    _assert_all_zeroed(built)
+    assert_not_shown(uninst.output, key)
