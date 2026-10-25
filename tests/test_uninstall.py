@@ -1234,6 +1234,54 @@ class TestMcpLeftoverReminder:
         assert "MCP server" in result.output, "default run should still name the file"
 
 
+@pytest.mark.parametrize("force", [False, True], ids=["no-force", "force"])
+def test_a_base_url_note_it_cannot_write_is_not_a_failed_restore(
+    home_dir: WorthlessHome, tmp_path, monkeypatch, force: bool
+) -> None:
+    """WOR-1043: unlock's *_BASE_URL note (WOR-1042) comes after that .env is
+    restored. A write that fails there stops uninstall. Read as a failed restore,
+    --force would say to rotate a key it had just put back, and wipe."""
+    from tests.helpers import fake_openai_key
+    from worthless.cli.console import WorthlessConsole
+
+    url = "https://gateway.example.com/v1/o'neil"  # lock can't save a quote (WOR-1027)
+    worthless_env = {"WORTHLESS_HOME": str(home_dir.base_dir)}
+    registered = runner.invoke(
+        app,
+        ["providers", "register", "--name", "quoted-gw", "--url", url, "--protocol", "openai"],
+        env=worthless_env,
+    )
+    assert registered.exit_code == 0, registered.output
+    key = fake_openai_key()
+    env = tmp_path / ".env"
+    env.write_text(f"OPENAI_BASE_URL={url}\nOPENAI_API_KEY={key}\n")
+    locked = runner.invoke(app, ["lock", "--env", str(env)], env=worthless_env)
+    assert locked.exit_code == 0, locked.output
+    real = WorthlessConsole.print_file_note
+    calls: list[str] = []
+
+    def _refuse_once(console, message: str) -> None:  # noqa: ANN001
+        calls.append(message)
+        if len(calls) == 1:
+            raise BlockingIOError(errno.EAGAIN, "Resource temporarily unavailable")
+        real(console, message)
+
+    monkeypatch.setattr(WorthlessConsole, "print_file_note", _refuse_once)
+
+    result = runner.invoke(
+        app,
+        ["--quiet", "uninstall", "--yes", *(["--force"] if force else [])],
+        env={**worthless_env, "COLUMNS": "1000"},
+    )
+
+    assert "lock couldn't save the value" in calls[0]  # the note that failed
+    assert result.exit_code != 0, result.output
+    assert home_dir.base_dir.exists(), "uninstall wiped after a note it couldn't write"
+    assert env.read_text() == f"OPENAI_API_KEY={key}\n"  # restored all the same
+    assert "could NOT restore" not in result.output
+    assert "stopped partway" in result.output
+
+
 @pytest.mark.parametrize("answers", [None, "y\ny\n", "y\nn\n"], ids=["yes", "tty-safe", "tty-keep"])
 def test_uninstall_shows_a_path_without_its_control_characters(
     home_dir: WorthlessHome, tmp_path, monkeypatch, answers: str | None
