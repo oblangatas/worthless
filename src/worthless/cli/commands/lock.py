@@ -1125,7 +1125,11 @@ async def _record_base_url_restores(
     for p in planned:
         slot = slot_of.get(p) or slot_of_alias.get(p.alias)
         # Not in originals: lock adds the line, or writes none for this key.
-        record = BaseUrlRestore(var=slot, original=originals.get(slot) if slot else None)
+        # In originals as None: the line had a value lock won't save (WOR-1042).
+        original = originals.get(slot) if slot else None
+        record = BaseUrlRestore(
+            var=slot, original=original, refused=slot in originals and original is None
+        )
         restores.append((p.alias, p.var_name, p.shard_a.decode("utf-8"), record))
     if await repo.record_base_url_restores(env_str, restores) != len(restores):
         # A row pass-1 just wrote is gone (known cause: WOR-1017's cleanup).

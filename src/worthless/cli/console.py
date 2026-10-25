@@ -127,6 +127,15 @@ class WorthlessConsole:
         if not self.quiet:
             self._err.print(f"[yellow]{_rich_escape(message)}[/yellow]")
 
+    def print_file_note(self, message: str) -> None:
+        """Yellow text to stderr about a change made to the user's own file.
+
+        NOT suppressed by ``--quiet`` (WOR-1042): quiet hides progress, but a
+        note that unlock removed or rewrote a line in the user's ``.env`` is
+        the only record of that change. Agents often pass ``--quiet``.
+        """
+        self._err.print(f"[yellow]{_rich_escape(message)}[/yellow]")
+
     def print_notice(self, message: str) -> None:
         """One-time informational notice to stderr (the AS-IS warranty
         notice, WOR-488).
