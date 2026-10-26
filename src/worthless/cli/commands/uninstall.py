@@ -628,16 +628,23 @@ def _apply_mcp_removal(console, found: list[Path]) -> None:  # noqa: ANN001
     Never fails the uninstall — a config we can't safely edit is reported so the
     user can finish it by hand, exactly as the default read-only path would.
     Every config is edited before any note prints, so a note that can't be
-    written never skips an edit (WOR-1043).
+    written never skips an edit, and one config it can't write never stops the
+    rest (WOR-1043).
     """
-    notes = [
-        f"removed the Worthless MCP entry from {_shown(path)} "
-        f"(original saved as {_shown(path.name)}.worthless.bak)"
-        if _remove_worthless_mcp_entries(path)
-        else f"could not edit {_shown(path)} (unreadable, malformed, or a symlink); "
-        "remove its 'worthless' entry by hand."
-        for path in found
-    ]
+    notes: list[str] = []
+    for path in found:
+        try:
+            removed = _remove_worthless_mcp_entries(path)
+        except OSError:  # the backup or the new file couldn't be written
+            logger.debug("uninstall: could not write %s", path, exc_info=True)
+            removed = []
+        notes.append(
+            f"removed the Worthless MCP entry from {_shown(path)} "
+            f"(original saved as {_shown(path.name)}.worthless.bak)"
+            if removed
+            else f"could not edit {_shown(path)} (unreadable, malformed, a symlink, or "
+            "not writable); remove its 'worthless' entry by hand."
+        )
     # Edits to your files, or ones it couldn't make: --quiet doesn't hide them.
     for note in notes:
         console.print_file_note(note)
