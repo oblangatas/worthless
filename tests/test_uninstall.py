@@ -11,6 +11,7 @@ import errno
 import json
 import os
 import sqlite3
+import sys
 
 import pytest
 import typer
@@ -1271,7 +1272,8 @@ class TestMcpLeftoverReminder:
             assert "worthless" not in servers, f"{cfg} was not edited"
 
     @pytest.mark.skipif(
-        hasattr(os, "geteuid") and os.geteuid() == 0, reason="root writes any folder"
+        sys.platform == "win32" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+        reason="needs POSIX folder permissions that bind this user",
     )
     def test_remove_mcp_names_a_config_it_cannot_write_and_edits_the_rest(
         self, home_dir: WorthlessHome, tmp_path, monkeypatch
@@ -1681,6 +1683,33 @@ class TestQuietUninstallStillSaysWhatYouLose:
         # The files it restored lost their OpenClaw rollback with their rows.
         assert "openclaw.json may still point at the proxy" in result.output
 
+    def test_a_busy_database_after_a_restore_does_not_say_nothing_changed(
+        self, home_dir: WorthlessHome, tmp_path, monkeypatch
+    ) -> None:
+        """CodeRabbit on #741: the database turns busy after one .env is back to
+        its real key. The refusal must not say "Nothing was changed"."""
+        real_unlock = uninstall_mod._unlock_batch
+        calls: list[object] = []
+
+        async def _busy_on_the_second(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+            calls.append(args)
+            if len(calls) == 2:
+                raise sqlite3.OperationalError("database is locked")
+            return await real_unlock(*args, **kwargs)
+
+        locked = [_lock_project(home_dir, tmp_path / name) for name in "ab"]
+        monkeypatch.setattr(uninstall_mod, "_unlock_batch", _busy_on_the_second)
+
+        result = _quiet_uninstall(home_dir, "--force")
+
+        assert result.exit_code != 0, result.output
+        assert home_dir.base_dir.exists()
+        assert sum(key in env.read_text() for key, env in locked) == 1
+        said = " ".join(result.output.split())
+        assert "another process" in said
+        assert "Nothing was changed" not in said
+        assert "any key it already restored is back in its .env" in said
+
     @pytest.mark.parametrize("force", [False, True], ids=["no-force", "force"])
     def test_a_base_url_note_it_cannot_write_is_not_a_failed_restore(
         self, home_dir: WorthlessHome, tmp_path, monkeypatch, force: bool
@@ -1715,7 +1744,8 @@ class TestQuietUninstallStillSaysWhatYouLose:
         assert "stopped partway" in result.output
 
     @pytest.mark.skipif(
-        hasattr(os, "geteuid") and os.geteuid() == 0, reason="root opens any folder"
+        sys.platform == "win32" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+        reason="needs POSIX folder permissions that bind this user",
     )
     @pytest.mark.parametrize("force", [False, True], ids=["no-force", "force"])
     def test_a_folder_it_cannot_open_is_named_like_a_file_it_could_not_restore(
@@ -1759,7 +1789,8 @@ class TestQuietUninstallStillSaysWhatYouLose:
         assert home_dir.base_dir.exists()
 
     @pytest.mark.skipif(
-        hasattr(os, "geteuid") and os.geteuid() == 0, reason="root opens any folder"
+        sys.platform == "win32" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+        reason="needs POSIX folder permissions that bind this user",
     )
     def test_a_folder_it_cannot_open_is_named_where_exists_hides_the_error(
         self, home_dir: WorthlessHome, tmp_path, monkeypatch
