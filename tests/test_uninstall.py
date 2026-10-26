@@ -1170,6 +1170,35 @@ class TestMcpLeftoverReminder:
         assert after["mcpServers"]["github"] == {"command": "docker"}, "another server was altered"
         assert "removed the Worthless MCP entry" in result.output
 
+    @pytest.mark.parametrize("remove", [False, True], ids=["reminder", "removed"])
+    def test_quiet_still_says_what_is_left_in_or_removed_from_an_editor_config(
+        self, home_dir: WorthlessHome, tmp_path, monkeypatch, remove: bool
+    ) -> None:
+        """WOR-1043 (CodeRabbit on #741): the config is your file. Under --quiet
+        uninstall still says it still names the Worthless MCP server, or that
+        --remove-mcp took our entry out."""
+        work = tmp_path / "work"
+        work.mkdir()
+        monkeypatch.chdir(work)
+        fake_home = tmp_path / "home"
+        cfg = self._seed_cursor_cfg(
+            fake_home, {"worthless": {"command": "npx", "args": ["-y", "worthless-mcp"]}}
+        )
+        self._lock_one(home_dir, work, fake_home)
+
+        result = runner.invoke(
+            app,
+            ["--quiet", "uninstall", "--yes", *(["--remove-mcp"] if remove else [])],
+            env=self._uninstall_env(home_dir, fake_home),
+        )
+
+        assert result.exit_code == 0, result.output
+        if remove:
+            assert f"removed the Worthless MCP entry from {cfg}" in result.output
+        else:
+            assert "You also set up the Worthless MCP server" in result.output
+            assert str(cfg) in result.output
+
     def test_quiet_still_says_which_config_it_could_not_edit(
         self, home_dir: WorthlessHome, tmp_path, monkeypatch
     ) -> None:
