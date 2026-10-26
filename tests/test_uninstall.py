@@ -1270,6 +1270,51 @@ class TestMcpLeftoverReminder:
             servers = json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"]
             assert "worthless" not in servers, f"{cfg} was not edited"
 
+    @pytest.mark.skipif(
+        hasattr(os, "geteuid") and os.geteuid() == 0, reason="root writes any folder"
+    )
+    def test_remove_mcp_names_a_config_it_cannot_write_and_edits_the_rest(
+        self, home_dir: WorthlessHome, tmp_path, monkeypatch
+    ) -> None:
+        """WOR-1043 (CodeRabbit on #741): a readable config in a folder it can't
+        write (no room for the backup) is named, and the configs after it are
+        still edited."""
+        from tests.helpers import fake_key
+
+        work = tmp_path / "work"
+        work.mkdir()
+        ours = {"worthless": {"command": "npx", "args": ["-y", "worthless-mcp"]}}
+        project_cfg = work / ".mcp.json"  # checked first
+        project_cfg.write_text(json.dumps({"mcpServers": ours}), encoding="utf-8")
+        fake_home = tmp_path / "home"
+        cursor_cfg = self._seed_cursor_cfg(fake_home, ours)
+        project = tmp_path / "proj"
+        project.mkdir()
+        env = project / ".env"
+        env.write_text(f"OPENAI_API_KEY={fake_key('sk-')}\n")
+        locked = runner.invoke(
+            app,
+            ["lock", "--env", str(env)],
+            env={"WORTHLESS_HOME": str(home_dir.base_dir), "HOME": str(fake_home)},
+        )
+        assert locked.exit_code == 0, locked.output
+        monkeypatch.chdir(work)
+        work.chmod(0o555)
+        try:
+            result = runner.invoke(
+                app,
+                ["--quiet", "uninstall", "--yes", "--remove-mcp"],
+                env=self._uninstall_env(home_dir, fake_home),
+            )
+        finally:
+            work.chmod(0o755)
+
+        assert result.exit_code == 0, result.output
+        assert f"could not edit {project_cfg}" in result.stderr, result.output
+        servers = json.loads(cursor_cfg.read_text(encoding="utf-8"))["mcpServers"]
+        assert "worthless" not in servers, "the config after it was not edited"
+        assert f"removed the Worthless MCP entry from {cursor_cfg}" in result.stderr
+
     def test_quiet_still_says_which_config_it_could_not_edit(
         self, home_dir: WorthlessHome, tmp_path, monkeypatch
     ) -> None:
