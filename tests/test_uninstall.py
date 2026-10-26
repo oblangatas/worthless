@@ -1194,10 +1194,81 @@ class TestMcpLeftoverReminder:
 
         assert result.exit_code == 0, result.output
         if remove:
-            assert f"removed the Worthless MCP entry from {cfg}" in result.output
+            assert f"removed the Worthless MCP entry from {cfg}" in result.stderr
         else:
-            assert "You also set up the Worthless MCP server" in result.output
-            assert str(cfg) in result.output
+            assert "You also set up the Worthless MCP server" in result.stderr
+            assert str(cfg) in result.stderr
+
+    def test_a_reminder_it_cannot_write_after_the_wipe_is_not_an_error(
+        self, home_dir: WorthlessHome, tmp_path, monkeypatch
+    ) -> None:
+        """WOR-1043 (Cursor Bugbot on #741): the MCP reminder comes after the
+        wipe. A stderr that refuses the write must not turn a finished uninstall
+        into an internal error: the reminder is advisory."""
+        from worthless.cli.console import WorthlessConsole
+
+        work = tmp_path / "work"
+        work.mkdir()
+        monkeypatch.chdir(work)
+        fake_home = tmp_path / "home"
+        self._seed_cursor_cfg(
+            fake_home, {"worthless": {"command": "npx", "args": ["-y", "worthless-mcp"]}}
+        )
+        self._lock_one(home_dir, work, fake_home)
+        real = WorthlessConsole.print_file_note
+
+        def _refuse_the_reminder(console, message: str) -> None:  # noqa: ANN001
+            if "Worthless MCP server" in message:
+                raise BlockingIOError(errno.EAGAIN, "Resource temporarily unavailable")
+            real(console, message)
+
+        monkeypatch.setattr(WorthlessConsole, "print_file_note", _refuse_the_reminder)
+
+        result = runner.invoke(
+            app, ["--quiet", "uninstall", "--yes"], env=self._uninstall_env(home_dir, fake_home)
+        )
+
+        assert result.exit_code == 0, result.output
+        assert not home_dir.base_dir.exists()
+
+    def test_remove_mcp_edits_every_config_even_if_a_note_cannot_be_written(
+        self, home_dir: WorthlessHome, tmp_path, monkeypatch
+    ) -> None:
+        """WOR-1043 (Cursor Bugbot on #741): a note --remove-mcp can't write after
+        its first edit must not stop it before the other configs are edited."""
+        from worthless.cli.console import WorthlessConsole
+
+        work = tmp_path / "work"
+        work.mkdir()
+        monkeypatch.chdir(work)
+        fake_home = tmp_path / "home"
+        ours = {"worthless": {"command": "npx", "args": ["-y", "worthless-mcp"]}}
+        project_cfg = work / ".mcp.json"  # checked first
+        project_cfg.write_text(json.dumps({"mcpServers": ours}), encoding="utf-8")
+        cursor_cfg = self._seed_cursor_cfg(fake_home, ours)
+        self._lock_one(home_dir, work, fake_home)
+        real = WorthlessConsole.print_file_note
+        mcp_notes: list[str] = []
+
+        def _refuse_the_first_mcp_note(console, message: str) -> None:  # noqa: ANN001
+            if "MCP entry" in message:
+                mcp_notes.append(message)
+                if len(mcp_notes) == 1:
+                    raise BlockingIOError(errno.EAGAIN, "Resource temporarily unavailable")
+            real(console, message)
+
+        monkeypatch.setattr(WorthlessConsole, "print_file_note", _refuse_the_first_mcp_note)
+
+        result = runner.invoke(
+            app,
+            ["--quiet", "uninstall", "--yes", "--remove-mcp"],
+            env=self._uninstall_env(home_dir, fake_home),
+        )
+
+        assert result.exit_code == 0, result.output
+        for cfg in (project_cfg, cursor_cfg):
+            servers = json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"]
+            assert "worthless" not in servers, f"{cfg} was not edited"
 
     def test_quiet_still_says_which_config_it_could_not_edit(
         self, home_dir: WorthlessHome, tmp_path, monkeypatch
