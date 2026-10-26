@@ -631,7 +631,8 @@ def _apply_mcp_removal(console, found: list[Path]) -> None:  # noqa: ANN001
     for path in found:
         removed = _remove_worthless_mcp_entries(path)
         if removed:
-            console.print_success(
+            # An edit to your file: --quiet doesn't hide it (WOR-1043).
+            console.print_file_note(
                 f"removed the Worthless MCP entry from {_shown(path)} "
                 f"(original saved as {_shown(path.name)}.worthless.bak)"
             )
@@ -673,7 +674,8 @@ def _remind_mcp_leftovers(console, *, remove: bool = False) -> None:  # noqa: AN
         logger.debug("uninstall: MCP-leftover check skipped", exc_info=True)
         return
     if found:
-        console.print_hint(
+        # Your file still names Worthless: --quiet doesn't hide that (WOR-1043).
+        console.print_file_note(
             "You also set up the Worthless MCP server. Remove its 'worthless' entry "
             f"from {', '.join(_shown(p) for p in found)} to fully unwire it — uninstall "
             "never edits editor configs unless you pass --remove-mcp."
