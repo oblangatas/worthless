@@ -627,21 +627,20 @@ def _apply_mcp_removal(console, found: list[Path]) -> None:  # noqa: ANN001
 
     Never fails the uninstall — a config we can't safely edit is reported so the
     user can finish it by hand, exactly as the default read-only path would.
+    Every config is edited before any note prints, so a note that can't be
+    written never skips an edit (WOR-1043).
     """
-    for path in found:
-        removed = _remove_worthless_mcp_entries(path)
-        if removed:
-            # An edit to your file: --quiet doesn't hide it (WOR-1043).
-            console.print_file_note(
-                f"removed the Worthless MCP entry from {_shown(path)} "
-                f"(original saved as {_shown(path.name)}.worthless.bak)"
-            )
-        else:
-            # You asked for this edit: --quiet doesn't hide that it didn't happen.
-            console.print_file_note(
-                f"could not edit {_shown(path)} (unreadable, malformed, or a symlink); "
-                "remove its 'worthless' entry by hand."
-            )
+    notes = [
+        f"removed the Worthless MCP entry from {_shown(path)} "
+        f"(original saved as {_shown(path.name)}.worthless.bak)"
+        if _remove_worthless_mcp_entries(path)
+        else f"could not edit {_shown(path)} (unreadable, malformed, or a symlink); "
+        "remove its 'worthless' entry by hand."
+        for path in found
+    ]
+    # Edits to your files, or ones it couldn't make: --quiet doesn't hide them.
+    for note in notes:
+        console.print_file_note(note)
 
 
 def _remind_mcp_leftovers(console, *, remove: bool = False) -> None:  # noqa: ANN001
@@ -667,19 +666,20 @@ def _remind_mcp_leftovers(console, *, remove: bool = False) -> None:  # noqa: AN
             Path.home() / ".cursor" / "mcp.json",  # Cursor
         ]
         found = [p for p in candidates if _mentions_worthless_mcp(p)]
-        if found and remove:
+        if not found:
+            return
+        if remove:
             _apply_mcp_removal(console, found)
             return
-    except Exception:  # noqa: BLE001 — advisory only; never fail a completed uninstall
-        logger.debug("uninstall: MCP-leftover check skipped", exc_info=True)
-        return
-    if found:
-        # Your file still names Worthless: --quiet doesn't hide that (WOR-1043).
+        # Your file still names Worthless: --quiet doesn't hide that. Inside the
+        # try: the wipe is done, so a note it can't write isn't a failure (WOR-1043).
         console.print_file_note(
             "You also set up the Worthless MCP server. Remove its 'worthless' entry "
             f"from {', '.join(_shown(p) for p in found)} to fully unwire it — uninstall "
             "never edits editor configs unless you pass --remove-mcp."
         )
+    except Exception:  # noqa: BLE001 — advisory only; never fail a completed uninstall
+        logger.debug("uninstall: MCP-leftover check or note skipped", exc_info=True)
 
 
 def _run_uninstall(*, assume_yes: bool, force: bool = False, remove_mcp: bool = False) -> None:
