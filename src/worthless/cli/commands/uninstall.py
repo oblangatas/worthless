@@ -729,14 +729,21 @@ def _run_uninstall(*, assume_yes: bool, force: bool = False, remove_mcp: bool = 
                 # A busy/locked DB (usually the running proxy) is RECOVERABLE —
                 # the keys are intact. Refuse, never wipe, even with --force:
                 # --force is for UNRECOVERABLE installs. `rm -rf ~/.worthless` is
-                # the escape for a permanently-wedged lock (worthless-u4hl).
+                # the escape for a permanently-wedged lock (worthless-u4hl). Once
+                # the install was read, a .env may already hold its real key, so
+                # don't say nothing changed (WOR-1043).
+                what = (
+                    "Nothing was wiped and your keys are safe: any key it already "
+                    "restored is back in its .env, and the rest are still locked."
+                    if read
+                    else "Nothing was changed — your keys are safe."
+                )
                 raise WorthlessError(
                     ErrorCode.LOCK_IN_PROGRESS,
                     "Worthless couldn't read its database because another process "
-                    "is using it (most likely the running proxy). Nothing was "
-                    "changed — your keys are safe. Stop it with `worthless down` "
-                    "and re-run. If it's permanently stuck, remove ~/.worthless "
-                    "manually and rotate those keys at your provider.",
+                    f"is using it (most likely the running proxy). {what} Stop it "
+                    "with `worthless down` and re-run. If it's permanently stuck, "
+                    "remove ~/.worthless manually and rotate those keys at your provider.",
                 ) from exc
             if read:
                 # The install was readable, so this isn't one --force may wipe: keys
