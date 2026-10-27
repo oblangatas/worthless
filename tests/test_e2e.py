@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import http.client
 import http.server
 import json
 import os
@@ -14,6 +15,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 from dotenv import dotenv_values
@@ -503,6 +505,92 @@ class TestUnlockedAppReachesYourOwnUpstream:
         # Compare in place: never print the key.
         assert [(path, auth == f"Bearer {key}") for path, auth in _FakeUpstream.received] == [
             ("/api/v1/chat/completions", True)
+        ]
+
+
+class _ForwardingEgressProxy(http.server.BaseHTTPRequestHandler):
+    """A plain-HTTP egress proxy, like a corporate one: relays and records every request."""
+
+    seen: list[bytes] = []
+
+    def _relay(self) -> None:
+        body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        self.seen.append(self.requestline.encode() + b"\n" + bytes(self.headers) + body)
+        target = urlsplit(self.path)  # absolute-form: http://host:port/path
+        conn = http.client.HTTPConnection(target.hostname or "", target.port, timeout=15)
+        hop = ("connection", "proxy-connection", "keep-alive")
+        headers = {k: v for k, v in self.headers.items() if k.lower() not in hop}
+        path = target.path + (f"?{target.query}" if target.query else "")
+        conn.request(self.command, path, body=body or None, headers=headers)
+        resp = conn.getresponse()
+        data = resp.read()
+        conn.close()
+        self.send_response(resp.status)
+        for name, value in resp.getheaders():
+            if name.lower() not in ("connection", "content-length", "transfer-encoding"):
+                self.send_header(name, value)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(data)
+
+    do_GET = do_POST = do_HEAD = _relay
+
+    def log_message(self, *_args: object) -> None:
+        pass
+
+
+@pytest.mark.integration
+@pytest.mark.real_ipc
+@pytest.mark.timeout(60)
+class TestShellProxyNeverSeesTheRealKey:
+    """A shell's HTTP_PROXY relays the app's shard-A at most, never the real key (WOR-1071)."""
+
+    def test_egress_proxy_in_the_shell_never_sees_the_real_key(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(_FakeUpstream, "received", [])
+        monkeypatch.setattr(_ForwardingEgressProxy, "seen", [])
+        servers = [
+            http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            for handler in (_FakeUpstream, _ForwardingEgressProxy)
+        ]
+        for server in servers:
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+        upstream = f"http://127.0.0.1:{servers[0].server_address[1]}/v1"
+        egress = f"http://127.0.0.1:{servers[1].server_address[1]}"
+        real_key = ""
+
+        def lock_to_own_gateway(env_file: Path, cli_env: dict[str, str]) -> None:
+            nonlocal real_key
+            real_key = dotenv_values(env_file)["OPENAI_API_KEY"] or ""
+            env_file.write_text(f"OPENAI_BASE_URL={upstream}\nOPENAI_API_KEY={real_key}\n")
+            _register_gateway(cli_env, "my-gateway", upstream)
+            _lock(env_file, cli_env)
+
+        # The proxy, the wrapped app and wrap itself all inherit this shell.
+        shell = {name: egress for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")}
+        shell |= {name.lower(): url for name, url in shell.items()}
+        shell |= {"NO_PROXY": "", "no_proxy": ""}
+        try:
+            proc = _run_child_under_wrap(
+                tmp_path, _ROUTED_CHILD_SCRIPT, lock_to_own_gateway, extra_env=shell
+            )
+        finally:
+            for server in servers:
+                server.shutdown()
+                server.server_close()
+
+        assert real_key
+        # The app's own call (carrying shard-A) went through it, so it was on the path.
+        assert _ForwardingEgressProxy.seen, "the shell's HTTP_PROXY relayed nothing"
+        # Compare in place: never print the key.
+        assert not any(real_key.encode() in request for request in _ForwardingEgressProxy.seen), (
+            "the shell's HTTP_PROXY received the real key"
+        )
+        assert "STATUS:200" in proc.stdout, f"stdout: {proc.stdout}\nstderr: {proc.stderr}"
+        assert [(path, auth == f"Bearer {real_key}") for path, auth in _FakeUpstream.received] == [
+            ("/v1/chat/completions", True)
         ]
 
 
