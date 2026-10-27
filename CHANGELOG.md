@@ -28,6 +28,13 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - For a key locked with this version, a saved value changed in the Worthless database is never replaced by the stored address: unlock removes the line and tells you.
   - The written value is the one lock resolved, so a `${...}` reference you had comes back expanded.
   - If the same key was also locked from another `.env`, the stored address is the last one lock saw for that key, which may be the other file's (WOR-1029).
+- **Malformed messages no longer leak the sidecar's memory** (CVE-2026-114613, [#745](https://github.com/oblangatas/worthless/pull/745)).
+  Before: Worthless accepted any msgpack from 1.0 on. msgpack 1.2.2 and earlier leak the rest of every message the sidecar rejects for having a non-string key. A process the sidecar accepts could grow it by about 1 MiB per message, without limit. Measured on the real sidecar, 200 such messages added 199 MiB.
+  Now: Worthless requires msgpack 1.2.3 or newer, which fixes the leak. The same 200 messages add 1 MiB. Installing or upgrading Worthless upgrades msgpack with it.
+
+  **Limits.**
+  - Only a process that passes the sidecar's peer-uid check can send these messages. That hasn't changed.
+  - On msgpack 1.2.3, one 5 KB message can still make the sidecar briefly allocate about 512 MiB (GHSA-j8c6-9vc5-hj6x, fixed in msgpack 1.2.4; WOR-1075).
 
 ### Fixed
 - **`worthless lock` accepts a `*_BASE_URL` line with no value** (WOR-1041, [#740](https://github.com/oblangatas/worthless/pull/740)).
