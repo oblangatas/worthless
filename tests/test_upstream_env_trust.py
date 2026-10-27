@@ -377,6 +377,31 @@ async def test_env_proxy_vars_never_receive_the_real_key(
     assert b"Bearer " + _KEY in upstream.received
 
 
+@pytest.mark.asyncio
+async def test_system_proxy_settings_never_receive_the_real_key(
+    tmp_db_path: str, fernet_key: bytes, repo: ShardRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no proxy variables set, macOS / Windows hand httpx the system proxy instead."""
+    async with (
+        _serve(_refuse) as (system_port, system_proxy),
+        _serve(_answer_chat) as (
+            up_port,
+            upstream,
+        ),
+    ):
+        url = f"http://127.0.0.1:{system_port}"
+        # httpx binds getproxies at import; patch both names to stand in for the OS.
+        monkeypatch.setattr("urllib.request.getproxies", lambda: {"http": url, "https": url})
+        monkeypatch.setattr("httpx._utils.getproxies", lambda: {"http": url, "https": url})
+
+        resp = await _proxied_chat(tmp_db_path, fernet_key, repo, f"http://127.0.0.1:{up_port}/v1")
+
+    assert _KEY not in system_proxy.received, "the system proxy received the real key"
+    assert system_proxy.connections == 0
+    assert resp.status_code == 200, resp.text
+    assert b"Bearer " + _KEY in upstream.received
+
+
 def _closed_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))

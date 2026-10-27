@@ -330,7 +330,10 @@ The reason: a TLS-inspecting egress proxy decrypts traffic with a certificate
 from its own CA, which clients are told to trust through settings like
 `SSL_CERT_FILE`. If the proxy honoured them, the inspecting proxy, and its
 logs, would see every real key. At startup the proxy logs a warning naming
-any proxy or CA setting it is ignoring (names only, never values).
+any proxy or CA setting it is ignoring (names only, never values). It shows
+in `docker logs`, and in `~/.worthless/proxy.log` for a proxy run by
+`worthless service install`. `worthless up` and `wrap` don't show the
+proxy's log yet ([WOR-1074](https://linear.app/plumbusai/issue/WOR-1074)).
 
 If your providers are reachable only through an egress proxy, opt in
 explicitly, wherever the proxy gets its environment: your shell for
