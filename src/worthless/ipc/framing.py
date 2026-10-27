@@ -26,6 +26,7 @@ import msgpack
 __all__ = [
     "MAX_FRAME_SIZE",
     "FrameError",
+    "FrameTimeoutError",
     "FrameTooLargeError",
     "FrameTruncatedError",
     "MalformedFrameError",
@@ -59,6 +60,13 @@ class FrameTruncatedError(FrameError):
     """
 
 
+class FrameTimeoutError(FrameError):
+    """Peer sent a frame header, then stopped before the body arrived.
+
+    Raised only when the caller passes ``body_timeout`` to :func:`read_frame`.
+    """
+
+
 class MalformedFrameError(FrameError):
     """Frame body is not a valid msgpack-encoded dict envelope."""
 
@@ -87,13 +95,22 @@ def encode_frame(envelope: Mapping[str, Any]) -> bytes:
     return len(payload).to_bytes(_HEADER_LEN, "big") + payload
 
 
-async def read_frame(reader: asyncio.StreamReader) -> dict[str, Any]:
+async def read_frame(
+    reader: asyncio.StreamReader, *, body_timeout: float | None = None
+) -> dict[str, Any]:
     """Read a single length-prefixed msgpack frame from ``reader``.
 
     Leaves any subsequent bytes in the stream untouched so back-to-back
     frames can be parsed by repeated calls.
 
+    Args:
+        reader: Stream to read from.
+        body_timeout: Seconds the body may take to arrive once the header
+            has. ``None`` waits forever. The wait for the header is never
+            bounded here: a connection idle between frames is normal.
+
     Raises:
+        FrameTimeoutError: body did not arrive within ``body_timeout``.
         FrameTruncatedError: stream closed before a complete frame was read.
         FrameTooLargeError: declared length exceeds :data:`MAX_FRAME_SIZE`.
         MalformedFrameError: body is not valid msgpack, or decodes to a
@@ -116,7 +133,11 @@ async def read_frame(reader: asyncio.StreamReader) -> dict[str, Any]:
 
     # --- body
     try:
-        payload = await reader.readexactly(length)
+        payload = await asyncio.wait_for(reader.readexactly(length), body_timeout)
+    except asyncio.TimeoutError as exc:
+        raise FrameTimeoutError(
+            f"body of {length} bytes did not arrive within {body_timeout}s"
+        ) from exc
     except asyncio.IncompleteReadError as exc:
         raise FrameTruncatedError(
             f"stream ended after {len(exc.partial)} of {length} body bytes"
