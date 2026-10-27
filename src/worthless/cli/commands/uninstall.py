@@ -18,6 +18,7 @@ import errno
 import json
 import logging
 import os
+import shlex
 import shutil
 import sqlite3
 import sys
@@ -40,6 +41,7 @@ from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary
 from worthless.cli.keystore import delete_fernet_key
 from worthless.cli.platform import IS_WINDOWS
 from worthless.crypto.types import zero_buf
+from worthless.openclaw import audit as _oc_audit
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +58,19 @@ def _scrub_exc(exc: BaseException) -> str:
     if isinstance(exc, WorthlessError):
         return f"WRTLS-{exc.code.value} ({exc.code.name})"
     return type(exc).__name__
+
+
+def _shown(path: object) -> str:
+    """A path as uninstall prints it: no control characters for the terminal."""
+    return _oc_audit.sanitise_for_message(str(path))
+
+
+def _chmod_command(mode: int, env_path: str) -> str:
+    """A ``chmod`` the user can paste, the path quoted for the shell. A path the
+    sanitiser changed is left out: pasted, it would name another file."""
+    if _shown(env_path) != env_path:
+        return f"chmod {mode:o} on that file"
+    return f"`chmod {mode:o} {shlex.quote(env_path)}`"
 
 
 # A restored .env holds the real reconstructed key, so clamp its mode to a hard
@@ -94,12 +109,14 @@ def _decide_mode(
     - already owner-only (incl. tighter ``0o400``) → restore it exactly, silently.
     - looser than owner-only → clamp to the safe mode. A human (no ``--yes``)
       is asked whether to keep their original instead; an agent (``--yes`` /
-      piped EOF) gets the safe default plus a plain notice. Non-judgmental.
+      piped EOF) gets the safe default plus a plain notice. Both notices show
+      even under ``--quiet`` (WOR-1043). Non-judgmental.
     """
     safe = secure_restore_mode(original_mode)
     if original_mode is None or safe == original_mode:
         return original_mode  # nothing to clamp
 
+    shown = _shown(env_path)
     if not assume_yes:
         # Human at the keyboard — let them decide, plainly. NOTE: on Ctrl-C or
         # EOF (piped/closed stdin) typer.confirm raises ``click.Abort`` (a
@@ -107,22 +124,25 @@ def _decide_mode(
         # (nothing wiped), and ``_restore_all``'s finally zeros any keys already
         # built into ``unlocked`` before it propagates (SR-02).
         keep_safe = typer.confirm(
-            f"{env_path} was 0o{original_mode:o} — other users on this machine could read "
+            f"{shown} was 0o{original_mode:o} — other users on this machine could read "
             f"this file, which now holds your real key. Set minimal-safe 0o{safe:o}?",
             default=True,
         )
         if not keep_safe:
-            console.print_warning(
-                f"{env_path}: kept original 0o{original_mode:o} at your request "
+            # Your choice, but the file still lets others read your key: --quiet
+            # doesn't hide that (WOR-1043).
+            console.print_file_note(
+                f"{shown}: kept original 0o{original_mode:o} at your request "
                 f"(other local users can read this key)."
             )
             return original_mode
         return safe
 
     # Agent / --yes: clamp to safe, tell them plainly how to revert.
-    console.print_warning(
-        f"{env_path}: original 0o{original_mode:o} was readable by other users; "
-        f"set to minimal-safe 0o{safe:o}. Run 'chmod {original_mode:o} {env_path}' to revert."
+    console.print_file_note(
+        f"{shown}: original 0o{original_mode:o} was readable by other users; "
+        f"set to minimal-safe 0o{safe:o}. Run {_chmod_command(original_mode, env_path)} "
+        "to revert."
     )
     return safe
 
@@ -142,8 +162,15 @@ def _zero_restore_keys(restores: list) -> None:
             zero_buf(key)
 
 
+async def _read_enrollments(repo) -> list:  # noqa: ANN001
+    """What uninstall reads before it restores any key. Only a failure here can
+    mean a broken install that --force may wipe past (WOR-1043)."""
+    await repo.initialize()
+    return await repo.list_enrollments()
+
+
 async def _restore_all(
-    home, repo, *, assume_yes: bool, console
+    home, repo, enrollments: list, *, assume_yes: bool, console
 ) -> tuple[
     list[tuple[str, int | None]],
     list[tuple[str, str]],
@@ -168,9 +195,6 @@ async def _restore_all(
     the .env with the real key, deletes that file's shard rows), then applies
     :func:`_decide_mode`.
     """
-    await repo.initialize()
-    enrollments = await repo.list_enrollments()
-
     by_path: dict[str, dict] = defaultdict(lambda: {"aliases": [], "mode": None})
     enroll_only: list[str] = []
     for e in enrollments:
@@ -197,13 +221,17 @@ async def _restore_all(
     completed = False
     try:
         for env_path, slot in by_path.items():
+            shown = _shown(env_path)
             # _unlock_batch is the ONLY shred-guarded step: it writes the real key
             # back and deletes shard-B, transactionally. A failure HERE means the
             # key is genuinely NOT restored, so it routes to missing/failed and may
             # block the wipe. Everything after it is best-effort post-restore work
             # that must never route to `failed` (worthless-ftit).
+            notes: list[str] = []
             try:
-                planned = await _unlock_batch(slot["aliases"], home, repo, Path(env_path))
+                planned = await _unlock_batch(
+                    slot["aliases"], home, repo, Path(env_path), notes_out=notes
+                )
             except Exception as exc:  # noqa: BLE001 — collect every failure, never abort mid-loop
                 # A busy/locked DB (or IPC blip) mid-restore is RECOVERABLE, not an
                 # unrestorable file: re-raise so the outer handler refuses (never
@@ -212,22 +240,38 @@ async def _restore_all(
                 if _is_recoverable_repo_error(exc):
                     raise
                 # Route by the ACTUAL state, only AFTER attempting the restore —
-                # never pre-classify via exists() (CodeRabbit). ``Path.exists()``
-                # follows symlinks, which is exactly right here (worthless-f2ge):
-                #   - deleted project (.env gone)    → exists()=False → `missing`:
+                # never pre-classify (CodeRabbit). ``stat()`` follows symlinks,
+                # which is exactly right here (worthless-f2ge):
+                #   - deleted project (.env gone)    → FileNotFoundError → `missing`:
                 #     skip+warn, nothing to brick (BUG-2).
-                #   - dangling symlink (target gone) → exists()=False → `missing`:
+                #   - dangling symlink (target gone) → FileNotFoundError → `missing`:
                 #     same — the file that held shard-A is already gone.
-                #   - live symlink (target present)  → exists()=True  → `failed`:
+                #   - live symlink (target present)  → stats fine → `failed`:
                 #     the real key was NOT written (safe_rewrite refuses symlinks,
                 #     UnsafeReason.SYMLINK), shard-A is still live → guard fires.
                 #   - present regular file, unrestorable (transient EACCES, tamper)
                 #     → `failed`, trips the guard.
-                if not Path(env_path).exists():
+                #   - a folder it can't open (EACCES, EIO) or a symlink loop (ELOOP)
+                #     → `failed`, so the guard names it and --force can still finish.
+                #     Not exists(): from Python 3.14 it returns False for any OSError,
+                #     and before that it read ELOOP as gone (WOR-1043).
+                try:
+                    Path(env_path).stat()
+                    gone = False
+                except (FileNotFoundError, NotADirectoryError):
+                    gone = True
+                except OSError:
+                    gone = False
+                if gone:
                     missing.append(env_path)
                 else:
                     failed.append((env_path, _scrub_exc(exc)))
                 continue
+            finally:
+                # Outside the catch above: a note that can't be written is not a
+                # failed restore, and stops the loop instead (WOR-1043).
+                for note in notes:
+                    console.print_file_note(note)
 
             # OpenClaw symmetric undo is FUNCTIONAL, not cosmetic: skipping it
             # leaves openclaw.json pointing at the proxy we're about to delete. A
@@ -237,24 +281,22 @@ async def _restore_all(
                 unlocked.extend(await _build_oc_restores(planned, repo, console))
             except Exception as exc:  # noqa: BLE001 — best-effort; surfaced via exit 73
                 oc_build_failed = True
-                console.print_warning(
-                    f"{env_path}: key restored, but openclaw.json may still point at the "
+                console.print_file_note(
+                    f"{shown}: key restored, but openclaw.json may still point at the "
                     f"proxy ({_scrub_exc(exc)}); run `worthless doctor` after uninstall."
                 )
 
             # Mode tightening is COSMETIC: a chmod-hostile filesystem (WSL /mnt/c,
             # FAT, some network mounts) must not abort an uninstall whose key is back.
-            target = slot["mode"]
+            # Only the chmod is caught: a note _decide_mode can't write is not one.
+            target = _decide_mode(env_path, slot["mode"], assume_yes=assume_yes, console=console)
             try:
-                target = _decide_mode(
-                    env_path, slot["mode"], assume_yes=assume_yes, console=console
-                )
                 if target is not None:
                     os.chmod(env_path, target)  # noqa: PTH101
             except OSError as exc:
-                console.print_warning(
-                    f"{env_path}: key restored, but the file mode wasn't tightened "
-                    f"({_scrub_exc(exc)}); run 'chmod 600 {env_path}' yourself."
+                console.print_file_note(
+                    f"{shown}: key restored, but the file mode wasn't tightened "
+                    f"({_scrub_exc(exc)}); run {_chmod_command(0o600, env_path)} yourself."
                 )
                 target = slot["mode"]
             restored.append((env_path, target))
@@ -375,7 +417,7 @@ def _handle_broken_repo(console, exc, *, force: bool):  # noqa: ANN001, ANN201
             "at your provider."
         )
         raise typer.Exit(code=1) from exc
-    console.print_warning(
+    console.print_key_note(
         f"--force: could not restore keys (broken install: {_scrub_exc(exc)}); wiping the "
         "remains anyway. Rotate your keys at the provider."
     )
@@ -383,18 +425,24 @@ def _handle_broken_repo(console, exc, *, force: bool):  # noqa: ANN001, ANN201
 
 
 def _report_outcomes(console, restored, missing, enroll_only) -> None:  # noqa: ANN001
-    """Print per-file results: restored, skipped-because-gone, enroll-only."""
+    """Print per-file results: restored, skipped-because-gone, enroll-only.
+
+    Only "restored" is progress. The other two delete a key for good, so
+    ``--quiet`` doesn't hide them (WOR-1043).
+    """
     for env_path, mode in restored:
         shown = f"0o{mode:o}" if mode is not None else "unchanged"
-        console.print_success(f"restored {env_path}  (mode {shown})")
+        console.print_success(f"restored {_shown(env_path)}  (mode {shown})")
     for env_path in missing:
-        # BUG-2: project deleted — nothing to restore, never a block.
-        console.print_warning(
-            f"skipping {env_path}: the project file is gone — nothing to restore "
-            "(removing the dead record)."
+        # BUG-2: project deleted — nothing to restore, never a block. A moved
+        # project still has its shard-A, which the wipe makes useless.
+        console.print_key_note(
+            f"skipping {_shown(env_path)}: the project file is gone — nothing to "
+            "restore (removing the dead record). If you moved the project, rotate its "
+            "key: it can't be restored after this."
         )
     for alias in enroll_only:
-        console.print_warning(
+        console.print_key_note(
             f"enroll-only key {alias!r} has no .env to restore — it will be removed. "
             "Rotate it at your provider if you still need it."
         )
@@ -403,13 +451,14 @@ def _report_outcomes(console, restored, missing, enroll_only) -> None:  # noqa: 
 def _guard_failed_restores(console, failed, unlocked, *, force: bool) -> None:  # noqa: ANN001
     """Key-shredder guard: a .env EXISTS but its key couldn't be reconstructed.
     Zero any built keys (SR-02), then block (no --force) or warn and continue
-    (--force).
+    (--force). The warnings show even under ``--quiet`` (WOR-1043): with
+    --force they are the only record of the keys it destroys.
     """
     if not failed:
         return
     _zero_restore_keys(unlocked)
     for env_path, why in failed:
-        console.print_warning(f"could NOT restore {env_path}: {why}")
+        console.print_key_note(f"could NOT restore {_shown(env_path)}: {why}")
     if not force:
         console.print_failure(
             f"Aborting uninstall — {len(failed)} file(s) could not be restored. "
@@ -420,7 +469,7 @@ def _guard_failed_restores(console, failed, unlocked, *, force: bool) -> None:  
             ErrorCode.SHARD_STORAGE_FAILED,
             "uninstall aborted: not all .env files restored",
         )
-    console.print_warning(
+    console.print_key_note(
         f"--force: wiping despite {len(failed)} file(s) whose keys could not be "
         "restored. Rotate those keys at your provider."
     )
@@ -432,8 +481,10 @@ def _finalize_wipe(console, home, n_restored: int) -> None:  # noqa: ANN001
     if home.base_dir.exists():
         # Partial wipe (e.g. an immutable/locked file survived rmtree). Tell the
         # truth — do NOT claim "~/.worthless removed" right after warning it wasn't.
-        console.print_warning(
-            f"~/.worthless could not be fully removed ({home.base_dir}); delete it manually."
+        # What's left can hold shard-B, so --quiet doesn't hide it (WOR-1043).
+        console.print_key_note(
+            f"~/.worthless could not be fully removed ({_shown(home.base_dir)}); "
+            "delete it manually."
         )
         console.print_success(
             f"Worthless uninstalled. {n_restored} .env file(s) restored to their real keys; "
@@ -576,19 +627,27 @@ def _apply_mcp_removal(console, found: list[Path]) -> None:  # noqa: ANN001
 
     Never fails the uninstall — a config we can't safely edit is reported so the
     user can finish it by hand, exactly as the default read-only path would.
+    Every config is edited before any note prints, so a note that can't be
+    written never skips an edit, and one config it can't write never stops the
+    rest (WOR-1043).
     """
+    notes: list[str] = []
     for path in found:
-        removed = _remove_worthless_mcp_entries(path)
-        if removed:
-            console.print_success(
-                f"removed the Worthless MCP entry from {path} "
-                f"(original saved as {path.name}.worthless.bak)"
-            )
-        else:
-            console.print_warning(
-                f"could not edit {path} (unreadable, malformed, or a symlink); "
-                "remove its 'worthless' entry by hand."
-            )
+        try:
+            removed = _remove_worthless_mcp_entries(path)
+        except OSError:  # the backup or the new file couldn't be written
+            logger.debug("uninstall: could not write %s", path, exc_info=True)
+            removed = []
+        notes.append(
+            f"removed the Worthless MCP entry from {_shown(path)} "
+            f"(original saved as {_shown(path.name)}.worthless.bak)"
+            if removed
+            else f"could not edit {_shown(path)} (unreadable, malformed, a symlink, or "
+            "not writable); remove its 'worthless' entry by hand."
+        )
+    # Edits to your files, or ones it couldn't make: --quiet doesn't hide them.
+    for note in notes:
+        console.print_file_note(note)
 
 
 def _remind_mcp_leftovers(console, *, remove: bool = False) -> None:  # noqa: ANN001
@@ -614,18 +673,20 @@ def _remind_mcp_leftovers(console, *, remove: bool = False) -> None:  # noqa: AN
             Path.home() / ".cursor" / "mcp.json",  # Cursor
         ]
         found = [p for p in candidates if _mentions_worthless_mcp(p)]
-        if found and remove:
+        if not found:
+            return
+        if remove:
             _apply_mcp_removal(console, found)
             return
-    except Exception:  # noqa: BLE001 — advisory only; never fail a completed uninstall
-        logger.debug("uninstall: MCP-leftover check skipped", exc_info=True)
-        return
-    if found:
-        console.print_hint(
+        # Your file still names Worthless: --quiet doesn't hide that. Inside the
+        # try: the wipe is done, so a note it can't write isn't a failure (WOR-1043).
+        console.print_file_note(
             "You also set up the Worthless MCP server. Remove its 'worthless' entry "
-            f"from {', '.join(str(p) for p in found)} to fully unwire it — uninstall "
+            f"from {', '.join(_shown(p) for p in found)} to fully unwire it — uninstall "
             "never edits editor configs unless you pass --remove-mcp."
         )
+    except Exception:  # noqa: BLE001 — advisory only; never fail a completed uninstall
+        logger.debug("uninstall: MCP-leftover check or note skipped", exc_info=True)
 
 
 def _run_uninstall(*, assume_yes: bool, force: bool = False, remove_mcp: bool = False) -> None:
@@ -650,10 +711,16 @@ def _run_uninstall(*, assume_yes: bool, force: bool = False, remove_mcp: bool = 
 
     oc_partial = False
     with acquire_lock(home):
+        read = False  # set once the install has been read: only before that is it "broken"
 
         async def _run():
+            nonlocal read
             async with open_repo(home) as repo:
-                return await _restore_all(home, repo, assume_yes=assume_yes, console=console)
+                enrollments = await _read_enrollments(repo)
+                read = True
+                return await _restore_all(
+                    home, repo, enrollments, assume_yes=assume_yes, console=console
+                )
 
         try:
             restored, failed, missing, unlocked, enroll_only, oc_build_failed = asyncio.run(_run())
@@ -662,14 +729,33 @@ def _run_uninstall(*, assume_yes: bool, force: bool = False, remove_mcp: bool = 
                 # A busy/locked DB (usually the running proxy) is RECOVERABLE —
                 # the keys are intact. Refuse, never wipe, even with --force:
                 # --force is for UNRECOVERABLE installs. `rm -rf ~/.worthless` is
-                # the escape for a permanently-wedged lock (worthless-u4hl).
+                # the escape for a permanently-wedged lock (worthless-u4hl). Once
+                # the install was read, a .env may already hold its real key, so
+                # don't say nothing changed (WOR-1043).
+                what = (
+                    "Nothing was wiped and your keys are safe: any key it already "
+                    "restored is back in its .env, and the rest are still locked."
+                    if read
+                    else "Nothing was changed — your keys are safe."
+                )
                 raise WorthlessError(
                     ErrorCode.LOCK_IN_PROGRESS,
                     "Worthless couldn't read its database because another process "
-                    "is using it (most likely the running proxy). Nothing was "
-                    "changed — your keys are safe. Stop it with `worthless down` "
-                    "and re-run. If it's permanently stuck, remove ~/.worthless "
-                    "manually and rotate those keys at your provider.",
+                    f"is using it (most likely the running proxy). {what} Stop it "
+                    "with `worthless down` and re-run. If it's permanently stuck, "
+                    "remove ~/.worthless manually and rotate those keys at your provider.",
+                ) from exc
+            if read:
+                # The install was readable, so this isn't one --force may wipe: keys
+                # may already be back in their .env. One file's restore failing is
+                # caught per file, so this is something else, such as a note it
+                # couldn't write (EAGAIN on a non-blocking pipe) (WOR-1043).
+                raise WorthlessError(
+                    ErrorCode.SHARD_STORAGE_FAILED,
+                    f"Uninstall stopped partway ({_scrub_exc(exc)}), so Worthless was not "
+                    "removed. Keys it already restored are back in their .env, but "
+                    "openclaw.json may still point at the proxy for them. Re-run "
+                    "`worthless uninstall` to restore the rest.",
                 ) from exc
             restored, failed, missing, unlocked, enroll_only, oc_build_failed = _handle_broken_repo(
                 console, exc, force=force

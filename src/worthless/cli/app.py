@@ -43,7 +43,7 @@ def _main(
         False,
         "--quiet",
         "-q",
-        help="Hide progress output; errors and changes to your files still show",
+        help="Hide progress output; errors, lost keys and changes to your files still show",
     ),
     json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON"),
     debug: bool = typer.Option(False, "--debug", help="Show full tracebacks on error"),

@@ -81,18 +81,9 @@ def _seed_missing_env_enrollment(home_dir: WorthlessHome, missing_path: str) -> 
     Seed pattern lifted from that existing test (direct sqlite INSERT into
     ``shards`` + ``enrollments``).
     """
-    con = sqlite3.connect(str(home_dir.db_path))
-    con.execute(
-        "INSERT INTO shards (key_alias, shard_b_enc, commitment, nonce, provider) "
-        "VALUES (?, ?, ?, ?, ?)",
-        ("ghost-alias", b"x", b"c", b"n", "openai"),
-    )
-    con.execute(
-        "INSERT INTO enrollments (key_alias, var_name, env_path) VALUES (?, ?, ?)",
-        ("ghost-alias", "GHOST_KEY", missing_path),
-    )
-    con.commit()
-    con.close()
+    from tests.helpers import seed_enrollment
+
+    seed_enrollment(home_dir.db_path, "ghost-alias", "GHOST_KEY", missing_path)
 
 
 # ---------------------------------------------------------------------------

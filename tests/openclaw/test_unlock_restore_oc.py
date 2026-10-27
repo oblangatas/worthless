@@ -103,11 +103,12 @@ def _lock(home_dir: WorthlessHome, env_file: Path):
     )
 
 
-def _unlock(home_dir: WorthlessHome, env_file: Path):
+def _unlock(home_dir: WorthlessHome, env_file: Path, *flags: str):
+    # A wide console keeps a long note on one line.
     return runner.invoke(
         app,
-        ["unlock", "--env", str(env_file)],
-        env={"WORTHLESS_HOME": str(home_dir.base_dir)},
+        [*flags, "unlock", "--env", str(env_file)],
+        env={"WORTHLESS_HOME": str(home_dir.base_dir), "COLUMNS": "1000"},
     )
 
 
@@ -348,3 +349,32 @@ def test_g4_cli_success_copy_says_restored_not_removed(
     assert "worthless-* entries" not in unlocked.output, (
         "stale 'worthless-* entries may remain' copy leaked into success path"
     )
+
+
+def test_quiet_unlock_still_says_a_malformed_record_leaves_the_entry_on_the_proxy(
+    home_dir: WorthlessHome,
+    env_file: Path,
+    sandboxed_home: Path,
+    fixed_key: str,
+) -> None:
+    """WOR-1043: Stage A then skips the provider with no [FAIL] block, so this
+    note is the only sign openclaw.json still points at the proxy."""
+    _seed_openclaw(sandboxed_home, {"baseUrl": "https://api.openai.com/v1", "apiKey": fixed_key})
+    locked = _lock(home_dir, env_file)
+    assert locked.exit_code == 0, locked.output
+
+    async def _corrupt() -> None:
+        async with aiosqlite.connect(str(home_dir.db_path)) as db:
+            await db.execute(
+                "UPDATE shards SET oc_original_api_key_json = '[]' "
+                "WHERE oc_original_api_key_json IS NOT NULL"
+            )
+            await db.commit()
+
+    asyncio.run(_corrupt())
+
+    result = _unlock(home_dir, env_file, "--quiet")
+
+    assert "OpenClaw 'openai' rollback record is malformed" in result.output, result.output
+    assert "leaving entry on the proxy" in result.output
+    assert fixed_key not in result.output
