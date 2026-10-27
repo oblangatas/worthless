@@ -1295,6 +1295,30 @@ class TestProxySpawnFailureFDCleanup:
         assert real_w in closed_fds
 
 
+class TestIgnoredUpstreamEnvNotice:
+    def test_wrap_says_which_proxy_settings_the_proxy_ignores(
+        self, home_with_key, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Nothing shows the proxy's own log under ``wrap`` (WOR-1074), so ``wrap``
+        prints the ignored-settings warning itself (WOR-1071). Names, never values."""
+
+        def _fail(**_kw):
+            raise RuntimeError("stop after the notice")
+
+        monkeypatch.setattr("worthless.cli.commands.wrap.spawn_proxy", _fail)
+        monkeypatch.delenv("WORTHLESS_UPSTREAM_PROXY", raising=False)
+        result = runner.invoke(
+            app,
+            ["wrap", "--", "echo", "hi"],
+            env={
+                "WORTHLESS_HOME": str(home_with_key.base_dir),
+                "HTTPS_PROXY": "http://corp-user:hunter2@egress.corp.example:3128",
+            },
+        )
+        assert "HTTPS_PROXY" in result.output and "WORTHLESS_UPSTREAM_PROXY" in result.output
+        assert "hunter2" not in result.output and "egress.corp.example" not in result.output
+
+
 class TestChildExitCodePropagatedViaWrap:
     """Child nonzero exit code flows through wrap → typer.Exit."""
 

@@ -40,6 +40,7 @@ from worthless.cli.process import (
     create_liveness_pipe,
     disable_core_dumps,
     forward_signals,
+    ignored_upstream_env_notes,
     poll_health,
     resolve_port,
     spawn_proxy,
@@ -347,6 +348,9 @@ def register_wrap_commands(app: typer.Typer) -> None:
                 ),
             )
 
+        for note in ignored_upstream_env_notes():
+            sys.stderr.write(f"worthless: warning: {note}\n")
+        sys.stderr.flush()
         try:
             proxy, port = spawn_proxy(
                 env=proxy_env,

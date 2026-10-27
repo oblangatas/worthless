@@ -317,8 +317,9 @@ not by the decoy.
 
 The proxy's call to the provider is the one moment the real key is on the
 wire. Where that call goes, and which certificates may vouch for the host that
-receives it, come only from Worthless's own settings, never from the proxy
-process's environment ([WOR-1071](https://linear.app/plumbusai/issue/WOR-1071)):
+receives it, come only from Worthless's own two settings below, never from the
+general proxy and CA settings in the proxy's environment
+([WOR-1071](https://linear.app/plumbusai/issue/WOR-1071)):
 
 - `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` and the macOS / Windows
   system proxy settings are ignored.
@@ -329,11 +330,12 @@ process's environment ([WOR-1071](https://linear.app/plumbusai/issue/WOR-1071)):
 The reason: a TLS-inspecting egress proxy decrypts traffic with a certificate
 from its own CA, which clients are told to trust through settings like
 `SSL_CERT_FILE`. If the proxy honoured them, the inspecting proxy, and its
-logs, would see every real key. At startup the proxy logs a warning naming
-any proxy or CA setting it is ignoring (names only, never values). It shows
-in `docker logs`, and in `~/.worthless/proxy.log` for a proxy run by
-`worthless service install`. `worthless up` and `wrap` don't show the
-proxy's log yet ([WOR-1074](https://linear.app/plumbusai/issue/WOR-1074)).
+logs, would see every real key. At startup Worthless warns about any proxy or
+CA setting it is ignoring and names the variable to set instead (names only,
+never values). `worthless up` and `wrap` print the warning to your terminal. A
+proxy started in the background (`worthless`) or by `worthless service install`
+writes it to `~/.worthless/proxy.log`, or on Linux a service writes it to the
+user journal. Docker shows it in `docker logs`.
 
 If your providers are reachable only through an egress proxy, opt in
 explicitly, wherever the proxy gets its environment: your shell for

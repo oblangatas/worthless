@@ -57,27 +57,35 @@ def _ambient_proxy_sources() -> list[str]:
     return ["the system proxy settings"] if routed else []
 
 
-def warn_ignored_env(settings: ProxySettings) -> None:
-    """Name the ambient proxy / CA settings the upstream call ignores, and the opt-in.
+def ignored_env_notes(upstream_proxy: str | None, upstream_ca_bundle: str | None) -> list[str]:
+    """Say which ambient proxy / CA settings upstream calls ignore, and the opt-in to set.
 
-    Called once at startup, by ``create_app``. Names only, never values: a proxy
-    URL can carry a password.
+    Names only, never values: a proxy URL can carry a password. The proxy logs
+    these at startup; ``worthless up`` / ``wrap`` print them too, because nothing
+    shows the proxy's own output there (WOR-1074).
     """
-    if settings.upstream_proxy is None and (proxies := _ambient_proxy_sources()):
-        logger.warning(
-            "upstream calls ignore %s. If providers are reachable only through an "
-            "egress proxy, set WORTHLESS_UPSTREAM_PROXY; whoever runs it can read "
-            "your real keys if it inspects TLS.",
-            ", ".join(proxies),
+    notes: list[str] = []
+    if upstream_proxy is None and (proxies := _ambient_proxy_sources()):
+        notes.append(
+            f"Upstream calls ignore {', '.join(proxies)}. If providers are reachable only "
+            "through an egress proxy, set WORTHLESS_UPSTREAM_PROXY. That proxy can read "
+            "your real keys only if it inspects TLS and you trust its CA with "
+            "WORTHLESS_UPSTREAM_CA_BUNDLE."
         )
     cas = [n for n in _CA_VARS if os.environ.get(n)]
-    if settings.upstream_ca_bundle is None and cas:
-        logger.warning(
-            "upstream TLS ignores %s and verifies providers against the built-in CA "
-            "list. To trust another CA, set WORTHLESS_UPSTREAM_CA_BUNDLE; anyone "
-            "holding that CA's key can read your real keys.",
-            ", ".join(cas),
+    if upstream_ca_bundle is None and cas:
+        notes.append(
+            f"Upstream TLS ignores {', '.join(cas)} and verifies providers against the "
+            "built-in CA list. To trust another CA, set WORTHLESS_UPSTREAM_CA_BUNDLE; "
+            "anyone holding that CA's key can then read your real keys."
         )
+    return notes
+
+
+def warn_ignored_env(settings: ProxySettings) -> None:
+    """Log :func:`ignored_env_notes` once at startup (``create_app``)."""
+    for note in ignored_env_notes(settings.upstream_proxy, settings.upstream_ca_bundle):
+        logger.warning("%s", note)
 
 
 def build_upstream_client(settings: ProxySettings) -> httpx.AsyncClient:

@@ -600,6 +600,9 @@ class TestShellProxyNeverSeesTheRealKey:
         assert [(path, auth == f"Bearer {real_key}") for path, auth in _FakeUpstream.received] == [
             ("/v1/chat/completions", True)
         ]
+        # wrap tells the user why, by name only.
+        assert "WORTHLESS_UPSTREAM_PROXY" in proc.stderr
+        assert egress not in proc.stderr
 
 
 @pytest.mark.integration

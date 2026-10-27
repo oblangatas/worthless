@@ -110,6 +110,22 @@ def resolve_openclaw_proxy_base_url(port: int | None = None) -> str:
     return f"http://{host}:{resolved_port}"  # NOSONAR python:S5332 — loopback/internal-only proxy
 
 
+def ignored_upstream_env_notes() -> list[str]:
+    """The proxy's ignored proxy / CA settings warning, for ``up`` / ``wrap`` to print.
+
+    The proxy inherits this environment and logs the same notes, but nothing
+    reads its output under ``up`` / ``wrap`` (WOR-1074), so a user behind a
+    corporate proxy would otherwise see only 502s (WOR-1071).
+    """
+    # Local import: keeps the proxy package off the CLI's cold start path.
+    from worthless.proxy.upstream import ignored_env_notes  # noqa: PLC0415
+
+    return ignored_env_notes(
+        os.environ.get("WORTHLESS_UPSTREAM_PROXY", "").strip() or None,
+        os.environ.get("WORTHLESS_UPSTREAM_CA_BUNDLE", "").strip() or None,
+    )
+
+
 def check_proxy_health(port: int) -> dict[str, object]:
     """Hit ``/healthz`` on *port* and return a status dict.
 
