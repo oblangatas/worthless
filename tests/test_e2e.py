@@ -516,8 +516,9 @@ class _ForwardingEgressProxy(http.server.BaseHTTPRequestHandler):
     def _relay(self) -> None:
         body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
         self.seen.append(self.requestline.encode() + b"\n" + bytes(self.headers) + body)
-        target = urlsplit(self.path)  # absolute-form: http://host:port/path
-        conn = http.client.HTTPConnection(target.hostname or "", target.port, timeout=15)
+        target = urlsplit(self.path)  # absolute-form: http://127.0.0.1:port/path
+        # Loopback only, whatever host the request names: everything in this test is local.
+        conn = http.client.HTTPConnection("127.0.0.1", int(target.port or 80), timeout=15)
         hop = ("connection", "proxy-connection", "keep-alive")
         headers = {k: v for k, v in self.headers.items() if k.lower() not in hop}
         path = target.path + (f"?{target.query}" if target.query else "")
@@ -526,9 +527,7 @@ class _ForwardingEgressProxy(http.server.BaseHTTPRequestHandler):
         data = resp.read()
         conn.close()
         self.send_response(resp.status)
-        for name, value in resp.getheaders():
-            if name.lower() not in ("connection", "content-length", "transfer-encoding"):
-                self.send_header(name, value)
+        self.send_header("Content-Type", "application/json")  # every reply here is JSON
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Connection", "close")
         self.end_headers()
