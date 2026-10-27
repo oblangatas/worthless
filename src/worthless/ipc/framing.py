@@ -24,6 +24,7 @@ from collections.abc import Mapping
 import msgpack
 
 __all__ = [
+    "MAX_CONTAINERS",
     "MAX_CONTAINER_LEN",
     "MAX_FRAME_SIZE",
     "FrameError",
@@ -45,6 +46,14 @@ MAX_FRAME_SIZE = 1024 * 1024
 #: The largest legitimate containers are the 6-key request envelope and the
 #: hello reply's ``backend_caps`` (one entry per known op, 4 today).
 MAX_CONTAINER_LEN = 32
+
+#: Most arrays and maps a frame may hold in total. Each one decoded costs
+#: ~60 bytes of Python objects, so a 1 MiB frame of empty lists used to cost
+#: ~65 MiB, and a hello padded that way stayed referenced while its
+#: connection stayed open (WOR-1075). With MAX_CONTAINER_LEN this bounds every
+#: frame's decoded size to about its byte size. Legitimate frames hold at most
+#: 3 (envelope, body, and ``client_versions`` or ``backend_caps``).
+MAX_CONTAINERS = 16
 
 _HEADER_LEN = 4
 
@@ -136,7 +145,17 @@ async def read_frame(reader: asyncio.StreamReader) -> dict[str, Any]:
     # could declare a 1 MiB frame whose body is a map with 10M keys, or an ext
     # type claiming multi-GiB length — msgpack-python would happily try to allocate
     # before we see the payload. Arrays and maps get MAX_CONTAINER_LEN, which
-    # bounds the up-front allocation on every msgpack version, not just ≥1.2.4.
+    # bounds the up-front allocation on every msgpack version, not just ≥1.2.4,
+    # and the hooks below stop decoding at MAX_CONTAINERS of them in total.
+    containers = 0
+
+    def _count_container(container: Any) -> Any:
+        nonlocal containers
+        containers += 1
+        if containers > MAX_CONTAINERS:
+            raise ValueError(f"more than {MAX_CONTAINERS} arrays and maps")
+        return container
+
     try:
         decoded = msgpack.unpackb(
             payload,
@@ -146,6 +165,8 @@ async def read_frame(reader: asyncio.StreamReader) -> dict[str, Any]:
             max_ext_len=MAX_FRAME_SIZE,
             max_array_len=MAX_CONTAINER_LEN,
             max_map_len=MAX_CONTAINER_LEN,
+            list_hook=_count_container,
+            object_hook=_count_container,
         )
     except (msgpack.UnpackException, ValueError) as exc:
         # msgpack.UnpackException covers format errors and our size-cap breaches

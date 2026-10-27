@@ -12,6 +12,7 @@ import pytest
 
 from worthless.ipc.framing import (
     MAX_CONTAINER_LEN,
+    MAX_CONTAINERS,
     MAX_FRAME_SIZE,
     FrameTooLargeError,
     FrameTruncatedError,
@@ -201,6 +202,24 @@ class TestContainerCaps:
         reader = asyncio.StreamReader()
         _feed(reader, encode_frame(_envelope(body={"x": make(MAX_CONTAINER_LEN + 1)})))
         with pytest.raises(MalformedFrameError, match="exceeds max"):
+            await read_frame(reader)
+
+    async def test_frame_with_the_most_containers_allowed_decodes(self) -> None:
+        # envelope + body + nested lists = MAX_CONTAINERS arrays and maps
+        nested: list[object] = []
+        for _ in range(MAX_CONTAINERS - 3):
+            nested = [nested]
+        env = _envelope(body={"x": nested})
+        reader = asyncio.StreamReader()
+        _feed(reader, encode_frame(env))
+        assert await read_frame(reader) == env
+
+    async def test_frame_with_one_container_too_many_rejected(self) -> None:
+        # Each list is within MAX_CONTAINER_LEN; their number is what's refused.
+        env = _envelope(body={"x": [[] for _ in range(MAX_CONTAINERS - 2)]})
+        reader = asyncio.StreamReader()
+        _feed(reader, encode_frame(env))
+        with pytest.raises(MalformedFrameError, match="arrays and maps"):
             await read_frame(reader)
 
     async def test_declared_length_rejected_before_items_arrive(self) -> None:

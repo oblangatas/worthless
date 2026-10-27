@@ -35,7 +35,7 @@ Shape is modelled after [Google Tink's `Aead`](https://developers.google.com/tin
 ```
 
 - **Max frame size:** 1 MiB. Larger → `PROTO` error, connection closed.
-- **Max container length:** 32 entries per array or map, at any depth. Longer → `PROTO` error, connection closed. Decoders preallocate a container at its declared length, so this cap is what keeps a tiny frame from allocating hundreds of MiB (WOR-1075). The largest legitimate containers are the 6-key request envelope and `backend_caps`.
+- **Max containers:** at most 16 arrays and maps per frame in total, each with at most 32 entries, at any depth. More → `PROTO` error, connection closed. Decoders preallocate a container at its declared length, and every decoded container costs far more memory than its bytes on the wire, so these two caps keep a frame's decoded size close to its size on the wire (WOR-1075). Legitimate frames hold at most 3 containers; the largest are the 6-key request envelope and `backend_caps`.
 - **Serialization:** [msgpack](https://msgpack.org/), `use_bin_type=True`, `raw=False`.
 
 ## Envelope
