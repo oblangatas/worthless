@@ -2,7 +2,8 @@
 FROM python:3.13-slim-trixie@sha256:3dd7cc108ec1493442514f5c2a871af6af0ec31d768ff6e378a93340c3b3db5f AS builder
 
 # uv only exports uv.lock below. It lives in /bin, outside the /usr/local paths
-# the final stage copies, so it never ships. Same release install.sh pins.
+# the final stage copies, so it never ships. Same release install.sh pins
+# (test_deploy_static.py keeps the two equal).
 COPY --from=ghcr.io/astral-sh/uv:0.11.7@sha256:240fb85ab0f263ef12f492d8476aa3a2e4e1e333f7d67fbdd923d00a506a516a /uv /bin/uv
 
 WORKDIR /build

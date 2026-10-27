@@ -76,7 +76,7 @@ Which versions of worthless's dependencies you get depends on how you install it
 
 | How you install | Dependency versions you get | Audited? |
 |---|---|---|
-| Docker image (`ghcr.io/oblangatas/worthless-proxy`) | Exactly the versions in `uv.lock`. Each file is checked against the hash recorded there, and the build stops if `uv.lock` doesn't match `pyproject.toml`. | Yes. The image holds the set the audit checked. |
+| Docker image (`ghcr.io/oblangatas/worthless-proxy`) | Exactly the versions in `uv.lock`. Each file is checked against the hash recorded there, and the build stops if `uv.lock` doesn't match `pyproject.toml`. | Yes. The image holds the set the audit checked. One gap: the tool that builds worthless itself during the image build (setuptools) is still downloaded unpinned, and it can write to the packages the image ships ([WOR-1084](https://linear.app/plumbusai/issue/WOR-1084)). |
 | `install.sh`, `pip install worthless`, `uv tool install`, `uvx` | The newest release of each dependency that meets worthless's minimum versions in `pyproject.toml`, as PyPI has them on the day you install. | No. You can get a version the audit has never seen, including one published minutes ago. |
 
 **What we promise for installs that don't read `uv.lock`: the minimums.** When an advisory is published against a dependency worthless runs, the next release sets that dependency's minimum in `pyproject.toml` past the fix, not just its version in `uv.lock`, even if worthless only uses it through another package. A fresh install of that release can't get the vulnerable version. `cryptography>=50.0.0` (PYSEC-2026-3552) is one.
@@ -93,7 +93,7 @@ This does not protect you from:
 - It would cover `install.sh` only. `pip install worthless`, `uvx` and the `mcp` extra resolve from the package's own requirements whatever we publish. The minimums are the one rule every path follows.
 - `install.sh` would have to fetch the file from another host, adding a trust root to the table above, or carry it inline and keep it in step with each release and with `WORTHLESS_VERSION` overrides.
 
-A 7-day `--exclude-newer` in `install.sh` would bring Dependabot's wait to installs with no file at all. It would also refuse a fix published days ago that a release had just raised a minimum to, and worthless's own release for its first week. So it isn't on by default.
+A 7-day `--exclude-newer` in `install.sh` would bring Dependabot's wait to installs with no file at all. But every release that raised a minimum to a fix published days earlier would fail to install for the rest of that week, and so would each new worthless release, unless `install.sh` carried a hand-kept exemption for each one. A failed install is safer than an unvetted one, but these failures would come exactly when an advisory makes upgrading urgent. So it isn't on by default.
 
 **If you want the audited set, run the Docker image.**
 

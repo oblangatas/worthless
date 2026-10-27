@@ -146,6 +146,20 @@ def dockerfile_final_stage(dockerfile_text: str) -> str:
     return dockerfile_text[from_indices[-1] :]
 
 
+# WOR-1077: every command in the Dockerfile that installs Python packages, in
+# order. See TestDockerfile.test_builder_installs_exactly_the_audited_lock.
+_LOCKED_INSTALL = [
+    "uv export --quiet --locked --no-dev --no-emit-project --format requirements-txt"
+    " -o /tmp/requirements.lock.txt",
+    "pip install --no-cache-dir --require-hashes --only-binary :all: -r /tmp/requirements.lock.txt",
+    "pip install --no-cache-dir --no-deps .",
+    "pip check",
+]
+# A command that can put Python packages on disk: pip in any spelling
+# (pip3, pip3.13, `python -m pip`, ensurepip), uv/uvx, easy_install, setup.py.
+_INSTALLER = re.compile(r"\b(?:pip[\d.]*|ensurepip|uvx?|easy_install|setup\.py)\b")
+
+
 def _run_commands(dockerfile_text: str) -> list[str]:
     """Each `&&`-joined shell command the Dockerfile's RUN instructions execute.
 
@@ -1095,42 +1109,43 @@ class TestDockerfile:
         26 of 42 runtime packages differed from the lock, msgpack 1.2.4 among
         them, one day old and inside Dependabot's 7-day cooldown).
 
-        So the only install that may pull dependencies is the one reading the
-        hashed `uv export` of the lock, and the only other install allowed is
-        worthless itself with `--no-deps`.
+        So the commands that install Python packages are pinned exactly: one
+        hashed export of the lock, one hashed install of it, worthless itself
+        with `--no-deps`, then `pip check`. Each flag backs a claim in
+        CHANGELOG.md and docs/install-security.md, so an edit to this list is
+        an edit to those promises. An allowlist of flags was tried first and
+        let `pip3`, `uv pip sync`, `--index-url=` and a dropped `--only-binary`
+        through. This is the check on a required lane: docker-e2e is not one.
         """
-        commands = _run_commands(dockerfile_text)
         assert re.search(r"^COPY\s[^\n]*\buv\.lock\b", dockerfile_text, re.MULTILINE), (
             "WOR-1077: the build must COPY uv.lock, the file the audit gate audits"
         )
-
-        exports = [c.split() for c in commands if c.startswith("uv export")]
-        assert len(exports) == 1, f"expected exactly one `uv export` step, got {exports}"
-        export = exports[0]
-        assert "--locked" in export or "--frozen" in export, (
-            "uv export must read uv.lock as it is (--locked or --frozen), not re-resolve it"
+        hidden = re.findall(r"^RUN\s+(?:--\S+\s+)*(\[|<<)", dockerfile_text, re.MULTILINE)
+        assert not hidden, (
+            "exec-form and heredoc RUN are invisible to _run_commands, so this test "
+            "can't see what they install. Use shell form."
         )
-        assert "--no-hashes" not in export, "the export must carry uv.lock's hashes"
-        out_flag = next((f for f in ("-o", "--output-file") if f in export), None)
-        assert out_flag, f"uv export must write a file for pip to read: {export}"
-        lock_export = export[export.index(out_flag) + 1]
+        installs = [c for c in _run_commands(dockerfile_text) if _INSTALLER.search(c)]
+        assert installs == _LOCKED_INSTALL, (
+            "WOR-1077: the image must install only uv.lock's hashed export.\n"
+            f"  expected: {_LOCKED_INSTALL}\n  found:    {installs}\n"
+            "If this change is deliberate, update _LOCKED_INSTALL and the claims it backs."
+        )
 
-        pip_installs = [c.split() for c in commands if re.search(r"\bpip install\b", c)]
-        hashed = [
-            c
-            for c in pip_installs
-            if "--require-hashes" in c and lock_export in c and c[c.index(lock_export) - 1] == "-r"
-        ]
-        assert hashed, f"WOR-1077: no `pip install --require-hashes -r {lock_export}` step"
-        for cmd in pip_installs:
-            if cmd in hashed:
-                continue
-            positional = [t for t in cmd[cmd.index("install") + 1 :] if not t.startswith("-")]
-            assert "--no-deps" in cmd and positional == ["."] and "-r" not in cmd, (
-                "WOR-1077: this pip install can resolve packages from PyPI that the "
-                f"audit never saw: {' '.join(cmd)}. Only the hashed lock export may "
-                "install dependencies; worthless itself goes in with --no-deps."
-            )
+    def test_builder_uv_matches_install_sh(self, dockerfile_text: str):
+        """The uv that exports uv.lock is the release install.sh pins (WOR-1077).
+
+        One vetted uv version for both shipped paths. A newer uv can also write
+        a lock an older one rejects, so letting the two drift is how an image
+        build starts failing at `uv export --locked`.
+        """
+        image = re.search(r"ghcr\.io/astral-sh/uv:([^@\s]+)@", dockerfile_text)
+        pin = re.search(r'^UV_VERSION="([^"]+)"', (REPO_ROOT / "install.sh").read_text(), re.M)
+        assert image and pin, "uv image tag or install.sh UV_VERSION not found"
+        assert image.group(1) == pin.group(1), (
+            f"Dockerfile copies uv {image.group(1)} but install.sh pins {pin.group(1)}; "
+            "bump both, with the image's new index digest"
+        )
 
     def test_external_images_are_digest_pinned(self, dockerfile_text: str):
         """Every image the build pulls, `COPY --from` sources included, pins a digest.
@@ -1141,10 +1156,16 @@ class TestDockerfile:
         stages = set(re.findall(r"^FROM\s+\S+\s+AS\s+(\S+)", dockerfile_text, re.MULTILINE | re.I))
         refs = re.findall(r"^FROM\s+(\S+)", dockerfile_text, re.MULTILINE)
         refs += re.findall(r"^COPY\s+--from=(\S+)", dockerfile_text, re.MULTILINE)
+        refs += re.findall(
+            r"^RUN\s[^\n]*--mount=\S*\bfrom=([^,\s]+)", dockerfile_text, re.MULTILINE
+        )
         external = [r for r in refs if r not in stages]
         assert external, "no external images found; did the parsing break?"
         for ref in external:
             assert "@sha256:" in ref, f"image not pinned by digest: {ref}"
+        assert not re.search(r"^ADD\s[^\n]*https?://", dockerfile_text, re.MULTILINE), (
+            "ADD <url> fetches with no digest; COPY it from a digest-pinned image instead"
+        )
 
     def test_pythondontwritebytecode(self, dockerfile_text: str):
         """PYTHONDONTWRITEBYTECODE must be set to avoid .pyc files on read-only fs."""
