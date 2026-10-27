@@ -5,7 +5,7 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 ## [Unreleased]
 
 ### Security
-- **The Docker image installs exactly the dependency versions our security audit checks** (WOR-1077).
+- **The Docker image installs exactly the dependency versions our security audit checks** (WOR-1077, [#747](https://github.com/oblangatas/worthless/pull/747)).
   Before: building the image installed whatever versions of worthless's dependencies PyPI offered that day, within the minimums in `pyproject.toml`. CI audits the versions pinned in `uv.lock`, so the image could hold versions the audit had never seen. On 2026-10-27, 26 of its 42 dependencies differed from the lock. One was msgpack 1.2.4, a day old and still inside the 7 days Dependabot waits before proposing a release.
   Now: the image installs the versions in `uv.lock` and checks every file against the hash recorded there. The build stops if `uv.lock` doesn't match `pyproject.toml`, and it installs only prebuilt wheels, so no dependency runs its own build script. The image behaves the same and is about the same size (74.4 MB on arm64, was 75.0 MB). `docs/install-security.md` now says which versions each way of installing gets, and why `install.sh` doesn't pin them.
 
