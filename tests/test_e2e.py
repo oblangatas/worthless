@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import http.client
 import http.server
 import json
@@ -13,7 +14,7 @@ import sys
 import textwrap
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -508,6 +509,20 @@ class TestUnlockedAppReachesYourOwnUpstream:
         ]
 
 
+@contextlib.contextmanager
+def _serving(handler: type[http.server.BaseHTTPRequestHandler]) -> Iterator[int]:
+    """Serve *handler* on a loopback port for the block; yield the port."""
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, args=(0.05,), daemon=True)
+    thread.start()
+    try:
+        yield server.server_address[1]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 class _ForwardingEgressProxy(http.server.BaseHTTPRequestHandler):
     """A plain-HTTP egress proxy, like a corporate one: relays and records every request."""
 
@@ -550,35 +565,29 @@ class TestShellProxyNeverSeesTheRealKey:
     ) -> None:
         monkeypatch.setattr(_FakeUpstream, "received", [])
         monkeypatch.setattr(_ForwardingEgressProxy, "seen", [])
-        servers = [
-            http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
-            for handler in (_FakeUpstream, _ForwardingEgressProxy)
-        ]
-        for server in servers:
-            threading.Thread(target=server.serve_forever, daemon=True).start()
-        upstream = f"http://127.0.0.1:{servers[0].server_address[1]}/v1"
-        egress = f"http://127.0.0.1:{servers[1].server_address[1]}"
         real_key = ""
 
-        def lock_to_own_gateway(env_file: Path, cli_env: dict[str, str]) -> None:
-            nonlocal real_key
-            real_key = dotenv_values(env_file)["OPENAI_API_KEY"] or ""
-            env_file.write_text(f"OPENAI_BASE_URL={upstream}\nOPENAI_API_KEY={real_key}\n")
-            _register_gateway(cli_env, "my-gateway", upstream)
-            _lock(env_file, cli_env)
+        with (
+            _serving(_FakeUpstream) as upstream_port,
+            _serving(_ForwardingEgressProxy) as egress_port,
+        ):
+            upstream = f"http://127.0.0.1:{upstream_port}/v1"
 
-        # The proxy, the wrapped app and wrap itself all inherit this shell.
-        shell = {name: egress for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")}
-        shell |= {name.lower(): url for name, url in shell.items()}
-        shell |= {"NO_PROXY": "", "no_proxy": ""}
-        try:
+            def lock_to_own_gateway(env_file: Path, cli_env: dict[str, str]) -> None:
+                nonlocal real_key
+                real_key = dotenv_values(env_file)["OPENAI_API_KEY"] or ""
+                env_file.write_text(f"OPENAI_BASE_URL={upstream}\nOPENAI_API_KEY={real_key}\n")
+                _register_gateway(cli_env, "my-gateway", upstream)
+                _lock(env_file, cli_env)
+
+            # The proxy, the wrapped app and wrap itself all inherit this shell.
+            egress = f"http://127.0.0.1:{egress_port}"
+            shell = {name: egress for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")}
+            shell |= {name.lower(): url for name, url in shell.items()}
+            shell |= {"NO_PROXY": "", "no_proxy": ""}
             proc = _run_child_under_wrap(
                 tmp_path, _ROUTED_CHILD_SCRIPT, lock_to_own_gateway, extra_env=shell
             )
-        finally:
-            for server in servers:
-                server.shutdown()
-                server.server_close()
 
         assert real_key
         # The app's own call (carrying shard-A) went through it, so it was on the path.

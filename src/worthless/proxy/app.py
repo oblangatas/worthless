@@ -51,7 +51,7 @@ from worthless.proxy.rules import (
     _estimate_tokens,
     extract_model,
 )
-from worthless.proxy.upstream import build_upstream_client
+from worthless.proxy.upstream import build_upstream_client, warn_ignored_env
 from worthless.storage.schema import SCHEMA, migrate_db
 from worthless.cli.log_redaction import install_redaction_filter
 from worthless.storage.shard_reader import ShardReader
@@ -362,6 +362,9 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
         settings = ProxySettings()
 
     settings.validate()
+    # WOR-1071: say which HTTP(S)_PROXY / SSL_CERT_FILE settings the upstream call
+    # ignores. Here rather than in the lifespan, so it shows even if startup fails.
+    warn_ignored_env(settings)
 
     app = FastAPI(
         title="worthless-proxy",

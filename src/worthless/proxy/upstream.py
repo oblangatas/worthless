@@ -31,7 +31,7 @@ _PROXY_VARS = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY")
 _CA_VARS = ("SSL_CERT_FILE", "SSL_CERT_DIR")
 
 
-def upstream_ssl_context(ca_bundle: str | None) -> ssl.SSLContext:
+def _upstream_ssl_context(ca_bundle: str | None) -> ssl.SSLContext:
     """Verify providers against certifi's CA list, or *ca_bundle* if the operator named one."""
     if ca_bundle is None:
         ctx = httpx.create_ssl_context(trust_env=False)
@@ -53,15 +53,15 @@ def _ambient_proxy_sources() -> list[str]:
         found = urllib.request.getproxies()
     except Exception:  # noqa: BLE001 — a diagnostic must never stop the proxy starting
         return []
-    return (
-        ["the system proxy settings"] if any(found.get(k) for k in ("http", "https", "all")) else []
-    )
+    routed = any(found.get(scheme) for scheme in ("http", "https", "all"))
+    return ["the system proxy settings"] if routed else []
 
 
-def _warn_ignored_env(settings: ProxySettings) -> None:
+def warn_ignored_env(settings: ProxySettings) -> None:
     """Name the ambient proxy / CA settings the upstream call ignores, and the opt-in.
 
-    Names only, never values: a proxy URL can carry a password.
+    Called once at startup, by ``create_app``. Names only, never values: a proxy
+    URL can carry a password.
     """
     if settings.upstream_proxy is None and (proxies := _ambient_proxy_sources()):
         logger.warning(
@@ -81,13 +81,8 @@ def _warn_ignored_env(settings: ProxySettings) -> None:
 
 
 def build_upstream_client(settings: ProxySettings) -> httpx.AsyncClient:
-    """Return the client the proxy forwards with.
-
-    Its routing and TLS trust come from *settings* only. The environment is read
-    just to warn about what is being ignored.
-    """
-    _warn_ignored_env(settings)
-    ssl_ctx = upstream_ssl_context(settings.upstream_ca_bundle)
+    """Return the client the proxy forwards with. Routing and TLS trust come from *settings*."""
+    ssl_ctx = _upstream_ssl_context(settings.upstream_ca_bundle)
     limits = httpx.Limits(max_connections=100, max_keepalive_connections=20)
     mounts: dict[str, httpx.AsyncBaseTransport] = {}
     if settings.upstream_proxy is not None:

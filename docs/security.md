@@ -337,8 +337,9 @@ proxy's log yet ([WOR-1074](https://linear.app/plumbusai/issue/WOR-1074)).
 
 If your providers are reachable only through an egress proxy, opt in
 explicitly, wherever the proxy gets its environment: your shell for
-`worthless up` / `wrap`, or the Docker Compose `.env` (mount the CA bundle
-into the container, readable by the proxy user). A proxy run by
+`worthless up` / `wrap`, or `deploy/docker-compose.env`, the file Compose
+loads into the container (bind-mount the CA bundle there too, readable by the
+proxy user). A proxy run by
 `worthless service install` doesn't read your shell, and re-running
 `service install` rewrites its unit. On Linux, add the settings in a drop-in
 (`systemctl --user edit worthless-proxy.service`), which survives a
@@ -349,7 +350,7 @@ them).
 
 | Setting | Effect | Who can read your real keys |
 |---|---|---|
-| `WORTHLESS_UPSTREAM_PROXY=http://proxy.example.com:3128` | `https://` upstream calls go through this proxy in a CONNECT tunnel. `http://` upstreams (a local gateway) are always reached directly, because any proxy could read a plain-http request. An `https://` proxy URL is verified against the same CA list as providers. | Nobody new, unless the proxy inspects TLS and you also set the CA below. A proxy that only tunnels sees the provider's hostname. |
+| `WORTHLESS_UPSTREAM_PROXY=http://proxy.example.com:3128` | `https://` upstream calls go through this proxy in a CONNECT tunnel. `http://` upstreams (a local gateway) are always reached directly, because any proxy could read a plain-http request. An `https://` proxy URL is verified against the same CA list as providers. | Nobody new, unless the proxy inspects TLS and you also set the CA below. A proxy that only tunnels sees the provider's hostname. An `https://` proxy whose certificate comes from a private CA needs that CA in the bundle below, which then vouches for providers too; prefer an `http://` proxy URL, which still tunnels the provider's TLS. |
 | `WORTHLESS_UPSTREAM_CA_BUNDLE=/path/to/bundle.pem` | Providers are verified against this PEM bundle instead of the built-in list. | Anyone holding the key of a CA in the bundle, including a TLS-inspecting proxy. |
 
 Setting both for an inspecting proxy is a deliberate decision to let it read

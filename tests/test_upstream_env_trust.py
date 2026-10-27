@@ -1,18 +1,12 @@
 """The real key goes where worthless was told, not where its environment says (WOR-1071).
 
-The proxy's upstream client used httpx's default ``trust_env=True``. httpx then
-routes through ``HTTP(S)_PROXY`` / ``ALL_PROXY`` (and the macOS / Windows system
-proxy when those are unset) and trusts any CA named by ``SSL_CERT_FILE`` /
-``SSL_CERT_DIR``. A TLS-inspecting corporate proxy whose CA is trusted that way
-sees every reconstructed key in clear. CPython's ``ssl.create_default_context``
-also honours ``SSLKEYLOGFILE``, which writes the secrets that decrypt a capture.
-
-These tests drive a real request through the client the real lifespan builds (no
+Why the environment must not decide is in ``worthless.proxy.upstream``. These
+tests drive a real request through the client the real lifespan builds (no
 injected ``httpx_client``), against local sockets only:
 
 * an "env proxy" sink named by the proxy variables,
-* an upstream TLS server whose certificate only a test CA vouches for: the
-  inspecting-proxy case, where that CA reaches the client via ``SSL_CERT_FILE``,
+* an upstream TLS server whose certificate only a test CA vouches for,
+* a TLS-inspecting proxy that decrypts with that CA's certificate,
 * a CONNECT tunnel standing in for an egress proxy the operator opted into.
 """
 
@@ -44,6 +38,7 @@ from worthless.storage.repository import ShardRepository, StoredShard
 from tests._fakes import pin_shard_b
 
 _REAL_KEY = "sk-envtrust-real-key-0123456789abcdef"
+_KEY = _REAL_KEY.encode()
 _ALIAS = "envtrust"
 
 _CHAT_REPLY = json.dumps(
@@ -68,9 +63,11 @@ _CHAT_RESPONSE = (
     b"Content-Length: %d\r\nConnection: close\r\n\r\n" % len(_CHAT_REPLY) + _CHAT_REPLY
 )
 
-_PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")
 _TRANSPORT_VARS = (
-    *_PROXY_VARS,
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
     "SSL_CERT_FILE",
     "SSL_CERT_DIR",
     "SSLKEYLOGFILE",
@@ -141,24 +138,26 @@ async def _serve(
             await asyncio.wait_for(server.wait_closed(), 2)
 
 
-async def _answer_chat(
-    reader: asyncio.StreamReader, writer: asyncio.StreamWriter, rec: _Recorder
-) -> None:
-    """A provider: record the request, reply with a chat completion."""
+async def _read_request(reader: asyncio.StreamReader, rec: _Recorder) -> None:
     head = await reader.readuntil(b"\r\n\r\n")
     rec.received += head + await reader.readexactly(_content_length(head))
-    writer.write(_CHAT_RESPONSE)
-    await writer.drain()
 
 
-async def _refuse(
-    reader: asyncio.StreamReader, writer: asyncio.StreamWriter, rec: _Recorder
-) -> None:
-    """A proxy that records what it was sent (CONNECT or a plain request) and refuses it."""
-    head = await reader.readuntil(b"\r\n\r\n")
-    rec.received += head + await reader.readexactly(_content_length(head))
-    writer.write(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-    await writer.drain()
+def _reply(response: bytes) -> Handler:
+    """A server that records one request (or CONNECT) and answers *response*."""
+
+    async def _handle(
+        reader: asyncio.StreamReader, writer: asyncio.StreamWriter, rec: _Recorder
+    ) -> None:
+        await _read_request(reader, rec)
+        writer.write(response)
+        await writer.drain()
+
+    return _handle
+
+
+_answer_chat = _reply(_CHAT_RESPONSE)  # a provider
+_refuse = _reply(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 
 
 async def _tunnel(
@@ -205,8 +204,7 @@ def _inspector(tls: ssl.SSLContext) -> Handler:
         decrypted = await asyncio.get_running_loop().start_tls(
             raw, raw.get_protocol(), tls, server_side=True
         )
-        head = await reader.readuntil(b"\r\n\r\n")
-        rec.received += head + await reader.readexactly(_content_length(head))
+        await _read_request(reader, rec)
         decrypted.write(_CHAT_RESPONSE)
         decrypted.close()
 
@@ -219,18 +217,15 @@ def _inspector(tls: ssl.SSLContext) -> Handler:
 
 
 @pytest.fixture(scope="module")
-def test_pki(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path, Path]:
-    """Return ``(ca_pem, server_cert_pem, server_key_pem)``.
+def test_pki(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, ssl.SSLContext]:
+    """Return ``(ca_pem, server_tls)``: the CA's PEM file and a server context for 127.0.0.1.
 
     The CA stands in for a corporate TLS-inspection CA. Python 3.13 verifies
     with ``VERIFY_X509_STRICT``, hence the key-identifier extensions.
     """
     out = tmp_path_factory.mktemp("pki")
     now = datetime.datetime.now(datetime.timezone.utc)
-    valid = {
-        "not_valid_before": now - datetime.timedelta(days=1),
-        "not_valid_after": now + datetime.timedelta(days=1),
-    }
+    not_before, not_after = now - datetime.timedelta(days=1), now + datetime.timedelta(days=1)
 
     ca_key = ec.generate_private_key(ec.SECP256R1())
     ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "worthless test inspection CA")])
@@ -241,8 +236,8 @@ def test_pki(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path, Path
         .issuer_name(ca_name)
         .public_key(ca_key.public_key())
         .serial_number(x509.random_serial_number())
-        .not_valid_before(valid["not_valid_before"])
-        .not_valid_after(valid["not_valid_after"])
+        .not_valid_before(not_before)
+        .not_valid_after(not_after)
         .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
         .add_extension(
             x509.KeyUsage(
@@ -269,8 +264,8 @@ def test_pki(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path, Path
         .issuer_name(ca_name)
         .public_key(leaf_key.public_key())
         .serial_number(x509.random_serial_number())
-        .not_valid_before(valid["not_valid_before"])
-        .not_valid_after(valid["not_valid_after"])
+        .not_valid_before(not_before)
+        .not_valid_after(not_after)
         .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
         .add_extension(
             x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]),
@@ -298,14 +293,15 @@ def test_pki(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path, Path
             serialization.NoEncryption(),
         )
     )
-    return ca_pem, cert_pem, key_pem
+    server_tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_tls.load_cert_chain(cert_pem, key_pem)
+    return ca_pem, server_tls
 
 
-def _server_tls(test_pki: tuple[Path, Path, Path]) -> ssl.SSLContext:
-    _ca, cert, key = test_pki
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    ctx.load_cert_chain(cert, key)
-    return ctx
+def _keylog_secrets(path: Path) -> list[str]:
+    """Secret lines in an SSLKEYLOGFILE. CPython writes a ``#`` header on open."""
+    written = path.read_text() if path.exists() else ""
+    return [line for line in written.splitlines() if line and not line.startswith("#")]
 
 
 # ---------------------------------------------------------------------------
@@ -313,14 +309,26 @@ def _server_tls(test_pki: tuple[Path, Path, Path]) -> ssl.SSLContext:
 # ---------------------------------------------------------------------------
 
 
+def _settings(tmp_db_path: str, fernet_key: bytes) -> ProxySettings:
+    """Build settings after the test sets its env, so they read it as production does."""
+    return ProxySettings(db_path=tmp_db_path, fernet_key=bytearray(fernet_key), allow_insecure=True)
+
+
+async def _startup_log(
+    tmp_db_path: str, fernet_key: bytes, caplog: pytest.LogCaptureFixture
+) -> str:
+    """Boot the proxy and return what it logged at WARNING and above."""
+    app = create_app(_settings(tmp_db_path, fernet_key))
+    with caplog.at_level(logging.WARNING):
+        async with app.router.lifespan_context(app):
+            pass
+    return caplog.text
+
+
 async def _proxied_chat(
     tmp_db_path: str, fernet_key: bytes, repo: ShardRepository, base_url: str
 ) -> httpx.Response:
-    """Lock ``_REAL_KEY`` to *base_url*, boot the proxy for real, send one chat request.
-
-    Settings are built here, after the test has set its environment, so the
-    proxy reads ``WORTHLESS_UPSTREAM_*`` the way it does in production.
-    """
+    """Lock ``_REAL_KEY`` to *base_url*, boot the proxy for real, send one chat request."""
     sr = split_key_fp(_REAL_KEY, prefix="sk-", provider="openai")
     shard = StoredShard(
         shard_b=bytearray(sr.shard_b),
@@ -330,10 +338,7 @@ async def _proxied_chat(
     )
     await repo.store(_ALIAS, shard, prefix=sr.prefix, charset=sr.charset, base_url=base_url)
 
-    settings = ProxySettings(
-        db_path=tmp_db_path, fernet_key=bytearray(fernet_key), allow_insecure=True
-    )
-    app = create_app(settings)
+    app = create_app(_settings(tmp_db_path, fernet_key))
     pin_shard_b(app, _ALIAS, sr.shard_b)
     async with app.router.lifespan_context(app):
         async with httpx.AsyncClient(
@@ -344,9 +349,6 @@ async def _proxied_chat(
                 headers={"Authorization": f"Bearer {sr.shard_a.decode()}"},
                 json={"model": "gpt-4o", "messages": [{"role": "user", "content": "ping"}]},
             )
-
-
-_KEY = _REAL_KEY.encode()
 
 
 # ---------------------------------------------------------------------------
@@ -381,7 +383,7 @@ async def test_env_proxy_vars_never_receive_the_real_key(
 async def test_system_proxy_settings_never_receive_the_real_key(
     tmp_db_path: str, fernet_key: bytes, repo: ShardRepository, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """With no proxy variables set, macOS / Windows hand httpx the system proxy instead."""
+    """The OS proxy httpx falls back to (macOS / Windows) doesn't reroute the call either."""
     async with (
         _serve(_refuse) as (system_port, system_proxy),
         _serve(_answer_chat) as (
@@ -414,7 +416,7 @@ async def test_tls_inspecting_https_proxy_never_reads_the_key(
     fernet_key: bytes,
     repo: ShardRepository,
     monkeypatch: pytest.MonkeyPatch,
-    test_pki: tuple[Path, Path, Path],
+    test_pki: tuple[Path, ssl.SSLContext],
 ) -> None:
     """The corporate case end to end: HTTPS_PROXY names an inspecting proxy whose CA
     the machine trusts through SSL_CERT_FILE, and the upstream is https.
@@ -422,8 +424,8 @@ async def test_tls_inspecting_https_proxy_never_reads_the_key(
     The upstream port is closed, so on this branch the direct call fails (502)
     without leaving the machine. On main the inspector decrypted the request.
     """
-    ca_pem, _cert, _key = test_pki
-    async with _serve(_inspector(_server_tls(test_pki))) as (inspector_port, inspector):
+    ca_pem, server_tls = test_pki
+    async with _serve(_inspector(server_tls)) as (inspector_port, inspector):
         _set_env_proxy(monkeypatch, f"http://127.0.0.1:{inspector_port}")
         monkeypatch.setenv("SSL_CERT_FILE", str(ca_pem))
 
@@ -442,7 +444,7 @@ async def test_ca_trusted_only_via_ssl_cert_file_cannot_vouch_for_the_upstream(
     fernet_key: bytes,
     repo: ShardRepository,
     monkeypatch: pytest.MonkeyPatch,
-    test_pki: tuple[Path, Path, Path],
+    test_pki: tuple[Path, ssl.SSLContext],
 ) -> None:
     """A server only ``SSL_CERT_FILE``'s CA vouches for never gets the key.
 
@@ -451,8 +453,8 @@ async def test_ca_trusted_only_via_ssl_cert_file_cannot_vouch_for_the_upstream(
     ``test_ca_bundle_opt_in_is_trusted_for_the_upstream``: the same server answers
     200 once its CA is trusted explicitly.
     """
-    ca_pem, _cert, _key = test_pki
-    async with _serve(_answer_chat, tls=_server_tls(test_pki)) as (port, inspector):
+    ca_pem, server_tls = test_pki
+    async with _serve(_answer_chat, tls=server_tls) as (port, inspector):
         monkeypatch.setenv("SSL_CERT_FILE", str(ca_pem))
 
         resp = await _proxied_chat(tmp_db_path, fernet_key, repo, f"https://127.0.0.1:{port}/v1")
@@ -469,25 +471,19 @@ async def test_sslkeylogfile_gets_no_upstream_tls_secrets(
     fernet_key: bytes,
     repo: ShardRepository,
     monkeypatch: pytest.MonkeyPatch,
-    test_pki: tuple[Path, Path, Path],
+    test_pki: tuple[Path, ssl.SSLContext],
     tmp_path: Path,
 ) -> None:
-    """SSLKEYLOGFILE would let anyone holding a packet capture decrypt the key.
-
-    CPython opens the file, writing only a ``#`` header, as soon as it builds an
-    SSL context. What must never appear is a secret line.
-    """
-    ca_pem, _cert, _key = test_pki
+    """SSLKEYLOGFILE would let anyone holding a packet capture decrypt the key."""
+    ca_pem, server_tls = test_pki
     keylog = tmp_path / "tls-keys.log"
-    async with _serve(_answer_chat, tls=_server_tls(test_pki)) as (port, upstream):
+    async with _serve(_answer_chat, tls=server_tls) as (port, upstream):
         monkeypatch.setenv("SSLKEYLOGFILE", str(keylog))
         monkeypatch.setenv("WORTHLESS_UPSTREAM_CA_BUNDLE", str(ca_pem))
 
         resp = await _proxied_chat(tmp_db_path, fernet_key, repo, f"https://127.0.0.1:{port}/v1")
 
-    written = keylog.read_text() if keylog.exists() else ""
-    secrets = [line for line in written.splitlines() if line and not line.startswith("#")]
-    assert not secrets, "upstream TLS secrets went to SSLKEYLOGFILE"
+    assert not _keylog_secrets(keylog), "upstream TLS secrets went to SSLKEYLOGFILE"
     assert resp.status_code == 200, resp.text
     assert b"Bearer " + _KEY in upstream.received
 
@@ -503,11 +499,11 @@ async def test_ca_bundle_opt_in_is_trusted_for_the_upstream(
     fernet_key: bytes,
     repo: ShardRepository,
     monkeypatch: pytest.MonkeyPatch,
-    test_pki: tuple[Path, Path, Path],
+    test_pki: tuple[Path, ssl.SSLContext],
 ) -> None:
     """``WORTHLESS_UPSTREAM_CA_BUNDLE`` is the one way to trust another CA."""
-    ca_pem, _cert, _key = test_pki
-    async with _serve(_answer_chat, tls=_server_tls(test_pki)) as (port, upstream):
+    ca_pem, server_tls = test_pki
+    async with _serve(_answer_chat, tls=server_tls) as (port, upstream):
         monkeypatch.setenv("WORTHLESS_UPSTREAM_CA_BUNDLE", str(ca_pem))
 
         resp = await _proxied_chat(tmp_db_path, fernet_key, repo, f"https://127.0.0.1:{port}/v1")
@@ -522,16 +518,16 @@ async def test_upstream_proxy_opt_in_tunnels_https_without_seeing_the_key(
     fernet_key: bytes,
     repo: ShardRepository,
     monkeypatch: pytest.MonkeyPatch,
-    test_pki: tuple[Path, Path, Path],
+    test_pki: tuple[Path, ssl.SSLContext],
 ) -> None:
     """``WORTHLESS_UPSTREAM_PROXY`` routes https upstreams through a CONNECT tunnel.
 
     A proxy that doesn't inspect TLS only relays ciphertext. Env proxy variables
     pointing elsewhere are still ignored.
     """
-    ca_pem, _cert, _key = test_pki
+    ca_pem, server_tls = test_pki
     async with (
-        _serve(_answer_chat, tls=_server_tls(test_pki)) as (up_port, upstream),
+        _serve(_answer_chat, tls=server_tls) as (up_port, upstream),
         _serve(_tunnel) as (tunnel_port, tunnel),
         _serve(_refuse) as (env_proxy_port, env_proxy),
     ):
@@ -554,7 +550,7 @@ async def test_https_upstream_proxy_is_verified_like_a_provider(
     fernet_key: bytes,
     repo: ShardRepository,
     monkeypatch: pytest.MonkeyPatch,
-    test_pki: tuple[Path, Path, Path],
+    test_pki: tuple[Path, ssl.SSLContext],
     tmp_path: Path,
 ) -> None:
     """An ``https://`` egress proxy is verified like a provider, never by the env's TLS settings.
@@ -563,11 +559,11 @@ async def test_https_upstream_proxy_is_verified_like_a_provider(
     (plus SSL_CERT_FILE) and write SSLKEYLOGFILE; this proxy's test CA is in the
     bundle only.
     """
-    ca_pem, _cert, _key = test_pki
+    ca_pem, server_tls = test_pki
     keylog = tmp_path / "tls-keys.log"
     async with (
-        _serve(_answer_chat, tls=_server_tls(test_pki)) as (up_port, upstream),
-        _serve(_tunnel, tls=_server_tls(test_pki)) as (tunnel_port, tunnel),
+        _serve(_answer_chat, tls=server_tls) as (up_port, upstream),
+        _serve(_tunnel, tls=server_tls) as (tunnel_port, tunnel),
     ):
         monkeypatch.setenv("SSLKEYLOGFILE", str(keylog))
         monkeypatch.setenv("WORTHLESS_UPSTREAM_PROXY", f"https://127.0.0.1:{tunnel_port}")
@@ -578,8 +574,7 @@ async def test_https_upstream_proxy_is_verified_like_a_provider(
     assert resp.status_code == 200, resp.text
     assert tunnel.received.startswith(b"CONNECT 127.0.0.1:%d " % up_port)
     assert b"Bearer " + _KEY in upstream.received
-    written = keylog.read_text() if keylog.exists() else ""
-    assert not [line for line in written.splitlines() if line and not line.startswith("#")]
+    assert not _keylog_secrets(keylog), "TLS secrets for the hop to the proxy went to SSLKEYLOGFILE"
 
 
 @pytest.mark.asyncio
@@ -608,25 +603,17 @@ async def test_startup_warns_that_ambient_proxy_and_ca_settings_are_ignored(
     fernet_key: bytes,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
-    test_pki: tuple[Path, Path, Path],
+    test_pki: tuple[Path, ssl.SSLContext],
 ) -> None:
     """Someone whose calls now fail behind a proxy learns why, and what to set.
 
     The warning names variables, never values: a proxy URL can hold a password.
     """
-    ca_pem, _cert, _key = test_pki
+    ca_pem, server_tls = test_pki
     monkeypatch.setenv("HTTPS_PROXY", "http://corp-user:hunter2@egress.corp.example:3128")
     monkeypatch.setenv("SSL_CERT_FILE", str(ca_pem))
-    settings = ProxySettings(
-        db_path=tmp_db_path, fernet_key=bytearray(fernet_key), allow_insecure=True
-    )
-    app = create_app(settings)
+    text = await _startup_log(tmp_db_path, fernet_key, caplog)
 
-    with caplog.at_level(logging.WARNING):
-        async with app.router.lifespan_context(app):
-            pass
-
-    text = caplog.text
     assert "HTTPS_PROXY" in text and "SSL_CERT_FILE" in text
     assert "WORTHLESS_UPSTREAM_PROXY" in text and "WORTHLESS_UPSTREAM_CA_BUNDLE" in text
     assert "hunter2" not in text and "egress.corp.example" not in text
@@ -644,17 +631,10 @@ async def test_startup_warns_about_an_ignored_system_proxy(
     monkeypatch.setattr(
         "urllib.request.getproxies", lambda: {"https": "http://egress.corp.example:3128"}
     )
-    settings = ProxySettings(
-        db_path=tmp_db_path, fernet_key=bytearray(fernet_key), allow_insecure=True
-    )
-    app = create_app(settings)
+    text = await _startup_log(tmp_db_path, fernet_key, caplog)
 
-    with caplog.at_level(logging.WARNING):
-        async with app.router.lifespan_context(app):
-            pass
-
-    assert "system proxy settings" in caplog.text and "WORTHLESS_UPSTREAM_PROXY" in caplog.text
-    assert "egress.corp.example" not in caplog.text
+    assert "system proxy settings" in text and "WORTHLESS_UPSTREAM_PROXY" in text
+    assert "egress.corp.example" not in text
 
 
 @pytest.mark.asyncio
@@ -665,16 +645,9 @@ async def test_no_warning_without_ambient_settings(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     monkeypatch.setattr("urllib.request.getproxies", dict)
-    settings = ProxySettings(
-        db_path=tmp_db_path, fernet_key=bytearray(fernet_key), allow_insecure=True
-    )
-    app = create_app(settings)
+    text = await _startup_log(tmp_db_path, fernet_key, caplog)
 
-    with caplog.at_level(logging.WARNING):
-        async with app.router.lifespan_context(app):
-            pass
-
-    assert "WORTHLESS_UPSTREAM" not in caplog.text
+    assert "WORTHLESS_UPSTREAM" not in text
 
 
 @pytest.mark.asyncio
@@ -687,16 +660,9 @@ async def test_no_warning_when_only_no_proxy_is_set(
     """A lone NO_PROXY routes nothing, so there is nothing to warn about."""
     monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1")
     monkeypatch.setenv("no_proxy", "localhost,127.0.0.1")
-    settings = ProxySettings(
-        db_path=tmp_db_path, fernet_key=bytearray(fernet_key), allow_insecure=True
-    )
-    app = create_app(settings)
+    text = await _startup_log(tmp_db_path, fernet_key, caplog)
 
-    with caplog.at_level(logging.WARNING):
-        async with app.router.lifespan_context(app):
-            pass
-
-    assert "WORTHLESS_UPSTREAM" not in caplog.text
+    assert "WORTHLESS_UPSTREAM" not in text
 
 
 @pytest.mark.asyncio
@@ -705,23 +671,16 @@ async def test_no_warning_once_the_operator_opted_in(
     fernet_key: bytes,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
-    test_pki: tuple[Path, Path, Path],
+    test_pki: tuple[Path, ssl.SSLContext],
 ) -> None:
-    ca_pem, _cert, _key = test_pki
+    ca_pem, server_tls = test_pki
     _set_env_proxy(monkeypatch, "http://egress.corp.example:3128")
     monkeypatch.setenv("SSL_CERT_FILE", str(ca_pem))
     monkeypatch.setenv("WORTHLESS_UPSTREAM_PROXY", "http://egress.corp.example:3128")
     monkeypatch.setenv("WORTHLESS_UPSTREAM_CA_BUNDLE", str(ca_pem))
-    settings = ProxySettings(
-        db_path=tmp_db_path, fernet_key=bytearray(fernet_key), allow_insecure=True
-    )
-    app = create_app(settings)
+    text = await _startup_log(tmp_db_path, fernet_key, caplog)
 
-    with caplog.at_level(logging.WARNING):
-        async with app.router.lifespan_context(app):
-            pass
-
-    assert "WORTHLESS_UPSTREAM" not in caplog.text
+    assert "WORTHLESS_UPSTREAM" not in text
 
 
 class TestUpstreamSettings:
@@ -733,9 +692,9 @@ class TestUpstreamSettings:
         assert s.upstream_ca_bundle is None
 
     def test_read_from_env(
-        self, monkeypatch: pytest.MonkeyPatch, test_pki: tuple[Path, Path, Path]
+        self, monkeypatch: pytest.MonkeyPatch, test_pki: tuple[Path, ssl.SSLContext]
     ) -> None:
-        ca_pem, _cert, _key = test_pki
+        ca_pem, server_tls = test_pki
         monkeypatch.setenv("WORTHLESS_UPSTREAM_PROXY", " http://egress.example:3128 ")
         monkeypatch.setenv("WORTHLESS_UPSTREAM_CA_BUNDLE", str(ca_pem))
         s = ProxySettings()

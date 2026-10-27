@@ -270,13 +270,11 @@ class ProxySettings:
         """
         self._validate_deploy_mode()
         self._validate_single_worker()
-        self._validate_upstream_transport()
+        self._validate_upstream_proxy()
+        self._validate_upstream_ca_bundle()
 
-    def _validate_upstream_transport(self) -> None:
-        """Refuse an upstream proxy or CA bundle the client couldn't use.
-
-        The proxy URL is never echoed: it can carry a password.
-        """
+    def _validate_upstream_proxy(self) -> None:
+        """Refuse a proxy URL the client couldn't use. Never echoed: it can carry a password."""
         if self.upstream_proxy is not None:
             try:
                 parsed = urlsplit(self.upstream_proxy)
@@ -289,6 +287,9 @@ class ProxySettings:
                     "WORTHLESS_UPSTREAM_PROXY must be an http:// or https:// URL with a host, "
                     "for example http://proxy.example.com:3128."
                 )
+
+    def _validate_upstream_ca_bundle(self) -> None:
+        """Refuse a CA bundle that would fail later, inside the lifespan, without naming it."""
         if self.upstream_ca_bundle is not None:
             bundle = self.upstream_ca_bundle
             fix = (

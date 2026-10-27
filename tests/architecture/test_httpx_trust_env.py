@@ -1,16 +1,15 @@
 """Every httpx client worthless builds ignores the process environment (WOR-1071).
 
-httpx defaults to ``trust_env=True``: it routes through ``HTTP(S)_PROXY`` /
-``ALL_PROXY`` (or the macOS / Windows system proxy) and trusts a CA named by
-``SSL_CERT_FILE`` / ``SSL_CERT_DIR``. On the client that carries reconstructed
-keys, that hands every key to a TLS-inspecting proxy. The behaviour is tested in
+httpx defaults to ``trust_env=True``; why that hands real keys to a proxy is in
+``worthless.proxy.upstream``. The behaviour is tested in
 ``tests/test_upstream_env_trust.py``; these guards stop a new client from
 quietly bringing the default back.
 
-1. Every httpx client, transport or module-level request helper (``httpx.get``
-   and friends build a client per call) under ``src/worthless`` passes
-   ``trust_env=False`` as a literal keyword. ``**kwargs`` can't be checked, so
-   it fails too, and so does a subclass of an httpx client.
+1. Every httpx client, transport, SSL-context helper or module-level request
+   helper (``httpx.get`` and friends build a client per call) under
+   ``src/worthless`` passes ``trust_env=False`` as a literal keyword.
+   ``**kwargs`` can't be checked, so it fails too, and so does a subclass of
+   an httpx client.
 2. Inside ``worthless.proxy`` only ``upstream.py`` builds an httpx client, so
    the key-carrying client has one source.
 3. ``worthless.proxy`` imports no other HTTP client library or provider SDK.
@@ -35,6 +34,7 @@ _HTTPX_BUILDERS = frozenset(
         "AsyncClient",
         "HTTPTransport",
         "AsyncHTTPTransport",
+        "create_ssl_context",  # its default trust_env=True reads SSL_CERT_FILE
         "request",
         "stream",
         "get",
@@ -53,6 +53,8 @@ _OTHER_HTTP_LIBS = frozenset(
         "aiohttp",
         "urllib3",
         "httpx2",
+        "httpcore",
+        "websockets",
         "urllib.request",
         "http.client",
         "pycurl",
@@ -103,13 +105,19 @@ def _httpx_calls(source: str) -> list[tuple[int, str, bool]]:
     return calls
 
 
+def _is_other_http_lib(module: str) -> bool:
+    return module in _OTHER_HTTP_LIBS or module.split(".")[0] in _OTHER_HTTP_LIBS
+
+
 def _imported_modules(source: str) -> set[str]:
+    """Every module a file imports. ``from urllib import request`` counts as ``urllib.request``."""
     found: set[str] = set()
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Import):
             found.update(a.name for a in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
             found.add(node.module)
+            found.update(f"{node.module}.{a.name}" for a in node.names)
     return found
 
 
@@ -145,8 +153,7 @@ def test_proxy_imports_no_other_http_client_library() -> None:
         f"{path.relative_to(_SRC.parent)}: imports {mod}"
         for path in _sources(_PROXY)
         for mod in sorted(_imported_modules(path.read_text(encoding="utf-8")))
-        if (mod in _OTHER_HTTP_LIBS or mod.split(".")[0] in _OTHER_HTTP_LIBS)
-        and (path, mod) not in allowed
+        if _is_other_http_lib(mod) and (path, mod) not in allowed
     ]
     assert not offenders, "\n".join(offenders)
 
@@ -164,6 +171,10 @@ def test_proxy_imports_no_other_http_client_library() -> None:
         ("import httpx\nhttpx.AsyncClient(trust_env=False)", [(2, "httpx.AsyncClient", True)]),
         ("import httpx\nhttpx.Timeout(1.0)\nhttpx.URL('u')", []),
         (
+            "import httpx\nhttpx.AsyncClient(trust_env=False, verify=httpx.create_ssl_context())",
+            [(2, "httpx.AsyncClient", True), (2, "httpx.create_ssl_context", False)],
+        ),
+        (
             "import httpx\nclass C(httpx.AsyncClient): ...",
             [(2, "subclass of httpx.AsyncClient", False)],
         ),
@@ -173,3 +184,20 @@ def test_guard_sees_every_way_to_build_a_client(
     source: str, expected: list[tuple[int, str, bool]]
 ) -> None:
     assert _httpx_calls(source) == expected
+
+
+@pytest.mark.parametrize(
+    ("source", "banned"),
+    [
+        ("import requests", True),
+        ("from urllib import request", True),
+        ("from http import client", True),
+        ("from openai import AsyncOpenAI", True),
+        ("import httpcore._async", True),
+        ("from urllib.parse import urlsplit", False),
+        ("import httpx", False),
+    ],
+)
+def test_guard_sees_every_way_to_import_another_http_library(source: str, banned: bool) -> None:
+    found = _imported_modules(source)
+    assert any(_is_other_http_lib(m) for m in found) is banned
