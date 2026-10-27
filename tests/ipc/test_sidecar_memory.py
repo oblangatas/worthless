@@ -1,0 +1,196 @@
+"""WOR-1075: malformed frames can't run up the real sidecar's memory.
+
+Both shapes come from msgpack advisories and reach ``read_frame`` right after
+the peer-uid check, before any envelope validation:
+
+* GHSA-j8c6-9vc5-hj6x: msgpack preallocates every array at the length its
+  header declares, before reading a single item. 1023 nested headers that
+  each declare 65535 items are 5 KB on the wire and peaked the sidecar at
+  ~513 MiB on msgpack 1.2.2/1.2.3 (~80 MiB on 1.2.4). ``MAX_CONTAINER_LEN``
+  bounds it on every msgpack version.
+* CVE-2026-114613: a map with a non-string key leaked the whole frame on
+  every rejection, ~1 MiB per connection on msgpack 1.2.2. Fixed in 1.2.3.
+
+The sidecar runs ``start_sidecar`` in a child process on a real AF_UNIX
+socket, so its RSS is measured alone, not mixed with pytest's.
+"""
+
+from __future__ import annotations
+
+import socket
+import subprocess
+import sys
+from collections.abc import Generator
+from pathlib import Path
+
+import msgpack
+import pytest
+
+from worthless.ipc.framing import MAX_CONTAINER_LEN
+
+# Spawns a real sidecar process; serial lane (WOR-582).
+pytestmark = [
+    pytest.mark.real_ipc,
+    pytest.mark.skipif(sys.platform == "win32", reason="AF_UNIX sidecar"),
+]
+
+_MiB = 1024 * 1024
+
+# Prints "ready", then answers each line on stdin with "<rss> <peak rss>" in
+# bytes. The backend is never reached: every frame here fails in read_frame.
+_SIDECAR = """
+import asyncio, os, resource, sys, threading
+from pathlib import Path
+
+import psutil
+
+from worthless.sidecar.backends.base import Backend
+from worthless.sidecar.server import start_sidecar
+
+
+def peak_rss():
+    # Linux: VmHWM counts this process since exec. ru_maxrss there also
+    # carries the parent's peak across vfork+exec, i.e. pytest's.
+    try:
+        with open("/proc/self/status") as status:
+            for line in status:
+                if line.startswith("VmHWM:"):
+                    return int(line.split()[1]) * 1024
+    except FileNotFoundError:
+        pass
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss  # macOS: bytes
+
+
+class Unreachable(Backend):
+    caps = ("seal", "open", "attest")
+
+    async def seal(self, plaintext, context=None):
+        raise AssertionError("malformed frames never reach the backend")
+
+    async def open(self, ciphertext, context=None, key_id=None):
+        raise AssertionError("malformed frames never reach the backend")
+
+    async def attest(self, nonce, purpose=None):
+        raise AssertionError("malformed frames never reach the backend")
+
+
+def report_memory():
+    me = psutil.Process()
+    for _ in sys.stdin:
+        print(me.memory_info().rss, peak_rss(), flush=True)
+    os._exit(0)
+
+
+async def main():
+    server = await start_sidecar(Path(sys.argv[1]), Unreachable(), [os.getuid()])
+    print("ready", flush=True)
+    threading.Thread(target=report_memory, daemon=True).start()
+    async with server:
+        await server.serve_forever()
+
+
+asyncio.run(main())
+"""
+
+
+class _Sidecar:
+    def __init__(self, child: subprocess.Popen[str], socket_path: Path) -> None:
+        self._child = child
+        self.socket_path = socket_path
+
+    def memory(self) -> tuple[int, int]:
+        """Return the sidecar's current and peak RSS in bytes."""
+        assert self._child.stdin is not None
+        assert self._child.stdout is not None
+        self._child.stdin.write("\n")
+        self._child.stdin.flush()
+        rss, peak = self._child.stdout.readline().split()
+        return int(rss), int(peak)
+
+    def send(self, body: bytes) -> dict[str, object]:
+        """Send one handshake frame on a fresh connection; return the reply."""
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+            conn.settimeout(20)
+            conn.connect(str(self.socket_path))
+            conn.sendall(len(body).to_bytes(4, "big") + body)
+            reply = b"".join(iter(lambda: conn.recv(1 << 16), b""))
+        decoded = msgpack.unpackb(reply[4:], raw=False)
+        # PROTO proves the frame got past peer-uid auth and was refused by
+        # the decoder, so the memory numbers measure the decode path.
+        assert decoded["code"] == "PROTO", decoded
+        return decoded
+
+
+@pytest.fixture
+def sidecar(sidecar_socket_path: Path) -> Generator[_Sidecar, None, None]:
+    child = subprocess.Popen(
+        [sys.executable, "-c", _SIDECAR, str(sidecar_socket_path)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert child.stdout is not None
+        assert child.stdout.readline().strip() == "ready", (
+            f"sidecar did not start (exit {child.poll()})"
+        )
+        yield _Sidecar(child, sidecar_socket_path)
+    finally:
+        child.kill()
+        child.wait(timeout=10)
+
+
+def _nested_array_headers(declared: int) -> bytes:
+    # array32 headers, each declaring ``declared`` items and holding none.
+    # 1023 is as deep as msgpack's C decoder nests.
+    return (b"\xdd" + declared.to_bytes(4, "big")) * 1023
+
+
+@pytest.mark.parametrize(
+    "declared",
+    [0xFFFF, MAX_CONTAINER_LEN],
+    ids=["advisory-shape", "at-the-cap"],
+)
+def test_tiny_frame_of_nested_array_headers_cannot_balloon_sidecar_memory(
+    sidecar: _Sidecar, declared: int
+) -> None:
+    body = _nested_array_headers(declared)
+    sidecar.send(msgpack.packb([1]))  # warm the rejection path
+    rss_before, _ = sidecar.memory()
+
+    for _ in range(3):
+        sidecar.send(body)
+
+    _, peak_after = sidecar.memory()
+    # Peak against the pre-attack RSS, not the earlier peak, so a startup
+    # high-water mark can't hide the attack. Was ~513 MiB on msgpack 1.2.2.
+    peak_growth = peak_after - rss_before
+    assert peak_growth < 32 * _MiB, (
+        f"a {len(body):,}-byte frame took sidecar RSS {peak_growth / _MiB:.1f} MiB above "
+        f"its {rss_before / _MiB:.1f} MiB baseline (msgpack {msgpack.version})"
+    )
+
+
+@pytest.mark.skipif(
+    msgpack.version < (1, 2, 3),
+    reason="CVE-2026-114613 leaks in msgpack < 1.2.3; the pyproject floor excludes it (PR #745)",
+)
+def test_non_string_map_keys_do_not_leak_sidecar_memory(sidecar: _Sidecar) -> None:
+    # One int key (strict_map_key rejects it) holding ~900 KB.
+    body = msgpack.packb({1: b"A" * 900_000}, use_bin_type=True)
+    for _ in range(10):  # let allocator pools and stream buffers settle
+        sidecar.send(body)
+    rss_before, _ = sidecar.memory()
+
+    connections = 200
+    for _ in range(connections):
+        sidecar.send(body)
+
+    rss_after, _ = sidecar.memory()
+    sent = connections * len(body)
+    growth = rss_after - rss_before
+    # A leak keeps every frame (~172 MiB here); a non-leaking decoder ~1 MiB.
+    assert growth < sent // 4, (
+        f"sidecar RSS grew {growth / _MiB:.1f} MiB after {connections} malformed "
+        f"handshakes carrying {sent / _MiB:.1f} MiB (msgpack {msgpack.version})"
+    )
