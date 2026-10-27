@@ -17,6 +17,7 @@ socket, so its RSS is measured alone, not mixed with pytest's.
 
 from __future__ import annotations
 
+import asyncio
 import socket
 import subprocess
 import sys
@@ -26,7 +27,7 @@ from pathlib import Path
 import msgpack
 import pytest
 
-from worthless.ipc.framing import MAX_CONTAINER_LEN
+from worthless.ipc.framing import MAX_CONTAINER_LEN, MalformedFrameError, read_frame
 
 # Spawns a real sidecar process; serial lane (WOR-582).
 pytestmark = [
@@ -39,7 +40,7 @@ _MiB = 1024 * 1024
 # Prints "ready", then answers each line on stdin with "<rss> <peak rss>" in
 # bytes. The backend is never reached: every frame here fails in read_frame.
 _SIDECAR = """
-import asyncio, os, resource, sys, threading
+import asyncio, os, resource, sys, threading, traceback
 from pathlib import Path
 
 import psutil
@@ -49,16 +50,15 @@ from worthless.sidecar.server import start_sidecar
 
 
 def peak_rss():
+    if sys.platform == "darwin":
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss  # bytes, this process
     # Linux: VmHWM counts this process since exec. ru_maxrss there also
     # carries the parent's peak across vfork+exec, i.e. pytest's.
-    try:
-        with open("/proc/self/status") as status:
-            for line in status:
-                if line.startswith("VmHWM:"):
-                    return int(line.split()[1]) * 1024
-    except FileNotFoundError:
-        pass
-    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss  # macOS: bytes
+    with open("/proc/self/status") as status:
+        for line in status:
+            if line.startswith("VmHWM:"):
+                return int(line.split()[1]) * 1024
+    raise RuntimeError("no VmHWM in /proc/self/status")
 
 
 class Unreachable(Backend):
@@ -75,9 +75,13 @@ class Unreachable(Backend):
 
 
 def report_memory():
-    me = psutil.Process()
-    for _ in sys.stdin:
-        print(me.memory_info().rss, peak_rss(), flush=True)
+    # Exits on stdin EOF or on any error, so the sidecar never outlives the test.
+    try:
+        me = psutil.Process()
+        for _ in sys.stdin:
+            print(me.memory_info().rss, peak_rss(), flush=True)
+    except BaseException:
+        traceback.print_exc()
     os._exit(0)
 
 
@@ -104,7 +108,10 @@ class _Sidecar:
         assert self._child.stdout is not None
         self._child.stdin.write("\n")
         self._child.stdin.flush()
-        rss, peak = self._child.stdout.readline().split()
+        line = self._child.stdout.readline()
+        if not line:
+            raise RuntimeError(f"sidecar stopped answering (exit {self._child.wait(timeout=10)})")
+        rss, peak = line.split()
         return int(rss), int(peak)
 
     def send(self, body: bytes) -> dict[str, object]:
@@ -115,29 +122,41 @@ class _Sidecar:
             conn.sendall(len(body).to_bytes(4, "big") + body)
             reply = b"".join(iter(lambda: conn.recv(1 << 16), b""))
         decoded = msgpack.unpackb(reply[4:], raw=False)
-        # PROTO proves the frame got past peer-uid auth and was refused by
-        # the decoder, so the memory numbers measure the decode path.
+        # PROTO: the frame got past peer-uid auth and was refused.
         assert decoded["code"] == "PROTO", decoded
         return decoded
 
 
 @pytest.fixture
 def sidecar(sidecar_socket_path: Path) -> Generator[_Sidecar, None, None]:
-    child = subprocess.Popen(
+    with subprocess.Popen(
         [sys.executable, "-c", _SIDECAR, str(sidecar_socket_path)],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         text=True,
-    )
-    try:
-        assert child.stdout is not None
-        assert child.stdout.readline().strip() == "ready", (
-            f"sidecar did not start (exit {child.poll()})"
-        )
-        yield _Sidecar(child, sidecar_socket_path)
-    finally:
-        child.kill()
-        child.wait(timeout=10)
+    ) as child:
+        try:
+            assert child.stdout is not None
+            assert child.stdout.readline().strip() == "ready", (
+                f"sidecar did not start (exit {child.poll()})"
+            )
+            yield _Sidecar(child, sidecar_socket_path)
+        finally:
+            child.kill()
+
+
+def _assert_decoder_rejects(body: bytes) -> None:
+    """The sidecar's PROTO reply could also come from handshake validation;
+    this pins it to read_frame's decoder, the path being measured."""
+
+    async def decode() -> None:
+        reader = asyncio.StreamReader()
+        reader.feed_data(len(body).to_bytes(4, "big") + body)
+        reader.feed_eof()
+        await read_frame(reader)
+
+    with pytest.raises(MalformedFrameError, match="invalid msgpack payload"):
+        asyncio.run(decode())
 
 
 def _nested_array_headers(declared: int) -> bytes:
@@ -155,6 +174,7 @@ def test_tiny_frame_of_nested_array_headers_cannot_balloon_sidecar_memory(
     sidecar: _Sidecar, declared: int
 ) -> None:
     body = _nested_array_headers(declared)
+    _assert_decoder_rejects(body)
     sidecar.send(msgpack.packb([1]))  # warm the rejection path
     rss_before, _ = sidecar.memory()
 
@@ -178,6 +198,7 @@ def test_tiny_frame_of_nested_array_headers_cannot_balloon_sidecar_memory(
 def test_non_string_map_keys_do_not_leak_sidecar_memory(sidecar: _Sidecar) -> None:
     # One int key (strict_map_key rejects it) holding ~900 KB.
     body = msgpack.packb({1: b"A" * 900_000}, use_bin_type=True)
+    _assert_decoder_rejects(body)
     for _ in range(10):  # let allocator pools and stream buffers settle
         sidecar.send(body)
     rss_before, _ = sidecar.memory()
