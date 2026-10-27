@@ -148,9 +148,9 @@ def _decide_mode(
 
 
 def _zero_restore_keys(restores: list) -> None:
-    """Zero every reconstructed plaintext key held by built ``OcRestore``s, so
-    no uninstall leaves real key material in memory (SR-02). ``zero_buf`` is
-    idempotent, so re-zeroing an already-cleared buffer is safe.
+    """Zero every reconstructed plaintext key buffer held by built ``OcRestore``s
+    (SR-02). Text copies made from them can't be wiped (WOR-1064). ``zero_buf``
+    is idempotent, so re-zeroing an already-cleared buffer is safe.
     """
     for r in restores:
         key = getattr(r, "plaintext_key", None)
@@ -788,10 +788,10 @@ def _run_uninstall(*, assume_yes: bool, force: bool = False, remove_mcp: bool = 
             # (oc_build_failed) rides the same exit-73 channel (worthless-ftit).
             oc_partial = _apply_openclaw_unlock(unlocked, console, home) or oc_build_failed
         finally:
-            # SR-02: no reconstructed key outlives the command, including when the
-            # guard refuses or a line can't be written before the OpenClaw undo. Zero
-            # only after that undo: it writes these keys to openclaw.json, so a zeroed
-            # one would land there as NUL bytes (WOR-1051).
+            # SR-02: zero the reconstructed key buffers before the command ends, even
+            # when the guard refuses or a line can't be written before the OpenClaw
+            # undo. Zero only after that undo: it writes these keys to openclaw.json,
+            # so a zeroed one would land there as NUL bytes (WOR-1051).
             _zero_restore_keys(unlocked)
 
         # Cleanup is best-effort so a broken install (key already gone) still wipes.
