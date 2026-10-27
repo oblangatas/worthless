@@ -120,6 +120,17 @@ def _isolate_fernet_storage_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _isolate_sidecar_uid_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Start every test expecting a sidecar that runs as this process's uid.
+
+    ``deploy/start.py`` writes ``WORTHLESS_SIDECAR_UID`` straight into
+    ``os.environ`` for the proxy it execs, so one deploy test would otherwise
+    point every later IPC client on its worker at a foreign sidecar uid.
+    """
+    monkeypatch.delenv("WORTHLESS_SIDECAR_UID", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_cli_globals() -> None:
     """Start every test with the CLI's console and debug flag at their defaults.
 
