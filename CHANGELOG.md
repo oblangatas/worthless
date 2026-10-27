@@ -5,7 +5,7 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 ## [Unreleased]
 
 ### Security
-- **The proxy no longer lets its environment pick an egress proxy or a CA for the call that carries your real key** (WOR-1071).
+- **The proxy no longer lets its environment pick an egress proxy or a CA for the call that carries your real key** (WOR-1071, [#744](https://github.com/oblangatas/worthless/pull/744)).
   Before: the proxy's call to the provider went through `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` (or, with none set, the macOS or Windows system proxy) and trusted any CA named by `SSL_CERT_FILE` / `SSL_CERT_DIR`. Behind a TLS-inspecting corporate proxy whose CA was trusted that way, that proxy and its logs could read every real key. With an `http://` upstream, any proxy named that way got the key in clear. `SSLKEYLOGFILE` received the TLS secrets that decrypt a packet capture.
   Now: the proxy ignores all of these. It verifies providers against its built-in CA list, and at startup logs a warning naming any proxy or CA setting it ignored (names only, never values). `worthless status`, `up` and `lock` also stop sending their loopback health and bind checks to an `HTTP_PROXY`.
   New: `WORTHLESS_UPSTREAM_PROXY=http://proxy.example.com:3128` sends `https://` provider calls through that proxy in a CONNECT tunnel. `http://` upstreams, such as a local gateway, always go direct. `WORTHLESS_UPSTREAM_CA_BUNDLE=/path/bundle.pem` verifies providers against your bundle instead of the built-in list. Whoever runs that proxy, or holds a key for a CA in that bundle, can read your real keys if the proxy inspects TLS. See [Egress proxies and custom CAs](docs/security.md#egress-proxies-and-custom-cas).
