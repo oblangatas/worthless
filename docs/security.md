@@ -332,10 +332,10 @@ from its own CA, which clients are told to trust through settings like
 `SSL_CERT_FILE`. If the proxy honoured them, the inspecting proxy, and its
 logs, would see every real key. At startup Worthless warns about any proxy or
 CA setting it is ignoring and names the variable to set instead (names only,
-never values). `worthless up` and `wrap` print the warning to your terminal. A
-proxy started in the background (`worthless`) or by `worthless service install`
-writes it to `~/.worthless/proxy.log`, or on Linux a service writes it to the
-user journal. Docker shows it in `docker logs`.
+never values). `worthless`, `worthless up` and `wrap` print the warning to your
+terminal. A proxy running in the background or under `worthless service install`
+also writes it to `~/.worthless/proxy.log`, or on Linux a service writes it to
+the user journal. Docker shows it in `docker logs`.
 
 If your providers are reachable only through an egress proxy, opt in
 explicitly, wherever the proxy gets its environment: your shell for
