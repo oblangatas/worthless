@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import ssl
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -277,23 +278,35 @@ class ProxySettings:
         The proxy URL is never echoed: it can carry a password.
         """
         if self.upstream_proxy is not None:
-            parsed = urlsplit(self.upstream_proxy)
             try:
+                parsed = urlsplit(self.upstream_proxy)
                 valid = parsed.scheme in ("http", "https") and bool(parsed.hostname)
                 parsed.port  # noqa: B018 — raises ValueError on a malformed port
-            except ValueError:
+            except ValueError:  # also a bracket urlsplit reads as a broken IPv6 host
                 valid = False
             if not valid:
                 raise ConfigError(
                     "WORTHLESS_UPSTREAM_PROXY must be an http:// or https:// URL with a host, "
                     "for example http://proxy.example.com:3128."
                 )
-        if self.upstream_ca_bundle is not None and not Path(self.upstream_ca_bundle).is_file():
-            raise ConfigError(
-                f"WORTHLESS_UPSTREAM_CA_BUNDLE={self.upstream_ca_bundle!r} is not a file. "
-                "Point it at a PEM bundle, or unset it to verify providers against "
-                "the built-in CA list."
+        if self.upstream_ca_bundle is not None:
+            bundle = self.upstream_ca_bundle
+            fix = (
+                "Point it at an absolute path to a readable PEM bundle, or unset it to "
+                "verify providers against the built-in CA list."
             )
+            # Absolute: under launchd / systemd the working directory is not your shell's.
+            if not Path(bundle).is_absolute():
+                raise ConfigError(f"WORTHLESS_UPSTREAM_CA_BUNDLE={bundle!r} is relative. {fix}")
+            try:
+                # Load it now so a bad bundle fails here, naming the variable. A bare
+                # SSLContext, not create_default_context: that one opens SSLKEYLOGFILE.
+                ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT).load_verify_locations(cafile=bundle)
+            except OSError as exc:  # includes ssl.SSLError
+                raise ConfigError(
+                    f"WORTHLESS_UPSTREAM_CA_BUNDLE={bundle!r} can't be loaded "
+                    f"({type(exc).__name__}). {fix}"
+                ) from exc
 
     def _validate_single_worker(self) -> None:
         """Refuse multi-worker launch — the spend cap is only exact per process.

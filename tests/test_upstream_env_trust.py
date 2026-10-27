@@ -358,7 +358,9 @@ async def test_ca_trusted_only_via_ssl_cert_file_cannot_vouch_for_the_upstream(
     """A server only ``SSL_CERT_FILE``'s CA vouches for never gets the key.
 
     That server is what a TLS-inspecting proxy looks like to the client: it
-    terminates TLS with a certificate from the corporate CA.
+    terminates TLS with a certificate from the corporate CA. The control is
+    ``test_ca_bundle_opt_in_is_trusted_for_the_upstream``: the same server answers
+    200 once its CA is trusted explicitly.
     """
     ca_pem, _cert, _key = test_pki
     async with _serve(_answer_chat, tls=_server_tls(test_pki)) as (port, inspector):
@@ -458,6 +460,40 @@ async def test_upstream_proxy_opt_in_tunnels_https_without_seeing_the_key(
 
 
 @pytest.mark.asyncio
+async def test_https_upstream_proxy_is_verified_like_a_provider(
+    tmp_db_path: str,
+    fernet_key: bytes,
+    repo: ShardRepository,
+    monkeypatch: pytest.MonkeyPatch,
+    test_pki: tuple[Path, Path, Path],
+    tmp_path: Path,
+) -> None:
+    """An ``https://`` egress proxy is verified like a provider, never by the env's TLS settings.
+
+    httpcore's default context for the hop to the proxy would trust only certifi
+    (plus SSL_CERT_FILE) and write SSLKEYLOGFILE; this proxy's test CA is in the
+    bundle only.
+    """
+    ca_pem, _cert, _key = test_pki
+    keylog = tmp_path / "tls-keys.log"
+    async with (
+        _serve(_answer_chat, tls=_server_tls(test_pki)) as (up_port, upstream),
+        _serve(_tunnel, tls=_server_tls(test_pki)) as (tunnel_port, tunnel),
+    ):
+        monkeypatch.setenv("SSLKEYLOGFILE", str(keylog))
+        monkeypatch.setenv("WORTHLESS_UPSTREAM_PROXY", f"https://127.0.0.1:{tunnel_port}")
+        monkeypatch.setenv("WORTHLESS_UPSTREAM_CA_BUNDLE", str(ca_pem))
+
+        resp = await _proxied_chat(tmp_db_path, fernet_key, repo, f"https://127.0.0.1:{up_port}/v1")
+
+    assert resp.status_code == 200, resp.text
+    assert tunnel.received.startswith(b"CONNECT 127.0.0.1:%d " % up_port)
+    assert b"Bearer " + _KEY in upstream.received
+    written = keylog.read_text() if keylog.exists() else ""
+    assert not [line for line in written.splitlines() if line and not line.startswith("#")]
+
+
+@pytest.mark.asyncio
 async def test_upstream_proxy_opt_in_never_carries_a_plain_http_upstream(
     tmp_db_path: str, fernet_key: bytes, repo: ShardRepository, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -553,6 +589,28 @@ async def test_no_warning_without_ambient_settings(
 
 
 @pytest.mark.asyncio
+async def test_no_warning_when_only_no_proxy_is_set(
+    tmp_db_path: str,
+    fernet_key: bytes,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A lone NO_PROXY routes nothing, so there is nothing to warn about."""
+    monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1")
+    monkeypatch.setenv("no_proxy", "localhost,127.0.0.1")
+    settings = ProxySettings(
+        db_path=tmp_db_path, fernet_key=bytearray(fernet_key), allow_insecure=True
+    )
+    app = create_app(settings)
+
+    with caplog.at_level(logging.WARNING):
+        async with app.router.lifespan_context(app):
+            pass
+
+    assert "WORTHLESS_UPSTREAM" not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_no_warning_once_the_operator_opted_in(
     tmp_db_path: str,
     fernet_key: bytes,
@@ -600,6 +658,7 @@ class TestUpstreamSettings:
         "value",
         [
             "socks5://u:hunter2@egress.example:1080",
+            "http://u:hunter2[@egress.example:3128",
             "egress.example:3128",
             "http://u:hunter2@:3128",
             "ftp://u:hunter2@egress.example",
@@ -613,10 +672,19 @@ class TestUpstreamSettings:
             ProxySettings().validate()
         assert "hunter2" not in str(exc.value)
 
-    def test_ca_bundle_must_be_a_file(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    @pytest.mark.parametrize("problem", ["missing", "no certificate", "relative", "directory"])
+    def test_ca_bundle_must_load_at_startup(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, problem: str
     ) -> None:
-        monkeypatch.setenv("WORTHLESS_UPSTREAM_CA_BUNDLE", str(tmp_path / "missing.pem"))
+        """A bundle the client couldn't use fails in validate(), naming the variable."""
+        paths = {
+            "missing": tmp_path / "missing.pem",
+            "no certificate": tmp_path / "empty.pem",
+            "relative": Path("bundle.pem"),
+            "directory": tmp_path,
+        }
+        (tmp_path / "empty.pem").write_text("not a certificate\n")
+        monkeypatch.setenv("WORTHLESS_UPSTREAM_CA_BUNDLE", str(paths[problem]))
         with pytest.raises(ConfigError, match="WORTHLESS_UPSTREAM_CA_BUNDLE"):
             ProxySettings().validate()
 

@@ -10,10 +10,10 @@ quietly bringing the default back.
 1. Every httpx client, transport or module-level request helper (``httpx.get``
    and friends build a client per call) under ``src/worthless`` passes
    ``trust_env=False`` as a literal keyword. ``**kwargs`` can't be checked, so
-   it fails too.
+   it fails too, and so does a subclass of an httpx client.
 2. Inside ``worthless.proxy`` only ``upstream.py`` builds an httpx client, so
    the key-carrying client has one source.
-3. ``worthless.proxy`` imports no other HTTP client library.
+3. ``worthless.proxy`` imports no other HTTP client library or provider SDK.
 """
 
 from __future__ import annotations
@@ -46,8 +46,19 @@ _HTTPX_BUILDERS = frozenset(
         "delete",
     }
 )
+# Provider SDKs build their own httpx client with the environment trusted.
 _OTHER_HTTP_LIBS = frozenset(
-    {"requests", "aiohttp", "urllib3", "httpx2", "urllib.request", "http.client", "pycurl"}
+    {
+        "requests",
+        "aiohttp",
+        "urllib3",
+        "httpx2",
+        "urllib.request",
+        "http.client",
+        "pycurl",
+        "openai",
+        "anthropic",
+    }
 )
 
 
@@ -64,27 +75,31 @@ def _httpx_calls(source: str) -> list[tuple[int, str, bool]]:
                 {a.asname or a.name: a.name for a in node.names if a.name in _HTTPX_BUILDERS}
             )
 
+    def builder(expr: ast.expr) -> str | None:
+        if isinstance(expr, ast.Attribute) and isinstance(expr.value, ast.Name):
+            if expr.value.id in modules and expr.attr in _HTTPX_BUILDERS:
+                return expr.attr
+        elif isinstance(expr, ast.Name):
+            return names.get(expr.id)
+        return None
+
     calls: list[tuple[int, str, bool]] = []
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        if (
-            isinstance(func, ast.Attribute)
-            and isinstance(func.value, ast.Name)
-            and func.value.id in modules
-            and func.attr in _HTTPX_BUILDERS
-        ):
-            name = func.attr
-        elif isinstance(func, ast.Name) and func.id in names:
-            name = names[func.id]
-        else:
-            continue
-        env_off = any(
-            kw.arg == "trust_env" and isinstance(kw.value, ast.Constant) and kw.value.value is False
-            for kw in node.keywords
-        )
-        calls.append((node.lineno, f"httpx.{name}", env_off))
+        if isinstance(node, ast.Call) and (name := builder(node.func)):
+            env_off = any(
+                kw.arg == "trust_env"
+                and isinstance(kw.value, ast.Constant)
+                and kw.value.value is False
+                for kw in node.keywords
+            )
+            calls.append((node.lineno, f"httpx.{name}", env_off))
+        elif isinstance(node, ast.ClassDef):
+            # A subclass can default trust_env however it likes; it can't be checked here.
+            calls.extend(
+                (node.lineno, f"subclass of httpx.{name}", False)
+                for base in node.bases
+                if (name := builder(base))
+            )
     return calls
 
 
@@ -148,6 +163,10 @@ def test_proxy_imports_no_other_http_client_library() -> None:
         ("def f():\n    import httpx\n    httpx.Client(timeout=1)", [(3, "httpx.Client", False)]),
         ("import httpx\nhttpx.AsyncClient(trust_env=False)", [(2, "httpx.AsyncClient", True)]),
         ("import httpx\nhttpx.Timeout(1.0)\nhttpx.URL('u')", []),
+        (
+            "import httpx\nclass C(httpx.AsyncClient): ...",
+            [(2, "subclass of httpx.AsyncClient", False)],
+        ),
     ],
 )
 def test_guard_sees_every_way_to_build_a_client(

@@ -333,18 +333,32 @@ logs, would see every real key. At startup the proxy logs a warning naming
 any proxy or CA setting it is ignoring (names only, never values).
 
 If your providers are reachable only through an egress proxy, opt in
-explicitly, wherever the proxy gets its environment (your shell, the Docker
-Compose `.env`, or the launchd plist / systemd unit `worthless service install`
-writes):
+explicitly, wherever the proxy gets its environment: your shell for
+`worthless up` / `wrap`, or the Docker Compose `.env` (mount the CA bundle
+into the container, readable by the proxy user). A proxy run by
+`worthless service install` doesn't read your shell, and re-running
+`service install` rewrites its unit. On Linux, add the settings in a drop-in
+(`systemctl --user edit worthless-proxy.service`), which survives a
+reinstall. On macOS, add them to the plist's `EnvironmentVariables` again
+after each `service install`
+([WOR-1072](https://linear.app/plumbusai/issue/WOR-1072) tracks keeping
+them).
 
 | Setting | Effect | Who can read your real keys |
 |---|---|---|
-| `WORTHLESS_UPSTREAM_PROXY=http://proxy.example.com:3128` | `https://` upstream calls go through this proxy in a CONNECT tunnel. `http://` upstreams (a local gateway) are always reached directly, because any proxy could read a plain-http request. | Nobody new, unless the proxy inspects TLS and you also set the CA below. A proxy that only tunnels sees the provider's hostname. |
+| `WORTHLESS_UPSTREAM_PROXY=http://proxy.example.com:3128` | `https://` upstream calls go through this proxy in a CONNECT tunnel. `http://` upstreams (a local gateway) are always reached directly, because any proxy could read a plain-http request. An `https://` proxy URL is verified against the same CA list as providers. | Nobody new, unless the proxy inspects TLS and you also set the CA below. A proxy that only tunnels sees the provider's hostname. |
 | `WORTHLESS_UPSTREAM_CA_BUNDLE=/path/to/bundle.pem` | Providers are verified against this PEM bundle instead of the built-in list. | Anyone holding the key of a CA in the bundle, including a TLS-inspecting proxy. |
 
 Setting both for an inspecting proxy is a deliberate decision to let it read
 your keys. If you can, ask for a TLS-inspection bypass for your providers'
 hosts instead (for example `api.openai.com` and `api.anthropic.com`).
+
+**What this does not defend against.** It keeps settings meant for other
+tools, such as a machine-wide `HTTPS_PROXY` / `SSL_CERT_FILE` from IT, from
+applying to Worthless. Someone who can change the Worthless proxy's own
+environment or files can still set the two variables above, or edit the CA
+list installed with it: that is a compromised host
+([non-goal 6](#threat-model-non-goals)).
 
 ## Threat model: non-goals
 

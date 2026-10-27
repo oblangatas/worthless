@@ -47,10 +47,15 @@ def _ambient_proxy_sources() -> list[str]:
     if named:
         return named
     try:
-        # Falls back to the macOS / Windows system settings when the env is empty.
-        return ["the system proxy settings"] if urllib.request.getproxies() else []
+        # Falls back to the macOS / Windows system settings when the env has no
+        # proxy variable. Only the schemes httpx would have used count: a lone
+        # NO_PROXY or FTP_PROXY routes nothing.
+        found = urllib.request.getproxies()
     except Exception:  # noqa: BLE001 — a diagnostic must never stop the proxy starting
         return []
+    return (
+        ["the system proxy settings"] if any(found.get(k) for k in ("http", "https", "all")) else []
+    )
 
 
 def _warn_ignored_env(settings: ProxySettings) -> None:
@@ -76,16 +81,24 @@ def _warn_ignored_env(settings: ProxySettings) -> None:
 
 
 def build_upstream_client(settings: ProxySettings) -> httpx.AsyncClient:
-    """Return the client the proxy forwards with. It never reads the environment."""
+    """Return the client the proxy forwards with.
+
+    Its routing and TLS trust come from *settings* only. The environment is read
+    just to warn about what is being ignored.
+    """
     _warn_ignored_env(settings)
     ssl_ctx = upstream_ssl_context(settings.upstream_ca_bundle)
     limits = httpx.Limits(max_connections=100, max_keepalive_connections=20)
     mounts: dict[str, httpx.AsyncBaseTransport] = {}
     if settings.upstream_proxy is not None:
         # https:// only. Any proxy could read the key in a plain-http request, so
-        # an http:// upstream (a local gateway) is always reached directly.
+        # an http:// upstream (a local gateway) is always reached directly. An
+        # https:// proxy is verified like a provider; httpcore's default context
+        # for it would read SSL_CERT_FILE and SSLKEYLOGFILE.
+        tls_to_proxy = settings.upstream_proxy.lower().startswith("https://")
+        proxy = httpx.Proxy(settings.upstream_proxy, ssl_context=ssl_ctx if tls_to_proxy else None)
         mounts["https://"] = httpx.AsyncHTTPTransport(
-            proxy=settings.upstream_proxy, verify=ssl_ctx, trust_env=False, limits=limits
+            proxy=proxy, verify=ssl_ctx, trust_env=False, limits=limits
         )
     return httpx.AsyncClient(
         follow_redirects=False,
