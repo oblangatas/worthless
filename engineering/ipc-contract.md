@@ -23,6 +23,7 @@ Shape is modelled after [Google Tink's `Aead`](https://developers.google.com/tin
 
 - **Socket:** Unix domain stream socket (`SOCK_STREAM`), path `/var/run/worthless/sidecar.sock` (configurable). **Pathname sockets only** — Linux abstract namespace (`\0name`) is forbidden: it bypasses filesystem ACLs and breaks the install-time permission model.
 - **Auth:** peer-uid check via `SO_PEERCRED` (Linux) / `getpeereid()` (macOS). Sidecar rejects if peer uid ∉ allowlist.
+- **Server auth (WOR-1078):** the client runs the same check on the server before writing its first frame, and closes the connection unless the server's uid is the sidecar's: `WORTHLESS_SIDECAR_UID`, or the client's own uid when that is unset. The Docker image sets it to the `worthless-crypto` uid.
 - **Framing:** length-prefixed binary frames.
 
 ## Frame

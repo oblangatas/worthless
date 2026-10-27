@@ -33,6 +33,7 @@ import pwd
 import threading
 from pathlib import Path
 
+from worthless._flags import WORTHLESS_SIDECAR_UID_ENV
 from worthless.cli.bootstrap import ensure_home
 from worthless.cli.errors import ErrorCode, WorthlessError
 from worthless.cli.sidecar_lifecycle import ServiceUids, spawn_sidecar, split_to_tmpfs
@@ -304,6 +305,12 @@ def main() -> None:
     zero_buf(shares.shard_b)
 
     os.environ["WORTHLESS_SIDECAR_SOCKET"] = str(socket_path)
+    # WOR-1078: the proxy refuses a sidecar socket served by any other uid.
+    # Overwrite whatever the image ENV or the operator set; this is the uid
+    # the sidecar was actually spawned as.
+    os.environ[WORTHLESS_SIDECAR_UID_ENV] = str(
+        service_uids.crypto_uid if service_uids is not None else os.getuid()
+    )
 
     # WOR-466: Create a stable well-known symlink so the Docker HEALTHCHECK
     # process can discover the PID-scoped socket path.  HEALTHCHECK processes
