@@ -328,8 +328,9 @@ class TestWrapProxiesRequest:
         )
 
 
-# Nothing leaves the machine: upstream HTTPS goes to a closed port.
-_CLOSED_UPSTREAM = {"HTTPS_PROXY": "http://127.0.0.1:9", "NO_PROXY": "127.0.0.1,localhost"}
+# Nothing leaves the machine: upstream HTTPS goes to a closed port. The proxy
+# ignores HTTPS_PROXY (WOR-1071), so name the egress proxy the way an operator would.
+_CLOSED_UPSTREAM = {"WORTHLESS_UPSTREAM_PROXY": "http://127.0.0.1:9"}
 
 # Sends the locked key from .env as an app would. Upstream is blocked, so a 502
 # means the proxy found the alias and rebuilt the key before failing to forward

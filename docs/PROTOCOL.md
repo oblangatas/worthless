@@ -70,6 +70,8 @@ All `401` responses return an identical body regardless of failure reason (anti-
 | `WORTHLESS_UPSTREAM_TIMEOUT` | `120.0` | Non-streaming upstream timeout (seconds) |
 | `WORTHLESS_STREAMING_TIMEOUT` | `300.0` | Streaming upstream timeout (seconds) |
 | `WORTHLESS_ALLOW_INSECURE` | `false` | Allow shard-A auth over non-TLS (dev only) |
+| `WORTHLESS_UPSTREAM_PROXY` | *(unset: direct)* | Egress proxy for `https://` upstream calls (`http`/`https` URL). `HTTPS_PROXY` and the system proxy are ignored. If it inspects TLS, it can read your real keys. See [Egress proxies](/security/#egress-proxies-and-custom-cas) |
+| `WORTHLESS_UPSTREAM_CA_BUNDLE` | *(unset: built-in CA list)* | PEM bundle to verify providers against. `SSL_CERT_FILE` is ignored. Anyone holding a key for a CA in it can read your real keys |
 
 ## Security Model
 

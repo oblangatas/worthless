@@ -313,6 +313,39 @@ shard-A into the tripwire and any further replay of it is caught. Until you
 rotate, a leaked active key is bounded by your spend cap and rules engine,
 not by the decoy.
 
+## Egress proxies and custom CAs
+
+The proxy's call to the provider is the one moment the real key is on the
+wire. Where that call goes, and which certificates may vouch for the host that
+receives it, come only from Worthless's own settings, never from the proxy
+process's environment ([WOR-1071](https://linear.app/plumbusai/issue/WOR-1071)):
+
+- `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` and the macOS / Windows
+  system proxy settings are ignored.
+- `SSL_CERT_FILE` and `SSL_CERT_DIR` are ignored. Providers are verified
+  against the CA list that ships with the proxy (certifi).
+- `SSLKEYLOGFILE` never receives the session secrets of the upstream call.
+
+The reason: a TLS-inspecting egress proxy decrypts traffic with a certificate
+from its own CA, which clients are told to trust through settings like
+`SSL_CERT_FILE`. If the proxy honoured them, the inspecting proxy, and its
+logs, would see every real key. At startup the proxy logs a warning naming
+any proxy or CA setting it is ignoring (names only, never values).
+
+If your providers are reachable only through an egress proxy, opt in
+explicitly, wherever the proxy gets its environment (your shell, the Docker
+Compose `.env`, or the launchd plist / systemd unit `worthless service install`
+writes):
+
+| Setting | Effect | Who can read your real keys |
+|---|---|---|
+| `WORTHLESS_UPSTREAM_PROXY=http://proxy.example.com:3128` | `https://` upstream calls go through this proxy in a CONNECT tunnel. `http://` upstreams (a local gateway) are always reached directly, because any proxy could read a plain-http request. | Nobody new, unless the proxy inspects TLS and you also set the CA below. A proxy that only tunnels sees the provider's hostname. |
+| `WORTHLESS_UPSTREAM_CA_BUNDLE=/path/to/bundle.pem` | Providers are verified against this PEM bundle instead of the built-in list. | Anyone holding the key of a CA in the bundle, including a TLS-inspecting proxy. |
+
+Setting both for an inspecting proxy is a deliberate decision to let it read
+your keys. If you can, ask for a TLS-inspection bypass for your providers'
+hosts instead (for example `api.openai.com` and `api.anthropic.com`).
+
 ## Threat model: non-goals
 
 Worthless does **not** protect against:
@@ -526,6 +559,7 @@ must make source available.
 
 | Date       | Change                                                                 |
 | ---------- | ---------------------------------------------------------------------- |
+| 2026-10-27 | Added [Egress proxies and custom CAs](#egress-proxies-and-custom-cas) (WOR-1071): the upstream call ignores `HTTP(S)_PROXY`, the system proxy, `SSL_CERT_FILE` / `SSL_CERT_DIR` and `SSLKEYLOGFILE`; `WORTHLESS_UPSTREAM_PROXY` and `WORTHLESS_UPSTREAM_CA_BUNDLE` are the explicit opt-ins. |
 | 2026-05-26 | Documented the crypto sidecar (WOR-306): in Docker, key reconstruction runs in a separate Unix user (`worthless-crypto`) the proxy process cannot read. Updated the in-process-reconstruction limitation, non-goal #6, and the residual-risk table to reflect the shipped boundary. |
 | 2026-04-24 | Added T-9 (in-flight transaction rollback) + T-10 (reconstruction-verify) for WOR-276 v2. Transactional `.env` rewrite replaces persistent cleartext backups. |
 | 2026-04-21 | Consolidated from SECURITY_POSTURE.md, docs/security-model.md, docs/risk-key-material-in-python-memory.md. Stripped confidence-tier prose, hard-cap rule, update-cadence, enterprise-tier marketing, mTLS orphan claim. Refs WOR-235, WOR-257, WOR-262. |

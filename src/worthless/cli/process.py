@@ -124,7 +124,8 @@ def check_proxy_health(port: int) -> dict[str, object]:
     refused, timeout, non-200, and non-JSON responses.
     """
     try:
-        resp = httpx.get(f"http://127.0.0.1:{port}/healthz", timeout=2.0)
+        # Loopback: an HTTP_PROXY must not intercept it (WOR-1071).
+        resp = httpx.get(f"http://127.0.0.1:{port}/healthz", timeout=2.0, trust_env=False)
         if resp.status_code == 200:
             data = resp.json()
             result: dict[str, object] = {
@@ -529,7 +530,7 @@ def _iter_healthz_responses(port: int, timeout: float) -> Generator[httpx.Respon
     """
     deadline = time.monotonic() + timeout
     url = f"http://127.0.0.1:{port}/healthz"
-    with httpx.Client(timeout=2.0) as client:
+    with httpx.Client(timeout=2.0, trust_env=False) as client:
         while time.monotonic() < deadline:
             try:
                 resp = client.get(url)
