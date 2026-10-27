@@ -262,7 +262,7 @@ def main() -> None:
     # current uid is the only consumer.
     spawn_allowed_uid = service_uids.proxy_uid if service_uids is not None else os.getuid()
     try:
-        spawn_sidecar(
+        sidecar = spawn_sidecar(
             socket_path,
             shares,
             allowed_uid=spawn_allowed_uid,
@@ -308,9 +308,7 @@ def main() -> None:
     # WOR-1078: the proxy refuses a sidecar socket served by any other uid.
     # Overwrite whatever the image ENV or the operator set; this is the uid
     # the sidecar was actually spawned as.
-    os.environ[WORTHLESS_SIDECAR_UID_ENV] = str(
-        service_uids.crypto_uid if service_uids is not None else os.getuid()
-    )
+    os.environ[WORTHLESS_SIDECAR_UID_ENV] = str(sidecar.sidecar_uid)
 
     # WOR-466: Create a stable well-known symlink so the Docker HEALTHCHECK
     # process can discover the PID-scoped socket path.  HEALTHCHECK processes

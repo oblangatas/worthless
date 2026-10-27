@@ -637,7 +637,9 @@ class TestWrapLifecycleOrdering:
     ) -> None:
         """spawn_proxy must receive WORTHLESS_SIDECAR_SOCKET pointing to the
         sidecar's actual socket path. Without this, the proxy can't connect
-        to the sidecar's IPC peer and refuses to bind."""
+        to the sidecar's IPC peer and refuses to bind. It must also receive
+        the uid the sidecar was spawned as, over any value inherited from
+        the shell, or it refuses the real sidecar (WOR-1078)."""
         from pathlib import Path
         from unittest.mock import MagicMock as _MagicMock
 
@@ -653,6 +655,7 @@ class TestWrapLifecycleOrdering:
             socket_path=fake_socket,
             shares=fake_shares,
             allowed_uid=os.getuid(),
+            sidecar_uid=4242,
             proc=_MagicMock(pid=99999, poll=lambda: 0),
         )
 
@@ -679,9 +682,10 @@ class TestWrapLifecycleOrdering:
         runner.invoke(
             app,
             ["wrap", "--", "echo", "hi"],
-            env={"WORTHLESS_HOME": str(home_with_key.base_dir)},
+            env={"WORTHLESS_HOME": str(home_with_key.base_dir), "WORTHLESS_SIDECAR_UID": "777"},
         )
 
+        assert captured_proxy_env.get("WORTHLESS_SIDECAR_UID") == "4242"
         assert "WORTHLESS_SIDECAR_SOCKET" in captured_proxy_env, (
             f"proxy env must include WORTHLESS_SIDECAR_SOCKET, got keys: "
             f"{sorted(captured_proxy_env)}"

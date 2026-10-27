@@ -935,11 +935,18 @@ class TestProxyLearnsTheSidecarUid:
     """
 
     def _env_at_execvp(
-        self, mod, monkeypatch: pytest.MonkeyPatch, service_uids: ServiceUids | None
+        self,
+        mod,
+        monkeypatch: pytest.MonkeyPatch,
+        service_uids: ServiceUids | None,
+        sidecar_uid: int,
     ) -> dict[str, str]:
         TestShareFileOwnership()._wire_minimal_main(mod, monkeypatch)
         monkeypatch.setattr(mod.os, "chown", lambda *_a, **_kw: None, raising=False)
         monkeypatch.setattr(mod, "_resolve_service_uids", lambda: service_uids)
+        monkeypatch.setattr(
+            mod, "spawn_sidecar", lambda *_a, **_kw: MagicMock(sidecar_uid=sidecar_uid)
+        )
         # A stale value from the image or the operator's env must not survive.
         monkeypatch.setenv("WORTHLESS_SIDECAR_UID", "4242")
         env: dict[str, str] = {}
@@ -956,6 +963,7 @@ class TestProxyLearnsTheSidecarUid:
             deploy_start_module,
             monkeypatch,
             ServiceUids(proxy_uid=10001, crypto_uid=10002, worthless_gid=10001),
+            sidecar_uid=10002,
         )
 
         assert env.get("WORTHLESS_SIDECAR_UID") == "10002"
@@ -963,6 +971,6 @@ class TestProxyLearnsTheSidecarUid:
     def test_bare_metal_proxy_expects_its_own_uid(
         self, deploy_start_module, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        env = self._env_at_execvp(deploy_start_module, monkeypatch, None)
+        env = self._env_at_execvp(deploy_start_module, monkeypatch, None, sidecar_uid=os.getuid())
 
         assert env.get("WORTHLESS_SIDECAR_UID") == str(os.getuid())

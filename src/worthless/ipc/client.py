@@ -126,6 +126,12 @@ def _err_from_envelope(envelope: dict[str, Any]) -> IPCError:
     return exc_cls(final)
 
 
+#: uids the kernel reports for a peer it can't map into our user namespace
+#: (Linux's default overflowuid) or one with no credentials ((uid_t)-1). A
+#: sidecar never runs as either, and trusting them trusts strangers.
+_UNMAPPED_UIDS = frozenset({65534, 2**32 - 1})
+
+
 def _env_sidecar_uid() -> int:
     """The sidecar uid from ``WORTHLESS_SIDECAR_UID``, or our own uid when unset.
 
@@ -136,9 +142,13 @@ def _env_sidecar_uid() -> int:
     raw = os.environ.get(WORTHLESS_SIDECAR_UID_ENV, "").strip()
     if not raw:
         return os.getuid()
-    if not (raw.isascii() and raw.isdigit()):
-        raise IPCAuthError(f"AUTH: {WORTHLESS_SIDECAR_UID_ENV}={raw!r} is not a numeric uid")
-    return int(raw)
+    # Length first: int() raises ValueError past 4300 digits, and uid_t is 32-bit.
+    if not (raw.isascii() and raw.isdigit() and len(raw) <= 10) or int(raw) >= 2**32:
+        raise IPCAuthError(f"AUTH: {WORTHLESS_SIDECAR_UID_ENV}={raw[:32]!r} is not a numeric uid")
+    uid = int(raw)
+    if uid in _UNMAPPED_UIDS:
+        raise IPCAuthError(f"AUTH: {WORTHLESS_SIDECAR_UID_ENV}={uid} is the kernel's no-user uid")
+    return uid
 
 
 class IPCClient:

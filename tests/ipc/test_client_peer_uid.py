@@ -182,7 +182,22 @@ async def test_unreadable_peer_credentials_fail_closed(
     assert bytes(impostor.received) == b""
 
 
-@pytest.mark.parametrize("raw", ["worthless-crypto", "-1", "10002.0", "10002,10003"])
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "worthless-crypto",
+        "-1",
+        "10002.0",
+        "10002,10003",
+        # The kernel reports these for peers it can't map (overflowuid) or that
+        # have no credentials at all, so trusting them trusts strangers.
+        "65534",
+        "4294967295",
+        # Past int()'s digit limit: must still be an AUTH refusal, not ValueError.
+        "9" * 5000,
+    ],
+    ids=lambda raw: raw if len(raw) < 20 else f"{len(raw)}-digits",
+)
 async def test_a_malformed_sidecar_uid_is_refused_before_connecting(
     impostor: _Impostor, monkeypatch: pytest.MonkeyPatch, raw: str
 ) -> None:
