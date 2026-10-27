@@ -5,7 +5,7 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 ## [Unreleased]
 
 ### Security
-- **The proxy only talks to a sidecar socket that the sidecar's own user is serving** (WOR-1078).
+- **The proxy only talks to a sidecar socket that the sidecar's own user is serving** (WOR-1078, [#749](https://github.com/oblangatas/worthless/pull/749)).
   Before: the sidecar checked which user had connected before it read a byte, but the proxy never checked who it had connected to. Anyone who could create or replace the socket file, for example by winning a race against a stale socket after a restart (WOR-352) or through a run directory other users can write, could answer as the sidecar. They saw every value the proxy sent to be encrypted, and could send the proxy any reply, including the msgpack frames behind CVE-2026-114613.
   Now: after it connects and before it sends anything, every Worthless client of the sidecar asks the kernel which user is serving the socket. That covers the proxy, CLI commands, the Docker health check, and the `worthless up` and `worthless doctor` probes. If the user isn't the sidecar's, the client closes the connection with an AUTH error. A proxy that hits this at startup refuses to start. One that hits it on a reconnect answers 503. A local install expects the sidecar to run as your own user, which is how `worthless up` and `worthless wrap` start it. The Docker image runs the sidecar as `worthless-crypto` (uid 10002) and sets `WORTHLESS_SIDECAR_UID=10002`. `deploy/start.py` also passes the proxy the uid it actually started the sidecar as. Set `WORTHLESS_SIDECAR_UID` yourself only if you run the sidecar as another user. A value that isn't a plain number is refused, not ignored.
 
