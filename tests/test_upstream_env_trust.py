@@ -24,6 +24,7 @@ import datetime
 import ipaddress
 import json
 import logging
+import socket
 import ssl
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
@@ -61,6 +62,11 @@ _CHAT_REPLY = json.dumps(
         "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
     }
 ).encode()
+
+_CHAT_RESPONSE = (
+    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+    b"Content-Length: %d\r\nConnection: close\r\n\r\n" % len(_CHAT_REPLY) + _CHAT_REPLY
+)
 
 _PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")
 _TRANSPORT_VARS = (
@@ -141,10 +147,7 @@ async def _answer_chat(
     """A provider: record the request, reply with a chat completion."""
     head = await reader.readuntil(b"\r\n\r\n")
     rec.received += head + await reader.readexactly(_content_length(head))
-    writer.write(
-        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
-        b"Content-Length: %d\r\nConnection: close\r\n\r\n" % len(_CHAT_REPLY) + _CHAT_REPLY
-    )
+    writer.write(_CHAT_RESPONSE)
     await writer.drain()
 
 
@@ -181,6 +184,33 @@ async def _tunnel(
             dst.close()
 
     await asyncio.gather(_pipe(reader, up_writer), _pipe(up_reader, writer))
+
+
+def _inspector(tls: ssl.SSLContext) -> Handler:
+    """A TLS-inspecting egress proxy: accept CONNECT, then decrypt with its own CA's cert.
+
+    It answers the decrypted request itself and never contacts the provider. Reading
+    the request is all an inspecting proxy needs to see, and log, the key.
+    """
+
+    async def _inspect(
+        reader: asyncio.StreamReader, writer: asyncio.StreamWriter, rec: _Recorder
+    ) -> None:
+        rec.received += await reader.readuntil(b"\r\n\r\n")
+        writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
+        await writer.drain()
+        # loop.start_tls rather than StreamWriter.start_tls, which is 3.11+. The
+        # reader keeps working; replies go out on the returned TLS transport.
+        raw = writer.transport
+        decrypted = await asyncio.get_running_loop().start_tls(
+            raw, raw.get_protocol(), tls, server_side=True
+        )
+        head = await reader.readuntil(b"\r\n\r\n")
+        rec.received += head + await reader.readexactly(_content_length(head))
+        decrypted.write(_CHAT_RESPONSE)
+        decrypted.close()
+
+    return _inspect
 
 
 # ---------------------------------------------------------------------------
@@ -345,6 +375,40 @@ async def test_env_proxy_vars_never_receive_the_real_key(
     assert env_proxy.connections == 0, "the upstream call went through the env proxy"
     assert resp.status_code == 200, resp.text
     assert b"Bearer " + _KEY in upstream.received
+
+
+def _closed_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+@pytest.mark.asyncio
+async def test_tls_inspecting_https_proxy_never_reads_the_key(
+    tmp_db_path: str,
+    fernet_key: bytes,
+    repo: ShardRepository,
+    monkeypatch: pytest.MonkeyPatch,
+    test_pki: tuple[Path, Path, Path],
+) -> None:
+    """The corporate case end to end: HTTPS_PROXY names an inspecting proxy whose CA
+    the machine trusts through SSL_CERT_FILE, and the upstream is https.
+
+    The upstream port is closed, so on this branch the direct call fails (502)
+    without leaving the machine. On main the inspector decrypted the request.
+    """
+    ca_pem, _cert, _key = test_pki
+    async with _serve(_inspector(_server_tls(test_pki))) as (inspector_port, inspector):
+        _set_env_proxy(monkeypatch, f"http://127.0.0.1:{inspector_port}")
+        monkeypatch.setenv("SSL_CERT_FILE", str(ca_pem))
+
+        resp = await _proxied_chat(
+            tmp_db_path, fernet_key, repo, f"https://127.0.0.1:{_closed_port()}/v1"
+        )
+
+    assert _KEY not in inspector.received, "the TLS-inspecting HTTPS_PROXY read the real key"
+    assert inspector.connections == 0, "the upstream call went through HTTPS_PROXY"
+    assert resp.status_code == 502
 
 
 @pytest.mark.asyncio
