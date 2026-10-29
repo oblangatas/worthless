@@ -22,18 +22,18 @@ import os
 import socket
 import time
 import tracemalloc
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import AsyncExitStack
 from pathlib import Path
+from typing import Any
 
 import pytest
+import pytest_asyncio
 
 from worthless.ipc.client import IPCClient, IPCProtocolError
 from worthless.ipc.framing import MAX_FRAME_SIZE, FrameTimeoutError, encode_frame, read_frame
 from worthless.sidecar.backends.fernet import FernetBackend
-from worthless.sidecar.server import (
-    DEFAULT_FRAME_TIMEOUT_S,
-    DEFAULT_MAX_CONNECTIONS,
-    start_sidecar,
-)
+from worthless.sidecar.server import start_sidecar
 
 # WOR-582: every test here spawns a real sidecar; running them in the
 # parallel xdist pass crashes a worker on py3.13 (asyncio server + forked
@@ -42,9 +42,9 @@ pytestmark = pytest.mark.real_ipc
 
 _FRAME_TIMEOUT_S = 0.5
 
-# Slack for a loaded CI host on top of the deadline. Before the fix the
-# sidecar never closes these connections, so any finite wait fails it.
-_CLOSE_SLACK_S = 3.0
+# The deadline plus slack for a loaded CI host. Before the fix the sidecar
+# never closes these connections, so any finite wait fails it.
+_CLOSE_WITHIN_S = _FRAME_TIMEOUT_S + 3.0
 
 _HELLO = encode_frame(
     {"v": 1, "id": 1, "kind": "req", "op": "hello", "body": {"client_versions": [1]}}
@@ -55,47 +55,39 @@ _HELLO = encode_frame(
 _STALLED_FRAME = MAX_FRAME_SIZE.to_bytes(4, "big") + b"\xa5" * (MAX_FRAME_SIZE - 1)
 
 
-async def _start(
-    sock: Path,
-    backend: FernetBackend,
-    *,
-    frame_timeout_s: float = DEFAULT_FRAME_TIMEOUT_S,
-    max_connections: int = DEFAULT_MAX_CONNECTIONS,
-) -> asyncio.AbstractServer:
-    return await start_sidecar(
-        socket_path=sock,
-        backend=backend,
-        allowed_uids=[os.getuid()],
-        frame_timeout_s=frame_timeout_s,
-        max_connections=max_connections,
-    )
+StartSidecar = Callable[..., Awaitable[asyncio.AbstractServer]]
 
 
-async def _stop(server: asyncio.AbstractServer) -> None:
-    server.close()
-    tasks = getattr(server, "_worthless_handler_tasks", set())
-    for task in list(tasks):
-        task.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
+@pytest_asyncio.fixture
+async def start(
+    sidecar_socket_path: Path, fernet_backend: FernetBackend
+) -> AsyncIterator[StartSidecar]:
+    """Start a sidecar with the given limits; stop it, stalled handlers included, at teardown."""
+    servers: list[asyncio.AbstractServer] = []
+
+    async def _start(**limits: Any) -> asyncio.AbstractServer:
+        server = await start_sidecar(sidecar_socket_path, fernet_backend, [os.getuid()], **limits)
+        servers.append(server)
+        return server
+
+    yield _start
+    for server in servers:
+        server.close()
+        # Before the fix stalled handlers never end; cancel them so teardown can't hang.
+        tasks = _handlers(server)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def _handlers(server: asyncio.AbstractServer) -> set[asyncio.Task[None]]:
+    return set(server._worthless_handler_tasks)  # type: ignore[attr-defined]
+
+
+async def _closed_by_sidecar(reader: asyncio.StreamReader) -> bool:
+    """True if the sidecar closes the connection within the deadline plus slack."""
     try:
-        await asyncio.wait_for(server.wait_closed(), timeout=2.0)
-    except Exception:  # noqa: BLE001 - best-effort teardown
-        pass
-
-
-async def _handlers_drop_to(server: asyncio.AbstractServer, count: int) -> bool:
-    """True once the sidecar has at most ``count`` live connection handlers."""
-    for _ in range(100):
-        if len(server._worthless_handler_tasks) <= count:  # type: ignore[attr-defined]
-            return True
-        await asyncio.sleep(0.02)
-    return False
-
-
-async def _closed_by_sidecar(reader: asyncio.StreamReader, within: float) -> bool:
-    """True if the sidecar closes the connection within ``within`` seconds."""
-    try:
-        data = await asyncio.wait_for(reader.read(1), timeout=within)
+        data = await asyncio.wait_for(reader.read(1), timeout=_CLOSE_WITHIN_S)
     except ConnectionResetError:
         return True
     except asyncio.TimeoutError:
@@ -118,30 +110,27 @@ async def _shake_hands(sock: Path) -> tuple[asyncio.StreamReader, asyncio.Stream
 
 
 async def test_stalled_half_frame_after_hello_is_closed_within_deadline(
-    sidecar_socket_path: Path, fernet_backend: FernetBackend
+    start: StartSidecar, sidecar_socket_path: Path
 ) -> None:
     """The attack in WOR-1076: hello, then a 1 MiB frame short one byte, then silence."""
-    server = await _start(sidecar_socket_path, fernet_backend, frame_timeout_s=_FRAME_TIMEOUT_S)
-    try:
-        reader, writer = await _shake_hands(sidecar_socket_path)
-        t0 = time.monotonic()
-        writer.write(_STALLED_FRAME)
-        await writer.drain()
+    server = await start(frame_timeout_s=_FRAME_TIMEOUT_S)
+    reader, writer = await _shake_hands(sidecar_socket_path)
+    stalled = _handlers(server)
+    t0 = time.monotonic()
+    writer.write(_STALLED_FRAME)
+    await writer.drain()
 
-        closed = await _closed_by_sidecar(reader, within=_FRAME_TIMEOUT_S + _CLOSE_SLACK_S)
-        elapsed = time.monotonic() - t0
+    closed = await _closed_by_sidecar(reader)
+    elapsed = time.monotonic() - t0
 
-        assert closed, "sidecar kept a half-sent frame open past its deadline"
-        # The deadline, not something else, closed it: the clock starts when
-        # the header arrives, which is after t0.
-        assert elapsed >= _FRAME_TIMEOUT_S * 0.9, (
-            f"closed after {elapsed:.3f}s, before the deadline"
-        )
-        writer.close()
-        # The handler is gone, so the partial frame's buffer is released.
-        assert await _handlers_drop_to(server, 0), "stalled handler is still running"
-    finally:
-        await _stop(server)
+    assert closed, "sidecar kept a half-sent frame open past its deadline"
+    # The deadline, not something else, closed it: the clock starts when
+    # the header arrives, which is after t0.
+    assert elapsed >= _FRAME_TIMEOUT_S * 0.9, f"closed after {elapsed:.3f}s, before the deadline"
+    writer.close()
+    # The handler is gone, so the partial frame's buffer is released.
+    _, still_running = await asyncio.wait(stalled, timeout=2.0)
+    assert not still_running, "stalled handler is still running"
 
 
 @pytest.mark.parametrize(
@@ -153,40 +142,34 @@ async def test_stalled_half_frame_after_hello_is_closed_within_deadline(
     ],
 )
 async def test_stalled_hello_is_closed_within_deadline(
-    sidecar_socket_path: Path, fernet_backend: FernetBackend, sent: bytes
+    start: StartSidecar, sidecar_socket_path: Path, sent: bytes
 ) -> None:
     """Every client sends its hello as soon as it connects, so the hello's clock starts then."""
-    server = await _start(sidecar_socket_path, fernet_backend, frame_timeout_s=_FRAME_TIMEOUT_S)
-    try:
-        reader, writer = await asyncio.open_unix_connection(str(sidecar_socket_path))
-        if sent:
-            writer.write(sent)
-            await writer.drain()
+    await start(frame_timeout_s=_FRAME_TIMEOUT_S)
+    reader, writer = await asyncio.open_unix_connection(str(sidecar_socket_path))
+    if sent:
+        writer.write(sent)
+        await writer.drain()
 
-        closed = await _closed_by_sidecar(reader, within=_FRAME_TIMEOUT_S + _CLOSE_SLACK_S)
-
-        assert closed, "sidecar kept a connection that never finished its hello"
-        writer.close()
-    finally:
-        await _stop(server)
+    assert await _closed_by_sidecar(reader), (
+        "sidecar kept a connection that never finished its hello"
+    )
+    writer.close()
 
 
 async def test_idle_connection_between_requests_stays_open(
-    sidecar_socket_path: Path, fernet_backend: FernetBackend
+    start: StartSidecar, sidecar_socket_path: Path
 ) -> None:
     """The proxy holds one connection for its whole life and may send nothing for hours.
 
     Only a frame that has started is on the clock. A connection idle for
     several deadlines must still serve its next request.
     """
-    server = await _start(sidecar_socket_path, fernet_backend, frame_timeout_s=_FRAME_TIMEOUT_S)
-    try:
-        async with IPCClient(sidecar_socket_path) as client:
-            await asyncio.sleep(_FRAME_TIMEOUT_S * 3)
-            ciphertext = await client.seal(b"still here")
-            assert await client.open(ciphertext) == b"still here"
-    finally:
-        await _stop(server)
+    await start(frame_timeout_s=_FRAME_TIMEOUT_S)
+    async with IPCClient(sidecar_socket_path) as client:
+        await asyncio.sleep(_FRAME_TIMEOUT_S * 3)
+        ciphertext = await client.seal(b"still here")
+        assert await client.open(ciphertext) == b"still here"
 
 
 # ---------------------------------------------------------------------------
@@ -216,71 +199,64 @@ def _attack(sock: Path) -> tuple[socket.socket, bool]:
 
 
 async def test_connections_beyond_cap_are_refused_without_memory_growth(
-    sidecar_socket_path: Path, fernet_backend: FernetBackend
+    start: StartSidecar, sidecar_socket_path: Path
 ) -> None:
     cap = 4
     extra = 8
-    server = await _start(
-        sidecar_socket_path, fernet_backend, max_connections=cap, frame_timeout_s=30.0
-    )
-    held: list[IPCClient] = []
+    await start(max_connections=cap, frame_timeout_s=30.0)
     attackers: list[socket.socket] = []
-    tracemalloc.start()
-    try:
-        for _ in range(cap):
-            client = IPCClient(sidecar_socket_path)
-            await client.__aenter__()
-            held.append(client)
+    async with AsyncExitStack() as stack:
+        held = [await stack.enter_async_context(IPCClient(sidecar_socket_path)) for _ in range(cap)]
+        tracemalloc.start()
+        try:
+            baseline, _ = tracemalloc.get_traced_memory()
+            results = await asyncio.gather(
+                *(asyncio.to_thread(_attack, sidecar_socket_path) for _ in range(extra))
+            )
+            grown = tracemalloc.get_traced_memory()[0] - baseline
+            attackers = [conn for conn, _ in results]
 
-        baseline, _ = tracemalloc.get_traced_memory()
-        results = await asyncio.gather(
-            *(asyncio.to_thread(_attack, sidecar_socket_path) for _ in range(extra))
-        )
-        grown = tracemalloc.get_traced_memory()[0] - baseline
-        attackers = [conn for conn, _ in results]
-
-        # Accepting them would buffer ~1 MiB each (~8 MiB here). Refused
-        # before the first read, they buffer nothing.
-        assert grown < MAX_FRAME_SIZE, f"sidecar memory grew {grown} bytes for refused connections"
-        refused = sum(1 for _, was_refused in results if was_refused)
-        assert refused == extra, f"only {refused} of {extra} connections over the cap were refused"
-        # The connections under the cap still work.
-        assert await held[0].open(await held[0].seal(b"ok")) == b"ok"
-    finally:
-        tracemalloc.stop()
-        for conn in attackers:
-            conn.close()
-        for client in held:
-            await client.aclose()
-        await _stop(server)
+            # Accepting them would buffer ~1 MiB each (~8 MiB here). Refused
+            # before the first read, they buffer nothing.
+            assert grown < MAX_FRAME_SIZE, (
+                f"sidecar memory grew {grown} bytes for refused connections"
+            )
+            refused = sum(1 for _, was_refused in results if was_refused)
+            assert refused == extra, (
+                f"only {refused} of {extra} connections over the cap were refused"
+            )
+            # The connections under the cap still work.
+            assert await held[0].open(await held[0].seal(b"ok")) == b"ok"
+        finally:
+            tracemalloc.stop()
+            for conn in attackers:
+                conn.close()
 
 
 async def test_closed_connection_frees_its_slot(
-    sidecar_socket_path: Path, fernet_backend: FernetBackend
+    start: StartSidecar, sidecar_socket_path: Path
 ) -> None:
-    server = await _start(sidecar_socket_path, fernet_backend, max_connections=2)
-    try:
-        first = IPCClient(sidecar_socket_path)
-        await first.__aenter__()
-        async with IPCClient(sidecar_socket_path):
-            with pytest.raises(IPCProtocolError):
-                async with IPCClient(sidecar_socket_path):
-                    pass
-            await first.aclose()
-            assert await _handlers_drop_to(server, 1), "closed connection kept its slot"
-            async with IPCClient(sidecar_socket_path) as late:
-                assert await late.open(await late.seal(b"late")) == b"late"
-    finally:
-        await _stop(server)
+    server = await start(max_connections=2)
+    async with IPCClient(sidecar_socket_path) as first, IPCClient(sidecar_socket_path):
+        with pytest.raises(IPCProtocolError):
+            async with IPCClient(sidecar_socket_path):
+                pass
+        await first.aclose()
+        _, still_open = await asyncio.wait(
+            _handlers(server), timeout=2.0, return_when=asyncio.FIRST_COMPLETED
+        )
+        assert len(still_open) == 1, "closed connection kept its slot"
+        async with IPCClient(sidecar_socket_path) as late:
+            assert await late.open(await late.seal(b"late")) == b"late"
 
 
 async def test_start_sidecar_rejects_nonsense_limits(
-    sidecar_socket_path: Path, fernet_backend: FernetBackend
+    start: StartSidecar, sidecar_socket_path: Path
 ) -> None:
     with pytest.raises(ValueError, match="max_connections"):
-        await _start(sidecar_socket_path, fernet_backend, max_connections=0)
+        await start(max_connections=0)
     with pytest.raises(ValueError, match="frame_timeout_s"):
-        await _start(sidecar_socket_path, fernet_backend, frame_timeout_s=0)
+        await start(frame_timeout_s=0)
     assert not sidecar_socket_path.exists(), "a refused config must not leave a bound socket"
 
 
