@@ -12,9 +12,14 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
+import signal
+import socket
 import subprocess
 import sys
+import tempfile
 import textwrap
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -22,6 +27,7 @@ from pathlib import Path
 import anthropic
 import httpx
 import openai
+import psutil
 import pytest
 from dotenv import dotenv_values
 from typer.testing import CliRunner
@@ -594,3 +600,61 @@ class TestAnthropicLiveSDK:
             msg = str(exc.value).lower()
             assert "traceback" not in msg
             assert "worthless" not in msg
+
+
+@pytest.mark.live
+@pytest.mark.timeout(90)
+def test_kill_9_on_up_takes_the_sidecar_and_its_shares_with_it() -> None:
+    """worthless-dhfn: real ``worthless up``; SIGKILL it; nothing keeps the keys.
+
+    Needs no API key. Sandboxes HOME too: WORTHLESS_HOME alone still lets
+    integrations write under the real home.
+    """
+    home = Path(tempfile.mkdtemp(prefix="wd-", dir="/tmp"))  # short: AF_UNIX path limit
+    env = {
+        **os.environ,
+        "HOME": str(home / "h"),
+        "WORTHLESS_HOME": str(home / "w"),
+        "WORTHLESS_KEYRING_BACKEND": "null",
+    }
+    (home / "h").mkdir()
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    cli = [str(Path(sys.executable).with_name("worthless"))]
+    sup = subprocess.Popen(
+        [*cli, "up", "--port", str(port)],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    sidecar: psutil.Process | None = None
+    try:
+        assert poll_health(port, timeout=30.0), "worthless up never became healthy"
+        sidecar = next(
+            c
+            for c in psutil.Process(sup.pid).children()
+            if "worthless.sidecar" in " ".join(c.cmdline())
+        )
+        run_dir = home / "w" / "run" / str(sup.pid)
+        assert (run_dir / "share_a.bin").exists()
+
+        sup.send_signal(signal.SIGKILL)
+        sup.wait(timeout=5)
+
+        deadline = time.monotonic() + 2.0  # one 0.5s poll + slack; the drain is 5s
+        while run_dir.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not run_dir.exists(), f"shares left behind: {sorted(run_dir.iterdir())}"
+        # Exits after its drain (the orphaned proxy's connection holds it open).
+        sidecar.wait(timeout=10)
+
+        down = subprocess.run([*cli, "down"], env=env, capture_output=True, text=True, timeout=30)
+        assert down.returncode == 0, down.stdout + down.stderr
+    finally:
+        if sup.poll() is None:
+            sup.kill()
+        if sidecar is not None and sidecar.is_running():
+            sidecar.kill()
+        subprocess.run([*cli, "down"], env=env, capture_output=True, timeout=30)
+        shutil.rmtree(home, ignore_errors=True)
