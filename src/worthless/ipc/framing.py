@@ -31,6 +31,7 @@ __all__ = [
     "FrameTooLargeError",
     "FrameTruncatedError",
     "MalformedFrameError",
+    "describe_peer_value",
     "encode_frame",
     "read_frame",
 ]
@@ -50,9 +51,9 @@ MAX_CONTAINER_LEN = 32
 #: Most arrays and maps a frame may hold in total. Each one decoded costs
 #: ~60 bytes of Python objects, so a 1 MiB frame of empty lists used to cost
 #: ~65 MiB, and a hello padded that way stayed referenced while its
-#: connection stayed open (WOR-1075). With MAX_CONTAINER_LEN this bounds every
-#: frame's decoded size to about its byte size. Legitimate frames hold at most
-#: 3 (envelope, body, and ``client_versions`` or ``backend_caps``).
+#: connection stayed open (WOR-1075). With MAX_CONTAINER_LEN this keeps every
+#: frame's decoded size within a few times its byte size. Legitimate frames
+#: hold at most 3 (envelope, body, and ``client_versions`` or ``backend_caps``).
 MAX_CONTAINERS = 16
 
 _HEADER_LEN = 4
@@ -79,6 +80,22 @@ class FrameTruncatedError(FrameError):
 
 class MalformedFrameError(FrameError):
     """Frame body is not a valid msgpack-encoded dict envelope."""
+
+
+def describe_peer_value(value: object) -> str:
+    """Name a decoded peer value for a log line or error without copying it.
+
+    ``repr`` of a 1 MiB string with one emoji in it is ~16 MiB, and on macOS
+    that memory piled up across refused connections (WOR-1075). Short scalars
+    are shown as they are; anything else by type and length.
+    """
+    if value is None or isinstance(value, bool | int | float):
+        return repr(value)
+    if isinstance(value, str) and len(value) <= 32:
+        return repr(value)
+    if isinstance(value, str | bytes | list | dict):
+        return f"{type(value).__name__} of length {len(value)}"
+    return type(value).__name__
 
 
 def encode_frame(envelope: Mapping[str, Any]) -> bytes:
@@ -144,9 +161,8 @@ async def read_frame(reader: asyncio.StreamReader) -> dict[str, Any]:
     # Hard caps on every nested msgpack allocation. Without these, a hostile peer
     # could declare a 1 MiB frame whose body is a map with 10M keys, or an ext
     # type claiming multi-GiB length — msgpack-python would happily try to allocate
-    # before we see the payload. Arrays and maps get MAX_CONTAINER_LEN, which
-    # bounds the up-front allocation on every msgpack version, not just ≥1.2.4,
-    # and the hooks below stop decoding at MAX_CONTAINERS of them in total.
+    # before we see the payload. Arrays and maps: see MAX_CONTAINER_LEN and
+    # MAX_CONTAINERS; the hooks below count them.
     containers = 0
 
     def _count_container(container: Any) -> Any:

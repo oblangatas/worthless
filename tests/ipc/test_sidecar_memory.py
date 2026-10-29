@@ -13,6 +13,9 @@ envelope validation:
 * A valid hello padded with ~1 MiB of empty lists: ~60 bytes of Python
   objects per byte on every msgpack version, kept for as long as the
   connection stays open. ``MAX_CONTAINERS`` bounds it.
+* A hello refused for a ~1 MiB string with one emoji in it: the reason the
+  sidecar logged held its ``repr``, ~16 bytes per byte received, and on macOS
+  that memory piled up across closed connections.
 
 The sidecar runs ``start_sidecar`` in a child process on a real AF_UNIX
 socket, so its RSS is measured alone, not mixed with pytest's.
@@ -21,6 +24,7 @@ socket, so its RSS is measured alone, not mixed with pytest's.
 from __future__ import annotations
 
 import asyncio
+import functools
 import socket
 import subprocess
 import sys
@@ -35,6 +39,7 @@ from worthless.ipc.framing import (
     MalformedFrameError,
     read_frame,
 )
+from worthless.sidecar.server import _validate_handshake, _validate_request_envelope
 
 # Spawns a real sidecar process; serial lane (WOR-582).
 pytestmark = [
@@ -43,6 +48,18 @@ pytestmark = [
 ]
 
 _MiB = 1024 * 1024
+_LIMIT = 32 * _MiB  # what any one test's frames may add to the sidecar's RSS
+
+_HELLO: dict[str, object] = {
+    "v": 1,
+    "id": 1,
+    "kind": "req",
+    "op": "hello",
+    "body": {"client_versions": [1]},
+}
+# ~1 MiB of control characters plus one emoji: CPython stores it at 4 bytes a
+# character, and repr() spells each control character as 4 of them.
+_HUGE_STR = "\x00" * 1_000_000 + "\U0001f600"
 
 # Prints "ready", then answers each line on stdin with "<rss> <peak rss>" in
 # bytes. The backend is never reached: every frame here fails in read_frame.
@@ -202,7 +219,7 @@ def test_tiny_frame_of_nested_array_headers_cannot_balloon_sidecar_memory(
     # Peak against the pre-attack RSS, not the earlier peak, so a startup
     # high-water mark can't hide the attack. Was ~513 MiB on msgpack 1.2.2.
     peak_growth = peak_after - rss_before
-    assert peak_growth < 32 * _MiB, (
+    assert peak_growth < _LIMIT, (
         f"a {len(body):,}-byte frame took sidecar RSS {peak_growth / _MiB:.1f} MiB above "
         f"its {rss_before / _MiB:.1f} MiB baseline (msgpack {msgpack.version})"
     )
@@ -212,16 +229,10 @@ def test_tiny_frame_of_nested_array_headers_cannot_balloon_sidecar_memory(
 def _hello_padded_with_empty_lists() -> bytes:
     # A valid hello with one unused key holding a tree of 31-entry lists
     # that ends in ~920k empty ones: just under MAX_FRAME_SIZE.
-    def tree(depth: int) -> bytes:
-        if depth == 0:
-            return b"\x90"
-        return b"\xdc" + (31).to_bytes(2, "big") + tree(depth - 1) * 31
-
-    hello = msgpack.packb(
-        {"v": 1, "id": 1, "kind": "req", "op": "hello", "body": {"client_versions": [1]}}
-    )
-    assert hello[0] == 0x85  # fixmap of 5; widen it to 6 for the "pad" key
-    return b"\x86" + hello[1:] + msgpack.packb("pad") + tree(4)
+    pad: list[object] = []
+    for _ in range(4):
+        pad = [pad] * 31
+    return msgpack.packb({**_HELLO, "pad": pad})
 
 
 def test_valid_hello_padded_with_empty_lists_cannot_hold_sidecar_memory(
@@ -241,7 +252,7 @@ def test_valid_hello_padded_with_empty_lists_cannot_hold_sidecar_memory(
 
     # Was +57 MiB per open connection: the hello passed every check.
     peak_growth = peak_after - rss_before
-    assert peak_growth < 32 * _MiB, (
+    assert peak_growth < _LIMIT, (
         f"{len(conns)} connections each sending a {len(body):,}-byte hello took sidecar RSS "
         f"{peak_growth / _MiB:.1f} MiB above its {rss_before / _MiB:.1f} MiB baseline "
         f"(msgpack {msgpack.version})"
@@ -274,3 +285,53 @@ def test_non_string_map_keys_do_not_leak_sidecar_memory(sidecar: _Sidecar) -> No
         f"handshakes carrying {sent / _MiB:.1f} MiB (msgpack {msgpack.version})"
     )
     _assert_decoder_rejects(body)
+
+
+_VALIDATORS = {
+    "hello": _validate_handshake,
+    "req": functools.partial(_validate_request_envelope, valid_ops=frozenset({"seal"})),
+}
+
+
+@pytest.mark.parametrize(
+    ("validator", "envelope"),
+    [
+        *(
+            pytest.param(name, {**_HELLO, field: _HUGE_STR}, id=f"{name}-{field}")
+            for name in _VALIDATORS
+            for field in ("v", "kind", "op")
+        ),
+        pytest.param(
+            "hello", {**_HELLO, "body": {"client_versions": [_HUGE_STR]}}, id="hello-versions"
+        ),
+    ],
+)
+def test_rejection_reasons_never_copy_peer_values(
+    validator: str, envelope: dict[str, object]
+) -> None:
+    ok, reason = _VALIDATORS[validator](envelope)
+    assert not ok
+    assert len(reason) < 200, f"{len(reason):,}-char reason: {reason[:80]!r}..."
+
+
+def test_refused_hellos_with_huge_strings_do_not_pile_up_in_sidecar_memory(
+    sidecar: _Sidecar,
+) -> None:
+    hello = {**_HELLO, "body": {"client_versions": [_HUGE_STR]}}
+    body = msgpack.packb(hello, use_bin_type=True)
+    for _ in range(4):  # let allocator pools and stream buffers settle
+        sidecar.send(body)
+    rss_before, _ = sidecar.memory()
+
+    connections = 32
+    for _ in range(connections):
+        sidecar.send(body)
+
+    _, peak_after = sidecar.memory()
+    # Was +145 to +270 MiB on macOS: each refusal built a ~16 MiB repr of the
+    # string. The peak bounds what's left over too.
+    peak_growth = peak_after - rss_before
+    assert peak_growth < _LIMIT, (
+        f"{connections} refused {len(body):,}-byte hellos took sidecar RSS "
+        f"{peak_growth / _MiB:.1f} MiB above its {rss_before / _MiB:.1f} MiB baseline"
+    )

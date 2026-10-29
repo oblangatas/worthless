@@ -28,6 +28,7 @@ from worthless.ipc.framing import (
     FrameTooLargeError,
     FrameTruncatedError,
     MalformedFrameError,
+    describe_peer_value,
     encode_frame,
     read_frame,
 )
@@ -142,11 +143,11 @@ def _validate_handshake(envelope: dict[str, Any]) -> tuple[bool, str]:
     ``_ERR_PROTO_HANDSHAKE`` message.
     """
     if envelope.get("v") != _PROTOCOL_VERSION:
-        return False, f"protocol version mismatch: got {envelope.get('v')!r}"
+        return False, f"protocol version mismatch: got {describe_peer_value(envelope.get('v'))}"
     if envelope.get("kind") != "req":
-        return False, f"expected kind='req', got {envelope.get('kind')!r}"
+        return False, f"expected kind='req', got {describe_peer_value(envelope.get('kind'))}"
     if envelope.get("op") != "hello":
-        return False, f"expected op='hello', got {envelope.get('op')!r}"
+        return False, f"expected op='hello', got {describe_peer_value(envelope.get('op'))}"
 
     body = envelope.get("body")
     if not isinstance(body, dict):
@@ -157,8 +158,8 @@ def _validate_handshake(envelope: dict[str, Any]) -> tuple[bool, str]:
         return False, (f"client_versions must be list, got {type(client_versions).__name__}")
     if _PROTOCOL_VERSION not in client_versions:
         return False, (
-            f"client_versions={list(client_versions)!r} does not include "
-            f"server version {_PROTOCOL_VERSION}"
+            f"client_versions [{', '.join(map(describe_peer_value, client_versions))}] "
+            f"does not include server version {_PROTOCOL_VERSION}"
         )
     return True, "ok"
 
@@ -178,12 +179,12 @@ def _validate_request_envelope(
     validation layer, BEFORE the dispatch switch ever runs.
     """
     if envelope.get("v") != _PROTOCOL_VERSION:
-        return False, f"protocol version mismatch: got {envelope.get('v')!r}"
+        return False, f"protocol version mismatch: got {describe_peer_value(envelope.get('v'))}"
     if envelope.get("kind") != "req":
-        return False, f"expected kind='req', got {envelope.get('kind')!r}"
+        return False, f"expected kind='req', got {describe_peer_value(envelope.get('kind'))}"
     op = envelope.get("op")
     if op not in valid_ops:
-        return False, f"unknown op {op!r}"
+        return False, f"unknown op {describe_peer_value(op)}"
     if _extract_request_id(envelope) is None:
         return False, f"id must be int, got {type(envelope.get('id')).__name__}"
     if not isinstance(envelope.get("body"), dict):

@@ -163,24 +163,15 @@ class TestContainerCaps:
         "envelope",
         [
             pytest.param(
-                {
-                    "v": 1,
-                    "id": 7,
-                    "kind": "req",
-                    "op": "open",
-                    "deadline_ms": 25_000,
-                    "body": {"ciphertext": b"ct", "context": b"ctx", "key_id": b"kid"},
-                },
+                _envelope(
+                    op="open",
+                    deadline_ms=25_000,
+                    body={"ciphertext": b"ct", "context": b"ctx", "key_id": b"kid"},
+                ),
                 id="request",
             ),
             pytest.param(
-                {
-                    "v": 1,
-                    "kind": "resp",
-                    "op": "hello",
-                    "id": 1,
-                    "body": {"version": 1, "backend_caps": sorted(_KNOWN_OPS)},
-                },
+                _envelope(kind="resp", body={"version": 1, "backend_caps": sorted(_KNOWN_OPS)}),
                 id="hello-reply",
             ),
         ],
@@ -205,17 +196,14 @@ class TestContainerCaps:
             await read_frame(reader)
 
     async def test_frame_with_the_most_containers_allowed_decodes(self) -> None:
-        # envelope + body + nested lists = MAX_CONTAINERS arrays and maps
-        nested: list[object] = []
-        for _ in range(MAX_CONTAINERS - 3):
-            nested = [nested]
-        env = _envelope(body={"x": nested})
+        # envelope + body + outer list + inner lists = MAX_CONTAINERS
+        env = _envelope(body={"x": [[] for _ in range(MAX_CONTAINERS - 3)]})
         reader = asyncio.StreamReader()
         _feed(reader, encode_frame(env))
         assert await read_frame(reader) == env
 
     async def test_frame_with_one_container_too_many_rejected(self) -> None:
-        # Each list is within MAX_CONTAINER_LEN; their number is what's refused.
+        # Each list is within MAX_CONTAINER_LEN; one list too many is refused.
         env = _envelope(body={"x": [[] for _ in range(MAX_CONTAINERS - 2)]})
         reader = asyncio.StreamReader()
         _feed(reader, encode_frame(env))
