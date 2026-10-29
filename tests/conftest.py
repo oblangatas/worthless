@@ -20,7 +20,7 @@ from cryptography.fernet import Fernet
 from hypothesis import HealthCheck, settings
 
 
-from worthless._flags import ipc_mode_active
+from worthless._flags import WORTHLESS_SIDECAR_UID_ENV, ipc_mode_active
 from worthless.cli import console as _cli_console  # used by _isolate_cli_globals
 from worthless.cli import errors as _cli_errors  # used by _isolate_cli_globals
 from worthless.cli import default_command  # used by _isolate_default_command_proxy autouse fixture
@@ -127,7 +127,7 @@ def _isolate_sidecar_uid_env(monkeypatch: pytest.MonkeyPatch) -> None:
     ``os.environ`` for the proxy it execs, so one deploy test would otherwise
     point every later IPC client on its worker at a foreign sidecar uid.
     """
-    monkeypatch.delenv("WORTHLESS_SIDECAR_UID", raising=False)
+    monkeypatch.delenv(WORTHLESS_SIDECAR_UID_ENV, raising=False)
 
 
 @pytest.fixture(autouse=True)

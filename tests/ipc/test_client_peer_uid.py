@@ -26,16 +26,17 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
+from worthless._flags import WORTHLESS_SIDECAR_UID_ENV
 from worthless.ipc import peercred
 from worthless.ipc.client import IPCAuthError, IPCClient
-from worthless.ipc.framing import FrameError, encode_frame, read_frame
 from worthless.proxy.ipc_supervisor import IPCSupervisor, IPCUnavailable
+
+from tests.ipc.conftest import FakeSidecarHandle
 
 # Real sockets and a real sidecar: the serial real_ipc lane, like the rest of
 # tests/ipc (WOR-582).
 pytestmark = pytest.mark.real_ipc
 
-_SIDECAR_UID_ENV = "WORTHLESS_SIDECAR_UID"
 # Any uid this process isn't running as. The kernel will report os.getuid().
 _OTHER_UID = os.getuid() + 1
 
@@ -76,47 +77,8 @@ async def impostor(sidecar_socket_path: Path) -> AsyncIterator[_Impostor]:
         await server.wait_closed()
 
 
-@pytest_asyncio.fixture
-async def talking_impostor(sidecar_socket_path: Path) -> AsyncIterator[list[bytes]]:
-    """An impostor that answers hello like the real sidecar and keeps what ``seal`` sends.
-
-    Yields the list of plaintexts it was handed. This is the attack the
-    ticket names: before WOR-1078 the client finished the handshake and
-    gave this server the value it wanted encrypted.
-    """
-    plaintexts: list[bytes] = []
-
-    async def _on_connect(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        try:
-            while True:
-                frame = await read_frame(reader)
-                body = frame.get("body") or {}
-                if isinstance(body.get("plaintext"), bytes):
-                    plaintexts.append(body["plaintext"])
-                reply = {
-                    "v": 1,
-                    "id": frame.get("id"),
-                    "kind": "resp",
-                    "op": frame.get("op"),
-                    "body": {"version": 1, "backend_caps": ["seal", "open"], "ciphertext": b"ct"},
-                }
-                writer.write(encode_frame(reply))
-                await writer.drain()
-        except (FrameError, ConnectionError):
-            return
-        finally:
-            writer.close()
-
-    server = await asyncio.start_unix_server(_on_connect, path=str(sidecar_socket_path))
-    try:
-        yield plaintexts
-    finally:
-        server.close()
-        await server.wait_closed()
-
-
-async def _connect(socket_path: Path, **kwargs: object) -> None:
-    async with IPCClient(socket_path, timeout=0.5, **kwargs):  # type: ignore[arg-type]
+async def _connect(socket_path: Path) -> None:
+    async with IPCClient(socket_path, timeout=0.5):
         pass
 
 
@@ -128,7 +90,7 @@ async def test_refuses_a_socket_served_by_another_uid_before_sending_a_byte(
     The client must refuse with an AUTH error and close the connection
     without writing anything, not even the hello frame.
     """
-    monkeypatch.setenv(_SIDECAR_UID_ENV, str(_OTHER_UID))
+    monkeypatch.setenv(WORTHLESS_SIDECAR_UID_ENV, str(_OTHER_UID))
 
     with pytest.raises(IPCAuthError, match="not served by the sidecar uid"):
         await _connect(impostor.socket_path)
@@ -141,29 +103,21 @@ async def test_refuses_a_socket_served_by_another_uid_before_sending_a_byte(
 
 
 async def test_an_impostor_that_answers_hello_never_sees_seal_plaintext(
-    talking_impostor: list[bytes], sidecar_socket_path: Path, monkeypatch: pytest.MonkeyPatch
+    fake_sidecar: tuple[Path, FakeSidecarHandle], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The user-visible promise: a value the proxy seals never reaches an impostor."""
-    monkeypatch.setenv(_SIDECAR_UID_ENV, str(_OTHER_UID))
+    """The user-visible promise: a value the proxy seals never reaches an impostor.
+
+    The impostor speaks the protocol, so before WOR-1078 the handshake
+    completed and the seal request carrying the plaintext reached it.
+    """
+    socket_path, impostor = fake_sidecar
+    monkeypatch.setenv(WORTHLESS_SIDECAR_UID_ENV, str(_OTHER_UID))
 
     with pytest.raises(IPCAuthError):
-        async with IPCClient(sidecar_socket_path, timeout=0.5) as client:
+        async with IPCClient(socket_path, timeout=0.5) as client:
             await client.seal(b"sk-live-the-key-the-proxy-protects")
 
-    assert talking_impostor == []
-
-
-async def test_explicit_sidecar_uid_overrides_the_environment(
-    impostor: _Impostor, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A caller that knows the sidecar's uid passes it; the env value is ignored."""
-    monkeypatch.setenv(_SIDECAR_UID_ENV, str(os.getuid()))
-
-    with pytest.raises(IPCAuthError, match="not served by the sidecar uid"):
-        await _connect(impostor.socket_path, sidecar_uid=_OTHER_UID)
-
-    await asyncio.wait_for(impostor.disconnected.wait(), timeout=2.0)
-    assert bytes(impostor.received) == b""
+    assert impostor.requests_seen == 0
 
 
 async def test_unreadable_peer_credentials_fail_closed(
@@ -184,7 +138,7 @@ async def test_unreadable_peer_credentials_fail_closed(
 
 
 async def test_the_kernels_answer_is_what_gets_compared(
-    talking_impostor: list[bytes], sidecar_socket_path: Path, monkeypatch: pytest.MonkeyPatch
+    fake_sidecar: tuple[Path, FakeSidecarHandle], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Accept when the peer credentials name the expected uid, even if it isn't ours.
 
@@ -198,9 +152,11 @@ async def test_the_kernels_answer_is_what_gets_compared(
         return peercred.PeerCredentials(uid=_OTHER_UID, gid=_OTHER_UID, pid=None)
 
     monkeypatch.setattr(peercred, "get_peer_credentials", _served_by_other_uid)
+    monkeypatch.setenv(WORTHLESS_SIDECAR_UID_ENV, str(_OTHER_UID))
+    socket_path, _ = fake_sidecar
 
-    async with IPCClient(sidecar_socket_path, timeout=0.5, sidecar_uid=_OTHER_UID) as client:
-        assert await client.seal(b"for the sidecar running as another uid") == b"ct"
+    async with IPCClient(socket_path, timeout=0.5) as client:
+        assert await client.seal(b"for the sidecar running as another uid") == b"FAKE-CT"
 
 
 @pytest.mark.parametrize(
@@ -223,16 +179,18 @@ async def test_a_malformed_sidecar_uid_is_refused_before_connecting(
     impostor: _Impostor, monkeypatch: pytest.MonkeyPatch, raw: str
 ) -> None:
     """A typo in the operator's setting must not fall back to trusting anyone."""
-    monkeypatch.setenv(_SIDECAR_UID_ENV, raw)
+    monkeypatch.setenv(WORTHLESS_SIDECAR_UID_ENV, raw)
 
-    with pytest.raises(IPCAuthError, match=_SIDECAR_UID_ENV):
+    with pytest.raises(IPCAuthError, match=WORTHLESS_SIDECAR_UID_ENV):
         await _connect(impostor.socket_path)
 
     assert impostor.connections == 0
     assert bytes(impostor.received) == b""
 
 
-@pytest.mark.parametrize("env_value", [None, "", "own-uid"])
+@pytest.mark.parametrize(
+    "env_value", [None, "", str(os.getuid())], ids=["unset", "empty", "own-uid"]
+)
 async def test_the_real_sidecar_is_trusted(
     running_sidecar: object,
     sidecar_socket_path: Path,
@@ -240,12 +198,8 @@ async def test_the_real_sidecar_is_trusted(
     env_value: str | None,
 ) -> None:
     """Single-uid install: unset, empty, or own uid all mean "the sidecar runs as me"."""
-    if env_value is None:
-        monkeypatch.delenv(_SIDECAR_UID_ENV, raising=False)
-    else:
-        monkeypatch.setenv(
-            _SIDECAR_UID_ENV, str(os.getuid()) if env_value == "own-uid" else env_value
-        )
+    if env_value is not None:
+        monkeypatch.setenv(WORTHLESS_SIDECAR_UID_ENV, env_value)
 
     async with IPCClient(sidecar_socket_path) as client:
         ciphertext = await client.seal(b"hello sidecar")
@@ -261,7 +215,7 @@ async def test_the_proxy_turns_an_impostor_into_unavailable(
     proxy log, or an operator can't tell an impostor from a crashed sidecar.
     """
     caplog.set_level(logging.WARNING, logger="worthless.proxy.ipc_supervisor")
-    monkeypatch.setenv(_SIDECAR_UID_ENV, str(_OTHER_UID))
+    monkeypatch.setenv(WORTHLESS_SIDECAR_UID_ENV, str(_OTHER_UID))
     sup = IPCSupervisor(
         impostor.socket_path,
         protocol_version=1,

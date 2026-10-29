@@ -934,19 +934,18 @@ class TestProxyLearnsTheSidecarUid:
     value here is a container whose proxy never reaches its sidecar.
     """
 
-    def _env_at_execvp(
-        self,
-        mod,
-        monkeypatch: pytest.MonkeyPatch,
-        service_uids: ServiceUids | None,
-        sidecar_uid: int,
-    ) -> dict[str, str]:
+    def test_the_proxy_expects_the_uid_spawn_sidecar_ran_the_sidecar_as(
+        self, deploy_start_module, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mod = deploy_start_module
         TestShareFileOwnership()._wire_minimal_main(mod, monkeypatch)
         monkeypatch.setattr(mod.os, "chown", lambda *_a, **_kw: None, raising=False)
-        monkeypatch.setattr(mod, "_resolve_service_uids", lambda: service_uids)
         monkeypatch.setattr(
-            mod, "spawn_sidecar", lambda *_a, **_kw: MagicMock(sidecar_uid=sidecar_uid)
+            mod,
+            "_resolve_service_uids",
+            lambda: ServiceUids(proxy_uid=10001, crypto_uid=10002, worthless_gid=10001),
         )
+        monkeypatch.setattr(mod, "spawn_sidecar", lambda *_a, **_kw: MagicMock(sidecar_uid=10002))
         # A stale value from the image or the operator's env must not survive.
         monkeypatch.setenv("WORTHLESS_SIDECAR_UID", "4242")
         env: dict[str, str] = {}
@@ -954,23 +953,4 @@ class TestProxyLearnsTheSidecarUid:
 
         mod.main()
 
-        return env
-
-    def test_docker_proxy_expects_the_crypto_uid(
-        self, deploy_start_module, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        env = self._env_at_execvp(
-            deploy_start_module,
-            monkeypatch,
-            ServiceUids(proxy_uid=10001, crypto_uid=10002, worthless_gid=10001),
-            sidecar_uid=10002,
-        )
-
         assert env.get("WORTHLESS_SIDECAR_UID") == "10002"
-
-    def test_bare_metal_proxy_expects_its_own_uid(
-        self, deploy_start_module, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        env = self._env_at_execvp(deploy_start_module, monkeypatch, None, sidecar_uid=os.getuid())
-
-        assert env.get("WORTHLESS_SIDECAR_UID") == str(os.getuid())

@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import socket
 from pathlib import Path
 from types import TracebackType
 from typing import Any
@@ -165,15 +166,9 @@ class IPCClient:
         socket_path: Path | str,
         *,
         timeout: float | None = DEFAULT_TIMEOUT_S,
-        sidecar_uid: int | None = None,
     ) -> None:
-        """``sidecar_uid`` is the uid the sidecar runs as. ``None`` reads
-        ``WORTHLESS_SIDECAR_UID`` at connect time and, when that is unset,
-        expects this process's own uid (the single-uid local install).
-        """
         self._socket_path = str(socket_path)
         self._timeout = timeout
-        self._sidecar_uid = sidecar_uid
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._lock = asyncio.Lock()
@@ -187,7 +182,7 @@ class IPCClient:
     async def __aenter__(self) -> IPCClient:
         # Resolve before connecting: a malformed setting must not reach the
         # socket at all.
-        sidecar_uid = self._sidecar_uid if self._sidecar_uid is not None else _env_sidecar_uid()
+        sidecar_uid = _env_sidecar_uid()
         try:
             # ``limit=MAX_FRAME_SIZE`` lifts the StreamReader's internal buffer
             # ceiling (default 64 KiB) up to our contract's frame cap (1 MiB).
@@ -200,7 +195,7 @@ class IPCClient:
         except (ConnectionError, FileNotFoundError, OSError) as exc:
             raise IPCProtocolError(f"sidecar connect failed: {exc}") from exc
         try:
-            self._verify_sidecar_uid(sidecar_uid)
+            self._verify_sidecar_uid(self._writer.get_extra_info("socket"), sidecar_uid)
             await self._handshake()
         except BaseException:
             # Clean up the socket before propagating. A half-open
@@ -302,14 +297,13 @@ class IPCClient:
     # Internals
     # ------------------------------------------------------------------
 
-    def _verify_sidecar_uid(self, sidecar_uid: int) -> None:
+    def _verify_sidecar_uid(self, sock: socket.socket | None, sidecar_uid: int) -> None:
         """Refuse the connection unless the sidecar's uid is serving it.
 
         Runs before the hello frame is written. The kernel reports the uid
         that called ``listen()`` on this very connection, so unlike a stat of
         the socket path there is no window to swap the file in between.
         """
-        sock = self._writer.get_extra_info("socket") if self._writer is not None else None
         if sock is None:
             raise IPCAuthError("AUTH: sidecar connection has no socket to read peer credentials")
         try:
