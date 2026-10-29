@@ -37,7 +37,7 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - Only a process that passes the sidecar's peer-uid check can send these messages to the sidecar. The proxy doesn't yet check who is on the other end of its socket (WOR-1078).
   - An existing install keeps the msgpack it has until you upgrade Worthless.
   - Decoding still costs far more memory than the message size: one 5 KB malformed message peaks at about 80 MiB, and a valid 1 MB message of empty lists costs about 68 MiB on any msgpack version. Tighter decoder limits are tracked in WOR-1075.
-  - A process the sidecar accepts can still hold its memory by opening many connections and stalling half-sent 1 MiB frames (WOR-1076).
+  - A process the sidecar accepts could also hold its memory by opening many connections and stalling half-sent 1 MiB frames. This release fixes that separately; see the next entry (WOR-1076).
 
 - **A process allowed to talk to the sidecar can no longer pin its memory by sending half a message and going quiet** (WOR-1076, [#748](https://github.com/oblangatas/worthless/pull/748)).
   Before: the sidecar, the process that holds your encryption key and does all decrypting, waited forever for a message to finish arriving and kept any number of connections open. A process running as an allowed user could open many connections, start a 1 MiB message on each, stop one byte short, and hold about 1 MiB of sidecar memory per connection until the sidecar ran out of file handles or was killed for using too much memory. Without the sidecar nothing decrypts. In the Docker image the proxy runs as a user that can't otherwise stop the sidecar (WOR-306), so a compromised proxy gained a way to take it down.
