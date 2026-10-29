@@ -39,7 +39,12 @@ dependencies = [
     "python-dotenv>=1.0",
     "psutil>=5.9",
     "keyring>=25.0",
-    "msgpack>=1.0",
+    # Floor is 1.2.4, not 1.0: CVE-2026-114613 (GHSA-j586-36cw-2gc2, fixed in
+    # 1.2.3) leaks on the default strict_map_key=True path ipc/framing.py
+    # decodes with, and GHSA-j8c6-9vc5-hj6x (fixed in 1.2.4) lets a 5 KB frame
+    # preallocate ~513 MiB of containers. The lock alone never reaches users:
+    # the Dockerfile and `uv tool install` resolve from this line.
+    "msgpack>=1.2.4",
     # TOML reader for the provider registry (worthless-8rqs). Stdlib `tomllib`
     # is 3.11+; for 3.10 we fall back to the `tomli` backport at runtime.
     "tomli>=2.0; python_version < '3.11'",
