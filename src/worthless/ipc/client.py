@@ -353,6 +353,10 @@ class IPCClient:
             raise IPCProtocolError(f"sidecar connection lost: {exc}") from exc
         except FrameError as exc:
             raise IPCProtocolError(f"malformed frame from sidecar: {exc}") from exc
+        except (ConnectionError, OSError) as exc:
+            # Linux resets, rather than ends, a socket closed with unread data
+            # in it, e.g. when the sidecar refuses a connection over its cap.
+            raise IPCProtocolError(f"sidecar connection lost: {exc}") from exc
 
     def _allocate_id(self) -> int:
         rid = self._next_id
