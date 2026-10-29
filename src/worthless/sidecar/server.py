@@ -259,6 +259,22 @@ async def _dispatch_op(
             raise ValueError(f"unhandled op {op!r}")
 
 
+def _detach_from_frames(exc: BaseException | None) -> None:
+    """Drop the tracebacks of ``exc`` and the exceptions it chains to.
+
+    When a peer closes before reading a reply, asyncio keeps the failed
+    write's error on the connection's StreamReader. Re-raised in the client
+    handler, that error's traceback holds the handler's frames, and they hold
+    the reader: a cycle that kept the peer's decoded frame alive until a GC
+    pass (WOR-1075). Run once the handler task is done, when nothing will
+    raise the error again.
+    """
+    while exc is not None:
+        chained = exc.__context__
+        exc.__traceback__ = exc.__context__ = exc.__cause__ = None
+        exc = chained
+
+
 def _make_client_handler(
     backend: Backend,
     allowed_uids: Sequence[int],
@@ -447,6 +463,7 @@ async def start_sidecar(
         if task is not None:
             tracked_tasks.add(task)
             task.add_done_callback(tracked_tasks.discard)
+            task.add_done_callback(lambda _: _detach_from_frames(reader.exception()))
         # If raw_handler raises, the task keeps the exception and its traceback
         # keeps this frame. A ``task`` local would close that into a cycle, and
         # the peer's frame would stay alive until a GC pass (WOR-1075).

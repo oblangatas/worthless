@@ -20,6 +20,10 @@ envelope validation:
 * A request that crashes the handler, such as a seal whose reply is over
   ``MAX_FRAME_SIZE``: the handler task kept the exception in a reference cycle,
   so every crashed connection's frame stayed alive until a GC pass.
+* A peer that closes without reading the reply: asyncio keeps the write's
+  BrokenPipeError on the StreamReader, and once the handler re-raised it, its
+  traceback held the handler's frame, the frame received included. Another
+  cycle only a GC pass freed.
 
 The sidecar runs ``start_sidecar`` in a child process on a real AF_UNIX
 socket, so its RSS is measured alone, not mixed with pytest's.
@@ -166,6 +170,14 @@ class _Sidecar:
         # PROTO: the frame got past peer-uid auth and was refused.
         assert reply["code"] == "PROTO", reply
         return reply
+
+    def send_unread(self, body: bytes) -> None:
+        """Send one frame on a fresh connection and close without reading the
+        reply, so the sidecar's reply write fails."""
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+            conn.settimeout(20)
+            conn.connect(str(self.socket_path))
+            conn.sendall(len(body).to_bytes(4, "big") + body)
 
     def request(self, body: bytes) -> dict[str, object]:
         """Shake hands, then send one request frame; return its reply."""
@@ -375,3 +387,35 @@ def test_requests_that_crash_the_handler_do_not_pile_up_in_sidecar_memory(
         f"{peak_growth / _MiB:.1f} MiB above its {rss_before / _MiB:.1f} MiB baseline"
     )
     assert {reply["message"] for reply in replies} == {"PROTO: internal error"}
+
+
+@pytest.mark.parametrize(
+    "envelope",
+    [
+        pytest.param({**_HELLO, "body": {"client_versions": [_HUGE_STR]}}, id="refused-hello"),
+        pytest.param({**_HELLO, "pad": _HUGE_STR}, id="accepted-hello"),
+    ],
+)
+def test_peers_that_close_without_reading_the_reply_do_not_pile_up_in_sidecar_memory(
+    sidecar: _Sidecar, envelope: dict[str, object]
+) -> None:
+    body = msgpack.packb(envelope, use_bin_type=True)
+    for _ in range(4):  # let allocator pools and stream buffers settle
+        sidecar.send_unread(body)
+    sidecar.send(msgpack.packb([1]))  # a full round trip: the sidecar caught up
+    rss_before, _ = sidecar.memory()
+
+    connections = 32
+    for _ in range(connections):
+        sidecar.send_unread(body)
+    sidecar.send(msgpack.packb([1]))
+
+    _, peak_after = sidecar.memory()
+    # Was +122 MiB on Linux for refused hellos: each failed reply write kept
+    # its BrokenPipeError on the reader, whose traceback kept the handler's
+    # frame and the decoded hello.
+    peak_growth = peak_after - rss_before
+    assert peak_growth < _LIMIT, (
+        f"{connections} peers that closed without reading took sidecar RSS "
+        f"{peak_growth / _MiB:.1f} MiB above its {rss_before / _MiB:.1f} MiB baseline"
+    )
