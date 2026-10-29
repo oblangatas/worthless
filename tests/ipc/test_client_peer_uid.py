@@ -172,8 +172,13 @@ async def test_the_kernels_answer_is_what_gets_compared(
         "4294967295",
         # Past int()'s digit limit: must still be an AUTH refusal, not ValueError.
         "9" * 5000,
+        # Set but empty, as compose's ${VAR} gives for an unset host variable.
+        # Falling back to our own uid would trust whoever shares it: in Docker,
+        # the proxy's user, which can replace the socket link.
+        "",
+        "  ",
     ],
-    ids=lambda raw: raw if len(raw) < 20 else f"{len(raw)}-digits",
+    ids=lambda raw: repr(raw) if len(raw) < 20 else f"{len(raw)}-digits",
 )
 async def test_a_malformed_sidecar_uid_is_refused_before_connecting(
     impostor: _Impostor, monkeypatch: pytest.MonkeyPatch, raw: str
@@ -188,16 +193,30 @@ async def test_a_malformed_sidecar_uid_is_refused_before_connecting(
     assert bytes(impostor.received) == b""
 
 
-@pytest.mark.parametrize(
-    "env_value", [None, "", str(os.getuid())], ids=["unset", "empty", "own-uid"]
-)
+async def test_running_as_the_no_user_uid_is_refused_too(
+    impostor: _Impostor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the setting unset, our own uid is the expectation, and 65534 is still a stranger.
+
+    A peer the kernel can't map into our user namespace also reports as
+    65534, so a client running as nobody would otherwise trust it.
+    """
+    monkeypatch.setattr(os, "getuid", lambda: 65534)
+
+    with pytest.raises(IPCAuthError, match="no-user uid"):
+        await _connect(impostor.socket_path)
+
+    assert impostor.connections == 0
+
+
+@pytest.mark.parametrize("env_value", [None, str(os.getuid())], ids=["unset", "own-uid"])
 async def test_the_real_sidecar_is_trusted(
     running_sidecar: object,
     sidecar_socket_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     env_value: str | None,
 ) -> None:
-    """Single-uid install: unset, empty, or own uid all mean "the sidecar runs as me"."""
+    """Single-uid install: unset or own uid both mean "the sidecar runs as me"."""
     if env_value is not None:
         monkeypatch.setenv(WORTHLESS_SIDECAR_UID_ENV, env_value)
 
