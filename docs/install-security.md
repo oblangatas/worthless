@@ -77,14 +77,17 @@ Which versions of worthless's dependencies you get depends on how you install it
 | How you install | Dependency versions you get | Audited? |
 |---|---|---|
 | Docker image (`ghcr.io/oblangatas/worthless-proxy`) | Exactly the versions in `uv.lock`, so only as new as its last update: a dependency fix reaches the image when `uv.lock` is bumped and a new image is published. Each file is checked against the hash recorded there, and the build stops if `uv.lock` doesn't match `pyproject.toml`. | Yes. The audit checks `uv.lock` on every pull request and every push to main. One gap: the tool that builds worthless itself during the image build (setuptools) is still downloaded unpinned, and it can write to the packages the image ships ([WOR-1084](https://linear.app/plumbusai/issue/WOR-1084)). |
-| `install.sh`, `pip install worthless`, `uv tool install`, `uvx` | The newest release of each dependency that meets worthless's minimum versions in `pyproject.toml`, as PyPI has them on the day you install. `pip install worthless` into an environment that already has a dependency keeps the version it has, if that meets the minimum. | No. You can get a version the audit has never seen, including one published minutes ago. |
+| `install.sh`, `pip install worthless`, `uv tool install`, `uvx` | The newest release of each dependency that meets worthless's minimum versions in `pyproject.toml`, as PyPI has them on the day you install (for `uvx`, the first run: later runs reuse that environment). `pip install worthless` into an environment that already has a dependency keeps the version it has, if that meets the minimum. | No. You can get a version the audit has never seen, including one published minutes ago. |
 
 **What we promise for installs that don't read `uv.lock`: the minimums.** When an advisory is published against a dependency worthless runs, the next release sets that dependency's minimum in `pyproject.toml` past the fix, not just its version in `uv.lock`, even if worthless only uses it through another package. A fresh install of that release can't get the vulnerable version. `cryptography>=50.0.0` (PYSEC-2026-3552) and `msgpack>=1.2.4` (CVE-2026-114613) are two. This is a manual step at release time: no CI check yet fails when a minimum sits below a known-vulnerable version ([WOR-1085](https://linear.app/plumbusai/issue/WOR-1085)).
 
 This does not protect you from:
 
 - **A version published after our release.** A new dependency release, vulnerable or compromised, can reach a fresh install until it is found and either we raise a minimum or PyPI removes it.
-- **An install you already have.** It keeps its versions until you reinstall it or install a newer worthless release.
+- **An install you already have.** It keeps its dependency versions until you refresh them or install a newer worthless release. Running `install.sh` again doesn't refresh them: when the pinned worthless is already installed, it stops there. To pick up a dependency fix and keep the worthless version you have (`worthless --version` shows it):
+  - `install.sh` or `uv tool install`: `uv tool install --upgrade "worthless==<version>"`.
+  - `pip`: `pip install --upgrade --upgrade-strategy eager "worthless==<version>"`. Plain `--upgrade` changes a dependency only when worthless's minimum requires it.
+  - `uvx`: `uvx --refresh worthless`, or `uvx worthless@latest`, which also takes the newest worthless.
 
 **Why we don't publish a constraints file.** `install.sh` could pass the versions in `uv.lock` to `uv tool install --constraints`. We don't, because:
 
