@@ -9,7 +9,8 @@ envelope validation:
   ~513 MiB on msgpack 1.2.2/1.2.3 (~80 MiB on 1.2.4). ``MAX_CONTAINER_LEN``
   bounds it on every msgpack version.
 * CVE-2026-114613: a map with a non-string key leaked the whole frame on
-  every rejection, ~1 MiB per connection on msgpack 1.2.2. Fixed in 1.2.3.
+  every rejection, ~1 MiB per connection on msgpack 1.2.2. Fixed in 1.2.3;
+  Worthless requires 1.2.4.
 * A valid hello padded with ~1 MiB of empty lists: ~60 bytes of Python
   objects per byte on every msgpack version, kept for as long as the
   connection stays open. ``MAX_CONTAINERS`` bounds it.
@@ -261,10 +262,6 @@ def test_valid_hello_padded_with_empty_lists_cannot_hold_sidecar_memory(
     _assert_decoder_rejects(body)
 
 
-@pytest.mark.skipif(
-    msgpack.version < (1, 2, 3),
-    reason="CVE-2026-114613 leaks in msgpack < 1.2.3; PR #745 moves the lock and floor past it",
-)
 def test_non_string_map_keys_do_not_leak_sidecar_memory(sidecar: _Sidecar) -> None:
     # One int key (strict_map_key rejects it) holding ~900 KB.
     body = msgpack.packb({1: b"A" * 900_000}, use_bin_type=True)
