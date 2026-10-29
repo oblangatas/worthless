@@ -140,15 +140,22 @@ def _env_sidecar_uid() -> int:
     hands the sidecar. A value that isn't a plain uid raises rather than
     falling back: a typo must not quietly widen who the proxy trusts.
     """
-    raw = os.environ.get(WORTHLESS_SIDECAR_UID_ENV, "").strip()
-    if not raw:
-        return os.getuid()
-    # Length first: int() raises ValueError past 4300 digits, and uid_t is 32-bit.
-    if not (raw.isascii() and raw.isdigit() and len(raw) <= 10) or int(raw) >= 2**32:
-        raise IPCAuthError(f"AUTH: {WORTHLESS_SIDECAR_UID_ENV}={raw[:32]!r} is not a numeric uid")
-    uid = int(raw)
+    raw = os.environ.get(WORTHLESS_SIDECAR_UID_ENV)
+    if raw is None:
+        uid = os.getuid()
+    else:
+        raw = raw.strip()
+        # Length first: int() raises ValueError past 4300 digits, and uid_t is 32-bit.
+        if not (raw.isascii() and raw.isdigit() and len(raw) <= 10) or int(raw) >= 2**32:
+            raise IPCAuthError(
+                f"AUTH: {WORTHLESS_SIDECAR_UID_ENV}={raw[:32]!r} is not a numeric uid"
+            )
+        uid = int(raw)
     if uid in _UNMAPPED_UIDS:
-        raise IPCAuthError(f"AUTH: {WORTHLESS_SIDECAR_UID_ENV}={uid} is the kernel's no-user uid")
+        raise IPCAuthError(
+            f"AUTH: the expected sidecar uid {uid} is the kernel's no-user uid; "
+            f"set {WORTHLESS_SIDECAR_UID_ENV} to the uid the sidecar runs as"
+        )
     return uid
 
 
