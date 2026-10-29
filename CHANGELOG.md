@@ -28,6 +28,16 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - For a key locked with this version, a saved value changed in the Worthless database is never replaced by the stored address: unlock removes the line and tells you.
   - The written value is the one lock resolved, so a `${...}` reference you had comes back expanded.
   - If the same key was also locked from another `.env`, the stored address is the last one lock saw for that key, which may be the other file's (WOR-1029).
+- **Malformed messages no longer leak the sidecar's memory** (CVE-2026-114613, [#745](https://github.com/oblangatas/worthless/pull/745)).
+  Before: Worthless accepted any msgpack from 1.0 on. msgpack 1.2.2 and earlier leak the rest of every message the sidecar rejects for having a non-string key. A process the sidecar accepts could grow it by about 1 MiB per message, without limit. Measured on the real sidecar, 200 such messages added 199 MiB. The proxy reads the sidecar's replies with the same decoder, so a fake sidecar could do the same to the proxy (WOR-1078).
+  Before, too: one 5 KB message that declares huge lists made the sidecar briefly allocate about 513 MiB (GHSA-j8c6-9vc5-hj6x).
+  Now: this release requires msgpack 1.2.4 or newer. It fixes the leak: the same 200 messages add 1 to 4 MiB, and 2,000 add no more. It also caps how much a list header can reserve, so the 5 KB message peaks at about 80 MiB instead of 513 MiB. Installing or upgrading to this release upgrades msgpack with it.
+
+  **Limits.**
+  - Only a process that passes the sidecar's peer-uid check can send these messages to the sidecar. The proxy doesn't yet check who is on the other end of its socket (WOR-1078).
+  - An existing install keeps the msgpack it has until you upgrade Worthless.
+  - Decoding still costs far more memory than the message size: one 5 KB malformed message peaks at about 80 MiB, and a valid 1 MB message of empty lists costs about 68 MiB on any msgpack version. Tighter decoder limits are tracked in WOR-1075.
+  - A process the sidecar accepts can still hold its memory by opening many connections and stalling half-sent 1 MiB frames (WOR-1076).
 
 ### Fixed
 - **`worthless lock` accepts a `*_BASE_URL` line with no value** (WOR-1041, [#740](https://github.com/oblangatas/worthless/pull/740)).

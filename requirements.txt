@@ -73,7 +73,7 @@ more-itertools==11.0.2
     # via
     #   jaraco-classes
     #   jaraco-functools
-msgpack==1.2.2
+msgpack==1.2.4
     # via worthless
 opentelemetry-api==1.45.1
     # via fastapi
