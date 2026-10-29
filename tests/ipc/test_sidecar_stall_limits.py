@@ -131,21 +131,32 @@ async def test_stalled_half_frame_after_hello_is_closed_within_deadline(
     server = await start(frame_timeout_s=_FRAME_TIMEOUT_S)
     reader, writer = await _shake_hands(sidecar_socket_path)
     stalled = _handlers(server)
-    t0 = time.monotonic()
-    writer.write(_STALLED_FRAME)
-    await writer.drain()
+    tracemalloc.start()
+    try:
+        baseline, _ = tracemalloc.get_traced_memory()
+        t0 = time.monotonic()
+        writer.write(_STALLED_FRAME)
+        await writer.drain()
+        await asyncio.sleep(0.1)  # well inside the deadline
+        pinned = tracemalloc.get_traced_memory()[0] - baseline
 
-    closed = await _closed_by_sidecar(reader)
-    elapsed = time.monotonic() - t0
+        closed = await _closed_by_sidecar(reader)
+        elapsed = time.monotonic() - t0
+        writer.close()
+        _, still_running = await asyncio.wait(stalled, timeout=2.0)
+        gc.collect()
+        kept = tracemalloc.get_traced_memory()[0] - baseline
+    finally:
+        tracemalloc.stop()
 
+    # Our side has sent it all, so this is the sidecar holding the partial frame.
+    assert pinned >= MAX_FRAME_SIZE // 2, f"sidecar held only {pinned} bytes of the stalled frame"
     assert closed, "sidecar kept a half-sent frame open past its deadline"
     # The deadline, not something else, closed it: the clock starts when
     # the header arrives, which is after t0.
     assert elapsed >= _FRAME_TIMEOUT_S * 0.9, f"closed after {elapsed:.3f}s, before the deadline"
-    writer.close()
-    # The handler is gone, so the partial frame's buffer is released.
-    _, still_running = await asyncio.wait(stalled, timeout=2.0)
     assert not still_running, "stalled handler is still running"
+    assert kept < MAX_FRAME_SIZE // 8, f"{kept} bytes still held after the sidecar closed it"
 
 
 @pytest.mark.parametrize(
