@@ -32,6 +32,8 @@ import pytest_asyncio
 
 from worthless.ipc.client import IPCClient, IPCProtocolError
 from worthless.ipc.framing import MAX_FRAME_SIZE, FrameTimeoutError, encode_frame, read_frame
+from tests.ipc.conftest import StallingBackend
+from worthless.sidecar.backends.base import Backend
 from worthless.sidecar.backends.fernet import FernetBackend
 from worthless.sidecar.server import start_sidecar
 
@@ -65,8 +67,10 @@ async def start(
     """Start a sidecar with the given limits; stop it, stalled handlers included, at teardown."""
     servers: list[asyncio.AbstractServer] = []
 
-    async def _start(**limits: Any) -> asyncio.AbstractServer:
-        server = await start_sidecar(sidecar_socket_path, fernet_backend, [os.getuid()], **limits)
+    async def _start(backend: Backend | None = None, **limits: Any) -> asyncio.AbstractServer:
+        server = await start_sidecar(
+            sidecar_socket_path, backend or fernet_backend, [os.getuid()], **limits
+        )
         servers.append(server)
         return server
 
@@ -279,3 +283,21 @@ async def test_read_frame_body_timeout_does_not_bound_the_wait_for_a_header() ->
     assert not pending.done(), "an idle stream between frames must not time out"
     reader.feed_data(encode_frame({"v": 1}))
     assert await asyncio.wait_for(pending, timeout=1.0) == {"v": 1}
+
+
+async def test_client_reports_a_reset_connection_as_a_protocol_error(
+    start: StartSidecar, sidecar_socket_path: Path, fernet_backend: FernetBackend
+) -> None:
+    """On Linux a peer the sidecar refuses or aborts reads a reset, not EOF.
+
+    The client's contract is that a lost connection is an ``IPCProtocolError``,
+    which the proxy turns into a 503 and the CLI into a clear error. The
+    stalling backend never replies, so the reset lands while the client reads.
+    """
+    await start(backend=StallingBackend(fernet_backend))
+    async with IPCClient(sidecar_socket_path) as client:
+        sealing = asyncio.create_task(client.seal(b"x"))
+        await asyncio.sleep(0.1)  # the request is written; the client is waiting to read
+        client._reader.set_exception(ConnectionResetError(104, "Connection reset by peer"))  # type: ignore[union-attr]  # noqa: SLF001
+        with pytest.raises(IPCProtocolError, match="connection lost"):
+            await sealing
