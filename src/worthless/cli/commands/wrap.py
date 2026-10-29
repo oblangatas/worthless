@@ -18,6 +18,7 @@ combinable. Run one or the other.
 from __future__ import annotations
 
 import logging
+import contextlib
 import os
 import re
 import socket
@@ -40,6 +41,7 @@ from worthless.cli.process import (
     create_liveness_pipe,
     disable_core_dumps,
     forward_signals,
+    ignored_upstream_env_notes,
     poll_health,
     resolve_port,
     spawn_proxy,
@@ -347,6 +349,11 @@ def register_wrap_commands(app: typer.Typer) -> None:
                 ),
             )
 
+        # Best-effort: a closed stderr must not skip the cleanup below.
+        with contextlib.suppress(OSError, ValueError):
+            for note in ignored_upstream_env_notes():
+                sys.stderr.write(f"worthless: warning: {note}\n")
+            sys.stderr.flush()
         try:
             proxy, port = spawn_proxy(
                 env=proxy_env,

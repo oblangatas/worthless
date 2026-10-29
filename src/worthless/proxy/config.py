@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import ssl
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from worthless._flags import fernet_ipc_only_enabled
 from worthless.cli.keystore import read_fernet_key
@@ -68,6 +70,11 @@ def _env_bool(name: str) -> bool:
     ``_read_fernet_key`` below).
     """
     return os.environ.get(name, "").lower() in ("1", "true", "yes")
+
+
+def _env_optional(name: str) -> str | None:
+    """Return the stripped value of *name*, or ``None`` when unset or blank."""
+    return os.environ.get(name, "").strip() or None
 
 
 def _read_deploy_mode() -> DeployMode:
@@ -236,6 +243,15 @@ class ProxySettings:
     deploy_mode: DeployMode = field(default_factory=_read_deploy_mode)
     host: str = field(default="")
     trusted_proxies: tuple[str, ...] = field(default_factory=_read_trusted_proxies)
+    # WOR-1071: the upstream client ignores HTTP(S)_PROXY and SSL_CERT_FILE; these
+    # are the explicit replacements. Whoever runs that proxy can read every real
+    # key if it inspects TLS. repr=False: a proxy URL can carry a password.
+    upstream_proxy: str | None = field(
+        default_factory=lambda: _env_optional("WORTHLESS_UPSTREAM_PROXY"), repr=False
+    )
+    upstream_ca_bundle: str | None = field(
+        default_factory=lambda: _env_optional("WORTHLESS_UPSTREAM_CA_BUNDLE")
+    )
 
     def __post_init__(self) -> None:
         if not self.host:
@@ -254,6 +270,44 @@ class ProxySettings:
         """
         self._validate_deploy_mode()
         self._validate_single_worker()
+        self._validate_upstream_proxy()
+        self._validate_upstream_ca_bundle()
+
+    def _validate_upstream_proxy(self) -> None:
+        """Refuse a proxy URL the client couldn't use. Never echoed: it can carry a password."""
+        if self.upstream_proxy is not None:
+            try:
+                parsed = urlsplit(self.upstream_proxy)
+                valid = parsed.scheme in ("http", "https") and bool(parsed.hostname)
+                parsed.port  # noqa: B018 — raises ValueError on a malformed port
+            except ValueError:  # also a bracket urlsplit reads as a broken IPv6 host
+                valid = False
+            if not valid:
+                raise ConfigError(
+                    "WORTHLESS_UPSTREAM_PROXY must be an http:// or https:// URL with a host, "
+                    "for example http://proxy.example.com:3128."
+                )
+
+    def _validate_upstream_ca_bundle(self) -> None:
+        """Refuse a CA bundle that would fail later, inside the lifespan, without naming it."""
+        if self.upstream_ca_bundle is not None:
+            bundle = self.upstream_ca_bundle
+            fix = (
+                "Point it at an absolute path to a readable PEM bundle, or unset it to "
+                "verify providers against the built-in CA list."
+            )
+            # Absolute: under launchd / systemd the working directory is not your shell's.
+            if not Path(bundle).is_absolute():
+                raise ConfigError(f"WORTHLESS_UPSTREAM_CA_BUNDLE={bundle!r} is relative. {fix}")
+            try:
+                # Load it now so a bad bundle fails here, naming the variable. A bare
+                # SSLContext, not create_default_context: that one opens SSLKEYLOGFILE.
+                ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT).load_verify_locations(cafile=bundle)
+            except OSError as exc:  # includes ssl.SSLError
+                raise ConfigError(
+                    f"WORTHLESS_UPSTREAM_CA_BUNDLE={bundle!r} can't be loaded "
+                    f"({type(exc).__name__}). {fix}"
+                ) from exc
 
     def _validate_single_worker(self) -> None:
         """Refuse multi-worker launch — the spend cap is only exact per process.
