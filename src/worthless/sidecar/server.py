@@ -269,10 +269,12 @@ def _detach_from_frames(exc: BaseException | None) -> None:
     pass (WOR-1075). Run once the handler task is done, when nothing will
     raise the error again.
     """
-    while exc is not None:
-        chained = exc.__context__
-        exc.__traceback__ = exc.__context__ = exc.__cause__ = None
-        exc = chained
+    pending = [exc]
+    while pending:
+        exc = pending.pop()
+        if exc is not None:
+            pending += (exc.__context__, exc.__cause__)
+            exc.__traceback__ = exc.__context__ = exc.__cause__ = None
 
 
 def _make_client_handler(

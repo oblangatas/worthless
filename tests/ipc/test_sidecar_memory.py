@@ -72,7 +72,7 @@ _HUGE_STR = "\x00" * 1_000_000 + "\U0001f600"
 # Prints "ready", then answers each line on stdin with "<rss> <peak rss>" in
 # bytes. Only seal reaches the backend.
 _SIDECAR = """
-import asyncio, os, resource, sys, threading, traceback
+import asyncio, gc, os, resource, sys, threading, traceback
 from pathlib import Path
 
 import psutil
@@ -120,6 +120,9 @@ def report_memory():
 
 
 async def main():
+    # No cyclic GC: a reference cycle that holds a peer's frame then stays
+    # alive every time, not only when a collection happens to run late.
+    gc.disable()
     server = await start_sidecar(Path(sys.argv[1]), Stub(), [os.getuid()])
     print("ready", flush=True)
     threading.Thread(target=report_memory, daemon=True).start()
