@@ -286,9 +286,10 @@ async def test_crashed_handler_is_not_reported_again_when_collected(
 ) -> None:
     """The handler logs its own crash; asyncio must not report it a second time.
 
-    The sidecar now creates each handler task itself, so nothing else reads
-    the task's exception. Left unread, asyncio reports it again, with its
-    traceback, whenever the task is garbage-collected.
+    The sidecar creates each handler task itself, so nothing else reads the
+    task's exception. Left unread, asyncio reports it again, with its
+    traceback, when the task is garbage-collected. (Before this change,
+    asyncio's own callback reported it again on 3.12+ instead.)
     """
 
     class CrashingBackend(StallingBackend):
@@ -310,7 +311,7 @@ async def test_crashed_handler_is_not_reported_again_when_collected(
         gc.collect()
     finally:
         loop.set_exception_handler(None)
-    assert not [m for m in reported if "never retrieved" in m], reported
+    assert reported == []
 
 
 async def test_start_sidecar_rejects_nonsense_limits(
