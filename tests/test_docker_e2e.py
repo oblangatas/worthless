@@ -1198,6 +1198,9 @@ class TestLockWrapE2E:
         assert output.startswith("STATUS="), (
             f"Request did not reach proxy. Expected STATUS=<code>, got: {output}"
         )
+        # Except 503: that is the proxy saying it can't reach its sidecar, for
+        # example because it refused a socket served by the wrong uid (WOR-1078).
+        assert output != "STATUS=503", "proxy answered 503: it couldn't reach its sidecar"
 
     def test_wrap_inside_daemon_container_is_rejected(self, container: tuple[str, int]) -> None:
         """v0.3.4 contract: ``worthless wrap`` inside a ``worthless up`` container

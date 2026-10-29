@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import logging
 import os
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -182,6 +183,26 @@ async def test_unreadable_peer_credentials_fail_closed(
     assert bytes(impostor.received) == b""
 
 
+async def test_the_kernels_answer_is_what_gets_compared(
+    talking_impostor: list[bytes], sidecar_socket_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Accept when the peer credentials name the expected uid, even if it isn't ours.
+
+    The tests above can't tell "compares the kernel's uid" from "compares our
+    own uid", since this process serves every socket here. Reporting a foreign
+    uid at the peer-credential boundary can: only a client that compares what
+    the kernel said lets this connection through.
+    """
+
+    def _served_by_other_uid(_sock: object) -> peercred.PeerCredentials:
+        return peercred.PeerCredentials(uid=_OTHER_UID, gid=_OTHER_UID, pid=None)
+
+    monkeypatch.setattr(peercred, "get_peer_credentials", _served_by_other_uid)
+
+    async with IPCClient(sidecar_socket_path, timeout=0.5, sidecar_uid=_OTHER_UID) as client:
+        assert await client.seal(b"for the sidecar running as another uid") == b"ct"
+
+
 @pytest.mark.parametrize(
     "raw",
     [
@@ -232,9 +253,14 @@ async def test_the_real_sidecar_is_trusted(
 
 
 async def test_the_proxy_turns_an_impostor_into_unavailable(
-    impostor: _Impostor, monkeypatch: pytest.MonkeyPatch
+    impostor: _Impostor, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The proxy's supervisor maps the refusal onto its 503 path; no bytes leave."""
+    """The proxy's supervisor maps the refusal onto its 503 path; no bytes leave.
+
+    The 503 body says only "sidecar unavailable", so the refusal must reach the
+    proxy log, or an operator can't tell an impostor from a crashed sidecar.
+    """
+    caplog.set_level(logging.WARNING, logger="worthless.proxy.ipc_supervisor")
     monkeypatch.setenv(_SIDECAR_UID_ENV, str(_OTHER_UID))
     sup = IPCSupervisor(
         impostor.socket_path,
@@ -247,6 +273,13 @@ async def test_the_proxy_turns_an_impostor_into_unavailable(
             await sup.connect()
     finally:
         await sup.aclose()
+
+    refusals = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "not served by the sidecar uid" in r.getMessage()
+    ]
+    assert refusals, "a refused sidecar socket left no warning in the proxy log"
 
     await asyncio.wait_for(impostor.disconnected.wait(), timeout=2.0)
     assert bytes(impostor.received) == b""
