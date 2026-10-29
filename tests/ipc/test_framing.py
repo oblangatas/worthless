@@ -17,6 +17,7 @@ from worthless.ipc.framing import (
     FrameTooLargeError,
     FrameTruncatedError,
     MalformedFrameError,
+    describe_peer_value,
     encode_frame,
     read_frame,
 )
@@ -218,3 +219,22 @@ class TestContainerCaps:
         _feed(reader, len(payload).to_bytes(4, "big") + payload)
         with pytest.raises(MalformedFrameError, match="exceeds max_array_len"):
             await read_frame(reader)
+
+
+@pytest.mark.parametrize(
+    ("value", "described"),
+    [
+        (None, "None"),
+        (True, "True"),
+        (7, "7"),
+        (1.5, "1.5"),
+        ("hello", "'hello'"),
+        ("x" * 33, "str of length 33"),
+        (b"\x00" * 2, "bytes of length 2"),
+        ([1, 2], "list of length 2"),
+        ({}, "dict of length 0"),
+        (msgpack.ExtType(1, b""), "ExtType"),
+    ],
+)
+def test_describe_peer_value_never_copies_long_values(value: object, described: str) -> None:
+    assert describe_peer_value(value) == described

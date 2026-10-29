@@ -183,7 +183,8 @@ def _validate_request_envelope(
     if envelope.get("kind") != "req":
         return False, f"expected kind='req', got {describe_peer_value(envelope.get('kind'))}"
     op = envelope.get("op")
-    if op not in valid_ops:
+    # isinstance first: a list or dict op would raise TypeError in the lookup.
+    if not isinstance(op, str) or op not in valid_ops:
         return False, f"unknown op {describe_peer_value(op)}"
     if _extract_request_id(envelope) is None:
         return False, f"id must be int, got {type(envelope.get('id')).__name__}"
@@ -446,6 +447,10 @@ async def start_sidecar(
         if task is not None:
             tracked_tasks.add(task)
             task.add_done_callback(tracked_tasks.discard)
+        # If raw_handler raises, the task keeps the exception and its traceback
+        # keeps this frame. A ``task`` local would close that into a cycle, and
+        # the peer's frame would stay alive until a GC pass (WOR-1075).
+        del task
         await raw_handler(reader, writer)
 
     # ``limit=MAX_FRAME_SIZE`` lifts the per-connection StreamReader buffer

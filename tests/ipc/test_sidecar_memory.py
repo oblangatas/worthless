@@ -17,6 +17,9 @@ envelope validation:
 * A hello refused for a ~1 MiB string with one emoji in it: the reason the
   sidecar logged held its ``repr``, ~16 bytes per byte received, and on macOS
   that memory piled up across closed connections.
+* A request that crashes the handler, such as a seal whose reply is over
+  ``MAX_FRAME_SIZE``: the handler task kept the exception in a reference cycle,
+  so every crashed connection's frame stayed alive until a GC pass.
 
 The sidecar runs ``start_sidecar`` in a child process on a real AF_UNIX
 socket, so its RSS is measured alone, not mixed with pytest's.
@@ -63,7 +66,7 @@ _HELLO: dict[str, object] = {
 _HUGE_STR = "\x00" * 1_000_000 + "\U0001f600"
 
 # Prints "ready", then answers each line on stdin with "<rss> <peak rss>" in
-# bytes. The backend is never reached: every frame here fails in read_frame.
+# bytes. Only seal reaches the backend.
 _SIDECAR = """
 import asyncio, os, resource, sys, threading, traceback
 from pathlib import Path
@@ -86,11 +89,13 @@ def peak_rss():
     raise RuntimeError("no VmHWM in /proc/self/status")
 
 
-class Unreachable(Backend):
+class Stub(Backend):
     caps = ("seal", "open", "attest")
 
     async def seal(self, plaintext, context=None):
-        raise AssertionError("malformed frames never reach the backend")
+        # Like Fernet's, the ciphertext is longer than the plaintext, so a
+        # seal near MAX_FRAME_SIZE gets a reply too large to send.
+        return plaintext * 2
 
     async def open(self, ciphertext, context=None, key_id=None):
         raise AssertionError("malformed frames never reach the backend")
@@ -111,7 +116,7 @@ def report_memory():
 
 
 async def main():
-    server = await start_sidecar(Path(sys.argv[1]), Unreachable(), [os.getuid()])
+    server = await start_sidecar(Path(sys.argv[1]), Stub(), [os.getuid()])
     print("ready", flush=True)
     threading.Thread(target=report_memory, daemon=True).start()
     async with server:
@@ -161,6 +166,15 @@ class _Sidecar:
         # PROTO: the frame got past peer-uid auth and was refused.
         assert reply["code"] == "PROTO", reply
         return reply
+
+    def request(self, body: bytes) -> dict[str, object]:
+        """Shake hands, then send one request frame; return its reply."""
+        conn, hello_reply = self.open(msgpack.packb(_HELLO))
+        with conn, conn.makefile("rb") as stream:
+            assert hello_reply["kind"] == "resp", hello_reply
+            conn.sendall(len(body).to_bytes(4, "big") + body)
+            reply = stream.read(int.from_bytes(stream.read(4), "big"))
+        return msgpack.unpackb(reply, raw=False)
 
 
 @pytest.fixture
@@ -251,7 +265,7 @@ def test_valid_hello_padded_with_empty_lists_cannot_hold_sidecar_memory(
         for conn, _ in conns:
             conn.close()
 
-    # Was +57 MiB per open connection: the hello passed every check.
+    # Was +67 MiB per open connection: the hello passed every check.
     peak_growth = peak_after - rss_before
     assert peak_growth < _LIMIT, (
         f"{len(conns)} connections each sending a {len(body):,}-byte hello took sidecar RSS "
@@ -301,6 +315,8 @@ _VALIDATORS = {
         pytest.param(
             "hello", {**_HELLO, "body": {"client_versions": [_HUGE_STR]}}, id="hello-versions"
         ),
+        # Unhashable: used to raise TypeError into the handler's crash path.
+        pytest.param("req", {**_HELLO, "op": [_HUGE_STR]}, id="req-op-list"),
     ],
 )
 def test_rejection_reasons_never_copy_peer_values(
@@ -332,3 +348,30 @@ def test_refused_hellos_with_huge_strings_do_not_pile_up_in_sidecar_memory(
         f"{connections} refused {len(body):,}-byte hellos took sidecar RSS "
         f"{peak_growth / _MiB:.1f} MiB above its {rss_before / _MiB:.1f} MiB baseline"
     )
+
+
+def test_requests_that_crash_the_handler_do_not_pile_up_in_sidecar_memory(
+    sidecar: _Sidecar,
+) -> None:
+    # The stub doubles it, so the reply is ~2 MB: encode_frame raises and the
+    # handler takes its internal-error path.
+    body = msgpack.packb(
+        {"v": 1, "id": 2, "kind": "req", "op": "seal", "body": {"plaintext": b"\x00" * 1_000_000}}
+    )
+    for _ in range(4):  # let allocator pools and stream buffers settle
+        sidecar.request(body)
+    rss_before, _ = sidecar.memory()
+
+    connections = 32
+    replies = [sidecar.request(body) for _ in range(connections)]
+
+    _, peak_after = sidecar.memory()
+    # Was +91 MiB on macOS with the real Fernet backend: each crashed task kept
+    # its exception, whose traceback held the frame, the plaintext and the
+    # reply, in a cycle only the GC could free.
+    peak_growth = peak_after - rss_before
+    assert peak_growth < _LIMIT, (
+        f"{connections} seal requests that crashed the handler took sidecar RSS "
+        f"{peak_growth / _MiB:.1f} MiB above its {rss_before / _MiB:.1f} MiB baseline"
+    )
+    assert {reply["message"] for reply in replies} == {"PROTO: internal error"}
