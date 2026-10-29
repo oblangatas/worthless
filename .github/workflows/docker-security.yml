@@ -74,24 +74,26 @@ jobs:
       - name: Build image
         run: docker build -t worthless-proxy:${{ github.sha }} .
 
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+
+      # WOR-1077: the image holds exactly uv.lock's runtime set, the one
+      # dependency-audit.yml audits. Here because `scan` is required and
+      # docker-e2e is not. First after the build, so an expired grype ignore
+      # or a CVE fails the job without hiding this step's result.
+      - name: Image holds exactly the locked dependency set
+        env:
+          IMAGE: worthless-proxy:${{ github.sha }}
+        run: uv run --no-project python scripts/check_image_matches_lock.py "$IMAGE"
+
       # Grype silently drops the unknown `expiry` key in .grype.yaml, so a
       # suppression dated 2020 still suppresses. The pre-commit hook that
       # enforces expiry is bypassed by Dependabot, web edits, --no-verify and
       # any clone that never ran `pre-commit install` — so it has to run here
       # too, right before the scan it is protecting. WOR-852.
-      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
       - name: Grype ignores are dated and current
         # --no-project: this only parses ~50 lines of YAML, so there is no
         # reason to sync the whole project venv for it.
         run: uv run --no-project --with pyyaml python scripts/hooks/check_grype_ignore_expiry.py
-
-      # WOR-1077: the image holds exactly uv.lock's runtime set, the one
-      # dependency-audit.yml audits. Here because `scan` is required and
-      # docker-e2e is not; before grype so a CVE can't skip it.
-      - name: Image holds exactly the locked dependency set
-        env:
-          IMAGE: worthless-proxy:${{ github.sha }}
-        run: uv run --no-project python scripts/check_image_matches_lock.py "$IMAGE"
 
       # Grype (Anchore) replaces Trivy (Aqua) after the TeamPCP supply-chain
       # compromise of aquasecurity/trivy-action in Feb-Mar 2026. Same
