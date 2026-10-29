@@ -160,18 +160,29 @@ _LOCKED_INSTALL = [
 _INSTALLER = re.compile(r"\b(?:pip[\d.]*|ensurepip|uvx?|easy_install|setup\.py)\b")
 
 
+def _instructions(dockerfile_text: str) -> str:
+    """The Dockerfile as Docker parses it: one instruction per line.
+
+    Comment lines go first, as Docker drops them: one inside a continued
+    instruction would otherwise end the join and hide everything after it. Then
+    continuations are joined and leading whitespace dropped, so an indented or
+    wrapped instruction can't slip past a `^INSTRUCTION` match. Match with re.I:
+    Docker reads `run` as RUN.
+    """
+    text = re.sub(r"^\s*#.*\n", "", dockerfile_text, flags=re.MULTILINE)
+    text = re.sub(r"\\\n", " ", text)
+    return re.sub(r"^[ \t]+", "", text, flags=re.MULTILINE)
+
+
 def _run_commands(dockerfile_text: str) -> list[str]:
     """Each `&&`-joined shell command the Dockerfile's RUN instructions execute.
 
-    Comment lines go first, as Docker drops them: one inside a continued RUN
-    would otherwise end the join and hide every command after it. Exec-form and
-    heredoc RUN can't be split this way, so they are refused, not skipped.
-    Docker reads instructions case-insensitively, so `run` counts too.
+    Exec-form and heredoc RUN can't be split this way, so they are refused, not
+    skipped.
     """
-    hidden = re.findall(r"^RUN\s+(?:--\S+\s+)*(\[|<<)", dockerfile_text, re.M | re.I)
+    text = _instructions(dockerfile_text)
+    hidden = re.findall(r"^RUN\s+(?:--\S+\s+)*(\[|<<)", text, re.M | re.I)
     assert not hidden, "exec-form or heredoc RUN hides its commands from this parser"
-    text = re.sub(r"^\s*#.*\n", "", dockerfile_text, flags=re.MULTILINE)
-    text = re.sub(r"\\\n", " ", text)
     commands: list[str] = []
     for match in re.finditer(r"^RUN\s+(.*)$", text, re.M | re.I):
         commands += [" ".join(part.split()) for part in match.group(1).split("&&")]
@@ -1099,7 +1110,8 @@ class TestDockerfile:
         checks what the built image holds; this checks what the text can't show
         there: the hashes, `--locked` and wheels-only.
         """
-        assert re.search(r"^COPY\s[^\n]*\buv\.lock\b", dockerfile_text, re.M | re.I), (
+        text = _instructions(dockerfile_text)
+        assert re.search(r"^COPY\s[^\n]*\buv\.lock\b", text, re.M | re.I), (
             "WOR-1077: the build must COPY uv.lock, the file the audit gate audits"
         )
         installs = [c for c in _run_commands(dockerfile_text) if _INSTALLER.search(c)]
@@ -1113,17 +1125,20 @@ class TestDockerfile:
         """Every image the build pulls, `COPY --from` sources included, pins a digest.
 
         A tag can be repointed at different content; the digest can't.
-        Instructions match in any case, and `--from` after other COPY flags.
+        Read through _instructions, so case, indenting, wrapping and flags before
+        an image (`FROM --platform=…`, `COPY --chown=… --from=…`) don't hide one.
         """
-        stages = set(re.findall(r"^FROM\s+\S+\s+AS\s+(\S+)", dockerfile_text, re.M | re.I))
-        refs = re.findall(r"^FROM\s+(\S+)", dockerfile_text, re.M | re.I)
-        refs += re.findall(r"^COPY\s[^\n]*--from=(\S+)", dockerfile_text, re.M | re.I)
-        refs += re.findall(r"^RUN\s[^\n]*--mount=\S*\bfrom=([^,\s]+)", dockerfile_text, re.M | re.I)
+        text = _instructions(dockerfile_text)
+        image = r"^FROM\s+(?:--\S+\s+)*(\S+)"
+        stages = {alias for _, alias in re.findall(image + r"\s+AS\s+(\S+)", text, re.M | re.I)}
+        refs = re.findall(image, text, re.M | re.I)
+        refs += re.findall(r"^COPY\s[^\n]*--from=(\S+)", text, re.M | re.I)
+        refs += re.findall(r"^RUN\s[^\n]*--mount=\S*\bfrom=([^,\s]+)", text, re.M | re.I)
         external = [r for r in refs if r not in stages]
         assert external, "no external images found; did the parsing break?"
         for ref in external:
             assert re.search(r"@sha256:[0-9a-f]{64}$", ref), f"image not pinned by digest: {ref}"
-        assert not re.search(r"^ADD\s[^\n]*https?://", dockerfile_text, re.M | re.I), (
+        assert not re.search(r"^ADD\s[^\n]*https?://", text, re.M | re.I), (
             "ADD <url> fetches with no digest; COPY it from a digest-pinned image instead"
         )
 
@@ -2890,6 +2905,20 @@ GUARD_MUTATIONS = [
         "Dockerfile",
         "COPY --from=ghcr.io/astral-sh/uv:",
         "COPY --chown=0:0 --from=ghcr.io/astral-sh/uv:latest #",
+        "test_external_images_are_digest_pinned",
+    ),
+    (
+        "an indented run the lock never hashed",
+        "Dockerfile",
+        "    && pip check\n",
+        "    && pip check\n  run pip3 install --no-cache-dir requests\n",
+        "test_builder_installs_exactly_the_audited_lock",
+    ),
+    (
+        "copy uv from a tag, with --from wrapped onto the next line",
+        "Dockerfile",
+        "COPY --from=ghcr.io/astral-sh/uv:",
+        "COPY --chown=0:0 \\\n    --from=ghcr.io/astral-sh/uv:latest #",
         "test_external_images_are_digest_pinned",
     ),
 ]
