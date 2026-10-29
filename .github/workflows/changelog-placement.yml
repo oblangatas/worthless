@@ -1,0 +1,39 @@
+name: Changelog placement
+
+# WOR-957: a PR's CHANGELOG lines must land under [Unreleased]. If a release
+# is cut while the PR is open, merging main back in can leave the entry under
+# the version that just shipped: the next release notes miss it and the old
+# version claims it (#691, #688 and #676 all did this in one week). The check
+# reads the PR's merge commit, so it sees where lines land after that merge.
+# Deliberate edits to a released section: add the 'changelog-released-edit' label.
+
+on:
+  pull_request:
+    # No paths filter: the job takes seconds, an unchanged CHANGELOG passes, and a
+    # path-filtered check can't be made required without stalling other PRs.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: changelog-placement-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  placement:
+    name: CHANGELOG lines land under [Unreleased]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'changelog-released-edit') }}
+    steps:
+      - name: Check out the PR merge commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Check CHANGELOG placement
+        run: |
+          git diff -U0 HEAD^1 HEAD -- CHANGELOG.md \
+            | python .github/scripts/check_changelog_placement.py CHANGELOG.md
