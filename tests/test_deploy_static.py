@@ -164,8 +164,11 @@ def _run_commands(dockerfile_text: str) -> list[str]:
     """Each `&&`-joined shell command the Dockerfile's RUN instructions execute.
 
     Comment lines go first, as Docker drops them: one inside a continued RUN
-    would otherwise end the join and hide every command after it.
+    would otherwise end the join and hide every command after it. Exec-form and
+    heredoc RUN can't be split this way, so they are refused, not skipped.
     """
+    hidden = re.findall(r"^RUN\s+(?:--\S+\s+)*(\[|<<)", dockerfile_text, re.MULTILINE)
+    assert not hidden, "exec-form or heredoc RUN hides its commands from this parser"
     text = re.sub(r"^\s*#.*\n", "", dockerfile_text, flags=re.MULTILINE)
     text = re.sub(r"\\\n", " ", text)
     commands: list[str] = []
@@ -815,14 +818,6 @@ class TestDockerfile:
             "Debian 12 is end-of-life — its CVEs have no fix. Use slim-trixie."
         )
 
-    def test_pinned_digest(self, dockerfile_text: str):
-        """Base image must be pinned by SHA256 digest for reproducibility.
-
-        Tag-only references (python:3.13-slim) can silently change content.
-        Pinning the digest ensures identical builds.
-        """
-        assert "@sha256:" in dockerfile_text
-
     def test_multi_stage_build(self, dockerfile_text: str):
         """Must use multi-stage build to minimize final image size."""
         from_count = len(re.findall(r"^FROM\s", dockerfile_text, re.MULTILINE))
@@ -1094,36 +1089,17 @@ class TestDockerfile:
         if user_lines:
             assert user_lines[-1] != "root", "Final USER must not be root"
 
-    def test_no_cache_pip_install(self, dockerfile_text: str):
-        """pip install must use --no-cache-dir to minimize image size."""
-        pip_lines = re.findall(r"pip install.*", dockerfile_text)
-        for line in pip_lines:
-            assert "--no-cache-dir" in line, f"pip install missing --no-cache-dir: {line}"
-
     def test_builder_installs_exactly_the_audited_lock(self, dockerfile_text: str):
         """Every package in the image comes from uv.lock, hash-checked (WOR-1077).
 
-        dependency-audit.yml audits uv.lock. The image used to run a plain
-        `pip install .`, which resolved pyproject's floors against PyPI at build
-        time, so it shipped versions the audit never saw (measured 2026-10-27:
-        26 of 42 runtime packages differed from the lock, msgpack 1.2.4 among
-        them, one day old and inside Dependabot's 7-day cooldown).
-
-        So the commands that install Python packages are pinned exactly: one
-        hashed export of the lock, one hashed install of it, worthless itself
-        with `--no-deps`, then `pip check`. Each flag backs a claim in
-        CHANGELOG.md and docs/install-security.md, so an edit to this list is
-        an edit to those promises. An allowlist of flags was tried first and
-        let `pip3`, `uv pip sync`, `--index-url=` and a dropped `--only-binary`
-        through. This is the check on a required lane: docker-e2e is not one.
+        The commands that install Python packages are pinned exactly, because
+        an allowlist of flags let `pip3`, `uv pip sync`, `--index-url=` and a
+        dropped `--only-binary` through. scripts/check_image_matches_lock.py
+        checks what the built image holds; this checks what the text can't show
+        there: the hashes, `--locked` and wheels-only.
         """
         assert re.search(r"^COPY\s[^\n]*\buv\.lock\b", dockerfile_text, re.MULTILINE), (
             "WOR-1077: the build must COPY uv.lock, the file the audit gate audits"
-        )
-        hidden = re.findall(r"^RUN\s+(?:--\S+\s+)*(\[|<<)", dockerfile_text, re.MULTILINE)
-        assert not hidden, (
-            "exec-form and heredoc RUN are invisible to _run_commands, so this test "
-            "can't see what they install. Use shell form."
         )
         installs = [c for c in _run_commands(dockerfile_text) if _INSTALLER.search(c)]
         assert installs == _LOCKED_INSTALL, (
@@ -1132,26 +1108,10 @@ class TestDockerfile:
             "If this change is deliberate, update _LOCKED_INSTALL and the claims it backs."
         )
 
-    def test_builder_uv_matches_install_sh(self, dockerfile_text: str):
-        """The uv that exports uv.lock is the release install.sh pins (WOR-1077).
-
-        One vetted uv version for both shipped paths. A newer uv can also write
-        a lock an older one rejects, so letting the two drift is how an image
-        build starts failing at `uv export --locked`.
-        """
-        image = re.search(r"ghcr\.io/astral-sh/uv:([^@\s]+)@", dockerfile_text)
-        pin = re.search(r'^UV_VERSION="([^"]+)"', (REPO_ROOT / "install.sh").read_text(), re.M)
-        assert image and pin, "uv image tag or install.sh UV_VERSION not found"
-        assert image.group(1) == pin.group(1), (
-            f"Dockerfile copies uv {image.group(1)} but install.sh pins {pin.group(1)}; "
-            "bump both, with the image's new index digest"
-        )
-
     def test_external_images_are_digest_pinned(self, dockerfile_text: str):
         """Every image the build pulls, `COPY --from` sources included, pins a digest.
 
-        test_pinned_digest only needs one `@sha256:` anywhere, so it passes
-        while a second image (the uv binary WOR-1077 copies in) floats on a tag.
+        A tag can be repointed at different content; the digest can't.
         """
         stages = set(re.findall(r"^FROM\s+\S+\s+AS\s+(\S+)", dockerfile_text, re.MULTILINE | re.I))
         refs = re.findall(r"^FROM\s+(\S+)", dockerfile_text, re.MULTILINE)
@@ -1162,7 +1122,7 @@ class TestDockerfile:
         external = [r for r in refs if r not in stages]
         assert external, "no external images found; did the parsing break?"
         for ref in external:
-            assert "@sha256:" in ref, f"image not pinned by digest: {ref}"
+            assert re.search(r"@sha256:[0-9a-f]{64}$", ref), f"image not pinned by digest: {ref}"
         assert not re.search(r"^ADD\s[^\n]*https?://", dockerfile_text, re.MULTILINE), (
             "ADD <url> fetches with no digest; COPY it from a digest-pinned image instead"
         )
@@ -2894,6 +2854,29 @@ GUARD_MUTATIONS = [
         "true",
         "test_publisher_still_waiting_after_three_days_is_named",
     ),
+    # WOR-1077: the image installs only uv.lock's hashed export.
+    (
+        "drop --require-hashes (image installs unchecked files)",
+        "Dockerfile",
+        # Anchor on the command, not the comment above it that also names the flag.
+        "pip install --no-cache-dir --require-hashes ",
+        "pip install --no-cache-dir ",
+        "test_builder_installs_exactly_the_audited_lock",
+    ),
+    (
+        "an extra pip3 install the audit never saw",
+        "Dockerfile",
+        "    && pip check\n",
+        "    && pip check \\\n    && pip3 install --no-cache-dir requests\n",
+        "test_builder_installs_exactly_the_audited_lock",
+    ),
+    (
+        "copy uv from a tag instead of a digest",
+        "Dockerfile",
+        "COPY --from=ghcr.io/astral-sh/uv:",
+        "COPY --from=ghcr.io/astral-sh/uv:latest #",
+        "test_external_images_are_digest_pinned",
+    ),
 ]
 
 
@@ -2931,6 +2914,8 @@ class TestGuardsCanActuallyFail:
         # RELEASING.md: the release-guide guard reads it, and without a copy that
         # guard errors in the control run instead of proving anything.
         shutil.copy(REPO_ROOT / "RELEASING.md", tmp_path / "RELEASING.md")
+        # Dockerfile: the WOR-1077 guards read it.
+        shutil.copy(REPO_ROOT / "Dockerfile", tmp_path / "Dockerfile")
         (tmp_path / "tests").mkdir()
         shutil.copy(Path(__file__), tmp_path / "tests" / Path(__file__).name)
 

@@ -10,7 +10,7 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   Now: the image installs the versions in `uv.lock` and checks every file against the hash recorded there. The build stops if `uv.lock` doesn't match `pyproject.toml`, and it installs only prebuilt wheels, so no dependency runs its own build script. The image behaves the same and is about the same size (74.4 MB on arm64, was 75.0 MB). `docs/install-security.md` now says which versions each way of installing gets, and why `install.sh` doesn't pin them.
 
   **Limits.**
-  - `install.sh`, `pip install worthless` and `uvx` still don't read `uv.lock`. They get the newest release of each dependency that meets worthless's minimums, which the audit may not have seen, including one published minutes ago. When an advisory lands against a dependency, the next release raises its minimum.
+  - `install.sh`, `pip install worthless` and `uvx` still don't read `uv.lock`. They get the newest release of each dependency that meets worthless's minimums, which the audit may not have seen, including one published minutes ago. When an advisory lands against a dependency, the next release raises its minimum. That is a manual step, and no CI check enforces it yet (WOR-1085).
   - The image picks up a dependency fix only after `uv.lock` is updated and a new image is published. An image you build from a clone no longer picks up newer dependency releases on its own.
   - The image's `pip` comes from the Python base image, not from `uv.lock`. The image scan still checks it.
   - Building the image now also pulls uv from `ghcr.io`, so a builder that can reach only Docker Hub can't build it.

@@ -9,11 +9,10 @@ Run with:
 
 from __future__ import annotations
 
-import json
 import os
 import re
-import shutil
 import subprocess
+import sys
 import uuid
 from pathlib import Path
 
@@ -21,8 +20,6 @@ import anthropic
 import httpx
 import openai
 import pytest
-from packaging.markers import Marker
-from packaging.utils import canonicalize_name
 
 from tests._docker_helpers import docker_available, docker_exec, wait_healthy
 from tests.helpers import fake_anthropic_key, fake_openai_key
@@ -421,46 +418,18 @@ class TestBuild:
     def test_image_holds_exactly_the_locked_runtime_set(self, docker_image: str) -> None:
         """Every package in the image is the one uv.lock pins, and nothing else (WOR-1077).
 
-        dependency-audit.yml audits uv.lock, so this is what makes the audit
-        true for the image. Before WOR-1077, `pip install .` resolved fresh at
-        build time and 26 of 42 runtime packages differed from the lock. The
-        static test in test_deploy_static.py pins how the Dockerfile installs;
-        this checks what actually landed, under the container's own markers.
+        The check lives in scripts/check_image_matches_lock.py so `scan`, a
+        required check, can run it on every PR. This wrapper is how the publish
+        smoke in publish-docker.yml runs it against the image users pull.
         """
-        probe = (
-            "import importlib.metadata as m, json\n"
-            "from pip._vendor.packaging.markers import default_environment\n"
-            "print(json.dumps({'env': default_environment(), 'dists': "
-            "{d.metadata['Name']: d.version for d in m.distributions()}}))"
+        result = _run(
+            [
+                sys.executable,
+                str(REPO_ROOT / "scripts" / "check_image_matches_lock.py"),
+                docker_image,
+            ]
         )
-        out = _run_ok(
-            ["docker", "run", "--rm", "--entrypoint", "python", docker_image, "-c", probe]
-        )
-        report = json.loads(out)
-        installed = {canonicalize_name(n): v for n, v in report["dists"].items()}
-
-        uv = shutil.which("uv")
-        assert uv, "uv is needed to read uv.lock (the docker-e2e lane runs under `uv run`)"
-        exported = _run(
-            [uv, "export", "--frozen", "--no-dev", "--no-emit-project", "--no-hashes"],
-            cwd=REPO_ROOT,
-        ).stdout
-        locked = {}
-        for line in exported.splitlines():
-            match = re.match(r"^([A-Za-z0-9_.-]+)==(\S+)(?:\s*;\s*(.+))?$", line.strip())
-            if match and (not match[3] or Marker(match[3]).evaluate(report["env"])):
-                locked[canonicalize_name(match[1])] = match[2]
-        assert locked, f"parsed no pins from uv export:\n{exported}"
-
-        # pip ships with the base image, not the lock; worthless is built from src/.
-        assert "worthless" in installed
-        extra = {"pip", "worthless"}
-        image_set = {n: v for n, v in installed.items() if n not in extra}
-        assert image_set == locked, (
-            "image packages differ from uv.lock:\n"
-            f"  not as locked: {sorted(n for n in image_set if locked.get(n) != image_set[n])}\n"
-            f"  locked, missing: {sorted(set(locked) - set(image_set))}"
-        )
+        assert "match uv.lock" in result.stdout
 
     def test_runs_as_non_root(self, container: tuple[str, int]) -> None:
         """The runtime PROCESSES (uvicorn + sidecar) must run as non-root.

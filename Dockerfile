@@ -2,8 +2,8 @@
 FROM python:3.13-slim-trixie@sha256:3dd7cc108ec1493442514f5c2a871af6af0ec31d768ff6e378a93340c3b3db5f AS builder
 
 # uv only exports uv.lock below. It lives in /bin, outside the /usr/local paths
-# the final stage copies, so it never ships. Same release install.sh pins
-# (test_deploy_static.py keeps the two equal).
+# the final stage copies, so it never ships. If a newer uv writes a lock this
+# one can't read, `uv export --locked` fails the build: bump it here.
 COPY --from=ghcr.io/astral-sh/uv:0.11.7@sha256:240fb85ab0f263ef12f492d8476aa3a2e4e1e333f7d67fbdd923d00a506a516a /uv /bin/uv
 
 WORKDIR /build
@@ -16,7 +16,8 @@ COPY pyproject.toml uv.lock ./
 #   --locked         refuses a uv.lock that no longer matches pyproject.toml
 #   --require-hashes every file must match the hash uv.lock recorded
 #   --only-binary    wheels only, so no locked sdist runs a setup.py here
-# tests/test_deploy_static.py and tests/test_docker_e2e.py pin this.
+# tests/test_deploy_static.py pins these commands; `scan` runs
+# scripts/check_image_matches_lock.py on the built image.
 RUN apt-get update \
     && apt-get upgrade -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \

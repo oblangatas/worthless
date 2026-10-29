@@ -26,15 +26,10 @@
 #     resolution of the lock, not the whole lock. Matrixing or stripping
 #     markers would close that; beads worthless-jymn carries the follow-up.
 #
-# WHAT REACHES USERS (WOR-1077). The Dockerfile installs exactly this lock's
-# runtime set, hash-checked, so for the image this audit is the whole story
-# (tests/test_deploy_static.py and tests/test_docker_e2e.py pin that).
-# install.sh, `pip install worthless` and uvx never read uv.lock: they resolve
-# pyproject.toml's minimums against PyPI on the day they run, so a green audit
-# says nothing about what they get. For an advisory against a runtime
-# dependency, raise (or add) its floor in pyproject.toml as well as the lock.
-# The user-facing contract, and why there is no constraints file, is in
-# docs/install-security.md under "Dependencies".
+# WHAT REACHES USERS (WOR-1077). The Docker image installs exactly this lock
+# (docker-security.yml's `scan` checks the built image against it); install.sh,
+# pip and uvx don't read it. That contract, and what an advisory against a
+# runtime dependency needs, is in docs/install-security.md under "Dependencies".
 #
 # Keep the command byte-identical to the hook's `entry:`. Note that this is a
 # weaker guarantee than it sounds — identical strings still audit different

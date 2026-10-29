@@ -9,9 +9,9 @@ which breaks the logging denylist (no prompt content, no raw IPs). worthless-3jj
 
 This is the SECOND layer. The first is the proxy switching fastapi telemetry
 off itself (tests/test_proxy_emits_no_telemetry.py), which holds whatever is
-installed. This one pins the locked tree (runtime plus every extra) — what CI
-and ``uv sync`` install. The Docker image (``pip install .``) and ``uv tool
-install`` resolve without the lock, so they rely on the first layer.
+installed. This one pins the locked tree (runtime plus every extra) — what CI,
+``uv sync`` and, since WOR-1077, the Docker image install. ``uv tool install``
+and pip resolve without the lock, so they rely on the first layer.
 """
 
 from __future__ import annotations
