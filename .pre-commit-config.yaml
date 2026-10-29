@@ -244,6 +244,16 @@ repos:
         #                     worthless-lwvs; reopen if it re-fires.
         # If an ignore is ever needed again it MUST cite its tracking ticket
         # and be re-checked quarterly.
+        #
+        # Ignored now (WOR-1006, expires 2026-11-24 — enforced by
+        # tests/test_dependency_audit_gate.py KNOWN_IGNORES):
+        #   CVE-2026-112940, CVE-2026-112913, CVE-2026-112907 : filelock. Every
+        #                     fixed release needs Python 3.11+, and worthless
+        #                     still supports 3.10 (Ubuntu 22.04, common on WSL),
+        #                     so the 3.10 lock keeps 3.25.2. Dev-only (pre-commit,
+        #                     virtualenv, pip-audit) — never in the wheel. pip-audit
+        #                     skips the 3.10-only line on 3.11+, so this only
+        #                     changes anything on a Python 3.10 machine.
         # `bash -c`, not `sh -c`, and `set -o pipefail` is why. This is a
         # PIPELINE: without pipefail the shell reports only pip-audit's exit
         # code, so a `uv export` that dies partway hands over a truncated-but-
@@ -253,7 +263,7 @@ repos:
         # now. pipefail is not POSIX — dash, which /bin/sh often is, does not
         # support it — so the shell has to be bash explicitly. beads
         # worthless-mh0r.
-        entry: bash -c 'set -o pipefail; uv export --frozen --no-emit-project | uv run pip-audit --disable-pip -r /dev/stdin'
+        entry: bash -c 'set -o pipefail; uv export --frozen --no-emit-project | uv run pip-audit --disable-pip -r /dev/stdin --ignore-vuln CVE-2026-112940 --ignore-vuln CVE-2026-112913 --ignore-vuln CVE-2026-112907'
         pass_filenames: false
         stages: [pre-push]
 

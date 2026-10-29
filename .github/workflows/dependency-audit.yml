@@ -101,7 +101,8 @@ jobs:
         shell: bash
         env:
           UV_CACHE_DIR: /tmp/uv-cache
-        run: uv export --frozen --no-emit-project | uv run pip-audit --disable-pip -r /dev/stdin
+        # Same ignores as the uv-audit hook (WOR-1006, expire 2026-11-24).
+        run: uv export --frozen --no-emit-project | uv run pip-audit --disable-pip -r /dev/stdin --ignore-vuln CVE-2026-112940 --ignore-vuln CVE-2026-112913 --ignore-vuln CVE-2026-112907
 
   # Python is not the only ecosystem here. workers/worthless-sh is a Cloudflare
   # Worker with its own package-lock.json, and nothing audited it — `grep -rn
