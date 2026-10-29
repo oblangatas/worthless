@@ -18,6 +18,8 @@ Every test here drives a real sidecar over a real AF_UNIX socket:
 from __future__ import annotations
 
 import asyncio
+import errno
+import gc
 import os
 import socket
 import time
@@ -88,6 +90,15 @@ def _handlers(server: asyncio.AbstractServer) -> set[asyncio.Task[None]]:
     return set(server._worthless_handler_tasks)  # type: ignore[attr-defined]
 
 
+async def _accepted(server: asyncio.AbstractServer) -> set[asyncio.Task[None]]:
+    """The handlers running once the sidecar has accepted our connection."""
+    for _ in range(100):
+        if tasks := _handlers(server):
+            return tasks
+        await asyncio.sleep(0.01)
+    raise AssertionError("sidecar never accepted the connection")
+
+
 async def _closed_by_sidecar(reader: asyncio.StreamReader) -> bool:
     """True if the sidecar closes the connection within the deadline plus slack."""
     try:
@@ -148,16 +159,21 @@ async def test_stalled_half_frame_after_hello_is_closed_within_deadline(
 async def test_stalled_hello_is_closed_within_deadline(
     start: StartSidecar, sidecar_socket_path: Path, sent: bytes
 ) -> None:
-    """Every client sends its hello as soon as it connects, so the hello's clock starts then."""
-    await start(frame_timeout_s=_FRAME_TIMEOUT_S)
+    """Every client sends its hello as soon as it connects, so the hello's clock starts then.
+
+    The handler must end even though this peer reads nothing: the sidecar has
+    written nothing to it yet, so closing has nothing to wait on.
+    """
+    server = await start(frame_timeout_s=_FRAME_TIMEOUT_S)
     reader, writer = await asyncio.open_unix_connection(str(sidecar_socket_path))
     if sent:
         writer.write(sent)
         await writer.drain()
+    stalled = await _accepted(server)
 
-    assert await _closed_by_sidecar(reader), (
-        "sidecar kept a connection that never finished its hello"
-    )
+    _, still_running = await asyncio.wait(stalled, timeout=_CLOSE_WITHIN_S)
+    assert not still_running, "sidecar kept a connection that never finished its hello"
+    assert await _closed_by_sidecar(reader)
     writer.close()
 
 
@@ -254,6 +270,38 @@ async def test_closed_connection_frees_its_slot(
             assert await late.open(await late.seal(b"late")) == b"late"
 
 
+async def test_crashed_handler_is_not_reported_again_when_collected(
+    start: StartSidecar, sidecar_socket_path: Path, fernet_backend: FernetBackend
+) -> None:
+    """The handler logs its own crash; asyncio must not report it a second time.
+
+    The sidecar now creates each handler task itself, so nothing else reads
+    the task's exception. Left unread, asyncio reports it again, with its
+    traceback, whenever the task is garbage-collected.
+    """
+
+    class CrashingBackend(StallingBackend):
+        async def seal(self, plaintext: bytes, context: bytes | None = None) -> bytes:
+            raise RuntimeError("backend bug")
+
+    reported: list[str] = []
+    loop = asyncio.get_running_loop()
+    loop.set_exception_handler(lambda _loop, context: reported.append(context["message"]))
+    try:
+        server = await start(backend=CrashingBackend(fernet_backend))
+        async with IPCClient(sidecar_socket_path) as client:
+            crashed = await _accepted(server)
+            with pytest.raises(IPCProtocolError):
+                await client.seal(b"x")
+        done, still_running = await asyncio.wait(crashed, timeout=2.0)
+        assert not still_running
+        del crashed, done
+        gc.collect()
+    finally:
+        loop.set_exception_handler(None)
+    assert not [m for m in reported if "never retrieved" in m], reported
+
+
 async def test_start_sidecar_rejects_nonsense_limits(
     start: StartSidecar, sidecar_socket_path: Path
 ) -> None:
@@ -283,6 +331,21 @@ async def test_read_frame_body_timeout_does_not_bound_the_wait_for_a_header() ->
     assert not pending.done(), "an idle stream between frames must not time out"
     reader.feed_data(encode_frame({"v": 1}))
     assert await asyncio.wait_for(pending, timeout=1.0) == {"v": 1}
+
+
+async def test_read_frame_without_body_timeout_passes_a_socket_timeout_through() -> None:
+    """With no deadline set, a socket's ETIMEDOUT is not a missed frame deadline.
+
+    From 3.11 ``asyncio.TimeoutError`` is the built-in ``TimeoutError``, which
+    is also what a socket's ETIMEDOUT raises.
+    """
+    reader = asyncio.StreamReader()
+    reading = asyncio.ensure_future(read_frame(reader))
+    reader.feed_data((8).to_bytes(4, "big"))
+    await asyncio.sleep(0.01)  # header consumed; now waiting for the body
+    reader.set_exception(TimeoutError(errno.ETIMEDOUT, "Connection timed out"))
+    with pytest.raises(TimeoutError):
+        await reading
 
 
 async def test_client_reports_a_reset_connection_as_a_protocol_error(

@@ -133,8 +133,13 @@ async def read_frame(
 
     # --- body
     try:
-        payload = await asyncio.wait_for(reader.readexactly(length), body_timeout)
+        if body_timeout is None:
+            payload = await reader.readexactly(length)
+        else:
+            payload = await asyncio.wait_for(reader.readexactly(length), body_timeout)
     except asyncio.TimeoutError as exc:
+        if body_timeout is None:
+            raise
         raise FrameTimeoutError(
             f"body of {length} bytes did not arrive within {body_timeout}s"
         ) from exc

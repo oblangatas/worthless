@@ -13,9 +13,7 @@ Design invariants (enforced here, reviewed by security-auditor):
 * One request violation closes the connection (no-fallback rule).
 * Pathname AF_UNIX sockets are ``unlink``-ed on server close; POSIX does
   not auto-unlink them, and stale files break xdist parallel test runs.
-* A peer can't hold sidecar memory by stalling (WOR-1076). A frame that has
-  started must finish within ``frame_timeout_s``, and at most
-  ``max_connections`` connections are open at once.
+* A stalling peer can't pin memory: frames have a deadline and connections a cap (WOR-1076).
 """
 
 from __future__ import annotations
@@ -47,21 +45,16 @@ __all__ = ["DEFAULT_FRAME_TIMEOUT_S", "DEFAULT_MAX_CONNECTIONS", "start_sidecar"
 _LOG = logging.getLogger(__name__)
 
 #: Seconds a frame may take to arrive once it has started, and the hello may
-#: take from connect. Every client writes each frame whole, in one
-#: ``write()``, as soon as it has it, and sends hello right after connecting,
-#: so a real frame arrives in milliseconds. By default every client also gives
-#: up on a reply after 2 s or less (``IPCClient``, the proxy's
-#: ``WORTHLESS_SIDECAR_REQUEST_TIMEOUT``, 1.5 s for the health probe), so a
-#: frame still arriving after 10 s comes from a peer that has stalled. The
-#: wait for a request to *start* is not bounded: the proxy keeps one
-#: connection open for its whole life and may be idle for hours.
+#: take from connect. ``IPCClient`` writes each frame whole, in one
+#: ``write()``, and sends hello right after connecting, so a real frame
+#: arrives in milliseconds. The wait for a request to *start* is not bounded:
+#: the proxy keeps one connection open for its whole life.
 DEFAULT_FRAME_TIMEOUT_S = 10.0
 
-#: Most connections the sidecar holds open at once; extras are closed before a
-#: byte is read from them. Real use peaks around four: the proxy's one
-#: connection (WEB_CONCURRENCY > 1 is refused), the reconnect that replaces
-#: it, a health probe, and a CLI command. A stalled frame can hold at most
-#: ``MAX_FRAME_SIZE`` (1 MiB), so the cap bounds that memory at 32 MiB.
+#: Most connections held open at once; extras are closed before a byte is read
+#: from them. Real use is a handful: the proxy's one connection (its in-flight
+#: requests share it), its reconnect, a health probe, a CLI command. A stalled
+#: frame holds about 1.07 MiB (measured), so this bounds that at about 34 MiB.
 DEFAULT_MAX_CONNECTIONS = 32
 
 # Protocol version the sidecar speaks. Clients advertise supported versions
@@ -326,8 +319,6 @@ def _make_client_handler(
                 hello = await asyncio.wait_for(read_frame(reader), frame_timeout_s)
             except asyncio.TimeoutError:
                 _LOG.warning("no hello within %.1fs; closing", frame_timeout_s)
-                # abort, not close: don't wait on a stalled peer to read.
-                writer.transport.abort()
                 return
             except FrameTruncatedError:
                 _LOG.debug("client closed before sending hello")
@@ -361,6 +352,8 @@ def _make_client_handler(
                     envelope = await read_frame(reader, body_timeout=frame_timeout_s)
                 except FrameTimeoutError:
                     _LOG.warning("request frame stalled for %.1fs; closing", frame_timeout_s)
+                    # abort, not close: unread replies may still be queued, and
+                    # close() would wait for this stalled peer to read them.
                     writer.transport.abort()
                     return
                 except FrameTruncatedError:
@@ -490,16 +483,22 @@ async def start_sidecar(
 
     def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         # A plain function, not a coroutine: asyncio calls it inside
-        # ``connection_made``, before the transport starts reading. A
-        # connection refused here never has a byte read into its buffer,
-        # and the task is counted the moment it exists.
+        # ``connection_made``, before the transport starts reading, so a
+        # connection refused here never has a byte read into its buffer.
         if len(tracked_tasks) >= max_connections:
             _LOG.warning("refusing connection: %d already open", max_connections)
             writer.transport.abort()
             return
-        task = asyncio.get_running_loop().create_task(raw_handler(reader, writer))
+        task = asyncio.create_task(raw_handler(reader, writer))
         tracked_tasks.add(task)
-        task.add_done_callback(tracked_tasks.discard)
+        task.add_done_callback(_forget)
+
+    def _forget(task: asyncio.Task[None]) -> None:
+        tracked_tasks.discard(task)
+        # The handler already logged any exception; mark it retrieved so
+        # asyncio doesn't report it again when the task is collected.
+        if not task.cancelled():
+            task.exception()
 
     # ``limit=MAX_FRAME_SIZE`` lifts the per-connection StreamReader buffer
     # ceiling (default 64 KiB) up to the contract's frame cap (1 MiB).
