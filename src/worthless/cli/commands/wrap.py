@@ -18,6 +18,7 @@ combinable. Run one or the other.
 from __future__ import annotations
 
 import logging
+import contextlib
 import os
 import re
 import socket
@@ -348,9 +349,11 @@ def register_wrap_commands(app: typer.Typer) -> None:
                 ),
             )
 
-        for note in ignored_upstream_env_notes():
-            sys.stderr.write(f"worthless: warning: {note}\n")
-        sys.stderr.flush()
+        # Best-effort: a closed stderr must not skip the cleanup below.
+        with contextlib.suppress(OSError, ValueError):
+            for note in ignored_upstream_env_notes():
+                sys.stderr.write(f"worthless: warning: {note}\n")
+            sys.stderr.flush()
         try:
             proxy, port = spawn_proxy(
                 env=proxy_env,

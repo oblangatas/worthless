@@ -1318,6 +1318,42 @@ class TestIgnoredUpstreamEnvNotice:
         assert "HTTPS_PROXY" in result.output and "WORTHLESS_UPSTREAM_PROXY" in result.output
         assert "hunter2" not in result.output and "egress.corp.example" not in result.output
 
+    def test_a_broken_stderr_does_not_stop_wrap_before_the_proxy_starts(
+        self, home_with_key, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The notice is best-effort: if stderr is a closed pipe, wrap still reaches
+        ``spawn_proxy``, whose failure path closes the fds and stops the sidecar."""
+
+        class _BrokenStderr:
+            def write(self, _s: str) -> int:
+                raise BrokenPipeError(32, "Broken pipe")
+
+            def flush(self) -> None:
+                raise BrokenPipeError(32, "Broken pipe")
+
+        real_stderr: list = []
+
+        def _notes() -> list[str]:
+            real_stderr.append(sys.stderr)
+            sys.stderr = _BrokenStderr()
+            return ["Upstream calls ignore HTTPS_PROXY."]
+
+        spawned: list[bool] = []
+
+        def _fail(**_kw):
+            spawned.append(True)
+            sys.stderr = real_stderr[0]  # CliRunner flushes it on the way out
+            raise RuntimeError("stop after the notice")
+
+        monkeypatch.setattr("worthless.cli.commands.wrap.ignored_upstream_env_notes", _notes)
+        monkeypatch.setattr("worthless.cli.commands.wrap.spawn_proxy", _fail)
+        runner.invoke(
+            app,
+            ["wrap", "--", "echo", "hi"],
+            env={"WORTHLESS_HOME": str(home_with_key.base_dir)},
+        )
+        assert spawned == [True]
+
 
 class TestChildExitCodePropagatedViaWrap:
     """Child nonzero exit code flows through wrap → typer.Exit."""
