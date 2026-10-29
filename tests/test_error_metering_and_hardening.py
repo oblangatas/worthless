@@ -595,6 +595,95 @@ class TestAnthropicNonStreamingMetering:
 
 
 # ------------------------------------------------------------------
+# WOR-1002: a null or non-int token count must not crash spend recording
+# ------------------------------------------------------------------
+
+ANTHROPIC_MESSAGES = "https://api.anthropic.com/v1/messages"
+
+
+@pytest.fixture()
+async def anthropic_alias(repo, proxy_app):
+    """Enroll an Anthropic key and return (alias, shard_a_utf8)."""
+    alias = "anthropic-key"
+    sr = split_key_fp("sk-ant-test-key-12345678901234", prefix="sk-ant-", provider="anthropic")
+    shard = StoredShard(
+        shard_b=bytearray(sr.shard_b),
+        commitment=bytearray(sr.commitment),
+        nonce=bytearray(sr.nonce),
+        provider="anthropic",
+    )
+    await repo.store(
+        alias, shard, prefix=sr.prefix, charset=sr.charset, base_url="https://api.anthropic.com/v1"
+    )
+    pin_shard_b(proxy_app, alias, sr.shard_b)
+    return alias, sr.shard_a.decode("utf-8")
+
+
+class TestNonIntTokenCounts:
+    """A null cache count bills as 0; any other non-int count means unreadable usage."""
+
+    @pytest.mark.parametrize(
+        ("usage", "expected_rows"),
+        [
+            pytest.param(
+                {
+                    "input_tokens": 5,
+                    "cache_creation_input_tokens": None,
+                    "cache_read_input_tokens": None,
+                    "output_tokens": 3,
+                },
+                [(8,)],
+                id="null-cache-counts-bill-the-rest",
+            ),
+            pytest.param(
+                {"input_tokens": None, "output_tokens": 3},
+                [],
+                id="null-required-count-records-nothing",
+            ),
+            pytest.param(
+                {"input_tokens": "5", "output_tokens": 3}, [], id="string-count-records-nothing"
+            ),
+        ],
+    )
+    @respx.mock
+    async def test_spend_task_survives_and_releases_reservation(
+        self,
+        proxy_client: httpx.AsyncClient,
+        proxy_app,
+        anthropic_alias,
+        proxy_settings,
+        usage,
+        expected_rows,
+    ):
+        alias, shard_a_utf8 = anthropic_alias
+        respx.post(ANTHROPIC_MESSAGES).mock(
+            return_value=httpx.Response(200, content=_anthropic_json(usage=usage))
+        )
+        engine = proxy_app.state.rules_engine
+
+        with patch.object(
+            engine, "release_spend_reservation", wraps=engine.release_spend_reservation
+        ) as release:
+            # ASGITransport re-raises background-task exceptions here, so a
+            # crash in the spend task fails this call, not just a later check.
+            resp = await proxy_client.post(
+                _proxy_url(alias, "/v1/messages"),
+                headers=_proxy_headers(alias, shard_a_utf8),
+                content=b'{"model": "claude-3-5-sonnet-20241022",'
+                b' "max_tokens": 10, "messages": []}',
+            )
+
+        assert resp.status_code == 200
+        release.assert_awaited_once()
+        async with aiosqlite.connect(proxy_settings.db_path) as db:
+            async with db.execute(
+                "SELECT tokens FROM spend_log WHERE key_alias = ?", (alias,)
+            ) as cur:
+                rows = await cur.fetchall()
+        assert rows == expected_rows
+
+
+# ------------------------------------------------------------------
 # worthless-64x: Malformed header values (null/CR/LF) rejected
 # ------------------------------------------------------------------
 
