@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import socket
 import subprocess
 import sys
 import textwrap
@@ -207,6 +208,134 @@ class TestOpenAILive:
         # Clean state
         home_obj = WorthlessHome(base_dir=worthless_home)
         assert list(home_obj.shard_a_dir.iterdir()) == []
+
+
+# ---------------------------------------------------------------------------
+# OpenRouter live test
+# ---------------------------------------------------------------------------
+
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+
+
+@pytest.fixture()
+def openrouter_env(tmp_path: Path) -> tuple[Path, Path, str, dict[str, str]]:
+    """Isolated env with a real OpenRouter key. Skips if not available.
+
+    Unlike the OpenAI fixture, every CLI call runs as a subprocess with HOME
+    sandboxed too: lock probes agent configs under HOME, which WORTHLESS_HOME
+    does not redirect.
+    """
+    key = os.environ.get("OPENROUTER_API_KEY")
+    if not key:
+        pytest.skip("OPENROUTER_API_KEY not set")
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    env_file = project_dir / ".env"
+    env_file.write_text(f"OPENROUTER_API_KEY={key}\n")
+
+    worthless_home = tmp_path / ".worthless"
+    env = {k: v for k, v in os.environ.items() if not k.startswith("WORTHLESS_")}
+    env.pop("OPENROUTER_API_KEY", None)
+    env.update(
+        {
+            "HOME": str(tmp_path),
+            "WORTHLESS_HOME": str(worthless_home),
+            "WORTHLESS_KEYRING_BACKEND": "null",
+            "WORTHLESS_PORT": str(_free_port()),
+            "NO_COLOR": "1",
+        }
+    )
+    return env_file, worthless_home, key, env
+
+
+@pytest.mark.live
+@pytest.mark.timeout(120)
+class TestOpenRouterLive:
+    """Lock a real OpenRouter key, call through the proxy, prove the leftover is useless."""
+
+    def test_openrouter_roundtrip(
+        self, openrouter_env: tuple[Path, Path, str, dict[str, str]]
+    ) -> None:
+        env_file, worthless_home, original_key, env = openrouter_env
+        original_bytes = env_file.read_bytes()
+        port = env["WORTHLESS_PORT"]
+        binary = str(Path(sys.executable).parent / "worthless")
+
+        def cli(*args: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(  # noqa: S603
+                [binary, *args], env=env, capture_output=True, text=True, timeout=60
+            )
+
+        # Lock: the real key leaves .env, OPENROUTER_BASE_URL points at the proxy.
+        locked = cli("lock", "--env", str(env_file))
+        assert locked.returncode == 0, f"lock failed: {locked.stdout}\n{locked.stderr}"
+        parsed = dotenv_values(env_file)
+        shard_a = parsed.get("OPENROUTER_API_KEY") or ""
+        base_url = parsed.get("OPENROUTER_BASE_URL") or ""
+        assert original_key not in env_file.read_text()
+        assert shard_a, "lock left no OPENROUTER_API_KEY in .env"
+        assert base_url.startswith(f"http://127.0.0.1:{port}/"), (
+            f"OPENROUTER_BASE_URL does not point at the proxy on port {port}"
+        )
+        assert base_url.endswith("/v1")
+
+        proxy = subprocess.Popen(  # noqa: S603
+            [binary, "up", "--port", port],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        try:
+            assert poll_health(int(port), timeout=30.0), "proxy never came up"
+            with httpx.Client(headers={"accept-encoding": "identity"}, timeout=60.0) as client:
+                request = {
+                    "model": "openai/gpt-4o-mini",
+                    "max_tokens": 5,
+                    "messages": [{"role": "user", "content": "say hi"}],
+                }
+
+                # Through the proxy: the real key is rebuilt and the call succeeds.
+                resp = client.post(
+                    f"{base_url}/chat/completions",
+                    json=request,
+                    headers={"Authorization": f"Bearer {shard_a}"},
+                )
+                assert resp.status_code == 200, (
+                    f"proxy call returned {resp.status_code}: {resp.text[:500]}"
+                )
+                content = resp.json()["choices"][0]["message"]["content"]
+                assert content, "empty completion content"
+
+                # Straight to OpenRouter: the value left in .env is worthless.
+                leaked = client.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    json=request,
+                    headers={"Authorization": f"Bearer {shard_a}"},
+                )
+                assert leaked.status_code in {401, 403}, (
+                    f"OpenRouter accepted the locked value: {leaked.status_code}"
+                )
+        finally:
+            proxy.terminate()
+            try:
+                proxy.wait(timeout=15)
+            except subprocess.TimeoutExpired:  # pragma: no cover
+                proxy.kill()
+
+        # Unlock: .env comes back byte-for-byte, no BASE_URL left behind.
+        unlocked = cli("unlock", "--env", str(env_file))
+        assert unlocked.returncode == 0, f"unlock failed: {unlocked.stdout}\n{unlocked.stderr}"
+        assert env_file.read_bytes() == original_bytes
+        assert "OPENROUTER_BASE_URL" not in env_file.read_text()
+
+        home = WorthlessHome(base_dir=worthless_home)
+        assert list(home.shard_a_dir.iterdir()) == []
 
 
 # ---------------------------------------------------------------------------
