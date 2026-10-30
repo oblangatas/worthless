@@ -210,12 +210,15 @@ ignore:
   #
   # RE-MEASURED 2026-10-05 on the REPINNED image (Python 3.13.16), not carried
   # over from the entry above: 11 compiled extensions, 0 linking libstdc++,
-  # interpreter 0.
+  # interpreter 0. RE-MEASURED again 2026-10-30 on Python 3.13.18 (#750),
+  # amd64 and arm64, with `ldd` over every site-packages .so and the
+  # interpreter: same result, and gcc-14-base, libgcc-s1 and libstdc++6 are
+  # still at 14.2.0-19.
   - vulnerability: CVE-2026-95619
     package:
       type: deb
       version: 14.2.0-19
-    reason: "Integer overflow in libstdc++'s aligned operator new: a large request wraps to an undersized allocation, so the caller writes past the block. Hits gcc-14-base, libgcc-s1 and libstdc++6. Debian has no fix in any release (gcc-12/14/15/16 all vulnerable, unfixed — tracker read 2026-10-05). Re-measured 2026-10-05 inside the repinned image (Python 3.13.16): 11 compiled extensions, none linking libstdc++, and the interpreter does not link it either. operator new is the C++ allocation operator and no Worthless code is C++; the gcc runtime is present only because the base image ships it. Tracking worthless-11ix. SCOPE: pinned to `type: deb` at version 14.2.0-19 rather than by package name, because `libstdc++6` contains a `+` that grype treats as a regex and this repo's expiry hook rejects. Measured by contrast that grype honours the version: the rule at 14.2.0-19 suppressed 3 of 3 matches, at 99.9.9-99 it suppressed 0 of 3. Both gates honour the version: grype by its own matching, and check_grype_unmapped_findings because `version` is carried into the scope and compared there too — without that the pin bound nothing on the gate that actually blocks, since the grype step runs only-fixed and never sees a not-fixed finding. Residual breadth: this still covers any Debian package at exactly 14.2.0-19, which today is only the three gcc-14 binaries reported, but would silently cover a future gcc-14-sourced addition."
+    reason: "Integer overflow in libstdc++'s aligned operator new: a large request wraps to an undersized allocation, so the caller writes past the block. Hits gcc-14-base, libgcc-s1 and libstdc++6. Debian has no fix in any release (gcc-12/14/15/16 all vulnerable, unfixed — tracker read 2026-10-05). Re-measured 2026-10-05 inside the repinned image (Python 3.13.16) and again 2026-10-30 on Python 3.13.18 (amd64 and arm64): 11 compiled extensions, none linking libstdc++, and the interpreter does not link it either. operator new is the C++ allocation operator and no Worthless code is C++; the gcc runtime is present only because the base image ships it. Tracking worthless-11ix. SCOPE: pinned to `type: deb` at version 14.2.0-19 rather than by package name, because `libstdc++6` contains a `+` that grype treats as a regex and this repo's expiry hook rejects. Measured by contrast that grype honours the version: the rule at 14.2.0-19 suppressed 3 of 3 matches, at 99.9.9-99 it suppressed 0 of 3. Both gates honour the version: grype by its own matching, and check_grype_unmapped_findings because `version` is carried into the scope and compared there too — without that the pin bound nothing on the gate that actually blocks, since the grype step runs only-fixed and never sees a not-fixed finding. Residual breadth: this still covers any Debian package at exactly 14.2.0-19, which today is only the three gcc-14 binaries reported, but would silently cover a future gcc-14-sourced addition."
     expiry: "2027-01-31"
 
   # CVE-2026-82049 (CPython tarfile extraction filters) was suppressed here
