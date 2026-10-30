@@ -2,8 +2,7 @@ name: Live OpenRouter round-trip
 
 # The only automatic run of a real provider round-trip: lock a real OpenRouter
 # key, call through the proxy, prove the value left in .env is rejected by
-# OpenRouter, unlock. Every other lane excludes `-m live`. A fraction of a cent
-# per run.
+# OpenRouter, unlock. Every other lane excludes `-m live`.
 #
 # Its own workflow, not a job in scheduled.yml: the failure alarm keeps one
 # issue per workflow, and an OpenRouter outage, 429 or retired model must not
@@ -22,6 +21,10 @@ jobs:
     name: Live OpenRouter round-trip
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # The key lives in this environment, not as a repo secret, so only
+    # branches its deployment rule allows (main) can read it. Every dependency
+    # and conftest runs in the process that holds it.
+    environment: openrouter-live
 
     steps:
       - name: Check out repository
@@ -41,14 +44,16 @@ jobs:
       # Without the secret the test skips and pytest exits 0 — a green run that
       # proved nothing. Fail instead, so a missing secret is visible.
       # --reruns 0: a rerun doubles the spend and lets a flaky upstream pass.
+      # --timeout-method=signal: under -n0 the default `thread` kills pytest
+      # itself, leaving a red run with no report.
       - name: Run live OpenRouter test
         env:
           UV_CACHE_DIR: /tmp/uv-cache
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
           if [ -z "$OPENROUTER_API_KEY" ]; then
-            echo "::error::OPENROUTER_API_KEY repo secret is not set"
+            echo "::error::OPENROUTER_API_KEY is not set in the openrouter-live environment"
             exit 1
           fi
-          uv run --no-sync pytest tests/live/test_e2e_live.py -m live -k openrouter \
-            -n0 --reruns 0 --no-header -q -rs
+          uv run --no-sync pytest "tests/live/test_e2e_live.py::TestOpenRouterLive" -m live \
+            -n0 --timeout-method=signal --reruns 0 --no-header -q -rs
