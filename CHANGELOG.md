@@ -38,6 +38,14 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - An existing install keeps the msgpack it has until you upgrade Worthless.
   - Decoding still costs far more memory than the message size: one 5 KB malformed message peaks at about 80 MiB, and a valid 1 MB message of empty lists costs about 68 MiB on any msgpack version. Tighter decoder limits are tracked in WOR-1075.
   - A process the sidecar accepts can still hold its memory by opening many connections and stalling half-sent 1 MiB frames (WOR-1076).
+- **The Docker image runs Python 3.13.18, which refuses TLS connections through the compromised eMudhra intermediate CA keys and fixes a way to write files outside the target folder when unpacking a tar archive** (CVE-2026-115557, CVE-2026-114583, [#750](https://github.com/oblangatas/worthless/pull/750)).
+  Before: the image ran Python 3.13.16. Several eMudhra intermediate CA keys were disclosed as compromised in October 2026, and a certificate chain through one of them verifies for as long as its issuing root is trusted. The proxy's calls to your provider, which carry your real key, are verified TLS connections that use the certifi bundle by default, and the image's bundle (certifi 2026.10.23) had already dropped the affected eMudhra root. So in the image this fix is a backstop: it also blocks cross-signed copies of those keys, and it holds when `SSL_CERT_FILE` or `SSL_CERT_DIR` points at an older bundle. Separately, `tarfile`'s `filter="tar"` could be bypassed with crafted link entries, so extracting a hostile archive could write outside the target folder. Worthless never extracts archives, so that flaw sat in the interpreter only.
+  Now: the image is built on `python:3.13-slim-trixie` 3.13.18. Its `ssl` module rejects any chain containing one of those keys whenever certificate verification is on, as it always is for the proxy's calls to your provider.
+
+  **Limits.**
+  - This changes the Docker image only. An install outside Docker runs on the Python it was installed with, which needs 3.11.18, 3.12.16, 3.13.18, 3.14.10 or 3.15.2 (or a later release in the same series) for the eMudhra denylist. Python 3.10 has no fixed release: move to 3.11.18 or later, or at least use certifi 2026.10.18 or later, which leaves out the affected root.
+  - The denylist covers only those eMudhra keys. It isn't general certificate revocation checking.
+  - The image still has about 70 known bugs with no fix yet (about 160 package matches), all but two in Debian packages and most marked won't-fix by Debian. The scan doesn't block on those unless one is High or Critical, not marked won't-fix, and not argued in `.grype.yaml`.
 
 ### Fixed
 - **`worthless lock` accepts a `*_BASE_URL` line with no value** (WOR-1041, [#740](https://github.com/oblangatas/worthless/pull/740)).

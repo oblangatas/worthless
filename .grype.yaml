@@ -114,9 +114,11 @@ ignore:
   # tree mid-cleanup swaps a directory for a symlink, so files OUTSIDE the
   # temp dir get deleted, or their permissions and flags reset.
   #
-  # Grype lists the fix as 3.15.0. That is not a stable release, and the
-  # advisory records no 3.13 backport, so there is nowhere to upgrade — the
-  # base image already runs 3.13.16, the newest 3.13 there is.
+  # Grype lists the fix as 3.15.0. 3.15 has been stable since 2026-10-09,
+  # but the image can't leave 3.13 yet (see the CVE-2026-82049 note below),
+  # and the advisory records no 3.13 backport, so there is nowhere to
+  # upgrade — the base image already runs 3.13.18 (repinned 2026-10-30), the
+  # newest 3.13 there is.
   #
   # MEASURED 2026-10-05 against the built image, not asserted:
   #   1. `tempfile.TemporaryDirectory` — the vulnerable class — appears
@@ -125,9 +127,9 @@ ignore:
   #   2. We do call shutil.rmtree on mkdtemp dirs (openclaw/skill.py,
   #      cli/sidecar_lifecycle.py), which is the same underlying path the
   #      advisory names. In this image that path is the SAFE one:
-  #      shutil.rmtree.avoids_symlink_attacks is True on Linux 3.13.16,
-  #      read from inside the container. The advisory's own caveat applies
-  #      only where that flag is False.
+  #      shutil.rmtree.avoids_symlink_attacks is True on Linux 3.13.16 and
+  #      3.13.18 (re-read 2026-10-30), read from inside the container. The
+  #      advisory's own caveat applies only where that flag is False.
   #   3. The residual on all platforms is file-flag reset, a BSD/macOS
   #      chflags concern that does not exist on this Linux image.
   #
@@ -138,7 +140,7 @@ ignore:
   # stable and worthless-jsx6 moves the base image.
   - vulnerability: CVE-2026-12345
     package: {name: python, type: binary}
-    reason: "Race in tempfile.TemporaryDirectory cleanup: a directory swapped for a symlink mid-cleanup deletes or re-permissions files outside the temp tree. Fix listed as 3.15.0, which is not stable, and no 3.13 backport exists — the image already runs 3.13.16, the newest 3.13. Measured 2026-10-05 on the built image: TemporaryDirectory appears zero times in src/ (worthless uses mkdtemp/mkstemp, which have no auto-cleanup finalizer), and where we do call shutil.rmtree on those dirs, shutil.rmtree.avoids_symlink_attacks reads True inside the container, which is the condition the advisory says removes the deletion attack. Remaining file-flag reset is a BSD/macOS chflags concern, absent on Linux. Tracking worthless-11ix."
+    reason: "Race in tempfile.TemporaryDirectory cleanup: a directory swapped for a symlink mid-cleanup deletes or re-permissions files outside the temp tree. Fix listed as 3.15.0; the image can't leave 3.13 yet (worthless-epnw), and no 3.13 backport exists — the image already runs 3.13.18 (repinned 2026-10-30), the newest 3.13. Measured 2026-10-05 on the built image: TemporaryDirectory appears zero times in src/ (worthless uses mkdtemp/mkstemp, which have no auto-cleanup finalizer), and where we do call shutil.rmtree on those dirs, shutil.rmtree.avoids_symlink_attacks reads True inside the container, which is the condition the advisory says removes the deletion attack. Remaining file-flag reset is a BSD/macOS chflags concern, absent on Linux. Tracking worthless-11ix."
     expiry: "2026-12-31"
 
   # ── libstdc++ erase_if, nothing here links it (worthless-11ix) ──────
@@ -208,12 +210,15 @@ ignore:
   #
   # RE-MEASURED 2026-10-05 on the REPINNED image (Python 3.13.16), not carried
   # over from the entry above: 11 compiled extensions, 0 linking libstdc++,
-  # interpreter 0.
+  # interpreter 0. RE-MEASURED again 2026-10-30 on Python 3.13.18 (#750),
+  # amd64 and arm64, with `ldd` over every site-packages .so and the
+  # interpreter: same result, and gcc-14-base, libgcc-s1 and libstdc++6 are
+  # still at 14.2.0-19.
   - vulnerability: CVE-2026-95619
     package:
       type: deb
       version: 14.2.0-19
-    reason: "Integer overflow in libstdc++'s aligned operator new: a large request wraps to an undersized allocation, so the caller writes past the block. Hits gcc-14-base, libgcc-s1 and libstdc++6. Debian has no fix in any release (gcc-12/14/15/16 all vulnerable, unfixed — tracker read 2026-10-05). Re-measured 2026-10-05 inside the repinned image (Python 3.13.16): 11 compiled extensions, none linking libstdc++, and the interpreter does not link it either. operator new is the C++ allocation operator and no Worthless code is C++; the gcc runtime is present only because the base image ships it. Tracking worthless-11ix. SCOPE: pinned to `type: deb` at version 14.2.0-19 rather than by package name, because `libstdc++6` contains a `+` that grype treats as a regex and this repo's expiry hook rejects. Measured by contrast that grype honours the version: the rule at 14.2.0-19 suppressed 3 of 3 matches, at 99.9.9-99 it suppressed 0 of 3. Both gates honour the version: grype by its own matching, and check_grype_unmapped_findings because `version` is carried into the scope and compared there too — without that the pin bound nothing on the gate that actually blocks, since the grype step runs only-fixed and never sees a not-fixed finding. Residual breadth: this still covers any Debian package at exactly 14.2.0-19, which today is only the three gcc-14 binaries reported, but would silently cover a future gcc-14-sourced addition."
+    reason: "Integer overflow in libstdc++'s aligned operator new: a large request wraps to an undersized allocation, so the caller writes past the block. Hits gcc-14-base, libgcc-s1 and libstdc++6. Debian has no fix in any release (gcc-12/14/15/16 all vulnerable, unfixed — tracker read 2026-10-05). Re-measured 2026-10-05 inside the repinned image (Python 3.13.16) and again 2026-10-30 on Python 3.13.18 (amd64 and arm64): 11 compiled extensions, none linking libstdc++, and the interpreter does not link it either. operator new is the C++ allocation operator and no Worthless code is C++; the gcc runtime is present only because the base image ships it. Tracking worthless-11ix. SCOPE: pinned to `type: deb` at version 14.2.0-19 rather than by package name, because `libstdc++6` contains a `+` that grype treats as a regex and this repo's expiry hook rejects. Measured by contrast that grype honours the version: the rule at 14.2.0-19 suppressed 3 of 3 matches, at 99.9.9-99 it suppressed 0 of 3. Both gates honour the version: grype by its own matching, and check_grype_unmapped_findings because `version` is carried into the scope and compared there too — without that the pin bound nothing on the gate that actually blocks, since the grype step runs only-fixed and never sees a not-fixed finding. Residual breadth: this still covers any Debian package at exactly 14.2.0-19, which today is only the three gcc-14 binaries reported, but would silently cover a future gcc-14-sourced addition."
     expiry: "2027-01-31"
 
   # CVE-2026-82049 (CPython tarfile extraction filters) was suppressed here
@@ -225,7 +230,13 @@ ignore:
   # (nothing EXTRACTS archives; tarfile is imported via keyring ->
   # jaraco.context but jaraco.context.tarball has no callers) is preserved
   # in tests/test_archive_reachability.py, which still guards the three
-  # older tarfile CVEs below.
+  # older tarfile suppressions below (grype no longer matches them on the
+  # shipped image; WOR-1096 decides whether they go). Its second block
+  # (deleted 2026-10-30, #750) recorded why the image is not on 3.14, and
+  # that still holds, for 3.15 too: 3.14's
+  # pathlib swallows EACCES in Path.is_file(), so an unreadable credential
+  # surface reports clean with no caveat (worthless-epnw), and the
+  # Dockerfile copies the python3.13 site-packages path by name.
 
 
   - vulnerability: CVE-2026-15806
@@ -276,43 +287,6 @@ ignore:
       type: deb
     reason: "Pod::Text <6.1.1 CPU/memory exhaustion when formatting an attacker-supplied POD document. THE MODULE IS NOT IN THE IMAGE: measured 2026-09-27, only perl-base is installed (no perl-modules-5.40), `find / -name Text.pm -path '*Pod*'` is empty, and perldoc/pod2text do not exist. Grype matched the perl-base version, not vulnerable code on disk. Debian fix=not-fixed, so there is nothing to upgrade to. Re-measure by re-running those commands; this dies when perl-modules appears. Tracking WOR-934."
     expiry: "2026-12-31"  # no fix exists; re-measure for a fixed perl-base, do not blind-extend.
-
-  # ── CPython tarfile, base-image only — A FIX EXISTS (WOR-934) ───────
-  # Read this one differently from every other entry in this file. The others
-  # are waivers because there is nowhere to upgrade to. This one is a DELAY:
-  # the fix is real, shipped, and stable, and we are not taking it yet.
-  #
-  # MEASURED 2026-09-26 (grype 0.118.0), bases pulled fresh:
-  #
-  #   python:3.13-slim-trixie  3.13.15  present   <- the base this image uses
-  #   python:3.14-slim-trixie  3.14.7   ABSENT
-  #   python:3.14-slim         3.14.7   ABSENT
-  #
-  # Why we are not on 3.14 today, measured the same day:
-  #   1. The suite fails there. unshardable_credentials.py relies on
-  #      Path.is_file() raising for EACCES to record a "could not be checked"
-  #      caveat; 3.14's pathlib swallows it, so an unreadable credential
-  #      surface reports CLEAN with no caveat — the false all-clear that
-  #      module exists to prevent (1 failed / 1136 passed, worthless-epnw P1).
-  #      Taking the fix today trades a CVE we do not call for a regression in
-  #      a guarantee we advertise.
-  #   2. The Dockerfile copies /usr/local/lib/python3.13/site-packages, so a
-  #      3.14 image does not build until that path moves too.
-  #
-  # Reachability: worthless calls no tarfile/unpack_archive/extract API at all
-  # (grep of src/ on 2026-09-26 is empty). This is the interpreter we ship
-  # inside the image, not a path our code takes. That argument is a grep taken
-  # on one day — it is not enforced by anything, so re-check it, do not
-  # inherit it.
-  #
-  # THIRTY DAYS, not the bulk date. A fix exists; the clock should hurt.
-  # WOR-934 (due 2026-10-27) carries the bump. DELETE this entry then.
-  - vulnerability: CVE-2026-82049
-    package:
-      name: python
-      type: binary
-    reason: "DELAY, not a dead end: Python 3.14.7 IS fixed. Measured 2026-09-26 — python:3.13-slim-trixie 3.13.15 affected, python:3.14-slim-trixie and python:3.14-slim 3.14.7 both clean. Not taken yet because the suite fails on 3.14 (worthless-epnw: an unreadable credential surface is reported clean with no caveat) and the Dockerfile hardcodes the python3.13 site-packages path. Base-image interpreter only; worthless calls no tarfile API. Tracking WOR-934, due 2026-10-27."
-    expiry: "2026-10-27"  # matches WOR-934's due date on purpose. Do not extend — fix it.
 
   # ── CPython tarfile, base-image only (WOR-852 Track B) ──────────────
   # All three are tarfile bugs in the digest-pinned python:3.13-slim-bookworm
