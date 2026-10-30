@@ -52,6 +52,7 @@ on:  # zizmor: ignore[dangerous-triggers]
     workflows:
       - "Docker Security Scan & E2E"
       - "Flake radar (nightly)"
+      - "Live OpenRouter round-trip"
       - "macOS service"
       - "Pip-audit canary (weekly)"
       - "Release Sync Check"
