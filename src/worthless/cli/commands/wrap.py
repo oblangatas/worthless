@@ -29,6 +29,7 @@ import aiosqlite
 import typer
 
 from worthless._async import run_sync
+from worthless._flags import WORTHLESS_SIDECAR_UID_ENV
 from worthless.cli.bootstrap import WorthlessHome, get_home
 from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary, sanitize_exception
 from worthless.cli.platform import fail_if_windows, popen_platform_kwargs
@@ -300,6 +301,7 @@ def register_wrap_commands(app: typer.Typer) -> None:
             # Build proxy environment with the sidecar socket path threaded in.
             proxy_env = build_proxy_env(home)
             proxy_env["WORTHLESS_SIDECAR_SOCKET"] = str(sidecar.socket_path)
+            proxy_env[WORTHLESS_SIDECAR_UID_ENV] = str(sidecar.sidecar_uid)
 
             # In IPC-only mode the sidecar holds the Fernet key; the proxy
             # must NOT receive it in its environment. Defense in depth — the

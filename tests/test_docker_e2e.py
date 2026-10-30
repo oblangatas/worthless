@@ -9,6 +9,7 @@ Run with:
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -479,6 +480,90 @@ class TestBuild:
             f"10002 (crypto), saw uids {sorted(uids_seen)}.\n"
             f"full /proc walk:\n{result.stdout}"
         )
+
+
+# Runs inside the container as worthless-proxy (10001). It serves its own
+# socket, so the kernel reports 10001 for it: the uid of the proxy, not of the
+# sidecar (10002), which is exactly the impostor WOR-1078 is about. The
+# impostor answers hello like a real sidecar and keeps any plaintext a seal
+# hands it, then the same client talks to the real sidecar.
+_IMPOSTOR_PROBE = r"""
+import asyncio, json, os
+from worthless.ipc.client import IPCAuthError, IPCClient
+from worthless.ipc.framing import encode_frame, read_frame
+
+SECRET = b"wor-1078-plaintext-for-the-impostor"
+IMPOSTOR = "/tmp/wor-1078-impostor.sock"
+
+async def main():
+    seen = {"connections": 0, "frames": 0, "plaintext_seen": False}
+
+    async def impostor(reader, writer):
+        seen["connections"] += 1
+        try:
+            while True:
+                frame = await read_frame(reader)
+                seen["frames"] += 1
+                if (frame.get("body") or {}).get("plaintext") == SECRET:
+                    seen["plaintext_seen"] = True
+                writer.write(encode_frame({
+                    "v": 1, "id": frame.get("id"), "kind": "resp", "op": frame.get("op"),
+                    "body": {"version": 1, "backend_caps": ["seal", "open"], "ciphertext": b"ct"},
+                }))
+                await writer.drain()
+        except Exception:
+            pass
+        finally:
+            writer.close()
+
+    server = await asyncio.start_unix_server(impostor, path=IMPOSTOR)
+    try:
+        async with IPCClient(IMPOSTOR, timeout=1.0) as client:
+            await client.seal(SECRET)
+        seen["impostor"] = "accepted"
+    except IPCAuthError as exc:
+        seen["impostor"] = "refused"
+        seen["reason"] = str(exc)
+    await asyncio.sleep(0.2)
+    server.close()
+
+    async with IPCClient(os.environ["WORTHLESS_SIDECAR_SOCKET"], timeout=2.0) as client:
+        seen["real_sidecar_roundtrip"] = await client.open(await client.seal(b"ok")) == b"ok"
+    seen["uid"] = os.getuid()
+    seen["expected_sidecar_uid"] = os.environ.get("WORTHLESS_SIDECAR_UID")
+    print(json.dumps(seen))
+
+asyncio.run(main())
+"""
+
+
+class TestSidecarAuthentication:
+    """WOR-1078 on a real kernel: two real uids, no test-side uid forcing."""
+
+    def test_proxy_uid_refuses_an_impostor_socket_and_keeps_its_sidecar(
+        self, container: tuple[str, int]
+    ) -> None:
+        """A socket served by any uid but worthless-crypto never gets a seal plaintext.
+
+        The image's ENV tells clients the sidecar runs as 10002. The impostor is
+        served by 10001, so the client must refuse it before sending a frame,
+        and still complete a seal/open round-trip with the real sidecar.
+        """
+        name, _ = container
+        result = _run(
+            ["docker", "exec", "-u", "10001:10001", name, "python", "-c", _IMPOSTOR_PROBE]
+        )
+        seen = json.loads(result.stdout.strip().splitlines()[-1])
+
+        assert seen["uid"] == 10001
+        assert seen["expected_sidecar_uid"] == "10002"
+        assert seen["impostor"] == "refused", seen
+        assert "not served by the sidecar uid 10002" in seen["reason"]
+        assert "peer uid 10001" in seen["reason"]
+        assert seen["connections"] == 1
+        assert seen["frames"] == 0, f"client sent {seen['frames']} frame(s) to the impostor"
+        assert seen["plaintext_seen"] is False
+        assert seen["real_sidecar_roundtrip"] is True
 
 
 # ===================================================================
@@ -1113,6 +1198,9 @@ class TestLockWrapE2E:
         assert output.startswith("STATUS="), (
             f"Request did not reach proxy. Expected STATUS=<code>, got: {output}"
         )
+        # Except 503: that is the proxy saying it can't reach its sidecar, for
+        # example because it refused a socket served by the wrong uid (WOR-1078).
+        assert output != "STATUS=503", "proxy answered 503: it couldn't reach its sidecar"
 
     def test_wrap_inside_daemon_container_is_rejected(self, container: tuple[str, int]) -> None:
         """v0.3.4 contract: ``worthless wrap`` inside a ``worthless up`` container

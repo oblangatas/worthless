@@ -31,6 +31,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEPLOY_DIR = REPO_ROOT / "deploy"
 DOCKERFILE = REPO_ROOT / "Dockerfile"
+SIDECAR_DOCKERFILE = REPO_ROOT / "docker" / "sidecar" / "Dockerfile"
 COMPOSE_FILE = DEPLOY_DIR / "docker-compose.yml"
 ENV_EXAMPLE = DEPLOY_DIR / "docker-compose.env.example"
 ENTRYPOINT = DEPLOY_DIR / "entrypoint.sh"
@@ -1075,6 +1076,28 @@ class TestDockerfile:
     def test_pythondontwritebytecode(self, dockerfile_text: str):
         """PYTHONDONTWRITEBYTECODE must be set to avoid .pyc files on read-only fs."""
         assert "PYTHONDONTWRITEBYTECODE=1" in dockerfile_text
+
+    @pytest.mark.parametrize(
+        "dockerfile", [DOCKERFILE, SIDECAR_DOCKERFILE], ids=["proxy-image", "sidecar-prototype"]
+    )
+    def test_sidecar_uid_env_is_the_crypto_users_uid(self, dockerfile: Path):
+        """WOR-1078: clients refuse a sidecar socket served by any uid but this one.
+
+        The HEALTHCHECK, ``docker exec`` CLI calls and the smoke client never
+        pass through ``deploy/start.py``, so the image ENV is how they learn
+        the sidecar's uid. It must be the uid ``useradd`` gives worthless-crypto,
+        the user the sidecar runs as.
+        """
+        text = dockerfile.read_text()
+        crypto = re.search(
+            r"useradd [^\n]*-u (\d+) [^\n]* worthless-crypto \\?$", text, re.MULTILINE
+        )
+        assert crypto, f"no useradd line for worthless-crypto in {dockerfile}"
+        env = re.search(r"^\s*(?:ENV\s+)?WORTHLESS_SIDECAR_UID=(\d+)\b", text, re.MULTILINE)
+        assert env, f"{dockerfile} must set WORTHLESS_SIDECAR_UID in its ENV"
+        assert env.group(1) == crypto.group(1), (
+            f"WORTHLESS_SIDECAR_UID={env.group(1)} but worthless-crypto is uid {crypto.group(1)}"
+        )
 
 
 # ------------------------------------------------------------------

@@ -27,6 +27,11 @@ WORTHLESS_FERNET_IPC_ONLY_ENV = "WORTHLESS_FERNET_IPC_ONLY"
 #: ``proxy.config.DEFAULT_SIDECAR_SOCKET_PATH`` at the call site.
 WORTHLESS_SIDECAR_SOCKET_ENV = "WORTHLESS_SIDECAR_SOCKET"
 
+#: Env var for the uid the sidecar runs as. IPC clients refuse a socket served
+#: by any other uid (WOR-1078). Unset means "same uid as this process", the
+#: single-uid local install; the Docker image sets the worthless-crypto uid.
+WORTHLESS_SIDECAR_UID_ENV = "WORTHLESS_SIDECAR_UID"
+
 
 def ipc_mode_active() -> bool:
     """True when this process should route Fernet operations via the sidecar IPC.
