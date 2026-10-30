@@ -89,7 +89,14 @@ This does not protect you from:
   - `pip`: `pip install --upgrade --upgrade-strategy eager "worthless==<version>"`. Plain `--upgrade` changes a dependency only when worthless's minimum requires it.
   - `uvx`: `uvx --refresh "worthless@<version>"`, or `uvx worthless@latest`, which also takes the newest worthless.
 
-  Unlike `install.sh`, these commands read your own uv or pip configuration, including any package index it names. `install.sh` ignores uv's config files and index variables; to do the same, run the `uv` command with `UV_NO_CONFIG=1` and none of `UV_INDEX`, `UV_INDEX_URL`, `UV_DEFAULT_INDEX` or `UV_EXTRA_INDEX_URL` set.
+  Unlike `install.sh`, these commands read your own uv or pip configuration, including any package index it names. `install.sh` ignores uv's config files and clears the variables that choose where packages come from. To refresh the same way:
+
+  ```bash
+  env -u UV_INDEX -u UV_INDEX_URL -u UV_DEFAULT_INDEX -u UV_EXTRA_INDEX_URL -u UV_INDEX_STRATEGY \
+      -u UV_FIND_LINKS -u UV_CONFIG_FILE UV_NO_CONFIG=1 uv tool install --upgrade "worthless==<version>"
+  ```
+
+  `install.sh` clears more than these, such as TLS and proxy overrides: the full list is the `unset` near the top of `install.sh`.
 
 **Why we don't publish a constraints file.** `install.sh` could pass the versions in `uv.lock` to `uv tool install --constraints`. We don't, because:
 

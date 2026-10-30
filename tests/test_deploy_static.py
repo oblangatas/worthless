@@ -177,11 +177,11 @@ def _instructions(dockerfile_text: str) -> str:
 def _run_commands(dockerfile_text: str) -> list[str]:
     """Each `&&`-joined shell command the Dockerfile's RUN instructions execute.
 
-    Exec-form and heredoc RUN can't be split this way, so they are refused, not
-    skipped.
+    Exec-form RUN, and a heredoc anywhere in a RUN (`RUN sh <<EOF` too), can't
+    be split this way, so they are refused, not skipped.
     """
     text = _instructions(dockerfile_text)
-    hidden = re.findall(r"^RUN\s+(?:--\S+\s+)*(\[|<<)", text, re.M | re.I)
+    hidden = re.findall(r"^RUN\s+(?:--\S+\s+)*\[|^RUN\s[^\n]*<<", text, re.M | re.I)
     assert not hidden, "exec-form or heredoc RUN hides its commands from this parser"
     commands: list[str] = []
     for match in re.finditer(r"^RUN\s+(.*)$", text, re.M | re.I):
@@ -1133,7 +1133,8 @@ class TestDockerfile:
         stages = {alias for _, alias in re.findall(image + r"\s+AS\s+(\S+)", text, re.M | re.I)}
         refs = re.findall(image, text, re.M | re.I)
         refs += re.findall(r"^COPY\s[^\n]*--from=(\S+)", text, re.M | re.I)
-        refs += re.findall(r"^RUN\s[^\n]*--mount=\S*\bfrom=([^,\s]+)", text, re.M | re.I)
+        for run in re.findall(r"^RUN\s([^\n]*)", text, re.M | re.I):
+            refs += re.findall(r"--mount=\S*?\bfrom=([^,\s]+)", run)
         external = [r for r in refs if r not in stages]
         assert external, "no external images found; did the parsing break?"
         for ref in external:
@@ -2919,6 +2920,21 @@ GUARD_MUTATIONS = [
         "Dockerfile",
         "COPY --from=ghcr.io/astral-sh/uv:",
         "COPY --chown=0:0 \\\n    --from=ghcr.io/astral-sh/uv:latest #",
+        "test_external_images_are_digest_pinned",
+    ),
+    (
+        "a heredoc after a command runs an install the parser can't see",
+        "Dockerfile",
+        "    && pip check\n",
+        "    && pip check\nRUN /bin/sh <<EOF\npip3 install --no-cache-dir requests\nEOF\n",
+        "test_builder_installs_exactly_the_audited_lock",
+    ),
+    (
+        "an unpinned image in the first of two RUN mounts",
+        "Dockerfile",
+        "RUN pip install --no-cache-dir --no-deps .",
+        "RUN --mount=type=bind,from=alpine:latest,target=/x"
+        " --mount=type=cache,from=builder,target=/y pip install --no-cache-dir --no-deps .",
         "test_external_images_are_digest_pinned",
     ),
 ]
