@@ -226,7 +226,8 @@ ignore:
   # (nothing EXTRACTS archives; tarfile is imported via keyring ->
   # jaraco.context but jaraco.context.tarball has no callers) is preserved
   # in tests/test_archive_reachability.py, which still guards the three
-  # older tarfile CVEs below. Its second block (deleted 2026-10-30, #750)
+  # older tarfile suppressions below (grype no longer matches them on the
+  # shipped image; WOR-1096 decides whether they go). Its second block (deleted 2026-10-30, #750)
   # recorded why the image is not on 3.14, and that still holds: 3.14's
   # pathlib swallows EACCES in Path.is_file(), so an unreadable credential
   # surface reports clean with no caveat (worthless-epnw), and the

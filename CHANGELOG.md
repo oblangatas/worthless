@@ -38,13 +38,14 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - An existing install keeps the msgpack it has until you upgrade Worthless.
   - Decoding still costs far more memory than the message size: one 5 KB malformed message peaks at about 80 MiB, and a valid 1 MB message of empty lists costs about 68 MiB on any msgpack version. Tighter decoder limits are tracked in WOR-1075.
   - A process the sidecar accepts can still hold its memory by opening many connections and stalling half-sent 1 MiB frames (WOR-1076).
-- **The Docker image runs Python 3.13.18, which rejects known-compromised TLS certificates and fixes a way to write files outside the target folder when unpacking a tar archive** (CVE-2026-115557, CVE-2026-114583, [#750](https://github.com/oblangatas/worthless/pull/750)).
-  Before: the image ran Python 3.13.16. Its `ssl` module had no list of certificates known to be compromised, so unless certificate revocation checking was configured, a TLS connection could be accepted on one of them. The proxy's calls to your provider, which carry your real key, go through that module. Separately, `tarfile`'s `filter="tar"` could be bypassed with crafted link entries, so extracting a hostile archive could write outside the target folder. Worthless never extracts archives, so that flaw sat in the interpreter only.
-  Now: the image is built on `python:3.13-slim-trixie` 3.13.18, which rejects those certificates whatever the TLS settings.
+- **The Docker image runs Python 3.13.18, which refuses TLS connections through the compromised eMudhra intermediate CA keys and fixes a way to write files outside the target folder when unpacking a tar archive** (CVE-2026-115557, CVE-2026-114583, [#750](https://github.com/oblangatas/worthless/pull/750)).
+  Before: the image ran Python 3.13.16. Several eMudhra intermediate CA keys were disclosed as compromised in October 2026, and until root stores drop them, a certificate chain through one of those keys still verifies. The proxy's calls to your provider, which carry your real key, are verified TLS connections. Separately, `tarfile`'s `filter="tar"` could be bypassed with crafted link entries, so extracting a hostile archive could write outside the target folder. Worthless never extracts archives, so that flaw sat in the interpreter only.
+  Now: the image is built on `python:3.13-slim-trixie` 3.13.18. Its `ssl` module rejects any chain containing one of those keys whenever certificate verification is on, as it always is for the proxy's calls to your provider.
 
   **Limits.**
-  - This changes the Docker image only. An install outside Docker runs on the Python it was installed with, which needs 3.11.18, 3.12.16, 3.13.18, 3.14.10 or later for the certificate list.
-  - The image still carries about 160 Python and Debian bugs that have no fix yet, most of them ones Debian has marked won't-fix. The scan doesn't block on those unless one is High or Critical, not marked won't-fix, and not argued in `.grype.yaml`.
+  - This changes the Docker image only. An install outside Docker runs on the Python it was installed with, which needs 3.11.18, 3.12.16, 3.13.18, 3.14.10 or later for the eMudhra denylist. Python 3.10 has no fixed release, so move to 3.11.18 or later.
+  - The denylist covers only those eMudhra keys. It isn't general certificate revocation checking.
+  - The image still has about 70 known bugs with no fix yet (about 160 package matches), all but two in Debian packages and most marked won't-fix by Debian. The scan doesn't block on those unless one is High or Critical, not marked won't-fix, and not argued in `.grype.yaml`.
 
 ### Fixed
 - **`worthless lock` accepts a `*_BASE_URL` line with no value** (WOR-1041, [#740](https://github.com/oblangatas/worthless/pull/740)).

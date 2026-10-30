@@ -1,11 +1,12 @@
 """Guard the reachability argument that three .grype.yaml suppressions rest on.
 
-WOR-852. The image carries three CPython ``tarfile`` CVEs — CVE-2026-11940,
-CVE-2026-11972 and CVE-2026-4360 — and all three are suppressed on one claim:
+WOR-852. Three .grype.yaml suppressions for CPython ``tarfile`` CVEs —
+CVE-2026-11940, CVE-2026-11972 and CVE-2026-4360 — rest on one claim:
 nothing in ``src/worthless`` ever hands an archive to the stdlib. The proxy
-forwards JSON; it does not open tarballs. (A fourth, CVE-2026-82049, was
-suppressed on the same claim until Python 3.13.16 retired it; its entry is
-gone from .grype.yaml.)
+forwards JSON; it does not open tarballs. Grype no longer matches any of the
+three on the shipped image (3.13.16 or 3.13.18); whether to delete them is
+WOR-1096. A fourth, CVE-2026-82049, rested on the same claim until Python
+3.13.16 retired it; its entry is gone from .grype.yaml.
 
 SCOPE, stated because review found it assumed: this walks ``src/worthless``
 only. It says NOTHING about dependencies. That half of the argument rotted
