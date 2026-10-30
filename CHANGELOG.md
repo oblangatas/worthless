@@ -38,14 +38,13 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - An existing install keeps the msgpack it has until you upgrade Worthless.
   - Decoding still costs far more memory than the message size: one 5 KB malformed message peaks at about 80 MiB, and a valid 1 MB message of empty lists costs about 68 MiB on any msgpack version. Tighter decoder limits are tracked in WOR-1075.
   - A process the sidecar accepts can still hold its memory by opening many connections and stalling half-sent 1 MiB frames (WOR-1076).
-
-- **The Docker image runs Python 3.13.18, which closes a way around Python's safe tar-unpacking filter** (CVE-2026-114583, [#750](https://github.com/oblangatas/worthless/pull/750)).
-  Before: the image ran Python 3.13.16. In that version, `tarfile`'s `filter="tar"` could be bypassed with crafted link entries, so extracting a hostile archive could write files outside the target folder. Worthless never extracts archives, so its own code didn't reach this, but the interpreter in the image still had the flaw. The image scan that should have caught it had stopped running on 2026-10-27: an old waiver (CVE-2026-82049) had expired, and the expiry check fails the job before the scan starts. That waiver had been obsolete since the move to 3.13.16.
-  Now: the image is built on `python:3.13-slim-trixie` 3.13.18, the obsolete waiver is gone, and the scan runs on every PR again with no fixable Medium-or-worse findings.
+- **The Docker image runs Python 3.13.18, which rejects known-compromised TLS certificates and fixes a way to write files outside the target folder when unpacking a tar archive** (CVE-2026-115557, CVE-2026-114583, [#750](https://github.com/oblangatas/worthless/pull/750)).
+  Before: the image ran Python 3.13.16. Its `ssl` module had no list of certificates known to be compromised, so unless certificate revocation checking was configured, a TLS connection could be accepted on one of them. The proxy's calls to your provider, which carry your real key, go through that module. Separately, `tarfile`'s `filter="tar"` could be bypassed with crafted link entries, so extracting a hostile archive could write outside the target folder. Worthless never extracts archives, so that flaw sat in the interpreter only.
+  Now: the image is built on `python:3.13-slim-trixie` 3.13.18, which rejects those certificates whatever the TLS settings.
 
   **Limits.**
-  - The image still has Python and Debian bugs that have no fix yet. Each is argued and dated in `.grype.yaml`, for example CVE-2026-12345, a race in `TemporaryDirectory` cleanup.
-  - The scan blocks a pull request only for Medium-or-worse findings that have a fix. A finding with no fix blocks only if it's High or Critical, Debian hasn't marked it won't-fix, and `.grype.yaml` doesn't argue it.
+  - This changes the Docker image only. An install outside Docker runs on the Python it was installed with, which needs 3.11.18, 3.12.16, 3.13.18, 3.14.10 or later for the certificate list.
+  - The image still carries about 160 Python and Debian bugs that have no fix yet, most of them ones Debian has marked won't-fix. The scan doesn't block on those unless one is High or Critical, not marked won't-fix, and not argued in `.grype.yaml`.
 
 ### Fixed
 - **`worthless lock` accepts a `*_BASE_URL` line with no value** (WOR-1041, [#740](https://github.com/oblangatas/worthless/pull/740)).

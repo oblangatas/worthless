@@ -139,7 +139,7 @@ ignore:
   # stable and worthless-jsx6 moves the base image.
   - vulnerability: CVE-2026-12345
     package: {name: python, type: binary}
-    reason: "Race in tempfile.TemporaryDirectory cleanup: a directory swapped for a symlink mid-cleanup deletes or re-permissions files outside the temp tree. Fix listed as 3.15.0, which is not stable, and no 3.13 backport exists — the image already runs 3.13.16, the newest 3.13. Measured 2026-10-05 on the built image: TemporaryDirectory appears zero times in src/ (worthless uses mkdtemp/mkstemp, which have no auto-cleanup finalizer), and where we do call shutil.rmtree on those dirs, shutil.rmtree.avoids_symlink_attacks reads True inside the container, which is the condition the advisory says removes the deletion attack. Remaining file-flag reset is a BSD/macOS chflags concern, absent on Linux. Tracking worthless-11ix."
+    reason: "Race in tempfile.TemporaryDirectory cleanup: a directory swapped for a symlink mid-cleanup deletes or re-permissions files outside the temp tree. Fix listed as 3.15.0, which is not stable, and no 3.13 backport exists — the image already runs 3.13.18 (repinned 2026-10-30), the newest 3.13. Measured 2026-10-05 on the built image: TemporaryDirectory appears zero times in src/ (worthless uses mkdtemp/mkstemp, which have no auto-cleanup finalizer), and where we do call shutil.rmtree on those dirs, shutil.rmtree.avoids_symlink_attacks reads True inside the container, which is the condition the advisory says removes the deletion attack. Remaining file-flag reset is a BSD/macOS chflags concern, absent on Linux. Tracking worthless-11ix."
     expiry: "2026-12-31"
 
   # ── libstdc++ erase_if, nothing here links it (worthless-11ix) ──────
@@ -226,7 +226,11 @@ ignore:
   # (nothing EXTRACTS archives; tarfile is imported via keyring ->
   # jaraco.context but jaraco.context.tarball has no callers) is preserved
   # in tests/test_archive_reachability.py, which still guards the three
-  # older tarfile CVEs below.
+  # older tarfile CVEs below. Its second block (deleted 2026-10-30, #750)
+  # recorded why the image is not on 3.14, and that still holds: 3.14's
+  # pathlib swallows EACCES in Path.is_file(), so an unreadable credential
+  # surface reports clean with no caveat (worthless-epnw), and the
+  # Dockerfile copies the python3.13 site-packages path by name.
 
 
   - vulnerability: CVE-2026-15806
