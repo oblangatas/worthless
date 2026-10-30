@@ -39,6 +39,14 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - Decoding still costs far more memory than the message size: one 5 KB malformed message peaks at about 80 MiB, and a valid 1 MB message of empty lists costs about 68 MiB on any msgpack version. Tighter decoder limits are tracked in WOR-1075.
   - A process the sidecar accepts can still hold its memory by opening many connections and stalling half-sent 1 MiB frames (WOR-1076).
 
+- **The Docker image runs Python 3.13.18, which closes a way around Python's safe tar-unpacking filter** (CVE-2026-114583, [#750](https://github.com/oblangatas/worthless/pull/750)).
+  Before: the image ran Python 3.13.16. In that version, `tarfile`'s `filter="tar"` could be bypassed with crafted link entries, so extracting a hostile archive could write files outside the target folder. Worthless never extracts archives, so its own code didn't reach this, but the interpreter in the image still had the flaw. The image scan that should have caught it had stopped running on 2026-10-27: an old waiver (CVE-2026-82049) had expired, and the expiry check fails the job before the scan starts. That waiver had been obsolete since the move to 3.13.16.
+  Now: the image is built on `python:3.13-slim-trixie` 3.13.18, the obsolete waiver is gone, and the scan runs on every PR again with no fixable Medium-or-worse findings.
+
+  **Limits.**
+  - The image still has Python and Debian bugs that have no fix yet. Each is argued and dated in `.grype.yaml`, for example CVE-2026-12345, a race in `TemporaryDirectory` cleanup.
+  - The scan blocks a pull request only for Medium-or-worse findings that have a fix. A finding with no fix blocks only if it's High or Critical, Debian hasn't marked it won't-fix, and `.grype.yaml` doesn't argue it.
+
 ### Fixed
 - **`worthless lock` accepts a `*_BASE_URL` line with no value** (WOR-1041, [#740](https://github.com/oblangatas/worthless/pull/740)).
   Before: a `.env` with a name and no `=`, such as `OPENROUTER_BASE_URL` or `export OPENROUTER_BASE_URL`, on the line lock writes for a key made lock stop with WRTLS-199, an internal error. A name in quotes, such as `'OPENROUTER_BASE_URL'=https://openrouter.ai/api/v1`, did the same. Nothing changed: your `.env` kept its key, and lock left nothing in the Worthless database.
