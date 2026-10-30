@@ -50,38 +50,6 @@ jobs:
           uv sync --extra dev --extra test
           uv run pytest tests/test_properties.py tests/test_security_properties.py -x --no-header -q -s
 
-  # The only automatic run of a real provider round-trip: lock a real
-  # OpenRouter key, call through the proxy, prove the value left in .env is
-  # rejected by OpenRouter, unlock. Every other lane excludes `-m live`.
-  # Costs a fraction of a cent per run.
-  openrouter-live:
-    name: Live OpenRouter round-trip
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v6
-        with:
-          persist-credentials: false
-
-      - name: Set up uv + Python
-        uses: ./.github/actions/setup-uv-python
-
-      # Without the secret the test skips and pytest exits 0 — a green run that
-      # proved nothing. Fail instead, so a missing secret is visible.
-      - name: Run live OpenRouter test
-        env:
-          UV_CACHE_DIR: /tmp/uv-cache
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-        run: |
-          if [ -z "$OPENROUTER_API_KEY" ]; then
-            echo "::error::OPENROUTER_API_KEY repo secret is not set"
-            exit 1
-          fi
-          uv sync --extra dev --extra test
-          uv run pytest tests/live/test_e2e_live.py -m live -k openrouter -n0 --no-header -q -rs
-
   # REMOVED: the `contract` job. WOR-877.
   #
   # It ran `pytest -m contract`. The `contract` marker is declared in

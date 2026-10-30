@@ -277,22 +277,25 @@ class TestOpenRouterLive:
         parsed = dotenv_values(env_file)
         shard_a = parsed.get("OPENROUTER_API_KEY") or ""
         base_url = parsed.get("OPENROUTER_BASE_URL") or ""
-        assert original_key not in env_file.read_text()
+        # Asserts on .env contents compare booleans: pytest's assertion rewrite
+        # would otherwise print the real key or shard-A on failure.
+        key_left = original_key in env_file.read_text()
+        assert not key_left, "lock left the real key in .env"
         assert shard_a, "lock left no OPENROUTER_API_KEY in .env"
         assert base_url.startswith(f"http://127.0.0.1:{port}/"), (
             f"OPENROUTER_BASE_URL does not point at the proxy on port {port}"
         )
         assert base_url.endswith("/v1")
 
-        proxy = subprocess.Popen(  # noqa: S603
-            [binary, "up", "--port", port],
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
+        proxy_log = worthless_home.parent / "proxy.log"
+        with proxy_log.open("w") as log:
+            proxy = subprocess.Popen(  # noqa: S603
+                [binary, "up", "--port", port], env=env, stdout=log, stderr=subprocess.STDOUT
+            )
         try:
-            assert poll_health(int(port), timeout=30.0), "proxy never came up"
+            assert poll_health(int(port), timeout=30.0), (
+                f"proxy never came up:\n{proxy_log.read_text()[-2000:]}"
+            )
             with httpx.Client(headers={"accept-encoding": "identity"}, timeout=60.0) as client:
                 request = {
                     "model": "openai/gpt-4o-mini",
@@ -307,7 +310,8 @@ class TestOpenRouterLive:
                     headers={"Authorization": f"Bearer {shard_a}"},
                 )
                 assert resp.status_code == 200, (
-                    f"proxy call returned {resp.status_code}: {resp.text[:500]}"
+                    f"proxy call returned {resp.status_code}: {resp.text[:500]}\n"
+                    f"{proxy_log.read_text()[-2000:]}"
                 )
                 content = resp.json()["choices"][0]["message"]["content"]
                 assert content, "empty completion content"
@@ -331,8 +335,10 @@ class TestOpenRouterLive:
         # Unlock: .env comes back byte-for-byte, no BASE_URL left behind.
         unlocked = cli("unlock", "--env", str(env_file))
         assert unlocked.returncode == 0, f"unlock failed: {unlocked.stdout}\n{unlocked.stderr}"
-        assert env_file.read_bytes() == original_bytes
-        assert "OPENROUTER_BASE_URL" not in env_file.read_text()
+        restored = env_file.read_bytes() == original_bytes
+        assert restored, ".env was not restored byte-for-byte"
+        base_url_left = "OPENROUTER_BASE_URL" in env_file.read_text()
+        assert not base_url_left, "unlock left OPENROUTER_BASE_URL in .env"
 
         home = WorthlessHome(base_dir=worthless_home)
         assert list(home.shard_a_dir.iterdir()) == []
