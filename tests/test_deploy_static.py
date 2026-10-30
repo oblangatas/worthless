@@ -1134,7 +1134,7 @@ class TestDockerfile:
         refs = re.findall(image, text, re.M | re.I)
         refs += re.findall(r"^COPY\s[^\n]*--from=(\S+)", text, re.M | re.I)
         for run in re.findall(r"^RUN\s([^\n]*)", text, re.M | re.I):
-            refs += re.findall(r"--mount=\S*?\bfrom=([^,\s]+)", run)
+            refs += re.findall(r"--mount=\S*?\bfrom=([^,\s]+)", run, re.I)
         external = [r for r in refs if r not in stages]
         assert external, "no external images found; did the parsing break?"
         for ref in external:
@@ -2935,6 +2935,13 @@ GUARD_MUTATIONS = [
         "RUN pip install --no-cache-dir --no-deps .",
         "RUN --mount=type=bind,from=alpine:latest,target=/x"
         " --mount=type=cache,from=builder,target=/y pip install --no-cache-dir --no-deps .",
+        "test_external_images_are_digest_pinned",
+    ),
+    (
+        "an unpinned RUN mount image under an uppercase FROM= key, which BuildKit accepts",
+        "Dockerfile",
+        "RUN pip install --no-cache-dir --no-deps .",
+        "RUN --mount=type=bind,FROM=alpine:latest,target=/x pip install --no-cache-dir --no-deps .",
         "test_external_images_are_digest_pinned",
     ),
 ]
