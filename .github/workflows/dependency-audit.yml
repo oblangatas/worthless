@@ -26,6 +26,11 @@
 #     resolution of the lock, not the whole lock. Matrixing or stripping
 #     markers would close that; beads worthless-jymn carries the follow-up.
 #
+# WHAT REACHES USERS (WOR-1077). The Docker image installs exactly this lock
+# (docker-security.yml's `scan` checks the built image against it); install.sh,
+# pip and uvx don't read it. That contract, and what an advisory against a
+# runtime dependency needs, is in docs/install-security.md under "Dependencies".
+#
 # Keep the command byte-identical to the hook's `entry:`. Note that this is a
 # weaker guarantee than it sounds — identical strings still audit different
 # package sets on different interpreters, and the hook's `sh -c` has neither

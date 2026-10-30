@@ -1,14 +1,37 @@
 # NOTE: pin patch versions; update quarterly or on CVE.
 FROM python:3.13-slim-trixie@sha256:3dd7cc108ec1493442514f5c2a871af6af0ec31d768ff6e378a93340c3b3db5f AS builder
 
-WORKDIR /build
-COPY pyproject.toml ./
-COPY src/ src/
+# uv only exports uv.lock below. It lives in /bin, outside the /usr/local paths
+# the final stage copies, so it never ships. If a newer uv writes a lock this
+# one can't read, `uv export --locked` fails the build: bump it here.
+COPY --from=ghcr.io/astral-sh/uv:0.11.7@sha256:240fb85ab0f263ef12f492d8476aa3a2e4e1e333f7d67fbdd923d00a506a516a /uv /bin/uv
 
+WORKDIR /build
+COPY pyproject.toml uv.lock ./
+
+# WOR-1077: install exactly the runtime set in uv.lock, the set
+# dependency-audit.yml audits, not whatever PyPI resolves today. Installing
+# from pyproject.toml alone resolved its floors at build time, so the image held
+# versions the audit never saw, some still inside Dependabot's 7-day cooldown.
+#   --locked         refuses a uv.lock that no longer matches pyproject.toml
+#   --require-hashes every file must match the hash uv.lock recorded
+#   --only-binary    wheels only, so no locked sdist runs a setup.py here
+# tests/test_deploy_static.py pins these commands; `scan` runs
+# scripts/check_image_matches_lock.py on the built image.
 RUN apt-get update \
     && apt-get upgrade -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir .
+    && uv export --quiet --locked --no-dev --no-emit-project --format requirements-txt \
+        -o /tmp/requirements.lock.txt \
+    && pip install --no-cache-dir --require-hashes --only-binary :all: \
+        -r /tmp/requirements.lock.txt
+
+# --no-deps: the dependencies are all installed above, so this step adds only
+# worthless itself. `pip check` then fails the build if the locked set doesn't
+# satisfy worthless's own requirements.
+COPY src/ src/
+RUN pip install --no-cache-dir --no-deps . \
+    && pip check
 
 # -----------------------------------------------------------
 FROM python:3.13-slim-trixie@sha256:3dd7cc108ec1493442514f5c2a871af6af0ec31d768ff6e378a93340c3b3db5f
