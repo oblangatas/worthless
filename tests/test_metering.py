@@ -417,6 +417,17 @@ def test_anthropic_stream_unreadable_output_count_is_no_usage(parse, bad):
 
 
 @pytest.mark.parametrize("bad", _NOT_REQUIRED_COUNTS, ids=repr)
+@_ANTHROPIC_STREAM_PARSERS
+def test_anthropic_stream_unreadable_latest_output_count_drops_earlier_one(parse, bad):
+    """output_tokens is cumulative: an unreadable latest count must not leave a stale one."""
+    last = {"type": "message_delta", "usage": {"output_tokens": bad}}
+    body = _anthropic_stream({"input_tokens": 5}, {"output_tokens": 10}) + (
+        f"event: message_delta\ndata: {json.dumps(last)}\n\n".encode()
+    )
+    assert parse(body) is None
+
+
+@pytest.mark.parametrize("bad", _NOT_REQUIRED_COUNTS, ids=repr)
 def test_extract_usage_openai_json_unreadable_total_is_no_usage(bad):
     body = json.dumps({"model": "m", "usage": {"total_tokens": bad}}).encode()
     assert extract_usage_openai(body) is None
