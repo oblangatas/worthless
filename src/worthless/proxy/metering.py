@@ -232,9 +232,10 @@ class StreamingUsageCollector:
                     return
                 if "output_tokens" in usage:
                     output_tokens = _sum_counts(usage, "output_tokens")
-                    if output_tokens is not None:
-                        self._output_tokens = output_tokens
-                        self._found_usage = True
+                    # The count is cumulative: an unreadable latest one makes the
+                    # usage unreadable rather than leaving an earlier count in place.
+                    self._output_tokens = output_tokens or 0
+                    self._found_usage = output_tokens is not None
 
         self._pending_event = None
 
