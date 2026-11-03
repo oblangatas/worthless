@@ -238,13 +238,19 @@
     }
 
     .hero {
-      min-height: auto;
+      /* Ends just short of the screen so only the next section's small
+         label peeks in on phones; on desktop the story's top edge and the
+         falling drip carry the hint, since the label is centred in a
+         full-screen stage there. */
+      min-height: calc(100svh - 3.5rem);
       position: relative;
-      display: grid;
-      align-items: center;
-      padding: 7rem clamp(1.35rem, 8vw, 10rem) 4rem;
+      display: flex;
+      flex-direction: column;
+      padding: 7rem clamp(1.35rem, 8vw, 10rem) 1.5rem;
       isolation: isolate;
-      overflow: hidden;
+      overflow-x: clip;
+      overflow-y: visible;
+      z-index: 1;
     }
 
     .hero-mark {
@@ -583,9 +589,10 @@
     /* Bottom of the first screen: the audit invitation, then the cue into the
        leak story. Fills the space the centred hero used to leave empty. */
     .hero-bottom {
-      margin-top: clamp(2.25rem, 5vh, 3.5rem);
+      margin-top: auto;
+      padding-top: 2.5rem;
       display: grid;
-      gap: 1.1rem;
+      gap: 1.6rem;
       justify-items: start;
     }
 
@@ -683,13 +690,17 @@
 
       100% {
         opacity: 0;
-        transform: translateY(1.6rem) scale(1);
+        transform: translateY(3.4rem) scale(1);
       }
     }
 
     .cinema {
       position: relative;
       min-height: 420svh;
+      /* A visible seam, so the story's top edge reads as the next chapter
+         rather than more empty page. */
+      border-top: 1px solid var(--line);
+      box-shadow: inset 0 1.25rem 2rem -1.5rem oklch(37% 0.095 205 / 0.28);
       overflow-x: clip;
       background:
         linear-gradient(180deg, var(--screen-wash-a) 0%, var(--screen-wash-b) 48%, var(--screen-wash-a) 100%);
@@ -1521,8 +1532,8 @@
       }
 
       .hero {
-        min-height: auto;
-        padding: 6rem 1.25rem 3.5rem;
+        min-height: calc(100svh - 9rem);
+        padding: 6rem 1.25rem 1.25rem;
       }
 
       .hero-mark {
@@ -1935,25 +1946,25 @@
           </div>
           <span class="sr-only" id="copy-install-status" aria-live="polite"></span>
         </div>
-        <div class="hero-bottom">
-          <div class="promise-audit hero-audit" aria-label="Audit Worthless with AI">
-            <p>Don’t trust us. Audit the installer with AI.</p>
-            <div class="audit-icons">
-              <a class="audit-icon" href="https://claude.ai/new" data-audit="claude" aria-label="Audit with Claude" title="Audit with Claude">
-                <svg aria-hidden="true"><use href="#audit-claude"></use></svg>
-              </a>
-              <a class="audit-icon" href="https://chatgpt.com/" data-audit="chatgpt" aria-label="Audit with ChatGPT" title="Audit with ChatGPT">
-                <svg aria-hidden="true"><use href="#audit-chatgpt"></use></svg>
-              </a>
-              <a class="audit-icon" href="https://gemini.google.com/app" data-audit="gemini" aria-label="Audit with Gemini" title="Audit with Gemini">
-                <svg aria-hidden="true"><use href="#audit-gemini"></use></svg>
-              </a>
-              <a class="audit-icon" href="https://grok.com/" data-audit="grok" aria-label="Audit with Grok" title="Audit with Grok">
-                <svg aria-hidden="true"><use href="#audit-grok"></use></svg>
-              </a>
-            </div>
       </div>
-        </div>
+      <div class="hero-bottom">
+        <div class="promise-audit hero-audit" aria-label="Audit Worthless with AI">
+          <p>Don’t trust us. Audit the installer with AI.</p>
+          <div class="audit-icons">
+            <a class="audit-icon" href="https://claude.ai/new" data-audit="claude" aria-label="Audit with Claude" title="Audit with Claude">
+              <svg aria-hidden="true"><use href="#audit-claude"></use></svg>
+            </a>
+            <a class="audit-icon" href="https://chatgpt.com/" data-audit="chatgpt" aria-label="Audit with ChatGPT" title="Audit with ChatGPT">
+              <svg aria-hidden="true"><use href="#audit-chatgpt"></use></svg>
+            </a>
+            <a class="audit-icon" href="https://gemini.google.com/app" data-audit="gemini" aria-label="Audit with Gemini" title="Audit with Gemini">
+              <svg aria-hidden="true"><use href="#audit-gemini"></use></svg>
+            </a>
+            <a class="audit-icon" href="https://grok.com/" data-audit="grok" aria-label="Audit with Grok" title="Audit with Grok">
+              <svg aria-hidden="true"><use href="#audit-grok"></use></svg>
+            </a>
+          </div>
+    </div>
         <a class="scroll-hint" href="#leak-story" aria-label="Scroll to the leak story">
           <span class="scroll-hint__text">Follow the leak</span>
           <span class="scroll-hint__wick" aria-hidden="true"></span>
