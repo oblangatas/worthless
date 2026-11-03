@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import errno
 import hashlib
 import os
+import sqlite3
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -65,6 +67,71 @@ def fake_openrouter_key() -> str:
     invisible to the scanner and any test built on one proves nothing.
     """
     return fake_key("sk-" + "or-" + "v1-", seed="openrouter-fixture-seed")
+
+
+def seed_enrollment(db_path: Path, alias: str, var_name: str, env_path: str | None) -> None:
+    """Insert one shard and its enrollment straight into the DB.
+
+    The shard bytes are placeholders, so use it only for rows nothing
+    reconstructs: an enroll-only key (``env_path=None``) or a .env that is gone.
+    """
+    con = sqlite3.connect(str(db_path))
+    try:
+        con.execute(
+            "INSERT INTO shards (key_alias, shard_b_enc, commitment, nonce, provider) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (alias, b"x", b"c", b"n", "openai"),
+        )
+        con.execute(
+            "INSERT INTO enrollments (key_alias, var_name, env_path) VALUES (?, ?, ?)",
+            (alias, var_name, env_path),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+def assert_not_shown(output: str, *secrets: str) -> None:
+    """Fail if any of *secrets* is in *output*, without echoing it.
+
+    Rich folds a long word across lines, so line breaks are dropped first.
+    """
+    unwrapped = output.replace("\n", "")
+    if any(secret in unwrapped for secret in secrets):
+        pytest.fail("the output shows a value it must never print")
+
+
+def make_unrestorable(env: Path) -> None:
+    """A live symlink in place of a locked .env: safe_rewrite refuses it, so
+    uninstall can't put the key back (f2ge)."""
+    target = env.with_name("elsewhere.env")
+    target.write_text("OPENAI_API_KEY=whatever\n")
+    env.unlink()
+    env.symlink_to(target)
+
+
+def refuse_console_writes(
+    monkeypatch: pytest.MonkeyPatch, method: str, *, times: int | None = None, containing: str = ""
+) -> list[str]:
+    """``WorthlessConsole.<method>`` raises EAGAIN, as a non-blocking pipe that
+    refuses a write does, for the first *times* messages containing *containing*
+    (all of them when *times* is None). Returns every message it was asked to print."""
+    from worthless.cli.console import WorthlessConsole
+
+    real = getattr(WorthlessConsole, method)
+    calls: list[str] = []
+    refused = 0
+
+    def _refuse(console, message: str) -> None:  # noqa: ANN001
+        nonlocal refused
+        calls.append(message)
+        if containing in message and (times is None or refused < times):
+            refused += 1
+            raise BlockingIOError(errno.EAGAIN, "Resource temporarily unavailable")
+        real(console, message)
+
+    monkeypatch.setattr(WorthlessConsole, method, _refuse)
+    return calls
 
 
 class MockAsyncByteStream(httpx.AsyncByteStream):

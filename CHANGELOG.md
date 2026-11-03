@@ -4,6 +4,127 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Security
+- **Lock no longer says "You're protected" while a copy of your key is still in the `.env` as plain text** (WOR-1048, [#740](https://github.com/oblangatas/worthless/pull/740)).
+  Before: if the `.env` held a second copy of a key on a line lock doesn't replace, such as a quoted name (`'OPENROUTER_API_KEY'=sk-or-…`), a commented-out line with the same key, or the key inside another variable's value, lock replaced the key's own line, said "You're protected", and left the real key readable in the file. python-dotenv reads the last line, so an app reading a quoted copy, or anyone with a copy of the file, still got the real key. If that file also had a `*_BASE_URL` line with no value, or a quoted one, lock used to stop with WRTLS-199 instead; the WOR-1041 fix below makes such a file lock, so both changes ship together.
+  Now: before it stores anything or touches the `.env`, lock checks that no copy of a key it is replacing would stay in the file. If one would, it stops with WRTLS-112 and names the variable, never the value. Your `.env` is unchanged, nothing new is stored, and a key this `.env` had already locked stays locked. Delete the copy and run `worthless lock` again.
+
+  **Limits.**
+  - Lock looks for the key's exact text. A copy that was changed, for example split across lines, escaped, encoded or assembled from `${...}` parts, isn't found.
+  - Lock checks only the keys it is replacing now. A different key on a line it won't replace, such as a commented-out older key, stays readable, and lock still says you're protected.
+- **Unlocking a key that v0.3.16 or earlier locked puts back its vendor's address where that is safe, and tells you when it can't** (WOR-981, [#737](https://github.com/oblangatas/worthless/pull/737); WOR-1013, [#738](https://github.com/oblangatas/worthless/pull/738)).
+  If your `.env` had a `*_BASE_URL` line before a normal lock with v0.3.16 or earlier, for example `OPENROUTER_BASE_URL=https://openrouter.ai/api/v1`, lock replaced it with the proxy URL and kept no copy of your value. Unlock and uninstall now put back that vendor's address when your key names the vendor (an `sk-or-` key gets OpenRouter's), and say so. Removing the line instead would let an app that reads `OPENROUTER_BASE_URL` with no default send your OpenRouter key to OpenAI. Before this release, unlock left the dead proxy line, so calls failed on your machine (an `OPENAI_BASE_URL` or `ANTHROPIC_BASE_URL` line was removed instead).
+
+  **Limits.**
+  - If lock had added the line, unlock leaves it in place with the vendor's address. Delete it if you don't want it.
+  - Unlock removes the line instead, and tells you to set it again, when it can't be sure the address is right for every app that reads the line:
+    - The key is an OpenAI-style `sk-` key. That prefix also starts DeepSeek and other keys, and OpenAI's address is the SDK default anyway.
+    - Another key in the same `.env`, locked or not, reads that line too, for example an OpenAI key next to an OpenRouter key's `OPENAI_BASE_URL`.
+    - The address speaks Anthropic's protocol (Anthropic's own, or a gateway you registered with `--protocol anthropic`), or the line is `ANTHROPIC_BASE_URL`. The Anthropic SDK adds its own `/v1`.
+    - The stored address isn't in the provider list, isn't a public https address (a local Ollama, for example), or contains a `$`.
+
+    A gateway you registered yourself with `--protocol openai` still goes back under the same line rules, because it came from your own line. An app that reads a removed line with no default uses its SDK's default address. Unlock only sees keys in this `.env`. It does not see another `.env` your app also loads (such as `.env.local`) or keys your shell exports, so an OpenAI key kept there can still end up reading an OpenRouter address (WOR-1034).
+  - The stored address isn't sealed: someone who can write the Worthless database can change it. Unlock writes back only an address that passes the rules above, and the proxy already sends your key to the stored address while the key is locked (worthless-rzi1).
+  - For a key locked with this version, a saved value changed in the Worthless database is never replaced by the stored address: unlock removes the line and tells you.
+  - The written value is the one lock resolved, so a `${...}` reference you had comes back expanded.
+  - If the same key was also locked from another `.env`, the stored address is the last one lock saw for that key, which may be the other file's (WOR-1029).
+- **Malformed messages no longer leak the sidecar's memory** (CVE-2026-114613, [#745](https://github.com/oblangatas/worthless/pull/745)).
+  Before: Worthless accepted any msgpack from 1.0 on. msgpack 1.2.2 and earlier leak the rest of every message the sidecar rejects for having a non-string key. A process the sidecar accepts could grow it by about 1 MiB per message, without limit. Measured on the real sidecar, 200 such messages added 199 MiB. The proxy reads the sidecar's replies with the same decoder, so a fake sidecar could do the same to the proxy (WOR-1078).
+  Before, too: one 5 KB message that declares huge lists made the sidecar briefly allocate about 513 MiB (GHSA-j8c6-9vc5-hj6x).
+  Now: this release requires msgpack 1.2.4 or newer. It fixes the leak: the same 200 messages add 1 to 4 MiB, and 2,000 add no more. It also caps how much a list header can reserve, so the 5 KB message peaks at about 80 MiB instead of 513 MiB. Installing or upgrading to this release upgrades msgpack with it.
+
+  **Limits.**
+  - Only a process that passes the sidecar's peer-uid check can send these messages to the sidecar. The proxy doesn't yet check who is on the other end of its socket (WOR-1078).
+  - An existing install keeps the msgpack it has until you upgrade Worthless.
+  - Decoding still costs far more memory than the message size: one 5 KB malformed message peaks at about 80 MiB, and a valid 1 MB message of empty lists costs about 68 MiB on any msgpack version. Tighter decoder limits are tracked in WOR-1075.
+  - A process the sidecar accepts can still hold its memory by opening many connections and stalling half-sent 1 MiB frames (WOR-1076).
+- **The Docker image runs Python 3.13.18, which refuses TLS connections through the compromised eMudhra intermediate CA keys and fixes a way to write files outside the target folder when unpacking a tar archive** (CVE-2026-115557, CVE-2026-114583, [#750](https://github.com/oblangatas/worthless/pull/750)).
+  Before: the image ran Python 3.13.16. Several eMudhra intermediate CA keys were disclosed as compromised in October 2026, and a certificate chain through one of them verifies for as long as its issuing root is trusted. The proxy's calls to your provider, which carry your real key, are verified TLS connections that use the certifi bundle by default, and the image's bundle (certifi 2026.10.23) had already dropped the affected eMudhra root. So in the image this fix is a backstop: it also blocks cross-signed copies of those keys, and it holds when `SSL_CERT_FILE` or `SSL_CERT_DIR` points at an older bundle. Separately, `tarfile`'s `filter="tar"` could be bypassed with crafted link entries, so extracting a hostile archive could write outside the target folder. Worthless never extracts archives, so that flaw sat in the interpreter only.
+  Now: the image is built on `python:3.13-slim-trixie` 3.13.18. Its `ssl` module rejects any chain containing one of those keys whenever certificate verification is on, as it always is for the proxy's calls to your provider.
+
+  **Limits.**
+  - This changes the Docker image only. An install outside Docker runs on the Python it was installed with, which needs 3.11.18, 3.12.16, 3.13.18, 3.14.10 or 3.15.2 (or a later release in the same series) for the eMudhra denylist. Python 3.10 has no fixed release: move to 3.11.18 or later, or at least use certifi 2026.10.18 or later, which leaves out the affected root.
+  - The denylist covers only those eMudhra keys. It isn't general certificate revocation checking.
+  - The image still has about 70 known bugs with no fix yet (about 160 package matches), all but two in Debian packages and most marked won't-fix by Debian. The scan doesn't block on those unless one is High or Critical, not marked won't-fix, and not argued in `.grype.yaml`.
+
+### Fixed
+- **`worthless lock` accepts a `*_BASE_URL` line with no value** (WOR-1041, [#740](https://github.com/oblangatas/worthless/pull/740)).
+  Before: a `.env` with a name and no `=`, such as `OPENROUTER_BASE_URL` or `export OPENROUTER_BASE_URL`, on the line lock writes for a key made lock stop with WRTLS-199, an internal error. A name in quotes, such as `'OPENROUTER_BASE_URL'=https://openrouter.ai/api/v1`, did the same. Nothing changed: your `.env` kept its key, and lock left nothing in the Worthless database.
+  Now: lock leaves that line as it is, adds its proxy line after it, and says the line "had no value", or that it "can't edit the line you have for it". python-dotenv, Node's `--env-file` and docker compose read the last line for a name, which is now the proxy line. Unlock removes only the line lock added, so lock then unlock gives back the `.env` you started with. Lock also prints that it added a line only after the `.env` is written, so a refused write no longer reports a line it never added.
+  New: after writing, lock reads the `.env` the way python-dotenv does, and if a `*_BASE_URL` it wrote doesn't come back as its proxy address, it warns you, even with `--quiet`, that the app's calls won't reach the proxy and will fail.
+
+  **Limits.**
+  - If the same name also has a value on an earlier line, lock rewrites that line as before, and a later bare line (or a later quoted `'NAME'=...` line) still decides what python-dotenv reads, so your app doesn't reach the proxy and its calls fail. Lock exits 0 and warns you. Delete the later line (WOR-1045).
+  - Changed in this release: if the line lock rewrites sits inside another variable's multi-line quoted value, lock writes its proxy address into that value until unlock, and your app doesn't reach the proxy. Lock exits 0 and warns you. Before, lock routed the key, but unlock deleted that line from the value for good (WOR-1045).
+  - If you give the bare line a value while the key is locked, unlock removes it along with lock's line, as it does for any name on two lines (WOR-1014).
+  - A `.env` whose last line has no newline gets one, as with every lock that adds a line (see the WOR-981 entry below).
+- **`worthless unlock` puts back a `*_BASE_URL` line you had before lock** (WOR-1013, [#738](https://github.com/oblangatas/worthless/pull/738)).
+  Before: if your `.env` already had the line lock writes for a key, for example `OPENROUTER_BASE_URL=https://openrouter.ai/api/v1` next to `OPENROUTER_API_KEY`, or your own gateway in `OPENAI_BASE_URL`, lock replaced its value with the proxy URL and did not keep yours. Unlock then removed the line. An app that reads `OPENROUTER_BASE_URL` with no default then used OpenAI's address and sent your OpenRouter key to OpenAI.
+  Now: lock saves, for each key, which line it writes and the value it replaces. Unlock writes that value back as you wrote it, with its quotes, comment and any `${...}` reference, and removes the line only if lock added it. Lock then unlock gives back the `.env` you started with. `worthless uninstall` does the same.
+
+  **Limits.**
+  - A key locked with an older version has nothing saved, so unlock puts back the vendor's address where that is safe, or removes the line, and says which. See Security above. Keys you lock with this version get back exactly what you wrote.
+  - Unlock writes your value back only while the line still points at that key on the proxy. If you changed or deleted the line after lock, unlock keeps your change and tells you, without putting your earlier value back (WOR-1024).
+  - The saved value is tied to your Worthless encryption key and to its own row. If someone without that key changes it in the Worthless database, unlock does not write it: it removes the line and tells you. Someone who can write that database can still delete the saved value, or swap in one saved by an earlier lock of the same key (WOR-1023). With the saved value deleted, unlock treats the key as one an older version locked (see Security above).
+  - A value that can't be written back unchanged (one with a quote, a space before `#`, or whitespace at one end) is not saved. Lock warns you, and unlock removes the line and tells you to set it again (WOR-1027, WOR-1042).
+  - A value that spells out one of your keys is not saved either, so the record never holds a key. A `${OPENAI_API_KEY}` reference is saved as written and comes back. Lock warns you, and unlock removes the line and tells you to set it again (WOR-1035, WOR-1042).
+  - An unquoted value loses whitespace at its end.
+  - A value that refers to another line lock rewrites, such as `OPENROUTER_BASE_URL=${OPENAI_BASE_URL}`, directly or through another variable, comes back as the value it had at lock, not as the reference. Restored as written, it would point at the other key's proxy line while that key is still locked. Lock says so (WOR-1026).
+  - If the `.env` sets the same `*_BASE_URL` on two lines, both get the last line's value back.
+  - Older versions don't read the saved value, so going back to one before you unlock loses your value: its unlock removes `OPENAI_BASE_URL` or `ANTHROPIC_BASE_URL`, and leaves any other proxy line, such as `OPENROUTER_BASE_URL`, pointing at the proxy. Unlock with this version first.
+  - When two keys share one line, for example `OPENAI_API_KEY` and `MY_OPENAI_KEY` both use `OPENAI_BASE_URL`, unlocking only `OPENAI_API_KEY` puts your value back while `MY_OPENAI_KEY` stays locked, so `MY_OPENAI_KEY`'s calls go to your URL with a locked value and fail. Unlock both together.
+  - If you replaced a key and kept the old one in the same `.env` under another name, lock now stops with the `.env` unchanged. Before, it left the old key's copy impossible to unlock (WOR-1017).
+- **`--quiet` no longer hides what unlock did to your `*_BASE_URL` line, and unlock says when lock couldn't save your value** (WOR-1042, [#739](https://github.com/oblangatas/worthless/pull/739)).
+  The notes `worthless unlock` and `worthless uninstall` print when they write back or remove a `*_BASE_URL` line (see the entries above) are printed even with `--quiet`, because they report a change to your `.env`, not progress. So are lock's warnings that it won't save a line's value as written. Agents often pass `--quiet`. When lock couldn't save the value you had on the line, unlock removes the line and says so, for example "lock couldn't save the value you had in OPENAI_BASE_URL", rather than removing it like a line lock added. The notes name the line, never its value.
+
+  **Limits.**
+  - If you changed or deleted the line after lock, unlock leaves it as it is and says nothing about the value lock couldn't save.
+  - A value that refers to another line lock rewrites comes back as the value it had at lock, and unlock doesn't say so again; lock does (WOR-1026).
+  - If the line appears more than once in the `.env`, unlock writes back or removes every copy, including one you added after lock, and says nothing about the extra copies (WOR-1014).
+  - The notes are plain text on stderr. `--json` output doesn't include them.
+- **`--quiet` no longer hides which keys `worthless uninstall` couldn't restore, or what it did to your files** (WOR-1043, [#741](https://github.com/oblangatas/worthless/pull/741)).
+  Before: `--quiet` hid every warning uninstall printed. `worthless --quiet uninstall --yes --force` could delete Worthless's half of a key it couldn't put back in its `.env` and print nothing, so nothing told you which file it was or to rotate that key. It was just as silent about an enroll-only key it removed, the record of a project whose `.env` is gone, a broken install `--force` wiped, and a `~/.worthless` it couldn't fully remove. It also gave no sign that it had set a `.env` other users could read to owner-only (0o600), or kept that mode because you said so at the prompt, that it couldn't tighten a file's mode, that `openclaw.json` may still point at the proxy, what `--remove-mcp` removed from an editor config or couldn't edit, or that one still names the Worthless MCP server. Without `--force`, the refusal said "fix the above" with nothing above it.
+  Now: those notes print even with `--quiet`, like unlock's `*_BASE_URL` notes (WOR-1042). `--quiet` still hides progress, such as "restored", "Worthless uninstalled" and OpenClaw's "[OK] restored". The OpenClaw `[FAIL]` block that unlock and uninstall print shows in full under `--quiet`, not only its first line, so it still says that `openclaw.json` may not be restored and to run `worthless doctor`. So do the notes that an OpenClaw entry stays on the proxy, because its saved record is damaged or because the restored `.env` couldn't be read back. The note about a project whose `.env` is gone now says to rotate its key if you moved the project rather than deleting it.
+  - If uninstall can't write a note while it restores keys (for example, stderr refuses the write), it stops with WRTLS-103 and Worthless not removed, rather than reading the error as a broken install. Before, `--force` then wiped the keys it hadn't restored yet, and without `--force` it told you to re-run with `--force`. The keys it already restored stay restored, and the message says `openclaw.json` may still point at the proxy for them. Re-run `worthless uninstall` to restore the rest.
+  - A project folder uninstall can't open is named like a `.env` it couldn't restore, so the refusal says which file, and `--force` can still finish. Before, on Python 3.13 and earlier it read as a broken install: without `--force` you were told to wipe, and `--force` wiped silently. On Python 3.14 it read as a deleted project, and uninstall dropped that key even without `--force`.
+  - A `.env` that is a symlink loop is named the same way. Before, it read as a deleted project and its key was dropped.
+  - Uninstall prints `.env`, editor-config and `~/.worthless` paths without control characters, so a folder name can't send escape codes to your terminal. Before, it did in a normal run. The `chmod` command it suggests quotes the path for the shell, so one with a space doesn't become two files. The `[FAIL]` block's details are printed the same way.
+
+  **Limits.**
+  - A `.env` on a drive or network share that isn't connected reads as a deleted project, the same as before: uninstall drops its key without `--force`. Connect the drive before you uninstall (WOR-1068).
+  - `--quiet` still hides that uninstall couldn't remove the service unit or the keychain entry, or couldn't stop the proxy (WOR-1055).
+  - If uninstall stops partway, or refuses because a `.env` can't be restored, `openclaw.json` may still point at the proxy for the keys it restored first. A second run doesn't fix that (WOR-1053).
+  - When uninstall refuses to read your encryption key (its mode, owner or a symlink), that message prints the key file's path as it is (WOR-1054).
+  - A suggested `chmod` command can still name another file when the path holds an emoji code such as `:fire:`, or wraps across lines when stderr is a pipe (WOR-1056).
+  - Under `--yes`, if setting a `.env` to 0o600 then fails, uninstall first says it set 0o600, then that it couldn't (WOR-1057).
+  - Lock's OpenClaw `[FAIL]` block still shows only its first line under `--quiet` (WOR-1052).
+  - The notes are plain text on stderr. `--json` output doesn't include them.
+- **`worthless uninstall --force` gives OpenClaw back the real key of each `.env` it restores** (WOR-1051, [#742](https://github.com/oblangatas/worthless/pull/742)).
+  Before: when one `.env` couldn't be restored, `uninstall --force` wrote NUL bytes in place of each restored key that OpenClaw uses, in `openclaw.json` and in the agent caches (`models.json`, `auth-profiles.json`). It pointed those providers back at the vendor, printed `[OK] OpenClaw: restored`, and exited 0. The keys were back in their `.env`, but OpenClaw couldn't use them, and the record that could fix `openclaw.json` was deleted with `~/.worthless`. If this happened to you, copy each key from its `.env` over the NUL bytes (`\u0000`) in OpenClaw's `openclaw.json` (usually `~/.openclaw/openclaw.json`) and in its agent caches (usually under `~/.openclaw/agents/`).
+  Now: OpenClaw gets each restored key back, the same as when every `.env` is restored. Uninstall still wipes from memory the keys it holds for OpenClaw before it exits, now also when it stops after restoring them, for example on a line it can't write. The limits below list the exceptions.
+
+  **Limits.**
+  - An `openclaw.json` entry that lock added still points at the removed proxy after uninstall. So does the entry for a key whose `.env` couldn't be restored, whether lock added it or replaced it. Uninstall still says `[OK]` (WOR-1062).
+  - If two projects set the same variable, such as `OPENAI_API_KEY`, to different keys, `openclaw.json` and the agent caches can get the other project's key instead of the one OpenClaw had before lock. This also happens when every `.env` is restored (WOR-1061, WOR-1067).
+  - Text copies of a key that Python makes while writing `openclaw.json` can't be wiped. Keys are also left in memory if closing the database fails, or a Ctrl-C lands, just after the restores (WOR-1064). Uninstall doesn't turn off core dumps, as lock and unlock do (WOR-1060).
+- **`worthless unlock` removes the proxy line that lock added for an OpenRouter key** (WOR-981, [#737](https://github.com/oblangatas/worthless/pull/737)).
+  Before: lock names the proxy line after the key's variable, so `OPENROUTER_API_KEY` gets `OPENROUTER_BASE_URL`. Unlock looked for `OPENAI_BASE_URL` instead. After unlock, `OPENROUTER_BASE_URL` still sent your app to the local proxy, for a key the proxy no longer had, and the `.env` did not match the original. The same happened for any other `<NAME>_API_KEY` variable, such as `GROQ_API_KEY`. If you had your own `OPENAI_BASE_URL` in that file, unlock deleted it, after a normal lock or a `--keys-only` one. If the `.env` also had a locked `OPENAI_API_KEY`, unlocking only the OpenRouter key deleted `OPENAI_BASE_URL`. The OpenAI key stayed locked, so its scrambled value then went straight to OpenAI and failed.
+  Now: unlock removes the line that lock wrote for each key it unlocks, and only while that line still sends that key's alias to the proxy (whatever the host or port). Other `*_BASE_URL` lines are kept, including your own after a `--keys-only` lock. If lock added the line, lock then unlock gives back the `.env` you started with. `worthless uninstall` restores the same way.
+
+  **Limits.**
+  - A `.env` you already unlocked with an older version keeps its leftover line. Run `worthless doctor` in that project's folder: it checks the file named `.env` there and reports the line as a BASE_URL alias missing from the DB. Delete that line by hand.
+  - If one `*_BASE_URL` name appears twice in the file, unlock decides on the last one, then keeps or removes every line with that name (WOR-1014).
+  - When two keys share one line (for example `OPENAI_API_KEY` and `MY_OPENAI_KEY` both use `OPENAI_BASE_URL`, which points at `OPENAI_API_KEY`), unlock both together. Unlocking only `OPENAI_API_KEY` removes the line if lock added it (if it was yours, see the WOR-1013 entry above) while `MY_OPENAI_KEY` stays locked. Unlocking only `MY_OPENAI_KEY` keeps the line, so an app that reads it sends `MY_OPENAI_KEY`'s real key to the local proxy, which refuses it (401) and never forwards it, and `lock` refuses that file until the other key is unlocked too.
+  - A `.env` whose last line has no newline gets one. This happened before too, for every key.
+- **A provider reply whose `usage` isn't an object no longer locks a key out of its token budget** (WOR-980, [#727](https://github.com/oblangatas/worthless/pull/727)).
+  Before: a reply such as `{"usage": "x"}` or `{"usage": null}` crashed the step that records spend after the response is sent. That step never released the request's token-budget hold. A key with a daily budget then got `429 token_budget_exceeded` with no tokens spent, and a spend-capped key's hold waited for the sweeper.
+  Now: such a reply counts as "usage unknown". The proxy logs a warning and releases the hold. A spend-capped key is billed right away at the larger of its admission estimate and the 128,000-token ceiling, the same amount the sweeper charged before.
+
+  **Limits.**
+  - A token count inside `usage` that is `null` or not a number still crashes the same step and can lock the key out the same way (WOR-1002, [#730](https://github.com/oblangatas/worthless/pull/730)).
+  - A reply nested thousands of levels deep still crashes the same step, with the same lockout (WOR-1030).
+  - On a key with a token budget but no spend cap, a reply whose usage can't be read is not counted against the budget (WOR-1031).
+
 ## [0.3.16] — 2026-10-22
 
 ### Security

@@ -156,6 +156,11 @@ def lookup_by_url(url: str) -> ProviderEntry | None:
     return load_registry().get(_strip_trailing_slash(url))
 
 
+def is_bundled_url(url: str) -> bool:
+    """Whether *url* is one of the URLs shipped in the bundled registry."""
+    return _strip_trailing_slash(url) in load_bundled()
+
+
 def bundled_names() -> set[str]:
     """Return the set of names registered in the bundled file (used to refuse
     name collisions when registering a user provider)."""
