@@ -22,14 +22,13 @@
 #     apply to the running interpreter. 16 of 116 pins are marker-gated, so on
 #     this runner (linux, CPython 3.13) entries like `numpy==2.2.6 ;
 #     python_full_version < '3.11'` and `pywin32-ctypes ; sys_platform ==
-#     'win32'` are never audited. This job therefore covers the linux/3.13
-#     resolution of the lock, not the whole lock. Matrixing or stripping
-#     markers would close that; beads worthless-jymn carries the follow-up.
+#     'win32'` are never audited. `audit` therefore covers the linux/3.13
+#     resolution of the lock, not the whole lock. `audit-py310` adds the linux/3.10
+#     runtime packages. Still audited nowhere: dev tools pinned only for 3.10
+#     (filelock, numpy, scipy) and Windows-only pins. beads worthless-jymn.
 #
-# Keep the command byte-identical to the hook's `entry:`. Note that this is a
-# weaker guarantee than it sounds — identical strings still audit different
-# package sets on different interpreters, and the hook's `sh -c` has neither
-# `-e` nor pipefail while this job runs under `shell: bash`.
+# Keep the `audit` command equal to the hook's pipeline. Both name their Python,
+# so the verdict does not change with the machine's Python (WOR-1006).
 
 name: Dependency Audit
 
@@ -101,8 +100,40 @@ jobs:
         shell: bash
         env:
           UV_CACHE_DIR: /tmp/uv-cache
-        # Same ignores as the uv-audit hook (WOR-1006, expire 2026-11-24).
-        run: uv export --frozen --no-emit-project | uv run pip-audit --disable-pip -r /dev/stdin --ignore-vuln CVE-2026-112940 --ignore-vuln CVE-2026-112913 --ignore-vuln CVE-2026-112907
+        run: uv export --frozen --no-emit-project | uv run --isolated --python 3.13 pip-audit --disable-pip -r /dev/stdin
+
+  # The packages people on the oldest supported Python really install. The job
+  # above runs on 3.13, so it skips every line marked for older Pythons: tomli,
+  # exceptiongroup, importlib-metadata, zipp and backports-tarfile, all runtime.
+  # `--no-dev` because dev tools stuck on old pins (filelock's fixes need 3.11+)
+  # would keep this red with nothing to bump (WOR-1006). If filelock ever becomes
+  # a runtime dependency it enters this export and this job goes red: correct.
+  #
+  # The `mcp` extra is not in this export either.
+  #
+  # ENFORCEMENT: this job REPORTS until its name is added to the required contexts
+  # of the `main` ruleset. Add it after this lands, not before: a required context
+  # no run reports leaves PRs waiting forever (WOR-874).
+  audit-py310:
+    name: uv-audit (oldest Python runtime)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up uv + Python
+        uses: ./.github/actions/setup-uv-python
+        with:
+          python-version: "3.10"
+
+      - name: pip-audit the runtime dependency tree on Python 3.10
+        shell: bash
+        env:
+          UV_CACHE_DIR: /tmp/uv-cache
+        run: uv export --frozen --no-dev --no-emit-project | uv run --isolated --python 3.10 pip-audit --disable-pip -r /dev/stdin
 
   # Python is not the only ecosystem here. workers/worthless-sh is a Cloudflare
   # Worker with its own package-lock.json, and nothing audited it — `grep -rn

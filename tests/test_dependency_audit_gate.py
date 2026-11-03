@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date
 from pathlib import Path
 
 import pytest
@@ -69,31 +68,64 @@ def _hook_pipeline() -> str:
     return re.sub(r"^set -o pipefail\s*;\s*", "", entry).strip()
 
 
-# Every advisory the pip-audit gate ignores, with the ticket that owns it and
-# the day the ignore stops being allowed. An ignore with no end date silently
-# absorbs the next finding for that package (see the uv-audit hook comment), so
-# the test below goes red on the expiry date and forces a re-check.
-KNOWN_IGNORES: dict[str, tuple[str, date]] = {
-    # WOR-1006: filelock has no fixed release for Python 3.10 (every fix needs
-    # 3.11+). Dev-only (pre-commit / virtualenv / pip-audit), never in the wheel;
-    # pip-audit skips the 3.10-only line on 3.11+, so this only matters on 3.10.
-    "CVE-2026-112940": ("WOR-1006", date(2026, 11, 24)),
-    "CVE-2026-112913": ("WOR-1006", date(2026, 11, 24)),
-    "CVE-2026-112907": ("WOR-1006", date(2026, 11, 24)),
-}
+# ── Python 3.10 (WOR-1006) ─────────────────────────────────────────────────
+# pip-audit skips lines whose markers don't match the Python running it. On 3.10
+# that adds dev tools stuck on old pins (filelock's fixes need 3.11+), which
+# blocked every push; on 3.13 it hides runtime packages real 3.10 users install.
+# So: the full tree on a fixed new Python, the runtime tree on the oldest one.
+
+PY310_JOB = "audit-py310"
 
 
-def test_every_ignored_advisory_is_tracked_and_unexpired() -> None:
-    """The gate may only ignore listed advisories, each with a ticket, until its date."""
-    ignored = set(re.findall(r"--ignore-vuln\s+(\S+)", _hook_entry()))
-    assert ignored == set(KNOWN_IGNORES), (
-        "the uv-audit hook's --ignore-vuln list must match KNOWN_IGNORES exactly"
+def _py310_step() -> dict:
+    wf = yaml.safe_load(WORKFLOW.read_text())
+    steps = wf["jobs"][PY310_JOB]["steps"]
+    matches = [s for s in steps if "pip-audit" in str(s.get("run", ""))]
+    assert len(matches) == 1, f"expected exactly one pip-audit step, got {len(matches)}"
+    return matches[0]
+
+
+def test_hook_does_not_follow_the_contributors_python() -> None:
+    """Plain `uv run` uses .venv's Python, so a 3.10 clone audits 3.10-only dev pins."""
+    pipeline = _hook_pipeline()
+    assert "--python 3.13" in pipeline, "the hook's verdict must not depend on the local Python"
+    assert "--isolated" in pipeline, "without it, uv deletes and rebuilds the 3.10 .venv"
+
+
+def test_py310_job_audits_what_oldest_python_users_install() -> None:
+    run = _py310_step()["run"]
+    floor = re.search(
+        r'^requires-python = ">=(\d+\.\d+)"', (REPO / "pyproject.toml").read_text(), re.M
     )
-    for vuln, (ticket, expires) in KNOWN_IGNORES.items():
-        assert date.today() <= expires, (
-            f"the ignore for {vuln} expired on {expires}: re-check {ticket} — remove it "
-            "if a fix is reachable, or extend it deliberately"
-        )
+    assert floor, "requires-python no longer has a plain floor; revisit this job"
+    assert f"--python {floor.group(1)}" in run, "this job must follow the oldest supported Python"
+    assert "--no-dev" in run, "the full tree on 3.10 stays red on dev-only filelock"
+    assert "--frozen" in run
+
+
+def test_py310_job_name_is_stable() -> None:
+    """The name is the required context in the `main` ruleset; a rename blocks every PR."""
+    wf = yaml.safe_load(WORKFLOW.read_text())
+    assert wf["jobs"][PY310_JOB]["name"] == "uv-audit (oldest Python runtime)"
+
+
+def test_py310_job_can_fail() -> None:
+    wf = yaml.safe_load(WORKFLOW.read_text())
+    job, step = wf["jobs"][PY310_JOB], _py310_step()
+    assert "continue-on-error" not in job and "continue-on-error" not in step
+    assert "if" not in job, "a skipped job reports SUCCESS to branch protection"
+    assert step.get("shell") == "bash", "a pipeline needs `shell: bash` for pipefail"
+    assert "|| true" not in step["run"] and "set +e" not in step["run"]
+
+
+def test_no_audit_ignores_anything() -> None:
+    """Advisories went from 3 to 9 in ten days; a list like that is never finished."""
+    for name, command in (
+        ("hook", _hook_entry()),
+        ("audit job", _audit_step()["run"]),
+        ("3.10 job", _py310_step()["run"]),
+    ):
+        assert "--ignore-vuln" not in command, f"{name} ignores an advisory"
 
 
 def test_hook_runs_with_pipefail() -> None:
