@@ -230,18 +230,6 @@ def test_extract_usage_anthropic_sse_non_dict_delta_is_no_usage(delta):
     assert extract_usage_anthropic(_sse(("message_delta", delta))) is None
 
 
-@pytest.mark.parametrize(
-    "start",
-    [["x"], {"message": "x"}, {"message": {"model": "m", "usage": "x"}}],
-    ids=repr,
-)
-def test_extract_usage_anthropic_sse_non_dict_start_counts_output_only(start):
-    body = _sse(("message_start", start), ("message_delta", {"usage": {"output_tokens": 7}}))
-    result = extract_usage_anthropic(body)
-    assert result is not None
-    assert result.total_tokens == 7
-
-
 # ---------------------------------------------------------------------------
 # record_spend
 # ---------------------------------------------------------------------------
@@ -323,7 +311,8 @@ def test_extraction_failure_is_distinguishable_from_zero_usage():
 # WOR-1002: a null cache count is 0; any other non-int count is unreadable usage
 # ---------------------------------------------------------------------------
 
-_NOT_COUNTS = ["5", 5.0, True]
+# WOR-1100: a negative int is no count either.
+_NOT_COUNTS = ["5", 5.0, True, -5]
 # Null means "none" only for the counts the SDKs type Optional[int].
 _NOT_REQUIRED_COUNTS = [None, *_NOT_COUNTS]
 _ANTHROPIC_COUNTS = {
@@ -334,7 +323,7 @@ _ANTHROPIC_COUNTS = {
 }
 
 
-def _anthropic_stream(start_usage: dict, delta_usage: dict) -> bytes:
+def _anthropic_stream(start_usage: object, delta_usage: dict) -> bytes:
     """Anthropic SSE body: message_start carries *start_usage*, message_delta *delta_usage*."""
     start = {"type": "message_start", "message": {"model": "m", "usage": start_usage}}
     delta = {"type": "message_delta", "usage": delta_usage}
@@ -378,7 +367,7 @@ def test_extract_usage_anthropic_json_null_required_count_is_no_usage(field):
 
 @pytest.mark.parametrize("bad", _NOT_COUNTS, ids=repr)
 @pytest.mark.parametrize("field", list(_ANTHROPIC_COUNTS))
-def test_extract_usage_anthropic_json_non_int_count_is_no_usage(field, bad):
+def test_extract_usage_anthropic_json_unreadable_count_is_no_usage(field, bad):
     usage = {**_ANTHROPIC_COUNTS, field: bad}
     assert extract_usage_anthropic(json.dumps({"model": "m", "usage": usage}).encode()) is None
 
@@ -398,16 +387,6 @@ def test_anthropic_stream_null_cache_counts_are_zero(parse):
     result = parse(_anthropic_stream(start, {"output_tokens": 3}))
     assert result is not None
     assert result.total_tokens == 8
-
-
-@pytest.mark.parametrize("bad", _NOT_REQUIRED_COUNTS, ids=repr)
-@_ANTHROPIC_STREAM_PARSERS
-def test_anthropic_stream_unreadable_input_count_counts_output_only(parse, bad):
-    """An unreadable message_start usage is treated like a missing message_start."""
-    start = {"input_tokens": bad, "cache_read_input_tokens": 11}
-    result = parse(_anthropic_stream(start, {"output_tokens": 3}))
-    assert result is not None
-    assert result.total_tokens == 3
 
 
 @pytest.mark.parametrize("bad", _NOT_REQUIRED_COUNTS, ids=repr)
@@ -439,3 +418,40 @@ def test_extract_usage_openai_json_unreadable_total_is_no_usage(bad):
 )
 def test_openai_stream_unreadable_total_is_no_usage(parse, bad):
     assert parse(_openai_stream({"total_tokens": bad})) is None
+
+
+# ---------------------------------------------------------------------------
+# WOR-1100: an input count that's there but unreadable makes the stream
+# unreadable; only a stream that gives no input count bills output only
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "start_usage",
+    [
+        "x",
+        None,
+        *({"input_tokens": bad, "cache_read_input_tokens": 11} for bad in _NOT_REQUIRED_COUNTS),
+        {"input_tokens": 5, "cache_read_input_tokens": -11},
+    ],
+    ids=repr,
+)
+@_ANTHROPIC_STREAM_PARSERS
+def test_anthropic_stream_unreadable_input_usage_is_no_usage(parse, start_usage):
+    """Billing output only would under-bill; the same usage as JSON is already no usage."""
+    assert parse(_anthropic_stream(start_usage, {"output_tokens": 3})) is None
+
+
+@pytest.mark.parametrize(
+    "start",
+    [None, ["x"], {"message": "x"}, {"message": {"model": "m"}}],
+    ids=["no-message_start", "non-object-start", "non-object-message", "no-usage"],
+)
+@_ANTHROPIC_STREAM_PARSERS
+def test_anthropic_stream_without_input_usage_counts_output_only(parse, start):
+    events: list[tuple[str, object]] = [("message_delta", {"usage": {"output_tokens": 7}})]
+    if start is not None:
+        events.insert(0, ("message_start", start))
+    result = parse(_sse(*events))
+    assert result is not None
+    assert result.total_tokens == 7

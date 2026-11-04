@@ -684,6 +684,90 @@ class TestNonIntTokenCounts:
 
 
 # ------------------------------------------------------------------
+# WOR-1100: an Anthropic stream with an unreadable input count or a negative
+# count is billed like any unreadable reply, never output only
+# ------------------------------------------------------------------
+
+
+def _anthropic_sse(start_usage: object, delta_usage: dict) -> bytes:
+    start = {"type": "message_start", "message": {"model": "m", "usage": start_usage}}
+    delta = {"type": "message_delta", "usage": delta_usage}
+    return (
+        f"event: message_start\ndata: {json.dumps(start)}\n\n"
+        f"event: message_delta\ndata: {json.dumps(delta)}\n\n"
+    ).encode()
+
+
+class TestUnreadableStreamCounts:
+    """A capped key settles its hold at the estimate; an uncapped key records nothing."""
+
+    @pytest.mark.parametrize("capped", [False, True], ids=["uncapped", "capped"])
+    @pytest.mark.parametrize(
+        "headers",
+        # Without the SSE content type the proxy buffers the body and reads it
+        # in _do_record_spend instead of the streaming collector.
+        [{"content-type": "text/event-stream"}, {}],
+        ids=["streamed", "buffered"],
+    )
+    @pytest.mark.parametrize(
+        ("start_usage", "delta_usage", "readable"),
+        [
+            pytest.param({"input_tokens": 5}, {"output_tokens": 3}, True, id="readable"),
+            pytest.param({"input_tokens": None}, {"output_tokens": 3}, False, id="null-input"),
+            pytest.param("x", {"output_tokens": 3}, False, id="non-object-input-usage"),
+            pytest.param({"input_tokens": -5}, {"output_tokens": 3}, False, id="negative-input"),
+            pytest.param({"input_tokens": 5}, {"output_tokens": -3}, False, id="negative-output"),
+        ],
+    )
+    @respx.mock
+    async def test_spend_row_is_the_real_count_or_no_guess(
+        self,
+        proxy_client: httpx.AsyncClient,
+        proxy_app,
+        anthropic_alias,
+        capped,
+        headers,
+        start_usage,
+        delta_usage,
+        readable,
+    ):
+        alias, shard_a_utf8 = anthropic_alias
+        db = proxy_app.state.db
+        if capped:
+            await db.execute(
+                "INSERT INTO enrollment_config (key_alias, spend_cap) VALUES (?, ?)",
+                (alias, 10_000_000),
+            )
+            await db.commit()
+        respx.post(ANTHROPIC_MESSAGES).mock(
+            return_value=httpx.Response(
+                200, headers=headers, content=_anthropic_sse(start_usage, delta_usage)
+            )
+        )
+        engine = proxy_app.state.rules_engine
+
+        with patch.object(
+            engine, "release_spend_reservation", wraps=engine.release_spend_reservation
+        ) as release:
+            resp = await proxy_client.post(
+                _proxy_url(alias, "/v1/messages"),
+                headers=_proxy_headers(alias, shard_a_utf8),
+                content=b'{"model": "claude-3-5-sonnet-20241022",'
+                b' "max_tokens": 10, "messages": []}',
+            )
+
+        assert resp.status_code == 200
+        release.assert_awaited_once()
+        async with db.execute("SELECT tokens FROM spend_log WHERE key_alias = ?", (alias,)) as cur:
+            rows = await cur.fetchall()
+        if readable:
+            assert rows == [(8,)]
+        else:
+            # max(estimate, ceiling) for a capped key; nothing for an uncapped one.
+            assert rows == ([(GLOBAL_CEILING_TOKENS,)] if capped else [])
+
+
+# ------------------------------------------------------------------
 # worthless-64x: Malformed header values (null/CR/LF) rejected
 # ------------------------------------------------------------------
 
