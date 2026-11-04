@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -222,12 +223,13 @@ def _free_port() -> int:
 
 
 @pytest.fixture()
-def openrouter_env(tmp_path: Path) -> tuple[Path, Path, str, dict[str, str]]:
+def openrouter_env(tmp_path: Path) -> Iterator[tuple[Path, Path, str, dict[str, str]]]:
     """Isolated env with a real OpenRouter key. Skips if not available.
 
     Unlike the OpenAI fixture, every CLI call runs as a subprocess with HOME
     sandboxed too: lock probes agent configs under HOME, which WORTHLESS_HOME
-    does not redirect.
+    does not redirect. The sandbox is deleted afterwards: unlock puts the real
+    key back in its .env, and pytest keeps recent tmp_path dirs.
     """
     key = os.environ.get("OPENROUTER_API_KEY")
     if not key:
@@ -250,7 +252,10 @@ def openrouter_env(tmp_path: Path) -> tuple[Path, Path, str, dict[str, str]]:
             "NO_COLOR": "1",
         }
     )
-    return env_file, worthless_home, key, env
+    try:
+        yield env_file, worthless_home, key, env
+    finally:
+        shutil.rmtree(tmp_path, ignore_errors=True)
 
 
 @pytest.mark.live
@@ -261,8 +266,10 @@ class TestOpenRouterLive:
     Not run in CI: no OpenRouter key is stored on GitHub. Run it locally with
     OPENROUTER_API_KEY in ./.env:
 
-        set -a; . ./.env; set +a; uv run pytest tests/live/test_e2e_live.py \
-            -m live -k openrouter -n0 --timeout-method=signal --reruns 0
+        (set -a; . ./.env; set +a; uv run pytest tests/live/test_e2e_live.py \
+            -m live -k openrouter -n0 --timeout-method=signal --reruns 0)
+
+    The parentheses keep the exported key out of your shell.
     """
 
     def test_openrouter_roundtrip(

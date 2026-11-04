@@ -71,7 +71,7 @@ timeout, and the paid live lane never runs in parallel or retries.
 | unit | `uv run pytest -x -q` |
 | docker | `uv run pytest -x -v -m docker -o "addopts=--strict-markers --timeout=300"` |
 | live (real APIs, costs money) | `uv run pytest -x -v -s -m live -o "addopts=--strict-markers --timeout=120"` |
-| live OpenRouter round-trip (local only, needs `OPENROUTER_API_KEY` in `./.env`) | `set -a; . ./.env; set +a; uv run pytest tests/live/test_e2e_live.py -m live -k openrouter -n0 --timeout-method=signal --reruns 0` |
+| live OpenRouter round-trip (local only, needs `OPENROUTER_API_KEY` in `./.env`) | `(set -a; . ./.env; set +a; uv run pytest tests/live/test_e2e_live.py -m live -k openrouter -n0 --timeout-method=signal --reruns 0)` (the subshell keeps the key out of your shell) |
 | openclaw | `uv run pytest -x -v -m openclaw -o "addopts=--strict-markers --timeout=300"` |
 | everything | `uv run pytest -v -o "addopts=--strict-markers --timeout=300"` |
 
