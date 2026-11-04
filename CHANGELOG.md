@@ -46,13 +46,14 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - This changes the Docker image only. An install outside Docker runs on the Python it was installed with, which needs 3.11.18, 3.12.16, 3.13.18, 3.14.10 or 3.15.2 (or a later release in the same series) for the eMudhra denylist. Python 3.10 has no fixed release: move to 3.11.18 or later. On 3.10 the certifi floor below (2026.10.23) still leaves out the affected root.
   - The denylist covers only those eMudhra keys. It isn't general certificate revocation checking.
   - The image still has about 70 known bugs with no fix yet (about 160 package matches), all but two in Debian packages and most marked won't-fix by Debian. The scan doesn't block on those unless one is High or Critical, not marked won't-fix, and not argued in `.grype.yaml`.
-- **Installing or upgrading Worthless now upgrades certifi to 2026.10.23, so the CA list the proxy checks your provider against no longer trusts the root above the compromised eMudhra intermediate keys** (GHSA-6q48-6c7w-9gw2, [#756](https://github.com/oblangatas/worthless/pull/756)).
+- **Installing or upgrading Worthless now upgrades certifi to at least 2026.10.23, so the CA list the proxy checks your provider against no longer trusts the root above the compromised eMudhra intermediate keys** (GHSA-6q48-6c7w-9gw2, [#756](https://github.com/oblangatas/worthless/pull/756)).
   Before: Worthless set no minimum certifi. The proxy's calls to your provider, which carry your real key, are verified against certifi's list. Installing Worthless with pip into an environment that already had certifi older than 2026.10.18 kept that certifi, whose list trusts the emSign root above the compromised eMudhra intermediate keys (GHSA-6q48-6c7w-9gw2, rated critical). A fresh environment, including `uv tool install` and install.sh, already got a fixed certifi.
-  Now: this release requires certifi 2026.10.23 or newer, the newest release, so installing or upgrading Worthless upgrades certifi with it. Besides the affected root, 2026.10.23 also leaves out emSign Root CA - C1 and emSign ECC Root CA - C3, which 2026.10.19 still trusted.
+  Now: this release requires certifi 2026.10.23 or newer, so installing or upgrading Worthless upgrades certifi with it. Besides the affected root, 2026.10.23 also leaves out emSign Root CA - C1 and emSign ECC Root CA - C3, which 2026.10.19 still trusted.
 
   **Limits.**
   - An existing install keeps the certifi it has until you upgrade Worthless.
-  - This changes which roots are trusted. It isn't certificate revocation checking, and it doesn't cover a bundle you point Python at with `SSL_CERT_FILE` or `SSL_CERT_DIR`. The Python denylist in the entry above does.
+  - This changes which roots are trusted. It isn't certificate revocation checking, and it doesn't cover a bundle you point Python at with `SSL_CERT_FILE` or `SSL_CERT_DIR`. The Python denylist in the entry above does, on a Python release that has it.
+  - If your environment's certifi is a Linux distribution's copy patched to read the system certificate store (reachable only through a `--system-site-packages` venv or `pip install --user`), the upgrade replaces it with PyPI's copy, which doesn't include roots you added to the system store.
 
 ### Fixed
 - **`worthless lock` accepts a `*_BASE_URL` line with no value** (WOR-1041, [#740](https://github.com/oblangatas/worthless/pull/740)).

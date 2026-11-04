@@ -27,12 +27,13 @@ dependencies = [
     "cryptography>=50.0.0",
     "aiosqlite>=0.22.1",
     "httpx>=0.28",
-    # Floor is 2026.10.23, not unpinned: GHSA-6q48-6c7w-9gw2 (PYSEC-2026-4320,
-    # fixed in 2026.10.18) trusts the emSign root above the compromised eMudhra
-    # intermediate keys, and httpx verifies the proxy's provider calls against
-    # this bundle. Never imported; declared only for the floor, because pip
-    # keeps an existing env's certifi otherwise. 2026.10.23 also drops
-    # emSign Root CA - C1 and ECC Root CA - C3, which 2026.10.19 kept.
+    # Floor is 2026.10.23, not unpinned: certifi below 2026.10.18 trusts the
+    # emSign root above the compromised eMudhra intermediate keys
+    # (GHSA-6q48-6c7w-9gw2, PYSEC-2026-4320), and httpx verifies the proxy's
+    # provider calls against this bundle. Never imported; declared only for
+    # the floor, because pip keeps an existing env's certifi otherwise.
+    # 2026.10.23 also drops emSign Root CA - C1 and ECC Root CA - C3, which
+    # 2026.10.19 kept.
     "certifi>=2026.10.23",
     "fastapi>=0.115.12",
     "uvicorn[standard]>=0.34",

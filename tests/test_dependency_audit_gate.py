@@ -395,8 +395,8 @@ def test_worker_override_is_declared_exactly(name: str, fixed: tuple[int, ...]) 
 
 # ── runtime floors in pyproject.toml ───────────────────────────────────────
 #
-# Nothing users install reads uv.lock: the Dockerfile and `uv tool install`
-# resolve pyproject's `dependencies`, and pip keeps an existing env's copy of a
+# install.sh (`uv tool install`), pip and uvx resolve pyproject's
+# `dependencies`, never uv.lock, and pip keeps an existing env's copy of a
 # transitive dependency unless a floor forces the upgrade. So an advisory
 # against a runtime dependency is closed by its floor, not by the lock.
 #   certifi       GHSA-6q48-6c7w-9gw2   < 2026.10.18
