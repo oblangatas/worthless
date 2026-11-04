@@ -12,7 +12,7 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   **Limits.**
   - On the default setups (`worthless up`, `worthless wrap`, the Docker image), the socket already sits in a directory that only your user, or only the sidecar's user, can write, so another user couldn't plant one there before this change either. The check adds protection where that isn't so: a socket path you set in a shared directory, and the image's `/run/worthless/sidecar.sock` link, which the health check and `docker exec` follow and which the proxy's user can replace.
   - A process running as the sidecar's user can still pose as the sidecar. On a local install that is your own user, which can already read the proxy's memory.
-  - Root can pose as any user, so this doesn't stop root either.
+  - A socket that root serves as itself (uid 0) is refused like any other wrong uid. But root can switch to the sidecar's uid before it serves the socket, so this doesn't stop root.
   - It doesn't make a compromised proxy safe. In the Docker image it stops a process running as the proxy's user from posing as the sidecar to the health check and CLI commands, not from attacking the container in other ways.
   - Someone who can replace the socket can still cut the proxy off from its sidecar. The proxy refuses their socket, so it won't start, or it answers 503 until the real socket is back. This keeps your values away from them, not your proxy up. The stale-socket race itself is WOR-352.
   - The check reads the kernel's peer credentials, which Worthless supports on Linux and macOS only. On any other system every connection is refused, as the sidecar already refuses its own clients there.
@@ -46,7 +46,7 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   Now: this release requires msgpack 1.2.4 or newer. It fixes the leak: the same 200 messages add 1 to 4 MiB, and 2,000 add no more. It also caps how much a list header can reserve, so the 5 KB message peaks at about 80 MiB instead of 513 MiB. Installing or upgrading to this release upgrades msgpack with it.
 
   **Limits.**
-  - Only a process that passes the sidecar's peer-uid check can send these messages to the sidecar. The proxy now talks only to a socket the sidecar's own user serves (WOR-1078), so a fake sidecar would have to run as that user, or be root, to send them to the proxy.
+  - Only a process that passes the sidecar's peer-uid check can send these messages to the sidecar. The proxy now talks only to a socket the sidecar's own user serves (WOR-1078), so a fake sidecar would have to run as that user to send them to the proxy. Root is refused too unless it first switches to that user's uid.
   - An existing install keeps the msgpack it has until you upgrade Worthless.
   - Decoding still costs far more memory than the message size: one 5 KB malformed message peaks at about 80 MiB, and a valid 1 MB message of empty lists costs about 68 MiB on any msgpack version. Tighter decoder limits are tracked in WOR-1075.
   - A process the sidecar accepts can still hold its memory by opening many connections and stalling half-sent 1 MiB frames (WOR-1076).
