@@ -46,7 +46,7 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   Now: this release requires msgpack 1.2.4 or newer. It fixes the leak: the same 200 messages add 1 to 4 MiB, and 2,000 add no more. It also caps how much a list header can reserve, so the 5 KB message peaks at about 80 MiB instead of 513 MiB. Installing or upgrading to this release upgrades msgpack with it.
 
   **Limits.**
-  - Only a process that passes the sidecar's peer-uid check can send these messages to the sidecar. The proxy doesn't yet check who is on the other end of its socket (WOR-1078).
+  - Only a process that passes the sidecar's peer-uid check can send these messages to the sidecar. The proxy now talks only to a socket the sidecar's own user serves (WOR-1078), so a fake sidecar would have to run as that user, or be root, to send them to the proxy.
   - An existing install keeps the msgpack it has until you upgrade Worthless.
   - Decoding still costs far more memory than the message size: one 5 KB malformed message peaks at about 80 MiB, and a valid 1 MB message of empty lists costs about 68 MiB on any msgpack version. Tighter decoder limits are tracked in WOR-1075.
   - A process the sidecar accepts can still hold its memory by opening many connections and stalling half-sent 1 MiB frames (WOR-1076).
