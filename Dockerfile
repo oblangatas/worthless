@@ -1,5 +1,5 @@
 # NOTE: pin patch versions; update quarterly or on CVE.
-FROM python:3.13-slim-trixie@sha256:3dd7cc108ec1493442514f5c2a871af6af0ec31d768ff6e378a93340c3b3db5f AS builder
+FROM python:3.13-slim-trixie@sha256:2d44738ebf4ce5f63b9d9ea871e9c7cfdc0426f7b0c97cac915fd88ded1d86bb AS builder
 
 WORKDIR /build
 COPY pyproject.toml ./
@@ -11,7 +11,7 @@ RUN apt-get update \
     && pip install --no-cache-dir .
 
 # -----------------------------------------------------------
-FROM python:3.13-slim-trixie@sha256:3dd7cc108ec1493442514f5c2a871af6af0ec31d768ff6e378a93340c3b3db5f
+FROM python:3.13-slim-trixie@sha256:2d44738ebf4ce5f63b9d9ea871e9c7cfdc0426f7b0c97cac915fd88ded1d86bb
 
 RUN apt-get update \
     && apt-get upgrade -y --no-install-recommends \
