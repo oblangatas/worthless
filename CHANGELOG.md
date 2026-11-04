@@ -53,7 +53,7 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   **Limits.**
   - An existing install keeps the certifi it has until you upgrade Worthless.
   - This changes which roots are trusted. It isn't certificate revocation checking, and it doesn't cover a bundle you point Python at with `SSL_CERT_FILE` or `SSL_CERT_DIR`. The Python denylist in the entry above does, on a Python release that has it.
-  - If your environment's certifi is a Linux distribution's copy patched to read the system certificate store (reachable only through a `--system-site-packages` venv or `pip install --user`), the upgrade replaces it with PyPI's copy, which doesn't include roots you added to the system store.
+  - If your environment uses a Linux distribution's certifi older than 2026.10.23 that is patched to read the system certificate store, as Debian's is, the upgrade puts PyPI's copy in front of it. That happens through a `--system-site-packages` venv, `pip install --user`, or pip run against the system Python. PyPI's copy doesn't include roots you added to the system store.
 
 ### Fixed
 - **`worthless lock` accepts a `*_BASE_URL` line with no value** (WOR-1041, [#740](https://github.com/oblangatas/worthless/pull/740)).
