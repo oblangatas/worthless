@@ -3543,6 +3543,7 @@ version = "0.3.16"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
+    { name = "certifi" },
     { name = "cryptography" },
     { name = "fastapi" },
     { name = "httpx" },
@@ -3652,6 +3653,7 @@ requires-dist = [
     { name = "anthropic", marker = "extra == 'test'", specifier = ">=0.40" },
     { name = "atheris", marker = "extra == 'fuzz'", specifier = ">=2.3" },
     { name = "bandit", extras = ["sarif"], marker = "extra == 'qa'", specifier = ">=1.8" },
+    { name = "certifi", specifier = ">=2026.10.23" },
     { name = "cryptography", specifier = ">=50.0.0" },
     { name = "deptry", marker = "extra == 'dev'", specifier = ">=0.22" },
     { name = "fastapi", specifier = ">=0.115.12" },

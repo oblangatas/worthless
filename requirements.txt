@@ -20,6 +20,7 @@ certifi==2026.10.23
     # via
     #   httpcore
     #   httpx
+    #   worthless
 cffi==2.0.0 ; platform_python_implementation != 'PyPy'
     # via cryptography
 click==8.4.2
