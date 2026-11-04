@@ -17,19 +17,30 @@ run as, and the kernel reports the real one.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import logging
 import os
+import signal
+import socket
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+import aiosqlite
+import httpx
 import pytest
 import pytest_asyncio
+import respx
 
 from worthless._flags import WORTHLESS_SIDECAR_UID_ENV
+from worthless.crypto.splitter import split_key_fp
 from worthless.ipc import peercred
 from worthless.ipc.client import IPCAuthError, IPCClient
+from worthless.proxy.app import create_app
+from worthless.proxy.config import ProxySettings
 from worthless.proxy.ipc_supervisor import IPCSupervisor, IPCUnavailable
+from worthless.proxy.rules import RateLimitRule, RulesEngine, SpendCapRule
+from worthless.storage.repository import ShardRepository, StoredShard
 
 from tests.ipc.conftest import FakeSidecarHandle
 
@@ -51,14 +62,14 @@ class _Impostor:
     disconnected: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)
 
 
-@pytest_asyncio.fixture
-async def impostor(sidecar_socket_path: Path) -> AsyncIterator[_Impostor]:
+@contextlib.asynccontextmanager
+async def _serving_impostor(socket_path: Path) -> AsyncIterator[_Impostor]:
     """A server bound at the sidecar path that records every byte and never replies.
 
     Stands in for whoever won the race for the socket path. Before WOR-1078
     the client wrote its hello frame here and waited for a reply.
     """
-    seen = _Impostor(socket_path=sidecar_socket_path)
+    seen = _Impostor(socket_path=socket_path)
 
     async def _on_connect(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         seen.connections += 1
@@ -69,12 +80,18 @@ async def impostor(sidecar_socket_path: Path) -> AsyncIterator[_Impostor]:
             writer.close()
             seen.disconnected.set()
 
-    server = await asyncio.start_unix_server(_on_connect, path=str(sidecar_socket_path))
+    server = await asyncio.start_unix_server(_on_connect, path=str(socket_path))
     try:
         yield seen
     finally:
         server.close()
         await server.wait_closed()
+
+
+@pytest_asyncio.fixture
+async def impostor(sidecar_socket_path: Path) -> AsyncIterator[_Impostor]:
+    async with _serving_impostor(sidecar_socket_path) as seen:
+        yield seen
 
 
 async def _connect(socket_path: Path) -> None:
@@ -256,3 +273,131 @@ async def test_the_proxy_turns_an_impostor_into_unavailable(
 
     await asyncio.wait_for(impostor.disconnected.wait(), timeout=2.0)
     assert bytes(impostor.received) == b""
+
+
+@pytest.mark.integration
+@respx.mock
+async def test_a_proxy_that_reconnects_to_an_impostor_answers_503_and_sends_it_nothing(
+    subprocess_sidecar: tuple[Path, int],
+    fernet_shares: tuple[bytes, bytes],
+    tmp_db_path: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The sidecar dies mid-run and someone else binds its path: the reconnect is refused.
+
+    The proxy serves one request through the real sidecar. The sidecar is then
+    SIGKILLed, which leaves its socket file behind (the WOR-352 stale-socket
+    race), and an impostor binds the same path. The next request's reconnect
+    must check the new server's uid before writing, so the request gets the
+    usual 503, the impostor gets nothing, and the proxy log names both uids.
+
+    This process can't run the sidecar as another uid, so the peer-credential
+    boundary stands in for a split-uid kernel: while the sidecar process is
+    alive it reports that process's connections as ``_OTHER_UID``, and after it
+    dies it passes on the kernel's own answer.
+    """
+    socket_path, sidecar_pid = subprocess_sidecar
+    sidecar_alive = True
+    kernel_answer = peercred.get_peer_credentials
+
+    def _split_uid_kernel(sock: socket.socket) -> peercred.PeerCredentials:
+        creds = kernel_answer(sock)
+        return dataclasses.replace(creds, uid=_OTHER_UID) if sidecar_alive else creds
+
+    monkeypatch.setattr(peercred, "get_peer_credentials", _split_uid_kernel)
+    monkeypatch.setenv(WORTHLESS_SIDECAR_UID_ENV, str(_OTHER_UID))
+    caplog.set_level(logging.WARNING, logger="worthless.proxy.ipc_supervisor")
+
+    # Seal shard B under the key the sidecar was started with, so it can open it.
+    fernet_key = bytes(a ^ b for a, b in zip(*fernet_shares, strict=True))
+    repo = ShardRepository(tmp_db_path, fernet_key)
+    await repo.initialize()
+    api_key = "sk-test-key-1234567890abcdef"
+    split = split_key_fp(api_key, prefix="sk-", provider="openai")
+    await repo.store(
+        "test-key",
+        StoredShard(
+            shard_b=bytearray(split.shard_b),
+            commitment=bytearray(split.commitment),
+            nonce=bytearray(split.nonce),
+            provider="openai",
+        ),
+        prefix=split.prefix,
+        charset=split.charset,
+        base_url="https://api.openai.com/v1",
+    )
+    upstream = respx.post("https://api.openai.com/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json={"choices": [], "usage": {"total_tokens": 5}})
+    )
+
+    settings = ProxySettings(
+        db_path=tmp_db_path,
+        fernet_key=bytearray(fernet_key),
+        default_rate_limit_rps=100.0,
+        upstream_timeout=10.0,
+        streaming_timeout=30.0,
+        allow_insecure=True,
+        sidecar_socket_path=str(socket_path),
+    )
+    sup = IPCSupervisor(
+        socket_path,
+        protocol_version=settings.sidecar_protocol_version,
+        expected_caps=settings.sidecar_expected_caps,
+        request_timeout_s=1.0,
+    )
+    await sup.connect()
+    app = create_app(settings)
+    db = await aiosqlite.connect(tmp_db_path)
+    app.state.db = db
+    app.state.repo = repo
+    app.state.httpx_client = httpx.AsyncClient(follow_redirects=False)
+    app.state.rules_engine = RulesEngine(
+        rules=[SpendCapRule(db=db), RateLimitRule(default_rps=settings.default_rate_limit_rps)]
+    )
+    app.state.ipc_supervisor = sup
+    app.state.ipc_supervisor_preconnected = True
+
+    request = {
+        "url": "/test-key/v1/chat/completions",
+        "headers": {
+            "authorization": f"Bearer {split.shard_a.decode('utf-8')}",
+            "content-type": "application/json",
+        },
+        "content": b'{"model": "gpt-4", "messages": []}',
+    }
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            first = await client.post(**request)
+            assert first.status_code == 200, first.text
+            # Only the real sidecar can open shard B, so this is the full key.
+            assert upstream.calls.last.request.headers["authorization"] == f"Bearer {api_key}"
+
+            os.kill(sidecar_pid, signal.SIGKILL)
+            os.waitpid(sidecar_pid, 0)
+            sidecar_alive = False
+            socket_path.unlink()
+
+            async with _serving_impostor(socket_path) as impostor:
+                second = await client.post(**request)
+                assert second.status_code == 503, second.text
+                assert second.json()["error"]["message"] == "sidecar unavailable"
+                await asyncio.wait_for(impostor.disconnected.wait(), timeout=2.0)
+                assert impostor.connections >= 1, "the proxy never reconnected to the path"
+                assert bytes(impostor.received) == b"", (
+                    f"proxy wrote {len(impostor.received)} bytes to the impostor on reconnect"
+                )
+    finally:
+        await sup.aclose()
+        await app.state.httpx_client.aclose()
+        await db.close()
+
+    refusals = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "sidecar connection refused" in r.getMessage()
+    ]
+    assert refusals, "the refused reconnect left no warning in the proxy log"
+    assert f"sidecar uid {_OTHER_UID}" in refusals[-1], refusals[-1]
+    assert f"peer uid {os.getuid()}" in refusals[-1], refusals[-1]
