@@ -256,7 +256,14 @@ def openrouter_env(tmp_path: Path) -> tuple[Path, Path, str, dict[str, str]]:
 @pytest.mark.live
 @pytest.mark.timeout(120)
 class TestOpenRouterLive:
-    """Lock a real OpenRouter key, call through the proxy, prove the leftover is useless."""
+    """Lock a real OpenRouter key, call through the proxy, prove the leftover is useless.
+
+    Not run in CI: no OpenRouter key is stored on GitHub. Run it locally with
+    OPENROUTER_API_KEY in ./.env:
+
+        set -a; . ./.env; set +a; uv run pytest tests/live/test_e2e_live.py \
+            -m live -k openrouter -n0 --timeout-method=signal --reruns 0
+    """
 
     def test_openrouter_roundtrip(
         self, openrouter_env: tuple[Path, Path, str, dict[str, str]]
