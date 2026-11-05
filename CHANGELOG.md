@@ -52,6 +52,7 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
 
   **Limits.**
   - An existing install keeps the certifi it has until you upgrade Worthless.
+  - A proxy that is already running keeps the CA list it loaded when it started, so it still trusts the affected root after the upgrade. Restart it: `worthless service restart` if it runs as a service, otherwise `worthless down` and then `worthless up`.
   - This changes which roots are trusted. It isn't certificate revocation checking, and it doesn't cover a bundle you point Python at with `SSL_CERT_FILE` or `SSL_CERT_DIR`. The Python denylist in the entry above does, on a Python release that has it.
   - If your environment uses a Linux distribution's certifi older than 2026.10.23 that is patched to read the system certificate store, as Debian's is, the upgrade puts PyPI's copy in front of it. That happens through a `--system-site-packages` venv, `pip install --user`, or pip run against the system Python. PyPI's copy doesn't include roots you added to the system store.
 
