@@ -402,9 +402,11 @@ def test_worker_override_is_declared_exactly(name: str, fixed: tuple[int, ...]) 
 #   certifi       GHSA-6q48-6c7w-9gw2   < 2026.10.18
 #   cryptography  PYSEC-2026-3552       < 50.0.0
 #   msgpack       GHSA-j8c6-9vc5-hj6x   < 1.2.4
+# certifi is held at 2026.10.23, above its advisory's fix: the CHANGELOG
+# promises that release, which also drops emSign Root CA - C1 and ECC C3.
 
 PYPROJECT = REPO / "pyproject.toml"
-RUNTIME_FLOORS = {"certifi": (2026, 10, 18), "cryptography": (50, 0, 0), "msgpack": (1, 2, 4)}
+RUNTIME_FLOORS = {"certifi": (2026, 10, 23), "cryptography": (50, 0, 0), "msgpack": (1, 2, 4)}
 
 
 def _declared_floor(name: str) -> str | None:
