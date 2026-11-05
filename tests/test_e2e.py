@@ -565,6 +565,9 @@ class TestShellProxyNeverSeesTheRealKey:
     ) -> None:
         monkeypatch.setattr(_FakeUpstream, "received", [])
         monkeypatch.setattr(_ForwardingEgressProxy, "seen", [])
+        # wrap inherits os.environ: an operator's own opt-ins would hide the warning.
+        monkeypatch.delenv("WORTHLESS_UPSTREAM_PROXY", raising=False)
+        monkeypatch.delenv("WORTHLESS_UPSTREAM_CA_BUNDLE", raising=False)
         real_key = ""
 
         with (
