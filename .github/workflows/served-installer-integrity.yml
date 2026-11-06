@@ -1,7 +1,7 @@
 name: Served installer integrity
 
 # Hourly: the bytes worthless.sh serves to `curl | sh` (install.sh and
-# /uninstall's uninstall.sh) must equal the latest GitHub Release.
+# /uninstall's uninstall.sh) must equal the latest release tag.
 # deploy-worker.yml checks this at every CI deploy and release-sync-check.yml
 # re-checks it daily; this narrows the gap for anything
 # that changes production OUTSIDE CI (a leaked deploy token, a manual

@@ -1208,6 +1208,16 @@ class TestCrossConfigConsistency:
 # ------------------------------------------------------------------
 
 
+class TestReleaseSyncSendsARealUserAgent:
+    """A fixed curl User-Agent is one no real curl sends: a tampered Worker could
+    serve the genuine script only to it, and this check would pass. Bare curl
+    sends its own, so the check looks like any user running `curl | sh`."""
+
+    def test_no_fixed_curl_user_agent(self, release_sync_text: str):
+        fixed = re.findall(r'(?:-A|--user-agent)\s+"?curl/|User-Agent:\s*curl/', release_sync_text)
+        assert not fixed, f"release-sync-check must use curl's own User-Agent: {fixed}"
+
+
 class TestInstallPinDriftCheck:
     """WOR-559 — release-sync-check.yml fails when install.sh's default pin
     falls behind the latest published PyPI release. This deploy-decoupled
