@@ -391,3 +391,44 @@ def test_worker_override_is_declared_exactly(name: str, fixed: tuple[int, ...]) 
     assert _version_tuple(override) >= fixed, (
         f"overrides.{name} {override!r} is inside the advisory"
     )
+
+
+# ── runtime floors in pyproject.toml ───────────────────────────────────────
+#
+# install.sh (`uv tool install`), pip and uvx resolve pyproject's
+# `dependencies`, never uv.lock, and pip keeps an existing env's copy of a
+# dependency unless a floor forces the upgrade. So an advisory
+# against a runtime dependency is closed by its floor, not by the lock.
+#   certifi       GHSA-6q48-6c7w-9gw2   < 2026.10.18
+#   cryptography  PYSEC-2026-3552       < 50.0.0
+#   msgpack       GHSA-j8c6-9vc5-hj6x   < 1.2.4
+# certifi is held at 2026.10.23, above its advisory's fix: the CHANGELOG
+# promises that release, which also drops emSign Root CA - C1 and ECC C3.
+
+PYPROJECT = REPO / "pyproject.toml"
+RUNTIME_FLOORS = {"certifi": (2026, 10, 23), "cryptography": (50, 0, 0), "msgpack": (1, 2, 4)}
+
+
+def _declared_floor(name: str) -> str | None:
+    """The `>=` version pyproject's [project] dependencies give *name*, if any.
+
+    Regex over the raw text, not a TOML parse: tomllib is 3.11+ and this suite
+    runs on 3.10 too.
+    """
+    block = re.search(r"^dependencies = \[(.*?)^\]", PYPROJECT.read_text(), re.S | re.M)
+    assert block, "no [project] dependencies list in pyproject.toml"
+    match = re.search(rf'^\s*"{re.escape(name)}>=([0-9.]+)"', block.group(1), re.M)
+    return match.group(1) if match else None
+
+
+@pytest.mark.parametrize(("name", "required"), RUNTIME_FLOORS.items(), ids=list(RUNTIME_FLOORS))
+def test_runtime_floor_is_outside_the_advisory(name: str, required: tuple[int, ...]) -> None:
+    """pyproject requires at least the listed version of each advised runtime dep."""
+    floor = _declared_floor(name)
+    assert floor, (
+        f"{name} has no `>=` floor in pyproject.toml's dependencies. pip keeps an "
+        f"existing env's {name}, so upgrading worthless can leave a vulnerable copy."
+    )
+    assert _version_tuple(floor) >= required, (
+        f"{name}>={floor} is below the required {'.'.join(map(str, required))}"
+    )
