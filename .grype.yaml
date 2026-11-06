@@ -216,16 +216,18 @@ ignore:
     reason: "Integer overflow in libstdc++'s aligned operator new: a large request wraps to an undersized allocation, so the caller writes past the block. Hits gcc-14-base, libgcc-s1 and libstdc++6. Debian has no fix in any release (gcc-12/14/15/16 all vulnerable, unfixed — tracker read 2026-10-05). Re-measured 2026-10-05 inside the repinned image (Python 3.13.16): 11 compiled extensions, none linking libstdc++, and the interpreter does not link it either. operator new is the C++ allocation operator and no Worthless code is C++; the gcc runtime is present only because the base image ships it. Tracking worthless-11ix. SCOPE: pinned to `type: deb` at version 14.2.0-19 rather than by package name, because `libstdc++6` contains a `+` that grype treats as a regex and this repo's expiry hook rejects. Measured by contrast that grype honours the version: the rule at 14.2.0-19 suppressed 3 of 3 matches, at 99.9.9-99 it suppressed 0 of 3. Both gates honour the version: grype by its own matching, and check_grype_unmapped_findings because `version` is carried into the scope and compared there too — without that the pin bound nothing on the gate that actually blocks, since the grype step runs only-fixed and never sees a not-fixed finding. Residual breadth: this still covers any Debian package at exactly 14.2.0-19, which today is only the three gcc-14 binaries reported, but would silently cover a future gcc-14-sourced addition."
     expiry: "2027-01-31"
 
-  # CVE-2026-82049 (CPython tarfile extraction filters) was suppressed here
-  # and is now DELETED rather than extended. Repinning the base image to
-  # Python 3.13.16 retired it: measured 2026-10-06 against the built image
-  # with ignores disabled, the finding is absent entirely. This file's rule
-  # is to delete a suppression once its finding is gone, not to leave it
-  # sitting there silencing nothing. The reachability argument it carried
-  # (nothing EXTRACTS archives; tarfile is imported via keyring ->
-  # jaraco.context but jaraco.context.tarball has no callers) is preserved
-  # in tests/test_archive_reachability.py, which still guards the three
-  # older tarfile CVEs below.
+  # CVE-2026-82049 was written about here on 2026-10-06, and that note was
+  # wrong in one way worth keeping: it said the entry had been deleted, while
+  # a second, better-argued entry for the same CVE was sitting ninety lines
+  # below, added the day before by a different PR. So the file claimed a
+  # tombstone and a live suppression at once. The real record now lives at the
+  # tarfile block further down, written 2026-11-06 on a fresh measurement.
+  #
+  # The reachability argument that note carried still stands and still guards
+  # the three older tarfile CVEs below: nothing EXTRACTS archives. tarfile is
+  # imported at runtime via keyring -> jaraco.context, but jaraco.context's
+  # only open/extract site has no callers. tests/test_archive_reachability.py
+  # enforces the src/ half of that; the dependency half is worthless-99ti.
 
 
   - vulnerability: CVE-2026-15806
@@ -277,42 +279,35 @@ ignore:
     reason: "Pod::Text <6.1.1 CPU/memory exhaustion when formatting an attacker-supplied POD document. THE MODULE IS NOT IN THE IMAGE: measured 2026-09-27, only perl-base is installed (no perl-modules-5.40), `find / -name Text.pm -path '*Pod*'` is empty, and perldoc/pod2text do not exist. Grype matched the perl-base version, not vulnerable code on disk. Debian fix=not-fixed, so there is nothing to upgrade to. Re-measure by re-running those commands; this dies when perl-modules appears. Tracking WOR-934."
     expiry: "2026-12-31"  # no fix exists; re-measure for a fixed perl-base, do not blind-extend.
 
-  # ── CPython tarfile, base-image only — A FIX EXISTS (WOR-934) ───────
-  # Read this one differently from every other entry in this file. The others
-  # are waivers because there is nowhere to upgrade to. This one is a DELAY:
-  # the fix is real, shipped, and stable, and we are not taking it yet.
+  # ── CVE-2026-82049, deleted twice and recorded properly this time ───
+  # The finding is GONE, measured 2026-11-06 against the image this Dockerfile
+  # actually builds (python 3.13.16, grype DB refreshed that day, ignores
+  # disabled): 0 matches. Its three tarfile siblings — CVE-2026-11940,
+  # CVE-2026-11972, CVE-2026-4360 — are absent from that scan too.
   #
-  # MEASURED 2026-09-26 (grype 0.118.0), bases pulled fresh:
+  # HOW IT GOT SUPPRESSED TWICE, because the mess is the lesson:
+  # PR #651 (WOR-934) added a careful entry measured 2026-09-26 against
+  # python:3.13-slim-trixie 3.13.15. PR #650 landed days later, repinned the
+  # base to 3.13.16, and left a note above saying the finding was deleted.
+  # Both were honest; neither saw the other, so the file ended up holding a
+  # tombstone AND a live entry for the same CVE, arguing about a base image
+  # that had stopped existing.
   #
-  #   python:3.13-slim-trixie  3.13.15  present   <- the base this image uses
-  #   python:3.14-slim-trixie  3.14.7   ABSENT
-  #   python:3.14-slim         3.14.7   ABSENT
+  # The entry's own instruction was "DELETE this entry then" once the fix
+  # landed. The fix arrived by a route it did not predict — a patch-level
+  # repin, not the 3.14 bump — so the instruction is honoured here, on a fresh
+  # measurement rather than on the calendar.
   #
-  # Why we are not on 3.14 today, measured the same day:
-  #   1. The suite fails there. unshardable_credentials.py relies on
-  #      Path.is_file() raising for EACCES to record a "could not be checked"
-  #      caveat; 3.14's pathlib swallows it, so an unreadable credential
-  #      surface reports CLEAN with no caveat — the false all-clear that
-  #      module exists to prevent (1 failed / 1136 passed, worthless-epnw P1).
-  #      Taking the fix today trades a CVE we do not call for a regression in
-  #      a guarantee we advertise.
-  #   2. The Dockerfile copies /usr/local/lib/python3.13/site-packages, so a
-  #      3.14 image does not build until that path moves too.
+  # NOT deleted: the three siblings below. They match nothing today either,
+  # but their expiries have not lapsed and their arguments are not mine to
+  # retire on a drive-by. Tracked with the other dead-but-unexpired entries in
+  # worthless-nvwm.
   #
-  # Reachability: worthless calls no tarfile/unpack_archive/extract API at all
-  # (grep of src/ on 2026-09-26 is empty). This is the interpreter we ship
-  # inside the image, not a path our code takes. That argument is a grep taken
-  # on one day — it is not enforced by anything, so re-check it, do not
-  # inherit it.
-  #
-  # THIRTY DAYS, not the bulk date. A fix exists; the clock should hurt.
-  # WOR-934 (due 2026-10-27) carries the bump. DELETE this entry then.
-  - vulnerability: CVE-2026-82049
-    package:
-      name: python
-      type: binary
-    reason: "DELAY, not a dead end: Python 3.14.7 IS fixed. Measured 2026-09-26 — python:3.13-slim-trixie 3.13.15 affected, python:3.14-slim-trixie and python:3.14-slim 3.14.7 both clean. Not taken yet because the suite fails on 3.14 (worthless-epnw: an unreadable credential surface is reported clean with no caveat) and the Dockerfile hardcodes the python3.13 site-packages path. Base-image interpreter only; worthless calls no tarfile API. Tracking WOR-934, due 2026-10-27."
-    expiry: "2026-10-27"  # matches WOR-934's due date on purpose. Do not extend — fix it.
+  # STILL TRUE AND STILL OWED: 3.14 is where CPython fixes this class for
+  # good, and WOR-934 is still blocked behind worthless-epnw (P1: an
+  # unreadable credential surface reported clean with no caveat) and a
+  # Dockerfile that hardcodes the python3.13 site-packages path. Deleting this
+  # entry removes a dead waiver; it does not discharge that work.
 
   # ── CPython tarfile, base-image only (WOR-852 Track B) ──────────────
   # All three are tarfile bugs in the digest-pinned python:3.13-slim-bookworm
