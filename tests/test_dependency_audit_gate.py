@@ -397,7 +397,7 @@ def test_worker_override_is_declared_exactly(name: str, fixed: tuple[int, ...]) 
 #
 # install.sh (`uv tool install`), pip and uvx resolve pyproject's
 # `dependencies`, never uv.lock, and pip keeps an existing env's copy of a
-# transitive dependency unless a floor forces the upgrade. So an advisory
+# dependency unless a floor forces the upgrade. So an advisory
 # against a runtime dependency is closed by its floor, not by the lock.
 #   certifi       GHSA-6q48-6c7w-9gw2   < 2026.10.18
 #   cryptography  PYSEC-2026-3552       < 50.0.0
@@ -421,12 +421,14 @@ def _declared_floor(name: str) -> str | None:
     return match.group(1) if match else None
 
 
-@pytest.mark.parametrize(("name", "fixed"), RUNTIME_FLOORS.items(), ids=list(RUNTIME_FLOORS))
-def test_runtime_floor_is_outside_the_advisory(name: str, fixed: tuple[int, ...]) -> None:
-    """pyproject declares a floor at or above the fix for each advised runtime dep."""
+@pytest.mark.parametrize(("name", "required"), RUNTIME_FLOORS.items(), ids=list(RUNTIME_FLOORS))
+def test_runtime_floor_is_outside_the_advisory(name: str, required: tuple[int, ...]) -> None:
+    """pyproject requires at least the listed version of each advised runtime dep."""
     floor = _declared_floor(name)
     assert floor, (
         f"{name} has no `>=` floor in pyproject.toml's dependencies. pip keeps an "
         f"existing env's {name}, so upgrading worthless can leave a vulnerable copy."
     )
-    assert _version_tuple(floor) >= fixed, f"{name}>={floor} still admits the advised range"
+    assert _version_tuple(floor) >= required, (
+        f"{name}>={floor} is below the required {'.'.join(map(str, required))}"
+    )
