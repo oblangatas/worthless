@@ -24,10 +24,9 @@ permissions:
   pull-requests: read # the push run reads the merged PR's labels
 
 concurrency:
-  # A newer push to a PR supersedes the older run. Each push to main gets its own
-  # group, because a shared one drops queued runs even without cancel-in-progress.
-  group: changelog-placement-${{ github.event_name == 'push' && github.run_id || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # A newer push to a PR supersedes the older run; each push to main is its own group.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
 
 jobs:
   placement:

@@ -15,7 +15,7 @@ Only *added* lines inside a tagged version's section count. Release
 headings, compare-link lines and blank lines are exempt. Removals pass: moving
 an entry out of a released section is the fix. A deliberate edit to a released
 section uses the ``changelog-released-edit`` label, checked in the workflow.
-With no tags visible (a checkout without them) it fails rather than guarding
+With no tags visible (a shallow checkout) it fails rather than guarding
 nothing. Exit 1 with the offending lines; 0 otherwise.
 """
 
@@ -83,10 +83,7 @@ def main(argv: list[str]) -> int:
         return 2
     changelog = Path(argv[1]).read_text(encoding="utf-8")
     shipped = _shipped()
-    has_releases = any(
-        m and m.group(1) != "Unreleased" for m in map(_HEADING.match, changelog.splitlines())
-    )
-    if has_releases and not shipped:
+    if not shipped:
         print("CHANGELOG: no release tags visible, so nothing can be checked. Fetch tags.")
         return 1
     bad = misplaced(changelog, sys.stdin.read(), shipped)

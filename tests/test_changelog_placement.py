@@ -92,10 +92,6 @@ def test_removals_only_pass() -> None:
     assert _load().misplaced(CHANGELOG, "@@ -11 +10,0 @@\n-- **Old fix** (#1)\n", SHIPPED) == []
 
 
-def test_no_released_section_means_nothing_to_guard() -> None:
-    assert _load().misplaced("# Changelog\n\n## [Unreleased]\n- a\n", _diff(4), SHIPPED) == []
-
-
 def test_a_merged_but_untagged_release_section_stays_open() -> None:
     """Between the release PR merging and the tag, fixes that land on main ship in
     that tag, so their notes belong in its section (#714, #732, #733 for 0.3.16).
