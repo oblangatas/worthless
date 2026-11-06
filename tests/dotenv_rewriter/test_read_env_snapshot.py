@@ -9,6 +9,7 @@ a rewrite given the snapshot's hash must refuse a file that changed since.
 from __future__ import annotations
 
 import hashlib
+import hmac
 from pathlib import Path
 
 import pytest
@@ -96,7 +97,7 @@ def test_parse_drops_the_bom_and_hash_covers_the_bytes(tmp_path: Path, make_env_
 
     snapshot = read_env_snapshot(env)
     assert list(snapshot.parsed) == ["OPENAI_BASE_URL"]
-    assert snapshot.sha256 == hashlib.sha256(content).digest()
+    assert hmac.compare_digest(snapshot.sha256, hashlib.sha256(content).digest())
 
 
 def test_a_file_that_is_not_utf8_is_refused(tmp_path: Path, make_env_file) -> None:
