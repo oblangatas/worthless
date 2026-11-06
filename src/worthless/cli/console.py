@@ -127,6 +127,25 @@ class WorthlessConsole:
         if not self.quiet:
             self._err.print(f"[yellow]{_rich_escape(message)}[/yellow]")
 
+    def print_file_note(self, message: str) -> None:
+        """Yellow text to stderr about what a command did, or won't do, to a user's file.
+
+        NOT suppressed by ``--quiet`` (WOR-1042): quiet hides progress, not a
+        change to the user's ``.env``. Shown under ``--json`` too: it is stderr.
+        """
+        self._err.print(f"[yellow]{_rich_escape(message)}[/yellow]")
+
+    def print_key_note(self, message: str) -> None:
+        """Yellow text to stderr about a key the user may lose: one a command
+        couldn't restore or is deleting, or what's left of ``~/.worthless``.
+
+        NOT suppressed by ``--quiet`` (WOR-1043): it can be the only record that
+        the user must rotate a key or delete what's left. Shown under ``--json``
+        too: it is stderr. A change to the user's own file is a
+        :meth:`print_file_note`.
+        """
+        self._err.print(f"[yellow]{_rich_escape(message)}[/yellow]")
+
     def print_notice(self, message: str) -> None:
         """One-time informational notice to stderr (the AS-IS warranty
         notice, WOR-488).

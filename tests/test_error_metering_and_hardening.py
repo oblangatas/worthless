@@ -18,10 +18,11 @@ import pytest
 import respx
 
 from worthless.crypto.splitter import split_key_fp
+from worthless.defaults import GLOBAL_CEILING_TOKENS
 from worthless.proxy.app import create_app
 from worthless.proxy.config import ProxySettings
 from worthless.proxy.metering import extract_usage_anthropic
-from worthless.proxy.rules import RateLimitRule, RulesEngine, SpendCapRule
+from worthless.proxy.rules import RateLimitRule, RulesEngine, SpendCapRule, TokenBudgetRule
 from worthless.storage.repository import ShardRepository, StoredShard
 
 from tests._fakes import pin_shard_b
@@ -315,6 +316,78 @@ class TestErrorResponseMetering:
             )
 
         assert resp.status_code == 200
+
+
+class TestNonDictUsage:
+    """WOR-980: a 200 whose ``usage`` isn't an object must not crash spend recording."""
+
+    @respx.mock
+    async def test_non_dict_usage_never_locks_a_budgeted_key_out(
+        self, proxy_client: httpx.AsyncClient, proxy_app, enrolled_alias
+    ):
+        """Each request reserves max_tokens against the daily budget. Before the fix
+        the background spend task crashed (ASGITransport re-raises that here) and
+        never released the reservation, so the next request got a 429 with zero
+        tokens spent."""
+        alias, shard_a_utf8, _ = enrolled_alias
+        db = proxy_app.state.db
+        await db.execute(
+            "INSERT INTO enrollment_config (key_alias, token_budget_daily) VALUES (?, ?)",
+            (alias, 1000),
+        )
+        await db.commit()
+        budget = TokenBudgetRule(db=db)
+        proxy_app.state.rules_engine = RulesEngine(
+            rules=[budget, *proxy_app.state.rules_engine.rules]
+        )
+        respx.post(OPENAI_COMPLETIONS).mock(
+            return_value=httpx.Response(200, json={"choices": [], "usage": "x"})
+        )
+
+        for _ in range(2):
+            resp = await proxy_client.post(
+                _proxy_url(alias),
+                headers=_proxy_headers(alias, shard_a_utf8),
+                content=b'{"model": "gpt-4", "messages": [], "max_tokens": 1000}',
+            )
+            assert resp.status_code == 200
+
+        assert budget._reserved.get(alias, 0) == 0
+        async with db.execute(
+            "SELECT COUNT(*) FROM spend_log WHERE key_alias = ?", (alias,)
+        ) as cur:
+            assert await cur.fetchone() == (0,)
+
+    @respx.mock
+    async def test_non_dict_usage_on_a_capped_key_settles_the_hold_now(
+        self, proxy_client: httpx.AsyncClient, proxy_app, enrolled_alias
+    ):
+        """The hold becomes one spend row at max(estimate, ceiling) right away,
+        instead of waiting for the sweeper."""
+        alias, shard_a_utf8, _ = enrolled_alias
+        db = proxy_app.state.db
+        await db.execute(
+            "INSERT INTO enrollment_config (key_alias, spend_cap) VALUES (?, ?)",
+            (alias, 10_000_000),
+        )
+        await db.commit()
+        respx.post(OPENAI_COMPLETIONS).mock(
+            return_value=httpx.Response(200, json={"choices": [], "usage": "x"})
+        )
+
+        resp = await proxy_client.post(
+            _proxy_url(alias),
+            headers=_proxy_headers(alias, shard_a_utf8),
+            content=b'{"model": "gpt-4", "messages": [], "max_tokens": 1000}',
+        )
+
+        assert resp.status_code == 200
+        async with db.execute(
+            "SELECT COUNT(*) FROM pending_charges WHERE key_alias = ?", (alias,)
+        ) as cur:
+            assert await cur.fetchone() == (0,)
+        async with db.execute("SELECT tokens FROM spend_log WHERE key_alias = ?", (alias,)) as cur:
+            assert await cur.fetchall() == [(GLOBAL_CEILING_TOKENS,)]
 
 
 # ------------------------------------------------------------------
