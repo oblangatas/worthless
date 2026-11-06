@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import os
 import secrets
 import select
@@ -33,6 +34,7 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
+from worthless.cli.platform import check_pid_alive
 from worthless.ipc.client import IPCClient
 from worthless.sidecar import __main__ as sidecar_main
 from worthless.sidecar.__main__ import _drain_server
@@ -445,14 +447,6 @@ time.sleep(60)
 """
 
 
-def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    return True
-
-
 def _wait_until(pred, timeout: float) -> bool:  # type: ignore[no-untyped-def]
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -486,14 +480,14 @@ def test_sidecar_exits_and_removes_shares_when_parent_is_killed(
         assert _wait_until(lambda: not base.exists(), 2.0), (
             f"orphaned sidecar left key material behind: {sorted(base.iterdir())}"
         )
-        # Reparented, so not our child: poll with kill(0) instead of wait().
-        assert _wait_until(lambda: not _pid_alive(sidecar_pid), 10.0)
+        # Reparented, so not our child: poll by pid instead of wait().
+        assert _wait_until(lambda: not check_pid_alive(sidecar_pid), 10.0)
     finally:
         idle.close()
         if sup.poll() is None:
             sup.kill()
             sup.wait(timeout=2)
-        if sidecar_pid and _pid_alive(sidecar_pid):
+        if sidecar_pid and check_pid_alive(sidecar_pid):
             os.kill(sidecar_pid, signal.SIGKILL)
 
 
@@ -509,28 +503,6 @@ def test_sidecar_keeps_serving_while_parent_is_alive(
         assert sock.exists()
     finally:
         _terminate(proc)
-
-
-def test_sidecar_refuses_to_start_when_parent_already_gone(
-    sidecar_env: tuple[Path, dict[str, str]],
-) -> None:
-    """Parent died during spawn: the sidecar must not bind, and must wipe the shares."""
-    sock, env = sidecar_env
-    proc = _spawn_sidecar({**env, "WORTHLESS_SIDECAR_PARENT_PID": str(os.getpid() + 999_999)})
-    rc, out, err = _terminate_after_exit(proc)
-    assert rc == 0, f"rc={rc}\nstdout:{out}\nstderr:{err}"
-    assert "sidecar: ready" not in out
-    assert not sock.parent.exists(), sorted(sock.parent.iterdir())
-
-
-def _terminate_after_exit(proc: subprocess.Popen[str]) -> tuple[int, str, str]:
-    try:
-        out, err = proc.communicate(timeout=_READY_TIMEOUT_S)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        out, err = proc.communicate(timeout=2)
-        pytest.fail(f"sidecar did not exit after detecting a dead parent\nstderr:{err}")
-    return proc.returncode, out, err
 
 
 async def test_watch_parent_sets_stop_when_ppid_changes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -555,7 +527,7 @@ async def test_watch_parent_returns_quietly_on_normal_stop(
     assert await asyncio.wait_for(task, timeout=1.0) is False
 
 
-# In-process twins of the subprocess tests above, so coverage sees _run.
+# In-process runs of _run: subprocess tests are invisible to coverage.
 
 
 def _use_env(monkeypatch: pytest.MonkeyPatch, env: dict[str, str], parent: str) -> None:
@@ -563,6 +535,25 @@ def _use_env(monkeypatch: pytest.MonkeyPatch, env: dict[str, str], parent: str) 
         if k.startswith("WORTHLESS_SIDECAR_"):
             monkeypatch.setenv(k, v)
     monkeypatch.setenv("WORTHLESS_SIDECAR_PARENT_PID", parent)
+
+
+@contextlib.asynccontextmanager
+async def _running_sidecar(sock: Path) -> AsyncIterator[asyncio.Task[int]]:
+    """Run ``_run`` in-process until its socket is bound; undo its signal handlers after."""
+    run = asyncio.create_task(sidecar_main._run())
+    try:
+        for _ in range(200):
+            if sock.exists():
+                break
+            await asyncio.sleep(0.01)
+        assert sock.exists(), "in-process sidecar never bound"
+        yield run
+    finally:
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.remove_signal_handler(sig)
+        if not run.done():
+            run.cancel()
 
 
 async def test_run_rejects_non_numeric_parent_pid(
@@ -575,11 +566,15 @@ async def test_run_rejects_non_numeric_parent_pid(
 
 
 async def test_run_wipes_without_binding_when_parent_already_gone(
-    sidecar_env: tuple[Path, dict[str, str]], monkeypatch: pytest.MonkeyPatch
+    sidecar_env: tuple[Path, dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
+    """Parent died during spawn: the sidecar must not bind, and must wipe the shares."""
     sock, env = sidecar_env
     _use_env(monkeypatch, env, str(os.getppid() + 999_999))
     assert await sidecar_main._run() == 0
+    assert "sidecar: ready" not in capsys.readouterr().out
     assert not sock.parent.exists()
 
 
@@ -590,24 +585,11 @@ async def test_run_wipes_and_exits_when_parent_dies_while_serving(
     real_ppid = os.getppid()
     _use_env(monkeypatch, env, str(real_ppid))
     monkeypatch.setattr(sidecar_main, "_PARENT_POLL_S", 0.01)
-    monkeypatch.setattr(sidecar_main, "_DEFAULT_DRAIN_TIMEOUT_S", 0.1)
-    monkeypatch.delenv("WORTHLESS_SIDECAR_DRAIN_TIMEOUT", raising=False)
-    run = asyncio.create_task(sidecar_main._run())
-    try:
-        for _ in range(200):
-            if sock.exists():
-                break
-            await asyncio.sleep(0.01)
-        assert sock.exists(), "in-process sidecar never bound"
+    monkeypatch.setenv("WORTHLESS_SIDECAR_DRAIN_TIMEOUT", "0.1")
+    async with _running_sidecar(sock) as run:
         monkeypatch.setattr(sidecar_main.os, "getppid", lambda: real_ppid + 1)
         assert await asyncio.wait_for(run, timeout=5.0) == 0
         assert not sock.parent.exists()
-    finally:
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            loop.remove_signal_handler(sig)
-        if not run.done():
-            run.cancel()
 
 
 def test_remove_key_material_keeps_a_dir_that_holds_other_files(tmp_path: Path) -> None:
@@ -633,20 +615,8 @@ async def test_run_wipes_when_parent_dies_after_a_signal_won_the_race(
     real_ppid = os.getppid()
     _use_env(monkeypatch, env, str(real_ppid))
     monkeypatch.setattr(sidecar_main, "_PARENT_POLL_S", 60.0)  # watcher never re-polls
-    run = asyncio.create_task(sidecar_main._run())
-    try:
-        for _ in range(200):
-            if sock.exists():
-                break
-            await asyncio.sleep(0.01)
-        assert sock.exists(), "in-process sidecar never bound"
+    async with _running_sidecar(sock) as run:
         monkeypatch.setattr(sidecar_main.os, "getppid", lambda: real_ppid + 1)
         os.kill(os.getpid(), signal.SIGTERM)  # caught by _run's loop handler
         assert await asyncio.wait_for(run, timeout=10.0) == 0
         assert not sock.parent.exists(), sorted(sock.parent.iterdir())
-    finally:
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            loop.remove_signal_handler(sig)
-        if not run.done():
-            run.cancel()

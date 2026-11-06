@@ -71,7 +71,7 @@ _REQUIRED_ENV = (
 
 _PROBE_TIMEOUT_S = 1.0
 _DEFAULT_DRAIN_TIMEOUT_S = 5.0
-# ponytail: poll getppid instead of PR_SET_PDEATHSIG (Linux-only, needs
+# Poll getppid instead of PR_SET_PDEATHSIG (Linux-only, needs
 # preexec_fn) or kqueue NOTE_EXIT (macOS-only). Ceiling: share files stay on
 # disk up to one interval after the parent dies; the key stays in memory until
 # the drain ends (up to drain_timeout while the orphaned proxy holds a connection).
