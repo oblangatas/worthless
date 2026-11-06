@@ -42,6 +42,7 @@ from worthless.cli.process import (
     disable_core_dumps,
     fernet_transport,
     finalize_fernet_transport,
+    ignored_upstream_env_notes,
     is_service_managed,
     pid_path,
     poll_health,
@@ -602,6 +603,8 @@ def _start_foreground_locked(
 
         proxy_env["WORTHLESS_SIDECAR_SOCKET"] = str(handle.socket_path)
 
+        for note in ignored_upstream_env_notes():
+            console.print_warning(note)
         try:
             proxy, actual_port = spawn_proxy(env=proxy_env, port=port)
         except Exception as exc:

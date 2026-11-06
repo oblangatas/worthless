@@ -206,6 +206,44 @@ class TestSidecarBeforeProxy:
         assert captured_proxy_env["WORTHLESS_SIDECAR_SOCKET"].endswith("sidecar.sock")
 
 
+class TestIgnoredUpstreamEnvNotice:
+    def test_up_says_which_proxy_settings_the_proxy_ignores(
+        self, home: WorthlessHome, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Under ``up`` nothing shows the proxy's own log (WOR-1074), so ``up`` prints
+        the ignored-settings warning itself (WOR-1071). Names, never values."""
+        from worthless.cli.commands import up as up_mod
+
+        monkeypatch.setenv("HTTPS_PROXY", "http://corp-user:hunter2@egress.corp.example:3128")
+        monkeypatch.delenv("WORTHLESS_UPSTREAM_PROXY", raising=False)
+        sidecar_proc = _FakeSidecarProc()
+        proxy_proc = _FakeProxyProc(poll_sequence=[None, 0])
+        console = MagicMock()
+
+        def fake_spawn_sidecar(socket_path: Path, shares: ShareFiles, allowed_uid: int, **_: Any):
+            return _make_handle(sidecar_proc, shares.run_dir)
+
+        with (
+            patch.object(up_mod, "spawn_sidecar", fake_spawn_sidecar),
+            patch.object(up_mod, "spawn_proxy", lambda *, env, port: (proxy_proc, port)),
+            patch.object(up_mod, "poll_health_pid", return_value=proxy_proc.pid),
+            patch.object(up_mod, "write_pid"),
+            patch.object(up_mod, "_upgrade_pidfile_if_trusted", return_value=proxy_proc.pid),
+            patch.object(up_mod, "shutdown_sidecar"),
+        ):
+            up_mod._start_foreground(
+                home=home,
+                proxy_env={"WORTHLESS_DB_PATH": "x", "WORTHLESS_HOME": str(home.base_dir)},
+                port=8787,
+                pid_file=home.base_dir / "proxy.pid",
+                console=console,
+            )
+
+        warned = " ".join(str(c.args[0]) for c in console.print_warning.call_args_list)
+        assert "HTTPS_PROXY" in warned and "WORTHLESS_UPSTREAM_PROXY" in warned
+        assert "hunter2" not in warned and "egress.corp.example" not in warned
+
+
 # ---------------------------------------------------------------------------
 # D2 — clean shutdown: proxy first, then sidecar
 # ---------------------------------------------------------------------------
