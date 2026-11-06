@@ -25,7 +25,11 @@ from typer.testing import CliRunner
 
 from worthless.cli import default_command
 from worthless.cli.app import app
-from worthless.cli.commands.lock import _offer_service_after_lock
+from worthless.cli.commands.lock import (
+    _offer_question,
+    _offer_service_after_lock,
+    _should_offer_service,
+)
 from worthless.cli.console import WorthlessConsole
 from worthless.cli.commands.service._common import ServiceState
 from worthless.cli.errors import ErrorCode, WorthlessError
@@ -763,3 +767,87 @@ class TestPlainWorthlessAsks:
         ):
             default_command.run_default(interactive=True, yes=False)
         assert order == ["enroll+offer", "proxy"]
+
+
+class TestWhoGetsAskedAtAll:
+    """Plain `worthless` offers when there is a repo to protect (worthless-mivd).
+
+    Operator decision, 2026-10-10. Until now only an explicit `worthless lock`
+    could show the offer: `default_command.py` locks with quiet=True and the
+    offer sat inside `if not quiet:`, so the documented first-run command —
+    the one the README tells people to type — never mentioned the feature.
+
+    The rule is not "always offer". A git repository means a real project that
+    outlives this terminal, so persistence is likely wanted. A scratch folder
+    does not need a background service, and plain `worthless` is quiet mode:
+    outside a repo it stays quiet and says nothing at all.
+
+    An explicit `worthless lock` offers either way, because the user asked.
+    """
+
+    def test_plain_worthless_offers_inside_a_repo(self, tmp_path: Path) -> None:
+        env_path = tmp_path / "proj" / ".env"
+        env_path.parent.mkdir()
+        (tmp_path / ".git").mkdir()
+        assert _should_offer_service(quiet=True, env_path=env_path) is True
+
+    def test_plain_worthless_stays_silent_outside_a_repo(self, tmp_path: Path) -> None:
+        env_path = tmp_path / "scratch" / ".env"
+        env_path.parent.mkdir()
+        assert _should_offer_service(quiet=True, env_path=env_path) is False
+
+    @pytest.mark.parametrize("has_repo", [True, False], ids=["in-repo", "no-repo"])
+    def test_explicit_lock_offers_either_way(self, tmp_path: Path, has_repo: bool) -> None:
+        env_path = tmp_path / "proj" / ".env"
+        env_path.parent.mkdir()
+        if has_repo:
+            (tmp_path / ".git").mkdir()
+        assert _should_offer_service(quiet=False, env_path=env_path) is True
+
+    def test_a_git_FILE_counts_too(self, tmp_path: Path) -> None:
+        """Worktrees and submodules have a .git FILE, not a folder."""
+        env_path = tmp_path / "proj" / ".env"
+        env_path.parent.mkdir()
+        (tmp_path / ".git").write_text("gitdir: /elsewhere/.git/worktrees/x\n")
+        assert _should_offer_service(quiet=True, env_path=env_path) is True
+
+
+class TestTheQuestionStaysHonestAboutKeySafety:
+    """The question must keep saying the service does not affect key safety.
+
+    The operator asked for wording explaining "what is it and why", and
+    proposed "this prevents git from pushing your secrets". That is NOT what
+    the service does: splitting the key makes a committed .env useless, and
+    `lock` has already done that by the time this appears. The service only
+    keeps the proxy alive so the app still WORKS afterwards.
+
+    WOR-859 had already put the true version in the question — "Your keys stay
+    locked either way" — so no new sentence was added. This pins that line, so
+    the honest half cannot be deleted by someone tightening the copy.
+    """
+
+    def _question(self, *, on_wsl: bool = False) -> str:
+        home = MagicMock()
+        # Not under /tmp: ruff S108 flags that, and the path is only ever
+        # interpolated into the question text — nothing opens it.
+        home.fernet_key_path = Path.home() / ".worthless" / "fernet.key"
+        with (
+            patch("worthless.cli.commands.lock.is_wsl", return_value=on_wsl),
+            patch(
+                "worthless.cli.commands.lock.current_platform_backend_name",
+                return_value="launchd",
+            ),
+        ):
+            # The question is hand-wrapped under 80 columns, so the sentence
+            # under test spans a newline. Assert on the words, not the layout.
+            return re.sub(r"\s+", " ", _offer_question(8787, home))
+
+    def test_it_says_keys_stay_locked_either_way(self) -> None:
+        assert "keys stay locked either way" in self._question().lower()
+
+    @pytest.mark.parametrize("on_wsl", [True, False], ids=["wsl", "not-wsl"])
+    def test_it_never_claims_to_protect_git(self, on_wsl: bool) -> None:
+        """The sentences that must never ship, on either platform."""
+        said = self._question(on_wsl=on_wsl).lower()
+        for lie in ("prevents git", "stops git", "from pushing your secrets"):
+            assert lie not in said, f"the service does not do this: {lie!r}"

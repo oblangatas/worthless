@@ -49,7 +49,11 @@ from worthless.cli.process import (
 )
 from worthless.cli.console import WorthlessConsole, get_console
 from worthless.cli.platform import _in_container, is_wsl
-from worthless.cli.scanner import SkippedFile, scan_source_for_hardcoded_provider_urls
+from worthless.cli.scanner import (
+    SkippedFile,
+    _has_git_above,
+    scan_source_for_hardcoded_provider_urls,
+)
 from worthless.cli.sentinel import is_partial, read_sentinel
 from worthless.cli.dotenv_rewriter import (
     rewrite_env_keys,
@@ -3108,15 +3112,23 @@ def _lock_keys(
                 oauth_skipped=result.oauth_skipped,
                 interrupted=result.openclaw_exit in _INTERRUPTED_EXITS,
             )
-        # WOR-853: same guard as the "Next:" hint above — only offer when the
-        # lock actually succeeded. A partial failure has no business installing
-        # anything.
-        #
-        # The post-lock Fernet sync runs FIRST, just below, and the order is
-        # load-bearing: the offer is an optional extra, and anything it raised
-        # used to skip WOR-748's sync entirely on a lock that had committed.
-        if result.fresh_count and not result.openclaw_exit:
-            _sync_fernet_after_lock(home)
+
+    # WOR-853: only offer when the lock actually succeeded. A partial failure
+    # has no business installing anything.
+    #
+    # Deliberately OUTSIDE `if not quiet:`, and deliberately the ONLY place the
+    # offer is called. Plain `worthless` locks quietly and must still be able
+    # to ask when there is a repo (worthless-mivd); a second call site is how
+    # four defects reached PR #606, each a fix landing in one copy and not its
+    # twin. One site, one decision function.
+    #
+    # The post-lock Fernet sync runs FIRST, and that order is load-bearing: the
+    # offer is an optional extra, and anything it raised used to skip WOR-748's
+    # sync on a lock that had already committed. Syncing again at the tail is
+    # harmless — same canonical key, a no-op when the bytes already match.
+    if result.fresh_count and not result.openclaw_exit:
+        _sync_fernet_after_lock(home)
+        if _should_offer_service(quiet=quiet, env_path=env_path):
             _offer_service_after_lock(console, home=home, port=resolve_port(None))
 
     # Trust-fix (2026-05-08 verification gauntlet): when OpenClaw was
@@ -3238,6 +3250,29 @@ def _tilde(path: Path) -> str:
     home = str(Path.home())
     text = str(path)
     return "~" + text[len(home) :] if text.startswith(home + "/") else text
+
+
+def _should_offer_service(*, quiet: bool, env_path: Path) -> bool:
+    """Who gets asked about the background service at all (worthless-mivd).
+
+    An explicit ``worthless lock`` always asks: the user typed it, so the
+    question is wanted. Plain ``worthless`` locks quietly, and until now quiet
+    meant the offer never appeared at all — so the documented first command,
+    the one the README tells people to run, was the only one that never
+    mentioned the feature.
+
+    Quiet still means quiet outside a project: it asks only where there is
+    something worth keeping a proxy alive for. A git repository is that; a
+    scratch folder is not.
+
+    Reuses scanner's ``_has_git_above`` rather than defining a second answer to
+    "is this a repo". Two definitions would eventually disagree, and that one
+    already walks resolved parents and catches a .git FILE, which is what a
+    worktree or a submodule has.
+    """
+    if not quiet:
+        return True
+    return _has_git_above(env_path)
 
 
 def _offer_question(port: int, home: WorthlessHome) -> str:
