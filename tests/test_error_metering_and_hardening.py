@@ -595,6 +595,121 @@ class TestAnthropicNonStreamingMetering:
 
 
 # ------------------------------------------------------------------
+# WOR-1002: a null or non-int token count must not crash spend recording
+# ------------------------------------------------------------------
+
+ANTHROPIC_MESSAGES = "https://api.anthropic.com/v1/messages"
+
+
+@pytest.fixture()
+async def anthropic_alias(repo, proxy_app):
+    """Enroll an Anthropic key and return (alias, shard_a_utf8)."""
+    alias = "anthropic-key"
+    sr = split_key_fp("sk-ant-test-key-12345678901234", prefix="sk-ant-", provider="anthropic")
+    shard = StoredShard(
+        shard_b=bytearray(sr.shard_b),
+        commitment=bytearray(sr.commitment),
+        nonce=bytearray(sr.nonce),
+        provider="anthropic",
+    )
+    await repo.store(
+        alias, shard, prefix=sr.prefix, charset=sr.charset, base_url="https://api.anthropic.com/v1"
+    )
+    pin_shard_b(proxy_app, alias, sr.shard_b)
+    return alias, sr.shard_a.decode("utf-8")
+
+
+ANTHROPIC_BODY = b'{"model": "claude-3-5-sonnet-20241022", "max_tokens": 1000, "messages": []}'
+
+# (usage, tokens billed): None means the usage is unreadable.
+_NON_INT_USAGES = [
+    pytest.param(
+        {
+            "input_tokens": 5,
+            "cache_creation_input_tokens": None,
+            "cache_read_input_tokens": None,
+            "output_tokens": 3,
+        },
+        8,
+        id="null-cache-counts-bill-the-rest",
+    ),
+    pytest.param({"input_tokens": None, "output_tokens": 3}, None, id="null-required-count"),
+    pytest.param({"input_tokens": "5", "output_tokens": 3}, None, id="string-count"),
+]
+
+
+class TestNonIntTokenCounts:
+    """A null cache count bills as 0; any other non-int count means unreadable usage."""
+
+    @pytest.mark.parametrize(("usage", "billed"), _NON_INT_USAGES)
+    @respx.mock
+    async def test_never_locks_a_budgeted_key_out(
+        self, proxy_client: httpx.AsyncClient, proxy_app, anthropic_alias, usage, billed
+    ):
+        """Each request reserves max_tokens against the daily budget. Before the fix
+        the background spend task crashed (ASGITransport re-raises that here) and
+        never released the reservation, so the next request got a 429."""
+        alias, shard_a_utf8 = anthropic_alias
+        db = proxy_app.state.db
+        await db.execute(
+            "INSERT INTO enrollment_config (key_alias, token_budget_daily) VALUES (?, ?)",
+            (alias, 1000),
+        )
+        await db.commit()
+        budget = TokenBudgetRule(db=db)
+        proxy_app.state.rules_engine = RulesEngine(
+            rules=[budget, *proxy_app.state.rules_engine.rules]
+        )
+        respx.post(ANTHROPIC_MESSAGES).mock(
+            return_value=httpx.Response(200, content=_anthropic_json(usage=usage))
+        )
+
+        for _ in range(2):
+            resp = await proxy_client.post(
+                _proxy_url(alias, "/v1/messages"),
+                headers=_proxy_headers(alias, shard_a_utf8),
+                content=ANTHROPIC_BODY,
+            )
+            assert resp.status_code == 200
+
+        assert budget._reserved.get(alias, 0) == 0
+        async with db.execute("SELECT tokens FROM spend_log WHERE key_alias = ?", (alias,)) as cur:
+            assert await cur.fetchall() == ([] if billed is None else [(billed,), (billed,)])
+
+    @pytest.mark.parametrize(("usage", "billed"), _NON_INT_USAGES)
+    @respx.mock
+    async def test_capped_key_is_billed_now(
+        self, proxy_client: httpx.AsyncClient, proxy_app, anthropic_alias, usage, billed
+    ):
+        """The hold becomes one spend row right away: at the real total when it can
+        be read, otherwise at max(estimate, ceiling)."""
+        alias, shard_a_utf8 = anthropic_alias
+        db = proxy_app.state.db
+        await db.execute(
+            "INSERT INTO enrollment_config (key_alias, spend_cap) VALUES (?, ?)",
+            (alias, 10_000_000),
+        )
+        await db.commit()
+        respx.post(ANTHROPIC_MESSAGES).mock(
+            return_value=httpx.Response(200, content=_anthropic_json(usage=usage))
+        )
+
+        resp = await proxy_client.post(
+            _proxy_url(alias, "/v1/messages"),
+            headers=_proxy_headers(alias, shard_a_utf8),
+            content=ANTHROPIC_BODY,
+        )
+
+        assert resp.status_code == 200
+        async with db.execute(
+            "SELECT COUNT(*) FROM pending_charges WHERE key_alias = ?", (alias,)
+        ) as cur:
+            assert await cur.fetchone() == (0,)
+        async with db.execute("SELECT tokens FROM spend_log WHERE key_alias = ?", (alias,)) as cur:
+            assert await cur.fetchall() == [(GLOBAL_CEILING_TOKENS if billed is None else billed,)]
+
+
+# ------------------------------------------------------------------
 # worthless-64x: Malformed header values (null/CR/LF) rejected
 # ------------------------------------------------------------------
 

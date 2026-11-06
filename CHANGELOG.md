@@ -121,8 +121,15 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   Now: such a reply counts as "usage unknown". The proxy logs a warning and releases the hold. A spend-capped key is billed right away at the larger of its admission estimate and the 128,000-token ceiling, the same amount the sweeper charged before.
 
   **Limits.**
-  - A token count inside `usage` that is `null` or not a number still crashes the same step and can lock the key out the same way (WOR-1002, [#730](https://github.com/oblangatas/worthless/pull/730)).
   - A reply nested thousands of levels deep still crashes the same step, with the same lockout (WOR-1030).
+  - On a key with a token budget but no spend cap, a reply whose usage can't be read is not counted against the budget (WOR-1031).
+- **A token count that is `null` or not a whole number no longer locks a key out of its token budget or under-bills a capped key** (WOR-1002, [#730](https://github.com/oblangatas/worthless/pull/730)).
+  Before: Anthropic can send `"cache_creation_input_tokens": null` or `"cache_read_input_tokens": null`, and such a reply crashed the step that records spend after the response is sent. A string count such as `"input_tokens": "5"`, or a `null` input or output count, crashed it too. As with a non-object `usage` before WOR-980, the request's token-budget hold was never released: a key with a daily budget then got `429 token_budget_exceeded`, and a spend-capped key's hold waited for the sweeper. A streamed Anthropic reply hit the same error while it was being relayed to your app. On OpenAI, a `"total_tokens": true` was billed to a spend-capped key as 1 token.
+  Now: a `null` cache count counts as 0, and the rest of the reply is billed. Any other count that isn't a whole number (a `null` input, output or total count, a string, a decimal, `true` or `false`) means the reply's usage can't be read, the same as a non-object `usage`: the proxy logs a warning and releases the hold, and a spend-capped key is billed right away at the larger of its admission estimate and the 128,000-token ceiling.
+
+  **Limits.**
+  - In a streamed Anthropic reply, an unreadable count in the opening `message_start` event counts as 0 input tokens, so only the output is billed (WOR-1100, [#755](https://github.com/oblangatas/worthless/pull/755)).
+  - A negative count is still accepted. On a key with no spend cap it is recorded as negative spend (WOR-1100, [#755](https://github.com/oblangatas/worthless/pull/755)).
   - On a key with a token budget but no spend cap, a reply whose usage can't be read is not counted against the budget (WOR-1031).
 
 ## [0.3.16] — 2026-10-22
