@@ -181,6 +181,15 @@ jobs:
             tests/test_storage_ipc.py \
             -m "not live and not docker and not user_flow and not real_ipc and not quarantine"
 
+      # WOR-1075: the sidecar's memory under malformed frames depends on the
+      # allocator, and the test reads peak RSS differently here (ru_maxrss)
+      # than on Linux (VmHWM). Serial with signal timeouts, like the Linux
+      # real_ipc lane.
+      - name: Run sidecar memory tests on macOS
+        env:
+          UV_CACHE_DIR: /tmp/uv-cache
+        run: uv run pytest -n0 --timeout-method=signal -m real_ipc tests/ipc/test_sidecar_memory.py
+
   coverage-gate:
     name: Per-module coverage gate
     if: github.event_name == 'pull_request'
