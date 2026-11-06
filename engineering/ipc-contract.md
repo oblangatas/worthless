@@ -36,6 +36,8 @@ Shape is modelled after [Google Tink's `Aead`](https://developers.google.com/tin
 
 - **Max frame size:** 1 MiB. Larger → `PROTO` error, connection closed.
 - **Serialization:** [msgpack](https://msgpack.org/), `use_bin_type=True`, `raw=False`.
+- **Frame deadline:** once a frame's 4-byte length has arrived, its body must arrive within 10 s. The hello must arrive within 10 s of connect. Otherwise the sidecar closes the connection with no error frame (WOR-1076). Time between frames is not limited: an idle connection stays open. Write each frame whole as soon as you have it.
+- **Connection cap:** the sidecar holds at most 32 connections. It closes extras on accept, before reading from them (WOR-1076).
 
 ## Envelope
 
