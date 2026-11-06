@@ -246,6 +246,26 @@ ignore:
     reason: "Upstream fix only in Python 3.15.0rc2 (pre-release). Measured 2026-09-10: python:3.13-slim-trixie 3.13.15 and python:3.14-slim-trixie 3.14.7 are both still affected, so there is nowhere stable to upgrade to. Base-image interpreter only. Tracking worthless-kzfq."
     expiry: "2026-12-08"
 
+  # socket.getaddrinfo() truncates a host or port at a null byte, which can
+  # slip an attacker-chosen address past an allowlist. Turned main's required
+  # `scan` red on 2026-11-05 (first seen on 4b4da0cf).
+  #
+  # MEASURED 2026-11-06 (grype 0.114.0, DB of 2026-11-05) on main's image,
+  # amd64: python 3.13.18 binary, Medium, fixed in 3.16.0. NVD maps every
+  # version < 3.16.0 as affected and 3.16.0 is not a stable release, so no
+  # base image (3.13, 3.14 or 3.15) has the fix.
+  #
+  # Reachability: the proxy resolves only the stored base_url (validated by
+  # lock's SSRF check) plus a fixed path; no request header or body reaches
+  # the host or port. tests/test_upstream_host_reachability.py goes red if
+  # that ever changes. Delete this entry as soon as a 3.13.x fix ships.
+  - vulnerability: CVE-2026-116566
+    package:
+      name: python
+      type: binary
+    reason: "getaddrinfo() null-byte truncation in CPython; fix only in 3.16.0 (not stable). Measured 2026-11-06: python 3.13.18 in the image affected, and NVD marks all versions < 3.16.0, so there is nowhere stable to upgrade to. Host and port come only from the stored base_url, never from request input (tests/test_upstream_host_reachability.py). Tracking WOR-1108."
+    expiry: "2026-12-08"  # same re-measure date as CVE-2026-15806; delete when 3.13.x is fixed.
+
   # ── perl's POD formatter, base-image only (WOR-934) ─────────────────
   # Arrived with the grype DB refresh of 2026-09-2x and turned main red. It is
   # fix=not-fixed, so `only-fixed: true` drops it and the fixed-only gate never
