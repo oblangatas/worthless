@@ -279,12 +279,17 @@ class SidecarHandle:
     ``drain_timeout`` is forwarded to the sidecar via
     ``WORTHLESS_SIDECAR_DRAIN_TIMEOUT`` and read back by
     :func:`shutdown_sidecar` to size the SIGTERM grace window.
+
+    ``sidecar_uid`` is the uid the sidecar runs as. Spawners hand it to their
+    proxy as ``WORTHLESS_SIDECAR_UID``, since IPC clients refuse a socket
+    served by any other uid (WOR-1078).
     """
 
     proc: subprocess.Popen[bytes]
     socket_path: Path
     shares: ShareFiles
     allowed_uid: int
+    sidecar_uid: int
     drain_timeout: float
     stderr_buf: collections.deque[bytes]
 
@@ -655,6 +660,7 @@ def spawn_sidecar(
         socket_path=socket_path,
         shares=shares,
         allowed_uid=allowed_uid,
+        sidecar_uid=service_uids.crypto_uid if service_uids is not None else os.getuid(),
         drain_timeout=drain_timeout,
         stderr_buf=stderr_buf,
     )
