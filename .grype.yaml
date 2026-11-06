@@ -55,6 +55,35 @@ ignore:
     reason: "zlib gz_vacate() overflow reachable only via gzprintf/gzvprintf; 951 binaries in the image reference neither, and CPython's zlib exposes no gz* API. Unfixed in every Debian release including sid (bug 1146895). Tracking worthless-tw1g."
     expiry: "2026-12-08"
 
+  - vulnerability: CVE-2026-76844
+    package:
+      name: zlib1g
+      type: deb
+    # High, fix=not-fixed. Same zlib gzFile-API class as CVE-2026-85091 above.
+    # Hidden on main until 2026-11-06: the fixed-only gate failed first, so
+    # the "Unmapped High/Critical findings" step never ran (WOR-1109).
+    #
+    # The flaw: gz_write() returns after a failed write() without resetting
+    # strm.next_in, and a later gz* write overflows the heap. That is zlib's
+    # gzip FILE api (gzopen/gzdopen/gzwrite), not the deflate/inflate stream
+    # api that HTTP content-encoding and CPython's zlib module use.
+    #
+    # MEASURED 2026-11-06 inside main's image (4b4da0cf, amd64), every ELF
+    # under /usr /lib /bin /sbin /opt /app /home searched for gzwrite, gzopen,
+    # gzdopen, gzprintf, gzputs:
+    #   - libz itself, dpkg-deb and libapt-pkg reference them; nothing else
+    #   - CPython's zlib.cpython-313 module references none
+    #   - zlib1g 1:1.3.dfsg+really1.3.1-1+b1
+    # Unlike CVE-2026-85091, the calls ARE present, in the package manager.
+    # Nothing runs dpkg or apt at runtime: /entrypoint.sh doesn't, and
+    # src/worthless never invokes either. A `docker exec` user who runs dpkg
+    # by hand already has a shell in the container.
+    #
+    # Re-measure at expiry with the same sweep; delete when Debian ships a
+    # fixed zlib1g, or the day anything at runtime calls dpkg or apt.
+    reason: "zlib gz_write() overflow reachable only via the gzFile API. Measured 2026-11-06 in the image: only libz, dpkg-deb and libapt-pkg reference it; CPython's zlib module does not, and nothing runs dpkg/apt at runtime. Debian fix=not-fixed. Tracking WOR-1109."
+    expiry: "2026-12-08"  # same re-measure date as CVE-2026-85091; do not blind-extend.
+
   - vulnerability: CVE-2026-15308
     package:
       name: python
@@ -251,20 +280,35 @@ ignore:
   # `scan` red on 2026-11-05 (first seen on 4b4da0cf).
   #
   # MEASURED 2026-11-06 (grype 0.114.0, DB of 2026-11-05) on main's image,
-  # amd64: python 3.13.18 binary, Medium, fixed in 3.16.0. NVD maps every
-  # version < 3.16.0 as affected and 3.16.0 is not a stable release, so no
-  # base image (3.13, 3.14 or 3.15) has the fix.
+  # amd64: python 3.13.18 binary, Medium. Upstream, checked via the CPython
+  # repo the same day: fixed on main by GH-160899 (2026-10-29); backports to
+  # 3.14 (GH-160926) and 3.15 (GH-160925) merged 2026-11-06; the 3.13
+  # backport GH-160974 is still OPEN, and no released 3.13.x carries it.
   #
-  # Reachability: the proxy resolves only the stored base_url (validated by
-  # lock's SSRF check) plus a fixed path; no request header or body reaches
-  # the host or port. tests/test_upstream_host_reachability.py goes red if
-  # that ever changes. Delete this entry as soon as a 3.13.x fix ships.
+  # RETIRING THIS ENTRY: grype's record is NVD's "< 3.16.0", so a fixed
+  # 3.13.19 would STILL match (the CVE-2026-4360 trap, documented below).
+  # At expiry, re-measure: delete when grype stops matching the shipped
+  # image, or when the image's interpreter contains GH-160974 and the range
+  # is shown to be stale. The version pin makes a base-image bump re-fire it.
+  #
+  # Reachability: every upstream call goes through httpx, which refuses a NUL
+  # in the host or port before any lookup (httpx.InvalidURL). The proxy only
+  # dials the stored or registered base_url plus a fixed path; no request
+  # header, body or path reaches the host or port. Pinned by
+  # tests/test_upstream_host_reachability.py and test_proxy.py's
+  # test_request_input_never_steers_the_upstream_host.
+  #
+  # NOT covered: the CLI installed outside this image runs the user's own
+  # Python, which is just as affected; this scan says nothing about it. And
+  # whoever can edit .env, providers.toml or the DB already chooses where
+  # the key goes, so a NUL there adds nothing.
   - vulnerability: CVE-2026-116566
     package:
       name: python
+      version: 3.13.18
       type: binary
-    reason: "getaddrinfo() null-byte truncation in CPython; fix only in 3.16.0 (not stable). Measured 2026-11-06: python 3.13.18 in the image affected, and NVD marks all versions < 3.16.0, so there is nowhere stable to upgrade to. Host and port come only from the stored base_url, never from request input (tests/test_upstream_host_reachability.py). Tracking WOR-1108."
-    expiry: "2026-12-08"  # same re-measure date as CVE-2026-15806; delete when 3.13.x is fixed.
+    reason: "getaddrinfo() null-byte truncation in CPython. Measured 2026-11-06: image python 3.13.18 affected; 3.13 backport GH-160974 still open (3.14/3.15 backports merged 2026-11-06); NVD's '< 3.16.0' range will match even a fixed 3.13.x. Unreachable: httpx refuses a NUL in host/port before lookup, and host/port come only from the stored or registered base_url (tests/test_upstream_host_reachability.py, test_proxy.py). Tracking WOR-1108."
+    expiry: "2026-12-08"  # re-measure; see RETIRING above. Do not blind-extend.
 
   # ── perl's POD formatter, base-image only (WOR-934) ─────────────────
   # Arrived with the grype DB refresh of 2026-09-2x and turned main red. It is

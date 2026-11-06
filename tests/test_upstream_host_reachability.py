@@ -19,9 +19,12 @@ from __future__ import annotations
 
 from urllib.parse import urlsplit
 
+import httpx
 import pytest
 
 from worthless.adapters.registry import _ADAPTERS
+from worthless.cli.commands.lock import _validate_upstream_base_url
+from worthless.cli.errors import WorthlessError
 
 _BASE_URL = "https://api.example.com:8443/v1"
 
@@ -48,3 +51,19 @@ def test_request_input_never_reaches_the_upstream_host_or_port(path: str) -> Non
     upstream, stored = urlsplit(req.url), urlsplit(_BASE_URL)
     assert (upstream.hostname, upstream.port) == (stored.hostname, stored.port), req.url
     assert "\x00" not in req.url
+
+
+@pytest.mark.parametrize(
+    "url", ["https://evil.example\x00.api.openai.com/v1", "https://api.openai.com:443\x00/v1"]
+)
+def test_httpx_refuses_a_null_byte_before_any_lookup(url: str) -> None:
+    """The actual defence: every upstream call goes through ``httpx.URL``, which
+    refuses a NUL in the host or port, so the CVE's trigger never reaches
+    ``getaddrinfo`` (httpx 0.28.1)."""
+    with pytest.raises(httpx.InvalidURL):
+        httpx.URL(url)
+
+
+def test_lock_refuses_to_store_a_base_url_with_a_null_byte() -> None:
+    with pytest.raises(WorthlessError):
+        _validate_upstream_base_url("https://evil.example\x00.api.openai.com/v1")
