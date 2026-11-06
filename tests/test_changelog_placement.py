@@ -10,11 +10,14 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import subprocess
 from pathlib import Path
 
-_CHECKER = (
-    Path(__file__).resolve().parents[1] / ".github" / "scripts" / "check_changelog_placement.py"
-)
+import yaml
+
+_ROOT = Path(__file__).resolve().parents[1]
+_CHECKER = _ROOT / ".github" / "scripts" / "check_changelog_placement.py"
+_WORKFLOW = _ROOT / ".github" / "workflows" / "changelog-placement.yml"
 
 
 def _load():
@@ -116,3 +119,75 @@ def test_no_tags_visible_fails_closed(monkeypatch, capsys) -> None:
     changelog = Path(mod.__file__).parents[2] / "CHANGELOG.md"
     assert mod.main(["check", str(changelog)]) == 1
     assert "no release tags" in capsys.readouterr().out
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(  # noqa: S603
+        [  # noqa: S607
+            "git",
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "tag.gpgsign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            *args,
+        ],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+
+def test_a_tag_on_the_commit_under_test_is_not_shipped_yet(tmp_path, monkeypatch) -> None:
+    """Re-running on the release commit after tagging must not flag its own lines."""
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "commit", "-q", "--allow-empty", "-m", "one")
+    _git(tmp_path, "tag", "v0.1.0")
+    _git(tmp_path, "commit", "-q", "--allow-empty", "-m", "release")
+    _git(tmp_path, "tag", "v0.2.0")
+    monkeypatch.chdir(tmp_path)
+    shipped = _load()._shipped()
+    assert "0.1.0" in shipped
+    assert "0.2.0" not in shipped
+
+
+def test_a_four_part_tag_closes_its_section(tmp_path, monkeypatch) -> None:
+    """0.3.8 shipped as ``v0.3.8.0``; without this its section never closes."""
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "commit", "-q", "--allow-empty", "-m", "one")
+    _git(tmp_path, "tag", "v0.3.8.0")
+    _git(tmp_path, "commit", "-q", "--allow-empty", "-m", "two")
+    monkeypatch.chdir(tmp_path)
+    assert "0.3.8" in _load()._shipped()
+
+
+def test_workflow_can_see_tags_and_fails_on_a_git_error() -> None:
+    """A shallow checkout fetches no tags (``fetch-tags`` only drops ``--no-tags``), so
+    the check would fail on every run. Without bash's pipefail a failed ``git diff``
+    hands the checker an empty diff, which passes."""
+    steps = yaml.safe_load(_WORKFLOW.read_text())["jobs"]["placement"]["steps"]
+    checkout = next(s for s in steps if "actions/checkout" in s.get("uses", ""))
+    assert checkout["with"]["fetch-depth"] == 0
+    check = next(s for s in steps if "check_changelog_placement.py" in s.get("run", ""))
+    assert check["shell"] == "bash"
+
+
+def test_the_label_overrides_on_both_pull_request_and_push() -> None:
+    workflow = yaml.safe_load(_WORKFLOW.read_text())
+    job = workflow["jobs"]["placement"]
+    assert "changelog-released-edit" in job["if"]
+    lookup = next(s for s in job["steps"] if s.get("id") == "label")
+    assert "changelog-released-edit" in lookup["run"]
+    check = next(s for s in job["steps"] if "check_changelog_placement.py" in s.get("run", ""))
+    assert check["if"] == "steps.label.outputs.skip != 'true'"
+
+
+def test_main_is_rechecked_after_merge() -> None:
+    """``on`` parses as YAML's True: a release can land after a PR's last push."""
+    workflow = yaml.safe_load(_WORKFLOW.read_text())
+    assert workflow[True]["push"]["branches"] == ["main"]

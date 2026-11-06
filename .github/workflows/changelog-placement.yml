@@ -24,13 +24,14 @@ permissions:
   pull-requests: read # the push run reads the merged PR's labels
 
 concurrency:
-  group: changelog-placement-${{ github.ref }}
-  # A newer push to a PR supersedes the older run; every push to main is checked.
+  # A newer push to a PR supersedes the older run. Each push to main gets its own
+  # group, because a shared one drops queued runs even without cancel-in-progress.
+  group: changelog-placement-${{ github.event_name == 'push' && github.run_id || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   placement:
-    name: CHANGELOG lines land under [Unreleased]
+    name: CHANGELOG lines stay out of shipped versions
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'changelog-released-edit') }}
@@ -38,8 +39,10 @@ jobs:
       - name: Check out the PR merge commit (or the pushed commit)
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          fetch-depth: 2
-          fetch-tags: true # "shipped" means the version's tag exists
+          # "Shipped" means the version's tag exists. Full history is what fetches
+          # tags: with a depth, fetch-tags only follows tags on the fetched commits.
+          fetch-depth: 0
+          fetch-tags: true
           persist-credentials: false
 
       - name: Skip a deliberate released-section edit (push to main)
@@ -61,6 +64,9 @@ jobs:
         # Explicit bash gives pipefail: a failing `git diff` must fail the step,
         # not hand the checker an empty diff that passes.
         shell: bash
+        env:
+          # A push can carry several commits; a PR's merge ref is one merge commit.
+          BASE: ${{ github.event_name == 'push' && github.event.before || 'HEAD^1' }}
         run: |
-          git diff -U0 HEAD^1 HEAD -- CHANGELOG.md \
+          git diff -U0 "$BASE" HEAD -- CHANGELOG.md \
             | python .github/scripts/check_changelog_placement.py CHANGELOG.md

@@ -10,8 +10,8 @@ end up under a released heading when a release is cut while the PR is open
 
 Shipped means the ``v<version>`` git tag exists, not that the heading does.
 Between a release PR merging and its tag, fixes that land on ``main`` ship in
-that tag, so their notes belong in its section (#714, #732 and #733 for
-0.3.16). Only *added* lines inside a tagged version's section count. Release
+that tag, so their notes belong in its section (#732 and #733 for 0.3.16).
+Only *added* lines inside a tagged version's section count. Release
 headings, compare-link lines and blank lines are exempt. Removals pass: moving
 an entry out of a released section is the fix. A deliberate edit to a released
 section uses the ``changelog-released-edit`` label, checked in the workflow.
@@ -62,14 +62,19 @@ def misplaced(changelog: str, diff: str, shipped: set[str]) -> list[tuple[int, s
 
 
 def _shipped() -> set[str]:
-    """Versions with a ``v`` tag in this checkout."""
+    """Versions tagged before this commit.
+
+    A tag on this commit was cut from it, so a re-run after tagging must not flag
+    the release's own lines. ``v0.3.8.0`` also closes ``[0.3.8]``.
+    """
     tags = subprocess.run(
-        ["git", "tag", "--list", "v*"],  # noqa: S607 — CI runner's git, fixed args
+        ["git", "tag", "--list", "v*", "--no-contains", "HEAD"],  # noqa: S607 — fixed args
         capture_output=True,
         text=True,
         check=True,
     ).stdout
-    return {t[1:] for t in tags.split()}
+    versions = {t[1:] for t in tags.split()}
+    return versions | {v.removesuffix(".0") for v in versions}
 
 
 def main(argv: list[str]) -> int:
@@ -86,7 +91,7 @@ def main(argv: list[str]) -> int:
         return 1
     bad = misplaced(changelog, sys.stdin.read(), shipped)
     if not bad:
-        print("CHANGELOG: every added line is under [Unreleased].")
+        print("CHANGELOG: no line added under a version that already shipped.")
         return 0
     print("CHANGELOG lines added under a version that already shipped:")
     for n, text in bad:
