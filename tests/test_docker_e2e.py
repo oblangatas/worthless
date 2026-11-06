@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 import uuid
 from pathlib import Path
 
@@ -413,6 +414,22 @@ class TestBuild:
             ]
         )
         assert result.returncode == 0
+
+    def test_image_holds_exactly_the_locked_runtime_set(self, docker_image: str) -> None:
+        """Every package in the image is the one uv.lock pins, and nothing else (WOR-1077).
+
+        The check lives in scripts/check_image_matches_lock.py so `scan`, a
+        required check, can run it on every PR. This wrapper is how the publish
+        smoke in publish-docker.yml runs it against the image users pull.
+        """
+        result = _run(
+            [
+                sys.executable,
+                str(REPO_ROOT / "scripts" / "check_image_matches_lock.py"),
+                docker_image,
+            ]
+        )
+        assert "match uv.lock" in result.stdout
 
     def test_runs_as_non_root(self, container: tuple[str, int]) -> None:
         """The runtime PROCESSES (uvicorn + sidecar) must run as non-root.

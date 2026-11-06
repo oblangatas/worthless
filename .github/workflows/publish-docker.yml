@@ -438,10 +438,12 @@ jobs:
       - name: Pull published image from registry
         run: docker pull "${IMAGE_REF}"
 
+      # `locked_runtime_set` (WOR-1077): the image users pull holds exactly
+      # uv.lock's runtime set, not just the PR build docker-e2e checks.
       - name: Run Docker smoke tests against published image
         env:
           WORTHLESS_DOCKER_IMAGE: ${{ env.IMAGE_REF }}
         run: |
           uv run pytest tests/test_docker_e2e.py -v -m docker \
-            -k "container_starts_healthy or enroll_and_healthz or runs_as_non_root" \
+            -k "container_starts_healthy or enroll_and_healthz or runs_as_non_root or locked_runtime_set" \
             --tb=short

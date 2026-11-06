@@ -21,6 +21,12 @@ classifiers = [
 ]
 
 dependencies = [
+    # These minimums are all that install.sh, `pip install worthless` and uvx
+    # get: none of them read uv.lock (only the Docker image does). So for an
+    # advisory against a runtime dependency, transitive ones included, raise or
+    # add its floor here, not just the lock. The user-facing contract is in
+    # docs/install-security.md under "Dependencies" (WOR-1077).
+    #
     # Floor is 50.0.0, not 48.0.1: PYSEC-2026-3552 affects everything below it.
     # A floor of 48 let a fresh `uv lock` land on 49.0.0 and fail uv-audit at
     # push time, which is how this surfaced. Raise the floor, not just the lock.
@@ -36,8 +42,8 @@ dependencies = [
     # Floor is 1.2.4, not 1.0: CVE-2026-114613 (GHSA-j586-36cw-2gc2, fixed in
     # 1.2.3) leaks on the default strict_map_key=True path ipc/framing.py
     # decodes with, and GHSA-j8c6-9vc5-hj6x (fixed in 1.2.4) lets a 5 KB frame
-    # preallocate ~513 MiB of containers. The lock alone never reaches users:
-    # the Dockerfile and `uv tool install` resolve from this line.
+    # preallocate ~513 MiB of containers. The lock alone only reaches the
+    # Docker image: install.sh, pip and uvx resolve from this line.
     "msgpack>=1.2.4",
     # TOML reader for the provider registry (worthless-8rqs). Stdlib `tomllib`
     # is 3.11+; for 3.10 we fall back to the `tomli` backport at runtime.

@@ -253,6 +253,7 @@ repos:
         # now. pipefail is not POSIX — dash, which /bin/sh often is, does not
         # support it — so the shell has to be bash explicitly. beads
         # worthless-mh0r.
+        # What this covers for users: docs/install-security.md "Dependencies".
         entry: bash -c 'set -o pipefail; uv export --frozen --no-emit-project | uv run pip-audit --disable-pip -r /dev/stdin'
         pass_filenames: false
         stages: [pre-push]

@@ -24,10 +24,16 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from pathlib import Path
 
 import pytest
 import yaml
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib  # backport for Python 3.10
 
 REPO = Path(__file__).resolve().parent.parent
 WORKFLOW = REPO / ".github" / "workflows" / "dependency-audit.yml"
@@ -134,6 +140,26 @@ def test_lock_freshness_is_checked() -> None:
         "without a freshness check, `--frozen` happily audits a lock that no longer "
         "matches pyproject.toml, while a different tree actually ships"
     )
+
+
+def test_every_locked_package_is_a_pypi_release() -> None:
+    """A lock-only edit can't point a package at a URL the audit skips (WOR-1077).
+
+    The Docker image installs uv.lock's export. A package whose lock source is a
+    URL exports as `name @ url` with whatever hash the lock carries, and pip
+    installs it while pip-audit skips it ("URL requirements cannot be pinned")
+    and exits 0. `uv lock --check` passes too when pyproject.toml is unchanged.
+    So the only non-registry entry allowed is worthless itself.
+    """
+    lock = tomllib.loads((REPO / "uv.lock").read_text())
+    pypi = {"registry": "https://pypi.org/simple"}
+    elsewhere = [
+        f"{p['name']} {p['source']}"
+        for p in lock["package"]
+        if p["source"] != pypi
+        and not (p["name"] == "worthless" and p["source"] == {"editable": "."})
+    ]
+    assert not elsewhere, f"uv.lock entries that aren't PyPI releases: {elsewhere}"
 
 
 @pytest.mark.parametrize("forbidden", ["paths", "paths-ignore"])

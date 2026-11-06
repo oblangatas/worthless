@@ -498,7 +498,7 @@ addresses. Upstream error messages are sanitized via `_sanitize_upstream_error`
 
 ## Supply chain
 
-- `pip-audit` runs in CI.
+- `pip-audit` audits the versions in `uv.lock` on every pull request. The Docker image installs exactly those versions, hash-checked. `install.sh` and `pip` installs resolve against the minimum versions in `pyproject.toml` instead, so they can get newer releases the audit hasn't checked. See [Dependencies](/install-security/#dependencies).
 - No SBOM, no reproducible builds, no second-reviewer gate on releases.
 - Install-time trust roots live in [install-security.md](/install-security/).
 

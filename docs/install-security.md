@@ -21,7 +21,7 @@ parties. Anyone who can forge TLS or modify the payload can own your box.
 | `worthless.sh` (Cloudflare) | `install.sh` itself | TLS only — the user's `curl` trusts the system CA bundle and Cloudflare's cert. |
 | `astral.sh` | `uv` installer script | `install.sh` pins `ASTRAL_INSTALLER_SHA256` for a specific `UV_VERSION`. Mismatch → exit `EXIT_NETWORK=10`. |
 | Astral release server | `uv` binary + managed Python | `uv`'s own signature verification (out of this installer's scope). |
-| `pypi.org` | `worthless` package | `uv` uses HTTPS + hash-locked resolution. |
+| `pypi.org` | `worthless` package and its dependencies | HTTPS only. `install.sh` pins the `worthless` version, not its files or its dependencies' versions. See [Dependencies](#dependencies). |
 
 ### What this means
 
@@ -69,5 +69,44 @@ so the installer has exactly one canonical source.
 - **A trusted TLS-terminating proxy can rewrite the script.** Plain TLS stops a passive network attacker, but a corporate/MITM proxy your machine already trusts can rewrite the piped bytes. On an untrusted network, download-and-inspect (above) instead of piping straight to `sh`.
 
 Cryptographic receipts you could verify *independently* of `worthless.sh` — cosign/Sigstore signatures and SLSA provenance on the released artifacts — are tracked in [WOR-303](https://linear.app/plumbusai/issue/WOR-303). Until they ship, the controls above are what's real; we'd rather say so than imply more.
+
+## Dependencies
+
+Which versions of worthless's dependencies you get depends on how you install it. CI audits one set: the versions pinned in `uv.lock`, checked by pip-audit on every pull request (`.github/workflows/dependency-audit.yml`). Dependabot proposes a new release as a routine update only after it is 7 days old.
+
+| How you install | Dependency versions you get | Audited? |
+|---|---|---|
+| Docker image (`ghcr.io/oblangatas/worthless-proxy`) | Exactly the versions in `uv.lock`, so only as new as its last update: a dependency fix reaches the image when `uv.lock` is bumped and a new image is published. Each file is checked against the hash recorded there, and the build stops if `uv.lock` doesn't match `pyproject.toml`. | Yes. The audit checks `uv.lock` on every pull request and every push to main. One gap: the tool that builds worthless itself during the image build (setuptools) is still downloaded unpinned, and it can write to the packages the image ships ([WOR-1084](https://linear.app/plumbusai/issue/WOR-1084)). |
+| `install.sh`, `pip install worthless`, `uv tool install`, `uvx` | The newest release of each dependency that meets worthless's minimum versions in `pyproject.toml`, as PyPI has them on the day you install (for `uvx`, the first run: later runs reuse that environment). `pip install worthless` into an environment that already has a dependency keeps the version it has, if that meets the minimum. | No. You can get a version the audit has never seen, including one published minutes ago. |
+
+**What we promise for installs that don't read `uv.lock`: the minimums.** When an advisory is published against a dependency worthless runs, the next release sets that dependency's minimum in `pyproject.toml` past the fix, not just its version in `uv.lock`, even if worthless only uses it through another package. A fresh install of that release can't get the vulnerable version. `cryptography>=50.0.0` (PYSEC-2026-3552) and `msgpack>=1.2.4` (CVE-2026-114613) are two. This is a manual step at release time: no CI check yet fails when a minimum sits below a known-vulnerable version ([WOR-1085](https://linear.app/plumbusai/issue/WOR-1085)).
+
+This does not protect you from:
+
+- **A version published after our release.** A new dependency release, vulnerable or compromised, can reach a fresh install until it is found and either we raise a minimum or PyPI removes it.
+- **An install you already have.** It keeps its dependency versions until you refresh them or install a newer worthless release. Running `install.sh` again doesn't refresh them: when the pinned worthless is already installed, it stops there. To pick up a dependency fix and keep the worthless version you have (`worthless --version` shows it):
+  - `install.sh` or `uv tool install`: `uv tool install --upgrade "worthless==<version>"`.
+  - `pip`: `pip install --upgrade --upgrade-strategy eager "worthless==<version>"`. Plain `--upgrade` changes a dependency only when worthless's minimum requires it.
+  - `uvx`: `uvx --refresh "worthless@<version>"`, or `uvx worthless@latest`, which also takes the newest worthless.
+
+  Unlike `install.sh`, these commands read your own uv or pip configuration, including any package index it names. `install.sh` ignores uv's config files and clears the variables that choose where packages come from. To refresh the same way:
+
+  ```bash
+  env -u UV_INDEX -u UV_INDEX_URL -u UV_DEFAULT_INDEX -u UV_EXTRA_INDEX_URL -u UV_INDEX_STRATEGY \
+      -u UV_FIND_LINKS -u UV_CONFIG_FILE UV_NO_CONFIG=1 uv tool install --upgrade "worthless==<version>"
+  ```
+
+  `install.sh` clears more than these, such as TLS and proxy overrides: the full list is the `unset` near the top of `install.sh`.
+
+**Why we don't publish a constraints file.** `install.sh` could pass the versions in `uv.lock` to `uv tool install --constraints`. We don't, because:
+
+- It would pin versions, not files. `uv tool install` can't check hashes, so it still wouldn't give you what the Docker image gives you.
+- It would hold every new install at release-day versions. That's the trade the Docker image makes, and on every path it would leave no way to get a dependency's fix published after our release until we cut another one. With minimums, a fresh install gets the fix the day it ships.
+- It would cover `install.sh` only. `pip install worthless`, `uvx` and the `mcp` extra resolve from the package's own requirements whatever we publish. The minimums are the one rule every path follows.
+- `install.sh` would have to fetch the file from another host, adding a trust root to the table above, or carry it inline and keep it in step with each release and with `WORTHLESS_VERSION` overrides.
+
+A 7-day `--exclude-newer` in `install.sh` would bring Dependabot's wait to installs with no file at all. But every release that raised a minimum to a fix published days earlier would fail to install for the rest of that week, and so would each new worthless release, unless `install.sh` carried a hand-kept exemption for each one. A failed install is safer than an unvetted one, but these failures would come exactly when an advisory makes upgrading urgent. So it isn't on by default.
+
+**Which to choose.** The Docker image gives you the versions the audit checked, but a dependency fix reaches it only with our next `uv.lock` update and image. `install.sh` and `pip` give you the newest releases, fixes included, along with versions no one here has audited.
 
 Planned hardening is tracked in Linear under [WOR-257](https://linear.app/plumbusai/issue/WOR-257). This file describes what's real today; controls move in here when they ship.
