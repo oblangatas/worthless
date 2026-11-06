@@ -25,6 +25,8 @@ permissions:
 
 concurrency:
   # A newer push to a PR supersedes the older run; each push to main is its own group.
+  # Not the usual `|| github.ref`: with cancel-in-progress, that would cancel an
+  # earlier push's check on main before it reports.
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
