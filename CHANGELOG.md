@@ -48,6 +48,19 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - The image still has about 70 known bugs with no fix yet (about 160 package matches), all but two in Debian packages and most marked won't-fix by Debian. The scan doesn't block on those unless one is High or Critical, not marked won't-fix, and not argued in `.grype.yaml`.
 
 ### Fixed
+- **A crashed `worthless up` no longer leaves your key shares on disk** (`worthless-dhfn`, [#713](https://github.com/oblangatas/worthless/pull/713)).
+  Before: if `worthless up` was killed with `kill -9` or crashed, its helper process kept running. Both key share files stayed in `~/.worthless/run/<pid>/`, also after a restart. `worthless doctor` reported "No issues found" because the helper still answered.
+  Now: the helper checks every 0.5 seconds that `worthless up` is still running. When `worthless up` is gone, the helper deletes both share files and its socket, then stops. It stops less than 8 seconds after `worthless up` stopped.
+
+  **Limits.**
+  - The key stays in the helper's memory for less than 8 seconds after `worthless up` stops. During that time it still answers the proxy that `worthless up` left running.
+  - The proxy also keeps running after `worthless up` crashes. Run `worthless down` to stop it.
+  - If the helper is killed at the same time as `worthless up` (for example `pkill -9 -f worthless`), the share files stay. `worthless doctor` reports them.
+  - A helper left running by an older version of Worthless does not stop. Stop it by hand. `worthless doctor` then reports its share files.
+  - If `worthless up` is killed and the terminal closes less than 0.5 seconds later, the share files stay. `worthless doctor` reports them.
+  - In Docker, the helper sometimes cannot remove the empty run folder. `worthless doctor` reports it.
+  - The share files are deleted, not securely erased.
+
 - **`worthless lock` accepts a `*_BASE_URL` line with no value** (WOR-1041, [#740](https://github.com/oblangatas/worthless/pull/740)).
   Before: a `.env` with a name and no `=`, such as `OPENROUTER_BASE_URL` or `export OPENROUTER_BASE_URL`, on the line lock writes for a key made lock stop with WRTLS-199, an internal error. A name in quotes, such as `'OPENROUTER_BASE_URL'=https://openrouter.ai/api/v1`, did the same. Nothing changed: your `.env` kept its key, and lock left nothing in the Worthless database.
   Now: lock leaves that line as it is, adds its proxy line after it, and says the line "had no value", or that it "can't edit the line you have for it". python-dotenv, Node's `--env-file` and docker compose read the last line for a name, which is now the proxy line. Unlock removes only the line lock added, so lock then unlock gives back the `.env` you started with. Lock also prints that it added a line only after the `.env` is written, so a refused write no longer reports a line it never added.
