@@ -89,5 +89,6 @@ def issue_loopback_cert(out: Path, ca_common_name: str) -> tuple[Path, ssl.SSLCo
         )
     )
     server_tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_tls.minimum_version = ssl.TLSVersion.TLSv1_2
     server_tls.load_cert_chain(cert_pem, key_pem)
     return ca_pem, server_tls
