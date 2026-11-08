@@ -406,7 +406,37 @@ jobs:
           SDIST="$(find /tmp/sdist-check -maxdepth 1 -name '*.tar.gz' -type f)"
           echo "sdist under test: $SDIST"
           uv venv /tmp/sdist-venv --python 3.13
+          # Start from a certifi older than GHSA-6q48-6c7w-9gw2's fix, as an
+          # existing install would have; the step below checks it was upgraded.
+          VIRTUAL_ENV=/tmp/sdist-venv uv pip install certifi==2026.7.22
           VIRTUAL_ENV=/tmp/sdist-venv uv pip install "$SDIST"
+
+      # pip and uv keep an installed dependency that still meets the floor, so
+      # only pyproject's certifi floor moves an existing install off the
+      # emSign roots. Check what the proxy's TLS trusts, not the version: its
+      # httpx client builds its context with httpx.create_ssl_context().
+      - name: Installing worthless drops the emSign roots certifi 2026.10.23 removed
+        run: |
+          set -euo pipefail
+          cd /tmp
+          env -u SSL_CERT_FILE -u SSL_CERT_DIR /tmp/sdist-venv/bin/python - <<'PY'
+          import certifi
+          import httpx
+
+          names = {
+              value
+              for cert in httpx.create_ssl_context().get_ca_certs()
+              for rdn in cert["subject"]
+              for key, value in rdn
+              if key == "commonName"
+          }
+          assert len(names) > 100, f"only {len(names)} roots loaded; is this certifi's list?"
+          dropped = {"emSign ECC Root CA - G3", "emSign Root CA - C1", "emSign ECC Root CA - C3"}
+          assert not names & dropped, (
+              f"certifi {certifi.__version__} still trusts {sorted(names & dropped)}"
+          )
+          print(f"certifi {certifi.__version__}: {len(names)} roots, no emSign G3/C1/C3")
+          PY
 
       # THE POINT OF THIS JOB. `worthless --version` is importlib.metadata — it
       # reads installed METADATA and never touches the package tree, so it
