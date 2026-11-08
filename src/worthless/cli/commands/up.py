@@ -24,6 +24,7 @@ else:  # pragma: no cover — fail_if_windows gates before flock is reached
 
 import typer
 
+from worthless._flags import WORTHLESS_SIDECAR_UID_ENV
 from worthless.cli.bootstrap import WorthlessHome, get_home
 from worthless.cli.console import get_console
 from worthless.cli.errors import ErrorCode, WorthlessError, error_boundary, sanitize_exception
@@ -602,6 +603,7 @@ def _start_foreground_locked(
         handle = spawn_sidecar(socket_path, shares, allowed_uid=os.getuid())
 
         proxy_env["WORTHLESS_SIDECAR_SOCKET"] = str(handle.socket_path)
+        proxy_env[WORTHLESS_SIDECAR_UID_ENV] = str(handle.sidecar_uid)
 
         for note in ignored_upstream_env_notes():
             console.print_warning(note)
