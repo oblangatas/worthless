@@ -24,6 +24,8 @@ from pathlib import Path
 import httpx
 import pytest
 
+from worthless.cli.commands.lock import _fire_synthetic_request
+from worthless.cli.process import check_proxy_health, poll_health
 from worthless.crypto.splitter import split_key_fp
 from worthless.proxy.app import create_app
 from worthless.proxy.config import ConfigError, ProxySettings
@@ -299,6 +301,59 @@ async def test_env_proxy_vars_never_receive_the_real_key(
     assert env_proxy.connections == 0, "the upstream call went through the env proxy"
     assert resp.status_code == 200, resp.text
     assert b"Bearer " + _KEY in upstream.received
+
+
+@pytest.mark.parametrize("name", ["HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"])
+@pytest.mark.asyncio
+async def test_each_env_proxy_var_alone_never_receives_the_real_key(
+    tmp_db_path: str,
+    fernet_key: bytes,
+    repo: ShardRepository,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    """Each variable httpx would route a plain-http upstream through, set on its own."""
+    async with (
+        _serve(_refuse) as (env_proxy_port, env_proxy),
+        _serve(_answer_chat) as (up_port, upstream),
+    ):
+        monkeypatch.setenv(name, f"http://127.0.0.1:{env_proxy_port}")
+
+        resp = await _proxied_chat(tmp_db_path, fernet_key, repo, f"http://127.0.0.1:{up_port}/v1")
+
+    assert _KEY not in env_proxy.received, f"the proxy named by {name} received the real key"
+    assert env_proxy.connections == 0, f"the upstream call went through {name}"
+    assert resp.status_code == 200, resp.text
+    assert b"Bearer " + _KEY in upstream.received
+
+
+_HEALTHZ_RESPONSE = (
+    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+    b"Content-Length: 2\r\nConnection: close\r\n\r\n{}"
+)
+
+
+@pytest.mark.asyncio
+async def test_cli_loopback_probes_never_go_through_an_env_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``status``, ``up``/``wrap``'s health poll and ``lock``'s bind probe reach the
+    local proxy directly. An HTTP_PROXY would otherwise answer for it, or see the alias."""
+    async with (
+        _serve(_refuse) as (env_proxy_port, env_proxy),
+        _serve(_reply(_HEALTHZ_RESPONSE)) as (port, local),
+    ):
+        _set_env_proxy(monkeypatch, f"http://127.0.0.1:{env_proxy_port}")
+
+        health = await asyncio.to_thread(check_proxy_health, port)
+        polled = await asyncio.to_thread(poll_health, port, 2.0)
+        probed = await asyncio.to_thread(_fire_synthetic_request, "127.0.0.1", port, _ALIAS)
+
+    assert env_proxy.connections == 0, "a loopback CLI probe went through HTTP_PROXY"
+    assert health["healthy"] is True
+    assert polled is True
+    assert probed is True
+    assert local.connections == 3
 
 
 @pytest.mark.asyncio
