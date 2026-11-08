@@ -48,7 +48,7 @@ def test_default_install_pins_baked_version(tmp_path: Path) -> None:
 
     pin = read_install_pin()
     log = (tmp_path / "uv-invocations.log").read_text()
-    assert f"tool install --force worthless=={pin}" in log, (
+    assert f"tool install --force --python 3.14 worthless=={pin}" in log, (
         f"default install must pin to worthless=={pin}.\nuv log:\n{log}"
     )
     assert "tool upgrade" not in log, (
@@ -236,7 +236,7 @@ def test_leading_dash_pin_is_not_arg_injection(tmp_path: Path) -> None:
 
     run_install(bin_dir, install_sh=patched)
     log = (tmp_path / "uv-invocations.log").read_text()
-    assert "--force worthless==-rf" in log, (
+    assert "--force --python 3.14 worthless==-rf" in log, (
         f"pin must be passed as `worthless==<pin>`, never a standalone "
         f"argument uv could interpret as a flag.\nuv log:\n{log}"
     )
@@ -1349,7 +1349,7 @@ esac""",
     if already_installed:
         expected = ["--version", "tool list", "tool dir --bin", "tool dir --bin"]
     else:
-        install = f"tool install --force worthless=={pin}"
+        install = f"tool install --force --python 3.14 worthless=={pin}"
         expected = ["--version", "tool list", install, "tool dir --bin"]
     if not already_installed:
         # Brutus on this PR: ~/.config/uv/uv.toml pointed the GENUINE uv at an
@@ -1678,3 +1678,21 @@ def test_a_wrong_version_copy_is_repaired_not_refused_forever(tmp_path: Path) ->
     assert "tool install --force" in log, f"the wrong-version copy was not reinstalled.\n{log}"
     assert result.returncode == 0, (result.returncode, result.stderr)
     assert f"worthless {pin}" in result.stdout, result.stdout
+
+
+def test_the_tool_env_gets_python_3_14_not_uv_0_13s_default(tmp_path: Path) -> None:
+    """WOR-1116: uv 0.13 picks Python 3.15 when none is requested. PyYAML (via
+    uvicorn[standard]) has no 3.15 wheel, so a fresh install built it from source:
+    unpinned setuptools and Cython from PyPI ran mid-install, with the caller's
+    unscrubbed CC/LDSHARED. uv 0.11.7 picked 3.14, which has a wheel for every
+    dependency, so install.sh asks for 3.14 by name.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_happy_path_stubs(bin_dir)
+
+    result = run_install(bin_dir)
+    log = (tmp_path / "uv-invocations.log").read_text()
+
+    assert result.returncode == 0, (result.returncode, result.stderr)
+    assert f"uv tool install --force --python 3.14 worthless=={read_install_pin()}\n" in log, log

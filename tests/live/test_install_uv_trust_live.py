@@ -45,6 +45,7 @@ def _install_sh_value(name: str) -> str:
 def _chain_top_issuer(host: str) -> str:
     """CN of the issuer of the last certificate the server sends, unverified."""
     ctx = ssl.create_default_context()
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
     with (
@@ -59,6 +60,8 @@ def _chain_top_issuer(host: str) -> str:
 @pytest.mark.live
 @pytest.mark.timeout(300)
 def test_pinned_uv_refuses_a_server_chained_to_the_emsign_g3_root(tmp_path: Path) -> None:
+    if not hasattr(ssl.SSLSocket, "get_unverified_chain"):
+        pytest.skip("reading the server's chain needs Python 3.13+")
     try:
         top_issuer = _chain_top_issuer(_TEST_HOST)
     except OSError as exc:
@@ -78,13 +81,13 @@ def test_pinned_uv_refuses_a_server_chained_to_the_emsign_g3_root(tmp_path: Path
         ["/bin/sh", str(tmp_path / "uv-installer.sh")],
         env={**env, "UV_INSTALL_VERSION": version, "UV_INSTALL_DIR": str(bin_dir)},
         check=True,
-        capture_output=True,
     )
     uv = bin_dir / "uv"
     reported = subprocess.run([str(uv), "--version"], capture_output=True, text=True, check=True)  # noqa: S603
     assert reported.stdout.split()[1] == version
 
-    # install.sh's own call, with the test site as the index.
+    # install.sh's `uv tool install`, with the test site as the index, no cache
+    # and this interpreter (so no Python download).
     result = subprocess.run(  # noqa: S603
         [
             str(uv),

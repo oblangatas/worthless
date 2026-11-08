@@ -407,7 +407,10 @@ install_or_upgrade_worthless() {
     # `.XXXXXX` template: BSD and GNU mktemp -t both accept it quietly.
     uv_install_err="$(mktemp 2>/dev/null || mktemp -t worthless-uv-install-err.XXXXXX)"
 
-    if ! "$UV" tool install --force "$spec" >/dev/null 2>"$uv_install_err"; then
+    # Python 3.14 by name (WOR-1116): unrequested, uv 0.13 picks 3.15, where
+    # PyYAML has no wheel and builds from source with unpinned setuptools/Cython
+    # and the caller's CC. 3.14 has a wheel for every dependency.
+    if ! "$UV" tool install --force --python 3.14 "$spec" >/dev/null 2>"$uv_install_err"; then
         err "Failed to install ${spec}."
         if [ -s "$uv_install_err" ]; then
             printf "\n       uv tool install reported:\n" >&2
