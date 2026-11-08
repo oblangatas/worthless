@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from tests._install_helpers import INSTALL_FIXTURES, INSTALL_SH, REPO_ROOT
+from tests._install_helpers import INSTALL_FIXTURES, INSTALL_SH, REPO_ROOT, read_install_var
 
 
 @pytest.fixture(scope="module")
@@ -33,21 +33,13 @@ def test_uv_version_pinned(install_text: str) -> None:
     )
 
 
-def test_uv_version_rejects_compromised_emudhra_keys(install_text: str) -> None:
-    """GHSA-hq85-5cpj-mr62 / GHSA-6q48-6c7w-9gw2 (WOR-1116): the bootstrapped uv
-    downloads worthless from PyPI and checks the certificate against its OWN
-    built-in roots, not the system store. uv < 0.13.4 trusts the emSign ECC Root
-    CA - G3 above the compromised eMudhra intermediate keys; 0.13.5 also rejects
-    chains carrying those keys (rustls-webpki 0.103.16). Below that, an on-path
-    attacker with a certificate from those keys could serve the install a fake
-    worthless. 0.13.6 is the first to download CPython 3.14.10, whose ssl
-    module rejects those keys too, for the Python the proxy then runs on.
-    """
-    match = re.search(r'^UV_VERSION="(\d+)\.(\d+)\.(\d+)"', install_text, re.MULTILINE)
-    assert match, 'install.sh must declare UV_VERSION="X.Y.Z"'
-    assert tuple(int(part) for part in match.groups()) >= (0, 13, 6), (
-        f"UV_VERSION {'.'.join(match.groups())} trusts the compromised eMudhra keys "
-        "or installs a Python that does; pin uv 0.13.6 or later (GHSA-hq85-5cpj-mr62)"
+def test_uv_version_rejects_compromised_emudhra_keys() -> None:
+    """WOR-1116 (GHSA-hq85-5cpj-mr62): uv checks PyPI against its own roots. Below
+    0.13.4 they trust the root above the compromised eMudhra keys; 0.13.6 is the
+    first to download CPython 3.14.10, whose ssl rejects those keys too."""
+    version = read_install_var("UV_VERSION")
+    assert tuple(int(part) for part in version.split(".")) >= (0, 13, 6), (
+        f"UV_VERSION {version} trusts the compromised eMudhra keys (GHSA-hq85-5cpj-mr62)"
     )
 
 

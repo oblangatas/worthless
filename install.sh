@@ -37,6 +37,12 @@ trap 'trap - EXIT TERM HUP; cleanup; exit 143' TERM
 trap 'trap - EXIT HUP; cleanup; exit 129' HUP
 
 UV_VERSION="0.13.7"
+# The Python `uv tool install` builds worthless's environment on (WOR-1116).
+# Unrequested, uv 0.13 picks 3.15, where PyYAML has no wheel and builds from
+# source with unpinned setuptools/Cython and the caller's CC; 3.14 has a wheel
+# for every dependency. uv >= 0.13.6 downloads 3.14.10, whose ssl rejects the
+# compromised eMudhra keys.
+TOOL_PYTHON="3.14"
 
 # Default worthless version: the latest release already on PyPI, hand-bumped
 # per release (release-sync-check.yml fails if it falls behind). We install
@@ -407,10 +413,7 @@ install_or_upgrade_worthless() {
     # `.XXXXXX` template: BSD and GNU mktemp -t both accept it quietly.
     uv_install_err="$(mktemp 2>/dev/null || mktemp -t worthless-uv-install-err.XXXXXX)"
 
-    # Python 3.14 by name (WOR-1116): unrequested, uv 0.13 picks 3.15, where
-    # PyYAML has no wheel and builds from source with unpinned setuptools/Cython
-    # and the caller's CC. 3.14 has a wheel for every dependency.
-    if ! "$UV" tool install --force --python 3.14 "$spec" >/dev/null 2>"$uv_install_err"; then
+    if ! "$UV" tool install --force --python "$TOOL_PYTHON" "$spec" >/dev/null 2>"$uv_install_err"; then
         err "Failed to install ${spec}."
         if [ -s "$uv_install_err" ]; then
             printf "\n       uv tool install reported:\n" >&2

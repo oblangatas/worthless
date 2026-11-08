@@ -3,7 +3,7 @@
 # Worthless is NOT installed via pip. The real install path is install.sh
 # (`curl worthless.sh | sh`), which bootstraps a pinned `uv` and runs
 # `uv tool install worthless`. We mirror that here — same engine (`uv`,
-# pinned to install.sh's UV_VERSION 0.13.7) — but install the LOCALLY-BUILT
+# pinned to install.sh's UV_VERSION) — but install the LOCALLY-BUILT
 # wheel instead of the published PyPI release, so the e2e exercises THIS
 # branch (F1/F2/the new skill), not whatever is currently on PyPI.
 #
@@ -16,7 +16,7 @@
 # Test-only. Not a shipped/published image.
 FROM ghcr.io/openclaw/openclaw:2026.5.3-1
 
-# Pinned uv — the same version install.sh bootstraps (UV_VERSION=0.13.7).
+# Pinned uv — must match install.sh's UV_VERSION.
 # Copied from Astral's official image (no pip, no curl-pipe at build).
 COPY --from=ghcr.io/astral-sh/uv:0.13.7 /uv /usr/local/bin/uv
 

@@ -18,7 +18,6 @@ Run:
 from __future__ import annotations
 
 import hashlib
-import re
 import socket
 import ssl
 import subprocess  # noqa: S404
@@ -30,16 +29,10 @@ import pytest
 from cryptography import x509
 from cryptography.x509.oid import NameOID
 
-from tests._install_helpers import INSTALL_SH
+from tests._install_helpers import read_install_var
 
 _TEST_HOST = "testevg3.emsign.com"
 _AFFECTED_ROOT = "emSign ECC Root CA - G3"
-
-
-def _install_sh_value(name: str) -> str:
-    match = re.search(rf'^{name}="([^"]+)"', INSTALL_SH.read_text(encoding="utf-8"), re.MULTILINE)
-    assert match, f'install.sh must declare {name}="..."'
-    return match.group(1)
 
 
 def _chain_top_issuer(host: str) -> str:
@@ -69,10 +62,10 @@ def test_pinned_uv_refuses_a_server_chained_to_the_emsign_g3_root(tmp_path: Path
     if top_issuer != _AFFECTED_ROOT:
         pytest.skip(f"{_TEST_HOST} now chains to {top_issuer!r}, not {_AFFECTED_ROOT!r}")
 
-    version = _install_sh_value("UV_VERSION")
-    url = _install_sh_value("ASTRAL_INSTALLER_URL").replace("${UV_VERSION}", version)
+    version = read_install_var("UV_VERSION")
+    url = read_install_var("ASTRAL_INSTALLER_URL").replace("${UV_VERSION}", version)
     installer = httpx.get(url, follow_redirects=True).content
-    assert hashlib.sha256(installer).hexdigest() == _install_sh_value("ASTRAL_INSTALLER_SHA256")
+    assert hashlib.sha256(installer).hexdigest() == read_install_var("ASTRAL_INSTALLER_SHA256")
     (tmp_path / "uv-installer.sh").write_bytes(installer)
     home, bin_dir = tmp_path / "home", tmp_path / "bin"
     home.mkdir()

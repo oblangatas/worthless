@@ -20,7 +20,7 @@ COPY tests/install_fixtures/verify_uv_reuse.sh /work/verify_uv_reuse.sh
 RUN chmod +x /work/install.sh /work/verify_install.sh /work/verify_uv_reuse.sh
 
 # Pre-install uv to $HOME/.local/bin (same place install.sh would put it).
-# Pin to the SAME version install.sh pins via UV_VERSION (currently 0.13.7),
+# Pin to the SAME version install.sh pins via UV_VERSION,
 # AND verify SHA256 against ASTRAL_INSTALLER_SHA256 — both extracted from
 # install.sh at build time so a UV_VERSION bump in install.sh propagates
 # without manual edits here.
