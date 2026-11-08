@@ -21,6 +21,7 @@ from tests._install_helpers import (
     EXIT_PIPX_CONFLICT,
     EXIT_PLATFORM,
     INSTALL_SH,
+    _UV_VERSION,
     install_sh_with_pin,
     read_install_pin,
     run_install,
@@ -400,7 +401,7 @@ def test_env_scrub_strips_poisoned_uv_pip_vars(tmp_path: Path) -> None:
         "uv",
         'env >> "$HOME/uv-env.log" || true\n'
         'case "$1" in\n'
-        '  --version) echo "uv 0.11.7" ;;\n'
+        f'  --version) echo "uv {_UV_VERSION}" ;;\n'
         '  tool) shift; case "$1" in\n'
         '    install|upgrade) echo "ok" ;;\n'
         "    list) ;;\n"
@@ -759,7 +760,7 @@ def test_success_with_persistent_rc_but_missing_parent_path_says_open_terminal(
 def _failing_uv_stub(install_stderr: str = "") -> str:
     """Build a uv stub whose `tool install` fails with the given stderr."""
     return f"""case "$1" in
-  --version) echo "uv 0.11.7" ;;
+  --version) echo "uv {_UV_VERSION}" ;;
   tool) shift; case "$1" in
     list) ;;  # empty → fast-path miss; forces the install attempt
     install)
@@ -1012,7 +1013,7 @@ def test_a_half_finished_install_repairs_itself_on_the_next_run(tmp_path: Path) 
         "uv",
         f"""printf 'uv %s\\n' "$*" >> "$HOME/uv-invocations.log"
 case "$1" in
-  --version) echo "uv 0.11.7" ;;
+  --version) echo "uv {_UV_VERSION}" ;;
   tool) shift; case "$1" in
     install|upgrade) echo "ok" ;;
     list) echo "worthless v{pinned}" ;;
@@ -1066,7 +1067,7 @@ def test_a_genuine_no_op_install_still_short_circuits(tmp_path: Path) -> None:
         "uv",
         f"""printf 'uv %s\\n' "$*" >> "$HOME/uv-invocations.log"
 case "$1" in
-  --version) echo "uv 0.11.7" ;;
+  --version) echo "uv {_UV_VERSION}" ;;
   tool) shift; case "$1" in
     install|upgrade) echo "ok" ;;
     list) echo "worthless v{pinned}" ;;
@@ -1132,7 +1133,7 @@ def test_a_present_but_broken_entry_point_still_repairs(tmp_path: Path) -> None:
         "uv",
         f"""printf 'uv %s\\n' "$*" >> "$HOME/uv-invocations.log"
 case "$1" in
-  --version) echo "uv 0.11.7" ;;
+  --version) echo "uv {_UV_VERSION}" ;;
   tool) shift; case "$1" in
     install|upgrade) echo "ok" ;;
     list) echo "worthless v{pinned}" ;;
@@ -1192,7 +1193,7 @@ def test_the_fast_path_looks_where_uv_actually_put_the_binary(tmp_path: Path) ->
         "uv",
         f"""printf 'uv %s\\n' "$*" >> "$HOME/uv-invocations.log"
 case "$1" in
-  --version) echo "uv 0.11.7" ;;
+  --version) echo "uv {_UV_VERSION}" ;;
   tool) shift; case "$1" in
     install|upgrade) echo "ok" ;;
     list) echo "worthless v{pinned}" ;;
@@ -1302,7 +1303,7 @@ def test_a_planted_uv_never_performs_the_install(tmp_path: Path, already_install
         "uv",
         f"""echo "LEGIT $*" >> {log}
 case "$1" in
-  --version) echo "uv 0.11.7" ;;
+  --version) echo "uv {_UV_VERSION}" ;;
   tool) case "$2" in
     list) [ -x "$HOME/.local/bin/worthless" ] && echo "worthless v{pin}" ;;
     install)
@@ -1330,7 +1331,7 @@ esac""",
         "uv",
         f"""echo "EVIL  $*" >> {log}
 case "$1" in
-  --version) echo "uv 0.11.7" ;;
+  --version) echo "uv {_UV_VERSION}" ;;
   tool) case "$2" in dir) echo "$HOME/.local/bin" ;; esac ;;
 esac""",
     )
@@ -1447,7 +1448,7 @@ def test_a_broken_install_reports_an_error_not_success(tmp_path: Path) -> None:
         bin_dir,
         "uv",
         f"""case "$1" in
-  --version) echo "uv 0.11.7" ;;
+  --version) echo "uv {_UV_VERSION}" ;;
   tool) shift; case "$1" in
     install|upgrade) echo "ok" ;;
     list) ;;

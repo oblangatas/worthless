@@ -33,6 +33,22 @@ def test_uv_version_pinned(install_text: str) -> None:
     )
 
 
+def test_uv_version_rejects_compromised_emudhra_keys(install_text: str) -> None:
+    """GHSA-6q48-6c7w-9gw2 (WOR-1116): the bootstrapped uv downloads worthless
+    from PyPI and checks the certificate against its OWN built-in roots, not the
+    system store. uv < 0.13.4 trusts the emSign ECC Root CA - G3 above the
+    compromised eMudhra intermediate keys; 0.13.5 also rejects chains carrying
+    those keys (rustls-webpki 0.103.16). Below that, an on-path attacker with a
+    certificate from those keys could serve the install a fake worthless.
+    """
+    match = re.search(r'^UV_VERSION="(\d+)\.(\d+)\.(\d+)"', install_text, re.MULTILINE)
+    assert match, 'install.sh must declare UV_VERSION="X.Y.Z"'
+    assert tuple(int(part) for part in match.groups()) >= (0, 13, 5), (
+        f"UV_VERSION {'.'.join(match.groups())} trusts the compromised eMudhra keys; "
+        "pin uv 0.13.5 or later (GHSA-6q48-6c7w-9gw2)"
+    )
+
+
 # --- WOR-679 (A8): EXIT_INTEGRITY=50 contract -------------------------------
 
 

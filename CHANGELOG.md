@@ -46,6 +46,15 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - This changes the Docker image only. An install outside Docker runs on the Python it was installed with, which needs 3.11.18, 3.12.16, 3.13.18, 3.14.10 or 3.15.2 (or a later release in the same series) for the eMudhra denylist. Python 3.10 has no fixed release: move to 3.11.18 or later, or at least use certifi 2026.10.18 or later, which leaves out the affected root.
   - The denylist covers only those eMudhra keys. It isn't general certificate revocation checking.
   - The image still has about 70 known bugs with no fix yet (about 160 package matches), all but two in Debian packages and most marked won't-fix by Debian. The scan doesn't block on those unless one is High or Critical, not marked won't-fix, and not argued in `.grype.yaml`.
+- **install.sh downloads Worthless with a uv that no longer trusts the root above the compromised eMudhra intermediate keys** (GHSA-6q48-6c7w-9gw2, WOR-1116, [#758](https://github.com/oblangatas/worthless/pull/758)).
+  Before: `curl worthless.sh | sh` installed uv 0.11.7, even over a uv you already had, and that uv downloaded Worthless and its dependencies from PyPI. uv checks PyPI's certificate against its own built-in list of roots, not your system's, and uv before 0.13.4 trusts the emSign ECC Root CA - G3 above the compromised eMudhra intermediate keys. Someone on your network path holding a certificate from one of those keys could have served the install a fake Worthless or a fake dependency.
+  Now: install.sh installs uv 0.13.7. uv 0.13.4 dropped the affected root from uv's list, and 0.13.5 also rejects any certificate chain that contains one of the compromised keys. The SHA-256 that install.sh checks on Astral's uv installer moves with it, and that installer checks the SHA-256 of the uv it downloads.
+  On a machine where uv has no Python of its own yet, uv 0.13 downloads Python 3.15 for Worthless, where 0.11.7 downloaded 3.14.
+
+  **Limits.**
+  - `curl worthless.sh` serves the install.sh of the latest release, so this reaches it with the next release.
+  - If you installed with install.sh before, the uv it left in `~/.local/bin` is still 0.11.7 and still trusts the affected root when you run it yourself, for example `uv tool upgrade worthless`. Run install.sh again once this release is out, or upgrade that uv yourself from a network you trust.
+  - `curl worthless.sh` and the curl that fetches Astral's installer check certificates against your system's list, which this doesn't change. The installer and the uv it fetches are pinned by SHA-256, so a fake one is refused; the install.sh you pipe into `sh` is not.
 
 ### Fixed
 - **A crashed `worthless up` no longer leaves your key shares on disk** (`worthless-dhfn`, [#713](https://github.com/oblangatas/worthless/pull/713)).

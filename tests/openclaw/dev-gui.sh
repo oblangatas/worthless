@@ -38,7 +38,7 @@ set -euo pipefail
 NAME=worthless-oc-gui
 IMG=worthless-oc-dev:local
 OC_IMAGE=ghcr.io/openclaw/openclaw:2026.5.3-1
-UV_IMAGE=ghcr.io/astral-sh/uv:0.11.7
+UV_IMAGE=ghcr.io/astral-sh/uv:0.13.7
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
 # WOR-664: plant the operator's OpenRouter key + baseUrl + a real model so

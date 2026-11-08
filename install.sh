@@ -36,7 +36,7 @@ trap 'trap - EXIT INT HUP; cleanup; kill -INT $$; exit 130' INT
 trap 'trap - EXIT TERM HUP; cleanup; exit 143' TERM
 trap 'trap - EXIT HUP; cleanup; exit 129' HUP
 
-UV_VERSION="0.11.7"
+UV_VERSION="0.13.7"
 
 # Default worthless version: the latest release already on PyPI, hand-bumped
 # per release (release-sync-check.yml fails if it falls behind). We install
@@ -48,7 +48,7 @@ UV_VERSION="0.11.7"
 WORTHLESS_VERSION_PIN="0.3.16"
 
 # SHA256 of https://astral.sh/uv/${UV_VERSION}/install.sh — bump with UV_VERSION.
-ASTRAL_INSTALLER_SHA256="efed99618cb5c31e4e36a700ab7c3698e83c0ae0f3c336714043d0f932c8d32c"
+ASTRAL_INSTALLER_SHA256="d263ee68314cf5bea36b08e6bd9e2c4563240d7adb73756cf33af5c199b92db4"
 
 ASTRAL_INSTALLER_URL="https://astral.sh/uv/${UV_VERSION}/install.sh"
 DOCS_URL="https://docs.wless.io"

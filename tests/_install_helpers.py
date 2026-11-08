@@ -29,7 +29,7 @@ def write_stub(bin_dir: Path, name: str, body: str) -> Path:
 
 # Pinned uv version must match install.sh UV_VERSION. Kept in sync manually —
 # a mismatch here breaks happy-path tests immediately, which is the signal.
-_UV_VERSION = "0.11.7"
+_UV_VERSION = "0.13.7"
 
 
 def read_install_pin() -> str:

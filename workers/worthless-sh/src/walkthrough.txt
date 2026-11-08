@@ -35,7 +35,7 @@ Step 3 — pipx-conflict check
 
 Step 4 — uv install with sha256 pin
   The crown-jewel security step. Downloads the pinned Astral uv installer
-  (UV_VERSION=0.11.7) and verifies its sha256 against a hash baked into
+  (UV_VERSION=0.13.7) and verifies its sha256 against a hash baked into
   this script. If upstream ever serves different bytes, exit 40 — no
   substitute, no fallback. Catches a compromised upstream before running
   its code.
