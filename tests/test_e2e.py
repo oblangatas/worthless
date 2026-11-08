@@ -9,6 +9,7 @@ import http.server
 import json
 import os
 import socket
+import ssl
 import subprocess
 import sys
 import textwrap
@@ -27,6 +28,7 @@ from worthless.cli.bootstrap import WorthlessHome
 from worthless.openclaw.integration import _alias_from_base_url
 from worthless.storage.repository import ShardRepository
 
+from tests._tls import issue_loopback_cert
 from tests.helpers import assert_not_shown, fake_openai_key, fake_openrouter_key
 
 runner = CliRunner()
@@ -510,9 +512,13 @@ class TestUnlockedAppReachesYourOwnUpstream:
 
 
 @contextlib.contextmanager
-def _serving(handler: type[http.server.BaseHTTPRequestHandler]) -> Iterator[int]:
-    """Serve *handler* on a loopback port for the block; yield the port."""
+def _serving(
+    handler: type[http.server.BaseHTTPRequestHandler], tls: ssl.SSLContext | None = None
+) -> Iterator[int]:
+    """Serve *handler* on a loopback port for the block (over TLS if *tls*); yield the port."""
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    if tls is not None:
+        server.socket = tls.wrap_socket(server.socket, server_side=True)
     thread = threading.Thread(target=server.serve_forever, args=(0.05,), daemon=True)
     thread.start()
     try:
@@ -606,6 +612,124 @@ class TestShellProxyNeverSeesTheRealKey:
         # wrap tells the user why, by name only.
         assert "WORTHLESS_UPSTREAM_PROXY" in proc.stderr
         assert egress not in proc.stderr
+
+
+class _InspectingEgressProxy(http.server.BaseHTTPRequestHandler):
+    """A TLS-inspecting egress proxy: accepts CONNECT, then decrypts with its own CA's cert.
+
+    It answers the decrypted request itself and never contacts the provider. Reading
+    the request is all such a proxy needs to see, and log, the key.
+    """
+
+    tls: ssl.SSLContext
+    seen: list[bytes] = []
+
+    def do_CONNECT(self) -> None:  # noqa: N802 — http.server's handler name
+        self.send_response(200, "Connection established")
+        self.end_headers()
+        with (
+            self.tls.wrap_socket(self.connection, server_side=True) as conn,
+            conn.makefile("rb") as stream,
+        ):
+            head = b""
+            while (line := stream.readline()) not in (b"\r\n", b""):
+                head += line
+            length = next(
+                (
+                    int(h.split(b":", 1)[1])
+                    for h in head.split(b"\r\n")
+                    if h.lower().startswith(b"content-length:")
+                ),
+                0,
+            )
+            self.seen.append(head + stream.read(length))
+            body = json.dumps(
+                {
+                    "id": "chatcmpl-inspected",
+                    "object": "chat.completion",
+                    "created": 0,
+                    "model": "gpt-4o",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "ok"},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                }
+            ).encode()
+            conn.sendall(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                b"Content-Length: %d\r\nConnection: close\r\n\r\n" % len(body) + body
+            )
+        self.close_connection = True
+
+    def log_message(self, *_args: object) -> None:
+        pass
+
+
+@pytest.mark.integration
+@pytest.mark.real_ipc
+@pytest.mark.timeout(60)
+class TestTlsInspectingShellProxyNeverReadsTheRealKey:
+    """The corporate case, as real processes: the shell's HTTPS_PROXY inspects TLS with a
+    CA the machine trusts through SSL_CERT_FILE. The real key never reaches it (WOR-1071)."""
+
+    def test_inspecting_https_proxy_in_the_shell_never_reads_the_real_key(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        inspection_ca, inspection_tls = issue_loopback_cert(
+            tmp_path / "corp-pki", "corp TLS inspection CA"
+        )
+        provider_ca, provider_tls = issue_loopback_cert(tmp_path / "provider-pki", "provider CA")
+        monkeypatch.setattr(_FakeUpstream, "received", [])
+        monkeypatch.setattr(_InspectingEgressProxy, "seen", [])
+        monkeypatch.setattr(_InspectingEgressProxy, "tls", inspection_tls, raising=False)
+        # wrap inherits os.environ: an operator's own opt-in would change the route.
+        monkeypatch.delenv("WORTHLESS_UPSTREAM_PROXY", raising=False)
+        real_key = ""
+
+        with (
+            _serving(_FakeUpstream, tls=provider_tls) as upstream_port,
+            _serving(_InspectingEgressProxy) as inspector_port,
+        ):
+            upstream = f"https://127.0.0.1:{upstream_port}/v1"
+
+            def lock_to_own_gateway(env_file: Path, cli_env: dict[str, str]) -> None:
+                nonlocal real_key
+                real_key = dotenv_values(env_file)["OPENAI_API_KEY"] or ""
+                env_file.write_text(f"OPENAI_BASE_URL={upstream}\nOPENAI_API_KEY={real_key}\n")
+                _register_gateway(cli_env, "my-gateway", upstream)
+                _lock(env_file, cli_env)
+
+            inspector = f"http://127.0.0.1:{inspector_port}"
+            shell = {
+                "HTTPS_PROXY": inspector,
+                "https_proxy": inspector,
+                "SSL_CERT_FILE": str(inspection_ca),
+                # Only https goes through it: the app reaches worthless over plain http.
+                **dict.fromkeys(("HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"), ""),
+                **dict.fromkeys(("NO_PROXY", "no_proxy"), ""),
+                # The provider's own CA, trusted the explicit way.
+                "WORTHLESS_UPSTREAM_CA_BUNDLE": str(provider_ca),
+            }
+            proc = _run_child_under_wrap(
+                tmp_path, _ROUTED_CHILD_SCRIPT, lock_to_own_gateway, extra_env=shell
+            )
+
+        assert real_key
+        # Compare in place: never print the key.
+        assert not any(real_key.encode() in request for request in _InspectingEgressProxy.seen), (
+            "the shell's TLS-inspecting HTTPS_PROXY decrypted the real key"
+        )
+        assert not _InspectingEgressProxy.seen, "the upstream call went through HTTPS_PROXY"
+        assert "STATUS:200" in proc.stdout, f"stdout: {proc.stdout}\nstderr: {proc.stderr}"
+        # The key went straight to the provider, verified against the provider's CA.
+        assert [(path, auth == f"Bearer {real_key}") for path, auth in _FakeUpstream.received] == [
+            ("/v1/chat/completions", True)
+        ]
+        assert "HTTPS_PROXY" in proc.stderr
+        assert inspector not in proc.stderr
 
 
 @pytest.mark.integration
