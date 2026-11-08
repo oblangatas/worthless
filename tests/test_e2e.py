@@ -29,6 +29,7 @@ from worthless.openclaw.integration import _alias_from_base_url
 from worthless.storage.repository import ShardRepository
 
 from tests._tls import issue_loopback_cert
+from tests._wire import chat_completion, content_length, http_200_json
 from tests.helpers import assert_not_shown, fake_openai_key, fake_openrouter_key
 
 runner = CliRunner()
@@ -443,21 +444,7 @@ class _FakeUpstream(http.server.BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 — http.server's handler name
         self.rfile.read(int(self.headers.get("Content-Length") or 0))
         self.received.append((self.path, self.headers.get("Authorization") or ""))
-        body = json.dumps(
-            {
-                "id": "chatcmpl-e2e",
-                "object": "chat.completion",
-                "created": 0,
-                "model": "openrouter/auto",
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {"role": "assistant", "content": "ok"},
-                        "finish_reason": "stop",
-                    }
-                ],
-            }
-        ).encode()
+        body = chat_completion("ok", model="openrouter/auto")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -560,6 +547,21 @@ class _ForwardingEgressProxy(http.server.BaseHTTPRequestHandler):
         pass
 
 
+class _OwnGateway:
+    """A ``prepare`` for ``_run_child_under_wrap``: point the key at *upstream*, a gateway
+    the user registered, and lock it. Keeps the real key to compare against, never print."""
+
+    def __init__(self, upstream: str) -> None:
+        self.upstream = upstream
+        self.real_key = ""
+
+    def __call__(self, env_file: Path, cli_env: dict[str, str]) -> None:
+        self.real_key = dotenv_values(env_file)["OPENAI_API_KEY"] or ""
+        env_file.write_text(f"OPENAI_BASE_URL={self.upstream}\nOPENAI_API_KEY={self.real_key}\n")
+        _register_gateway(cli_env, "my-gateway", self.upstream)
+        _lock(env_file, cli_env)
+
+
 @pytest.mark.integration
 @pytest.mark.real_ipc
 @pytest.mark.timeout(60)
@@ -574,30 +576,21 @@ class TestShellProxyNeverSeesTheRealKey:
         # wrap inherits os.environ: an operator's own opt-ins would hide the warning.
         monkeypatch.delenv("WORTHLESS_UPSTREAM_PROXY", raising=False)
         monkeypatch.delenv("WORTHLESS_UPSTREAM_CA_BUNDLE", raising=False)
-        real_key = ""
-
         with (
             _serving(_FakeUpstream) as upstream_port,
             _serving(_ForwardingEgressProxy) as egress_port,
         ):
             upstream = f"http://127.0.0.1:{upstream_port}/v1"
-
-            def lock_to_own_gateway(env_file: Path, cli_env: dict[str, str]) -> None:
-                nonlocal real_key
-                real_key = dotenv_values(env_file)["OPENAI_API_KEY"] or ""
-                env_file.write_text(f"OPENAI_BASE_URL={upstream}\nOPENAI_API_KEY={real_key}\n")
-                _register_gateway(cli_env, "my-gateway", upstream)
-                _lock(env_file, cli_env)
+            gateway = _OwnGateway(upstream)
 
             # The proxy, the wrapped app and wrap itself all inherit this shell.
             egress = f"http://127.0.0.1:{egress_port}"
             shell = {name: egress for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")}
             shell |= {name.lower(): url for name, url in shell.items()}
             shell |= {"NO_PROXY": "", "no_proxy": ""}
-            proc = _run_child_under_wrap(
-                tmp_path, _ROUTED_CHILD_SCRIPT, lock_to_own_gateway, extra_env=shell
-            )
+            proc = _run_child_under_wrap(tmp_path, _ROUTED_CHILD_SCRIPT, gateway, extra_env=shell)
 
+        real_key = gateway.real_key
         assert real_key
         # The app's own call (carrying shard-A) went through it, so it was on the path.
         assert _ForwardingEgressProxy.seen, "the shell's HTTP_PROXY relayed nothing"
@@ -621,10 +614,11 @@ class _InspectingEgressProxy(http.server.BaseHTTPRequestHandler):
     the request is all such a proxy needs to see, and log, the key.
     """
 
-    tls: ssl.SSLContext
+    tls: ssl.SSLContext | None = None
     seen: list[bytes] = []
 
     def do_CONNECT(self) -> None:  # noqa: N802 — http.server's handler name
+        assert self.tls is not None, "set _InspectingEgressProxy.tls first"
         self.send_response(200, "Connection established")
         self.end_headers()
         with (
@@ -634,34 +628,8 @@ class _InspectingEgressProxy(http.server.BaseHTTPRequestHandler):
             head = b""
             while (line := stream.readline()) not in (b"\r\n", b""):
                 head += line
-            length = next(
-                (
-                    int(h.split(b":", 1)[1])
-                    for h in head.split(b"\r\n")
-                    if h.lower().startswith(b"content-length:")
-                ),
-                0,
-            )
-            self.seen.append(head + stream.read(length))
-            body = json.dumps(
-                {
-                    "id": "chatcmpl-inspected",
-                    "object": "chat.completion",
-                    "created": 0,
-                    "model": "gpt-4o",
-                    "choices": [
-                        {
-                            "index": 0,
-                            "message": {"role": "assistant", "content": "ok"},
-                            "finish_reason": "stop",
-                        }
-                    ],
-                }
-            ).encode()
-            conn.sendall(
-                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
-                b"Content-Length: %d\r\nConnection: close\r\n\r\n" % len(body) + body
-            )
+            self.seen.append(head + stream.read(content_length(head)))
+            conn.sendall(http_200_json(chat_completion("ok")))
         self.close_connection = True
 
     def log_message(self, *_args: object) -> None:
@@ -684,23 +652,15 @@ class TestTlsInspectingShellProxyNeverReadsTheRealKey:
         provider_ca, provider_tls = issue_loopback_cert(tmp_path / "provider-pki", "provider CA")
         monkeypatch.setattr(_FakeUpstream, "received", [])
         monkeypatch.setattr(_InspectingEgressProxy, "seen", [])
-        monkeypatch.setattr(_InspectingEgressProxy, "tls", inspection_tls, raising=False)
+        monkeypatch.setattr(_InspectingEgressProxy, "tls", inspection_tls)
         # wrap inherits os.environ: an operator's own opt-in would change the route.
         monkeypatch.delenv("WORTHLESS_UPSTREAM_PROXY", raising=False)
-        real_key = ""
-
         with (
             _serving(_FakeUpstream, tls=provider_tls) as upstream_port,
             _serving(_InspectingEgressProxy) as inspector_port,
         ):
             upstream = f"https://127.0.0.1:{upstream_port}/v1"
-
-            def lock_to_own_gateway(env_file: Path, cli_env: dict[str, str]) -> None:
-                nonlocal real_key
-                real_key = dotenv_values(env_file)["OPENAI_API_KEY"] or ""
-                env_file.write_text(f"OPENAI_BASE_URL={upstream}\nOPENAI_API_KEY={real_key}\n")
-                _register_gateway(cli_env, "my-gateway", upstream)
-                _lock(env_file, cli_env)
+            gateway = _OwnGateway(upstream)
 
             inspector = f"http://127.0.0.1:{inspector_port}"
             shell = {
@@ -708,15 +668,16 @@ class TestTlsInspectingShellProxyNeverReadsTheRealKey:
                 "https_proxy": inspector,
                 "SSL_CERT_FILE": str(inspection_ca),
                 # Only https goes through it: the app reaches worthless over plain http.
-                **dict.fromkeys(("HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"), ""),
-                **dict.fromkeys(("NO_PROXY", "no_proxy"), ""),
+                **dict.fromkeys(
+                    ("HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"),
+                    "",
+                ),
                 # The provider's own CA, trusted the explicit way.
                 "WORTHLESS_UPSTREAM_CA_BUNDLE": str(provider_ca),
             }
-            proc = _run_child_under_wrap(
-                tmp_path, _ROUTED_CHILD_SCRIPT, lock_to_own_gateway, extra_env=shell
-            )
+            proc = _run_child_under_wrap(tmp_path, _ROUTED_CHILD_SCRIPT, gateway, extra_env=shell)
 
+        real_key = gateway.real_key
         assert real_key
         # Compare in place: never print the key.
         assert not any(real_key.encode() in request for request in _InspectingEgressProxy.seen), (

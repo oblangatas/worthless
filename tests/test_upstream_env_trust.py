@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import logging
 import socket
 import ssl
@@ -33,32 +32,13 @@ from worthless.storage.repository import ShardRepository, StoredShard
 
 from tests._fakes import pin_shard_b
 from tests._tls import issue_loopback_cert
+from tests._wire import chat_completion, content_length, http_200_json
 
 _REAL_KEY = "sk-envtrust-real-key-0123456789abcdef"
 _KEY = _REAL_KEY.encode()
 _ALIAS = "envtrust"
 
-_CHAT_REPLY = json.dumps(
-    {
-        "id": "chatcmpl-envtrust",
-        "object": "chat.completion",
-        "created": 0,
-        "model": "gpt-4o",
-        "choices": [
-            {
-                "index": 0,
-                "message": {"role": "assistant", "content": "pong"},
-                "finish_reason": "stop",
-            }
-        ],
-        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
-    }
-).encode()
-
-_CHAT_RESPONSE = (
-    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
-    b"Content-Length: %d\r\nConnection: close\r\n\r\n" % len(_CHAT_REPLY) + _CHAT_REPLY
-)
+_CHAT_RESPONSE = http_200_json(chat_completion("pong"))
 
 _TRANSPORT_VARS = (
     "HTTP_PROXY",
@@ -81,23 +61,24 @@ def _clean_transport_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(name.lower(), raising=False)
 
 
+_EVERY_PROXY_VAR = (
+    "HTTP_PROXY",
+    "http_proxy",
+    "HTTPS_PROXY",
+    "https_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+)
+
+
 def _set_env_proxy(monkeypatch: pytest.MonkeyPatch, url: str) -> None:
-    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+    for name in _EVERY_PROXY_VAR:
         monkeypatch.setenv(name, url)
-        monkeypatch.setenv(name.lower(), url)
 
 
 # ---------------------------------------------------------------------------
 # Local sockets
 # ---------------------------------------------------------------------------
-
-
-def _content_length(head: bytes) -> int:
-    for line in head.split(b"\r\n")[1:]:
-        name, _, value = line.partition(b":")
-        if name.strip().lower() == b"content-length":
-            return int(value.strip())
-    return 0
 
 
 class _Recorder:
@@ -137,7 +118,7 @@ async def _serve(
 
 async def _read_request(reader: asyncio.StreamReader, rec: _Recorder) -> None:
     head = await reader.readuntil(b"\r\n\r\n")
-    rec.received += head + await reader.readexactly(_content_length(head))
+    rec.received += head + await reader.readexactly(content_length(head))
 
 
 def _reply(response: bytes) -> Handler:
@@ -280,11 +261,20 @@ async def _proxied_chat(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    "names",
+    [_EVERY_PROXY_VAR, ("HTTP_PROXY",), ("http_proxy",), ("ALL_PROXY",), ("all_proxy",)],
+    ids=["all", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"],
+)
 @pytest.mark.asyncio
 async def test_env_proxy_vars_never_receive_the_real_key(
-    tmp_db_path: str, fernet_key: bytes, repo: ShardRepository, monkeypatch: pytest.MonkeyPatch
+    tmp_db_path: str,
+    fernet_key: bytes,
+    repo: ShardRepository,
+    monkeypatch: pytest.MonkeyPatch,
+    names: tuple[str, ...],
 ) -> None:
-    """HTTP(S)_PROXY / ALL_PROXY don't reroute the upstream call.
+    """HTTP(S)_PROXY / ALL_PROXY, together or each alone, don't reroute the upstream call.
 
     A plain-http upstream makes the leak literal: httpx sends an env proxy the
     whole request, ``Authorization: Bearer <real key>`` included.
@@ -293,44 +283,18 @@ async def test_env_proxy_vars_never_receive_the_real_key(
         _serve(_refuse) as (env_proxy_port, env_proxy),
         _serve(_answer_chat) as (up_port, upstream),
     ):
-        _set_env_proxy(monkeypatch, f"http://127.0.0.1:{env_proxy_port}")
+        for name in names:
+            monkeypatch.setenv(name, f"http://127.0.0.1:{env_proxy_port}")
 
         resp = await _proxied_chat(tmp_db_path, fernet_key, repo, f"http://127.0.0.1:{up_port}/v1")
 
-    assert _KEY not in env_proxy.received, "the proxy named by HTTP_PROXY received the real key"
-    assert env_proxy.connections == 0, "the upstream call went through the env proxy"
+    assert _KEY not in env_proxy.received, f"the proxy named by {names} received the real key"
+    assert env_proxy.connections == 0, f"the upstream call went through {names}"
     assert resp.status_code == 200, resp.text
     assert b"Bearer " + _KEY in upstream.received
 
 
-@pytest.mark.parametrize("name", ["HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"])
-@pytest.mark.asyncio
-async def test_each_env_proxy_var_alone_never_receives_the_real_key(
-    tmp_db_path: str,
-    fernet_key: bytes,
-    repo: ShardRepository,
-    monkeypatch: pytest.MonkeyPatch,
-    name: str,
-) -> None:
-    """Each variable httpx would route a plain-http upstream through, set on its own."""
-    async with (
-        _serve(_refuse) as (env_proxy_port, env_proxy),
-        _serve(_answer_chat) as (up_port, upstream),
-    ):
-        monkeypatch.setenv(name, f"http://127.0.0.1:{env_proxy_port}")
-
-        resp = await _proxied_chat(tmp_db_path, fernet_key, repo, f"http://127.0.0.1:{up_port}/v1")
-
-    assert _KEY not in env_proxy.received, f"the proxy named by {name} received the real key"
-    assert env_proxy.connections == 0, f"the upstream call went through {name}"
-    assert resp.status_code == 200, resp.text
-    assert b"Bearer " + _KEY in upstream.received
-
-
-_HEALTHZ_RESPONSE = (
-    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
-    b"Content-Length: 2\r\nConnection: close\r\n\r\n{}"
-)
+_HEALTHZ_RESPONSE = http_200_json(b"{}")
 
 
 @pytest.mark.asyncio
