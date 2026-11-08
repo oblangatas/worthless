@@ -31,7 +31,7 @@ def write_stub(bin_dir: Path, name: str, body: str) -> Path:
 # a mismatch here breaks happy-path tests immediately, which is the signal.
 _UV_VERSION = "0.13.7"
 # Same deal for install.sh TOOL_PYTHON (the --python passed to `uv tool install`).
-_TOOL_PYTHON = "3.14"
+_TOOL_PYTHON = ">=3.14.10,<3.15"
 
 
 def read_install_var(name: str) -> str:

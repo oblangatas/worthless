@@ -40,9 +40,10 @@ UV_VERSION="0.13.7"
 # The Python `uv tool install` builds worthless's environment on (WOR-1116).
 # Unrequested, uv 0.13 picks 3.15, where PyYAML has no wheel and builds from
 # source with unpinned setuptools/Cython and the caller's CC; 3.14 has a wheel
-# for every dependency. uv >= 0.13.6 downloads 3.14.10, whose ssl rejects the
-# compromised eMudhra keys.
-TOOL_PYTHON="3.14"
+# for every dependency. The floor is 3.14.10, whose ssl rejects the compromised
+# eMudhra keys: a bare "3.14" kept an older uv-managed 3.14 (verified: 3.14.4).
+# uv >= 0.13.6 can download 3.14.10.
+TOOL_PYTHON=">=3.14.10,<3.15"
 
 # Default worthless version: the latest release already on PyPI, hand-bumped
 # per release (release-sync-check.yml fails if it falls behind). We install

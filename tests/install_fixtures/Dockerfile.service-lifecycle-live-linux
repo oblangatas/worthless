@@ -47,7 +47,7 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=shared \
 ENV PATH="/root/.local/bin:${PATH}"
 # The entrypoints `uv sync --frozen` the repo. Unrequested, uv 0.13 picks
 # Python 3.15, the locked cffi 2.0.0 has no 3.15 wheel, and this image has no
-# compiler. Use install.sh's TOOL_PYTHON.
+# compiler. Use the 3.14 series install.sh's TOOL_PYTHON asks for.
 ENV UV_PYTHON=3.14
 
 COPY engineering/testing/scripts/service-lifecycle-docker-entrypoint.sh /usr/local/bin/service-lifecycle-docker-entrypoint.sh
