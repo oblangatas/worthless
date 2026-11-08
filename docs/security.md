@@ -355,6 +355,13 @@ them).
 | `WORTHLESS_UPSTREAM_PROXY=http://proxy.example.com:3128` | `https://` upstream calls go through this proxy in a CONNECT tunnel. `http://` upstreams (a local gateway) are always reached directly, because any proxy could read a plain-http request. An `https://` proxy URL is verified against the same CA list as providers. | Nobody new, unless the proxy inspects TLS and you also set the CA below. A proxy that only tunnels sees the provider's hostname. An `https://` proxy whose certificate comes from a private CA needs that CA in the bundle below, which then vouches for providers too; prefer an `http://` proxy URL, which still tunnels the provider's TLS. |
 | `WORTHLESS_UPSTREAM_CA_BUNDLE=/path/to/bundle.pem` | Providers are verified against this PEM bundle instead of the built-in list. | Anyone holding the key of a CA in the bundle, including a TLS-inspecting proxy. |
 
+On Python 3.13 and later, certificates are checked in OpenSSL's strict mode.
+Some older corporate CAs fail it: for example, a CA certificate with no key
+usage extension, or whose basicConstraints isn't marked critical. The
+bundle still loads at startup, but every upstream call then fails its TLS
+check and the app gets a `502`. Have the CA reissued, or run Worthless on
+Python 3.12.
+
 Setting both for an inspecting proxy is a deliberate decision to let it read
 your keys. If you can, ask for a TLS-inspection bypass for your providers'
 hosts instead (for example `api.openai.com` and `api.anthropic.com`).
