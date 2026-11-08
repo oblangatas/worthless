@@ -538,6 +538,7 @@ def test_shutdown_sidecar_sigkills_after_grace_window(home: Path, key: bytearray
         socket_path=shares.run_dir / "sc.sock",
         shares=shares,
         allowed_uid=os.getuid(),
+        sidecar_uid=os.getuid(),
         drain_timeout=0.25,
         stderr_buf=collections.deque(),
     )
@@ -559,6 +560,7 @@ def test_shutdown_sidecar_zeroes_share_bytearrays(home: Path, key: bytearray) ->
         socket_path=shares.run_dir / "sc.sock",
         shares=shares,
         allowed_uid=os.getuid(),
+        sidecar_uid=os.getuid(),
         drain_timeout=5.0,
         stderr_buf=collections.deque(),
     )
@@ -580,6 +582,7 @@ def test_shutdown_sidecar_is_idempotent(home: Path, key: bytearray) -> None:
         socket_path=shares.run_dir / "sc.sock",
         shares=shares,
         allowed_uid=os.getuid(),
+        sidecar_uid=os.getuid(),
         drain_timeout=5.0,
         stderr_buf=collections.deque(),
     )

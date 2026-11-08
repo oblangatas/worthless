@@ -36,6 +36,7 @@ Backoff between reconnects is jittered (CSPRNG only, SR-08):
 from __future__ import annotations
 
 import asyncio
+import logging
 import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -44,11 +45,14 @@ from pathlib import Path
 from typing import Final
 
 from worthless.ipc.client import (
+    IPCAuthError,
     IPCClient,
     IPCError,
     IPCProtocolError,
     IPCTimeoutError,
 )
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "DEFAULT_ACQUIRE_TIMEOUT_S",
@@ -231,6 +235,11 @@ class IPCSupervisor:
         client = IPCClient(self._socket_path, timeout=self._request_timeout_s)
         try:
             await client.__aenter__()
+        except IPCAuthError as exc:
+            # A uid refusal in either direction is a security event, and the
+            # 503 a request gets says only "sidecar unavailable" (WOR-1078).
+            logger.warning("sidecar connection refused: %s", exc)
+            raise IPCUnavailable(f"sidecar connect failed: {exc}") from exc
         except IPCError as exc:
             raise IPCUnavailable(f"sidecar connect failed: {exc}") from exc
         except (OSError, ConnectionError) as exc:
