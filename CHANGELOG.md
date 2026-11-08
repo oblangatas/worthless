@@ -59,6 +59,19 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - If your environment uses a Linux distribution's certifi older than 2026.10.23 that is patched to read the system certificate store, as Debian's is, the upgrade puts PyPI's copy in front of it. That happens through a `--system-site-packages` venv, `pip install --user`, or pip run against the system Python. An up-to-date Debian store already leaves out the affected root, so there the upgrade adds no protection: it swaps Debian's store for certifi's list, which leaves out about 40 roots Debian 13 still trusts (among them DigiCert Global Root CA, GlobalSign Root CA and GTS Root R2) and any roots you added to the system store. If your upstream chains to one of those, or sits behind an internal CA or a TLS-inspecting proxy, its calls then fail with `CERTIFICATE_VERIFY_FAILED`. To use the system store again, keep `ca-certificates` up to date, check that the bundle doesn't contain emSign ECC Root CA - G3 (an old store, or a copy of that root you added yourself, can still include it), and set `SSL_CERT_FILE` where the proxy starts: `/etc/ssl/certs/ca-certificates.crt` on Debian and Ubuntu, `/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem` on Fedora.
 
 ### Fixed
+- **A crashed `worthless up` no longer leaves your key shares on disk** (`worthless-dhfn`, [#713](https://github.com/oblangatas/worthless/pull/713)).
+  Before: if `worthless up` was killed with `kill -9` or crashed, its helper process kept running. Both key share files stayed in `~/.worthless/run/<pid>/`, also after a restart. `worthless doctor` reported "No issues found" because the helper still answered.
+  Now: the helper checks every 0.5 seconds that `worthless up` is still running. When `worthless up` is gone, the helper deletes both share files and its socket, then stops. It stops less than 8 seconds after `worthless up` stopped.
+
+  **Limits.**
+  - The key stays in the helper's memory for less than 8 seconds after `worthless up` stops. During that time it still answers the proxy that `worthless up` left running.
+  - The proxy also keeps running after `worthless up` crashes. Run `worthless down` to stop it.
+  - If the helper is killed at the same time as `worthless up` (for example `pkill -9 -f worthless`), the share files stay. `worthless doctor` reports them.
+  - A helper left running by an older version of Worthless does not stop. Stop it by hand. `worthless doctor` then reports its share files.
+  - If `worthless up` is killed and the terminal closes less than 0.5 seconds later, the share files stay. `worthless doctor` reports them.
+  - In Docker, the helper sometimes cannot remove the empty run folder. `worthless doctor` reports it.
+  - The share files are deleted, not securely erased.
+
 - **`worthless lock` accepts a `*_BASE_URL` line with no value** (WOR-1041, [#740](https://github.com/oblangatas/worthless/pull/740)).
   Before: a `.env` with a name and no `=`, such as `OPENROUTER_BASE_URL` or `export OPENROUTER_BASE_URL`, on the line lock writes for a key made lock stop with WRTLS-199, an internal error. A name in quotes, such as `'OPENROUTER_BASE_URL'=https://openrouter.ai/api/v1`, did the same. Nothing changed: your `.env` kept its key, and lock left nothing in the Worthless database.
   Now: lock leaves that line as it is, adds its proxy line after it, and says the line "had no value", or that it "can't edit the line you have for it". python-dotenv, Node's `--env-file` and docker compose read the last line for a name, which is now the proxy line. Unlock removes only the line lock added, so lock then unlock gives back the `.env` you started with. Lock also prints that it added a line only after the `.env` is written, so a refused write no longer reports a line it never added.

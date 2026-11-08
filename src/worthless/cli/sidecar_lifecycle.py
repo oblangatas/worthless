@@ -594,6 +594,9 @@ def spawn_sidecar(
         "WORTHLESS_SIDECAR_ALLOWED_UID": str(allowed_uid),
         "WORTHLESS_SIDECAR_DRAIN_TIMEOUT": str(drain_timeout),
         "WORTHLESS_LOG_LEVEL": "WARNING",
+        # The sidecar exits and wipes its shares once this pid stops being
+        # its parent (kill -9 on `worthless up`; worthless-dhfn).
+        "WORTHLESS_SIDECAR_PARENT_PID": str(os.getpid()),
     }
     # When service_uids is set (Docker root-entry path), the forked child
     # runs the priv-drop dance via preexec_fn before exec'ing the sidecar
