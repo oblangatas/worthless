@@ -484,19 +484,19 @@ def test_tiny_reply_of_nested_array_headers_cannot_balloon_proxy_memory(
         listener.settimeout(30)
         server = threading.Thread(target=_serve_one_reply, args=(listener, reply), daemon=True)
         server.start()
-        out = subprocess.run(
+        client = subprocess.run(
             [sys.executable, "-c", _PROXY_CLIENT, str(sidecar_socket_path)],
             capture_output=True,
             text=True,
             timeout=60,
             env=env,
-            check=True,
-        ).stdout
+        )
         server.join(timeout=30)
 
-    rss_before, peak_after, error = out.split(maxsplit=2)
-    # Was 75 to 240 MiB on msgpack 1.2.4 (~513 MiB on 1.2.2): the client
-    # preallocated every header's 65535 items before finding them missing.
+    assert client.returncode == 0, client.stderr
+    rss_before, peak_after, error = client.stdout.split(maxsplit=2)
+    # Was +80 MiB on msgpack 1.2.4 (macOS): the client preallocated every
+    # header's 65535 items before finding them missing.
     peak_growth = int(peak_after) - int(rss_before)
     assert peak_growth < _LIMIT, (
         f"a {len(reply):,}-byte sidecar reply took proxy RSS {peak_growth / _MiB:.1f} MiB "
