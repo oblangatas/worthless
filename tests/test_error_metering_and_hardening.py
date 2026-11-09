@@ -26,6 +26,7 @@ from worthless.proxy.rules import RateLimitRule, RulesEngine, SpendCapRule, Toke
 from worthless.storage.repository import ShardRepository, StoredShard
 
 from tests._fakes import pin_shard_b
+from tests.helpers import make_streaming_response
 
 
 # ------------------------------------------------------------------
@@ -620,6 +621,9 @@ async def anthropic_alias(repo, proxy_app):
 
 
 ANTHROPIC_BODY = b'{"model": "claude-3-5-sonnet-20241022", "max_tokens": 1000, "messages": []}'
+ANTHROPIC_STREAM_BODY = (
+    b'{"model": "claude-3-5-sonnet-20241022", "max_tokens": 1000, "messages": [], "stream": true}'
+)
 
 # (usage, tokens billed): None means the usage is unreadable.
 _NON_INT_USAGES = [
@@ -635,7 +639,48 @@ _NON_INT_USAGES = [
     ),
     pytest.param({"input_tokens": None, "output_tokens": 3}, None, id="null-required-count"),
     pytest.param({"input_tokens": "5", "output_tokens": 3}, None, id="string-count"),
+    pytest.param({"input_tokens": 5.0, "output_tokens": 3}, None, id="decimal-count"),
+    pytest.param({"input_tokens": 5, "output_tokens": True}, None, id="bool-count"),
 ]
+
+# (message_start usage, message_delta usage, tokens billed): None means unreadable.
+_NON_INT_STREAM_USAGES = [
+    pytest.param(
+        {"input_tokens": 5, "cache_creation_input_tokens": None, "cache_read_input_tokens": None},
+        {"output_tokens": 3},
+        8,
+        id="null-cache-counts-bill-the-rest",
+    ),
+    pytest.param({"input_tokens": 5}, {"output_tokens": "3"}, None, id="string-output-count"),
+    pytest.param({"input_tokens": 5}, {"output_tokens": True}, None, id="bool-output-count"),
+]
+
+
+def _anthropic_sse(start_usage: dict, delta_usage: dict) -> bytes:
+    events = [
+        ("message_start", {"type": "message_start", "message": {"usage": start_usage}}),
+        ("message_delta", {"type": "message_delta", "usage": delta_usage}),
+        ("message_stop", {"type": "message_stop"}),
+    ]
+    return b"".join(f"event: {e}\ndata: {json.dumps(d)}\n\n".encode() for e, d in events)
+
+
+async def _cap_spend(db, alias: str) -> None:
+    await db.execute(
+        "INSERT INTO enrollment_config (key_alias, spend_cap) VALUES (?, ?)", (alias, 10_000_000)
+    )
+    await db.commit()
+
+
+async def _assert_billed_now(db, alias: str, billed: int | None) -> None:
+    """The hold became one spend row right away: *billed*, or max(estimate, ceiling)
+    when the usage is unreadable (None)."""
+    async with db.execute(
+        "SELECT COUNT(*) FROM pending_charges WHERE key_alias = ?", (alias,)
+    ) as cur:
+        assert await cur.fetchone() == (0,)
+    async with db.execute("SELECT tokens FROM spend_log WHERE key_alias = ?", (alias,)) as cur:
+        assert await cur.fetchall() == [(GLOBAL_CEILING_TOKENS if billed is None else billed,)]
 
 
 class TestNonIntTokenCounts:
@@ -685,11 +730,7 @@ class TestNonIntTokenCounts:
         be read, otherwise at max(estimate, ceiling)."""
         alias, shard_a_utf8 = anthropic_alias
         db = proxy_app.state.db
-        await db.execute(
-            "INSERT INTO enrollment_config (key_alias, spend_cap) VALUES (?, ?)",
-            (alias, 10_000_000),
-        )
-        await db.commit()
+        await _cap_spend(db, alias)
         respx.post(ANTHROPIC_MESSAGES).mock(
             return_value=httpx.Response(200, content=_anthropic_json(usage=usage))
         )
@@ -701,12 +742,62 @@ class TestNonIntTokenCounts:
         )
 
         assert resp.status_code == 200
-        async with db.execute(
-            "SELECT COUNT(*) FROM pending_charges WHERE key_alias = ?", (alias,)
-        ) as cur:
-            assert await cur.fetchone() == (0,)
-        async with db.execute("SELECT tokens FROM spend_log WHERE key_alias = ?", (alias,)) as cur:
-            assert await cur.fetchall() == [(GLOBAL_CEILING_TOKENS if billed is None else billed,)]
+        await _assert_billed_now(db, alias, billed)
+
+    @pytest.mark.parametrize(("start_usage", "delta_usage", "billed"), _NON_INT_STREAM_USAGES)
+    @respx.mock
+    async def test_capped_key_is_billed_now_for_a_streamed_reply(
+        self,
+        proxy_client: httpx.AsyncClient,
+        proxy_app,
+        anthropic_alias,
+        start_usage,
+        delta_usage,
+        billed,
+    ):
+        """Before the fix a null cache count crashed the stream while it was being
+        relayed and left the hold for the sweeper."""
+        alias, shard_a_utf8 = anthropic_alias
+        db = proxy_app.state.db
+        await _cap_spend(db, alias)
+        respx.post(ANTHROPIC_MESSAGES).mock(
+            return_value=make_streaming_response([_anthropic_sse(start_usage, delta_usage)])
+        )
+
+        resp = await proxy_client.post(
+            _proxy_url(alias, "/v1/messages"),
+            headers=_proxy_headers(alias, shard_a_utf8),
+            content=ANTHROPIC_STREAM_BODY,
+        )
+
+        assert resp.status_code == 200
+        await _assert_billed_now(db, alias, billed)
+
+    @pytest.mark.parametrize("bad", [None, "90011"], ids=repr)
+    @respx.mock
+    async def test_unreadable_latest_stream_total_bills_capped_key_the_ceiling(
+        self, proxy_client: httpx.AsyncClient, proxy_app, enrolled_alias, bad
+    ):
+        """An upstream that sends usage on every chunk ends with an unreadable total.
+        The key must not be billed the earlier, smaller total."""
+        alias, shard_a_utf8, _ = enrolled_alias
+        db = proxy_app.state.db
+        await _cap_spend(db, alias)
+        chunks = [
+            {"model": "gpt-4", "choices": [], "usage": {"total_tokens": 11}},
+            {"model": "gpt-4", "choices": [], "usage": {"total_tokens": bad}},
+        ]
+        sse = b"".join(f"data: {json.dumps(c)}\n\n".encode() for c in chunks) + b"data: [DONE]\n\n"
+        respx.post(OPENAI_COMPLETIONS).mock(return_value=make_streaming_response([sse]))
+
+        resp = await proxy_client.post(
+            _proxy_url(alias),
+            headers=_proxy_headers(alias, shard_a_utf8),
+            content=b'{"model": "gpt-4", "messages": [], "max_tokens": 1000, "stream": true}',
+        )
+
+        assert resp.status_code == 200
+        await _assert_billed_now(db, alias, None)
 
 
 # ------------------------------------------------------------------

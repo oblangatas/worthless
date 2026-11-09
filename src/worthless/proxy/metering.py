@@ -169,11 +169,10 @@ class StreamingUsageCollector:
         self.provider = provider
         self._partial_line: str = ""
         self._input_tokens: int = 0
-        self._output_tokens: int = 0
+        self._output_tokens: int | None = None
         self._total_tokens: int | None = None
         self._model: str | None = None
         self._pending_event: str | None = None
-        self._found_usage = False
 
     # No legitimate SSE line exceeds 64KB; cap _partial_line to prevent
     # a malicious upstream without newlines from growing it unbounded.
@@ -212,11 +211,10 @@ class StreamingUsageCollector:
         if self.provider == "openai":
             usage = parsed.get("usage")
             if usage and isinstance(usage, dict):
-                total = _sum_counts(usage, "total_tokens")
-                if total is not None:
-                    self._total_tokens = total
-                    self._model = parsed.get("model", self._model)
-                    self._found_usage = True
+                # Some upstreams send usage on every chunk: an unreadable latest
+                # total makes the usage unreadable rather than leaving an earlier one.
+                self._total_tokens = _sum_counts(usage, "total_tokens")
+                self._model = parsed.get("model", self._model)
         elif self.provider == "anthropic":
             if self._pending_event == "message_start":
                 msg = parsed.get("message")
@@ -231,11 +229,9 @@ class StreamingUsageCollector:
                 if not isinstance(usage, dict):
                     return
                 if "output_tokens" in usage:
-                    output_tokens = _sum_counts(usage, "output_tokens")
                     # The count is cumulative: an unreadable latest one makes the
                     # usage unreadable rather than leaving an earlier count in place.
-                    self._output_tokens = output_tokens or 0
-                    self._found_usage = output_tokens is not None
+                    self._output_tokens = _sum_counts(usage, "output_tokens")
 
         self._pending_event = None
 
@@ -259,7 +255,7 @@ class StreamingUsageCollector:
                 return UsageInfo(total_tokens=self._total_tokens, model=self._model)
             return None
         elif self.provider == "anthropic":
-            if not self._found_usage:
+            if self._output_tokens is None:
                 return None
             return UsageInfo(
                 total_tokens=self._input_tokens + self._output_tokens,

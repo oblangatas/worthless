@@ -323,7 +323,7 @@ def test_extraction_failure_is_distinguishable_from_zero_usage():
 # WOR-1002: a null cache count is 0; any other non-int count is unreadable usage
 # ---------------------------------------------------------------------------
 
-_NOT_COUNTS = ["5", 5.0, True]
+_NOT_COUNTS = ["5", 5.0, True, [5]]
 # Null means "none" only for the counts the SDKs type Optional[int].
 _NOT_REQUIRED_COUNTS = [None, *_NOT_COUNTS]
 _ANTHROPIC_COUNTS = {
@@ -334,20 +334,20 @@ _ANTHROPIC_COUNTS = {
 }
 
 
+def _anthropic_delta(usage: dict) -> tuple[str, dict]:
+    return "message_delta", {"type": "message_delta", "usage": usage}
+
+
 def _anthropic_stream(start_usage: dict, delta_usage: dict) -> bytes:
     """Anthropic SSE body: message_start carries *start_usage*, message_delta *delta_usage*."""
     start = {"type": "message_start", "message": {"model": "m", "usage": start_usage}}
-    delta = {"type": "message_delta", "usage": delta_usage}
-    return (
-        f"event: message_start\ndata: {json.dumps(start)}\n\n"
-        f"event: message_delta\ndata: {json.dumps(delta)}\n\n"
-    ).encode()
+    return _sse(("message_start", start), _anthropic_delta(delta_usage))
 
 
-def _openai_stream(usage: dict) -> bytes:
-    """OpenAI SSE body whose final chunk carries *usage*."""
-    chunk = {"model": "m", "choices": [], "usage": usage}
-    return f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n".encode()
+def _openai_stream(*usages: dict) -> bytes:
+    """OpenAI SSE body with one chunk per usage in *usages*, then [DONE]."""
+    chunks = (json.dumps({"model": "m", "choices": [], "usage": usage}) for usage in usages)
+    return "".join(f"data: {chunk}\n\n" for chunk in chunks).encode() + b"data: [DONE]\n\n"
 
 
 def _collect_anthropic(body: bytes) -> UsageInfo | None:
@@ -420,9 +420,8 @@ def test_anthropic_stream_unreadable_output_count_is_no_usage(parse, bad):
 @_ANTHROPIC_STREAM_PARSERS
 def test_anthropic_stream_unreadable_latest_output_count_drops_earlier_one(parse, bad):
     """output_tokens is cumulative: an unreadable latest count must not leave a stale one."""
-    last = {"type": "message_delta", "usage": {"output_tokens": bad}}
-    body = _anthropic_stream({"input_tokens": 5}, {"output_tokens": 10}) + (
-        f"event: message_delta\ndata: {json.dumps(last)}\n\n".encode()
+    body = _anthropic_stream({"input_tokens": 5}, {"output_tokens": 10}) + _sse(
+        _anthropic_delta({"output_tokens": bad})
     )
     assert parse(body) is None
 
@@ -433,9 +432,20 @@ def test_extract_usage_openai_json_unreadable_total_is_no_usage(bad):
     assert extract_usage_openai(body) is None
 
 
-@pytest.mark.parametrize("bad", _NOT_REQUIRED_COUNTS, ids=repr)
-@pytest.mark.parametrize(
+_OPENAI_STREAM_PARSERS = pytest.mark.parametrize(
     "parse", [extract_usage_openai, _collect_openai], ids=["sse_fallback", "collector"]
 )
+
+
+@pytest.mark.parametrize("bad", _NOT_REQUIRED_COUNTS, ids=repr)
+@_OPENAI_STREAM_PARSERS
 def test_openai_stream_unreadable_total_is_no_usage(parse, bad):
     assert parse(_openai_stream({"total_tokens": bad})) is None
+
+
+@pytest.mark.parametrize("bad", _NOT_REQUIRED_COUNTS, ids=repr)
+@_OPENAI_STREAM_PARSERS
+def test_openai_stream_unreadable_latest_total_drops_earlier_one(parse, bad):
+    """Some upstreams send usage on every chunk: an unreadable latest total must not
+    leave a stale one."""
+    assert parse(_openai_stream({"total_tokens": 11}, {"total_tokens": bad})) is None
