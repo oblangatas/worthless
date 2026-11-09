@@ -1171,6 +1171,42 @@ class TestDockerfile:
         )
 
 
+def _lock_check_step(workflow: str, job: str, image: str) -> None:
+    """*job* checks the *image* it built against uv.lock, before anything scans or pushes it."""
+    wf = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / workflow).read_text())
+    steps = wf["jobs"][job]["steps"]
+    found = [i for i, s in enumerate(steps) if "check_image_matches_lock.py" in str(s.get("run"))]
+    assert len(found) == 1, f"{workflow} {job}: expected one lock-check step, found {len(found)}"
+    step = steps[found[0]]
+    assert "if" not in step and "continue-on-error" not in step, (
+        "a skipped or soft-failing lock check passes on any image"
+    )
+    assert step.get("env", {}).get("IMAGE") == image and '"$IMAGE"' in step["run"], (
+        f"the lock check must run on the image this job built, {image}"
+    )
+    built = next(i for i, s in enumerate(steps) if image in str(s))
+    assert built < found[0], "the lock check runs before the image is built"
+    for s in steps[: found[0]]:
+        assert "anchore/scan-action" not in str(s.get("uses")), (
+            "a failing scan step before it would skip the lock check"
+        )
+        assert not str(s.get("name", "")).startswith("Push"), "the image is pushed unchecked"
+
+
+class TestImageLockCheck:
+    """The built image is checked against uv.lock before anything relies on it (WOR-1077)."""
+
+    def test_pr_scan_checks_the_image_against_the_lock(self):
+        """`scan` is required on every PR; docker-e2e, which also runs the check, is not."""
+        _lock_check_step("docker-security.yml", "scan", "worthless-proxy:${{ github.sha }}")
+
+    def test_release_checks_the_image_before_pushing_it(self):
+        """The publish smoke checks the pulled image too, but only after it is public."""
+        _lock_check_step(
+            "publish-docker.yml", "build-push", "worthless-proxy:scan-${{ github.sha }}"
+        )
+
+
 # ------------------------------------------------------------------
 # Compose env example
 # ------------------------------------------------------------------
@@ -2966,6 +3002,21 @@ GUARD_MUTATIONS = [
         "RUN pip install --no-cache-dir --no-deps .",
         "RUN --mount=type=bind,FROM=alpine:latest,target=/x pip install --no-cache-dir --no-deps .",
         "test_external_images_are_digest_pinned",
+    ),
+    (
+        "the required scan lets a failing lock check through",
+        ".github/workflows/docker-security.yml",
+        "      - name: Image holds exactly the locked dependency set\n",
+        "      - name: Image holds exactly the locked dependency set\n"
+        "        continue-on-error: true\n",
+        "test_pr_scan_checks_the_image_against_the_lock",
+    ),
+    (
+        "a release pushes an image nobody checked against the lock",
+        ".github/workflows/publish-docker.yml",
+        'run: uv run --no-project python scripts/check_image_matches_lock.py "$IMAGE"',
+        'run: "true"',
+        "test_release_checks_the_image_before_pushing_it",
     ),
 ]
 
