@@ -432,11 +432,20 @@ jobs:
               if key == "commonName"
           }
           assert len(names) > 100, f"only {len(names)} roots loaded; is this certifi's list?"
-          dropped = {"emSign ECC Root CA - G3", "emSign Root CA - C1", "emSign ECC Root CA - C3"}
-          assert not names & dropped, (
-              f"certifi {certifi.__version__} still trusts {sorted(names & dropped)}"
+          # The three roots 2026.10.23 dropped, plus the other two roots the
+          # oss-security notice lists for the compromised keys (the CHANGELOG
+          # names them), so neither can come back unnoticed.
+          banned = {
+              "emSign ECC Root CA - G3",
+              "emSign Root CA - C1",
+              "emSign ECC Root CA - C3",
+              "emSign Root TLS CA - G3",
+              "AAA Certificate Services",
+          }
+          assert not names & banned, (
+              f"certifi {certifi.__version__} still trusts {sorted(names & banned)}"
           )
-          print(f"certifi {certifi.__version__}: {len(names)} roots, no emSign G3/C1/C3")
+          print(f"certifi {certifi.__version__}: {len(names)} roots, none of {sorted(banned)}")
           PY
 
       # THE POINT OF THIS JOB. `worthless --version` is importlib.metadata — it
