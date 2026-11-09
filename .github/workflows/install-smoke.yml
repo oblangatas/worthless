@@ -88,7 +88,7 @@ jobs:
           UV_CACHE_DIR: /tmp/uv-cache
         run: |
           uv sync --extra test
-          uv run pytest -q -m live tests/live/test_install_uv_trust_live.py
+          uv run pytest -q -rs -m live tests/live/test_install_uv_trust_live.py
 
   execute:
     name: Execute install.sh (${{ matrix.os }})

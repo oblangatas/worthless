@@ -54,7 +54,10 @@ def test_tool_python_keeps_the_3_14_10_floor() -> None:
     try:
         spec = SpecifierSet(value)
     except InvalidSpecifier:
-        pytest.fail(f"TOOL_PYTHON {value!r} has no patch floor: uv would reuse any 3.14")
+        pytest.fail(
+            f'TOOL_PYTHON {value!r} is not a version range like ">=3.14.10,<3.15": a bare '
+            '"3.14" lets uv reuse any 3.14, an exact version blocks later 3.14 fixes'
+        )
     assert "3.14.10" in spec and "3.14.9" not in spec and "3.15.0" not in spec, (
         f"TOOL_PYTHON {value!r} must allow 3.14.10+ and nothing below it or from 3.15"
     )
