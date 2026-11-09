@@ -9,7 +9,9 @@ certificate from those keys can't serve the install a package.
 
 Installs the pinned uv the way install.sh does: Astral's installer from
 ASTRAL_INSTALLER_URL, checked against ASTRAL_INSTALLER_SHA256. Needs network;
-skips if the test site is gone or no longer chains to that root.
+skips if the test site is gone or no longer chains to that root. CI sets
+WORTHLESS_UV_TRUST_REQUIRED=1, so there a skip fails instead: a green job
+means the check ran.
 
 Run:
     uv run pytest tests/live/test_install_uv_trust_live.py -m live -v
@@ -18,11 +20,13 @@ Run:
 from __future__ import annotations
 
 import hashlib
+import os
 import socket
 import ssl
 import subprocess  # noqa: S404
 import sys
 from pathlib import Path
+from typing import NoReturn
 
 import httpx
 import pytest
@@ -50,18 +54,25 @@ def _chain_top_issuer(host: str) -> str:
     return top.issuer.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
 
 
+def _skip_unless_required(reason: str) -> NoReturn:
+    """Skip, unless CI requires the check (WORTHLESS_UV_TRUST_REQUIRED=1): then fail."""
+    if os.environ.get("WORTHLESS_UV_TRUST_REQUIRED") == "1":
+        pytest.fail(reason)
+    pytest.skip(reason)
+
+
 @pytest.mark.live
 @pytest.mark.timeout(300)
 def test_pinned_uv_refuses_a_server_chained_to_the_emsign_g3_root(tmp_path: Path) -> None:
     """`uv tool install` with the pinned uv fails TLS against the test site."""
     if not hasattr(ssl.SSLSocket, "get_unverified_chain"):
-        pytest.skip("reading the server's chain needs Python 3.13+")
+        _skip_unless_required("reading the server's chain needs Python 3.13+")
     try:
         top_issuer = _chain_top_issuer(_TEST_HOST)
     except OSError as exc:
-        pytest.skip(f"{_TEST_HOST} unreachable: {exc}")
+        _skip_unless_required(f"{_TEST_HOST} unreachable: {exc}")
     if top_issuer != _AFFECTED_ROOT:
-        pytest.skip(f"{_TEST_HOST} now chains to {top_issuer!r}, not {_AFFECTED_ROOT!r}")
+        _skip_unless_required(f"{_TEST_HOST} now chains to {top_issuer!r}, not {_AFFECTED_ROOT!r}")
 
     version = read_install_var("UV_VERSION")
     url = read_install_var("ASTRAL_INSTALLER_URL").replace("${UV_VERSION}", version)
