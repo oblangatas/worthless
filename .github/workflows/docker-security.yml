@@ -413,19 +413,20 @@ jobs:
 
       # pip and uv keep an installed dependency that still meets the floor, so
       # only pyproject's certifi floor moves an existing install off the
-      # emSign roots. Check what the proxy's TLS trusts, not the version: its
-      # httpx client builds its context with httpx.create_ssl_context().
+      # emSign roots. Check what the proxy's TLS trusts, not the version: ask
+      # the installed proxy for the context its provider calls use, with no
+      # WORTHLESS_UPSTREAM_CA_BUNDLE (SSL_CERT_FILE no longer applies, #744).
       - name: Installing worthless drops the emSign roots certifi 2026.10.23 removed
         run: |
           set -euo pipefail
           cd /tmp
-          env -u SSL_CERT_FILE -u SSL_CERT_DIR /tmp/sdist-venv/bin/python - <<'PY'
+          /tmp/sdist-venv/bin/python - <<'PY'
           import certifi
-          import httpx
+          from worthless.proxy.upstream import _upstream_ssl_context
 
           names = {
               value
-              for cert in httpx.create_ssl_context().get_ca_certs()
+              for cert in _upstream_ssl_context(None).get_ca_certs()
               for rdn in cert["subject"]
               for key, value in rdn
               if key == "commonName"
