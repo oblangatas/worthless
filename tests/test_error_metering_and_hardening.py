@@ -639,7 +639,8 @@ _NON_INT_USAGES = [
     ),
     pytest.param({"input_tokens": None, "output_tokens": 3}, None, id="null-required-count"),
     pytest.param({"input_tokens": "5", "output_tokens": 3}, None, id="string-count"),
-    pytest.param({"input_tokens": 5.0, "output_tokens": 3}, None, id="decimal-count"),
+    pytest.param({"input_tokens": 5.0, "output_tokens": 3}, 8, id="whole-float-count-is-the-count"),
+    pytest.param({"input_tokens": 5.5, "output_tokens": 3}, None, id="fractional-count"),
     pytest.param({"input_tokens": 5, "output_tokens": True}, None, id="bool-count"),
 ]
 
@@ -653,6 +654,9 @@ _NON_INT_STREAM_USAGES = [
     ),
     pytest.param({"input_tokens": 5}, {"output_tokens": "3"}, None, id="string-output-count"),
     pytest.param({"input_tokens": 5}, {"output_tokens": True}, None, id="bool-output-count"),
+    pytest.param(
+        {"input_tokens": 50000.0}, {"output_tokens": 3}, 50003, id="whole-float-input-count"
+    ),
 ]
 
 
@@ -663,6 +667,11 @@ def _anthropic_sse(start_usage: dict, delta_usage: dict) -> bytes:
         ("message_stop", {"type": "message_stop"}),
     ]
     return b"".join(f"event: {e}\ndata: {json.dumps(d)}\n\n".encode() for e, d in events)
+
+
+def _openai_sse(*usages: dict) -> bytes:
+    chunks = ({"model": "gpt-4", "choices": [], "usage": usage} for usage in usages)
+    return b"".join(f"data: {json.dumps(c)}\n\n".encode() for c in chunks) + b"data: [DONE]\n\n"
 
 
 async def _cap_spend(db, alias: str) -> None:
@@ -783,11 +792,7 @@ class TestNonIntTokenCounts:
         alias, shard_a_utf8, _ = enrolled_alias
         db = proxy_app.state.db
         await _cap_spend(db, alias)
-        chunks = [
-            {"model": "gpt-4", "choices": [], "usage": {"total_tokens": 11}},
-            {"model": "gpt-4", "choices": [], "usage": {"total_tokens": bad}},
-        ]
-        sse = b"".join(f"data: {json.dumps(c)}\n\n".encode() for c in chunks) + b"data: [DONE]\n\n"
+        sse = _openai_sse({"total_tokens": 11}, {"total_tokens": bad})
         respx.post(OPENAI_COMPLETIONS).mock(return_value=make_streaming_response([sse]))
 
         resp = await proxy_client.post(
@@ -798,6 +803,33 @@ class TestNonIntTokenCounts:
 
         assert resp.status_code == 200
         await _assert_billed_now(db, alias, None)
+
+    @pytest.mark.parametrize("stream", [False, True], ids=["json", "stream"])
+    @respx.mock
+    async def test_whole_float_total_bills_capped_key_the_count(
+        self, proxy_client: httpx.AsyncClient, proxy_app, enrolled_alias, stream
+    ):
+        """JSON can't tell 1234 from 1234.0, so the key is billed 1234, not the ceiling."""
+        alias, shard_a_utf8, _ = enrolled_alias
+        db = proxy_app.state.db
+        await _cap_spend(db, alias)
+        usage = {"total_tokens": 1234.0}
+        respx.post(OPENAI_COMPLETIONS).mock(
+            return_value=make_streaming_response([_openai_sse(usage)])
+            if stream
+            else httpx.Response(200, json={"model": "gpt-4", "choices": [], "usage": usage})
+        )
+
+        resp = await proxy_client.post(
+            _proxy_url(alias),
+            headers=_proxy_headers(alias, shard_a_utf8),
+            content=json.dumps(
+                {"model": "gpt-4", "messages": [], "max_tokens": 1000, "stream": stream}
+            ).encode(),
+        )
+
+        assert resp.status_code == 200
+        await _assert_billed_now(db, alias, 1234)
 
 
 # ------------------------------------------------------------------

@@ -28,11 +28,12 @@ _NULLABLE_COUNTS = frozenset({"cache_creation_input_tokens", "cache_read_input_t
 def _sum_counts(usage: object, *keys: str) -> int | None:
     """Sum the token counts named by *keys* in a provider ``usage`` object.
 
-    An absent count is 0, and so is a null one where the SDK allows null.
+    An absent count is 0, and so is a null one where the SDK allows null. A
+    whole, non-negative float is its int value: JSON can't tell 1234 from 1234.0.
     Returns None when the usage is unreadable: *usage* isn't an object, or a
-    count is any other non-int (a null required count, a string, a float, a
-    bool). The caller then treats it like a reply without usage rather than
-    crashing or billing a bogus number.
+    count is anything else (a null required count, a string, a fractional,
+    negative or non-finite float, a bool). The caller then treats it like a
+    reply without usage rather than crashing or billing a bogus number.
     """
     if not isinstance(usage, dict):
         return None
@@ -41,6 +42,8 @@ def _sum_counts(usage: object, *keys: str) -> int | None:
         count = usage.get(key, 0)
         if count is None and key in _NULLABLE_COUNTS:
             continue
+        if isinstance(count, float) and count.is_integer() and count >= 0:
+            count = int(count)
         if isinstance(count, bool) or not isinstance(count, int):
             return None
         total += count
