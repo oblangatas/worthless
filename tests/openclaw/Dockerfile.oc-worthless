@@ -25,8 +25,6 @@ USER node
 # the spike confirmed a worthless bin there flips the skill to modelVisible.
 ENV PATH=/home/node/.local/bin:$PATH
 COPY --chown=node:node worthless-*.whl /tmp/
-# --python must match install.sh's TOOL_PYTHON; without it uv takes the base
-# image's /usr/bin/python3 (3.11), not the Python a real install runs on.
-RUN uv tool install --python ">=3.14.10,<3.15" /tmp/worthless-*.whl \
+RUN uv tool install /tmp/worthless-*.whl \
     && rm -f /tmp/worthless-*.whl \
     && worthless --version
