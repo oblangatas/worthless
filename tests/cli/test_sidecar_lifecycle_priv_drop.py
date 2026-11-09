@@ -539,6 +539,40 @@ def test_spawn_sidecar_omits_preexec_fn_when_service_uids_is_none(
     )
 
 
+@pytest.mark.parametrize(
+    ("service_uids", "expected"),
+    [
+        (ServiceUids(proxy_uid=10001, crypto_uid=10002, worthless_gid=10001), 10002),
+        (None, os.getuid()),
+    ],
+    ids=["docker", "bare-metal"],
+)
+def test_spawn_sidecar_handle_names_the_uid_the_sidecar_runs_as(
+    _share_files: ShareFiles, tmp_path: Path, service_uids: ServiceUids | None, expected: int
+) -> None:
+    """WOR-1078: clients refuse a sidecar socket served by any other uid.
+
+    The handle is how each spawner learns which uid to hand its proxy, so it
+    must name the uid the sidecar was started as, not the proxy's.
+    """
+    fake_proc = MagicMock(pid=12345, stderr=None)
+    fake_proc.poll.return_value = None
+
+    with (
+        patch.object(_sidecar_lifecycle.subprocess, "Popen", lambda *_a, **_kw: fake_proc),
+        patch.object(_sidecar_lifecycle, "_wait_for_ready", return_value=True),
+        patch.object(_sidecar_lifecycle, "_verify_socket_inode", lambda _p: None),
+    ):
+        handle = spawn_sidecar(
+            socket_path=tmp_path / "s.sock",
+            shares=_share_files,
+            allowed_uid=10001,
+            service_uids=service_uids,
+        )
+
+    assert handle.sidecar_uid == expected
+
+
 # ---------------------------------------------------------------------------
 # set_no_new_privs_or_log — fork-child-safe variant of NO_NEW_PRIVS
 # ---------------------------------------------------------------------------

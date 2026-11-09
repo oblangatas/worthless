@@ -378,6 +378,36 @@ class TestGateBeforeReconstruct:
 
 class TestTransparentRouting:
     @respx.mock
+    async def test_request_input_never_steers_the_upstream_host(
+        self, proxy_client: httpx.AsyncClient, enrolled_alias
+    ):
+        """WOR-1108: the CVE-2026-116566 suppression rests on this. Whatever the
+        client sends, every upstream call goes to the stored base_url's host and port."""
+        alias, shard_a_utf8, _ = enrolled_alias
+        route = respx.route().mock(
+            return_value=httpx.Response(200, json={"choices": [], "usage": {"total_tokens": 1}})
+        )
+        hostile = {
+            "authorization": f"Bearer {shard_a_utf8}",
+            "content-type": "application/json",
+            "host": "evil.example",
+            "x-forwarded-host": "169.254.169.254",
+            "x-forwarded-port": "80",
+        }
+        body = b'{"model": "m", "base_url": "http://evil.example/", "messages": []}'
+        for path in (
+            f"/{alias}/v1/chat/completions",
+            f"/{alias}/v1/chat/completions/@evil.example",
+            f"/{alias}@evil.example/v1/chat/completions",
+        ):
+            await proxy_client.post(path, headers=hostile, content=body)
+        assert route.called
+        for call in route.calls:
+            assert (call.request.url.host, call.request.url.port) == ("api.openai.com", None), (
+                call.request.url
+            )
+
+    @respx.mock
     async def test_openai_path_routes_to_openai(
         self, proxy_client: httpx.AsyncClient, enrolled_alias
     ):
