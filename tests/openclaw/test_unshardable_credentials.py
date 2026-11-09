@@ -696,9 +696,10 @@ def _pathlib_as_on_python_314(monkeypatch: pytest.MonkeyPatch) -> None:
 
     Under a directory this process can't search, ``Path.is_file()`` and its
     siblings raise ``PermissionError`` on 3.10-3.13 but return False on 3.14.
-    Real installs run on 3.14 (install.sh); CI runs this suite on 3.10 and
-    3.13. This gives any interpreter 3.14's answer. ``os.path``'s versions
-    have always swallowed the error.
+    Many installs run Worthless on 3.14 (install.sh asks for it from
+    WOR-1116 on); CI runs this suite on 3.10 and 3.13. This gives any
+    interpreter 3.14's answer. ``os.path``'s versions have always swallowed
+    the error.
     """
     for name, probe in (
         ("is_file", os.path.isfile),
@@ -762,6 +763,44 @@ def test_clean_machine_emits_no_probe_caveats(
     findings = uc.detect_unshardable_credentials(caveats)
     assert findings == []
     assert caveats == [], f"a clean machine must not be told the scan was partial: {caveats!r}"
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root ignores chmod, so the unreadable directory would still be readable "
+    "and this test would pass without exercising anything",
+)
+@pytest.mark.parametrize("pathlib_like", ["this-python", "python-3.14"])
+def test_agent_dir_behind_an_unreadable_folder_is_caveated(
+    sandboxed_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pathlib_like: str
+) -> None:
+    """An ``agents/<id>`` symlink into a folder this process can't search:
+    ``is_dir()`` raised on 3.10-3.13, crashing the scan, and returns False on
+    3.14, which dropped the agent and every OAuth profile in it without a
+    caveat. It must be listed, so its unreadable auth-profiles.json is named.
+    """
+    monkeypatch.setattr(uc, "_keychain_service_present", lambda service: False)
+    locked = tmp_path / "locked"
+    _write_json(
+        locked / "work" / "agent" / "auth-profiles.json",
+        {"profiles": {"work-login": {"type": "oauth", "provider": "anthropic"}}},
+    )
+    agents = sandboxed_home / ".openclaw" / "agents"
+    agents.mkdir(parents=True)
+    (agents / "work").symlink_to(locked / "work")
+    locked.chmod(0o000)
+    if pathlib_like == "python-3.14":
+        _pathlib_as_on_python_314(monkeypatch)
+    try:
+        caveats: list[str] = []
+        findings = uc.detect_unshardable_credentials(caveats)  # must not raise
+    finally:
+        locked.chmod(0o700)
+
+    assert findings == [], "an unreadable profile store is reported absent, not invented"
+    assert any("auth-profiles.json could not be read" in c for c in caveats), (
+        f"the unreadable agent must be surfaced, got {caveats!r}"
+    )
 
 
 def test_malformed_auth_profiles_json_is_reported_not_silently_skipped(
