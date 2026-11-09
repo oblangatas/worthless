@@ -599,7 +599,11 @@ def test_lock_surfaces_detection_caveats_on_non_macos(
     out = result.output
     assert "[NOTE]" in out, "the coverage caveat must be surfaced on the lock path"
     assert "could not be checked" in out
-    assert "worthless doctor" in out, "the NOTE must point the user at the full check"
+    # Plain `worthless doctor` doesn't run this check and can say "No issues
+    # found.", so pointing there would turn the caveat back into an all-clear.
+    assert "worthless doctor --json" in " ".join(out.split()), (
+        "the NOTE must point the user at the command that runs the full check"
+    )
 
 
 def test_doctor_summary_names_the_credentials_when_found(

@@ -2933,11 +2933,12 @@ def _print_unshardable_credentials_warning(console: WorthlessConsole) -> None:
     # WOR-797 (Gap 1, second surface): a Linux/WSL scan cannot inspect the two
     # macOS-keychain surfaces. Surface that caveat here — exactly as `doctor`
     # does — so a partial scan on the target platform never reads as a clean
-    # bill of health. Runs on both the has-keys and zero-keys paths.
+    # bill of health. Runs on both the has-keys and zero-keys paths. Only
+    # `doctor --json` runs this check; plain `doctor` can say "No issues found."
     caveats = detection_caveats() + probe_caveats
     if caveats:
         console.print_hint(
-            "[NOTE] " + "; ".join(caveats) + " — run `worthless doctor` for a full check."
+            "[NOTE] " + "; ".join(caveats) + " — run `worthless doctor --json` for a full check."
         )
 
 
