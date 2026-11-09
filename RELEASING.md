@@ -29,6 +29,10 @@ because that sentence was not enforced, and the same bug shipped twice.
    per-invocation `gpg.format` override, verifies it locally, and pushes it. That starts the four
    publishers, and the script prints the exact commit to check before approving.
 
+   A fix that merges between step 1 and this tag ships in this tag, so its note goes in the new
+   version's section. After the tag, notes go in `[Unreleased]`: the `Changelog placement` check
+   fails lines added under a tagged version, unless the PR has the `changelog-released-edit` label.
+
 3. **Approve three publishers.** In Actions, open each waiting run → **Review deployments**:
 
    | Run in Actions | Environment |
