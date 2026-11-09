@@ -26,16 +26,21 @@ envelope validation:
   cycle only a GC pass freed.
 
 The sidecar runs ``start_sidecar`` in a child process on a real AF_UNIX
-socket, so its RSS is measured alone, not mixed with pytest's.
+socket, so its RSS is measured alone, not mixed with pytest's. The proxy reads
+the sidecar's replies with the same ``read_frame``, so the last test runs the
+proxy's ``IPCClient`` in a child process against a fake sidecar that answers
+its hello with the advisory shape.
 """
 
 from __future__ import annotations
 
 import asyncio
 import functools
+import os
 import socket
 import subprocess
 import sys
+import threading
 from collections.abc import Generator
 from pathlib import Path
 
@@ -422,3 +427,79 @@ def test_peers_that_close_without_reading_the_reply_do_not_pile_up_in_sidecar_me
         f"{connections} peers that closed without reading took sidecar RSS "
         f"{peak_growth / _MiB:.1f} MiB above its {rss_before / _MiB:.1f} MiB baseline"
     )
+
+
+# Connects the proxy's IPCClient to argv[1] and prints "<rss before> <peak rss>
+# after> <error>": the handshake reply is the fake sidecar's frame.
+_PROXY_CLIENT = """
+import asyncio, resource, sys
+
+import psutil
+
+from worthless.ipc.client import IPCClient, IPCProtocolError
+
+
+def peak_rss():
+    if sys.platform == "darwin":
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    with open("/proc/self/status") as status:
+        for line in status:
+            if line.startswith("VmHWM:"):
+                return int(line.split()[1]) * 1024
+    raise RuntimeError("no VmHWM in /proc/self/status")
+
+
+async def main():
+    rss_before = psutil.Process().memory_info().rss
+    try:
+        async with IPCClient(sys.argv[1], timeout=20):
+            error = "handshake accepted"
+    except IPCProtocolError as exc:
+        error = str(exc)
+    print(rss_before, peak_rss(), error[:200], flush=True)
+
+
+asyncio.run(main())
+"""
+
+
+def _serve_one_reply(listener: socket.socket, reply: bytes) -> None:
+    """Act as the sidecar for one connection: read its hello, answer ``reply``."""
+    conn, _ = listener.accept()
+    with conn, conn.makefile("rb") as stream:
+        stream.read(int.from_bytes(stream.read(4), "big"))
+        conn.sendall(len(reply).to_bytes(4, "big") + reply)
+
+
+def test_tiny_reply_of_nested_array_headers_cannot_balloon_proxy_memory(
+    sidecar_socket_path: Path,
+) -> None:
+    # The proxy's own uid serves the socket, as the sidecar's does on a local
+    # install, so the reply gets past the client's peer-uid check (WOR-1078).
+    reply = _nested_array_headers(0xFFFF)
+    env = {k: v for k, v in os.environ.items() if k != "WORTHLESS_SIDECAR_UID"}
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+        listener.bind(str(sidecar_socket_path))
+        listener.listen(1)
+        listener.settimeout(30)
+        server = threading.Thread(target=_serve_one_reply, args=(listener, reply), daemon=True)
+        server.start()
+        out = subprocess.run(
+            [sys.executable, "-c", _PROXY_CLIENT, str(sidecar_socket_path)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=env,
+            check=True,
+        ).stdout
+        server.join(timeout=30)
+
+    rss_before, peak_after, error = out.split(maxsplit=2)
+    # Was 75 to 240 MiB on msgpack 1.2.4 (~513 MiB on 1.2.2): the client
+    # preallocated every header's 65535 items before finding them missing.
+    peak_growth = int(peak_after) - int(rss_before)
+    assert peak_growth < _LIMIT, (
+        f"a {len(reply):,}-byte sidecar reply took proxy RSS {peak_growth / _MiB:.1f} MiB "
+        f"above its {int(rss_before) / _MiB:.1f} MiB baseline (msgpack {msgpack.version})"
+    )
+    assert "exceeds max_array_len" in error, error
