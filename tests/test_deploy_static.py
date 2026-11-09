@@ -1171,6 +1171,9 @@ class TestDockerfile:
         )
 
 
+_LOCK_CHECK_RUN = 'uv run --no-project python scripts/check_image_matches_lock.py "$IMAGE"'
+
+
 def _lock_check_step(workflow: str, job: str, image: str) -> None:
     """*job* checks the *image* it built against uv.lock, before anything scans or pushes it."""
     wf = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / workflow).read_text())
@@ -1181,9 +1184,11 @@ def _lock_check_step(workflow: str, job: str, image: str) -> None:
     assert "if" not in step and "continue-on-error" not in step, (
         "a skipped or soft-failing lock check passes on any image"
     )
-    assert step.get("env", {}).get("IMAGE") == image and '"$IMAGE"' in step["run"], (
+    assert step.get("env", {}).get("IMAGE") == image, (
         f"the lock check must run on the image this job built, {image}"
     )
+    # Exact, so `|| true` or `; exit 0` can't turn a failing check into a pass.
+    assert step["run"].strip() == _LOCK_CHECK_RUN, f"the step must run exactly: {_LOCK_CHECK_RUN}"
     built = next(i for i, s in enumerate(steps) if image in str(s))
     assert built < found[0], "the lock check runs before the image is built"
     for s in steps[: found[0]]:
@@ -3009,6 +3014,13 @@ GUARD_MUTATIONS = [
         "      - name: Image holds exactly the locked dependency set\n",
         "      - name: Image holds exactly the locked dependency set\n"
         "        continue-on-error: true\n",
+        "test_pr_scan_checks_the_image_against_the_lock",
+    ),
+    (
+        "the required scan's lock check can fail without failing the job",
+        ".github/workflows/docker-security.yml",
+        'run: uv run --no-project python scripts/check_image_matches_lock.py "$IMAGE"',
+        'run: uv run --no-project python scripts/check_image_matches_lock.py "$IMAGE" || true',
         "test_pr_scan_checks_the_image_against_the_lock",
     ),
     (

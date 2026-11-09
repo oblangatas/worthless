@@ -89,7 +89,21 @@ def main(image: str) -> int:
     # different version in each, so both are read and compared below.
     exports = {"runtime": _export("--no-dev"), "audited": _export()}
     probe = subprocess.run(
-        ["docker", "run", "--rm", "-i", "--entrypoint", "python", image, "-c", _PROBE],  # noqa: S607
+        # No network: the probe only reads stdin, and in publish-docker.yml it
+        # runs inside the job that holds the signing token.
+        [  # noqa: S607
+            "docker",
+            "run",
+            "--rm",
+            "-i",
+            "--network",
+            "none",
+            "--entrypoint",
+            "python",
+            image,
+            "-c",
+            _PROBE,
+        ],
         input=json.dumps(exports),
         capture_output=True,
         text=True,
