@@ -1,6 +1,6 @@
 """Live: the uv install.sh bootstraps refuses a server chained to emSign ECC Root CA - G3.
 
-GHSA-6q48-6c7w-9gw2 (WOR-1116). eMudhra's public test site chains
+GHSA-hq85-5cpj-mr62 (WOR-1116). eMudhra's public test site chains
 leaf -> EM EV TLS CA - G3A-1 -> emSign Root TLS CA - G3 -> emSign ECC Root CA - G3,
 the root above the compromised intermediate keys. uv 0.11.7, install.sh's old
 pin, completed TLS with it and read its 404 as "not found in the package

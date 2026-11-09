@@ -12,6 +12,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
 
 from tests._install_helpers import INSTALL_FIXTURES, INSTALL_SH, REPO_ROOT, read_install_var
 
@@ -39,7 +40,23 @@ def test_uv_version_rejects_compromised_emudhra_keys() -> None:
     first to download CPython 3.14.10, whose ssl rejects those keys too."""
     version = read_install_var("UV_VERSION")
     assert tuple(int(part) for part in version.split(".")) >= (0, 13, 6), (
-        f"UV_VERSION {version} trusts the compromised eMudhra keys (GHSA-hq85-5cpj-mr62)"
+        f"UV_VERSION {version} is below 0.13.6: uv below 0.13.4 trusts the root above the "
+        "compromised eMudhra keys (GHSA-hq85-5cpj-mr62), and uv below 0.13.6 can't "
+        "download CPython 3.14.10"
+    )
+
+
+def test_tool_python_keeps_the_3_14_10_floor() -> None:
+    """WOR-1116: 3.14.10's ssl rejects the compromised eMudhra keys, and an older
+    uv-managed 3.14 is reused unless the floor excludes it; 3.15 has no PyYAML wheel.
+    Reads install.sh, not the tests' hand copy, so weakening both still fails here."""
+    value = read_install_var("TOOL_PYTHON")
+    try:
+        spec = SpecifierSet(value)
+    except InvalidSpecifier:
+        pytest.fail(f"TOOL_PYTHON {value!r} has no patch floor: uv would reuse any 3.14")
+    assert "3.14.10" in spec and "3.14.9" not in spec and "3.15.0" not in spec, (
+        f"TOOL_PYTHON {value!r} must allow 3.14.10+ and nothing below it or from 3.15"
     )
 
 
