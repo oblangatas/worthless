@@ -637,7 +637,9 @@ class TestWrapLifecycleOrdering:
     ) -> None:
         """spawn_proxy must receive WORTHLESS_SIDECAR_SOCKET pointing to the
         sidecar's actual socket path. Without this, the proxy can't connect
-        to the sidecar's IPC peer and refuses to bind."""
+        to the sidecar's IPC peer and refuses to bind. It must also receive
+        the uid the sidecar was spawned as, over any value inherited from
+        the shell, or it refuses the real sidecar (WOR-1078)."""
         from pathlib import Path
         from unittest.mock import MagicMock as _MagicMock
 
@@ -653,6 +655,7 @@ class TestWrapLifecycleOrdering:
             socket_path=fake_socket,
             shares=fake_shares,
             allowed_uid=os.getuid(),
+            sidecar_uid=4242,
             proc=_MagicMock(pid=99999, poll=lambda: 0),
         )
 
@@ -679,9 +682,10 @@ class TestWrapLifecycleOrdering:
         runner.invoke(
             app,
             ["wrap", "--", "echo", "hi"],
-            env={"WORTHLESS_HOME": str(home_with_key.base_dir)},
+            env={"WORTHLESS_HOME": str(home_with_key.base_dir), "WORTHLESS_SIDECAR_UID": "777"},
         )
 
+        assert captured_proxy_env.get("WORTHLESS_SIDECAR_UID") == "4242"
         assert "WORTHLESS_SIDECAR_SOCKET" in captured_proxy_env, (
             f"proxy env must include WORTHLESS_SIDECAR_SOCKET, got keys: "
             f"{sorted(captured_proxy_env)}"
@@ -1293,6 +1297,66 @@ class TestProxySpawnFailureFDCleanup:
         assert result.exit_code == 1
         assert real_r in closed_fds
         assert real_w in closed_fds
+
+
+class TestIgnoredUpstreamEnvNotice:
+    def test_wrap_says_which_proxy_settings_the_proxy_ignores(
+        self, home_with_key, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Nothing shows the proxy's own log under ``wrap`` (WOR-1074), so ``wrap``
+        prints the ignored-settings warning itself (WOR-1071). Names, never values."""
+
+        def _fail(**_kw):
+            raise RuntimeError("stop after the notice")
+
+        monkeypatch.setattr("worthless.cli.commands.wrap.spawn_proxy", _fail)
+        monkeypatch.delenv("WORTHLESS_UPSTREAM_PROXY", raising=False)
+        result = runner.invoke(
+            app,
+            ["wrap", "--", "echo", "hi"],
+            env={
+                "WORTHLESS_HOME": str(home_with_key.base_dir),
+                "HTTPS_PROXY": "http://corp-user:hunter2@egress.corp.example:3128",
+            },
+        )
+        assert "HTTPS_PROXY" in result.output and "WORTHLESS_UPSTREAM_PROXY" in result.output
+        assert "hunter2" not in result.output and "egress.corp.example" not in result.output
+
+    def test_a_broken_stderr_does_not_stop_wrap_before_the_proxy_starts(
+        self, home_with_key, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The notice is best-effort: if stderr is a closed pipe, wrap still reaches
+        ``spawn_proxy``, whose failure path closes the fds and stops the sidecar."""
+
+        class _BrokenStderr:
+            def write(self, _s: str) -> int:
+                raise BrokenPipeError(32, "Broken pipe")
+
+            def flush(self) -> None:
+                raise BrokenPipeError(32, "Broken pipe")
+
+        real_stderr: list = []
+
+        def _notes() -> list[str]:
+            real_stderr.append(sys.stderr)
+            sys.stderr = _BrokenStderr()
+            return ["Upstream calls ignore HTTPS_PROXY."]
+
+        spawned: list[bool] = []
+
+        def _fail(**_kw):
+            spawned.append(True)
+            sys.stderr = real_stderr[0]  # CliRunner flushes it on the way out
+            raise RuntimeError("stop after the notice")
+
+        monkeypatch.setattr("worthless.cli.commands.wrap.ignored_upstream_env_notes", _notes)
+        monkeypatch.setattr("worthless.cli.commands.wrap.spawn_proxy", _fail)
+        runner.invoke(
+            app,
+            ["wrap", "--", "echo", "hi"],
+            env={"WORTHLESS_HOME": str(home_with_key.base_dir)},
+        )
+        assert spawned == [True]
 
 
 class TestChildExitCodePropagatedViaWrap:
