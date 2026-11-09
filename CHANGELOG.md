@@ -128,8 +128,13 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   Now: a `null` cache count counts as 0, and the rest of the reply is billed. Any other count that isn't a whole number (a `null` input, output or total count, a string, a decimal, `true` or `false`) means the reply's usage can't be read, the same as a non-object `usage`: the proxy logs a warning and releases the hold, and a spend-capped key is billed right away at the larger of its admission estimate and the 128,000-token ceiling.
 
   **Limits.**
-  - In a streamed Anthropic reply, an unreadable count in the opening `message_start` event counts as 0 input tokens, so only the output is billed (WOR-1100, [#755](https://github.com/oblangatas/worthless/pull/755)).
-  - A negative count is still accepted. On a key with no spend cap it is recorded as negative spend (WOR-1100, [#755](https://github.com/oblangatas/worthless/pull/755)).
+  - On a key with a token budget but no spend cap, a reply whose usage can't be read is not counted against the budget (WOR-1031).
+- **A streamed Anthropic reply whose input count can't be read, or any reply with a negative token count, is no longer under-billed** (WOR-1100, [#755](https://github.com/oblangatas/worthless/pull/755)).
+  Before: in a streamed Anthropic reply, an input count in the opening `message_start` event that couldn't be read (a `null` or string `input_tokens`, or a `usage` that isn't an object) counted as 0, so a spend-capped key was billed for the output only. A negative count such as `"output_tokens": -3` was accepted. A key with no spend cap recorded it as negative spend. A spend-capped key was under-billed whenever the other counts outweighed it: 5 input and −3 output tokens were billed as 2.
+  Now: both mean the reply's usage can't be read, the same as a `null` or string count in a non-streamed reply. The proxy logs a warning and releases the hold, and a spend-capped key is billed right away at the larger of its admission estimate and the 128,000-token ceiling. A key with no spend cap records nothing for that reply.
+
+  **Limits.**
+  - A streamed Anthropic reply that sends no input count at all (no `message_start` event, or one without a `usage`) is still billed for its output only.
   - On a key with a token budget but no spend cap, a reply whose usage can't be read is not counted against the budget (WOR-1031).
 
 ## [0.3.16] — 2026-10-22
