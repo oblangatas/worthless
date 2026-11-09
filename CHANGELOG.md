@@ -60,6 +60,13 @@ All notable changes to Worthless are documented here. Format follows [Keep a Cha
   - The image still has about 70 known bugs with no fix yet (about 160 package matches), all but two in Debian packages and most marked won't-fix by Debian. The scan doesn't block on those unless one is High or Critical, not marked won't-fix, and not argued in `.grype.yaml`.
 
 ### Fixed
+- **`worthless doctor` on Python 3.14 says when it couldn't look for a credentials file** ([#762](https://github.com/oblangatas/worthless/pull/762)).
+  Before: on Python 3.14, if your user couldn't open the folder holding one of the OAuth credential files doctor looks for, such as `~/.gemini`, doctor reported "No unshardable OAuth/token credentials found." with no note. A check that couldn't look read as a clean one. Python 3.10 to 3.13 were not affected: there, doctor adds "NOTE: Gemini CLI credentials file could not be checked (Permission denied)."
+  Now: doctor adds that note on every Python version, for each credential file it looks for: Claude Code, Codex, Gemini, MiniMax and Vertex AI. A file it can't reach for another reason, such as a symlink loop, also gets the note, where before it was reported as not there.
+
+  **Limits.**
+  - The note says doctor couldn't check the file, not whether it is there.
+  - Other checks still treat a folder they can't open as missing on Python 3.14. For example, if your user can't open the folder holding a locked key's `.env`, `worthless status` and `worthless scan` show that key as BROKEN, and `worthless doctor` says its `.env` was not found and asks whether you moved the project. `doctor --fix` still keeps that key's records.
 - **A crashed `worthless up` no longer leaves your key shares on disk** (`worthless-dhfn`, [#713](https://github.com/oblangatas/worthless/pull/713)).
   Before: if `worthless up` was killed with `kill -9` or crashed, its helper process kept running. Both key share files stayed in `~/.worthless/run/<pid>/`, also after a restart. `worthless doctor` reported "No issues found" because the helper still answered.
   Now: the helper checks every 0.5 seconds that `worthless up` is still running. When `worthless up` is gone, the helper deletes both share files and its socket, then stops. It stops less than 8 seconds after `worthless up` stopped.

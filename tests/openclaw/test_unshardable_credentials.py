@@ -691,24 +691,50 @@ def test_doctor_fix_reports_symlinked_credential_as_unfixed_with_reason(
 # ---------------------------------------------------------------------------
 
 
+def _pathlib_as_on_python_314(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make pathlib's probes answer False on an error, as Python 3.14's do.
+
+    Under a directory this process can't search, ``Path.is_file()`` and its
+    siblings raise ``PermissionError`` on 3.10-3.13 but return False on 3.14.
+    Real installs run on 3.14 (install.sh); CI runs this suite on 3.10 and
+    3.13. This gives any interpreter 3.14's answer. ``os.path``'s versions
+    have always swallowed the error.
+    """
+    for name, probe in (
+        ("is_file", os.path.isfile),
+        ("is_dir", os.path.isdir),
+        ("exists", os.path.exists),
+        ("is_symlink", os.path.islink),
+    ):
+        monkeypatch.setattr(Path, name, lambda self, *_a, _probe=probe, **_k: _probe(self))
+
+
 @pytest.mark.skipif(
     hasattr(os, "geteuid") and os.geteuid() == 0,
     reason="root ignores chmod, so the unreadable directory would still be readable "
     "and this test would pass without exercising anything",
 )
+@pytest.mark.parametrize("pathlib_like", ["this-python", "python-3.14"])
 def test_unreadable_credential_dir_is_caveated_not_crashed(
-    sandboxed_home: Path, monkeypatch: pytest.MonkeyPatch
+    sandboxed_home: Path, monkeypatch: pytest.MonkeyPatch, pathlib_like: str
 ) -> None:
     """WOR-823: ``Path.is_file()`` does not swallow EACCES, so a credential
     directory this process can't traverse used to raise ``PermissionError``
     straight out of detection and take down the whole scan (confirmed
     empirically). It must now fail soft AND say what it couldn't check.
+
+    On Python 3.14 ``Path.is_file()`` returns False there instead of raising,
+    so a probe that waited for the raise reported the surface absent with no
+    caveat: a false all-clear. The ``python-3.14`` case pins that on every
+    interpreter.
     """
     monkeypatch.setattr(uc, "_keychain_service_present", lambda service: False)
     gemini_dir = sandboxed_home / ".gemini"
     gemini_dir.mkdir(parents=True)
     (gemini_dir / "oauth_creds.json").write_text('{"refresh_token": "fake"}')
     gemini_dir.chmod(0o000)
+    if pathlib_like == "python-3.14":
+        _pathlib_as_on_python_314(monkeypatch)
     try:
         caveats: list[str] = []
         findings = uc.detect_unshardable_credentials(caveats)  # must not raise

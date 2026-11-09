@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import stat
 import subprocess  # nosec B404
 import sys
 from dataclasses import dataclass
@@ -125,19 +126,25 @@ def _home_relative_path(*parts: str) -> Path:
 def _probe_is_file(path: Path, surface_label: str, caveats: list[str] | None) -> bool:
     """Presence probe that can never raise.
 
-    ``Path.is_file()`` does NOT swallow ``EACCES`` — pathlib ignores only
-    ENOENT/ENOTDIR/EBADF/ELOOP — so a credential directory this process
-    can't traverse propagates ``PermissionError`` and takes down the whole
-    scan. Treat an un-probeable surface as absent, but record a caveat:
-    "we couldn't look" must never be reported as "it isn't there", which is
-    exactly the false all-clear this module exists to prevent.
+    Only ENOENT/ENOTDIR mean "it isn't there". Any other failure, such as a
+    credential directory this process can't traverse, means "we couldn't
+    look": treat the surface as absent, but record a caveat. Reporting it as
+    "it isn't there" is exactly the false all-clear this module exists to
+    prevent.
+
+    ``stat()``, not ``is_file()``: ``is_file()``'s answer depends on the
+    Python version. Under an untraversable directory, 3.10-3.13 raise
+    ``PermissionError`` but 3.14 returns False, which silently dropped the
+    caveat there.
 
     The caveat names the surface, never the path — caveats surface in CLI
     output and CI logs, and a home-relative path is needless detail there
     (the full path goes to the debug log instead).
     """
     try:
-        return path.is_file()
+        return stat.S_ISREG(path.stat().st_mode)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
     except OSError as exc:
         logger.warning("could not probe %s at %s: %s", surface_label, path, exc)
         if caveats is not None:
