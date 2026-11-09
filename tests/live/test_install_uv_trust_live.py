@@ -53,6 +53,7 @@ def _chain_top_issuer(host: str) -> str:
 @pytest.mark.live
 @pytest.mark.timeout(300)
 def test_pinned_uv_refuses_a_server_chained_to_the_emsign_g3_root(tmp_path: Path) -> None:
+    """`uv tool install` with the pinned uv fails TLS against the test site."""
     if not hasattr(ssl.SSLSocket, "get_unverified_chain"):
         pytest.skip("reading the server's chain needs Python 3.13+")
     try:
@@ -64,7 +65,9 @@ def test_pinned_uv_refuses_a_server_chained_to_the_emsign_g3_root(tmp_path: Path
 
     version = read_install_var("UV_VERSION")
     url = read_install_var("ASTRAL_INSTALLER_URL").replace("${UV_VERSION}", version)
-    installer = httpx.get(url, follow_redirects=True).content
+    response = httpx.get(url, follow_redirects=True, timeout=60)
+    response.raise_for_status()
+    installer = response.content
     assert hashlib.sha256(installer).hexdigest() == read_install_var("ASTRAL_INSTALLER_SHA256")
     (tmp_path / "uv-installer.sh").write_bytes(installer)
     home, bin_dir = tmp_path / "home", tmp_path / "bin"
