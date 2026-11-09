@@ -132,10 +132,8 @@ def _probe_is_file(path: Path, surface_label: str, caveats: list[str] | None) ->
     "it isn't there" is exactly the false all-clear this module exists to
     prevent.
 
-    ``stat()``, not ``is_file()``: ``is_file()``'s answer depends on the
-    Python version. Under an untraversable directory, 3.10-3.13 raise
-    ``PermissionError`` but 3.14 returns False, which silently dropped the
-    caveat there.
+    ``stat()``, not ``is_file()``: on Python 3.14, ``is_file()`` returns
+    False where it can't look, instead of raising.
 
     The caveat names the surface, never the path — caveats surface in CLI
     output and CI logs, and a home-relative path is needless detail there

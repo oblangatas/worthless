@@ -1599,10 +1599,11 @@ def _agent_auth_store_dirs(state_dir: Path, config: dict | None = None) -> list[
 def _is_dir_or_unknown(path: Path) -> bool:
     """True for a directory, and for an entry whose type can't be read.
 
-    ``is_dir()`` can't decide this: for an ``agents/<id>`` symlink into a
-    directory this process can't search, 3.10-3.13 raise ``PermissionError``
-    and 3.14 returns False, dropping that agent without a word. Keeping it
-    lets the read of its files fail where callers already handle that.
+    Keeping the second, such as an ``agents/<id>`` symlink into a directory
+    this process can't search, lets detection report the unreadable files as
+    a caveat; scrub and restore skip them like any other unreadable store.
+    ``is_dir()`` can't decide this: on Python 3.14 it returns False where it
+    can't look, instead of raising.
     """
     try:
         return stat.S_ISDIR(path.stat().st_mode)

@@ -24,7 +24,7 @@ from worthless.cli.app import app
 from worthless.cli.bootstrap import WorthlessHome, ensure_home
 from worthless.openclaw import unshardable_credentials as uc
 
-from tests.helpers import fake_openai_key
+from tests.helpers import fake_openai_key, skip_if_root
 
 runner = CliRunner()
 
@@ -691,62 +691,76 @@ def test_doctor_fix_reports_symlinked_credential_as_unfixed_with_reason(
 # ---------------------------------------------------------------------------
 
 
-def _pathlib_as_on_python_314(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make pathlib's probes answer False on an error, as Python 3.14's do.
+@pytest.fixture(params=["this-python", "python-3.14"])
+def pathlib_like(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run once with this interpreter's pathlib, once with Python 3.14's.
 
     Under a directory this process can't search, ``Path.is_file()`` and its
     siblings raise ``PermissionError`` on 3.10-3.13 but return False on 3.14.
-    Many installs run Worthless on 3.14 (install.sh asks for it from
-    WOR-1116 on); CI runs this suite on 3.10 and 3.13. This gives any
-    interpreter 3.14's answer. ``os.path``'s versions have always swallowed
-    the error.
+    CI runs this suite on 3.10 and 3.13, so the second run gives them 3.14's
+    answer: ``os.path``'s versions have always swallowed the error.
     """
-    for name, probe in (
-        ("is_file", os.path.isfile),
-        ("is_dir", os.path.isdir),
-        ("exists", os.path.exists),
-        ("is_symlink", os.path.islink),
-    ):
-        monkeypatch.setattr(Path, name, lambda self, *_a, _probe=probe, **_k: _probe(self))
+    if request.param == "python-3.14":
+        for name, probe in (
+            ("is_file", os.path.isfile),
+            ("is_dir", os.path.isdir),
+            ("exists", os.path.exists),
+            ("is_symlink", os.path.islink),
+        ):
+            monkeypatch.setattr(Path, name, lambda self, *_a, _probe=probe, **_k: _probe(self))
 
 
-@pytest.mark.skipif(
-    hasattr(os, "geteuid") and os.geteuid() == 0,
-    reason="root ignores chmod, so the unreadable directory would still be readable "
-    "and this test would pass without exercising anything",
+@skip_if_root
+@pytest.mark.usefixtures("pathlib_like")
+@pytest.mark.parametrize(
+    ("credential", "surface"),
+    [
+        (".claude/.credentials.json", "Claude Code CLI"),
+        (".codex/auth.json", "Codex CLI"),
+        (".gemini/oauth_creds.json", "Gemini CLI"),
+        (".minimax/oauth_creds.json", "MiniMax CLI"),
+        (".config/gcloud/application_default_credentials.json", "Vertex AI ADC"),
+    ],
 )
-@pytest.mark.parametrize("pathlib_like", ["this-python", "python-3.14"])
 def test_unreadable_credential_dir_is_caveated_not_crashed(
-    sandboxed_home: Path, monkeypatch: pytest.MonkeyPatch, pathlib_like: str
+    sandboxed_home: Path, monkeypatch: pytest.MonkeyPatch, credential: str, surface: str
 ) -> None:
-    """WOR-823: ``Path.is_file()`` does not swallow EACCES, so a credential
-    directory this process can't traverse used to raise ``PermissionError``
-    straight out of detection and take down the whole scan (confirmed
-    empirically). It must now fail soft AND say what it couldn't check.
-
-    On Python 3.14 ``Path.is_file()`` returns False there instead of raising,
-    so a probe that waited for the raise reported the surface absent with no
-    caveat: a false all-clear. The ``python-3.14`` case pins that on every
-    interpreter.
+    """WOR-823: a credential directory this process can't traverse used to
+    raise ``PermissionError`` straight out of detection and take down the
+    whole scan (confirmed empirically). It must now fail soft AND say what it
+    couldn't check, for every file surface, on every Python version.
     """
     monkeypatch.setattr(uc, "_keychain_service_present", lambda service: False)
-    gemini_dir = sandboxed_home / ".gemini"
-    gemini_dir.mkdir(parents=True)
-    (gemini_dir / "oauth_creds.json").write_text('{"refresh_token": "fake"}')
-    gemini_dir.chmod(0o000)
-    if pathlib_like == "python-3.14":
-        _pathlib_as_on_python_314(monkeypatch)
+    path = sandboxed_home / credential
+    path.parent.mkdir(parents=True)
+    path.write_text('{"refresh_token": "fake"}')
+    path.parent.chmod(0o000)
     try:
         caveats: list[str] = []
         findings = uc.detect_unshardable_credentials(caveats)  # must not raise
     finally:
-        gemini_dir.chmod(0o700)  # always restore so tmp cleanup works
+        path.parent.chmod(0o700)  # always restore so tmp cleanup works
 
     assert findings == [], "an un-probeable surface is reported absent, not invented"
-    assert any("could not be checked" in c for c in caveats), (
-        f"the blind spot must be surfaced, got {caveats!r}"
+    assert any(surface in c and "could not be checked" in c for c in caveats), (
+        f"the blind spot must be surfaced and name its surface, got {caveats!r}"
     )
-    assert any("Gemini" in c for c in caveats), "the caveat must name which surface"
+
+
+def test_credential_file_in_a_symlink_loop_is_caveated(
+    sandboxed_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """pathlib's ``is_file()`` reports a symlink loop as absent. A loop at a
+    credential path is one we couldn't look past, not proof nothing is there.
+    """
+    monkeypatch.setattr(uc, "_keychain_service_present", lambda service: False)
+    creds = sandboxed_home / ".gemini" / "oauth_creds.json"
+    creds.parent.mkdir()
+    creds.symlink_to(creds)
+
+    caveats: list[str] = []
+    assert uc.detect_unshardable_credentials(caveats) == []
+    assert any("Gemini" in c and "could not be checked" in c for c in caveats), caveats
 
 
 def test_clean_machine_emits_no_probe_caveats(
@@ -765,19 +779,15 @@ def test_clean_machine_emits_no_probe_caveats(
     assert caveats == [], f"a clean machine must not be told the scan was partial: {caveats!r}"
 
 
-@pytest.mark.skipif(
-    hasattr(os, "geteuid") and os.geteuid() == 0,
-    reason="root ignores chmod, so the unreadable directory would still be readable "
-    "and this test would pass without exercising anything",
-)
-@pytest.mark.parametrize("pathlib_like", ["this-python", "python-3.14"])
+@skip_if_root
+@pytest.mark.usefixtures("pathlib_like")
 def test_agent_dir_behind_an_unreadable_folder_is_caveated(
-    sandboxed_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pathlib_like: str
+    sandboxed_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An ``agents/<id>`` symlink into a folder this process can't search:
-    ``is_dir()`` raised on 3.10-3.13, crashing the scan, and returns False on
-    3.14, which dropped the agent and every OAuth profile in it without a
-    caveat. It must be listed, so its unreadable auth-profiles.json is named.
+    """An ``agents/<id>`` symlink into a folder this process can't search
+    crashed the scan on 3.10-3.13 and was dropped without a caveat on 3.14,
+    with every OAuth profile in it. It must be listed, so its unreadable
+    auth-profiles.json is named.
     """
     monkeypatch.setattr(uc, "_keychain_service_present", lambda service: False)
     locked = tmp_path / "locked"
@@ -789,8 +799,6 @@ def test_agent_dir_behind_an_unreadable_folder_is_caveated(
     agents.mkdir(parents=True)
     (agents / "work").symlink_to(locked / "work")
     locked.chmod(0o000)
-    if pathlib_like == "python-3.14":
-        _pathlib_as_on_python_314(monkeypatch)
     try:
         caveats: list[str] = []
         findings = uc.detect_unshardable_credentials(caveats)  # must not raise
