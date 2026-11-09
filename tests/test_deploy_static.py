@@ -1213,9 +1213,22 @@ class TestReleaseSyncSendsARealUserAgent:
     serve the genuine script only to it, and this check would pass. Bare curl
     sends its own, so the check looks like any user running `curl | sh`."""
 
-    def test_no_fixed_curl_user_agent(self, release_sync_text: str):
-        fixed = re.findall(r'(?:-A|--user-agent)\s+"?curl/|User-Agent:\s*curl/', release_sync_text)
-        assert not fixed, f"release-sync-check must use curl's own User-Agent: {fixed}"
+    # Any form: -A 'x', -A"x", --user-agent=x, -H "user-agent: x" (any case).
+    SETS_UA = re.compile(r"(?:^|\s)(?:-A|--user-agent)(?=[\s='\"]|$)|user-agent\s*:", re.I | re.M)
+
+    def test_script_fetches_set_no_user_agent(self, release_sync_text: str):
+        # A2b sends a browser User-Agent on purpose (it tests the redirect), so
+        # scope to the steps that compare served bytes against the tag.
+        steps = [
+            s
+            for job in yaml.safe_load(release_sync_text)["jobs"].values()
+            for s in job.get("steps", [])
+            if s.get("name", "").startswith(("A2a", "A2c"))
+        ]
+        assert len(steps) == 2, [s.get("name") for s in steps]
+        for step in steps:
+            found = self.SETS_UA.findall(step["run"])
+            assert not found, f"{step['name']} must send curl's own User-Agent: {found}"
 
 
 class TestInstallPinDriftCheck:

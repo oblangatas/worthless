@@ -194,7 +194,7 @@ jobs:
           exit "$failed"
 
       # ===== Assertion 2a: worthless.sh content negotiation (curl) ==========
-      - name: A2a — worthless.sh curl-UA serves install.sh @ latest tag
+      - name: A2a — worthless.sh serves install.sh @ latest tag to plain curl
         env:
           LATEST_TAG: ${{ steps.versions.outputs.latest_tag }}
         run: |
