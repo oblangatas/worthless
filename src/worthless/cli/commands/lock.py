@@ -3122,14 +3122,8 @@ def _lock_keys(
     # four defects reached PR #606, each a fix landing in one copy and not its
     # twin. One site, one decision function.
     #
-    # The post-lock Fernet sync runs FIRST, and that order is load-bearing: the
-    # offer is an optional extra, and anything it raised used to skip WOR-748's
-    # sync on a lock that had already committed. Syncing again at the tail is
-    # harmless — same canonical key, a no-op when the bytes already match.
     if result.fresh_count and not result.openclaw_exit:
-        _sync_fernet_after_lock(home)
-        if _should_offer_service(quiet=quiet, env_path=env_path):
-            _offer_service_after_lock(console, home=home, port=resolve_port(None))
+        _after_successful_lock(console, home=home, env_path=env_path, quiet=quiet)
 
     # Trust-fix (2026-05-08 verification gauntlet): when OpenClaw was
     # detected on this host AND the integration stage failed, the user is
@@ -3250,6 +3244,23 @@ def _tilde(path: Path) -> str:
     home = str(Path.home())
     text = str(path)
     return "~" + text[len(home) :] if text.startswith(home + "/") else text
+
+
+def _after_successful_lock(console, *, home: WorthlessHome, env_path: Path, quiet: bool) -> None:
+    """Everything that happens once a lock has actually written fresh keys.
+
+    Extracted so ``_lock_keys`` carries one call instead of a branch: that
+    function sits at the top of the complexity gate's C band, and adding the
+    git guard below tipped it to D.
+
+    The Fernet sync runs FIRST, and that order is load-bearing: the offer is an
+    optional extra, and anything it raised used to skip WOR-748's sync on a
+    lock that had already committed. Syncing again at the tail of ``_lock_keys``
+    is harmless — same canonical key, a no-op when the bytes already match.
+    """
+    _sync_fernet_after_lock(home)
+    if _should_offer_service(quiet=quiet, env_path=env_path):
+        _offer_service_after_lock(console, home=home, port=resolve_port(None))
 
 
 def _should_offer_service(*, quiet: bool, env_path: Path) -> bool:
