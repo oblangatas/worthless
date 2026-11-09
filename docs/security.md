@@ -359,8 +359,8 @@ On Python 3.13 and later, certificates are checked in OpenSSL's strict mode.
 Some older corporate CAs fail it: for example, a CA certificate with no key
 usage extension, or whose basicConstraints isn't marked critical. The
 bundle still loads at startup, but every upstream call then fails its TLS
-check and the app gets a `502`. Have the CA reissued, or run Worthless on
-Python 3.12.
+check and the app gets a `502`. Have the CA reissued. Outside Docker, running
+Worthless on Python 3.12 also works around it; the Docker image ships 3.13.
 
 Setting both for an inspecting proxy is a deliberate decision to let it read
 your keys. If you can, ask for a TLS-inspection bypass for your providers'
