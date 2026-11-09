@@ -17,6 +17,10 @@ Design invariants:
 * No fallback: transport failure raises :class:`IPCProtocolError`. The
   proxy's HTTP layer above translates that to HTTP 503. We do NOT fall
   back to in-process crypto — that is the whole point of the sidecar.
+* Sidecar authentication (WOR-1078): before writing a byte, the client asks
+  the kernel which uid is serving the socket and refuses anything but the
+  sidecar's. A socket path someone else bound (a stale-socket race, a
+  writable run dir) never sees a hello frame, let alone ``seal`` plaintext.
 * Request-id correlation: monotonic uint64 starting at 1 (server uses 0
   as a pre-handshake sentinel). Mismatched ids raise
   :class:`IPCProtocolError`.
@@ -29,10 +33,13 @@ Design invariants:
 from __future__ import annotations
 
 import asyncio
+import os
+import socket
 from pathlib import Path
 from types import TracebackType
 from typing import Any
 
+from worthless._flags import WORTHLESS_SIDECAR_UID_ENV
 from worthless.ipc.framing import (
     MAX_FRAME_SIZE,
     FrameError,
@@ -40,6 +47,7 @@ from worthless.ipc.framing import (
     encode_frame,
     read_frame,
 )
+from worthless.ipc.peercred import PeerCredError, UnauthorizedPeerError, require_peer_uid
 
 __all__ = [
     "DEFAULT_TIMEOUT_S",
@@ -64,7 +72,11 @@ class IPCError(Exception):
 
 
 class IPCAuthError(IPCError):
-    """Server rejected the peer (``code=AUTH``)."""
+    """Peer authentication failed in either direction.
+
+    Either the server rejected this client (``code=AUTH``), or the socket is
+    served by a uid other than the sidecar's and the client refused it.
+    """
 
 
 class IPCProtocolError(IPCError):
@@ -115,6 +127,38 @@ def _err_from_envelope(envelope: dict[str, Any]) -> IPCError:
     return exc_cls(final)
 
 
+#: uids the kernel reports for a peer it can't map into our user namespace
+#: (Linux's default overflowuid) or one with no credentials ((uid_t)-1). A
+#: sidecar never runs as either, and trusting them trusts strangers.
+_UNMAPPED_UIDS = frozenset({65534, 2**32 - 1})
+
+
+def _env_sidecar_uid() -> int:
+    """The sidecar uid from ``WORTHLESS_SIDECAR_UID``, or our own uid when unset.
+
+    Own uid, not euid, to match the ``allowed_uid=os.getuid()`` every spawner
+    hands the sidecar. A value that isn't a plain uid raises rather than
+    falling back: a typo must not quietly widen who the proxy trusts.
+    """
+    raw = os.environ.get(WORTHLESS_SIDECAR_UID_ENV)
+    if raw is None:
+        uid = os.getuid()
+    else:
+        raw = raw.strip()
+        # Length first: int() raises ValueError past 4300 digits, and uid_t is 32-bit.
+        if not (raw.isascii() and raw.isdigit() and len(raw) <= 10) or int(raw) >= 2**32:
+            raise IPCAuthError(
+                f"AUTH: {WORTHLESS_SIDECAR_UID_ENV}={raw[:32]!r} is not a numeric uid"
+            )
+        uid = int(raw)
+    if uid in _UNMAPPED_UIDS:
+        raise IPCAuthError(
+            f"AUTH: the expected sidecar uid {uid} is the kernel's no-user uid; "
+            f"set {WORTHLESS_SIDECAR_UID_ENV} to the uid the sidecar runs as"
+        )
+    return uid
+
+
 class IPCClient:
     """Async context-managed client for the sidecar IPC.
 
@@ -143,6 +187,9 @@ class IPCClient:
     # ------------------------------------------------------------------
 
     async def __aenter__(self) -> IPCClient:
+        # Resolve before connecting: a malformed setting must not reach the
+        # socket at all.
+        sidecar_uid = _env_sidecar_uid()
         try:
             # ``limit=MAX_FRAME_SIZE`` lifts the StreamReader's internal buffer
             # ceiling (default 64 KiB) up to our contract's frame cap (1 MiB).
@@ -155,6 +202,7 @@ class IPCClient:
         except (ConnectionError, FileNotFoundError, OSError) as exc:
             raise IPCProtocolError(f"sidecar connect failed: {exc}") from exc
         try:
+            self._verify_sidecar_uid(self._writer.get_extra_info("socket"), sidecar_uid)
             await self._handshake()
         except BaseException:
             # Clean up the socket before propagating. A half-open
@@ -255,6 +303,26 @@ class IPCClient:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def _verify_sidecar_uid(self, sock: socket.socket | None, sidecar_uid: int) -> None:
+        """Refuse the connection unless the sidecar's uid is serving it.
+
+        Runs before the hello frame is written. The kernel reports the uid
+        that called ``listen()`` on this very connection, so unlike a stat of
+        the socket path there is no window to swap the file in between.
+        """
+        if sock is None:
+            raise IPCAuthError("AUTH: sidecar connection has no socket to read peer credentials")
+        try:
+            require_peer_uid(sock, (sidecar_uid,))
+        except UnauthorizedPeerError as exc:
+            raise IPCAuthError(
+                f"AUTH: {self._socket_path} is not served by the sidecar uid {sidecar_uid}: {exc}"
+            ) from exc
+        except PeerCredError as exc:
+            raise IPCAuthError(
+                f"AUTH: cannot read the sidecar's peer credentials, refusing: {exc}"
+            ) from exc
 
     async def _handshake(self) -> None:
         envelope = {

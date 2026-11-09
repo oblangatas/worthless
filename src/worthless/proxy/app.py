@@ -51,6 +51,7 @@ from worthless.proxy.rules import (
     _estimate_tokens,
     extract_model,
 )
+from worthless.proxy.upstream import build_upstream_client, warn_ignored_env
 from worthless.storage.schema import SCHEMA, migrate_db
 from worthless.cli.log_redaction import install_redaction_filter
 from worthless.storage.shard_reader import ShardReader
@@ -270,16 +271,9 @@ async def _lifespan(app: FastAPI):
             await ipc.connect()
         app.state.ipc_supervisor = ipc
 
-        client = httpx.AsyncClient(
-            follow_redirects=False,
-            timeout=httpx.Timeout(
-                connect=10.0,
-                read=settings.streaming_timeout,
-                write=settings.upstream_timeout,
-                pool=10.0,
-            ),
-            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
-        )
+        # WOR-1071: proxy, CA and keylog settings come from ProxySettings only,
+        # never from HTTP(S)_PROXY / SSL_CERT_FILE / SSLKEYLOGFILE.
+        client = build_upstream_client(settings)
         app.state.httpx_client = client
 
         # One transaction lock per connection: every BEGIN IMMEDIATE path on `db`
@@ -368,6 +362,9 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
         settings = ProxySettings()
 
     settings.validate()
+    # WOR-1071: say which HTTP(S)_PROXY / SSL_CERT_FILE settings the upstream call
+    # ignores. Here rather than in the lifespan, so it shows even if startup fails.
+    warn_ignored_env(settings)
 
     app = FastAPI(
         title="worthless-proxy",

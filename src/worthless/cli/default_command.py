@@ -23,7 +23,7 @@ from worthless.cli.bootstrap import WorthlessHome, acquire_lock, get_home
 from worthless.cli.commands.lock import _lock_keys, _offer_service_after_lock
 from worthless.cli._repo_factory import open_repo
 from worthless.cli.commands.up import start_supervised_proxy
-from worthless.cli.process import poll_health, resolve_port
+from worthless.cli.process import ignored_upstream_env_notes, poll_health, resolve_port
 from worthless.cli.console import get_console
 from worthless.cli.dotenv_rewriter import build_enrolled_locations, scan_env_keys
 from worthless.cli.errors import ErrorCode, WorthlessError
@@ -262,6 +262,9 @@ def _ensure_proxy_running(home: WorthlessHome, console) -> tuple[bool, int | Non
     log_file = home.base_dir / "proxy.log"
 
     console.print_hint(f"\n  Starting proxy on 127.0.0.1:{actual_port}...")
+    # The background `up` writes these to proxy.log; say them here too (WOR-1071).
+    for note in ignored_upstream_env_notes():
+        console.print_warning(note)
 
     try:
         start_supervised_proxy(home, actual_port, log_file, console)
