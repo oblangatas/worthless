@@ -28,11 +28,13 @@ _NULLABLE_COUNTS = frozenset({"cache_creation_input_tokens", "cache_read_input_t
 def _sum_counts(usage: object, *keys: str) -> int | None:
     """Sum the token counts named by *keys* in a provider ``usage`` object.
 
-    An absent count is 0, and so is a null one where the SDK allows null.
+    An absent count is 0, and so is a null one where the SDK allows null. A
+    whole, non-negative float is its int value: JSON can't tell 1234 from 1234.0.
     Returns None when the usage is unreadable: *usage* isn't an object, or a
-    count is any other non-int (a null required count, a string, a float, a
-    bool) or a negative int. The caller then treats it like a reply without
-    usage rather than crashing or billing a bogus number.
+    count is anything else (a null required count, a string, a fractional,
+    negative or non-finite float, a bool, a negative int). The caller then
+    treats it like a reply without usage rather than crashing or billing a
+    bogus number.
     """
     if not isinstance(usage, dict):
         return None
@@ -41,6 +43,8 @@ def _sum_counts(usage: object, *keys: str) -> int | None:
         count = usage.get(key, 0)
         if count is None and key in _NULLABLE_COUNTS:
             continue
+        if isinstance(count, float) and count.is_integer() and count >= 0:
+            count = int(count)
         if isinstance(count, bool) or not isinstance(count, int) or count < 0:
             return None
         total += count
@@ -174,11 +178,10 @@ class StreamingUsageCollector:
         self._partial_line: str = ""
         # None once message_start carries an input count that can't be read.
         self._input_tokens: int | None = 0
-        self._output_tokens: int = 0
+        self._output_tokens: int | None = None
         self._total_tokens: int | None = None
         self._model: str | None = None
         self._pending_event: str | None = None
-        self._found_usage = False
 
     # No legitimate SSE line exceeds 64KB; cap _partial_line to prevent
     # a malicious upstream without newlines from growing it unbounded.
@@ -217,11 +220,10 @@ class StreamingUsageCollector:
         if self.provider == "openai":
             usage = parsed.get("usage")
             if usage and isinstance(usage, dict):
-                total = _sum_counts(usage, "total_tokens")
-                if total is not None:
-                    self._total_tokens = total
-                    self._model = parsed.get("model", self._model)
-                    self._found_usage = True
+                # Some upstreams send usage on every chunk: an unreadable latest
+                # total makes the usage unreadable rather than leaving an earlier one.
+                self._total_tokens = _sum_counts(usage, "total_tokens")
+                self._model = parsed.get("model", self._model)
         elif self.provider == "anthropic":
             if self._pending_event == "message_start":
                 msg = parsed.get("message")
@@ -235,11 +237,9 @@ class StreamingUsageCollector:
                 if not isinstance(usage, dict):
                     return
                 if "output_tokens" in usage:
-                    output_tokens = _sum_counts(usage, "output_tokens")
                     # The count is cumulative: an unreadable latest one makes the
                     # usage unreadable rather than leaving an earlier count in place.
-                    self._output_tokens = output_tokens or 0
-                    self._found_usage = output_tokens is not None
+                    self._output_tokens = _sum_counts(usage, "output_tokens")
 
         self._pending_event = None
 
@@ -263,7 +263,7 @@ class StreamingUsageCollector:
                 return UsageInfo(total_tokens=self._total_tokens, model=self._model)
             return None
         elif self.provider == "anthropic":
-            if not self._found_usage or self._input_tokens is None:
+            if self._output_tokens is None or self._input_tokens is None:
                 return None
             return UsageInfo(
                 total_tokens=self._input_tokens + self._output_tokens,
