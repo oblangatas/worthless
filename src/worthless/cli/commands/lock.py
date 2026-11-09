@@ -1301,7 +1301,7 @@ def _fire_synthetic_request(host: str, port: int, alias: str) -> bool:
     # ``check_proxy_health`` call at ``cli/process.py``.
     url = f"http://{host}:{port}/_bind_probe/{alias}"  # NOSONAR
     try:
-        with httpx.Client(timeout=1.0) as client:
+        with httpx.Client(timeout=1.0, trust_env=False) as client:
             client.head(url)
     except (httpx.HTTPError, OSError):
         return False
