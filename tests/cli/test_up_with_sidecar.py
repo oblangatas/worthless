@@ -138,6 +138,7 @@ def _make_handle(sidecar_proc: _FakeSidecarProc, run_dir: Path) -> SidecarHandle
         socket_path=run_dir / "sidecar.sock",
         shares=_make_share_files(run_dir),
         allowed_uid=1000,
+        sidecar_uid=1002,
         drain_timeout=5.0,
         stderr_buf=collections.deque(),
     )
@@ -161,7 +162,9 @@ def home(tmp_path: Path) -> WorthlessHome:
 class TestSidecarBeforeProxy:
     def test_up_spawns_sidecar_before_proxy(self, home: WorthlessHome) -> None:
         """spawn_sidecar must be called BEFORE spawn_proxy, and the proxy
-        env passed to spawn_proxy must contain WORTHLESS_SIDECAR_SOCKET."""
+        env passed to spawn_proxy must contain WORTHLESS_SIDECAR_SOCKET and
+        the uid the sidecar was spawned as (WOR-1078), not one inherited
+        from the shell."""
         # Lazy import — module is being edited as part of Phase D.
         from worthless.cli.commands import up as up_mod
 
@@ -195,7 +198,11 @@ class TestSidecarBeforeProxy:
         ):
             up_mod._start_foreground(
                 home=home,
-                proxy_env={"WORTHLESS_DB_PATH": "x", "WORTHLESS_HOME": str(home.base_dir)},
+                proxy_env={
+                    "WORTHLESS_DB_PATH": "x",
+                    "WORTHLESS_HOME": str(home.base_dir),
+                    "WORTHLESS_SIDECAR_UID": "777",  # stale export from the shell
+                },
                 port=8787,
                 pid_file=home.base_dir / "proxy.pid",
                 console=MagicMock(),
@@ -204,6 +211,7 @@ class TestSidecarBeforeProxy:
         assert order == ["sidecar", "proxy"], f"sidecar must be spawned first, got {order!r}"
         assert "WORTHLESS_SIDECAR_SOCKET" in captured_proxy_env
         assert captured_proxy_env["WORTHLESS_SIDECAR_SOCKET"].endswith("sidecar.sock")
+        assert captured_proxy_env["WORTHLESS_SIDECAR_UID"] == "1002"
 
 
 # ---------------------------------------------------------------------------
