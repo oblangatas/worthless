@@ -3051,7 +3051,8 @@ GUARD_MUTATIONS = [
         "        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6\n"
         "        with:\n"
         "          push: false\n"
-        "          outputs: type=image,name=ghcr.io/x/worthless-proxy,push=true\n"
+        "          outputs: type=image,name=ghcr.io/${{ github.repository_owner }}"
+        "/worthless-proxy,push=true\n"
         "      - name: Image holds exactly the locked dependency set\n",
         "test_release_checks_the_image_before_pushing_it",
     ),
