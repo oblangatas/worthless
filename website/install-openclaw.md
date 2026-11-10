@@ -14,7 +14,7 @@ Running worthless as a host process? [Start here](#quick-start-local). Running w
 
 Your provider keeps its original name. You pick the same model in OpenClaw as before — the difference is that the request now travels through the Worthless proxy, where the spend cap is enforced and the full key is reassembled.
 
-> Providers you signed into with OAuth can't be split, so they still go direct. `worthless doctor` lists them.
+> Providers you signed into with OAuth can't be split, so they still go direct. `worthless doctor --json` lists them.
 
 ## Quick start (local)
 

@@ -438,13 +438,15 @@ def test_doctor_fix_vertex_adc_prints_gcloud_reauth_remediation(
 def test_doctor_playbook_names_the_command_that_clears_these() -> None:
     """`doctor --json` attaches this playbook to each finding, and `doctor
     --explain` prints it. Plain `doctor --fix` doesn't run this check, so
-    sending users there leaves every credential in place.
+    sending users there leaves every credential in place. `--json --fix` also
+    runs every other check's fix without asking, so the playbook must say so.
     """
     from worthless.cli.commands.doctor.checks._remediation import PLAYBOOKS
 
     play = " ".join(PLAYBOOKS["unshardable_credentials"].split())
     assert "worthless doctor --json --fix" in play, play
     assert "doctor --fix" not in play, play
+    assert "without asking" in play, play
 
 
 # ---------------------------------------------------------------------------
