@@ -449,6 +449,21 @@ def test_doctor_playbook_names_the_command_that_clears_these() -> None:
     assert "without asking" in play, play
 
 
+def test_doctor_playbook_says_how_to_remove_one_by_hand() -> None:
+    """The playbook offers removing only the ones you don't need, so it must
+    say how for each ``location`` form, the way ``--fix`` clears it. A
+    ``<file>#<id>`` is one entry in an auth-profiles.json that can hold other
+    profiles too: deleting the whole file would take those with it.
+    """
+    from worthless.cli.commands.doctor.checks._remediation import PLAYBOOKS
+
+    play = " ".join(PLAYBOOKS["unshardable_credentials"].split())
+    assert "OpenClaw" in play, play
+    assert 'security delete-generic-password -s "<name>"' in play, play
+    assert "under `profiles`" in play, play
+    assert "not the whole file" in play, play
+
+
 # ---------------------------------------------------------------------------
 # Security-review follow-ups: a 0-finding scan must never read as "verified
 # clean" when part of the scan genuinely couldn't run, and clearing a

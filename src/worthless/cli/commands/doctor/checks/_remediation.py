@@ -83,9 +83,13 @@ PLAYBOOKS: dict[str, str] = {
     ),
     "unshardable_credentials": (
         "These aren't API keys — they're OAuth logins (Claude Code, Codex, Gemini, MiniMax, "
-        "or Google Vertex), and the proxy can't shard or protect them at all. Each finding's "
-        "`location` says where it is: remove the ones you don't need, and each provider "
-        "re-prompts you to log in again on next use. `worthless doctor --json --fix` clears "
+        "Google Vertex, or an OpenClaw auth profile), and the proxy can't shard or protect "
+        "them at all. Each finding's `location` says where it is, so you can remove only the "
+        "ones you don't need: delete a plain file path; for `keychain:<name>`, run "
+        '`security delete-generic-password -s "<name>"`; for `<file>#<id>`, delete only the '
+        "`<id>` entry under `profiles` in that file, not the whole file, which can hold other "
+        "profiles too. Each provider asks you to log in again on next use. "
+        "`worthless doctor --json --fix` clears "
         "all of them at once, and also applies every other check's fix (such as deleting "
         "orphaned key records and keychain entries) without asking. Vertex needs one extra "
         "step after clearing: `gcloud auth application-default login`."
