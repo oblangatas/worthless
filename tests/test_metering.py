@@ -324,8 +324,9 @@ def test_extraction_failure_is_distinguishable_from_zero_usage():
 # WOR-1002: a null cache count is 0; any other non-int count is unreadable usage
 # ---------------------------------------------------------------------------
 
-# Not a whole, non-negative number. A whole float such as 5.0 is a count.
-_NOT_COUNTS = ["5", 5.5, -5.0, math.nan, math.inf, -math.inf, True, [5]]
+# Not a whole, non-negative number that fits the spend log's 64-bit column. A whole
+# float such as 5.0 is a count.
+_NOT_COUNTS = ["5", 5.5, -5.0, math.nan, math.inf, -math.inf, True, [5], 1e300, 2**63]
 # Null means "none" only for the counts the SDKs type Optional[int].
 _NOT_REQUIRED_COUNTS = [None, *_NOT_COUNTS]
 _ANTHROPIC_COUNTS = {
@@ -456,6 +457,18 @@ def test_openai_stream_unreadable_latest_total_drops_earlier_one(parse, bad):
     assert parse(_openai_stream({"total_tokens": 11}, {"total_tokens": bad})) is None
 
 
+def test_counts_whose_total_is_too_large_to_store_are_no_usage():
+    """Each count fits, but the spend log can't store their sum."""
+    usage = {"input_tokens": 2**62, "output_tokens": 2**62}
+    assert extract_usage_anthropic(json.dumps({"model": "m", "usage": usage}).encode()) is None
+
+
+@_ANTHROPIC_STREAM_PARSERS
+def test_anthropic_stream_input_plus_output_too_large_to_store_is_no_usage(parse):
+    """Each event's count fits, but the spend log can't store their sum."""
+    assert parse(_anthropic_stream({"input_tokens": 5e18}, {"output_tokens": 5e18})) is None
+
+
 # JSON can't tell 1234 from 1234.0, so a whole float is billed as its int value.
 
 
@@ -485,6 +498,6 @@ def test_extract_usage_anthropic_json_whole_float_counts_are_the_count():
 
 @_ANTHROPIC_STREAM_PARSERS
 def test_anthropic_stream_whole_float_counts_are_the_count(parse):
-    """Before, a 50000.0 input count was dropped and only the output was billed."""
+    """A whole float is its int value, so a 50000.0 input count is billed, not dropped."""
     start = {"input_tokens": 50000.0, "cache_read_input_tokens": 11.0}
     assert _total(parse(_anthropic_stream(start, {"output_tokens": 3.0}))) == 50014

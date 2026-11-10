@@ -23,6 +23,13 @@ _ANTHROPIC_INPUT_COUNTS = (
 )
 # The only counts a provider SDK types as Optional[int]: null means none.
 _NULLABLE_COUNTS = frozenset({"cache_creation_input_tokens", "cache_read_input_tokens"})
+# The spend log's INTEGER column is signed 64-bit; a larger total can't be stored.
+_MAX_TOTAL = 2**63 - 1
+
+
+def _usage_info(total: int, model: str | None) -> UsageInfo | None:
+    """*total* as usage, or None (unreadable) when the spend log can't store it."""
+    return UsageInfo(total_tokens=total, model=model) if total <= _MAX_TOTAL else None
 
 
 def _sum_counts(usage: object, *keys: str) -> int | None:
@@ -30,10 +37,11 @@ def _sum_counts(usage: object, *keys: str) -> int | None:
 
     An absent count is 0, and so is a null one where the SDK allows null. A
     whole, non-negative float is its int value: JSON can't tell 1234 from 1234.0.
-    Returns None when the usage is unreadable: *usage* isn't an object, or a
-    count is anything else (a null required count, a string, a fractional,
-    negative or non-finite float, a bool). The caller then treats it like a
-    reply without usage rather than crashing or billing a bogus number.
+    Returns None when the usage is unreadable: *usage* isn't an object, a count
+    is anything else (a null required count, a string, a fractional, negative
+    or non-finite float, a bool), or the total is too large for the spend log
+    to store (such as 1e300). The caller then treats it like a reply without
+    usage rather than crashing or billing a bogus number.
     """
     if not isinstance(usage, dict):
         return None
@@ -47,7 +55,7 @@ def _sum_counts(usage: object, *keys: str) -> int | None:
         if isinstance(count, bool) or not isinstance(count, int):
             return None
         total += count
-    return total
+    return total if total <= _MAX_TOTAL else None
 
 
 def extract_usage_openai(data: bytes) -> UsageInfo | None:
@@ -157,7 +165,7 @@ def extract_usage_anthropic(data: bytes) -> UsageInfo | None:
     output_tokens = _sum_counts(delta.get("usage"), "output_tokens")
     if output_tokens is None:
         return None
-    return UsageInfo(total_tokens=input_tokens + output_tokens, model=model)
+    return _usage_info(input_tokens + output_tokens, model)
 
 
 class StreamingUsageCollector:
@@ -260,10 +268,7 @@ class StreamingUsageCollector:
         elif self.provider == "anthropic":
             if self._output_tokens is None:
                 return None
-            return UsageInfo(
-                total_tokens=self._input_tokens + self._output_tokens,
-                model=self._model,
-            )
+            return _usage_info(self._input_tokens + self._output_tokens, self._model)
         return None
 
 
