@@ -84,6 +84,7 @@ def _export(*flags: str) -> str:
 
 
 def main(image: str) -> int:
+    """Exit status for *image*: 0 if it holds exactly uv.lock's runtime set, else 1."""
     # The image installs the export without the dev group; dependency-audit.yml
     # audits the one with it. A dev-group conflict can resolve a package to a
     # different version in each, so both are read and compared below.

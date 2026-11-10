@@ -1174,6 +1174,17 @@ class TestDockerfile:
 _LOCK_CHECK_RUN = 'uv run --no-project python scripts/check_image_matches_lock.py "$IMAGE"'
 
 
+def _pushes(step: dict) -> bool:
+    """*step* pushes an image, going by what it does as well as by its name."""
+    opts = step.get("with") or {}
+    # publish-docker.yml's real push sets `push: false` and pushes via `outputs`.
+    return (
+        str(step.get("name", "")).startswith("Push")
+        or opts.get("push") not in (None, False, "false")
+        or "push=true" in str(opts.get("outputs", "")).replace(" ", "")
+    )
+
+
 def _lock_check_step(workflow: str, job: str, image: str) -> None:
     """*job* checks the *image* it built against uv.lock, before anything scans or pushes it."""
     wf = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / workflow).read_text())
@@ -1195,7 +1206,7 @@ def _lock_check_step(workflow: str, job: str, image: str) -> None:
         assert "anchore/scan-action" not in str(s.get("uses")), (
             "a failing scan step before it would skip the lock check"
         )
-        assert not str(s.get("name", "")).startswith("Push"), "the image is pushed unchecked"
+        assert not _pushes(s), "the image is pushed unchecked"
 
 
 class TestImageLockCheck:
@@ -3028,6 +3039,20 @@ GUARD_MUTATIONS = [
         ".github/workflows/publish-docker.yml",
         'run: uv run --no-project python scripts/check_image_matches_lock.py "$IMAGE"',
         'run: "true"',
+        "test_release_checks_the_image_before_pushing_it",
+    ),
+    (
+        # The real push step pushes through `outputs`, with `push: false`, so
+        # only its name said it pushed.
+        "a release pushes, under another step name, before the lock check",
+        ".github/workflows/publish-docker.yml",
+        "      - name: Image holds exactly the locked dependency set\n",
+        "      - name: Publish to GHCR\n"
+        "        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6\n"
+        "        with:\n"
+        "          push: false\n"
+        "          outputs: type=image,name=ghcr.io/x/worthless-proxy,push=true\n"
+        "      - name: Image holds exactly the locked dependency set\n",
         "test_release_checks_the_image_before_pushing_it",
     ),
 ]
