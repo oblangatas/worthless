@@ -947,8 +947,33 @@ def test_unreadable_auth_profiles_caveat_names_which_agent(
 
     unread = [c for c in caveats if "auth-profiles.json could not be read" in c]
     assert len(unread) == 1, caveats
-    assert "agents/broken/agent" in unread[0], unread
+    assert "(in ~/.openclaw/agents/broken/agent)" in unread[0], unread
     assert "fine" not in unread[0], unread
+
+
+def test_unreadable_agent_dir_override_is_named_from_home(
+    sandboxed_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An ``agentDir`` set in openclaw.json can sit outside OpenClaw's folder.
+    lock prints the caveat and CI logs keep it, so a folder under home is
+    named from ``~``, not by its full path.
+    """
+    monkeypatch.setattr(uc, "_keychain_service_present", lambda service: False)
+    custom = sandboxed_home / "work-agent"
+    custom.mkdir()
+    (custom / "auth-profiles.json").write_text('{"profiles": {"leaky": {"type": "oau')
+    _write_json(
+        sandboxed_home / ".openclaw" / "openclaw.json",
+        {"agents": {"list": [{"id": "work", "agentDir": str(custom)}]}},
+    )
+
+    caveats: list[str] = []
+    uc.detect_unshardable_credentials(caveats)
+
+    unread = [c for c in caveats if "auth-profiles.json could not be read" in c]
+    assert len(unread) == 1, caveats
+    assert "(in ~/work-agent)" in unread[0], unread
+    assert str(sandboxed_home) not in unread[0], unread
 
 
 def test_doctor_reports_probe_caveats_so_a_blind_scan_is_not_verified_clean(

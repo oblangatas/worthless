@@ -241,12 +241,13 @@ def _detect_minimax_cli(
         )
 
 
-def _agent_store_label(agent_dir: Path, state_dir: Path) -> str:
-    """Where an agent's auth store is: relative to OpenClaw's state dir when
-    it's inside it (``agents/<id>/agent``), else an ``agentDir`` the user set.
+def _agent_store_label(agent_dir: Path) -> str:
+    """Where an agent's auth store is, for a caveat that ``lock`` prints and
+    CI logs keep: from ``~`` when it's under home (``~/.openclaw/agents/<id>/
+    agent``, or an ``agentDir`` the user set), else the path as configured.
     """
     try:
-        return agent_dir.relative_to(state_dir).as_posix()
+        return f"~/{agent_dir.relative_to(Path.home()).as_posix()}"
     except ValueError:
         return str(agent_dir)
 
@@ -292,7 +293,7 @@ def _detect_auth_profiles_oauth_token(
                 # caveat itself has to say which store to look at.
                 caveats.append(
                     "an OpenClaw auth-profiles.json could not be read "
-                    f"(in {_agent_store_label(agent_dir, state_dir)}) — any "
+                    f"(in {_agent_store_label(agent_dir)}) — any "
                     "OAuth/token profiles inside it were not checked"
                 )
             continue
