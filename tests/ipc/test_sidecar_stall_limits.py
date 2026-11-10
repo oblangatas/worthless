@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import errno
 import gc
+import logging
 import os
 import socket
 import time
@@ -186,6 +187,54 @@ async def test_stalled_hello_is_closed_within_deadline(
     assert not still_running, "sidecar kept a connection that never finished its hello"
     assert await _closed_by_sidecar(reader)
     writer.close()
+
+
+@pytest.mark.parametrize(
+    ("sent", "close"),
+    [
+        pytest.param(_STALLED_FRAME, False, id="stalled"),
+        pytest.param(_STALLED_FRAME, True, id="closed-mid-frame"),
+        # 0xc1 is never valid msgpack, so the decoder refuses the first byte.
+        pytest.param(
+            MAX_FRAME_SIZE.to_bytes(4, "big") + b"\xc1" * MAX_FRAME_SIZE, False, id="malformed"
+        ),
+    ],
+)
+async def test_a_failed_hello_frees_its_frame_without_a_gc_pass(
+    start: StartSidecar,
+    sidecar_socket_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sent: bytes,
+    close: bool,
+) -> None:
+    """On 3.10 and 3.11 wait_for reads the hello in a task of its own. The error
+    it re-raised held that task, and the task held the error, so every failed
+    hello kept its frame until a GC pass ran."""
+    # pytest's log capture keeps every record, and a record keeps the error
+    # it was given, frames and all.
+    monkeypatch.setattr(logging.getLogger("worthless.sidecar.server"), "disabled", True)
+    server = await start(frame_timeout_s=_FRAME_TIMEOUT_S)
+    gc.collect()
+    gc.disable()
+    tracemalloc.start()
+    try:
+        baseline, _ = tracemalloc.get_traced_memory()
+        reader, writer = await asyncio.open_unix_connection(str(sidecar_socket_path))
+        writer.write(sent)
+        await writer.drain()
+        failed = await _accepted(server)
+        if close:
+            writer.close()
+        _, still_running = await asyncio.wait(failed, timeout=_CLOSE_WITHIN_S)
+        writer.close()
+        await asyncio.sleep(0.1)  # let both transports finish closing
+        kept = tracemalloc.get_traced_memory()[0] - baseline
+    finally:
+        tracemalloc.stop()
+        gc.enable()
+
+    assert not still_running, "sidecar kept a connection whose hello failed"
+    assert kept < MAX_FRAME_SIZE // 8, f"{kept} bytes still held after the hello failed"
 
 
 async def test_idle_connection_between_requests_stays_open(

@@ -334,17 +334,24 @@ def _make_client_handler(
 
             # --- 2. Handshake ----------------------------------------------
             # Clients send hello as soon as they connect, so its clock starts
-            # now rather than at its first byte.
+            # now rather than at its first byte. On 3.10 and 3.11 wait_for
+            # reads in a task of its own, and an error it re-raises has
+            # wait_for's frame in its traceback. That frame holds the task,
+            # and the task holds the error: a cycle that kept the peer's
+            # frame alive until a GC pass. Each branch below breaks it.
             try:
                 hello = await asyncio.wait_for(read_frame(reader), frame_timeout_s)
-            except asyncio.TimeoutError:
+            except asyncio.TimeoutError as exc:
+                _detach_from_frames(exc)
                 _LOG.warning("no hello within %.1fs; closing", frame_timeout_s)
                 return
-            except FrameTruncatedError:
+            except FrameTruncatedError as exc:
+                _detach_from_frames(exc)
                 _LOG.debug("client closed before sending hello")
                 return
             except (FrameTooLargeError, MalformedFrameError) as exc:
                 _LOG.warning("malformed handshake frame: %s", exc)
+                _detach_from_frames(exc)
                 await _write_err(writer, "PROTO", _ERR_PROTO_HANDSHAKE, _ID_UNKNOWN)
                 return
 
