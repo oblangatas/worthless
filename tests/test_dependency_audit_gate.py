@@ -496,15 +496,12 @@ RUNTIME_FLOORS = {"certifi": (2026, 10, 23), "cryptography": (50, 0, 0), "msgpac
 
 
 def _declared_floor(name: str) -> str | None:
-    """The `>=` version pyproject's [project] dependencies give *name*, if any.
-
-    Regex over the raw text, not a TOML parse: tomllib is 3.11+ and this suite
-    runs on 3.10 too.
-    """
-    block = re.search(r"^dependencies = \[(.*?)^\]", PYPROJECT.read_text(), re.S | re.M)
-    assert block, "no [project] dependencies list in pyproject.toml"
-    match = re.search(rf'^\s*"{re.escape(name)}>=([0-9.]+)"', block.group(1), re.M)
-    return match.group(1) if match else None
+    """The `>=` version pyproject's [project] dependencies give *name*, if any."""
+    for dep in tomllib.loads(PYPROJECT.read_text())["project"]["dependencies"]:
+        match = re.fullmatch(rf"{re.escape(name)}>=([0-9.]+)", dep)
+        if match:
+            return match.group(1)
+    return None
 
 
 @pytest.mark.parametrize(("name", "required"), RUNTIME_FLOORS.items(), ids=list(RUNTIME_FLOORS))
