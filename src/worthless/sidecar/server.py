@@ -375,15 +375,20 @@ def _make_client_handler(
 
             # --- 3. Dispatch loop ------------------------------------------
             while True:
+                # read_frame waits for a request's body with wait_for, so its
+                # timeout and truncation errors close the same cycle as a
+                # failed hello's.
                 try:
                     envelope = await read_frame(reader, body_timeout=frame_timeout_s)
-                except FrameTimeoutError:
+                except FrameTimeoutError as exc:
+                    _detach_from_frames(exc)
                     _LOG.warning("request frame stalled for %.1fs; closing", frame_timeout_s)
                     # abort, not close: unread replies may still be queued, and
                     # close() would wait for this stalled peer to read them.
                     writer.transport.abort()
                     return
-                except FrameTruncatedError:
+                except FrameTruncatedError as exc:
+                    _detach_from_frames(exc)
                     _LOG.debug("peer closed connection cleanly")
                     return
                 except (FrameTooLargeError, MalformedFrameError) as exc:

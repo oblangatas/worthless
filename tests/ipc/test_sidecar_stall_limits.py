@@ -189,6 +189,7 @@ async def test_stalled_hello_is_closed_within_deadline(
     writer.close()
 
 
+@pytest.mark.parametrize("after_hello", [False, True], ids=["hello", "request"])
 @pytest.mark.parametrize(
     ("sent", "close"),
     [
@@ -200,26 +201,30 @@ async def test_stalled_hello_is_closed_within_deadline(
         ),
     ],
 )
-async def test_a_failed_hello_frees_its_frame_without_a_gc_pass(
+async def test_a_failed_frame_frees_its_memory_without_a_gc_pass(
     start: StartSidecar,
     sidecar_socket_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     sent: bytes,
     close: bool,
+    after_hello: bool,
 ) -> None:
-    """On 3.10 and 3.11 wait_for reads the hello in a task of its own. The error
-    it re-raised held that task, and the task held the error, so every failed
-    hello kept its frame until a GC pass ran."""
+    """On 3.10 and 3.11 wait_for reads in a task of its own: the hello, and a
+    request's body. The error it re-raised held that task, and the task held
+    the error, so every such failed frame was kept until a GC pass ran."""
     # pytest's log capture keeps every record, and a record keeps the error
     # it was given, frames and all.
     monkeypatch.setattr(logging.getLogger("worthless.sidecar.server"), "disabled", True)
     server = await start(frame_timeout_s=_FRAME_TIMEOUT_S)
+    if after_hello:
+        reader, writer = await _shake_hands(sidecar_socket_path)
+    else:
+        reader, writer = await asyncio.open_unix_connection(str(sidecar_socket_path))
     gc.collect()
     gc.disable()
     tracemalloc.start()
     try:
         baseline, _ = tracemalloc.get_traced_memory()
-        reader, writer = await asyncio.open_unix_connection(str(sidecar_socket_path))
         writer.write(sent)
         await writer.drain()
         failed = await _accepted(server)
@@ -233,8 +238,8 @@ async def test_a_failed_hello_frees_its_frame_without_a_gc_pass(
         tracemalloc.stop()
         gc.enable()
 
-    assert not still_running, "sidecar kept a connection whose hello failed"
-    assert kept < MAX_FRAME_SIZE // 8, f"{kept} bytes still held after the hello failed"
+    assert not still_running, "sidecar kept a connection whose frame failed"
+    assert kept < MAX_FRAME_SIZE // 8, f"{kept} bytes still held after the frame failed"
 
 
 async def test_idle_connection_between_requests_stays_open(
