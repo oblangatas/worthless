@@ -659,8 +659,19 @@ _NON_INT_STREAM_USAGES = [
     ),
 ]
 
+# (provider, usage in a 400 reply, tokens billed): None means nothing is billed.
+_ERROR_REPLY_USAGES = [
+    pytest.param("openai", {"total_tokens": 42}, 42, id="openai-readable-total-is-billed"),
+    pytest.param("openai", {"total_tokens": None}, None, id="openai-null-total"),
+    pytest.param("openai", {"total_tokens": "42"}, None, id="openai-string-total"),
+    pytest.param(
+        "anthropic", {"input_tokens": None, "output_tokens": 0}, None, id="anthropic-null-input"
+    ),
+]
+
 
 def _anthropic_sse(start_usage: dict, delta_usage: dict) -> bytes:
+    """Anthropic SSE body: message_start, message_delta and message_stop."""
     events = [
         ("message_start", {"type": "message_start", "message": {"usage": start_usage}}),
         ("message_delta", {"type": "message_delta", "usage": delta_usage}),
@@ -670,11 +681,13 @@ def _anthropic_sse(start_usage: dict, delta_usage: dict) -> bytes:
 
 
 def _openai_sse(*usages: dict) -> bytes:
+    """OpenAI SSE body with one chunk per usage in *usages*, then [DONE]."""
     chunks = ({"model": "gpt-4", "choices": [], "usage": usage} for usage in usages)
     return b"".join(f"data: {json.dumps(c)}\n\n".encode() for c in chunks) + b"data: [DONE]\n\n"
 
 
 async def _cap_spend(db, alias: str) -> None:
+    """Give *alias* a spend cap far above anything these tests bill."""
     await db.execute(
         "INSERT INTO enrollment_config (key_alias, spend_cap) VALUES (?, ?)", (alias, 10_000_000)
     )
@@ -830,6 +843,43 @@ class TestNonIntTokenCounts:
 
         assert resp.status_code == 200
         await _assert_billed_now(db, alias, 1234)
+
+    @pytest.mark.parametrize(("provider", "usage", "billed"), _ERROR_REPLY_USAGES)
+    @respx.mock
+    async def test_error_reply_with_unreadable_usage_refunds_capped_key(
+        self,
+        proxy_client: httpx.AsyncClient,
+        proxy_app,
+        enrolled_alias,
+        anthropic_alias,
+        provider,
+        usage,
+        billed,
+    ):
+        """An error reply is billed only for the usage it reports. Usage that can't be
+        read counts as none, so the hold is refunded like any error reply without usage."""
+        if provider == "openai":
+            alias, shard_a_utf8, _ = enrolled_alias
+            url, path, body = OPENAI_COMPLETIONS, "/v1/chat/completions", PROXY_BODY
+        else:
+            alias, shard_a_utf8 = anthropic_alias
+            url, path, body = ANTHROPIC_MESSAGES, "/v1/messages", ANTHROPIC_BODY
+        db = proxy_app.state.db
+        await _cap_spend(db, alias)
+        error = {"type": "error", "error": {"type": "invalid_request_error", "message": "bad"}}
+        respx.post(url).mock(return_value=httpx.Response(400, json={**error, "usage": usage}))
+
+        resp = await proxy_client.post(
+            _proxy_url(alias, path), headers=_proxy_headers(alias, shard_a_utf8), content=body
+        )
+
+        assert resp.status_code == 400
+        async with db.execute(
+            "SELECT COUNT(*) FROM pending_charges WHERE key_alias = ?", (alias,)
+        ) as cur:
+            assert await cur.fetchone() == (0,)
+        async with db.execute("SELECT tokens FROM spend_log WHERE key_alias = ?", (alias,)) as cur:
+            assert await cur.fetchall() == ([] if billed is None else [(billed,)])
 
 
 # ------------------------------------------------------------------

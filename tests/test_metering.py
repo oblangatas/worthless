@@ -325,6 +325,7 @@ _ANTHROPIC_COUNTS = {
 
 
 def _anthropic_delta(usage: dict) -> tuple[str, dict]:
+    """A message_delta (event, payload) pair for ``_sse`` carrying *usage*."""
     return "message_delta", {"type": "message_delta", "usage": usage}
 
 
@@ -341,12 +342,14 @@ def _openai_stream(*usages: dict) -> bytes:
 
 
 def _collect_anthropic(body: bytes) -> UsageInfo | None:
+    """Feed *body* to an Anthropic StreamingUsageCollector in one chunk."""
     collector = StreamingUsageCollector(provider="anthropic")
     collector.feed(body)
     return collector.result()
 
 
 def _collect_openai(body: bytes) -> UsageInfo | None:
+    """Feed *body* to an OpenAI StreamingUsageCollector in one chunk."""
     collector = StreamingUsageCollector(provider="openai")
     collector.feed(body)
     return collector.result()
@@ -435,6 +438,7 @@ def test_openai_stream_unreadable_latest_total_drops_earlier_one(parse, bad):
 
 
 def _total(result: UsageInfo | None) -> int:
+    """The billed total, which must be a real int: SQLite would store 1234.0 as REAL."""
     assert result is not None
     assert type(result.total_tokens) is int
     return result.total_tokens
@@ -451,6 +455,7 @@ def test_openai_stream_whole_float_total_is_the_count(parse):
 
 
 def test_extract_usage_anthropic_json_whole_float_counts_are_the_count():
+    """Every count sent as a whole float is billed, input, cache and output alike."""
     usage = {field: float(count) for field, count in _ANTHROPIC_COUNTS.items()}
     body = json.dumps({"model": "m", "usage": usage}).encode()
     assert _total(extract_usage_anthropic(body)) == sum(_ANTHROPIC_COUNTS.values())
@@ -458,6 +463,7 @@ def test_extract_usage_anthropic_json_whole_float_counts_are_the_count():
 
 @_ANTHROPIC_STREAM_PARSERS
 def test_anthropic_stream_whole_float_counts_are_the_count(parse):
+    """Before, a 50000.0 input count was dropped and only the output was billed."""
     start = {"input_tokens": 50000.0, "cache_read_input_tokens": 11.0}
     assert _total(parse(_anthropic_stream(start, {"output_tokens": 3.0}))) == 50014
 
