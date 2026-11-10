@@ -439,21 +439,19 @@ def test_doctor_fix_vertex_adc_prints_gcloud_reauth_remediation(
     assert not adc_path.exists()
 
 
-def test_doctor_playbook_names_the_command_that_clears_these() -> None:
+def test_doctor_playbook_points_at_no_fix_command() -> None:
     """`doctor --json` attaches this playbook to each finding, and `doctor
     --explain` prints it. Plain `doctor --fix` doesn't run this check, so
-    sending users there leaves every credential in place. `--json --fix` also
-    runs every other check's fix without asking, so the playbook must say so.
+    sending users there leaves every credential in place. `--json --fix` does
+    run it, but deletes every listed file, including a Vertex service-account
+    key Google never lets you download again, and runs every other check's fix
+    without asking. Until `--fix` can tell that key from a login, the advice
+    gives only the steps to remove each one by hand (council, 2026-11-10).
     """
     from worthless.cli.commands.doctor.checks._remediation import PLAYBOOKS
 
     play = " ".join(PLAYBOOKS["unshardable_credentials"].split())
-    assert "worthless doctor --json --fix" in play, play
-    assert "doctor --fix" not in play, play
-    assert "without asking" in play, play
-    # `--fix` refuses a symlink and can fail on a permission error: those
-    # logins stay, listed under `unfixed` (CodeRabbit).
-    assert "`unfixed`" in play, play
+    assert "--fix" not in play, play
 
 
 def test_doctor_playbook_says_how_to_remove_one_by_hand() -> None:
