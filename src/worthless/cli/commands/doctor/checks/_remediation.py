@@ -98,8 +98,8 @@ PLAYBOOKS: dict[str, str] = {
         "step after clearing: `gcloud auth application-default login`, which writes to the "
         "default path, so if `GOOGLE_APPLICATION_CREDENTIALS` named the file you cleared, "
         "unset `GOOGLE_APPLICATION_CREDENTIALS` or point it at the new file. One exception: a "
-        'Vertex file with `"type": "service_account"` is a service-account key, not a login. '
-        "Google never lets you download one again and `gcloud` doesn't recreate it, so keep "
-        "it: don't delete it, and don't run `--json --fix` while it's listed."
+        "Vertex file whose `type` field is `service_account` is a service-account key, not a "
+        "login. Google never lets you download one again and `gcloud` doesn't recreate it, so "
+        "keep it: don't delete it, and don't run `--json --fix` while it's listed."
     ),
 }

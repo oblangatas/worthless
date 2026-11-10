@@ -473,7 +473,8 @@ def test_doctor_playbook_says_how_to_remove_one_by_hand() -> None:
     assert "under `profiles`" in play, play
     assert "not the whole file" in play, play
     assert "if it's a symlink, delete the file it points to" in play, play
-    assert '"type": "service_account"' in play, play
+    # Not the JSON form: Semgrep's secret scan (src/ only) reads that as a key.
+    assert "whose `type` field is `service_account`" in play, play
     assert "keep it" in play, play
     # gcloud writes to the default path, so a GOOGLE_APPLICATION_CREDENTIALS
     # still naming the cleared file leaves Vertex pointing at nothing.
