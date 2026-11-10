@@ -475,6 +475,9 @@ def test_doctor_playbook_says_how_to_remove_one_by_hand() -> None:
     assert "if it's a symlink, delete the file it points to" in play, play
     assert '"type": "service_account"' in play, play
     assert "keep it" in play, play
+    # gcloud writes to the default path, so a GOOGLE_APPLICATION_CREDENTIALS
+    # still naming the cleared file leaves Vertex pointing at nothing.
+    assert "unset `GOOGLE_APPLICATION_CREDENTIALS`" in play, play
 
 
 # ---------------------------------------------------------------------------
@@ -924,6 +927,28 @@ def test_malformed_auth_profiles_json_is_reported_not_silently_skipped(
     assert any("auth-profiles.json could not be read" in c for c in caveats), (
         f"the unparsable profile store must be surfaced, got {caveats!r}"
     )
+
+
+def test_unreadable_auth_profiles_caveat_names_which_agent(
+    sandboxed_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CLI prints no DEBUG log, so the caveat is all a user sees. With
+    several agents, it must say which one's auth-profiles.json to look at.
+    """
+    monkeypatch.setattr(uc, "_keychain_service_present", lambda service: False)
+    agents = sandboxed_home / ".openclaw" / "agents"
+    _write_json(agents / "fine" / "agent" / "auth-profiles.json", {"profiles": {}})
+    broken = agents / "broken" / "agent"
+    broken.mkdir(parents=True)
+    (broken / "auth-profiles.json").write_text('{"profiles": {"leaky": {"type": "oau')
+
+    caveats: list[str] = []
+    uc.detect_unshardable_credentials(caveats)
+
+    unread = [c for c in caveats if "auth-profiles.json could not be read" in c]
+    assert len(unread) == 1, caveats
+    assert "agents/broken/agent" in unread[0], unread
+    assert "fine" not in unread[0], unread
 
 
 def test_doctor_reports_probe_caveats_so_a_blind_scan_is_not_verified_clean(

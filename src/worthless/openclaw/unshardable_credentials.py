@@ -136,8 +136,8 @@ def _probe_is_file(path: Path, surface_label: str, caveats: list[str] | None) ->
     False where it can't look, instead of raising.
 
     The caveat names the surface, never the path — caveats surface in CLI
-    output and CI logs, and a home-relative path is needless detail there
-    (the full path goes to the debug log instead).
+    output and CI logs, and a home-relative path is needless detail there.
+    The full path is logged at DEBUG only, which the CLI doesn't print.
     """
     try:
         return stat.S_ISREG(path.stat().st_mode)
@@ -241,6 +241,16 @@ def _detect_minimax_cli(
         )
 
 
+def _agent_store_label(agent_dir: Path, state_dir: Path) -> str:
+    """Where an agent's auth store is: relative to OpenClaw's state dir when
+    it's inside it (``agents/<id>/agent``), else an ``agentDir`` the user set.
+    """
+    try:
+        return agent_dir.relative_to(state_dir).as_posix()
+    except ValueError:
+        return str(agent_dir)
+
+
 def _detect_auth_profiles_oauth_token(
     findings: list[UnshardableCredentialFinding],
     caveats: list[str] | None = None,
@@ -278,8 +288,11 @@ def _detect_auth_profiles_oauth_token(
             # file we couldn't parse. Skip it, but say so.
             logger.debug("could not read %s: %s", auth_profiles_path, exc)
             if caveats is not None:
+                # The CLI prints no DEBUG log, so with several agents the
+                # caveat itself has to say which store to look at.
                 caveats.append(
-                    "an OpenClaw auth-profiles.json could not be read — any "
+                    "an OpenClaw auth-profiles.json could not be read "
+                    f"(in {_agent_store_label(agent_dir, state_dir)}) — any "
                     "OAuth/token profiles inside it were not checked"
                 )
             continue

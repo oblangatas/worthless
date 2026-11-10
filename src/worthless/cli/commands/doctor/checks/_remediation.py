@@ -95,7 +95,9 @@ PLAYBOOKS: dict[str, str] = {
         "orphaned key records and keychain entries) without asking. A login it can't clear, "
         "such as a symlinked file or one it isn't allowed to delete, stays in place and is "
         "listed under `unfixed` with the reason. Vertex needs one extra "
-        "step after clearing: `gcloud auth application-default login`. One exception: a "
+        "step after clearing: `gcloud auth application-default login`, which writes to the "
+        "default path, so if `GOOGLE_APPLICATION_CREDENTIALS` named the file you cleared, "
+        "unset `GOOGLE_APPLICATION_CREDENTIALS` or point it at the new file. One exception: a "
         'Vertex file with `"type": "service_account"` is a service-account key, not a login. '
         "Google never lets you download one again and `gcloud` doesn't recreate it, so keep "
         "it: don't delete it, and don't run `--json --fix` while it's listed."
