@@ -406,7 +406,47 @@ jobs:
           SDIST="$(find /tmp/sdist-check -maxdepth 1 -name '*.tar.gz' -type f)"
           echo "sdist under test: $SDIST"
           uv venv /tmp/sdist-venv --python 3.13
+          # Start from a certifi older than GHSA-6q48-6c7w-9gw2's fix, as an
+          # existing install would have; the step below checks it was upgraded.
+          VIRTUAL_ENV=/tmp/sdist-venv uv pip install certifi==2026.7.22
           VIRTUAL_ENV=/tmp/sdist-venv uv pip install "$SDIST"
+
+      # pip and uv keep an installed dependency that still meets the floor, so
+      # only pyproject's certifi floor moves an existing install off the
+      # emSign roots. Check what the proxy's TLS trusts, not the version: ask
+      # the installed proxy for the context its provider calls use, with no
+      # WORTHLESS_UPSTREAM_CA_BUNDLE (SSL_CERT_FILE no longer applies, #744).
+      - name: Installing worthless drops the emSign roots certifi 2026.10.23 removed
+        run: |
+          set -euo pipefail
+          cd /tmp
+          /tmp/sdist-venv/bin/python - <<'PY'
+          import certifi
+          from worthless.proxy.upstream import _upstream_ssl_context
+
+          names = {
+              value
+              for cert in _upstream_ssl_context(None).get_ca_certs()
+              for rdn in cert["subject"]
+              for key, value in rdn
+              if key == "commonName"
+          }
+          assert len(names) > 100, f"only {len(names)} roots loaded; is this certifi's list?"
+          # The three roots 2026.10.23 dropped, plus the other two roots the
+          # oss-security notice lists for the compromised keys (the CHANGELOG
+          # names them), so neither can come back unnoticed.
+          banned = {
+              "emSign ECC Root CA - G3",
+              "emSign Root CA - C1",
+              "emSign ECC Root CA - C3",
+              "emSign Root TLS CA - G3",
+              "AAA Certificate Services",
+          }
+          assert not names & banned, (
+              f"certifi {certifi.__version__} still trusts {sorted(names & banned)}"
+          )
+          print(f"certifi {certifi.__version__}: {len(names)} roots, none of {sorted(banned)}")
+          PY
 
       # THE POINT OF THIS JOB. `worthless --version` is importlib.metadata — it
       # reads installed METADATA and never touches the package tree, so it
