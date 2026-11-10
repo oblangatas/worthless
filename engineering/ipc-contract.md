@@ -36,6 +36,7 @@ Shape is modelled after [Google Tink's `Aead`](https://developers.google.com/tin
 ```
 
 - **Max frame size:** 1 MiB. Larger → `PROTO` error, connection closed.
+- **Max containers:** at most 16 arrays and maps per frame in total, each with at most 32 entries, at any depth. More → `PROTO` error, connection closed. Decoders preallocate a container at its declared length, and every decoded container costs far more memory than its bytes on the wire, so these two caps keep a frame's decoded size within a few times its size on the wire (WOR-1075). Legitimate frames hold at most 3 containers; the largest are the 6-key request envelope and `backend_caps`.
 - **Serialization:** [msgpack](https://msgpack.org/), `use_bin_type=True`, `raw=False`.
 - **Frame deadline:** once a frame's 4-byte length has arrived, its body must arrive within 10 s. The hello must arrive within 10 s of connect. Otherwise the sidecar closes the connection with no error frame (WOR-1076). Time between frames is not limited: an idle connection stays open. Write each frame whole as soon as you have it.
 - **Connection cap:** the sidecar holds at most 32 connections. It closes extras on accept, before reading from them (WOR-1076).
