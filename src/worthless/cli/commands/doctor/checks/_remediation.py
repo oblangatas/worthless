@@ -85,13 +85,19 @@ PLAYBOOKS: dict[str, str] = {
         "These aren't API keys — they're OAuth logins (Claude Code, Codex, Gemini, MiniMax, "
         "Google Vertex, or an OpenClaw auth profile), and the proxy can't shard or protect "
         "them at all. Each finding's `location` says where it is, so you can remove only the "
-        "ones you don't need: delete a plain file path; for `keychain:<name>`, run "
+        "ones you don't need: delete a plain file path (if it's a symlink, delete the file it "
+        "points to; deleting the link leaves the login in place); for `keychain:<name>`, run "
         '`security delete-generic-password -s "<name>"`; for `<file>#<id>`, delete only the '
         "`<id>` entry under `profiles` in that file, not the whole file, which can hold other "
         "profiles too. Each provider asks you to log in again on next use. "
         "`worthless doctor --json --fix` clears "
         "all of them at once, and also applies every other check's fix (such as deleting "
-        "orphaned key records and keychain entries) without asking. Vertex needs one extra "
-        "step after clearing: `gcloud auth application-default login`."
+        "orphaned key records and keychain entries) without asking. A login it can't clear, "
+        "such as a symlinked file or one it isn't allowed to delete, stays in place and is "
+        "listed under `unfixed` with the reason. Vertex needs one extra "
+        "step after clearing: `gcloud auth application-default login`. One exception: a "
+        'Vertex file with `"type": "service_account"` is a service-account key, not a login. '
+        "Google never lets you download one again and `gcloud` doesn't recreate it, so keep "
+        "it: don't delete it, and don't run `--json --fix` while it's listed."
     ),
 }

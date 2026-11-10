@@ -144,7 +144,7 @@ def _probe_is_file(path: Path, surface_label: str, caveats: list[str] | None) ->
     except (FileNotFoundError, NotADirectoryError):
         return False
     except OSError as exc:
-        logger.warning("could not probe %s at %s: %s", surface_label, path, exc)
+        logger.debug("could not probe %s at %s: %s", surface_label, path, exc)
         if caveats is not None:
             caveats.append(f"{surface_label} could not be checked ({exc.strerror or 'unreadable'})")
         return False
@@ -276,7 +276,7 @@ def _detect_auth_profiles_oauth_token(
             # drop EVERY oauth/token profile inside it and still report "no
             # unshardable credentials found" — a false all-clear caused by a
             # file we couldn't parse. Skip it, but say so.
-            logger.warning("could not read %s: %s", auth_profiles_path, exc)
+            logger.debug("could not read %s: %s", auth_profiles_path, exc)
             if caveats is not None:
                 caveats.append(
                     "an OpenClaw auth-profiles.json could not be read — any "

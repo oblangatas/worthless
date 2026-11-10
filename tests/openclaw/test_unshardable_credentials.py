@@ -14,6 +14,7 @@ honest warning, and ``doctor --fix`` clears a detected surface end to end.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -78,6 +79,8 @@ def test_surface1_claude_cli_keychain(
     findings = uc.detect_unshardable_credentials()
     finding = _find_surface(findings, "claude_cli_keychain")
     assert finding.clear_kind == "keychain"
+    # doctor's fix advice tells users what to run for a `keychain:<name>` location.
+    assert finding.location == f"keychain:{uc.CLAUDE_CLI_KEYCHAIN_SERVICE}"
     assert not finding.needs_vertex_reauth_notice
 
     assert uc.clear_unshardable_credential(finding)
@@ -131,6 +134,7 @@ def test_surface3_codex_cli_auth_file_and_keychain(
     keychain_finding = _find_surface(findings, "codex_cli_keychain")
     assert file_finding.clear_kind == "file"
     assert keychain_finding.clear_kind == "keychain"
+    assert keychain_finding.location == f"keychain:{uc.CODEX_CLI_KEYCHAIN_SERVICE}"
 
     assert uc.clear_unshardable_credential(file_finding)
     assert uc.clear_unshardable_credential(keychain_finding)
@@ -447,13 +451,19 @@ def test_doctor_playbook_names_the_command_that_clears_these() -> None:
     assert "worthless doctor --json --fix" in play, play
     assert "doctor --fix" not in play, play
     assert "without asking" in play, play
+    # `--fix` refuses a symlink and can fail on a permission error: those
+    # logins stay, listed under `unfixed` (CodeRabbit).
+    assert "`unfixed`" in play, play
 
 
 def test_doctor_playbook_says_how_to_remove_one_by_hand() -> None:
     """The playbook offers removing only the ones you don't need, so it must
     say how for each ``location`` form, the way ``--fix`` clears it. A
     ``<file>#<id>`` is one entry in an auth-profiles.json that can hold other
-    profiles too: deleting the whole file would take those with it.
+    profiles too: deleting the whole file would take those with it. Deleting
+    a symlinked file removes only the link, which is why ``--fix`` refuses
+    one. And a Vertex finding can be a service-account key: Google never lets
+    you download one again, so the advice must say to keep it.
     """
     from worthless.cli.commands.doctor.checks._remediation import PLAYBOOKS
 
@@ -462,6 +472,9 @@ def test_doctor_playbook_says_how_to_remove_one_by_hand() -> None:
     assert 'security delete-generic-password -s "<name>"' in play, play
     assert "under `profiles`" in play, play
     assert "not the whole file" in play, play
+    assert "if it's a symlink, delete the file it points to" in play, play
+    assert '"type": "service_account"' in play, play
+    assert "keep it" in play, play
 
 
 # ---------------------------------------------------------------------------
@@ -856,6 +869,38 @@ def test_agent_dir_behind_an_unreadable_folder_is_caveated(
     assert any("auth-profiles.json could not be read" in c for c in caveats), (
         f"the unreadable agent must be surfaced, got {caveats!r}"
     )
+
+
+@skip_if_root
+def test_probe_failures_keep_credential_paths_out_of_warnings(
+    sandboxed_home: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The CLI has no log handler, so Python prints WARNING records to stderr
+    on every scan. Caveats name the surface, never the path, and the probe's
+    log must match: the full path goes only to the debug log.
+    """
+    monkeypatch.setattr(uc, "_keychain_service_present", lambda service: False)
+    gemini = sandboxed_home / ".gemini" / "oauth_creds.json"
+    gemini.parent.mkdir()
+    gemini.write_text('{"refresh_token": "fake"}')
+    store = sandboxed_home / ".openclaw" / "agents" / "main" / "agent" / "auth-profiles.json"
+    store.parent.mkdir(parents=True)
+    store.write_text('{"profiles": {"leaky": {"type": "oau')
+    gemini.parent.chmod(0o000)
+    try:
+        caveats: list[str] = []
+        with caplog.at_level(logging.DEBUG, logger=uc.logger.name):
+            uc.detect_unshardable_credentials(caveats)
+    finally:
+        gemini.parent.chmod(0o700)
+
+    assert any("Gemini" in c for c in caveats), caveats
+    assert any("auth-profiles.json could not be read" in c for c in caveats), caveats
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert not any(str(sandboxed_home) in m for m in warnings), warnings
+    debug = [r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG]
+    assert any(str(gemini) in m for m in debug), debug
+    assert any(str(store) in m for m in debug), debug
 
 
 def test_malformed_auth_profiles_json_is_reported_not_silently_skipped(
