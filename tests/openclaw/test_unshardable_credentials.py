@@ -288,6 +288,20 @@ def test_surface8_vertex_adc_needs_reauth_notice(
 # ---------------------------------------------------------------------------
 
 
+def _warn_line(output: str) -> str:
+    """lock's ``[WARN]`` line, unwrapped, without the ``[NOTE]`` that may follow."""
+    flat = " ".join(output.split())
+    return flat[flat.index("[WARN]") :].split("[NOTE]")[0]
+
+
+def _assert_warn_points_at_doctor_json(output: str) -> None:
+    # Plain `doctor --fix` doesn't run this check, so it can't clear these:
+    # the warning must name the command that lists them.
+    warn = _warn_line(output)
+    assert "worthless doctor --json" in warn, warn
+    assert "doctor --fix" not in warn, warn
+
+
 def test_lock_prints_warning_when_unshardable_credential_present(
     home_dir: WorthlessHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -310,7 +324,7 @@ def test_lock_prints_warning_when_unshardable_credential_present(
 
     assert result.exit_code == 0, result.output
     assert "cannot protect" in result.output.lower() or "cannot protect" in result.stderr.lower()
-    assert "worthless doctor --fix" in result.output or "worthless doctor --fix" in result.stderr
+    _assert_warn_points_at_doctor_json(result.output)
 
 
 def test_lock_warns_about_oauth_credentials_when_no_shardable_keys_exist(
@@ -347,7 +361,7 @@ def test_lock_warns_about_oauth_credentials_when_no_shardable_keys_exist(
     assert "no unprotected api keys found" in out
     # THE FIX: the OAuth warning now fires on the zero-shardable-keys path too.
     assert "cannot protect" in out
-    assert "worthless doctor --fix" in result.output
+    _assert_warn_points_at_doctor_json(result.output)
 
 
 def test_doctor_fix_clears_unshardable_credential_via_cli(
@@ -419,6 +433,18 @@ def test_doctor_fix_vertex_adc_prints_gcloud_reauth_remediation(
     entry = next(f for f in check["fixed"] if f["surface_id"] == "vertex_adc")
     assert "gcloud auth application-default login" in entry.get("remediation", ""), entry
     assert not adc_path.exists()
+
+
+def test_doctor_playbook_names_the_command_that_clears_these() -> None:
+    """`doctor --json` attaches this playbook to each finding, and `doctor
+    --explain` prints it. Plain `doctor --fix` doesn't run this check, so
+    sending users there leaves every credential in place.
+    """
+    from worthless.cli.commands.doctor.checks._remediation import PLAYBOOKS
+
+    play = " ".join(PLAYBOOKS["unshardable_credentials"].split())
+    assert "worthless doctor --json --fix" in play, play
+    assert "doctor --fix" not in play, play
 
 
 # ---------------------------------------------------------------------------
