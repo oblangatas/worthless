@@ -28,6 +28,7 @@ from worthless.ipc.framing import (
     FrameTooLargeError,
     FrameTruncatedError,
     MalformedFrameError,
+    describe_peer_value,
     encode_frame,
     read_frame,
 )
@@ -142,11 +143,11 @@ def _validate_handshake(envelope: dict[str, Any]) -> tuple[bool, str]:
     ``_ERR_PROTO_HANDSHAKE`` message.
     """
     if envelope.get("v") != _PROTOCOL_VERSION:
-        return False, f"protocol version mismatch: got {envelope.get('v')!r}"
+        return False, f"protocol version mismatch: got {describe_peer_value(envelope.get('v'))}"
     if envelope.get("kind") != "req":
-        return False, f"expected kind='req', got {envelope.get('kind')!r}"
+        return False, f"expected kind='req', got {describe_peer_value(envelope.get('kind'))}"
     if envelope.get("op") != "hello":
-        return False, f"expected op='hello', got {envelope.get('op')!r}"
+        return False, f"expected op='hello', got {describe_peer_value(envelope.get('op'))}"
 
     body = envelope.get("body")
     if not isinstance(body, dict):
@@ -157,8 +158,8 @@ def _validate_handshake(envelope: dict[str, Any]) -> tuple[bool, str]:
         return False, (f"client_versions must be list, got {type(client_versions).__name__}")
     if _PROTOCOL_VERSION not in client_versions:
         return False, (
-            f"client_versions={list(client_versions)!r} does not include "
-            f"server version {_PROTOCOL_VERSION}"
+            f"client_versions [{', '.join(map(describe_peer_value, client_versions))}] "
+            f"does not include server version {_PROTOCOL_VERSION}"
         )
     return True, "ok"
 
@@ -178,12 +179,13 @@ def _validate_request_envelope(
     validation layer, BEFORE the dispatch switch ever runs.
     """
     if envelope.get("v") != _PROTOCOL_VERSION:
-        return False, f"protocol version mismatch: got {envelope.get('v')!r}"
+        return False, f"protocol version mismatch: got {describe_peer_value(envelope.get('v'))}"
     if envelope.get("kind") != "req":
-        return False, f"expected kind='req', got {envelope.get('kind')!r}"
+        return False, f"expected kind='req', got {describe_peer_value(envelope.get('kind'))}"
     op = envelope.get("op")
-    if op not in valid_ops:
-        return False, f"unknown op {op!r}"
+    # isinstance first: a list or dict op would raise TypeError in the lookup.
+    if not isinstance(op, str) or op not in valid_ops:
+        return False, f"unknown op {describe_peer_value(op)}"
     if _extract_request_id(envelope) is None:
         return False, f"id must be int, got {type(envelope.get('id')).__name__}"
     if not isinstance(envelope.get("body"), dict):
@@ -255,6 +257,24 @@ async def _dispatch_op(
         case _:
             # Guarded by _validate_request_envelope; unreachable if that ran first.
             raise ValueError(f"unhandled op {op!r}")
+
+
+def _detach_from_frames(exc: BaseException | None) -> None:
+    """Drop the tracebacks of ``exc`` and the exceptions it chains to.
+
+    When a peer closes before reading a reply, asyncio keeps the failed
+    write's error on the connection's StreamReader. Re-raised in the client
+    handler, that error's traceback holds the handler's frames, and they hold
+    the reader: a cycle that kept the peer's decoded frame alive until a GC
+    pass (WOR-1075). Run once the handler task is done, when nothing will
+    raise the error again.
+    """
+    pending = [exc]
+    while pending:
+        exc = pending.pop()
+        if exc is not None:
+            pending += (exc.__context__, exc.__cause__)
+            exc.__traceback__ = exc.__context__ = exc.__cause__ = None
 
 
 def _make_client_handler(
@@ -445,6 +465,11 @@ async def start_sidecar(
         if task is not None:
             tracked_tasks.add(task)
             task.add_done_callback(tracked_tasks.discard)
+            task.add_done_callback(lambda _: _detach_from_frames(reader.exception()))
+        # If raw_handler raises, the task keeps the exception and its traceback
+        # keeps this frame. A ``task`` local would close that into a cycle, and
+        # the peer's frame would stay alive until a GC pass (WOR-1075).
+        del task
         await raw_handler(reader, writer)
 
     # ``limit=MAX_FRAME_SIZE`` lifts the per-connection StreamReader buffer
