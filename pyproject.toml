@@ -36,9 +36,11 @@ dependencies = [
     # 2026.10.19 kept.
     "certifi>=2026.10.23",
     "fastapi>=0.115.12",
-    # Floor is 2.14.2: below it, aliased fields in TypedDicts and dataclasses
-    # let extra data past validation (GHSA-3r8g-cqwr-jr29). fastapi brings
-    # pydantic in; never imported here, declared only for the floor.
+    # Floor is 2.14.2: below it, extra data gets past validation through
+    # aliased fields in TypedDicts and dataclasses (GHSA-3r8g-cqwr-jr29) and,
+    # from 2.13, through extra keys in JSON model validation
+    # (GHSA-qpmf-fgh3-ff25). fastapi brings pydantic in; never imported here,
+    # declared only for the floor.
     "pydantic>=2.14.2",
     "uvicorn[standard]>=0.34",
     # Floor is 17.4: below it, unbounded empty fragments can exhaust memory
