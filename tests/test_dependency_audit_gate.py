@@ -462,11 +462,19 @@ def test_worker_override_is_declared_exactly(name: str, fixed: tuple[int, ...]) 
 #   certifi       GHSA-6q48-6c7w-9gw2   < 2026.10.18
 #   cryptography  PYSEC-2026-3552       < 50.0.0
 #   msgpack       GHSA-j8c6-9vc5-hj6x   < 1.2.4
+#   pydantic      GHSA-3r8g-cqwr-jr29   < 2.14.2
+#   websockets    GHSA-6m5v-9gmr-5665   < 17.4  (3.11+ only: 17.x needs 3.11)
 # certifi is held at 2026.10.23, above its advisory's fix: the CHANGELOG
 # promises that release, which also drops emSign Root CA - C1 and ECC C3.
 
 PYPROJECT = REPO / "pyproject.toml"
-RUNTIME_FLOORS = {"certifi": (2026, 10, 23), "cryptography": (50, 0, 0), "msgpack": (1, 2, 4)}
+RUNTIME_FLOORS = {
+    "certifi": (2026, 10, 23),
+    "cryptography": (50, 0, 0),
+    "msgpack": (1, 2, 4),
+    "pydantic": (2, 14, 2),
+    "websockets": (17, 4),
+}
 
 
 def _declared_floor(name: str) -> str | None:
@@ -477,7 +485,7 @@ def _declared_floor(name: str) -> str | None:
     """
     block = re.search(r"^dependencies = \[(.*?)^\]", PYPROJECT.read_text(), re.S | re.M)
     assert block, "no [project] dependencies list in pyproject.toml"
-    match = re.search(rf'^\s*"{re.escape(name)}>=([0-9.]+)"', block.group(1), re.M)
+    match = re.search(rf'^\s*"{re.escape(name)}>=([0-9.]+)(?:\s*;[^"]*)?"', block.group(1), re.M)
     return match.group(1) if match else None
 
 
