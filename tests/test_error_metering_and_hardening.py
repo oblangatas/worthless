@@ -965,9 +965,14 @@ class TestOverCapTokenCounts:
         alias, shard_a_utf8 = anthropic_alias
         await _daily_budget(proxy_app, alias, tokens=10_000)
         db = proxy_app.state.db
-        both_upstream = asyncio.Barrier(2)
+        # Both requests reach the upstream before either replies (asyncio.Barrier is 3.11+).
+        arrived: list[httpx.Request] = []
+        both_upstream = asyncio.Event()
 
-        async def over_cap_reply(_request: httpx.Request) -> httpx.Response:
+        async def over_cap_reply(request: httpx.Request) -> httpx.Response:
+            arrived.append(request)
+            if len(arrived) == 2:
+                both_upstream.set()
             await both_upstream.wait()
             usage = {"input_tokens": 9_000_000_000_000_000_000, "output_tokens": 3}
             return httpx.Response(200, content=_anthropic_json(usage=usage))

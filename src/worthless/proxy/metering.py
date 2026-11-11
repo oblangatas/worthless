@@ -24,7 +24,8 @@ _ANTHROPIC_INPUT_COUNTS = (
 # The only counts a provider SDK types as Optional[int]: null means none.
 _NULLABLE_COUNTS = frozenset({"cache_creation_input_tokens", "cache_read_input_tokens"})
 # One reply bills at most this many tokens: far above any real reply, and far enough
-# below the spend log's signed 64-bit sums that a key's bogus rows can't overflow them.
+# below the spend log's signed 64-bit sums that it takes millions of capped rows on one
+# key to overflow them.
 _MAX_REPLY_TOKENS = 10**12
 
 
