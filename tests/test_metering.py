@@ -324,9 +324,8 @@ def test_extraction_failure_is_distinguishable_from_zero_usage():
 # WOR-1002: a null cache count is 0; any other non-int count is unreadable usage
 # ---------------------------------------------------------------------------
 
-# Not a whole, non-negative number that fits the spend log's 64-bit column. A whole
-# float such as 5.0 is a count.
-_NOT_COUNTS = ["5", 5.5, -5.0, math.nan, math.inf, -math.inf, True, [5], 1e300, 2**63]
+# Not a whole, non-negative number. A whole float such as 5.0 is a count.
+_NOT_COUNTS = ["5", 5.5, -5.0, math.nan, math.inf, -math.inf, True, [5]]
 # Null means "none" only for the counts the SDKs type Optional[int].
 _NOT_REQUIRED_COUNTS = [None, *_NOT_COUNTS]
 _ANTHROPIC_COUNTS = {
@@ -457,47 +456,62 @@ def test_openai_stream_unreadable_latest_total_drops_earlier_one(parse, bad):
     assert parse(_openai_stream({"total_tokens": 11}, {"total_tokens": bad})) is None
 
 
-def test_counts_whose_total_is_too_large_to_store_are_no_usage():
-    """Each count fits, but the spend log can't store their sum."""
+# ---------------------------------------------------------------------------
+# WOR-1002: one reply bills at most 10**12 tokens
+# ---------------------------------------------------------------------------
+
+_REPLY_CAP = 10**12
+_OVER_CAP_COUNTS = [_REPLY_CAP + 1, 9_000_000_000_000_000_000, 2**63, 1e300]
+
+
+def _anthropic_json_usage(usage: dict) -> UsageInfo | None:
+    return extract_usage_anthropic(json.dumps({"model": "m", "usage": usage}).encode())
+
+
+def _openai_json_usage(usage: dict) -> UsageInfo | None:
+    return extract_usage_openai(json.dumps({"model": "m", "usage": usage}).encode())
+
+
+def _total(usage: UsageInfo | None) -> int | None:
+    return None if usage is None else usage.total_tokens
+
+
+@pytest.mark.parametrize("count", _OVER_CAP_COUNTS, ids=repr)
+def test_over_cap_count_bills_the_cap(count):
+    """A count above 10**12 bills 10**12, so a bogus count can't overflow the key's
+    spend total."""
+    assert _total(_anthropic_json_usage({"input_tokens": 5, "output_tokens": count})) == _REPLY_CAP
+    assert _total(_openai_json_usage({"total_tokens": count})) == _REPLY_CAP
+    for parse in (extract_usage_openai, _collect_openai):
+        assert _total(parse(_openai_stream({"total_tokens": count}))) == _REPLY_CAP
+
+
+@pytest.mark.parametrize("count", _OVER_CAP_COUNTS, ids=repr)
+@_ANTHROPIC_STREAM_PARSERS
+def test_anthropic_stream_over_cap_count_bills_the_cap(parse, count):
+    assert _total(parse(_anthropic_stream({"input_tokens": 5}, {"output_tokens": count}))) == (
+        _REPLY_CAP
+    )
+    assert _total(parse(_anthropic_stream({"input_tokens": count}, {"output_tokens": 3}))) == (
+        _REPLY_CAP
+    )
+
+
+def test_counts_whose_total_is_over_the_cap_bill_the_cap():
+    """Each count is under the cap, but their sum isn't."""
     usage = {"input_tokens": 2**62, "output_tokens": 2**62}
-    assert extract_usage_anthropic(json.dumps({"model": "m", "usage": usage}).encode()) is None
+    assert _total(_anthropic_json_usage(usage)) == _REPLY_CAP
 
 
 @_ANTHROPIC_STREAM_PARSERS
-def test_anthropic_stream_input_plus_output_too_large_to_store_is_no_usage(parse):
-    """Each event's count fits, but the spend log can't store their sum."""
-    assert parse(_anthropic_stream({"input_tokens": 5e18}, {"output_tokens": 5e18})) is None
+def test_anthropic_stream_input_plus_output_over_the_cap_bills_the_cap(parse):
+    """Each event's count is under the cap, but their sum isn't."""
+    body = _anthropic_stream({"input_tokens": 5e18}, {"output_tokens": 5e18})
+    assert _total(parse(body)) == _REPLY_CAP
 
 
-# JSON can't tell 1234 from 1234.0, so a whole float is billed as its int value.
-
-
-def _total(result: UsageInfo | None) -> int:
-    """The billed total, which must be a real int: SQLite would store 1234.0 as REAL."""
-    assert result is not None
-    assert type(result.total_tokens) is int
-    return result.total_tokens
-
-
-def test_extract_usage_openai_json_whole_float_total_is_the_count():
-    body = json.dumps({"model": "m", "usage": {"total_tokens": 1234.0}}).encode()
-    assert _total(extract_usage_openai(body)) == 1234
-
-
-@_OPENAI_STREAM_PARSERS
-def test_openai_stream_whole_float_total_is_the_count(parse):
-    assert _total(parse(_openai_stream({"total_tokens": 1234.0}))) == 1234
-
-
-def test_extract_usage_anthropic_json_whole_float_counts_are_the_count():
-    """Every count sent as a whole float is billed, input, cache and output alike."""
-    usage = {field: float(count) for field, count in _ANTHROPIC_COUNTS.items()}
-    body = json.dumps({"model": "m", "usage": usage}).encode()
-    assert _total(extract_usage_anthropic(body)) == sum(_ANTHROPIC_COUNTS.values())
-
-
-@_ANTHROPIC_STREAM_PARSERS
-def test_anthropic_stream_whole_float_counts_are_the_count(parse):
-    """A whole float is its int value, so a 50000.0 input count is billed, not dropped."""
-    start = {"input_tokens": 50000.0, "cache_read_input_tokens": 11.0}
-    assert _total(parse(_anthropic_stream(start, {"output_tokens": 3.0}))) == 50014
+def test_a_count_of_exactly_the_cap_is_billed_as_is():
+    assert _total(_openai_json_usage({"total_tokens": _REPLY_CAP})) == _REPLY_CAP
+    assert _total(_anthropic_json_usage({"input_tokens": _REPLY_CAP - 3, "output_tokens": 3})) == (
+        _REPLY_CAP
+    )

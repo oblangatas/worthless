@@ -23,13 +23,14 @@ _ANTHROPIC_INPUT_COUNTS = (
 )
 # The only counts a provider SDK types as Optional[int]: null means none.
 _NULLABLE_COUNTS = frozenset({"cache_creation_input_tokens", "cache_read_input_tokens"})
-# The spend log's INTEGER column is signed 64-bit; a larger total can't be stored.
-_MAX_TOTAL = 2**63 - 1
+# One reply bills at most this many tokens: far above any real reply, and far enough
+# below the spend log's signed 64-bit sums that a key's bogus rows can't overflow them.
+_MAX_REPLY_TOKENS = 10**12
 
 
-def _usage_info(total: int, model: str | None) -> UsageInfo | None:
-    """*total* as usage, or None (unreadable) when the spend log can't store it."""
-    return UsageInfo(total_tokens=total, model=model) if total <= _MAX_TOTAL else None
+def _usage_info(total: int, model: str | None) -> UsageInfo:
+    """*total* as usage, capped at ``_MAX_REPLY_TOKENS``."""
+    return UsageInfo(total_tokens=min(total, _MAX_REPLY_TOKENS), model=model)
 
 
 def _sum_counts(usage: object, *keys: str) -> int | None:
@@ -37,11 +38,11 @@ def _sum_counts(usage: object, *keys: str) -> int | None:
 
     An absent count is 0, and so is a null one where the SDK allows null. A
     whole, non-negative float is its int value: JSON can't tell 1234 from 1234.0.
-    Returns None when the usage is unreadable: *usage* isn't an object, a count
-    is anything else (a null required count, a string, a fractional, negative
-    or non-finite float, a bool), or the total is too large for the spend log
-    to store (such as 1e300). The caller then treats it like a reply without
-    usage rather than crashing or billing a bogus number.
+    A total above ``_MAX_REPLY_TOKENS`` (such as 1e300) is the cap. Returns None
+    when the usage is unreadable: *usage* isn't an object, or a count is anything
+    else (a null required count, a string, a fractional, negative or non-finite
+    float, a bool). The caller then treats it like a reply without usage rather
+    than crashing or billing a bogus number.
     """
     if not isinstance(usage, dict):
         return None
@@ -55,7 +56,7 @@ def _sum_counts(usage: object, *keys: str) -> int | None:
         if isinstance(count, bool) or not isinstance(count, int):
             return None
         total += count
-    return total if total <= _MAX_TOTAL else None
+    return min(total, _MAX_REPLY_TOKENS)
 
 
 def extract_usage_openai(data: bytes) -> UsageInfo | None:
