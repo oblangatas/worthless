@@ -79,6 +79,12 @@ mcp = [
     # resolves this extra fresh (ignoring uv.lock), so an unbounded range
     # would pick up the next breaking major the day it ships (WOR-864).
     "mcp>=2.1,<3",
+    # Floor is 1.45.2: up to 1.45.1, parsing a crafted traceparent takes
+    # quadratic time (GHSA-mf5v-w3w3-f6cg). mcp's server middleware parses the
+    # traceparent in every request's _meta, with or without tracing set up.
+    # The proxy turns fastapi's tracing off, so only this extra needs the
+    # floor. Never imported here; declared only for the floor.
+    "opentelemetry-api>=1.45.2",
 ]
 dev = [
     "deptry>=0.22",
@@ -304,8 +310,9 @@ optional_dependencies_dev_groups = ["dev", "test", "qa", "fuzz"]
 DEP001 = ["tomllib"]
 # uvicorn: runtime ASGI server invoked via CLI, never imported
 # python-dotenv: planned refactor to replace custom parser (worthless-ic6)
-# certifi, pydantic, websockets: never imported; declared only for their advisory floors
-DEP002 = ["uvicorn", "python-dotenv", "certifi", "pydantic", "websockets"]
+# certifi, pydantic, websockets, opentelemetry-api: never imported; declared
+# only for their advisory floors
+DEP002 = ["uvicorn", "python-dotenv", "certifi", "pydantic", "websockets", "opentelemetry-api"]
 # starlette: transitive dep of fastapi, but we import ASGI types directly
 # rich: transitive dep of typer (bundled in typer>=0.12), but we import directly for console output
 DEP003 = ["starlette", "rich"]
