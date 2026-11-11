@@ -879,10 +879,10 @@ def test_install_smoke_uploads_terminal_artifacts() -> None:
     )
     assert "install-smoke-traces-${{ matrix.os }}-${{ github.run_id }}" in text, (
         "live matrix artifact names must use matrix.os, not runner.os, so "
-        "macos-14/macos-15 and ubuntu-22.04/ubuntu-24.04 uploads do not collide."
+        "ubuntu-22.04/ubuntu-24.04 uploads do not collide."
     )
     assert "install-smoke-traces-${{ runner.os }}-${{ github.run_id }}" not in text, (
-        "runner.os collapses macos-14/macos-15 and ubuntu-22.04/ubuntu-24.04 "
+        "runner.os collapses ubuntu-22.04/ubuntu-24.04 "
         "into duplicate artifact names under upload-artifact@v4."
     )
     assert "install-smoke-traces-proxy-${{ github.run_id }}" in text, (

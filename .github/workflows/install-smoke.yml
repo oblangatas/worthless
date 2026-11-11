@@ -100,12 +100,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macos-15 = arm64 Sequoia; macos-14 = arm64 Sonoma.
-        # (macos-13 was retired from GH runners.)
+        # macos-15 = arm64 Sequoia.
+        # (macos-13 and macos-14 were retired from GH runners.)
         # ubuntu-24.04 = current LTS; ubuntu-22.04 = previous LTS still in field.
         os:
           - macos-15
-          - macos-14
           - ubuntu-24.04
           - ubuntu-22.04
 
