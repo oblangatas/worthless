@@ -40,15 +40,18 @@ MCP_AFFECTED = {"opentelemetry-api": ("1.45.1", "1.45.2")}
 
 
 def _uv(*args: str, isolated: bool = True) -> str:
-    """Run uv. ``isolated`` drops the caller's UV_* settings (all but the cache),
-    so the stub venv can't pick up an outer project or Python; the wheel build
-    passes False to keep the configured index and offline settings."""
+    """Run uv. ``isolated`` drops the caller's UV_* settings (all but the cache)
+    and its uv.toml files, so the stub venv can't pick up an outer project,
+    Python or pip settings such as no-deps or upgrade; the wheel build passes
+    False to keep the configured index and offline settings."""
     uv = shutil.which("uv")
     assert uv, "uv is not on PATH; this repo's tests run under `uv run`"
     env = dict(os.environ)
+    command = [uv, *args]
     if isolated:
         env = {k: v for k, v in env.items() if not k.startswith("UV_") or k == "UV_CACHE_DIR"}
-    done = subprocess.run([uv, *args], capture_output=True, text=True, env=env, check=False)
+        command.append("--no-config")
+    done = subprocess.run(command, capture_output=True, text=True, env=env, check=False)
     assert done.returncode == 0, f"uv {' '.join(args)} failed:\n{done.stderr}"
     return done.stdout
 
