@@ -13,6 +13,7 @@ Design invariants (enforced here, reviewed by security-auditor):
 * One request violation closes the connection (no-fallback rule).
 * Pathname AF_UNIX sockets are ``unlink``-ed on server close; POSIX does
   not auto-unlink them, and stale files break xdist parallel test runs.
+* A stalling peer can't pin memory: frames have a deadline and connections a cap (WOR-1076).
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from typing import Any
 
 from worthless.ipc.framing import (
     MAX_FRAME_SIZE,
+    FrameTimeoutError,
     FrameTooLargeError,
     FrameTruncatedError,
     MalformedFrameError,
@@ -39,9 +41,22 @@ from worthless.ipc.peercred import (
 )
 from worthless.sidecar.backends.base import Backend, BackendError
 
-__all__ = ["start_sidecar"]
+__all__ = ["DEFAULT_FRAME_TIMEOUT_S", "DEFAULT_MAX_CONNECTIONS", "start_sidecar"]
 
 _LOG = logging.getLogger(__name__)
+
+#: Seconds a frame may take to arrive once it has started, and the hello may
+#: take from connect. ``IPCClient`` writes each frame whole, in one
+#: ``write()``, and sends hello right after connecting, so a real frame
+#: arrives in milliseconds. The wait for a request to *start* is not bounded:
+#: the proxy keeps one connection open for its whole life.
+DEFAULT_FRAME_TIMEOUT_S = 10.0
+
+#: Most connections held open at once; extras are closed before a byte is read
+#: from them. Real use is a handful: the proxy's one connection (its in-flight
+#: requests share it), its reconnect, a health probe, a CLI command. A stalled
+#: frame holds about 1.07 MiB (measured), so this bounds that at about 34 MiB.
+DEFAULT_MAX_CONNECTIONS = 32
 
 # Protocol version the sidecar speaks. Clients advertise supported versions
 # in the hello envelope; we require 1 to appear in that list.
@@ -280,6 +295,7 @@ def _detach_from_frames(exc: BaseException | None) -> None:
 def _make_client_handler(
     backend: Backend,
     allowed_uids: Sequence[int],
+    frame_timeout_s: float,
 ):
     """Build the per-connection callback closed over ``backend`` + allowlist.
 
@@ -317,13 +333,25 @@ def _make_client_handler(
             _LOG.debug("peer authenticated uid=%d pid=%s", creds.uid, creds.pid)
 
             # --- 2. Handshake ----------------------------------------------
+            # Clients send hello as soon as they connect, so its clock starts
+            # now rather than at its first byte. On 3.10 and 3.11 wait_for
+            # reads in a task of its own, and an error it re-raises has
+            # wait_for's frame in its traceback. That frame holds the task,
+            # and the task holds the error: a cycle that kept the peer's
+            # frame alive until a GC pass. Each branch below breaks it.
             try:
-                hello = await read_frame(reader)
-            except FrameTruncatedError:
+                hello = await asyncio.wait_for(read_frame(reader), frame_timeout_s)
+            except asyncio.TimeoutError as exc:
+                _detach_from_frames(exc)
+                _LOG.warning("no hello within %.1fs; closing", frame_timeout_s)
+                return
+            except FrameTruncatedError as exc:
+                _detach_from_frames(exc)
                 _LOG.debug("client closed before sending hello")
                 return
             except (FrameTooLargeError, MalformedFrameError) as exc:
                 _LOG.warning("malformed handshake frame: %s", exc)
+                _detach_from_frames(exc)
                 await _write_err(writer, "PROTO", _ERR_PROTO_HANDSHAKE, _ID_UNKNOWN)
                 return
 
@@ -347,9 +375,20 @@ def _make_client_handler(
 
             # --- 3. Dispatch loop ------------------------------------------
             while True:
+                # read_frame waits for a request's body with wait_for, so its
+                # timeout and truncation errors close the same cycle as a
+                # failed hello's.
                 try:
-                    envelope = await read_frame(reader)
-                except FrameTruncatedError:
+                    envelope = await read_frame(reader, body_timeout=frame_timeout_s)
+                except FrameTimeoutError as exc:
+                    _detach_from_frames(exc)
+                    _LOG.warning("request frame stalled for %.1fs; closing", frame_timeout_s)
+                    # abort, not close: unread replies may still be queued, and
+                    # close() would wait for this stalled peer to read them.
+                    writer.transport.abort()
+                    return
+                except FrameTruncatedError as exc:
+                    _detach_from_frames(exc)
                     _LOG.debug("peer closed connection cleanly")
                     return
                 except (FrameTooLargeError, MalformedFrameError) as exc:
@@ -418,6 +457,9 @@ async def start_sidecar(
     socket_path: Path,
     backend: Backend,
     allowed_uids: Sequence[int],
+    *,
+    frame_timeout_s: float = DEFAULT_FRAME_TIMEOUT_S,
+    max_connections: int = DEFAULT_MAX_CONNECTIONS,
 ) -> asyncio.Server:
     """Bind the sidecar to an AF_UNIX pathname socket and start serving.
 
@@ -435,13 +477,18 @@ async def start_sidecar(
         allowed_uids: uids permitted to connect. Empty allowlist rejects
             every peer; callers almost always want ``[os.getuid()]`` or
             the proxy uid.
+        frame_timeout_s: Seconds a frame may take to arrive once started
+            (the hello: from connect). See :data:`DEFAULT_FRAME_TIMEOUT_S`.
+        max_connections: Most connections held open at once. See
+            :data:`DEFAULT_MAX_CONNECTIONS`.
 
     Returns:
         Live :class:`asyncio.Server`. ``close()`` is monkey-patched to
         also unlink ``socket_path``.
 
     Raises:
-        ValueError: ``socket_path`` is abstract-namespace.
+        ValueError: ``socket_path`` is abstract-namespace, or a limit is
+            not positive.
         OSError: bind failed (address in use, parent dir missing, etc.).
     """
     # Contract addendum: abstract-namespace sockets not supported. These
@@ -451,26 +498,40 @@ async def start_sidecar(
             "abstract-namespace AF_UNIX paths are not supported; use a pathname socket"
         )
 
-    raw_handler = _make_client_handler(backend, allowed_uids)
+    if max_connections < 1:
+        raise ValueError(f"max_connections must be >= 1, got {max_connections}")
+    if frame_timeout_s <= 0:
+        raise ValueError(f"frame_timeout_s must be > 0, got {frame_timeout_s}")
+
+    raw_handler = _make_client_handler(backend, allowed_uids, frame_timeout_s)
     # Track live handler tasks so a shutdown path can cancel them when the
     # drain deadline expires. asyncio.Server doesn't expose a public
     # iterator over connection tasks until Python 3.13 (close_clients /
     # abort_clients), and server.close() only stops accept() — it does
     # NOT cancel in-flight handlers. Without this set, a stuck handler
-    # would hang ``await server.wait_closed()`` forever.
+    # would hang ``await server.wait_closed()`` forever. Its size is also
+    # the open-connection count the cap checks.
     tracked_tasks: set[asyncio.Task[None]] = set()
 
-    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        task = asyncio.current_task()
-        if task is not None:
-            tracked_tasks.add(task)
-            task.add_done_callback(tracked_tasks.discard)
-            task.add_done_callback(lambda _: _detach_from_frames(reader.exception()))
-        # If raw_handler raises, the task keeps the exception and its traceback
-        # keeps this frame. A ``task`` local would close that into a cycle, and
-        # the peer's frame would stay alive until a GC pass (WOR-1075).
-        del task
-        await raw_handler(reader, writer)
+    def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        # A plain function, not a coroutine: asyncio calls it inside
+        # ``connection_made``, before the transport starts reading, so a
+        # connection refused here never has a byte read into its buffer.
+        if len(tracked_tasks) >= max_connections:
+            _LOG.warning("refusing connection: %d already open", max_connections)
+            writer.transport.abort()
+            return
+        task = asyncio.create_task(raw_handler(reader, writer))
+        tracked_tasks.add(task)
+        task.add_done_callback(_forget)
+        task.add_done_callback(lambda _: _detach_from_frames(reader.exception()))
+
+    def _forget(task: asyncio.Task[None]) -> None:
+        tracked_tasks.discard(task)
+        # The handler already logged any exception; mark it retrieved so
+        # asyncio doesn't report it again when the task is collected.
+        if not task.cancelled():
+            task.exception()
 
     # ``limit=MAX_FRAME_SIZE`` lifts the per-connection StreamReader buffer
     # ceiling (default 64 KiB) up to the contract's frame cap (1 MiB).
