@@ -68,10 +68,12 @@ jobs:
   uv-trust:
     # WOR-1116: the pinned uv, installed through the SHA-checked Astral
     # installer as install.sh does, must refuse a server chained to emSign ECC
-    # Root CA - G3 (the root above the compromised eMudhra keys). Fails if
-    # eMudhra's test site is gone or no longer chains to that root: a skip
-    # here would leave the job green with the check lost.
-    name: Pinned uv refuses a server chained to the emSign G3 root
+    # Root CA - G3 (the root above the compromised eMudhra keys), and a server
+    # whose leaf is signed with one of those keys (CPython's test chain), even
+    # when the chain's root is given as a trust anchor. Fails if eMudhra's test
+    # site or CPython's test data is gone, or the site no longer chains to that
+    # root: a skip here would leave the job green with the check lost.
+    name: Pinned uv refuses the emSign G3 root and the compromised keys
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     needs: static
