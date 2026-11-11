@@ -5,10 +5,11 @@ test_dependency_audit_gate.py checks the floors as written in pyproject.toml.
 This checks what a user gets: build the real wheel, put the affected releases
 in a fresh venv, install Worthless (with the mcp extra) on top with uv, and
 read what is installed afterwards. On Python 3.10 websockets has no fixed
-release, so there it must stay where it was.
+release and Worthless declares no floor for it, so it is not checked there.
 
-Offline apart from the wheel build's own backend: every requirement resolves
-from empty stub wheels made here, so no real package is downloaded.
+Offline apart from the wheel build's own backend, which uses uv's index
+settings as given: every requirement resolves from empty stub wheels made
+here, so no real package is downloaded.
 """
 
 from __future__ import annotations
@@ -32,16 +33,21 @@ from packaging.version import Version
 REPO = Path(__file__).resolve().parent.parent
 
 # Affected release -> the release with the fix.
-AFFECTED = {"websockets": ("17.3", "17.4"), "pydantic": ("2.14.1", "2.14.3")}
-if sys.version_info < (3, 11):
-    AFFECTED["websockets"] = ("16.1.1", "16.1.1")
+AFFECTED = {"pydantic": ("2.14.1", "2.14.3")}
+if sys.version_info >= (3, 11):
+    AFFECTED["websockets"] = ("17.3", "17.4")
 MCP_AFFECTED = {"opentelemetry-api": ("1.45.1", "1.45.2")}
 
 
-def _uv(*args: str) -> str:
+def _uv(*args: str, isolated: bool = True) -> str:
+    """Run uv. ``isolated`` drops the caller's UV_* settings (all but the cache),
+    so the stub venv can't pick up an outer project or Python; the wheel build
+    passes False to keep the configured index and offline settings."""
     uv = shutil.which("uv")
     assert uv, "uv is not on PATH; this repo's tests run under `uv run`"
-    env = {k: v for k, v in os.environ.items() if not k.startswith("UV_") or k == "UV_CACHE_DIR"}
+    env = dict(os.environ)
+    if isolated:
+        env = {k: v for k, v in env.items() if not k.startswith("UV_") or k == "UV_CACHE_DIR"}
     done = subprocess.run([uv, *args], capture_output=True, text=True, env=env, check=False)
     assert done.returncode == 0, f"uv {' '.join(args)} failed:\n{done.stderr}"
     return done.stdout
@@ -86,7 +92,7 @@ def installed(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
     )
     for name in ("pyproject.toml", "README.md"):
         shutil.copy2(REPO / name, source / name)
-    _uv("build", "--wheel", "--out-dir", str(tmp / "dist"), str(source))
+    _uv("build", "--wheel", "--out-dir", str(tmp / "dist"), str(source), isolated=False)
     (wheel,) = (tmp / "dist").glob("worthless-*.whl")
 
     stubs = tmp / "stubs"
