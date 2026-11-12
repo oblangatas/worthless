@@ -667,10 +667,13 @@ _ERROR_REPLY_USAGES = [
     pytest.param(
         "anthropic", {"input_tokens": None, "output_tokens": 0}, None, id="anthropic-null-input"
     ),
+    pytest.param(
+        "anthropic", {"input_tokens": 5, "output_tokens": -3}, None, id="anthropic-negative-output"
+    ),
 ]
 
 
-def _anthropic_sse(start_usage: dict, delta_usage: dict) -> bytes:
+def _anthropic_sse(start_usage: object, delta_usage: dict) -> bytes:
     """Anthropic SSE body: message_start, message_delta and message_stop."""
     events = [
         ("message_start", {"type": "message_start", "message": {"usage": start_usage}}),
@@ -888,15 +891,6 @@ class TestNonIntTokenCounts:
 # ------------------------------------------------------------------
 
 
-def _anthropic_sse(start_usage: object, delta_usage: dict) -> bytes:
-    start = {"type": "message_start", "message": {"model": "m", "usage": start_usage}}
-    delta = {"type": "message_delta", "usage": delta_usage}
-    return (
-        f"event: message_start\ndata: {json.dumps(start)}\n\n"
-        f"event: message_delta\ndata: {json.dumps(delta)}\n\n"
-    ).encode()
-
-
 class TestUnreadableStreamCounts:
     """A capped key settles its hold at the estimate; an uncapped key records nothing."""
 
@@ -933,11 +927,7 @@ class TestUnreadableStreamCounts:
         alias, shard_a_utf8 = anthropic_alias
         db = proxy_app.state.db
         if capped:
-            await db.execute(
-                "INSERT INTO enrollment_config (key_alias, spend_cap) VALUES (?, ?)",
-                (alias, 10_000_000),
-            )
-            await db.commit()
+            await _cap_spend(db, alias)
         respx.post(ANTHROPIC_MESSAGES).mock(
             return_value=httpx.Response(
                 200, headers=headers, content=_anthropic_sse(start_usage, delta_usage)
